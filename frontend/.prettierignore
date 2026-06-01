@@ -1,0 +1,25 @@
+# 依赖和构建产物
+node_modules
+dist
+build
+.git
+coverage
+.next
+.nuxt
+.vscode
+
+# Lock 文件
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Codegen 生成的文件
+src/generated
+src/features/*/hooks/api.ts
+
+# 归档代码（不需要格式化）
+docs/archive
+
+# 压缩文件
+*.min.js
+*.min.css

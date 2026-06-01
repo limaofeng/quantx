@@ -1,0 +1,258 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # PR 信息检查
+  pr-info:
+    name: PR Information Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check PR title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            test
+            chore
+            perf
+            ci
+          requireScope: false
+
+  # 代码变更分析
+  changes:
+    name: Analyze Changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      src: ${{ steps.changes.outputs.src }}
+      tests: ${{ steps.changes.outputs.tests }}
+      docs: ${{ steps.changes.outputs.docs }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            src:
+              - 'src/**'
+              - 'package.json'
+              - 'vite.config.ts'
+              - 'tsconfig.json'
+            tests:
+              - 'src/**/*.test.*'
+              - 'src/**/*.spec.*'
+              - 'src/__tests__/**'
+            docs:
+              - '*.md'
+              - 'docs/**'
+
+  # 代码质量检查
+  quality-check:
+    name: Quality Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Lint check
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+  # 测试检查
+  test-check:
+    name: Test Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test:run
+
+      - name: Check test coverage
+        run: npm run test:coverage
+
+  # 构建检查
+  build-check:
+    name: Build Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        run: npm run build
+
+      - name: Check bundle size
+        run: |
+          BUNDLE_SIZE=$(du -sb dist/ | cut -f1)
+          BUNDLE_SIZE_MB=$((BUNDLE_SIZE / 1024 / 1024))
+          echo "Bundle size: ${BUNDLE_SIZE_MB}MB"
+
+          if [ $BUNDLE_SIZE_MB -gt 10 ]; then
+            echo "❌ Bundle size too large: ${BUNDLE_SIZE_MB}MB (limit: 10MB)"
+            exit 1
+          else
+            echo "✅ Bundle size acceptable: ${BUNDLE_SIZE_MB}MB"
+          fi
+
+  # 安全检查
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run security audit
+        run: npm audit --audit-level=moderate
+
+  # 依赖检查
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for new dependencies
+        run: |
+          git diff origin/main HEAD -- package.json | grep '^+' | grep -E '".*":' || echo "No new dependencies"
+
+      - name: Check package-lock.json
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "❌ package-lock.json is missing"
+            exit 1
+          fi
+
+          if git diff --name-only origin/main HEAD | grep -q package.json && ! git diff --name-only origin/main HEAD | grep -q package-lock.json; then
+            echo "❌ package.json changed but package-lock.json was not updated"
+            exit 1
+          fi
+
+  # 文档检查
+  docs-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.src == 'true'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check README links
+        run: |
+          if command -v markdown-link-check &> /dev/null; then
+            markdown-link-check README.md
+          else
+            echo "Skipping link check (markdown-link-check not available)"
+          fi
+
+  # 总结
+  pr-summary:
+    name: PR Summary
+    runs-on: ubuntu-latest
+    needs: [quality-check, test-check, build-check, security-check, dependency-check]
+    if: always()
+
+    steps:
+      - name: Create summary comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const checks = {
+              'Quality Check': '${{ needs.quality-check.result }}',
+              'Test Check': '${{ needs.test-check.result }}',
+              'Build Check': '${{ needs.build-check.result }}',
+              'Security Check': '${{ needs.security-check.result }}',
+              'Dependency Check': '${{ needs.dependency-check.result }}'
+            };
+
+            let summary = '## 📋 PR 检查结果\n\n';
+
+            for (const [check, result] of Object.entries(checks)) {
+              const icon = result === 'success' ? '✅' : result === 'failure' ? '❌' : '⏸️';
+              summary += `${icon} **${check}**: ${result}\n`;
+            }
+
+            summary += '\n---\n';
+            summary += '*此检查由 GitHub Actions 自动生成*';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });

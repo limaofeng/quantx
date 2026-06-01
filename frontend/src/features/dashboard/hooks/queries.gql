@@ -1,0 +1,44 @@
+# Dashboard 模块查询操作
+
+# 获取当前账户信息 - 用于 Layout 头部显示
+query GetCurrentAccount {
+  currentAccount {
+    id
+    accountName
+    accountType
+    totalAsset
+    cash
+    frozenCash
+    marketValue
+    totalProfitLoss
+    profitLossPercent
+    createTime
+    updateTime
+  }
+}
+
+# # 获取主要指数信息
+# query mainIndexes {
+#   mainIndexes {
+#     id
+#     name
+#     symbol
+#     price
+#     change
+#   }
+# }
+
+
+# # 获取仪表板汇总信息
+# query dashboardSummary {
+#   dashboardSummary {
+#     totalAsset
+#     todayPnL
+#     todayPnLPercent
+#     totalReturn
+#     totalReturnPercent
+#     activePositions
+#     todayTrades
+#     marketStatus
+#   }
+# }

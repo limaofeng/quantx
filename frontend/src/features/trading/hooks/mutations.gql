@@ -1,0 +1,35 @@
+# Trading 模块变更操作
+
+# # 创建订单（通用接口，支持买入和卖出）
+# # mutation CreateOrder($input: CreateOrderInput!) {
+# #   createOrder(input: $input) {
+# #     success
+# #     message
+# #     orderId
+# #     orderNo
+# #   }
+# # }
+
+# 撤销订单
+# mutation CancelOrder($orderId: String!) {
+#   cancelOrder(orderId: $orderId) {
+#     success
+#     message
+#   }
+# }
+# 
+# # 修改订单
+# # mutation ModifyOrder(
+# #   $orderId: String!
+# #   $price: Float
+# #   $volume: Int
+# # ) {
+# #   modifyOrder(
+# #     orderId: $orderId
+# #     price: $price
+# #     volume: $volume
+# #   ) {
+# #     success
+# #     message
+# #   }
+# # }

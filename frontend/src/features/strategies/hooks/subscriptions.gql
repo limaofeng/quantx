@@ -1,0 +1,46 @@
+# 策略运行时订阅操作
+
+# 订阅策略运行实例的日志
+subscription StrategyLogs($runId: String!, $levels: [String!], $includeHistory: Boolean) {
+  strategyLogs(runId: $runId, levels: $levels, includeHistory: $includeHistory) {
+    runId
+    timestamp
+    level
+    message
+    source
+  }
+}
+
+# 订阅策略运行实例的 Tick 数据（分时图）
+subscription StrategyTicks($runId: String!) {
+  strategyTicks(runId: $runId) {
+    stockCode
+    lastPrice
+    volume
+    amount
+    bidPrice
+    askPrice
+    bidVolume
+    askVolume
+    openPrice
+    highPrice
+    lowPrice
+    preClose
+    time
+  }
+}
+
+# 订阅策略运行实例的 K线 数据
+subscription StrategyKlines($runId: String!, $periods: [String!]) {
+  strategyKlines(runId: $runId, periods: $periods) {
+    stockCode
+    period
+    open
+    close
+    high
+    low
+    volume
+    amount
+    time
+  }
+}

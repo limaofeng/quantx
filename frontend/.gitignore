@@ -1,0 +1,116 @@
+# Dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Build outputs
+dist
+build
+html
+out
+.output
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+.nyc_output
+
+# Environment variables (保留 .env.example 作为模板)
+.env
+.env.*
+!.env.example
+
+# Vite
+vite.config.ts.*
+.vite
+
+# Testing
+test-results/
+playwright-report/
+playwright/.cache/
+
+# IDE & Editor files
+.vscode/
+.idea/
+CLAUDE.md
+.claude/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Devtools
+docs/dev/
+.shared/
+.agent/
+assets/
+
+# Runtime data and cache
+.cache/
+.temp/
+.tmp/
+
+# Debug files
+debug.log
+performance.log
+
+# Build artifacts
+*.tar.gz
+*.tgz
+*.zip
+
+# Backup files
+*.backup
+*.bak
+
+# Generated files
+CHANGELOG.md
+.husky/_
+
+# GraphQL Codegen 生成的文件
+src/generated/
+src/features/*/hooks/api.ts
+src/schema.graphql
+
+# GraphQL 临时文件
+*.xgql
+
+# Local VSCode settings (keep shared settings)
+.vscode/settings.json
+.vscode/launch.json
+
+# Test output
+test-results/
+coverage/
+.nyc_output/
+
+# Environment-specific files
+.env.local
+.env.*.local
+
+# Performance reports
+lighthouse-report.html
+
+# MSW 生成的 Service Worker
+public/mockServiceWorker.js

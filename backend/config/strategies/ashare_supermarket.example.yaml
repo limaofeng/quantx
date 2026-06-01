@@ -1,0 +1,107 @@
+# A-Share Supermarket Strategy - Example Configuration
+#
+# This strategy implements a diversified T+1 trading approach for Chinese A-shares
+# with box support entries and multi-layered risk controls.
+#
+# Strategy Highlights:
+# - Target: 20 concurrent positions (highly diversified)
+# - Entry: Buy near box support levels (within 2%)
+# - Exit: Prioritized queue (stop loss > structure break > time stop > take profit)
+# - Risk: Daily loss limit, max drawdown, loss streak controls
+# - Position sizing: 2-6% per position based on distance from support
+#
+# For more details, see: docs/strategies/ashare_supermarket.md
+
+# =============================================================================
+# Position Management
+# =============================================================================
+target_positions: 20          # Target number of concurrent positions (5-50)
+min_position_pct: 0.02        # Minimum allocation per position (2% of equity)
+max_position_pct: 0.06        # Maximum allocation per position (6% of equity)
+max_turnover_per_day: 4       # Max new positions per trading day
+
+# =============================================================================
+# Entry Parameters
+# =============================================================================
+buy_threshold_pct: 0.02       # Buy threshold: buy when within 2% above support (daily)
+buy_threshold_pct_60m: 0.02   # Buy threshold for 60-minute bars
+box_window_daily: 20          # Lookback for box detection (daily bars)
+box_window_60m: 80            # Lookback for box detection (60-minute bars)
+
+# =============================================================================
+# Exit Parameters
+# =============================================================================
+stop_loss_pct: 0.03           # Stop loss: exit at -3% (unconditional)
+take_profit_pct: 0.05         # Take profit: exit at +5%
+structure_break_pct: 0.01     # Structure break: exit when below support by 1%
+time_stop_bars_daily: 20      # Time stop: exit after 20 daily bars if no profit
+time_stop_bars_60m: 80        # Time stop: exit after 80 60m bars if no profit
+
+# =============================================================================
+# Risk Control Parameters
+# =============================================================================
+max_daily_loss_pct: 0.02      # Daily loss limit: stop opening positions at -2%
+max_drawdown_pct: 0.08        # Max drawdown: liquidate all positions at -8%
+loss_streak_reduce: 3         # Reduce position size 50% after 3 consecutive losses
+loss_streak_stop: 5           # Stop opening positions after 5 consecutive losses
+
+# =============================================================================
+# System Parameters
+# =============================================================================
+max_price_history: 200        # Max price bars to keep per instrument
+market: SH                    # Trading calendar market (SH/SZ)
+
+# =============================================================================
+# Candidate Pool Configuration (Optional)
+# =============================================================================
+# These parameters control the candidate pool filtering process
+# Uncomment and adjust as needed
+
+# candidate_pool:
+#   # Hard Filters
+#   min_turnover: 50000000          # Minimum daily turnover (50M yuan)
+#   exclude_st: true                # Exclude ST stocks
+#   exclude_suspended: true         # Exclude suspended stocks
+#
+#   # Structure Filters
+#   max_volatility_pct: 0.30        # Max volatility for range-bound filter
+#   ma_divergence_pct: 0.05         # Max MA divergence for 均线粘合
+#   min_data_points: 60             # Min data points for analysis
+#
+#   # Box Detection
+#   min_box_width_pct: 0.05         # Min box width (5% of price)
+#   max_box_width_pct: 0.20         # Max box width (20% of price)
+#   min_touches: 2                  # Min touches for valid box
+
+# =============================================================================
+# Example Configurations
+# =============================================================================
+#
+# Conservative Configuration:
+#   target_positions: 15
+#   min_position_pct: 0.015
+#   max_position_pct: 0.04
+#   stop_loss_pct: 0.025
+#   max_daily_loss_pct: 0.015
+#   max_drawdown_pct: 0.06
+#
+# Aggressive Configuration:
+#   target_positions: 25
+#   min_position_pct: 0.025
+#   max_position_pct: 0.08
+#   stop_loss_pct: 0.04
+#   take_profit_pct: 0.08
+#   max_daily_loss_pct: 0.03
+#   max_drawdown_pct: 0.10
+#
+# Backtest Configuration (Daily):
+#   target_positions: 20
+#   buy_threshold_pct: 0.02
+#   box_window_daily: 20
+#   time_stop_bars_daily: 20
+#
+# Intraday Configuration (60m):
+#   target_positions: 20
+#   buy_threshold_pct_60m: 0.015
+#   box_window_60m: 80
+#   time_stop_bars_60m: 80

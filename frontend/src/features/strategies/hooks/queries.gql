@@ -1,0 +1,139 @@
+# Strategies 模块查询操作
+
+# 获取所有策略
+query strategies {
+  strategies {
+    id
+    name
+    description
+    className
+    filePath
+    category
+    riskLevel
+    status
+    tags
+    version
+    codeHash
+    instrumentScope
+    parameterSchema {
+      type
+      required
+      additionalProperties
+      properties {
+        key
+        value {
+          type
+          title
+          description
+          default
+          minimum
+          maximum
+          step
+          enum
+          enumDescriptions
+          placeholder
+          unit
+          widget
+          group
+        }
+      }
+    }
+    defaultParameters
+    isActive
+    createdAt
+    updatedAt
+  }
+}
+
+# 获取单个策略详情
+query strategy($strategyId: Int!) {
+  strategy(strategyId: $strategyId) {
+    id
+    name
+    description
+    riskLevel
+    category
+    status
+    instrumentScope
+    defaultParameters
+    parameterSchema {
+      type
+      properties {
+        key
+        value {
+          type
+          title
+          description
+          default
+          enum
+        }
+      }
+    }
+  }
+}
+
+# 获取策略运行状态
+query strategyRuns {
+  strategyRuns {
+    id
+    name
+    strategy {
+      id
+      name
+    }
+    instruments
+    parameters
+    mode
+    status
+    profitLoss
+    totalTrades
+    metrics
+    errorMessage
+    createTime
+    startTime
+    stopTime
+  }
+}
+
+# 获取单个策略运行详情
+query strategyRun($runId: String!) {
+  strategyRun(runId: $runId) {
+    id
+    name
+    strategy {
+      id
+      name
+    }
+    instruments
+    parameters
+    mode
+    status
+    profitLoss
+    totalTrades
+    metrics
+    errorMessage
+    createTime
+    startTime
+    stopTime
+  }
+}
+
+# TODO: Uncomment when backend is restarted
+# query backtestHistory($runId: String!) {
+#   backtestHistory(runId: $runId) {
+#     id
+#     strategyRunId
+#     version
+#     parameters
+#     instruments
+#     backtestStartTime
+#     backtestEndTime
+#     startTime
+#     endTime
+#     metrics
+#     status
+#     errorMessage
+#     resultPath
+#     createdAt
+#   }
+# }

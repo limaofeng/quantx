@@ -1,0 +1,25 @@
+# Portfolio 模块变更操作
+
+# 个股清仓
+mutation LiquidatePosition($input: LiquidatePositionInput!) {
+  liquidatePosition(input: $input) {
+    success
+    stockCode
+    message
+    orderId
+    error
+  }
+}
+
+
+# 赎回资金
+mutation RedeemClearedPosition($input: RedeemPositionInput!) {
+  redeemClearedPosition(input: $input) {
+    success
+    stockCode
+    redeemedAmount
+    remainingAmount
+    message
+    error
+  }
+}

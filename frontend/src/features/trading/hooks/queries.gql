@@ -1,0 +1,219 @@
+# Trading 模块查询操作
+
+# 搜索股票（用于交易下单时选择股票）
+query SearchInstruments($searchQuery: String!, $limit: Int) {
+  instruments(
+    where: {
+      stockCode_contains: $searchQuery
+      type_in: [STOCK, ETF]
+    }
+    limit: $limit
+  ) {
+    id
+    stockCode: id
+    name
+    market
+    type
+    quote {
+      lastPrice
+      changePercent
+    }
+  }
+}
+
+# 获取今日委托订单
+query todayOrders($accountId: String) {
+  todayOrders(accountId: $accountId) {
+    id
+    sysid
+    stockCode
+    stockName
+    type
+    status
+    price
+    volume
+    tradedVolume
+    tradedPrice
+    time
+  }
+}
+
+
+# 获取历史委托订单
+query GetHistoryOrders(
+  $accountId: String!
+  $startDate: String!
+  $endDate: String!
+) {
+  historyOrders(
+    accountId: $accountId
+    startDate: $startDate
+    endDate: $endDate
+  ) {
+    id
+    sysid
+    stockCode
+    stockName
+    type
+    status
+    price
+    volume
+    tradedVolume
+    tradedPrice
+    time
+  }
+}
+
+
+# 获取今日成交记录
+query todayTrades($accountId: String) {
+  todayTrades(accountId: $accountId) {
+    tradedId
+    orderId
+    stockCode
+    orderType
+    direction
+    tradedPrice
+    tradedVolume
+    tradedAmount
+    tradedTime
+  }
+}
+
+
+# 获取历史成交记录
+query GetHistoryTrades(
+  $accountId: String!
+  $startDate: String!
+  $endDate: String!
+) {
+  historyTrades(
+    accountId: $accountId
+    startDate: $startDate
+    endDate: $endDate
+  ) {
+    tradedId
+    orderId
+    stockCode
+    orderType
+    direction
+    tradedPrice
+    tradedVolume
+    tradedAmount
+    tradedTime
+  }
+}
+
+
+# 获取单个订单详情
+# 获取单个订单详情
+query GetOrder($orderId: Int!) {
+  order(orderId: $orderId) {
+    id
+    # orderNo -> sysid
+    sysid
+    # stockCode -> stockCode
+    stockCode
+    stockName
+    # orderType -> type
+    type
+    # orderStatus -> status
+    status
+    # orderPrice -> price
+    price
+    # orderVolume -> volume
+    volume
+    # filledVolume -> tradedVolume
+    tradedVolume
+    # remainingVolume -> removed (calculate in client)
+    # avgPrice -> tradedPrice
+    tradedPrice
+    # totalAmount -> removed
+    # fees -> removed
+    # orderTime -> time
+    time
+    # filledTime -> removed
+    # cancelTime -> removed
+    statusMsg
+
+    trades {
+      tradedId
+      orderType
+      direction
+      stockCode
+      # tradeNo -> removed, use tradedId
+      tradedPrice
+      # tradeVolume -> tradedVolume
+      tradedVolume
+      # tradeAmount -> tradedAmount
+      tradedAmount
+      # fees -> removed
+      tradedTime
+    }
+  }
+}
+
+# 获取账户资金信息
+query GetAccountFunds($accountId: String!) {
+  account(accountId: $accountId) {
+    id
+    accountName
+    totalAsset
+    cash
+    frozenCash
+    marketValue
+    profitLossPercent
+  }
+}
+
+# 获取分时数据 (Ticks)
+query GetTicks($stockCode: String!, $startTime: DateTime, $endTime: DateTime) {
+  ticks(stockCode: $stockCode, startTime: $startTime, endTime: $endTime) {
+    stockCode
+    period
+    time
+    open
+    high
+    low
+    volume
+    amount
+  }
+}
+
+# 获取K线数据 (K-Lines)
+query GetKLines($stockCode: String!, $period: KLinePeriod!, $startTime: DateTime, $endTime: DateTime) {
+  klines(stockCode: $stockCode, period: $period, startTime: $startTime, endTime: $endTime) {
+    stockCode
+    period
+    time
+    open
+    high
+    low
+    close
+    volume
+    amount
+  }
+}
+
+# 获取K线分页数据 (K-Lines Page)
+query GetKLinesPage($page: KLinePageInput!) {
+  klinesPage(page: $page) {
+    items {
+      stockCode
+      period
+      time
+      open
+      high
+      low
+      close
+      volume
+      amount
+    }
+    pageInfo {
+      hasNextPage
+      hasPreviousPage
+      startCursor
+      endCursor
+    }
+  }
+}

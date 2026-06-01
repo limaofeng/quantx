@@ -1,0 +1,92 @@
+# Portfolio 模块查询操作
+
+# 获取持仓列表
+query holdings {
+  positions {
+    id
+    accountId
+    stockCode
+    instrumentName
+    volume
+    canUseVolume
+    frozenVolume
+    onRoadVolume
+    yesterdayVolume
+    avgPrice
+    lastPrice
+    marketValue
+    marketValuePercent
+    profitLoss
+    profitRate
+    openPrice
+    accountType
+    direction
+    createdAt
+    updatedAt
+  }
+}
+
+# 订阅持仓股票的实时报价
+subscription marketQuotesSubscription($symbols: [String!]!) {
+  marketQuotes(stockList: $symbols) {
+    stockCode
+    currentPrice
+    change
+    changePercent
+    high
+    low
+    open
+    preClose
+    volume
+    time
+  }
+}
+
+# 获取投资组合汇总信息
+query portfolioSummary($accountId: String) {
+  portfolioSummary(accountId: $accountId) {
+    accountId
+    accountName
+    totalAsset
+    cash
+    cashRatio
+    totalMarketValue
+    totalProfitLoss
+    totalProfitLossPercent
+    todayProfitLoss
+    todayProfitLossPercent
+    positionCount
+    profitPositionCount
+    lossPositionCount
+    updateTime
+    topHoldings {
+      id
+      stockCode
+      instrumentName
+      volume
+      avgPrice
+      lastPrice
+      marketValue
+      marketValuePercent
+      profitLoss
+      profitRate
+    }
+  }
+}
+
+# 获取清仓概况
+query liquidationSummary {
+  liquidationSummary {
+    totalPositions
+    liquidatablePositions
+    totalMarketValue
+    positions {
+      stockCode
+      instrumentName
+      volume
+      canUseVolume
+      avgPrice
+      marketValue
+    }
+  }
+}

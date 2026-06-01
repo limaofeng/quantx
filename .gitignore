@@ -1,0 +1,85 @@
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+
+# Runtime data
+data/
+logs/
+*.log
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+site/
+
+# Node and frontend build artifacts
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+test-results/
+playwright-report/
+coverage/
+
+# QuantX local services and caches
+.prefect/
+.prefect-test/
+.pytest-tmp*/
+.playwright-mcp/
+.quantx-dev/
+quantx.pid
+quantx_service_runner.bat
+
+# Local editor and agent state
+.vscode/
+.idea/
+.claude/
+.agent/
+.agents/
+.shared/
+.codex_screenshots/
+.codex/*
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/**/__pycache__/
+.codex/skills/**/*.py[cod]
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary and backup files
+tmp/
+temp/
+.tmp/
+.temp/
+.cache/
+*.backup
+*.bak
+*.tmp
+*~

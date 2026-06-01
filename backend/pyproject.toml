@@ -1,0 +1,149 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantx-api"
+version = "0.1.0"
+# XTQuant 相关依赖
+# 注意：xtdata 和 xttrader 需要从迅投量化官网下载安装
+
+dependencies = [
+    # 数据处理
+    "pandas>=1.3.0",
+    "numpy>=1.21.0",
+    "pandas-ta==0.3.14b0",
+    # 技术指标计算
+    # talib>=0.4.0                          # 可选，用于更多技术指标
+    # Web框架
+    "fastapi>=0.68.0",
+    "uvicorn>=0.15.0",
+    "pydantic>=1.8.0",
+    # Strawberry GraphQL
+    "strawberry-graphql[fastapi]",
+    # 数据库
+    "sqlalchemy>=1.4.0",
+    "psycopg2-binary>=2.9.0",               # PostgreSQL驱动
+    "influxdb3-python>=0.13.0",             # InfluxDB 3.x时间序列数据库
+    "pyarrow>=10.0.0",                      # InfluxDB 3.x依赖
+    "redis>=4.0.0",                         # Redis 缓存数据库
+    # sqlite3  # Python 内置
+    # 工具库
+    "python-dateutil>=2.8.0",
+    "pypinyin>=0.55.0",
+    "pytz>=2021.1",
+    # 日志
+    "loguru>=0.5.0",                        # 可选，更好的日志库
+    # 异步支持
+    "aiofiles",
+    # 配置管理
+    "python-dotenv>=0.19.0",
+    "pydantic-settings>=2.0.0",
+    # WebSocket支持
+    "websockets>=11.0.0",
+    # HTTP客户端
+    "httpx>=0.24.0",
+    "requests>=2.28.0",
+    "aiohttp>=3.8.0",
+    # 监控和指标
+    "prometheus-client>=0.15.0",
+    "psutil>=5.9.0",
+    # 数据验证和序列化
+    "pydantic[email]>=2.0.0",
+    # AI/LLM
+    "openai>=2.16.0",
+    # MCP (Model Context Protocol)
+    "mcp>=0.9.0",
+    # 工作流编排
+    "prefect>=3.6.10",
+    "anyio>=4.12.1",
+    # 网页抓取
+    "playwright>=1.40.0",
+    # 测试工具（开发时使用）
+    "pytest>=6.0.0",
+    "pytest-asyncio>=0.15.0",
+    "pytest-cov>=3.0.0",
+    "pytest-xdist>=2.5.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --tb=short --import-mode=importlib"
+env = ["ENV=testing"]
+pythonpath = "."
+testpaths = [
+    "tests",
+]
+python_files = [
+    "test_*.py",
+    "*_test.py",
+]
+python_classes = [
+    "Test*",
+]
+python_functions = [
+    "test_*",
+]
+
+# 异步测试配置
+asyncio_mode = "auto"
+
+# 标记
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "api: marks tests as API tests",
+    "middleware: marks tests as middleware tests",
+    "graphql: marks tests as GraphQL tests",
+    "mcp: marks tests as MCP integration tests",
+]
+
+# 测试覆盖率配置
+[tool.coverage.run]
+source = [
+    ".",
+]
+omit = [
+    "tests/*",
+    "venv/*",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+indent-width = 2                        # 使用 2 个空格作为缩进
+line-length = 88                        # 默认行长度，与 Black 一致
+target-version = "py39"                 # 指定 Python 版本
+exclude = ["migrations", "tests", "core.bak"]       # 排除特定目录
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]                # 启用 pycodestyle (E)、pyflakes (F) 和 isort (I) 规则
+ignore = ["E501"]                       # 忽略行长度超限警告
+
+[tool.ruff.format]
+quote-style = "double"                  # 使用双引号
+indent-style = "space"                  # 使用空格缩进
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.13.0",
+    "pre-commit>=4.3.0",
+    "pytest-env>=1.1.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["config*", "core*", "models*", "miniqmt*", "database*", "services*", "monitoring*", "graphql*", "repositories*", "prefector*", "quantx_mcp*"]
+exclude = ["logs*", "htmlcov*", "__pycache__", "docs*", "tests*", "tasks*"]

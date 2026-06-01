@@ -1,0 +1,719 @@
+# A 股三层协作与执行契约
+
+**文档目标：** 定义 A 股个人量化系统中环境层、风控层、仓位调节层、策略层、执行层与状态管理层之间的统一协作顺序、职责边界、状态真源和异常处理规则。本文是**策略无关的交易域契约**：当前必须服务 `A股单标的动态天平双仓策略.md`，后续新增其他 A 股策略时也应复用本文约定。
+
+---
+
+## 0. 核心定位
+
+本文回答一个问题：**一次 A 股策略决策从行情快照到成交回报，应该如何在各模块之间确定性流转？**
+
+它不定义任何具体策略公式，不定义个股买卖逻辑，也不决定某只股票是否值得交易。它只定义：
+
+- 环境层、风控层、仓位调节层的调用顺序。
+- 策略如何消费公共快照并输出交易意图。
+- 风控如何拆分为“前置上下文风控”和“后置订单风控”。
+- 订单、成交、bucket 归因、T+1 库存置换如何收敛到统一账本。
+- 实盘 miniQMT 与回测 broker 如何保持状态流同构。
+- 后续策略如何接入而不破坏当前双仓策略。
+
+当前主线策略：
+
+```text
+ashare_dynamic_balance_dual_bucket
+A 股单标的动态天平双仓策略
+bucket 模型：locked_core / core / swing
+节奏：日线确认趋势与核心仓目标，盘中分钟/tick 触发 swing 网格
+```
+
+但本文的公共能力必须允许未来策略使用不同 bucket 模型，例如：
+
+```text
+single_bucket_trend       // 单仓趋势策略
+core_only_dca             // 只建核心仓策略
+swing_only_grid           // 只做短仓网格策略
+multi_signal_rebalance    // 多信号再平衡策略，仍限定单标的实例
+```
+
+---
+
+## 1. 不可推翻的协作原则
+
+### 1.1 策略只表达意图
+
+策略层只输出 `TradeIntent`。它可以表达：
+
+- 想买还是想卖。
+- 属于哪个逻辑 bucket。
+- 目标仓位、目标金额或目标数量。
+- 触发原因、置信度、状态机标签、网格层级。
+
+策略层不得表达：
+
+- 已修正后的真实可买数量。
+- 已修正后的真实可卖数量。
+- 真实现金是否足够。
+- 今日买入能否卖出。
+- miniQMT 是否已经成交。
+
+### 1.2 风控拆成两段
+
+A 股系统必须使用双阶段风控，避免“风控既需要交易意图又要给仓位调节层上限”的顺序冲突。
+
+```text
+前置上下文风控 ContextRiskCaps
+    在策略 Step() 之前执行
+    输入：环境快照 + 组合状态 + 实例风险配置 + 订单/账户健康状态
+    输出：最大仓位、最大买入额、是否禁买、是否防御、是否熔断
+
+后置订单风控 OrderRiskDecision
+    在策略 TradeIntent 之后执行
+    输入：交易意图 + 组合状态 + A 股规则 + 订单状态 + broker 快照
+    输出：ALLOW / CAP / DELAY / REJECT / KILL_SWITCH
+```
+
+### 1.3 仓位调节层只调整工作空间
+
+仓位调节层只把环境与风险约束映射为策略可用的参数 profile，例如：
+
+- `min_position_pct`
+- `max_position_pct`
+- `target_cash_buffer_pct`
+- `core_share_min / core_share_max`
+- `swing_max_pct`
+- `balance_beta_multiplier`
+- `inventory_gamma_multiplier`
+- `grid_step_multiplier`
+- `allow_core_buy / allow_swing_buy / allow_swing_sell`
+
+仓位调节层不生成买卖方向，不修改真实持仓，不标记订单成交。
+
+### 1.4 miniQMT 是实盘成交真源
+
+实盘路径中，以下事件都不能改变真实成交状态：
+
+- 策略发出信号。
+- SaaS 下发指令。
+- LocalAgent 收到指令。
+- miniQMT 接受委托。
+- 委托状态为已报。
+
+只有 miniQMT 的成交回报可以改变：
+
+- 真实持仓。
+- 真实现金。
+- 冻结资金释放。
+- 冻结股份释放。
+- bucket 成交归因。
+- 网格成交状态。
+
+### 1.5 回测必须模拟同一条状态流
+
+回测 broker 不允许把 `TradeIntent` 直接当成成交。回测路径必须模拟：
+
+```text
+TradeIntent
+  -> OrderSizer
+  -> OrderRiskDecision
+  -> OrderRequest
+  -> BrokerOrderAccepted / BrokerOrderRejected
+  -> BrokerExecutionReport
+  -> RuntimeStateManager
+  -> Strategy on_order / on_trade
+```
+
+否则 GA 会利用假成交漏洞，尤其是涨停买入、跌停卖出、日线 high/low 触达和 T+1 场景。
+
+---
+
+## 2. 标准调用顺序
+
+### 2.1 总体数据流
+
+推荐统一数据流如下：
+
+```text
+MarketData / Calendar / SecurityStatus / Portfolio / OrderReports
+    -> MarketDataAdapter
+    -> 环境层 EnvironmentLayer
+       输出 MarketContextSnapshot
+
+MarketContextSnapshot + PortfolioState + OrderHealth + InstanceRiskConfig
+    -> 前置风控 ContextRiskLayer
+       输出 RiskContextCaps
+
+MarketContextSnapshot + RiskContextCaps + StrategyRuntimeState + PortfolioBucketState
+    -> 仓位调节层 PositionAdjustmentLayer
+       输出 PositionAdjustmentProfile
+
+StrategyInput = {
+    instrument bars,
+    portfolio snapshot,
+    bucket ledger snapshot,
+    MarketContextSnapshot,
+    RiskContextCaps,
+    PositionAdjustmentProfile,
+    RuntimeState,
+    ParamPack
+}
+    -> Strategy.Step()
+       输出 TradeIntent[] + RuntimeStatePatch
+
+TradeIntent[] + PortfolioState + BucketLedger + AshareMarketRules
+    -> OrderSizer
+       输出 OrderDraft[]
+
+OrderDraft[] + PortfolioState + BucketLedger + OrderState + BrokerSnapshot
+    -> 后置风控 OrderRiskLayer
+       输出 OrderRiskDecision[]
+
+OrderRiskDecision[ALLOW/CAP]
+    -> OrderRouter
+    -> TradeCommand
+    -> LocalAgent
+    -> miniQMT / BacktestBroker
+    -> BrokerExecutionReport
+    -> RuntimeStateManager
+    -> PortfolioState / BucketLedger / OrderState / DecisionTrace
+```
+
+### 2.2 日线收盘动作
+
+日线动作通常在收盘后或下一交易日前执行，用于确认慢变量。
+
+```text
+1. 同步当日完整日线、指数、行业、概念、宽度、证券状态、公司行为。
+2. 校验数据质量和交易日历。
+3. 生成 MarketContextSnapshot。
+4. 生成 RiskContextCaps。
+5. 生成 PositionAdjustmentProfile。
+6. 调用策略日线 Step 或策略 Step 的日线分支。
+7. 更新趋势状态、动态基准、低位评分、高位评分、core 目标。
+8. 如有 core 调仓意图，进入 OrderSizer + OrderRiskLayer。
+9. 记录 DecisionTrace。
+```
+
+对当前双仓策略：
+
+- 日线动作主要影响 `core` 目标、动态基准、趋势状态和仓位阶段。
+- 日线动作不应频繁改变盘中 swing 的已成交网格状态。
+- 如果日线动作产生 core 买卖意图，也必须经过订单状态流。
+
+### 2.3 盘中分钟 / tick 动作
+
+盘中动作用于处理快变量，尤其是 swing 网格。
+
+```text
+1. 读取上一交易日确认的动态基准和日线状态。
+2. 读取当前分钟/tick 行情、盘口、涨跌停、停牌、交易时段。
+3. 刷新组合状态、可卖量、冻结状态、未完成订单。
+4. 环境层可使用盘中宽度/流动性增量；缺失时沿用最近确认快照并标记 stale。
+5. 前置风控确认是否允许盘中新增买入或只允许卖出。
+6. 仓位调节层输出盘中 profile 修正。
+7. 策略根据 grid index 输出 swing 意图。
+8. 后置风控处理 T+1、100 股、涨跌停、可卖量、现金和库存置换。
+9. 下发订单或延迟/拒绝。
+10. 记录 DecisionTrace。
+```
+
+对当前双仓策略：
+
+- `BUILDING_CORE` 阶段普通网格不得卖出 core。
+- swing 买入必须让位于 core 建仓节奏。
+- swing 卖出不足时可触发合法 T+1 库存置换，但只能由风控与账本层处理。
+
+### 2.4 订单回报动作
+
+订单回报动作由 miniQMT 或回测 broker 事件驱动，不由策略主动驱动。
+
+```text
+1. 收到委托回报或成交回报。
+2. 用 broker_order_id / client_order_id 定位 OrderState。
+3. 更新订单状态和冻结状态。
+4. 对成交回报按成交数量更新 PortfolioState 与 BucketLedger。
+5. 对部分成交只应用部分 bucket 归因和部分库存置换。
+6. 对拒单、撤单、废单释放冻结并回滚未成交的置换流水。
+7. 调用 Strategy on_order / on_trade 更新算法状态，例如 pending 网格、最近成交层级。
+8. 记录 BrokerExecutionReport 和 DecisionTrace 补充事件。
+```
+
+### 2.5 对账动作
+
+对账动作用于修复本地账本与 broker 真实快照差异。
+
+```text
+1. LocalAgent 重连、每日收盘后、系统启动后、异常回报后触发。
+2. 拉取 miniQMT 资金、持仓、可卖量、冻结、未完成委托、当日成交。
+3. 与 SaaS PortfolioState / BucketLedger / OrderState 比较。
+4. 在容忍范围内自动修正冻结和可卖量。
+5. 发现持仓数量、现金、成交流水无法解释的差异时进入 RECONCILE_REQUIRED。
+6. 必要时触发 KILL_SWITCH，等待人工确认。
+```
+
+---
+
+## 3. 层级职责边界
+
+### 3.1 MarketDataAdapter
+
+MarketDataAdapter 是环境层与策略层之前的数据适配器。
+
+职责：
+
+- 拉取或读取 A 股行情、指数、行业、概念、宽度、交易日历、涨跌停、证券状态、公司行为。
+- 保证数据按时点可得，禁止未来数据泄露。
+- 统一价格口径：指标可以用时点可得复权序列，交易撮合必须用未复权真实价格。
+- 输出 `MarketDataSnapshot`。
+
+不做：
+
+- 不计算买卖信号。
+- 不修改组合状态。
+- 不替代环境层判断。
+
+### 3.2 EnvironmentLayer
+
+环境层职责：
+
+- 把大盘、行业、概念、宽度、流动性、量价结构压缩成 `MarketContextSnapshot`。
+- 输出 `context_score` 和 `risk_tags`。
+- 对数据缺失进行保守降级。
+
+不做：
+
+- 不输出 `BUY / SELL`。
+- 不决定 target position。
+- 不调用 broker。
+
+### 3.3 ContextRiskLayer
+
+前置上下文风控职责：
+
+- 根据环境和账户健康状态输出全局约束。
+- 决定是否进入防御、是否禁买、是否只允许卖出。
+- 给仓位调节层提供硬上限。
+
+输出：`RiskContextCaps`。
+
+典型字段：
+
+```json
+{
+  "risk_mode": "RISK_REDUCED",
+  "max_position_pct_cap": 0.45,
+  "max_buy_amount_cny": 8000,
+  "max_daily_add_pct": 0.03,
+  "allow_core_buy": true,
+  "allow_swing_buy": false,
+  "allow_sell": true,
+  "force_profile": "CAUTIOUS",
+  "kill_switch": false,
+  "reason_codes": ["MARKET_RISK_OFF", "SWING_BUY_DISABLED"]
+}
+```
+
+### 3.4 PositionAdjustmentLayer
+
+仓位调节层职责：
+
+- 把 `MarketContextSnapshot` + `RiskContextCaps` + 策略状态映射为 profile。
+- 输出动态天平边界和参数乘数。
+- 给策略提供“当前能活动多大”的工作空间。
+
+对当前双仓策略，它直接影响：
+
+- `MinPct / MaxPct`
+- `NeutralPositionPct`
+- `balance_beta / inventory_gamma`
+- `CoreShareMin / CoreShareMax`
+- `SwingMaxPct`
+- `GridStepPct`
+
+对未来策略，它可以只输出策略声明支持的字段。策略不支持的字段应被忽略，而不是强行解释。
+
+### 3.5 StrategyLayer
+
+策略层职责：
+
+- 消费标准 `StrategyInput`。
+- 输出 `TradeIntent[]` 与 `RuntimeStatePatch`。
+- 更新算法状态，但不得更新真实持仓、现金和订单状态。
+
+当前双仓策略必须满足：
+
+- `TradeIntent.metadata.bucket` 必须为 `core` 或 `swing`。
+- `locked_core` 默认不由策略主动卖出。
+- `BUILDING_CORE` 阶段普通网格不得卖 core。
+- 网格成交状态只能由 `on_order / on_trade` 事件更新。
+
+### 3.6 OrderSizer
+
+OrderSizer 职责：
+
+- 把目标仓位、目标金额或目标数量转换成 A 股合法订单草案。
+- 处理 100 股整数倍、零股清仓、价格 tick、最小订单金额、单笔最大比例、现金预占用。
+
+OrderSizer 只做尺寸与格式修正，不做环境判断和策略判断。
+
+### 3.7 OrderRiskLayer
+
+后置订单风控职责：
+
+- 校验交易时段。
+- 校验停牌、ST、退市风险、涨跌停、盘口可成交性。
+- 校验现金、冻结、持仓、可卖量、T+1。
+- 生成库存置换计划。
+- 输出 `OrderRiskDecision`。
+
+它可以改变订单数量或拒绝订单，但不得改变交易方向。
+
+### 3.8 OrderRouter / LocalAgent
+
+OrderRouter 和 LocalAgent 职责：
+
+- 把 SaaS 侧 `TradeCommand` 转换为本地 miniQMT 下单参数。
+- 执行本地保护检查。
+- 上报委托状态、成交状态、账户快照。
+
+LocalAgent 不含策略代码，不生成新交易意图。
+
+### 3.9 RuntimeStateManager
+
+RuntimeStateManager 职责：
+
+- 消费 broker 事件。
+- 更新订单状态、冻结状态、真实组合快照、bucket 账本。
+- 调用策略 `on_order / on_trade` 更新算法状态。
+- 生成审计快照。
+
+RuntimeStateManager 是交易事实收敛中心。
+
+---
+
+## 4. 公共策略接入契约
+
+### 4.1 StrategyManifest
+
+每个策略必须声明自己的能力，而不是让执行层猜测。
+
+```json
+{
+  "strategy_id": "ashare_dynamic_balance_dual_bucket",
+  "market": "A_SHARE",
+  "instrument_scope": "SINGLE_INSTRUMENT",
+  "direction_mode": "LONG_ONLY",
+  "bucket_model": "CORE_SWING_LOCKED",
+  "decision_cadence": ["DAILY_CLOSE", "INTRADAY_1M", "ORDER_EVENT"],
+  "requires_environment_layer": true,
+  "requires_position_adjustment_profile": true,
+  "supports_context_risk_caps": true,
+  "supports_t1_substitution": true,
+  "supported_intent_types": ["TARGET_POSITION_PCT", "TARGET_AMOUNT", "TARGET_VOLUME"],
+  "data_dependencies": [
+    "INSTRUMENT_DAILY_BAR",
+    "INSTRUMENT_INTRADAY_BAR",
+    "MARKET_INDEX_DAILY_BAR",
+    "SECTOR_INDEX_DAILY_BAR",
+    "TRADING_CALENDAR",
+    "LIMIT_PRICE",
+    "SECURITY_STATUS"
+  ]
+}
+```
+
+### 4.2 bucket_model 枚举
+
+| bucket_model | 说明 | 适用策略 |
+|---|---|---|
+| `NONE` | 策略不使用 bucket，执行层只维护真实持仓 | 简单趋势策略 |
+| `SINGLE_ACTIVE` | 只有一个主动交易 bucket | 普通单仓策略 |
+| `CORE_SWING` | 核心仓 + 波动仓 | 网格增强、趋势增强 |
+| `CORE_SWING_LOCKED` | 封存仓 + 核心仓 + 波动仓 | 当前动态天平双仓策略 |
+| `CUSTOM` | 策略自定义 bucket，但必须实现映射接口 | 后续高级策略 |
+
+### 4.3 StrategyInput 标准字段
+
+所有策略共享的基础输入：
+
+```text
+StrategyInput
+├── instance_id
+├── strategy_id
+├── instrument_code
+├── decision_time
+├── cadence
+├── market_data_snapshot
+├── portfolio_snapshot
+├── bucket_ledger_snapshot
+├── market_context_snapshot
+├── risk_context_caps
+├── position_adjustment_profile
+├── runtime_state
+├── param_pack
+└── pending_order_summary
+```
+
+策略可以忽略不需要的字段，但不能要求直接访问数据库或 broker。
+
+### 4.4 TradeIntent 标准字段
+
+```text
+TradeIntent
+├── intent_id
+├── instance_id
+├── strategy_id
+├── instrument_code
+├── side                         // BUY / SELL
+├── intent_type                  // TARGET_POSITION_PCT / TARGET_AMOUNT / TARGET_VOLUME
+├── target_position_pct
+├── target_amount_cny
+├── target_volume
+├── bucket                       // core / swing / locked_core / default / custom
+├── confidence
+├── priority                     // LOW / NORMAL / HIGH / RISK_REDUCTION
+├── expiry_policy
+├── reason
+├── metadata
+└── trace_id
+```
+
+当前双仓策略要求：
+
+- core 调仓必须带 `bucket = core`。
+- swing 网格必须带 `bucket = swing`。
+- 普通方向性卖出不得带 `bucket = locked_core`。
+- 高位防御卖出 core 时 `priority = RISK_REDUCTION`。
+
+---
+
+## 5. 状态所有权
+
+| 状态 | 真源 | 可写模块 | 策略是否可写 | 说明 |
+|---|---|---|---|---|
+| `MarketContextSnapshot` | 环境层 | EnvironmentLayer | 否 | 每次决策可复现 |
+| `RiskContextCaps` | 前置风控 | ContextRiskLayer | 否 | 约束仓位调节与策略 |
+| `PositionAdjustmentProfile` | 仓位调节层 | PositionAdjustmentLayer | 否 | 策略只消费 |
+| `RuntimeState` | 策略算法状态 | Strategy / RuntimeStateManager | 是，限算法状态 | 不含真实现金持仓 |
+| `PortfolioState` | miniQMT / broker 快照 | RuntimeStateManager | 否 | 真实资金与持仓 |
+| `BucketLedger` | 成交归因账本 | RuntimeStateManager | 否 | 策略只能请求 bucket |
+| `OrderState` | broker 事件状态流 | RuntimeStateManager | 否 | 下单、撤单、成交、拒单 |
+| `DecisionTrace` | 审计系统 | 各层追加 | 否 | 只追加，不覆盖 |
+| `ParamPack` | 基因库 / 实例配置 | Instance / Evolution | 否 | 策略读取参数 |
+
+---
+
+## 6. 冲突处理规则
+
+### 6.1 保守优先级
+
+当多个模块给出冲突结论时，按以下优先级处理：
+
+```text
+KILL_SWITCH
+  > 法规与交易所/交易所等价规则（交易时段、停牌、T+1、涨跌停、100股）
+  > 账户事实（现金、可卖量、冻结、真实持仓）
+  > 实例硬风控（最大仓位、最大回撤、现金缓冲）
+  > 前置上下文风控 RiskContextCaps
+  > 仓位调节 Profile
+  > 策略 TradeIntent
+  > 用户偏好软参数
+```
+
+### 6.2 只允许向保守方向降级
+
+数据缺失、状态不一致、Agent 离线、回报延迟时，只能：
+
+- 降低买入额度。
+- 降低仓位上限。
+- 禁止 swing 买入。
+- 延迟订单。
+- 触发人工确认。
+
+不能：
+
+- 提高买入额度。
+- 提高仓位上限。
+- 把未知状态视为安全。
+- 把未成交订单视为已成交。
+
+### 6.3 风控不得反向交易
+
+如果策略输出 BUY，后置风控可以：
+
+- 允许。
+- 限额。
+- 延迟。
+- 拒绝。
+- 触发熔断。
+
+但不得把 BUY 改为 SELL。
+
+如果需要强制减仓，必须由独立的风险处置流程产生 `RiskReductionIntent`，并明确人工确认或自动风控权限。
+
+---
+
+## 7. 异常与降级
+
+### 7.1 数据缺失
+
+| 缺失类型 | 默认动作 |
+|---|---|
+| 缺大盘指数 | 环境层 `INSUFFICIENT`，前置风控进入保守，禁止 aggressive |
+| 缺行业指数 | 行业降级为大盘，不允许进入 aggressive accumulation |
+| 缺概念指数 | 概念中性，不阻塞 |
+| 缺涨跌停价 | 实盘禁止下单，回测使用保守推导并标注 |
+| 缺停牌状态 | 实盘禁止下单 |
+| 缺分钟/tick | 禁用盘中网格，只允许日线低频逻辑 |
+| 缺 broker 账户快照 | 禁止新增买入，只允许对账 |
+
+### 7.2 Agent 离线
+
+Agent 离线时：
+
+- SaaS 不下发新订单。
+- 不把待下发指令保留为无限期有效订单。
+- 记录 `AGENT_OFFLINE` trace。
+- 下次 tick 重新基于最新状态决策。
+
+### 7.3 订单回报延迟
+
+当订单处于 `SUBMITTED / ACCEPTED / PARTIALLY_FILLED` 且超过超时阈值未收到完整回报：
+
+- 禁止同一 bucket、同一方向、同一网格层级重复发单。
+- 可以查询 broker 委托状态。
+- 如果查询失败，进入 `ORDER_REPORT_STALE`。
+- 超过更高阈值触发对账或 KILL_SWITCH。
+
+### 7.4 账本与 broker 不一致
+
+若 broker 快照显示真实持仓与本地账本不一致：
+
+1. 先尝试用未处理成交、撤单、冻结释放解释。
+2. 解释成功则生成 `RECONCILED` 事件。
+3. 无法解释则进入 `RECONCILE_REQUIRED`。
+4. 重大差异触发 `KILL_SWITCH`。
+
+---
+
+## 8. 当前双仓策略适配要求
+
+### 8.1 必须支持的公共能力
+
+当前 `A股单标的动态天平双仓策略` 依赖以下公共能力：
+
+| 能力 | 是否必须 | 说明 |
+|---|---|---|
+| `MarketContextSnapshot` | 是 | 大盘、行业、概念、流动性、宽度、量价结构 |
+| `RiskContextCaps` | 是 | 给仓位调节层的最大仓位和禁买约束 |
+| `PositionAdjustmentProfile` | 是 | 动态天平边界、core/swing 拆分、beta/gamma、grid step |
+| `BucketLedger` | 是 | locked_core / core / swing 归因 |
+| `T1SubstitutionPlan` | 是 | swing 当日买入后可使用老仓置换 |
+| `OrderStateMachine` | 是 | 网格成交状态必须由回报驱动 |
+| `BacktestBroker` | 是 | GA 和回测不能假成交 |
+| `DecisionTrace` | 是 | 回测归因和实盘追责 |
+
+### 8.2 策略内禁止事项
+
+当前双仓策略不得：
+
+- 直接读取 miniQMT。
+- 直接读取数据库。
+- 自行修正 100 股手数。
+- 自行判定真实可卖量。
+- 在信号生成时标记网格已成交。
+- 因 T+1 不可卖而自行修改 core/swing 账本。
+- 把 `locked_core` 当作普通方向性卖出来源。
+
+### 8.3 策略事件回调
+
+为保证 pending 和网格状态正确，当前双仓策略至少需要以下事件回调：
+
+```text
+on_order_accepted(order_state)
+on_order_rejected(order_state, reason_code)
+on_order_canceled(order_state)
+on_trade_filled(execution_report, applied_bucket_attribution)
+on_trade_partially_filled(execution_report, applied_bucket_attribution)
+on_reconcile(reconcile_event)
+```
+
+事件回调只更新算法状态，例如：
+
+- pending 网格层级。
+- 最近成交 grid index。
+- 最近成交基准。
+- 拒单冷却时间。
+- 部分成交后的剩余待处理意图。
+
+不得更新真实持仓和现金。
+
+---
+
+## 9. 后续策略接入方式
+
+新增策略只需要实现以下内容：
+
+1. `StrategyManifest`。
+2. 参数解析 `ParamPack`。
+3. 纯函数 `Step(StrategyInput) -> StrategyOutput`。
+4. 可选 `on_order / on_trade` 事件处理。
+5. 若参与 GA，则实现 `EvolvableStrategy` 适配器。
+6. 声明 bucket 模型和所需公共数据。
+
+不需要重复实现：
+
+- A 股交易时段。
+- 100 股规则。
+- T+1。
+- 涨跌停/停牌。
+- 订单状态机。
+- bucket 账本。
+- 回测 broker。
+- 数据质量降级。
+- 公司行为处理。
+- 审计追踪。
+
+---
+
+## 10. 开发验收清单
+
+### 10.1 架构验收
+
+- [ ] 风控已拆分为 `ContextRiskCaps` 和 `OrderRiskDecision`。
+- [ ] 仓位调节层消费的是前置风控约束，不消费具体订单状态。
+- [ ] 后置风控消费具体 `TradeIntent / OrderDraft`。
+- [ ] 策略不直接写真实持仓、现金、可卖量。
+- [ ] miniQMT 成交回报是实盘成交真源。
+- [ ] 回测 broker 模拟订单状态流。
+
+### 10.2 当前双仓策略验收
+
+- [ ] `TradeIntent` 必须带 bucket。
+- [ ] `BUILDING_CORE` 普通网格不得卖 core。
+- [ ] swing T+1 不可卖时，风控层可输出置换计划。
+- [ ] `locked_core` 默认不参与方向性卖出。
+- [ ] 部分成交只更新部分网格与 bucket 归因。
+- [ ] 拒单/撤单不更新网格成交状态。
+
+### 10.3 通用策略验收
+
+- [ ] 新策略可以声明 `bucket_model = NONE` 或 `SINGLE_ACTIVE`。
+- [ ] 公共执行层不依赖 `core/swing` 字段硬编码。
+- [ ] 策略不支持的 profile 字段可被忽略。
+- [ ] 风控规则不依赖具体策略公式。
+
+---
+
+## 11. 与其他文档的关系
+
+本文是协作总契约。细节拆分如下：
+
+| 文档 | 负责内容 |
+|---|---|
+| `A股交易域数据结构与状态机.md` | 结构体、枚举、订单状态机、bucket 账本不变量、原因码 |
+| `A股数据源与公司行为契约.md` | 数据源映射、数据质量、时点可得、公司行为、证券状态 |
+| `A股回测Broker与成交撮合契约.md` | 回测撮合、成本模型、T+1 模拟、涨跌停/停牌、成交约束统计 |
+| `A股单标的动态天平双仓策略.md` | 当前主线策略的公式、状态机、core/swing 逻辑 |
+| `A股单标的环境层设计.md` | 环境层计算规则 |
+| `A股单标的风控层设计.md` | 风控规则细节 |
+| `A股单标的仓位调节层设计.md` | profile 与动态天平参数调节 |

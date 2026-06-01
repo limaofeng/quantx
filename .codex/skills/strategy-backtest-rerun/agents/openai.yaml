@@ -1,0 +1,3 @@
+display_name: 策略回测重试
+short_description: 重新执行 QuantX 策略回测并核验版本、成交和绩效快照
+default_prompt: 使用策略回测重试 skill，重新回测指定 run，并汇总最新版本、状态、成交与绩效快照。
