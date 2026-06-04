@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import List, Optional
 
@@ -108,6 +108,7 @@ class KLineData:
   high: float = strawberry.field(description="最高价")
   low: float = strawberry.field(description="最低价")
   close: float = strawberry.field(description="收盘价")
+  pre_close: float = strawberry.field(description="前收盘价")
   volume: int = strawberry.field(description="成交量")
   amount: float = strawberry.field(description="成交额")
 
@@ -122,6 +123,7 @@ class KLineData:
       high=kline.high,
       low=kline.low,
       close=kline.close,
+      pre_close=getattr(kline, "pre_close", 0.0),
       volume=int(kline.volume),
       amount=kline.amount,
     )
@@ -133,6 +135,45 @@ class KLineData:
 class KLinePage:
   items: List[KLineData] = strawberry.field(description="K线列表(按 order 排序)")
   page_info: PageInfo = strawberry.field(description="分页信息")
+
+
+@strawberry.type(description="日内热缓存状态")
+class IntradayWarmCacheStatus:
+  stock_code: str = strawberry.field(description="股票代码")
+  sources: List[str] = strawberry.field(description="热池来源")
+  tick_subscribed: bool = strawberry.field(description="是否已订阅 tick")
+  kline_subscribed: bool = strawberry.field(description="是否已订阅 1m K线")
+  initialized_date: Optional[date] = strawberry.field(
+    default=None, description="首次初始化下载所属交易日"
+  )
+  initializing: bool = strawberry.field(description="是否正在初始化下载")
+  initialization_error: Optional[str] = strawberry.field(
+    default=None, description="初始化下载错误"
+  )
+  last_tick_at: Optional[datetime] = strawberry.field(
+    default=None, description="最近 tick 时间"
+  )
+  last_kline_at: Optional[datetime] = strawberry.field(
+    default=None, description="最近 1m K线时间"
+  )
+  tick_count: int = strawberry.field(description="缓存 tick 数量")
+  kline_count: int = strawberry.field(description="缓存 1m K线数量")
+
+  @staticmethod
+  def from_status(row: dict) -> "IntradayWarmCacheStatus":
+    return IntradayWarmCacheStatus(
+      stock_code=row["stock_code"],
+      sources=list(row.get("sources") or []),
+      tick_subscribed=bool(row.get("tick_subscribed")),
+      kline_subscribed=bool(row.get("kline_subscribed")),
+      initialized_date=row.get("initialized_date"),
+      initializing=bool(row.get("initializing")),
+      initialization_error=row.get("initialization_error"),
+      last_tick_at=row.get("last_tick_at"),
+      last_kline_at=row.get("last_kline_at"),
+      tick_count=int(row.get("tick_count") or 0),
+      kline_count=int(row.get("kline_count") or 0),
+    )
 
 
 @strawberry.type(description="实时价格数据")

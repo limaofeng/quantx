@@ -62,14 +62,19 @@ class ConnectionPool:
     database: str,
     max_connections: int = 10,
     timeout: float = 30.0,
+    pool_acquire_timeout: Optional[float] = None,
   ):
     self.host = host
     self.token = token
     self.database = database
-    self.max_connections = max_connections
+    self.max_connections = max(1, int(max_connections or 1))
     self.timeout = timeout
+    self.pool_acquire_timeout = (
+      timeout if pool_acquire_timeout is None else pool_acquire_timeout
+    )
     self._pool = []
     self._pool_lock = threading.Lock()
+    self._pool_available = threading.Condition(self._pool_lock)
     self._in_use = weakref.WeakSet()
 
   def _create_client(self):
@@ -112,20 +117,34 @@ class ConnectionPool:
 
   def get_client(self):
     """从连接池获取客户端"""
-    with self._pool_lock:
-      if self._pool:
-        client = self._pool.pop()
-      else:
-        if len(self._in_use) >= self.max_connections:
-          raise ConnectionError("连接池已满，无法创建新连接")
-        client = self._create_client()
+    deadline = None
+    if self.pool_acquire_timeout is not None and self.pool_acquire_timeout >= 0:
+      deadline = time.monotonic() + self.pool_acquire_timeout
 
-      self._in_use.add(client)
-      return client
+    with self._pool_available:
+      while True:
+        if self._pool:
+          client = self._pool.pop()
+          self._in_use.add(client)
+          return client
+
+        if len(self._in_use) < self.max_connections:
+          client = self._create_client()
+          self._in_use.add(client)
+          return client
+
+        if deadline is None:
+          self._pool_available.wait()
+          continue
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          raise ConnectionError("连接池已满，等待空闲连接超时")
+        self._pool_available.wait(remaining)
 
   def return_client(self, client):
     """将客户端返回连接池"""
-    with self._pool_lock:
+    with self._pool_available:
       if client in self._in_use:
         self._in_use.discard(client)
         if len(self._pool) < self.max_connections:
@@ -135,10 +154,11 @@ class ConnectionPool:
             client.close()
           except Exception:
             pass
+        self._pool_available.notify()
 
   def close_all(self):
     """关闭所有连接"""
-    with self._pool_lock:
+    with self._pool_available:
       # 关闭池中的连接
       for client in self._pool:
         try:
@@ -154,6 +174,7 @@ class ConnectionPool:
         except Exception:
           pass
       self._in_use.clear()
+      self._pool_available.notify_all()
 
 
 class TimeSeriesConnection:
@@ -168,6 +189,7 @@ class TimeSeriesConnection:
     ssl_ca_cert: str = "",
     max_connections: int = 10,
     timeout: float = 30.0,
+    pool_acquire_timeout: Optional[float] = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
     enable_cache: bool = True,
@@ -186,7 +208,14 @@ class TimeSeriesConnection:
     self.query_chunk_hours = query_chunk_hours
 
     # 连接池
-    self._pool = ConnectionPool(host, token, database, max_connections, timeout)
+    self._pool = ConnectionPool(
+      host,
+      token,
+      database,
+      max_connections,
+      timeout,
+      pool_acquire_timeout,
+    )
 
     # 缓存
     if enable_cache:
@@ -281,6 +310,7 @@ def create_timeseries_connection(
     ssl_ca_cert=getattr(settings, "influxdb_ssl_ca_cert", ""),
     max_connections=getattr(settings, "influxdb_max_connections", 10),
     timeout=getattr(settings, "influxdb_timeout", 30.0),
+    pool_acquire_timeout=getattr(settings, "influxdb_pool_acquire_timeout", None),
     max_retries=getattr(settings, "influxdb_max_retries", 3),
     retry_delay=getattr(settings, "influxdb_retry_delay", 1.0),
     enable_cache=getattr(settings, "influxdb_enable_cache", True),

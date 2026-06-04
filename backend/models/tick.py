@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from database.timeseries_base import BaseModel, ListAttributeConverter
+from core.utils import time_utils
 
 
 @dataclass
@@ -89,7 +90,9 @@ class Tick(BaseModel):
       else:
         time = datetime.strptime(timetag, "%Y%m%d %H:%M:%S")
     elif "time" in tick:
-      time = datetime.fromtimestamp(tick.get("time", 0) / 1000)
+      time = time_utils.to_shanghai(
+        datetime.fromtimestamp(tick.get("time", 0) / 1000, timezone.utc)
+      )
     else:
       raise ValueError("Tick data must contain 'timetag' or 'time' field.")
 

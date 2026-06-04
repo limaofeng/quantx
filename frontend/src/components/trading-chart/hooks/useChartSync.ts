@@ -9,7 +9,7 @@ import { useEffect } from 'react';
 export function useChartSync(
   mainChartRef: React.RefObject<IChartApi | null>,
   subChartsRef: React.RefObject<Map<string, IChartApi>>,
-  mainSeriesRef: React.RefObject<ISeriesApi<any> | null>,
+  mainSeriesRef: React.RefObject<ISeriesApi<any> | null> | undefined,
   subSeriesMapRef: React.RefObject<Map<string, ISeriesApi<any>>>,
   isReady: boolean,
   chartVersion: number
@@ -20,7 +20,7 @@ export function useChartSync(
     const mc = mainChartRef.current;
     if (!mc) return;
 
-    const ms = mainSeriesRef.current;
+    const ms = mainSeriesRef?.current;
 
     const subscribedSubCharts = new Map(subChartsRef.current); // Snapshot for cleanup
 

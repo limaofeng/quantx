@@ -17,9 +17,11 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import AsyncIterator, Dict, Set
+from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
+from config.settings import settings
 from core.data.unified_subscription_manager import unified_subscription_manager
+from services.historical_market_data_service import HistoricalMarketDataService
 from models.kline import KLine
 from models.market_depth import MarketDepth
 from models.realtime_price import RealTimePrice
@@ -59,11 +61,27 @@ class RealTimeDataManager:
 
     # 智能合并相关
     self.subscription_ref_count: Dict[str, int] = {}  # 订阅引用计数
+    self.tick_minute_klines: Dict[str, Dict[str, Any]] = {}
+    self.previous_daily_close_cache: Dict[str, Dict[str, Any]] = {}
+    self.tick_generated_kline_save_interval_seconds = max(
+      0.0,
+      float(
+        getattr(settings, "realtime_generated_kline_save_interval_seconds", 10.0)
+        or 0.0
+      ),
+    )
+    self.historical_market_data_service = HistoricalMarketDataService()
+    self._started_loop: Optional[asyncio.AbstractEventLoop] = None
 
   async def start(self):
     """启动实时数据管理器"""
+    loop = asyncio.get_running_loop()
+    if self._started_loop is loop:
+      return
+
     # 设置主事件循环到统一订阅管理器
-    self.subscription_manager.set_main_loop()
+    self.subscription_manager.set_main_loop(loop)
+    self._started_loop = loop
     logger.info("实时数据管理器已启动")
 
   async def stop(self):
@@ -79,6 +97,7 @@ class RealTimeDataManager:
       # 清理本地订阅者队列
       self.tick_subscribers.clear()
       self.kline_subscribers.clear()
+      self._started_loop = None
 
       logger.info("实时数据管理器已停止")
     except Exception as e:
@@ -176,12 +195,17 @@ class RealTimeDataManager:
         """数据回调处理"""
         await self._handle_xt_tick_data(stock_code, data)
 
-      await self.subscription_manager.subscribe(
+      subscribed = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period="tick",
       )
+      if not subscribed:
+        self.tick_subscribers[stock_code].discard(queue)
+        if not self.tick_subscribers[stock_code]:
+          del self.tick_subscribers[stock_code]
+        raise RuntimeError(f"底层tick订阅失败: {stock_code}")
 
     # 统一管理器缓存首帧推送，确保后加入订阅者立即收到最新数据
     try:
@@ -194,6 +218,9 @@ class RealTimeDataManager:
             else latest_tick_raw
           )
           tick_snapshot = Tick.from_xtquant(stock_code, latest_tick)
+          tick_snapshot = await self._normalize_tick_pre_close(
+            stock_code, tick_snapshot
+          )
           await self._safe_queue_put(
             queue, tick_snapshot, f"tick_snapshot_{stock_code}"
           )
@@ -221,6 +248,324 @@ class RealTimeDataManager:
             self.subscriber_id, stock_code, "tick"
           )
           del self.tick_subscribers[stock_code]
+
+  async def publish_tick_backfill(
+    self, stock_code: str, ticks: List[Tick], source: str = "gap_fill"
+  ) -> int:
+    """Push downloaded historical tick gap data to active GraphQL subscribers."""
+    if not ticks or stock_code not in self.tick_subscribers:
+      return 0
+
+    delivered = 0
+    for tick in sorted(ticks, key=lambda item: item.time):
+      dead_queues = set()
+      for queue in self.tick_subscribers[stock_code].copy():
+        success = await self._safe_queue_put(
+          queue, tick, f"tick_backfill_{stock_code}"
+        )
+        if success:
+          delivered += 1
+        else:
+          dead_queues.add(queue)
+
+      for queue in dead_queues:
+        self.tick_subscribers[stock_code].discard(queue)
+
+    if delivered:
+      if source == "warm_cache_initial":
+        logger.info("推送tick热缓存初始化数据: %s, ticks=%s", stock_code, delivered)
+      else:
+        logger.info("推送tick补全数据: %s, ticks=%s", stock_code, delivered)
+
+    return delivered
+
+  async def publish_kline_backfill(
+    self,
+    stock_code: str,
+    period: str,
+    klines: List[KLine],
+    source: str = "gap_fill",
+  ) -> int:
+    """Push downloaded 1m K-line gap data to active GraphQL subscribers."""
+    key = f"{stock_code}_{period}"
+    if not klines or key not in self.kline_subscribers:
+      return 0
+
+    delivered = 0
+    for kline in sorted(klines, key=lambda item: item.time):
+      dead_queues = set()
+      for queue in self.kline_subscribers[key].copy():
+        success = await self._safe_queue_put(
+          queue, kline, f"kline_backfill_{key}"
+        )
+        if success:
+          delivered += 1
+        else:
+          dead_queues.add(queue)
+
+      for queue in dead_queues:
+        self.kline_subscribers[key].discard(queue)
+
+    if delivered:
+      if source == "warm_cache_initial":
+        logger.info(
+          "推送K线热缓存初始化数据: %s %s, klines=%s",
+          stock_code,
+          period,
+          delivered,
+        )
+      else:
+        logger.info("推送K线补全数据: %s %s, klines=%s", stock_code, period, delivered)
+
+    return delivered
+
+  def _tick_price(self, tick: Tick) -> Optional[float]:
+    for value in [
+      getattr(tick, "last_price", None),
+      getattr(tick, "open", None),
+      getattr(tick, "high", None),
+      getattr(tick, "low", None),
+    ]:
+      try:
+        price = float(value)
+      except (TypeError, ValueError):
+        continue
+      if price > 0:
+        return price
+    return None
+
+  def _minute_start(self, value: datetime) -> datetime:
+    return time_utils.to_shanghai(value).replace(second=0, microsecond=0)
+
+  def _is_intraday_1m_minute(self, value: datetime) -> bool:
+    minute = self._minute_start(value)
+    minutes = minute.hour * 60 + minute.minute
+    return (
+      9 * 60 + 15 <= minutes <= 9 * 60 + 25
+      or 9 * 60 + 30 <= minutes <= 11 * 60 + 30
+      or 13 * 60 <= minutes <= 15 * 60
+    )
+
+  async def _get_previous_daily_close(
+    self, stock_code: str, tick_time: datetime
+  ) -> Optional[float]:
+    tick_date = time_utils.to_shanghai(tick_time).date()
+    cache_key = f"{stock_code}:{tick_date.isoformat()}"
+    cached = self.previous_daily_close_cache.get(cache_key)
+    if cached is not None:
+      return cached.get("close")
+
+    try:
+      klines = await self.historical_market_data_service.get_kline_data(
+        stock_code=stock_code,
+        period="1d",
+        limit=5,
+        order="desc",
+        dividend_type="none",
+      )
+    except Exception as exc:
+      logger.warning("查询昨收日K失败: %s, %s", stock_code, exc)
+      self.previous_daily_close_cache[cache_key] = {"close": None}
+      return None
+
+    previous_close = None
+    for kline in klines:
+      try:
+        kline_date = time_utils.to_shanghai(kline.time).date()
+        close = float(getattr(kline, "close", 0.0) or 0.0)
+      except Exception:
+        continue
+      if kline_date < tick_date and close > 0:
+        previous_close = close
+        break
+
+    self.previous_daily_close_cache[cache_key] = {"close": previous_close}
+    return previous_close
+
+  async def _normalize_tick_pre_close(self, stock_code: str, tick: Tick) -> Tick:
+    previous_close = await self._get_previous_daily_close(stock_code, tick.time)
+    if previous_close and previous_close > 0:
+      tick.last_close = previous_close
+    return tick
+
+  def _build_tick_generated_kline(self, stock_code: str, tick: Tick) -> Optional[KLine]:
+    price = self._tick_price(tick)
+    if price is None or not self._is_intraday_1m_minute(tick.time):
+      return None
+
+    minute = self._minute_start(tick.time)
+    state = self.tick_minute_klines.get(stock_code)
+    tick_volume = max(0.0, float(getattr(tick, "volume", 0.0) or 0.0))
+    tick_amount = max(0.0, float(getattr(tick, "amount", 0.0) or 0.0))
+
+    if state and minute < state["minute"]:
+      return None
+
+    if not state or minute > state["minute"]:
+      observed_tick_volume = max(0.0, float(getattr(tick, "tickvol", 0.0) or 0.0))
+      if state:
+        base_volume = max(0.0, float(state.get("last_cumulative_volume", 0.0)))
+        base_amount = max(0.0, float(state.get("last_cumulative_amount", 0.0)))
+      else:
+        base_volume = max(0.0, tick_volume - observed_tick_volume)
+        base_amount = max(0.0, tick_amount - observed_tick_volume * price)
+
+      kline = KLine(
+        stock_code=stock_code,
+        period="1m",
+        time=minute,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        pre_close=float(getattr(tick, "last_close", 0.0) or 0.0),
+        volume=max(0.0, tick_volume - base_volume),
+        amount=max(0.0, tick_amount - base_amount),
+        settelement_price=0.0,
+        open_interest=int(getattr(tick, "open_int", 0) or 0),
+        suspend_flag=int(getattr(tick, "stock_status", 0) or 0),
+      )
+      state = {
+        "base_amount": base_amount,
+        "base_volume": base_volume,
+        "kline": kline,
+        "last_saved_at": None,
+        "last_saved_minute": None,
+        "last_cumulative_amount": tick_amount,
+        "last_cumulative_volume": tick_volume,
+        "minute": minute,
+      }
+      self.tick_minute_klines[stock_code] = state
+      return kline
+
+    kline = state["kline"]
+    kline.high = max(float(kline.high), price)
+    kline.low = min(float(kline.low), price)
+    kline.close = price
+    kline.pre_close = float(
+      getattr(tick, "last_close", kline.pre_close) or kline.pre_close
+    )
+    kline.volume = max(0.0, tick_volume - float(state.get("base_volume", 0.0)))
+    kline.amount = max(0.0, tick_amount - float(state.get("base_amount", 0.0)))
+    kline.open_interest = int(getattr(tick, "open_int", kline.open_interest) or 0)
+    kline.suspend_flag = int(getattr(tick, "stock_status", kline.suspend_flag) or 0)
+    state["last_cumulative_amount"] = tick_amount
+    state["last_cumulative_volume"] = tick_volume
+    return kline
+
+  def _copy_kline(self, kline: KLine) -> KLine:
+    return KLine(
+      stock_code=kline.stock_code,
+      period=kline.period,
+      time=kline.time,
+      open=kline.open,
+      high=kline.high,
+      low=kline.low,
+      close=kline.close,
+      pre_close=kline.pre_close,
+      volume=kline.volume,
+      amount=kline.amount,
+      settelement_price=kline.settelement_price,
+      open_interest=kline.open_interest,
+      suspend_flag=kline.suspend_flag,
+    )
+
+  async def _safe_save_tick_generated_kline(self, kline: KLine) -> None:
+    try:
+      await asyncio.to_thread(self.historical_market_data_service.save_kline, kline)
+    except Exception as exc:
+      logger.warning(
+        "保存tick生成1m K线失败: %s %s %s, %s",
+        kline.stock_code,
+        kline.period,
+        kline.time,
+        exc,
+      )
+
+  def _should_save_tick_generated_kline(
+    self, stock_code: str, tick: Tick, kline: KLine
+  ) -> bool:
+    state = self.tick_minute_klines.get(stock_code)
+    if not state:
+      return True
+
+    if state.get("last_saved_minute") != kline.time:
+      return True
+
+    last_saved_at = state.get("last_saved_at")
+    if last_saved_at is None:
+      return True
+
+    if self.tick_generated_kline_save_interval_seconds <= 0:
+      return True
+
+    tick_time = self._minute_start(tick.time)
+    try:
+      tick_time = time_utils.to_shanghai(tick.time)
+    except Exception:
+      pass
+
+    return (
+      tick_time - last_saved_at
+    ).total_seconds() >= self.tick_generated_kline_save_interval_seconds
+
+  def _mark_tick_generated_kline_save_attempt(
+    self, stock_code: str, tick: Tick, kline: KLine
+  ) -> None:
+    state = self.tick_minute_klines.get(stock_code)
+    if not state:
+      return
+
+    try:
+      state["last_saved_at"] = time_utils.to_shanghai(tick.time)
+    except Exception:
+      state["last_saved_at"] = self._minute_start(tick.time)
+    state["last_saved_minute"] = kline.time
+
+  async def _publish_kline_to_subscribers(self, key: str, kline: KLine) -> None:
+    if key not in self.kline_subscribers:
+      return
+
+    dead_queues = set()
+    for queue in self.kline_subscribers[key].copy():
+      success = await self._safe_queue_put(queue, kline, f"kline_{key}")
+      if not success:
+        dead_queues.add(queue)
+
+    for queue in dead_queues:
+      self.kline_subscribers[key].discard(queue)
+      logger.warning(f"K线队列失效，移除订阅者: {key}")
+
+  async def _handle_tick_generated_1m(self, stock_code: str, tick: Tick) -> None:
+    previous_state = self.tick_minute_klines.get(stock_code)
+    previous_minute = previous_state.get("minute") if previous_state else None
+    previous_kline = (
+      self._copy_kline(previous_state["kline"])
+      if previous_state and previous_state.get("kline") is not None
+      else None
+    )
+
+    kline = self._build_tick_generated_kline(stock_code, tick)
+    if kline is None:
+      return
+
+    kline_snapshot = self._copy_kline(kline)
+    from core.data.intraday_warm_cache import intraday_warm_cache
+
+    intraday_warm_cache.store_kline(kline_snapshot)
+    await self._publish_kline_to_subscribers(f"{stock_code}_1m", kline_snapshot)
+
+    save_candidates: List[KLine] = []
+    if previous_kline is not None and previous_minute is not None:
+      if kline_snapshot.time > previous_minute:
+        save_candidates.append(previous_kline)
+
+    if self._should_save_tick_generated_kline(stock_code, tick, kline_snapshot):
+      self._mark_tick_generated_kline_save_attempt(stock_code, tick, kline_snapshot)
+      save_candidates.append(kline_snapshot)
+
+    for candidate in save_candidates:
+      await self._safe_save_tick_generated_kline(candidate)
 
   async def subscribe_price(self, stock_code: str) -> AsyncIterator[RealTimePrice]:
     """
@@ -258,12 +603,17 @@ class RealTimeDataManager:
         """数据回调处理"""
         await self._handle_xt_kline_data(stock_code, period, data)
 
-      await self.subscription_manager.subscribe(
+      subscribed = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period=period,
       )
+      if not subscribed:
+        self.kline_subscribers[key].discard(queue)
+        if not self.kline_subscribers[key]:
+          del self.kline_subscribers[key]
+        raise RuntimeError(f"底层K线订阅失败: {stock_code} {period}")
 
     try:
       logger.info(f"新增GraphQL K线订阅: {stock_code} {period}")
@@ -366,6 +716,12 @@ class RealTimeDataManager:
 
       # 构建Tick领域模型对象
       tick_data = Tick.from_xtquant(stock_code, latest_tick)
+      tick_data = await self._normalize_tick_pre_close(stock_code, tick_data)
+      from core.data.intraday_warm_cache import intraday_warm_cache
+
+      intraday_warm_cache.store_tick(tick_data)
+
+      await self._handle_tick_generated_1m(stock_code, tick_data)
 
       # 推送给所有订阅者（使用优化的队列放入方法）
       if stock_code in self.tick_subscribers:
@@ -404,19 +760,13 @@ class RealTimeDataManager:
 
       # 构建KLine领域模型对象
       kline_data = KLine.from_xtquant(stock_code, period, latest_kline)
+      if period == "1m":
+        from core.data.intraday_warm_cache import intraday_warm_cache
+
+        intraday_warm_cache.store_kline(kline_data)
 
       # 推送给所有订阅者（使用优化的队列放入方法）
-      if key in self.kline_subscribers:
-        dead_queues = set()
-        for queue in self.kline_subscribers[key].copy():
-          success = await self._safe_queue_put(queue, kline_data, f"kline_{key}")
-          if not success:
-            dead_queues.add(queue)
-
-        # 清理失效的队列
-        for queue in dead_queues:
-          self.kline_subscribers[key].discard(queue)
-          logger.warning(f"K线队列失效，移除订阅者: {key}")
+      await self._publish_kline_to_subscribers(key, kline_data)
 
     except Exception as e:
       logger.error(f"处理XTQuant K线数据回调失败: {stock_code} {period}, {e}")

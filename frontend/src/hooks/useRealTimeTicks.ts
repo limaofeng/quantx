@@ -1,29 +1,58 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useSubscription } from 'urql';
 
-import { getTickDateRange } from '@/components/trading-chart/utils/time-utils';
+import {
+  getTickDateRange,
+  parseMarketDate,
+} from '@/components/trading-chart/utils/time-utils';
 import { useTicks } from '@/features/trading/hooks/useTrading';
 import { gql } from '@/generated/gql';
 import { useTradingDays } from '@/hooks/useTradingDays';
 
-// 定义订阅的 GraphQL
-const MarketQuoteSubscription = gql(`
-  subscription Market_Quotes($stockList: [String!]!) {
-    marketQuotes(stockList: $stockList) {
+const MarketTickSubscription = gql(`
+  subscription Market_Ticks($stockList: [String!]!) {
+    marketTicks(stockList: $stockList) {
       stockCode
-      currentPrice
+      period
       time
-      volume
-      amount
+      lastPrice
+      open
       high
       low
-      open
       preClose
-      change
-      changePercent
+      volume
+      amount
     }
   }
 `);
+
+const getTickKey = (tick: any) => {
+  const sourceTime = tick?.sourceTime ?? tick?.time;
+  const timestamp = parseMarketDate(sourceTime)?.getTime() ?? NaN;
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const mergeTickLists = (...lists: any[][]) => {
+  const byTime = new Map<number, any>();
+  const withoutTime: any[] = [];
+
+  lists.forEach(list => {
+    list.forEach(tick => {
+      const key = getTickKey(tick);
+      if (key === null) {
+        withoutTime.push(tick);
+        return;
+      }
+      byTime.set(key, tick);
+    });
+  });
+
+  return [...byTime.values(), ...withoutTime].sort((a, b) => {
+    const left = getTickKey(a) ?? Number.MAX_SAFE_INTEGER;
+    const right = getTickKey(b) ?? Number.MAX_SAFE_INTEGER;
+    return left - right;
+  });
+};
 
 export function useRealTimeTicks(stockCode: string, mode: '1d' | '5d' = '1d') {
   // 0. 获取交易日数据 (默认获取过去30天)
@@ -37,59 +66,54 @@ export function useRealTimeTicks(stockCode: string, mode: '1d' | '5d' = '1d') {
     return getTickDateRange(tradingDays, mode);
   }, [mode, tradingDays, stockCode]);
 
-  const { data: initialTicks, loading: initialLoading } = useTicks(
-    stockCode,
-    startTime,
-    endTime
-  );
+  const {
+    data: initialTicks,
+    loading: initialLoading,
+    refresh,
+  } = useTicks(stockCode, startTime, endTime, {
+    order: 'asc',
+    pause: !startTime || !endTime,
+    requestPolicy: 'network-only',
+  });
 
   // 2. 实时行情订阅
   const [subResult] = useSubscription({
-    query: MarketQuoteSubscription as any,
+    query: MarketTickSubscription as any,
     variables: { stockList: [stockCode] },
-    pause: !stockCode,
+    pause: !stockCode || !startTime || !endTime,
   });
 
   // 3. 本地合并数据状态
   const [mergedTicks, setMergedTicks] = useState<any[]>([]);
 
-  // 当初始数据加载完成后，初始化 mergedTicks
-  // 注意：切换 mode 时，initialTicks 会变化，这里会重置
+  useEffect(() => {
+    setMergedTicks([]);
+  }, [stockCode, mode]);
+
+  useEffect(() => {
+    if (!stockCode || !startTime || !endTime) return;
+
+    const timer = window.setInterval(() => {
+      refresh();
+    }, 30_000);
+
+    return () => window.clearInterval(timer);
+  }, [endTime, refresh, startTime, stockCode]);
+
+  // 当初始数据加载完成后，与订阅数据合并；不能让旧的整日缓存覆盖实时tick。
   useEffect(() => {
     if (initialTicks) {
-      setMergedTicks(initialTicks);
+      setMergedTicks(prev => mergeTickLists(prev, initialTicks));
     }
   }, [initialTicks]);
 
   // 监听订阅更新，合并新数据
   useEffect(() => {
-    const newQuote = subResult.data?.marketQuotes;
-    if (newQuote && newQuote.stockCode === stockCode) {
-      setMergedTicks(prev => {
-        // 将 Quote 转换为 Tick 格式
-        const newTick = {
-          stockCode: newQuote.stockCode,
-          time: newQuote.time,
-          lastPrice: newQuote.currentPrice,
-          volume: newQuote.volume,
-          amount: newQuote.amount,
-          high: newQuote.high,
-          low: newQuote.low,
-          open: newQuote.open,
-          preClose: newQuote.preClose,
-          // 保持其他字段兼容性
-          period: '1m', // 默认周期
-        };
-
-        const lastTick = prev[prev.length - 1];
-        if (lastTick && lastTick.time === newTick.time) {
-          // 更新最后一条
-          return [...prev.slice(0, -1), newTick];
-        } else {
-          // 追加新数据
-          return [...prev, newTick];
-        }
-      });
+    const newTickData = subResult.data?.marketTicks;
+    if (newTickData && newTickData.stockCode === stockCode) {
+      setMergedTicks(prev =>
+        mergeTickLists(prev, [{ ...newTickData, source: 'marketTicks' }])
+      );
     }
   }, [subResult.data, stockCode]);
 

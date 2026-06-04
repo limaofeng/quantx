@@ -1,6 +1,10 @@
 import { useMemo } from 'react';
 import { useQuery } from 'urql';
 
+import {
+  addShanghaiDays,
+  getShanghaiDateKey,
+} from '@/components/trading-chart/utils/time-utils';
 import { gql } from '@/generated/gql';
 
 const GET_TRADING_CALENDAR = gql(`
@@ -12,15 +16,13 @@ const GET_TRADING_CALENDAR = gql(`
 export function useTradingDays(market: string = 'SH', daysBefore: number = 30) {
   // Calculate date range: [Today - daysBefore, Today + 1]
   const { startDate, endDate } = useMemo(() => {
-    const end = new Date();
-    end.setDate(end.getDate() + 1); // Future buffer
-
-    const start = new Date();
-    start.setDate(start.getDate() - daysBefore);
+    const now = new Date();
+    const end = addShanghaiDays(now, 1); // Future buffer
+    const start = addShanghaiDays(now, -daysBefore);
 
     return {
-      startDate: start.toISOString().split('T')[0],
-      endDate: end.toISOString().split('T')[0],
+      startDate: getShanghaiDateKey(start),
+      endDate: getShanghaiDateKey(end),
     };
   }, [daysBefore]);
 

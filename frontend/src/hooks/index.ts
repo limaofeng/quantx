@@ -3,4 +3,7 @@ export * from './use-mobile';
 export * from './useStockSearch';
 export * from './useDeploymentSync';
 export * from './useRealTimeTicks';
+export * from './useIntradayKLines';
+export * from './useIntradayTrendData';
 export * from './useInfiniteKLines';
+export * from './useWatchlist';

@@ -2,23 +2,75 @@ import type {
   Time,
   ISeriesApi,
   CandlestickData,
-  AreaData,
+  LineData,
   HistogramData,
   IChartApi,
   IPriceLine,
+  WhitespaceData,
 } from 'lightweight-charts';
 import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 
-import { getTradingRange } from '../utils/time-utils';
+import {
+  getTradingRange,
+  getTradingSessionMinutes,
+  isCallAuctionTimestamp,
+  toChartTimestamp,
+} from '../utils/time-utils';
+
+const MAX_INTRADAY_BAR_GAP_SECONDS = 2 * 60;
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const toValidPrice = (...values: unknown[]): number | null => {
+  for (const value of values) {
+    const parsed = toFiniteNumber(value);
+    if (parsed !== null && parsed > 0) return parsed;
+  }
+  return null;
+};
+
+const getShanghaiMinutes = (time: number) => {
+  const date = new Date(time * 1000);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hour = Number(
+    parts.find(part => part.type === 'hour')?.value.replace('24', '0') || 0
+  );
+  const minute = Number(parts.find(part => part.type === 'minute')?.value || 0);
+  return hour * 60 + minute;
+};
+
+const isLunchBreakGap = (previousTime: number, currentTime: number) => {
+  const previousMinutes = getShanghaiMinutes(previousTime);
+  const currentMinutes = getShanghaiMinutes(currentTime);
+  return previousMinutes <= 11 * 60 + 30 && currentMinutes >= 13 * 60;
+};
+
+const isCallAuctionChartTime = (time: number) =>
+  isCallAuctionTimestamp(new Date(time * 1000));
+
+const isCallAuctionInternalGap = (
+  previousTime: number,
+  currentTime: number
+) => isCallAuctionChartTime(previousTime) && isCallAuctionChartTime(currentTime);
 
 export function useChartData(
   isTimeMode: boolean,
-  rawTicks: any[],
+  rawIntradayBars: any[],
   rawKlines: any[],
   series: {
     candlestick: React.RefObject<ISeriesApi<'Candlestick'> | null>;
-    area: React.RefObject<ISeriesApi<'Area'> | null>;
+    timeLine: React.RefObject<ISeriesApi<'Line'> | null>;
+    timeAverage: React.RefObject<ISeriesApi<'Line'> | null>;
+    timeAnchor: React.RefObject<ISeriesApi<'Line'> | null>;
   },
   charts: {
     main: React.RefObject<IChartApi | null>;
@@ -27,7 +79,6 @@ export function useChartData(
   isReady: boolean,
   chartVersion: number
 ) {
-  // Keep track of the price line to remove it before creating a new one
   const priceLineRef = useRef<IPriceLine | null>(null);
 
   const [datasets, setDatasets] = useState<{
@@ -38,108 +89,202 @@ export function useChartData(
   useEffect(() => {
     if (!isReady) return;
 
-    const { candlestick, area } = series;
+    const { candlestick, timeLine, timeAverage, timeAnchor } = series;
     const { main, subs } = charts;
 
     if (!main.current) return;
 
     const candlestickData: CandlestickData[] = [];
-    const areaData: AreaData[] = [];
+    const lineData: Array<LineData | WhitespaceData> = [];
+    const averageData: Array<LineData | WhitespaceData> = [];
     const volumeData: HistogramData[] = [];
 
-    const safeTicks = Array.isArray(rawTicks) ? rawTicks : [];
-    const latestTick =
-      safeTicks.length > 0 ? safeTicks[safeTicks.length - 1] : null;
-    const refDate = latestTick?.time || new Date().toISOString();
-    const dayRange = getTradingRange(refDate);
+    const safeIntradayBars = Array.isArray(rawIntradayBars)
+      ? rawIntradayBars
+      : [];
+    const latestBar =
+      safeIntradayBars.length > 0
+        ? safeIntradayBars[safeIntradayBars.length - 1]
+        : null;
+    const refDate = latestBar?.time || new Date().toISOString();
+    const hasCallAuctionBars = safeIntradayBars.some(item =>
+      isCallAuctionTimestamp(item?.sourceTime ?? item?.time)
+    );
+    const tradingSessionOptions = hasCallAuctionBars
+      ? { includeCallAuction: true }
+      : {};
+    const dayRange = getTradingRange(refDate, tradingSessionOptions);
 
-    // Clean up existing price line if any
-    if (priceLineRef.current && area.current) {
+    if (priceLineRef.current && timeLine.current) {
       try {
-        area.current.removePriceLine(priceLineRef.current);
-      } catch (e) {
-        // Ignore error if line cannot be removed (e.g. belongs to destroyed series)
+        timeLine.current.removePriceLine(priceLineRef.current);
+      } catch (_e) {
+        // Series may already have been destroyed during chart re-init.
       }
       priceLineRef.current = null;
     }
 
-    if (isTimeMode && safeTicks.length > 0 && area.current) {
-      const currentDayTicks = safeTicks
-        .map((item: any) => ({
-          time: (new Date(item.time).getTime() / 1000) as Time,
-          price: item.lastPrice ?? item.high,
-          volume: item.volume || 0,
-          preClose: item.preClose,
-        }))
-        .filter(
-          (t: any) =>
-            (t.time as number) >= (dayRange.from as number) &&
-            (t.time as number) <= (dayRange.to as number)
-        )
+    if (isTimeMode && timeLine.current) {
+      const sessionMinutes = getTradingSessionMinutes(
+        refDate,
+        tradingSessionOptions
+      );
+      const intradayBars = safeIntradayBars
+        .map((item: any) => {
+          const timeValue = toChartTimestamp(item.time);
+          const close = toValidPrice(
+            item.close,
+            item.lastPrice,
+            item.currentPrice,
+            item.open,
+            item.high,
+            item.low
+          );
+          const open = toValidPrice(item.open, close);
+          return {
+            time: timeValue,
+            open: open || close,
+            high: toValidPrice(item.high, close) || close,
+            low: toValidPrice(item.low, close) || close,
+            close,
+            volume: Math.max(0, toFiniteNumber(item.volume) || 0),
+            amount: Math.max(0, toFiniteNumber(item.amount) || 0),
+            preClose: toValidPrice(item.preClose),
+          };
+        })
+        .filter(item => {
+          const time = item.time as number;
+          return (
+            item.close !== null &&
+            time !== null &&
+            Number.isFinite(time) &&
+            time >= (dayRange.from as number) &&
+            time <= (dayRange.to as number)
+          );
+        })
         .sort((a: any, b: any) => (a.time as number) - (b.time as number));
 
-      let lastTotalVol = 0;
+      let runningPriceSum = 0;
+      let runningVolume = 0;
+      let runningAmount = 0;
       const preCloseValue =
-        currentDayTicks.length > 0 ? currentDayTicks[0].preClose : null;
+        intradayBars.find(item => item.preClose !== null)?.preClose || null;
+      const anchorValue =
+        preCloseValue ||
+        (intradayBars.length > 0 ? intradayBars[0].close : null);
 
-      currentDayTicks.forEach((item: any, idx: number) => {
-        let intervalVol = 0;
-        if (idx > 0) intervalVol = Math.max(0, item.volume - lastTotalVol);
-        lastTotalVol = item.volume;
+      intradayBars.forEach((item: any, idx: number) => {
+        const previousBar = idx > 0 ? intradayBars[idx - 1] : null;
+        const previousTime = previousBar?.time as number | undefined;
+        const currentTime = item.time as number;
+        const hasMissingMinutes =
+          previousTime !== undefined &&
+          currentTime - previousTime > MAX_INTRADAY_BAR_GAP_SECONDS &&
+          !isCallAuctionInternalGap(previousTime, currentTime) &&
+          !isLunchBreakGap(previousTime, currentTime);
 
-        areaData.push({ time: item.time, value: item.price });
+        if (hasMissingMinutes) {
+          const breakTime = Math.min(
+            previousTime + 60,
+            currentTime - 60
+          ) as Time;
+          lineData.push({ time: breakTime });
+          averageData.push({ time: breakTime });
+        }
+
+        runningPriceSum += item.close;
+        runningVolume += item.volume;
+        runningAmount += item.amount;
+
+        const rawWeightedAverage =
+          runningAmount > 0 && runningVolume > 0
+            ? runningAmount / runningVolume
+            : null;
+        const weightedAverage =
+          rawWeightedAverage !== null && rawWeightedAverage > item.close * 20
+            ? rawWeightedAverage / 100
+            : rawWeightedAverage;
+        const averagePrice =
+          weightedAverage !== null
+            ? weightedAverage
+            : runningPriceSum / (idx + 1);
+
+        lineData.push({ time: item.time as Time, value: item.close });
+        averageData.push({
+          time: item.time as Time,
+          value: averagePrice,
+        });
+
+        const previousPrice = previousBar?.close || preCloseValue || item.open;
         volumeData.push({
-          time: item.time,
-          value: intervalVol,
+          time: item.time as Time,
+          value: item.volume,
           color:
-            item.price >=
-            (idx > 0
-              ? currentDayTicks[idx - 1].price
-              : preCloseValue || item.price)
-              ? 'rgba(239, 68, 68, 0.5)'
-              : 'rgba(34, 197, 94, 0.5)',
+            item.close >= previousPrice
+              ? 'rgba(239, 68, 68, 0.58)'
+              : 'rgba(34, 197, 94, 0.58)',
         });
       });
 
-      // Supplement boundaries
-      const startPrice =
-        preCloseValue || (areaData.length > 0 ? areaData[0].value : 0);
-      const endPrice =
-        areaData.length > 0 ? areaData[areaData.length - 1].value : startPrice;
+      const lineMap = new Map<number, LineData | WhitespaceData>();
+      const averageMap = new Map<number, LineData | WhitespaceData>();
+      const volMap = new Map<number, HistogramData>();
 
-      const areaMap = new Map<number, any>();
-      const volMap = new Map<number, any>();
-
-      areaMap.set(dayRange.from as number, {
-        time: dayRange.from,
-        value: startPrice,
+      sessionMinutes.forEach(time => {
+        volMap.set(time as number, { time, value: 0 });
       });
-      volMap.set(dayRange.from as number, { time: dayRange.from, value: 0 });
-      areaMap.set(dayRange.to as number, {
-        time: dayRange.to,
-        value: endPrice,
-      });
-      volMap.set(dayRange.to as number, { time: dayRange.to, value: 0 });
 
-      areaData.forEach(d => areaMap.set(d.time as number, d));
+      if (lineData.length === 1) {
+        const firstPoint = lineData[0] as LineData;
+        const firstAverage = averageData[0] as LineData;
+        const previousTime = Math.max(
+          dayRange.from as number,
+          (firstPoint.time as number) - 60
+        ) as Time;
+        lineMap.set(previousTime as number, {
+          time: previousTime,
+          value: firstPoint.value,
+        });
+        averageMap.set(previousTime as number, {
+          time: previousTime,
+          value: firstAverage.value,
+        });
+      }
+
+      lineData.forEach(d => lineMap.set(d.time as number, d));
+      averageData.forEach(d => averageMap.set(d.time as number, d));
       volumeData.forEach(d => volMap.set(d.time as number, d));
 
-      const sortedArea = Array.from(areaMap.values()).sort(
+      const sortedLine = Array.from(lineMap.values()).sort(
+        (a, b) => (a.time as number) - (b.time as number)
+      );
+      const sortedAverage = Array.from(averageMap.values()).sort(
         (a, b) => (a.time as number) - (b.time as number)
       );
       const sortedVol = Array.from(volMap.values()).sort(
         (a, b) => (a.time as number) - (b.time as number)
       );
 
-      area.current.setData(sortedArea);
-      // volume data is not set here anymore
+      if (anchorValue !== null) {
+        timeAnchor.current?.setData(
+          sessionMinutes.map(time => ({ time, value: anchorValue }))
+        );
+      } else {
+        timeAnchor.current?.setData([]);
+      }
+      timeLine.current.setData(sortedLine);
+      timeAverage.current?.setData(sortedAverage);
 
-      // Symmetry axis
       if (preCloseValue !== null && preCloseValue > 0) {
-        area.current.applyOptions({
+        timeLine.current.applyOptions({
           autoscaleInfoProvider: (original: any) => {
             const res = original();
-            if (res !== null) {
+            if (
+              res !== null &&
+              res.priceRange !== null &&
+              Number.isFinite(res.priceRange.maxValue) &&
+              Number.isFinite(res.priceRange.minValue)
+            ) {
               const priceRange = res.priceRange;
               const maxDiff = Math.max(
                 Math.abs(priceRange.maxValue - preCloseValue),
@@ -147,7 +292,7 @@ export function useChartData(
               );
               const padding =
                 maxDiff > 0 ? maxDiff * 0.05 : preCloseValue * 0.001;
-              const finalDiff = Math.max(maxDiff, padding);
+              const finalDiff = maxDiff + padding;
               return {
                 priceRange: {
                   minValue: preCloseValue - finalDiff,
@@ -159,7 +304,7 @@ export function useChartData(
           },
         });
 
-        const priceLine = area.current.createPriceLine({
+        const priceLine = timeLine.current.createPriceLine({
           price: preCloseValue,
           color: 'rgba(120, 120, 120, 0.4)',
           lineWidth: 1,
@@ -169,40 +314,43 @@ export function useChartData(
         });
 
         priceLineRef.current = priceLine;
+      } else {
+        timeLine.current.applyOptions({
+          autoscaleInfoProvider: undefined,
+        });
       }
 
-      // Use setTimeout to ensure chart has processed the new data
-      setTimeout(() => {
+      const applyFullDayRange = () => {
         try {
-          if (main.current) {
-            main.current.timeScale().setVisibleRange(dayRange);
-          }
-          if (subs.current) {
-            subs.current.forEach(subChart => {
-              subChart.timeScale().setVisibleRange(dayRange);
-            });
-          }
-        } catch (e) {
-          // Chart might not be ready or range is invalid relative to data
+          main.current?.timeScale().setVisibleRange(dayRange);
+          subs.current?.forEach(subChart => {
+            subChart.timeScale().setVisibleRange(dayRange);
+          });
+        } catch (_e) {
+          // Chart might not be ready or range is invalid relative to data.
         }
-      }, 0);
+      };
 
-      // Generate pseudo-candlestick data for indicators in Time Mode
-      const timeModeCandles: CandlestickData[] = sortedArea.map((d: any) => ({
-        time: d.time,
-        open: d.value,
-        high: d.value,
-        low: d.value,
-        close: d.value,
-      }));
+      [0, 80, 240].forEach(delay => setTimeout(applyFullDayRange, delay));
+
+      const timeModeCandles: CandlestickData[] = intradayBars.map(
+        (item: any) => ({
+          time: item.time,
+          open: item.open || item.close,
+          high: item.high || item.close,
+          low: item.low || item.close,
+          close: item.close,
+        })
+      );
 
       setDatasets({
         candlestickData: timeModeCandles,
-        volumeData: sortedVol as HistogramData[],
+        volumeData: sortedVol,
       });
     } else if (!isTimeMode && rawKlines && candlestick.current) {
       rawKlines.forEach((item: any) => {
-        const time = (new Date(item.time).getTime() / 1000) as Time;
+        const time = toChartTimestamp(item.time);
+        if (time === null) return;
         candlestickData.push({
           time,
           open: item.open,
@@ -225,20 +373,22 @@ export function useChartData(
       candlestick.current.setData(candlestickData);
       setDatasets({ candlestickData, volumeData });
 
-      // Auto fit content for K-line mode to ensure data is visible
-      // Use setTimeout to ensure options and data are fully settled
       setTimeout(() => {
-        if (main.current) {
-          main.current.timeScale().fitContent();
-        }
-        if (subs.current) {
-          subs.current.forEach(subChart => {
-            subChart.timeScale().fitContent();
-          });
-        }
+        main.current?.timeScale().fitContent();
+        subs.current?.forEach(subChart => {
+          subChart.timeScale().fitContent();
+        });
       }, 50);
     }
-  }, [isTimeMode, rawTicks, rawKlines, series, charts, isReady, chartVersion]);
+  }, [
+    isTimeMode,
+    rawIntradayBars,
+    rawKlines,
+    series,
+    charts,
+    isReady,
+    chartVersion,
+  ]);
 
   return datasets;
 }

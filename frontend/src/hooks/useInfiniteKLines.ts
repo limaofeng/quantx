@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 
+import { parseMarketDate } from '@/components/trading-chart/utils/time-utils';
 import { useKLinesPage } from '@/features/trading/hooks/useTrading';
 
 interface InfiniteKLineOptions {
@@ -12,7 +13,7 @@ interface InfiniteKLineOptions {
 
 function toTime(value?: string | null) {
   if (!value) return null;
-  const time = new Date(value).getTime();
+  const time = parseMarketDate(value)?.getTime() ?? NaN;
   return Number.isNaN(time) ? null : time;
 }
 
@@ -74,16 +75,13 @@ export function useInfiniteKLines(
 
     const sortedPageData = [...pageData]
       .filter((item: any) => {
-        const itemTime = new Date(item.time).getTime();
-        if (Number.isNaN(itemTime)) return false;
+        const itemTime = toTime(item.time);
+        if (itemTime === null) return false;
         if (rangeStartMs !== null && itemTime < rangeStartMs) return false;
         if (rangeEndMs !== null && itemTime > rangeEndMs) return false;
         return true;
       })
-      .sort(
-        (a: any, b: any) =>
-          new Date(a.time).getTime() - new Date(b.time).getTime()
-      );
+      .sort((a: any, b: any) => (toTime(a.time) ?? 0) - (toTime(b.time) ?? 0));
 
     if (sortedPageData.length === 0) {
       setHasMore(false);
@@ -101,11 +99,13 @@ export function useInfiniteKLines(
       // Deduplication: prevent appending charts that overlap
       if (prev.length > 0) {
         const firstExisting = prev[0];
-        const prevStart = new Date(firstExisting.time).getTime();
+        const prevStart = toTime(firstExisting.time);
 
         // Keep only new items strictly older than the oldest existing item
         const distinctNew = sortedPageData.filter(
-          (item: any) => new Date(item.time).getTime() < prevStart
+          (item: any) =>
+            prevStart !== null &&
+            (toTime(item.time) ?? Number.MAX_SAFE_INTEGER) < prevStart
         );
 
         return [...distinctNew, ...prev];
@@ -116,9 +116,7 @@ export function useInfiniteKLines(
 
     // Update pagination status
     const oldestLoadedMs =
-      sortedPageData.length > 0
-        ? new Date(sortedPageData[0].time).getTime()
-        : null;
+      sortedPageData.length > 0 ? toTime(sortedPageData[0].time) : null;
 
     if (
       rangeStartMs !== null &&

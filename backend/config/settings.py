@@ -52,6 +52,9 @@ class Settings(BaseSettings):
   # InfluxDB 连接池和性能配置
   influxdb_max_connections: int = Field(default=10, description="InfluxDB最大连接数")
   influxdb_timeout: float = Field(default=30.0, description="InfluxDB连接超时时间(秒)")
+  influxdb_pool_acquire_timeout: float = Field(
+    default=30.0, description="InfluxDB连接池获取连接等待时间(秒)"
+  )
   influxdb_max_retries: int = Field(default=3, description="InfluxDB操作最大重试次数")
   influxdb_retry_delay: float = Field(
     default=1.0, description="InfluxDB重试延迟时间(秒)"
@@ -71,6 +74,10 @@ class Settings(BaseSettings):
   realtime_update_interval: int = Field(default=1, description="实时数据更新间隔(秒)")
   kline_cache_size: int = Field(default=100, description="K线数据缓存大小")
   max_subscribers_per_stock: int = Field(default=10, description="每只股票最大订阅者数")
+  realtime_generated_kline_save_interval_seconds: float = Field(
+    default=10.0,
+    description="tick生成1m K线同一分钟快照最小保存间隔(秒)",
+  )
 
   # 交易时间管理配置
   trading_sessions: Dict[str, List[str]] = Field(

@@ -6,6 +6,7 @@ import strawberry
 from ..resolvers.market_data import MarketDataResolver
 from ..types import (
   DividendType,
+  IntradayWarmCacheStatus,
   KLineData,
   KLinePage,
   KLinePageInput,
@@ -65,6 +66,13 @@ class MarketDataQuery:
       limit=limit,
       order=order,
     )
+
+  @strawberry.field(description="查看日内热缓存状态")
+  async def intraday_warm_cache_status(
+    self,
+    symbols: Optional[List[str]] = None,
+  ) -> List[IntradayWarmCacheStatus]:
+    return await MarketDataResolver.get_intraday_warm_cache_status(symbols)
 
   @strawberry.field(description="获取交易日历（指定区间内的交易日列表）")
   async def trading_calendar(

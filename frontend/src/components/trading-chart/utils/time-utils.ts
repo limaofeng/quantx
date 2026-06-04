@@ -2,20 +2,152 @@ import type { Time } from 'lightweight-charts';
 
 import type { TradingRange } from '../types';
 
-/**
- * 获取 A 股交易时间范围 (09:30 - 15:00 Beijing Time)
- * 映射到 UTC 为 01:30 - 07:00
- */
-export const getTradingRange = (dateStr: string): TradingRange => {
-  const d = new Date(dateStr);
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth();
-  const day = d.getUTCDate();
+const TIMEZONE_SUFFIX_RE = /(?:z|[+-]\d{2}:?\d{2})$/i;
+const DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+const SHANGHAI_TIME_ZONE = 'Asia/Shanghai';
+const SHANGHAI_OFFSET = '+08:00';
+const CALL_AUCTION_START_MINUTES = 9 * 60 + 15;
+const CALL_AUCTION_END_MINUTES = 9 * 60 + 25;
+const MARKET_OPEN_MINUTES = 9 * 60 + 30;
 
-  // 09:30 Beijing = 01:30 UTC
+interface TradingSessionOptions {
+  includeCallAuction?: boolean;
+  now?: Date;
+}
+
+const shanghaiDateTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: SHANGHAI_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+const getShanghaiDateParts = (date: Date) => {
+  let year = '';
+  let month = '';
+  let day = '';
+  let hour = '0';
+  let minute = '0';
+
+  shanghaiDateTimeFormatter.formatToParts(date).forEach(part => {
+    if (part.type === 'year') year = part.value;
+    if (part.type === 'month') month = part.value;
+    if (part.type === 'day') day = part.value;
+    if (part.type === 'hour') hour = part.value;
+    if (part.type === 'minute') minute = part.value;
+  });
+
+  const parsedHour = Number(hour === '24' ? '0' : hour);
+
+  return {
+    year: Number(year),
+    month: Number(month),
+    day: Number(day),
+    dateKey: `${year}-${month}-${day}`,
+    minutes: parsedHour * 60 + Number(minute),
+  };
+};
+
+export const getShanghaiDateKey = (date: Date = new Date()) => {
+  return getShanghaiDateParts(date).dateKey;
+};
+
+export const addShanghaiDays = (date: Date, days: number) => {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
+};
+
+const shouldShowCallAuction = (dateStr: string, now = new Date()) => {
+  const chartDate = parseMarketDate(dateStr) || now;
+  const chartParts = getShanghaiDateParts(chartDate);
+  const nowParts = getShanghaiDateParts(now);
+
+  return (
+    chartParts.dateKey === nowParts.dateKey &&
+    nowParts.minutes < MARKET_OPEN_MINUTES
+  );
+};
+
+const shouldIncludeCallAuction = (
+  dateStr: string,
+  options: TradingSessionOptions = {}
+) =>
+  options.includeCallAuction ??
+  shouldShowCallAuction(dateStr, options.now || new Date());
+
+export const parseMarketDate = (
+  value: string | number | Date | null | undefined
+): Date | null => {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value;
+  if (typeof value === 'number') return new Date(value);
+
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const normalized = trimmed.includes(' ')
+    ? trimmed.replace(' ', 'T')
+    : trimmed;
+  const withTimezone =
+    DATE_TIME_RE.test(normalized) && !TIMEZONE_SUFFIX_RE.test(normalized)
+      ? `${normalized}${SHANGHAI_OFFSET}`
+      : normalized;
+
+  const date = new Date(withTimezone);
+  return Number.isFinite(date.getTime()) ? date : null;
+};
+
+export const toChartTimestamp = (
+  value: string | number | Date | null | undefined
+): Time | null => {
+  const date = parseMarketDate(value);
+  if (!date) return null;
+  return Math.floor(date.getTime() / 1000) as Time;
+};
+
+export const isCallAuctionTimestamp = (
+  value: string | number | Date | null | undefined
+) => {
+  const date = parseMarketDate(value);
+  if (!date) return false;
+  const { minutes } = getShanghaiDateParts(date);
+  return (
+    minutes >= CALL_AUCTION_START_MINUTES &&
+    minutes <= CALL_AUCTION_END_MINUTES
+  );
+};
+
+export const getCallAuctionDateRange = (
+  value: string | number | Date | null | undefined
+) => {
+  const d = parseMarketDate(value) || new Date();
+  const { dateKey } = getShanghaiDateParts(d);
+
+  return {
+    startTime: `${dateKey} 09:15:00`,
+    endTime: `${dateKey} 09:25:59`,
+  };
+};
+
+/**
+ * 获取 A 股分时展示范围。开盘前默认展示集合竞价；传入 includeCallAuction
+ * 时可用 tick 数据把竞价段保留在分时左侧。
+ */
+export const getTradingRange = (
+  dateStr: string,
+  options: TradingSessionOptions = {}
+): TradingRange => {
+  const d = parseMarketDate(dateStr) || new Date();
+  const { year, month, day } = getShanghaiDateParts(d);
+  const includeCallAuction = shouldIncludeCallAuction(dateStr, options);
+
+  // 09:30 Beijing = 01:30 UTC. 09:15 Beijing = 01:15 UTC before open.
   // 15:00 Beijing = 07:00 UTC
-  const start = Date.UTC(y, m, day, 1, 30, 0) / 1000;
-  const end = Date.UTC(y, m, day, 7, 0, 0) / 1000;
+  const start =
+    Date.UTC(year, month - 1, day, 1, includeCallAuction ? 15 : 30, 0) / 1000;
+  const end = Date.UTC(year, month - 1, day, 7, 0, 0) / 1000;
 
   return {
     from: start as Time,
@@ -23,45 +155,130 @@ export const getTradingRange = (dateStr: string): TradingRange => {
   };
 };
 
+export const getTradingSessionAnchors = (
+  dateStr: string,
+  options: TradingSessionOptions = {}
+): Time[] => {
+  const d = parseMarketDate(dateStr) || new Date();
+  const { year, month, day } = getShanghaiDateParts(d);
+  const includeCallAuction = shouldIncludeCallAuction(dateStr, options);
+
+  const anchors = [
+    Date.UTC(year, month - 1, day, 1, 30, 0) / 1000,
+    Date.UTC(year, month - 1, day, 3, 30, 0) / 1000,
+    Date.UTC(year, month - 1, day, 5, 0, 0) / 1000,
+    Date.UTC(year, month - 1, day, 7, 0, 0) / 1000,
+  ];
+
+  if (includeCallAuction) {
+    anchors.unshift(
+      Date.UTC(year, month - 1, day, 1, 15, 0) / 1000,
+      Date.UTC(year, month - 1, day, 1, 25, 0) / 1000
+    );
+  }
+
+  return anchors as Time[];
+};
+
+export const getTradingSessionMinutes = (
+  dateStr: string,
+  options: TradingSessionOptions = {}
+): Time[] => {
+  const d = parseMarketDate(dateStr) || new Date();
+  const { year, month, day } = getShanghaiDateParts(d);
+  const minutes: Time[] = [];
+
+  const addRange = (
+    startHour: number,
+    startMinute: number,
+    endHour: number,
+    endMinute: number
+  ) => {
+    const start =
+      Date.UTC(year, month - 1, day, startHour, startMinute, 0) / 1000;
+    const end = Date.UTC(year, month - 1, day, endHour, endMinute, 0) / 1000;
+    for (let time = start; time <= end; time += 60) {
+      minutes.push(time as Time);
+    }
+  };
+
+  if (shouldIncludeCallAuction(dateStr, options)) {
+    addRange(1, 15, 1, 25);
+  }
+  addRange(1, 30, 3, 30);
+  addRange(5, 0, 7, 0);
+
+  return minutes;
+};
+
+export const getTradingSessionTickSlots = (
+  dateStr: string,
+  intervalSeconds = 3,
+  options: TradingSessionOptions = {}
+): Time[] => {
+  const d = parseMarketDate(dateStr) || new Date();
+  const { year, month, day } = getShanghaiDateParts(d);
+  const slots: Time[] = [];
+  const step = Math.max(1, intervalSeconds);
+
+  const addRange = (
+    startHour: number,
+    startMinute: number,
+    endHour: number,
+    endMinute: number
+  ) => {
+    const start =
+      Date.UTC(year, month - 1, day, startHour, startMinute, 0) / 1000;
+    const end = Date.UTC(year, month - 1, day, endHour, endMinute, 0) / 1000;
+    for (let time = start; time <= end; time += step) {
+      slots.push(time as Time);
+    }
+  };
+
+  if (shouldIncludeCallAuction(dateStr, options)) {
+    addRange(1, 15, 1, 25);
+  }
+  addRange(1, 30, 3, 30);
+  addRange(5, 0, 7, 0);
+
+  return slots;
+};
+
 export const formatTime = (time: number) => {
   return new Intl.DateTimeFormat('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-    timeZone: 'Asia/Shanghai',
+    timeZone: SHANGHAI_TIME_ZONE,
   }).format(new Date(time * 1000));
 };
 
-export const formatDate = (time: number) => {
-  const date = new Date(time * 1000);
-  const m = (date.getMonth() + 1).toString().padStart(2, '0');
-  const d = date.getDate().toString().padStart(2, '0');
-  return `${m}-${d}`;
+export const formatIntradayTick = (time: number) => {
+  if (isCallAuctionTimestamp(new Date(time * 1000))) return '09:15~25';
+  const value = formatTime(time);
+  return value;
 };
 
-const formatDateKey = (date: Date) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+export const formatDate = (time: number) => {
+  const { month, day } = getShanghaiDateParts(new Date(time * 1000));
+  return `${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 };
 
 export const getTickDateRange = (
   tradingDays: string[] = [],
-  mode: '1d' | '5d' = '1d'
+  mode: '1d' | '5d' = '1d',
+  now: Date = new Date()
 ) => {
   if (tradingDays.length === 0) {
-    // Fallback if no trading days loaded yet: return today/empty
-    const fallback = formatDateKey(new Date());
     return {
-      startTime: `${fallback} 00:00:00`,
-      endTime: `${fallback} 23:59:59`,
+      startTime: undefined,
+      endTime: undefined,
     };
   }
 
-  const now = new Date();
-  const hours = now.getHours();
-  const todayStr = formatDateKey(now);
+  const nowParts = getShanghaiDateParts(now);
+  const hours = Math.floor(nowParts.minutes / 60);
+  const todayStr = nowParts.dateKey;
 
   // Determine "current" trading day anchor
   let anchorDateStr = todayStr;

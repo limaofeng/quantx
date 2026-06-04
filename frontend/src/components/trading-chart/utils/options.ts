@@ -4,7 +4,7 @@ import {
   type ChartOptions,
 } from 'lightweight-charts';
 
-import { formatTime, formatDate } from './time-utils';
+import { formatIntradayTick, formatTime, formatDate } from './time-utils';
 
 export const getCommonOptions = (
   isTimeMode: boolean
@@ -30,7 +30,7 @@ export const getCommonOptions = (
 
     fixLeftEdge: isTimeMode,
     fixRightEdge: true,
-    tickMarkFormatter: isTimeMode ? formatTime : formatDate,
+    tickMarkFormatter: isTimeMode ? formatIntradayTick : formatDate,
   },
   crosshair: {
     vertLine: {

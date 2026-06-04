@@ -3,9 +3,9 @@ import {
   type IChartApi,
   type ISeriesApi,
   CandlestickSeries,
-  AreaSeries,
+  LineSeries,
 } from 'lightweight-charts';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { getCommonOptions } from '../utils/options';
 
@@ -19,7 +19,9 @@ export function useChartInit(
   const subChartsRef = useRef<Map<string, IChartApi>>(new Map());
 
   const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const areaSeriesRef = useRef<ISeriesApi<'Area'> | null>(null);
+  const timeLineSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const timeAverageSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const timeAnchorSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   const [isReady, setIsReady] = useState(false);
   const [chartVersion, setChartVersion] = useState(0);
@@ -87,19 +89,42 @@ export function useChartInit(
       priceLineVisible: true,
     });
 
-    const areaSeries = mainChart.addSeries(AreaSeries, {
-      topColor: 'rgba(37, 99, 235, 0.4)',
-      bottomColor: 'rgba(37, 99, 235, 0.01)',
-      lineColor: '#2563eb',
+    const timeLineSeries = mainChart.addSeries(LineSeries, {
+      color: '#e5e7eb',
+      lineWidth: 2,
+      visible: isTimeMode,
+      lastValueVisible: true,
+      priceLineVisible: true,
+      priceLineColor: 'rgba(234, 179, 8, 0.65)',
+      priceLineStyle: 2,
+      priceLineWidth: 1,
+      crosshairMarkerVisible: true,
+      crosshairMarkerRadius: 4,
+    });
+
+    const timeAverageSeries = mainChart.addSeries(LineSeries, {
+      color: '#f59e0b',
       lineWidth: 2,
       visible: isTimeMode,
       lastValueVisible: false,
-      priceLineVisible: true,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+    });
+
+    const timeAnchorSeries = mainChart.addSeries(LineSeries, {
+      color: 'rgba(0, 0, 0, 0)',
+      lineWidth: 1,
+      visible: isTimeMode,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
     });
 
     mainChartRef.current = mainChart;
     candlestickSeriesRef.current = candlestickSeries;
-    areaSeriesRef.current = areaSeries;
+    timeLineSeriesRef.current = timeLineSeries;
+    timeAverageSeriesRef.current = timeAverageSeries;
+    timeAnchorSeriesRef.current = timeAnchorSeries;
 
     // --- Sub Charts ---
     // Initialize sub-charts
@@ -136,7 +161,9 @@ export function useChartInit(
       mainChart.remove();
       mainChartRef.current = null;
       candlestickSeriesRef.current = null;
-      areaSeriesRef.current = null;
+      timeLineSeriesRef.current = null;
+      timeAverageSeriesRef.current = null;
+      timeAnchorSeriesRef.current = null;
 
       subChartsRef.current.forEach(c => c.remove());
       subChartsRef.current.clear();
@@ -151,7 +178,9 @@ export function useChartInit(
       },
       series: {
         candlestick: candlestickSeriesRef,
-        area: areaSeriesRef,
+        timeLine: timeLineSeriesRef,
+        timeAverage: timeAverageSeriesRef,
+        timeAnchor: timeAnchorSeriesRef,
       },
       isReady,
       chartVersion,

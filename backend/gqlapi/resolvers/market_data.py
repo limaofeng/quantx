@@ -1,14 +1,23 @@
+import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 from core.data.market_data_service import market_data_service
 from services.trading_time_service import TradingDateHelper
 
-from ..types import KLineData, KLinePage, PageDirection, PageInfo, TickData
+from ..types import (
+  IntradayWarmCacheStatus,
+  KLineData,
+  KLinePage,
+  PageDirection,
+  PageInfo,
+  TickData,
+)
 
 logger = logging.getLogger(__name__)
 trading_date_helper = TradingDateHelper()
+TRADING_CALENDAR_TIMEOUT_SECONDS = 1.0
 
 
 
@@ -270,8 +279,41 @@ class MarketDataResolver:
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
   ) -> List[date]:
-    return await trading_date_helper.get_trading_calendar(
-      market=market,
-      start_date=start_date,
-      end_date=end_date,
-    )
+    try:
+      return await asyncio.wait_for(
+        trading_date_helper.get_trading_calendar(
+          market=market,
+          start_date=start_date,
+          end_date=end_date,
+        ),
+        timeout=TRADING_CALENDAR_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      logger.warning(
+        "交易日历查询超时，使用工作日保守降级: market=%s, start=%s, end=%s",
+        market,
+        start_date,
+        end_date,
+      )
+      start = start_date or date.today()
+      end = end_date or start
+      if end < start:
+        return []
+      days = []
+      current = start
+      while current <= end:
+        if current.weekday() < 5:
+          days.append(current)
+        current += timedelta(days=1)
+      return days
+
+  @staticmethod
+  async def get_intraday_warm_cache_status(
+    symbols: Optional[List[str]] = None,
+  ) -> List[IntradayWarmCacheStatus]:
+    from core.data.intraday_warm_cache import intraday_warm_cache
+
+    return [
+      IntradayWarmCacheStatus.from_status(row)
+      for row in intraday_warm_cache.get_status(symbols)
+    ]

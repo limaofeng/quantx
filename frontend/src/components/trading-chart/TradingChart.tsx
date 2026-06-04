@@ -2,14 +2,14 @@ import type { ISeriesApi } from 'lightweight-charts';
 import React, { useState, useCallback, useRef } from 'react';
 
 import { Card } from '@/components/ui/card';
-import { useKLinesPage } from '@/features/trading/hooks/useTrading';
-import { useRealTimeTicks, useInfiniteKLines } from '@/hooks';
+import { useIntradayTrendData, useInfiniteKLines } from '@/hooks';
 import { cn } from '@/utils/cn';
 
 import { ChartContainer } from './components/ChartContainer';
 import { ChartHeader } from './components/ChartHeader';
 import { EmptyChartState } from './components/EmptyChartState';
 import { IndicatorBar } from './components/IndicatorBar';
+import { IntradayInfoBar } from './components/IntradayInfoBar';
 import { LoadingOverlay } from './components/LoadingOverlay';
 import { useChartData } from './hooks/useChartData';
 import { useChartIndicators } from './hooks/useChartIndicators';
@@ -51,10 +51,11 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
   const isTimeMode = activePeriod === '1m_line' || activePeriod === '5d_line';
 
   // 1. Fetch Data
-  const { data: rawTicks, loading: ticksLoading } = useRealTimeTicks(
-    isTimeMode && stockCode ? stockCode : '',
-    activePeriod === '5d_line' ? '5d' : '1d'
-  );
+  const { bars: rawIntradayBars, loading: intradayLoading } =
+    useIntradayTrendData(
+      isTimeMode && stockCode ? stockCode : '',
+      activePeriod === '5d_line' ? '5d' : '1d'
+    );
 
   const periodMap: Record<string, string> = {
     '1m': 'MIN_1',
@@ -81,7 +82,7 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
     !isTimeMode
   );
 
-  const isLoading = isTimeMode ? ticksLoading : klinesLoading;
+  const isLoading = isTimeMode ? intradayLoading : klinesLoading;
 
   // 2. Initialize Charts
   // We pass activeSubs as dependency to force re-init when they change
@@ -131,7 +132,7 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
   // 3. Update Data (Calculate Base Data)
   const { candlestickData, volumeData } = useChartData(
     isTimeMode,
-    rawTicks,
+    rawIntradayBars,
     rawKlines,
     series,
     charts,
@@ -140,11 +141,16 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
   );
 
   // 4. Indicators
+  const appliedMainIndicators = React.useMemo(
+    () => (isTimeMode ? [] : activeMain),
+    [activeMain, isTimeMode]
+  );
+
   useChartIndicators(
     charts,
     candlestickData,
     volumeData,
-    activeMain,
+    appliedMainIndicators,
     activeSubs,
     subSeriesMapRef,
     isReady,
@@ -155,7 +161,7 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
   useChartSync(
     charts.main,
     charts.subs,
-    isTimeMode ? (series.area as any) : series.candlestick,
+    isTimeMode ? (series.timeLine as any) : series.candlestick,
     subSeriesMapRef,
     isReady,
     chartVersion
@@ -251,6 +257,8 @@ export function TradingChart({ stockCode, className }: TradingChartProps) {
         onKLinePeriodChange={handleKLinePeriodChange}
         onTimePeriodChange={handleTimePeriodChange}
       />
+
+      {isTimeMode && <IntradayInfoBar bars={rawIntradayBars} />}
 
       <LoadingOverlay isLoading={isLoading} />
 

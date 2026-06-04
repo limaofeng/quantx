@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from database.timeseries_base import BaseModel
@@ -56,7 +56,9 @@ class KLine(BaseModel):
   def from_xtquant(stock_code: str, period: str, data: Dict[str, Any]) -> "KLine":
     # 转换时间戳
     timestamp = (
-      datetime.fromtimestamp(data.get("time", 0) / 1000)
+      time_utils.to_shanghai(
+        datetime.fromtimestamp(data.get("time", 0) / 1000, timezone.utc)
+      )
       if data.get("time")
       else time_utils.now()
     )

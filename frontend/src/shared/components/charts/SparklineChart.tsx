@@ -1,16 +1,18 @@
 import {
   createChart,
   ColorType,
-  type UTCTimestamp,
+  type AreaData,
+  type Time,
+  type WhitespaceData,
   AreaSeries,
 } from 'lightweight-charts';
 import { useEffect, useMemo, useRef } from 'react';
 
 interface SparklineChartProps {
-  data: { time: UTCTimestamp; value: number }[];
+  data: Array<AreaData | WhitespaceData>;
   color?: string;
   className?: string;
-  visibleRange?: { from: UTCTimestamp; to: UTCTimestamp };
+  visibleRange?: { from: Time; to: Time };
 }
 
 export function SparklineChart({
