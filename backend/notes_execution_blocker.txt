@@ -1,2 +1,0 @@
-环境工具当前报错: shell 调用均出现 pipe-in 超时（windows sandbox: timed out after 15000ms connecting runner pipe-in），无法读取/写入仓库文件。
-请先恢复容器命令执行能力后继续应用该计划。

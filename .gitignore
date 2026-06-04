@@ -37,6 +37,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.vite-build-analysis/
 test-results/
 playwright-report/
 coverage/
@@ -46,6 +47,7 @@ coverage/
 .prefect-test/
 .pytest-tmp*/
 .playwright-mcp/
+.tmp-chrome-*/
 .quantx-dev/
 quantx.pid
 quantx_service_runner.bat
