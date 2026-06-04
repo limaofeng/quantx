@@ -1,5 +1,8 @@
+import { Bot, CandlestickChart, Copy, FileX2, ReceiptText } from 'lucide-react';
 import * as React from 'react';
+import { useLocation } from 'wouter';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { formatCurrency } from '@/shared/utils/format';
@@ -12,10 +15,17 @@ interface ActiveOrdersProps {
   className?: string;
 }
 
+function copyText(text: string) {
+  if (!navigator.clipboard || !text) return;
+  void navigator.clipboard.writeText(text);
+}
+
 /**
  * 活跃委托组件 - 专门用于侧边栏展示可撤销的订单
  */
 export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
+  const [, setLocation] = useLocation();
+  const { closeMenu, menu, openAtPointer } = useStudioMenu<any>();
   const actualAccountId = accountId || '300000013250';
   const { orders, loading } = useTodayOrders(actualAccountId);
   const { cancelOrder, fetching: isCancelling } = useCancelOrder();
@@ -49,6 +59,12 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
     }
   };
 
+  const handleCancelWithConfirm = (order: any) => {
+    const label = `${order.stockName || order.stockCode || order.id}`;
+    if (!window.confirm(`确认撤销 ${label} 的活跃委托吗？`)) return;
+    void handleCancel(order.id);
+  };
+
   return (
     <Card
       className={cn(
@@ -69,6 +85,7 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
         {activeOrders.map((order: any) => (
           <div
             key={order.id}
+            onContextMenu={event => openAtPointer(event, order)}
             className={cn(
               'group relative flex flex-col p-2 rounded-lg bg-white/40 dark:bg-slate-900/40 border border-slate-200/30 dark:border-slate-800/30 transition-all duration-300 hover:bg-white/60 dark:hover:bg-slate-800/60 overflow-hidden',
               order.type === 'buy' || order.type === 'BUY'
@@ -159,6 +176,65 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
           </div>
         ))}
       </div>
+
+      <StudioMenu
+        ariaLabel="活跃委托菜单"
+        items={[
+          {
+            icon: <ReceiptText className="h-3.5 w-3.5" />,
+            id: 'copy-order-id',
+            label: '复制委托 ID',
+            onSelect: () => copyText(menu?.payload?.id || ''),
+          },
+          {
+            icon: <CandlestickChart className="h-3.5 w-3.5" />,
+            id: 'stock-detail',
+            label: '查看个股详情',
+            onSelect: () => {
+              if (menu?.payload?.stockCode) {
+                setLocation(`/stock/${menu.payload.stockCode}`);
+              }
+            },
+          },
+          {
+            icon: <Bot className="h-3.5 w-3.5" />,
+            id: 'create-strategy',
+            label: '创建策略',
+            onSelect: () => {
+              if (menu?.payload?.stockCode) {
+                setLocation(`/strategies/run?symbol=${menu.payload.stockCode}`);
+              }
+            },
+          },
+          { id: 'separator-copy', type: 'separator' },
+          {
+            icon: <Copy className="h-3.5 w-3.5" />,
+            id: 'copy-code',
+            label: '复制代码',
+            onSelect: () => copyText(menu?.payload?.stockCode || ''),
+          },
+          {
+            icon: <Copy className="h-3.5 w-3.5" />,
+            id: 'copy-name',
+            label: '复制名称',
+            onSelect: () => copyText(menu?.payload?.stockName || ''),
+          },
+          { id: 'separator-risk', type: 'separator' },
+          {
+            danger: true,
+            disabled: isCancelling,
+            icon: <FileX2 className="h-3.5 w-3.5" />,
+            id: 'cancel',
+            label: '撤单入口',
+            onSelect: () => {
+              if (menu?.payload) handleCancelWithConfirm(menu.payload);
+            },
+          },
+        ]}
+        menu={menu}
+        onClose={closeMenu}
+        width={188}
+      />
     </Card>
   );
 }

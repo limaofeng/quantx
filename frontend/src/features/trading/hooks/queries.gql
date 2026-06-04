@@ -190,6 +190,7 @@ query GetKLines($stockCode: String!, $period: KLinePeriod!, $startTime: DateTime
     high
     low
     close
+    preClose
     volume
     amount
   }
@@ -206,6 +207,7 @@ query GetKLinesPage($page: KLinePageInput!) {
       high
       low
       close
+      preClose
       volume
       amount
     }

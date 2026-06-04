@@ -1,5 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import { gql as urqlGql, useQuery, useMutation } from 'urql';
+import type { RequestPolicy } from 'urql';
 
 import { gql } from '@/generated/gql';
 
@@ -19,6 +20,8 @@ export const GetTodayOrdersQuery = gql(`
       volume
       tradedVolume
       tradedPrice
+      strategyName
+      orderRemark
       time
     }
   }
@@ -39,6 +42,8 @@ export const GetTodayTradesQuery = gql(`
       tradedVolume
       tradedAmount
       tradedTime
+      strategyName
+      orderRemark
     }
   }
 `);
@@ -107,8 +112,8 @@ export const GetTicksQuery = urqlGql`
  * 获取K线数据 (K-Lines)
  */
 export const GetKLinesQuery = gql(`
-  query Trading_GetKLines($stockCode: String!, $period: KLinePeriod!, $startTime: DateTime, $endTime: DateTime) {
-    klines(stockCode: $stockCode, period: $period, startTime: $startTime, endTime: $endTime) {
+  query Trading_GetKLines($stockCode: String!, $period: KLinePeriod!, $startTime: DateTime, $endTime: DateTime, $order: String! = "desc") {
+    klines(stockCode: $stockCode, period: $period, startTime: $startTime, endTime: $endTime, order: $order) {
       stockCode
       period
       time
@@ -116,6 +121,7 @@ export const GetKLinesQuery = gql(`
       high
       low
       close
+      preClose
       volume
       amount
     }
@@ -157,19 +163,24 @@ export const CancelOrderMutation = gql(`
  * 今日委托 Hook
  */
 export function useTodayOrders(accountId?: string) {
-  const [result] = useQuery({
+  const [result, reexecuteQuery] = useQuery({
     query: GetTodayOrdersQuery as any,
     variables: { accountId },
     pause: !accountId,
   });
+
+  const refresh = useCallback(() => {
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [reexecuteQuery]);
 
   return useMemo(
     () => ({
       orders: result.data?.todayOrders || [],
       loading: result.fetching,
       error: result.error,
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 
@@ -177,19 +188,24 @@ export function useTodayOrders(accountId?: string) {
  * 今日成交 Hook
  */
 export function useTodayTrades(accountId?: string) {
-  const [result] = useQuery({
+  const [result, reexecuteQuery] = useQuery({
     query: GetTodayTradesQuery as any,
     variables: { accountId },
     pause: !accountId,
   });
+
+  const refresh = useCallback(() => {
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [reexecuteQuery]);
 
   return useMemo(
     () => ({
       trades: result.data?.todayTrades || [],
       loading: result.fetching,
       error: result.error,
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 
@@ -313,9 +329,14 @@ export function useTicks(
   stockCode: string,
   startTime?: string,
   endTime?: string,
-  options: { limit?: number; order?: 'asc' | 'desc' } = {}
+  options: {
+    limit?: number;
+    order?: 'asc' | 'desc';
+    pause?: boolean;
+    requestPolicy?: RequestPolicy;
+  } = {}
 ) {
-  const [result] = useQuery({
+  const [result, reexecuteQuery] = useQuery({
     query: GetTicksQuery as any,
     variables: {
       stockCode,
@@ -324,17 +345,22 @@ export function useTicks(
       limit: options.limit,
       order: options.order || 'desc',
     },
-    pause: !stockCode,
+    pause: options.pause || !stockCode,
+    requestPolicy: options.requestPolicy || 'cache-and-network',
   });
+
+  const refresh = useCallback(() => {
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [reexecuteQuery]);
 
   return useMemo(
     () => ({
       data: result.data?.ticks || [],
       loading: result.fetching,
       error: result.error,
-      refresh: () => {}, // urql usually handles this via cache/subscription
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 
@@ -342,7 +368,7 @@ export function useTicks(
  * 获取K线分页数据 (K-Lines Page)
  */
 export const GetKLinesPageQuery = gql(`
-  query GetKLinesPage($page: KLinePageInput!) {
+  query Trading_GetKLinesPage($page: KLinePageInput!) {
     klinesPage(page: $page) {
       items {
         stockCode
@@ -352,6 +378,7 @@ export const GetKLinesPageQuery = gql(`
         high
         low
         close
+        preClose
         volume
         amount
       }
@@ -369,21 +396,38 @@ export function useKLines(
   stockCode: string,
   period: string,
   startTime?: string,
-  endTime?: string
+  endTime?: string,
+  options: {
+    order?: 'asc' | 'desc';
+    pause?: boolean;
+    requestPolicy?: RequestPolicy;
+  } = {}
 ) {
-  const [result] = useQuery({
+  const [result, reexecuteQuery] = useQuery({
     query: GetKLinesQuery as any,
-    variables: { stockCode, period, startTime, endTime },
-    pause: !stockCode || !period,
+    variables: {
+      stockCode,
+      period,
+      startTime,
+      endTime,
+      order: options.order || 'desc',
+    },
+    pause: options.pause || !stockCode || !period,
+    requestPolicy: options.requestPolicy || 'cache-and-network',
   });
+
+  const refresh = useCallback(() => {
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [reexecuteQuery]);
 
   return useMemo(
     () => ({
       data: result.data?.klines || [],
       loading: result.fetching,
       error: result.error,
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 

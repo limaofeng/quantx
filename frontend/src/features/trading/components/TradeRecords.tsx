@@ -1,3 +1,7 @@
+import { Bot, CandlestickChart, Copy, ReceiptText } from 'lucide-react';
+import { useLocation } from 'wouter';
+
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -18,11 +22,29 @@ interface TradeRecordsProps {
   initialTimeFilter?: string;
 }
 
+function copyText(text: string) {
+  if (!navigator.clipboard || !text) return;
+  void navigator.clipboard.writeText(text);
+}
+
+function getTransactionStockCode(transaction?: EnrichedTransaction | null) {
+  const stock = transaction?.stock;
+  return stock?.code || stock?.stockCode || transaction?.stockCode || '';
+}
+
+function getTransactionStockName(transaction?: EnrichedTransaction | null) {
+  const stock = transaction?.stock;
+  return stock?.name || transaction?.stockName || '';
+}
+
 export function TradeRecords({
   userId = 'demo-user',
   itemsPerPage = 10,
   initialTimeFilter = '30days',
 }: TradeRecordsProps) {
+  const [, setLocation] = useLocation();
+  const { closeMenu, menu, openAtPointer } =
+    useStudioMenu<EnrichedTransaction>();
   const {
     typeFilter,
     setTypeFilter,
@@ -60,6 +82,54 @@ export function TradeRecords({
       <span className="text-[10px] text-destructive font-bold">卖出</span>
     );
   };
+
+  const tradeMenu = (
+    <StudioMenu
+      ariaLabel="成交记录菜单"
+      items={[
+        {
+          icon: <ReceiptText className="h-3.5 w-3.5" />,
+          id: 'copy-trade-id',
+          label: '复制成交 ID',
+          onSelect: () => copyText(menu?.payload?.id || ''),
+        },
+        {
+          icon: <CandlestickChart className="h-3.5 w-3.5" />,
+          id: 'stock-detail',
+          label: '查看个股详情',
+          onSelect: () => {
+            const stockCode = getTransactionStockCode(menu?.payload);
+            if (stockCode) setLocation(`/stock/${stockCode}`);
+          },
+        },
+        {
+          icon: <Bot className="h-3.5 w-3.5" />,
+          id: 'create-strategy',
+          label: '创建策略',
+          onSelect: () => {
+            const stockCode = getTransactionStockCode(menu?.payload);
+            if (stockCode) setLocation(`/strategies/run?symbol=${stockCode}`);
+          },
+        },
+        { id: 'separator-copy', type: 'separator' },
+        {
+          icon: <Copy className="h-3.5 w-3.5" />,
+          id: 'copy-code',
+          label: '复制代码',
+          onSelect: () => copyText(getTransactionStockCode(menu?.payload)),
+        },
+        {
+          icon: <Copy className="h-3.5 w-3.5" />,
+          id: 'copy-name',
+          label: '复制名称',
+          onSelect: () => copyText(getTransactionStockName(menu?.payload)),
+        },
+      ]}
+      menu={menu}
+      onClose={closeMenu}
+      width={188}
+    />
+  );
 
   return (
     <div className="space-y-3 h-full flex flex-col">
@@ -190,6 +260,9 @@ export function TradeRecords({
                       return (
                         <tr
                           key={transaction.id}
+                          onContextMenu={event =>
+                            openAtPointer(event, transaction)
+                          }
                           className="hover:bg-muted/30 transition-colors group"
                         >
                           <td className="px-3 py-1 text-[10px] font-mono text-muted-foreground">
@@ -197,6 +270,7 @@ export function TradeRecords({
                               ? new Date(
                                   transaction.createdAt
                                 ).toLocaleTimeString([], {
+                                  timeZone: 'Asia/Shanghai',
                                   hour12: false,
                                   hour: '2-digit',
                                   minute: '2-digit',
@@ -257,6 +331,7 @@ export function TradeRecords({
             </table>
           </div>
         )}
+        {tradeMenu}
 
         {/* Dense Pagination */}
         {totalPages > 1 && (

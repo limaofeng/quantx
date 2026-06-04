@@ -1,6 +1,12 @@
-import { format, subDays } from 'date-fns';
+import { Bot, CandlestickChart, Copy, FileX2, ReceiptText } from 'lucide-react';
 import * as React from 'react';
+import { useLocation } from 'wouter';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
+import {
+  addShanghaiDays,
+  getShanghaiDateKey,
+} from '@/components/trading-chart/utils/time-utils';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { formatCurrency } from '@/shared/utils/format';
@@ -18,11 +24,29 @@ interface OrderRecordsProps {
   filterType?: 'active' | 'all' | 'history';
 }
 
+const CANCELABLE_ORDER_STATUSES = [
+  'UNREPORTED',
+  'WAIT_REPORTING',
+  'REPORTED',
+  'PART_SUCC',
+];
+
+function copyText(text: string) {
+  if (!navigator.clipboard || !text) return;
+  void navigator.clipboard.writeText(text);
+}
+
+function isOrderCancelable(order: any) {
+  return CANCELABLE_ORDER_STATUSES.includes(order?.status);
+}
+
 export function OrderRecords({
   accountId,
   viewMode = 'list',
   filterType = 'active',
 }: OrderRecordsProps) {
+  const [, setLocation] = useLocation();
+  const { closeMenu, menu, openAtPointer } = useStudioMenu<any>();
   // Today's orders
   // 暂时使用 '300000013250' 作为默认 accountId，如果 props 没传
   const actualAccountId = accountId || '300000013250';
@@ -33,10 +57,10 @@ export function OrderRecords({
   // History orders (default last 30 days)
   const [dateRange] = React.useState(() => {
     const end = new Date();
-    const start = subDays(end, 30);
+    const start = addShanghaiDays(end, -30);
     return {
-      startDate: format(start, 'yyyy-MM-dd'),
-      endDate: format(end, 'yyyy-MM-dd'),
+      startDate: getShanghaiDateKey(start),
+      endDate: getShanghaiDateKey(end),
     };
   });
 
@@ -120,6 +144,73 @@ export function OrderRecords({
     }
   };
 
+  const handleCancelWithConfirm = (order: any) => {
+    const label = `${order.stockName || order.stockCode || order.id}`;
+    if (!window.confirm(`确认撤销 ${label} 的委托吗？`)) return;
+    void handleCancel(order.id);
+  };
+
+  const orderMenu = (
+    <StudioMenu
+      ariaLabel="委托记录菜单"
+      items={[
+        {
+          icon: <ReceiptText className="h-3.5 w-3.5" />,
+          id: 'copy-order-id',
+          label: '复制委托 ID',
+          onSelect: () => copyText(menu?.payload?.id || ''),
+        },
+        {
+          icon: <CandlestickChart className="h-3.5 w-3.5" />,
+          id: 'stock-detail',
+          label: '查看个股详情',
+          onSelect: () => {
+            if (menu?.payload?.stockCode) {
+              setLocation(`/stock/${menu.payload.stockCode}`);
+            }
+          },
+        },
+        {
+          icon: <Bot className="h-3.5 w-3.5" />,
+          id: 'create-strategy',
+          label: '创建策略',
+          onSelect: () => {
+            if (menu?.payload?.stockCode) {
+              setLocation(`/strategies/run?symbol=${menu.payload.stockCode}`);
+            }
+          },
+        },
+        { id: 'separator-copy', type: 'separator' },
+        {
+          icon: <Copy className="h-3.5 w-3.5" />,
+          id: 'copy-code',
+          label: '复制代码',
+          onSelect: () => copyText(menu?.payload?.stockCode || ''),
+        },
+        {
+          icon: <Copy className="h-3.5 w-3.5" />,
+          id: 'copy-name',
+          label: '复制名称',
+          onSelect: () => copyText(menu?.payload?.stockName || ''),
+        },
+        { id: 'separator-risk', type: 'separator' },
+        {
+          danger: true,
+          disabled: !isOrderCancelable(menu?.payload) || isCancelling,
+          icon: <FileX2 className="h-3.5 w-3.5" />,
+          id: 'cancel',
+          label: '撤单入口',
+          onSelect: () => {
+            if (menu?.payload) handleCancelWithConfirm(menu.payload);
+          },
+        },
+      ]}
+      menu={menu}
+      onClose={closeMenu}
+      width={188}
+    />
+  );
+
   if (viewMode === 'table') {
     return (
       <div className="h-full overflow-hidden flex flex-col">
@@ -160,6 +251,7 @@ export function OrderRecords({
               {displayOrders.map((order: any) => (
                 <tr
                   key={order.id}
+                  onContextMenu={event => openAtPointer(event, order)}
                   className="hover:bg-muted/30 transition-colors group"
                 >
                   <td className="px-3 py-1 text-[10px] font-mono text-muted-foreground tabular-nums">
@@ -206,12 +298,7 @@ export function OrderRecords({
                     {order.status}
                   </td>
                   <td className="px-3 py-1 text-right">
-                    {[
-                      'UNREPORTED',
-                      'WAIT_REPORTING',
-                      'REPORTED',
-                      'PART_SUCC',
-                    ].includes(order.status) && (
+                    {isOrderCancelable(order) && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -231,6 +318,7 @@ export function OrderRecords({
             </tbody>
           </table>
         </div>
+        {orderMenu}
       </div>
     );
   }
@@ -257,6 +345,7 @@ export function OrderRecords({
         {displayOrders.map((order: any) => (
           <div
             key={order.id}
+            onContextMenu={event => openAtPointer(event, order)}
             className={cn(
               'relative flex items-center justify-between p-2.5 rounded-xl bg-card dark:bg-slate-900 border border-slate-200/40 dark:border-slate-800/40 text-xs shadow-sm hover:shadow hover:bg-card/90 dark:hover:bg-slate-800 transition-all duration-300 group overflow-hidden pl-3',
               order.type === 'buy' || order.type === 'BUY'
@@ -349,6 +438,7 @@ export function OrderRecords({
           </div>
         ))}
       </div>
+      {orderMenu}
     </Card>
   );
 }

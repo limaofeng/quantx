@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/select';
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
 import { useStockSearch } from '@/hooks/useStockSearch';
+import type { Stock } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
 import { cn } from '@/utils/cn';
 
@@ -23,16 +24,57 @@ import { useTradingCalculation } from './hooks/useTradingCalculation';
 import { useTradingSubmit } from './hooks/useTradingSubmit';
 
 interface TradingCardProps {
+  initialStockCode?: string;
   userId?: string;
   onSuccess?: () => void;
-  onStockSelect?: (stock: unknown) => void;
+  onStockSelect?: (stock: Stock | null) => void;
   priceUpdate?: { price: string; timestamp: number } | null;
 }
+
+interface HoldingLike {
+  instrumentName?: string | null;
+  lastPrice?: number | null;
+  name?: string | null;
+  profitRate?: number | null;
+  stockCode?: string | null;
+  [key: string]: unknown;
+}
+
+const normalizeStockCode = (value: unknown) =>
+  typeof value === 'string' ? value.trim().toUpperCase() : '';
+
+const getStockCode = (stock: unknown) => {
+  if (!stock || typeof stock !== 'object') return '';
+  const candidate = stock as { id?: unknown; stockCode?: unknown };
+  return normalizeStockCode(candidate.stockCode || candidate.id);
+};
+
+const stockFromHolding = (holding: HoldingLike, stockCode: string) => ({
+  ...holding,
+  id: holding?.stockCode || stockCode,
+  stockCode: holding?.stockCode || stockCode,
+  name: holding?.instrumentName || holding?.name || stockCode,
+  quote: {
+    lastPrice: holding?.lastPrice || 0,
+    changePercent: holding?.profitRate || 0,
+  },
+});
+
+const fallbackStock = (stockCode: string) => ({
+  id: stockCode,
+  stockCode,
+  name: stockCode,
+  quote: {
+    lastPrice: 0,
+    changePercent: 0,
+  },
+});
 
 /**
  * 交易卡片 - 紧凑型下单面板
  */
 export function TradingCard({
+  initialStockCode,
   userId = 'demo-user',
   onSuccess,
   onStockSelect,
@@ -61,31 +103,74 @@ export function TradingCard({
     handleStockSelect,
   } = useStockSearch(holdings);
 
+  const normalizedInitialStockCode = normalizeStockCode(initialStockCode);
+  const selectedStockCode = getStockCode(selectedStock);
+
+  const selectStock = React.useCallback(
+    (stock: Stock) => {
+      handleStockSelect(stock, setPrice);
+      onStockSelect?.(stock);
+    },
+    [handleStockSelect, onStockSelect, setPrice]
+  );
+
   React.useEffect(() => {
-    onStockSelect?.(selectedStock);
-  }, [selectedStock, onStockSelect]);
+    if (!normalizedInitialStockCode) return;
+    const holding = holdings.find(
+      item => normalizeStockCode(item?.stockCode) === normalizedInitialStockCode
+    );
+    const selectedCode = selectedStockCode;
+    const selectedName =
+      selectedStock && typeof selectedStock === 'object'
+        ? String((selectedStock as { name?: unknown }).name || '')
+        : '';
+    const selectedPrice =
+      selectedStock && typeof selectedStock === 'object'
+        ? Number(
+            (selectedStock as { quote?: { lastPrice?: unknown } }).quote
+              ?.lastPrice || 0
+          )
+        : 0;
+    const shouldHydrateFromHolding =
+      !!holding &&
+      selectedCode === normalizedInitialStockCode &&
+      (selectedName === normalizedInitialStockCode || selectedPrice <= 0);
+    if (
+      selectedCode === normalizedInitialStockCode &&
+      !shouldHydrateFromHolding
+    ) {
+      return;
+    }
+
+    handleStockSelect(
+      holding
+        ? stockFromHolding(holding, normalizedInitialStockCode)
+        : fallbackStock(normalizedInitialStockCode),
+      setPrice
+    );
+  }, [
+    handleStockSelect,
+    holdings,
+    normalizedInitialStockCode,
+    selectedStock,
+    selectedStockCode,
+    setPrice,
+  ]);
 
   // Default to first holding if no stock selected
   const hasAutoSelectedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!hasAutoSelectedRef.current && !selectedStock && holdings.length > 0) {
+    if (
+      !normalizedInitialStockCode &&
+      !hasAutoSelectedRef.current &&
+      !selectedStock &&
+      holdings.length > 0
+    ) {
       const first = holdings[0];
-      handleStockSelect(
-        {
-          ...first,
-          id: first.stockCode,
-          stockCode: first.stockCode,
-          name: first.instrumentName || '',
-          quote: {
-            lastPrice: first.lastPrice || 0,
-            changePercent: first.profitRate || 0,
-          },
-        },
-        setPrice
-      );
+      selectStock(stockFromHolding(first, first.stockCode));
       hasAutoSelectedRef.current = true;
     }
-  }, [holdings, selectedStock, handleStockSelect, setPrice]);
+  }, [holdings, normalizedInitialStockCode, selectedStock, selectStock]);
 
   const { estimatedAmount, estimatedFees } = useTradingCalculation(
     quantity,
@@ -201,7 +286,7 @@ export function TradingCard({
                 searchQuery={searchQuery}
                 setSearchQuery={setSearchQuery}
                 filteredStocks={filteredStocks}
-                onStockSelect={stock => handleStockSelect(stock, setPrice)}
+                onStockSelect={selectStock}
                 selectedStock={selectedStock}
               />
             </div>

@@ -1,6 +1,9 @@
-import { format, subDays } from 'date-fns';
 import { useState, useMemo } from 'react';
 
+import {
+  addShanghaiDays,
+  getShanghaiDateKey,
+} from '@/components/trading-chart/utils/time-utils';
 import type { EnrichedTransaction } from '@/shared/types';
 
 import { useTodayTrades, useHistoryTrades } from './useTrading';
@@ -112,24 +115,24 @@ export function useTradeRecords(
   // Calculate date range for history query
   const dateRange = useMemo(() => {
     const end = new Date();
-    let start = new Date();
+    let start = end;
 
     switch (timeFilter) {
       case 'today':
-        return { startDate: '', endDate: format(end, 'yyyy-MM-dd') };
+        return { startDate: '', endDate: getShanghaiDateKey(end) };
       case '7days':
-        start = subDays(end, 7);
+        start = addShanghaiDays(end, -7);
         break;
       case '30days':
-        start = subDays(end, 30);
+        start = addShanghaiDays(end, -30);
         break;
       default:
-        start = subDays(end, 30); // Default to 30 days
+        start = addShanghaiDays(end, -30); // Default to 30 days
     }
 
     return {
-      startDate: format(start, 'yyyy-MM-dd'),
-      endDate: format(end, 'yyyy-MM-dd'),
+      startDate: getShanghaiDateKey(start),
+      endDate: getShanghaiDateKey(end),
     };
   }, [timeFilter]);
 
