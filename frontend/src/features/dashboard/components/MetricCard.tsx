@@ -61,14 +61,14 @@ export function MetricCard({
   return (
     <Card
       className={`
-      p-6 rounded-2xl
-      bg-white dark:bg-slate-900/50
-      border border-slate-200 dark:border-slate-800/50
-      shadow-sm hover:shadow-lg
-      transition-all duration-200
+      rounded-lg p-4
+      bg-[#0f172a]/70
+      border ${styles.borderColor}
+      shadow-sm
+      transition-colors duration-200
       animate-slide-up
       group
-      hover:border-${styles.borderColor}
+      hover:bg-[#111c31]
     `}
     >
       <div className="flex items-center justify-between">
@@ -77,7 +77,7 @@ export function MetricCard({
             {title}
           </p>
           <p
-            className={`text-3xl font-black ${styles.valueColor} transition-colors duration-200`}
+            className={`text-2xl font-black ${styles.valueColor} transition-colors duration-200`}
             data-testid={testId}
           >
             {value}
@@ -85,21 +85,20 @@ export function MetricCard({
         </div>
         <div
           className={`
-            w-14 h-14 ${styles.iconBg} ${styles.borderColor}
-            rounded-2xl
+            w-10 h-10 ${styles.iconBg} ${styles.borderColor}
+            rounded-lg
             flex items-center justify-center
             border
-            shadow-lg ${styles.shadowColor}
-            group-hover:scale-110
-            transition-all duration-200
+            shadow-sm ${styles.shadowColor}
+            transition-colors duration-200
           `}
         >
-          <Icon className={`${styles.iconColor} h-7 w-7`} />
+          <Icon className={`${styles.iconColor} h-5 w-5`} />
         </div>
       </div>
 
       {(change || children) && (
-        <div className="flex items-center mt-4 pt-4 border-t border-slate-100 dark:border-slate-800/50">
+        <div className="flex items-center mt-3 pt-3 border-t border-white/5">
           {change && (
             <>
               <span

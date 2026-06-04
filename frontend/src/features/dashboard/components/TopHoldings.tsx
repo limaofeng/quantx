@@ -19,18 +19,22 @@ interface TopHoldingsProps {
 export function TopHoldings({ holdings, isLoading }: TopHoldingsProps) {
   if (isLoading) {
     return (
-      <Card className="p-6">
-        <h3 className="text-lg font-semibold mb-4">主要持仓</h3>
-        <div>加载持仓数据中...</div>
+      <Card className="rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
+        <h3 className="mb-3 text-xs font-black uppercase tracking-[0.2em] text-slate-300">
+          主要持仓
+        </h3>
+        <div className="text-sm text-slate-500">加载持仓数据中...</div>
       </Card>
     );
   }
 
   if (holdings.length === 0) {
     return (
-      <Card className="p-6">
-        <h3 className="text-lg font-semibold mb-4">主要持仓</h3>
-        <div className="text-center py-8 text-muted-foreground">
+      <Card className="rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
+        <h3 className="mb-3 text-xs font-black uppercase tracking-[0.2em] text-slate-300">
+          主要持仓
+        </h3>
+        <div className="py-8 text-center text-sm text-slate-500">
           暂无持仓数据
         </div>
       </Card>
@@ -38,14 +42,20 @@ export function TopHoldings({ holdings, isLoading }: TopHoldingsProps) {
   }
 
   return (
-    <Card className="p-6">
-      <h3 className="text-lg font-semibold mb-4">主要持仓</h3>
-      <div className="space-y-4">
+    <Card className="rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
+      <h3 className="mb-3 text-xs font-black uppercase tracking-[0.2em] text-slate-300">
+        主要持仓
+      </h3>
+      <div className="space-y-2">
         {holdings.map(holding => {
           const stock = holding.stock;
           if (!stock) return null;
 
-          const currentValue = holding.volume * (stock.currentPrice || 0);
+          const currentPrice =
+            typeof stock.currentPrice === 'number'
+              ? stock.currentPrice
+              : Number(stock.currentPrice || 0);
+          const currentValue = holding.volume * currentPrice;
           const cost = holding.volume * holding.avgPrice;
           const pnl = currentValue - cost;
           const pnlPercent =
@@ -54,27 +64,27 @@ export function TopHoldings({ holdings, isLoading }: TopHoldingsProps) {
           return (
             <div
               key={holding.id}
-              className="flex items-center justify-between py-3 border-b border-border last:border-b-0"
+              className="flex items-center justify-between border-b border-white/5 py-2 last:border-b-0"
               data-testid={`holding-${stock.code}`}
             >
               <div className="flex items-center">
-                <div className="w-10 h-10 bg-primary/10 rounded-lg flex items-center justify-center mr-3">
-                  <span className="text-primary font-medium">
+                <div className="mr-3 flex h-9 w-9 items-center justify-center rounded-md border border-red-500/10 bg-red-500/10">
+                  <span className="text-sm font-bold text-red-300">
                     {getStockIconText(stock.name)}
                   </span>
                 </div>
                 <div>
-                  <p className="font-medium">
+                  <p className="text-sm font-medium text-slate-200">
                     {stock.name} ({stock.code})
                   </p>
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-xs text-slate-500">
                     {holding.volume}股 • 成本{formatCurrency(holding.avgPrice)}
                   </p>
                 </div>
               </div>
               <div className="text-right">
                 <p
-                  className="font-medium"
+                  className="font-mono text-sm font-medium text-slate-200"
                   data-testid={`holding-${stock.code}-value`}
                 >
                   {formatCurrency(currentValue)}
@@ -93,7 +103,7 @@ export function TopHoldings({ holdings, isLoading }: TopHoldingsProps) {
       <Link href="/holdings">
         <Button
           variant="ghost"
-          className="w-full mt-4 text-primary hover:text-primary/80"
+          className="mt-3 h-8 w-full text-xs text-red-300 hover:text-red-100"
           data-testid="view-all-holdings"
         >
           查看全部持仓 <ArrowRight className="ml-1 h-4 w-4" />
