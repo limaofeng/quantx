@@ -61,13 +61,13 @@ export function FinancialDataSyncCard() {
       };
     if (isSyncing)
       return {
-        bg: 'bg-gradient-to-br from-cyan-50/50 to-teal-50/50 dark:from-cyan-900/10 dark:to-teal-900/10',
-        border: 'border-cyan-200/40 dark:border-cyan-800/40',
-        iconBg: 'bg-cyan-500/10',
-        iconText: 'text-cyan-600 dark:text-cyan-400',
+        bg: 'bg-gradient-to-br from-blue-50/50 to-teal-50/50 dark:from-blue-950/10 dark:to-teal-900/10',
+        border: 'border-blue-300/40 dark:border-blue-900/40',
+        iconBg: 'bg-blue-600/10',
+        iconText: 'text-blue-700 dark:text-blue-500',
         text: 'text-slate-800 dark:text-slate-100',
-        hover: 'hover:bg-cyan-50/80 dark:hover:bg-cyan-900/20',
-        accent: 'text-cyan-600 dark:text-cyan-400',
+        hover: 'hover:bg-blue-50/80 dark:hover:bg-blue-950/20',
+        accent: 'text-blue-700 dark:text-blue-500',
       };
     if (isError)
       return {
@@ -81,20 +81,20 @@ export function FinancialDataSyncCard() {
       };
     return {
       // Default (Healthy/Ready) - Cyan/Teal theme
-      bg: 'bg-gradient-to-br from-cyan-50/50 to-emerald-50/50 dark:from-cyan-900/10 dark:to-emerald-900/10',
-      border: 'border-cyan-200/40 dark:border-cyan-500/10',
-      iconBg: 'bg-cyan-500/10',
-      iconText: 'text-cyan-600 dark:text-cyan-500',
+      bg: 'bg-gradient-to-br from-blue-50/50 to-emerald-50/50 dark:from-blue-950/10 dark:to-emerald-900/10',
+      border: 'border-blue-300/40 dark:border-blue-600/10',
+      iconBg: 'bg-blue-600/10',
+      iconText: 'text-blue-700 dark:text-blue-600',
       text: 'text-slate-800 dark:text-slate-100',
-      hover: 'hover:bg-cyan-50/80 dark:hover:bg-cyan-900/20',
-      accent: 'text-cyan-600 dark:text-cyan-500',
+      hover: 'hover:bg-blue-50/80 dark:hover:bg-blue-950/20',
+      accent: 'text-blue-700 dark:text-blue-600',
     };
   }, [isInternalOffline, isSyncing, isError]);
 
   return (
     <div
       className={cn(
-        'h-full flex flex-col p-5 rounded-xl border overflow-hidden relative group cursor-pointer transition-all shadow-sm hover:shadow-md hover:shadow-cyan-500/5',
+        'h-full flex flex-col p-5 rounded-xl border overflow-hidden relative group cursor-pointer transition-all shadow-sm hover:shadow-md hover:shadow-blue-600/5',
         theme.bg,
         theme.border,
         theme.hover
@@ -231,7 +231,7 @@ export function FinancialDataSyncCard() {
       <div
         className={cn(
           'absolute -right-8 -bottom-8 w-32 h-32 rounded-full blur-3xl transition-all duration-500 opacity-10 group-hover:opacity-20',
-          isSyncing ? 'bg-cyan-500' : isError ? 'bg-red-500' : 'bg-emerald-500'
+          isSyncing ? 'bg-blue-600' : isError ? 'bg-red-500' : 'bg-emerald-500'
         )}
       />
     </div>

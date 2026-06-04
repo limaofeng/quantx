@@ -1,6 +1,7 @@
-import { Search } from 'lucide-react';
+import { Copy, Eye, Search } from 'lucide-react';
 import React from 'react';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -36,6 +37,15 @@ interface SectorTableProps {
   onSectorClick: (sector: Sector) => void;
 }
 
+type SectorTableMenuPayload =
+  | { columnId: string; kind: 'column'; label: string }
+  | { kind: 'row'; sector: Sector };
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
+}
+
 export function SectorTable({
   sectors,
   fetching,
@@ -46,25 +56,72 @@ export function SectorTable({
   onSectorClick,
 }: SectorTableProps) {
   const totalPages = Math.ceil(totalCount / pageSize);
+  const { closeMenu, menu, openAtPointer } =
+    useStudioMenu<SectorTableMenuPayload>();
 
   return (
     <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-[24px] overflow-hidden shadow-sm flex flex-col min-h-0">
       <Table wrapperClassName="flex-1 custom-scrollbar" className="relative">
         <TableHeader className="sticky top-0 z-10">
           <TableRow className="hover:bg-transparent border-none">
-            <TableHead className="w-[120px] h-9 pl-6 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0">
+            <TableHead
+              className="w-[120px] h-9 pl-6 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0"
+              onContextMenu={event =>
+                openAtPointer(event, {
+                  kind: 'column',
+                  columnId: 'code',
+                  label: 'CODE',
+                })
+              }
+            >
               CODE
             </TableHead>
-            <TableHead className="h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0">
+            <TableHead
+              className="h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0"
+              onContextMenu={event =>
+                openAtPointer(event, {
+                  kind: 'column',
+                  columnId: 'name',
+                  label: 'SECTOR NAME',
+                })
+              }
+            >
               SECTOR NAME
             </TableHead>
-            <TableHead className="w-[60px] h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0">
+            <TableHead
+              className="w-[60px] h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0"
+              onContextMenu={event =>
+                openAtPointer(event, {
+                  kind: 'column',
+                  columnId: 'market',
+                  label: 'MKT',
+                })
+              }
+            >
               MKT
             </TableHead>
-            <TableHead className="w-[80px] h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0">
+            <TableHead
+              className="w-[80px] h-9 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0"
+              onContextMenu={event =>
+                openAtPointer(event, {
+                  kind: 'column',
+                  columnId: 'level',
+                  label: 'LEVEL',
+                })
+              }
+            >
               LEVEL
             </TableHead>
-            <TableHead className="w-[80px] h-9 text-right pr-6 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0">
+            <TableHead
+              className="w-[80px] h-9 text-right pr-6 text-[9px] font-black uppercase tracking-widest text-slate-400 bg-slate-50/95 dark:bg-[#0c1120]/95 backdrop-blur-md sticky top-0"
+              onContextMenu={event =>
+                openAtPointer(event, {
+                  kind: 'column',
+                  columnId: 'stocks',
+                  label: 'STOCKS',
+                })
+              }
+            >
               STOCKS
             </TableHead>
           </TableRow>
@@ -102,6 +159,9 @@ export function SectorTable({
                 key={sector.id}
                 className="h-10 group cursor-pointer hover:bg-slate-50/50 dark:hover:bg-white/[0.03] transition-all border-b border-slate-50 dark:border-white/5"
                 onClick={() => onSectorClick(sector)}
+                onContextMenu={event =>
+                  openAtPointer(event, { kind: 'row', sector })
+                }
               >
                 <TableCell className="pl-6 py-0 font-mono text-[10px] font-bold text-slate-400 dark:text-slate-500 group-hover:text-blue-500 transition-colors">
                   {sector.code}
@@ -191,6 +251,71 @@ export function SectorTable({
           </Button>
         </div>
       </div>
+
+      <StudioMenu
+        ariaLabel="板块表菜单"
+        menu={menu}
+        onClose={closeMenu}
+        width={196}
+        items={[
+          {
+            id: 'open-sector',
+            label: '打开板块详情',
+            icon: <Eye size={14} />,
+            disabled: menu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'row') {
+                onSectorClick(menu.payload.sector);
+              }
+            },
+          },
+          {
+            id: 'copy-code',
+            label: '复制板块代码',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'row') {
+                copyText(menu.payload.sector.code);
+              }
+            },
+          },
+          {
+            id: 'copy-name',
+            label: '复制板块名称',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'row') {
+                copyText(menu.payload.sector.name);
+              }
+            },
+          },
+          { id: 'sep-column', type: 'separator' },
+          {
+            id: 'copy-column-name',
+            label: '复制列名',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'column',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'column') {
+                copyText(menu.payload.label);
+              }
+            },
+          },
+          {
+            id: 'copy-column-id',
+            label: '复制字段 ID',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'column',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'column') {
+                copyText(menu.payload.columnId);
+              }
+            },
+          },
+        ]}
+      />
     </Card>
   );
 }

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { HoldingsDataList } from '../components/HoldingsDataList';
 import { HoldingsStatsCards } from '../components/HoldingsStatsCards';
 import { SectorHoldingCard } from '../components/SectorHoldingCard';
@@ -57,7 +58,11 @@ export function HoldingsDataSyncPage() {
   const sectorCount = Object.keys(groupedHoldings).length;
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="HOLDINGS"
+      description="本地持仓数据同步"
+      title="持仓数据同步"
+    >
       <div className="flex flex-col gap-4 animate-fade-in -mt-2 h-[calc(100vh-var(--header-height)-2rem)]">
         {/* Compact Header Section */}
         <div className="flex items-center justify-between gap-4 py-1">
@@ -151,6 +156,6 @@ export function HoldingsDataSyncPage() {
         deploymentName={deployment?.flowName || '持仓数据同步'}
         workPoolName={deployment?.workPoolName}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }

@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
+import { MARKET_MENU_ITEMS } from '../constants/marketMenu';
 import { ChinaIndicesManager } from '../components/ChinaIndicesManager';
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { ExRightsDataManager } from '../components/ExRightsDataManager';
 import { MarketActionBar } from '../components/MarketActionBar';
 import { MarketOverview } from '../components/MarketOverview';
@@ -12,9 +14,31 @@ import { MarketStatsCards } from '../components/MarketStatsCards';
 import { StockDataQueryCard } from '../components/SingleStockSyncCard';
 import { TaskHistory } from '../components/TaskHistory';
 
+const DEFAULT_MARKET_TAB = 'overview';
+const marketTabIds = new Set<string>(MARKET_MENU_ITEMS.map(item => item.id));
+
+function getMarketTabFromLocation(location: string) {
+  const search = location.includes('?')
+    ? location.slice(location.indexOf('?') + 1)
+    : typeof window !== 'undefined'
+      ? window.location.search
+      : '';
+  const tab = new URLSearchParams(search).get('tab');
+
+  return tab && marketTabIds.has(tab) ? tab : DEFAULT_MARKET_TAB;
+}
+
+function getMarketTabPath(tab: string) {
+  return tab === DEFAULT_MARKET_TAB
+    ? '/settings/data/market'
+    : `/settings/data/market?tab=${tab}`;
+}
+
 export function ComprehensiveMarketPage() {
-  const [, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState('overview');
+  const [location, setLocation] = useLocation();
+  const [activeTab, setActiveTab] = useState(() =>
+    getMarketTabFromLocation(location)
+  );
   const [showHistory, setShowHistory] = useState(false);
 
   // 使用统一的 Hook 管理部署同步
@@ -34,8 +58,22 @@ export function ComprehensiveMarketPage() {
     latency: 45,
   };
 
+  useEffect(() => {
+    setActiveTab(getMarketTabFromLocation(location));
+  }, [location]);
+
+  const handleTabChange = (tab: string) => {
+    const nextTab = marketTabIds.has(tab) ? tab : DEFAULT_MARKET_TAB;
+    setActiveTab(nextTab);
+    setLocation(getMarketTabPath(nextTab));
+  };
+
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="MARKET"
+      description="行情、指数、市场概览"
+      title="全市场数据"
+    >
       <div className="flex flex-col gap-6 animate-fade-in -mt-4 h-[calc(100vh-var(--header-height)-3rem)]">
         {/* Action Bar */}
         <MarketActionBar
@@ -50,7 +88,7 @@ export function ComprehensiveMarketPage() {
         {/* Layout Grid */}
         <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
           {/* Left Sidebar */}
-          <MarketSidebar activeTab={activeTab} onTabChange={setActiveTab} />
+          <MarketSidebar activeTab={activeTab} onTabChange={handleTabChange} />
 
           {/* Right Content Area */}
           <div className="flex-1 flex flex-col gap-6 min-h-0">
@@ -128,6 +166,6 @@ export function ComprehensiveMarketPage() {
         deploymentName={syncDeployment?.flowName}
         workPoolName={syncDeployment?.workPoolName}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }

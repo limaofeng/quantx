@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
 import { gql } from '../../../generated/gql';
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { SectorActionBar } from '../components/SectorActionBar';
 import { SectorDetailDrawer } from '../components/SectorDetailDrawer';
 import { SectorSidebar } from '../components/SectorSidebar';
@@ -97,7 +98,11 @@ export function SectorDataPage() {
   };
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="SECTORS"
+      description="行业、概念、板块持仓"
+      title="板块数据管理"
+    >
       <div className="flex flex-col gap-6 animate-fade-in -mt-4 h-[calc(100vh-var(--header-height)-3rem)]">
         {/* Action Bar & Identity Area */}
         <SectorActionBar
@@ -175,6 +180,6 @@ export function SectorDataPage() {
         open={!!selectedSector}
         onOpenChange={open => !open && setSelectedSector(null)}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }

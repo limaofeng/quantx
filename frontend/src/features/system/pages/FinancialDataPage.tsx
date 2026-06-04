@@ -8,6 +8,8 @@ import {
   Search,
   Filter,
   Columns3,
+  Copy,
+  Eye,
   RefreshCw,
   Loader2,
   ListFilter,
@@ -21,6 +23,7 @@ import type { Client } from 'urql';
 import { useClient, useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -47,9 +50,10 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { gql } from '@/generated/gql';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
-import { STORAGE_KEYS } from '@/shared/constants/app';
+import { useWatchlist } from '@/hooks/useWatchlist';
 import { cn } from '@/utils/cn';
 
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { SyncControlPanel } from '../components/SyncControlPanel';
 import { TaskHistory } from '../components/TaskHistory';
 
@@ -89,6 +93,7 @@ type QuickFilter = 'all' | 'holdings' | 'watchlist';
 type ReportPeriodFilter = 'all' | 'latest' | 'annual' | 'q3' | 'half' | 'q1';
 type DisclosureFilter = 'all' | 'disclosed' | 'undisclosed';
 type ProfitFilter = 'all' | 'profit' | 'loss';
+type FinancialSortDirection = 'asc' | 'desc';
 
 type FinancialReportItem = {
   stockCode: string;
@@ -149,6 +154,20 @@ type FinancialColumn = {
   alwaysVisible?: boolean;
   defaultPinned?: boolean;
 };
+
+type FinancialTableMenuPayload =
+  | { column: FinancialColumn; kind: 'column' }
+  | { item: FinancialReportItem; kind: 'row' };
+
+type FinancialSortState = {
+  columnId: FinancialColumnId;
+  direction: FinancialSortDirection;
+};
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
+}
 
 const FINANCIAL_TABLE_COLUMNS_STORAGE_KEY = 'quantx_financial_table_columns';
 
@@ -324,7 +343,6 @@ export function FinancialDataPage() {
   const [revenueMaxYi, setRevenueMaxYi] = useState('');
   const [netProfitMinYi, setNetProfitMinYi] = useState('');
   const [netProfitMaxYi, setNetProfitMaxYi] = useState('');
-  const [watchlistCodes, setWatchlistCodes] = useState<string[]>([]);
   const [filteredReports, setFilteredReports] = useState<FinancialReportItem[]>(
     []
   );
@@ -339,6 +357,12 @@ export function FinancialDataPage() {
   const [pinnedColumnIds, setPinnedColumnIds] = useState<FinancialColumnId[]>(
     () => readFinancialColumnSettings().pinned
   );
+  const [sortState, setSortState] = useState<FinancialSortState | null>(null);
+  const {
+    closeMenu: closeTableMenu,
+    menu: tableMenu,
+    openAtPointer: openTableMenuAtPointer,
+  } = useStudioMenu<FinancialTableMenuPayload>();
 
   const { deployment, isSyncing, triggerSync } = useDeploymentSync(
     'financial-sync',
@@ -348,13 +372,7 @@ export function FinancialDataPage() {
   const [{ data: holdingsData, fetching: holdingsFetching }] = useQuery({
     query: FINANCIAL_HOLDINGS_QUERY,
   });
-
-  useEffect(() => {
-    const loadWatchlist = () => setWatchlistCodes(readWatchlistCodes());
-    loadWatchlist();
-    window.addEventListener('storage', loadWatchlist);
-    return () => window.removeEventListener('storage', loadWatchlist);
-  }, []);
+  const { codes: watchlistCodes, fetching: watchlistFetching } = useWatchlist();
 
   const normalizedSearch = searchTerm.trim() || undefined;
   const holdingCodes = useMemo(
@@ -412,10 +430,39 @@ export function FinancialDataPage() {
       revenueMinYi,
     ]
   );
+  const displayReports = useMemo(() => {
+    if (!sortState) return reports;
+
+    const direction = sortState.direction === 'asc' ? 1 : -1;
+    return [...reports].sort((left, right) => {
+      const leftSummary = summaryByCode[left.stockCode];
+      const rightSummary = summaryByCode[right.stockCode];
+      const leftValue = getFinancialSortValue(
+        sortState.columnId,
+        left,
+        leftSummary
+      );
+      const rightValue = getFinancialSortValue(
+        sortState.columnId,
+        right,
+        rightSummary
+      );
+
+      if (typeof leftValue === 'number' && typeof rightValue === 'number') {
+        return (leftValue - rightValue) * direction;
+      }
+
+      return (
+        String(leftValue).localeCompare(String(rightValue), 'zh-CN') * direction
+      );
+    });
+  }, [reports, sortState, summaryByCode]);
   const activeFetching =
     quickFilter === 'all'
       ? fetching
-      : filteredFetching || (quickFilter === 'holdings' && holdingsFetching);
+      : filteredFetching ||
+        (quickFilter === 'holdings' && holdingsFetching) ||
+        (quickFilter === 'watchlist' && watchlistFetching);
   const isFilteringReady = quickFilter === 'all' || !activeFetching;
   const activeFilterCount = [
     quickFilter !== 'all',
@@ -619,7 +666,11 @@ export function FinancialDataPage() {
   }, [client, reportCodesKey, summaryColumnsVisible]);
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="FINANCIAL"
+      description="财报、指标、财务快照"
+      title="财务数据"
+    >
       <div className="flex flex-col gap-6 animate-fade-in -mt-4 pb-10">
         {/* Header Section */}
         <div className="flex flex-col md:flex-row items-baseline justify-between gap-4">
@@ -656,7 +707,7 @@ export function FinancialDataPage() {
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-cyan-50 text-cyan-600 dark:bg-cyan-950 dark:text-cyan-400">
+            <div className="p-3 rounded-xl bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-500">
               <FileText className="w-6 h-6" />
             </div>
             <div>
@@ -670,7 +721,7 @@ export function FinancialDataPage() {
           </Card>
 
           <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-400">
+            <div className="p-3 rounded-xl bg-red-50 text-red-600 dark:bg-red-950 dark:text-red-400">
               <PieChart className="w-6 h-6" />
             </div>
             <div>
@@ -730,13 +781,13 @@ export function FinancialDataPage() {
                         className={cn(
                           'relative h-9 w-9 shrink-0',
                           activeFilterCount > 0 &&
-                            'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
+                            'border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
                         )}
                         title="筛选财务列表"
                       >
                         <Filter className="w-4 h-4" />
                         {activeFilterCount > 0 && (
-                          <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-600 px-1 font-mono text-[10px] leading-none text-white">
+                          <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 font-mono text-[10px] leading-none text-white">
                             {activeFilterCount}
                           </span>
                         )}
@@ -779,9 +830,9 @@ export function FinancialDataPage() {
                                   key={filter.value}
                                   type="button"
                                   className={cn(
-                                    'rounded-lg border px-2.5 py-2 text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500',
+                                    'rounded-lg border px-2.5 py-2 text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500',
                                     active
-                                      ? 'border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
+                                      ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
                                       : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-900'
                                   )}
                                   onClick={() => setQuickFilter(filter.value)}
@@ -984,7 +1035,7 @@ export function FinancialDataPage() {
                                         className={cn(
                                           'flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
                                           pinned
-                                            ? 'border-blue-300 bg-blue-50 text-blue-600 dark:border-blue-500/40 dark:bg-blue-500/10 dark:text-blue-300'
+                                            ? 'border-red-300 bg-red-50 text-red-600 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
                                             : 'border-slate-200 text-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:text-slate-200',
                                           (!visible || column.defaultPinned) &&
                                             'cursor-not-allowed opacity-50'
@@ -1085,6 +1136,12 @@ export function FinancialDataPage() {
                               ? { left: pinnedLeftOffsets[column.id] ?? 0 }
                               : {}),
                           }}
+                          onContextMenu={event =>
+                            openTableMenuAtPointer(event, {
+                              kind: 'column',
+                              column,
+                            })
+                          }
                         >
                           {column.label}
                         </th>
@@ -1093,7 +1150,7 @@ export function FinancialDataPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {reports.map(item => {
+                  {displayReports.map(item => {
                     const summary = summaryByCode[item.stockCode];
 
                     return (
@@ -1102,8 +1159,11 @@ export function FinancialDataPage() {
                         role="link"
                         tabIndex={0}
                         title={`查看 ${item.stockName || item.stockCode} 数据详情`}
-                        className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group cursor-pointer focus-visible:outline-none focus-visible:bg-blue-50 dark:focus-visible:bg-slate-900"
+                        className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group cursor-pointer focus-visible:outline-none focus-visible:bg-red-50 dark:focus-visible:bg-slate-900"
                         onClick={() => openStockDetail(item.stockCode)}
+                        onContextMenu={event =>
+                          openTableMenuAtPointer(event, { kind: 'row', item })
+                        }
                         onKeyDown={e => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
@@ -1163,7 +1223,7 @@ export function FinancialDataPage() {
               </div>
             )}
 
-            {!activeFetching && reports.length === 0 && (
+            {!activeFetching && displayReports.length === 0 && (
               <div className="flex flex-col items-center justify-center py-20 text-slate-400">
                 <div className="p-4 rounded-full bg-slate-50 dark:bg-slate-800/50 mb-4">
                   <Banknote className="w-8 h-8 opacity-20" />
@@ -1177,6 +1237,143 @@ export function FinancialDataPage() {
         </Card>
       </div>
 
+      <StudioMenu
+        ariaLabel="财务数据表菜单"
+        menu={tableMenu}
+        onClose={closeTableMenu}
+        width={220}
+        items={[
+          {
+            id: 'open-row',
+            label: '打开股票数据详情',
+            icon: <Eye size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                openStockDetail(tableMenu.payload.item.stockCode);
+              }
+            },
+          },
+          {
+            id: 'copy-stock-code',
+            label: '复制股票代码',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                copyText(tableMenu.payload.item.stockCode);
+              }
+            },
+          },
+          {
+            id: 'copy-stock-name',
+            label: '复制股票名称',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                copyText(tableMenu.payload.item.stockName);
+              }
+            },
+          },
+          { id: 'sep-column', type: 'separator' },
+          {
+            id: 'sort-asc',
+            label: '升序排序',
+            icon: <ListFilter size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'column',
+            checked:
+              tableMenu?.payload?.kind === 'column' &&
+              sortState?.columnId === tableMenu.payload.column.id &&
+              sortState.direction === 'asc',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                setSortState({
+                  columnId: tableMenu.payload.column.id,
+                  direction: 'asc',
+                });
+              }
+            },
+          },
+          {
+            id: 'sort-desc',
+            label: '降序排序',
+            icon: <ListFilter size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'column',
+            checked:
+              tableMenu?.payload?.kind === 'column' &&
+              sortState?.columnId === tableMenu.payload.column.id &&
+              sortState.direction === 'desc',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                setSortState({
+                  columnId: tableMenu.payload.column.id,
+                  direction: 'desc',
+                });
+              }
+            },
+          },
+          {
+            id: 'clear-sort',
+            label: '清除排序',
+            icon: <X size={14} />,
+            disabled: !sortState,
+            onSelect: () => setSortState(null),
+          },
+          {
+            id: 'copy-column-name',
+            label: '复制列名',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'column',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                copyText(tableMenu.payload.column.label);
+              }
+            },
+          },
+          {
+            id: 'toggle-pin-column',
+            label:
+              tableMenu?.payload?.kind === 'column' &&
+              pinnedColumnIds.includes(tableMenu.payload.column.id)
+                ? '取消固定列'
+                : '固定列',
+            icon: <Pin size={14} />,
+            disabled:
+              tableMenu?.payload?.kind !== 'column' ||
+              tableMenu.payload.column.defaultPinned ||
+              !visibleColumnIds.includes(tableMenu.payload.column.id),
+            checked:
+              tableMenu?.payload?.kind === 'column' &&
+              pinnedColumnIds.includes(tableMenu.payload.column.id),
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                toggleColumnPinned(tableMenu.payload.column);
+              }
+            },
+          },
+          {
+            id: 'hide-column',
+            label: '隐藏列',
+            icon: <X size={14} />,
+            disabled:
+              tableMenu?.payload?.kind !== 'column' ||
+              tableMenu.payload.column.alwaysVisible,
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                toggleColumnVisibility(tableMenu.payload.column, false);
+              }
+            },
+          },
+          {
+            id: 'reset-columns',
+            label: '恢复默认列',
+            icon: <Columns3 size={14} />,
+            onSelect: resetColumnSettings,
+          },
+        ]}
+      />
+
       <TaskHistory
         open={showHistory}
         onOpenChange={setShowHistory}
@@ -1184,7 +1381,7 @@ export function FinancialDataPage() {
         deploymentName={deployment?.flowName || '财务数据同步'}
         workPoolName={deployment?.workPoolName}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }
 
@@ -1318,31 +1515,6 @@ function uniqueStockCodes(values: Array<string | null | undefined>) {
         .filter((value): value is string => Boolean(value))
     )
   );
-}
-
-function readWatchlistCodes() {
-  if (typeof window === 'undefined') return [];
-
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEYS.WATCHLIST);
-    if (!raw) return [];
-
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-
-    return uniqueStockCodes(
-      parsed.map(item => {
-        if (typeof item === 'string') return item;
-        if (item && typeof item === 'object') {
-          const record = item as Record<string, unknown>;
-          return String(record.stockCode ?? record.code ?? record.id ?? '');
-        }
-        return '';
-      })
-    );
-  } catch {
-    return [];
-  }
 }
 
 function applyFinancialFilters(
@@ -1556,7 +1728,7 @@ function renderFinancialCell(
     case 'stock':
       return (
         <div className="flex flex-col">
-          <span className="font-bold text-sm text-slate-900 dark:text-slate-100 group-hover:text-blue-600 dark:group-hover:text-blue-400">
+          <span className="font-bold text-sm text-slate-900 dark:text-slate-100 group-hover:text-red-600 dark:group-hover:text-red-400">
             {item.stockName || item.stockCode}
           </span>
           <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
@@ -1694,6 +1866,66 @@ function renderFinancialCell(
 
     default:
       return '--';
+  }
+}
+
+function getFinancialSortValue(
+  columnId: FinancialColumnId,
+  item: FinancialReportItem,
+  summary?: FinancialSummaryItem
+) {
+  const revenue = item.revenue ?? summary?.revenue;
+  const netProfit =
+    item.netProfitExclMinIntInc ?? summary?.netProfitExclMinIntInc;
+
+  switch (columnId) {
+    case 'stock':
+      return item.stockName || item.stockCode;
+    case 'reportDate':
+      return item.reportDate || summary?.latestReportDate || '';
+    case 'announceDate':
+      return item.announceDate || summary?.latestAnnounceDate || '';
+    case 'status':
+      return item.announceDate || summary?.latestAnnounceDate ? 1 : 0;
+    case 'revenue':
+      return Number(revenue ?? Number.NEGATIVE_INFINITY);
+    case 'netProfit':
+      return Number(netProfit ?? Number.NEGATIVE_INFINITY);
+    case 'epsBasic':
+      return Number(
+        item.epsBasic ?? summary?.epsBasic ?? Number.NEGATIVE_INFINITY
+      );
+    case 'netProfitMargin':
+      return revenue
+        ? Number(netProfit ?? 0) / Number(revenue)
+        : Number.NEGATIVE_INFINITY;
+    case 'totalAssets':
+      return Number(summary?.totalAssets ?? Number.NEGATIVE_INFINITY);
+    case 'totalLiabilities':
+      return Number(summary?.totalLiabilities ?? Number.NEGATIVE_INFINITY);
+    case 'totalEquity':
+      return Number(summary?.totalEquity ?? Number.NEGATIVE_INFINITY);
+    case 'assetLiabilityRatio':
+      return summary?.totalAssets
+        ? Number(summary.totalLiabilities ?? 0) / Number(summary.totalAssets)
+        : Number.NEGATIVE_INFINITY;
+    case 'operatingCashFlow':
+      return Number(summary?.operatingCashFlow ?? Number.NEGATIVE_INFINITY);
+    case 'cashBalance':
+      return Number(summary?.cashBalance ?? Number.NEGATIVE_INFINITY);
+    case 'totalCapital':
+      return Number(summary?.totalCapital ?? Number.NEGATIVE_INFINITY);
+    case 'circulatingCapital':
+      return Number(summary?.circulatingCapital ?? Number.NEGATIVE_INFINITY);
+    case 'statementCounts':
+      return (
+        Number(summary?.incomeCount ?? 0) +
+        Number(summary?.balanceCount ?? 0) +
+        Number(summary?.cashFlowCount ?? 0) +
+        Number(summary?.capitalCount ?? 0)
+      );
+    default:
+      return '';
   }
 }
 

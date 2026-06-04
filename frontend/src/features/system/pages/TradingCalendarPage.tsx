@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { gql } from '@/generated/gql';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { SyncControlPanel } from '../components/SyncControlPanel';
 import { TaskHistory } from '../components/TaskHistory';
 import { TradingCalendar } from '../components/TradingCalendar';
@@ -40,7 +41,11 @@ export function TradingCalendarPage() {
   const holidayCount = holidaysData?.holidays?.total ?? 0;
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="CALENDAR"
+      description="交易日、休市、开盘状态"
+      title="交易日历"
+    >
       <div className="flex flex-col gap-4 animate-fade-in -mt-2 h-[calc(100vh-var(--header-height)-2rem)]">
         {/* Compact Header Section */}
         <div className="flex items-center justify-between gap-4 py-1">
@@ -86,6 +91,6 @@ export function TradingCalendarPage() {
         deploymentName={deployment?.flowName || '交易日历同步'}
         workPoolName={deployment?.workPoolName}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }

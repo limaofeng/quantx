@@ -1,4 +1,11 @@
 import {
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  createChart,
+  HistogramSeries,
+} from 'lightweight-charts';
+import {
   Activity,
   ArrowLeft,
   BarChart3,
@@ -13,13 +20,6 @@ import {
   Table2,
   WalletCards,
 } from 'lucide-react';
-import {
-  CandlestickSeries,
-  ColorType,
-  CrosshairMode,
-  createChart,
-  HistogramSeries,
-} from 'lightweight-charts';
 import React, {
   useCallback,
   useEffect,
@@ -61,6 +61,7 @@ import { DividendType, KLinePeriod } from '@/generated/gql/graphql';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { TaskHistory } from '../components/TaskHistory';
 
 const STOCK_DATA_DETAIL_QUERY = gql(`
@@ -241,7 +242,9 @@ export function StockDataDetailPage() {
   const [endDate, setEndDate] = useState(today);
   const [historyTarget, setHistoryTarget] =
     useState<DeploymentHistoryTarget | null>(null);
-  const [submittedRuns, setSubmittedRuns] = useState<Record<string, string>>({});
+  const [submittedRuns, setSubmittedRuns] = useState<Record<string, string>>(
+    {}
+  );
 
   useEffect(() => {
     setQueryCode(stockCode);
@@ -337,14 +340,25 @@ export function StockDataDetailPage() {
 
   if (!stockCode) {
     return (
-      <div className="container mx-auto max-w-[1600px] p-6">
-        <EmptyState title="缺少标的代码" description="请从数据管理门户选择一个标的。" />
-      </div>
+      <DataStudioPageFrame
+        activeMode="MARKET"
+        description="基础资料、K线、财务与同步任务"
+        title="标的数据详情"
+      >
+        <EmptyState
+          title="缺少标的代码"
+          description="请从数据管理门户选择一个标的。"
+        />
+      </DataStudioPageFrame>
     );
   }
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="MARKET"
+      description="基础资料、K线、财务与同步任务"
+      title={`标的数据详情 ${stockCode}`}
+    >
       <div className="container mx-auto max-w-[1600px] space-y-6 pb-10">
         <div className="flex flex-col gap-4 border-b border-slate-200 pb-4 dark:border-slate-800 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex items-start gap-3">
@@ -389,7 +403,9 @@ export function StockDataDetailPage() {
               <Input
                 value={queryCode}
                 onChange={event => setQueryCode(event.target.value)}
-                onKeyDown={event => event.key === 'Enter' && handleNavigateCode()}
+                onKeyDown={event =>
+                  event.key === 'Enter' && handleNavigateCode()
+                }
                 className="h-9 pl-9 text-sm"
                 placeholder="切换标的代码"
               />
@@ -418,7 +434,9 @@ export function StockDataDetailPage() {
             label="最新行情"
             value={formatMoney(instrument?.quote?.lastPrice)}
             subValue={formatPercent(instrument?.quote?.changePercent)}
-            tone={(instrument?.quote?.changePercent ?? 0) >= 0 ? 'red' : 'green'}
+            tone={
+              (instrument?.quote?.changePercent ?? 0) >= 0 ? 'red' : 'green'
+            }
           />
           <MetricTile
             icon={CandlestickChart}
@@ -458,7 +476,10 @@ export function StockDataDetailPage() {
                   className="h-8 gap-1.5 bg-indigo-600 text-xs hover:bg-indigo-700"
                 >
                   <RefreshCw
-                    className={cn('h-3.5 w-3.5', isAnySyncing && 'animate-spin')}
+                    className={cn(
+                      'h-3.5 w-3.5',
+                      isAnySyncing && 'animate-spin'
+                    )}
                   />
                   同步全部
                 </Button>
@@ -470,7 +491,9 @@ export function StockDataDetailPage() {
                   onHistory={() =>
                     setHistoryTarget({
                       id: instrumentSync.deployment?.id,
-                      name: instrumentSync.deployment?.flowName || '单只标的数据同步',
+                      name:
+                        instrumentSync.deployment?.flowName ||
+                        '单只标的数据同步',
                       workPoolName: instrumentSync.deployment?.workPoolName,
                     })
                   }
@@ -496,7 +519,8 @@ export function StockDataDetailPage() {
                   onHistory={() =>
                     setHistoryTarget({
                       id: financialSync.deployment?.id,
-                      name: financialSync.deployment?.flowName || '财务数据同步',
+                      name:
+                        financialSync.deployment?.flowName || '财务数据同步',
                       workPoolName: financialSync.deployment?.workPoolName,
                     })
                   }
@@ -507,21 +531,27 @@ export function StockDataDetailPage() {
           <CardContent className="grid gap-3 p-5 md:grid-cols-3">
             <SyncStatus
               title="基础信息"
-              deploymentName={instrumentSync.deployment?.name || 'instrument-sync'}
+              deploymentName={
+                instrumentSync.deployment?.name || 'instrument-sync'
+              }
               status={instrumentSync.deployment?.status}
               lastRunTime={instrumentSync.deployment?.lastRunTime}
               runId={submittedRuns.instrument}
             />
             <SyncStatus
               title="K线缓存"
-              deploymentName={marketSync.deployment?.name || 'daily-market-data-sync'}
+              deploymentName={
+                marketSync.deployment?.name || 'daily-market-data-sync'
+              }
               status={marketSync.deployment?.status}
               lastRunTime={marketSync.deployment?.lastRunTime}
               runId={submittedRuns.market}
             />
             <SyncStatus
               title="财务四表"
-              deploymentName={financialSync.deployment?.name || 'financial-sync'}
+              deploymentName={
+                financialSync.deployment?.name || 'financial-sync'
+              }
               status={financialSync.deployment?.status}
               lastRunTime={financialSync.deployment?.lastRunTime}
               runId={submittedRuns.financial}
@@ -573,7 +603,9 @@ export function StockDataDetailPage() {
                 </Select>
                 <Select
                   value={dividendType}
-                  onValueChange={value => setDividendType(value as DividendType)}
+                  onValueChange={value =>
+                    setDividendType(value as DividendType)
+                  }
                 >
                   <SelectTrigger className="h-9 text-xs">
                     <SelectValue />
@@ -625,7 +657,7 @@ export function StockDataDetailPage() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <CardTitle className="flex items-center gap-2 text-base">
-                    <FileText className="h-4 w-4 text-cyan-500" />
+                    <FileText className="h-4 w-4 text-red-600" />
                     财务数据
                   </CardTitle>
                   <CardDescription className="text-xs">
@@ -636,7 +668,9 @@ export function StockDataDetailPage() {
                   variant="outline"
                   size="sm"
                   className="h-8 gap-1.5 text-xs"
-                  onClick={() => reloadFinancial({ requestPolicy: 'network-only' })}
+                  onClick={() =>
+                    reloadFinancial({ requestPolicy: 'network-only' })
+                  }
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   刷新
@@ -652,12 +686,18 @@ export function StockDataDetailPage() {
               ) : (
                 <>
                   <div className="grid grid-cols-2 gap-3">
-                    <FinancialMetric label="营业总收入" value={summary?.revenue} />
+                    <FinancialMetric
+                      label="营业总收入"
+                      value={summary?.revenue}
+                    />
                     <FinancialMetric
                       label="归母净利润"
                       value={summary?.netProfitExclMinIntInc}
                     />
-                    <FinancialMetric label="总资产" value={summary?.totalAssets} />
+                    <FinancialMetric
+                      label="总资产"
+                      value={summary?.totalAssets}
+                    />
                     <FinancialMetric
                       label="经营现金流"
                       value={summary?.operatingCashFlow}
@@ -732,11 +772,26 @@ export function StockDataDetailPage() {
             <InfoCell label="名称" value={instrument?.name || '--'} />
             <InfoCell label="市场" value={instrument?.market || '--'} />
             <InfoCell label="昨收" value={formatMoney(instrument?.preClose)} />
-            <InfoCell label="涨跌停" value={`${formatMoney(instrument?.upStopPrice)} / ${formatMoney(instrument?.downStopPrice)}`} />
-            <InfoCell label="总股本" value={formatNumber(instrument?.totalVolume)} />
-            <InfoCell label="流通股本" value={formatNumber(instrument?.floatVolume)} />
-            <InfoCell label="行情时间" value={formatDateTime(instrument?.quote?.time)} />
-            <InfoCell label="资料更新" value={formatDateTime(instrument?.updatedAt)} />
+            <InfoCell
+              label="涨跌停"
+              value={`${formatMoney(instrument?.upStopPrice)} / ${formatMoney(instrument?.downStopPrice)}`}
+            />
+            <InfoCell
+              label="总股本"
+              value={formatNumber(instrument?.totalVolume)}
+            />
+            <InfoCell
+              label="流通股本"
+              value={formatNumber(instrument?.floatVolume)}
+            />
+            <InfoCell
+              label="行情时间"
+              value={formatDateTime(instrument?.quote?.time)}
+            />
+            <InfoCell
+              label="资料更新"
+              value={formatDateTime(instrument?.updatedAt)}
+            />
           </CardContent>
         </Card>
       </div>
@@ -750,7 +805,7 @@ export function StockDataDetailPage() {
         deploymentName={historyTarget?.name || '数据同步'}
         workPoolName={historyTarget?.workPoolName || undefined}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }
 
@@ -835,7 +890,10 @@ function SyncButton({
         历史
       </Button>
       {runId && (
-        <Badge variant="secondary" className="h-6 rounded-md font-mono text-[10px]">
+        <Badge
+          variant="secondary"
+          className="h-6 rounded-md font-mono text-[10px]"
+        >
           {runId.slice(0, 8)}
         </Badge>
       )}
@@ -856,9 +914,13 @@ function SyncStatus({
   lastRunTime?: string | null;
   runId?: string;
 }) {
-  const running = ['Running', 'Pending', 'Cancelling', 'Scheduled', 'Late'].includes(
-    status || ''
-  );
+  const running = [
+    'Running',
+    'Pending',
+    'Cancelling',
+    'Scheduled',
+    'Late',
+  ].includes(status || '');
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
       <div className="flex items-center justify-between gap-2">
@@ -870,7 +932,7 @@ function SyncStatus({
           className={cn(
             'gap-1 rounded-md',
             running
-              ? 'border-blue-500/30 text-blue-600'
+              ? 'border-red-500/30 text-red-600'
               : status === 'Failed' || status === 'Crashed'
                 ? 'border-red-500/30 text-red-600'
                 : 'border-emerald-500/30 text-emerald-600'
@@ -1017,7 +1079,9 @@ function KLineTable({
   }>;
 }) {
   if (data.length === 0) {
-    return <EmptyState title="没有明细记录" description="请先同步或调整查询区间。" />;
+    return (
+      <EmptyState title="没有明细记录" description="请先同步或调整查询区间。" />
+    );
   }
   return (
     <Table wrapperClassName="max-h-[340px]">
@@ -1090,7 +1154,13 @@ function FinancialRows({
   columns: Array<[string, string]>;
 }) {
   if (rows.length === 0) {
-    return <EmptyState title="暂无财务记录" description="可点击财务同步后再刷新。" compact />;
+    return (
+      <EmptyState
+        title="暂无财务记录"
+        description="可点击财务同步后再刷新。"
+        compact
+      />
+    );
   }
   return (
     <Table wrapperClassName="max-h-[360px] rounded-lg border border-slate-200 dark:border-slate-800">
@@ -1159,7 +1229,9 @@ function EmptyState({
 }
 
 function periodLabel(value: string) {
-  return KLINE_PERIOD_OPTIONS.find(item => item.value === value)?.label || value;
+  return (
+    KLINE_PERIOD_OPTIONS.find(item => item.value === value)?.label || value
+  );
 }
 
 function dividendLabel(value: string) {

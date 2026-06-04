@@ -1,6 +1,5 @@
-import React from 'react';
-
 import { DataPortalHeader } from '../components/DataPortalHeader';
+import { DataStudioShell } from '../components/DataStudioShell';
 import { FinancialDataSyncCard } from '../components/FinancialDataSyncCard';
 import { GlobalSyncCard } from '../components/GlobalSyncCard';
 import { HoldingsSummaryCard } from '../components/HoldingsSummaryCard';
@@ -27,66 +26,53 @@ const MOCK_HOLDINGS = Array(15)
 
 export function DataManagementPage() {
   return (
-    <div className="container mx-auto max-w-[1600px] space-y-6">
-      {/* Header Section */}
-      <div className="flex items-end justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
-        <div>
-          <h1 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
-            <span className="w-2 h-8 rounded bg-indigo-600 inline-block"></span>
-            数据管理门户
-          </h1>
-          <p className="text-slate-500 dark:text-slate-400 mt-2 text-sm ml-4">
-            统筹管理全市场行情数据同步、本地缓存与系统健康状态。
-          </p>
-        </div>
-        <div className="pb-1">
-          <DataPortalHeader />
-        </div>
-      </div>
+    <DataStudioShell
+      activeMode="OVERVIEW"
+      className="h-full min-h-0"
+      showSidebar={false}
+      content={
+        <div className="h-full overflow-y-auto bg-[#08101d] p-3 custom-scrollbar">
+          <div className="grid min-h-full grid-cols-12 gap-3">
+            <div className="col-span-12 flex flex-col gap-3 xl:col-span-9">
+              <SystemInsightCard />
 
-      {/* Main Layout (Grid) */}
-      <div className="grid grid-cols-12 gap-6">
-        {/* Left Column: Management Tiles (9 cols) */}
-        <div className="col-span-12 lg:col-span-9 flex flex-col gap-6">
-          {/* Global Insight Section */}
-          <SystemInsightCard />
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-9">
+                <div className="min-h-[150px] md:col-span-2 xl:col-span-9">
+                  <GlobalSyncCard />
+                </div>
+                <div className="min-h-[180px] xl:col-span-3">
+                  <SectorSyncCard />
+                </div>
+                <div className="min-h-[180px] xl:col-span-3">
+                  <TradingCalendarCard />
+                </div>
+                <div className="min-h-[180px] xl:col-span-3">
+                  <HoldingsSummaryCard holdings={MOCK_HOLDINGS} />
+                </div>
+                <div className="min-h-[150px] xl:col-span-3">
+                  <ReverseRepoSyncCard />
+                </div>
+                <div className="min-h-[150px] xl:col-span-3">
+                  <FinancialDataSyncCard />
+                </div>
+                <div className="min-h-[150px] xl:col-span-3">
+                  <TransactionDataSyncCard />
+                </div>
+              </div>
+            </div>
 
-          {/* Action Tiles Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-9 gap-6">
-            <div className="md:col-span-2 lg:col-span-9 min-h-[160px]">
-              <GlobalSyncCard />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[200px]">
-              <SectorSyncCard />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[200px]">
-              <TradingCalendarCard />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[200px]">
-              <HoldingsSummaryCard holdings={MOCK_HOLDINGS} />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[160px]">
-              <ReverseRepoSyncCard />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[160px]">
-              <FinancialDataSyncCard />
-            </div>
-            <div className="md:col-span-1 lg:col-span-3 min-h-[160px]">
-              <TransactionDataSyncCard />
+            <div className="col-span-12 flex min-h-[500px] flex-col gap-3 xl:col-span-3">
+              <div className="h-[190px] shrink-0">
+                <StockDataQueryCard />
+              </div>
+              <div className="min-h-[300px] flex-1">
+                <SyncStatusWidget />
+              </div>
             </div>
           </div>
         </div>
-
-        {/* Right Column: Query & Status (3 cols) */}
-        <div className="col-span-12 lg:col-span-3 flex flex-col gap-6 h-full min-h-[500px]">
-          <div className="h-[200px] shrink-0">
-            <StockDataQueryCard />
-          </div>
-          <div className="flex-1 min-h-[300px]">
-            <SyncStatusWidget />
-          </div>
-        </div>
-      </div>
-    </div>
+      }
+      tabBarTrailing={<DataPortalHeader />}
+    />
   );
 }

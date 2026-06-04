@@ -5,10 +5,13 @@ import {
   Search,
   Filter,
   BarChart2,
+  Copy,
+  Eye,
 } from 'lucide-react';
 import React, { useState } from 'react';
 import { useLocation } from 'wouter';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
+import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { SyncControlPanel } from '../components/SyncControlPanel';
 import { TaskHistory } from '../components/TaskHistory';
 
@@ -117,10 +121,26 @@ const MOCK_TRANSACTIONS = [
   },
 ];
 
+type TransactionRecord = (typeof MOCK_TRANSACTIONS)[number];
+
+type TransactionTableMenuPayload =
+  | { columnId: string; kind: 'column'; label: string }
+  | { item: TransactionRecord; kind: 'row' };
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
+}
+
 export function TransactionDataPage() {
   const [, setLocation] = useLocation();
   const [showHistory, setShowHistory] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+  const {
+    closeMenu: closeTableMenu,
+    menu: tableMenu,
+    openAtPointer: openTableMenuAtPointer,
+  } = useStudioMenu<TransactionTableMenuPayload>();
 
   const { deployment, isSyncing, triggerSync } = useDeploymentSync(
     'daily-trading-sync',
@@ -134,7 +154,11 @@ export function TransactionDataPage() {
   );
 
   return (
-    <>
+    <DataStudioPageFrame
+      activeMode="FLOWS"
+      description="交易流水、委托成交数据"
+      title="交易流水数据"
+    >
       <div className="flex flex-col gap-6 animate-fade-in -mt-4 pb-10">
         {/* Header Section */}
         <div className="flex flex-col md:flex-row items-baseline justify-between gap-4">
@@ -249,18 +273,78 @@ export function TransactionDataPage() {
               <table className="w-full border-collapse">
                 <thead>
                   <tr className="bg-slate-50/50 dark:bg-white/[0.01] text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800">
-                    <th className="px-6 py-4 text-left font-black">
+                    <th
+                      className="px-6 py-4 text-left font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'stock',
+                          label: '时间/股票',
+                        })
+                      }
+                    >
                       时间/股票
                     </th>
-                    <th className="px-6 py-4 text-left font-black">类型</th>
-                    <th className="px-6 py-4 text-right font-black">
+                    <th
+                      className="px-6 py-4 text-left font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'type',
+                          label: '类型',
+                        })
+                      }
+                    >
+                      类型
+                    </th>
+                    <th
+                      className="px-6 py-4 text-right font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'price',
+                          label: '成交价格',
+                        })
+                      }
+                    >
                       成交价格
                     </th>
-                    <th className="px-6 py-4 text-right font-black">数量</th>
-                    <th className="px-6 py-4 text-right font-black">
+                    <th
+                      className="px-6 py-4 text-right font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'amount',
+                          label: '数量',
+                        })
+                      }
+                    >
+                      数量
+                    </th>
+                    <th
+                      className="px-6 py-4 text-right font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'total',
+                          label: '成交金额',
+                        })
+                      }
+                    >
                       成交金额
                     </th>
-                    <th className="px-6 py-4 text-right font-black">状态</th>
+                    <th
+                      className="px-6 py-4 text-right font-black"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, {
+                          kind: 'column',
+                          columnId: 'status',
+                          label: '状态',
+                        })
+                      }
+                    >
+                      状态
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -268,6 +352,9 @@ export function TransactionDataPage() {
                     <tr
                       key={item.id}
                       className="hover:bg-slate-50/80 dark:hover:bg-white/[0.02] transition-colors group"
+                      onContextMenu={event =>
+                        openTableMenuAtPointer(event, { kind: 'row', item })
+                      }
                     >
                       <td className="px-6 py-5 whitespace-nowrap">
                         <div className="flex flex-col">
@@ -334,6 +421,82 @@ export function TransactionDataPage() {
         </Card>
       </div>
 
+      <StudioMenu
+        ariaLabel="交易流水表菜单"
+        menu={tableMenu}
+        onClose={closeTableMenu}
+        width={204}
+        items={[
+          {
+            id: 'open-stock',
+            label: '查看个股详情',
+            icon: <Eye size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                setLocation(`/stock/${tableMenu.payload.item.code}`);
+              }
+            },
+          },
+          {
+            id: 'copy-code',
+            label: '复制股票代码',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                copyText(tableMenu.payload.item.code);
+              }
+            },
+          },
+          {
+            id: 'copy-name',
+            label: '复制股票名称',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                copyText(tableMenu.payload.item.name);
+              }
+            },
+          },
+          {
+            id: 'copy-transaction-id',
+            label: '复制记录 ID',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'row',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'row') {
+                copyText(tableMenu.payload.item.id);
+              }
+            },
+          },
+          { id: 'sep-column', type: 'separator' },
+          {
+            id: 'copy-column-name',
+            label: '复制列名',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'column',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                copyText(tableMenu.payload.label);
+              }
+            },
+          },
+          {
+            id: 'copy-column-id',
+            label: '复制字段 ID',
+            icon: <Copy size={14} />,
+            disabled: tableMenu?.payload?.kind !== 'column',
+            onSelect: () => {
+              if (tableMenu?.payload?.kind === 'column') {
+                copyText(tableMenu.payload.columnId);
+              }
+            },
+          },
+        ]}
+      />
+
       <TaskHistory
         open={showHistory}
         onOpenChange={setShowHistory}
@@ -341,6 +504,6 @@ export function TransactionDataPage() {
         deploymentName={deployment?.flowName || '交易数据同步'}
         workPoolName={deployment?.workPoolName}
       />
-    </>
+    </DataStudioPageFrame>
   );
 }

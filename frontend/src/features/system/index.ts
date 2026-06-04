@@ -8,3 +8,4 @@ export * from './pages/TradingCalendarPage';
 export * from './pages/ReverseRepoDataPage';
 export * from './pages/FinancialDataPage';
 export * from './pages/TransactionDataPage';
+export * from './components/DataStudioPageFrame';
