@@ -1,4 +1,5 @@
 import { Plus } from 'lucide-react';
+import type { Dispatch, SetStateAction } from 'react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -12,15 +13,17 @@ import {
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 
+interface NewScreening {
+  name: string;
+  description: string;
+  criteria: unknown;
+}
+
 interface CreateScreeningDialogProps {
   isOpen: boolean;
   setIsOpen: (open: boolean) => void;
-  newScreening: {
-    name: string;
-    description: string;
-    criteria: any;
-  };
-  setNewScreening: (screening: any) => void;
+  newScreening: NewScreening;
+  setNewScreening: Dispatch<SetStateAction<NewScreening>>;
   onCreateScreening: () => Promise<void>;
 }
 

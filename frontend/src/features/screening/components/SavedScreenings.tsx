@@ -8,8 +8,25 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 
+interface SavedScreeningResult {
+  id: string;
+  stock: {
+    name: string;
+  };
+  returnPercentage: number;
+}
+
+interface SavedScreening {
+  id: string;
+  name: string;
+  description: string;
+  isActive: boolean;
+  createdAt: Date | string;
+  results: SavedScreeningResult[];
+}
+
 interface SavedScreeningsProps {
-  screenings: any[];
+  screenings: SavedScreening[];
 }
 
 export function SavedScreenings({ screenings }: SavedScreeningsProps) {

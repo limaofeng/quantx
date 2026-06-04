@@ -13,7 +13,11 @@ import {
 } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
-import { type ScreeningCriteria, type StockScreeningMeta } from '../types';
+import {
+  type ScreeningCriteria,
+  type StockScreenUniverse,
+  type StockScreeningMeta,
+} from '../types';
 
 interface ScreeningTopBarProps {
   screeningCriteria: ScreeningCriteria;
@@ -41,6 +45,12 @@ const STRATEGIES = [
   { id: 'enableRSIStrong', label: 'RSI强势' },
 ] as const;
 
+const UNIVERSE_OPTIONS: Array<{ label: string; value: StockScreenUniverse }> = [
+  { label: '股票', value: 'STOCK' },
+  { label: 'ETF', value: 'ETF' },
+  { label: '股票+ETF', value: 'STOCK_AND_ETF' },
+];
+
 export function ScreeningTopBar({
   screeningCriteria,
   setScreeningCriteria,
@@ -51,6 +61,10 @@ export function ScreeningTopBar({
   onReset,
 }: ScreeningTopBarProps) {
   const [industrySearch, setIndustrySearch] = useState('');
+  const universe = screeningCriteria.universe ?? 'STOCK';
+  const stockUniverseEnabled = universe !== 'ETF';
+  const stockOnlyFiltersEnabled = universe === 'STOCK';
+  const excludeST = screeningCriteria.excludeST !== false;
   const snapshotStateLabel = meta.snapshotDate
     ? meta.hasStaleData
       ? '历史快照'
@@ -73,6 +87,23 @@ export function ScreeningTopBar({
     value: ScreeningCriteria[K]
   ) => {
     setScreeningCriteria(prev => ({ ...prev, [key]: value }));
+  };
+
+  const updateUniverse = (nextUniverse: StockScreenUniverse) => {
+    setScreeningCriteria(prev => {
+      const nextCriteria: ScreeningCriteria = {
+        ...prev,
+        universe: nextUniverse,
+      };
+      if (nextUniverse !== 'STOCK') {
+        nextCriteria.includeIndustries = undefined;
+        nextCriteria.excludeIndustries = undefined;
+        nextCriteria.minROE = undefined;
+        nextCriteria.minNetProfitGrowth = undefined;
+        nextCriteria.minYoYGrowth = undefined;
+      }
+      return nextCriteria;
+    });
   };
 
   const toggleIndustry = (industry: string) => {
@@ -100,7 +131,45 @@ export function ScreeningTopBar({
   // --- Active Tags Rendering ---
   const activeTags: React.ReactNode[] = [];
 
-  if (screeningCriteria.minROE && screeningCriteria.minROE > 0) {
+  if (universe !== 'STOCK') {
+    const universeLabel =
+      UNIVERSE_OPTIONS.find(option => option.value === universe)?.label || '股票';
+    activeTags.push(
+      <Badge
+        key="universe"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        范围: {universeLabel}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => updateUniverse('STOCK')}
+        />
+      </Badge>
+    );
+  }
+
+  if (stockUniverseEnabled && !excludeST) {
+    activeTags.push(
+      <Badge
+        key="includeST"
+        variant="secondary"
+        className="bg-red-500/10 text-red-300 border border-red-500/25"
+      >
+        包含 ST
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => updateCriteria('excludeST', true)}
+        />
+      </Badge>
+    );
+  }
+
+  if (
+    stockOnlyFiltersEnabled &&
+    screeningCriteria.minROE &&
+    screeningCriteria.minROE > 0
+  ) {
     activeTags.push(
       <Badge
         key="minROE"
@@ -116,6 +185,7 @@ export function ScreeningTopBar({
     );
   }
   if (
+    stockOnlyFiltersEnabled &&
     screeningCriteria.minNetProfitGrowth &&
     screeningCriteria.minNetProfitGrowth > 0
   ) {
@@ -125,7 +195,7 @@ export function ScreeningTopBar({
         variant="secondary"
         className="bg-purple-500/10 text-purple-400 border border-purple-500/20"
       >
-        净利润增速 &gt; {screeningCriteria.minNetProfitGrowth}%
+        净利单季同比 &gt; {screeningCriteria.minNetProfitGrowth}%
         <X
           className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
           onClick={() => removeTag('minNetProfitGrowth')}
@@ -133,14 +203,18 @@ export function ScreeningTopBar({
       </Badge>
     );
   }
-  if (screeningCriteria.minYoYGrowth && screeningCriteria.minYoYGrowth > 0) {
+  if (
+    stockOnlyFiltersEnabled &&
+    screeningCriteria.minYoYGrowth &&
+    screeningCriteria.minYoYGrowth > 0
+  ) {
     activeTags.push(
       <Badge
         key="minYoYGrowth"
         variant="secondary"
         className="bg-purple-500/10 text-purple-400 border border-purple-500/20"
       >
-        营收同比 &gt; {screeningCriteria.minYoYGrowth}%
+        营收单季同比 &gt; {screeningCriteria.minYoYGrowth}%
         <X
           className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
           onClick={() => removeTag('minYoYGrowth')}
@@ -218,21 +292,23 @@ export function ScreeningTopBar({
     }
   });
 
-  screeningCriteria.includeIndustries?.forEach(ind => {
-    activeTags.push(
-      <Badge
-        key={`ind-${ind}`}
-        variant="secondary"
-        className="bg-blue-500/10 text-blue-400 border border-blue-500/20"
-      >
-        行业: {ind}
-        <X
-          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
-          onClick={() => removeTag('includeIndustries', ind)}
-        />
-      </Badge>
-    );
-  });
+  if (stockOnlyFiltersEnabled) {
+    screeningCriteria.includeIndustries?.forEach(ind => {
+      activeTags.push(
+        <Badge
+          key={`ind-${ind}`}
+          variant="secondary"
+          className="bg-blue-500/10 text-blue-400 border border-blue-500/20"
+        >
+          行业: {ind}
+          <X
+            className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+            onClick={() => removeTag('includeIndustries', ind)}
+          />
+        </Badge>
+      );
+    });
+  }
 
   return (
     <div className="flex flex-col gap-4 p-4 shrink-0 bg-[#0F1729]/80 backdrop-blur-md border-b border-white/5 z-20 shadow-xl">
@@ -261,13 +337,53 @@ export function ScreeningTopBar({
 
           <div className="w-[1px] h-6 bg-white/10 mx-2" />
 
+          <div className="flex h-8 items-center rounded-lg border border-white/10 bg-slate-950/50 p-0.5">
+            {UNIVERSE_OPTIONS.map(option => {
+              const isSelected = universe === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => updateUniverse(option.value)}
+                  className={`h-6 rounded-md px-2.5 text-[11px] font-medium transition-colors ${
+                    isSelected
+                      ? 'bg-cyan-500/15 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.12)]'
+                      : 'text-slate-500 hover:bg-white/5 hover:text-slate-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <label
+            className={`flex h-8 items-center gap-2 rounded-lg border px-2.5 text-[11px] font-medium transition-colors ${
+              stockUniverseEnabled
+                ? 'cursor-pointer border-white/10 bg-slate-900/50 text-slate-300 hover:bg-slate-800 hover:text-white'
+                : 'cursor-not-allowed border-white/5 bg-slate-950/40 text-slate-600'
+            }`}
+          >
+            <Checkbox
+              checked={excludeST}
+              disabled={!stockUniverseEnabled}
+              onCheckedChange={checked =>
+                updateCriteria('excludeST', Boolean(checked))
+              }
+              aria-label="排除 ST 股票"
+              className="h-3.5 w-3.5 data-[state=checked]:bg-red-500 data-[state=checked]:border-red-500 disabled:opacity-40"
+            />
+            <span>排除 ST</span>
+          </label>
+
           {/* 1. 行业板块 Popover */}
           <Popover>
             <PopoverTrigger asChild>
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 border-white/10 bg-slate-900/50 hover:bg-slate-800 hover:text-white text-slate-300"
+                disabled={!stockOnlyFiltersEnabled}
+                className="h-8 border-white/10 bg-slate-900/50 hover:bg-slate-800 hover:text-white text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 行业分类{' '}
                 <span className="ml-2 text-[10px] bg-slate-800 px-1.5 rounded-full">
@@ -308,6 +424,7 @@ export function ScreeningTopBar({
                           className={`flex items-center space-x-2 p-2 rounded-md hover:bg-white/5 cursor-pointer transition-colors ${isSelected ? 'bg-blue-500/10 border border-blue-500/20' : 'border border-transparent'}`}
                           onClick={e => {
                             e.preventDefault();
+                            if (!stockOnlyFiltersEnabled) return;
                             toggleIndustry(ind);
                           }}
                         >
@@ -344,7 +461,8 @@ export function ScreeningTopBar({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-8 border-white/10 bg-slate-900/50 hover:bg-slate-800 hover:text-white text-slate-300"
+                disabled={!stockOnlyFiltersEnabled}
+                className="h-8 border-white/10 bg-slate-900/50 hover:bg-slate-800 hover:text-white text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 基本面
               </Button>
@@ -366,6 +484,7 @@ export function ScreeningTopBar({
                       <Input
                         type="number"
                         value={screeningCriteria.minROE || ''}
+                        disabled={!stockOnlyFiltersEnabled}
                         onChange={e =>
                           updateCriteria('minROE', Number(e.target.value))
                         }
@@ -379,7 +498,7 @@ export function ScreeningTopBar({
                   </div>
                   <div className="space-y-1.5 flex flex-col justify-end">
                     <Label className="text-[10px] text-slate-400 leading-tight">
-                      最小净利润同比
+                      最小净利单季同比
                       <br />
                       (YoY %)
                     </Label>
@@ -387,6 +506,7 @@ export function ScreeningTopBar({
                       <Input
                         type="number"
                         value={screeningCriteria.minNetProfitGrowth || ''}
+                        disabled={!stockOnlyFiltersEnabled}
                         onChange={e =>
                           updateCriteria(
                             'minNetProfitGrowth',
@@ -403,12 +523,13 @@ export function ScreeningTopBar({
                   </div>
                   <div className="space-y-1.5 flex flex-col justify-end">
                     <Label className="text-[10px] text-slate-400">
-                      最小营收同比 (%)
+                      最小营收单季同比 (%)
                     </Label>
                     <div className="relative">
                       <Input
                         type="number"
                         value={screeningCriteria.minYoYGrowth || ''}
+                        disabled={!stockOnlyFiltersEnabled}
                         onChange={e =>
                           updateCriteria('minYoYGrowth', Number(e.target.value))
                         }

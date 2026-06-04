@@ -8,12 +8,32 @@ import { GetStockScreeningsQuery } from './useScreening';
 interface NewScreening {
   name: string;
   description: string;
-  criteria: any;
+  criteria: unknown;
+}
+
+interface SavedScreeningResult {
+  id: string;
+  stockCode: string;
+  stock: {
+    code: string;
+    name: string;
+  };
+  score: number;
+  returnPercentage: number;
+}
+
+interface SavedScreening {
+  id: string;
+  name: string;
+  description: string;
+  isActive: boolean;
+  createdAt: Date;
+  results: SavedScreeningResult[];
 }
 
 interface UseScreeningSavedResult {
   // 已保存的筛选列表
-  savedScreenings: any[];
+  savedScreenings: SavedScreening[];
   screeningsLoading: boolean;
 
   // 创建对话框状态
@@ -53,7 +73,7 @@ export function useScreeningSaved(
   const screeningsLoading = result.fetching;
 
   // Mock 数据
-  const savedScreenings = useMemo(
+  const savedScreenings = useMemo<SavedScreening[]>(
     () => [
       {
         id: '1',

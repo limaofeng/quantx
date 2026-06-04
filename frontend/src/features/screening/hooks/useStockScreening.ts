@@ -6,10 +6,17 @@ import {
   GetSectorsDocument,
   type GetSectorsQuery,
   type GetSectorsQueryVariables,
+  StockScreenSortDirection as GqlStockScreenSortDirection,
+  StockScreenSortField as GqlStockScreenSortField,
+  StockScreenUniverse as GqlStockScreenUniverse,
 } from '@/generated/gql/graphql';
 
 import {
   type ScreeningCriteria,
+  type StockScreenSortDirection,
+  type StockScreenSortField,
+  type StockScreenSortState,
+  type StockScreenUniverse,
   type StockScreeningMeta,
   type StockScreeningResult,
 } from '../types';
@@ -31,6 +38,7 @@ const STOCK_SCREEN_QUERY = gql(`
         code
         name
         industry
+        instrumentType
         currentPrice
         openPrice
         changePct
@@ -60,6 +68,14 @@ const STOCK_SCREEN_QUERY = gql(`
         ma20
         ma5Prev
         ma10Prev
+        roe
+        netProfitGrowth
+        yoyGrowth
+        netProfitAccumGrowth
+        revenueAccumGrowth
+        financialReportDate
+        financialAnnounceDate
+        financialQualityFlags
         matchedStrategies
         score
         scoreVersion
@@ -78,6 +94,8 @@ function normalizeIndustryName(name: string): string {
 }
 
 const DEFAULT_CRITERIA: ScreeningCriteria = {
+  universe: 'STOCK',
+  excludeST: true,
   minROE: 5,
   minNetProfitGrowth: 5,
   minYoYGrowth: 0,
@@ -127,7 +145,49 @@ const SIGNAL_BY_FLAG: Array<[keyof ScreeningCriteria, string, number]> = [
   ['enableRSIStrong', 'RSI 强势', 1],
 ];
 
-function buildStockScreenInput(criteria: ScreeningCriteria) {
+const SORT_FIELD_INPUT: Record<
+  StockScreenSortField,
+  GqlStockScreenSortField
+> = {
+  CHANGE_PCT: GqlStockScreenSortField.ChangePct,
+  CODE: GqlStockScreenSortField.Code,
+  CURRENT_PRICE: GqlStockScreenSortField.CurrentPrice,
+  DAYS_SINCE_PEAK: GqlStockScreenSortField.DaysSincePeak,
+  KDJ_J: GqlStockScreenSortField.KdjJ,
+  NAME: GqlStockScreenSortField.Name,
+  NET_PROFIT_GROWTH: GqlStockScreenSortField.NetProfitGrowth,
+  PRICE_DROP_PCT: GqlStockScreenSortField.PriceDropPct,
+  ROE: GqlStockScreenSortField.Roe,
+  RSI12: GqlStockScreenSortField.Rsi12,
+  SIGNAL_COUNT: GqlStockScreenSortField.SignalCount,
+  VOLUME_RATIO: GqlStockScreenSortField.VolumeRatio,
+  YOY_GROWTH: GqlStockScreenSortField.YoyGrowth,
+};
+
+const SORT_DIRECTION_INPUT: Record<
+  StockScreenSortDirection,
+  GqlStockScreenSortDirection
+> = {
+  ASC: GqlStockScreenSortDirection.Asc,
+  DESC: GqlStockScreenSortDirection.Desc,
+};
+
+const UNIVERSE_INPUT: Record<StockScreenUniverse, GqlStockScreenUniverse> = {
+  ETF: GqlStockScreenUniverse.Etf,
+  STOCK: GqlStockScreenUniverse.Stock,
+  STOCK_AND_ETF: GqlStockScreenUniverse.StockAndEtf,
+};
+
+function buildStockScreenInput(
+  criteria: ScreeningCriteria,
+  sort: StockScreenSortState | null
+) {
+  const universe = criteria.universe ?? 'STOCK';
+  const supportsStockOnlyFilters = universe === 'STOCK';
+  const activeFundamentalThreshold = (value?: number) =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? value
+      : null;
   const signalConditions = SIGNAL_BY_FLAG.filter(
     ([flag]) => criteria[flag]
   ).map(([, signalCode]) => ({
@@ -170,29 +230,44 @@ function buildStockScreenInput(criteria: ScreeningCriteria) {
   }
 
   return {
-    includeIndustries: criteria.includeIndustries?.length
+    includeIndustries: supportsStockOnlyFilters && criteria.includeIndustries?.length
       ? criteria.includeIndustries
       : null,
-    excludeIndustries: criteria.excludeIndustries?.length
+    excludeIndustries: supportsStockOnlyFilters && criteria.excludeIndustries?.length
       ? criteria.excludeIndustries
       : null,
     signalConditions,
     scoreRules,
     fieldConditions,
+    universe: UNIVERSE_INPUT[universe],
+    excludeSt: criteria.excludeST !== false,
     requireFresh: Boolean(criteria.requireFresh),
+    sort: sort
+      ? {
+          field: SORT_FIELD_INPUT[sort.field],
+          direction: SORT_DIRECTION_INPUT[sort.direction],
+        }
+      : null,
     limit: 200,
     offset: 0,
-    minRoe: criteria.minROE ?? null,
-    minNetProfitGrowth: criteria.minNetProfitGrowth ?? null,
-    minYoyGrowth: criteria.minYoYGrowth ?? null,
+    minRoe: supportsStockOnlyFilters
+      ? activeFundamentalThreshold(criteria.minROE)
+      : null,
+    minNetProfitGrowth: supportsStockOnlyFilters
+      ? activeFundamentalThreshold(criteria.minNetProfitGrowth)
+      : null,
+    minYoyGrowth: supportsStockOnlyFilters
+      ? activeFundamentalThreshold(criteria.minYoYGrowth)
+      : null,
   };
 }
 
 export function useStockScreening() {
   const [screeningCriteria, setScreeningCriteria] =
     useState<ScreeningCriteria>(DEFAULT_CRITERIA);
+  const [sort, setSort] = useState<StockScreenSortState | null>(null);
   const [queryInput, setQueryInput] = useState(() =>
-    buildStockScreenInput(DEFAULT_CRITERIA)
+    buildStockScreenInput(DEFAULT_CRITERIA, null)
   );
 
   const [stockScreenResult] = useQuery({
@@ -238,14 +313,21 @@ export function useStockScreening() {
 
   const results = useMemo<StockScreeningResult[]>(() => {
     const items = stockScreenResult.data?.stockScreen?.items ?? [];
-    return items
-      .map(item => ({
-        ...item,
-        industry: item.industry ?? undefined,
-        ma5Prev: item.ma5Prev ?? undefined,
-        ma10Prev: item.ma10Prev ?? undefined,
-      }))
-      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    return items.map(item => ({
+      ...item,
+      industry: item.industry ?? undefined,
+      instrumentType: item.instrumentType || 'stock',
+      ma5Prev: item.ma5Prev ?? undefined,
+      ma10Prev: item.ma10Prev ?? undefined,
+      roe: item.roe ?? undefined,
+      netProfitGrowth: item.netProfitGrowth ?? undefined,
+      yoyGrowth: item.yoyGrowth ?? undefined,
+      netProfitAccumGrowth: item.netProfitAccumGrowth ?? undefined,
+      revenueAccumGrowth: item.revenueAccumGrowth ?? undefined,
+      financialReportDate: item.financialReportDate ?? undefined,
+      financialAnnounceDate: item.financialAnnounceDate ?? undefined,
+      financialQualityFlags: item.financialQualityFlags ?? [],
+    }));
   }, [stockScreenResult.data?.stockScreen?.items]);
 
   const meta = useMemo<StockScreeningMeta>(() => {
@@ -262,13 +344,20 @@ export function useStockScreening() {
     };
   }, [stockScreenResult.data?.stockScreen]);
 
-  const runScreening = () => {
-    setQueryInput(buildStockScreenInput(screeningCriteria));
+  const runScreening = (criteria: ScreeningCriteria = screeningCriteria) => {
+    setScreeningCriteria(criteria);
+    setQueryInput(buildStockScreenInput(criteria, sort));
+  };
+
+  const applySort = (nextSort: StockScreenSortState | null) => {
+    setSort(nextSort);
+    setQueryInput(buildStockScreenInput(screeningCriteria, nextSort));
   };
 
   const resetCriteria = () => {
     setScreeningCriteria(DEFAULT_CRITERIA);
-    setQueryInput(buildStockScreenInput(DEFAULT_CRITERIA));
+    setSort(null);
+    setQueryInput(buildStockScreenInput(DEFAULT_CRITERIA, null));
   };
 
   return {
@@ -276,6 +365,8 @@ export function useStockScreening() {
     setScreeningCriteria,
     results,
     meta,
+    sort,
+    applySort,
     error: stockScreenResult.error,
     isLoading: stockScreenResult.fetching,
     runScreening,

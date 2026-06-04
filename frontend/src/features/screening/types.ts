@@ -1,6 +1,9 @@
+export type StockScreenUniverse = 'STOCK' | 'ETF' | 'STOCK_AND_ETF';
+
 export interface ScreeningCriteria {
   // --- Universe ---
-  indexScope?: string; // 'all', 'hs300', 'zz500', etc.
+  universe?: StockScreenUniverse;
+  excludeST?: boolean;
   includeIndustries?: string[];
   excludeIndustries?: string[];
 
@@ -37,6 +40,7 @@ export interface StockScreeningResult {
   code: string;
   name: string;
   industry?: string;
+  instrumentType: string;
 
   // Market Data
   currentPrice: number;
@@ -51,6 +55,11 @@ export interface StockScreeningResult {
   roe?: number;
   netProfitGrowth?: number;
   yoyGrowth?: number;
+  netProfitAccumGrowth?: number;
+  revenueAccumGrowth?: number;
+  financialReportDate?: string | null;
+  financialAnnounceDate?: string | null;
+  financialQualityFlags?: string[];
 
   // Peak/Trough Stats
   peakPrice: number;
@@ -108,4 +117,26 @@ export interface StockScreeningMeta {
 export interface FilterOption {
   value: string;
   label: string;
+}
+
+export type StockScreenSortField =
+  | 'CODE'
+  | 'NAME'
+  | 'CURRENT_PRICE'
+  | 'CHANGE_PCT'
+  | 'SIGNAL_COUNT'
+  | 'KDJ_J'
+  | 'RSI12'
+  | 'VOLUME_RATIO'
+  | 'PRICE_DROP_PCT'
+  | 'DAYS_SINCE_PEAK'
+  | 'ROE'
+  | 'NET_PROFIT_GROWTH'
+  | 'YOY_GROWTH';
+
+export type StockScreenSortDirection = 'ASC' | 'DESC';
+
+export interface StockScreenSortState {
+  field: StockScreenSortField;
+  direction: StockScreenSortDirection;
 }
