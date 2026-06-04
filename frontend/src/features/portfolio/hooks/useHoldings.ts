@@ -108,9 +108,11 @@ export function useHoldings() {
 
   const liquidateHolding = useCallback(
     async (stockCode: string) => {
-      return await executeLiquidate({ input: { stockCode, confirm: true } });
+      return await executeLiquidate({
+        input: { accountId, stockCode, confirm: true },
+      });
     },
-    [executeLiquidate]
+    [accountId, executeLiquidate]
   );
 
   return useMemo(

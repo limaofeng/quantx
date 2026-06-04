@@ -6,7 +6,7 @@ import { formatCurrency } from '@/utils/transform/data';
 interface LiquidationStatsProps {
   totalMarketValue: number;
   totalLiquidatedPnL: number;
-  availableCash: number; // In a real app, this might come from a portfolio API
+  availableCash: number;
 }
 
 export function LiquidationStats({
@@ -60,7 +60,7 @@ export function LiquidationStats({
           </div>
           <div>
             <p className="text-sm font-medium text-muted-foreground">
-              可用现金(模拟)
+              可用现金
             </p>
             <h3 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-emerald-400">
               {formatCurrency(availableCash)}

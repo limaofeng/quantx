@@ -1,64 +1,216 @@
-import { useState, useCallback } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { useMutation } from 'urql';
 
-import { logger } from '@/core/errors/logger';
+import { useCurrentAccount } from '@/features/dashboard/hooks';
+
+import {
+  LiquidateAllPositionsMutation,
+  LiquidatePositionMutation,
+} from './usePortfolio';
+
+export interface LiquidationActionFailure {
+  error: string;
+  stockCode: string;
+}
+
+export interface LiquidationActionResult {
+  failures: LiquidationActionFailure[];
+  message: string;
+  submittedOrderIds: string[];
+  success: boolean;
+}
 
 interface UseLiquidationActionsResult {
-  isLoading: boolean;
   error: Error | null;
-  liquidateMultiple: (holdingIds: string[]) => Promise<void>;
+  isLoading: boolean;
+  liquidateAll: () => Promise<LiquidationActionResult>;
+  liquidateMultiple: (stockCodes: string[]) => Promise<LiquidationActionResult>;
   redeemCash: (amount: number) => Promise<void>;
 }
 
-/**
- * 清仓操作 Hook
- * 负责执行清仓和现金赎回操作
- */
+function normalizeStockCode(value: unknown) {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function uniqueStockCodes(stockCodes: string[]) {
+  return Array.from(new Set(stockCodes.map(normalizeStockCode))).filter(Boolean);
+}
+
+function asActionError(message: string) {
+  return new Error(message || '清仓委托提交失败');
+}
+
+function summarizeFailures(failures: LiquidationActionFailure[]) {
+  if (failures.length === 0) return '';
+  return failures
+    .map(item => `${item.stockCode}: ${item.error}`)
+    .join('; ');
+}
+
 export function useLiquidationActions(): UseLiquidationActionsResult {
-  const [isLoading, setIsLoading] = useState(false);
+  const [localLoading, setLocalLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const { data: accountData } = useCurrentAccount();
+  const accountId = accountData?.currentAccount?.id;
 
-  // 部分清仓操作
-  const liquidateMultiple = useCallback(async (holdingIds: string[]) => {
-    try {
-      setIsLoading(true);
+  const [positionResult, executeLiquidatePosition] = useMutation(
+    LiquidatePositionMutation
+  );
+  const [batchResult, executeLiquidateAll] = useMutation(
+    LiquidateAllPositionsMutation
+  );
+
+  const liquidateMultiple = useCallback(
+    async (stockCodes: string[]): Promise<LiquidationActionResult> => {
+      const codes = uniqueStockCodes(stockCodes);
+      if (codes.length === 0) {
+        return {
+          failures: [],
+          message: '没有可提交的清仓标的',
+          submittedOrderIds: [],
+          success: true,
+        };
+      }
+
+      setLocalLoading(true);
       setError(null);
 
-      // 模拟网络延迟
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      const failures: LiquidationActionFailure[] = [];
+      const submittedOrderIds: string[] = [];
 
-      logger.info(`模拟部分清仓: ${holdingIds.join(', ')}`);
-    } catch (error) {
-      logger.error('部分清仓失败:', error);
-      setError(error instanceof Error ? error : new Error('部分清仓失败'));
-      throw error;
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+      try {
+        for (const stockCode of codes) {
+          const operation = await executeLiquidatePosition({
+            input: {
+              accountId,
+              confirm: true,
+              maxRetry: 1,
+              stockCode,
+            },
+          });
 
-  // 赎回现金操作
-  const redeemCash = useCallback(async (amount: number) => {
+          if (operation.error) {
+            failures.push({
+              error: operation.error.message,
+              stockCode,
+            });
+            continue;
+          }
+
+          const result = operation.data?.liquidatePosition;
+          if (!result?.success) {
+            failures.push({
+              error: result?.error || result?.message || '委托提交失败',
+              stockCode,
+            });
+            continue;
+          }
+
+          if (result.orderId !== null && result.orderId !== undefined) {
+            submittedOrderIds.push(String(result.orderId));
+          }
+        }
+
+        const failureSummary = summarizeFailures(failures);
+        const actionResult = {
+          failures,
+          message:
+            failures.length > 0
+              ? `部分清仓委托提交失败：${failureSummary}`
+              : `清仓委托已提交：${codes.length} 只标的`,
+          submittedOrderIds,
+          success: failures.length === 0,
+        };
+
+        if (!actionResult.success) setError(asActionError(actionResult.message));
+        return actionResult;
+      } catch (nextError) {
+        const normalized =
+          nextError instanceof Error
+            ? nextError
+            : asActionError(String(nextError));
+        setError(normalized);
+        throw normalized;
+      } finally {
+        setLocalLoading(false);
+      }
+    },
+    [accountId, executeLiquidatePosition]
+  );
+
+  const liquidateAll = useCallback(async (): Promise<LiquidationActionResult> => {
+    setLocalLoading(true);
+    setError(null);
+
     try {
-      setIsLoading(true);
-      setError(null);
+      const operation = await executeLiquidateAll({
+        input: {
+          accountId,
+          confirm: true,
+          maxRetry: 1,
+        },
+      });
 
-      // 模拟网络延迟
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (operation.error) {
+        const nextError = asActionError(operation.error.message);
+        setError(nextError);
+        throw nextError;
+      }
 
-      logger.info(`模拟赎回现金: ${amount}`);
-    } catch (error) {
-      logger.error('赎回现金失败:', error);
-      setError(error instanceof Error ? error : new Error('赎回现金失败'));
-      throw error;
+      const result = operation.data?.liquidateAllPositions;
+      if (!result) {
+        const nextError = asActionError('清仓结果为空');
+        setError(nextError);
+        throw nextError;
+      }
+
+      const failures =
+        result.errors?.map(item => ({
+          error: item.error,
+          stockCode: item.stockCode,
+        })) || [];
+      const actionResult = {
+        failures,
+        message: result.message,
+        submittedOrderIds: (result.orders || []).map(String),
+        success: Boolean(result.success),
+      };
+
+      if (!actionResult.success) setError(asActionError(actionResult.message));
+      return actionResult;
+    } catch (nextError) {
+      const normalized =
+        nextError instanceof Error ? nextError : asActionError(String(nextError));
+      setError(normalized);
+      throw normalized;
     } finally {
-      setIsLoading(false);
+      setLocalLoading(false);
     }
+  }, [accountId, executeLiquidateAll]);
+
+  const redeemCash = useCallback(async () => {
+    const nextError = new Error('资金赎回请在券商客户端办理，QuantX 当前不提交转账指令。');
+    setError(nextError);
+    throw nextError;
   }, []);
 
-  return {
-    isLoading,
-    error,
-    liquidateMultiple,
-    redeemCash,
-  };
+  return useMemo(
+    () => ({
+      error,
+      isLoading:
+        localLoading || positionResult.fetching || batchResult.fetching,
+      liquidateAll,
+      liquidateMultiple,
+      redeemCash,
+    }),
+    [
+      batchResult.fetching,
+      error,
+      liquidateAll,
+      liquidateMultiple,
+      localLoading,
+      positionResult.fetching,
+      redeemCash,
+    ]
+  );
 }

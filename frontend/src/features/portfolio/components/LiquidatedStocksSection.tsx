@@ -26,6 +26,29 @@ function getStockIconText(name: string): string {
   return name.charAt(0) + name.charAt(name.length - 1);
 }
 
+function toFiniteNumber(value: unknown) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatCurrencyOrDash(value: unknown) {
+  const amount = toFiniteNumber(value);
+  return amount === null || amount <= 0 ? '--' : formatCurrency(amount);
+}
+
+function formatSignedCurrencyOrDash(value: unknown) {
+  const amount = toFiniteNumber(value);
+  if (amount === null) return '--';
+  return `${amount >= 0 ? '+' : ''}${formatCurrency(amount)}`;
+}
+
+function formatPercentOrDash(value: unknown) {
+  const amount = toFiniteNumber(value);
+  if (amount === null) return '--';
+  return formatPercent(amount);
+}
+
 export function LiquidatedStocksSection({
   liquidatedStocks,
 }: LiquidatedStocksSectionProps) {
@@ -38,10 +61,10 @@ export function LiquidatedStocksSection({
           </div>
           <div>
             <h3 className="text-lg font-semibold text-foreground">
-              暂无清仓记录
+              暂无真实清仓回报
             </h3>
             <p className="text-muted-foreground mt-1">
-              您还没有任何已清仓的股票
+              只有真实委托或成交回报会显示在这里
             </p>
           </div>
         </div>
@@ -49,15 +72,19 @@ export function LiquidatedStocksSection({
     );
   }
 
-  const totalRealizedPnL = liquidatedStocks.reduce(
-    (sum, stock) => sum + stock.realizedPnL,
+  const realizedPnLValues = liquidatedStocks
+    .map(stock => toFiniteNumber(stock.realizedPnL))
+    .filter((value): value is number => value !== null);
+  const totalRealizedPnL = realizedPnLValues.reduce(
+    (sum, value) => sum + value,
     0
   );
+  const hasRealizedPnL = realizedPnLValues.length > 0;
 
   return (
     <div className="space-y-4">
       {/* Summary Inline Card */}
-      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-xl border border-white/10 shadow-sm">
+      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
         <div className="flex items-center gap-2">
           <BarChart2 className="w-5 h-5 text-muted-foreground" />
           <span className="text-sm font-medium text-muted-foreground">
@@ -72,11 +99,18 @@ export function LiquidatedStocksSection({
             <span
               className={cn(
                 'text-xl font-bold',
-                totalRealizedPnL >= 0 ? 'text-success' : 'text-destructive'
+                !hasRealizedPnL
+                  ? 'text-slate-400'
+                  : totalRealizedPnL >= 0
+                    ? 'text-success'
+                    : 'text-destructive'
               )}
             >
-              {totalRealizedPnL >= 0 ? '+' : ''}
-              {formatCurrency(totalRealizedPnL)}
+              {hasRealizedPnL
+                ? `${totalRealizedPnL >= 0 ? '+' : ''}${formatCurrency(
+                    totalRealizedPnL
+                  )}`
+                : '--'}
             </span>
           </div>
         </div>
@@ -96,7 +130,8 @@ export function LiquidatedStocksSection({
           </TableHeader>
           <TableBody>
             {liquidatedStocks.map(stock => {
-              const isProfitable = stock.realizedPnL >= 0;
+              const realizedPnL = toFiniteNumber(stock.realizedPnL);
+              const isProfitable = realizedPnL === null || realizedPnL >= 0;
 
               return (
                 <TableRow
@@ -117,7 +152,7 @@ export function LiquidatedStocksSection({
                             variant="secondary"
                             className="text-[10px] h-4 px-1"
                           >
-                            已清仓
+                            {stock.status || '真实回报'}
                           </Badge>
                         </div>
                         <div className="text-xs text-muted-foreground">
@@ -134,7 +169,7 @@ export function LiquidatedStocksSection({
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="text-sm">
-                      {formatCurrency(stock.sellPrice)}
+                      {formatCurrencyOrDash(stock.sellPrice)}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
@@ -146,24 +181,31 @@ export function LiquidatedStocksSection({
                     <div
                       className={cn(
                         'font-medium flex items-center justify-end gap-1',
-                        isProfitable ? 'text-success' : 'text-destructive'
+                        realizedPnL === null
+                          ? 'text-slate-400'
+                          : isProfitable
+                            ? 'text-success'
+                            : 'text-destructive'
                       )}
                     >
-                      {isProfitable ? (
+                      {realizedPnL === null ? null : isProfitable ? (
                         <TrendingUp className="h-3 w-3" />
                       ) : (
                         <TrendingDown className="h-3 w-3" />
                       )}
-                      {isProfitable ? '+' : ''}
-                      {formatCurrency(stock.realizedPnL)}
+                      {formatSignedCurrencyOrDash(stock.realizedPnL)}
                     </div>
                     <div
                       className={cn(
                         'text-xs',
-                        isProfitable ? 'text-success' : 'text-destructive'
+                        realizedPnL === null
+                          ? 'text-slate-500'
+                          : isProfitable
+                            ? 'text-success'
+                            : 'text-destructive'
                       )}
                     >
-                      {formatPercent(stock.realizedPnLPercent)}
+                      {formatPercentOrDash(stock.realizedPnLPercent)}
                     </div>
                   </TableCell>
                 </TableRow>

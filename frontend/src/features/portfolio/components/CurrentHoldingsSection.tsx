@@ -1,4 +1,10 @@
-import { AlertTriangle, TrendingUp, TrendingDown, Package } from 'lucide-react';
+import {
+  AlertTriangle,
+  Package,
+  Target,
+  TrendingDown,
+  TrendingUp,
+} from 'lucide-react';
 import { useState } from 'react';
 
 import {
@@ -29,11 +35,14 @@ import { formatCurrency, formatPercent } from '@/utils/transform/data';
 import type { Position } from '../types';
 
 interface CurrentHoldingsSectionProps {
+  conditionalOrderStockCodes?: Set<string>;
   holdings: Position[];
+  isSubmitting?: boolean;
   selectedHoldings: string[];
+  onConfigureConditionalOrder?: (holding: Position) => void;
   onSelectionChange: (selected: string[]) => void;
   onLiquidateSelected: () => void;
-  liquidateMultiple: (holdingIds: string[]) => Promise<void>;
+  liquidateMultiple: (stockCodes: string[]) => Promise<unknown>;
 }
 
 // 获取股票图标文字
@@ -43,35 +52,114 @@ function getStockIconText(name: string): string {
   return name.charAt(0) + name.charAt(name.length - 1);
 }
 
+function normalizeStockCode(value: unknown) {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getStockCodePrefix(value: unknown) {
+  return normalizeStockCode(value).split('.')[0] || '';
+}
+
+function hasConditionalOrder(
+  conditionalOrderStockCodes: Set<string>,
+  stockCode: unknown
+) {
+  const code = normalizeStockCode(stockCode);
+  const prefix = getStockCodePrefix(code);
+  return Boolean(
+    code &&
+      (conditionalOrderStockCodes.has(code) ||
+        (prefix && conditionalOrderStockCodes.has(prefix)))
+  );
+}
+
+function toFiniteNumber(value: unknown) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getSellableVolume(holding: Position) {
+  return Math.max(0, Math.trunc(toFiniteNumber(holding.canUseVolume) ?? 0));
+}
+
+function isLiquidatable(holding: Position) {
+  return getSellableVolume(holding) > 0;
+}
+
+function getEstimatedSellValue(holding: Position) {
+  const sellableVolume = getSellableVolume(holding);
+  if (sellableVolume <= 0) return 0;
+
+  const volume = toFiniteNumber(holding.volume);
+  const marketValue = toFiniteNumber(holding.marketValue);
+  if (volume !== null && volume > 0 && marketValue !== null) {
+    return (marketValue * sellableVolume) / volume;
+  }
+
+  const price =
+    toFiniteNumber(holding.lastPrice) ?? toFiniteNumber(holding.avgPrice) ?? 0;
+  return sellableVolume * price;
+}
+
 export function CurrentHoldingsSection({
+  conditionalOrderStockCodes = new Set<string>(),
   holdings,
+  isSubmitting = false,
   selectedHoldings,
+  onConfigureConditionalOrder,
   onSelectionChange,
   onLiquidateSelected,
   liquidateMultiple,
 }: CurrentHoldingsSectionProps) {
   const [isProcessing, setIsProcessing] = useState(false);
+  const liquidatableHoldings = holdings.filter(isLiquidatable);
+  const selectedSet = new Set(selectedHoldings.map(normalizeStockCode));
+  const selectedPositions = liquidatableHoldings.filter(holding =>
+    selectedSet.has(normalizeStockCode(holding.stockCode))
+  );
+  const selectedSellableVolume = selectedPositions.reduce(
+    (sum, holding) => sum + getSellableVolume(holding),
+    0
+  );
+  const selectedEstimatedValue = selectedPositions.reduce(
+    (sum, holding) => sum + getEstimatedSellValue(holding),
+    0
+  );
+  const allSelected =
+    liquidatableHoldings.length > 0 &&
+    selectedHoldings.length === liquidatableHoldings.length;
+  const partiallySelected =
+    selectedHoldings.length > 0 &&
+    selectedHoldings.length < liquidatableHoldings.length;
 
   const handleToggleAll = () => {
-    if (selectedHoldings.length === holdings.length) {
+    if (allSelected) {
       onSelectionChange([]);
     } else {
-      onSelectionChange(holdings.map(h => h.id));
+      onSelectionChange(
+        liquidatableHoldings.map(holding =>
+          normalizeStockCode(holding.stockCode)
+        )
+      );
     }
   };
 
-  const handleToggleHolding = (holdingId: string) => {
-    if (selectedHoldings.includes(holdingId)) {
-      onSelectionChange(selectedHoldings.filter(id => id !== holdingId));
+  const handleToggleHolding = (stockCode: string) => {
+    const normalizedStockCode = normalizeStockCode(stockCode);
+    if (selectedHoldings.includes(normalizedStockCode)) {
+      onSelectionChange(
+        selectedHoldings.filter(code => code !== normalizedStockCode)
+      );
     } else {
-      onSelectionChange([...selectedHoldings, holdingId]);
+      onSelectionChange([...selectedHoldings, normalizedStockCode]);
     }
   };
 
-  const handleLiquidateIndividual = async (holdingId: string) => {
+  const handleLiquidateIndividual = async (stockCode: string) => {
     setIsProcessing(true);
     try {
-      await liquidateMultiple([holdingId]);
+      await liquidateMultiple([normalizeStockCode(stockCode)]);
     } finally {
       setIsProcessing(false);
     }
@@ -96,17 +184,20 @@ export function CurrentHoldingsSection({
   return (
     <div className="space-y-4">
       {/* Batch Operations Bar */}
-      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-xl border border-white/10 shadow-sm">
+      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
         <div className="flex items-center gap-3">
           <Checkbox
-            checked={selectedHoldings.length === holdings.length}
+            checked={
+              allSelected ? true : partiallySelected ? 'indeterminate' : false
+            }
+            disabled={liquidatableHoldings.length === 0}
             onCheckedChange={handleToggleAll}
             data-testid="select-all-checkbox"
           />
           <span className="text-sm font-medium">
             已选择{' '}
             <span className="text-primary">{selectedHoldings.length}</span> /{' '}
-            {holdings.length} 只股票
+            {liquidatableHoldings.length} 只可清仓股票
           </span>
         </div>
 
@@ -117,6 +208,7 @@ export function CurrentHoldingsSection({
                 variant="destructive"
                 size="sm"
                 className="shadow-md hover:shadow-lg transition-all"
+                disabled={isSubmitting || isProcessing}
                 data-testid="liquidate-selected-button"
               >
                 <AlertTriangle className="mr-2 h-4 w-4" />
@@ -126,14 +218,25 @@ export function CurrentHoldingsSection({
             <AlertDialogContent>
               <AlertDialogHeader>
                 <AlertDialogTitle>确认批量清仓</AlertDialogTitle>
-                <AlertDialogDescription>
-                  您确定要清仓选中的{' '}
-                  <span className="font-bold text-destructive">
-                    {selectedHoldings.length}
-                  </span>{' '}
-                  只股票吗？
-                  <br />
-                  此操作将以市价卖出所有选中的持仓，且不可撤销。
+                <AlertDialogDescription asChild>
+                  <div>
+                    您确定要清仓选中的{' '}
+                    <span className="font-bold text-destructive">
+                      {selectedHoldings.length}
+                    </span>{' '}
+                    只股票吗？
+                    <br />
+                    系统将先提交市价风格卖出委托，不会把委托提交成功写成已成交。
+                    <div className="mt-3 rounded-md bg-muted p-3 text-sm">
+                      <p>
+                        可卖数量: {selectedSellableVolume.toLocaleString()} 股
+                      </p>
+                      <p>
+                        估算委托市值:{' '}
+                        {formatCurrency(selectedEstimatedValue)}
+                      </p>
+                    </div>
+                  </div>
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -142,7 +245,7 @@ export function CurrentHoldingsSection({
                   onClick={onLiquidateSelected}
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 >
-                  确认清仓
+                  提交清仓委托
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
@@ -161,26 +264,35 @@ export function CurrentHoldingsSection({
               <TableHead className="text-right">成本/现价</TableHead>
               <TableHead className="text-right">市值</TableHead>
               <TableHead className="text-right">盈亏</TableHead>
-              <TableHead className="text-right w-[100px]">操作</TableHead>
+              <TableHead className="text-right w-[132px]">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {holdings.map(holding => {
               const isProfitable = (holding.profitLoss ?? 0) >= 0;
-              const isSelected = selectedHoldings.includes(holding.id);
+              const stockCode = normalizeStockCode(holding.stockCode);
+              const sellableVolume = getSellableVolume(holding);
+              const rowLiquidatable = sellableVolume > 0;
+              const isSelected = selectedSet.has(stockCode);
+              const hasCondition = hasConditionalOrder(
+                conditionalOrderStockCodes,
+                stockCode
+              );
 
               return (
                 <TableRow
                   key={holding.id}
                   className={cn(
                     'transition-colors hover:bg-muted/30 border-b border-white/5',
-                    isSelected && 'bg-primary/5 hover:bg-primary/10'
+                    isSelected && 'bg-primary/5 hover:bg-primary/10',
+                    !rowLiquidatable && 'opacity-55'
                   )}
                 >
                   <TableCell>
                     <Checkbox
                       checked={isSelected}
-                      onCheckedChange={() => handleToggleHolding(holding.id)}
+                      disabled={!rowLiquidatable}
+                      onCheckedChange={() => handleToggleHolding(stockCode)}
                       data-testid={`checkbox-${holding.stockCode}`}
                     />
                   </TableCell>
@@ -197,11 +309,16 @@ export function CurrentHoldingsSection({
                         <div className="font-medium text-sm">
                           {holding.instrumentName || holding.stockCode}
                         </div>
-                        <div className="text-xs text-muted-foreground flex items-center">
-                          <span className="bg-primary/10 text-primary px-1 rounded-[2px] mr-1 text-[10px]">
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <span className="bg-primary/10 text-primary px-1 rounded-[2px] text-[10px]">
                             Stock
                           </span>
-                          {holding.stockCode}
+                          {stockCode}
+                          {hasCondition && (
+                            <span className="rounded border border-rose-400/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-bold text-rose-200">
+                              条件清仓
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -210,7 +327,9 @@ export function CurrentHoldingsSection({
                     <div className="font-medium text-sm">
                       {holding.volume.toLocaleString()}
                     </div>
-                    <div className="text-xs text-muted-foreground">股</div>
+                    <div className="text-xs text-muted-foreground">
+                      可卖 {sellableVolume.toLocaleString()} 股
+                    </div>
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="text-sm">
@@ -218,7 +337,11 @@ export function CurrentHoldingsSection({
                     </div>
                     <div className="text-xs text-muted-foreground flex items-center justify-end gap-1">
                       <span className="opacity-70">现价:</span>
-                      <span>---</span>
+                      <span>
+                        {holding.lastPrice
+                          ? formatCurrency(holding.lastPrice)
+                          : '--'}
+                      </span>
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
@@ -251,54 +374,83 @@ export function CurrentHoldingsSection({
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
-                          disabled={isProcessing}
-                          data-testid={`liquidate-${holding.stockCode}`}
-                        >
-                          <AlertTriangle className="h-4 w-4" />
-                          <span className="sr-only">清仓</span>
-                        </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>
-                            确认清仓{' '}
-                            {holding.instrumentName || holding.stockCode}
-                          </AlertDialogTitle>
-                          <AlertDialogDescription>
-                            您确定要卖出{' '}
-                            {holding.instrumentName || holding.stockCode} (
-                            {holding.stockCode}) 吗？
-                            <br />
-                            <div className="mt-2 text-sm bg-muted p-2 rounded-md">
-                              <p>
-                                持仓数量: {holding.volume.toLocaleString()} 股
-                              </p>
-                              <p>
-                                当前市值:{' '}
-                                {formatCurrency(holding.marketValue ?? 0)}
-                              </p>
-                            </div>
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>取消</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() =>
-                              handleLiquidateIndividual(holding.id)
+                    <div className="flex justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={cn(
+                          'h-8 w-8 p-0 hover:bg-rose-500/10',
+                          hasCondition
+                            ? 'text-rose-300 hover:text-rose-200'
+                            : 'text-muted-foreground hover:text-foreground'
+                        )}
+                        disabled={isProcessing || !onConfigureConditionalOrder}
+                        title="设置条件清仓"
+                        onClick={() => onConfigureConditionalOrder?.(holding)}
+                        data-testid={`conditional-liquidation-${holding.stockCode}`}
+                      >
+                        <Target className="h-4 w-4" />
+                        <span className="sr-only">设置条件清仓</span>
+                      </Button>
+
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                            disabled={
+                              isProcessing || isSubmitting || !rowLiquidatable
                             }
-                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            data-testid={`liquidate-${holding.stockCode}`}
                           >
-                            确认清仓
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                            <AlertTriangle className="h-4 w-4" />
+                            <span className="sr-only">清仓</span>
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>
+                              确认清仓{' '}
+                              {holding.instrumentName || holding.stockCode}
+                            </AlertDialogTitle>
+                            <AlertDialogDescription asChild>
+                              <div>
+                                您确定要卖出{' '}
+                                {holding.instrumentName || holding.stockCode} (
+                                {holding.stockCode}) 吗？
+                                <br />
+                                <div className="mt-2 text-sm bg-muted p-2 rounded-md">
+                                  <p>
+                                    持仓数量: {holding.volume.toLocaleString()}{' '}
+                                    股
+                                  </p>
+                                  <p>
+                                    可卖数量: {sellableVolume.toLocaleString()}{' '}
+                                    股
+                                  </p>
+                                  <p>
+                                    当前市值:{' '}
+                                    {formatCurrency(holding.marketValue ?? 0)}
+                                  </p>
+                                </div>
+                              </div>
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() =>
+                                handleLiquidateIndividual(stockCode)
+                              }
+                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            >
+                              提交清仓委托
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
                   </TableCell>
                 </TableRow>
               );

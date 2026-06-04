@@ -75,8 +75,8 @@ query portfolioSummary($accountId: String) {
 }
 
 # 获取清仓概况
-query liquidationSummary {
-  liquidationSummary {
+query liquidationSummary($accountId: String) {
+  liquidationSummary(accountId: $accountId) {
     totalPositions
     liquidatablePositions
     totalMarketValue

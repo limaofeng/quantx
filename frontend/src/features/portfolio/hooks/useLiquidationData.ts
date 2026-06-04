@@ -1,84 +1,182 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
+import { useQuery } from 'urql';
 
-import { logger } from '@/core/errors/logger';
+import { useCurrentAccount } from '@/features/dashboard/hooks';
+import { useTodayOrders, useTodayTrades } from '@/features/trading/hooks';
 
-import type { LiquidatedStock, Position } from '../types';
+import type {
+  LiquidatedStock,
+  LiquidationSummaryData,
+  LiquidationTodayOrder,
+  LiquidationTodayTrade,
+  Position,
+  PortfolioSummaryData,
+} from '../types';
+
+import { useHoldings } from './useHoldings';
+import { LiquidationSummaryQuery } from './usePortfolio';
 
 interface UseLiquidationDataResult {
-  liquidatedStocks: LiquidatedStock[];
+  accountId?: string;
   currentHoldings: Position[];
-  isLoading: boolean;
   error: Error | null;
+  isLoading: boolean;
+  liquidatedStocks: LiquidatedStock[];
+  liquidationSummary?: LiquidationSummaryData;
+  portfolioSummary?: PortfolioSummaryData;
   refetch: () => void;
+  todayOrders: LiquidationTodayOrder[];
+  todayTrades: LiquidationTodayTrade[];
+}
+
+function normalizeStockCode(value: unknown) {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function toFiniteNumber(value: unknown) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isSellOrderType(value: unknown) {
+  const text = String(value ?? '').toUpperCase();
+  return text === 'SELL' || text.endsWith('.SELL');
+}
+
+function getPositivePrice(...values: unknown[]) {
+  for (const value of values) {
+    const parsed = toFiniteNumber(value);
+    if (parsed !== null && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function buildHoldingNameMap(holdings: Position[]) {
+  return new Map(
+    holdings.map(holding => [
+      normalizeStockCode(holding.stockCode),
+      holding.instrumentName || normalizeStockCode(holding.stockCode),
+    ])
+  );
+}
+
+function mapOrderToLiquidatedStock(
+  order: LiquidationTodayOrder,
+  holdingNameMap: Map<string, string>,
+  holdings: Position[]
+): LiquidatedStock {
+  const stockCode = normalizeStockCode(order.stockCode);
+  const matchingHolding = holdings.find(
+    holding => normalizeStockCode(holding.stockCode) === stockCode
+  );
+
+  return {
+    id: `order-${order.id}`,
+    name: order.stockName || holdingNameMap.get(stockCode) || stockCode,
+    orderId: order.id,
+    originalCost: matchingHolding?.avgPrice ?? null,
+    quantity: Number(order.tradedVolume || order.volume || 0),
+    realizedPnL: null,
+    realizedPnLPercent: null,
+    sellDate: order.time,
+    sellPrice: getPositivePrice(order.tradedPrice, order.price),
+    source: 'ORDER',
+    status: order.status,
+    symbol: stockCode,
+  };
 }
 
 /**
  * 清仓数据查询 Hook
- * 负责获取当前持仓和已清仓股票数据
+ * 组合真实持仓、清仓预检、当日委托和成交回报。
  */
 export function useLiquidationData(): UseLiquidationDataResult {
-  // TODO: 将来接入 GraphQL 查询
-  const isLoading = false;
-  const error = null;
+  const {
+    error: holdingsError,
+    holdings,
+    isLoading: holdingsLoading,
+    portfolioSummary,
+    refetch: refetchHoldings,
+  } = useHoldings();
+  const {
+    data: accountData,
+    error: accountError,
+    loading: accountLoading,
+  } = useCurrentAccount();
 
-  // Mock 已清仓股票数据
-  const liquidatedStocks: LiquidatedStock[] = useMemo(
-    () => [
-      {
-        id: 'liquidated-1',
-        symbol: '000002',
-        name: '万科A',
-        quantity: 1000,
-        sellPrice: 8.55,
-        sellDate: '2024-03-15',
-        realizedPnL: 550,
-        realizedPnLPercent: 6.88,
-        originalCost: 8.0,
-      },
-    ],
-    []
+  const accountId =
+    accountData?.currentAccount?.id || portfolioSummary?.accountId;
+
+  const [summaryResult, reexecuteSummaryQuery] = useQuery({
+    query: LiquidationSummaryQuery,
+    variables: { accountId },
+  });
+
+  const {
+    error: ordersError,
+    loading: ordersLoading,
+    orders,
+    refresh: refreshOrders,
+  } = useTodayOrders(accountId);
+  const {
+    error: tradesError,
+    loading: tradesLoading,
+    refresh: refreshTrades,
+    trades,
+  } = useTodayTrades(accountId);
+  const todayOrders = orders as LiquidationTodayOrder[];
+  const todayTrades = trades as LiquidationTodayTrade[];
+
+  const currentHoldings = useMemo(
+    () =>
+      holdings.filter(holding => {
+        const volume = toFiniteNumber(holding.volume);
+        return volume !== null && volume > 0;
+      }),
+    [holdings]
   );
 
-  // Mock 当前持仓数据
-  const currentHoldings: Position[] = useMemo(
-    () => [
-      {
-        id: 'pos-1',
-        stockCode: '600519',
-        instrumentName: '贵州茅台',
-        volume: 100,
-        canUseVolume: 100,
-        avgPrice: 1680.5,
-        lastPrice: 1720.0,
-        marketValue: 172000,
-        profitLoss: 3950,
-        profitRate: 2.35,
-      },
-      {
-        id: 'pos-2',
-        stockCode: '000001',
-        instrumentName: '平安银行',
-        volume: 2000,
-        canUseVolume: 2000,
-        avgPrice: 12.8,
-        lastPrice: 13.45,
-        marketValue: 26900,
-        profitLoss: 1300,
-        profitRate: 5.08,
-      },
-    ],
-    []
-  );
+  const liquidatedStocks = useMemo(() => {
+    const holdingNameMap = buildHoldingNameMap(currentHoldings);
 
-  const refetch = () => {
-    logger.info('模拟刷新数据');
-  };
+    return todayOrders
+      .filter(order => isSellOrderType(order.type))
+      .map(order =>
+        mapOrderToLiquidatedStock(order, holdingNameMap, currentHoldings)
+      );
+  }, [currentHoldings, todayOrders]);
+
+  const refetch = useCallback(() => {
+    refetchHoldings();
+    reexecuteSummaryQuery({ requestPolicy: 'network-only' });
+    refreshOrders();
+    refreshTrades();
+  }, [
+    refetchHoldings,
+    reexecuteSummaryQuery,
+    refreshOrders,
+    refreshTrades,
+  ]);
+
+  const error =
+    holdingsError || accountError || summaryResult.error || ordersError || tradesError;
 
   return {
-    liquidatedStocks,
+    accountId,
     currentHoldings,
-    isLoading,
-    error,
+    error: error instanceof Error ? error : error ? new Error(String(error)) : null,
+    isLoading:
+      holdingsLoading ||
+      accountLoading ||
+      summaryResult.fetching ||
+      ordersLoading ||
+      tradesLoading,
+    liquidatedStocks,
+    liquidationSummary: summaryResult.data?.liquidationSummary,
+    portfolioSummary,
     refetch,
+    todayOrders,
+    todayTrades,
   };
 }

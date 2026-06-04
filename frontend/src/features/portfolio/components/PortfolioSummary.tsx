@@ -27,9 +27,13 @@ function signedPercent(value: number) {
 
 function buildTrend(
   snapshots: DailyAssetSnapshotData[],
-  selector: (snapshot: DailyAssetSnapshotData) => number | null | undefined
+  selector: (snapshot: DailyAssetSnapshotData) => number | null | undefined,
+  fallbackValue?: number | null
 ) {
   const values = snapshots.map(selector).filter(isFiniteNumber);
+  if (values.length === 0 && isFiniteNumber(fallbackValue)) {
+    values.push(fallbackValue);
+  }
 
   if (values.length === 1) {
     return [values[0], values[0]];
@@ -38,7 +42,10 @@ function buildTrend(
   return values;
 }
 
-function buildCumulativePnlTrend(snapshots: DailyAssetSnapshotData[]) {
+function buildCumulativePnlTrend(
+  snapshots: DailyAssetSnapshotData[],
+  fallbackValue?: number | null
+) {
   let cumulative = 0;
   const values = snapshots
     .map((snapshot) => snapshot.dailyPnlCny)
@@ -47,6 +54,9 @@ function buildCumulativePnlTrend(snapshots: DailyAssetSnapshotData[]) {
       cumulative += value;
       return cumulative;
     });
+  if (values.length === 0 && isFiniteNumber(fallbackValue)) {
+    values.push(fallbackValue);
+  }
 
   if (values.length === 1) {
     return [values[0], values[0]];
@@ -68,25 +78,18 @@ export function PortfolioSummary({
   );
 
   const marketValueTrend = useMemo(
-    () => buildTrend(orderedSnapshots, (snapshot) => snapshot.marketValueCny),
-    [orderedSnapshots]
+    () =>
+      buildTrend(
+        orderedSnapshots,
+        (snapshot) => snapshot.marketValueCny,
+        summary.totalMarketValue
+      ),
+    [orderedSnapshots, summary.totalMarketValue]
   );
   const cumulativePnlTrend = useMemo(
-    () => buildCumulativePnlTrend(orderedSnapshots),
-    [orderedSnapshots]
-  );
-  const dailyPnlTrend = useMemo(
-    () => buildTrend(orderedSnapshots, (snapshot) => snapshot.dailyPnlCny),
-    [orderedSnapshots]
-  );
-  const positionRatioTrend = useMemo(
     () =>
-      buildTrend(orderedSnapshots, (snapshot) =>
-        snapshot.totalAssetCny > 0
-          ? (snapshot.marketValueCny / snapshot.totalAssetCny) * 100
-          : null
-      ),
-    [orderedSnapshots]
+      buildCumulativePnlTrend(orderedSnapshots, summary.totalProfitLoss),
+    [orderedSnapshots, summary.totalProfitLoss]
   );
 
   const hasTodayProfitLoss = isFiniteNumber(summary.todayProfitLoss);
@@ -98,6 +101,27 @@ export function PortfolioSummary({
     summary.totalAsset > 0
       ? (summary.totalMarketValue / summary.totalAsset) * 100
       : 0;
+  const dailyPnlTrend = useMemo(
+    () =>
+      buildTrend(
+        orderedSnapshots,
+        (snapshot) => snapshot.dailyPnlCny,
+        hasTodayProfitLoss ? todayProfitLoss : null
+      ),
+    [hasTodayProfitLoss, orderedSnapshots, todayProfitLoss]
+  );
+  const positionRatioTrend = useMemo(
+    () =>
+      buildTrend(
+        orderedSnapshots,
+        (snapshot) =>
+          snapshot.totalAssetCny > 0
+            ? (snapshot.marketValueCny / snapshot.totalAssetCny) * 100
+            : null,
+        positionRatio
+      ),
+    [orderedSnapshots, positionRatio]
+  );
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-8">
