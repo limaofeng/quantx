@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional
 
 import aiofiles
 
+from core.utils import time_utils
+
 logger = logging.getLogger(__name__)
 
 MAX_DECISION_SUMMARY_RECORDS = 5000
@@ -139,26 +141,26 @@ class BacktestResultStorage:
     def add_trade_intent(self, intent: Dict[str, Any]) -> None:
         """添加交易意图到缓冲区"""
         intent["_type"] = "trade_intent"
-        intent["_timestamp"] = datetime.now().isoformat()
+        intent["_timestamp"] = time_utils.now().isoformat()
         self._trade_intents.append(intent)
 
     def add_order(self, order: Dict[str, Any]) -> None:
         """添加订单到缓冲区"""
         order["_type"] = "order"
-        order["_timestamp"] = datetime.now().isoformat()
+        order["_timestamp"] = time_utils.now().isoformat()
         self._orders.append(order)
 
     def add_trade(self, trade: Dict[str, Any]) -> None:
         """添加成交到缓冲区"""
         trade["_type"] = "trade"
-        trade["_timestamp"] = datetime.now().isoformat()
+        trade["_timestamp"] = time_utils.now().isoformat()
         self._trades.append(trade)
 
     def add_trace(self, trace: Dict[str, Any]) -> None:
         """添加决策审计轨迹到缓冲区"""
         item = dict(trace or {})
         item["_type"] = "decision_trace"
-        item["_timestamp"] = datetime.now().isoformat()
+        item["_timestamp"] = time_utils.now().isoformat()
         if not self._manifest_path or self.audit_mode == AUDIT_MODE_FULL:
             self._traces.append(item)
             return
@@ -185,7 +187,7 @@ class BacktestResultStorage:
         """添加日志到缓冲区"""
         record = {
             "_type": "log",
-            "_timestamp": datetime.now().isoformat(),
+            "_timestamp": time_utils.now().isoformat(),
             "level": level,
             "message": message,
             "source": source,
@@ -199,7 +201,7 @@ class BacktestResultStorage:
         """添加 GridBook 快照到缓冲区，语义未变化时只保留最新引用。"""
         item = dict(snapshot or {})
         item["_type"] = "grid_book_snapshot"
-        item["_timestamp"] = datetime.now().isoformat()
+        item["_timestamp"] = time_utils.now().isoformat()
         self._grid_book_observed_count += 1
         item["_sequence"] = self._grid_book_observed_count
         self._latest_grid_book = item
@@ -443,7 +445,7 @@ class BacktestResultStorage:
             "backtest_id": self.backtest_id,
             "strategy_run_id": self.strategy_run_id,
             "version": self.version,
-            "created_at": datetime.now().isoformat(),
+            "created_at": time_utils.now().isoformat(),
             "audit_mode": self.audit_mode,
             "compaction_policy": BACKTEST_AUDIT_COMPACTION_POLICY,
             "artifacts": {
@@ -1065,7 +1067,7 @@ class BacktestResultStorage:
             return
         intent = dict(intent or {})
         intent["_type"] = "trade_intent"
-        intent["_timestamp"] = datetime.now().isoformat()
+        intent["_timestamp"] = time_utils.now().isoformat()
         path = self._raw_file_path or self._file_path
         if not path:
             return

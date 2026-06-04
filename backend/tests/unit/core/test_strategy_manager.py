@@ -11,6 +11,7 @@ StrategyManager 单元测试
 
 import asyncio
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -334,6 +335,69 @@ class TestStrategyManager:
 
       runtime = strategy_manager.get_run(run_id)
       assert runtime.mode == StrategyRunMode.PAPER
+
+  @pytest.mark.asyncio
+  async def test_clone_strategy_to_paper_uses_isolated_snapshot(
+    self,
+    strategy_manager: StrategyManager,
+  ):
+    """转模拟盘时应创建独立快照账户参数，且不自动启动。"""
+    source_run = SimpleNamespace(
+      id="source-run",
+      strategy_id=11,
+      strategy=SimpleNamespace(class_name="MockStrategy", file_path=""),
+      parameters={
+        "cash_total": "123456.78",
+        "position_shares": 500,
+        "avg_cost": 40.25,
+      },
+      instruments=["688552.SH"],
+      initial_capital=None,
+      name="Source Backtest",
+    )
+
+    async def fake_get_async_db():
+      yield object()
+
+    with (
+      patch("core.strategy_manager.get_async_db", fake_get_async_db),
+      patch("core.strategy_manager.StrategyRunRepository") as repo_class,
+      patch(
+        "core.strategy_manager.strategy_registry.get_strategy_class",
+        return_value=MockStrategy,
+      ),
+      patch.object(
+        strategy_manager,
+        "run_strategy",
+        new_callable=AsyncMock,
+        return_value="new-paper-run",
+      ) as run_strategy,
+    ):
+      repo = repo_class.return_value
+      repo.find_run_by_id = AsyncMock(return_value=source_run)
+
+      new_run_id = await strategy_manager.clone_strategy(
+        "source-run",
+        StrategyRunMode.PAPER,
+        parameter_overrides={
+          "cash_total": 200000,
+          "position_shares": 300,
+        },
+      )
+
+    assert new_run_id == "new-paper-run"
+    kwargs = run_strategy.await_args.kwargs
+    assert kwargs["mode"] == StrategyRunMode.PAPER
+    assert kwargs["instruments"] == ["688552.SH"]
+    assert kwargs["auto_start"] is False
+    assert kwargs["strategy_class"] is MockStrategy
+    assert kwargs["parameters"]["initial_capital"] == 200000
+    assert kwargs["parameters"]["cash_total"] == 200000
+    assert kwargs["parameters"]["position_shares"] == 300
+    paper_account = kwargs["parameters"]["_paper_account"]
+    assert paper_account["model"] == "isolated_snapshot"
+    assert paper_account["source_run_id"] == "source-run"
+    assert paper_account["created_at"]
 
   @pytest.mark.asyncio
   async def test_run_strategy_live_mode(self, strategy_manager):

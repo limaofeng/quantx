@@ -79,6 +79,31 @@ class StrategyManager:
       for schema_name, schema in COMMON_PARAMETER_SCHEMAS.items():
         self.parameter_manager.register_schema(schema_name, schema)
 
+  @staticmethod
+  def _coerce_positive_float(value: Any) -> Optional[float]:
+    """Return a positive float or None when the value is absent/invalid."""
+    if value is None:
+      return None
+    try:
+      parsed = float(value)
+    except (TypeError, ValueError):
+      return None
+    return parsed if parsed > 0 else None
+
+  def _resolve_initial_capital(
+    self,
+    parameters: Dict[str, Any],
+    fallback: Optional[float] = None,
+  ) -> float:
+    """Resolve starting cash from canonical and legacy parameter keys."""
+    params = dict(parameters or {})
+    for key in ("initial_capital", "initialCapital", "cash_total", "cashTotal"):
+      parsed = self._coerce_positive_float(params.get(key))
+      if parsed is not None:
+        return parsed
+    parsed_fallback = self._coerce_positive_float(fallback)
+    return parsed_fallback if parsed_fallback is not None else 1000000.0
+
   async def start(self):
     """启动策略管理器服务"""
     if self.running:
@@ -251,13 +276,15 @@ class StrategyManager:
     if mode == StrategyRunMode.BACKTEST:
       backtest_id = str(uuid.uuid4())
 
+    initial_capital = self._resolve_initial_capital(parameters)
+
     # 创建策略上下文
     context = StrategyContext(
       run_id=run_id,
       mode=mode,
       instruments=instruments,
       parameters=parameters,
-      initial_capital=parameters.get("initial_capital", 1000000.0),
+      initial_capital=initial_capital,
       backtest_start_time=backtest_start_time,
       backtest_end_time=backtest_end_time,
       backtest_id=backtest_id,
@@ -1204,74 +1231,79 @@ class StrategyManager:
         return False
 
   async def clone_strategy(
-      self, 
-      source_run_id: str, 
-      target_mode: StrategyRunMode, 
-      parameter_overrides: Optional[Dict[str, Any]] = None
+    self,
+    source_run_id: str,
+    target_mode: StrategyRunMode,
+    parameter_overrides: Optional[Dict[str, Any]] = None
   ) -> str:
-      """
-      克隆策略运行实例（例如：将回测克隆为模拟盘）
-      
-      Args:
-          source_run_id: 源运行实例ID
-          target_mode: 目标运行模式
-          parameter_overrides: 可选的参数覆盖
-          
-      Returns:
-          new_run_id: 新创建的运行实例ID
-      """
-      # 1. 获取源运行实例信息
-      async for db in get_async_db():
-          repo = StrategyRunRepository(db)
-          source_run = await repo.find_run_by_id(source_run_id)
-          if not source_run:
-              raise ValueError(f"未找到源策略运行实例: {source_run_id}")
-          
-          # 提取必要信息
-          strategy_id = source_run.strategy_id
-          # Deep copy parameters to avoid modifying correct dict
-          parameters = dict(source_run.parameters) if source_run.parameters else {}
-          if isinstance(parameters, str):
-              parameters = json.loads(parameters)
-              
-          if parameter_overrides:
-              parameters.update(parameter_overrides)
-              
-          instruments = list(source_run.instruments) if source_run.instruments else []
-          initial_capital = source_run.initial_capital
-          
-          # 获取策略类
-          try:
-              strategy_class = strategy_registry.get_strategy_class(
-                  source_run.strategy.class_name, source_run.strategy.file_path
-              )
-          except Exception as e:
-              raise ValueError(f"无法加载策略类: {e}")
-              
-          # 生成新名称
-          timestamp = datetime.now().strftime("%Y%m%d%H%M")
-          mode_suffix = "Paper" if target_mode == StrategyRunMode.PAPER else \
-                        "Live" if target_mode == StrategyRunMode.LIVE else "Backtest"
-          new_name = f"{source_run.name}-Clone-{mode_suffix}-{timestamp}"
-          
-          # 2. 调用 run_strategy 创建新实例
-          # 注意：我们需要跳出 async for db 循环来调用 self.run_strategy 
-          # (虽然 run_strategy 内部也会获取 db session，通常没问题，但为了保险起见提取数据后调用)
-          break
-      
-      # 创建新实例
-      # 对于实盘/模拟盘，通常不需要 backtest_start_time
-      return await self.run_strategy(
-          strategy_id=strategy_id,
-          strategy_class=strategy_class,
-          mode=target_mode,
-          instruments=instruments,
-          parameters=parameters,
-          name=new_name,
-          auto_start=False # 克隆后通常让用户手动启动，或者可以自动启动？
-                           # 需求说“转模拟盘”，通常意味着准备好环境。
-                           # 这里我们设置为 False，让用户在 UI 上确认后再启动比较安全
+    """
+    克隆策略运行实例（例如：将回测克隆为模拟盘）
+
+    Args:
+        source_run_id: 源运行实例ID
+        target_mode: 目标运行模式
+        parameter_overrides: 可选的参数覆盖
+
+    Returns:
+        new_run_id: 新创建的运行实例ID
+    """
+    # 1. 获取源运行实例信息
+    async for db in get_async_db():
+      repo = StrategyRunRepository(db)
+      source_run = await repo.find_run_by_id(source_run_id)
+      if not source_run:
+        raise ValueError(f"未找到源策略运行实例: {source_run_id}")
+
+      strategy_id = source_run.strategy_id
+      parameters = dict(source_run.parameters) if source_run.parameters else {}
+      if isinstance(parameters, str):
+        parameters = json.loads(parameters)
+
+      if parameter_overrides:
+        parameters.update(parameter_overrides)
+
+      instruments = list(source_run.instruments) if source_run.instruments else []
+
+      if target_mode == StrategyRunMode.PAPER:
+        initial_capital = self._resolve_initial_capital(
+          parameters,
+          fallback=source_run.initial_capital,
+        )
+        parameters["initial_capital"] = initial_capital
+        parameters["_paper_account"] = {
+          "model": "isolated_snapshot",
+          "source_run_id": source_run_id,
+          "created_at": time_utils.now().isoformat(),
+        }
+
+      try:
+        strategy_class = strategy_registry.get_strategy_class(
+          source_run.strategy.class_name, source_run.strategy.file_path
+        )
+      except Exception as e:
+        raise ValueError(f"无法加载策略类: {e}")
+
+      timestamp = time_utils.now().strftime("%Y%m%d%H%M")
+      mode_suffix = (
+        "Paper"
+        if target_mode == StrategyRunMode.PAPER
+        else "Live"
+        if target_mode == StrategyRunMode.LIVE
+        else "Backtest"
       )
+      new_name = f"{source_run.name}-Clone-{mode_suffix}-{timestamp}"
+      break
+
+    return await self.run_strategy(
+      strategy_id=strategy_id,
+      strategy_class=strategy_class,
+      mode=target_mode,
+      instruments=instruments,
+      parameters=parameters,
+      name=new_name,
+      auto_start=False,
+    )
+
   def _extract_supported_sync_periods(
     self, missing: Dict[str, Dict[str, Any]]
   ) -> Set[str]:
@@ -1447,6 +1479,7 @@ class StrategyManager:
         "start_time": time_utils.now(),
         "mode": runtime.context.mode.value,
         "instruments": runtime.context.instruments,
+        "initial_capital": runtime.context.initial_capital,
         "user_id": "system",
       }
 

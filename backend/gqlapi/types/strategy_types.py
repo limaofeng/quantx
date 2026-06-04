@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 import strawberry
 from strawberry.scalars import JSON
 
+from core.utils import time_utils
 from gqlapi.types.parameter_schema_types import ParameterSchema
 from models import StrategyStatus
 from models.enums import (
@@ -363,7 +364,7 @@ class StrategyDecision:
       _optional_datetime(input_summary.get("timestamp"))
       or _optional_datetime((trace.get("environment") or {}).get("timestamp"))
       or _optional_datetime(trace.get("timestamp"))
-      or datetime.now()
+      or time_utils.now()
     )
     return StrategyDecision(
       id=str(trace.get("id") or trace.get("trace_id") or trace.get("_timestamp") or ""),

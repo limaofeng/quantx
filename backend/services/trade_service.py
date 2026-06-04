@@ -3,7 +3,7 @@
 处理成交记录相关的业务逻辑
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from xtquant.xttype import XtTrade
@@ -130,7 +130,9 @@ class TradeService:
       order_id=xt_trade.order_id,
       order_sysid=xt_trade.order_sysid,
       order_type=xt_trade.order_type,
-      time=datetime.fromtimestamp(xt_trade.traded_time),
+      time=time_utils.to_shanghai(
+        datetime.fromtimestamp(xt_trade.traded_time, timezone.utc)
+      ),
       price=xt_trade.traded_price,
       volume=xt_trade.traded_volume,
       amount=xt_trade.traded_amount,

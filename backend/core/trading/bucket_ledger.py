@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional
 
 from core.brokers.base import OrderType
+from core.utils import time_utils
 
 
 CORE_BUCKET = "core"
@@ -358,7 +359,7 @@ class BucketLedger:
       "metadata": metadata,
       "reserved_legs": reserved_legs,
       "substitution_plan_id": plan.plan_id if plan else None,
-      "created_at": datetime.now().isoformat(),
+      "created_at": time_utils.now().isoformat(),
     }
     return True
 

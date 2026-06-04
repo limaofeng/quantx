@@ -513,7 +513,7 @@ class StrategyExecutor:
 
       # 根据模式创建 Broker 和 DataAdapter
       await self._setup_broker_and_data(runtime)
-      self._seed_backtest_broker_positions(runtime)
+      self._seed_simulated_broker_positions(runtime)
       runtime.performance_recorder = StrategyPerformanceRecorder(
         run_id=run_id,
         mode=runtime.context.mode,
@@ -605,11 +605,11 @@ class StrategyExecutor:
       },
     )
 
-  def _seed_backtest_broker_positions(self, runtime) -> None:
-    """Seed BacktestBroker with configured initial holdings."""
+  def _seed_simulated_broker_positions(self, runtime) -> None:
+    """Seed backtest/paper brokers with configured initial holdings."""
     if (
       not runtime
-      or runtime.context.mode != StrategyRunMode.BACKTEST
+      or runtime.context.mode not in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
       or not runtime.broker
       or not hasattr(runtime.broker, "positions")
       or not runtime.state_manager
@@ -652,7 +652,11 @@ class StrategyExecutor:
       seeded += 1
 
     if seeded:
-      self.logger.info(f"回测 Broker 初始持仓已注入: {seeded} 个标的")
+      self.logger.info(f"{runtime.context.mode.value} Broker 初始持仓已注入: {seeded} 个标的")
+
+  def _seed_backtest_broker_positions(self, runtime) -> None:
+    """Backward-compatible wrapper for tests and older callers."""
+    self._seed_simulated_broker_positions(runtime)
 
   async def stop(self, run_id: str) -> bool:
     """
@@ -967,7 +971,7 @@ class StrategyExecutor:
                 backtest_id=runtime.context.backtest_id,
                 status="COMPLETED",
                 metrics=metrics,
-                end_time=datetime.now(),
+                end_time=time_utils.now(),
               )
               await run_repo.update_run(
                 runtime.run_id,
@@ -975,7 +979,7 @@ class StrategyExecutor:
                   "status": StrategyRunStatus.COMPLETED,
                   "metrics": metrics,
                   "error_message": None,
-                  "stop_time": datetime.now(),
+                  "stop_time": time_utils.now(),
                 },
               )
               if backtest and final_grid_book_snapshot:
@@ -2861,6 +2865,34 @@ class StrategyExecutor:
       )
     return amount + commission
 
+  def _resolve_realtime_instruments(self, runtime: StrategyRuntime) -> List[str]:
+    """Resolve realtime subscriptions from context first, then legacy parameters."""
+    instruments = [
+      str(item or "").strip()
+      for item in list(getattr(runtime.context, "instruments", []) or [])
+      if str(item or "").strip()
+    ]
+    if instruments:
+      return instruments
+
+    params = dict(getattr(runtime.context, "parameters", {}) or {})
+    raw = (
+      params.get("instruments")
+      or params.get("stockCodes")
+      or params.get("stock_codes")
+      or params.get("instrument_code")
+      or params.get("instrumentCode")
+    )
+    if isinstance(raw, list):
+      candidates = raw
+    else:
+      candidates = str(raw or "").split(",")
+    return [
+      str(item or "").strip()
+      for item in candidates
+      if str(item or "").strip()
+    ]
+
   async def _run_realtime_loop(self, runtime: StrategyRuntime) -> None:
     """运行实时交易循环"""
     metrics = runtime.metrics
@@ -2868,7 +2900,7 @@ class StrategyExecutor:
     broker = runtime.broker
 
     # 订阅数据
-    instruments = runtime.context.parameters.get("instruments", [])
+    instruments = self._resolve_realtime_instruments(runtime)
     subscription_ids = []
 
     for instrument in instruments:

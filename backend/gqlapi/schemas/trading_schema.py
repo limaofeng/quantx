@@ -124,7 +124,7 @@ class TradingMutation:
       order_type = _parse_order_type(input.type)
       price_type = _parse_price_type(input.price_type)
       price = input.price or 0
-      service = TradingService()
+      service = TradingService(account_id=account_id)
       result = await service.place_order(
         stock_code=input.stock_code,
         order_type=order_type,

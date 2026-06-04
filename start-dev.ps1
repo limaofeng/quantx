@@ -5,6 +5,7 @@ param(
   [int]$StopTimeoutSeconds = 20,
   [int]$StartTimeoutSeconds = 90,
   [string]$CondaEnvName = "xtquant-demo",
+  [string]$PrefectWorkerPool = "quantx-pool",
   [string]$BackendPython = "",
   [switch]$StopOnly,
   [switch]$Hidden,
@@ -99,6 +100,138 @@ function Format-CommandLine {
   }
 
   return $compact.Substring(0, 180) + "..."
+}
+
+function Normalize-TextForMatch {
+  param([string]$Text)
+
+  if (-not $Text) {
+    return ""
+  }
+
+  return ($Text -replace "/", "\").ToLowerInvariant()
+}
+
+function Get-DecodedPowerShellCommand {
+  param([string]$CommandLine)
+
+  if (-not $CommandLine) {
+    return ""
+  }
+
+  if ($CommandLine -match "(?i)-encodedcommand\s+([A-Za-z0-9+/=]+)") {
+    try {
+      return [Text.Encoding]::Unicode.GetString(
+        [Convert]::FromBase64String($Matches[1])
+      )
+    } catch {
+      return ""
+    }
+  }
+
+  return ""
+}
+
+function Test-QuantXServiceProcess {
+  param($ProcessInfo)
+
+  if ($null -eq $ProcessInfo -or -not $ProcessInfo.CommandLine) {
+    return $false
+  }
+
+  if ($ProcessInfo.ProcessId -eq $PID) {
+    return $false
+  }
+
+  $commandLine = Normalize-TextForMatch -Text $ProcessInfo.CommandLine
+  $decodedCommand = Normalize-TextForMatch -Text (
+    Get-DecodedPowerShellCommand -CommandLine $ProcessInfo.CommandLine
+  )
+  $combinedCommand = "$commandLine`n$decodedCommand"
+
+  $backendDirText = Normalize-TextForMatch -Text $BackendDir
+  $frontendDirText = Normalize-TextForMatch -Text $FrontendDir
+  $backendRunnerText = Normalize-TextForMatch -Text $BackendRunner
+  $frontendRunnerText = Normalize-TextForMatch -Text $FrontendRunner
+  $condaEnvText = [regex]::Escape($CondaEnvName.ToLowerInvariant())
+  $prefectPoolText = [regex]::Escape($PrefectWorkerPool.ToLowerInvariant())
+
+  if (
+    $combinedCommand.Contains($backendRunnerText) -or
+    $combinedCommand.Contains($frontendRunnerText)
+  ) {
+    return $true
+  }
+
+  if (
+    $combinedCommand.Contains("quantx backend") -or
+    $combinedCommand.Contains("quantx frontend")
+  ) {
+    return $true
+  }
+
+  if (
+    $combinedCommand -match 'python(?:\.exe)?"?\s+main\.py(?:\s|$)' -or
+    (
+      $combinedCommand.Contains($backendDirText) -and
+      $combinedCommand.Contains("main.py") -and
+      $combinedCommand.Contains("python")
+    )
+  ) {
+    return $true
+  }
+
+  if (
+    $combinedCommand -match "prefect\s+worker\s+start\s+--pool\s+$prefectPoolText" -or
+    $combinedCommand -match "conda(?:\.exe)?\s+run\s+-n\s+$condaEnvText\s+python\s+-m\s+prefect\s+worker\s+start\s+--pool\s+$prefectPoolText"
+  ) {
+    return $true
+  }
+
+  if (
+    $combinedCommand.Contains("quantx_mcp") -or
+    $combinedCommand.Contains("quantx-mcp")
+  ) {
+    return $true
+  }
+
+  $frontendPorts = @($FrontendPort) + $LegacyFrontendPorts
+  foreach ($port in $frontendPorts | Sort-Object -Unique) {
+    if (
+      $combinedCommand -match "vite(?:\.js)?[^`n]*--port\s+$port(?:\s|$)" -or
+      $combinedCommand -match "npm-cli\.js[^`n]*run\s+dev[^`n]*--port\s+$port(?:\s|$)"
+    ) {
+      return $true
+    }
+  }
+
+  if (
+    $combinedCommand.Contains($frontendDirText) -and
+    (
+      $combinedCommand.Contains("vite") -or
+      $combinedCommand.Contains("esbuild") -or
+      $combinedCommand.Contains("npm-cli.js")
+    )
+  ) {
+    return $true
+  }
+
+  return $false
+}
+
+function Get-QuantXServiceProcessIds {
+  $matches = @()
+  $processes = @(
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+  )
+
+  foreach ($processInfo in $processes) {
+    if (Test-QuantXServiceProcess -ProcessInfo $processInfo) {
+      $matches += [int]$processInfo.ProcessId
+    }
+  }
+
+  @($matches | Where-Object { $_ -and $_ -ne $PID } | Sort-Object -Unique)
 }
 
 function Get-ProcessTreeIds {
@@ -245,6 +378,50 @@ function Wait-PortOpen {
   return $false
 }
 
+function Wait-HttpReady {
+  param(
+    [string]$Name,
+    [string]$Uri,
+    [int]$TimeoutSeconds,
+    [string]$Method = "GET",
+    [string]$Body = "",
+    [string]$ContentType = "application/json",
+    [int]$RequestTimeoutSeconds = 5
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    try {
+      if ($Method -eq "POST") {
+        $response = Invoke-WebRequest `
+          -UseBasicParsing `
+          -Uri $Uri `
+          -Method Post `
+          -ContentType $ContentType `
+          -Body $Body `
+          -TimeoutSec $RequestTimeoutSeconds
+      } else {
+        $response = Invoke-WebRequest `
+          -UseBasicParsing `
+          -Uri $Uri `
+          -TimeoutSec $RequestTimeoutSeconds
+      }
+
+      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+        return $true
+      }
+    } catch {
+      Start-Sleep -Seconds 1
+      continue
+    }
+
+    Start-Sleep -Seconds 1
+  } while ((Get-Date) -lt $deadline)
+
+  Write-Warn "$Name did not become ready at $Uri within $TimeoutSeconds seconds."
+  return $false
+}
+
 function Stop-ProcessRoots {
   param(
     [string]$Reason,
@@ -367,6 +544,19 @@ function Stop-DevWindowProcesses {
   Stop-ProcessRoots -Reason "'$TitlePrefix' dev window process tree" -RootProcessIds $windowPids
 }
 
+function Stop-QuantXServiceProcesses {
+  $serviceProcessIds = @(Get-QuantXServiceProcessIds)
+
+  if ($serviceProcessIds.Count -eq 0) {
+    Write-Ok "No untracked QuantX backend/frontend/Prefect/MCP service process found."
+    return
+  }
+
+  Stop-ProcessRoots `
+    -Reason "Untracked QuantX backend/frontend/Prefect/MCP service process tree" `
+    -RootProcessIds $serviceProcessIds
+}
+
 function Clear-Port {
   param([int]$Port)
 
@@ -453,10 +643,6 @@ function Resolve-BackendPython {
     $candidates += $env:QUANTX_PYTHON_EXE
   }
 
-  if ($env:CONDA_PREFIX) {
-    $candidates += (Join-Path $env:CONDA_PREFIX "python.exe")
-  }
-
   if ($env:CONDA_EXE) {
     $condaScriptsDir = Split-Path -Parent $env:CONDA_EXE
     $condaRootDir = Split-Path -Parent $condaScriptsDir
@@ -466,6 +652,13 @@ function Resolve-BackendPython {
   if ($env:USERPROFILE) {
     $candidates += (Join-Path $env:USERPROFILE "miniconda3\envs\$CondaEnvName\python.exe")
     $candidates += (Join-Path $env:USERPROFILE "anaconda3\envs\$CondaEnvName\python.exe")
+  }
+
+  if (
+    $env:CONDA_PREFIX -and
+    (Split-Path -Leaf $env:CONDA_PREFIX) -eq $CondaEnvName
+  ) {
+    $candidates += (Join-Path $env:CONDA_PREFIX "python.exe")
   }
 
   foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
@@ -501,16 +694,34 @@ function Resolve-CondaActivateBat {
 
 function Write-DevRunners {
   param(
-    [string]$CondaActivateBat
+    [string]$CondaActivateBat,
+    [string]$ResolvedBackendPythonPath
   )
+
+  $resolvedCondaPrefixPath = Split-Path -Parent $ResolvedBackendPythonPath
+  $resolvedCondaScriptsPath = Join-Path $resolvedCondaPrefixPath "Scripts"
+  $resolvedCondaExePath = $env:CONDA_EXE
+  if (-not $resolvedCondaExePath -or -not (Test-Path -LiteralPath $resolvedCondaExePath)) {
+    $condaEnvsDir = Split-Path -Parent $resolvedCondaPrefixPath
+    $condaRootDir = Split-Path -Parent $condaEnvsDir
+    $condaExeCandidate = Join-Path $condaRootDir "Scripts\conda.exe"
+    if (Test-Path -LiteralPath $condaExeCandidate) {
+      $resolvedCondaExePath = (Resolve-Path -LiteralPath $condaExeCandidate).Path
+    }
+  }
 
   $backendRunnerContent = @(
     "@echo off",
     "set ENV=development",
     "set QUANTX_DEV_SERVICE=backend",
+    "set CONDA_DEFAULT_ENV=$CondaEnvName",
+    "set CONDA_ENV_NAME=$CondaEnvName",
+    "set CONDA_PREFIX=$resolvedCondaPrefixPath",
+    "set CONDA_EXE=$resolvedCondaExePath",
+    "set QUANTX_PYTHON_EXE=$ResolvedBackendPythonPath",
+    "set PATH=$resolvedCondaPrefixPath;$resolvedCondaScriptsPath;%PATH%",
     "cd /d ""$BackendDir""",
-    "call ""$CondaActivateBat"" $CondaEnvName",
-    "python main.py"
+    """$ResolvedBackendPythonPath"" main.py"
   )
 
   $frontendRunnerContent = @(
@@ -538,7 +749,9 @@ Write-Info "Conda activate: $ResolvedCondaActivateBat"
 
 if (-not $DryRun) {
   New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
-  Write-DevRunners -CondaActivateBat $ResolvedCondaActivateBat
+  Write-DevRunners `
+    -CondaActivateBat $ResolvedCondaActivateBat `
+    -ResolvedBackendPythonPath $ResolvedBackendPython
 }
 
 Write-Info "Step 1: stop previously tracked QuantX dev processes."
@@ -547,7 +760,10 @@ Stop-PidFileProcess -Name "frontend" -PidFile $FrontendPidFile
 Stop-DevWindowProcesses -TitlePrefix "QuantX Backend"
 Stop-DevWindowProcesses -TitlePrefix "QuantX Frontend"
 
-Write-Info "Step 2: check and release occupied ports."
+Write-Info "Step 2: stop untracked QuantX backend/frontend/Prefect/MCP service processes."
+Stop-QuantXServiceProcesses
+
+Write-Info "Step 3: check and release occupied ports."
 $portsToRelease = @($BackendPort, $FrontendPort) + $LegacyFrontendPorts
 foreach ($port in $portsToRelease | Sort-Object -Unique) {
   Clear-Port -Port $port
@@ -565,7 +781,7 @@ if ($StopOnly) {
   exit 0
 }
 
-Write-Info "Step 3: start backend and frontend."
+Write-Info "Step 4: start backend and frontend."
 Start-DevWindow `
   -Title "QuantX Backend :$BackendPort" `
   -WorkingDirectory $BackendDir `
@@ -582,6 +798,13 @@ if (-not $DryRun) {
   Write-Info "Waiting for backend port $BackendPort..."
   if (Wait-PortOpen -Port $BackendPort -TimeoutSeconds $StartTimeoutSeconds) {
     Write-Ok "Backend is listening on http://localhost:$BackendPort"
+    if (Wait-HttpReady -Name "Backend health" -Uri "http://127.0.0.1:$BackendPort/health" -TimeoutSeconds 20) {
+      Write-Ok "Backend health check is responding."
+    }
+    $graphqlProbeBody = '{ "query": "query { __typename }" }'
+    if (Wait-HttpReady -Name "Backend GraphQL" -Uri "http://127.0.0.1:$BackendPort/graphql" -TimeoutSeconds 20 -Method "POST" -Body $graphqlProbeBody) {
+      Write-Ok "Backend GraphQL is responding."
+    }
   } else {
     Write-Warn "Backend port $BackendPort did not open within $StartTimeoutSeconds seconds."
   }

@@ -4,7 +4,7 @@ XTQuant 工具函数
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Union
 
 import numpy as np
@@ -88,7 +88,9 @@ def format_timestamp(timestamp: Union[str, int, float, datetime]) -> str:
   elif isinstance(timestamp, (int, float)):
     if timestamp > 1e10:  # 毫秒时间戳
       timestamp = timestamp / 1000
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    return time_utils.to_shanghai(
+      datetime.fromtimestamp(timestamp, timezone.utc)
+    ).strftime("%Y-%m-%d %H:%M:%S")
   else:
     return str(timestamp)
 

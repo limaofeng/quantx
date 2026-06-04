@@ -461,7 +461,15 @@ class XTTradingManager:
     """关闭交易连接"""
     try:
       if getattr(self, "xttrader", None):
-        self.xttrader.disconnect()
+        close_method = getattr(self.xttrader, "disconnect", None)
+        if not callable(close_method):
+          close_method = getattr(self.xttrader, "stop", None)
+
+        if callable(close_method):
+          close_method()
+        else:
+          logger.warning("XTQuant交易对象缺少可用的关闭方法")
+
         self.is_connected = False
         self.session_id = None
         logger.info("XTQuant交易连接已关闭")

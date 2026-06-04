@@ -6,7 +6,6 @@
 2. StrategyRunPositionRepository: 负责独立持仓表的操作
 """
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, update
@@ -14,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.relational_base import BaseRepository
+from core.utils import time_utils
 from models.strategy_run_state import StrategyRunPosition, StrategyRunState
 
 
@@ -47,7 +47,7 @@ class StrategyRunStateRepository(BaseRepository[StrategyRunState]):
             是否成功
         """
         custom_state = custom_state or {}
-        now = datetime.now()
+        now = time_utils.now()
 
         # 获取当前版本
         existing = await self.get_state(run_id)

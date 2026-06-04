@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional, List
 
 from mcp.types import Tool
+from core.utils import time_utils
 
 logger = logging.getLogger(__name__)
 
@@ -324,7 +325,7 @@ class MarketDataTools:
                 "status": "success",
                 "symbol": symbol,
                 "data": data,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": time_utils.now().isoformat()
             }
             
         except Exception as e:
@@ -418,7 +419,7 @@ class MarketDataTools:
 
             # 计算开始时间（根据周期估算回溯时间）
             # 默认往前推足够长的时间以获取足够的K线数据
-            start_time = datetime.now() - timedelta(days=365)  # 默认获取最近1年的数据
+            start_time = time_utils.now() - timedelta(days=365)  # 默认获取最近1年的数据
 
             # 获取最近的 K 线数据（使用 desc 排序，获取最新的 count 条）
             klines = await market_data_service.get_klines(

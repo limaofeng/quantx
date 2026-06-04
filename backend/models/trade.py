@@ -2,12 +2,13 @@
 数据库模型 - 成交相关数据模型
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 
 from database.relational_base import Base, TimestampMixin
+from core.utils import time_utils
 from models.enums import AccountType
 
 
@@ -97,7 +98,9 @@ class Trade(Base, TimestampMixin):
   @staticmethod
   def from_dict(data: dict) -> "Trade":
     traded_time = (
-      datetime.fromtimestamp(data.get("traded_time"))
+      time_utils.to_shanghai(
+        datetime.fromtimestamp(data.get("traded_time"), timezone.utc)
+      )
       if isinstance(data.get("traded_time"), (int, float))
       else data.get("traded_time")
     )

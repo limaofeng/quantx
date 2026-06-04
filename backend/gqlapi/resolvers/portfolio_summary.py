@@ -1,13 +1,12 @@
-from typing import Optional
+from typing import List, Optional
 
-from miniqmt.manager_registry import XTTradingManagerRegistry
-from models.position import Position as PositionModel
 from services.daily_asset_snapshot_service import DailyAssetSnapshotService
 
-from ..types.portfolio_types import PortfolioSummary, Position
 from core.utils import time_utils
 
-registry = XTTradingManagerRegistry()
+from ..types.portfolio_types import Account, PortfolioSummary, Position
+from .account import AccountResolver
+from .positions import PositionResolver
 
 
 class PortfolioSummaryResolver:
@@ -19,21 +18,11 @@ class PortfolioSummaryResolver:
       if account_id is None:
         account_id = "300000013250"  # 默认账户
 
-      # 获取 trading manager
-      trading_manager = registry.get_manager(account_id)
-
-      if not trading_manager:
-        raise Exception(f"无法获取账户 {account_id} 的交易管理器")
-
-      # 获取账户信息
-      account_info = trading_manager.get_account_info()
-      if not account_info:
+      account_info = await AccountResolver.get_account_async(account_id)
+      if account_info is None:
         raise Exception(f"无法获取账户 {account_id} 的信息")
 
-      # 获取持仓信息
-      positions = trading_manager.get_positions()
-      if not positions:
-        positions = []
+      positions = await PositionResolver.get_positions()
 
       # 计算汇总数据
       summary_data = PortfolioSummaryResolver._calculate_summary(
@@ -77,20 +66,25 @@ class PortfolioSummaryResolver:
       )
 
   @staticmethod
-  def _calculate_summary(account_id: str, account_info: dict, positions: list) -> dict:
+  def _calculate_summary(
+    account_id: str, account_info: Account, positions: List[Position]
+  ) -> dict:
     """计算持仓汇总数据"""
 
     # 基础资产信息
-    total_asset = account_info.get("total_asset", 0)
-    cash = account_info.get("cash", 0)
-    total_market_value = account_info.get("market_value", 0)
+    total_asset = account_info.total_asset or 0
+    cash = account_info.cash or 0
+    position_market_value = sum(
+      float(position.market_value or 0) for position in positions
+    )
+    total_market_value = account_info.market_value or position_market_value
 
     # 计算现金占比
     cash_ratio = (cash / total_asset * 100) if total_asset > 0 else 100.0
 
     # 总盈亏
-    total_profit_loss = account_info.get("profit_loss", 0)
-    total_profit_loss_percent = account_info.get("profit_loss_ratio", 0) * 100
+    total_profit_loss = account_info.total_profit_loss or 0
+    total_profit_loss_percent = account_info.profit_loss_percent or 0
 
     # 持仓统计
     position_count = len(positions)
@@ -101,42 +95,20 @@ class PortfolioSummaryResolver:
     position_objects = []
 
     for position in positions:
-      # 获取实时价格（这里需要实现获取实时价格的逻辑）
-      last_price = position.get("last_price", 0)
-      avg_price = position.get("avg_price", 0)
-      volume = position.get("volume", 0)
-      market_value = position.get("market_value", 0)
+      market_value = float(position.market_value or 0)
+      profit_loss = position.profit_loss
 
-      # 计算盈亏
-      profit_loss = 0
-
-      if last_price > 0 and avg_price > 0 and volume > 0:
-        profit_loss = (last_price - avg_price) * volume
-
+      if profit_loss is not None:
         if profit_loss > 0:
           profit_position_count += 1
         elif profit_loss < 0:
           loss_position_count += 1
 
-      # 添加到重要持仓列表
-      if market_value > 0:  # 只包含有市值的持仓
-        market_value_percent = (
+      if market_value > 0:
+        position.market_value_percent = (
           (market_value / total_market_value * 100) if total_market_value > 0 else 0
         )
-
-        # 创建 PositionModel 对象用于转换
-        position_model = PositionModel.from_dict(position)
-
-        # 转换为 GraphQL Position 对象，包含市值占比
-        position_obj = Position.from_model(
-          position_model,
-          last_price=last_price,
-          market_value_percent=market_value_percent,
-        )
-
-        position_objects.append(
-          {"position": position_obj, "market_value": market_value}
-        )
+        position_objects.append({"position": position, "market_value": market_value})
 
     # 按市值排序，取前10大持仓
     position_objects.sort(key=lambda x: x["market_value"], reverse=True)
@@ -144,7 +116,7 @@ class PortfolioSummaryResolver:
 
     return {
       "account_id": account_id,
-      "account_name": f"账户{account_id}",
+      "account_name": account_info.account_name,
       "total_asset": round(total_asset, 2),
       "total_market_value": round(total_market_value, 2),
       "cash": round(cash, 2),
@@ -157,5 +129,5 @@ class PortfolioSummaryResolver:
       "profit_position_count": profit_position_count,
       "loss_position_count": loss_position_count,
       "top_holdings": top_holdings,
-      "update_time": time_utils.now(),
+      "update_time": account_info.update_time or time_utils.now(),
     }

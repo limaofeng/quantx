@@ -62,7 +62,7 @@ pytest tests\integration\miniqmt\test_miniqmt_data.py -v -s
 
 测试运行时会在以下位置生成日志文件：
 ```
-tests/integration/miniqmt/test_miniqmt_data.log
+.quantx-dev/logs/tests/integration/miniqmt/test_miniqmt_data.log
 ```
 
 日志包含：

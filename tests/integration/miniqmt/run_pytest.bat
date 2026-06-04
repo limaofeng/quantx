@@ -47,5 +47,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo 查看日志文件: tests\integration\miniqmt\test_miniqmt_data.log
+echo 查看日志文件: .quantx-dev\logs\tests\integration\miniqmt\test_miniqmt_data.log
 pause

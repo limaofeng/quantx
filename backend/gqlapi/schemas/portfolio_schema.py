@@ -24,12 +24,12 @@ class PortfolioQuery:
     return await PositionResolver.get_position(stock_code)
 
   @strawberry.field(description="获取账户信息")
-  def account(self, account_id: str) -> Optional[Account]:
-    return AccountResolver.get_account(account_id)
+  async def account(self, account_id: str) -> Optional[Account]:
+    return await AccountResolver.get_account_async(account_id)
 
   @strawberry.field(description="获取当前账户信息")
-  def current_account(self) -> Account:
-    return AccountResolver.get_current_account()
+  async def current_account(self) -> Optional[Account]:
+    return await AccountResolver.get_current_account_async()
 
   @strawberry.field(description="获取持仓表现汇总")
   async def portfolio_summary(

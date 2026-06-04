@@ -2046,10 +2046,18 @@ class StrategyResolver:
       return OperationResult(success=False, message=str(e))
 
   @staticmethod
-  async def clone_strategy(run_id: str, target_mode: StrategyRunMode) -> OperationResult:
+  async def clone_strategy(
+    run_id: str,
+    target_mode: StrategyRunMode,
+    parameter_overrides: Optional[Dict[str, Any]] = None,
+  ) -> OperationResult:
     """克隆策略运行"""
     try:
-      new_run_id = await strategy_manager.clone_strategy(run_id, target_mode)
+      new_run_id = await strategy_manager.clone_strategy(
+        run_id,
+        target_mode,
+        parameter_overrides=parameter_overrides,
+      )
       if new_run_id:
         # 成功时 message 返回新的 run_id
         return OperationResult(success=True, message=str(new_run_id))

@@ -4,13 +4,19 @@
 import logging
 import pytest
 from datetime import datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+TEST_LOG_DIR = PROJECT_ROOT / ".quantx-dev" / "logs" / "tests" / "integration" / "miniqmt"
+TEST_LOG_DIR.mkdir(parents=True, exist_ok=True)
+TEST_LOG_FILE = TEST_LOG_DIR / "test_miniqmt_data.log"
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('tests/integration/miniqmt/test_miniqmt_data.log'),
+        logging.FileHandler(TEST_LOG_FILE, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )

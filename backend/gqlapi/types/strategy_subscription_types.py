@@ -12,6 +12,8 @@ from typing import List, Optional
 
 import strawberry
 
+from core.utils import time_utils
+
 
 @strawberry.enum(description="策略市场数据类型")
 class StrategyDataType(Enum):
@@ -160,7 +162,7 @@ class StrategyLogEntry:
         raw_timestamp = (
             record.get("timestamp")
             or record.get("_timestamp")
-            or datetime.now().isoformat()
+            or time_utils.now().isoformat()
         )
         if isinstance(raw_timestamp, datetime):
             timestamp = raw_timestamp
@@ -170,7 +172,7 @@ class StrategyLogEntry:
                     str(raw_timestamp).replace("Z", "+00:00")
                 )
             except ValueError:
-                timestamp = datetime.now()
+                timestamp = time_utils.now()
 
         return cls(
             run_id=str(record.get("run_id") or run_id),

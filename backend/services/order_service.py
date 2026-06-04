@@ -3,7 +3,7 @@
 处理订单相关的业务逻辑
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from xtquant.xttype import XtOrder
@@ -15,6 +15,7 @@ from miniqmt.utils.helpers import get_stock_name
 from models import Order
 from models.enums import AccountType, OrderPriceType, OrderStatus, OrderType
 from repositories.order_repository import OrderRepository
+from core.utils import time_utils
 
 trading_registry = XTTradingManagerRegistry()
 
@@ -79,7 +80,9 @@ class OrderService:
       account_type=AccountType.from_int(xt_order.account_type),
       stock_code=xt_order.stock_code,
       sysid=xt_order.order_sysid,
-      time=datetime.fromtimestamp(xt_order.order_time),
+      time=time_utils.to_shanghai(
+        datetime.fromtimestamp(xt_order.order_time, timezone.utc)
+      ),
       type=OrderType(xt_order.order_type),
       volume=xt_order.order_volume,
       price_type=OrderPriceType(xt_order.price_type),

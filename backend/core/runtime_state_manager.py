@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
+from core.utils import time_utils
+
 try:
     import aiofiles
 except ModuleNotFoundError:  # pragma: no cover - lightweight test environments
@@ -272,7 +274,7 @@ class RuntimeStateManager:
                 StrategyRunStateRepository,
             )
 
-            self._state["last_updated"] = datetime.now().isoformat()
+            self._state["last_updated"] = time_utils.now().isoformat()
             custom_state = dict(self._state.get("custom", {}) or {})
             custom_state[BUCKET_LEDGER_CUSTOM_STATE_KEY] = self.get_bucket_ledger_snapshot()
             
@@ -344,7 +346,7 @@ class RuntimeStateManager:
             return
 
         entry = {
-            "timestamp": (timestamp or datetime.now()).isoformat(),
+            "timestamp": (timestamp or time_utils.now()).isoformat(),
             "level": level,
             "message": message,
             "source": source,
@@ -929,7 +931,7 @@ class RuntimeStateManager:
         trace_dict = trace.to_dict() if hasattr(trace, "to_dict") else dict(trace or {})
         decided_at = getattr(trace, "timestamp", None)
         if decided_at is None:
-            decided_at = datetime.now()
+            decided_at = time_utils.now()
         input_summary = dict(getattr(trace, "input_summary", {}) or trace_dict.get("input_summary") or {})
         output_summary = dict(getattr(trace, "output_summary", {}) or trace_dict.get("output_summary") or {})
         state_patch = dict(getattr(trace, "state_patch", {}) or trace_dict.get("state_patch") or {})

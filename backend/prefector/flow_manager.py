@@ -5,7 +5,7 @@ Prefect流程管理器 - 用于GraphQL接口的Prefect操作
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from prefect import get_client
@@ -117,7 +117,7 @@ class ScheduledFlow:
     self.cron_expression = cron_expression
     self.is_active = is_active
     self.next_run = next_run
-    self.created_at = created_at or datetime.now(timezone.utc)
+    self.created_at = created_at or time_utils.now()
 
 
 class PrefectManager:
@@ -476,7 +476,7 @@ class PrefectManager:
         cron_expression=cron_expression,
         is_active=True,
         next_run=None,  # 需要根据cron表达式计算
-        created_at=datetime.now(timezone.utc),
+        created_at=time_utils.now(),
       )
 
       return scheduled_flow

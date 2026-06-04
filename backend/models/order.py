@@ -2,13 +2,14 @@
 数据库模型 - 订单相关数据模型
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from sqlalchemy import Column, DateTime, Enum, Float, Integer, String
 from sqlalchemy.orm import relationship
 
 from database.relational_base import Base, TimestampMixin
+from core.utils import time_utils
 from models.enums import AccountType, OrderPriceType, OrderStatus, OrderType
 
 
@@ -129,7 +130,9 @@ class Order(Base, TimestampMixin):
 
     order_id = data.get("order_id")
     order_time = (
-      datetime.fromtimestamp(data.get("order_time"))
+      time_utils.to_shanghai(
+        datetime.fromtimestamp(data.get("order_time"), timezone.utc)
+      )
       if isinstance(data.get("order_time"), (int, float))
       else data.get("order_time")
     )

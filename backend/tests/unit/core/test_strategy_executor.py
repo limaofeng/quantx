@@ -940,6 +940,151 @@ class TestStrategyExecutor:
             mock_get_adapter.assert_called_with(mode)
 
   @pytest.mark.asyncio
+  async def test_paper_setup_uses_simulator_broker_not_live(
+    self,
+    strategy_executor: StrategyExecutor,
+  ):
+    """PAPER 模式只应创建 SimulatorBroker，不触发实盘 Broker。"""
+    context = StrategyContext(
+      run_id="paper-run",
+      mode=StrategyRunMode.PAPER,
+      instruments=["688552.SH"],
+      parameters={},
+      initial_capital=250000.0,
+    )
+    runtime = StrategyRuntime(
+      run_id="paper-run",
+      name="Paper Run",
+      strategy_id=1,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+
+    with (
+      patch("core.strategy_executor.LiveBroker") as live_broker,
+      patch("core.strategy_executor.SimulatorBroker") as simulator_broker,
+      patch("core.strategy_executor.adapter_manager.get_adapter_for_mode") as get_adapter,
+    ):
+      broker = AsyncMock()
+      broker.connect = AsyncMock(return_value=True)
+      broker.subscribe_order_updates = MagicMock()
+      broker.subscribe_trade_updates = MagicMock()
+      simulator_broker.return_value = broker
+
+      adapter = AsyncMock()
+      adapter.connect = AsyncMock(return_value=True)
+      get_adapter.return_value = adapter
+
+      await strategy_executor._setup_broker_and_data(runtime)
+
+    simulator_broker.assert_called_once_with(
+      account_id="paper-run",
+      initial_capital=250000.0,
+    )
+    live_broker.assert_not_called()
+
+  @pytest.mark.asyncio
+  async def test_paper_broker_seeds_initial_holdings(
+    self,
+    strategy_executor: StrategyExecutor,
+  ):
+    """模拟盘 broker 应从策略参数注入初始虚拟持仓。"""
+    run_id = "paper-seed-run"
+    context = StrategyContext(
+      run_id=run_id,
+      mode=StrategyRunMode.PAPER,
+      instruments=["688552.SH"],
+      parameters={
+        "instrument_code": "688552.SH",
+        "position_shares": 500,
+        "locked_core_shares": 100,
+        "core_shares": 200,
+        "swing_shares": 200,
+        "avg_cost": 40.0,
+        "base_price": 42.0,
+      },
+      initial_capital=100000.0,
+    )
+    runtime = strategy_executor.create(
+      run_id=run_id,
+      strategy_id=2,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+
+    with (
+      patch("core.strategy_executor.adapter_manager.get_adapter_for_mode") as get_adapter,
+      patch.object(
+        strategy_executor,
+        "_run_strategy_loop",
+        side_effect=keep_running_loop,
+      ),
+    ):
+      adapter = AsyncMock()
+      adapter.connect = AsyncMock(return_value=True)
+      get_adapter.return_value = adapter
+
+      success = await strategy_executor.start(run_id)
+
+    assert success is True
+    assert runtime.broker is not None
+    position = runtime.broker.positions["688552.SH"]
+    assert position.long_volume == 500
+    assert position.available_volume == 500
+    assert position.long_avg_price == 40.0
+    assert position.last_price == 42.0
+    account = await runtime.broker.get_account()
+    assert account.cash == 100000.0
+    assert account.total_asset == 121000.0
+
+  @pytest.mark.asyncio
+  async def test_realtime_loop_subscribes_context_instruments(
+    self,
+    strategy_executor: StrategyExecutor,
+  ):
+    """实时模式订阅应优先使用 context.instruments。"""
+    context = StrategyContext(
+      run_id="paper-context-instrument",
+      mode=StrategyRunMode.PAPER,
+      instruments=["688552.SH"],
+      parameters={},
+      initial_capital=100000.0,
+    )
+    adapter = AsyncMock()
+    adapter.subscribe_kline = AsyncMock(return_value="sub-001")
+    adapter.unsubscribe = AsyncMock(return_value=True)
+    broker = AsyncMock()
+    broker.get_position = AsyncMock(return_value={})
+    broker.get_account = AsyncMock(
+      return_value=SimpleNamespace(
+        cash=100000.0,
+        total_asset=100000.0,
+        frozen_cash=0.0,
+        market_value=0.0,
+        total_pnl=0.0,
+        daily_pnl=0.0,
+      )
+    )
+    runtime = SimpleNamespace(
+      run_id="paper-context-instrument",
+      status=ExecutionStatus.RUNNING,
+      context=context,
+      data_adapter=adapter,
+      broker=broker,
+      metrics=SimpleNamespace(last_heartbeat=None),
+    )
+
+    async def stop_after_heartbeat(_seconds):
+      runtime.status = ExecutionStatus.STOPPED
+
+    with patch("core.strategy_executor.asyncio.sleep", side_effect=stop_after_heartbeat):
+      await strategy_executor._run_realtime_loop(runtime)
+
+    adapter.subscribe_kline.assert_awaited_once()
+    assert adapter.subscribe_kline.await_args.kwargs["instrument_code"] == "688552.SH"
+    adapter.unsubscribe.assert_awaited_once_with("sub-001")
+
+  @pytest.mark.asyncio
   async def test_stop_all_runs(self, strategy_executor):
     """测试停止所有运行"""
     # Mock 数据适配器

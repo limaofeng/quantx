@@ -184,12 +184,15 @@ class XTTradingManagerRegistry:
           cls._instance._connection_timeout = 30.0
     return cls._instance
 
-  def get_manager(self, account_id: str) -> XTTradingManager:
+  def get_manager(
+    self, account_id: str, reconnect: bool = True
+  ) -> XTTradingManager:
     """
     获取或创建交易管理器实例
 
     Args:
         account_id: 账户ID
+        reconnect: 是否在已有管理器断开时主动重连
 
     Returns:
         XTTradingManager: 交易管理器实例
@@ -202,8 +205,9 @@ class XTTradingManagerRegistry:
         self._managers[account_id] = mgr
         return mgr
 
-    # 健康检查和重连逻辑
-    if not self._is_manager_healthy(mgr):
+    # 健康检查和重连逻辑。高频只读接口可选择跳过重连，避免在交易端
+    # 不可用时把 GraphQL 请求线程池堆满。
+    if reconnect and not self._is_manager_healthy(mgr):
       self._reconnect_manager(account_id, mgr)
 
     return mgr

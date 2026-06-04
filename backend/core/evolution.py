@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from core.utils import time_utils
+
 
 @dataclass(frozen=True)
 class EvolvableParameter:
@@ -253,7 +255,7 @@ class EvolvableStrategy:
         hard_violations[f"{window.name}.data_quality"] = metrics.get("data_quality")
     aggregate.update(score_metrics)
     result = self.evaluate_result(candidate, aggregate, hard_rule_violations=hard_violations)
-    result.metrics.setdefault("evaluated_at", datetime.now().isoformat())
+    result.metrics.setdefault("evaluated_at", time_utils.now().isoformat())
     return result
 
   def champion_challenger_payload(

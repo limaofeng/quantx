@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.utils import time_utils
+
 
 GRID_BOOK_CUSTOM_STATE_KEY = "grid_book_snapshot"
 GRID_BOOK_MODEL_VERSION = 2
@@ -29,7 +31,7 @@ LOT_STATUSES = {"OPEN", "RESERVED", "CLOSED", "CANCELLED"}
 
 
 def now_iso() -> str:
-  return datetime.now().isoformat()
+  return time_utils.now().isoformat()
 
 
 def _value(data: Dict[str, Any], *keys: str, default: Any = None) -> Any:

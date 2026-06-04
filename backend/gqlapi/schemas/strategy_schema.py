@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 
 import strawberry
+from strawberry.scalars import JSON
 
 from ..resolvers.strategies import StrategyResolver
 from ..types import (
@@ -230,9 +231,16 @@ class StrategyMutation:
 
   @strawberry.field(description="克隆策略运行(转模拟盘/实盘)")
   def clone_strategy(
-    self, run_id: str, target_mode: StrategyRunMode
+    self,
+    run_id: str,
+    target_mode: StrategyRunMode,
+    parameter_overrides: Optional[JSON] = None,
   ) -> OperationResult:
-    return StrategyResolver.clone_strategy(run_id, target_mode)
+    return StrategyResolver.clone_strategy(
+      run_id,
+      target_mode,
+      parameter_overrides=parameter_overrides,
+    )
 
   @strawberry.field(description="创建策略实例")
   async def create_strategy_instance(

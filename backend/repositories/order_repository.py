@@ -109,13 +109,13 @@ class OrderRepository(BaseRepository[Order]):
 
   async def complete_order(self, order_id: int, execute_time=None) -> bool:
     """完成订单"""
-    from datetime import datetime
+    from core.utils import time_utils
 
     update_data = {"status": "COMPLETED"}
     if execute_time:
       update_data["execute_time"] = execute_time
     else:
-      update_data["execute_time"] = datetime.utcnow()
+      update_data["execute_time"] = time_utils.now()
 
     return await self.update(order_id, update_data) is not None
 

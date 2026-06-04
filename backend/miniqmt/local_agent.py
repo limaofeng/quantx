@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from core.utils import time_utils
+
 
 class LocalAgentStatus(str, Enum):
   READY = "READY"
@@ -135,8 +137,8 @@ class MiniQmtLocalAgent:
     current = self.full_snapshot()
     previous = dict(previous_snapshot or self.last_full_snapshot or {})
     report = DeltaReport(
-      report_id=f"delta-{int(datetime.now().timestamp() * 1000)}",
-      generated_at=datetime.now(),
+      report_id=f"delta-{int(time_utils.now_aware().timestamp() * 1000)}",
+      generated_at=time_utils.now(),
       order_delta=_diff_list(previous.get("orders", []), current.get("orders", []), "order_id"),
       trade_delta=_diff_list(previous.get("trades", []), current.get("trades", []), "trade_id"),
       position_delta=_diff_list(
@@ -154,8 +156,8 @@ class MiniQmtLocalAgent:
   ) -> DeltaReport:
     actual = actual_snapshot or self.full_snapshot()
     report = DeltaReport(
-      report_id=f"reconcile-{int(datetime.now().timestamp() * 1000)}",
-      generated_at=datetime.now(),
+      report_id=f"reconcile-{int(time_utils.now_aware().timestamp() * 1000)}",
+      generated_at=time_utils.now(),
       order_delta=_diff_list(expected_snapshot.get("orders", []), actual.get("orders", []), "order_id"),
       trade_delta=_diff_list(expected_snapshot.get("trades", []), actual.get("trades", []), "trade_id"),
       position_delta=_diff_list(
@@ -189,7 +191,7 @@ class MiniQmtLocalAgent:
   def should_kill_switch(self, now: Optional[datetime] = None) -> bool:
     if self.last_report_time is None:
       return False
-    now = now or datetime.now()
+    now = now or time_utils.now()
     return now - self.last_report_time > timedelta(seconds=self.max_report_lag_seconds)
 
 

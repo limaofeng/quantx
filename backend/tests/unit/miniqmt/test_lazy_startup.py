@@ -20,6 +20,27 @@ def test_global_xt_data_manager_is_lazy(monkeypatch):
   assert data_manager_module.xt_data_manager._manager is None
 
 
+def test_subscribe_quote_passes_scalar_stock_code_to_xtquant(monkeypatch):
+  from miniqmt.data import data_manager as data_manager_module
+
+  calls = []
+
+  class FakeXTData:
+    def subscribe_quote2(self, stock_code, **kwargs):
+      calls.append((stock_code, kwargs))
+      return 42
+
+  monkeypatch.setattr(data_manager_module, "xtdata", FakeXTData())
+
+  manager = object.__new__(data_manager_module.XTDataManager)
+  sub_id = manager.subscribe_quote(["600900.SH"], period="1m", count=-1)
+
+  assert sub_id == 42
+  assert calls[0][0] == "600900.SH"
+  assert calls[0][1]["period"] == "1m"
+  assert calls[0][1]["count"] == -1
+
+
 def test_unified_subscription_manager_defers_data_manager():
   from core.data.unified_subscription_manager import UnifiedDataSubscriptionManager
 
@@ -41,6 +62,31 @@ def test_unified_subscription_manager_defers_data_manager():
 
   assert manager.data_manager is not None
   assert registry.called is True
+
+
+def test_unified_subscription_manager_dispatches_sync_callback_to_main_loop():
+  from core.data.unified_subscription_manager import UnifiedDataSubscriptionManager
+
+  async def run_case():
+    manager = UnifiedDataSubscriptionManager()
+    manager.set_main_loop(asyncio.get_running_loop())
+    called = asyncio.Event()
+
+    async def mark_called():
+      called.set()
+
+    def callback(_data):
+      asyncio.create_task(mark_called())
+
+    thread = threading.Thread(
+      target=lambda: manager._invoke_callback(callback, {"600900.SH": {}}, "600900.SH")
+    )
+    thread.start()
+    thread.join(timeout=1)
+
+    await asyncio.wait_for(called.wait(), timeout=1)
+
+  asyncio.run(run_case())
 
 
 def test_realtime_adapter_attempts_xtquant_by_default():
@@ -134,6 +180,30 @@ def test_xt_trading_manager_account_status_rejects_non_ok_status():
   manager.xttrader = FakeTrader()
 
   assert manager.is_account_status_ok() is False
+
+
+def test_xt_trading_manager_close_connection_uses_stop_fallback():
+  from miniqmt.trading.trading_manager import XTTradingManager
+
+  class FakeTrader:
+    def __init__(self):
+      self.stopped = False
+
+    def stop(self):
+      self.stopped = True
+
+  manager = object.__new__(XTTradingManager)
+  manager.is_connected = True
+  manager.session_id = 123
+  manager.xttrader = FakeTrader()
+  manager.event_loop = None
+  manager.event_loop_thread = None
+
+  manager.close_connection()
+
+  assert manager.xttrader.stopped is True
+  assert manager.is_connected is False
+  assert manager.session_id is None
 
 
 def test_miniqmt_health_probe_requires_ok_account_status(monkeypatch):
