@@ -66,10 +66,10 @@ export function GridBookSummaryCard({
     <Card className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
       <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.3em] text-blue-500">
+          <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.3em] text-red-500">
             <BookOpen className="h-4 w-4" />
             网格簿
-            <span className="rounded-md border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 tracking-normal text-blue-300">
+            <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-0.5 tracking-normal text-red-300">
               {viewLabel}
             </span>
           </div>
@@ -96,7 +96,7 @@ export function GridBookSummaryCard({
           <SummaryTile
             label="已成交"
             value={summary.filledLevels}
-            className="text-blue-500"
+            className="text-red-500"
           />
           <SummaryTile
             label="禁用"
@@ -114,12 +114,12 @@ export function GridBookSummaryCard({
         <InventoryTile
           label="买入档"
           value={summary.buySlotCount || 0}
-          className="border-blue-500/20 bg-blue-500/5 text-blue-400"
+          className="border-red-500/20 bg-red-500/5 text-red-400"
         />
         <InventoryTile
           label="卖出档"
           value={summary.sellWaterlineCount || 0}
-          className="border-cyan-500/20 bg-cyan-500/5 text-cyan-400"
+          className="border-red-600/20 bg-red-600/5 text-red-500"
         />
         <InventoryTile
           label="可用库存"
@@ -149,7 +149,7 @@ export function GridBookSummaryCard({
       )}
 
       {book?.needsBacktest && (
-        <div className="mt-5 rounded-xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-xs font-medium text-blue-300">
+        <div className="mt-5 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs font-medium text-red-300">
           网格簿计划已变更，当前回测结果可能不是最新计划，请重新回测。
         </div>
       )}

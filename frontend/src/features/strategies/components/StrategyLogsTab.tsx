@@ -4,6 +4,7 @@ import {
   Play,
   Copy,
   Download,
+  FileText,
   Trash2,
   Wifi,
   WifiOff,
@@ -19,6 +20,7 @@ import {
 import type { UIEvent } from 'react';
 import { useClient, useQuery } from 'urql';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -81,6 +83,11 @@ type LoadedStrategyLogPage = {
 
 function logKey(log: StrategyLogEntry) {
   return `${log.runId}|${log.timestamp}|${log.level}|${log.source}|${log.message}`;
+}
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
 }
 
 type StrategyExecutionLogRecord =
@@ -172,6 +179,7 @@ export default function StrategyLogsTab({
   const lastLiveLogKeyRef = useRef<string | null>(null);
   const previousWsStatusRef = useRef<string>('idle');
   const pendingScrollAdjustRef = useRef(0);
+  const { closeMenu, menu, openAtPointer } = useStudioMenu<StrategyLogEntry>();
   const wsStatus = useGraphqlWsStatus();
 
   const updateLogViewportHeight = useCallback(() => {
@@ -352,12 +360,7 @@ export default function StrategyLogsTab({
           : new Error('策略日志恢复失败')
       );
     }
-  }, [
-    client,
-    resolvedBacktestId,
-    resolvedBacktestVersion,
-    runId,
-  ]);
+  }, [client, resolvedBacktestId, resolvedBacktestVersion, runId]);
 
   useEffect(() => {
     const wasConnected = previousWsStatusRef.current === 'connected';
@@ -604,176 +607,225 @@ export default function StrategyLogsTab({
       }
     : wsStatus === 'connecting'
       ? {
-          icon: <Wifi size={12} className="text-cyan-400" />,
+          icon: <Wifi size={12} className="text-blue-500" />,
           text: '连接中',
-          className: 'text-cyan-400',
+          className: 'text-blue-500',
         }
-      : wsStatus === 'reconnecting' || (wsStatus === 'closed' && shouldSubscribe)
+      : wsStatus === 'reconnecting' ||
+          (wsStatus === 'closed' && shouldSubscribe)
         ? {
             icon: <Wifi size={12} className="text-amber-400" />,
             text: '重连中',
             className: 'text-amber-400',
           }
         : error || recoveryError || wsStatus === 'error'
-        ? {
-            icon: <WifiOff size={12} className="text-rose-400" />,
-            text: '连接错误',
-            className: 'text-rose-400',
-          }
-        : {
-            icon: <WifiOff size={12} className="text-slate-500" />,
-            text: '未连接',
-            className: 'text-slate-500',
-          };
+          ? {
+              icon: <WifiOff size={12} className="text-rose-400" />,
+              text: '连接错误',
+              className: 'text-rose-400',
+            }
+          : {
+              icon: <WifiOff size={12} className="text-slate-500" />,
+              text: '未连接',
+              className: 'text-slate-500',
+            };
 
   return (
-    <Card
-      className={cn(
-        'overflow-hidden rounded-lg border border-white/5 bg-slate-950 shadow-2xl',
-        fillAvailable && 'flex h-full min-h-0 flex-col'
-      )}
-    >
-      <div className="flex items-center justify-between border-b border-white/5 bg-slate-900/40 px-6 py-4 backdrop-blur-md">
-        <div className="flex min-w-0 items-center gap-3">
-          <Terminal size={14} className="shrink-0 text-slate-400" />
-          <span className="truncate font-mono text-[11px] font-bold text-slate-300">
-            终端 - {strategyName}
-          </span>
-          <Badge
-            variant="outline"
-            className={cn(
-              'rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest',
-              isRunning
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
-                : 'border-slate-600 text-slate-500'
-            )}
-          >
-            {isRunning ? '运行中' : '已停止'}
-          </Badge>
-          <div className="flex shrink-0 items-center gap-1.5 text-[9px] font-bold">
-            {realtimeStatus.icon}
-            <span className={realtimeStatus.className}>
-              {realtimeStatus.text}
+    <>
+      <Card
+        className={cn(
+          'overflow-hidden rounded-lg border border-white/5 bg-slate-950 shadow-2xl',
+          fillAvailable && 'flex h-full min-h-0 flex-col'
+        )}
+      >
+        <div className="flex items-center justify-between border-b border-white/5 bg-slate-900/40 px-6 py-4 backdrop-blur-md">
+          <div className="flex min-w-0 items-center gap-3">
+            <Terminal size={14} className="shrink-0 text-slate-400" />
+            <span className="truncate font-mono text-[11px] font-bold text-slate-300">
+              终端 - {strategyName}
             </span>
+            <Badge
+              variant="outline"
+              className={cn(
+                'rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest',
+                isRunning
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                  : 'border-slate-600 text-slate-500'
+              )}
+            >
+              {isRunning ? '运行中' : '已停止'}
+            </Badge>
+            <div className="flex shrink-0 items-center gap-1.5 text-[9px] font-bold">
+              {realtimeStatus.icon}
+              <span className={realtimeStatus.className}>
+                {realtimeStatus.text}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              onClick={() => setIsPaused(!isPaused)}
+            >
+              {isPaused ? <Play size={14} /> : <Pause size={14} />}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              onClick={handleCopy}
+            >
+              <Copy size={14} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              onClick={handleDownload}
+            >
+              <Download size={14} />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-rose-400"
+              onClick={handleClear}
+            >
+              <Trash2 size={14} />
+            </Button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
-            onClick={() => setIsPaused(!isPaused)}
-          >
-            {isPaused ? <Play size={14} /> : <Pause size={14} />}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
-            onClick={handleCopy}
-          >
-            <Copy size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
-            onClick={handleDownload}
-          >
-            <Download size={14} />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-rose-400"
-            onClick={handleClear}
-          >
-            <Trash2 size={14} />
-          </Button>
-        </div>
-      </div>
-
-      <div className="border-b border-slate-800 bg-slate-900/30 px-6 py-2">
-        <div className="flex items-center justify-center gap-3 text-center">
-          <span className="rounded border border-cyan-500/30 bg-cyan-500/5 px-3 py-0.5 font-mono text-[10px] text-cyan-400">
-            A股量化交易策略日志终端
-          </span>
-          <span className="font-mono text-[10px] text-slate-500">
-            {loadedSummary}
-          </span>
-          {fileError && (
-            <span className="font-mono text-[10px] text-rose-400">
-              文件加载错误
+        <div className="border-b border-slate-800 bg-slate-900/30 px-6 py-2">
+          <div className="flex items-center justify-center gap-3 text-center">
+            <span className="rounded border border-blue-600/30 bg-blue-600/5 px-3 py-0.5 font-mono text-[10px] text-blue-500">
+              A股量化交易策略日志终端
             </span>
+            <span className="font-mono text-[10px] text-slate-500">
+              {loadedSummary}
+            </span>
+            {fileError && (
+              <span className="font-mono text-[10px] text-rose-400">
+                文件加载错误
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div
+          ref={logContainerRef}
+          className={cn(
+            'execution-log-scrollbar overflow-auto p-5 font-mono text-[10px] leading-relaxed',
+            fillAvailable && 'min-h-0 flex-1'
+          )}
+          style={fillAvailable ? undefined : { height: `${viewportHeight}px` }}
+          onScroll={handleScroll}
+        >
+          {!runId ? (
+            <div className="py-12 text-center text-slate-600">
+              请选择一个运行中的策略实例
+            </div>
+          ) : logs.length === 0 && !isFileFetching ? (
+            <div className="py-12 text-center text-slate-600">暂无日志记录</div>
+          ) : (
+            <div
+              className="relative min-w-max"
+              style={{ height: `${logs.length * ROW_HEIGHT}px` }}
+            >
+              {isLoadingOlder && (
+                <div className="absolute left-2 top-0 z-10 text-slate-500">
+                  正在加载更早日志...
+                </div>
+              )}
+              {visibleLogs.map((log, index) => {
+                const absoluteIndex = visibleRange.start + index;
+                return (
+                  <div
+                    key={`${logKey(log)}-${absoluteIndex}`}
+                    className="absolute left-0 right-0 flex h-6 items-center gap-3 rounded px-2 hover:bg-slate-900/50"
+                    style={{ top: `${absoluteIndex * ROW_HEIGHT}px` }}
+                    onContextMenu={event => openAtPointer(event, log)}
+                  >
+                    <span className="shrink-0 text-slate-600">
+                      {formatTimestamp(log.timestamp)}
+                    </span>
+                    <span
+                      className={cn(
+                        'shrink-0 font-bold',
+                        getLevelColor(log.level)
+                      )}
+                    >
+                      [{log.level.padEnd(7)}]
+                    </span>
+                    <span className="shrink-0 text-slate-400">
+                      [{log.source}]
+                    </span>
+                    <span className="whitespace-pre text-slate-300">
+                      {log.message}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {isRunning && !isPaused && isConnected && autoFollow && (
+            <div className="mt-4 flex items-center gap-2 text-slate-500">
+              <span className="text-blue-400">[INFO]</span>
+              <span>正在等待实时日志...</span>
+              <span className="animate-pulse">|</span>
+            </div>
           )}
         </div>
-      </div>
+      </Card>
 
-      <div
-        ref={logContainerRef}
-        className={cn(
-          'execution-log-scrollbar overflow-auto p-5 font-mono text-[10px] leading-relaxed',
-          fillAvailable && 'min-h-0 flex-1'
-        )}
-        style={fillAvailable ? undefined : { height: `${viewportHeight}px` }}
-        onScroll={handleScroll}
-      >
-        {!runId ? (
-          <div className="py-12 text-center text-slate-600">
-            请选择一个运行中的策略实例
-          </div>
-        ) : logs.length === 0 && !isFileFetching ? (
-          <div className="py-12 text-center text-slate-600">暂无日志记录</div>
-        ) : (
-          <div
-            className="relative min-w-max"
-            style={{ height: `${logs.length * ROW_HEIGHT}px` }}
-          >
-            {isLoadingOlder && (
-              <div className="absolute left-2 top-0 z-10 text-slate-500">
-                正在加载更早日志...
-              </div>
-            )}
-            {visibleLogs.map((log, index) => {
-              const absoluteIndex = visibleRange.start + index;
-              return (
-                <div
-                  key={`${logKey(log)}-${absoluteIndex}`}
-                  className="absolute left-0 right-0 flex h-6 items-center gap-3 rounded px-2 hover:bg-slate-900/50"
-                  style={{ top: `${absoluteIndex * ROW_HEIGHT}px` }}
-                >
-                  <span className="shrink-0 text-slate-600">
-                    {formatTimestamp(log.timestamp)}
-                  </span>
-                  <span
-                    className={cn(
-                      'shrink-0 font-bold',
-                      getLevelColor(log.level)
-                    )}
-                  >
-                    [{log.level.padEnd(7)}]
-                  </span>
-                  <span className="shrink-0 text-slate-400">
-                    [{log.source}]
-                  </span>
-                  <span className="whitespace-pre text-slate-300">
-                    {log.message}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {isRunning && !isPaused && isConnected && autoFollow && (
-          <div className="mt-4 flex items-center gap-2 text-slate-500">
-            <span className="text-blue-400">[INFO]</span>
-            <span>正在等待实时日志...</span>
-            <span className="animate-pulse">|</span>
-          </div>
-        )}
-      </div>
-    </Card>
+      <StudioMenu
+        ariaLabel="策略日志菜单"
+        menu={menu}
+        onClose={closeMenu}
+        width={220}
+        items={[
+          {
+            id: 'copy-line',
+            label: '复制整行日志',
+            icon: <Copy size={14} />,
+            onSelect: () =>
+              copyText(
+                menu?.payload
+                  ? `${formatTimestamp(menu.payload.timestamp)} [${menu.payload.level}] [${menu.payload.source}] ${menu.payload.message}`
+                  : ''
+              ),
+          },
+          {
+            id: 'copy-message',
+            label: '复制消息',
+            icon: <FileText size={14} />,
+            onSelect: () => copyText(menu?.payload?.message),
+          },
+          {
+            id: 'copy-source',
+            label: '复制来源',
+            icon: <Copy size={14} />,
+            onSelect: () => copyText(menu?.payload?.source),
+          },
+          {
+            id: 'copy-time',
+            label: '复制时间',
+            icon: <Copy size={14} />,
+            onSelect: () => copyText(menu?.payload?.timestamp),
+          },
+          { id: 'sep-terminal', type: 'separator' },
+          {
+            id: 'toggle-pause',
+            label: isPaused ? '继续跟随日志' : '暂停跟随日志',
+            icon: isPaused ? <Play size={14} /> : <Pause size={14} />,
+            onSelect: () => setIsPaused(prev => !prev),
+          },
+        ]}
+      />
+    </>
   );
 }

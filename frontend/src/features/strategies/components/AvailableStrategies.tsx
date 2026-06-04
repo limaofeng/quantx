@@ -9,11 +9,18 @@ import {
   getRiskLevelName,
   getCategoryIcon,
 } from '@/shared/utils/strategyHelpers';
+import { cn } from '@/utils/cn';
 
 import { mapStrategyDefinitionView, type StrategyDefinition } from '../domain';
 import { StrategyDefinitionsQuery } from '../hooks/strategyInstanceOperations';
 
-export default function AvailableStrategies() {
+interface AvailableStrategiesProps {
+  compact?: boolean;
+}
+
+export default function AvailableStrategies({
+  compact = false,
+}: AvailableStrategiesProps) {
   const [, setLocation] = useLocation();
   const [{ data, fetching: isLoading, error }] = useQuery({
     query: StrategyDefinitionsQuery,
@@ -30,10 +37,26 @@ export default function AvailableStrategies() {
 
   if (isLoading && strategies.length === 0) {
     return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div
+        className={cn(
+          'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
+          compact ? 'gap-3' : 'gap-6'
+        )}
+      >
         {[1, 2, 3].map(i => (
-          <Card key={i} className="p-6 rounded-[2rem] animate-pulse">
-            <div className="h-12 w-12 bg-slate-200 dark:bg-slate-700 rounded-2xl mb-4" />
+          <Card
+            key={i}
+            className={cn(
+              'animate-pulse',
+              compact ? 'rounded-lg p-4' : 'rounded-[2rem] p-6'
+            )}
+          >
+            <div
+              className={cn(
+                'mb-4 bg-slate-200 dark:bg-slate-700',
+                compact ? 'h-9 w-9 rounded-lg' : 'h-12 w-12 rounded-2xl'
+              )}
+            />
             <div className="h-4 w-2/3 bg-slate-200 dark:bg-slate-700 rounded mb-2" />
             <div className="h-3 w-full bg-slate-100 dark:bg-slate-800 rounded" />
           </Card>
@@ -44,7 +67,12 @@ export default function AvailableStrategies() {
 
   if (error) {
     return (
-      <Card className="p-8 text-center border-rose-500/20 bg-rose-500/5 rounded-[2rem]">
+      <Card
+        className={cn(
+          'border-rose-500/20 bg-rose-500/5 text-center',
+          compact ? 'rounded-lg p-4' : 'rounded-[2rem] p-8'
+        )}
+      >
         <p className="text-rose-500 font-black text-[10px] uppercase tracking-widest">
           初始化失败: {error.message}
         </p>
@@ -54,7 +82,12 @@ export default function AvailableStrategies() {
 
   if (!strategies || strategies.length === 0) {
     return (
-      <Card className="p-16 text-center border-2 border-dashed border-slate-200 dark:border-white/10 rounded-[3rem] bg-slate-50/50 dark:bg-slate-900/20">
+      <Card
+        className={cn(
+          'border-2 border-dashed border-slate-200 bg-slate-50/50 text-center dark:border-white/10 dark:bg-slate-900/20',
+          compact ? 'rounded-lg p-8' : 'rounded-[3rem] p-16'
+        )}
+      >
         <Bot className="mx-auto h-12 w-12 text-slate-300 mb-6" />
         <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">
           未发现策略模板
@@ -99,7 +132,12 @@ export default function AvailableStrategies() {
   };
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+    <div
+      className={cn(
+        'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
+        compact ? 'gap-3' : 'gap-6'
+      )}
+    >
       {strategies.map((definition: StrategyDefinition) => {
         const IconComponent = getCategoryIcon(definition.category as any);
         const gradient = getGradientByRisk(definition.riskLevel as string);
@@ -111,7 +149,10 @@ export default function AvailableStrategies() {
             onClick={() =>
               setLocation(`/strategies/${definition.strategyId}/run`)
             }
-            className="group relative overflow-hidden bg-white dark:bg-slate-900/40 border border-slate-200 dark:border-white/5 rounded-[2rem] hover:shadow-xl hover:shadow-primary/5 transition-all duration-500 cursor-pointer hover:border-primary/20"
+            className={cn(
+              'group relative cursor-pointer overflow-hidden border border-slate-200 bg-white transition-all duration-300 hover:border-primary/20 hover:shadow-xl hover:shadow-primary/5 dark:border-white/5 dark:bg-slate-900/40',
+              compact ? 'rounded-lg' : 'rounded-[2rem]'
+            )}
           >
             {/* 渐变装饰背景 */}
             <div
@@ -123,13 +164,19 @@ export default function AvailableStrategies() {
               className={`absolute top-0 left-8 right-8 h-0.5 bg-gradient-to-r ${gradient.replace('/20', '/40').replace('/5', '/20')} opacity-0 group-hover:opacity-100 transition-opacity duration-300`}
             />
 
-            <div className="relative p-6">
+            <div className={cn('relative', compact ? 'p-4' : 'p-6')}>
               {/* 头部区域 */}
               <div className="flex items-start justify-between mb-5">
                 <div
-                  className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 shadow-lg transition-all duration-500 group-hover:scale-110 group-hover:rotate-3 text-white ${iconColor}`}
+                  className={cn(
+                    'flex shrink-0 items-center justify-center text-white shadow-lg transition-all duration-300 group-hover:scale-105',
+                    compact
+                      ? 'h-10 w-10 rounded-lg'
+                      : 'h-14 w-14 rounded-2xl group-hover:rotate-3',
+                    iconColor
+                  )}
                 >
-                  <IconComponent size={26} />
+                  <IconComponent size={compact ? 20 : 26} />
                 </div>
 
                 <div className="opacity-0 group-hover:opacity-100 transition-all duration-300 translate-x-2 group-hover:translate-x-0">
@@ -140,7 +187,7 @@ export default function AvailableStrategies() {
               </div>
 
               {/* 策略名称和描述 */}
-              <div className="mb-5">
+              <div className={cn(compact ? 'mb-4' : 'mb-5')}>
                 <div className="flex items-center gap-2 mb-2">
                   <h3 className="text-base font-black text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-primary transition-colors duration-300">
                     {definition.displayName}
@@ -152,7 +199,7 @@ export default function AvailableStrategies() {
               </div>
 
               {/* 底部信息区 */}
-              <div className="flex items-center justify-between pt-4 border-t border-slate-100 dark:border-white/5">
+              <div className="flex items-center justify-between border-t border-slate-100 pt-4 dark:border-white/5">
                 <div className="flex items-center gap-3">
                   {/* 类型标签 */}
                   <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-white/5">

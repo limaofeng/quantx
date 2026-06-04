@@ -1,11 +1,16 @@
 import {
   AlertCircle,
+  Bot,
+  CandlestickChart,
   ClipboardList,
+  Copy,
   GitBranch,
   ShieldAlert,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { useLocation } from 'wouter';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -14,6 +19,7 @@ import {
   getBucketLabel,
   type StrategyDecision,
   type StrategyInstance,
+  type TradeIntentView,
 } from '../domain';
 
 interface DecisionAuditTabProps {
@@ -28,6 +34,11 @@ function formatValue(value: unknown) {
   if (typeof value === 'boolean') return value ? '是' : '否';
   if (typeof value === 'string') return value;
   return JSON.stringify(value);
+}
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
 }
 
 function SummaryGrid({
@@ -70,6 +81,8 @@ export default function DecisionAuditTab({
   instance,
   decisions,
 }: DecisionAuditTabProps) {
+  const [, setLocation] = useLocation();
+  const { closeMenu, menu, openAtPointer } = useStudioMenu<TradeIntentView>();
   const [selectedId, setSelectedId] = useState(decisions[0]?.id);
   const selectedDecision = useMemo(
     () =>
@@ -197,7 +210,8 @@ export default function DecisionAuditTab({
                   selectedDecision.tradeIntents.map(intent => (
                     <div
                       key={intent.id}
-                      className="grid grid-cols-12 gap-3 border-b border-slate-100 px-6 py-4 text-[11px] font-bold last:border-b-0 dark:border-white/5"
+                      className="grid grid-cols-12 gap-3 border-b border-slate-100 px-6 py-4 text-[11px] font-bold transition-colors last:border-b-0 hover:bg-slate-50 dark:border-white/5 dark:hover:bg-white/[0.04]"
+                      onContextMenu={event => openAtPointer(event, intent)}
                     >
                       <div className="col-span-2 font-mono text-slate-700 dark:text-slate-200">
                         {intent.instrumentCode}
@@ -272,6 +286,60 @@ export default function DecisionAuditTab({
           </Card>
         </div>
       )}
+
+      <StudioMenu
+        ariaLabel="策略意图菜单"
+        menu={menu}
+        onClose={closeMenu}
+        width={216}
+        items={[
+          {
+            id: 'open-stock',
+            label: '查看标的详情',
+            icon: <CandlestickChart size={14} />,
+            onSelect: () =>
+              menu?.payload?.instrumentCode &&
+              setLocation(`/stock/${menu.payload.instrumentCode}`),
+          },
+          {
+            id: 'create-strategy',
+            label: '创建同标的策略',
+            icon: <Bot size={14} />,
+            onSelect: () =>
+              menu?.payload?.instrumentCode &&
+              setLocation(
+                `/strategies/run?symbol=${menu.payload.instrumentCode}`
+              ),
+          },
+          { id: 'sep-copy', type: 'separator' },
+          {
+            id: 'copy-intent',
+            label: '复制意图 ID',
+            icon: <Copy size={14} />,
+            onSelect: () => copyText(menu?.payload?.id),
+          },
+          {
+            id: 'copy-code',
+            label: '复制标的代码',
+            icon: <Copy size={14} />,
+            onSelect: () => copyText(menu?.payload?.instrumentCode),
+          },
+          {
+            id: 'copy-trace',
+            label: '复制 Trace ID',
+            icon: <Copy size={14} />,
+            disabled: !menu?.payload?.traceId,
+            onSelect: () => copyText(menu?.payload?.traceId),
+          },
+          {
+            id: 'copy-reason',
+            label: '复制原因',
+            icon: <Copy size={14} />,
+            disabled: !menu?.payload?.reason,
+            onSelect: () => copyText(menu?.payload?.reason),
+          },
+        ]}
+      />
     </div>
   );
 }

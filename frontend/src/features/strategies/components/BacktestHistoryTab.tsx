@@ -13,11 +13,15 @@ import {
   XCircle,
   AlertCircle,
   Activity,
+  Copy,
+  Eye,
+  RotateCcw,
   Trash2,
 } from 'lucide-react';
 import { useState, type MouseEvent } from 'react';
 import { useMutation, useQuery } from 'urql';
 
+import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -56,6 +60,15 @@ interface BacktestHistoryTabProps {
   onVersionDeleted?: (backtestId: string) => void;
 }
 
+type BacktestMenuPayload =
+  | { kind: 'template' }
+  | { backtest: StrategyBacktest; kind: 'backtest' };
+
+function copyText(value: string | number | undefined | null) {
+  if (value === undefined || value === null || value === '') return;
+  void navigator.clipboard?.writeText(String(value));
+}
+
 export default function BacktestHistoryTab({
   runId,
   mode,
@@ -70,6 +83,8 @@ export default function BacktestHistoryTab({
     null
   );
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { closeMenu, menu, openAtPointer } =
+    useStudioMenu<BacktestMenuPayload>();
   const [{ data, fetching, error }, reexecuteBacktestHistory] = useQuery({
     query: BacktestHistoryQuery,
     variables: { runId },
@@ -309,6 +324,9 @@ export default function BacktestHistoryTab({
                 !activeBacktestId &&
                   'bg-emerald-900/20 border-l-2 border-emerald-500'
               )}
+              onContextMenu={event =>
+                openAtPointer(event, { kind: 'template' })
+              }
               onClick={() => {
                 setSelectedVersion(null);
                 onTemplateSelect?.();
@@ -349,6 +367,9 @@ export default function BacktestHistoryTab({
                     'p-4 cursor-pointer transition-colors hover:bg-gray-800/50',
                     isCurrent && 'bg-blue-900/20 border-l-2 border-blue-500'
                   )}
+                  onContextMenu={event =>
+                    openAtPointer(event, { kind: 'backtest', backtest })
+                  }
                   onClick={() => handleSelectVersion(backtest)}
                 >
                   <div className="flex items-center justify-between mb-2">
@@ -482,6 +503,95 @@ export default function BacktestHistoryTab({
         variant="destructive"
         loading={deletingId === deleteTarget?.id}
         onConfirm={confirmDeleteVersion}
+      />
+
+      <StudioMenu
+        ariaLabel="回测版本菜单"
+        menu={menu}
+        onClose={closeMenu}
+        width={216}
+        items={[
+          {
+            id: 'open',
+            label:
+              menu?.payload?.kind === 'template'
+                ? '查看模板版本'
+                : '查看回测版本',
+            icon: <Eye size={14} />,
+            onSelect: () => {
+              if (menu?.payload?.kind === 'template') {
+                setSelectedVersion(null);
+                onTemplateSelect?.();
+                return;
+              }
+              if (menu?.payload?.kind === 'backtest') {
+                handleSelectVersion(menu.payload.backtest);
+              }
+            },
+          },
+          {
+            id: 'rerun-entry',
+            label: '作为重新回测入口',
+            icon: <RotateCcw size={14} />,
+            onSelect: () => {
+              if (menu?.payload?.kind === 'template') {
+                setSelectedVersion(null);
+                onTemplateSelect?.();
+                return;
+              }
+              if (menu?.payload?.kind === 'backtest') {
+                handleSelectVersion(menu.payload.backtest);
+              }
+            },
+          },
+          { id: 'sep-copy', type: 'separator' },
+          {
+            id: 'copy-run-id',
+            label: '复制运行 ID',
+            icon: <Copy size={14} />,
+            onSelect: () => copyText(runId),
+          },
+          {
+            id: 'copy-backtest-id',
+            label: '复制回测 ID',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'backtest',
+            onSelect: () =>
+              copyText(
+                menu?.payload?.kind === 'backtest'
+                  ? menu.payload.backtest.id
+                  : undefined
+              ),
+          },
+          {
+            id: 'copy-version',
+            label: '复制版本号',
+            icon: <Copy size={14} />,
+            disabled: menu?.payload?.kind !== 'backtest',
+            onSelect: () =>
+              copyText(
+                menu?.payload?.kind === 'backtest'
+                  ? menu.payload.backtest.version
+                  : undefined
+              ),
+          },
+          { id: 'sep-danger', type: 'separator' },
+          {
+            id: 'delete',
+            label: '删除回测版本...',
+            danger: true,
+            icon: <Trash2 size={14} />,
+            disabled:
+              menu?.payload?.kind !== 'backtest' ||
+              menu.payload.backtest.status.toUpperCase() === 'RUNNING',
+            onSelect: () => {
+              if (menu?.payload?.kind === 'backtest') {
+                setDeleteError(null);
+                setDeleteTarget(menu.payload.backtest);
+              }
+            },
+          },
+        ]}
       />
     </>
   );

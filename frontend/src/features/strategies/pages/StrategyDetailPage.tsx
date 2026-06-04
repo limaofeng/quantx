@@ -33,13 +33,13 @@ import {
   useRef,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from 'react';
 import type { DateRange } from 'react-day-picker';
 import { useQuery, useMutation } from 'urql';
-import { useParams, useLocation } from 'wouter';
+import { Link, useParams, useLocation } from 'wouter';
 
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { DateRangePicker } from '@/components/ui/date-range-picker';
 import {
@@ -56,6 +56,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   StartStrategyDocument,
@@ -72,11 +74,14 @@ import DecisionAuditTab from '../components/DecisionAuditTab';
 import ExecutionTraceTab from '../components/ExecutionTraceTab';
 import GridBookTab from '../components/GridBookTab';
 import PerformanceTab from '../components/PerformanceTab';
-import { ProfessionalBackground } from '../components/ProfessionalBackground';
 import StrategyConfigTab from '../components/StrategyConfigTab';
 import StrategyLogsTab from '../components/StrategyLogsTab';
 import StrategyMonitor from '../components/StrategyMonitor';
 import StrategyOverviewTab from '../components/StrategyOverviewTab';
+import {
+  StrategyStudioShell,
+  type StrategyStudioMode,
+} from '../components/StrategyStudioShell';
 import {
   mapBucketLedgerView,
   mapExecutionTraceView,
@@ -136,6 +141,235 @@ function readString(record: Record<string, unknown>, keys: string[]) {
     if (typeof value === 'string' && value.trim()) return value;
   }
   return undefined;
+}
+
+function readNumber(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+type PaperAccountSnapshotDraft = {
+  instrumentCode: string;
+  initialCash: string;
+  positionShares: string;
+  avgCost: string;
+};
+
+function toInputNumberValue(value?: number) {
+  return value === undefined ? '' : String(value);
+}
+
+function toNonNegativeNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function toPositiveNumber(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function toNonNegativeInteger(value: string) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.floor(parsed)
+    : undefined;
+}
+
+function buildPaperAccountSnapshotDraft(
+  displayRun:
+    | {
+        instruments?: string[];
+        parameters?: Record<string, StrategyJsonValue>;
+      }
+    | null
+    | undefined,
+  instance?: StrategyInstance | null
+): PaperAccountSnapshotDraft {
+  const parameters = {
+    ...asParameterRecord(displayRun?.parameters),
+    ...asParameterRecord(instance?.parameters),
+  } as Record<string, unknown>;
+  const bucketShares = [
+    readNumber(parameters, ['locked_core_shares', 'lockedCoreShares']),
+    readNumber(parameters, ['core_shares', 'coreShares']),
+    readNumber(parameters, ['swing_shares', 'swingShares']),
+  ];
+  const derivedPositionShares = bucketShares.some(value => value !== undefined)
+    ? bucketShares.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+    : undefined;
+
+  const instrumentCode =
+    instance?.instrumentCode ||
+    displayRun?.instruments?.[0] ||
+    readString(parameters, ['instrument_code', 'instrumentCode', 'symbol']) ||
+    '-';
+  const initialCash = readNumber(parameters, [
+    'cash_total',
+    'cashTotal',
+    'available_cash',
+    'availableCash',
+    'initial_capital',
+    'initialCapital',
+  ]);
+  const positionShares =
+    readNumber(parameters, ['position_shares', 'positionShares']) ??
+    derivedPositionShares;
+  const avgCost = readNumber(parameters, [
+    'avg_cost',
+    'avgCost',
+    'long_avg_price',
+    'longAvgPrice',
+    'base_price',
+    'basePrice',
+  ]);
+
+  return {
+    instrumentCode,
+    initialCash: toInputNumberValue(initialCash),
+    positionShares: toInputNumberValue(positionShares ?? 0),
+    avgCost: toInputNumberValue(avgCost),
+  };
+}
+
+function buildPaperParameterOverrides(
+  draft: PaperAccountSnapshotDraft,
+  sourceParameters: Record<string, StrategyJsonValue>
+) {
+  const parameters = sourceParameters as Record<string, unknown>;
+  const overrides: Record<string, StrategyJsonValue> = {};
+  const initialCash = toPositiveNumber(draft.initialCash);
+  if (initialCash !== undefined) {
+    overrides.initial_capital = initialCash;
+    overrides.cash_total = initialCash;
+  }
+
+  const positionShares = toNonNegativeInteger(draft.positionShares);
+  if (positionShares !== undefined) {
+    const lockedSource =
+      readNumber(parameters, ['locked_core_shares', 'lockedCoreShares']) ?? 0;
+    const swingSource =
+      readNumber(parameters, ['swing_shares', 'swingShares']) ?? 0;
+    const lockedCoreShares = Math.min(
+      Math.max(0, Math.floor(lockedSource)),
+      positionShares
+    );
+    const swingShares = Math.min(
+      Math.max(0, Math.floor(swingSource)),
+      Math.max(0, positionShares - lockedCoreShares)
+    );
+    overrides.position_shares = positionShares;
+    overrides.locked_core_shares = lockedCoreShares;
+    overrides.swing_shares = swingShares;
+    overrides.core_shares = Math.max(
+      0,
+      positionShares - lockedCoreShares - swingShares
+    );
+  }
+
+  const avgCost = toNonNegativeNumber(draft.avgCost);
+  if (avgCost !== undefined) {
+    overrides.avg_cost = avgCost;
+    const basePrice = readNumber(parameters, ['base_price', 'basePrice']);
+    if (!basePrice || basePrice <= 0) {
+      overrides.base_price = avgCost;
+    }
+  }
+
+  return overrides;
+}
+
+function PaperAccountSnapshotEditor({
+  draft,
+  onChange,
+}: {
+  draft: PaperAccountSnapshotDraft;
+  onChange: (draft: PaperAccountSnapshotDraft) => void;
+}) {
+  const fields = [
+    {
+      key: 'initialCash' as const,
+      label: '初始可用资金',
+      suffix: '元',
+      step: '1000',
+      min: '1',
+    },
+    {
+      key: 'positionShares' as const,
+      label: '初始持仓',
+      suffix: '股',
+      step: '100',
+      min: '0',
+    },
+    {
+      key: 'avgCost' as const,
+      label: '成本价',
+      suffix: '元',
+      step: '0.01',
+      min: '0',
+    },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <p className="leading-relaxed">
+        将创建一个独立模拟账户快照，不连接真实账户，也不复用其他模拟盘账户。
+      </p>
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/[0.03]">
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <div className="text-[10px] font-bold text-slate-400">绑定标的</div>
+            <div className="text-xs font-bold text-slate-900 dark:text-white">
+              {draft.instrumentCode}
+            </div>
+          </div>
+          <div className="space-y-1">
+            <div className="text-[10px] font-bold text-slate-400">账户模型</div>
+            <div className="text-xs font-bold text-slate-900 dark:text-white">
+              独立快照
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-3">
+          {fields.map(field => (
+            <div key={field.key} className="space-y-1.5">
+              <Label className="text-[10px] font-bold text-slate-400">
+                {field.label}
+              </Label>
+              <div className="relative">
+                <Input
+                  type="number"
+                  min={field.min}
+                  step={field.step}
+                  value={draft[field.key]}
+                  onChange={event =>
+                    onChange({
+                      ...draft,
+                      [field.key]: event.target.value,
+                    })
+                  }
+                  className="h-9 rounded-lg border-slate-200 bg-white pr-10 text-xs font-bold tabular-nums dark:border-white/10 dark:bg-slate-950/40"
+                />
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">
+                  {field.suffix}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+        创建后不会自动启动；启动模拟盘时只使用这份虚拟资金和持仓快照。
+      </p>
+    </div>
+  );
 }
 
 function formatDateOnly(value?: string | Date | number | null) {
@@ -233,9 +467,9 @@ function getPrimaryActionClass(tone?: string) {
       return 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/20';
     case 'slate':
       return 'bg-slate-700 hover:bg-slate-600 shadow-slate-700/20';
-    case 'blue':
+    case 'red':
     default:
-      return 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/20';
+      return 'bg-red-600 hover:bg-red-500 shadow-red-600/20';
   }
 }
 
@@ -435,7 +669,7 @@ function ScrollableStrategyTabs({
           aria-label="向左显示上一个标签"
           disabled={!canScrollPrevious}
           onClick={() => scrollToTab('previous')}
-          className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-slate-300 shadow-inner transition-colors hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/10 disabled:hover:bg-white/[0.04] disabled:hover:text-slate-300"
+          className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-slate-300 shadow-inner transition-colors hover:border-red-400/40 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/10 disabled:hover:bg-white/[0.04] disabled:hover:text-slate-300"
         >
           <ChevronLeft size={14} aria-hidden="true" />
         </button>
@@ -460,17 +694,17 @@ function ScrollableStrategyTabs({
                 key={tab.id}
                 value={tab.id}
                 data-strategy-run-tab={tab.id}
-                className="group relative shrink-0 rounded-none bg-transparent px-0 py-4 text-xs font-bold text-slate-500 transition-colors hover:bg-transparent hover:text-slate-300 data-[state=active]:bg-transparent data-[state=active]:text-blue-400 data-[state=active]:shadow-none"
+                className="group relative shrink-0 rounded-none bg-transparent px-0 py-4 text-xs font-bold text-slate-500 transition-colors hover:bg-transparent hover:text-slate-300 data-[state=active]:bg-transparent data-[state=active]:text-red-400 data-[state=active]:shadow-none"
               >
                 <div className="flex items-center gap-2">
                   <TabIcon
                     size={14}
-                    className="group-hover:text-slate-300 group-data-[state=active]:text-blue-400"
+                    className="group-hover:text-slate-300 group-data-[state=active]:text-red-400"
                     aria-hidden="true"
                   />
                   {tab.name}
                 </div>
-                <span className="absolute bottom-0 left-0 h-[2px] w-full scale-x-0 bg-blue-500 transition-transform duration-300 group-data-[state=active]:scale-x-100" />
+                <span className="absolute bottom-0 left-0 h-[2px] w-full scale-x-0 bg-red-500 transition-transform duration-300 group-data-[state=active]:scale-x-100" />
               </TabsTrigger>
             );
           })}
@@ -482,7 +716,7 @@ function ScrollableStrategyTabs({
           aria-label="向右显示下一个标签"
           disabled={!canScrollNext}
           onClick={() => scrollToTab('next')}
-          className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-slate-300 shadow-inner transition-colors hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/10 disabled:hover:bg-white/[0.04] disabled:hover:text-slate-300"
+          className="flex h-8 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-slate-300 shadow-inner transition-colors hover:border-red-400/40 hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:border-white/10 disabled:hover:bg-white/[0.04] disabled:hover:text-slate-300"
         >
           <ChevronRight size={14} aria-hidden="true" />
         </button>
@@ -501,8 +735,8 @@ function getTagClass(tone?: string) {
       return 'bg-rose-500/10 border-rose-500/20 text-rose-400';
     case 'purple':
       return 'bg-purple-500/10 border-purple-500/20 text-purple-400';
-    case 'blue':
-      return 'bg-blue-500/10 border-blue-500/20 text-blue-400';
+    case 'red':
+      return 'bg-red-500/10 border-red-500/20 text-red-400';
     default:
       return 'bg-slate-500/10 border-slate-500/20 text-slate-400';
   }
@@ -543,10 +777,13 @@ export default function StrategyDetailPage() {
   const [confirmDialog, setConfirmDialog] = useState<{
     open: boolean;
     title: string;
-    description: string;
+    description: ReactNode;
+    paperSnapshotDraft?: PaperAccountSnapshotDraft;
+    confirmText?: string;
     variant?: 'default' | 'destructive';
     onConfirm: () => Promise<void> | void;
   }>({ open: false, title: '', description: '', onConfirm: () => {} });
+  const paperSnapshotDraftRef = useRef<PaperAccountSnapshotDraft | null>(null);
   const [rerunDialogOpen, setRerunDialogOpen] = useState(false);
   const [rerunDateRange, setRerunDateRange] = useState<DateRange>();
   const [rerunError, setRerunError] = useState<string | null>(null);
@@ -557,11 +794,27 @@ export default function StrategyDetailPage() {
 
   const openConfirm = (
     title: string,
-    description: string,
+    description: ReactNode,
     onConfirm: () => Promise<void> | void,
-    variant?: 'default' | 'destructive'
+    variant?: 'default' | 'destructive',
+    confirmText = '确认',
+    paperSnapshotDraft?: PaperAccountSnapshotDraft
   ) => {
-    setConfirmDialog({ open: true, title, description, onConfirm, variant });
+    paperSnapshotDraftRef.current = paperSnapshotDraft || null;
+    setConfirmDialog({
+      open: true,
+      title,
+      description,
+      onConfirm,
+      variant,
+      confirmText,
+      paperSnapshotDraft,
+    });
+  };
+
+  const updatePaperSnapshotDraft = (draft: PaperAccountSnapshotDraft) => {
+    paperSnapshotDraftRef.current = draft;
+    setConfirmDialog(prev => ({ ...prev, paperSnapshotDraft: draft }));
   };
 
   const [, startStrategy] = useMutation(StartStrategyDocument);
@@ -604,51 +857,65 @@ export default function StrategyDetailPage() {
     return raw ? mapStrategyInstanceView(raw) : null;
   }, [selectedInstanceData]);
 
-  const strategyInstances: StrategyInstance[] = useMemo(
-    () => {
-      const instances = (
-        ((instancesData as any)?.strategyInstances || []) as unknown[]
-      ).map(
-        mapStrategyInstanceView
-      );
+  const strategyInstances: StrategyInstance[] = useMemo(() => {
+    const instances = (
+      ((instancesData as any)?.strategyInstances || []) as unknown[]
+    ).map(mapStrategyInstanceView);
 
-      if (!selectedInstanceFromRoute) return instances;
+    if (!selectedInstanceFromRoute) return instances;
 
-      const existingIndex = instances.findIndex(
-        instance => instance.id === selectedInstanceFromRoute.id
-      );
-      if (existingIndex < 0) {
-        return [selectedInstanceFromRoute, ...instances];
-      }
+    const existingIndex = instances.findIndex(
+      instance => instance.id === selectedInstanceFromRoute.id
+    );
+    if (existingIndex < 0) {
+      return [selectedInstanceFromRoute, ...instances];
+    }
 
-      const merged = [...instances];
-      merged[existingIndex] = selectedInstanceFromRoute;
-      return merged;
-    },
-    [instancesData, selectedInstanceFromRoute]
-  );
+    const merged = [...instances];
+    merged[existingIndex] = selectedInstanceFromRoute;
+    return merged;
+  }, [instancesData, selectedInstanceFromRoute]);
 
   const strategyRuns = useMemo(
     () =>
-      strategyInstances.map(instance => ({
-        id: instance.id,
-        name: instance.displayName,
-        strategy: {
-          id: instance.strategyId || id,
-          name: instance.strategyKey,
-        },
-        instruments: [instance.instrumentCode],
-        parameters: instance.parameters,
-        mode: instance.mode as StrategyRunMode,
-        status: instance.status as StrategyRunStatus,
-        profitLoss: 0,
-        totalTrades: 0,
-        metrics: {},
-        errorMessage: null,
-        createTime: instance.createdAt,
-        startTime: instance.createdAt,
-        stopTime: null,
-      })),
+      strategyInstances
+        .map(instance => ({
+          id: instance.id,
+          name: instance.displayName,
+          strategy: {
+            id: instance.strategyId || id,
+            name: instance.strategyKey,
+          },
+          instruments: [instance.instrumentCode],
+          parameters: instance.parameters,
+          mode: instance.mode as StrategyRunMode,
+          status: instance.status as StrategyRunStatus,
+          profitLoss: 0,
+          totalTrades: 0,
+          metrics: {},
+          errorMessage: null,
+          createTime: instance.createdAt,
+          startTime: instance.createdAt,
+          stopTime: null,
+          updatedAt: instance.updatedAt,
+          lastDecisionAt: instance.lastDecisionAt,
+        }))
+        .sort((a, b) => {
+          const bTime = Date.parse(
+            b.lastDecisionAt || b.updatedAt || b.createTime || ''
+          );
+          const aTime = Date.parse(
+            a.lastDecisionAt || a.updatedAt || a.createTime || ''
+          );
+          const normalizedBTime = Number.isFinite(bTime) ? bTime : 0;
+          const normalizedATime = Number.isFinite(aTime) ? aTime : 0;
+
+          if (normalizedBTime !== normalizedATime) {
+            return normalizedBTime - normalizedATime;
+          }
+
+          return String(b.id).localeCompare(String(a.id));
+        }),
     [strategyInstances, id]
   );
 
@@ -865,8 +1132,16 @@ export default function StrategyDetailPage() {
   );
 
   const CloneStrategyMutation = `
-    mutation CloneStrategy($runId: String!, $targetMode: StrategyRunMode!) {
-      cloneStrategy(runId: $runId, targetMode: $targetMode) {
+    mutation CloneStrategy(
+      $runId: String!
+      $targetMode: StrategyRunMode!
+      $parameterOverrides: JSON
+    ) {
+      cloneStrategy(
+        runId: $runId
+        targetMode: $targetMode
+        parameterOverrides: $parameterOverrides
+      ) {
         success
         message
       }
@@ -900,7 +1175,7 @@ export default function StrategyDetailPage() {
             ? getTimeDuration(displayRun.startTime, displayRun.stopTime)
             : '-',
       icon: displayRun?.mode === StrategyRunMode.Backtest ? History : Clock,
-      color: 'text-blue-500',
+      color: 'text-red-500',
     },
     {
       label: '绑定标的',
@@ -921,7 +1196,7 @@ export default function StrategyDetailPage() {
           : BarChart2,
       color:
         displayRun?.mode === StrategyRunMode.Backtest
-          ? 'text-cyan-500'
+          ? 'text-red-600'
           : 'text-amber-500',
     },
   ];
@@ -980,11 +1255,15 @@ export default function StrategyDetailPage() {
     }
   };
 
-  const cloneToMode = async (targetMode: StrategyRunMode) => {
+  const cloneToMode = async (
+    targetMode: StrategyRunMode,
+    parameterOverrides?: Record<string, StrategyJsonValue>
+  ) => {
     if (!displayRun) return;
     const result = await cloneStrategy({
       runId: displayRun.id,
       targetMode,
+      parameterOverrides,
     });
     const newRunId = (result.data as any)?.cloneStrategy?.message;
     refreshRuns();
@@ -1026,10 +1305,27 @@ export default function StrategyDetailPage() {
     }
 
     if (action === 'clone_to_paper' || action === 'clone_paper') {
+      const draft = buildPaperAccountSnapshotDraft(
+        displayRun,
+        strategyInstance
+      );
       openConfirm(
         '转为模拟盘',
-        '将以当前参数创建一个新的模拟盘实例，创建后不会自动启动。',
-        () => cloneToMode(StrategyRunMode.Paper)
+        null,
+        () => {
+          const currentDraft = paperSnapshotDraftRef.current || draft;
+          const sourceParameters = {
+            ...asParameterRecord(displayRun.parameters),
+            ...asParameterRecord(strategyInstance?.parameters),
+          };
+          return cloneToMode(
+            StrategyRunMode.Paper,
+            buildPaperParameterOverrides(currentDraft, sourceParameters)
+          );
+        },
+        'default',
+        '创建模拟盘',
+        draft
       );
       return;
     }
@@ -1112,24 +1408,102 @@ export default function StrategyDetailPage() {
     return `${diffDays} 天`;
   }
 
-  if (strategyLoading || runsLoading || selectedInstanceLoading) {
-    return (
-      <div className="p-12 text-center text-muted-foreground font-mono text-[10px] uppercase tracking-widest animate-pulse">
-        正在加载策略引擎...
+  const loadingSidebar = (
+    <aside className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-white/5 px-4 py-3">
+        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+          Strategy Studio
+        </div>
+        <div className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
+          策略实例、模板和运行状态集中管理。
+        </div>
       </div>
-    );
+
+      <div className="border-b border-white/5 p-2">
+        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+          Workspace
+        </div>
+        <div className="space-y-1">
+          {[
+            { icon: Boxes, label: '策略看板', meta: '加载实例中' },
+            { icon: BookOpen, label: '策略库', meta: 'Catalog' },
+          ].map(item => {
+            const Icon = item.icon;
+
+            return (
+              <div
+                key={item.label}
+                className="flex w-full items-center gap-3 rounded-md border border-transparent px-2.5 py-2 text-left text-slate-500"
+              >
+                <Icon className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-bold">
+                    {item.label}
+                  </span>
+                  <span className="block truncate text-[10px] font-medium text-slate-600">
+                    {item.meta}
+                  </span>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-hidden p-2">
+        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+          Strategy Instances
+        </div>
+        <div className="space-y-2">
+          {[1, 2, 3, 4].map(item => (
+            <div
+              key={item}
+              className="h-[64px] animate-pulse rounded-md border border-white/5 bg-white/[0.03]"
+            />
+          ))}
+        </div>
+      </div>
+    </aside>
+  );
+
+  const renderStudioMessage = (message: ReactNode, tone: 'rose' | 'slate') => (
+    <StrategyStudioShell
+      activeMode="MONITOR"
+      className="h-full min-h-0"
+      content={
+        <div className="flex h-full items-center justify-center bg-[#08101d] p-6">
+          <div
+            className={cn(
+              'rounded-lg border px-5 py-4 text-center text-[11px] font-black uppercase tracking-widest',
+              tone === 'rose'
+                ? 'border-rose-500/20 bg-rose-500/10 text-rose-300'
+                : 'border-white/10 bg-white/[0.03] text-slate-400'
+            )}
+          >
+            {message}
+          </div>
+        </div>
+      }
+      onModeChange={mode => {
+        if (mode === 'RUNS' || mode === 'CATALOG') setLocation('/strategies');
+      }}
+      sidebar={loadingSidebar}
+      statusBarLeft={<span>策略详情</span>}
+      statusBarRight={<span>{strategyId || '-'}</span>}
+      tabBar={
+        <div className="flex h-10 shrink-0 items-center border-b border-white/5 bg-[#0b1120]/80 px-3 text-[11px] font-black uppercase tracking-[0.2em] text-slate-300">
+          QuantX Strategy Studio
+        </div>
+      }
+    />
+  );
+
+  if (strategyLoading || runsLoading || selectedInstanceLoading) {
+    return renderStudioMessage('正在加载策略引擎...', 'slate');
   }
 
   if (!strategy) {
-    return (
-      <div className="p-12 text-center">
-        <Card className="p-8 border-rose-500/20 bg-rose-500/5 rounded-[2rem]">
-          <p className="text-rose-500 font-black text-[10px] uppercase tracking-widest">
-            策略不存在或已被移除
-          </p>
-        </Card>
-      </div>
-    );
+    return renderStudioMessage('策略不存在或已被移除', 'rose');
   }
 
   const runState = displayRun
@@ -1162,14 +1536,158 @@ export default function StrategyDetailPage() {
   const backtestStatusLabel = getBacktestStatusLabel(
     currentBacktestVersion?.status
   );
+  const studioActiveMode: StrategyStudioMode =
+    activeTab === 'history' || activeTab === 'performance'
+      ? 'BACKTEST'
+      : activeTab === 'audit' ||
+          activeTab === 'execution' ||
+          activeTab === 'logs'
+        ? 'TRACE'
+        : activeTab === 'config' ||
+            activeTab === 'buckets' ||
+            activeTab === 'gridbook'
+          ? 'CONFIG'
+          : activeTab === 'overview'
+            ? 'RUNS'
+            : 'MONITOR';
 
-  return (
+  const handleStudioModeChange = (mode: StrategyStudioMode) => {
+    if (mode === 'CATALOG' || mode === 'RUNS') {
+      setLocation('/strategies');
+      return;
+    }
+
+    if (mode === 'MONITOR') {
+      setActiveTab('monitor');
+      return;
+    }
+
+    if (mode === 'TRACE') {
+      setActiveTab('audit');
+      return;
+    }
+
+    if (mode === 'BACKTEST') {
+      setActiveTab(
+        displayRun?.mode === StrategyRunMode.Backtest
+          ? 'history'
+          : 'performance'
+      );
+      return;
+    }
+
+    setActiveTab('config');
+  };
+
+  const openRunDashboard = (run: (typeof strategyRuns)[number]) => {
+    setLocation(
+      `/strategies/${run.strategy?.id}/runs/${encodeURIComponent(run.id)}`
+    );
+  };
+
+  const detailSidebar = (
+    <aside className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-white/5 px-4 py-3">
+        <Link
+          href="/strategies"
+          className="mb-3 inline-flex h-7 items-center gap-2 rounded-md border border-white/10 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
+        >
+          <ArrowLeft className="h-3 w-3" />
+          策略看板
+        </Link>
+        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+          Strategy Dashboard
+        </div>
+        <h2 className="mt-1 truncate text-sm font-bold text-slate-100">
+          {strategyInstance?.displayName || strategy.name}
+        </h2>
+        <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-slate-500">
+          {strategy.description}
+        </p>
+      </div>
+
+      <div className="border-b border-white/5 p-3">
+        <div className="grid grid-cols-2 gap-2">
+          {stats.map(stat => (
+            <div
+              key={stat.label}
+              className="rounded-md border border-white/5 bg-white/[0.03] px-2 py-2"
+            >
+              <div className="truncate text-[9px] font-black uppercase tracking-wider text-slate-600">
+                {stat.label}
+              </div>
+              <div
+                className={cn(
+                  'mt-1 truncate font-mono text-xs font-bold',
+                  stat.color
+                )}
+              >
+                {stat.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
+        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+          Runs
+        </div>
+        <div className="space-y-1">
+          {strategyRuns.length === 0 && (
+            <div className="rounded-md border border-dashed border-white/10 px-3 py-4 text-center text-[11px] text-slate-500">
+              暂无运行实例
+            </div>
+          )}
+          {strategyRuns.map(run => {
+            const state = getStrategyRunState(run.mode, run.status);
+            const isActive = run.id === displayRun?.id;
+
+            return (
+              <button
+                key={run.id}
+                type="button"
+                onClick={() => openRunDashboard(run)}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                  isActive
+                    ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                    : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
+                )}
+              >
+                <span
+                  className={cn(
+                    'h-2 w-2 shrink-0 rounded-full',
+                    state.status === 'RUNNING'
+                      ? 'bg-emerald-400'
+                      : state.color === 'rose'
+                        ? 'bg-rose-400'
+                        : 'bg-slate-600'
+                  )}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-bold">
+                    {run.name}
+                  </span>
+                  <span className="block truncate text-[10px] text-slate-600">
+                    {state.modeLabel} / {state.statusLabel}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </aside>
+  );
+
+  const detailContent = (
     <div
       className={cn(
-        'mx-auto max-w-7xl',
+        'h-full min-h-0 bg-[#08101d] p-3',
         activeTab === 'logs'
-          ? 'flex h-[calc(100vh-var(--header-height)-5.5rem)] min-h-0 flex-col gap-3 overflow-hidden lg:h-[calc(100vh-var(--header-height)-4rem)]'
-          : 'space-y-3'
+          ? 'flex flex-col gap-3 overflow-hidden'
+          : 'overflow-y-auto custom-scrollbar'
       )}
     >
       <Tabs
@@ -1181,20 +1699,17 @@ export default function StrategyDetailPage() {
         )}
       >
         {/* Unified Command Center Header Card */}
-        <div className="relative overflow-hidden bg-[#0F1729] border border-white/5 rounded-2xl p-5 pb-0 shadow-xl">
-          <ProfessionalBackground />
-
+        <div className="relative overflow-hidden border border-white/5 bg-[#0b1120]/70 px-4 py-3">
           <div className="relative z-10 flex flex-col gap-3 w-full">
             {/* Slim Top Row: Back Nav & Tags */}
             <div className="flex justify-between items-center w-full">
-              <Button
-                variant="ghost"
-                className="group h-6 px-2 -ml-2 rounded-md text-[10px] font-bold text-slate-500 hover:text-blue-400 hover:bg-blue-500/10 uppercase tracking-wider gap-1.5 transition-all duration-300"
-                onClick={() => setLocation('/strategies')}
+              <Link
+                href="/strategies"
+                className="group -ml-2 inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 transition-all duration-300 hover:bg-red-500/10 hover:text-red-400"
               >
                 <ArrowLeft className="h-3 w-3 transition-transform duration-300 group-hover:-translate-x-0.5" />
-                返回实例中心
-              </Button>
+                返回策略看板
+              </Link>
 
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <div
@@ -1207,7 +1722,7 @@ export default function StrategyDetailPage() {
                   <div
                     className={cn(
                       'flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border',
-                      runState.mode === 'BACKTEST' && getTagClass('blue'),
+                      runState.mode === 'BACKTEST' && getTagClass('red'),
                       runState.mode === 'PAPER' && getTagClass('emerald'),
                       runState.mode === 'LIVE' && getTagClass('rose')
                     )}
@@ -1228,12 +1743,12 @@ export default function StrategyDetailPage() {
                 {displayRun?.mode === StrategyRunMode.Backtest && (
                   <button
                     type="button"
-                    className="flex items-center gap-2 rounded-md border border-blue-400/30 bg-blue-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-200 shadow-sm shadow-blue-500/10 hover:border-blue-300/60 hover:bg-blue-500/20"
+                    className="flex items-center gap-2 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-red-200 shadow-sm shadow-red-500/10 hover:border-red-300/60 hover:bg-red-500/20"
                     onClick={() => setActiveTab('history')}
                     aria-label="查看当前回测版本"
                   >
                     <History size={10} strokeWidth={2} />
-                    <span className="text-blue-300">回测版本</span>
+                    <span className="text-red-300">回测版本</span>
                     <span className="font-mono text-slate-50">
                       {currentBacktestVersion
                         ? `v${currentBacktestVersion.version}`
@@ -1253,7 +1768,7 @@ export default function StrategyDetailPage() {
             <div className="flex flex-col xl:flex-row justify-between xl:items-center gap-5 w-full pb-3">
               {/* Identity compressed */}
               <div className="flex items-center gap-4 flex-1 min-w-0 pr-4">
-                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-blue-600/20 to-blue-500/5 border border-blue-500/20 flex items-center justify-center text-blue-500 shadow-md shrink-0">
+                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-red-600/20 to-red-500/5 border border-red-500/20 flex items-center justify-center text-red-500 shadow-md shrink-0">
                   <Bot size={22} strokeWidth={1.5} />
                 </div>
 
@@ -1305,7 +1820,7 @@ export default function StrategyDetailPage() {
                     })()}
                   {!primaryAction && !displayRun && (
                     <Button
-                      className="rounded-lg h-8 px-4 bg-blue-600 hover:bg-blue-500 text-white shadow shadow-blue-600/20 text-[10px] font-bold uppercase tracking-wider"
+                      className="rounded-lg h-8 px-4 bg-red-600 hover:bg-red-500 text-white shadow shadow-red-600/20 text-[10px] font-bold uppercase tracking-wider"
                       onClick={() => setLocation(`/strategies/${id}/run`)}
                     >
                       <Play className="mr-1.5 h-3 w-3 fill-current" />
@@ -1332,7 +1847,7 @@ export default function StrategyDetailPage() {
                                 'text-[10px] h-8 font-bold uppercase tracking-wider cursor-pointer',
                                 action.dangerous
                                   ? 'text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 focus:bg-rose-500/10 focus:text-rose-300'
-                                  : 'text-slate-300 hover:text-blue-300 hover:bg-blue-500/10 focus:bg-blue-500/10 focus:text-blue-300'
+                                  : 'text-slate-300 hover:text-red-300 hover:bg-red-500/10 focus:bg-red-500/10 focus:text-red-300'
                               )}
                               onClick={() => void executeAction(action.id)}
                             >
@@ -1509,6 +2024,94 @@ export default function StrategyDetailPage() {
           )}
         </div>
       </Tabs>
+    </div>
+  );
+
+  return (
+    <>
+      <StrategyStudioShell
+        activeMode={studioActiveMode}
+        className="h-full min-h-0"
+        content={detailContent}
+        onModeChange={handleStudioModeChange}
+        sidebar={detailSidebar}
+        statusBarLeft={
+          <>
+            <span className="inline-flex items-center gap-2">
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  runState?.status === 'RUNNING'
+                    ? 'bg-emerald-400'
+                    : 'bg-slate-500'
+                )}
+              />
+              {runState?.statusLabel || '未创建实例'}
+            </span>
+            <span className="text-slate-700">|</span>
+            <span>{runState?.modeLabel || '策略详情'}</span>
+          </>
+        }
+        statusBarRight={
+          <>
+            <span>{strategyInstance?.instrumentCode || '未绑定标的'}</span>
+            <span className="text-slate-700">|</span>
+            <span className="font-mono">{displayRun?.id || '-'}</span>
+            {displayRun?.mode === StrategyRunMode.Backtest && (
+              <>
+                <span className="text-slate-700">|</span>
+                <span>
+                  {currentBacktestVersion
+                    ? `Backtest v${currentBacktestVersion.version}`
+                    : 'Backtest'}
+                </span>
+              </>
+            )}
+          </>
+        }
+        tabBar={
+          <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/5 bg-[#0b1120]/80 px-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <Bot className="h-4 w-4 shrink-0 text-red-400" />
+              <div className="min-w-0">
+                <div className="truncate text-[11px] font-black uppercase tracking-[0.2em] text-slate-200">
+                  {strategyInstance?.displayName || strategy.name}
+                </div>
+                <div className="truncate text-[10px] font-medium text-slate-600">
+                  {activeTab} / {runState?.modeLabel || 'template'}
+                </div>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              {primaryAction &&
+                (() => {
+                  const PrimaryIcon = getActionIcon(primaryAction.id);
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => void executeAction(primaryAction.id)}
+                      className={cn(
+                        'flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[10px] font-black uppercase tracking-wider text-white transition-colors',
+                        getPrimaryActionClass(primaryAction.tone)
+                      )}
+                    >
+                      <PrimaryIcon className="h-3.5 w-3.5" />
+                      {primaryAction.label}
+                    </button>
+                  );
+                })()}
+              <button
+                type="button"
+                onClick={() => setActiveTab('config')}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-red-500/40 hover:text-red-300"
+                title="参数配置"
+              >
+                <Settings className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        }
+      />
       <Dialog
         open={rerunDialogOpen}
         onOpenChange={open => {
@@ -1537,7 +2140,7 @@ export default function StrategyDetailPage() {
                 setRerunDateRange(range);
                 setRerunError(null);
               }}
-              buttonClassName="min-h-12 border-slate-700 bg-slate-900/80 text-slate-100 hover:border-blue-500/70"
+              buttonClassName="min-h-12 border-slate-700 bg-slate-900/80 text-slate-100 hover:border-red-500/70"
             />
 
             {rerunError && (
@@ -1570,15 +2173,29 @@ export default function StrategyDetailPage() {
       </Dialog>
       <ConfirmDialog
         open={confirmDialog.open}
-        onOpenChange={open => setConfirmDialog(prev => ({ ...prev, open }))}
+        onOpenChange={open => {
+          if (!open) {
+            paperSnapshotDraftRef.current = null;
+          }
+          setConfirmDialog(prev => ({ ...prev, open }));
+        }}
         title={confirmDialog.title}
-        description={confirmDialog.description}
-        confirmText="确认"
+        description={
+          confirmDialog.paperSnapshotDraft ? (
+            <PaperAccountSnapshotEditor
+              draft={confirmDialog.paperSnapshotDraft}
+              onChange={updatePaperSnapshotDraft}
+            />
+          ) : (
+            confirmDialog.description
+          )
+        }
+        confirmText={confirmDialog.confirmText || '确认'}
         loadingText="处理中..."
         cancelText="取消"
         variant={confirmDialog.variant}
         onConfirm={confirmDialog.onConfirm}
       />
-    </div>
+    </>
   );
 }
