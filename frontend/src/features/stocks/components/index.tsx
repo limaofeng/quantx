@@ -2,6 +2,9 @@
 import type { StockDetail, StockHolding, StockTransaction } from '../types';
 
 export { StockHeader } from './StockHeader';
+export { StockStudioShell } from './StockStudioShell';
+
+export type { StockStudioMode } from './StockStudioShell';
 
 // 简化导出，其他组件可以后续添加
 export const StockMetrics = ({ stock }: { stock: StockDetail }) => {

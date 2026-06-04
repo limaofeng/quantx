@@ -1,6 +1,7 @@
 import { ArrowLeft, DollarSign } from 'lucide-react';
 import { Link } from 'wouter';
 
+import { useStudioNavigate } from '@/components/studio-workspace';
 import { Button } from '@/components/ui/button';
 
 import type { StockDetail } from '../types';
@@ -17,6 +18,9 @@ function getStockIconText(name: string): string {
 }
 
 export function StockHeader({ stock }: StockHeaderProps) {
+  const openStudioTab = useStudioNavigate();
+  const tradingPath = stock.id ? `/holdings?symbol=${stock.id}` : '/holdings';
+
   return (
     <div className="flex items-center justify-between mb-6">
       <div className="flex items-center">
@@ -46,12 +50,13 @@ export function StockHeader({ stock }: StockHeaderProps) {
         </div>
       </div>
       <div className="flex gap-3">
-        <Link href="/trading">
-          <Button data-testid="trade-stock">
-            <DollarSign className="mr-2 h-4 w-4" />
-            交易
-          </Button>
-        </Link>
+        <Button
+          data-testid="trade-stock"
+          onClick={() => openStudioTab(tradingPath)}
+        >
+          <DollarSign className="mr-2 h-4 w-4" />
+          交易
+        </Button>
       </div>
     </div>
   );

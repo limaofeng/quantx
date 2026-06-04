@@ -14,16 +14,21 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
   const isPositive = quote.change! >= 0;
   const changePercent = quote.changePercent!;
   return (
-    <Card className="p-6 mb-6">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <Card className="mb-0 rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
+      <div className="grid grid-cols-3 gap-4">
         <div>
-          <p className="text-sm text-muted-foreground mb-1">当前价格</p>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+            当前价格
+          </p>
           <div className="flex items-baseline">
-            <span className="text-3xl font-bold" data-testid="current-price">
+            <span
+              className="font-mono text-2xl font-black text-slate-100"
+              data-testid="current-price"
+            >
               ¥{quote.lastPrice.toFixed(2)}
             </span>
             <div
-              className={`ml-3 flex items-center ${isPositive ? 'text-success' : 'text-destructive'}`}
+              className={`ml-3 flex items-center text-xs font-bold ${isPositive ? 'text-success' : 'text-destructive'}`}
             >
               {isPositive ? (
                 <ArrowUpRight className="h-4 w-4 mr-1" />
@@ -38,20 +43,25 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
         </div>
 
         <div>
-          <p className="text-sm text-muted-foreground mb-1">52周最高/最低</p>
-          <div className="space-y-1">
+          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+            52周最高/最低
+          </p>
+          <div className="space-y-1 text-xs">
             <div className="flex justify-between">
-              <span className="text-sm">最高:</span>
+              <span className="text-slate-500">最高:</span>
               <span
-                className="font-medium text-destructive"
+                className="font-mono font-medium text-destructive"
                 data-testid="52w-high"
               >
                 ¥{quote.high.toFixed(2)}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-sm">最低:</span>
-              <span className="font-medium text-success" data-testid="52w-low">
+              <span className="text-slate-500">最低:</span>
+              <span
+                className="font-mono font-medium text-success"
+                data-testid="52w-low"
+              >
                 ¥{quote.low.toFixed(2)}
               </span>
             </div>
@@ -59,17 +69,25 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
         </div>
 
         <div>
-          <p className="text-sm text-muted-foreground mb-1">成交量/成交额</p>
-          <div className="space-y-1">
+          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+            成交量/成交额
+          </p>
+          <div className="space-y-1 text-xs">
             <div className="flex justify-between">
-              <span className="text-sm">成交量:</span>
-              <span className="font-medium" data-testid="volume">
+              <span className="text-slate-500">成交量:</span>
+              <span
+                className="font-mono font-medium text-slate-200"
+                data-testid="volume"
+              >
                 {quote.volume}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-sm">成交额:</span>
-              <span className="font-medium" data-testid="turnover">
+              <span className="text-slate-500">成交额:</span>
+              <span
+                className="font-mono font-medium text-slate-200"
+                data-testid="turnover"
+              >
                 {quote.amount}
               </span>
             </div>
