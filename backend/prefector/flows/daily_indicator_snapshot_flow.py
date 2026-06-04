@@ -28,6 +28,8 @@ from services.instrument_service import InstrumentService
 
 # 每批处理的标的数量
 _BATCH_SIZE = 300
+_ETF_CODE_PREFIXES = ("510", "511", "512", "513", "515", "516", "517", "518", "159")
+_SH_INDEX_PREFIXES = ("000", "880", "881", "882", "883", "884", "885", "886", "887", "888", "899")
 
 
 def _chunks(lst: List, n: int):
@@ -56,6 +58,45 @@ def _signal_run_warnings(saved: int, skipped: int, failed: int, errors: List[str
     warnings.append("部分标的数据不足被跳过")
   warnings.extend(errors[:3])
   return "; ".join(warnings)
+
+
+def _normalize_instrument_type(value: Any) -> Optional[str]:
+  if value is None:
+    return None
+  enum_value = getattr(value, "value", None)
+  if enum_value is not None:
+    return str(enum_value).lower()
+  text = str(value)
+  if "." in text:
+    text = text.rsplit(".", 1)[-1]
+  return text.lower()
+
+
+def _infer_instrument_type(code: str, sector: Optional[str] = None) -> str:
+  sector_text = (sector or "").upper()
+  if "指数" in (sector or "") or "INDEX" in sector_text:
+    return "index"
+  if "ETF" in sector_text:
+    return "etf"
+  normalized_code = (code or "").upper()
+  if normalized_code.startswith(_ETF_CODE_PREFIXES):
+    return "etf"
+  if normalized_code.endswith(".SH") and normalized_code.startswith(_SH_INDEX_PREFIXES):
+    return "index"
+  if normalized_code.endswith(".SZ") and normalized_code.startswith("399"):
+    return "index"
+  return "stock"
+
+
+def _filter_signal_snapshot_codes(
+  codes: List[str],
+  instrument_type_map: Dict[str, str],
+) -> List[str]:
+  return [
+    code
+    for code in codes
+    if instrument_type_map.get(code, "stock") != "index"
+  ]
 
 
 @flow(
@@ -129,12 +170,12 @@ async def daily_indicator_snapshot_flow(
   if stock_list:
     all_codes = list(dict.fromkeys(stock_list))
     for code in all_codes:
-      instrument_type_map[code] = "etf" if code.startswith(("510", "511", "512", "513", "515", "516", "517", "518", "159")) else "stock"
+      instrument_type_map[code] = _infer_instrument_type(code)
     logger.info(f"使用传入增量标的列表: {len(all_codes)} 只")
   else:
     for sector in sectors:
       codes = data_manager.get_stock_list_in_sector(sector)
-      itype = "etf" if "ETF" in sector.upper() else "stock"
+      itype = _infer_instrument_type("", sector)
       for code in codes:
         instrument_type_map[code] = itype
       all_codes.extend(codes)
@@ -154,9 +195,18 @@ async def daily_indicator_snapshot_flow(
     instruments = await instrument_service.find_all(where=where, limit=20000)
     for inst in instruments:
       name_map[inst.id] = inst.name or ""
+      instrument_type = _normalize_instrument_type(inst.type)
+      if instrument_type in {"stock", "etf", "index"}:
+        instrument_type_map[inst.id] = instrument_type
     logger.info(f"  加载到 {len(name_map)} 条名称")
   except Exception as e:
     logger.warning(f"  加载名称失败（将以空名称继续）: {e}")
+
+  eligible_codes = _filter_signal_snapshot_codes(all_codes, instrument_type_map)
+  skipped_index_count = len(all_codes) - len(eligible_codes)
+  if skipped_index_count:
+    logger.info(f"  已跳过 {skipped_index_count} 只指数标的，不写入选股信号快照")
+  all_codes = eligible_codes
 
   # ── 步骤3：分批计算指标并写库 ────────────────────────────
   total_batches = (len(all_codes) + batch_size - 1) // batch_size

@@ -4,9 +4,14 @@
 包含数据获取、保存等基础任务
 """
 
+import asyncio
 import datetime
+import json
 import random
-from typing import Any, Dict, List
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from prefect import get_run_logger, task
 from prefect.cache_policies import INPUTS
@@ -23,6 +28,9 @@ PRICE_CACHE_EXPIRATION = datetime.timedelta(minutes=1)
 # 重试配置
 DEFAULT_RETRIES = 3
 SAVE_RETRIES = 2
+FINANCIAL_BATCH_TIMEOUT_SECONDS = 300
+FINANCIAL_TASK_TIMEOUT_SECONDS = 960
+FINANCIAL_WORKER_OUTPUT_LIMIT = 4000
 
 
 @task(
@@ -598,12 +606,17 @@ async def save_batch_financial_data(financial_data_map: Dict[str, Any]) -> int:
 @task(
     name="批量分片同步财务数据",
     description="同步一批标的的财务数据（获取+保存）",
-    retries=3,
-    retry_delay_seconds=60,
+    retries=1,
+    retry_delay_seconds=30,
+    timeout_seconds=FINANCIAL_TASK_TIMEOUT_SECONDS,
 )
-async def sync_financial_batch_task(stock_codes: List[str]) -> Dict[str, Any]:
+async def sync_financial_batch_task(
+    stock_codes: List[str],
+    batch_index: Optional[int] = None,
+    batch_total: Optional[int] = None,
+    timeout_seconds: int = FINANCIAL_BATCH_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
     """批量分片同步财务数据任务"""
-    from services.financial_service import FinancialService
     logger = get_run_logger()
     
     result = {
@@ -616,25 +629,99 @@ async def sync_financial_batch_task(stock_codes: List[str]) -> Dict[str, Any]:
     if not stock_codes:
         return result
         
+    batch_label = (
+        f"{batch_index}/{batch_total}"
+        if batch_index is not None and batch_total is not None
+        else "unknown"
+    )
+    logger.info(
+        f"开始财务分片同步: batch={batch_label}, 股票数={len(stock_codes)}, "
+        f"范围={stock_codes[0]}~{stock_codes[-1]}, 超时={timeout_seconds}s"
+    )
+
     try:
-        # 1. 获取财务数据
-        data_registry = XTDataManagerRegistry()
-        data_manager = data_registry.get_manager()
-        financial_data_map = data_manager.get_financial_data_list(stock_codes)
-        
-        if not financial_data_map:
-            result["failed"] = len(stock_codes)
-            return result
-            
-        # 2. 保存财务数据
-        service = FinancialService()
-        total_saved = await service.save_batch_financial_data(financial_data_map)
-        
-        result["saved_count"] = total_saved
-        result["success"] = len(financial_data_map)
-        result["failed"] = result["total"] - result["success"]
-        
-        return result
+        worker_result = await _run_financial_batch_worker(
+            stock_codes=stock_codes,
+            timeout_seconds=timeout_seconds,
+        )
+        logger.info(
+            f"财务分片同步完成: batch={batch_label}, "
+            f"success={worker_result.get('success', 0)}, "
+            f"failed={worker_result.get('failed', 0)}, "
+            f"saved={worker_result.get('saved_count', 0)}, "
+            f"status={worker_result.get('status')}"
+        )
+        return worker_result
     except Exception as e:
-        logger.error(f"财务分片同步任务失败: {e}")
+        logger.error(f"财务分片同步任务失败: batch={batch_label}, error={e}")
         raise
+
+
+async def _run_financial_batch_worker(
+    stock_codes: List[str],
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    backend_root = Path(__file__).resolve().parents[2]
+
+    with tempfile.TemporaryDirectory(prefix="quantx_financial_sync_") as tmp_dir:
+        input_path = Path(tmp_dir) / "input.json"
+        output_path = Path(tmp_dir) / "output.json"
+        input_path.write_text(
+            json.dumps({"stock_codes": stock_codes}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "prefector.workers.financial_batch_worker",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            cwd=str(backend_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            stdout, stderr = await process.communicate()
+            raise TimeoutError(
+                f"财务批次 worker 超时 {timeout_seconds}s，"
+                f"股票范围 {stock_codes[0]}~{stock_codes[-1]}，"
+                f"stdout={_decode_worker_output(stdout)}, "
+                f"stderr={_decode_worker_output(stderr)}"
+            ) from exc
+
+        if output_path.exists():
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+        else:
+            result = {}
+
+        if process.returncode != 0:
+            raise RuntimeError(
+                f"财务批次 worker 退出码 {process.returncode}，"
+                f"result={result}, stdout={_decode_worker_output(stdout)}, "
+                f"stderr={_decode_worker_output(stderr)}"
+            )
+
+        if not result:
+            raise RuntimeError(
+                f"财务批次 worker 未返回结果，stdout={_decode_worker_output(stdout)}, "
+                f"stderr={_decode_worker_output(stderr)}"
+            )
+
+        return result
+
+
+def _decode_worker_output(output: bytes) -> str:
+    text = output.decode("utf-8", errors="replace").strip()
+    if len(text) <= FINANCIAL_WORKER_OUTPUT_LIMIT:
+        return text
+    return text[-FINANCIAL_WORKER_OUTPUT_LIMIT:]

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.relational_base import BaseRepository
 from models import Position
+from models.enums import AccountType
 
 
 class PositionRepository(BaseRepository[Position]):
@@ -20,14 +21,26 @@ class PositionRepository(BaseRepository[Position]):
   def __init__(self, db_session: AsyncSession):
     super().__init__(db_session)
 
-  async def find_all(self) -> List[Position]:
+  async def find_all(self, account_id: Optional[str] = None) -> List[Position]:
     """获取所有持仓"""
-    result = await self.db.execute(select(Position))
+    stmt = select(Position)
+    if account_id:
+      stmt = stmt.filter(Position.account_id == account_id)
+    result = await self.db.execute(stmt)
     return list(result.scalars().all())
 
-  async def find_by_stock_code(self, stock_code: str) -> Optional[Position]:
+  async def find_by_stock_code(
+    self,
+    stock_code: str,
+    account_id: Optional[str] = None,
+    account_type: Optional[AccountType] = None,
+  ) -> Optional[Position]:
     """获取某只股票的持仓"""
     stmt = select(Position).filter(Position.stock_code == stock_code)
+    if account_id:
+      stmt = stmt.filter(Position.account_id == account_id)
+    if account_type:
+      stmt = stmt.filter(Position.account_type == account_type)
     result = await self.db.execute(stmt)
     return result.scalar_one_or_none()
 

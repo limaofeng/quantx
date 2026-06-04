@@ -4,7 +4,7 @@
 """
 
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import date, datetime
 import pandas as pd
 import logging
 
@@ -17,6 +17,8 @@ from repositories.financial_repository import (
     FinancialCashFlowRepository,
     FinancialCapitalRepository,
 )
+from services.financial_report_date import normalize_financial_report_date
+from services.financial_metric_snapshot_service import FinancialMetricSnapshotService
 
 
 class FinancialService:
@@ -32,7 +34,23 @@ class FinancialService:
                 return datetime.strptime(val, "%Y%m%d").date()
             except ValueError:
                 return None
+        if isinstance(val, datetime):
+            return val.date()
+        if isinstance(val, date):
+            return val
+        if hasattr(val, "date"):
+            try:
+                parsed_date = val.date()
+                if isinstance(parsed_date, date):
+                    return parsed_date
+            except (TypeError, ValueError):
+                return None
         return val
+
+    @classmethod
+    def _parse_report_date(cls, val):
+        """将财报报告期规范为真实季度末；公告日不得使用此方法。"""
+        return normalize_financial_report_date(cls._parse_date(val))
 
     @staticmethod
     def _safe_decimal(val):
@@ -75,7 +93,7 @@ class FinancialService:
                         for _, row in balance_df.iterrows():
                             await balance_repo.upsert({
                                 "stock_code": stock_code,
-                                "report_date": self._parse_date(row.get("m_timetag")),
+                                "report_date": self._parse_report_date(row.get("m_timetag")),
                                 "announce_date": self._parse_date(row.get("m_anntime")),
                                 "total_assets": self._safe_decimal(row.get("tot_assets")),
                                 "total_current_assets": self._safe_decimal(row.get("total_current_assets")),
@@ -98,7 +116,7 @@ class FinancialService:
                         for _, row in income_df.iterrows():
                             await income_repo.upsert({
                                 "stock_code": stock_code,
-                                "report_date": self._parse_date(row.get("m_timetag")),
+                                "report_date": self._parse_report_date(row.get("m_timetag")),
                                 "announce_date": self._parse_date(row.get("m_anntime")),
                                 "revenue": self._safe_decimal(row.get("revenue")),
                                 "revenue_inc": self._safe_decimal(row.get("revenue_inc")),
@@ -117,7 +135,7 @@ class FinancialService:
                         for _, row in cashflow_df.iterrows():
                             await cashflow_repo.upsert({
                                 "stock_code": stock_code,
-                                "report_date": self._parse_date(row.get("m_timetag")),
+                                "report_date": self._parse_report_date(row.get("m_timetag")),
                                 "announce_date": self._parse_date(row.get("m_anntime")),
                                 "net_cash_flows_oper_act": self._safe_decimal(row.get("net_cash_flows_oper_act")),
                                 "net_cash_flows_inv_act": self._safe_decimal(row.get("net_cash_flows_inv_act")),
@@ -133,7 +151,7 @@ class FinancialService:
                         for _, row in capital_df.iterrows():
                             await capital_repo.upsert({
                                 "stock_code": stock_code,
-                                "report_date": self._parse_date(row.get("m_timetag")),
+                                "report_date": self._parse_report_date(row.get("m_timetag")),
                                 "announce_date": self._parse_date(row.get("m_anntime")),
                                 "total_capital": self._safe_decimal(row.get("total_capital")),
                                 "circulating_capital": self._safe_decimal(row.get("circulating_capital")),
@@ -143,6 +161,16 @@ class FinancialService:
                             total_saved += 1
 
                 await db.commit()
+
+                metric_service = FinancialMetricSnapshotService(db_session=db)
+                metric_result = await metric_service.rebuild_for_codes(
+                    list(financial_data_map.keys())
+                )
+                logger.info(
+                    "财务指标快照重算完成: codes=%s, records=%s",
+                    metric_result.get("codes", 0),
+                    metric_result.get("records", 0),
+                )
                 
             except Exception as e:
                 await db.rollback()

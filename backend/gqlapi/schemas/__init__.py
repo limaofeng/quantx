@@ -11,6 +11,7 @@ from .market_data_schema import MarketDataQuery
 from .divid_factor_schema import DividFactorQuery
 from .financial_schema import FinancialQuery
 from .stock_screening_schema import StockScreeningQuery
+from .watchlist_schema import WatchlistMutation, WatchlistQuery
 
 __all__ = [
   "InstrumentQuery",
@@ -19,6 +20,8 @@ __all__ = [
   "DividFactorQuery",
   "FinancialQuery",
   "StockScreeningQuery",
+  "WatchlistQuery",
+  "WatchlistMutation",
   "TradingQuery",
   "TradingMutation",
   "LiquidationQuery",

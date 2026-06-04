@@ -7,6 +7,9 @@ from typing import List, Optional
 from services.liquidation_service import LiquidationService
 
 from ..types.liquidation_types import (
+  ConditionalLiquidationEvaluationResult,
+  ConditionalLiquidationOrder,
+  ConditionalLiquidationOrderInput,
   LiquidatablePosition,
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
@@ -25,9 +28,27 @@ class LiquidationResolver:
   """清仓管理解析器"""
 
   @staticmethod
-  async def get_liquidation_summary() -> LiquidationSummary:
+  def _conditional_evaluation_result(
+    result,
+  ) -> ConditionalLiquidationEvaluationResult:
+    return ConditionalLiquidationEvaluationResult(
+      order=ConditionalLiquidationOrder.from_model(result.order),
+      triggered=result.triggered,
+      submitted=result.submitted,
+      message=result.message,
+      sell_volume=result.sell_volume,
+      order_id=result.order_id,
+      latest_price=result.latest_price,
+      profit_pct=result.profit_pct,
+      error=result.error,
+    )
+
+  @staticmethod
+  async def get_liquidation_summary(
+    account_id: Optional[str] = None,
+  ) -> LiquidationSummary:
     """获取清仓概况"""
-    liquidation_service = LiquidationService()
+    liquidation_service = LiquidationService(account_id=account_id)
     summary_data = await liquidation_service.get_liquidation_summary()
 
     # 转换持仓数据
@@ -53,11 +74,24 @@ class LiquidationResolver:
     return summary
 
   @staticmethod
+  async def get_conditional_liquidation_orders(
+    account_id: Optional[str] = None,
+    stock_code: Optional[str] = None,
+    include_cancelled: bool = False,
+  ) -> List[ConditionalLiquidationOrder]:
+    service = LiquidationService(account_id=account_id)
+    orders = await service.list_conditional_liquidation_orders(
+      stock_code=stock_code,
+      include_cancelled=include_cancelled,
+    )
+    return [ConditionalLiquidationOrder.from_model(order) for order in orders]
+
+  @staticmethod
   async def liquidate_all_positions(
     input: LiquidateAllPositionsInput,
   ) -> LiquidationResult:
     """一键清仓"""
-    liquidation_service = LiquidationService()
+    liquidation_service = LiquidationService(account_id=input.account_id)
 
     # 执行一键清仓
     result_data = await liquidation_service.liquidate_all_positions(
@@ -78,7 +112,12 @@ class LiquidationResolver:
       message=result_data.message,
     )
     result.errors = lambda: errors
-    result.orders = lambda: []  # 这里可以根据需要返回订单信息
+    order_ids = [
+      str(order.get("order_id"))
+      for order in result_data.orders
+      if order.get("order_id") is not None
+    ]
+    result.orders = lambda: order_ids
 
     return result
 
@@ -87,7 +126,7 @@ class LiquidationResolver:
     input: LiquidatePositionInput,
   ) -> PositionLiquidationResult:
     """个股清仓"""
-    liquidation_service = LiquidationService()
+    liquidation_service = LiquidationService(account_id=input.account_id)
 
     # 执行个股清仓
     result_data = await liquidation_service.liquidate_position(
@@ -102,6 +141,56 @@ class LiquidationResolver:
       message=result_data["message"],
       error=result_data.get("error"),
     )
+
+  @staticmethod
+  async def upsert_conditional_liquidation_order(
+    input: ConditionalLiquidationOrderInput,
+  ) -> ConditionalLiquidationOrder:
+    service = LiquidationService(account_id=input.account_id)
+    order = await service.upsert_conditional_liquidation_order(
+      order_id=input.id,
+      stock_code=input.stock_code,
+      instrument_name=input.instrument_name,
+      enabled=input.enabled,
+      target_profit_pct=input.target_profit_pct,
+      target_price=input.target_price,
+      sell_mode=input.sell_mode,
+      sell_ratio_pct=input.sell_ratio_pct,
+      sell_volume=input.sell_volume,
+      remark=input.remark,
+    )
+    return ConditionalLiquidationOrder.from_model(order)
+
+  @staticmethod
+  async def set_conditional_liquidation_order_enabled(
+    order_id: str,
+    enabled: bool,
+  ) -> Optional[ConditionalLiquidationOrder]:
+    service = LiquidationService()
+    order = await service.set_conditional_liquidation_order_enabled(
+      order_id,
+      enabled,
+    )
+    return ConditionalLiquidationOrder.from_model(order) if order else None
+
+  @staticmethod
+  async def cancel_conditional_liquidation_order(
+    order_id: str,
+  ) -> Optional[ConditionalLiquidationOrder]:
+    service = LiquidationService()
+    order = await service.cancel_conditional_liquidation_order(order_id)
+    return ConditionalLiquidationOrder.from_model(order) if order else None
+
+  @staticmethod
+  async def evaluate_conditional_liquidation_orders(
+    account_id: Optional[str] = None,
+    stock_code: Optional[str] = None,
+  ) -> List[ConditionalLiquidationEvaluationResult]:
+    service = LiquidationService(account_id=account_id)
+    results = await service.evaluate_conditional_liquidation_orders(
+      stock_code=stock_code,
+    )
+    return [LiquidationResolver._conditional_evaluation_result(item) for item in results]
 
   @staticmethod
   async def redeem_cleared_position(input: RedeemPositionInput) -> RedemptionResult:

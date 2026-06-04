@@ -22,11 +22,13 @@ class PositionService:
   def __init__(self):
     pass
 
-  async def get_positions(self) -> List[Position]:
+  async def get_positions(
+    self, account_id: Optional[str] = None
+  ) -> List[Position]:
     """获取用户持仓列表"""
     async for db in get_async_db():
       position_repo = PositionRepository(db)
-      return await position_repo.find_all()
+      return await position_repo.find_all(account_id=account_id)
 
   async def get_position_by_stock(self, stock_code: str) -> Optional[Position]:
     """获取用户某股票的持仓"""

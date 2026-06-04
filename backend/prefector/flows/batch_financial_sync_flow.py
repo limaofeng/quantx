@@ -33,9 +33,11 @@ FINANCIAL_SYNC_SCHEDULE = CronSchedule(cron="0 9 * * 1-5")
   **STANDARD_FLOW_HOOKS
 )
 async def batch_financial_sync_flow(
-  max_concurrency: int = 5,
+  max_concurrency: int = 3,
   limit: Optional[int] = None,
   stock_codes: Optional[List[str]] = None,
+  batch_size: int = 25,
+  batch_timeout_seconds: int = 300,
 ) -> Dict[str, Any]:
   """
   全市场财务数据同步流程
@@ -44,6 +46,8 @@ async def batch_financial_sync_flow(
       max_concurrency: 并发分片数
       limit: 限制处理的股票数量（用于测试）
       stock_codes: 指定股票代码列表；为空时同步全市场股票财务数据
+      batch_size: 每个财务同步批次包含的股票数量
+      batch_timeout_seconds: 单个批次允许的最大运行秒数
   """
   logger = get_run_logger()
   start_time = time_utils.now()
@@ -97,17 +101,38 @@ async def batch_financial_sync_flow(
       }
 
     # 步骤2: 分片并发执行
-    CHUNK_SIZE = 50
-    chunks = [stock_codes[i:i + CHUNK_SIZE] for i in range(0, len(stock_codes), CHUNK_SIZE)]
-    logger.info(f"将 {total_stocks} 只股票分为 {len(chunks)} 个批次，每批 {CHUNK_SIZE}，并发数 {max_concurrency}")
+    max_concurrency = max(1, min(max_concurrency, 10))
+    batch_size = max(1, min(batch_size, 200))
+    batch_timeout_seconds = max(30, min(batch_timeout_seconds, 900))
+
+    chunks = [
+      stock_codes[i:i + batch_size]
+      for i in range(0, len(stock_codes), batch_size)
+    ]
+    logger.info(
+      f"将 {total_stocks} 只股票分为 {len(chunks)} 个批次，每批 {batch_size}，"
+      f"并发数 {max_concurrency}，单批超时 {batch_timeout_seconds}s"
+    )
     
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def process_chunk(chunk_codes):
+    async def process_chunk(batch_index, chunk_codes):
       async with semaphore:
-        return await sync_financial_batch_task(chunk_codes)
+        logger.info(
+          f"开始财务同步批次 {batch_index}/{len(chunks)}，"
+          f"股票数 {len(chunk_codes)}，范围 {chunk_codes[0]} ~ {chunk_codes[-1]}"
+        )
+        return await sync_financial_batch_task(
+          chunk_codes,
+          batch_index=batch_index,
+          batch_total=len(chunks),
+          timeout_seconds=batch_timeout_seconds,
+        )
 
-    tasks = [asyncio.create_task(process_chunk(chunk)) for chunk in chunks]
+    tasks = [
+      asyncio.create_task(process_chunk(index, chunk))
+      for index, chunk in enumerate(chunks, start=1)
+    ]
     
     logger.info("任务创建完成，等待执行...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -128,9 +153,15 @@ async def batch_financial_sync_flow(
             failed_batches.append(f"Batch {i}: {str(res)}")
             continue
             
-        if res.get("status") == "failed":
+        status = res.get("status")
+        if status == "failed":
             error_count += 1
             failed_batches.append(f"Batch {i}: {res.get('error')}")
+        elif status == "partial":
+            failed_batches.append(
+              f"Batch {i}: success={res.get('success', 0)}, "
+              f"failed={res.get('failed', 0)}"
+            )
             
         success_count += res.get("success", 0)
         failed_count += res.get("failed", 0)
@@ -169,6 +200,8 @@ async def batch_financial_sync_flow(
       skipped_stocks=[],
       error_stocks=failed_batches,
       max_concurrency=max_concurrency,
+      batch_size=batch_size,
+      batch_timeout_seconds=batch_timeout_seconds,
     )
     
     if failed_count > 0 or error_count > 0:

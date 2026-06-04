@@ -1,0 +1,57 @@
+from typing import List, Optional
+
+import strawberry
+
+from gqlapi.resolvers.watchlist import WatchlistResolver
+from gqlapi.types.watchlist_types import (
+  AddWatchlistItemInput,
+  ReorderWatchlistInput,
+  WatchlistItem,
+  WatchlistMutationResult,
+)
+
+
+@strawberry.type(description="自选股查询")
+class WatchlistQuery:
+  @strawberry.field(description="获取自选股列表")
+  async def watchlist(self, account_id: Optional[str] = None) -> List[WatchlistItem]:
+    return await WatchlistResolver.get_watchlist(account_id)
+
+
+@strawberry.type(description="自选股变更")
+class WatchlistMutation:
+  @strawberry.mutation(description="添加或更新自选股")
+  async def add_watchlist_item(
+    self, input: AddWatchlistItemInput
+  ) -> WatchlistMutationResult:
+    return await WatchlistResolver.add_watchlist_item(
+      account_id=input.account_id,
+      stock_code=input.stock_code,
+      instrument_name=input.instrument_name,
+      display_order=input.display_order,
+      group_name=input.group_name,
+      note=input.note,
+    )
+
+  @strawberry.mutation(description="删除自选股")
+  async def remove_watchlist_item(
+    self,
+    stock_code: str,
+    account_id: Optional[str] = None,
+  ) -> WatchlistMutationResult:
+    return await WatchlistResolver.remove_watchlist_item(stock_code, account_id)
+
+  @strawberry.mutation(description="替换自选股列表")
+  async def replace_watchlist(
+    self,
+    symbols: List[str],
+    account_id: Optional[str] = None,
+  ) -> WatchlistMutationResult:
+    return await WatchlistResolver.replace_watchlist(symbols, account_id)
+
+  @strawberry.mutation(description="更新自选股排序")
+  async def reorder_watchlist(
+    self,
+    input: ReorderWatchlistInput,
+  ) -> WatchlistMutationResult:
+    return await WatchlistResolver.reorder_watchlist(input.symbols, input.account_id)

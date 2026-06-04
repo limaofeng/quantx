@@ -4,7 +4,7 @@
 """
 
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from services.holiday_service import HolidayService
 from core.utils import time_utils
@@ -250,12 +250,37 @@ class TradingDateHelper:
     if end_date < start_date:
       return []
 
+    years = range(start_date.year, end_date.year + 1)
+    holiday_dates: Set[date] = set()
+    try:
+      for year in years:
+        holidays = await self.trading_time_service.holiday_service.get_holidays(
+          market, year
+        )
+        holiday_dates.update(holiday.date for holiday in holidays)
+    except Exception:
+      # 回退到逐日判断，保持旧行为。
+      holiday_dates = set()
+      use_bulk_holidays = False
+    else:
+      use_bulk_holidays = True
+
     trading_dates: List[date] = []
     current_date = start_date
     total_days = (end_date - start_date).days + 1
 
     for _ in range(total_days):
-      if await self.is_trading_date(market, current_date):
+      if use_bulk_holidays:
+        is_trading_date = (
+          current_date.weekday() < 5 and current_date not in holiday_dates
+        )
+        self.trading_time_service._trading_day_cache[
+          f"{market}_{current_date}"
+        ] = is_trading_date
+      else:
+        is_trading_date = await self.is_trading_date(market, current_date)
+
+      if is_trading_date:
         trading_dates.append(current_date)
       current_date += timedelta(days=1)
 

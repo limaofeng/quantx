@@ -32,7 +32,7 @@ deployments:
     schedules:
       - cron: "0 9 * * 1-5"
         timezone: Asia/Shanghai
-    version: "0.1.0"
+    version: "0.1.1"
   - name: bond-repo-sync
     entrypoint: prefector/flows/bond_repo_flow.py:bond_repo_sync_flow
     work_queue_name: default

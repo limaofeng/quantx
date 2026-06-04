@@ -58,6 +58,17 @@ def _finite_int(value: Any, default: int = 0) -> int:
   return default if number is None else int(number)
 
 
+def _instrument_type_value(value: Any) -> str:
+  enum_value = getattr(value, "value", None)
+  if enum_value is not None:
+    value = enum_value
+  text = str(value or "stock")
+  if "." in text:
+    text = text.rsplit(".", 1)[-1]
+  text = text.lower()
+  return text if text in {"stock", "etf"} else "stock"
+
+
 class StockScreeningResolver:
   @staticmethod
   def _today() -> date:
@@ -178,9 +189,6 @@ class StockScreeningResolver:
         warnings.append(f"日级信号快照部分完成: {metadata_run.warnings or '部分标的未成功'}")
       elif metadata_run.status == "failed":
         warnings.append(f"最近日级信号快照运行失败: {metadata_run.warnings or '未保存任何快照'}")
-      if input.min_roe or input.min_net_profit_growth or input.min_yoy_growth:
-        warnings.append("财务筛选字段尚未进入日级信号快照，本次仅应用技术面与行业条件")
-
       required_signals = [
         item.signal_code for item in input.signal_conditions or [] if item.required
       ]
@@ -193,16 +201,45 @@ class StockScreeningResolver:
         }
         for item in input.field_conditions or []
       ]
+      sort = (
+        {
+          "field": input.sort.field.value,
+          "direction": input.sort.direction.value,
+        }
+        if input.sort
+        else None
+      )
       records, total = await snapshot_repo.screen_snapshots(
         snapshot_date=snapshot_date,
         signal_codes=required_signals,
         field_conditions=field_conditions,
         include_industries=input.include_industries,
         exclude_industries=input.exclude_industries,
+        sort=sort,
+        min_roe=input.min_roe,
+        min_net_profit_growth=input.min_net_profit_growth,
+        min_yoy_growth=input.min_yoy_growth,
         limit=limit,
         offset=offset,
+        universe=input.universe.value,
+        exclude_st=input.exclude_st,
       )
+      financial_filter_active = any(
+        value is not None
+        for value in [
+          input.min_roe,
+          input.min_net_profit_growth,
+          input.min_yoy_growth,
+        ]
+      )
+      if financial_filter_active and total == 0:
+        warnings.append("未找到满足财务指标条件的标的，未公告或质量异常的财报不会通过财务筛选")
       industry_map = await snapshot_repo.find_industry_names_by_codes([record.code for record in records])
+      instrument_type_map = (
+        await snapshot_repo.find_instrument_types_by_codes([record.code for record in records])
+        if hasattr(snapshot_repo, "find_instrument_types_by_codes")
+        else {}
+      )
       weights = {item.signal_code: item.weight for item in input.score_rules or []}
 
       items: List[StockScreenItem] = []
@@ -217,11 +254,16 @@ class StockScreeningResolver:
         )
         current_price = _finite_float(record.current_price)
         open_price = _finite_float(record.open_price)
+        financial_metric = getattr(record, "financial_metric", None)
         items.append(
           StockScreenItem(
             code=record.code,
             name=record.name or record.code,
             industry=industry_map.get(record.code),
+            instrument_type=_instrument_type_value(
+              instrument_type_map.get(record.code)
+              or getattr(record, "instrument_type", None)
+            ),
             current_price=current_price,
             open_price=open_price,
             change_pct=_finite_float(record.change_pct),
@@ -251,6 +293,26 @@ class StockScreeningResolver:
             ma20=_finite_float(record.ma20),
             ma5_prev=_finite_optional_float(record.ma5_prev),
             ma10_prev=_finite_optional_float(record.ma10_prev),
+            roe=_finite_optional_float(
+              getattr(financial_metric, "roe_ttm", None)
+            ),
+            net_profit_growth=_finite_optional_float(
+              getattr(financial_metric, "net_profit_quarter_growth_pct", None)
+            ),
+            yoy_growth=_finite_optional_float(
+              getattr(financial_metric, "revenue_quarter_growth_pct", None)
+            ),
+            net_profit_accum_growth=_finite_optional_float(
+              getattr(financial_metric, "net_profit_growth_pct", None)
+            ),
+            revenue_accum_growth=_finite_optional_float(
+              getattr(financial_metric, "revenue_growth_pct", None)
+            ),
+            financial_report_date=getattr(financial_metric, "report_date", None),
+            financial_announce_date=getattr(financial_metric, "announce_date", None),
+            financial_quality_flags=list(
+              getattr(financial_metric, "quality_flags", None) or []
+            ),
             matched_strategies=matched,
             score=score,
             score_version=score_version,
@@ -262,7 +324,8 @@ class StockScreeningResolver:
           )
         )
 
-      items.sort(key=lambda item: (item.score, item.change_pct), reverse=True)
+      if sort is None:
+        items.sort(key=lambda item: (item.score, item.change_pct), reverse=True)
       return StockScreenPage(
         items=items,
         total=total,

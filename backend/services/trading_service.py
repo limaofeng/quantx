@@ -24,6 +24,7 @@ from services.position_service import PositionService
 from core.utils import time_utils
 
 logger = logging.getLogger(__name__)
+DEFAULT_ACCOUNT_ID = "300000013250"
 
 
 class TradingStatus:
@@ -62,13 +63,17 @@ class InvalidOrderError(TradingError):
 class TradingService:
   """交易服务类 - 提供完整的交易业务功能"""
 
-  def __init__(self):
-    self.order_service = OrderService()
+  def __init__(
+    self,
+    account_id: str = DEFAULT_ACCOUNT_ID,
+    account_type: AccountType = AccountType.STOCK,
+  ):
+    self.account_id = account_id or DEFAULT_ACCOUNT_ID
+    self.account_type = account_type
+    self.order_service = OrderService(self.account_id)
     self.position_service = PositionService()
     self.market_data_service = HistoricalMarketDataService()
     self.instrument_service = InstrumentService()
-    self.account_id = "300000013250"
-    self.account_type = AccountType.STOCK
     data_manager_registry = XTDataManagerRegistry()
     trading_registry = XTTradingManagerRegistry()
     self.trading_manager = trading_registry.get_manager(self.account_id)
@@ -114,6 +119,7 @@ class TradingService:
     price: float = 0,
     strategy_name: str = "",
     order_remark: str = "",
+    close_position: bool = False,
   ) -> str:
     """
     下单 - 核心交易功能
@@ -138,11 +144,17 @@ class TradingService:
 
       # 3. 参数验证
       await self._validate_order_request(
-        order_type, order_volume, price_type, price, stock_info, account
+        order_type,
+        order_volume,
+        price_type,
+        price,
+        stock_info,
+        account,
+        close_position=close_position,
       )
 
       # 4. 风险检查
-      await self._risk_check(order_volume, price, stock_info)
+      await self._risk_check(order_volume, price, stock_info, price_type)
 
       # 5. 资金/持仓检查
       await self._check_trading_capacity(
@@ -334,13 +346,19 @@ class TradingService:
     price: float,
     stock_info: Instrument,
     account: Account,
+    close_position: bool = False,
   ) -> None:
     """验证订单请求参数"""
     if order_type not in [OrderType.BUY, OrderType.SELL]:
       raise InvalidOrderError("订单类型必须是 BUY 或 SELL")
 
     # 使用配置验证数量
-    if not self._validate_order_volume(order_volume, stock_info):
+    if not self._validate_order_volume(
+      order_volume,
+      stock_info,
+      order_type=order_type,
+      close_position=close_position,
+    ):
       raise InvalidOrderError(f"订单数量不符合规则: {order_volume}")
 
     if price_type == PriceType.FIX_PRICE and price <= 0:
@@ -354,14 +372,21 @@ class TradingService:
     return stock
 
   async def _risk_check(
-    self, order_volume: int, price: float, stock_info: Instrument
+    self,
+    order_volume: int,
+    price: float,
+    stock_info: Instrument,
+    price_type: PriceType,
   ) -> None:
     """风险检查"""
     # 检查交易时间
     if not await self._is_trading_time(stock_info):
       raise TradingError("当前不在交易时间")
 
-    # 检查价格限制
+    if price_type != PriceType.FIX_PRICE:
+      return
+
+    # 检查限价单价格限制；市价类委托可传 price=0。
     up_stop_price = stock_info.up_stop_price
     down_stop_price = stock_info.down_stop_price
     order_price = Decimal(str(price))
@@ -499,7 +524,14 @@ class TradingService:
     return position.can_use_volume
 
   # 内部工具方法
-  def _validate_order_volume(self, volume: int, stock_info: Instrument) -> bool:
+  def _validate_order_volume(
+    self,
+    volume: int,
+    stock_info: Instrument,
+    *,
+    order_type: OrderType = None,
+    close_position: bool = False,
+  ) -> bool:
     """验证订单数量"""
     min_order_volume = stock_info.min_market_order_volume
     max_order_volume = stock_info.max_market_order_volume
@@ -510,6 +542,9 @@ class TradingService:
 
     if stock_info.type == InstrumentType.TRR:
       lot_size = 10  # 国债逆回购最小交易单位是10
+
+    if order_type == OrderType.SELL and close_position:
+      return 0 < volume <= max_order_volume
 
     return min_order_volume <= volume <= max_order_volume and volume % lot_size == 0
 
@@ -597,7 +632,9 @@ class TradingService:
         position_repo = PositionRepository(db)
         # 查找或创建持仓记录
         existing_position = await position_repo.find_by_stock_code(
-          self.account_id, position.stock_code
+          position.stock_code,
+          account_id=self.account_id,
+          account_type=self.account_type,
         )
 
         if existing_position:

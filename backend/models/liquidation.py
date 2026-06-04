@@ -4,7 +4,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Enum, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, Numeric, String, Text
 
 from database.relational_base import Base, TimestampMixin
 from models.enums import AccountType
@@ -27,6 +27,23 @@ class LiquidationType:
   ALL_POSITIONS = "ALL_POSITIONS"  # 一键清仓
   SINGLE_POSITION = "SINGLE_POSITION"  # 个股清仓
   REDEMPTION = "REDEMPTION"  # 资金赎回
+
+
+class ConditionalLiquidationStatus:
+  """条件清仓单状态"""
+
+  ACTIVE = "ACTIVE"
+  SUBMITTED = "SUBMITTED"
+  FAILED = "FAILED"
+  CANCELLED = "CANCELLED"
+
+
+class ConditionalLiquidationSellMode:
+  """条件清仓卖出数量模式"""
+
+  ALL_AVAILABLE = "ALL_AVAILABLE"
+  PERCENT_AVAILABLE = "PERCENT_AVAILABLE"
+  FIXED_VOLUME = "FIXED_VOLUME"
 
 
 class LiquidationOrder(Base, TimestampMixin):
@@ -191,6 +208,94 @@ class LiquidationLog(Base, TimestampMixin):
 
   def __repr__(self):
     return f"<LiquidationLog(id='{self.id}', action='{self.action}', status='{self.status}')>"
+
+
+class ConditionalLiquidationOrder(Base, TimestampMixin):
+  """条件清仓单，用于手动持仓的轻量止盈/退出规则。"""
+
+  __tablename__ = "conditional_liquidation_orders"
+  __allow_unmapped__ = True
+
+  id = Column(String(36), primary_key=True, index=True, comment="条件清仓单ID")
+  account_id = Column(String(50), nullable=False, index=True, comment="资金账号")
+  account_type = Column(Enum(AccountType), nullable=True, comment="账户类型")
+  stock_code = Column(String(20), nullable=False, index=True, comment="证券代码")
+  instrument_name = Column(String(50), nullable=True, comment="证券名称")
+
+  enabled = Column(Boolean, nullable=False, default=True, comment="是否启用")
+  status = Column(
+    String(20),
+    nullable=False,
+    default=ConditionalLiquidationStatus.ACTIVE,
+    comment="条件单状态",
+  )
+
+  target_profit_pct = Column(Numeric(10, 4), nullable=True, comment="目标收益率百分比")
+  target_price = Column(Numeric(10, 4), nullable=True, comment="目标触发价")
+
+  sell_mode = Column(
+    String(30),
+    nullable=False,
+    default=ConditionalLiquidationSellMode.ALL_AVAILABLE,
+    comment="卖出数量模式",
+  )
+  sell_ratio_pct = Column(Numeric(10, 4), nullable=True, comment="卖出可卖数量比例")
+  sell_volume = Column(Integer, nullable=True, comment="固定卖出股数")
+
+  triggered_at = Column(DateTime, nullable=True, comment="触发时间")
+  triggered_price = Column(Numeric(10, 4), nullable=True, comment="触发价格")
+  triggered_profit_pct = Column(Numeric(10, 4), nullable=True, comment="触发收益率")
+  submitted_order_id = Column(String(50), nullable=True, comment="提交的委托编号")
+  submitted_volume = Column(Integer, nullable=True, comment="已提交委托数量")
+  last_checked_at = Column(DateTime, nullable=True, comment="最近检查时间")
+  last_error = Column(Text, nullable=True, comment="最近错误或保守跳过原因")
+  remark = Column(Text, nullable=True, comment="备注")
+
+  def to_dict(self):
+    return {
+      "id": self.id,
+      "account_id": self.account_id,
+      "account_type": self.account_type.name if self.account_type else None,
+      "stock_code": self.stock_code,
+      "instrument_name": self.instrument_name,
+      "enabled": bool(self.enabled),
+      "status": self.status,
+      "target_profit_pct": float(self.target_profit_pct)
+      if self.target_profit_pct is not None
+      else None,
+      "target_price": float(self.target_price)
+      if self.target_price is not None
+      else None,
+      "sell_mode": self.sell_mode,
+      "sell_ratio_pct": float(self.sell_ratio_pct)
+      if self.sell_ratio_pct is not None
+      else None,
+      "sell_volume": self.sell_volume,
+      "triggered_at": self.triggered_at.isoformat()
+      if self.triggered_at
+      else None,
+      "triggered_price": float(self.triggered_price)
+      if self.triggered_price is not None
+      else None,
+      "triggered_profit_pct": float(self.triggered_profit_pct)
+      if self.triggered_profit_pct is not None
+      else None,
+      "submitted_order_id": self.submitted_order_id,
+      "submitted_volume": self.submitted_volume,
+      "last_checked_at": self.last_checked_at.isoformat()
+      if self.last_checked_at
+      else None,
+      "last_error": self.last_error,
+      "remark": self.remark,
+      "created_at": self.created_at.isoformat() if self.created_at else None,
+      "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+    }
+
+  def __repr__(self):
+    return (
+      f"<ConditionalLiquidationOrder(id='{self.id}', "
+      f"stock_code='{self.stock_code}', status='{self.status}')>"
+    )
 
 
 class RedemptionRecord(Base, TimestampMixin):

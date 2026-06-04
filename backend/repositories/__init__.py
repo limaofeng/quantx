@@ -7,6 +7,9 @@ from database.relational_base import BaseRepository
 from database.types import Pageable, Pagination, Sort, SortDirection, SortOrder
 
 from .account_repository import AccountRepository
+from .conditional_liquidation_order_repository import (
+  ConditionalLiquidationOrderRepository,
+)
 from .daily_asset_snapshot_repository import (
   DailyAssetPositionSnapshotRepository,
   DailyAssetSnapshotRepository,
@@ -20,6 +23,7 @@ from .strategy_run_repository import StrategyRunRepository
 from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
 from .trade_intent_repository import TradeIntentRepository
 from .strategy_performance_sample_repository import StrategyPerformanceSampleRepository
+from .watchlist_repository import WatchlistRepository
 
 __all__ = [
   "BaseRepository",
@@ -29,12 +33,14 @@ __all__ = [
   "Pageable",
   "Pagination",
   "InstrumentRepository",
+  "ConditionalLiquidationOrderRepository",
   "OrderRepository",
   "PositionRepository",
   "StrategyRepository",
   "StrategyRunRepository",
   "StrategyDecisionTraceRepository",
   "TradeIntentRepository",
+  "WatchlistRepository",
   "StrategyPerformanceSampleRepository",
   "MarketDataRepository",
   "HolidayRepository",

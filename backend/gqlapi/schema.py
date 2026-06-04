@@ -19,6 +19,8 @@ from .schemas import (
   HolidayQuery,
   HolidayMutation,
   StockScreeningQuery,
+  WatchlistMutation,
+  WatchlistQuery,
 )
 
 
@@ -70,6 +72,7 @@ class Query(
   SectorQuery,
   HolidayQuery,
   StockScreeningQuery,
+  WatchlistQuery,
 ):
   pass
 
@@ -102,6 +105,7 @@ class Mutation(
   StrategyMutation,
   WorkflowMutation,
   HolidayMutation,
+  WatchlistMutation,
 ):
   pass
 

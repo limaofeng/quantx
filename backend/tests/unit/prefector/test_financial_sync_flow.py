@@ -35,7 +35,12 @@ async def test_batch_financial_sync_flow_uses_explicit_stock_codes():
     )
 
     mock_service_cls.assert_not_called()
-    mock_sync_task.assert_called_once_with(["600519.SH", "000001.SZ"])
+    mock_sync_task.assert_called_once_with(
+      ["600519.SH", "000001.SZ"],
+      batch_index=1,
+      batch_total=1,
+      timeout_seconds=300,
+    )
     assert result["total_stocks"] == 2
     assert result["success_count"] == 2
     assert result["total_records_saved"] == 12

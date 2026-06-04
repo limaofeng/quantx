@@ -3,6 +3,7 @@ from typing import Any, Dict
 
 from models.enums import InstrumentType
 from models.instrument import Instrument
+from core.utils import time_utils
 
 
 def convert_xtinstrument_to_instrument(instrument_detail: Dict[str, Any]) -> Instrument:
@@ -44,8 +45,8 @@ def convert_xtinstrument_to_instrument(instrument_detail: Dict[str, Any]) -> Ins
     open_date=datetime.strptime(instrument_detail.get("OpenDate", "0"), "%Y%m%d")
     if instrument_detail.get("OpenDate", "0") != "0"
     else None,  # OpenDate -> open_date
-    expire_date=datetime.fromtimestamp(
-      int(instrument_detail.get("ExpireDate", "0")), timezone.utc
+    expire_date=time_utils.to_shanghai(
+      datetime.fromtimestamp(int(instrument_detail.get("ExpireDate", "0")), timezone.utc)
     )
     if instrument_detail.get("ExpireDate", "0") != "0"
     else None,  # ExpireDate -> expire_date

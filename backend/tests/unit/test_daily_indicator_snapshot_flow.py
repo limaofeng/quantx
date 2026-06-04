@@ -18,6 +18,8 @@ def load_backend_prefector_package():
 load_backend_prefector_package()
 
 from prefector.flows.daily_indicator_snapshot_flow import (  # noqa: E402
+  _filter_signal_snapshot_codes,
+  _infer_instrument_type,
   _signal_run_status,
   _signal_run_warnings,
 )
@@ -46,3 +48,25 @@ def test_signal_run_warnings_expose_failure_summary():
   assert "未保存任何日级信号快照" in warnings
   assert "部分标的信号计算失败" in warnings
   assert "批量拉取 K 线失败" in warnings
+
+
+def test_indicator_snapshot_flow_classifies_etf_and_index_codes():
+  assert _infer_instrument_type("510300.SH") == "etf"
+  assert _infer_instrument_type("000300.SH") == "index"
+  assert _infer_instrument_type("399001.SZ") == "index"
+  assert _infer_instrument_type("000001.SZ") == "stock"
+  assert _infer_instrument_type("ignored", "沪深指数") == "index"
+
+
+def test_indicator_snapshot_flow_filters_index_codes_from_signal_snapshots():
+  codes = ["000001.SZ", "510300.SH", "000300.SH"]
+  instrument_type_map = {
+    "000001.SZ": "stock",
+    "510300.SH": "etf",
+    "000300.SH": "index",
+  }
+
+  assert _filter_signal_snapshot_codes(codes, instrument_type_map) == [
+    "000001.SZ",
+    "510300.SH",
+  ]

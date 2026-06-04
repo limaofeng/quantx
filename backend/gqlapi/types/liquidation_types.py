@@ -2,9 +2,12 @@
 清仓管理相关的GraphQL类型定义
 """
 
+from datetime import datetime
 from typing import List, Optional
 
 import strawberry
+
+from models.liquidation import ConditionalLiquidationOrder as ConditionalOrderModel
 
 
 @strawberry.type(description="清仓结果")
@@ -109,11 +112,86 @@ class RedemptionRecord:
   created_at: Optional[str] = strawberry.field(description="创建时间")
 
 
+@strawberry.type(description="条件清仓单")
+class ConditionalLiquidationOrder:
+  id: str = strawberry.field(description="条件清仓单ID")
+  account_id: str = strawberry.field(description="资金账号")
+  stock_code: str = strawberry.field(description="证券代码")
+  instrument_name: Optional[str] = strawberry.field(description="证券名称")
+  enabled: bool = strawberry.field(description="是否启用")
+  status: str = strawberry.field(description="状态")
+  target_profit_pct: Optional[float] = strawberry.field(description="目标收益率百分比")
+  target_price: Optional[float] = strawberry.field(description="目标触发价")
+  sell_mode: str = strawberry.field(description="卖出数量模式")
+  sell_ratio_pct: Optional[float] = strawberry.field(description="卖出可卖数量比例")
+  sell_volume: Optional[int] = strawberry.field(description="固定卖出股数")
+  triggered_at: Optional[datetime] = strawberry.field(description="触发时间")
+  triggered_price: Optional[float] = strawberry.field(description="触发价格")
+  triggered_profit_pct: Optional[float] = strawberry.field(description="触发收益率")
+  submitted_order_id: Optional[str] = strawberry.field(description="提交委托编号")
+  submitted_volume: Optional[int] = strawberry.field(description="提交委托数量")
+  last_checked_at: Optional[datetime] = strawberry.field(description="最近检查时间")
+  last_error: Optional[str] = strawberry.field(description="最近错误")
+  remark: Optional[str] = strawberry.field(description="备注")
+  created_at: Optional[datetime] = strawberry.field(description="创建时间")
+  updated_at: Optional[datetime] = strawberry.field(description="更新时间")
+
+  @staticmethod
+  def from_model(model: ConditionalOrderModel) -> "ConditionalLiquidationOrder":
+    return ConditionalLiquidationOrder(
+      id=model.id,
+      account_id=model.account_id,
+      stock_code=model.stock_code,
+      instrument_name=model.instrument_name,
+      enabled=bool(model.enabled),
+      status=model.status,
+      target_profit_pct=float(model.target_profit_pct)
+      if model.target_profit_pct is not None
+      else None,
+      target_price=float(model.target_price)
+      if model.target_price is not None
+      else None,
+      sell_mode=model.sell_mode,
+      sell_ratio_pct=float(model.sell_ratio_pct)
+      if model.sell_ratio_pct is not None
+      else None,
+      sell_volume=model.sell_volume,
+      triggered_at=model.triggered_at,
+      triggered_price=float(model.triggered_price)
+      if model.triggered_price is not None
+      else None,
+      triggered_profit_pct=float(model.triggered_profit_pct)
+      if model.triggered_profit_pct is not None
+      else None,
+      submitted_order_id=model.submitted_order_id,
+      submitted_volume=model.submitted_volume,
+      last_checked_at=model.last_checked_at,
+      last_error=model.last_error,
+      remark=model.remark,
+      created_at=model.created_at,
+      updated_at=model.updated_at,
+    )
+
+
+@strawberry.type(description="条件清仓单评估结果")
+class ConditionalLiquidationEvaluationResult:
+  order: ConditionalLiquidationOrder = strawberry.field(description="条件清仓单")
+  triggered: bool = strawberry.field(description="是否触发")
+  submitted: bool = strawberry.field(description="是否提交委托")
+  message: str = strawberry.field(description="评估说明")
+  sell_volume: int = strawberry.field(description="计划卖出数量")
+  order_id: Optional[str] = strawberry.field(description="提交委托编号")
+  latest_price: Optional[float] = strawberry.field(description="评估价格")
+  profit_pct: Optional[float] = strawberry.field(description="评估收益率")
+  error: Optional[str] = strawberry.field(description="错误信息")
+
+
 # 输入类型
 @strawberry.input(description="一键清仓输入")
 class LiquidateAllPositionsInput:
   confirm: bool = strawberry.field(description="风险确认")
   max_retry: int = strawberry.field(default=3, description="最大重试次数")
+  account_id: Optional[str] = strawberry.field(default=None, description="资金账号")
 
 
 @strawberry.input(description="个股清仓输入")
@@ -121,6 +199,32 @@ class LiquidatePositionInput:
   stock_code: str = strawberry.field(description="股票代码")
   confirm: bool = strawberry.field(description="风险确认")
   max_retry: int = strawberry.field(default=3, description="最大重试次数")
+  account_id: Optional[str] = strawberry.field(default=None, description="资金账号")
+
+
+@strawberry.input(description="条件清仓单输入")
+class ConditionalLiquidationOrderInput:
+  id: Optional[str] = strawberry.field(default=None, description="条件清仓单ID")
+  stock_code: str = strawberry.field(description="证券代码")
+  account_id: Optional[str] = strawberry.field(default=None, description="资金账号")
+  instrument_name: Optional[str] = strawberry.field(default=None, description="证券名称")
+  enabled: bool = strawberry.field(default=True, description="是否启用")
+  target_profit_pct: Optional[float] = strawberry.field(
+    default=None, description="目标收益率百分比"
+  )
+  target_price: Optional[float] = strawberry.field(
+    default=None, description="目标触发价"
+  )
+  sell_mode: str = strawberry.field(
+    default="ALL_AVAILABLE", description="卖出数量模式"
+  )
+  sell_ratio_pct: Optional[float] = strawberry.field(
+    default=None, description="卖出可卖数量比例"
+  )
+  sell_volume: Optional[int] = strawberry.field(
+    default=None, description="固定卖出股数"
+  )
+  remark: Optional[str] = strawberry.field(default=None, description="备注")
 
 
 @strawberry.input(description="资金赎回输入")

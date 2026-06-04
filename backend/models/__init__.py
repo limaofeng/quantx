@@ -28,6 +28,7 @@ from .strategy_run import StrategyRun
 from .strategy_decision_trace_record import StrategyDecisionTraceRecord
 from .trade import Trade
 from .trade_intent_record import TradeIntentRecord
+from .watchlist_item import WatchlistItem
 from .financial import (
   FinancialBalanceSheet,
   FinancialIncomeStatement,
@@ -36,11 +37,22 @@ from .financial import (
   FinancialHolderNum,
   FinancialShareholder,
 )
+from .financial_metric_snapshot import FinancialMetricSnapshot
 from .daily_signal_definition import DailySignalDefinition
 from .daily_signal_run import DailySignalRun
 from .daily_asset_snapshot import DailyAssetPositionSnapshot, DailyAssetSnapshot
 from .indicator_snapshot import IndicatorSnapshot
 from .kline import KLine
+from .liquidation import (
+  ConditionalLiquidationOrder,
+  ConditionalLiquidationSellMode,
+  ConditionalLiquidationStatus,
+  LiquidationLog,
+  LiquidationOrder,
+  LiquidationStatus,
+  LiquidationType,
+  RedemptionRecord,
+)
 from .tick import Tick
 from .strategy_run_state import (
   StrategyRunPosition,
@@ -70,10 +82,19 @@ __all__ = [
   "StrategyRun",
   "StrategyDecisionTraceRecord",
   "TradeIntentRecord",
+  "WatchlistItem",
   "Account",
   "Holiday",
   "Sector",
   "SectorStock",
+  "LiquidationOrder",
+  "LiquidationLog",
+  "RedemptionRecord",
+  "LiquidationStatus",
+  "LiquidationType",
+  "ConditionalLiquidationOrder",
+  "ConditionalLiquidationStatus",
+  "ConditionalLiquidationSellMode",
   # 财务数据模型
   "FinancialBalanceSheet",
   "FinancialIncomeStatement",
@@ -81,6 +102,7 @@ __all__ = [
   "FinancialCapital",
   "FinancialHolderNum",
   "FinancialShareholder",
+  "FinancialMetricSnapshot",
   "DailySignalDefinition",
   "DailySignalRun",
   "DailyAssetSnapshot",
