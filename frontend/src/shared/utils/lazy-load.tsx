@@ -59,12 +59,14 @@ export function withLazyLoading<P extends object>(
   } = options;
 
   return function LazyLoadedComponent(props: P) {
+    const Component = LazyComponent as unknown as ComponentType<P>;
+
     return (
       <ErrorBoundary
         fallback={<ErrorComponent error={new Error('组件加载失败')} />}
       >
         <Suspense fallback={<LoadingComponent isLoading={true} />}>
-          <LazyComponent {...props} />
+          <Component {...props} />
         </Suspense>
       </ErrorBoundary>
     );

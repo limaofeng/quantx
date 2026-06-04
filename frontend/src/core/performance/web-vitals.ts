@@ -137,10 +137,10 @@ class PerformanceMonitor {
     poor: number;
     metrics: Record<string, PerformanceMetric>;
   } {
-    const latestMetrics: Record<string, PerformanceMetric> = {}[
-      // 获取每种类型的最新指标
-      ('CLS', 'FCP', 'INP', 'LCP', 'TTFB')
-    ].forEach(name => {
+    const latestMetrics: Record<string, PerformanceMetric> = {};
+
+    // 获取每种类型的最新指标
+    (['CLS', 'FCP', 'INP', 'LCP', 'TTFB'] as const).forEach(name => {
       const metric = this.getLatestMetric(name);
       if (metric) {
         latestMetrics[name] = metric;

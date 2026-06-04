@@ -31,7 +31,7 @@ describe('router configuration', () => {
 
   it('resolves titles from the unified route source', () => {
     expect(getPageTitle('/')).toBe('仪表板');
-    expect(getPageTitle('/holdings')).toBe('持仓管理');
+    expect(getPageTitle('/holdings')).toBe('持仓');
     expect(getPageTitle('/stock/000001')).toBe('个股详情');
     expect(getPageTitle('/settings/data/market')).toBe('全市场数据');
     expect(getPageTitle('/settings/data/000001')).toBe('数据详情');
@@ -54,6 +54,7 @@ describe('router configuration', () => {
     expect(indexOf('/settings/data/financial')).toBeLessThan(
       indexOf('/settings/data/:stockCode')
     );
+    expect(indexOf('/trading')).toBe(-1);
   });
 
   it('builds desktop navigation groups from route metadata', () => {
@@ -64,7 +65,6 @@ describe('router configuration', () => {
     expect(main?.items.map(item => item.href)).toEqual([
       '/',
       '/holdings',
-      '/trading',
       '/liquidation',
       '/strategies',
       '/screening',
@@ -76,7 +76,6 @@ describe('router configuration', () => {
     expect(getMobileNavigation().map(item => item.href)).toEqual([
       '/',
       '/holdings',
-      '/trading',
       '/liquidation',
       '/strategies',
     ]);

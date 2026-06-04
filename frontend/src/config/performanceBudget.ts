@@ -59,7 +59,7 @@ const PAGE_SPECIFIC_BUDGETS: Record<
   },
 
   // 交易页面 - 交互密集型，严格的交互指标
-  '/trading': {
+  '/holdings': {
     INP: 100,
     CLS: 0.05, // 交易界面需要极稳定的布局
   },
@@ -76,6 +76,17 @@ const PAGE_SPECIFIC_BUDGETS: Record<
     CLS: 0.08,
   },
 };
+
+interface PerformanceBudgetCompliance {
+  totalViolations: number;
+  violations: Array<{
+    metric: string;
+    current: number;
+    budget: number;
+    overage: number;
+    severity: 'minor' | 'major' | 'critical';
+  }>;
+}
 
 // 性能预算管理器
 class PerformanceBudgetManager {
@@ -147,16 +158,7 @@ class PerformanceBudgetManager {
   }
 
   // 检查预算合规性
-  checkCompliance(): {
-    totalViolations: number;
-    violations: Array<{
-      metric: string;
-      current: number;
-      budget: number;
-      overage: number;
-      severity: 'minor' | 'major' | 'critical';
-    }>;
-  } {
+  checkCompliance(): PerformanceBudgetCompliance {
     const violations = performanceBudget.getBudgetViolations();
 
     const formattedViolations = violations.map(violation => {
@@ -192,7 +194,7 @@ class PerformanceBudgetManager {
     environment: string;
     path: string;
     budgets: PerformanceBudgetConfig;
-    compliance: ReturnType<typeof this.checkCompliance>;
+    compliance: PerformanceBudgetCompliance;
     timestamp: string;
   } {
     return {

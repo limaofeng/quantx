@@ -1,4 +1,6 @@
 // ErrorBoundary 组件测试
+import { vi } from 'vitest';
+
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 import { render, screen } from '../utils/test-utils';
@@ -15,7 +17,7 @@ const ThrowError = ({ shouldThrow }: { shouldThrow: boolean }) => {
 /* eslint-disable no-console */
 const originalError = console.error;
 beforeAll(() => {
-  console.error = jest.fn();
+  console.error = vi.fn();
 });
 
 afterAll(() => {

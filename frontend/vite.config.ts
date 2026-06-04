@@ -4,6 +4,11 @@ import graphql from '@rollup/plugin-graphql';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
+const backendProxyTarget =
+  process.env.VITE_PROXY_TARGET ||
+  process.env.VITE_API_URL ||
+  'http://127.0.0.1:8080';
+
 export default defineConfig({
   plugins: [
     react({
@@ -113,14 +118,14 @@ export default defineConfig({
     },
     proxy: {
       '/graphql': {
-        target: 'http://192.168.5.6:8080',
+        target: backendProxyTarget,
         changeOrigin: true,
         secure: false,
         ws: true,
         rewrite: path => path.replace(/^\/graphql/, '/graphql'),
       },
       '/health': {
-        target: 'http://192.168.5.6:8080',
+        target: backendProxyTarget,
         changeOrigin: true,
         secure: false,
         rewrite: path => path.replace(/^\/health/, '/health'),

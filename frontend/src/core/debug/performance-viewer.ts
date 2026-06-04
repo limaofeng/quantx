@@ -27,6 +27,12 @@ interface DebugPerformanceTools {
   monitor: (enable?: boolean) => void;
 }
 
+declare global {
+  interface Window {
+    debugPerformance?: DebugPerformanceTools;
+  }
+}
+
 // 创建性能调试工具
 const createDebugPerformanceTools = (): DebugPerformanceTools => {
   let monitoringEnabled = false;
@@ -204,13 +210,6 @@ console.log('性能调试工具环境检测:', {
 });
 
 if (import.meta.env.DEV) {
-  // 扩展 Window 接口
-  declare global {
-    interface Window {
-      debugPerformance: DebugPerformanceTools;
-    }
-  }
-
   // 挂载到全局
   window.debugPerformance = createDebugPerformanceTools();
 

@@ -150,7 +150,7 @@ export default function XTerminalLog({
         background: '#1a1a1a',
         foreground: '#ffffff',
         cursor: '#ffffff',
-        selection: '#ffffff40',
+        selectionBackground: '#ffffff40',
         black: '#000000',
         red: '#ff5555',
         green: '#50fa7b',

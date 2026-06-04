@@ -4,6 +4,7 @@ import { toast } from '@/hooks/use-toast';
 
 export interface ErrorContext {
   component?: string;
+  componentStack?: string;
   action?: string;
   userId?: string;
   timestamp?: string;
@@ -170,7 +171,7 @@ function shouldShowUserNotification(error: StandardError): boolean {
   }
 
   // 其他中等以上严重级别的错误显示通知
-  return error.severity !== 'low';
+  return true;
 }
 
 /**

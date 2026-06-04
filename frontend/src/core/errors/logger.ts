@@ -20,7 +20,7 @@ export interface LogEntry {
   level: LogLevel;
   message: string;
   timestamp: Date;
-  context?: Record<string, any>;
+  context?: unknown;
   userAgent?: string;
   url?: string;
   userId?: string;
@@ -46,22 +46,22 @@ export class Logger {
   }
 
   // 调试日志
-  debug(message: string, context?: Record<string, any>): void {
+  debug(message: string, context?: unknown): void {
     this.log(LogLevel.DEBUG, message, context);
   }
 
   // 信息日志
-  info(message: string, context?: Record<string, any>): void {
+  info(message: string, context?: unknown): void {
     this.log(LogLevel.INFO, message, context);
   }
 
   // 警告日志
-  warn(message: string, context?: Record<string, any>): void {
+  warn(message: string, context?: unknown): void {
     this.log(LogLevel.WARN, message, context);
   }
 
   // 错误日志
-  error(message: string, context?: Record<string, any>): void {
+  error(message: string, context?: unknown): void {
     this.log(LogLevel.ERROR, message, context);
   }
 
@@ -79,10 +79,10 @@ export class Logger {
   }
 
   // 核心日志记录方法
-  private log(
+  log(
     level: LogLevel,
     message: string,
-    context?: Record<string, any>
+    context?: unknown
   ): void {
     const logEntry: LogEntry = {
       id: this.generateLogId(),
@@ -230,13 +230,13 @@ export const logger = Logger.getInstance();
 
 // 便捷日志函数
 export const log = {
-  debug: (message: string, context?: Record<string, any>) =>
+  debug: (message: string, context?: unknown) =>
     logger.debug(message, context),
-  info: (message: string, context?: Record<string, any>) =>
+  info: (message: string, context?: unknown) =>
     logger.info(message, context),
-  warn: (message: string, context?: Record<string, any>) =>
+  warn: (message: string, context?: unknown) =>
     logger.warn(message, context),
-  error: (message: string, context?: Record<string, any>) =>
+  error: (message: string, context?: unknown) =>
     logger.error(message, context),
   logError: (standardError: StandardError) => logger.logError(standardError),
 };

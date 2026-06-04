@@ -35,19 +35,23 @@ export function StockSelector({
   children,
 }: StockSelectorProps) {
   const [open, setOpen] = React.useState(false);
+  const anchorRef = React.useRef<HTMLDivElement>(null);
+  const inputId = React.useId();
+  const showingSelectedStock = Boolean(selectedStock && !searchQuery);
 
   return (
     <div className={cn('w-full', className)}>
       <Popover open={open} onOpenChange={setOpen} modal={false}>
         <PopoverAnchor asChild>
           <div
+            ref={anchorRef}
             className="relative group cursor-pointer"
             onClick={() => setOpen(true)}
           >
             {children || (
               <>
                 <Input
-                  id="stock-search"
+                  id={inputId}
                   placeholder={
                     placeholder ||
                     (selectedStock
@@ -62,14 +66,20 @@ export function StockSelector({
                   onFocus={() => setOpen(true)}
                   className={cn(
                     'h-8 text-xs font-mono bg-muted/30 border-none focus-visible:ring-1 pr-8 transition-all',
-                    selectedStock &&
-                      !searchQuery &&
-                      'placeholder:text-foreground placeholder:font-bold',
+                    showingSelectedStock &&
+                      'bg-white/70 placeholder:font-black placeholder:text-slate-900 dark:bg-slate-950/70 dark:placeholder:text-slate-100 ring-1 ring-primary/20 focus-visible:ring-primary/40',
                     inputClassName
                   )}
                   autoComplete="off"
                 />
-                <Search className="absolute right-2 top-2 h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+                <Search
+                  className={cn(
+                    'absolute right-2 top-2 h-4 w-4 transition-colors',
+                    showingSelectedStock
+                      ? 'text-slate-700 group-hover:text-slate-900 dark:text-slate-200 dark:group-hover:text-white'
+                      : 'text-muted-foreground group-hover:text-foreground'
+                  )}
+                />
               </>
             )}
           </div>
@@ -81,10 +91,10 @@ export function StockSelector({
           onOpenAutoFocus={e => e.preventDefault()}
           onCloseAutoFocus={e => e.preventDefault()}
           onInteractOutside={e => {
-            // Only close if we didn't click the input again
+            // Only close if we didn't click this selector again.
             if (
-              e.target instanceof Element &&
-              e.target.closest('#stock-search')
+              e.target instanceof Node &&
+              anchorRef.current?.contains(e.target)
             ) {
               e.preventDefault();
             } else {

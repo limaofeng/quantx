@@ -1,11 +1,12 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { Suspense, type ComponentType } from 'react';
+import type { RouteComponentProps } from 'wouter';
 
 import ErrorBoundary from '@/components/ErrorBoundary';
 
 import { RouteSkeleton, type RouteSkeletonVariant } from './skeletons';
 
-export type RouteComponent = ComponentType<Record<string, unknown>>;
+export type RouteComponent = ComponentType<RouteComponentProps>;
 export type RouteImporter = () => Promise<{ default: RouteComponent }>;
 
 const preloadCache = new WeakMap<RouteImporter, Promise<void>>();
@@ -53,7 +54,7 @@ export function createLazyRoute(
 ) {
   const LazyComponent = React.lazy(importer);
 
-  function LazyRouteComponent(props: Record<string, unknown>) {
+  function LazyRouteComponent(props: RouteComponentProps) {
     return (
       <ErrorBoundary fallback={<RouteLoadError routeName={routeName} />}>
         <Suspense fallback={<RouteSkeleton variant={skeleton} />}>

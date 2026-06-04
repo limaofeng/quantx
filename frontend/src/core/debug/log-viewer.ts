@@ -24,6 +24,12 @@ interface DebugLogTools {
   testLogs: () => void;
 }
 
+declare global {
+  interface Window {
+    debugLogs?: DebugLogTools;
+  }
+}
+
 // 创建调试工具
 const createDebugLogTools = (): DebugLogTools => {
   return {
@@ -146,13 +152,6 @@ const createDebugLogTools = (): DebugLogTools => {
 // 在开发环境下将调试工具挂载到全局对象
 console.log('日志调试工具环境检测:', import.meta.env.DEV);
 if (import.meta.env.DEV) {
-  // 扩展 Window 接口
-  declare global {
-    interface Window {
-      debugLogs: DebugLogTools;
-    }
-  }
-
   // 挂载到全局
   window.debugLogs = createDebugLogTools();
 

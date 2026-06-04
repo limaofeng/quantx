@@ -9,7 +9,14 @@ import { ThemeProvider } from '@/components/ThemeProvider';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { urqlClient } from '@/core/graphql';
+import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars';
+import { useWatchlist } from '@/hooks/useWatchlist';
 import { appRoutes, preloadImportantRoutes } from '@/router';
+
+function WatchlistBootstrap() {
+  useWatchlist();
+  return null;
+}
 
 function Router() {
   useEffect(() => {
@@ -33,11 +40,14 @@ function Router() {
 }
 
 function App() {
+  useAutoHideScrollbars();
+
   return (
     <ErrorBoundary>
       <ThemeProvider>
         <UrqlProvider value={urqlClient}>
           <TooltipProvider>
+            <WatchlistBootstrap />
             <Toaster />
             <Router />
           </TooltipProvider>

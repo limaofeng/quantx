@@ -1,5 +1,5 @@
 import {
-  ArrowLeftRight,
+  BarChart3,
   Bot,
   Briefcase,
   Database,
@@ -101,25 +101,24 @@ export const appRoutes: AppRouteConfig[] = [
     mobileNav: { label: '仪表板', icon: LayoutDashboard, order: 10 },
   }),
   route({
-    path: '/holdings',
-    title: '持仓管理',
+    path: '/market-shortcuts',
+    title: '行情快捷方式',
     importer: toDefaultExport(
-      () => import('@/features/portfolio'),
-      'HoldingsPage'
+      () => import('@/features/dashboard'),
+      'MarketShortcutsPage'
     ),
-    skeleton: 'dashboard',
+    skeleton: 'studio',
     preload: true,
     nav: {
-      label: '持仓管理',
-      icon: Briefcase,
+      label: '行情',
+      icon: BarChart3,
       group: MAIN_GROUP,
-      order: 20,
+      order: 15,
     },
-    mobileNav: { label: '持仓', icon: Briefcase, order: 20 },
   }),
   route({
-    path: '/trading',
-    title: '交易下单',
+    path: '/holdings',
+    title: '持仓',
     importer: toDefaultExport(
       () => import('@/features/trading'),
       'TradingPage'
@@ -127,12 +126,12 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
     preload: true,
     nav: {
-      label: '交易下单',
-      icon: ArrowLeftRight,
+      label: '持仓',
+      icon: Briefcase,
       group: MAIN_GROUP,
-      order: 30,
+      order: 20,
     },
-    mobileNav: { label: '交易', icon: ArrowLeftRight, order: 30 },
+    mobileNav: { label: '持仓', icon: Briefcase, order: 20 },
   }),
   route({
     path: '/liquidation',

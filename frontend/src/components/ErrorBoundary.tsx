@@ -44,7 +44,7 @@ export class ErrorBoundary extends Component<Props, State> {
     // 使用新的错误处理系统
     const standardError = handleError(error, {
       component: 'ErrorBoundary',
-      componentStack: errorInfo.componentStack,
+      componentStack: errorInfo.componentStack ?? undefined,
     });
 
     this.setState({

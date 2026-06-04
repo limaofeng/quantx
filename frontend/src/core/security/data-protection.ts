@@ -285,13 +285,17 @@ export class ConsoleProtection {
     const sanitizer = this.sanitizer;
 
     // 重写 console 方法
-    const protectedMethods: (keyof typeof console)[] = [
+    const protectedMethods = [
       'log',
       'info',
       'warn',
       'error',
       'debug',
-    ];
+    ] as const;
+    const writableConsole = console as unknown as Record<
+      (typeof protectedMethods)[number],
+      (...args: any[]) => void
+    >;
 
     protectedMethods.forEach(method => {
       // eslint-disable-next-line no-console
@@ -299,8 +303,7 @@ export class ConsoleProtection {
         // eslint-disable-next-line no-console
         const originalMethod = console[method] as (...args: any[]) => void;
 
-        // eslint-disable-next-line no-console
-        console[method] = (...args: any[]) => {
+        writableConsole[method] = (...args: any[]) => {
           // 脱敏所有参数
           const sanitizedArgs = args.map(arg => {
             if (typeof arg === 'string') {

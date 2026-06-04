@@ -11,19 +11,17 @@ import {
 // 模拟股票数据
 export const mockStock: Stock = {
   id: '1',
+  stockCode: '000001',
   code: '000001',
   name: '平安银行',
-  exchange: 'SZ',
+  market: 'SZ',
+  type: 'stock',
   currentPrice: 12.5,
-  changePercent: 2.5,
-  sector: '金融',
-  industry: '银行',
-  marketCap: 240000000000,
-  volume: 1500000,
-  pe: 8.5,
-  pb: 0.8,
-  eps: 1.47,
-  createdAt: '2024-01-01T00:00:00Z',
+  quote: {
+    lastPrice: 12.5,
+    changePercent: 2.5,
+    volume: 1500000,
+  },
 };
 
 // 模拟持仓数据
@@ -150,10 +148,15 @@ export const mockStocks: Stock[] = [
   {
     ...mockStock,
     id: '2',
+    stockCode: '000002',
     code: '000002',
     name: '万科A',
     currentPrice: 18.5,
-    changePercent: -1.2,
+    quote: {
+      lastPrice: 18.5,
+      changePercent: -1.2,
+      volume: 1500000,
+    },
   },
 ];
 

@@ -1,6 +1,6 @@
 // 性能监控工具
 import React from 'react';
-import { onCLS, onFCP, onLCP, onTTFB, onINP } from 'web-vitals';
+import { onCLS, onFCP, onLCP, onTTFB, onINP, type Metric } from 'web-vitals';
 
 import { logger } from '@/core/errors/logger';
 
@@ -34,7 +34,7 @@ class PerformanceCollector {
 
   // 初始化 Web Vitals
   private initWebVitals() {
-    const onMetric = (metric: PerformanceMetric) => {
+    const onMetric = (metric: Metric) => {
       const performanceMetric: PerformanceMetric = {
         name: metric.name,
         value: metric.value,
