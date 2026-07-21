@@ -106,3 +106,11 @@ deployments:
           batch_size: 300
           retain_days: 30
     version: "0.1.0"
+  - name: announcement-sync
+    entrypoint: prefector/flows/announcement_sync_flow.py:announcement_sync_flow
+    work_queue_name: default
+    description: 每日同步持仓股/自选股上市公司公告与股票回购事件
+    schedules:
+      - cron: "45 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.1.0"

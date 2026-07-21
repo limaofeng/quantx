@@ -3,4 +3,5 @@
  */
 
 export * from './useStockDetail';
+export * from './useStockDisclosures';
 export { useStockDetail as useStockInfo } from './useStockDetail';

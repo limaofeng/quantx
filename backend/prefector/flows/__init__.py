@@ -20,6 +20,7 @@ from .realtime_price_flow import REALTIME_SYNC_SCHEDULE, realtime_price_sync_flo
 from .sector_data_flow import sector_data_sync_flow
 from .daily_indicator_snapshot_flow import daily_indicator_snapshot_flow
 from .daily_market_data_sync_flow import daily_market_data_sync_flow
+from .announcement_sync_flow import announcement_sync_flow
 
 __all__ = [
   # 主要流程
@@ -30,6 +31,7 @@ __all__ = [
   "batch_financial_sync_flow",
   "daily_indicator_snapshot_flow",
   "daily_market_data_sync_flow",
+  "announcement_sync_flow",
   # 国债逆回购流程
   "bond_repo_sync_flow",
   "bond_repo_auto_trade_flow",

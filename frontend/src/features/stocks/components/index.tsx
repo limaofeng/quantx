@@ -3,6 +3,7 @@ import type { StockDetail, StockHolding, StockTransaction } from '../types';
 
 export { StockHeader } from './StockHeader';
 export { StockStudioShell } from './StockStudioShell';
+export { StockDetailWorkbench } from './stock-detail-workbench/StockDetailWorkbench';
 
 export type { StockStudioMode } from './StockStudioShell';
 

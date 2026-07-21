@@ -10,6 +10,10 @@ from .bond_tasks import (
   execute_bond_repo_purchase,
   fetch_bond_repo_rates,
 )
+from .announcement_tasks import (
+  collect_disclosure_sync_symbols,
+  sync_stock_disclosures_task,
+)
 from .market_data_tasks import (
   # K线数据相关
   download_market_data,
@@ -77,6 +81,8 @@ from .trading_tasks import (
 
 __all__ = [
   # 股票任务
+  "collect_disclosure_sync_symbols",
+  "sync_stock_disclosures_task",
   "fetch_stock_list",
   "fetch_stock_prices",
   "save_stock_data",
