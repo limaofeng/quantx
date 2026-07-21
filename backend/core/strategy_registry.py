@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from core.strategies.base import StrategyBase
-from models.enums import StrategyInstrumentScope
+from models.enums import StrategyInstrumentScope, StrategyInstrumentUniverseMode
 from core.utils import time_utils
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,9 @@ class StrategyMetadata:
   category: Optional[str] = None
   risk_level: Optional[str] = None
   instrument_scope: Optional[StrategyInstrumentScope] = None
+  instrument_universe_mode: StrategyInstrumentUniverseMode = (
+    StrategyInstrumentUniverseMode.STATIC
+  )
   tags: Optional[List[str]] = None
 
   @property
@@ -168,6 +171,18 @@ class StrategyRegistry:
           instrument_scope = StrategyInstrumentScope(instrument_scope)
         except ValueError:
           instrument_scope = None
+      instrument_universe_mode = getattr(
+        strategy_class,
+        "INSTRUMENT_UNIVERSE_MODE",
+        StrategyInstrumentUniverseMode.STATIC,
+      )
+      if isinstance(instrument_universe_mode, str):
+        try:
+          instrument_universe_mode = StrategyInstrumentUniverseMode(
+            instrument_universe_mode
+          )
+        except ValueError:
+          instrument_universe_mode = StrategyInstrumentUniverseMode.STATIC
 
       return StrategyMetadata(
         name=name,
@@ -180,6 +195,7 @@ class StrategyRegistry:
         category=category,
         risk_level=risk_level,
         instrument_scope=instrument_scope,
+        instrument_universe_mode=instrument_universe_mode,
         tags=tags if isinstance(tags, list) else None,
       )
 

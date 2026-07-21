@@ -11,7 +11,11 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from models.enums import StrategyInstrumentScope, StrategyRunMode
+from models.enums import (
+  StrategyInstrumentScope,
+  StrategyInstrumentUniverseMode,
+  StrategyRunMode,
+)
 from core.utils import time_utils
 
 if TYPE_CHECKING:
@@ -54,6 +58,13 @@ class TradeIntentType(str, Enum):
   TARGET_AMOUNT = "TARGET_AMOUNT"
   TARGET_VOLUME = "TARGET_VOLUME"
   CANCEL_ORDER = "CANCEL_ORDER"
+
+
+class TradeIntentExecutionMode(str, Enum):
+  """Whether an intent may route immediately or requires explicit approval."""
+
+  AUTO = "AUTO"
+  MANUAL_CONFIRM = "MANUAL_CONFIRM"
 
 
 FORBIDDEN_RUNTIME_STATE_FIELDS = {
@@ -102,6 +113,9 @@ class TradeIntent:
   target_position_pct: Optional[float] = None
   target_volume: Optional[int] = None
   limit_price_hint: Optional[float] = None
+  execution_mode: TradeIntentExecutionMode = TradeIntentExecutionMode.AUTO
+  approval_ttl_ms: Optional[int] = None
+  max_price_deviation_bps: Optional[float] = None
   expiry_policy: Dict[str, Any] = field(default_factory=dict)
   metadata: Dict[str, Any] = field(default_factory=dict)
   trace_id: Optional[str] = None
@@ -115,6 +129,8 @@ class TradeIntent:
       self.priority = TradeIntentPriority(self.priority)
     if isinstance(self.intent_type, str):
       self.intent_type = TradeIntentType(self.intent_type)
+    if isinstance(self.execution_mode, str):
+      self.execution_mode = TradeIntentExecutionMode(self.execution_mode)
     if self.intent_type is None:
       self.intent_type = self._infer_intent_type()
 
@@ -529,6 +545,8 @@ class StrategyBase(ABC):
 
   # 策略标的范围（用于展示与校验）
   INSTRUMENT_SCOPE = StrategyInstrumentScope.MULTI
+  # 标的池来源。动态持仓策略的 instruments 只能由执行层维护。
+  INSTRUMENT_UNIVERSE_MODE = StrategyInstrumentUniverseMode.STATIC
 
   def __init__(self, context: StrategyContext):
     self.context = context
@@ -579,6 +597,10 @@ class StrategyBase(ABC):
   def get_data_requirements(cls) -> Dict[str, Any]:
     """获取策略的数据订阅需求（固定声明，运行层据此订阅数据）"""
     return {"use_tick_data": True, "periods": ["1m", "1d"]}
+
+  def pending_manual_intent_ids(self) -> List[str]:
+    """Return persisted manual-confirm intents that should survive a restart."""
+    return []
 
   @abstractmethod
   async def on_init(self) -> None:

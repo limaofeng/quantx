@@ -6,8 +6,8 @@ import { gql } from '@/generated/gql';
  * 获取持仓列表
  */
 export const GetHoldingsQuery = gql(`
-  query holdings {
-    positions {
+  query Portfolio_Holdings($accountId: String) {
+    positions(accountId: $accountId) {
       id
       accountId
       stockCode
@@ -64,6 +64,118 @@ export const GetPortfolioSummaryQuery = gql(`
         marketValuePercent
         profitLoss
         profitRate
+      }
+    }
+  }
+`);
+
+export const TTradeSessionsQuery = gql(`
+  query Portfolio_TTradeSessions(
+    $accountId: String
+    $stockCode: String
+    $activeOnly: Boolean! = true
+  ) {
+    tTradeSessions(
+      accountId: $accountId
+      stockCode: $stockCode
+      activeOnly: $activeOnly
+    ) {
+      runId
+      accountId
+      stockCode
+      mode
+      runStatus
+      status
+      positionShares
+      positionAvailableShares
+      targetTradeAmount
+      maxTradeAmount
+      plannedEntryVolume
+      targetProfitPct
+      baseFloorPct
+      hardStopEnabled
+      hardStopPct
+      timeExitMode
+      timeExitTime
+      maxHoldingTradingDays
+      currentSignal
+      pendingEntryIntentId
+      pendingExitIntentId
+      entryOrderStatus
+      exitOrderStatus
+      entryFilledVolume
+      entryAvgPrice
+      exitFilledVolume
+      exitAvgPrice
+      activeVolume
+      lastPrice
+      lastNetProfitPct
+      peakNetProfitPct
+      trailingFloorPct
+      profitArmed
+      lastExitReason
+      completedCycles
+      latestIntent
+      canCancel
+      errorMessage
+      createdAt
+      updatedAt
+    }
+  }
+`);
+
+export const StartTTradeSessionMutation = gql(`
+  mutation Portfolio_StartTTradeSession($input: TTradeStartInput!) {
+    startTTradeSession(input: $input) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+      }
+    }
+  }
+`);
+
+export const ApproveTTradeEntryMutation = gql(`
+  mutation Portfolio_ApproveTTradeEntry($runId: String!, $intentId: String!) {
+    approveTTradeEntry(runId: $runId, intentId: $intentId) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+      }
+    }
+  }
+`);
+
+export const RejectTTradeEntryMutation = gql(`
+  mutation Portfolio_RejectTTradeEntry($runId: String!, $intentId: String!) {
+    rejectTTradeEntry(runId: $runId, intentId: $intentId) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+      }
+    }
+  }
+`);
+
+export const StopTTradeSessionMutation = gql(`
+  mutation Portfolio_StopTTradeSession($runId: String!) {
+    stopTTradeSession(runId: $runId) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+        runStatus
       }
     }
   }

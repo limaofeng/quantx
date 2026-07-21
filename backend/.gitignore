@@ -144,6 +144,10 @@ dmypy.json
 .bmad-core
 CLAUDE.md
 migrations
+!migrations/
+migrations/*
+!migrations/014_add_dynamic_holdings_t_strategy.sql
+!migrations/014_add_dynamic_holdings_t_strategy_rollback.sql
 run_migrations.py
 
 # OS generated files

@@ -33,6 +33,8 @@ class BacktestBroker(BrokerBase):
     commission_rate: float = 0.0003,
     slippage_rate: float = 0.0001,
     min_commission: float = 5.0,
+    stamp_tax_rate: float = 0.0005,
+    transfer_fee_rate: float = 0.00001,
   ):
     super().__init__(account_id, initial_capital)
 
@@ -40,6 +42,8 @@ class BacktestBroker(BrokerBase):
     self.commission_rate = commission_rate
     self.slippage_rate = slippage_rate
     self.min_commission = min_commission
+    self.stamp_tax_rate = stamp_tax_rate
+    self.transfer_fee_rate = transfer_fee_rate
 
     # 账户状态
     self.cash = initial_capital
@@ -76,6 +80,10 @@ class BacktestBroker(BrokerBase):
       "ghost_dca_units": 0.0,
       "ghost_dca_last_price": 0.0,
     }
+    self.passive_cash = initial_capital
+    self.passive_volumes: Dict[str, int] = {}
+    self.passive_prices: Dict[str, float] = {}
+    self.replay_curve: List[Dict[str, Any]] = []
 
     self.logger = logging.getLogger("BacktestBroker")
 
@@ -83,6 +91,29 @@ class BacktestBroker(BrokerBase):
     """连接（回测模式始终返回成功）"""
     self.logger.info(f"回测 Broker 初始化，初始资金: {self.initial_capital}")
     return True
+
+  def configure_initial_portfolio(
+    self,
+    *,
+    cash: float,
+    total_asset: float,
+    positions: Dict[str, Position],
+  ) -> None:
+    """Configure cash and the passive no-T baseline without double counting holdings."""
+
+    self.cash = max(0.0, float(cash or 0.0))
+    self.initial_capital = max(float(total_asset or 0.0), self.cash)
+    self.equity_curve = [self.initial_capital]
+    self.peak_equity = self.initial_capital
+    self.passive_cash = self.cash
+    self.passive_volumes = {
+      code: max(0, int(position.long_volume or 0))
+      for code, position in positions.items()
+    }
+    self.passive_prices = {
+      code: float(position.last_price or position.long_avg_price or 0.0)
+      for code, position in positions.items()
+    }
 
   async def disconnect(self) -> None:
     """断开连接"""
@@ -241,13 +272,15 @@ class BacktestBroker(BrokerBase):
 
     # 更新权益曲线
     await self._update_equity_curve()
+    self._record_replay_curve()
 
   async def _validate_order(self, request: OrderRequest) -> bool:
     """验证订单"""
     if request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]:
       # 买入验证
       amount = request.volume * request.price
-      required_cash = amount + self.calculate_commission(amount)
+      costs = self._calculate_costs(amount, request.order_type)
+      required_cash = amount + costs["total"]
       if required_cash > self.cash:
         self.logger.warning(f"资金不足: 需要 {required_cash}, 可用 {self.cash}")
         return False
@@ -302,9 +335,17 @@ class BacktestBroker(BrokerBase):
     request = order.request
     instrument_code = request.instrument_code
 
-    # 计算成交金额和手续费
+    # 计算成交金额和完整 A 股交易成本
     amount = price * volume
-    commission = max(amount * self.commission_rate, self.min_commission)
+    previous_costs = self._calculate_costs(order.filled_amount, request.order_type)
+    cumulative_costs = self._calculate_costs(
+      order.filled_amount + amount, request.order_type
+    )
+    costs = {
+      key: max(0.0, cumulative_costs[key] - previous_costs[key])
+      for key in cumulative_costs
+    }
+    commission = costs["total"]
 
     # 更新订单状态（支持部分成交）
     previous_amount = order.filled_amount
@@ -339,7 +380,7 @@ class BacktestBroker(BrokerBase):
       amount=amount,
       commission=commission,
       trade_time=self.current_time or time_utils.now(),
-      metadata=dict(request.metadata or {}),
+      metadata={**dict(request.metadata or {}), "costs": costs},
     )
     self.trades.append(trade)
 
@@ -381,9 +422,33 @@ class BacktestBroker(BrokerBase):
     position.long_avg_price = (
       total_value / position.long_volume if position.long_volume > 0 else 0
     )
-
     position.last_price = price
     position.market_value = position.long_volume * price
+
+  def _calculate_costs(
+    self, amount: float, order_type: OrderType
+  ) -> Dict[str, float]:
+    amount = float(amount or 0.0)
+    if amount <= 0:
+      return {
+        "commission": 0.0,
+        "transfer_fee": 0.0,
+        "stamp_tax": 0.0,
+        "total": 0.0,
+      }
+    commission = max(amount * self.commission_rate, self.min_commission)
+    transfer_fee = amount * self.transfer_fee_rate
+    stamp_tax = (
+      amount * self.stamp_tax_rate
+      if order_type not in [OrderType.BUY, OrderType.BUY_TO_COVER]
+      else 0.0
+    )
+    return {
+      "commission": commission,
+      "transfer_fee": transfer_fee,
+      "stamp_tax": stamp_tax,
+      "total": commission + transfer_fee + stamp_tax,
+    }
 
   def _update_position_sell(
     self, instrument_code: str, volume: int, price: float
@@ -535,6 +600,30 @@ class BacktestBroker(BrokerBase):
     if len(self.equity_curve) > 1:
       daily_return = (equity - self.equity_curve[-2]) / self.equity_curve[-2]
       self.daily_returns.append(daily_return)
+
+  def _record_replay_curve(self) -> None:
+    if not self.current_time:
+      return
+    for code in self.passive_volumes:
+      if code in self.current_prices:
+        self.passive_prices[code] = self.current_prices[code]
+    equity = self.cash + sum(position.market_value for position in self.positions.values())
+    passive_equity = self.passive_cash + sum(
+      volume * self.passive_prices.get(code, 0.0)
+      for code, volume in self.passive_volumes.items()
+    )
+    point = {
+      "timestamp": self.current_time,
+      "equity": equity,
+      "passive_equity": passive_equity,
+    }
+    minute_key = self.current_time.replace(second=0, microsecond=0)
+    if self.replay_curve:
+      previous_time = self.replay_curve[-1].get("timestamp")
+      if previous_time and previous_time.replace(second=0, microsecond=0) == minute_key:
+        self.replay_curve[-1] = point
+        return
+    self.replay_curve.append(point)
 
   def _update_ghost_dca(self, price: float) -> None:
     if price <= 0:

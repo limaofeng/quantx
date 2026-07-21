@@ -42,6 +42,7 @@ from core.strategies.base import (
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
+  TradeIntentExecutionMode,
 )
 from core.trading import (
   AShareMarketRules,
@@ -143,6 +144,22 @@ class StrategyRuntime:
   last_trade_report_at: Optional[datetime] = field(default=None, repr=False)
   #: 最近任意 broker 回报时间（用于 broker 健康状态）
   last_broker_report_at: Optional[datetime] = field(default=None, repr=False)
+  #: 等待人工确认的交易意图，仅在运行进程内保留完整对象
+  pending_approvals: Dict[str, TradeIntent] = field(default_factory=dict, repr=False)
+  #: 审批串行锁，避免重复点击导致重复下单
+  approval_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+  #: 实时订阅按标的归组，支持运行中动态增删标的。
+  realtime_subscription_ids: Dict[str, List[str]] = field(
+    default_factory=dict, repr=False
+  )
+  #: 动态订阅变更锁，避免持仓同步与停机清理互相穿透。
+  realtime_subscription_lock: asyncio.Lock = field(
+    default_factory=asyncio.Lock, repr=False
+  )
+  #: 已确认但尚未完全由成交持仓接管的 T 入场金额预留。
+  t_trade_entry_reservations: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict, repr=False
+  )
 
   @property
   def mode(self) -> StrategyRunMode:
@@ -488,6 +505,8 @@ class StrategyExecutor:
         runtime.strategy.apply_state_snapshot(
           restored_state.get("custom") if restored_state else None
         )
+      await self._restore_pending_manual_approvals(runtime)
+      self._restore_t_trade_entry_reservations(runtime)
       if restored_state.get("positions"):
         self.logger.info(f"恢复持仓: {len(restored_state['positions'])} 个")
       if restored_state.get("active_orders"):
@@ -509,7 +528,15 @@ class StrategyExecutor:
             total_asset=runtime.context.initial_capital,
           )
         if not positions:
-          self._seed_bucket_ledger_from_parameters(runtime)
+          initial_metadata = dict(
+            runtime.context.parameters.get("initial_portfolio_metadata")
+            or runtime.context.parameters.get("initial_instrument_metadata")
+            or {}
+          )
+          if initial_metadata:
+            self._sync_dynamic_holding_inventory(runtime, initial_metadata)
+          else:
+            self._seed_bucket_ledger_from_parameters(runtime)
 
       # 根据模式创建 Broker 和 DataAdapter
       await self._setup_broker_and_data(runtime)
@@ -548,6 +575,13 @@ class StrategyExecutor:
 
     params = dict(getattr(runtime.context, "parameters", {}) or {})
     total_shares = int(params.get("position_shares", 0) or 0)
+    available_shares = max(
+      0,
+      min(
+        total_shares,
+        int(params.get("position_available_shares", total_shares) or 0),
+      ),
+    )
     locked_core_shares = max(0, int(params.get("locked_core_shares", 0) or 0))
     swing_shares = max(0, int(params.get("swing_shares", 0) or 0))
     raw_core_shares = params.get("core_shares")
@@ -574,7 +608,7 @@ class StrategyExecutor:
     last_price = float(params.get("base_price", avg_price) or avg_price)
     position_payload = {
       "long_volume": attributed_total,
-      "available_volume": attributed_total,
+      "available_volume": min(available_shares, attributed_total),
       "frozen_volume": 0,
       "today_buy_volume": 0,
       "long_avg_price": avg_price,
@@ -584,13 +618,18 @@ class StrategyExecutor:
     }
     runtime.state_manager.update_position(instrument_code, **position_payload)
 
+    remaining_available = min(available_shares, attributed_total)
+
     def bucket_payload(volume):
+      nonlocal remaining_available
       volume = max(0, int(volume or 0))
+      bucket_available = min(volume, remaining_available)
+      remaining_available -= bucket_available
       return {
         "total_volume": volume,
-        "available_volume": volume,
+        "available_volume": bucket_available,
         "frozen_volume": 0,
-        "today_buy_volume": 0,
+        "today_buy_volume": max(0, volume - bucket_available),
         "avg_price": avg_price,
         "last_price": last_price,
         "market_value": volume * (last_price or avg_price),
@@ -653,6 +692,115 @@ class StrategyExecutor:
 
     if seeded:
       self.logger.info(f"{runtime.context.mode.value} Broker 初始持仓已注入: {seeded} 个标的")
+    if isinstance(runtime.broker, BacktestBroker):
+      params = dict(runtime.context.parameters or {})
+      runtime.broker.configure_initial_portfolio(
+        cash=float(params.get("initial_cash", runtime.context.initial_capital) or 0.0),
+        total_asset=float(
+          params.get("initial_total_asset", runtime.context.initial_capital) or 0.0
+        ),
+        positions=dict(runtime.broker.positions or {}),
+      )
+
+  def _sync_dynamic_holding_inventory(
+    self,
+    runtime: StrategyRuntime,
+    instrument_metadata: Optional[Dict[str, Dict[str, Any]]],
+  ) -> None:
+    """Seed idle dynamic-holdings symbols as core inventory for T+1 substitution."""
+
+    if not runtime.state_manager or not instrument_metadata:
+      return
+    instrument_states = (
+      dict(runtime.strategy.state.get("instrument_states", {}) or {})
+      if runtime.strategy
+      else {}
+    )
+    for raw_code, raw_metadata in instrument_metadata.items():
+      code = str(raw_code or "").strip().upper()
+      metadata = dict(raw_metadata or {})
+      if not code or "position_shares" not in metadata:
+        continue
+      state = dict(instrument_states.get(code, {}) or {})
+      active_volume = max(
+        0,
+        int(state.get("entry_filled_volume", 0) or 0)
+        - int(state.get("exit_filled_volume", 0) or 0),
+      )
+      if (
+        active_volume > 0
+        or state.get("batch_id")
+        or state.get("pending_entry_intent_id")
+        or state.get("pending_exit_intent_id")
+      ):
+        continue
+
+      total_volume = max(0, int(metadata.get("position_shares", 0) or 0))
+      available_volume = min(
+        total_volume,
+        max(0, int(metadata.get("position_available_shares", 0) or 0)),
+      )
+      frozen_volume = min(
+        max(0, total_volume - available_volume),
+        max(0, int(metadata.get("position_frozen_shares", 0) or 0)),
+      )
+      today_buy_volume = max(
+        0, total_volume - available_volume - frozen_volume
+      )
+      avg_price = max(0.0, float(metadata.get("position_avg_price", 0.0) or 0.0))
+      market_value = max(
+        0.0, float(metadata.get("position_market_value", 0.0) or 0.0)
+      )
+      last_price = (
+        market_value / total_volume
+        if total_volume > 0 and market_value > 0
+        else avg_price
+      )
+      position_payload = {
+        "long_volume": total_volume,
+        "available_volume": available_volume,
+        "frozen_volume": frozen_volume,
+        "today_buy_volume": today_buy_volume,
+        "long_avg_price": avg_price,
+        "last_price": last_price,
+        "market_value": market_value or total_volume * last_price,
+      }
+      runtime.state_manager.update_position(code, **position_payload)
+      runtime.state_manager.seed_bucket_positions(
+        code,
+        {
+          "locked_core": {},
+          "core": {
+            "total_volume": total_volume,
+            "available_volume": available_volume,
+            "frozen_volume": frozen_volume,
+            "today_buy_volume": today_buy_volume,
+            "avg_price": avg_price,
+            "last_price": last_price,
+            "market_value": position_payload["market_value"],
+          },
+          "swing": {},
+        },
+      )
+      if (
+        runtime.context.mode == StrategyRunMode.PAPER
+        and runtime.broker
+        and hasattr(runtime.broker, "positions")
+      ):
+        if total_volume <= 0:
+          runtime.broker.positions.pop(code, None)
+        else:
+          runtime.broker.positions[code] = Position(
+            instrument_code=code,
+            long_volume=total_volume,
+            available_volume=available_volume,
+            frozen_volume=frozen_volume,
+            today_buy_volume=today_buy_volume,
+            long_avg_price=avg_price,
+            market_value=position_payload["market_value"],
+            pnl=0.0,
+            last_price=last_price,
+          )
 
   def _seed_backtest_broker_positions(self, runtime) -> None:
     """Backward-compatible wrapper for tests and older callers."""
@@ -818,6 +966,49 @@ class StrategyExecutor:
     """获取所有策略运行"""
     return list(self.runs.values())
 
+  async def reconcile_instruments(
+    self,
+    run_id: str,
+    instruments: List[str],
+    *,
+    instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+  ) -> Dict[str, List[str]]:
+    """串行调整运行中策略的标的池和实时行情订阅。"""
+
+    runtime = self.runs.get(run_id)
+    if runtime is None:
+      raise ValueError(f"策略运行不存在: {run_id}")
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      raise ValueError("回测运行不支持动态修改标的池")
+
+    normalized = []
+    for raw in instruments or []:
+      code = str(raw or "").strip().upper()
+      if code and code not in normalized:
+        normalized.append(code)
+
+    if runtime.status in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}:
+      future = asyncio.get_running_loop().create_future()
+      await runtime.event_queue.put(
+        (
+          "universe",
+          {
+            "instruments": normalized,
+            "instrument_metadata": dict(instrument_metadata or {}),
+            "future": future,
+          },
+        )
+      )
+      return await future
+
+    current = list(runtime.context.instruments or [])
+    runtime.context.instruments = normalized
+    return {
+      "added": [code for code in normalized if code not in current],
+      "removed": [code for code in current if code not in normalized],
+      "instruments": normalized,
+    }
+
   def get_running(self) -> List[StrategyRuntime]:
     """获取运行中的策略运行"""
     return [
@@ -861,6 +1052,21 @@ class StrategyExecutor:
       runtime.broker = BacktestBroker(
         account_id=runtime.run_id,
         initial_capital=runtime.context.initial_capital,
+        commission_rate=float(
+          runtime.context.parameters.get("commission_rate", 0.0003) or 0.0
+        ),
+        min_commission=float(
+          runtime.context.parameters.get("minimum_commission", 5.0) or 0.0
+        ),
+        stamp_tax_rate=float(
+          runtime.context.parameters.get("stamp_tax_rate", 0.0005) or 0.0
+        ),
+        transfer_fee_rate=float(
+          runtime.context.parameters.get("transfer_fee_rate", 0.00001) or 0.0
+        ),
+        slippage_rate=float(
+          runtime.context.parameters.get("slippage_rate", 0.0001) or 0.0
+        ),
       )
     elif mode == StrategyRunMode.PAPER:
       runtime.broker = SimulatorBroker(
@@ -869,7 +1075,7 @@ class StrategyExecutor:
       )
     else:  # LIVE
       runtime.broker = LiveBroker(
-        account_id=runtime.run_id,
+        account_id=str(runtime.context.parameters.get("account_id") or runtime.run_id),
         initial_capital=runtime.context.initial_capital,
       )
 
@@ -894,6 +1100,41 @@ class StrategyExecutor:
 
     self.logger.info(f"Broker 和 DataAdapter 已设置: {mode.value}")
 
+  async def _initialize_backtest_dynamic_universe(
+    self, runtime: StrategyRuntime
+  ) -> None:
+    """Apply the account-holdings universe snapshot before historical replay."""
+
+    if runtime.context.mode != StrategyRunMode.BACKTEST or not runtime.strategy:
+      return
+    metadata = dict(
+      runtime.context.parameters.get("initial_instrument_metadata") or {}
+    )
+    if not metadata:
+      return
+    desired = list(runtime.context.instruments or [])
+    state = runtime.strategy.state.to_dict()
+    account = runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+    positions = runtime.state_manager.get_all_positions() if runtime.state_manager else {}
+    reconcile_input = StrategyInput(
+      run_id=runtime.run_id,
+      strategy_id=str(runtime.strategy_id),
+      timestamp=runtime.context.backtest_start_time or time_utils.now(),
+      cadence=StrategyCadence.RECONCILE,
+      instrument_code="",
+      event={
+        "added": desired,
+        "removed": [],
+        "instruments": desired,
+        "instrument_metadata": metadata,
+      },
+      portfolio_state={"account": account, "positions": positions},
+      strategy_state=state,
+      parameters=dict(runtime.context.parameters or {}),
+    )
+    output = await runtime.strategy.step(reconcile_input)
+    await self._process_strategy_output(runtime, output, reconcile_input)
+
 
   async def _run_strategy_loop(self, runtime: StrategyRuntime) -> None:
     """策略运行循环"""
@@ -903,6 +1144,7 @@ class StrategyExecutor:
       # 初始化策略
       await strategy.initialize()
       await strategy.start()
+      await self._initialize_backtest_dynamic_universe(runtime)
       self._runtime_log(runtime, "INFO", "策略初始化完成，进入执行循环")
 
       # 根据模式运行不同的逻辑（回测模式需要回放数据）
@@ -948,6 +1190,10 @@ class StrategyExecutor:
             from datetime import datetime
 
             metrics = runtime.get_metrics()
+            if runtime.context.parameters.get("t_trade_replay"):
+              from core.t_trade_replay_metrics import build_t_trade_replay_metrics
+
+              metrics["t_trade_replay"] = build_t_trade_replay_metrics(runtime)
             if runtime.performance_recorder:
               try:
                 await runtime.performance_recorder.flush()
@@ -1048,6 +1294,17 @@ class StrategyExecutor:
       ),
     )
     
+    if isinstance(data_adapter, HistoricalDataAdapter) and len(runtime.context.instruments) > 1:
+      await self._run_backtest_multi_instrument_timeline(
+        runtime,
+        list(runtime.context.instruments),
+        periods,
+        start_time,
+        end_time,
+        use_tick_data=use_tick_data,
+      )
+      return
+
     for instrument_code in runtime.context.instruments:
       self._runtime_log(runtime, "INFO", f"回测标的开始回放: {instrument_code}")
       if isinstance(data_adapter, HistoricalDataAdapter):
@@ -1083,6 +1340,124 @@ class StrategyExecutor:
             period,
             lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
           )
+
+  async def _run_backtest_multi_instrument_timeline(
+    self,
+    runtime: StrategyRuntime,
+    instrument_codes: List[str],
+    periods: List[str],
+    start_time: datetime,
+    end_time: datetime,
+    *,
+    use_tick_data: bool,
+  ) -> None:
+    """Replay all instruments on one chronological event timeline."""
+    data_adapter = runtime.data_adapter
+    if not isinstance(data_adapter, HistoricalDataAdapter):
+      return
+    for code in instrument_codes:
+      await self._run_backtest_warmup_klines(runtime, code, periods, start_time)
+
+    trading_dates = await TradingDateHelper().get_trading_calendar(
+      market="SH",
+      start_date=start_time.date(),
+      end_date=end_time.date(),
+    )
+    if not trading_dates:
+      self._runtime_log(runtime, "WARNING", "多标的回测区间无交易日")
+      return
+
+    window_hours = self._get_backtest_window_hours()
+    last_tick_time: Dict[str, Optional[datetime]] = {
+      code: None for code in instrument_codes
+    }
+    last_kline_time: Dict[tuple[str, str], Optional[datetime]] = {
+      (code, period): None for code in instrument_codes for period in periods
+    }
+    totals = {"tick": 0, "kline": 0}
+    alignment = str(
+      runtime.context.parameters.get("kline_time_alignment", "end") or "end"
+    ).lower()
+    for trading_date in trading_dates:
+      if runtime.status != ExecutionStatus.RUNNING:
+        break
+      day_start = max(start_time, datetime.combine(trading_date, time(9, 30)))
+      day_end = min(end_time, datetime.combine(trading_date, time(15, 30)))
+      if day_end < day_start:
+        continue
+      for window_start, window_end in self._iter_backtest_windows(
+        day_start, day_end, window_hours
+      ):
+        events: List[tuple[datetime, int, str, str, Any]] = []
+        for code in instrument_codes:
+          if use_tick_data:
+            ticks = await data_adapter.get_ticks(
+              instrument_code=code,
+              start_time=window_start,
+              end_time=window_end,
+              dividend_type="front",
+              limit=6000,
+            )
+            previous_tick = last_tick_time.get(code)
+            filtered_ticks = [
+              tick
+              for tick in (ticks or [])
+              if tick is not None
+              and tick.time is not None
+              and (previous_tick is None or tick.time > previous_tick)
+            ]
+            for tick in self._filter_backtest_continuous_session_events(
+              filtered_ticks
+            ):
+              events.append((tick.time, 0, code, "tick", tick))
+          for period in periods:
+            klines = await data_adapter.get_klines(
+              instrument_code=code,
+              period=period,
+              start_time=window_start,
+              end_time=window_end,
+            )
+            previous_kline = last_kline_time.get((code, period))
+            filtered_klines = [
+              kline
+              for kline in (klines or [])
+              if kline is not None
+              and kline.time is not None
+              and (previous_kline is None or kline.time > previous_kline)
+            ]
+            if self._is_backtest_intraday_period(period):
+              filtered_klines = self._filter_backtest_continuous_session_events(
+                filtered_klines
+              )
+            for kline in filtered_klines:
+              event_time = self._get_kline_end_time(
+                kline, period, alignment=alignment
+              )
+              events.append((event_time, 1, code, period, kline))
+
+        events.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        for _, event_type, code, period, event in events:
+          if runtime.status != ExecutionStatus.RUNNING:
+            break
+          if event_type == 0:
+            await self._process_tick(runtime, event)
+            last_tick_time[code] = event.time
+            totals["tick"] += 1
+          else:
+            await self._process_kline(runtime, event)
+            last_kline_time[(code, period)] = event.time
+            totals["kline"] += 1
+        self._runtime_log(
+          runtime,
+          "INFO",
+          f"多标的回测窗口完成: {window_start} -> {window_end}, events={len(events)}",
+        )
+    self._runtime_log(
+      runtime,
+      "SUCCESS",
+      f"多标的全局时间线回测完成: instruments={len(instrument_codes)}, "
+      f"tick={totals['tick']}, kline={totals['kline']}",
+    )
 
   def _get_backtest_window_hours(self) -> int:
     """获取回测回放窗口大小（小时）"""
@@ -1706,10 +2081,12 @@ class StrategyExecutor:
     if not runtime.strategy:
       return
     try:
+      self._update_t_trade_entry_reservation(runtime, event)
       result = runtime.strategy.on_order(event)
       patch = await result if inspect.isawaitable(result) else result
       if patch:
         self._apply_runtime_state_patch(runtime, patch)
+      self._refresh_t_trade_entry_reservation(runtime, event)
     except Exception as exc:
       if runtime.metrics:
         runtime.metrics.error_count += 1
@@ -1728,6 +2105,7 @@ class StrategyExecutor:
       patch = await result if inspect.isawaitable(result) else result
       if patch:
         self._apply_runtime_state_patch(runtime, patch)
+      self._refresh_t_trade_entry_reservation(runtime, event)
     except Exception as exc:
       if runtime.metrics:
         runtime.metrics.error_count += 1
@@ -1921,7 +2299,11 @@ class StrategyExecutor:
         except asyncio.TimeoutError:
           continue
 
-        if runtime.status == ExecutionStatus.PAUSED and event_type not in ["order", "trade"]:
+        if runtime.status == ExecutionStatus.PAUSED and event_type not in [
+          "order",
+          "trade",
+          "universe",
+        ]:
           runtime.event_queue.task_done()
           continue
 
@@ -1953,7 +2335,7 @@ class StrategyExecutor:
                   runtime.metrics.cancelled_orders += 1
                 else:
                   runtime.metrics.rejected_orders += 1
-          
+
           await self._notify_strategy_order(runtime, OrderStateEvent.from_raw(data))
           if runtime.performance_recorder:
             await runtime.performance_recorder.record(runtime, "order", data)
@@ -1987,6 +2369,21 @@ class StrategyExecutor:
           if runtime.performance_recorder:
             await runtime.performance_recorder.record(runtime, "trade", data)
 
+        elif event_type == "universe":
+          future = data.get("future")
+          try:
+            result = await self._apply_realtime_instrument_reconcile(
+              runtime,
+              list(data.get("instruments") or []),
+              instrument_metadata=dict(data.get("instrument_metadata") or {}),
+            )
+            if future and not future.done():
+              future.set_result(result)
+          except Exception as exc:
+            if future and not future.done():
+              future.set_exception(exc)
+            raise
+
         runtime.event_queue.task_done()
 
       except Exception as e:
@@ -2001,6 +2398,9 @@ class StrategyExecutor:
     metrics = runtime.metrics
 
     try:
+      if tick.stock_code not in set(runtime.context.instruments or []):
+        self.logger.debug("忽略已移出标的池的迟到 Tick: %s", tick.stock_code)
+        return
       # 更新策略上下文时间
       runtime.context.current_time = tick.time
       if isinstance(runtime.data_adapter, HistoricalDataAdapter):
@@ -2009,6 +2409,7 @@ class StrategyExecutor:
       runtime.latest_market_data[tick.stock_code] = market_snapshot
       if runtime.state_manager:
         runtime.state_manager.settle_trading_day(tick.time.date())
+      await self._expire_pending_approvals(runtime)
 
       # 更新回测 Broker 的市场数据
       if isinstance(broker, BacktestBroker):
@@ -2046,6 +2447,9 @@ class StrategyExecutor:
     metrics = runtime.metrics
 
     try:
+      if kline.stock_code not in set(runtime.context.instruments or []):
+        self.logger.debug("忽略已移出标的池的迟到 K 线: %s", kline.stock_code)
+        return
       # 更新策略上下文时间
       runtime.context.current_time = kline.time
       if isinstance(runtime.data_adapter, HistoricalDataAdapter):
@@ -2333,13 +2737,462 @@ class StrategyExecutor:
       runtime.metrics.trade_intents_generated += len(intents)
     if runtime.state_manager:
       for intent in intents:
-        await runtime.state_manager.record_trade_intent(intent)
+        status = (
+          "AWAITING_APPROVAL"
+          if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+          else "PENDING"
+        )
+        await runtime.state_manager.record_trade_intent(intent, status=status)
     if runtime.strategy:
       for intent in intents:
         runtime.strategy.record_trade_intent(intent)
     self._record_strategy_output_trace(runtime, output, input_snapshot)
     for intent in intents:
+      if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
+        runtime.pending_approvals[intent.intent_id] = intent
+        if (
+          runtime.context.mode == StrategyRunMode.BACKTEST
+          and runtime.context.parameters.get("auto_approve_manual_intents")
+        ):
+          result = await self.approve_trade_intent(
+            runtime.run_id, intent.intent_id
+          )
+          self._runtime_log(
+            runtime,
+            "INFO" if result.get("success") else "WARNING",
+            f"回放测试自动确认交易信号: intent_id={intent.intent_id}, "
+            f"result={result.get('code')}",
+          )
+          continue
+        self._runtime_log(
+          runtime,
+          "INFO",
+          f"交易信号等待人工确认: {intent.instrument_code} {intent.direction.value} "
+          f"intent_id={intent.intent_id}",
+        )
+        continue
       await self._process_trade_intent(runtime, intent)
+
+  async def approve_trade_intent(self, run_id: str, intent_id: str) -> Dict[str, Any]:
+    """Approve one manual-confirm intent after rechecking TTL and price drift."""
+
+    runtime = self.runs.get(run_id)
+    if runtime is None:
+      return {"success": False, "code": "RUN_NOT_FOUND", "message": "策略运行不存在"}
+    async with runtime.approval_lock:
+      intent = runtime.pending_approvals.get(intent_id)
+      if intent is None:
+        return {
+          "success": False,
+          "code": "INTENT_NOT_AWAITING_APPROVAL",
+          "message": "信号不存在、已处理或已过期",
+        }
+
+      failure = self._approval_failure(runtime, intent)
+      if failure is not None:
+        await self._reject_pending_approval(
+          runtime,
+          intent,
+          status="EXPIRED",
+          reason=failure[0],
+          message=failure[1],
+        )
+        return {"success": False, "code": failure[0], "message": failure[1]}
+
+      portfolio_failure = self._t_trade_portfolio_approval_failure(runtime, intent)
+      if portfolio_failure is not None:
+        return {
+          "success": False,
+          "code": portfolio_failure[0],
+          "message": portfolio_failure[1],
+        }
+
+      self._reserve_t_trade_entry_exposure(runtime, intent)
+
+      runtime.pending_approvals.pop(intent_id, None)
+      if runtime.state_manager:
+        await runtime.state_manager.update_trade_intent_status(
+          intent_id,
+          "APPROVED",
+          notes="MANUAL_APPROVAL_ACCEPTED",
+        )
+      await self._notify_strategy_order(
+        runtime,
+        OrderStateEvent(
+          order_id=None,
+          status=OrderStatus.PENDING.value,
+          metadata={
+            **dict(intent.metadata or {}),
+            "intent_id": intent.intent_id,
+            "instrument_code": intent.instrument_code,
+          },
+        ),
+      )
+      await self._process_trade_intent(runtime, intent)
+      return {"success": True, "code": "APPROVED", "message": "信号已确认并进入下单风控"}
+
+  async def _restore_pending_manual_approvals(self, runtime: StrategyRuntime) -> None:
+    """Restore only strategy-declared manual intents, preserving TTL semantics."""
+    if not runtime.strategy or not runtime.state_manager:
+      return
+    for intent_id in runtime.strategy.pending_manual_intent_ids():
+      intent = await runtime.state_manager.restore_manual_trade_intent(intent_id)
+      if intent is None:
+        continue
+      failure = self._approval_failure(runtime, intent)
+      if failure and failure[0] == "APPROVAL_TTL_EXPIRED":
+        await self._reject_pending_approval(
+          runtime,
+          intent,
+          status="EXPIRED",
+          reason=failure[0],
+          message=failure[1],
+        )
+        continue
+      runtime.pending_approvals[intent.intent_id] = intent
+      self._runtime_log(
+        runtime,
+        "INFO",
+        f"已恢复待人工确认交易信号: intent_id={intent.intent_id}",
+      )
+
+  def _restore_t_trade_entry_reservations(self, runtime: StrategyRuntime) -> None:
+    """Rebuild approved-but-unfinished T entry exposure after a restart."""
+    if not runtime.strategy:
+      return
+    states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
+    for code, raw_state in states.items():
+      state = dict(raw_state or {})
+      status = str(state.get("entry_order_status", "") or "").upper()
+      intent_id = str(state.get("pending_entry_intent_id", "") or "")
+      if not intent_id or status not in {
+        "PENDING",
+        "SUBMITTED",
+        "ACCEPTED",
+        "PARTIAL_FILLED",
+      }:
+        continue
+      requested = int(state.get("requested_entry_volume", 0) or 0)
+      filled = int(state.get("entry_filled_volume", 0) or 0)
+      remaining = max(0, requested - filled)
+      if remaining <= 0:
+        continue
+      signal = dict(state.get("current_signal", {}) or {})
+      price = float(
+        signal.get("signal_price", 0.0)
+        or state.get("last_price", 0.0)
+        or state.get("entry_avg_price", 0.0)
+        or 0.0
+      )
+      runtime.t_trade_entry_reservations[intent_id] = {
+        "instrument_code": str(code),
+        "batch_id": state.get("batch_id"),
+        "requested_volume": requested,
+        "volume": remaining,
+        "price": price,
+        "amount": remaining * price,
+      }
+
+  async def reject_trade_intent(
+    self, run_id: str, intent_id: str, reason: str = "USER_REJECTED"
+  ) -> Dict[str, Any]:
+    """Reject one manual-confirm intent without creating any broker order."""
+
+    runtime = self.runs.get(run_id)
+    if runtime is None:
+      return {"success": False, "code": "RUN_NOT_FOUND", "message": "策略运行不存在"}
+    async with runtime.approval_lock:
+      intent = runtime.pending_approvals.get(intent_id)
+      if intent is None:
+        return {
+          "success": False,
+          "code": "INTENT_NOT_AWAITING_APPROVAL",
+          "message": "信号不存在、已处理或已过期",
+        }
+      await self._reject_pending_approval(
+        runtime,
+        intent,
+        status="REJECTED",
+        reason=reason,
+        message="用户已忽略本次做 T 信号",
+      )
+      return {"success": True, "code": "REJECTED", "message": "信号已忽略"}
+
+  def _approval_failure(
+    self, runtime: StrategyRuntime, intent: TradeIntent
+  ) -> Optional[tuple[str, str]]:
+    ttl_ms = int(intent.approval_ttl_ms or 0)
+    if ttl_ms > 0:
+      elapsed_ms = (time_utils.now() - intent.created_at).total_seconds() * 1000
+      if elapsed_ms > ttl_ms:
+        return "APPROVAL_TTL_EXPIRED", "信号已超过确认有效期，请等待新信号"
+
+    market_data = runtime.latest_market_data.get(intent.instrument_code)
+    reference_price = float(intent.limit_price_hint or 0.0)
+    current_price = float(getattr(market_data, "price", 0.0) or 0.0)
+    if intent.direction == TradeIntentDirection.BUY and market_data:
+      asks = list(getattr(market_data, "ask_price", []) or [])
+      current_price = float(asks[0] if asks and asks[0] else current_price)
+    if intent.direction == TradeIntentDirection.SELL and market_data:
+      bids = list(getattr(market_data, "bid_price", []) or [])
+      current_price = float(bids[0] if bids and bids[0] else current_price)
+    max_deviation_bps = float(intent.max_price_deviation_bps or 0.0)
+    if reference_price > 0 and current_price > 0 and max_deviation_bps > 0:
+      deviation_bps = abs(current_price - reference_price) / reference_price * 10000
+      if deviation_bps > max_deviation_bps:
+        return "PRICE_DEVIATION_EXCEEDED", "价格已偏离信号价，请等待新信号"
+    return None
+
+  def _t_trade_portfolio_approval_failure(
+    self, runtime: StrategyRuntime, intent: TradeIntent
+  ) -> Optional[tuple[str, str]]:
+    metadata = dict(intent.metadata or {})
+    if (
+      intent.direction != TradeIntentDirection.BUY
+      or metadata.get("t_trade_role") != "entry"
+    ):
+      return None
+
+    params = dict(runtime.context.parameters or {})
+    max_batches = max(1, int(params.get("max_concurrent_batches", 3) or 3))
+    max_exposure_pct = float(params.get("max_total_t_exposure_pct", 0.1) or 0.1)
+    states = {}
+    if runtime.strategy:
+      states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
+
+    active_batch_keys: set[str] = set()
+    active_exposure = 0.0
+    for instrument_code, state in states.items():
+      item = dict(state or {})
+      active_volume = max(
+        0,
+        int(item.get("entry_filled_volume", 0) or 0)
+        - int(item.get("exit_filled_volume", 0) or 0),
+      )
+      if active_volume > 0:
+        batch_key = str(
+          item.get("batch_id") or item.get("instrument_code") or instrument_code
+        )
+        active_batch_keys.add(batch_key)
+        active_exposure += active_volume * float(item.get("entry_avg_price", 0.0) or 0.0)
+      elif item.get("batch_id") and str(
+        item.get("entry_order_status", "") or ""
+      ).upper() in {
+        "PENDING",
+        "SUBMITTED",
+        "ACCEPTED",
+        "PARTIAL_FILLED",
+        "FILLED",
+      }:
+        active_batch_keys.add(str(item["batch_id"]))
+
+    reserved_batch_keys = {
+      str(item.get("batch_id") or item.get("instrument_code") or intent_id)
+      for intent_id, item in runtime.t_trade_entry_reservations.items()
+    }
+    if len(active_batch_keys | reserved_batch_keys) >= max_batches:
+      return (
+        "T_TRADE_CONCURRENT_BATCH_LIMIT",
+        f"账户级做 T 批次已达到上限（{max_batches} 个），信号仍保留至过期",
+      )
+
+    market_data = runtime.latest_market_data.get(intent.instrument_code)
+    asks = list(getattr(market_data, "ask_price", []) or []) if market_data else []
+    current_price = float(
+      (asks[0] if asks and asks[0] else 0.0)
+      or getattr(market_data, "price", 0.0)
+      or intent.limit_price_hint
+      or 0.0
+    )
+    requested_volume = int(intent.target_volume or 0)
+    requested_amount = current_price * requested_volume
+    max_trade_amount = float(
+      params.get("max_trade_amount", 12_000.0) or 12_000.0
+    )
+    account = runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+    total_asset = float(
+      account.get("total_asset", account.get("total_value", 0.0)) or 0.0
+    )
+    if total_asset <= 0 or current_price <= 0 or requested_volume <= 0:
+      return (
+        "T_TRADE_PORTFOLIO_SNAPSHOT_STALE",
+        "账户资产或最新可执行价格不可用，暂不允许确认新批次",
+      )
+    if requested_amount > max_trade_amount + 1e-6:
+      return (
+        "T_TRADE_SINGLE_AMOUNT_LIMIT",
+        f"按最新卖一价计算将超过单次金额硬上限 ¥{max_trade_amount:,.2f}",
+      )
+
+    reserved_exposure = sum(
+      float(item.get("amount", 0.0) or 0.0)
+      for item in runtime.t_trade_entry_reservations.values()
+    )
+    if active_exposure + reserved_exposure + requested_amount > total_asset * max_exposure_pct:
+      return (
+        "T_TRADE_TOTAL_EXPOSURE_LIMIT",
+        f"确认后将超过账户总资产 {max_exposure_pct * 100:g}% 的做 T 敞口上限",
+      )
+    return None
+
+  def _reserve_t_trade_entry_exposure(
+    self, runtime: StrategyRuntime, intent: TradeIntent
+  ) -> None:
+    metadata = dict(intent.metadata or {})
+    if (
+      intent.direction != TradeIntentDirection.BUY
+      or metadata.get("t_trade_role") != "entry"
+    ):
+      return
+    market_data = runtime.latest_market_data.get(intent.instrument_code)
+    asks = list(getattr(market_data, "ask_price", []) or []) if market_data else []
+    price = float(
+      (asks[0] if asks and asks[0] else 0.0)
+      or getattr(market_data, "price", 0.0)
+      or intent.limit_price_hint
+      or 0.0
+    )
+    runtime.t_trade_entry_reservations[intent.intent_id] = {
+      "instrument_code": intent.instrument_code,
+      "batch_id": metadata.get("t_batch_id"),
+      "requested_volume": int(intent.target_volume or 0),
+      "volume": int(intent.target_volume or 0),
+      "price": price,
+      "amount": price * int(intent.target_volume or 0),
+    }
+
+  def _update_t_trade_entry_reservation(
+    self, runtime: StrategyRuntime, order: Any
+  ) -> None:
+    request = self._get_value(order, "request")
+    metadata = dict(self._get_value(order, "metadata", {}) or {})
+    if not metadata:
+      metadata = dict(self._get_value(request, "metadata", {}) or {})
+    if metadata.get("t_trade_role") != "entry":
+      return
+    intent_id = str(metadata.get("intent_id", "") or "")
+    if not intent_id or intent_id not in runtime.t_trade_entry_reservations:
+      return
+    raw_status = self._get_value(order, "status", "")
+    status = str(getattr(raw_status, "value", raw_status)).upper()
+    if status not in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}:
+      return
+    reservation = runtime.t_trade_entry_reservations[intent_id]
+    requested_volume = int(
+      reservation.get("requested_volume", 0)
+      or self._get_value(request, "volume", 0)
+      or 0
+    )
+    filled_volume = int(self._get_value(order, "filled_volume", 0) or 0)
+    terminal_volume = requested_volume if status == "FILLED" else filled_volume
+    if terminal_volume <= 0:
+      runtime.t_trade_entry_reservations.pop(intent_id, None)
+      return
+    reservation["terminal_status"] = status
+    reservation["terminal_filled_volume"] = terminal_volume
+
+  def _refresh_t_trade_entry_reservation(
+    self, runtime: StrategyRuntime, report: Any
+  ) -> None:
+    """Keep exposure reserved until trade details are reflected in strategy state."""
+
+    request = self._get_value(report, "request")
+    metadata = dict(self._get_value(report, "metadata", {}) or {})
+    if not metadata:
+      metadata = dict(self._get_value(request, "metadata", {}) or {})
+    if metadata.get("t_trade_role") != "entry":
+      return
+    intent_id = str(metadata.get("intent_id", "") or "")
+    reservation = runtime.t_trade_entry_reservations.get(intent_id)
+    if reservation is None:
+      batch_id = str(metadata.get("t_batch_id", "") or "")
+      instrument_code = str(
+        self._get_value(report, "instrument_code", "")
+        or metadata.get("instrument_code", "")
+        or self._get_value(request, "instrument_code", "")
+        or ""
+      )
+      for candidate_id, candidate in runtime.t_trade_entry_reservations.items():
+        if batch_id and str(candidate.get("batch_id", "") or "") == batch_id:
+          intent_id, reservation = candidate_id, candidate
+          break
+        candidate_code = str(candidate.get("instrument_code", "") or "")
+        if instrument_code and candidate_code == instrument_code:
+          intent_id, reservation = candidate_id, candidate
+          break
+    if reservation is None or not runtime.strategy:
+      return
+
+    code = str(reservation.get("instrument_code", "") or "")
+    state = dict(
+      dict(runtime.strategy.state.get("instrument_states", {}) or {}).get(code, {})
+      or {}
+    )
+    reflected_volume = max(0, int(state.get("entry_filled_volume", 0) or 0))
+    requested_volume = max(
+      0,
+      int(
+        reservation.get("requested_volume", 0)
+        or reservation.get("volume", 0)
+        or 0
+      ),
+    )
+    terminal_status = str(reservation.get("terminal_status", "") or "")
+    terminal_volume = max(
+      0,
+      int(reservation.get("terminal_filled_volume", 0) or 0),
+    )
+    if terminal_status and reflected_volume >= terminal_volume:
+      runtime.t_trade_entry_reservations.pop(intent_id, None)
+      return
+    remaining = max(
+      0,
+      (terminal_volume if terminal_status else requested_volume) - reflected_volume,
+    )
+    reservation["volume"] = remaining
+    reservation["amount"] = remaining * float(reservation.get("price", 0.0) or 0.0)
+
+  async def _expire_pending_approvals(self, runtime: StrategyRuntime) -> None:
+    for intent in list(runtime.pending_approvals.values()):
+      failure = self._approval_failure(runtime, intent)
+      if failure and failure[0] == "APPROVAL_TTL_EXPIRED":
+        await self._reject_pending_approval(
+          runtime,
+          intent,
+          status="EXPIRED",
+          reason=failure[0],
+          message=failure[1],
+        )
+
+  async def _reject_pending_approval(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    status: str,
+    reason: str,
+    message: str,
+  ) -> None:
+    runtime.pending_approvals.pop(intent.intent_id, None)
+    if runtime.state_manager:
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id,
+        status,
+        notes=reason,
+      )
+    await self._notify_strategy_order(
+      runtime,
+      OrderStateEvent(
+        order_id=None,
+        status=status,
+        error_message=message,
+        metadata={
+          **dict(intent.metadata or {}),
+          "intent_id": intent.intent_id,
+          "approval_reason": reason,
+        },
+      ),
+    )
 
   def _record_strategy_output_trace(
     self,
@@ -2401,6 +3254,13 @@ class StrategyExecutor:
       existing = list(runtime.strategy.state.get("runtime_events", []) or [])
       existing.extend(events)
       runtime.strategy.state.runtime_events = existing[-200:]
+
+  def apply_external_state_patch(self, run_id: str, patch) -> None:
+    """Apply a state patch produced by an explicit, audited external action."""
+    runtime = self.runs.get(run_id)
+    if runtime is None or runtime.strategy is None:
+      raise ValueError("策略运行不存在或尚未启动")
+    self._apply_runtime_state_patch(runtime, patch)
 
   async def _process_trade_intent(self, runtime: StrategyRuntime, intent: TradeIntent) -> None:
     """处理策略交易意图"""
@@ -2517,7 +3377,12 @@ class StrategyExecutor:
       request = OrderRequest(
         instrument_code=intent.instrument_code,
         order_type=order_type,
-        price_type=PriceType.LIMIT,
+        price_type=(
+          PriceType.MARKET
+          if str((intent.metadata or {}).get("price_type", "LIMIT")).upper()
+          == "MARKET"
+          else PriceType.LIMIT
+        ),
         volume=draft.sized_volume,
         price=price,
         strategy_id=str(runtime.strategy_id),
@@ -2724,7 +3589,28 @@ class StrategyExecutor:
       )
 
     except Exception as e:
-      metrics.error_count += 1
+      runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
+      if metrics:
+        metrics.error_count += 1
+      await self._notify_strategy_order(
+        runtime,
+        OrderStateEvent(
+          order_id=None,
+          status=OrderStatus.REJECTED.value,
+          request={
+            "instrument_code": intent.instrument_code,
+            "metadata": {
+              **dict(intent.metadata or {}),
+              "intent_id": intent.intent_id,
+            },
+          },
+          error_message=str(e),
+          metadata={
+            **dict(intent.metadata or {}),
+            "intent_id": intent.intent_id,
+          },
+        ),
+      )
       self._runtime_log(runtime, "ERROR", f"处理交易意图失败: {e}")
 
   async def _reserve_order_resources(
@@ -2893,26 +3779,155 @@ class StrategyExecutor:
       if str(item or "").strip()
     ]
 
+  def _realtime_data_requirements(
+    self, runtime: StrategyRuntime
+  ) -> tuple[bool, List[str]]:
+    strategy_class = getattr(runtime, "strategy_class", None)
+    requirements = (
+      strategy_class.get_data_requirements()
+      if strategy_class and hasattr(strategy_class, "get_data_requirements")
+      else {
+        "use_tick_data": False,
+        "periods": [runtime.context.parameters.get("period", "1m")],
+      }
+    )
+    use_tick_data = bool(requirements.get("use_tick_data", False))
+    periods = [
+      str(period).lower()
+      for period in list(requirements.get("periods") or [])
+      if period and str(period).lower() != "tick"
+    ]
+    if not use_tick_data and not periods:
+      periods = [str(runtime.context.parameters.get("period", "1m"))]
+    return use_tick_data, periods
+
+  async def _subscribe_realtime_instrument(
+    self, runtime: StrategyRuntime, instrument: str
+  ) -> List[str]:
+    data_adapter = runtime.data_adapter
+    if data_adapter is None:
+      return []
+    use_tick_data, periods = self._realtime_data_requirements(runtime)
+    subscription_ids: List[str] = []
+    try:
+      if use_tick_data:
+        subscription_ids.append(
+          await data_adapter.subscribe_tick(
+            instrument_code=instrument,
+            callback=lambda tick: runtime.event_queue.put_nowait(("tick", tick)),
+          )
+        )
+      for period in periods:
+        subscription_ids.append(
+          await data_adapter.subscribe_kline(
+            instrument_code=instrument,
+            period=period,
+            callback=lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
+          )
+        )
+    except Exception:
+      for subscription_id in subscription_ids:
+        await data_adapter.unsubscribe(subscription_id)
+      raise
+    self.logger.info(
+      "订阅实时数据: %s, tick=%s, periods=%s",
+      instrument,
+      use_tick_data,
+      periods,
+    )
+    return subscription_ids
+
+  async def _apply_realtime_instrument_reconcile(
+    self,
+    runtime: StrategyRuntime,
+    instruments: List[str],
+    *,
+    instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+  ) -> Dict[str, List[str]]:
+    """在运行事件队列内安全调整标的池和订阅。"""
+
+    desired = []
+    for raw in instruments or []:
+      code = str(raw or "").strip().upper()
+      if code and code not in desired:
+        desired.append(code)
+    previous = list(runtime.context.instruments or [])
+    membership_added = [code for code in desired if code not in previous]
+    membership_removed = [code for code in previous if code not in desired]
+
+    async with runtime.realtime_subscription_lock:
+      subscribed = set(runtime.realtime_subscription_ids)
+      to_subscribe = [code for code in desired if code not in subscribed]
+      to_unsubscribe = [code for code in subscribed if code not in desired]
+      created: List[str] = []
+      runtime.context.instruments = desired
+      try:
+        for code in to_subscribe:
+          runtime.realtime_subscription_ids[code] = (
+            await self._subscribe_realtime_instrument(runtime, code)
+          )
+          created.append(code)
+      except Exception:
+        runtime.context.instruments = previous
+        for code in created:
+          for subscription_id in runtime.realtime_subscription_ids.pop(code, []):
+            await runtime.data_adapter.unsubscribe(subscription_id)
+        raise
+
+      for code in to_unsubscribe:
+        for subscription_id in runtime.realtime_subscription_ids.pop(code, []):
+          await runtime.data_adapter.unsubscribe(subscription_id)
+        runtime.latest_market_data.pop(code, None)
+        self.logger.info("取消已移出标的池的实时订阅: %s", code)
+
+    if runtime.strategy:
+      self._sync_dynamic_holding_inventory(runtime, instrument_metadata)
+      state = runtime.strategy.state.to_dict()
+      account = runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+      positions = runtime.state_manager.get_all_positions() if runtime.state_manager else {}
+      reconcile_input = StrategyInput(
+        run_id=runtime.run_id,
+        strategy_id=str(runtime.strategy_id),
+        timestamp=runtime.context.current_time or time_utils.now(),
+        cadence=StrategyCadence.RECONCILE,
+        instrument_code="",
+        event={
+          "added": membership_added,
+          "removed": membership_removed,
+          "instruments": desired,
+          "instrument_metadata": dict(instrument_metadata or {}),
+        },
+        portfolio_state={"account": account, "positions": positions},
+        strategy_state=state,
+        parameters=dict(runtime.context.parameters or {}),
+      )
+      output = await runtime.strategy.step(reconcile_input)
+      await self._process_strategy_output(runtime, output, reconcile_input)
+
+    return {
+      "added": membership_added,
+      "removed": membership_removed,
+      "instruments": desired,
+    }
+
+  async def _clear_realtime_subscriptions(self, runtime: StrategyRuntime) -> None:
+    data_adapter = runtime.data_adapter
+    if data_adapter is None:
+      return
+    async with runtime.realtime_subscription_lock:
+      subscription_groups = list(runtime.realtime_subscription_ids.values())
+      runtime.realtime_subscription_ids.clear()
+      for subscription_ids in subscription_groups:
+        for subscription_id in subscription_ids:
+          await data_adapter.unsubscribe(subscription_id)
+
   async def _run_realtime_loop(self, runtime: StrategyRuntime) -> None:
     """运行实时交易循环"""
     metrics = runtime.metrics
-    data_adapter = runtime.data_adapter
     broker = runtime.broker
 
-    # 订阅数据
     instruments = self._resolve_realtime_instruments(runtime)
-    subscription_ids = []
-
-    for instrument in instruments:
-      # 订阅K线数据
-      sub_id = await data_adapter.subscribe_kline(
-        instrument_code=instrument,
-        period=runtime.context.parameters.get("period", "1m"),
-        callback=lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
-      )
-      subscription_ids.append(sub_id)
-
-      self.logger.info(f"订阅实时数据: {instrument}")
+    await self._apply_realtime_instrument_reconcile(runtime, instruments)
 
     # 运行直到停止
     while (
@@ -2931,7 +3946,8 @@ class StrategyExecutor:
       setattr(self, f"heartbeat_count_{runtime.run_id}", heartbeat_count)
 
       # 检查持仓
-      positions = await broker.get_position()
+      positions_result = await broker.get_position()
+      positions = positions_result if isinstance(positions_result, dict) else {}
       runtime.context.positions = positions
 
       # 检查账户
@@ -2945,12 +3961,29 @@ class StrategyExecutor:
         "total_pnl": account.total_pnl,
         "daily_pnl": account.daily_pnl,
       }
+      state_manager = getattr(runtime, "state_manager", None)
+      if state_manager:
+        state_manager.update_account(
+          cash=account.cash,
+          frozen_cash=account.frozen_cash,
+          total_asset=account.total_asset,
+        )
+        for instrument_code, position in positions.items():
+          state_manager.update_position(
+            instrument_code,
+            long_volume=position.long_volume,
+            available_volume=position.available_volume,
+            frozen_volume=position.frozen_volume,
+            today_buy_volume=position.today_buy_volume,
+            long_avg_price=position.long_avg_price,
+            last_price=position.last_price,
+            market_value=position.market_value,
+            pnl=position.pnl,
+          )
 
       await asyncio.sleep(1)
 
-    # 取消订阅
-    for sub_id in subscription_ids:
-      await data_adapter.unsubscribe(sub_id)
+    await self._clear_realtime_subscriptions(runtime)
 
   def get_statistics(self) -> Dict[str, Any]:
     """获取执行器统计信息"""

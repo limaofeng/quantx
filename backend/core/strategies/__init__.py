@@ -16,10 +16,12 @@ from .base import (
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
+  TradeIntentExecutionMode,
   TradeIntentPriority,
   TradeIntentType,
 )
 from .ashare_dynamic_balance_dual_bucket import AshareDynamicBalanceDualBucketStrategy
+from .ashare_intraday_t_assistant import AshareIntradayTAssistantStrategy
 from .ashare_supermarket import AshareSupermarketStrategy
 from .pullback_grid import PullbackGridStrategy
 
@@ -33,6 +35,7 @@ __all__ = [
   "StrategyOutput",
   "TradeIntent",
   "TradeIntentDirection",
+  "TradeIntentExecutionMode",
   "TradeIntentPriority",
   "TradeIntentType",
   "RuntimeStatePatch",
@@ -40,6 +43,7 @@ __all__ = [
   "TradeExecutionEvent",
   # 策略实现
   "AshareDynamicBalanceDualBucketStrategy",
+  "AshareIntradayTAssistantStrategy",
   "AshareSupermarketStrategy",
   "PullbackGridStrategy",
 ]

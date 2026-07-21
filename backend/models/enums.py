@@ -214,6 +214,22 @@ class StrategyInstrumentScope(str, Enum):
 
 
 @strawberry.enum(
+  description="""策略标的池来源
+
+- STATIC: 创建运行实例时固定指定标的
+- ACCOUNT_HOLDINGS: 由账户持仓快照动态维护标的池"""
+)
+class StrategyInstrumentUniverseMode(str, Enum):
+  """策略运行实例的标的池维护方式。"""
+
+  STATIC = "static"
+  """创建实例时固定指定标的。"""
+
+  ACCOUNT_HOLDINGS = "account_holdings"
+  """由账户持仓快照动态维护标的。"""
+
+
+@strawberry.enum(
   description="""策略模板状态
 
 - ACTIVE: 激活 - 策略可用，可创建运行实例

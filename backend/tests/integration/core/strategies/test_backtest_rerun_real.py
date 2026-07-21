@@ -163,6 +163,18 @@ async def _graphql_history(run_id: str) -> List[Dict[str, Any]]:
   return list(result.data["backtestHistory"])
 
 
+async def _wait_for_runtime_task(run_id: str, timeout_seconds: float = 300.0):
+  deadline = asyncio.get_running_loop().time() + timeout_seconds
+  while asyncio.get_running_loop().time() < deadline:
+    runtime = strategy_manager.get_run(run_id)
+    if runtime and runtime.task is not None:
+      return runtime
+    if runtime and runtime.status == ExecutionStatus.ERROR:
+      raise AssertionError(runtime.error_message or "后台启动回测任务失败")
+    await asyncio.sleep(0.5)
+  raise AssertionError("重新回测后台启动超时")
+
+
 def _choose_backtest_window(
   run: StrategyRun,
   history: List[StrategyBacktest],
@@ -237,7 +249,7 @@ async def test_rerun_backtest_version_creates_history_for_specific_run():
   assert after_versions == before_versions | {before_max_version + 1}
   assert len(after_history) >= 2
 
-  runtime = strategy_manager.get_run(TARGET_RUN_ID)
+  runtime = await _wait_for_runtime_task(TARGET_RUN_ID)
   assert runtime is not None, "重新回测必须加载真实运行时"
   assert runtime.task is not None, "重新回测必须启动真实回测任务"
   await runtime.task

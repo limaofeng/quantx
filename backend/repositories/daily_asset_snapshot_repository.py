@@ -132,6 +132,22 @@ class DailyAssetPositionSnapshotRepository(
   def __init__(self, db_session: AsyncSession):
     super().__init__(db_session)
 
+  async def find_by_snapshot(
+    self, snapshot_id: str
+  ) -> List[DailyAssetPositionSnapshot]:
+    """Return all position rows attached to one daily asset snapshot."""
+
+    stmt = (
+      select(DailyAssetPositionSnapshot)
+      .where(DailyAssetPositionSnapshot.snapshot_id == snapshot_id)
+      .order_by(
+        DailyAssetPositionSnapshot.instrument_code.asc(),
+        DailyAssetPositionSnapshot.bucket.asc(),
+      )
+    )
+    result = await self.db.execute(stmt)
+    return list(result.scalars().all())
+
   async def replace_for_snapshot(
     self,
     snapshot_id: str,

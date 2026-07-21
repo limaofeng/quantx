@@ -260,6 +260,57 @@ class RuntimeStateManager:
 
         return self._state
 
+    async def restore_manual_trade_intent(self, intent_id: str):
+        """Rebuild one still-pending manual intent from its durable record."""
+        if not self.persist_enabled or not intent_id:
+            return None
+
+        try:
+            from core.strategies.base import TradeIntent, TradeIntentExecutionMode
+            from database.connection import get_async_db
+            from repositories.trade_intent_repository import TradeIntentRepository
+
+            async for db in get_async_db():
+                record = await TradeIntentRepository(db).find_by_id(intent_id)
+                if record is None or str(record.status or "").upper() != "AWAITING_APPROVAL":
+                    return None
+
+                data = record.to_dict()
+                metadata = dict(data.get("metadata") or {})
+                created_at_raw = metadata.get("intent_created_at")
+                created_at = (
+                    datetime.fromisoformat(created_at_raw)
+                    if isinstance(created_at_raw, str) and created_at_raw
+                    else record.created_at
+                )
+                intent = TradeIntent(
+                    strategy_id=str(record.strategy_id or ""),
+                    run_id=str(record.strategy_run_id),
+                    instrument_code=str(record.instrument_code),
+                    direction=str(record.direction),
+                    bucket=str(record.bucket or "core"),
+                    reason=str(record.reason or ""),
+                    priority=str(record.priority or "NORMAL"),
+                    intent_type=str(record.intent_type) if record.intent_type else None,
+                    confidence=float(record.confidence or 0.0),
+                    target_amount=record.target_amount,
+                    target_position_pct=record.target_position_pct,
+                    target_volume=record.target_volume,
+                    limit_price_hint=record.limit_price_hint,
+                    execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
+                    approval_ttl_ms=metadata.get("approval_ttl_ms"),
+                    max_price_deviation_bps=metadata.get("max_price_deviation_bps"),
+                    metadata=metadata,
+                    trace_id=record.trace_id,
+                    intent_id=str(record.id),
+                    created_at=created_at or time_utils.now(),
+                )
+                self._state.setdefault("trade_intents", {})[intent_id] = data
+                return intent
+        except Exception as e:
+            self.logger.error(f"恢复人工确认交易意图失败: intent_id={intent_id}, error={e}")
+        return None
+
     # ==================== 快照管理 ====================
 
     async def save_snapshot(self) -> bool:
@@ -1012,6 +1063,17 @@ class RuntimeStateManager:
 
     def _trade_intent_record_data(self, intent, *, status: str) -> Dict[str, Any]:
         metadata = dict(getattr(intent, "metadata", {}) or {})
+        metadata.setdefault(
+            "execution_mode", _enum_value(getattr(intent, "execution_mode", "AUTO"))
+        )
+        metadata.setdefault("approval_ttl_ms", getattr(intent, "approval_ttl_ms", None))
+        metadata.setdefault(
+            "max_price_deviation_bps",
+            getattr(intent, "max_price_deviation_bps", None),
+        )
+        created_at = getattr(intent, "created_at", None)
+        if created_at is not None and hasattr(created_at, "isoformat"):
+            metadata.setdefault("intent_created_at", created_at.isoformat())
         return {
             "id": str(getattr(intent, "intent_id", "") or ""),
             "strategy_run_id": str(getattr(intent, "run_id", self.run_id) or self.run_id),

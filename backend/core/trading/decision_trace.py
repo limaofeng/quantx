@@ -256,5 +256,12 @@ def summarize_intent(intent: Any) -> Dict[str, Any]:
     "target_position_pct": getattr(intent, "target_position_pct", None),
     "target_volume": getattr(intent, "target_volume", None),
     "limit_price_hint": getattr(intent, "limit_price_hint", None),
+    "execution_mode": getattr(
+      getattr(intent, "execution_mode", None),
+      "value",
+      getattr(intent, "execution_mode", None),
+    ),
+    "approval_ttl_ms": getattr(intent, "approval_ttl_ms", None),
+    "max_price_deviation_bps": getattr(intent, "max_price_deviation_bps", None),
     "metadata": dict(getattr(intent, "metadata", {}) or {}),
   }

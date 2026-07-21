@@ -104,6 +104,39 @@ class StrategyManager:
     parsed_fallback = self._coerce_positive_float(fallback)
     return parsed_fallback if parsed_fallback is not None else 1000000.0
 
+  async def _mark_backtest_started_safely(self, backtest_id: str) -> None:
+    """Best-effort persistence for backtest lifecycle state."""
+    try:
+      from repositories.backtest_repository import BacktestRepository
+
+      async for db in get_async_db():
+        backtest_repo = BacktestRepository(db)
+        await backtest_repo.update_backtest_start(backtest_id, time_utils.now())
+        break
+    except Exception as exc:
+      self.logger.warning(f"更新回测开始状态失败: backtest_id={backtest_id}, error={exc}")
+
+  async def _mark_backtest_error_safely(
+    self,
+    backtest_id: str,
+    error_message: str,
+  ) -> None:
+    """Best-effort persistence for a failed backtest version."""
+    try:
+      from repositories.backtest_repository import BacktestRepository
+
+      async for db in get_async_db():
+        backtest_repo = BacktestRepository(db)
+        await backtest_repo.update_backtest_status(
+          backtest_id=backtest_id,
+          status="ERROR",
+          error_message=error_message,
+          end_time=time_utils.now(),
+        )
+        break
+    except Exception as exc:
+      self.logger.warning(f"更新回测失败状态失败: backtest_id={backtest_id}, error={exc}")
+
   async def start(self):
     """启动策略管理器服务"""
     if self.running:
@@ -198,6 +231,48 @@ class StrategyManager:
               await repo.update_strategy_run_status(run.id, "ERROR", f"策略代码加载失败: {e}")
               continue
 
+            mode_value = str(getattr(run.mode, "value", run.mode)).lower()
+            status_value = str(getattr(run.status, "value", run.status)).lower()
+            backtest = None
+            backtest_start_time = None
+            backtest_end_time = None
+            backtest_version = None
+            if mode_value == StrategyRunMode.BACKTEST.value:
+              from repositories.backtest_repository import BacktestRepository
+
+              backtest_repo = BacktestRepository(db)
+              history = await backtest_repo.get_backtests_by_run(run.id)
+              backtest = history[0] if history else None
+              if backtest:
+                backtest_start_time = (
+                  self._read_backtest_time_from_parameters(
+                    parameters,
+                    ["backtestStartTime", "backtest_start_time", "startTime", "start_time"],
+                  )
+                  or backtest.backtest_start_time
+                )
+                backtest_end_time = (
+                  self._read_backtest_time_from_parameters(
+                    parameters,
+                    ["backtestEndTime", "backtest_end_time", "endTime", "end_time"],
+                  )
+                  or backtest.backtest_end_time
+                )
+                backtest_version = int(backtest.version or 0) or None
+
+            should_start = status_value == StrategyRunStatus.RUNNING.value
+            if (
+              mode_value == StrategyRunMode.BACKTEST.value
+              and status_value == StrategyRunStatus.PENDING.value
+              and backtest
+              and str(backtest.status or "").upper() == "RUNNING"
+            ):
+              self.logger.warning(
+                f"检测到中断的回测版本，恢复启动: "
+                f"run_id={run.id}, backtest_id={backtest.id}, v{backtest_version}"
+              )
+              should_start = True
+
             # 创建策略上下文
             context = StrategyContext(
               run_id=run.id,
@@ -205,6 +280,10 @@ class StrategyManager:
               instruments=run.instruments or [],
               parameters=parameters or {},
               initial_capital=run.initial_capital or 1000000.0,
+              backtest_start_time=backtest_start_time,
+              backtest_end_time=backtest_end_time,
+              backtest_id=backtest.id if backtest else None,
+              backtest_version=backtest_version,
             )
 
             # 委托给 Executor 重建运行时并加入管理
@@ -221,7 +300,7 @@ class StrategyManager:
               runtime.metrics = run.metrics
 
             # 根据状态决定是否自动启动
-            if run.status == StrategyRunStatus.RUNNING:
+            if should_start:
               # 只有 RUNNING 状态的实例需要自动启动
               await self.start_strategy(run.id)
               self.logger.info(f"策略运行 {run.id} 恢复并启动成功")
@@ -496,7 +575,6 @@ class StrategyManager:
         backtest_start_time=start_time,
         backtest_end_time=end_time,
       )
-      await backtest_repo.update_backtest_start(backtest.id, time_utils.now())
 
       run.parameters = parameters
       run.instruments = instruments
@@ -552,18 +630,20 @@ class StrategyManager:
       context=context,
     )
 
-    success = await self.start_strategy(run_id)
-    if not success:
-      async for db in get_async_db():
-        backtest_repo = BacktestRepository(db)
-        await backtest_repo.update_backtest_status(
-          backtest_id=run_info["backtest_id"],
-          status="ERROR",
-          error_message="启动新回测版本失败",
-          end_time=time_utils.now(),
+    async def _safe_start_rerun() -> None:
+      try:
+        success = await self.start_strategy(run_id)
+        if success:
+          return
+        await self._mark_backtest_error_safely(
+          run_info["backtest_id"],
+          "启动新回测版本失败",
         )
-        break
-      raise RuntimeError("启动新回测版本失败")
+      except Exception as e:
+        self.logger.error(f"后台启动新回测版本失败: {run_id}, 错误: {e}")
+        await self._mark_backtest_error_safely(run_info["backtest_id"], str(e))
+
+    asyncio.create_task(_safe_start_rerun())
 
     return run_info["backtest_id"]
 
@@ -589,11 +669,16 @@ class StrategyManager:
       except RuntimeError as e:
         self.logger.error(f"回测数据准备失败: {e}")
         await self._update_runtime_status(run_id, "ERROR", str(e))
+        if runtime.context.backtest_id:
+          await self._mark_backtest_error_safely(runtime.context.backtest_id, str(e))
         return False
 
     success = await self.executor.start(run_id)
 
     if success:
+      if runtime.context.mode == StrategyRunMode.BACKTEST and runtime.context.backtest_id:
+        await self._mark_backtest_started_safely(runtime.context.backtest_id)
+
       # 注册任务完成回调
       runtime = self.executor.get(run_id)
       if runtime and runtime.task:
@@ -679,11 +764,19 @@ class StrategyManager:
         + ", ".join(sorted(unsupported_periods))
       )
 
-    await self._sync_missing_backtest_data(
-      runtime=runtime,
-      missing=missing_before,
-      sync_periods=sync_periods,
-    )
+    try:
+      await self._sync_missing_backtest_data(
+        runtime=runtime,
+        missing=missing_before,
+        sync_periods=sync_periods,
+      )
+    except RuntimeError:
+      if not runtime.context.parameters.get("t_trade_replay"):
+        raise
+      self.logger.warning(
+        "做 T 回放历史数据补全未全部成功，将按标的保守降级",
+        exc_info=True,
+      )
 
     missing_after = await self._find_missing_backtest_data(
       service=service,
@@ -695,6 +788,47 @@ class StrategyManager:
     )
 
     if missing_after:
+      if runtime.context.parameters.get("t_trade_replay"):
+        missing_codes = set(missing_after)
+        available = [
+          code for code in runtime.context.instruments if code not in missing_codes
+        ]
+        if not available:
+          raise RuntimeError("回放区间内全部持仓标的均缺少历史 Tick 数据")
+        metadata = dict(
+          runtime.context.parameters.get("initial_instrument_metadata") or {}
+        )
+        existing_skipped = list(
+          runtime.context.parameters.get("replay_skipped_instruments") or []
+        )
+        for code in sorted(missing_codes):
+          item = dict(metadata.get(code) or {})
+          existing_skipped.append(
+            {
+              "stock_code": code,
+              "instrument_name": str(item.get("instrument_name", "") or ""),
+              "reason": "历史 Tick 数据同步后仍不完整",
+            }
+          )
+        runtime.context.instruments = available
+        runtime.context.parameters["initial_instrument_metadata"] = {
+          code: value for code, value in metadata.items() if code in available
+        }
+        runtime.context.parameters["replay_skipped_instruments"] = existing_skipped
+        async for db in get_async_db():
+          await StrategyRunRepository(db).update_run(
+            runtime.run_id,
+            {
+              "instruments": available,
+              "parameters": runtime.context.parameters,
+            },
+          )
+          break
+        self.logger.warning(
+          "做 T 回放已跳过历史数据不足标的: %s",
+          ", ".join(sorted(missing_codes)),
+        )
+        return
       remaining_desc = self._format_missing_data(missing_after)
       raise RuntimeError(f"历史数据同步后仍缺失: {remaining_desc}")
 
@@ -773,9 +907,16 @@ class StrategyManager:
         keys.append(f"daily_market_data_stock:{instrument}:{day}:{period}")
 
     period_key = "".join(sorted(periods))
-    keys.append(
+    complete_key = (
       f"daily_market_data_sync_complete:{instrument}:{start_day}-{end_day}:{period_key}"
     )
+    keys.append(complete_key)
+    try:
+      from prefector.flows.daily_market_data_sync_flow import _build_sync_lock_key
+
+      keys.append(_build_sync_lock_key(complete_key))
+    except Exception as exc:
+      self.logger.warning(f"生成历史数据同步锁缓存键失败: error={exc}")
 
     deleted = 0
     for key in keys:
@@ -1402,6 +1543,58 @@ class StrategyManager:
     """
     return self.executor.get(run_id)
 
+  async def reconcile_run_instruments(
+    self,
+    run_id: str,
+    instruments: List[str],
+    *,
+    instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+  ) -> Dict[str, List[str]]:
+    """调整动态标的池，并把最新快照持久化到 StrategyRun。"""
+
+    runtime = self.executor.get(run_id)
+    if runtime is None:
+      raise ValueError(f"策略运行不存在: {run_id}")
+    previous = list(runtime.context.instruments or [])
+    result = await self.executor.reconcile_instruments(
+      run_id,
+      instruments,
+      instrument_metadata=instrument_metadata,
+    )
+    try:
+      async for db in get_async_db():
+        await StrategyRunRepository(db).update_run(
+          run_id, {"instruments": list(result["instruments"])}
+        )
+        break
+    except Exception:
+      await self.executor.reconcile_instruments(run_id, previous)
+      raise
+    return result
+
+  async def update_run_parameters(
+    self, run_id: str, parameters: Dict[str, Any]
+  ) -> None:
+    """原地更新运行参数，供动态持仓策略应用新的全局设置。"""
+
+    normalized = dict(parameters or {})
+    runtime = self.executor.get(run_id)
+    previous = dict(runtime.context.parameters or {}) if runtime else None
+    if runtime:
+      runtime.context.parameters = normalized
+    try:
+      async for db in get_async_db():
+        run = await StrategyRunRepository(db).update_run(
+          run_id, {"parameters": normalized}
+        )
+        if run is None:
+          raise ValueError(f"策略运行不存在: {run_id}")
+        break
+    except Exception:
+      if runtime and previous is not None:
+        runtime.context.parameters = previous
+      raise
+
   def get_all_runs(self) -> List[StrategyRuntime]:
     """
     获取所有策略运行（从 Executor 获取）
@@ -1429,6 +1622,11 @@ class StrategyManager:
   async def _on_run_task_done(self, run_id: str, task: asyncio.Task) -> None:
     """策略运行任务结束回调"""
     try:
+      # task.exception() 会在取消任务上抛 CancelledError，必须先判断。
+      if task.cancelled():
+        self.logger.warning(f"策略运行任务被取消: {run_id}")
+        return
+
       # 检查是否有异常
       exc = task.exception()
       if exc:
@@ -1436,17 +1634,19 @@ class StrategyManager:
         await self._update_runtime_status(run_id, "ERROR", str(exc))
         return
       
-      # 检查是否被取消
-      if task.cancelled():
-        self.logger.warning(f"策略运行任务被取消: {run_id}")
-        return
-
       # 正常结束
       # 检查 runtime 状态，确定是否是自然完成
       runtime = self.executor.get(run_id)
       status = "COMPLETED"
       if runtime and runtime.status == ExecutionStatus.COMPLETED:
         status = "COMPLETED"
+      elif runtime and runtime.status == ExecutionStatus.ERROR:
+        status = "ERROR"
+        if runtime.context.backtest_id:
+          await self._mark_backtest_error_safely(
+            runtime.context.backtest_id,
+            runtime.error_message or "策略运行异常结束",
+          )
       elif runtime and runtime.status == ExecutionStatus.STOPPED:
          status = "STOPPED"
       

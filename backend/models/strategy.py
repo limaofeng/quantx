@@ -9,7 +9,13 @@ from sqlalchemy import ARRAY, Column, Enum, String, Text
 from sqlalchemy.orm import relationship
 
 from database.relational_base import BaseModel, TimestampMixin
-from models.enums import RiskLevel, StrategyCategory, StrategyInstrumentScope, StrategyStatus
+from models.enums import (
+  RiskLevel,
+  StrategyCategory,
+  StrategyInstrumentScope,
+  StrategyInstrumentUniverseMode,
+  StrategyStatus,
+)
 from models.parameter_schema import (
   ParameterSchema,
   ParameterSchemaType,
@@ -64,6 +70,18 @@ class Strategy(BaseModel, TimestampMixin):
     comment="策略标的范围",
   )
   """策略标的范围: single（单标的）/multi（多标的）"""
+
+  instrument_universe_mode = Column(
+    Enum(
+      StrategyInstrumentUniverseMode,
+      name="strategy_instrument_universe_mode",
+      create_constraint=True,
+      native_enum=True,
+    ),
+    nullable=False,
+    default=StrategyInstrumentUniverseMode.STATIC,
+    comment="策略标的池来源",
+  )
 
   tags: List[str] = Column(ARRAY(String), default=list, comment="策略标签")
   """策略标签列表，用于分类和搜索"""
@@ -137,6 +155,9 @@ class Strategy(BaseModel, TimestampMixin):
       "instrument_scope": self.instrument_scope.value
       if self.instrument_scope
       else None,
+      "instrument_universe_mode": self.instrument_universe_mode.value
+      if self.instrument_universe_mode
+      else StrategyInstrumentUniverseMode.STATIC.value,
       "tags": json.loads(self.tags) if self.tags else [],
       "parameter_schema": self.parameter_schema.model_dump()
       if self.parameter_schema

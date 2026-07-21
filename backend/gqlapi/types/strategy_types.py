@@ -11,6 +11,7 @@ from models.enums import (
   RiskLevel,
   StrategyCategory,
   StrategyInstrumentScope,
+  StrategyInstrumentUniverseMode,
   StrategyRunMode,
   StrategyRunStatus,
 )
@@ -45,6 +46,7 @@ class Strategy:
     default=None, description="风险等级"
   )
   _instrument_scope: strawberry.Private[Optional[object]] = None
+  _instrument_universe_mode: strawberry.Private[Optional[object]] = None
   tags: List[str] = strawberry.field(default_factory=list, description="策略标签列表")
   parameter_schema: Optional[ParameterSchema] = strawberry.field(
     default=None, description="参数 Schema 定义（结构化类型，支持前端表单生成）"
@@ -73,6 +75,7 @@ class Strategy:
       category=model.category,
       risk_level=model.risk_level,
       _instrument_scope=model.instrument_scope,
+      _instrument_universe_mode=model.instrument_universe_mode,
       tags=model.tags or [],
       parameter_schema=ParameterSchema.from_pydantic(model.parameter_schema)
       if model.parameter_schema
@@ -105,6 +108,16 @@ class Strategy:
       return StrategyInstrumentScope(str(value))
     except ValueError:
       return None
+
+  @strawberry.field(description="标的池来源（固定配置/账户持仓）")
+  def instrument_universe_mode(self) -> StrategyInstrumentUniverseMode:
+    value = self._instrument_universe_mode
+    if isinstance(value, StrategyInstrumentUniverseMode):
+      return value
+    try:
+      return StrategyInstrumentUniverseMode(str(value or "STATIC"))
+    except ValueError:
+      return StrategyInstrumentUniverseMode.STATIC
 
 
 @strawberry.type(description="策略运行实例信息")
@@ -155,6 +168,9 @@ class StrategyDefinition:
   supported_instruments: List[str] = strawberry.field(default_factory=list)
   risk_level: Optional[RiskLevel] = strawberry.field(default=None)
   category: Optional[StrategyCategory] = strawberry.field(default=None)
+  instrument_universe_mode: StrategyInstrumentUniverseMode = strawberry.field(
+    default=StrategyInstrumentUniverseMode.STATIC
+  )
 
   @staticmethod
   def from_strategy(model: StrategyRunModel) -> "StrategyDefinition":
@@ -174,6 +190,8 @@ class StrategyDefinition:
       supported_instruments=supported,
       risk_level=model.risk_level,
       category=model.category,
+      instrument_universe_mode=model.instrument_universe_mode
+      or StrategyInstrumentUniverseMode.STATIC,
     )
 
 

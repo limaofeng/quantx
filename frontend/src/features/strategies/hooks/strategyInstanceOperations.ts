@@ -32,6 +32,7 @@ export const StrategyDefinitionsQuery = `
         }
       }
       supportedInstruments
+      instrumentUniverseMode
       riskLevel
       category
     }

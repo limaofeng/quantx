@@ -172,6 +172,7 @@ class StrategyReconciler:
       category=metadata.category,
       risk_level=metadata.risk_level,
       instrument_scope=metadata.instrument_scope,
+      instrument_universe_mode=metadata.instrument_universe_mode,
       tags=metadata.tags if metadata.tags else [],  # ARRAY 字段直接传列表
       status=StrategyStatus.ACTIVE,
     )
@@ -199,6 +200,7 @@ class StrategyReconciler:
     db_strategy.category = metadata.category
     db_strategy.risk_level = metadata.risk_level
     db_strategy.instrument_scope = metadata.instrument_scope
+    db_strategy.instrument_universe_mode = metadata.instrument_universe_mode
     db_strategy.tags = metadata.tags if metadata.tags else []  # ARRAY 字段直接传列表
     db_strategy.status = StrategyStatus.UPGRADING  # 标记为待升级状态
 
@@ -315,6 +317,12 @@ class StrategyReconciler:
     if (
       self._normalize_instrument_scope(code_metadata.instrument_scope)
       != self._normalize_instrument_scope(db_strategy.instrument_scope)
+    ):
+      return True
+
+    if (
+      code_metadata.instrument_universe_mode
+      != db_strategy.instrument_universe_mode
     ):
       return True
 

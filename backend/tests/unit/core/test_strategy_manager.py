@@ -84,6 +84,14 @@ class TestStrategyManager:
         "repositories.backtest_repository.BacktestRepository.create_backtest",
         new_callable=AsyncMock,
       ),
+      patch(
+        "repositories.backtest_repository.BacktestRepository.update_backtest_start",
+        new_callable=AsyncMock,
+      ),
+      patch(
+        "repositories.backtest_repository.BacktestRepository.update_backtest_status",
+        new_callable=AsyncMock,
+      ),
     ):
       await manager.start()
       yield manager
@@ -449,6 +457,7 @@ class TestStrategyManager:
       "daily_market_data_stock:562500.SH:20260407:tick",
       "daily_market_data_stock:562500.SH:20260408:tick",
       "daily_market_data_sync_complete:562500.SH:20260407-20260408:tick",
+      "daily_market_data_sync_lock:7ec5286b3886c94e76a3203e3db4078dfc30ed2171e6f3574c441da0c0868872",
     ]
     StrategyManager._instance = None
 

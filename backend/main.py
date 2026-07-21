@@ -26,6 +26,7 @@ from monitoring import get_prometheus_metrics
 from monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
 from prefector.prefect_manager import prefect_manager
 from services.liquidation_service import conditional_liquidation_monitor
+from services.t_trade_global_monitor import t_trade_global_monitor
 
 # 创建日志目录
 create_log_directory()
@@ -423,6 +424,9 @@ async def lifespan(app: FastAPI):
   # 启动条件清仓单监控器
   await conditional_liquidation_monitor.start()
 
+  # 启动账户级全局持仓做 T 编排器
+  await t_trade_global_monitor.start()
+
   # 启动 Prefect 服务
   await prefect_manager.start()
 
@@ -490,6 +494,7 @@ async def lifespan(app: FastAPI):
 
   # 停止其他组件(按依赖关系倒序)
   await stop_with_timeout("Prefect 任务调度服务", prefect_manager.stop(), 3.0)
+  await stop_with_timeout("全局做 T 监控器", t_trade_global_monitor.stop(), 3.0)
   await stop_with_timeout("条件清仓单监控器", conditional_liquidation_monitor.stop(), 3.0)
   await stop_with_timeout("策略管理器", strategy_manager.stop(), 5.0)
   await stop_with_timeout("日内热缓存", intraday_warm_cache.shutdown(), 3.0)
