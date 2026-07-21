@@ -3,7 +3,11 @@ import time
 
 import pytest
 
-from database.timeseries_connection import ConnectionError, ConnectionPool
+from database.timeseries_connection import (
+  ConnectionError,
+  ConnectionPool,
+  TimeSeriesConnection,
+)
 
 
 class FakeClient:
@@ -67,3 +71,33 @@ def test_get_client_times_out_when_pool_stays_full():
       pool.get_client()
   finally:
     pool.return_client(client)
+
+
+def test_connection_context_discards_client_after_operation_error():
+  connection = TimeSeriesConnection(
+    host="http://localhost:8181",
+    token="token",
+    database="quantx",
+    max_connections=1,
+    timeout=1.0,
+    pool_acquire_timeout=1.0,
+  )
+  created = []
+  connection._pool._create_client = lambda: created.append(FakeClient()) or created[-1]
+  failed_client = []
+
+  try:
+    with pytest.raises(RuntimeError, match="connection reset"):
+      with connection.get_client() as client:
+        failed_client.append(client)
+        raise RuntimeError("connection reset")
+
+    assert failed_client[0].closed
+    assert connection._pool._pool == []
+
+    with connection.get_client() as client:
+      assert client is not failed_client[0]
+
+    assert len(created) == 2
+  finally:
+    connection.close()

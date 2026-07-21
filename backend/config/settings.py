@@ -11,14 +11,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
-from config.timezone import configure_process_timezone
-
 # 预加载环境变量并强制覆盖系统已有的同名变量
 # 这确保了 .env 或 .env.{ENV} 中的配置优先级高于本地 OS 环境
 env_type = os.getenv("ENV", "development")
 load_dotenv(".env", override=True)
 load_dotenv(f".env.{env_type}", override=True)
-configure_process_timezone()
 
 
 class Settings(BaseSettings):
@@ -182,8 +179,6 @@ class Settings(BaseSettings):
   # 向后兼容
   gemini_api_key: str = Field(default="", description="Gemini API Key (已废弃，请使用 LLM_API_KEY)")
 
-  akshare_enabled: bool = Field(default=False, description="是否启用AKShare")
-
   # Prefect 任务调度配置 - 外部服务模式
   prefect_enabled: bool = Field(default=True, description="是否启用Prefect任务调度")
   prefect_api_url: str = Field(
@@ -209,7 +204,6 @@ class Settings(BaseSettings):
   )
 
   # 任务执行配置
-  timezone: str = Field(default="Asia/Shanghai", description="时区设置")
   task_max_retries: int = Field(default=3, description="任务最大重试次数")
   task_retry_delay_seconds: int = Field(default=60, description="任务重试延迟秒数")
   task_cache_enabled: bool = Field(default=True, description="是否启用任务缓存")
@@ -225,7 +219,6 @@ class Settings(BaseSettings):
 
   def __init__(self, **data):
     super().__init__(**data)
-    configure_process_timezone(self.timezone)
 
     # 处理CORS_ORIGINS字符串转列表
     if isinstance(self.cors_origins, str):
@@ -250,8 +243,7 @@ class Settings(BaseSettings):
     os.environ["PREFECT_SILENCE_API_URL_MISCONFIGURATION"] = "true"
     os.environ["PREFECT_API_CSRF_ENABLED"] = "false"
     os.environ["PREFECT_HOME"] = os.path.expanduser(self.prefect_home)
-    os.environ["PREFECT_DEFAULT_TIMEZONE"] = self.timezone
-    os.environ["PREFECT_LOCAL_TIMEZONE"] = self.timezone
+
 
   @property
   def is_development(self) -> bool:

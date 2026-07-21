@@ -142,12 +142,12 @@ class ConnectionPool:
           raise ConnectionError("连接池已满，等待空闲连接超时")
         self._pool_available.wait(remaining)
 
-  def return_client(self, client):
+  def return_client(self, client, reusable: bool = True):
     """将客户端返回连接池"""
     with self._pool_available:
       if client in self._in_use:
         self._in_use.discard(client)
-        if len(self._pool) < self.max_connections:
+        if reusable and len(self._pool) < self.max_connections:
           self._pool.append(client)
         else:
           try:
@@ -252,6 +252,11 @@ class TimeSeriesConnection:
     try:
       client = self._pool.get_client()
       yield client
+    except BaseException:
+      if client:
+        self._pool.return_client(client, reusable=False)
+        client = None
+      raise
     finally:
       if client:
         self._pool.return_client(client)

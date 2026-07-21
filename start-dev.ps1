@@ -1,11 +1,8 @@
 param(
-  [int]$BackendPort = 8080,
-  [int]$FrontendPort = 5250,
-  [int[]]$LegacyFrontendPorts = @(5173),
   [int]$StopTimeoutSeconds = 20,
+  [int]$GracefulStopTimeoutSeconds = 45,
   [int]$StartTimeoutSeconds = 90,
   [string]$CondaEnvName = "xtquant-demo",
-  [string]$PrefectWorkerPool = "quantx-pool",
   [string]$BackendPython = "",
   [switch]$StopOnly,
   [switch]$Hidden,
@@ -20,8 +17,11 @@ $FrontendDir = Join-Path $RootDir "frontend"
 $StateDir = Join-Path $RootDir ".quantx-dev"
 $BackendPidFile = Join-Path $StateDir "backend.pid"
 $FrontendPidFile = Join-Path $StateDir "frontend.pid"
+$PrefectWorkerStateFile = Join-Path $StateDir "prefect-worker.json"
 $BackendRunner = Join-Path $StateDir "run-backend.bat"
 $FrontendRunner = Join-Path $StateDir "run-frontend.bat"
+$BackendPort = 8080
+$FrontendPort = 5250
 
 function Write-Info {
   param([string]$Message)
@@ -38,6 +38,36 @@ function Write-Ok {
   Write-Host "[OK] $Message" -ForegroundColor Green
 }
 
+function Get-RequiredDevPorts {
+  @(
+    [pscustomobject]@{
+      Service = "backend"
+      Port = $BackendPort
+      Purpose = "FastAPI / GraphQL"
+    },
+    [pscustomobject]@{
+      Service = "frontend"
+      Port = $FrontendPort
+      Purpose = "Vite dev server"
+    }
+  )
+}
+
+function Get-RequiredDevPortNumbers {
+  @(
+    Get-RequiredDevPorts |
+      Select-Object -ExpandProperty Port |
+      Sort-Object -Unique
+  )
+}
+
+function Write-RequiredDevPorts {
+  Write-Info "Required fixed dev ports:"
+  foreach ($portInfo in Get-RequiredDevPorts) {
+    Write-Host ("  {0,-8} {1,5}  {2}" -f $portInfo.Service, $portInfo.Port, $portInfo.Purpose)
+  }
+}
+
 function Test-RequiredPath {
   param(
     [string]$Path,
@@ -46,6 +76,47 @@ function Test-RequiredPath {
 
   if (-not (Test-Path -LiteralPath $Path)) {
     throw "$Description not found: $Path"
+  }
+}
+
+function Get-PidFileProcessId {
+  param([string]$PidFile)
+
+  if (-not (Test-Path -LiteralPath $PidFile)) {
+    return 0
+  }
+
+  $pidText = (Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+  $trackedPid = 0
+  if ([int]::TryParse($pidText, [ref]$trackedPid)) {
+    return $trackedPid
+  }
+
+  return 0
+}
+
+function Remove-StateFile {
+  param([string]$Path)
+
+  if ($DryRun) {
+    Write-Info "DryRun: would remove state file $Path"
+    return
+  }
+
+  Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+}
+
+function Get-PrefectWorkerState {
+  if (-not (Test-Path -LiteralPath $PrefectWorkerStateFile)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -LiteralPath $PrefectWorkerStateFile -Raw | ConvertFrom-Json
+  } catch {
+    Write-Warn "Invalid Prefect Worker state file; removing: $PrefectWorkerStateFile"
+    Remove-StateFile -Path $PrefectWorkerStateFile
+    return $null
   }
 }
 
@@ -150,11 +221,8 @@ function Test-QuantXServiceProcess {
   $combinedCommand = "$commandLine`n$decodedCommand"
 
   $backendDirText = Normalize-TextForMatch -Text $BackendDir
-  $frontendDirText = Normalize-TextForMatch -Text $FrontendDir
   $backendRunnerText = Normalize-TextForMatch -Text $BackendRunner
   $frontendRunnerText = Normalize-TextForMatch -Text $FrontendRunner
-  $condaEnvText = [regex]::Escape($CondaEnvName.ToLowerInvariant())
-  $prefectPoolText = [regex]::Escape($PrefectWorkerPool.ToLowerInvariant())
 
   if (
     $combinedCommand.Contains($backendRunnerText) -or
@@ -171,52 +239,119 @@ function Test-QuantXServiceProcess {
   }
 
   if (
-    $combinedCommand -match 'python(?:\.exe)?"?\s+main\.py(?:\s|$)' -or
-    (
-      $combinedCommand.Contains($backendDirText) -and
-      $combinedCommand.Contains("main.py") -and
-      $combinedCommand.Contains("python")
-    )
+    $combinedCommand.Contains($backendDirText) -and
+    $combinedCommand.Contains("main.py") -and
+    $combinedCommand.Contains("python")
   ) {
     return $true
   }
 
   if (
-    $combinedCommand -match "prefect\s+worker\s+start\s+--pool\s+$prefectPoolText" -or
-    $combinedCommand -match "conda(?:\.exe)?\s+run\s+-n\s+$condaEnvText\s+python\s+-m\s+prefect\s+worker\s+start\s+--pool\s+$prefectPoolText"
-  ) {
-    return $true
-  }
-
-  if (
-    $combinedCommand.Contains("quantx_mcp") -or
-    $combinedCommand.Contains("quantx-mcp")
-  ) {
-    return $true
-  }
-
-  $frontendPorts = @($FrontendPort) + $LegacyFrontendPorts
-  foreach ($port in $frontendPorts | Sort-Object -Unique) {
-    if (
-      $combinedCommand -match "vite(?:\.js)?[^`n]*--port\s+$port(?:\s|$)" -or
-      $combinedCommand -match "npm-cli\.js[^`n]*run\s+dev[^`n]*--port\s+$port(?:\s|$)"
-    ) {
-      return $true
-    }
-  }
-
-  if (
-    $combinedCommand.Contains($frontendDirText) -and
-    (
-      $combinedCommand.Contains("vite") -or
-      $combinedCommand.Contains("esbuild") -or
-      $combinedCommand.Contains("npm-cli.js")
-    )
+    $combinedCommand -match "vite(?:\.js)?[^`n]*--port\s+$FrontendPort(?:\s|$)" -or
+    $combinedCommand -match "npm-cli\.js[^`n]*run\s+dev[^`n]*--port\s+$FrontendPort(?:\s|$)"
   ) {
     return $true
   }
 
   return $false
+}
+
+function Test-BackendRuntimeProcess {
+  param(
+    $ProcessInfo,
+    [switch]$WithinTrackedTree
+  )
+
+  if ($null -eq $ProcessInfo -or -not $ProcessInfo.CommandLine) {
+    return $false
+  }
+
+  $commandLine = Normalize-TextForMatch -Text $ProcessInfo.CommandLine
+  $decodedCommand = Normalize-TextForMatch -Text (
+    Get-DecodedPowerShellCommand -CommandLine $ProcessInfo.CommandLine
+  )
+  $combinedCommand = "$commandLine`n$decodedCommand"
+
+  if (-not (
+      $combinedCommand.Contains("main.py") -and
+      $combinedCommand.Contains("python")
+    )) {
+    return $false
+  }
+
+  if ($WithinTrackedTree) {
+    return $true
+  }
+
+  $backendDirText = Normalize-TextForMatch -Text $BackendDir
+  return $combinedCommand.Contains($backendDirText)
+}
+
+function Test-PrefectWorkerProcess {
+  param(
+    $ProcessInfo,
+    $State
+  )
+
+  if ($null -eq $ProcessInfo -or -not $ProcessInfo.CommandLine) {
+    return $false
+  }
+
+  $commandLine = Normalize-TextForMatch -Text $ProcessInfo.CommandLine
+  $decodedCommand = Normalize-TextForMatch -Text (
+    Get-DecodedPowerShellCommand -CommandLine $ProcessInfo.CommandLine
+  )
+  $combinedCommand = "$commandLine`n$decodedCommand"
+
+  if (-not (
+      $combinedCommand.Contains("prefect") -and
+      $combinedCommand.Contains("worker") -and
+      $combinedCommand.Contains("start")
+    )) {
+    return $false
+  }
+
+  $workerPool = ""
+  if ($null -ne $State -and $State.PSObject.Properties.Name -contains "worker_pool") {
+    $workerPool = [string]$State.worker_pool
+  }
+
+  if ($workerPool) {
+    $workerPoolText = Normalize-TextForMatch -Text $workerPool
+    if (-not $combinedCommand.Contains($workerPoolText)) {
+      return $false
+    }
+  }
+
+  return $true
+}
+
+function Get-BackendRuntimeProcessIds {
+  $matches = @()
+  $trackedRootPid = Get-PidFileProcessId -PidFile $BackendPidFile
+
+  if ($trackedRootPid -and (Get-Process -Id $trackedRootPid -ErrorAction SilentlyContinue)) {
+    foreach ($processId in Get-ProcessTreeIds -RootProcessId $trackedRootPid) {
+      $processInfo = Get-ProcessDetails -ProcessIdValue $processId
+      if (Test-BackendRuntimeProcess -ProcessInfo $processInfo -WithinTrackedTree) {
+        $matches += [int]$processId
+      }
+    }
+  }
+
+  if ($matches.Count -eq 0) {
+    $processes = @(
+      Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    )
+
+    foreach ($processInfo in $processes) {
+      if (Test-BackendRuntimeProcess -ProcessInfo $processInfo) {
+        $matches += [int]$processInfo.ProcessId
+      }
+    }
+  }
+
+  @($matches | Where-Object { $_ -and $_ -ne $PID } | Sort-Object -Unique)
 }
 
 function Get-QuantXServiceProcessIds {
@@ -422,6 +557,54 @@ function Wait-HttpReady {
   return $false
 }
 
+function Invoke-BackendGracefulShutdown {
+  $listenerPids = @(Get-ListeningPids -Port $BackendPort)
+
+  if ($listenerPids.Count -eq 0) {
+    Write-Ok "No running backend found for graceful shutdown."
+    return $true
+  }
+
+  $shutdownUri = "http://127.0.0.1:$BackendPort/_dev/shutdown"
+
+  if ($DryRun) {
+    Write-Info "DryRun: would request backend graceful shutdown via POST $shutdownUri"
+    Write-Info "DryRun: would wait for backend port $BackendPort to close"
+    return $false
+  }
+
+  $requestAccepted = $false
+  try {
+    $response = Invoke-WebRequest `
+      -UseBasicParsing `
+      -Uri $shutdownUri `
+      -Method Post `
+      -TimeoutSec 5
+
+    if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+      $requestAccepted = $true
+      Write-Ok "Backend accepted graceful shutdown request."
+    } else {
+      Write-Warn "Backend shutdown endpoint returned HTTP $($response.StatusCode)."
+    }
+  } catch {
+    Write-Warn "Backend graceful shutdown request failed: $($_.Exception.Message)"
+  }
+
+  if (-not $requestAccepted) {
+    return $false
+  }
+
+  Write-Info "Waiting up to $GracefulStopTimeoutSeconds seconds for backend port $BackendPort to close."
+  if (Wait-PortFree -Port $BackendPort -TimeoutSeconds $GracefulStopTimeoutSeconds) {
+    Write-Ok "Backend port $BackendPort closed after graceful shutdown."
+    return $true
+  }
+
+  Write-Warn "Backend port $BackendPort did not close within $GracefulStopTimeoutSeconds seconds."
+  return $false
+}
+
 function Stop-ProcessRoots {
   param(
     [string]$Reason,
@@ -451,8 +634,8 @@ function Stop-ProcessRoots {
       Write-Info "Stopping PID $rootProcessId"
     }
 
-    $treeProcessIds += Get-ProcessTreeIds -RootProcessId $rootProcessId
     if (-not $DryRun) {
+      $treeProcessIds += Get-ProcessTreeIds -RootProcessId $rootProcessId
       Stop-ProcessTree -RootProcessId $rootProcessId -Force
     }
   }
@@ -527,6 +710,51 @@ function Stop-PidFileProcess {
   }
 }
 
+function Stop-PrefectWorkerFromState {
+  $state = Get-PrefectWorkerState
+  if ($null -eq $state) {
+    Write-Ok "No tracked Prefect Worker state file."
+    return
+  }
+
+  if (
+    -not ($state.PSObject.Properties.Name -contains "kind") -or
+    [string]$state.kind -ne "prefect-worker"
+  ) {
+    Write-Warn "Unexpected Prefect Worker state file kind; removing: $PrefectWorkerStateFile"
+    Remove-StateFile -Path $PrefectWorkerStateFile
+    return
+  }
+
+  $trackedPid = 0
+  if (-not [int]::TryParse([string]$state.pid, [ref]$trackedPid)) {
+    Write-Warn "Invalid Prefect Worker PID in state file; removing: $PrefectWorkerStateFile"
+    Remove-StateFile -Path $PrefectWorkerStateFile
+    return
+  }
+
+  if (-not (Get-Process -Id $trackedPid -ErrorAction SilentlyContinue)) {
+    Write-Ok "Tracked Prefect Worker process $trackedPid is already gone."
+    Remove-StateFile -Path $PrefectWorkerStateFile
+    return
+  }
+
+  $details = Get-ProcessDetails -ProcessIdValue $trackedPid
+  if (-not (Test-PrefectWorkerProcess -ProcessInfo $details -State $state)) {
+    Write-Warn "Tracked PID $trackedPid no longer looks like the QuantX Prefect Worker; removing stale state only."
+    Remove-StateFile -Path $PrefectWorkerStateFile
+    return
+  }
+
+  try {
+    Stop-ProcessRoots -Reason "Tracked Prefect Worker process tree" -RootProcessIds @($trackedPid)
+  } catch {
+    Write-Warn "Tracked Prefect Worker process $trackedPid could not be fully stopped: $($_.Exception.Message)"
+  }
+
+  Remove-StateFile -Path $PrefectWorkerStateFile
+}
+
 function Stop-DevWindowProcesses {
   param([string]$TitlePrefix)
 
@@ -548,12 +776,12 @@ function Stop-QuantXServiceProcesses {
   $serviceProcessIds = @(Get-QuantXServiceProcessIds)
 
   if ($serviceProcessIds.Count -eq 0) {
-    Write-Ok "No untracked QuantX backend/frontend/Prefect/MCP service process found."
+    Write-Ok "No untracked QuantX backend/frontend service process found."
     return
   }
 
   Stop-ProcessRoots `
-    -Reason "Untracked QuantX backend/frontend/Prefect/MCP service process tree" `
+    -Reason "Untracked QuantX backend/frontend service process tree" `
     -RootProcessIds $serviceProcessIds
 }
 
@@ -578,6 +806,32 @@ function Clear-Port {
   }
 
   Write-Ok "Port $Port has been released."
+}
+
+function Stop-ExistingDevServices {
+  Write-Info "Step 1: request backend graceful shutdown."
+  $backendGracefullyStopped = Invoke-BackendGracefulShutdown
+  if (-not $backendGracefullyStopped) {
+    Write-Warn "Backend graceful shutdown was not confirmed; fallback cleanup will continue."
+  }
+
+  Write-Info "Step 2: stop tracked Prefect Worker if it survived backend shutdown."
+  Stop-PrefectWorkerFromState
+
+  Write-Info "Step 3: stop tracked QuantX dev process trees."
+  Stop-PidFileProcess -Name "backend" -PidFile $BackendPidFile
+  Stop-PidFileProcess -Name "frontend" -PidFile $FrontendPidFile
+  Stop-DevWindowProcesses -TitlePrefix "QuantX Backend"
+  Stop-DevWindowProcesses -TitlePrefix "QuantX Frontend"
+
+  Write-Info "Step 4: stop untracked QuantX backend/frontend service processes."
+  Stop-QuantXServiceProcesses
+
+  Write-Info "Step 5: check and release only required fixed dev ports."
+  Write-RequiredDevPorts
+  foreach ($port in Get-RequiredDevPortNumbers) {
+    Clear-Port -Port $port
+  }
 }
 
 function Start-DevWindow {
@@ -712,8 +966,12 @@ function Write-DevRunners {
 
   $backendRunnerContent = @(
     "@echo off",
+    "call ""$CondaActivateBat"" $CondaEnvName",
     "set ENV=development",
+    "set HOST=0.0.0.0",
+    "set PORT=$BackendPort",
     "set QUANTX_DEV_SERVICE=backend",
+    "set QUANTX_PREFECT_WORKER_STATE_FILE=$PrefectWorkerStateFile",
     "set CONDA_DEFAULT_ENV=$CondaEnvName",
     "set CONDA_ENV_NAME=$CondaEnvName",
     "set CONDA_PREFIX=$resolvedCondaPrefixPath",
@@ -735,53 +993,45 @@ function Write-DevRunners {
   Set-Content -LiteralPath $FrontendRunner -Value $frontendRunnerContent -Encoding ASCII
 }
 
-Write-Host "============================================"
-Write-Host "QuantX development startup"
-Write-Host "============================================"
-
-Test-RequiredPath -Path (Join-Path $BackendDir "main.py") -Description "Backend entry"
-Test-RequiredPath -Path (Join-Path $FrontendDir "package.json") -Description "Frontend package"
-Assert-CommandAvailable -CommandName "npm"
-$ResolvedBackendPython = Resolve-BackendPython
-$ResolvedCondaActivateBat = Resolve-CondaActivateBat -ResolvedBackendPythonPath $ResolvedBackendPython
-Write-Info "Backend Python: $ResolvedBackendPython"
-Write-Info "Conda activate: $ResolvedCondaActivateBat"
-
-if (-not $DryRun) {
-  New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
-  Write-DevRunners `
-    -CondaActivateBat $ResolvedCondaActivateBat `
-    -ResolvedBackendPythonPath $ResolvedBackendPython
+$scriptTitle = if ($StopOnly) {
+  "QuantX development shutdown"
+} else {
+  "QuantX development startup"
 }
 
-Write-Info "Step 1: stop previously tracked QuantX dev processes."
-Stop-PidFileProcess -Name "backend" -PidFile $BackendPidFile
-Stop-PidFileProcess -Name "frontend" -PidFile $FrontendPidFile
-Stop-DevWindowProcesses -TitlePrefix "QuantX Backend"
-Stop-DevWindowProcesses -TitlePrefix "QuantX Frontend"
+Write-Host "============================================"
+Write-Host $scriptTitle
+Write-Host "============================================"
 
-Write-Info "Step 2: stop untracked QuantX backend/frontend/Prefect/MCP service processes."
-Stop-QuantXServiceProcesses
+if (-not $StopOnly) {
+  Test-RequiredPath -Path (Join-Path $BackendDir "main.py") -Description "Backend entry"
+  Test-RequiredPath -Path (Join-Path $FrontendDir "package.json") -Description "Frontend package"
+  Assert-CommandAvailable -CommandName "npm"
+  $ResolvedBackendPython = Resolve-BackendPython
+  $ResolvedCondaActivateBat = Resolve-CondaActivateBat -ResolvedBackendPythonPath $ResolvedBackendPython
+  Write-Info "Backend Python: $ResolvedBackendPython"
+  Write-Info "Conda activate: $ResolvedCondaActivateBat"
 
-Write-Info "Step 3: check and release occupied ports."
-$portsToRelease = @($BackendPort, $FrontendPort) + $LegacyFrontendPorts
-foreach ($port in $portsToRelease | Sort-Object -Unique) {
-  Clear-Port -Port $port
+  if (-not $DryRun) {
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    Write-DevRunners `
+      -CondaActivateBat $ResolvedCondaActivateBat `
+      -ResolvedBackendPythonPath $ResolvedBackendPython
+  }
 }
+
+Stop-ExistingDevServices
 
 if ($StopOnly) {
   Write-Host "============================================"
   Write-Ok "QuantX dev processes stopped."
   Write-Host "Backend port:  $BackendPort"
   Write-Host "Frontend port: $FrontendPort"
-  if ($LegacyFrontendPorts.Count -gt 0) {
-    Write-Host "Legacy frontend ports checked: $($LegacyFrontendPorts -join ', ')"
-  }
   Write-Host "============================================"
   exit 0
 }
 
-Write-Info "Step 4: start backend and frontend."
+Write-Info "Step 6: start backend and frontend."
 Start-DevWindow `
   -Title "QuantX Backend :$BackendPort" `
   -WorkingDirectory $BackendDir `

@@ -7,10 +7,12 @@ Prefect Worker 管理器
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -29,10 +31,53 @@ class PrefectServiceManager:
     self.is_running = False
     self.worker_pool_name = getattr(settings, "prefect_worker_pool", "my-docker-pool")
     self._output_reader_task: Optional[asyncio.Task] = None
+    self.worker_state_file = self._resolve_worker_state_file()
 
     # 确保日志目录存在
     reports_dir = Path(getattr(settings, "sync_reports_dir", "logs/sync_reports"))
     reports_dir.mkdir(parents=True, exist_ok=True)
+
+  def _resolve_worker_state_file(self) -> Optional[Path]:
+    path_text = os.environ.get("QUANTX_PREFECT_WORKER_STATE_FILE", "").strip()
+    if not path_text:
+      return None
+    return Path(path_text)
+
+  def _write_worker_state(self, cmd: list[str], cwd: Path) -> None:
+    if not self.worker_state_file or not self.worker_process:
+      return
+
+    state = {
+      "kind": "prefect-worker",
+      "pid": self.worker_process.pid,
+      "parent_pid": os.getpid(),
+      "worker_pool": self.worker_pool_name,
+      "cwd": str(cwd),
+      "command": cmd,
+      "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+      self.worker_state_file.parent.mkdir(parents=True, exist_ok=True)
+      temp_path = self.worker_state_file.with_suffix(
+        f"{self.worker_state_file.suffix}.tmp"
+      )
+      temp_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+      )
+      temp_path.replace(self.worker_state_file)
+    except Exception as e:
+      logger.warning(f"写入 Prefect Worker 状态文件失败: {e}")
+
+  def _remove_worker_state(self) -> None:
+    if not self.worker_state_file:
+      return
+
+    try:
+      self.worker_state_file.unlink(missing_ok=True)
+    except Exception as e:
+      logger.warning(f"删除 Prefect Worker 状态文件失败: {e}")
 
   async def start(self):
     """启动 Prefect Worker"""
@@ -142,6 +187,7 @@ class PrefectServiceManager:
 
       self.is_running = False
       logger.info("Prefect Worker 已停止")
+      self._remove_worker_state()
 
     except Exception as e:
       logger.error(f"停止 Prefect Worker 失败: {e}")
@@ -194,6 +240,7 @@ class PrefectServiceManager:
 
       # 启动 Worker 进程
       env = os.environ.copy()
+      worker_cwd = Path(__file__).parent.parent
 
       # Windows 特殊处理: 创建新的进程组以便正确处理信号
       creation_flags = 0
@@ -204,7 +251,7 @@ class PrefectServiceManager:
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        cwd=Path(__file__).parent.parent,
+        cwd=worker_cwd,
         env=env,
         creationflags=creation_flags,
       )
@@ -215,10 +262,12 @@ class PrefectServiceManager:
       # 检查进程是否正常运行
       if self.worker_process.poll() is None:
         logger.info(f"Prefect Worker 启动成功，PID: {self.worker_process.pid}")
+        self._write_worker_state(cmd, worker_cwd)
         # 启动后台任务读取输出,防止管道阻塞
         self._output_reader_task = asyncio.create_task(self._read_worker_output())
       else:
         logger.error("Prefect Worker 启动失败")
+        self._remove_worker_state()
         # 输出启动日志用于调试
         if self.worker_process and self.worker_process.stdout:
           try:
@@ -268,6 +317,9 @@ class PrefectServiceManager:
       logger.debug("Worker 输出读取任务被取消")
     except Exception as e:
       logger.error(f"读取 Worker 输出失败: {e}")
+    finally:
+      if self.worker_process and self.worker_process.poll() is not None:
+        self._remove_worker_state()
 
   async def _deploy_flows(self):
     """部署所有可用的 flows"""

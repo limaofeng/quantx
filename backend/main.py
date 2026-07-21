@@ -7,6 +7,7 @@ import threading
 import time
 # Trigger reload
 from contextlib import asynccontextmanager
+from ipaddress import ip_address
 from typing import Callable
 
 import uvicorn
@@ -37,6 +38,7 @@ MINIQMT_HEALTH_ACCOUNT_ID = "300000013250"
 SHUTDOWN_WATCHDOG_SECONDS = 40.0
 RELOAD_WORKER_EXIT_SECONDS = 10.0
 WINDOWS_CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
+DEV_SHUTDOWN_PATH = "/_dev/shutdown"
 
 
 def _configure_windows_event_loop_policy() -> None:
@@ -116,6 +118,33 @@ def _install_asyncio_client_disconnect_filter() -> None:
 
   loop.set_exception_handler(handle_loop_exception)
   setattr(loop, "_quantx_client_disconnect_filter", True)
+
+
+def _is_local_request(request: Request) -> bool:
+  client_host = request.client.host if request.client else ""
+  if not client_host:
+    return False
+
+  try:
+    return ip_address(client_host).is_loopback
+  except ValueError:
+    return client_host.lower() == "localhost"
+
+
+def _schedule_dev_shutdown() -> None:
+  def request_shutdown() -> None:
+    time.sleep(0.2)
+    try:
+      signal.raise_signal(signal.SIGINT)
+    except Exception as exc:
+      logger.error("触发开发环境关闭信号失败: %s", exc)
+
+  thread = threading.Thread(
+    target=request_shutdown,
+    name="QuantXDevShutdownRequest",
+    daemon=True,
+  )
+  thread.start()
 
 
 class ShutdownWatchdog:
@@ -583,6 +612,20 @@ async def root():
     "graphql_endpoint": "/graphql",
     "docs_url": "/docs" if settings.is_development else None,
   }
+
+
+@app.post(DEV_SHUTDOWN_PATH)
+async def request_dev_shutdown(request: Request):
+  """Request a local development shutdown so lifespan cleanup can run."""
+  if not (settings.is_development or settings.debug):
+    raise HTTPException(status_code=404, detail="Not found")
+
+  if not _is_local_request(request):
+    raise HTTPException(status_code=403, detail="Forbidden")
+
+  logger.info("收到本地开发环境关闭请求，准备优雅退出")
+  _schedule_dev_shutdown()
+  return {"status": "shutdown_requested"}
 
 
 @app.get("/health")
