@@ -285,13 +285,7 @@ export class ConsoleProtection {
     const sanitizer = this.sanitizer;
 
     // 重写 console 方法
-    const protectedMethods = [
-      'log',
-      'info',
-      'warn',
-      'error',
-      'debug',
-    ] as const;
+    const protectedMethods = ['log', 'info', 'warn', 'error', 'debug'] as const;
     const writableConsole = console as unknown as Record<
       (typeof protectedMethods)[number],
       (...args: any[]) => void

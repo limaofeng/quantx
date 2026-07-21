@@ -79,11 +79,7 @@ export class Logger {
   }
 
   // 核心日志记录方法
-  log(
-    level: LogLevel,
-    message: string,
-    context?: unknown
-  ): void {
+  log(level: LogLevel, message: string, context?: unknown): void {
     const logEntry: LogEntry = {
       id: this.generateLogId(),
       level,
@@ -230,14 +226,10 @@ export const logger = Logger.getInstance();
 
 // 便捷日志函数
 export const log = {
-  debug: (message: string, context?: unknown) =>
-    logger.debug(message, context),
-  info: (message: string, context?: unknown) =>
-    logger.info(message, context),
-  warn: (message: string, context?: unknown) =>
-    logger.warn(message, context),
-  error: (message: string, context?: unknown) =>
-    logger.error(message, context),
+  debug: (message: string, context?: unknown) => logger.debug(message, context),
+  info: (message: string, context?: unknown) => logger.info(message, context),
+  warn: (message: string, context?: unknown) => logger.warn(message, context),
+  error: (message: string, context?: unknown) => logger.error(message, context),
   logError: (standardError: StandardError) => logger.logError(standardError),
 };
 
