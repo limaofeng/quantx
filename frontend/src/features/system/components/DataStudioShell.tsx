@@ -2,12 +2,14 @@ import {
   BarChart3,
   Briefcase,
   CalendarDays,
+  CandlestickChart,
   ClipboardList,
   Copy,
   Database,
   Filter,
   Landmark,
   LineChart,
+  Megaphone,
   RefreshCw,
   Search,
   WalletCards,
@@ -27,15 +29,18 @@ import {
 import { cn } from '@/utils/cn';
 
 export type DataStudioMode =
+  | 'ANNOUNCEMENTS'
   | 'CALENDAR'
   | 'FINANCIAL'
   | 'FLOWS'
   | 'HOLDINGS'
   | 'MARKET'
+  | 'MARKET_DATA'
   | 'OVERVIEW'
   | 'REVERSE_REPO'
   | 'SCREENING'
-  | 'SECTORS';
+  | 'SECTORS'
+  | 'STOCKS';
 
 interface DataResourceItem {
   description: string;
@@ -63,6 +68,20 @@ const dataResources: DataResourceItem[] = [
     id: 'MARKET',
     label: '市场数据',
     path: '/settings/data/market',
+  },
+  {
+    description: '单票覆盖、缺口、手动补拉',
+    icon: Search,
+    id: 'STOCKS',
+    label: '个股数据',
+    path: '/settings/data/stocks',
+  },
+  {
+    description: 'K线、tick、批量行情缓存',
+    icon: CandlestickChart,
+    id: 'MARKET_DATA',
+    label: 'K线同步',
+    path: '/settings/data/market-data',
   },
   {
     description: '行业、概念、板块持仓',
@@ -98,6 +117,13 @@ const dataResources: DataResourceItem[] = [
     id: 'FINANCIAL',
     label: '财务数据',
     path: '/settings/data/financial',
+  },
+  {
+    description: '公告、回购、披露事件',
+    icon: Megaphone,
+    id: 'ANNOUNCEMENTS',
+    label: '公告同步',
+    path: '/settings/data/announcements',
   },
   {
     description: '国债逆回购、利率与交易记录',

@@ -15,6 +15,7 @@ import { useLocation } from 'wouter';
 
 import { Badge } from '@/components/ui/badge';
 import { gql } from '@/generated/gql';
+import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn'; // Assuming cn utility is available here
 
 const GET_SECTOR_STATS = gql(`
@@ -26,34 +27,15 @@ const GET_SECTOR_STATS = gql(`
   }
 `);
 
-const GET_DEPLOYMENT_STATUS = gql(`
-  query GetSectorDeploymentStatus($name: String!) {
-    getDeploymentByName(name: $name) {
-      id
-      name
-      status
-      lastRunTime
-    }
-  }
-`);
-
 export function SectorSyncCard() {
   const [, setLocation] = useLocation();
 
   // Fetch Stats
   const [{ data: statsData }] = useQuery({ query: GET_SECTOR_STATS as any });
 
-  // Fetch Deployment Status
-  const [{ data: deployData }] = useQuery({
-    query: GET_DEPLOYMENT_STATUS as any,
-    variables: { name: 'sector-data-sync' },
-    requestPolicy: 'cache-and-network', // Ensure fresh status
-  });
-
-  const deployment = deployData?.getDeploymentByName;
+  const { deployment, isSyncing } = useDeploymentSync('sector-data-sync');
   const isHealthy =
     deployment?.status === 'Ready' || deployment?.status === 'Scheduled';
-  const isRunning = deployment?.status === 'Running';
 
   // Process Stats
   const counts = useMemo(() => {
@@ -68,9 +50,11 @@ export function SectorSyncCard() {
 
   // Determine State
   const isInternalOffline = !deployment;
-  const isSyncing = deployment?.status === 'Running';
+  const isStale = deployment?.isStale || deployment?.status === 'Stale';
   const isError =
-    deployment?.status === 'Failed' || deployment?.status === 'Crashed';
+    deployment?.status === 'Failed' ||
+    deployment?.status === 'Crashed' ||
+    isStale;
   const isEmpty = counts.SW1 === 0 && counts.GN === 0;
 
   // Visual Config based on State
@@ -84,6 +68,16 @@ export function SectorSyncCard() {
         text: 'text-slate-600 dark:text-slate-400',
         hover: 'hover:bg-slate-100 dark:hover:bg-slate-800/50',
         accent: 'text-slate-500',
+      };
+    if (isStale)
+      return {
+        bg: 'bg-gradient-to-br from-red-50/50 to-rose-50/50 dark:from-red-900/10 dark:to-rose-900/10',
+        border: 'border-red-200/40 dark:border-red-800/40',
+        iconBg: 'bg-red-500/10',
+        iconText: 'text-red-600 dark:text-red-400',
+        text: 'text-slate-800 dark:text-slate-100',
+        hover: 'hover:bg-red-50/80 dark:hover:bg-red-900/20',
+        accent: 'text-red-600 dark:text-red-400',
       };
     if (isSyncing)
       return {
@@ -115,7 +109,7 @@ export function SectorSyncCard() {
       hover: 'hover:bg-amber-50/80 dark:hover:bg-amber-900/20',
       accent: 'text-amber-600 dark:text-amber-500',
     };
-  }, [isInternalOffline, isSyncing, isError]);
+  }, [isInternalOffline, isStale, isSyncing, isError]);
 
   return (
     <div
@@ -159,16 +153,20 @@ export function SectorSyncCard() {
             variant="outline"
             className={cn(
               'gap-1 flex items-center pr-2 border-opacity-20',
-              isHealthy
-                ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
-                : isSyncing
-                  ? 'bg-blue-500/5 text-blue-600 border-blue-500'
-                  : isError
-                    ? 'bg-red-500/5 text-red-600 border-red-500'
-                    : 'bg-slate-500/5 text-slate-500 border-slate-500'
+              isStale
+                ? 'bg-red-500/5 text-red-600 border-red-500'
+                : isHealthy
+                  ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
+                  : isSyncing
+                    ? 'bg-blue-500/5 text-blue-600 border-blue-500'
+                    : isError
+                      ? 'bg-red-500/5 text-red-600 border-red-500'
+                      : 'bg-slate-500/5 text-slate-500 border-slate-500'
             )}
           >
-            {isSyncing ? (
+            {isStale ? (
+              <AlertCircle size={10} />
+            ) : isSyncing ? (
               <Activity size={10} className="animate-spin" />
             ) : isHealthy ? (
               <Activity size={10} />
@@ -178,13 +176,15 @@ export function SectorSyncCard() {
               <Activity size={10} className="opacity-50" />
             )}
             <span className="text-[10px]">
-              {isSyncing
-                ? '同步中'
-                : isHealthy
-                  ? '系统就绪'
-                  : isError
-                    ? '任务异常'
-                    : deployment.status}
+              {isStale
+                ? '运行卡住'
+                : isSyncing
+                  ? '同步中'
+                  : isHealthy
+                    ? '系统就绪'
+                    : isError
+                      ? '任务异常'
+                      : deployment.status}
             </span>
           </Badge>
         ) : (
@@ -251,13 +251,15 @@ export function SectorSyncCard() {
         <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
           <Clock size={12} />
           <span className="text-[10px] font-mono">
-            {isSyncing
-              ? '正在同步数据...'
-              : isError
-                ? '上次同步失败'
-                : deployment?.lastRunTime
-                  ? `上次同步: ${formatDistanceToNow(new Date(deployment.lastRunTime), { locale: zhCN, addSuffix: true })}`
-                  : '暂无同步记录'}
+            {isStale
+              ? deployment?.staleReason || '运行中但长时间无活动'
+              : isSyncing
+                ? '正在同步数据...'
+                : isError
+                  ? '上次同步失败'
+                  : deployment?.lastRunTime
+                    ? `上次同步: ${formatDistanceToNow(new Date(deployment.lastRunTime), { locale: zhCN, addSuffix: true })}`
+                    : '暂无同步记录'}
           </span>
         </div>
 
@@ -276,13 +278,15 @@ export function SectorSyncCard() {
       <div
         className={cn(
           'absolute -right-8 -bottom-8 w-32 h-32 rounded-full blur-3xl transition-all duration-500 opacity-10 group-hover:opacity-20',
-          isSyncing
-            ? 'bg-blue-500'
-            : isError
-              ? 'bg-red-500'
-              : isInternalOffline
-                ? 'bg-slate-500'
-                : 'bg-amber-500'
+          isStale
+            ? 'bg-red-500'
+            : isSyncing
+              ? 'bg-blue-500'
+              : isError
+                ? 'bg-red-500'
+                : isInternalOffline
+                  ? 'bg-slate-500'
+                  : 'bg-amber-500'
         )}
       />
     </div>

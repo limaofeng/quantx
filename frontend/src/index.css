@@ -192,6 +192,18 @@
   }
 }
 
+/* Keep horizontal tab strips scrollable without reserving scrollbar space. */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* 兼容旧的 custom-scrollbar 类，视觉统一交给全局滚动条变量。 */
 .custom-scrollbar {
   scrollbar-width: thin;

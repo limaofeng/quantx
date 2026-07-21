@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useEffect, useId } from 'react';
 import type React from 'react';
 import { createPortal } from 'react-dom';
 
@@ -13,16 +6,7 @@ import { useStudioWorkspaceContext } from '@/components/studio-workspace/context
 import { cn } from '@/utils/cn';
 
 import { ActivityBar } from './ActivityBar';
-import {
-  DEFAULT_SIDEBAR_WIDTH,
-  MAX_SIDEBAR_WIDTH,
-  MIN_SIDEBAR_WIDTH,
-  RESIZE_LARGE_STEP,
-  RESIZE_STEP,
-  clampSidebarWidth,
-  readStudioSidebarWidths,
-  writeStudioSidebarWidths,
-} from './sidebarSizing';
+import { useStudioSidebarSizing } from './sidebarSizing';
 import { StatusBar } from './StatusBar';
 import { getStudioThemeStyles } from './themeStyles';
 import type {
@@ -131,115 +115,20 @@ export function StudioWorkbench({
     left: statusBarLeft,
     right: statusBarRight,
   });
-  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
-  const [sidebarWidths, setSidebarWidths] =
-    useState<Record<string, number>>(readStudioSidebarWidths);
-  const resizeStateRef = useRef({
-    startWidth: DEFAULT_SIDEBAR_WIDTH,
-    startX: 0,
-  });
   const themeStyles = getStudioThemeStyles(theme.name);
-
-  const minSidebarWidth = sidebarSizing?.minWidth ?? MIN_SIDEBAR_WIDTH;
-  const maxSidebarWidth = Math.max(
+  const {
+    handleSidebarResizeKeyDown,
+    handleSidebarResizeStart,
+    isResizingSidebar,
+    maxSidebarWidth,
     minSidebarWidth,
-    sidebarSizing?.maxWidth ?? MAX_SIDEBAR_WIDTH
-  );
-  const defaultSidebarWidth = clampSidebarWidth(
-    sidebarSizing?.defaultWidth ?? DEFAULT_SIDEBAR_WIDTH,
-    minSidebarWidth,
-    maxSidebarWidth
-  );
-  const sidebarWidthKey = useMemo(() => {
-    return sidebarSizing?.storageScope || theme.title || 'studio-workbench';
-  }, [sidebarSizing?.storageScope, theme.title]);
-  const sidebarWidth = clampSidebarWidth(
-    sidebarWidths[sidebarWidthKey] ?? defaultSidebarWidth,
-    minSidebarWidth,
-    maxSidebarWidth
-  );
+    sidebarWidth,
+  } = useStudioSidebarSizing({
+    resizeEdge: 'right',
+    sizing: sidebarSizing,
+    storageFallback: theme.title || 'studio-workbench',
+  });
   const effectiveTabBar = isHostedPage ? null : tabBar;
-
-  const updateSidebarWidth = useCallback(
-    (nextWidth: number) => {
-      setSidebarWidths(current => {
-        const next = {
-          ...current,
-          [sidebarWidthKey]: clampSidebarWidth(
-            nextWidth,
-            minSidebarWidth,
-            maxSidebarWidth
-          ),
-        };
-        writeStudioSidebarWidths(next);
-        return next;
-      });
-    },
-    [maxSidebarWidth, minSidebarWidth, sidebarWidthKey]
-  );
-
-  const handleSidebarResizeStart = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      resizeStateRef.current = {
-        startWidth: sidebarWidth,
-        startX: event.clientX,
-      };
-      setIsResizingSidebar(true);
-    },
-    [sidebarWidth]
-  );
-
-  const handleSidebarResizeKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      const step = event.shiftKey ? RESIZE_LARGE_STEP : RESIZE_STEP;
-      let nextWidth: number | null = null;
-
-      if (event.key === 'ArrowLeft') {
-        nextWidth = sidebarWidth - step;
-      } else if (event.key === 'ArrowRight') {
-        nextWidth = sidebarWidth + step;
-      } else if (event.key === 'Home') {
-        nextWidth = minSidebarWidth;
-      } else if (event.key === 'End') {
-        nextWidth = maxSidebarWidth;
-      }
-
-      if (nextWidth === null) return;
-      event.preventDefault();
-      updateSidebarWidth(nextWidth);
-    },
-    [maxSidebarWidth, minSidebarWidth, sidebarWidth, updateSidebarWidth]
-  );
-
-  useEffect(() => {
-    if (!isResizingSidebar) return;
-
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const deltaX = event.clientX - resizeStateRef.current.startX;
-      updateSidebarWidth(resizeStateRef.current.startWidth + deltaX);
-    };
-
-    const handlePointerUp = () => {
-      setIsResizingSidebar(false);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-    };
-  }, [isResizingSidebar, updateSidebarWidth]);
 
   useEffect(() => {
     if (!isHostedPage) return;

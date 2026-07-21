@@ -3,25 +3,20 @@ import React from 'react';
 
 import { Button } from '@/components/ui/button';
 import { MARKET_TAB_LABELS } from '@/features/system/constants/marketMenu';
+import type { UseDeploymentSyncResult } from '@/hooks/useDeploymentSync';
 
-import { SyncControlPanel, type DeploymentStatus } from './SyncControlPanel';
+import { DeploymentSyncControl } from './DeploymentSyncControl';
 
 interface MarketActionBarProps {
   activeTab: string;
-  syncDeployment: DeploymentStatus | undefined;
-  isSyncing: boolean;
+  sync: UseDeploymentSyncResult;
   onBack: () => void;
-  onShowHistory: () => void;
-  onSync: () => void;
 }
 
 export function MarketActionBar({
   activeTab,
-  syncDeployment,
-  isSyncing,
+  sync,
   onBack,
-  onShowHistory,
-  onSync,
 }: MarketActionBarProps) {
   return (
     <div className="flex flex-col md:flex-row items-center justify-between gap-4 py-2">
@@ -44,13 +39,7 @@ export function MarketActionBar({
         </div>
       </div>
 
-      <SyncControlPanel
-        deployment={syncDeployment}
-        isSyncing={isSyncing}
-        defaultFlowName="市场同步"
-        onShowHistory={onShowHistory}
-        onSync={onSync}
-      />
+      <DeploymentSyncControl sync={sync} defaultFlowName="市场同步" />
     </div>
   );
 }

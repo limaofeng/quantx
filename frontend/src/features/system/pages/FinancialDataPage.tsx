@@ -1,5 +1,7 @@
 import {
   ArrowLeft,
+  ArrowDownZA,
+  ArrowUpAZ,
   Banknote,
   TrendingUp,
   FileText,
@@ -13,6 +15,7 @@ import {
   RefreshCw,
   Loader2,
   ListFilter,
+  LayoutList,
   Briefcase,
   Star,
   X,
@@ -23,16 +26,14 @@ import type { Client } from 'urql';
 import { useClient, useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
-import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
+import {
+  StudioDataTable,
+  StudioMenu,
+  useStudioMenu,
+} from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-} from '@/components/ui/card';
+import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import {
@@ -49,13 +50,11 @@ import {
 } from '@/components/ui/select';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { gql } from '@/generated/gql';
-import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
-import { SyncControlPanel } from '../components/SyncControlPanel';
-import { TaskHistory } from '../components/TaskHistory';
+import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 
 const FINANCIAL_DATA_PAGE_QUERY = gql(`
   query FinancialDataPage($search: String, $limit: Int!, $offset: Int!) {
@@ -153,6 +152,11 @@ type FinancialColumn = {
   defaultVisible?: boolean;
   alwaysVisible?: boolean;
   defaultPinned?: boolean;
+};
+
+type FinancialTableColumn = FinancialColumn & {
+  alwaysFrozen?: boolean;
+  sortField: FinancialColumnId;
 };
 
 type FinancialTableMenuPayload =
@@ -330,7 +334,6 @@ const SUMMARY_COLUMN_IDS = new Set<FinancialColumnId>([
 export function FinancialDataPage() {
   const client = useClient();
   const [, setLocation] = useLocation();
-  const [showHistory, setShowHistory] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
@@ -363,11 +366,6 @@ export function FinancialDataPage() {
     menu: tableMenu,
     openAtPointer: openTableMenuAtPointer,
   } = useStudioMenu<FinancialTableMenuPayload>();
-
-  const { deployment, isSyncing, triggerSync } = useDeploymentSync(
-    'financial-sync',
-    { successMessage: '财务数据同步任务已提交' }
-  );
 
   const [{ data: holdingsData, fetching: holdingsFetching }] = useQuery({
     query: FINANCIAL_HOLDINGS_QUERY,
@@ -497,26 +495,17 @@ export function FinancialDataPage() {
       FINANCIAL_COLUMNS.filter(column => visibleColumnIds.includes(column.id)),
     [visibleColumnIds]
   );
+  const tableColumns = useMemo<FinancialTableColumn[]>(
+    () =>
+      visibleColumns.map(column => ({
+        ...column,
+        alwaysFrozen: column.defaultPinned,
+        sortField: column.id,
+      })),
+    [visibleColumns]
+  );
   const summaryColumnsVisible = visibleColumns.some(column =>
     SUMMARY_COLUMN_IDS.has(column.id)
-  );
-  const pinnedVisibleColumns = visibleColumns.filter(column =>
-    pinnedColumnIds.includes(column.id)
-  );
-  const pinnedLeftOffsets = useMemo(() => {
-    let left = 0;
-    return pinnedVisibleColumns.reduce<Record<string, number>>(
-      (acc, column) => {
-        acc[column.id] = left;
-        left += column.width;
-        return acc;
-      },
-      {}
-    );
-  }, [pinnedVisibleColumns]);
-  const tableMinWidth = visibleColumns.reduce(
-    (sum, column) => sum + column.width,
-    0
   );
   const selectedColumnCount = visibleColumns.length;
   const reportCodesKey = reports.map(item => item.stockCode).join('|');
@@ -578,6 +567,42 @@ export function FinancialDataPage() {
         'pinned',
         visibleColumnIds
       )
+    );
+  };
+
+  const updatePinnedColumnIds = (ids: string[]) => {
+    setPinnedColumnIds(
+      normalizeFinancialColumnIds(
+        ids.filter((id): id is FinancialColumnId =>
+          FINANCIAL_COLUMN_BY_ID.has(id as FinancialColumnId)
+        ),
+        'pinned',
+        visibleColumnIds
+      )
+    );
+  };
+
+  const toggleFinancialColumnSort = (column: FinancialTableColumn) => {
+    setSortState(current => {
+      if (!current || current.columnId !== column.id) {
+        return { columnId: column.id, direction: 'desc' };
+      }
+      if (current.direction === 'desc') {
+        return { columnId: column.id, direction: 'asc' };
+      }
+      return null;
+    });
+  };
+
+  const renderFinancialSortIndicator = (column: FinancialTableColumn) => {
+    if (sortState?.columnId !== column.id) {
+      return <span className="h-3 w-3 text-slate-700" />;
+    }
+
+    return sortState.direction === 'asc' ? (
+      <ArrowUpAZ className="h-3.5 w-3.5 text-red-300" />
+    ) : (
+      <ArrowDownZA className="h-3.5 w-3.5 text-red-300" />
     );
   };
 
@@ -671,36 +696,32 @@ export function FinancialDataPage() {
       description="财报、指标、财务快照"
       title="财务数据"
     >
-      <div className="flex flex-col gap-6 animate-fade-in -mt-4 pb-10">
-        {/* Header Section */}
-        <div className="flex flex-col md:flex-row items-baseline justify-between gap-4">
-          <div className="flex items-center gap-4">
+      <div className="flex flex-col gap-4 pb-10 animate-fade-in">
+        {/* Compact Header Section */}
+        <div className="flex items-center justify-between gap-4 py-1">
+          <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-10 w-10 rounded-xl bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm hover:scale-105 active:scale-95 transition-all"
+              className="h-8 w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
               onClick={() => setLocation('/settings/data')}
             >
-              <ArrowLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
+              <ArrowLeft className="w-4 h-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div>
-              <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+              <h1 className="text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none">
                 财务数据
               </h1>
-              <p className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-70">
+              <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
                 FINANCIAL REPORTS & STATEMENTS
               </p>
             </div>
           </div>
 
-          <SyncControlPanel
-            deployment={deployment}
-            isSyncing={isSyncing}
+          <DeploymentSyncControl
+            deploymentName="financial-sync"
             defaultFlowName="财务数据同步"
-            onShowHistory={() => setShowHistory(true)}
-            onSync={() => {
-              void triggerSync();
-            }}
+            successMessage="财务数据同步任务已提交"
           />
         </div>
 
@@ -750,491 +771,442 @@ export function FinancialDataPage() {
         </div>
 
         {/* Main Content: Data Table */}
-        <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm overflow-hidden min-h-[500px] flex flex-col">
-          <CardHeader className="px-6 py-5 border-b border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-950">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-              <div>
-                <CardTitle className="text-lg font-bold tracking-tight">
-                  上市公司财报明细
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  最新披露的 A 股上市公司季度及年度财务报告概览
-                </CardDescription>
-              </div>
+        <div className="flex min-h-[500px] flex-col overflow-hidden rounded-md border border-white/10 bg-[#050915] shadow-sm">
+          <div className="flex flex-col gap-2 border-b border-white/5 bg-slate-900/40 px-4 py-2 md:flex-row md:items-center md:justify-between">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <LayoutList className="h-4 w-4 shrink-0 text-slate-400" />
+              <span className="truncate text-xs font-bold text-slate-200">
+                上市公司财报明细
+              </span>
+              <Badge
+                variant="outline"
+                className="font-mono text-[10px] font-normal text-slate-400"
+              >
+                总数: {displayReports.length}
+              </Badge>
+              <Badge
+                variant="outline"
+                className="font-mono text-[10px] font-normal text-slate-400"
+              >
+                字段: {selectedColumnCount}
+              </Badge>
+              {activeFilterCount > 0 && (
+                <Badge
+                  variant="outline"
+                  className="border-red-500/30 bg-red-500/10 font-mono text-[10px] font-normal text-red-300"
+                >
+                  筛选: {activeFilterCount}
+                </Badge>
+              )}
+            </div>
 
-              <div className="w-full md:w-auto">
-                <div className="flex items-center gap-2 w-full md:w-auto">
-                  <div className="relative flex-1 md:w-64">
-                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
-                    <Input
-                      placeholder="搜索股票代码或名称..."
-                      className="pl-9 h-9 text-sm bg-white dark:bg-slate-900"
-                      value={searchTerm}
-                      onChange={e => setSearchTerm(e.target.value)}
-                    />
-                  </div>
-                  <Sheet open={showFilters} onOpenChange={setShowFilters}>
-                    <SheetTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className={cn(
-                          'relative h-9 w-9 shrink-0',
-                          activeFilterCount > 0 &&
-                            'border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
-                        )}
-                        title="筛选财务列表"
-                      >
-                        <Filter className="w-4 h-4" />
-                        {activeFilterCount > 0 && (
-                          <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 font-mono text-[10px] leading-none text-white">
-                            {activeFilterCount}
-                          </span>
-                        )}
-                      </Button>
-                    </SheetTrigger>
-                    <SheetContent
-                      side="right"
-                      className="w-[92vw] overflow-y-auto border-slate-200 bg-white p-0 dark:border-slate-800 dark:bg-slate-950 sm:max-w-[420px]"
+            <div className="w-full md:w-auto">
+              <div className="flex w-full items-center gap-2 md:w-auto">
+                <div className="relative flex-1 md:w-64">
+                  <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+                  <Input
+                    placeholder="搜索股票代码或名称..."
+                    className="h-7 rounded-[4px] border-white/10 bg-[#0b1120]/80 pl-8 text-xs text-slate-200 placeholder:text-slate-600 focus-visible:ring-red-500/30"
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                  />
+                </div>
+                <Sheet open={showFilters} onOpenChange={setShowFilters}>
+                  <SheetTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className={cn(
+                        'relative h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white',
+                        activeFilterCount > 0 &&
+                          'border-red-500/40 bg-red-500/10 text-red-300'
+                      )}
+                      title="筛选财务列表"
                     >
-                      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-                        <div>
-                          <div className="text-sm font-black text-slate-900 dark:text-slate-100">
-                            筛选条件
-                          </div>
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                            Financial filters
-                          </div>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="mr-8 h-7 px-2 text-xs"
-                          onClick={resetFilters}
-                          disabled={activeFilterCount === 0}
-                        >
-                          <X className="mr-1 h-3.5 w-3.5" />
-                          重置
-                        </Button>
-                      </div>
-
-                      <div className="space-y-5 p-5">
-                        <div className="space-y-2">
-                          <FilterLabel>快捷范围</FilterLabel>
-                          <div className="grid grid-cols-3 gap-2">
-                            {quickFilters.map(filter => {
-                              const Icon = filter.icon;
-                              const active = quickFilter === filter.value;
-                              return (
-                                <button
-                                  key={filter.value}
-                                  type="button"
-                                  className={cn(
-                                    'rounded-lg border px-2.5 py-2 text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500',
-                                    active
-                                      ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
-                                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-900'
-                                  )}
-                                  onClick={() => setQuickFilter(filter.value)}
-                                >
-                                  <div className="flex items-center gap-1.5 text-xs font-bold">
-                                    <Icon className="h-3.5 w-3.5" />
-                                    {filter.label}
-                                  </div>
-                                  <div className="mt-1 font-mono text-[11px] text-slate-400">
-                                    {formatNumber(filter.count)}
-                                  </div>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-2">
-                            <FilterLabel>报告期</FilterLabel>
-                            <Select
-                              value={reportPeriodFilter}
-                              onValueChange={value =>
-                                setReportPeriodFilter(
-                                  value as ReportPeriodFilter
-                                )
-                              }
-                            >
-                              <SelectTrigger className="h-9 text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="all">全部</SelectItem>
-                                <SelectItem value="latest">最新期</SelectItem>
-                                <SelectItem value="annual">年报</SelectItem>
-                                <SelectItem value="q3">三季报</SelectItem>
-                                <SelectItem value="half">中报</SelectItem>
-                                <SelectItem value="q1">一季报</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-
-                          <div className="space-y-2">
-                            <FilterLabel>披露状态</FilterLabel>
-                            <Select
-                              value={disclosureFilter}
-                              onValueChange={value =>
-                                setDisclosureFilter(value as DisclosureFilter)
-                              }
-                            >
-                              <SelectTrigger className="h-9 text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="all">全部</SelectItem>
-                                <SelectItem value="disclosed">
-                                  已披露
-                                </SelectItem>
-                                <SelectItem value="undisclosed">
-                                  未披露
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <FilterLabel>盈利状态</FilterLabel>
-                          <div className="grid grid-cols-3 gap-2">
-                            {[
-                              ['all', '全部'],
-                              ['profit', '盈利'],
-                              ['loss', '亏损'],
-                            ].map(([value, label]) => (
-                              <button
-                                key={value}
-                                type="button"
-                                className={cn(
-                                  'h-8 rounded-lg border text-xs font-bold transition-colors cursor-pointer',
-                                  profitFilter === value
-                                    ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300'
-                                    : 'border-slate-200 text-slate-500 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-400 dark:hover:bg-slate-900'
-                                )}
-                                onClick={() =>
-                                  setProfitFilter(value as ProfitFilter)
-                                }
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <RangeFilter
-                          label="营业收入"
-                          minValue={revenueMinYi}
-                          maxValue={revenueMaxYi}
-                          onMinChange={setRevenueMinYi}
-                          onMaxChange={setRevenueMaxYi}
-                        />
-
-                        <RangeFilter
-                          label="归母净利润"
-                          minValue={netProfitMinYi}
-                          maxValue={netProfitMaxYi}
-                          onMinChange={setNetProfitMinYi}
-                          onMaxChange={setNetProfitMaxYi}
-                        />
-                      </div>
-                    </SheetContent>
-                  </Sheet>
-                  <Popover>
-                    <PopoverTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="relative h-9 w-9 shrink-0"
-                        title="配置显示字段"
-                      >
-                        <Columns3 className="w-4 h-4 text-slate-500" />
-                        <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-slate-900 px-1 font-mono text-[10px] leading-none text-white dark:bg-slate-100 dark:text-slate-900">
-                          {selectedColumnCount}
+                      <Filter className="h-3.5 w-3.5" />
+                      {activeFilterCount > 0 && (
+                        <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 font-mono text-[10px] leading-none text-white">
+                          {activeFilterCount}
                         </span>
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      align="end"
-                      side="top"
-                      sideOffset={10}
-                      className="max-h-[300px] w-80 overflow-hidden border-slate-200 bg-white p-0 shadow-xl dark:border-slate-800 dark:bg-slate-950"
-                    >
-                      <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+                      )}
+                    </Button>
+                  </SheetTrigger>
+                  <SheetContent
+                    side="right"
+                    className="w-[92vw] overflow-y-auto border-slate-200 bg-white p-0 dark:border-slate-800 dark:bg-slate-950 sm:max-w-[420px]"
+                  >
+                    <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+                      <div>
                         <div className="text-sm font-black text-slate-900 dark:text-slate-100">
-                          显示字段
+                          筛选条件
                         </div>
                         <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                          Columns & pinned fields
+                          Financial filters
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="mr-8 h-7 px-2 text-xs"
+                        onClick={resetFilters}
+                        disabled={activeFilterCount === 0}
+                      >
+                        <X className="mr-1 h-3.5 w-3.5" />
+                        重置
+                      </Button>
+                    </div>
+
+                    <div className="space-y-5 p-5">
+                      <div className="space-y-2">
+                        <FilterLabel>快捷范围</FilterLabel>
+                        <div className="grid grid-cols-3 gap-2">
+                          {quickFilters.map(filter => {
+                            const Icon = filter.icon;
+                            const active = quickFilter === filter.value;
+                            return (
+                              <button
+                                key={filter.value}
+                                type="button"
+                                className={cn(
+                                  'rounded-lg border px-2.5 py-2 text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500',
+                                  active
+                                    ? 'border-red-300 bg-red-50 text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
+                                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 dark:hover:bg-slate-900'
+                                )}
+                                onClick={() => setQuickFilter(filter.value)}
+                              >
+                                <div className="flex items-center gap-1.5 text-xs font-bold">
+                                  <Icon className="h-3.5 w-3.5" />
+                                  {filter.label}
+                                </div>
+                                <div className="mt-1 font-mono text-[11px] text-slate-400">
+                                  {formatNumber(filter.count)}
+                                </div>
+                              </button>
+                            );
+                          })}
                         </div>
                       </div>
 
-                      <div className="max-h-[188px] overflow-y-auto p-3">
-                        {[
-                          '基础',
-                          '利润表',
-                          '资产负债表',
-                          '现金流量表',
-                          '股本结构',
-                          '数据状态',
-                        ].map(group => {
-                          const columns = FINANCIAL_COLUMNS.filter(
-                            column => column.group === group
-                          );
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-2">
+                          <FilterLabel>报告期</FilterLabel>
+                          <Select
+                            value={reportPeriodFilter}
+                            onValueChange={value =>
+                              setReportPeriodFilter(value as ReportPeriodFilter)
+                            }
+                          >
+                            <SelectTrigger className="h-9 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="all">全部</SelectItem>
+                              <SelectItem value="latest">最新期</SelectItem>
+                              <SelectItem value="annual">年报</SelectItem>
+                              <SelectItem value="q3">三季报</SelectItem>
+                              <SelectItem value="half">中报</SelectItem>
+                              <SelectItem value="q1">一季报</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
 
-                          return (
-                            <div key={group} className="mb-3 last:mb-0">
-                              <FilterLabel>{group}</FilterLabel>
-                              <div className="mt-2 space-y-1">
-                                {columns.map(column => {
-                                  const visible = visibleColumnIds.includes(
-                                    column.id
-                                  );
-                                  const pinned = pinnedColumnIds.includes(
-                                    column.id
-                                  );
-
-                                  return (
-                                    <div
-                                      key={column.id}
-                                      className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-900"
-                                    >
-                                      <Checkbox
-                                        checked={visible}
-                                        disabled={column.alwaysVisible}
-                                        onCheckedChange={checked =>
-                                          toggleColumnVisibility(
-                                            column,
-                                            checked
-                                          )
-                                        }
-                                      />
-                                      <button
-                                        type="button"
-                                        className="min-w-0 flex-1 text-left text-xs font-bold text-slate-700 dark:text-slate-200"
-                                        onClick={() =>
-                                          toggleColumnVisibility(
-                                            column,
-                                            !visible
-                                          )
-                                        }
-                                        disabled={column.alwaysVisible}
-                                      >
-                                        {column.label}
-                                      </button>
-                                      <button
-                                        type="button"
-                                        aria-pressed={pinned}
-                                        title={
-                                          pinned ? '取消固定列' : '固定到左侧'
-                                        }
-                                        className={cn(
-                                          'flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
-                                          pinned
-                                            ? 'border-red-300 bg-red-50 text-red-600 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
-                                            : 'border-slate-200 text-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:text-slate-200',
-                                          (!visible || column.defaultPinned) &&
-                                            'cursor-not-allowed opacity-50'
-                                        )}
-                                        onClick={() =>
-                                          toggleColumnPinned(column)
-                                        }
-                                        disabled={
-                                          !visible || column.defaultPinned
-                                        }
-                                      >
-                                        <Pin className="h-3.5 w-3.5" />
-                                      </button>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          );
-                        })}
+                        <div className="space-y-2">
+                          <FilterLabel>披露状态</FilterLabel>
+                          <Select
+                            value={disclosureFilter}
+                            onValueChange={value =>
+                              setDisclosureFilter(value as DisclosureFilter)
+                            }
+                          >
+                            <SelectTrigger className="h-9 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="all">全部</SelectItem>
+                              <SelectItem value="disclosed">已披露</SelectItem>
+                              <SelectItem value="undisclosed">
+                                未披露
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
 
-                      <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 dark:border-slate-800">
-                        <span className="text-[11px] text-slate-500">
-                          已显示 {selectedColumnCount} 列
-                        </span>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={resetColumnSettings}
-                        >
-                          重置默认
-                        </Button>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    className="h-9 w-9 shrink-0"
-                    disabled={activeFetching || !isFilteringReady}
-                    onClick={() => {
-                      if (quickFilter === 'all') {
-                        reloadFinancialData({ requestPolicy: 'network-only' });
-                      } else {
-                        setFilteredReports([]);
-                        setFilteredFetching(true);
-                        void fetchFinancialReportsForCodes(
-                          client,
-                          scopedStockCodes ?? [],
-                          normalizedSearch
-                        )
-                          .then(setFilteredReports)
-                          .finally(() => setFilteredFetching(false));
-                      }
-                    }}
-                    title="刷新财务列表"
-                  >
-                    {activeFetching || !isFilteringReady ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-slate-500" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4 text-slate-500" />
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0 flex-1">
-            <div className="overflow-x-auto">
-              <table
-                className="border-collapse"
-                style={{ minWidth: Math.max(tableMinWidth, 760) }}
-              >
-                <thead>
-                  <tr className="bg-slate-50 dark:bg-slate-900 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800">
-                    {visibleColumns.map(column => {
-                      const pinned = pinnedColumnIds.includes(column.id);
-                      const isLastPinned =
-                        pinnedVisibleColumns[pinnedVisibleColumns.length - 1]
-                          ?.id === column.id;
-
-                      return (
-                        <th
-                          key={column.id}
-                          className={cn(
-                            'px-6 py-4 font-black whitespace-nowrap bg-slate-50 dark:bg-slate-900',
-                            getColumnAlignClass(column.align),
-                            pinned && 'sticky z-20',
-                            isLastPinned &&
-                              'after:absolute after:right-0 after:top-0 after:h-full after:w-px after:bg-slate-200 dark:after:bg-slate-800'
-                          )}
-                          style={{
-                            width: column.width,
-                            minWidth: column.width,
-                            ...(pinned
-                              ? { left: pinnedLeftOffsets[column.id] ?? 0 }
-                              : {}),
-                          }}
-                          onContextMenu={event =>
-                            openTableMenuAtPointer(event, {
-                              kind: 'column',
-                              column,
-                            })
-                          }
-                        >
-                          {column.label}
-                        </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {displayReports.map(item => {
-                    const summary = summaryByCode[item.stockCode];
-
-                    return (
-                      <tr
-                        key={item.stockCode}
-                        role="link"
-                        tabIndex={0}
-                        title={`查看 ${item.stockName || item.stockCode} 数据详情`}
-                        className="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors group cursor-pointer focus-visible:outline-none focus-visible:bg-red-50 dark:focus-visible:bg-slate-900"
-                        onClick={() => openStockDetail(item.stockCode)}
-                        onContextMenu={event =>
-                          openTableMenuAtPointer(event, { kind: 'row', item })
-                        }
-                        onKeyDown={e => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            openStockDetail(item.stockCode);
-                          }
-                        }}
-                      >
-                        {visibleColumns.map(column => {
-                          const pinned = pinnedColumnIds.includes(column.id);
-                          const isLastPinned =
-                            pinnedVisibleColumns[
-                              pinnedVisibleColumns.length - 1
-                            ]?.id === column.id;
-
-                          return (
-                            <td
-                              key={`${item.stockCode}-${column.id}`}
+                      <div className="space-y-2">
+                        <FilterLabel>盈利状态</FilterLabel>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            ['all', '全部'],
+                            ['profit', '盈利'],
+                            ['loss', '亏损'],
+                          ].map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
                               className={cn(
-                                'px-6 py-5 whitespace-nowrap bg-white dark:bg-slate-950 group-hover:bg-slate-50 dark:group-hover:bg-slate-900',
-                                getColumnAlignClass(column.align),
-                                pinned && 'sticky z-10',
-                                isLastPinned &&
-                                  'after:absolute after:right-0 after:top-0 after:h-full after:w-px after:bg-slate-200 dark:after:bg-slate-800'
+                                'h-8 rounded-lg border text-xs font-bold transition-colors cursor-pointer',
+                                profitFilter === value
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300'
+                                  : 'border-slate-200 text-slate-500 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-400 dark:hover:bg-slate-900'
                               )}
-                              style={{
-                                width: column.width,
-                                minWidth: column.width,
-                                ...(pinned
-                                  ? {
-                                      left: pinnedLeftOffsets[column.id] ?? 0,
-                                    }
-                                  : {}),
-                              }}
+                              onClick={() =>
+                                setProfitFilter(value as ProfitFilter)
+                              }
                             >
-                              {renderFinancialCell(
-                                column.id,
-                                item,
-                                summary,
-                                summaryFetching
-                              )}
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <RangeFilter
+                        label="营业收入"
+                        minValue={revenueMinYi}
+                        maxValue={revenueMaxYi}
+                        onMinChange={setRevenueMinYi}
+                        onMaxChange={setRevenueMaxYi}
+                      />
+
+                      <RangeFilter
+                        label="归母净利润"
+                        minValue={netProfitMinYi}
+                        maxValue={netProfitMaxYi}
+                        onMinChange={setNetProfitMinYi}
+                        onMaxChange={setNetProfitMaxYi}
+                      />
+                    </div>
+                  </SheetContent>
+                </Sheet>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="relative h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
+                      title="配置显示字段"
+                    >
+                      <Columns3 className="h-3.5 w-3.5" />
+                      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-slate-900 px-1 font-mono text-[10px] leading-none text-white dark:bg-slate-100 dark:text-slate-900">
+                        {selectedColumnCount}
+                      </span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align="end"
+                    side="top"
+                    sideOffset={10}
+                    className="max-h-[300px] w-80 overflow-hidden border-slate-200 bg-white p-0 shadow-xl dark:border-slate-800 dark:bg-slate-950"
+                  >
+                    <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+                      <div className="text-sm font-black text-slate-900 dark:text-slate-100">
+                        显示字段
+                      </div>
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                        Columns & pinned fields
+                      </div>
+                    </div>
+
+                    <div className="max-h-[188px] overflow-y-auto p-3">
+                      {[
+                        '基础',
+                        '利润表',
+                        '资产负债表',
+                        '现金流量表',
+                        '股本结构',
+                        '数据状态',
+                      ].map(group => {
+                        const columns = FINANCIAL_COLUMNS.filter(
+                          column => column.group === group
+                        );
+
+                        return (
+                          <div key={group} className="mb-3 last:mb-0">
+                            <FilterLabel>{group}</FilterLabel>
+                            <div className="mt-2 space-y-1">
+                              {columns.map(column => {
+                                const visible = visibleColumnIds.includes(
+                                  column.id
+                                );
+                                const pinned = pinnedColumnIds.includes(
+                                  column.id
+                                );
+
+                                return (
+                                  <div
+                                    key={column.id}
+                                    className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-50 dark:hover:bg-slate-900"
+                                  >
+                                    <Checkbox
+                                      checked={visible}
+                                      disabled={column.alwaysVisible}
+                                      onCheckedChange={checked =>
+                                        toggleColumnVisibility(column, checked)
+                                      }
+                                    />
+                                    <button
+                                      type="button"
+                                      className="min-w-0 flex-1 text-left text-xs font-bold text-slate-700 dark:text-slate-200"
+                                      onClick={() =>
+                                        toggleColumnVisibility(column, !visible)
+                                      }
+                                      disabled={column.alwaysVisible}
+                                    >
+                                      {column.label}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      aria-pressed={pinned}
+                                      title={
+                                        pinned ? '取消固定列' : '固定到左侧'
+                                      }
+                                      className={cn(
+                                        'flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
+                                        pinned
+                                          ? 'border-red-300 bg-red-50 text-red-600 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
+                                          : 'border-slate-200 text-slate-400 hover:text-slate-700 dark:border-slate-800 dark:hover:text-slate-200',
+                                        (!visible || column.defaultPinned) &&
+                                          'cursor-not-allowed opacity-50'
+                                      )}
+                                      onClick={() => toggleColumnPinned(column)}
+                                      disabled={
+                                        !visible || column.defaultPinned
+                                      }
+                                    >
+                                      <Pin className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 dark:border-slate-800">
+                      <span className="text-[11px] text-slate-500">
+                        已显示 {selectedColumnCount} 列
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={resetColumnSettings}
+                      >
+                        重置默认
+                      </Button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
+                  disabled={activeFetching || !isFilteringReady}
+                  onClick={() => {
+                    if (quickFilter === 'all') {
+                      reloadFinancialData({ requestPolicy: 'network-only' });
+                    } else {
+                      setFilteredReports([]);
+                      setFilteredFetching(true);
+                      void fetchFinancialReportsForCodes(
+                        client,
+                        scopedStockCodes ?? [],
+                        normalizedSearch
+                      )
+                        .then(setFilteredReports)
+                        .finally(() => setFilteredFetching(false));
+                    }
+                  }}
+                  title="刷新财务列表"
+                >
+                  {activeFetching || !isFilteringReady ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </div>
             </div>
-
-            {activeFetching && (
-              <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-                <Loader2 className="w-8 h-8 animate-spin opacity-40 mb-4" />
-                <p className="text-xs font-bold uppercase tracking-widest">
-                  正在加载真实财务数据
-                </p>
-              </div>
-            )}
-
-            {!activeFetching && displayReports.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-                <div className="p-4 rounded-full bg-slate-50 dark:bg-slate-800/50 mb-4">
-                  <Banknote className="w-8 h-8 opacity-20" />
+          </div>
+          <StudioDataTable<FinancialReportItem, FinancialTableColumn>
+            ariaLabel="上市公司财报明细"
+            className="!min-h-0 flex-1 rounded-none border-0 bg-transparent shadow-none"
+            columns={tableColumns}
+            columnMenuTestIdPrefix="financial-column-menu"
+            defaultFrozenColumnIds={DEFAULT_PINNED_FINANCIAL_COLUMN_IDS}
+            frozenColumnIds={pinnedColumnIds}
+            getCellClassName={({ column }) =>
+              cn('h-[40px]', column.id === 'stock' && 'font-sans')
+            }
+            getRowKey={item => item.stockCode}
+            getRowTitle={item =>
+              `查看 ${item.stockName || item.stockCode} 数据详情`
+            }
+            isColumnSorted={column => sortState?.columnId === column.id}
+            loading={activeFetching}
+            testId="financial-reports-grid"
+            loadingOverlay={
+              activeFetching && (
+                <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/60 backdrop-blur-[2px]">
+                  <div className="flex flex-col items-center text-slate-400">
+                    <Loader2 className="mb-4 h-8 w-8 animate-spin opacity-50" />
+                    <p className="text-xs font-bold uppercase tracking-widest">
+                      正在加载真实财务数据
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs font-bold uppercase tracking-widest">
-                  {getEmptyMessage(quickFilter)}
-                </p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              )
+            }
+            onColumnContextMenu={(event, column) =>
+              openTableMenuAtPointer(event, {
+                kind: 'column',
+                column,
+              })
+            }
+            onColumnMenuOpen={(event, column) =>
+              openTableMenuAtPointer(event, {
+                kind: 'column',
+                column,
+              })
+            }
+            onColumnSortToggle={toggleFinancialColumnSort}
+            onFrozenColumnIdsChange={updatePinnedColumnIds}
+            onRowClick={item => openStockDetail(item.stockCode)}
+            onRowContextMenu={(event, item) =>
+              openTableMenuAtPointer(event, { kind: 'row', item })
+            }
+            renderCell={({ column, row }) =>
+              renderFinancialCell(
+                column.id,
+                row,
+                summaryByCode[row.stockCode],
+                summaryFetching
+              )
+            }
+            renderSortIndicator={renderFinancialSortIndicator}
+            rows={displayReports}
+            sortTestIdPrefix="financial-sort"
+            emptyState={
+              <tr>
+                <td
+                  colSpan={Math.max(visibleColumns.length, 1)}
+                  className="h-[400px] border-b border-white/5 text-center"
+                >
+                  <div className="flex flex-col items-center justify-center space-y-3 text-slate-500">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
+                      <Banknote className="h-6 w-6 text-slate-400" />
+                    </div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                      {getEmptyMessage(quickFilter)}
+                    </p>
+                  </div>
+                </td>
+              </tr>
+            }
+          />
+        </div>
       </div>
 
       <StudioMenu
@@ -1372,14 +1344,6 @@ export function FinancialDataPage() {
             onSelect: resetColumnSettings,
           },
         ]}
-      />
-
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={deployment?.id}
-        deploymentName={deployment?.flowName || '财务数据同步'}
-        workPoolName={deployment?.workPoolName}
       />
     </DataStudioPageFrame>
   );
@@ -1728,10 +1692,10 @@ function renderFinancialCell(
     case 'stock':
       return (
         <div className="flex flex-col">
-          <span className="font-bold text-sm text-slate-900 dark:text-slate-100 group-hover:text-red-600 dark:group-hover:text-red-400">
+          <span className="text-sm font-semibold leading-4 text-slate-200 group-hover:text-red-300">
             {item.stockName || item.stockCode}
           </span>
-          <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+          <span className="font-mono text-[10px] leading-4 text-slate-500">
             {item.stockCode}
           </span>
         </div>
@@ -1741,7 +1705,7 @@ function renderFinancialCell(
       return (
         <Badge
           variant="secondary"
-          className="font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-0"
+          className="h-5 border-0 bg-slate-800/70 px-2 font-mono text-[10px] font-medium text-slate-400"
         >
           {formatReportPeriod(item.reportDate)}
         </Badge>
@@ -1749,15 +1713,15 @@ function renderFinancialCell(
 
     case 'announceDate':
       return (
-        <div className="flex items-center justify-end gap-2 text-slate-500 dark:text-slate-400 font-mono text-xs">
-          <Clock className="w-3.5 h-3.5 opacity-40" />
+        <div className="flex items-center justify-end gap-2 font-mono text-[11px] text-slate-500">
+          <Clock className="h-3.5 w-3.5 opacity-40" />
           {item.announceDate || summary?.latestAnnounceDate || '--'}
         </div>
       );
 
     case 'status':
       return (
-        <Badge className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
+        <Badge className="h-5 border border-emerald-500/20 bg-emerald-500/10 px-2 font-mono text-[10px] text-emerald-400">
           {item.announceDate || summary?.latestAnnounceDate
             ? '已披露'
             : '已入库'}
@@ -1772,14 +1736,14 @@ function renderFinancialCell(
 
     case 'epsBasic':
       return (
-        <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+        <span className="font-mono text-[11px] font-bold text-slate-300">
           {formatDecimal(item.epsBasic ?? summary?.epsBasic, 3)}
         </span>
       );
 
     case 'netProfitMargin':
       return (
-        <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+        <span className="font-mono text-[11px] font-bold text-slate-300">
           {formatRatio(netProfit, revenue)}
         </span>
       );
@@ -1810,7 +1774,7 @@ function renderFinancialCell(
 
     case 'assetLiabilityRatio':
       return (
-        <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+        <span className="font-mono text-[11px] font-bold text-slate-300">
           {summaryFetching && !summary
             ? '--'
             : formatRatio(summary?.totalLiabilities, summary?.totalAssets)}
@@ -1852,7 +1816,7 @@ function renderFinancialCell(
 
     case 'statementCounts':
       return (
-        <span className="font-mono text-xs font-bold text-slate-500 dark:text-slate-400">
+        <span className="font-mono text-[11px] font-bold text-slate-500">
           {summaryFetching && !summary
             ? '--'
             : [
@@ -1939,12 +1903,12 @@ function MoneyValue({
   return (
     <span
       className={cn(
-        'font-mono text-sm font-bold',
+        'font-mono text-[11px] font-bold',
         trend
           ? Number(value ?? 0) < 0
             ? 'text-rose-600 dark:text-rose-400'
             : 'text-emerald-600 dark:text-emerald-400'
-          : 'text-slate-700 dark:text-slate-300'
+          : 'text-slate-300'
       )}
     >
       {formatCompactMoney(value)}
@@ -1980,16 +1944,10 @@ function SummaryNumberValue({
   }
 
   return (
-    <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+    <span className="font-mono text-[11px] font-bold text-slate-300">
       {formatCompactNumber(value)}
     </span>
   );
-}
-
-function getColumnAlignClass(align: FinancialColumn['align']) {
-  if (align === 'right') return 'text-right';
-  if (align === 'center') return 'text-center';
-  return 'text-left';
 }
 
 function getEmptyMessage(filter: QuickFilter) {

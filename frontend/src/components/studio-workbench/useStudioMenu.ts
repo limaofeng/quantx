@@ -1,7 +1,11 @@
 import { useCallback, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent } from 'react';
 
-import type { StudioMenuAnchor, StudioMenuPlacement, StudioMenuState } from './StudioMenu';
+import type {
+  StudioMenuAnchor,
+  StudioMenuPlacement,
+  StudioMenuState,
+} from './StudioMenu';
 
 interface OpenFromElementOptions {
   offset?: number;

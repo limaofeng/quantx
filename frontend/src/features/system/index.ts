@@ -1,4 +1,5 @@
 export * from './pages/DataManagementPage';
+export * from './pages/StockDataIndexPage';
 export * from './pages/StockDataDetailPage';
 export * from './pages/MarketPage';
 export * from './pages/SectorDataPage';
@@ -8,4 +9,6 @@ export * from './pages/TradingCalendarPage';
 export * from './pages/ReverseRepoDataPage';
 export * from './pages/FinancialDataPage';
 export * from './pages/TransactionDataPage';
+export * from './pages/DailyMarketDataSyncPage';
+export * from './pages/AnnouncementSyncPage';
 export * from './components/DataStudioPageFrame';

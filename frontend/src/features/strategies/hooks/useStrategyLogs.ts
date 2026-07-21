@@ -123,7 +123,8 @@ export function useStrategyLogs(
 
   return {
     logs,
-    isConnected: !!runId && !paused && fetching && wsStatus === 'connected' && !error,
+    isConnected:
+      !!runId && !paused && fetching && wsStatus === 'connected' && !error,
     wsStatus,
     error: error ?? null,
     clearLogs,

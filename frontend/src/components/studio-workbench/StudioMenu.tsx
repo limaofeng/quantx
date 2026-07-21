@@ -103,7 +103,10 @@ function resolveAnchorPosition(
   const placement = anchor.placement ?? 'bottom-start';
 
   if (placement === 'bottom-end') {
-    return { left: anchor.rect.right - width, top: anchor.rect.bottom + offset };
+    return {
+      left: anchor.rect.right - width,
+      top: anchor.rect.bottom + offset,
+    };
   }
 
   if (placement === 'top-start') {
@@ -111,7 +114,10 @@ function resolveAnchorPosition(
   }
 
   if (placement === 'top-end') {
-    return { left: anchor.rect.right - width, top: anchor.rect.top - height - offset };
+    return {
+      left: anchor.rect.right - width,
+      top: anchor.rect.top - height - offset,
+    };
   }
 
   if (placement === 'right-start') {
@@ -125,7 +131,11 @@ function resolveAnchorPosition(
   return { left: anchor.rect.left, top: anchor.rect.bottom + offset };
 }
 
-function clampPosition(anchor: StudioMenuAnchor, width: number, height: number) {
+function clampPosition(
+  anchor: StudioMenuAnchor,
+  width: number,
+  height: number
+) {
   if (typeof window === 'undefined') return { left: 0, top: 0 };
 
   const ideal = resolveAnchorPosition(anchor, width, height);
@@ -167,7 +177,10 @@ export function StudioMenu<TPayload = unknown>({
   const previousActiveElementRef = useRef<HTMLElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const actionItems = useMemo(
-    () => items.filter((item): item is StudioMenuActionItem => item.type !== 'separator'),
+    () =>
+      items.filter(
+        (item): item is StudioMenuActionItem => item.type !== 'separator'
+      ),
     [items]
   );
 
@@ -176,7 +189,9 @@ export function StudioMenu<TPayload = unknown>({
 
     previousActiveElementRef.current =
       returnFocusRef?.current ||
-      (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      (document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null);
 
     const closeMenu = () => onClose();
     const handlePointerDown = (event: PointerEvent) => {
@@ -221,12 +236,16 @@ export function StudioMenu<TPayload = unknown>({
       document.removeEventListener('pointerdown', handlePointerDown, true);
       document.removeEventListener('contextmenu', handleContextMenu, true);
       document.removeEventListener('keydown', handleKeyDown);
-      document.removeEventListener(STUDIO_MENU_OPEN_EVENT, handleStudioMenuOpen);
+      document.removeEventListener(
+        STUDIO_MENU_OPEN_EVENT,
+        handleStudioMenuOpen
+      );
       window.removeEventListener('resize', closeMenu);
       scrollElement?.removeEventListener('scroll', closeMenu);
 
       const target = previousActiveElementRef.current;
-      if (target && document.contains(target)) target.focus({ preventScroll: true });
+      if (target && document.contains(target))
+        target.focus({ preventScroll: true });
     };
   }, [closeOnScrollRef, instanceId, menu, onClose, returnFocusRef]);
 
@@ -247,7 +266,8 @@ export function StudioMenu<TPayload = unknown>({
     if (!actionItems.length) return;
     for (let offset = 1; offset <= actionItems.length; offset += 1) {
       const nextIndex =
-        (currentIndex + offset * delta + actionItems.length) % actionItems.length;
+        (currentIndex + offset * delta + actionItems.length) %
+        actionItems.length;
       const next = itemRefs.current[nextIndex];
       if (next && !next.disabled) {
         next.focus();
@@ -304,10 +324,17 @@ export function StudioMenu<TPayload = unknown>({
     >
       {items.map((item, itemIndex) => {
         if (item.type === 'separator') {
-          return <div key={item.id || `separator-${itemIndex}`} className="my-1 h-px bg-white/10" />;
+          return (
+            <div
+              key={item.id || `separator-${itemIndex}`}
+              className="my-1 h-px bg-white/10"
+            />
+          );
         }
 
-        const actionIndex = actionItems.findIndex(action => action.id === item.id);
+        const actionIndex = actionItems.findIndex(
+          action => action.id === item.id
+        );
         const disabled = Boolean(item.disabled);
         const itemClass = disabled
           ? 'cursor-not-allowed text-slate-600'

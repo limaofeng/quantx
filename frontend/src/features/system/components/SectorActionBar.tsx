@@ -3,7 +3,7 @@ import React from 'react';
 
 import { Button } from '@/components/ui/button';
 
-import { SyncControlPanel, type DeploymentStatus } from './SyncControlPanel';
+import { DeploymentSyncControl } from './DeploymentSyncControl';
 
 const CLASSIFICATION_LABELS: Record<string, string> = {
   all: '全部板块',
@@ -37,11 +37,7 @@ interface SectorActionBarProps {
   totalCount: number;
   currentPage: number;
   totalPages: number;
-  sectorSyncDeployment: DeploymentStatus | undefined;
-  isSyncing: boolean;
   onBack: () => void;
-  onShowHistory: () => void;
-  onSync: () => void;
 }
 
 export function SectorActionBar({
@@ -49,11 +45,7 @@ export function SectorActionBar({
   totalCount,
   currentPage,
   totalPages,
-  sectorSyncDeployment,
-  isSyncing,
   onBack,
-  onShowHistory,
-  onSync,
 }: SectorActionBarProps) {
   return (
     <div className="flex flex-col md:flex-row items-center justify-between gap-4 py-2">
@@ -78,12 +70,10 @@ export function SectorActionBar({
         </div>
       </div>
 
-      <SyncControlPanel
-        deployment={sectorSyncDeployment}
-        isSyncing={isSyncing}
+      <DeploymentSyncControl
+        deploymentName="sector-data-sync"
         defaultFlowName="板块同步"
-        onShowHistory={onShowHistory}
-        onSync={onSync}
+        successMessage="同步已启动"
       />
     </div>
   );

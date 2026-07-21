@@ -31,6 +31,7 @@ export function DataStudioPageFrame({
           <div className={cn('min-h-full', className)}>{children}</div>
         </div>
       }
+      showSidebar={false}
       statusBarLeft={
         statusBarLeft || (
           <>

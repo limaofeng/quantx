@@ -1,8 +1,10 @@
+import { AnnouncementSyncCard } from '../components/AnnouncementSyncCard';
 import { DataPortalHeader } from '../components/DataPortalHeader';
 import { DataStudioShell } from '../components/DataStudioShell';
 import { FinancialDataSyncCard } from '../components/FinancialDataSyncCard';
 import { GlobalSyncCard } from '../components/GlobalSyncCard';
 import { HoldingsSummaryCard } from '../components/HoldingsSummaryCard';
+import { MarketDataSyncCard } from '../components/MarketDataSyncCard';
 import { ReverseRepoSyncCard } from '../components/ReverseRepoSyncCard';
 import { SectorSyncCard } from '../components/SectorSyncCard';
 import { StockDataQueryCard } from '../components/SingleStockSyncCard';
@@ -39,6 +41,12 @@ export function DataManagementPage() {
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-9">
                 <div className="min-h-[150px] md:col-span-2 xl:col-span-9">
                   <GlobalSyncCard />
+                </div>
+                <div className="min-h-[180px] xl:col-span-3">
+                  <MarketDataSyncCard />
+                </div>
+                <div className="min-h-[180px] xl:col-span-3">
+                  <AnnouncementSyncCard />
                 </div>
                 <div className="min-h-[180px] xl:col-span-3">
                   <SectorSyncCard />

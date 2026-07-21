@@ -3,7 +3,6 @@ import { useLocation } from 'wouter';
 
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
-import { MARKET_MENU_ITEMS } from '../constants/marketMenu';
 import { ChinaIndicesManager } from '../components/ChinaIndicesManager';
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { ExRightsDataManager } from '../components/ExRightsDataManager';
@@ -12,7 +11,7 @@ import { MarketOverview } from '../components/MarketOverview';
 import { MarketSidebar } from '../components/MarketSidebar';
 import { MarketStatsCards } from '../components/MarketStatsCards';
 import { StockDataQueryCard } from '../components/SingleStockSyncCard';
-import { TaskHistory } from '../components/TaskHistory';
+import { MARKET_MENU_ITEMS } from '../constants/marketMenu';
 
 const DEFAULT_MARKET_TAB = 'overview';
 const marketTabIds = new Set<string>(MARKET_MENU_ITEMS.map(item => item.id));
@@ -39,16 +38,12 @@ export function ComprehensiveMarketPage() {
   const [activeTab, setActiveTab] = useState(() =>
     getMarketTabFromLocation(location)
   );
-  const [showHistory, setShowHistory] = useState(false);
 
   // 使用统一的 Hook 管理部署同步
-  const {
-    deployment: syncDeployment,
-    isSyncing,
-    triggerSync,
-  } = useDeploymentSync('market-sync', {
+  const marketSync = useDeploymentSync('market-sync', {
     successMessage: '全市场同步已启动',
   });
+  const { isSyncing } = marketSync;
 
   // Mock Market Stats (Placeholder until real stats API is ready)
   const mockStats = {
@@ -74,15 +69,12 @@ export function ComprehensiveMarketPage() {
       description="行情、指数、市场概览"
       title="全市场数据"
     >
-      <div className="flex flex-col gap-6 animate-fade-in -mt-4 h-[calc(100vh-var(--header-height)-3rem)]">
+      <div className="flex h-[calc(100vh-var(--header-height)-4rem)] flex-col gap-6 animate-fade-in">
         {/* Action Bar */}
         <MarketActionBar
           activeTab={activeTab}
-          syncDeployment={syncDeployment}
-          isSyncing={isSyncing}
+          sync={marketSync}
           onBack={() => setLocation('/settings/data')}
-          onShowHistory={() => setShowHistory(true)}
-          onSync={triggerSync}
         />
 
         {/* Layout Grid */}
@@ -157,15 +149,6 @@ export function ComprehensiveMarketPage() {
           </div>
         </div>
       </div>
-
-      {/* Task History Drawer */}
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={syncDeployment?.id}
-        deploymentName={syncDeployment?.flowName}
-        workPoolName={syncDeployment?.workPoolName}
-      />
     </DataStudioPageFrame>
   );
 }

@@ -22,12 +22,10 @@ import {
   CardDescription,
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
-import { SyncControlPanel } from '../components/SyncControlPanel';
-import { TaskHistory } from '../components/TaskHistory';
+import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 
 // Mock Data
 const MOCK_TRANSACTIONS = [
@@ -134,18 +132,12 @@ function copyText(value: string | number | undefined | null) {
 
 export function TransactionDataPage() {
   const [, setLocation] = useLocation();
-  const [showHistory, setShowHistory] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const {
     closeMenu: closeTableMenu,
     menu: tableMenu,
     openAtPointer: openTableMenuAtPointer,
   } = useStudioMenu<TransactionTableMenuPayload>();
-
-  const { deployment, isSyncing, triggerSync } = useDeploymentSync(
-    'daily-trading-sync',
-    { successMessage: '交易数据同步任务已提交' }
-  );
 
   const filteredData = MOCK_TRANSACTIONS.filter(
     item =>
@@ -159,34 +151,32 @@ export function TransactionDataPage() {
       description="交易流水、委托成交数据"
       title="交易流水数据"
     >
-      <div className="flex flex-col gap-6 animate-fade-in -mt-4 pb-10">
-        {/* Header Section */}
-        <div className="flex flex-col md:flex-row items-baseline justify-between gap-4">
-          <div className="flex items-center gap-4">
+      <div className="flex flex-col gap-4 pb-10 animate-fade-in">
+        {/* Compact Header Section */}
+        <div className="flex items-center justify-between gap-4 py-1">
+          <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-10 w-10 rounded-xl bg-white dark:bg-white/5 border border-slate-200 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all"
+              className="h-8 w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
               onClick={() => setLocation('/settings/data')}
             >
-              <ArrowLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
+              <ArrowLeft className="w-4 h-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div>
-              <h1 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+              <h1 className="text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none">
                 交易数据
               </h1>
-              <p className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-70">
+              <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
                 TRANSACTION HISTORY & LOGS
               </p>
             </div>
           </div>
 
-          <SyncControlPanel
-            deployment={deployment}
-            isSyncing={isSyncing}
+          <DeploymentSyncControl
+            deploymentName="daily-trading-sync"
             defaultFlowName="交易数据同步"
-            onShowHistory={() => setShowHistory(true)}
-            onSync={triggerSync}
+            successMessage="交易数据同步任务已提交"
           />
         </div>
 
@@ -495,14 +485,6 @@ export function TransactionDataPage() {
             },
           },
         ]}
-      />
-
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={deployment?.id}
-        deploymentName={deployment?.flowName || '交易数据同步'}
-        workPoolName={deployment?.workPoolName}
       />
     </DataStudioPageFrame>
   );

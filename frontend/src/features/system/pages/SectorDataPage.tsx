@@ -4,7 +4,6 @@ import { useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
 import { Input } from '@/components/ui/input';
-import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
 import { gql } from '../../../generated/gql';
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
@@ -13,7 +12,6 @@ import { SectorDetailDrawer } from '../components/SectorDetailDrawer';
 import { SectorSidebar } from '../components/SectorSidebar';
 import { SectorStatsCards } from '../components/SectorStatsCards';
 import { SectorTable } from '../components/SectorTable';
-import { TaskHistory } from '../components/TaskHistory';
 
 // Define the GraphQL queries (仅保留业务相关的)
 const GET_SECTORS = gql(`
@@ -51,14 +49,6 @@ export function SectorDataPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize] = useState(100);
   const [selectedSector, setSelectedSector] = useState<any>(null);
-  const [showHistory, setShowHistory] = useState(false);
-
-  // 使用统一的 Hook 管理部署同步
-  const {
-    deployment: sectorSyncDeployment,
-    isSyncing,
-    triggerSync,
-  } = useDeploymentSync('sector-data-sync', { successMessage: '同步已启动' });
 
   // Fetch Stats once
   const [{ data: statsData }] = useQuery({ query: GET_SECTOR_STATS as any });
@@ -103,18 +93,14 @@ export function SectorDataPage() {
       description="行业、概念、板块持仓"
       title="板块数据管理"
     >
-      <div className="flex flex-col gap-6 animate-fade-in -mt-4 h-[calc(100vh-var(--header-height)-3rem)]">
+      <div className="flex h-[calc(100vh-var(--header-height)-4rem)] flex-col gap-6 animate-fade-in">
         {/* Action Bar & Identity Area */}
         <SectorActionBar
           activeTab={activeTab}
           totalCount={totalCount}
           currentPage={currentPage}
           totalPages={totalPages}
-          sectorSyncDeployment={sectorSyncDeployment}
-          isSyncing={isSyncing}
           onBack={() => setLocation('/settings/data')}
-          onShowHistory={() => setShowHistory(true)}
-          onSync={triggerSync}
         />
 
         {/* Layout Grid */}
@@ -164,16 +150,6 @@ export function SectorDataPage() {
           </div>
         </div>
       </div>
-
-      {/* Task History Component */}
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={sectorSyncDeployment?.id}
-        deploymentName={sectorSyncDeployment?.flowName}
-        workPoolName={sectorSyncDeployment?.workPoolName}
-      />
-
       {/* Detail Drawer */}
       <SectorDetailDrawer
         sector={selectedSector}

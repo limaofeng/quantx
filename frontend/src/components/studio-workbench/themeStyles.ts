@@ -63,7 +63,8 @@ const STUDIO_THEME_STYLES: Record<StudioThemeName, StudioThemeStyles> = {
     tabIcon: 'text-amber-300',
   },
   emerald: {
-    activeButton: 'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20',
+    activeButton:
+      'bg-emerald-500 text-slate-950 shadow-lg shadow-emerald-500/20',
     activeIndicator: 'bg-emerald-400',
     activeTab: 'border-emerald-400 bg-emerald-500/10 text-slate-100',
     focusRing: 'focus-visible:ring-emerald-300/70',

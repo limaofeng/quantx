@@ -4,16 +4,23 @@ import {
   CrosshairMode,
   createChart,
   HistogramSeries,
+  type CandlestickData,
+  type HistogramData,
+  type UTCTimestamp,
 } from 'lightweight-charts';
 import {
   Activity,
+  AlertTriangle,
   ArrowLeft,
   BarChart3,
+  CalendarDays,
   CandlestickChart,
   CheckCircle2,
   Clock3,
   Database,
+  Download,
   FileText,
+  Layers3,
   Loader2,
   RefreshCw,
   Search,
@@ -57,7 +64,11 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { gql } from '@/generated/gql';
-import { DividendType, KLinePeriod } from '@/generated/gql/graphql';
+import {
+  DividendType,
+  GetTradingCalendarDocument,
+  KLinePeriod,
+} from '@/generated/gql/graphql';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
@@ -221,6 +232,51 @@ const DIVIDEND_OPTIONS = [
   { label: '后复权', value: DividendType.Back },
 ] as const;
 
+const KLINE_QUERY_LIMIT = 800;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+type CoverageTone = 'good' | 'warning' | 'danger' | 'muted';
+
+type KLineCoveragePoint = {
+  date: string;
+  status: 'present' | 'missing';
+};
+
+type MissingRange = {
+  startDate: string;
+  endDate: string;
+  count: number;
+};
+
+type KLineCoverage = {
+  coveragePoints: KLineCoveragePoint[];
+  coverageRatio: number;
+  expectedDays: number;
+  firstDataTime?: string;
+  lastDataTime?: string;
+  missingDays: number;
+  missingRanges: MissingRange[];
+  presentDays: number;
+  queryCapped: boolean;
+  records: number;
+  tone: CoverageTone;
+};
+
+type DataAssetStatus = {
+  icon: React.ElementType;
+  label: string;
+  meta: string;
+  status: CoverageTone;
+  statusLabel: string;
+  value: string;
+};
+
+type DataAssetAction = {
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+};
+
 export function StockDataDetailPage() {
   const [, params] = useRoute('/settings/data/:stockCode');
   const [, setLocation] = useLocation();
@@ -274,7 +330,7 @@ export function StockDataDetailPage() {
       dividendType,
       startTime: toDateTimeStart(startDate),
       endTime: toDateTimeEnd(endDate),
-      limit: 800,
+      limit: KLINE_QUERY_LIMIT,
     },
     pause: !stockCode,
   });
@@ -287,20 +343,113 @@ export function StockDataDetailPage() {
     });
 
   const instrument = instrumentData?.instrument;
-  const klines = klineData?.klines ?? [];
+  const calendarMarket = useMemo(
+    () => resolveCalendarMarket(instrument?.market, stockCode),
+    [instrument?.market, stockCode]
+  );
+  const [{ data: calendarData, fetching: calendarLoading }, reloadCalendar] =
+    useQuery({
+      query: GetTradingCalendarDocument,
+      variables: {
+        endDate,
+        market: calendarMarket,
+        startDate,
+      },
+      pause: !stockCode || !startDate || !endDate,
+      requestPolicy: 'cache-and-network',
+    });
+
+  const klines = useMemo(() => klineData?.klines ?? [], [klineData?.klines]);
   const statements = financialData?.financialStatements;
   const summary = financialData?.financialSummary;
   const isAnySyncing =
     instrumentSync.isSyncing || marketSync.isSyncing || financialSync.isSyncing;
+  const klineCoverage = useMemo(
+    () =>
+      buildKLineCoverage({
+        endDate,
+        expectedTradingDays: calendarData?.tradingCalendar ?? [],
+        klines,
+        limit: KLINE_QUERY_LIMIT,
+        startDate,
+      }),
+    [calendarData?.tradingCalendar, endDate, klines, startDate]
+  );
+  const assetStatuses = useMemo<DataAssetStatus[]>(
+    () => [
+      {
+        icon: Database,
+        label: '基础资料',
+        meta: instrument?.updatedAt
+          ? `更新 ${formatDateTime(instrument.updatedAt)}`
+          : '等待基础资料',
+        status: instrument
+          ? 'good'
+          : instrumentSync.isSyncing
+            ? 'warning'
+            : 'muted',
+        statusLabel: instrument ? '已存在' : '缺失',
+        value: instrument?.name || stockCode,
+      },
+      {
+        icon: BarChart3,
+        label: '行情快照',
+        meta: instrument?.quote?.time
+          ? `时间 ${formatDateTime(instrument.quote.time)}`
+          : '等待行情快照',
+        status: instrument?.quote?.time ? 'good' : 'muted',
+        statusLabel: instrument?.quote?.time ? '已存在' : '缺失',
+        value: formatMoney(instrument?.quote?.lastPrice),
+      },
+      {
+        icon: CandlestickChart,
+        label: 'K线缓存',
+        meta: `${periodLabel(period)} · ${startDate} 至 ${endDate}`,
+        status:
+          marketSync.isSyncing && klineCoverage.tone !== 'good'
+            ? 'warning'
+            : klineCoverage.tone,
+        statusLabel: coverageStatusLabel(klineCoverage),
+        value: `${formatRatio(klineCoverage.coverageRatio)} 覆盖`,
+      },
+      {
+        icon: FileText,
+        label: '财务四表',
+        meta: summary?.latestReportDate
+          ? `最新报告 ${summary.latestReportDate}`
+          : '等待财务数据',
+        status:
+          financialSync.isSyncing && !summary
+            ? 'warning'
+            : summary
+              ? 'good'
+              : 'muted',
+        statusLabel: summary ? '已存在' : '缺失',
+        value: `${summary?.incomeCount ?? 0}/${summary?.balanceCount ?? 0}/${summary?.cashFlowCount ?? 0}/${summary?.capitalCount ?? 0}`,
+      },
+    ],
+    [
+      endDate,
+      financialSync.isSyncing,
+      instrument,
+      instrumentSync.isSyncing,
+      klineCoverage,
+      marketSync.isSyncing,
+      period,
+      startDate,
+      stockCode,
+      summary,
+    ]
+  );
 
   const syncMarketParams = useMemo(
     () => ({
       stock_list: [stockCode],
       start_time: toCompactDate(startDate),
       end_time: toCompactDate(endDate),
-      periods: ['1d', '1m'],
+      periods: toSyncPeriods(period),
     }),
-    [endDate, startDate, stockCode]
+    [endDate, period, startDate, stockCode]
   );
 
   const setRun = useCallback((key: string, runId?: string) => {
@@ -317,6 +466,20 @@ export function StockDataDetailPage() {
 
   const handleSyncKLines = async () => {
     setRun('market', await marketSync.triggerSync(syncMarketParams));
+  };
+
+  const handleSyncKLineRange = async (range: MissingRange) => {
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
+    setRun(
+      'market',
+      await marketSync.triggerSync({
+        stock_list: [stockCode],
+        start_time: toCompactDate(range.startDate),
+        end_time: toCompactDate(range.endDate),
+        periods: toSyncPeriods(period),
+      })
+    );
   };
 
   const handleSyncFinancial = async () => {
@@ -341,7 +504,7 @@ export function StockDataDetailPage() {
   if (!stockCode) {
     return (
       <DataStudioPageFrame
-        activeMode="MARKET"
+        activeMode="STOCKS"
         description="基础资料、K线、财务与同步任务"
         title="标的数据详情"
       >
@@ -355,7 +518,7 @@ export function StockDataDetailPage() {
 
   return (
     <DataStudioPageFrame
-      activeMode="MARKET"
+      activeMode="STOCKS"
       description="基础资料、K线、财务与同步任务"
       title={`标的数据详情 ${stockCode}`}
     >
@@ -422,7 +585,7 @@ export function StockDataDetailPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
           <MetricTile
             icon={Database}
             label="标的类型"
@@ -440,9 +603,21 @@ export function StockDataDetailPage() {
           />
           <MetricTile
             icon={CandlestickChart}
-            label="K线记录"
-            value={`${klines.length}`}
-            subValue={`${periodLabel(period)} · ${dividendLabel(dividendType)}`}
+            label="K线覆盖"
+            value={formatRatio(klineCoverage.coverageRatio)}
+            subValue={`${klineCoverage.presentDays}/${klineCoverage.expectedDays} 交易日`}
+            tone={coverageMetricTone(klineCoverage.tone)}
+          />
+          <MetricTile
+            icon={AlertTriangle}
+            label="缺失交易日"
+            value={`${klineCoverage.missingDays}`}
+            subValue={
+              klineCoverage.queryCapped
+                ? `查询已达 ${KLINE_QUERY_LIMIT} 条上限`
+                : `${klineCoverage.missingRanges.length} 段缺口`
+            }
+            tone={klineCoverage.missingDays > 0 ? 'amber' : 'green'}
           />
           <MetricTile
             icon={FileText}
@@ -455,6 +630,27 @@ export function StockDataDetailPage() {
             }
           />
         </div>
+
+        <DataAssetMatrix
+          assets={assetStatuses}
+          actions={[
+            {
+              disabled: instrumentSync.isSyncing,
+              label: instrumentSync.isSyncing ? '基础同步中' : '同步基础',
+              onClick: handleSyncInstrument,
+            },
+            {
+              disabled: marketSync.isSyncing,
+              label: marketSync.isSyncing ? 'K线同步中' : '同步K线',
+              onClick: handleSyncKLines,
+            },
+            {
+              disabled: financialSync.isSyncing,
+              label: financialSync.isSyncing ? '财务同步中' : '同步财务',
+              onClick: handleSyncFinancial,
+            },
+          ]}
+        />
 
         <Card className="overflow-hidden border-slate-200/70 shadow-sm dark:border-slate-800/70">
           <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
@@ -535,6 +731,8 @@ export function StockDataDetailPage() {
                 instrumentSync.deployment?.name || 'instrument-sync'
               }
               status={instrumentSync.deployment?.status}
+              isStale={instrumentSync.deployment?.isStale}
+              staleReason={instrumentSync.deployment?.staleReason}
               lastRunTime={instrumentSync.deployment?.lastRunTime}
               runId={submittedRuns.instrument}
             />
@@ -544,6 +742,8 @@ export function StockDataDetailPage() {
                 marketSync.deployment?.name || 'daily-market-data-sync'
               }
               status={marketSync.deployment?.status}
+              isStale={marketSync.deployment?.isStale}
+              staleReason={marketSync.deployment?.staleReason}
               lastRunTime={marketSync.deployment?.lastRunTime}
               runId={submittedRuns.market}
             />
@@ -553,6 +753,8 @@ export function StockDataDetailPage() {
                 financialSync.deployment?.name || 'financial-sync'
               }
               status={financialSync.deployment?.status}
+              isStale={financialSync.deployment?.isStale}
+              staleReason={financialSync.deployment?.staleReason}
               lastRunTime={financialSync.deployment?.lastRunTime}
               runId={submittedRuns.financial}
             />
@@ -579,6 +781,7 @@ export function StockDataDetailPage() {
                   onClick={() => {
                     reloadKlines({ requestPolicy: 'network-only' });
                     reloadInstrument({ requestPolicy: 'network-only' });
+                    reloadCalendar({ requestPolicy: 'network-only' });
                   }}
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
@@ -647,6 +850,15 @@ export function StockDataDetailPage() {
               </div>
             </CardHeader>
             <CardContent className="p-0">
+              <KLineCoveragePanel
+                calendarLoading={calendarLoading}
+                coverage={klineCoverage}
+                dividendType={dividendType}
+                period={period}
+                onSyncAll={handleSyncKLines}
+                onSyncRange={handleSyncKLineRange}
+                syncing={marketSync.isSyncing}
+              />
               <KLinePreviewChart data={klines} loading={klineLoading} />
               <KLineTable data={klines.slice(-80).reverse()} />
             </CardContent>
@@ -809,6 +1021,307 @@ export function StockDataDetailPage() {
   );
 }
 
+function DataAssetMatrix({
+  actions,
+  assets,
+}: {
+  actions: DataAssetAction[];
+  assets: DataAssetStatus[];
+}) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-sm dark:border-slate-800/70 dark:bg-slate-950">
+      <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02] lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white">
+            <Layers3 className="h-4 w-4 text-indigo-500" />
+            数据资产状态
+          </h2>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            单票基础资料、行情快照、K线缓存与财务四表的当前可用情况。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {actions.map(action => (
+            <Button
+              key={action.label}
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5 text-xs"
+              disabled={action.disabled}
+              onClick={action.onClick}
+            >
+              {action.disabled ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              {action.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
+        {assets.map(asset => {
+          const Icon = asset.icon;
+          return (
+            <div
+              key={asset.label}
+              className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    <Icon className="h-3.5 w-3.5" />
+                    {asset.label}
+                  </div>
+                  <div className="mt-2 truncate text-sm font-black text-slate-900 dark:text-white">
+                    {asset.value}
+                  </div>
+                </div>
+                <StatusBadge label={asset.statusLabel} tone={asset.status} />
+              </div>
+              <div className="mt-2 truncate text-xs text-slate-500 dark:text-slate-400">
+                {asset.meta}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function KLineCoveragePanel({
+  calendarLoading,
+  coverage,
+  dividendType,
+  onSyncAll,
+  onSyncRange,
+  period,
+  syncing,
+}: {
+  calendarLoading: boolean;
+  coverage: KLineCoverage;
+  dividendType: DividendType;
+  onSyncAll: () => void;
+  onSyncRange: (range: MissingRange) => void;
+  period: KLinePeriod;
+  syncing: boolean;
+}) {
+  const visibleRanges = coverage.missingRanges.slice(0, 6);
+  return (
+    <div className="border-b border-slate-100 p-5 dark:border-slate-800">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="flex items-center gap-2 text-sm font-black text-slate-900 dark:text-white">
+              <CalendarDays className="h-4 w-4 text-indigo-500" />
+              K线覆盖诊断
+            </h3>
+            <StatusBadge
+              label={coverageStatusLabel(coverage)}
+              tone={coverage.tone}
+            />
+            {coverage.queryCapped && (
+              <Badge
+                variant="outline"
+                className="rounded-md border-amber-500/30 text-amber-600"
+              >
+                查询触顶
+              </Badge>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            {periodLabel(period)} · {dividendLabel(dividendType)} · 交易日存在性检查
+          </p>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 gap-1.5 bg-indigo-600 text-xs hover:bg-indigo-700"
+          disabled={syncing}
+          onClick={onSyncAll}
+        >
+          {syncing ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          拉取当前区间
+        </Button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <CoverageStat
+          label="覆盖交易日"
+          value={`${coverage.presentDays}/${coverage.expectedDays}`}
+          subValue={formatRatio(coverage.coverageRatio)}
+        />
+        <CoverageStat
+          label="缺失交易日"
+          value={`${coverage.missingDays}`}
+          subValue={`${coverage.missingRanges.length} 段缺口`}
+          tone={coverage.missingDays > 0 ? 'warning' : 'good'}
+        />
+        <CoverageStat
+          label="首条样本"
+          value={formatDateShort(coverage.firstDataTime)}
+          subValue={formatTimeShort(coverage.firstDataTime)}
+        />
+        <CoverageStat
+          label="末条样本"
+          value={formatDateShort(coverage.lastDataTime)}
+          subValue={formatTimeShort(coverage.lastDataTime)}
+        />
+      </div>
+
+      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02] custom-scrollbar">
+        <div
+          className="grid min-w-full gap-1"
+          style={{
+            gridTemplateColumns: `repeat(${Math.max(coverage.coveragePoints.length, 1)}, minmax(5px, 1fr))`,
+          }}
+          aria-label="K线交易日覆盖时间带"
+        >
+          {coverage.coveragePoints.length === 0 ? (
+            <span className="h-4 rounded-sm bg-slate-200 dark:bg-slate-800" />
+          ) : (
+            coverage.coveragePoints.map(point => (
+              <span
+                key={point.date}
+                title={`${point.date} ${point.status === 'present' ? '已存在' : '缺失'}`}
+                className={cn(
+                  'h-4 min-w-[5px] rounded-sm',
+                  point.status === 'present'
+                    ? 'bg-emerald-500/80'
+                    : 'bg-amber-400/80'
+                )}
+              />
+            ))
+          )}
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold text-slate-500">
+          <span>左侧为开始日期，右侧为结束日期</span>
+          <span>
+            {calendarLoading ? '交易日历加载中' : `${coverage.records} 条样本`}
+          </span>
+        </div>
+      </div>
+
+      {coverage.queryCapped && (
+        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs font-medium leading-relaxed text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5" />
+          当前查询返回数量达到 {KLINE_QUERY_LIMIT}
+          条上限，覆盖率可能只代表已加载窗口。
+        </div>
+      )}
+
+      <div className="mt-4">
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-xs font-black uppercase tracking-widest text-slate-400">
+            Missing Ranges
+          </div>
+          {coverage.missingRanges.length > visibleRanges.length && (
+            <div className="text-[10px] font-bold text-slate-500">
+              仅显示前 {visibleRanges.length} 段
+            </div>
+          )}
+        </div>
+        {visibleRanges.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            当前区间未发现交易日级缺口
+          </div>
+        ) : (
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {visibleRanges.map(range => (
+              <div
+                key={`${range.startDate}-${range.endDate}`}
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-900"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-mono text-xs font-black text-slate-900 dark:text-white">
+                    {formatRangeLabel(range)}
+                  </div>
+                  <div className="text-[10px] font-bold text-slate-500">
+                    {range.count} 个交易日
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 shrink-0 gap-1.5 px-2 text-xs"
+                  disabled={syncing}
+                  onClick={() => onSyncRange(range)}
+                >
+                  {syncing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Download className="h-3.5 w-3.5" />
+                  )}
+                  拉取
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CoverageStat({
+  label,
+  subValue,
+  tone = 'muted',
+  value,
+}: {
+  label: string;
+  subValue?: string;
+  tone?: CoverageTone;
+  value: string;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
+      <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+        {label}
+      </div>
+      <div
+        className={cn(
+          'mt-1 truncate font-mono text-lg font-black text-slate-900 dark:text-white',
+          tone === 'good' && 'text-emerald-600 dark:text-emerald-400',
+          tone === 'warning' && 'text-amber-600 dark:text-amber-400',
+          tone === 'danger' && 'text-red-600 dark:text-red-400'
+        )}
+      >
+        {value}
+      </div>
+      {subValue && (
+        <div className="truncate text-xs text-slate-500">{subValue}</div>
+      )}
+    </div>
+  );
+}
+
+function StatusBadge({ label, tone }: { label: string; tone: CoverageTone }) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'rounded-md',
+        tone === 'good' && 'border-emerald-500/30 text-emerald-600',
+        tone === 'warning' && 'border-amber-500/30 text-amber-600',
+        tone === 'danger' && 'border-red-500/30 text-red-600',
+        tone === 'muted' && 'border-slate-300 text-slate-500'
+      )}
+    >
+      {label}
+    </Badge>
+  );
+}
+
 function MetricTile({
   icon: Icon,
   label,
@@ -820,7 +1333,7 @@ function MetricTile({
   label: string;
   value: string;
   subValue?: string;
-  tone?: 'red' | 'green';
+  tone?: 'amber' | 'blue' | 'red' | 'green';
 }) {
   return (
     <Card className="border-slate-200/70 p-4 shadow-sm dark:border-slate-800/70">
@@ -836,7 +1349,9 @@ function MetricTile({
             className={cn(
               'truncate text-lg font-black text-slate-900 dark:text-white',
               tone === 'red' && 'text-red-600 dark:text-red-400',
-              tone === 'green' && 'text-emerald-600 dark:text-emerald-400'
+              tone === 'green' && 'text-emerald-600 dark:text-emerald-400',
+              tone === 'amber' && 'text-amber-600 dark:text-amber-400',
+              tone === 'blue' && 'text-blue-600 dark:text-blue-400'
             )}
           >
             {value}
@@ -905,12 +1420,16 @@ function SyncStatus({
   title,
   deploymentName,
   status,
+  isStale,
+  staleReason,
   lastRunTime,
   runId,
 }: {
   title: string;
   deploymentName: string;
   status?: string | null;
+  isStale?: boolean | null;
+  staleReason?: string | null;
   lastRunTime?: string | null;
   runId?: string;
 }) {
@@ -921,6 +1440,8 @@ function SyncStatus({
     'Scheduled',
     'Late',
   ].includes(status || '');
+  const failed =
+    ['Failed', 'Crashed'].includes(status || '') || Boolean(isStale);
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
       <div className="flex items-center justify-between gap-2">
@@ -933,23 +1454,24 @@ function SyncStatus({
             'gap-1 rounded-md',
             running
               ? 'border-red-500/30 text-red-600'
-              : status === 'Failed' || status === 'Crashed'
+              : failed
                 ? 'border-red-500/30 text-red-600'
                 : 'border-emerald-500/30 text-emerald-600'
           )}
         >
           {running ? (
             <Activity className="h-3 w-3 animate-spin" />
-          ) : status === 'Failed' || status === 'Crashed' ? (
+          ) : failed ? (
             <Clock3 className="h-3 w-3" />
           ) : (
             <CheckCircle2 className="h-3 w-3" />
           )}
-          {status || 'Ready'}
+          {running && isStale ? 'Running · 卡住' : status || 'Ready'}
         </Badge>
       </div>
       <div className="mt-2 text-[11px] text-slate-500">
         <div className="truncate font-mono">{deploymentName}</div>
+        {isStale && staleReason ? <div>{staleReason}</div> : null}
         <div>上次同步：{formatDateTime(lastRunTime)}</div>
         <div>最近提交：{runId ? runId.slice(0, 12) : '--'}</div>
       </div>
@@ -1016,21 +1538,21 @@ function KLinePreviewChart({
       scaleMargins: { top: 0.82, bottom: 0 },
     });
 
-    const candleData = data.map(item => ({
+    const candleData: CandlestickData<UTCTimestamp>[] = data.map(item => ({
       time: toChartTime(item.time),
       open: item.open,
       high: item.high,
       low: item.low,
       close: item.close,
     }));
-    const volumeData = data.map(item => ({
+    const volumeData: HistogramData<UTCTimestamp>[] = data.map(item => ({
       time: toChartTime(item.time),
       value: item.volume,
       color: item.close >= item.open ? '#ef444433' : '#10b98133',
     }));
 
-    candleSeries.setData(candleData as any);
-    volumeSeries.setData(volumeData as any);
+    candleSeries.setData(candleData);
+    volumeSeries.setData(volumeData);
     chart.timeScale().fitContent();
 
     const resizeObserver = new ResizeObserver(entries => {
@@ -1238,6 +1760,184 @@ function dividendLabel(value: string) {
   return DIVIDEND_OPTIONS.find(item => item.value === value)?.label || value;
 }
 
+function toSyncPeriods(value: KLinePeriod) {
+  return value === KLinePeriod.Day_1 ? ['1d'] : ['1m'];
+}
+
+function resolveCalendarMarket(
+  market: string | null | undefined,
+  stockCode: string
+) {
+  const normalizedMarket = (market || '').toUpperCase();
+  const normalizedCode = stockCode.toUpperCase();
+  if (normalizedMarket.includes('SZ') || normalizedCode.endsWith('.SZ')) {
+    return 'SZ';
+  }
+  return 'SH';
+}
+
+function buildKLineCoverage({
+  endDate,
+  expectedTradingDays,
+  klines,
+  limit,
+  startDate,
+}: {
+  endDate: string;
+  expectedTradingDays: string[];
+  klines: Array<{ time: string }>;
+  limit: number;
+  startDate: string;
+}): KLineCoverage {
+  const presentDateSet = new Set(
+    klines
+      .map(item => toDateKey(item.time))
+      .filter((value): value is string => Boolean(value))
+  );
+  const expectedDays = buildExpectedTradingDays({
+    endDate,
+    tradingDays: expectedTradingDays,
+    startDate,
+  });
+  const coveragePoints: KLineCoveragePoint[] = expectedDays.map(date => ({
+    date,
+    status: presentDateSet.has(date) ? 'present' : 'missing',
+  }));
+  const presentDays = coveragePoints.filter(
+    point => point.status === 'present'
+  ).length;
+  const missingRanges = groupMissingRanges(coveragePoints);
+  const sortedTimes = klines
+    .map(item => item.time)
+    .filter(Boolean)
+    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+  const expectedCount = expectedDays.length;
+  const coverageRatio =
+    expectedCount > 0 ? presentDays / expectedCount : klines.length > 0 ? 1 : 0;
+  const missingDays = Math.max(expectedCount - presentDays, 0);
+
+  return {
+    coveragePoints,
+    coverageRatio,
+    expectedDays: expectedCount,
+    firstDataTime: sortedTimes[0],
+    lastDataTime: sortedTimes[sortedTimes.length - 1],
+    missingDays,
+    missingRanges,
+    presentDays,
+    queryCapped: klines.length >= limit,
+    records: klines.length,
+    tone: getCoverageTone(coverageRatio, expectedCount, klines.length),
+  };
+}
+
+function buildExpectedTradingDays({
+  endDate,
+  startDate,
+  tradingDays,
+}: {
+  endDate: string;
+  startDate: string;
+  tradingDays: string[];
+}) {
+  const normalizedStart = toDateKey(startDate);
+  const normalizedEnd = toDateKey(endDate);
+  const normalizedDays = Array.from(
+    new Set(
+      tradingDays
+        .map(day => toDateKey(day))
+        .filter((value): value is string => Boolean(value))
+    )
+  )
+    .filter(day => isDateKeyInRange(day, normalizedStart, normalizedEnd))
+    .sort();
+
+  if (normalizedDays.length > 0) return normalizedDays;
+  if (!normalizedStart || !normalizedEnd) return [];
+  return getWeekdayDateKeys(normalizedStart, normalizedEnd);
+}
+
+function groupMissingRanges(points: KLineCoveragePoint[]) {
+  const ranges: MissingRange[] = [];
+  let activeRange: MissingRange | null = null;
+
+  points.forEach(point => {
+    if (point.status === 'missing') {
+      if (!activeRange) {
+        activeRange = {
+          count: 1,
+          endDate: point.date,
+          startDate: point.date,
+        };
+        return;
+      }
+      activeRange.endDate = point.date;
+      activeRange.count += 1;
+      return;
+    }
+
+    if (activeRange) {
+      ranges.push(activeRange);
+      activeRange = null;
+    }
+  });
+
+  if (activeRange) ranges.push(activeRange);
+  return ranges;
+}
+
+function getCoverageTone(
+  ratio: number,
+  expectedDays: number,
+  records: number
+): CoverageTone {
+  if (expectedDays === 0) return records > 0 ? 'warning' : 'muted';
+  if (ratio >= 0.98) return 'good';
+  if (ratio >= 0.85) return 'warning';
+  return records > 0 ? 'danger' : 'muted';
+}
+
+function coverageStatusLabel(coverage: KLineCoverage) {
+  if (coverage.expectedDays === 0 && coverage.records === 0) return '无样本';
+  if (coverage.tone === 'good') return '覆盖正常';
+  if (coverage.tone === 'warning') return '存在缺口';
+  if (coverage.tone === 'danger') return '缺口较多';
+  return '待同步';
+}
+
+function coverageMetricTone(tone: CoverageTone) {
+  if (tone === 'good') return 'green';
+  if (tone === 'warning') return 'amber';
+  if (tone === 'danger') return 'red';
+  return 'blue';
+}
+
+function formatRatio(value: number) {
+  if (!Number.isFinite(value)) return '--';
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatRangeLabel(range: MissingRange) {
+  if (range.startDate === range.endDate) return range.startDate;
+  return `${range.startDate} 至 ${range.endDate}`;
+}
+
+function formatDateShort(value?: string | null) {
+  const dateKey = toDateKey(value);
+  return dateKey ? dateKey.slice(5) : '--';
+}
+
+function formatTimeShort(value?: string | null) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    hour12: false,
+    minute: '2-digit',
+  });
+}
+
 function toDateTimeStart(value: string) {
   return value ? `${value}T00:00:00` : undefined;
 }
@@ -1250,6 +1950,57 @@ function toCompactDate(value: string) {
   return value.replace(/-/g, '');
 }
 
+function toDateKey(value?: string | null) {
+  if (!value) return undefined;
+  const match = String(value).match(/^(\d{4})-?(\d{2})-?(\d{2})/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return formatDateInput(date);
+}
+
+function isDateKeyInRange(
+  value: string,
+  startDate?: string,
+  endDate?: string
+) {
+  if (startDate && value < startDate) return false;
+  if (endDate && value > endDate) return false;
+  return true;
+}
+
+function getWeekdayDateKeys(startDate: string, endDate: string) {
+  const start = parseDateKey(startDate);
+  const end = parseDateKey(endDate);
+  if (!start || !end || end < start) return [];
+
+  const days: string[] = [];
+  for (
+    let cursor = start;
+    cursor <= end;
+    cursor = new Date(cursor.getTime() + DAY_MS)
+  ) {
+    const day = cursor.getUTCDay();
+    if (day !== 0 && day !== 6) days.push(formatUtcDateKey(cursor));
+  }
+  return days;
+}
+
+function parseDateKey(value: string) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return undefined;
+  return new Date(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  );
+}
+
+function formatUtcDateKey(value: Date) {
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(value.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function formatDateInput(value: Date) {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -1257,8 +2008,8 @@ function formatDateInput(value: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function toChartTime(value: string) {
-  return Math.floor(new Date(value).getTime() / 1000);
+function toChartTime(value: string): UTCTimestamp {
+  return Math.floor(new Date(value).getTime() / 1000) as UTCTimestamp;
 }
 
 function formatDateTime(value?: string | null) {

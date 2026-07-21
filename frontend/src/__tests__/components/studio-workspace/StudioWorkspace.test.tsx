@@ -34,7 +34,7 @@ function RegisteredSidebarPage() {
         defaultWidth: 304,
         maxWidth: 420,
         minWidth: 248,
-        storageScope: 'test-sidebar',
+        storageScope: 'page-specific-sidebar',
       },
       themeName: 'red',
       title: 'Test Studio',
@@ -49,6 +49,21 @@ function RegisteredSidebarPage() {
 }
 
 describe('StudioWorkspace', () => {
+  beforeEach(() => {
+    vi.mocked(window.localStorage.getItem).mockImplementation(key => {
+      if (key === 'quantx-studio-workbench') {
+        return JSON.stringify({
+          sidebarWidths: {
+            'page-specific-sidebar': 280,
+            'studio-workspace-sidebar': 360,
+          },
+        });
+      }
+
+      return null;
+    });
+  });
+
   it('renders the registered page sidebar as a left-side workspace dock', () => {
     render(
       <StudioWorkspace>
@@ -58,10 +73,13 @@ describe('StudioWorkspace', () => {
 
     const main = screen.getByTestId('studio-workspace-main');
     const dock = screen.getByTestId('studio-sidebar-dock');
+    const resizer = screen.getByTestId('studio-sidebar-resizer');
 
     expect(screen.getByText('Workspace page content')).toBeInTheDocument();
     expect(screen.getByText('Registered sidebar')).toBeInTheDocument();
     expect(screen.getAllByTestId('studio-sidebar-dock')).toHaveLength(1);
+    expect(dock).toHaveStyle({ width: '360px' });
+    expect(resizer).toHaveAttribute('aria-valuenow', '360');
     expect(main).not.toContainElement(dock);
     expect(
       dock.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING

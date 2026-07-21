@@ -618,9 +618,7 @@ function StrategyDashboardHome({
           <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-black text-slate-100">
-                  最近活动
-                </h2>
+                <h2 className="text-sm font-black text-slate-100">最近活动</h2>
                 <p className="mt-1 text-[11px] text-slate-600">
                   按最近更新时间展示可打开的策略实例。
                 </p>
@@ -782,7 +780,7 @@ export default function StrategiesPage() {
   });
   const instances: StrategyInstance[] = useMemo(
     () =>
-      ((((data as any)?.strategyInstances || []) as unknown[])
+      (((data as any)?.strategyInstances || []) as unknown[])
         .map(mapStrategyInstanceView)
         .sort((a, b) => {
           const activeDelta =
@@ -790,18 +788,21 @@ export default function StrategiesPage() {
             Number(getStrategyRunState(a.mode, a.status).isActive);
           if (activeDelta !== 0) return activeDelta;
           return getActivityTimestamp(b) - getActivityTimestamp(a);
-        })),
+        }),
     [data]
   );
   const refreshInstances = useCallback(
     () => reexecuteQuery({ requestPolicy: 'network-only' }),
     [reexecuteQuery]
   );
-  const openInstance = useCallback((instance: StrategyInstance) => {
-    const detailUrl = getInstanceDetailUrl(instance);
-    if (!detailUrl) return;
-    setLocation(detailUrl);
-  }, [setLocation]);
+  const openInstance = useCallback(
+    (instance: StrategyInstance) => {
+      const detailUrl = getInstanceDetailUrl(instance);
+      if (!detailUrl) return;
+      setLocation(detailUrl);
+    },
+    [setLocation]
+  );
 
   const activeTabId = activeMode === 'CATALOG' ? 'catalog' : 'runs';
   const activeMeta = modeMeta[activeMode];

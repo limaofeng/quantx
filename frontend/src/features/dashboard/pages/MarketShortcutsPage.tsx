@@ -71,7 +71,8 @@ export default function MarketShortcutsPage() {
                         主要行情数据入口
                       </h1>
                       <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">
-                        聚合全市场、沪深指数、个股查询、板块数据、除权数据和交易日历，便于从仪表盘快速进入常用 A 股数据视图。
+                        聚合全市场、沪深指数、个股查询、板块数据、除权数据和交易日历，便于从仪表盘快速进入常用
+                        A 股数据视图。
                       </p>
                     </div>
                     <Link href="/settings/data/market">

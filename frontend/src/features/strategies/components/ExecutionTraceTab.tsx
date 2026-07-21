@@ -128,11 +128,7 @@ export default function ExecutionTraceTab({
 
             <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
               <Stage label="风控" value={trace.riskDecision} tone="amber" />
-              <Stage
-                label="OrderSizer"
-                value={trace.sizingResult}
-                tone="red"
-              />
+              <Stage label="OrderSizer" value={trace.sizingResult} tone="red" />
               <Stage label="委托" value={trace.orderStatus} tone="slate" />
               <Stage label="成交" value={trace.fillStatus} tone="emerald" />
             </div>

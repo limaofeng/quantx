@@ -25,7 +25,7 @@ import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
-import { SyncControlPanel } from '../components/SyncControlPanel';
+import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 import { TaskHistory } from '../components/TaskHistory';
 
 const GET_REVERSE_REPO_INSTRUMENTS = gql(`
@@ -78,7 +78,6 @@ const MOCK_ORDERS = [
 
 export function ReverseRepoDataPage() {
   const [, setLocation] = useLocation();
-  const [showHistory, setShowHistory] = useState(false);
   const [showTradeHistory, setShowTradeHistory] = useState(false);
   const [activeMarket, setActiveMarket] = useState('SH');
   const [orderPage] = useState(1);
@@ -93,11 +92,6 @@ export function ReverseRepoDataPage() {
   const paginatedOrders = allOrders.slice(
     (orderPage - 1) * ITEMS_PER_PAGE,
     orderPage * ITEMS_PER_PAGE
-  );
-
-  const { deployment, isSyncing, triggerSync } = useDeploymentSync(
-    'bond-repo-sync',
-    { successMessage: '国债逆回购数据同步任务已提交' }
   );
 
   const {
@@ -196,12 +190,11 @@ export function ReverseRepoDataPage() {
             </div>
           </div>
 
-          <SyncControlPanel
-            deployment={deployment}
-            isSyncing={isSyncing}
+          <DeploymentSyncControl
+            deploymentName="bond-repo-sync"
             defaultFlowName="数据同步"
-            onShowHistory={() => setShowHistory(true)}
-            onSync={triggerSync}
+            historyFallbackName="逆回购数据同步"
+            successMessage="国债逆回购数据同步任务已提交"
           />
         </div>
 
@@ -542,14 +535,6 @@ export function ReverseRepoDataPage() {
             </Card>
           </div>
         </div>
-
-        <TaskHistory
-          open={showHistory}
-          onOpenChange={setShowHistory}
-          deploymentId={deployment?.id}
-          deploymentName={deployment?.flowName || '逆回购数据同步'}
-          workPoolName={deployment?.workPoolName}
-        />
 
         <TaskHistory
           open={showTradeHistory}

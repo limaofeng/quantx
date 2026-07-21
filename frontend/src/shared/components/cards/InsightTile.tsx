@@ -33,9 +33,9 @@ export const MiniSparkline: React.FC<{
 
   const data = useMemo(() => {
     const normalized = (sparklineData || [])
-      .map((point) => (typeof point === 'number' ? point : point.v))
-      .filter((value) => Number.isFinite(value))
-      .map((value) => ({ v: value }));
+      .map(point => (typeof point === 'number' ? point : point.v))
+      .filter(value => Number.isFinite(value))
+      .map(value => ({ v: value }));
 
     if (normalized.length >= 2) {
       return normalized;

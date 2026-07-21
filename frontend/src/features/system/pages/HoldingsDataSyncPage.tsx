@@ -1,17 +1,15 @@
 import { ArrowLeft, LayoutGrid, List as ListIcon } from 'lucide-react';
-import React, { useState, useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { useLocation } from 'wouter';
 
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
+import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 import { HoldingsDataList } from '../components/HoldingsDataList';
 import { HoldingsStatsCards } from '../components/HoldingsStatsCards';
 import { SectorHoldingCard } from '../components/SectorHoldingCard';
-import { SyncControlPanel } from '../components/SyncControlPanel';
-import { TaskHistory } from '../components/TaskHistory';
 
 // Mock Data for Holdings with Sector Info
 const MOCK_HOLDINGS_DATA = Array(26)
@@ -30,15 +28,6 @@ const MOCK_HOLDINGS_DATA = Array(26)
 
 export function HoldingsDataSyncPage() {
   const [, setLocation] = useLocation();
-  const [showHistory, setShowHistory] = useState(false);
-
-  // Sync Logic
-  const { deployment, isSyncing, triggerSync } = useDeploymentSync(
-    'position-sync',
-    {
-      successMessage: '持仓数据同步任务已提交',
-    }
-  );
 
   const holdingsCount = MOCK_HOLDINGS_DATA.length;
 
@@ -63,7 +52,7 @@ export function HoldingsDataSyncPage() {
       description="本地持仓数据同步"
       title="持仓数据同步"
     >
-      <div className="flex flex-col gap-4 animate-fade-in -mt-2 h-[calc(100vh-var(--header-height)-2rem)]">
+      <div className="flex h-[calc(100vh-var(--header-height)-4rem)] flex-col gap-4 animate-fade-in">
         {/* Compact Header Section */}
         <div className="flex items-center justify-between gap-4 py-1">
           <div className="flex items-center gap-3">
@@ -85,12 +74,10 @@ export function HoldingsDataSyncPage() {
             </div>
           </div>
 
-          <SyncControlPanel
-            deployment={deployment}
-            isSyncing={isSyncing}
+          <DeploymentSyncControl
+            deploymentName="position-sync"
             defaultFlowName="持仓数据同步"
-            onShowHistory={() => setShowHistory(true)}
-            onSync={triggerSync}
+            successMessage="持仓数据同步任务已提交"
           />
         </div>
 
@@ -147,15 +134,6 @@ export function HoldingsDataSyncPage() {
           </Tabs>
         </div>
       </div>
-
-      {/* Task History Dialog */}
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={deployment?.id}
-        deploymentName={deployment?.flowName || '持仓数据同步'}
-        workPoolName={deployment?.workPoolName}
-      />
     </DataStudioPageFrame>
   );
 }

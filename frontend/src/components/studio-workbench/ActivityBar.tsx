@@ -146,9 +146,7 @@ export function ActivityBar({
         className="mt-auto flex w-full flex-col items-center gap-2.5 border-t border-white/5 pt-2.5"
         data-testid="studio-utility-bar"
       >
-        {utilityActions.map(action =>
-          renderActionButton(action, 'utility')
-        )}
+        {utilityActions.map(action => renderActionButton(action, 'utility'))}
         <div
           className={cn(
             'flex h-8 w-8 items-center justify-center rounded-lg border',

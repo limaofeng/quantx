@@ -80,7 +80,9 @@ export function useStudioTabs<T extends StudioTab>(): UseStudioTabsResult<T> {
 
   const updateTab = useCallback((tabId: string, patch: Partial<T>) => {
     setTabs(currentTabs =>
-      currentTabs.map(tab => (tab.id === tabId ? ({ ...tab, ...patch } as T) : tab))
+      currentTabs.map(tab =>
+        tab.id === tabId ? ({ ...tab, ...patch } as T) : tab
+      )
     );
   }, []);
 
@@ -88,7 +90,11 @@ export function useStudioTabs<T extends StudioTab>(): UseStudioTabsResult<T> {
     setTabs(currentTabs =>
       currentTabs.map(tab => {
         if (tab.id !== tabId) return tab;
-        return { ...tab, isDirty, isPreview: isDirty ? false : tab.isPreview } as T;
+        return {
+          ...tab,
+          isDirty,
+          isPreview: isDirty ? false : tab.isPreview,
+        } as T;
       })
     );
   }, []);

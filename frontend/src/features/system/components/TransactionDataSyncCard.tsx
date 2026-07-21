@@ -35,8 +35,11 @@ export function TransactionDataSyncCard() {
     deployment?.status === 'Ready' ||
     deployment?.status === 'Scheduled' ||
     !deployment; // Default to healthy if no deployment found for mock
+  const isStale = deployment?.isStale || deployment?.status === 'Stale';
   const isError =
-    deployment?.status === 'Failed' || deployment?.status === 'Crashed';
+    deployment?.status === 'Failed' ||
+    deployment?.status === 'Crashed' ||
+    isStale;
   const isInternalOffline = false; // Assume online for now
 
   // Visual Config
@@ -50,6 +53,16 @@ export function TransactionDataSyncCard() {
         text: 'text-slate-600 dark:text-slate-400',
         hover: 'hover:bg-slate-100 dark:hover:bg-slate-800/50',
         accent: 'text-slate-500',
+      };
+    if (isStale)
+      return {
+        bg: 'bg-gradient-to-br from-red-50/50 to-rose-50/50 dark:from-red-900/10 dark:to-rose-900/10',
+        border: 'border-red-200/40 dark:border-red-800/40',
+        iconBg: 'bg-red-500/10',
+        iconText: 'text-red-600 dark:text-red-400',
+        text: 'text-slate-800 dark:text-slate-100',
+        hover: 'hover:bg-red-50/80 dark:hover:bg-red-900/20',
+        accent: 'text-red-600 dark:text-red-400',
       };
     if (isSyncing)
       return {
@@ -81,7 +94,7 @@ export function TransactionDataSyncCard() {
       hover: 'hover:bg-indigo-50/80 dark:hover:bg-indigo-900/20',
       accent: 'text-indigo-600 dark:text-indigo-500',
     };
-  }, [isInternalOffline, isSyncing, isError]);
+  }, [isInternalOffline, isStale, isSyncing, isError]);
 
   return (
     <div
@@ -127,16 +140,20 @@ export function TransactionDataSyncCard() {
             variant="outline"
             className={cn(
               'gap-1 flex items-center pr-2 border-opacity-20',
-              isHealthy
-                ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
-                : isSyncing
-                  ? 'bg-blue-500/5 text-blue-600 border-blue-500'
-                  : isError
-                    ? 'bg-red-500/5 text-red-600 border-red-500'
-                    : 'bg-slate-500/5 text-slate-500 border-slate-500'
+              isStale
+                ? 'bg-red-500/5 text-red-600 border-red-500'
+                : isHealthy
+                  ? 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
+                  : isSyncing
+                    ? 'bg-blue-500/5 text-blue-600 border-blue-500'
+                    : isError
+                      ? 'bg-red-500/5 text-red-600 border-red-500'
+                      : 'bg-slate-500/5 text-slate-500 border-slate-500'
             )}
           >
-            {isSyncing ? (
+            {isStale ? (
+              <AlertCircle size={10} />
+            ) : isSyncing ? (
               <Activity size={10} className="animate-spin" />
             ) : isHealthy ? (
               <Activity size={10} />
@@ -146,13 +163,15 @@ export function TransactionDataSyncCard() {
               <Activity size={10} className="opacity-50" />
             )}
             <span className="text-[10px]">
-              {isSyncing
-                ? '同步中'
-                : isHealthy
-                  ? '系统就绪'
-                  : isError
-                    ? '任务异常'
-                    : deployment.status}
+              {isStale
+                ? '运行卡住'
+                : isSyncing
+                  ? '同步中'
+                  : isHealthy
+                    ? '系统就绪'
+                    : isError
+                      ? '任务异常'
+                      : deployment.status}
             </span>
           </Badge>
         ) : (
@@ -200,13 +219,15 @@ export function TransactionDataSyncCard() {
         <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
           <Clock size={12} />
           <span className="text-[10px] font-mono">
-            {isSyncing
-              ? '正在同步数据...'
-              : isError
-                ? '上次同步失败'
-                : deployment?.lastRunTime
-                  ? `上次同步: ${formatDistanceToNow(new Date(deployment.lastRunTime), { locale: zhCN, addSuffix: true })}`
-                  : '自动同步'}
+            {isStale
+              ? deployment?.staleReason || '运行中但长时间无活动'
+              : isSyncing
+                ? '正在同步数据...'
+                : isError
+                  ? '上次同步失败'
+                  : deployment?.lastRunTime
+                    ? `上次同步: ${formatDistanceToNow(new Date(deployment.lastRunTime), { locale: zhCN, addSuffix: true })}`
+                    : '自动同步'}
           </span>
         </div>
 
@@ -225,7 +246,13 @@ export function TransactionDataSyncCard() {
       <div
         className={cn(
           'absolute -right-8 -bottom-8 w-32 h-32 rounded-full blur-3xl transition-all duration-500 opacity-10 group-hover:opacity-20',
-          isSyncing ? 'bg-indigo-500' : isError ? 'bg-red-500' : 'bg-purple-500'
+          isStale
+            ? 'bg-red-500'
+            : isSyncing
+              ? 'bg-indigo-500'
+              : isError
+                ? 'bg-red-500'
+                : 'bg-purple-500'
         )}
       />
     </div>

@@ -36,8 +36,11 @@ export function TradingCalendarCard() {
     successMessage: '交易日历同步已启动',
   });
 
+  const isStale = deployment?.isStale || deployment?.status === 'Stale';
   const isError =
-    deployment?.status === 'Failed' || deployment?.status === 'Crashed';
+    deployment?.status === 'Failed' ||
+    deployment?.status === 'Crashed' ||
+    isStale;
   const holidayCount = holidaysData?.holidays?.total ?? 0;
 
   return (
@@ -68,14 +71,18 @@ export function TradingCalendarCard() {
           variant="outline"
           className={cn(
             'gap-1 flex items-center pr-2 border-opacity-20',
-            isSyncing
-              ? 'bg-blue-500/5 text-blue-600 border-blue-500'
-              : isError
-                ? 'bg-red-500/5 text-red-600 border-red-500'
-                : 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
+            isStale
+              ? 'bg-red-500/5 text-red-600 border-red-500'
+              : isSyncing
+                ? 'bg-blue-500/5 text-blue-600 border-blue-500'
+                : isError
+                  ? 'bg-red-500/5 text-red-600 border-red-500'
+                  : 'bg-emerald-500/5 text-emerald-600 border-emerald-500'
           )}
         >
-          {isSyncing ? (
+          {isStale ? (
+            <AlertCircle size={10} />
+          ) : isSyncing ? (
             <Activity size={10} className="animate-spin" />
           ) : isError ? (
             <AlertCircle size={10} />
@@ -83,7 +90,13 @@ export function TradingCalendarCard() {
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
           )}
           <span className="text-[10px]">
-            {isSyncing ? '同步中' : isError ? '任务异常' : '系统就绪'}
+            {isStale
+              ? '运行卡住'
+              : isSyncing
+                ? '同步中'
+                : isError
+                  ? '任务异常'
+                  : '系统就绪'}
           </span>
         </Badge>
       </div>

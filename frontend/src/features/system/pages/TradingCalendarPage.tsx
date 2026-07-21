@@ -1,15 +1,13 @@
 import { ArrowLeft } from 'lucide-react';
-import React, { useState } from 'react';
+import React from 'react';
 import { useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
 import { Button } from '@/components/ui/button';
 import { gql } from '@/generated/gql';
-import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
-import { SyncControlPanel } from '../components/SyncControlPanel';
-import { TaskHistory } from '../components/TaskHistory';
+import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 import { TradingCalendar } from '../components/TradingCalendar';
 
 const GET_HOLIDAYS_COUNT = gql(`
@@ -22,7 +20,6 @@ const GET_HOLIDAYS_COUNT = gql(`
 
 export function TradingCalendarPage() {
   const [, setLocation] = useLocation();
-  const [showHistory, setShowHistory] = useState(false);
   const currentYear = new Date().getFullYear();
 
   // Fetch Holidays Count for Header
@@ -30,13 +27,6 @@ export function TradingCalendarPage() {
     query: GET_HOLIDAYS_COUNT as any,
     variables: { market: 'SH', year: currentYear },
   });
-
-  const { deployment, isSyncing, triggerSync } = useDeploymentSync(
-    'holiday-sync',
-    {
-      successMessage: '交易日历同步任务已提交',
-    }
-  );
 
   const holidayCount = holidaysData?.holidays?.total ?? 0;
 
@@ -46,7 +36,7 @@ export function TradingCalendarPage() {
       description="交易日、休市、开盘状态"
       title="交易日历"
     >
-      <div className="flex flex-col gap-4 animate-fade-in -mt-2 h-[calc(100vh-var(--header-height)-2rem)]">
+      <div className="flex h-[calc(100vh-var(--header-height)-4rem)] flex-col gap-4 animate-fade-in">
         {/* Compact Header Section */}
         <div className="flex items-center justify-between gap-4 py-1">
           <div className="flex items-center gap-3">
@@ -68,12 +58,10 @@ export function TradingCalendarPage() {
             </div>
           </div>
 
-          <SyncControlPanel
-            deployment={deployment}
-            isSyncing={isSyncing}
+          <DeploymentSyncControl
+            deploymentName="holiday-sync"
             defaultFlowName="交易日历同步"
-            onShowHistory={() => setShowHistory(true)}
-            onSync={triggerSync}
+            successMessage="交易日历同步任务已提交"
           />
         </div>
 
@@ -82,15 +70,6 @@ export function TradingCalendarPage() {
           <TradingCalendar hideSyncWidget={true} />
         </div>
       </div>
-
-      {/* Task History Dialog */}
-      <TaskHistory
-        open={showHistory}
-        onOpenChange={setShowHistory}
-        deploymentId={deployment?.id}
-        deploymentName={deployment?.flowName || '交易日历同步'}
-        workPoolName={deployment?.workPoolName}
-      />
     </DataStudioPageFrame>
   );
 }
