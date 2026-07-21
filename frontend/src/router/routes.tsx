@@ -6,6 +6,7 @@ import {
   Filter,
   Hand,
   LayoutDashboard,
+  Radar,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -134,6 +135,31 @@ export const appRoutes: AppRouteConfig[] = [
     mobileNav: { label: '持仓', icon: Briefcase, order: 20 },
   }),
   route({
+    path: '/account',
+    title: '账户中心',
+    importer: toDefaultExport(
+      () => import('@/features/account'),
+      'AccountPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
+    path: '/t-trade',
+    title: '做T助手',
+    importer: toDefaultExport(
+      () => import('@/features/portfolio'),
+      'TTradeGlobalPage'
+    ),
+    skeleton: 'dashboard',
+    nav: {
+      label: '做T助手',
+      icon: Radar,
+      group: MAIN_GROUP,
+      order: 30,
+    },
+    mobileNav: { label: '做T', icon: Radar, order: 30 },
+  }),
+  route({
     path: '/liquidation',
     title: '清仓管理',
     importer: toDefaultExport(
@@ -251,6 +277,15 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
   }),
   route({
+    path: '/settings/data/stocks',
+    title: '个股数据',
+    importer: toDefaultExport(
+      () => import('@/features/system'),
+      'StockDataIndexPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
     path: '/settings/data/sectors',
     title: '板块数据管理',
     importer: toDefaultExport(
@@ -303,6 +338,24 @@ export const appRoutes: AppRouteConfig[] = [
       'FinancialDataPage'
     ),
     skeleton: 'table',
+  }),
+  route({
+    path: '/settings/data/market-data',
+    title: 'K线批量同步',
+    importer: toDefaultExport(
+      () => import('@/features/system'),
+      'DailyMarketDataSyncPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
+    path: '/settings/data/announcements',
+    title: '公告同步',
+    importer: toDefaultExport(
+      () => import('@/features/system'),
+      'AnnouncementSyncPage'
+    ),
+    skeleton: 'dashboard',
   }),
   route({
     path: '/settings/data/:stockCode',

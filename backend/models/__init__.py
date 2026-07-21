@@ -21,6 +21,8 @@ from .holidays import Holiday
 from .instrument import Instrument
 from .order import Order
 from .position import Position
+from .broker_position_snapshot import BrokerPositionSnapshot
+from .closed_position_cycle import ClosedPositionCycle
 from .sector import Sector
 from .sector_stock import SectorStock
 from .strategy import Strategy
@@ -28,6 +30,7 @@ from .strategy_run import StrategyRun
 from .strategy_decision_trace_record import StrategyDecisionTraceRecord
 from .trade import Trade
 from .trade_intent_record import TradeIntentRecord
+from .t_trade_global_config import TTradeGlobalConfig
 from .watchlist_item import WatchlistItem
 from .financial import (
   FinancialBalanceSheet,
@@ -54,6 +57,7 @@ from .liquidation import (
   RedemptionRecord,
 )
 from .tick import Tick
+from .t_trade_imported_entry import TTradeImportedEntry
 from .strategy_run_state import (
   StrategyRunPosition,
   StrategyRunState,
@@ -61,6 +65,11 @@ from .strategy_run_state import (
 from .strategy_backtest import StrategyBacktest
 from .strategy_grid_book_snapshot import StrategyGridBookSnapshot
 from .strategy_performance_sample import StrategyPerformanceSample
+from .stock_disclosure import (
+  AnnouncementSyncRun,
+  StockAnnouncement,
+  StockRepurchaseEvent,
+)
 
 # 导出所有模型
 __all__ = [
@@ -76,12 +85,16 @@ __all__ = [
   # 数据库模型
   "Instrument",
   "Position",
+  "BrokerPositionSnapshot",
+  "ClosedPositionCycle",
   "Order",
   "Trade",
   "Strategy",
   "StrategyRun",
   "StrategyDecisionTraceRecord",
   "TradeIntentRecord",
+  "TTradeGlobalConfig",
+  "TTradeImportedEntry",
   "WatchlistItem",
   "Account",
   "Holiday",
@@ -121,4 +134,7 @@ __all__ = [
   "StrategyBacktest",
   "StrategyGridBookSnapshot",
   "StrategyPerformanceSample",
+  "StockAnnouncement",
+  "StockRepurchaseEvent",
+  "AnnouncementSyncRun",
 ]

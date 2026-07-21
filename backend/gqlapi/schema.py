@@ -1,6 +1,10 @@
 import strawberry
 
 from .schemas import (
+  AnnouncementMutation,
+  AnnouncementQuery,
+  TTradeMutation,
+  TTradeQuery,
   DividFactorQuery,
   FinancialQuery,
   InstrumentQuery,
@@ -60,6 +64,7 @@ from .schemas import (
 """
 )
 class Query(
+  AnnouncementQuery,
   DividFactorQuery,
   FinancialQuery,
   InstrumentQuery,
@@ -73,6 +78,7 @@ class Query(
   HolidayQuery,
   StockScreeningQuery,
   WatchlistQuery,
+  TTradeQuery,
 ):
   pass
 
@@ -100,12 +106,14 @@ class Query(
 """
 )
 class Mutation(
+  AnnouncementMutation,
   TradingMutation,
   LiquidationMutation,
   StrategyMutation,
   WorkflowMutation,
   HolidayMutation,
   WatchlistMutation,
+  TTradeMutation,
 ):
   pass
 

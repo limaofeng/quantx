@@ -12,8 +12,14 @@ from .divid_factor_schema import DividFactorQuery
 from .financial_schema import FinancialQuery
 from .stock_screening_schema import StockScreeningQuery
 from .watchlist_schema import WatchlistMutation, WatchlistQuery
+from .announcement_schema import AnnouncementMutation, AnnouncementQuery
+from .t_trade_schema import TTradeMutation, TTradeQuery
 
 __all__ = [
+  "AnnouncementQuery",
+  "AnnouncementMutation",
+  "TTradeQuery",
+  "TTradeMutation",
   "InstrumentQuery",
   "PortfolioQuery",
   "MarketDataQuery",

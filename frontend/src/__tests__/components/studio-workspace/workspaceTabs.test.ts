@@ -33,6 +33,26 @@ describe('studio workspace tabs', () => {
     expect(tab?.path).toBe('/market-shortcuts');
   });
 
+  it('hosts the global T trade assistant in the studio workspace', () => {
+    const tab = buildStudioWorkspaceTab('/t-trade');
+
+    expect(tab?.id).toBe('page:/t-trade');
+    expect(tab?.name).toBe('做T助手');
+    expect(tab?.path).toBe('/t-trade');
+  });
+
+  it('keeps every account view in one stable workspace tab', () => {
+    const overview = buildStudioWorkspaceTab('/account?view=overview');
+    const trades = buildStudioWorkspaceTab('/account?view=trades');
+    const closed = buildStudioWorkspaceTab('/account?view=closed');
+
+    expect(overview?.id).toBe('account');
+    expect(trades?.id).toBe('account');
+    expect(closed?.id).toBe('account');
+    expect(trades?.name).toBe('账户中心');
+    expect(mergeStudioWorkspaceTab([overview!], trades!)).toEqual([trades]);
+  });
+
   it('merges selected holdings symbols into the same tab', () => {
     const firstTab = buildStudioWorkspaceTab('/holdings?symbol=562500.SH')!;
     const duplicateTab = buildStudioWorkspaceTab(

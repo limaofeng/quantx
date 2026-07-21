@@ -2,6 +2,7 @@
 
 from .account import AccountResolver
 from .daily_asset_snapshots import DailyAssetSnapshotResolver
+from .closed_position_cycles import ClosedPositionCycleResolver
 from .financial import FinancialResolver
 from .instruments import InstrumentResolver
 from .orders import OrderResolver
@@ -13,6 +14,7 @@ from .stock_screening import StockScreeningResolver
 __all__ = [
   "AccountResolver",
   "DailyAssetSnapshotResolver",
+  "ClosedPositionCycleResolver",
   "OrderResolver",
   "PositionResolver",
   "InstrumentResolver",

@@ -6,6 +6,7 @@ import {
   Hand,
   LayoutDashboard,
   LineChart,
+  Wallet,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -82,6 +83,8 @@ export function isStudioWorkspacePath(rawPath: string) {
     path === '/' ||
     path === '/market-shortcuts' ||
     path === '/holdings' ||
+    path === '/account' ||
+    path === '/t-trade' ||
     path === '/liquidation' ||
     path === '/screening' ||
     path.startsWith('/stock/') ||
@@ -98,6 +101,10 @@ export function getStudioWorkspaceTabId(rawPath: string) {
 
   if (normalizedPath === '/holdings') {
     return 'holdings';
+  }
+
+  if (normalizedPath === '/account') {
+    return 'account';
   }
 
   if (normalizedPath === '/liquidation') {
@@ -117,6 +124,7 @@ function getTabIcon(pathname: string): LucideIcon {
   if (route?.nav?.icon) return route.nav.icon;
   if (pathname === '/') return LayoutDashboard;
   if (pathname === '/holdings') return Briefcase;
+  if (pathname === '/account') return Wallet;
   if (pathname === '/liquidation') return Hand;
   if (pathname === '/screening') return Filter;
   if (pathname.startsWith('/stock/')) return LineChart;
@@ -132,6 +140,7 @@ function getTabIcon(pathname: string): LucideIcon {
 
 function getTabTitle(pathname: string, search = '') {
   if (pathname === '/holdings') return '持仓';
+  if (pathname === '/account') return '账户中心';
 
   if (pathname === '/liquidation' && getSearchParam(search, 'workspaceTab')) {
     const stockName = (getSearchParam(search, 'name') || '').trim();
@@ -183,7 +192,9 @@ export function mergeStudioWorkspaceTab(
 }
 
 function isSafeTabName(tab: StudioWorkspaceTab, fallback: StudioWorkspaceTab) {
-  if (tab.id === 'holdings') return tab.name === fallback.name;
+  if (tab.id === 'holdings' || tab.id === 'account') {
+    return tab.name === fallback.name;
+  }
 
   return tab.name === fallback.name;
 }

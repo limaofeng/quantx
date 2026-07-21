@@ -10,6 +10,7 @@ from .account_repository import AccountRepository
 from .conditional_liquidation_order_repository import (
   ConditionalLiquidationOrderRepository,
 )
+from .closed_position_cycle_repository import ClosedPositionCycleRepository
 from .daily_asset_snapshot_repository import (
   DailyAssetPositionSnapshotRepository,
   DailyAssetSnapshotRepository,
@@ -22,6 +23,7 @@ from .strategy_repository import StrategyRepository
 from .strategy_run_repository import StrategyRunRepository
 from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
 from .trade_intent_repository import TradeIntentRepository
+from .t_trade_global_config_repository import TTradeGlobalConfigRepository
 from .strategy_performance_sample_repository import StrategyPerformanceSampleRepository
 from .watchlist_repository import WatchlistRepository
 
@@ -34,12 +36,14 @@ __all__ = [
   "Pagination",
   "InstrumentRepository",
   "ConditionalLiquidationOrderRepository",
+  "ClosedPositionCycleRepository",
   "OrderRepository",
   "PositionRepository",
   "StrategyRepository",
   "StrategyRunRepository",
   "StrategyDecisionTraceRepository",
   "TradeIntentRepository",
+  "TTradeGlobalConfigRepository",
   "WatchlistRepository",
   "StrategyPerformanceSampleRepository",
   "MarketDataRepository",

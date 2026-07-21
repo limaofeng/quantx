@@ -43,7 +43,13 @@ from .market_data_types import (
   SystemAlert,
   TickData,
 )
-from .portfolio_types import Account, DailyAssetSnapshot, Position
+from .portfolio_types import (
+  Account,
+  ClosedPositionCycle,
+  ClosedPositionCyclePage,
+  DailyAssetSnapshot,
+  Position,
+)
 from .strategy_types import (
   Strategy,
   StrategyBacktest,
@@ -113,7 +119,16 @@ from .financial_types import (
   FinancialStatements,
   FinancialSummary,
 )
+from .announcement_types import (
+  AnnouncementSyncStatus,
+  StockAnnouncement,
+  StockDisclosureSummary,
+  StockRepurchaseEvent,
+)
 from .stock_screening_types import (
+  IntradayVolumeScreenInput,
+  IntradayVolumeScreenItem,
+  IntradayVolumeScreenPage,
   SignalMeta,
   StockFieldConditionInput,
   StockScreenInput,
@@ -150,6 +165,8 @@ __all__ = [
   "Instrument",
   "Account",
   "Position",
+  "ClosedPositionCycle",
+  "ClosedPositionCyclePage",
   "DailyAssetSnapshot",
   "Order",
   "Trade",
@@ -241,6 +258,13 @@ __all__ = [
   "FinancialReportSummary",
   "FinancialStatements",
   "FinancialSummary",
+  "StockAnnouncement",
+  "StockRepurchaseEvent",
+  "StockDisclosureSummary",
+  "AnnouncementSyncStatus",
+  "IntradayVolumeScreenInput",
+  "IntradayVolumeScreenItem",
+  "IntradayVolumeScreenPage",
   "SignalMeta",
   "StockFieldConditionInput",
   "StockScreenInput",
