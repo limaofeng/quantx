@@ -48,9 +48,9 @@ function buildCumulativePnlTrend(
 ) {
   let cumulative = 0;
   const values = snapshots
-    .map((snapshot) => snapshot.dailyPnlCny)
+    .map(snapshot => snapshot.dailyPnlCny)
     .filter(isFiniteNumber)
-    .map((value) => {
+    .map(value => {
       cumulative += value;
       return cumulative;
     });
@@ -81,14 +81,13 @@ export function PortfolioSummary({
     () =>
       buildTrend(
         orderedSnapshots,
-        (snapshot) => snapshot.marketValueCny,
+        snapshot => snapshot.marketValueCny,
         summary.totalMarketValue
       ),
     [orderedSnapshots, summary.totalMarketValue]
   );
   const cumulativePnlTrend = useMemo(
-    () =>
-      buildCumulativePnlTrend(orderedSnapshots, summary.totalProfitLoss),
+    () => buildCumulativePnlTrend(orderedSnapshots, summary.totalProfitLoss),
     [orderedSnapshots, summary.totalProfitLoss]
   );
 
@@ -105,7 +104,7 @@ export function PortfolioSummary({
     () =>
       buildTrend(
         orderedSnapshots,
-        (snapshot) => snapshot.dailyPnlCny,
+        snapshot => snapshot.dailyPnlCny,
         hasTodayProfitLoss ? todayProfitLoss : null
       ),
     [hasTodayProfitLoss, orderedSnapshots, todayProfitLoss]
@@ -114,7 +113,7 @@ export function PortfolioSummary({
     () =>
       buildTrend(
         orderedSnapshots,
-        (snapshot) =>
+        snapshot =>
           snapshot.totalAssetCny > 0
             ? (snapshot.marketValueCny / snapshot.totalAssetCny) * 100
             : null,
@@ -146,9 +145,7 @@ export function PortfolioSummary({
 
       <InsightTile
         label="今日盈亏"
-        value={
-          hasTodayProfitLoss ? signedCurrency(todayProfitLoss) : '待更新'
-        }
+        value={hasTodayProfitLoss ? signedCurrency(todayProfitLoss) : '待更新'}
         subValue={
           hasTodayProfitLoss
             ? `收盘收益率: ${signedPercent(todayProfitLossPercent)}`
@@ -156,7 +153,11 @@ export function PortfolioSummary({
         }
         icon={<Activity />}
         theme={
-          hasTodayProfitLoss ? (isTodayProfitable ? 'emerald' : 'rose') : 'amber'
+          hasTodayProfitLoss
+            ? isTodayProfitable
+              ? 'emerald'
+              : 'rose'
+            : 'amber'
         }
         status={
           hasTodayProfitLoss ? (isTodayProfitable ? '盈利' : '亏损') : undefined

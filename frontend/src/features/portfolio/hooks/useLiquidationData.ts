@@ -152,20 +152,20 @@ export function useLiquidationData(): UseLiquidationDataResult {
     reexecuteSummaryQuery({ requestPolicy: 'network-only' });
     refreshOrders();
     refreshTrades();
-  }, [
-    refetchHoldings,
-    reexecuteSummaryQuery,
-    refreshOrders,
-    refreshTrades,
-  ]);
+  }, [refetchHoldings, reexecuteSummaryQuery, refreshOrders, refreshTrades]);
 
   const error =
-    holdingsError || accountError || summaryResult.error || ordersError || tradesError;
+    holdingsError ||
+    accountError ||
+    summaryResult.error ||
+    ordersError ||
+    tradesError;
 
   return {
     accountId,
     currentHoldings,
-    error: error instanceof Error ? error : error ? new Error(String(error)) : null,
+    error:
+      error instanceof Error ? error : error ? new Error(String(error)) : null,
     isLoading:
       holdingsLoading ||
       accountLoading ||

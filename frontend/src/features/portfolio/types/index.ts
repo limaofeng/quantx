@@ -32,11 +32,9 @@ export type LiquidationSummaryData = NonNullable<
   Portfolio_LiquidationSummaryQuery['liquidationSummary']
 >;
 
-export type LiquidationTodayOrder =
-  Trading_TodayOrdersQuery['todayOrders'][0];
+export type LiquidationTodayOrder = Trading_TodayOrdersQuery['todayOrders'][0];
 
-export type LiquidationTodayTrade =
-  Trading_TodayTradesQuery['todayTrades'][0];
+export type LiquidationTodayTrade = Trading_TodayTradesQuery['todayTrades'][0];
 
 export interface LiquidatedStock {
   id: string;

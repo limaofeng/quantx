@@ -232,8 +232,7 @@ export function CurrentHoldingsSection({
                         可卖数量: {selectedSellableVolume.toLocaleString()} 股
                       </p>
                       <p>
-                        估算委托市值:{' '}
-                        {formatCurrency(selectedEstimatedValue)}
+                        估算委托市值: {formatCurrency(selectedEstimatedValue)}
                       </p>
                     </div>
                   </div>

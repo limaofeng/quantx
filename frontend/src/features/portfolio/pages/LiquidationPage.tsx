@@ -5,16 +5,9 @@ import {
   Briefcase,
   ClipboardList,
   Hand,
-  History,
   Loader2,
-  Power,
   RefreshCw,
-  Save,
   ShieldAlert,
-  ShieldCheck,
-  SlidersHorizontal,
-  Target,
-  Trash2,
   Wallet,
 } from 'lucide-react';
 import * as React from 'react';
@@ -38,25 +31,17 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
 import type { ConditionalLiquidationOrdersQuery as ConditionalLiquidationOrdersQueryData } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
-import { CurrentHoldingsSection } from '../components/CurrentHoldingsSection';
-import { LiquidatedStocksSection } from '../components/LiquidatedStocksSection';
-import { LiquidationStats } from '../components/LiquidationStats';
+import { LiquidationDashboard } from '../components/LiquidationDashboard';
+import {
+  TakeProfitPlanPanel,
+  type ConditionalLiquidationFormPayload,
+} from '../components/TakeProfitPlanPanel';
 import {
   useLiquidationActions,
   type LiquidationActionResult,
@@ -75,20 +60,16 @@ import type {
   Position,
 } from '../types';
 
-type LiquidationStudioMode = 'ACCOUNT' | 'HISTORY' | 'HOLDINGS' | 'LIQUIDATION';
+type LiquidationStudioMode = 'ACCOUNT' | 'HOLDINGS' | 'LIQUIDATION';
 type ConditionalLiquidationOrderView = NonNullable<
   ConditionalLiquidationOrdersQueryData['conditionalLiquidationOrders']
 >[number];
 
 const liquidationModes: StudioMode[] = [
-  { id: 'LIQUIDATION', icon: Hand, label: '清仓' },
-  { id: 'HISTORY', icon: History, label: '回报' },
+  { id: 'LIQUIDATION', icon: ShieldAlert, label: '监控' },
   { id: 'HOLDINGS', icon: Briefcase, label: '持仓' },
   { id: 'ACCOUNT', icon: Wallet, label: '账户' },
 ];
-
-const compactTabTriggerClass =
-  'h-8 rounded-md px-3 text-[11px] font-black text-slate-500 transition-colors data-[state=active]:bg-red-500/15 data-[state=active]:text-red-100';
 
 function normalizeStockCode(value: unknown) {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
@@ -190,12 +171,54 @@ function getEstimatedSellValue(holding?: Position | null) {
   return sellableVolume * price;
 }
 
-function getBatchEstimatedSellValue(holdings: Position[]) {
-  return holdings.reduce((sum, holding) => sum + getEstimatedSellValue(holding), 0);
-}
+function useRollingQuoteDrops(holdings: Position[]) {
+  const previousPricesRef = React.useRef<Map<string, number>>(new Map());
+  const latestDropsRef = React.useRef<Record<string, number>>({});
+  const [tickDropPctByCode, setTickDropPctByCode] = React.useState<
+    Record<string, number>
+  >({});
 
-function getBatchSellableVolume(holdings: Position[]) {
-  return holdings.reduce((sum, holding) => sum + getSellableVolume(holding), 0);
+  React.useEffect(() => {
+    const activeCodes = new Set<string>();
+    const nextDrops = { ...latestDropsRef.current };
+    let changed = false;
+
+    holdings.forEach(holding => {
+      const stockCode = normalizeStockCode(holding.stockCode);
+      const price = toFiniteNumber(holding.lastPrice);
+      if (!stockCode || price === null || price <= 0) return;
+
+      activeCodes.add(stockCode);
+      const previousPrice = previousPricesRef.current.get(stockCode);
+      if (
+        previousPrice !== undefined &&
+        previousPrice > 0 &&
+        previousPrice !== price
+      ) {
+        const movePct =
+          Math.round(((price - previousPrice) / previousPrice) * 10000) / 100;
+        if (nextDrops[stockCode] !== movePct) {
+          nextDrops[stockCode] = movePct;
+          changed = true;
+        }
+      }
+      previousPricesRef.current.set(stockCode, price);
+    });
+
+    Object.keys(nextDrops).forEach(stockCode => {
+      if (!activeCodes.has(stockCode)) {
+        delete nextDrops[stockCode];
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      latestDropsRef.current = nextDrops;
+      setTickDropPctByCode(nextDrops);
+    }
+  }, [holdings]);
+
+  return tickDropPctByCode;
 }
 
 function formatDateTime(value: unknown) {
@@ -397,340 +420,6 @@ function RelatedOrdersTable({
   );
 }
 
-type ConditionalLiquidationFormPayload = {
-  accountId?: string;
-  enabled: boolean;
-  id?: string;
-  instrumentName?: string | null;
-  remark?: string | null;
-  sellMode: string;
-  sellRatioPct?: number | null;
-  sellVolume?: number | null;
-  stockCode: string;
-  targetPrice?: number | null;
-  targetProfitPct?: number | null;
-};
-
-function numericInput(value: unknown) {
-  const amount = toFiniteNumber(value);
-  return amount === null ? '' : String(amount);
-}
-
-function parseOptionalNumber(value: string) {
-  const text = value.trim();
-  if (!text) return null;
-  const parsed = Number(text);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function getConditionalOrderStatus(order?: ConditionalLiquidationOrderView | null) {
-  if (!order) return { label: '未配置', tone: 'text-slate-400' };
-  if (order.status === 'SUBMITTED') return { label: '已提交', tone: 'text-emerald-300' };
-  if (order.status === 'FAILED') return { label: '提交失败', tone: 'text-rose-300' };
-  if (order.status === 'CANCELLED') return { label: '已取消', tone: 'text-slate-500' };
-  return order.enabled
-    ? { label: '监控中', tone: 'text-red-200' }
-    : { label: '已停用', tone: 'text-amber-200' };
-}
-
-function ConditionalLiquidationPanel({
-  accountId,
-  actionLoading,
-  holding,
-  isLoading,
-  onCancel,
-  onEvaluate,
-  onSave,
-  onToggleEnabled,
-  order,
-  selectedStockCode,
-}: {
-  accountId?: string;
-  actionLoading: boolean;
-  holding?: Position | null;
-  isLoading: boolean;
-  onCancel: (orderId: string) => Promise<void>;
-  onEvaluate: () => Promise<void>;
-  onSave: (payload: ConditionalLiquidationFormPayload) => Promise<void>;
-  onToggleEnabled: (orderId: string, enabled: boolean) => Promise<void>;
-  order?: ConditionalLiquidationOrderView | null;
-  selectedStockCode: string;
-}) {
-  const { toast } = useToast();
-  const [enabled, setEnabled] = React.useState(true);
-  const [targetProfitPct, setTargetProfitPct] = React.useState('');
-  const [targetPrice, setTargetPrice] = React.useState('');
-  const [sellMode, setSellMode] = React.useState('ALL_AVAILABLE');
-  const [sellRatioPct, setSellRatioPct] = React.useState('50');
-  const [sellVolume, setSellVolume] = React.useState('');
-
-  React.useEffect(() => {
-    setEnabled(order?.enabled ?? true);
-    setTargetProfitPct(numericInput(order?.targetProfitPct));
-    setTargetPrice(numericInput(order?.targetPrice));
-    setSellMode(order?.sellMode || 'ALL_AVAILABLE');
-    setSellRatioPct(numericInput(order?.sellRatioPct) || '50');
-    setSellVolume(numericInput(order?.sellVolume));
-  }, [order?.id, order?.updatedAt]);
-
-  const status = getConditionalOrderStatus(order);
-  const isTerminal =
-    order?.status === 'SUBMITTED' || order?.status === 'CANCELLED';
-  const canOperate = Boolean(selectedStockCode) && !actionLoading;
-  const canUpdateExisting = Boolean(order?.id && !isTerminal);
-  const existingId = canUpdateExisting ? order?.id : undefined;
-  const sellableVolume = getSellableVolume(holding);
-
-  const handleSave = async () => {
-    const profitPct = parseOptionalNumber(targetProfitPct);
-    const price = parseOptionalNumber(targetPrice);
-    const ratioPct = parseOptionalNumber(sellRatioPct);
-    const fixedVolume = parseOptionalNumber(sellVolume);
-
-    if (profitPct === null && price === null) {
-      toast({
-        title: '缺少触发条件',
-        description: '请至少填写目标收益率或目标价。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (sellMode === 'PERCENT_AVAILABLE' && (!ratioPct || ratioPct <= 0)) {
-      toast({
-        title: '卖出比例无效',
-        description: '按比例卖出时，请填写 0 到 100 之间的比例。',
-        variant: 'destructive',
-      });
-      return;
-    }
-    if (sellMode === 'FIXED_VOLUME' && (!fixedVolume || fixedVolume <= 0)) {
-      toast({
-        title: '固定股数无效',
-        description: '按股数卖出时，请填写大于 0 的股数。',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    await onSave({
-      accountId,
-      enabled,
-      id: existingId,
-      instrumentName: holding?.instrumentName || null,
-      sellMode,
-      sellRatioPct: sellMode === 'PERCENT_AVAILABLE' ? ratioPct : null,
-      sellVolume:
-        sellMode === 'FIXED_VOLUME' && fixedVolume !== null
-          ? Math.trunc(fixedVolume)
-          : null,
-      stockCode: selectedStockCode,
-      targetPrice: price,
-      targetProfitPct: profitPct,
-    });
-  };
-
-  return (
-    <DataPanel icon={ShieldCheck} title="条件清仓">
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className={cn(
-                  'rounded border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-black',
-                  status.tone
-                )}
-              >
-                {status.label}
-              </span>
-              {order?.submittedOrderId && (
-                <span className="rounded border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] font-bold text-emerald-200">
-                  委托 {order.submittedOrderId}
-                </span>
-              )}
-              {isTerminal && (
-                <span className="text-[10px] font-bold text-slate-500">
-                  一次性条件单
-                </span>
-              )}
-            </div>
-            <div className="mt-1 text-[10px] font-bold text-slate-600">
-              最近检查 {formatDateTime(order?.lastCheckedAt)}
-              {order?.lastError ? ` · ${order.lastError}` : ''}
-            </div>
-          </div>
-
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              title="立即检查条件，满足时提交清仓委托"
-              disabled={!order?.id || isTerminal || actionLoading}
-              onClick={onEvaluate}
-              className="h-8 px-2 text-[10px] font-black"
-            >
-              <Target className="mr-1.5 h-3.5 w-3.5" />
-              检查触发
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              title={order?.enabled ? '停用条件单' : '启用条件单'}
-              disabled={!order?.id || isTerminal || actionLoading}
-              onClick={() =>
-                order?.id && onToggleEnabled(order.id, !order.enabled)
-              }
-              className="h-8 px-2 text-[10px] font-black"
-            >
-              <Power className="mr-1.5 h-3.5 w-3.5" />
-              {order?.enabled ? '停用' : '启用'}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              title="取消条件单"
-              disabled={!order?.id || isTerminal || actionLoading}
-              onClick={() => order?.id && onCancel(order.id)}
-              className="h-8 px-2 text-[10px] font-black text-rose-200 hover:text-rose-100"
-            >
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-              取消
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <div className="grid gap-1.5">
-            <Label
-              htmlFor="conditional-target-profit"
-              className="text-[10px] font-black text-slate-500"
-            >
-              目标收益率 (%)
-            </Label>
-            <Input
-              id="conditional-target-profit"
-              type="number"
-              inputMode="decimal"
-              value={targetProfitPct}
-              onChange={event => setTargetProfitPct(event.target.value)}
-              placeholder="15"
-              className="h-9 rounded-md border-white/10 bg-[#08101d]/90 text-xs font-bold text-slate-100"
-            />
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label
-              htmlFor="conditional-target-price"
-              className="text-[10px] font-black text-slate-500"
-            >
-              目标价
-            </Label>
-            <Input
-              id="conditional-target-price"
-              type="number"
-              inputMode="decimal"
-              value={targetPrice}
-              onChange={event => setTargetPrice(event.target.value)}
-              placeholder={holding?.lastPrice ? String(holding.lastPrice) : '0.00'}
-              className="h-9 rounded-md border-white/10 bg-[#08101d]/90 text-xs font-bold text-slate-100"
-            />
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label
-              htmlFor="conditional-sell-mode"
-              className="text-[10px] font-black text-slate-500"
-            >
-              卖出数量
-            </Label>
-            <Select value={sellMode} onValueChange={setSellMode}>
-              <SelectTrigger
-                id="conditional-sell-mode"
-                className="h-9 rounded-md border-white/10 bg-[#08101d]/90 text-xs font-bold text-slate-100"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="ALL_AVAILABLE">全部可卖</SelectItem>
-                <SelectItem value="PERCENT_AVAILABLE">按比例</SelectItem>
-                <SelectItem value="FIXED_VOLUME">固定股数</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label
-              htmlFor="conditional-sell-value"
-              className="text-[10px] font-black text-slate-500"
-            >
-              {sellMode === 'PERCENT_AVAILABLE'
-                ? '卖出比例 (%)'
-                : sellMode === 'FIXED_VOLUME'
-                  ? '卖出股数'
-                  : '可卖库存'}
-            </Label>
-            <Input
-              id="conditional-sell-value"
-              type="number"
-              inputMode="decimal"
-              value={
-                sellMode === 'PERCENT_AVAILABLE'
-                  ? sellRatioPct
-                  : sellMode === 'FIXED_VOLUME'
-                    ? sellVolume
-                    : String(sellableVolume)
-              }
-              disabled={sellMode === 'ALL_AVAILABLE'}
-              onChange={event => {
-                if (sellMode === 'PERCENT_AVAILABLE') {
-                  setSellRatioPct(event.target.value);
-                } else {
-                  setSellVolume(event.target.value);
-                }
-              }}
-              className="h-9 rounded-md border-white/10 bg-[#08101d]/90 text-xs font-bold text-slate-100 disabled:opacity-70"
-            />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/5 bg-[#08101d]/75 px-3 py-2">
-          <button
-            type="button"
-            onClick={() => setEnabled(value => !value)}
-            className={cn(
-              'inline-flex h-8 items-center gap-2 rounded-md border px-3 text-[10px] font-black transition-colors',
-              enabled
-                ? 'border-red-400/30 bg-red-500/10 text-red-100'
-                : 'border-white/10 bg-white/[0.03] text-slate-500'
-            )}
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5" />
-            {enabled ? '保存后启用监控' : '保存但暂不启用'}
-          </button>
-
-          <Button
-            type="button"
-            size="sm"
-            disabled={!canOperate || isLoading}
-            onClick={handleSave}
-            className="h-8 bg-red-600 px-4 text-[10px] font-black text-white hover:bg-red-500"
-          >
-            {isLoading ? (
-              <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Save className="mr-2 h-3.5 w-3.5" />
-            )}
-            保存条件单
-          </Button>
-        </div>
-      </div>
-    </DataPanel>
-  );
-}
-
 function SingleStockLiquidationPanel({
   actionLoading,
   accountId,
@@ -759,7 +448,10 @@ function SingleStockLiquidationPanel({
   onSaveConditionalOrder: (
     payload: ConditionalLiquidationFormPayload
   ) => Promise<void>;
-  onToggleConditionalOrder: (orderId: string, enabled: boolean) => Promise<void>;
+  onToggleConditionalOrder: (
+    orderId: string,
+    enabled: boolean
+  ) => Promise<void>;
   orders: LiquidationTodayOrder[];
   selectedStockCode: string;
   trades: LiquidationTodayTrade[];
@@ -910,7 +602,7 @@ function SingleStockLiquidationPanel({
         </div>
       </DataPanel>
 
-      <ConditionalLiquidationPanel
+      <TakeProfitPlanPanel
         accountId={accountId}
         actionLoading={actionLoading || conditionalActionLoading}
         holding={holding}
@@ -922,6 +614,7 @@ function SingleStockLiquidationPanel({
         order={conditionalOrder}
         selectedStockCode={selectedStockCode}
       />
+
 
       <RelatedOrdersTable orders={orders} trades={trades} />
     </div>
@@ -937,8 +630,6 @@ export function LiquidationPage() {
   );
   const openStudioTab = useStudioNavigate();
   const { toast } = useToast();
-  const [selectedHoldings, setSelectedHoldings] = React.useState<string[]>([]);
-  const [activeTab, setActiveTab] = React.useState('current');
   const {
     accountId,
     currentHoldings,
@@ -954,9 +645,9 @@ export function LiquidationPage() {
   const {
     error: actionError,
     isLoading: actionLoading,
-    liquidateAll,
     liquidateMultiple,
   } = useLiquidationActions();
+  const tickDropPctByCode = useRollingQuoteDrops(currentHoldings);
   const [conditionalOrdersResult, refetchConditionalOrders] = useQuery({
     query: ConditionalLiquidationOrdersQuery,
     variables: {
@@ -978,8 +669,10 @@ export function LiquidationPage() {
   const [evaluateConditionalResult, evaluateConditionalOrders] = useMutation(
     EvaluateConditionalLiquidationOrdersMutation
   );
-  const conditionalOrders =
-    conditionalOrdersResult.data?.conditionalLiquidationOrders ?? [];
+  const conditionalOrders = React.useMemo(
+    () => conditionalOrdersResult.data?.conditionalLiquidationOrders ?? [],
+    [conditionalOrdersResult.data?.conditionalLiquidationOrders]
+  );
   const conditionalActionLoading =
     upsertConditionalResult.fetching ||
     toggleConditionalResult.fetching ||
@@ -1028,34 +721,18 @@ export function LiquidationPage() {
         : null,
     [conditionalOrders, selectedStockCode]
   );
-  const conditionalOrderStockCodes = React.useMemo(() => {
-    const codes = new Set<string>();
-    conditionalOrders
-      .filter(order => order.status !== 'CANCELLED')
-      .forEach(order => {
-        const code = normalizeStockCode(order.stockCode);
-        const prefix = getStockCodePrefix(code);
-        if (code) codes.add(code);
-        if (prefix) codes.add(prefix);
-      });
-    return codes;
-  }, [conditionalOrders]);
-  const portfolioMarketValue =
-    portfolioSummary?.totalMarketValue ??
-    currentHoldings.reduce((sum, holding) => sum + (holding.marketValue ?? 0), 0);
-  const totalLiquidatedPnL = liquidatedStocks.reduce(
-    (sum, stock) => sum + (toFiniteNumber(stock.realizedPnL) ?? 0),
+  const holdingsMarketValue = currentHoldings.reduce(
+    (sum, holding) => sum + (toFiniteNumber(holding.marketValue) ?? 0),
     0
   );
-  const accountName =
-    portfolioSummary?.accountName || accountId || '当前账户';
+  const portfolioMarketValue =
+    holdingsMarketValue ||
+    portfolioSummary?.totalMarketValue ||
+    liquidationSummary?.totalMarketValue ||
+    0;
+  const accountName = portfolioSummary?.accountName || accountId || '当前账户';
   const totalAsset = portfolioSummary?.totalAsset;
-  const activeMode: LiquidationStudioMode =
-    activeTab === 'liquidated' ? 'HISTORY' : 'LIQUIDATION';
-  const batchSellableVolume = getBatchSellableVolume(liquidatableHoldings);
-  const batchEstimatedSellValue =
-    liquidationSummary?.totalMarketValue ??
-    getBatchEstimatedSellValue(liquidatableHoldings);
+  const activeMode: LiquidationStudioMode = 'LIQUIDATION';
 
   const showActionResult = React.useCallback(
     (result: LiquidationActionResult) => {
@@ -1084,30 +761,17 @@ export function LiquidationPage() {
     async (stockCodes: string[]) => {
       const result = await liquidateMultiple(stockCodes);
       showActionResult(result);
-      if (result.success) setSelectedHoldings([]);
       refetch();
     },
     [liquidateMultiple, refetch, showActionResult]
   );
-
-  const handleLiquidateSelected = React.useCallback(async () => {
-    if (selectedHoldings.length === 0) return;
-    await handleLiquidateStockCodes(selectedHoldings);
-  }, [handleLiquidateStockCodes, selectedHoldings]);
-
-  const handleLiquidateAll = React.useCallback(async () => {
-    const result = await liquidateAll();
-    showActionResult(result);
-    if (result.success) setSelectedHoldings([]);
-    refetch();
-  }, [liquidateAll, refetch, showActionResult]);
 
   const handleSaveConditionalOrder = React.useCallback(
     async (payload: ConditionalLiquidationFormPayload) => {
       const result = await upsertConditionalOrder({ input: payload });
       if (result.error) {
         toast({
-          title: '条件清仓保存失败',
+          title: '止盈计划保存失败',
           description: result.error.message,
           variant: 'destructive',
         });
@@ -1115,7 +779,7 @@ export function LiquidationPage() {
       }
 
       toast({
-        title: payload.enabled ? '条件清仓已启用' : '条件清仓已保存',
+        title: payload.enabled ? '止盈计划已启用' : '止盈计划已保存',
         description: payload.stockCode,
       });
       refreshConditionalOrders();
@@ -1136,7 +800,7 @@ export function LiquidationPage() {
       }
 
       toast({
-        title: enabled ? '条件清仓已启用' : '条件清仓已停用',
+        title: enabled ? '止盈计划已启用' : '止盈计划已停用',
       });
       refreshConditionalOrders();
     },
@@ -1155,7 +819,7 @@ export function LiquidationPage() {
         return;
       }
 
-      toast({ title: '条件清仓已取消' });
+      toast({ title: '止盈计划已取消' });
       refreshConditionalOrders();
     },
     [cancelConditionalOrder, refreshConditionalOrders, toast]
@@ -1182,7 +846,7 @@ export function LiquidationPage() {
     toast({
       title:
         submitted.length > 0
-          ? '条件清仓委托已提交'
+          ? '止盈委托已提交'
           : triggered.length > 0
             ? '条件已触发但未提交'
             : '条件尚未触发',
@@ -1215,13 +879,12 @@ export function LiquidationPage() {
         openStudioTab('/holdings');
         return;
       }
-      if (nextMode === 'HISTORY') {
-        setActiveTab('liquidated');
+      if (nextMode === 'LIQUIDATION' && selectedStockCode) {
+        openStudioTab('/liquidation');
         return;
       }
-      setActiveTab('current');
     },
-    [openStudioTab]
+    [openStudioTab, selectedStockCode]
   );
 
   const sidebar = (
@@ -1263,10 +926,10 @@ export function LiquidationPage() {
     <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-[#0b1120]/70 px-4">
       <div className="min-w-0">
         <div className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-200">
-          清仓管理
+          清仓风控
         </div>
         <div className="truncate text-[10px] font-medium text-slate-600">
-          当前持仓、清仓委托、当日真实回报
+          条件触发监控、持仓风险提示、当日真实回报
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
@@ -1278,50 +941,6 @@ export function LiquidationPage() {
           <RefreshCw className="h-3.5 w-3.5" />
           刷新数据
         </button>
-
-        <AlertDialog>
-          <AlertDialogTrigger asChild>
-            <button
-              type="button"
-              disabled={liquidatableHoldings.length === 0 || actionLoading}
-              className="flex h-8 items-center justify-center gap-2 rounded-md border border-rose-400/25 bg-rose-500/10 px-3 text-[10px] font-black uppercase tracking-wider text-rose-200 transition-colors hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {actionLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <AlertTriangle className="h-3.5 w-3.5" />
-              )}
-              一键清仓
-            </button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>确认一键清仓</AlertDialogTitle>
-              <AlertDialogDescription asChild>
-                <div>
-                  将对当前账户所有可卖持仓提交 SELL 委托。
-                  <div className="mt-3 rounded-md bg-muted p-3 text-sm">
-                    <p>可清仓标的: {liquidatableHoldings.length} 只</p>
-                    <p>可卖数量: {batchSellableVolume.toLocaleString()} 股</p>
-                    <p>
-                      估算委托市值:{' '}
-                      {formatCurrency(batchEstimatedSellValue)}
-                    </p>
-                  </div>
-                </div>
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>取消</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={handleLiquidateAll}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              >
-                提交全部清仓委托
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
 
         <button
           type="button"
@@ -1336,61 +955,23 @@ export function LiquidationPage() {
     </div>
   );
 
-  const batchContent = (
-    <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
-      <LiquidationStats
-        availableCash={portfolioSummary?.cash ?? 0}
-        totalLiquidatedPnL={totalLiquidatedPnL}
-        totalMarketValue={portfolioMarketValue}
-      />
-
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-3">
-        <TabsList className="flex h-9 w-full max-w-[360px] gap-1 rounded-md border border-white/10 bg-white/[0.03] p-1">
-          <TabsTrigger value="current" className={compactTabTriggerClass}>
-            <Briefcase className="mr-2 h-3.5 w-3.5" />
-            当前持仓
-            <span className="ml-2 rounded bg-white/[0.04] px-1 text-[9px]">
-              {currentHoldings.length}
-            </span>
-          </TabsTrigger>
-          <TabsTrigger value="liquidated" className={compactTabTriggerClass}>
-            <History className="mr-2 h-3.5 w-3.5" />
-            真实回报
-            <span className="ml-2 rounded bg-white/[0.04] px-1 text-[9px]">
-              {liquidatedStocks.length}
-            </span>
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="current" className="mt-0 focus-visible:outline-none">
-          <CurrentHoldingsSection
-            conditionalOrderStockCodes={conditionalOrderStockCodes}
-            holdings={currentHoldings}
-            isSubmitting={actionLoading}
-            liquidateMultiple={handleLiquidateStockCodes}
-            onConfigureConditionalOrder={holding =>
-              openStudioTab(
-                buildLiquidationSymbolPath(
-                  holding.stockCode,
-                  manualWorkspaceTabId,
-                  holding.instrumentName
-                )
-              )
-            }
-            onLiquidateSelected={handleLiquidateSelected}
-            onSelectionChange={setSelectedHoldings}
-            selectedHoldings={selectedHoldings}
-          />
-        </TabsContent>
-
-        <TabsContent
-          value="liquidated"
-          className="mt-0 focus-visible:outline-none"
-        >
-          <LiquidatedStocksSection liquidatedStocks={liquidatedStocks} />
-        </TabsContent>
-      </Tabs>
-    </div>
+  const dashboardContent = (
+    <LiquidationDashboard
+      conditionalOrders={conditionalOrders}
+      currentHoldings={currentHoldings}
+      liquidatedStocks={liquidatedStocks}
+      onOpenStock={(stockCode, instrumentName) =>
+        openStudioTab(
+          buildLiquidationSymbolPath(
+            stockCode,
+            manualWorkspaceTabId,
+            instrumentName
+          )
+        )
+      }
+      portfolioMarketValue={portfolioMarketValue}
+      tickDropPctByCode={tickDropPctByCode}
+    />
   );
 
   const stockContent = (
@@ -1435,7 +1016,7 @@ export function LiquidationPage() {
       ) : selectedStockCode ? (
         stockContent
       ) : (
-        batchContent
+        dashboardContent
       )}
     </div>
   );
@@ -1465,7 +1046,7 @@ export function LiquidationPage() {
           <span className="text-slate-700">|</span>
           <span>{accountName}</span>
           <span className="text-slate-700">|</span>
-          <span>已选 {selectedHoldings.length}</span>
+          <span>监控 {conditionalOrders.length} 条条件单</span>
         </>
       }
       statusBarRight={

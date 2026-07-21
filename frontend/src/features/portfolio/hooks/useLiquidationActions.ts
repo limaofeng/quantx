@@ -33,7 +33,9 @@ function normalizeStockCode(value: unknown) {
 }
 
 function uniqueStockCodes(stockCodes: string[]) {
-  return Array.from(new Set(stockCodes.map(normalizeStockCode))).filter(Boolean);
+  return Array.from(new Set(stockCodes.map(normalizeStockCode))).filter(
+    Boolean
+  );
 }
 
 function asActionError(message: string) {
@@ -42,9 +44,7 @@ function asActionError(message: string) {
 
 function summarizeFailures(failures: LiquidationActionFailure[]) {
   if (failures.length === 0) return '';
-  return failures
-    .map(item => `${item.stockCode}: ${item.error}`)
-    .join('; ');
+  return failures.map(item => `${item.stockCode}: ${item.error}`).join('; ');
 }
 
 export function useLiquidationActions(): UseLiquidationActionsResult {
@@ -122,7 +122,8 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
           success: failures.length === 0,
         };
 
-        if (!actionResult.success) setError(asActionError(actionResult.message));
+        if (!actionResult.success)
+          setError(asActionError(actionResult.message));
         return actionResult;
       } catch (nextError) {
         const normalized =
@@ -138,58 +139,64 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
     [accountId, executeLiquidatePosition]
   );
 
-  const liquidateAll = useCallback(async (): Promise<LiquidationActionResult> => {
-    setLocalLoading(true);
-    setError(null);
+  const liquidateAll =
+    useCallback(async (): Promise<LiquidationActionResult> => {
+      setLocalLoading(true);
+      setError(null);
 
-    try {
-      const operation = await executeLiquidateAll({
-        input: {
-          accountId,
-          confirm: true,
-          maxRetry: 1,
-        },
-      });
+      try {
+        const operation = await executeLiquidateAll({
+          input: {
+            accountId,
+            confirm: true,
+            maxRetry: 1,
+          },
+        });
 
-      if (operation.error) {
-        const nextError = asActionError(operation.error.message);
-        setError(nextError);
-        throw nextError;
+        if (operation.error) {
+          const nextError = asActionError(operation.error.message);
+          setError(nextError);
+          throw nextError;
+        }
+
+        const result = operation.data?.liquidateAllPositions;
+        if (!result) {
+          const nextError = asActionError('清仓结果为空');
+          setError(nextError);
+          throw nextError;
+        }
+
+        const failures =
+          result.errors?.map(item => ({
+            error: item.error,
+            stockCode: item.stockCode,
+          })) || [];
+        const actionResult = {
+          failures,
+          message: result.message,
+          submittedOrderIds: (result.orders || []).map(String),
+          success: Boolean(result.success),
+        };
+
+        if (!actionResult.success)
+          setError(asActionError(actionResult.message));
+        return actionResult;
+      } catch (nextError) {
+        const normalized =
+          nextError instanceof Error
+            ? nextError
+            : asActionError(String(nextError));
+        setError(normalized);
+        throw normalized;
+      } finally {
+        setLocalLoading(false);
       }
-
-      const result = operation.data?.liquidateAllPositions;
-      if (!result) {
-        const nextError = asActionError('清仓结果为空');
-        setError(nextError);
-        throw nextError;
-      }
-
-      const failures =
-        result.errors?.map(item => ({
-          error: item.error,
-          stockCode: item.stockCode,
-        })) || [];
-      const actionResult = {
-        failures,
-        message: result.message,
-        submittedOrderIds: (result.orders || []).map(String),
-        success: Boolean(result.success),
-      };
-
-      if (!actionResult.success) setError(asActionError(actionResult.message));
-      return actionResult;
-    } catch (nextError) {
-      const normalized =
-        nextError instanceof Error ? nextError : asActionError(String(nextError));
-      setError(normalized);
-      throw normalized;
-    } finally {
-      setLocalLoading(false);
-    }
-  }, [accountId, executeLiquidateAll]);
+    }, [accountId, executeLiquidateAll]);
 
   const redeemCash = useCallback(async () => {
-    const nextError = new Error('资金赎回请在券商客户端办理，QuantX 当前不提交转账指令。');
+    const nextError = new Error(
+      '资金赎回请在券商客户端办理，QuantX 当前不提交转账指令。'
+    );
     setError(nextError);
     throw nextError;
   }, []);

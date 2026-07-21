@@ -1,5 +1,5 @@
-import { render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Position } from '@/features/portfolio/types';
 import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
@@ -11,6 +11,9 @@ vi.mock('@/features/portfolio/hooks/useRealTimeHoldings', () => ({
     isConnected: true,
   }),
 }));
+
+const SORT_PREFERENCE_STORAGE_KEY =
+  'quantx.tradingHoldingsSidebar.sortPreference.v1';
 
 function makePosition(overrides: Partial<Position> = {}) {
   return {
@@ -39,7 +42,36 @@ function makePosition(overrides: Partial<Position> = {}) {
   } as Position;
 }
 
+function getRenderedHoldingButtons() {
+  return screen
+    .getAllByRole('button')
+    .filter(button =>
+      ['比亚迪', '长江电力'].some(name => button.textContent?.includes(name))
+    );
+}
+
+async function openSortMenu() {
+  fireEvent.pointerDown(screen.getByRole('button', { name: '选择持仓排序' }));
+  await screen.findByRole('menu');
+}
+
 describe('TradingHoldingsSidebar', () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.mocked(window.localStorage.getItem).mockImplementation(
+      key => storage.get(String(key)) ?? null
+    );
+    vi.mocked(window.localStorage.setItem).mockImplementation((key, value) => {
+      storage.set(String(key), String(value));
+    });
+    vi.mocked(window.localStorage.removeItem).mockImplementation(key => {
+      storage.delete(String(key));
+    });
+    vi.mocked(window.localStorage.clear).mockImplementation(() => {
+      storage.clear();
+    });
+  });
+
   it('shows daily quote change percent separately from holding return', () => {
     render(
       <TradingHoldingsSidebar
@@ -141,5 +173,139 @@ describe('TradingHoldingsSidebar', () => {
     expect(within(holdingButton).getByText('¥58.41万')).toBeInTheDocument();
     expect(within(holdingButton).getByText('市值')).toBeInTheDocument();
     expect(within(holdingButton).getByText('¥51.80万')).toBeInTheDocument();
+  });
+
+  it('keeps market value sorting as the default', () => {
+    render(
+      <TradingHoldingsSidebar
+        accountName="账户300000013250"
+        holdings={[
+          makePosition({
+            id: 'position-low',
+            instrumentName: '长江电力',
+            marketValue: 100000,
+            stockCode: '600900.SH',
+          }),
+          makePosition(),
+        ]}
+        isLoading={false}
+        onAccountOpen={vi.fn()}
+        onHoldingSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onStockInfoOpen={vi.fn()}
+      />
+    );
+
+    const holdingButtons = getRenderedHoldingButtons();
+    expect(holdingButtons[0]).toHaveTextContent('比亚迪');
+    expect(holdingButtons[1]).toHaveTextContent('长江电力');
+  });
+
+  it('uses the persisted manual holding order when manual sorting is active', () => {
+    window.localStorage.setItem(
+      SORT_PREFERENCE_STORAGE_KEY,
+      JSON.stringify({
+        manualOrder: ['600900.SH', '002594.SZ'],
+        sortKey: 'MANUAL',
+      })
+    );
+
+    render(
+      <TradingHoldingsSidebar
+        accountName="账户300000013250"
+        holdings={[
+          makePosition(),
+          makePosition({
+            id: 'position-low',
+            instrumentName: '长江电力',
+            marketValue: 100000,
+            stockCode: '600900.SH',
+          }),
+        ]}
+        isLoading={false}
+        onAccountOpen={vi.fn()}
+        onHoldingSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onStockInfoOpen={vi.fn()}
+      />
+    );
+
+    const holdingButtons = getRenderedHoldingButtons();
+    expect(holdingButtons[0]).toHaveTextContent('长江电力');
+    expect(holdingButtons[1]).toHaveTextContent('比亚迪');
+    expect(
+      screen.getByRole('button', { name: '选择持仓排序' })
+    ).toHaveTextContent('手动');
+    expect(
+      screen.queryByRole('button', { name: '设置手动排序' })
+    ).not.toBeInTheDocument();
+  });
+
+  it('sorts holdings by selected profit field', async () => {
+    render(
+      <TradingHoldingsSidebar
+        accountName="账户300000013250"
+        holdings={[
+          makePosition(),
+          makePosition({
+            id: 'position-profit',
+            instrumentName: '长江电力',
+            marketValue: 100000,
+            profitLoss: 1200,
+            stockCode: '600900.SH',
+          }),
+        ]}
+        isLoading={false}
+        onAccountOpen={vi.fn()}
+        onHoldingSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onStockInfoOpen={vi.fn()}
+      />
+    );
+
+    await openSortMenu();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '持仓盈亏' }));
+
+    let holdingButtons = getRenderedHoldingButtons();
+    expect(holdingButtons[0]).toHaveTextContent('长江电力');
+    expect(holdingButtons[1]).toHaveTextContent('比亚迪');
+
+    await openSortMenu();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '升序优先' }));
+
+    holdingButtons = getRenderedHoldingButtons();
+    expect(holdingButtons[0]).toHaveTextContent('比亚迪');
+    expect(holdingButtons[1]).toHaveTextContent('长江电力');
+  });
+
+  it('switches into manual sorting and opens manual order settings', async () => {
+    render(
+      <TradingHoldingsSidebar
+        accountName="账户300000013250"
+        holdings={[makePosition()]}
+        isLoading={false}
+        onAccountOpen={vi.fn()}
+        onHoldingSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onStockInfoOpen={vi.fn()}
+      />
+    );
+
+    await openSortMenu();
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '手动排序' }));
+
+    expect(
+      screen.getByRole('button', { name: '选择持仓排序' })
+    ).toHaveTextContent('手动');
+    await openSortMenu();
+    fireEvent.click(screen.getByRole('menuitem', { name: '编辑手动顺序' }));
+
+    expect(
+      screen.getByRole('heading', { name: '设置手动排序' })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('拖拽持仓 比亚迪')).toBeInTheDocument();
+    expect(window.localStorage.getItem(SORT_PREFERENCE_STORAGE_KEY)).toContain(
+      '"sortKey":"MANUAL"'
+    );
   });
 });
