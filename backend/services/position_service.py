@@ -3,15 +3,21 @@
 处理持仓相关的业务逻辑
 """
 
+import asyncio
 import logging
+from datetime import datetime
 from hashlib import md5
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+from sqlalchemy import select
 from database.connection import get_async_db
 from database.relational_base import BulkSaveResult
+from models.broker_position_snapshot import BrokerPositionSnapshot
 from models.position import Position
 from repositories import InstrumentRepository
 from repositories.position_repository import PositionRepository
+from services.closed_position_cycle_service import ClosedPositionCycleService
+from core.utils import time_utils
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,16 @@ class PositionService:
 
       return position_db
 
+  async def get_position_by_account_stock(
+    self, account_id: str, stock_code: str
+  ) -> Optional[Position]:
+    """Return a position scoped to the requested funding account."""
+    async for db in get_async_db():
+      return await PositionRepository(db).find_by_stock_code(
+        stock_code, account_id=account_id
+      )
+    return None
+
   async def save_position(self, position: Position) -> Position:
     """创建或更新持仓"""
     async for db in get_async_db():
@@ -59,22 +75,42 @@ class PositionService:
   async def save_positions(self, positions: List[Position]) -> BulkSaveResult:
     """批量保存持仓数据"""
     async for db in get_async_db():
-      position_repo = PositionRepository(db)
-
-      # 统计清仓的数据
+      cycle_service = ClosedPositionCycleService()
       closed_positions = [pos for pos in positions if pos.volume == 0]
-
-      # 删除清仓的持仓
-      if closed_positions:
-        closed_ids = [pos.id for pos in closed_positions if pos.id]
-        if closed_ids:
-          await position_repo.bulk_delete_by_ids(closed_ids)
-          logger.info(f"已删除 {len(closed_ids)} 个清仓持仓记录")
-
-      # 只保存活跃持仓（volume > 0）
       active_positions = [pos for pos in positions if pos.volume > 0]
-      result = await position_repo.bulk_save(active_positions)
-      result.deleted_count = len(closed_positions)
+      deleted_count = 0
+      inserted_count = 0
+      updated_count = 0
+      saved_entities = []
+
+      for position in closed_positions:
+        existing = await db.get(Position, position.id) if position.id else None
+        if existing is None:
+          continue
+        await cycle_service.record_position_closed(
+          db,
+          existing,
+          closed_at=time_utils.now(),
+          source="POSITION_BATCH",
+        )
+        await db.delete(existing)
+        deleted_count += 1
+
+      for position in active_positions:
+        existing = await db.get(Position, position.id) if position.id else None
+        saved_entities.append(await db.merge(position))
+        if existing is None:
+          inserted_count += 1
+        else:
+          updated_count += 1
+      await db.commit()
+      result = BulkSaveResult(
+        saved_entities=saved_entities,
+        saved_count=len(saved_entities),
+        inserted_count=inserted_count,
+        updated_count=updated_count,
+        deleted_count=deleted_count,
+      )
 
       logger.info(
         f"持仓数据更新完成: 新增/更新 {result.saved_count} 个, "
@@ -82,6 +118,164 @@ class PositionService:
       )
 
       return result
+
+  async def refresh_from_miniqmt(self, account_id: str) -> Dict[str, Any]:
+    """Query one complete miniQMT snapshot and atomically persist it."""
+    from core.utils import time_utils
+    from miniqmt import XTTradingManagerRegistry
+
+    registry = XTTradingManagerRegistry()
+    try:
+      manager = await asyncio.to_thread(registry.get_manager, account_id, False)
+      positions = await asyncio.to_thread(manager.query_positions_snapshot)
+      reported_at = time_utils.now()
+      sequence = int(reported_at.timestamp() * 1_000_000)
+      return await self.apply_full_snapshot(
+        account_id=account_id,
+        positions=positions,
+        sequence=sequence,
+        reported_at=reported_at,
+        source="MINIQMT",
+        is_complete=True,
+      )
+    except Exception as exc:
+      await self.mark_snapshot_failure(account_id, str(exc))
+      raise RuntimeError(f"miniQMT 持仓完整快照失败: {exc}") from exc
+
+  async def apply_full_snapshot(
+    self,
+    *,
+    account_id: str,
+    positions: List[Any],
+    sequence: int,
+    reported_at: datetime,
+    source: str,
+    is_complete: bool,
+  ) -> Dict[str, Any]:
+    """Apply only a complete, monotonic snapshot; a confirmed [] means empty."""
+    if not is_complete:
+      raise ValueError("不完整持仓结果不能覆盖当前快照")
+    normalized_account = str(account_id or "").strip()
+    if not normalized_account:
+      raise ValueError("持仓快照缺少账户")
+    converted = [
+      self._position_from_broker(item, normalized_account) for item in positions
+    ]
+    incoming = {
+      item.stock_code: item for item in converted if int(item.volume or 0) > 0
+    }
+
+    async for db in get_async_db():
+      status = await db.get(BrokerPositionSnapshot, normalized_account)
+      if status and int(sequence) <= int(status.sequence or 0):
+        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+      result = await db.execute(
+        select(Position).where(Position.account_id == normalized_account)
+      )
+      existing = {item.stock_code: item for item in result.scalars().all()}
+      cycle_service = ClosedPositionCycleService()
+      for code, item in existing.items():
+        if code not in incoming:
+          await cycle_service.record_position_closed(
+            db,
+            item,
+            closed_at=reported_at,
+            source=str(source or "MINIQMT"),
+          )
+          await db.delete(item)
+      for item in incoming.values():
+        await db.merge(item)
+      received_at = datetime.now(reported_at.tzinfo) if reported_at.tzinfo else datetime.now()
+      snapshot = status or BrokerPositionSnapshot(account_id=normalized_account)
+      snapshot.sequence = int(sequence)
+      snapshot.source = str(source or "MINIQMT")
+      snapshot.reported_at = reported_at
+      snapshot.received_at = received_at
+      snapshot.position_count = len(incoming)
+      snapshot.is_complete = True
+      snapshot.last_error = None
+      await db.merge(snapshot)
+      await db.commit()
+      return {**snapshot.to_dict(), "applied": True, "reason": "APPLIED"}
+    raise RuntimeError("持仓快照数据库不可用")
+
+  async def apply_position_delta(self, position: Any, account_id: str) -> None:
+    """Persist an immediate miniQMT callback without pretending it is full."""
+    item = self._position_from_broker(position, account_id)
+    async for db in get_async_db():
+      existing = await db.get(Position, item.id)
+      if int(item.volume or 0) <= 0:
+        if existing:
+          await ClosedPositionCycleService().record_position_closed(
+            db,
+            existing,
+            closed_at=time_utils.now(),
+            source="POSITION_CALLBACK",
+          )
+          await db.delete(existing)
+      else:
+        await db.merge(item)
+      await db.commit()
+      return
+
+  async def get_snapshot_status(
+    self, account_id: str
+  ) -> Optional[Dict[str, Any]]:
+    async for db in get_async_db():
+      status = await db.get(BrokerPositionSnapshot, account_id)
+      return status.to_dict() if status else None
+    return None
+
+  async def mark_snapshot_failure(self, account_id: str, error: str) -> None:
+    async for db in get_async_db():
+      status = await db.get(BrokerPositionSnapshot, account_id)
+      if status is None:
+        status = BrokerPositionSnapshot(
+          account_id=account_id,
+          sequence=0,
+          source="MINIQMT",
+          is_complete=False,
+        )
+      status.last_error = str(error or "")[:2000]
+      await db.merge(status)
+      await db.commit()
+      return
+
+  @staticmethod
+  def _position_from_broker(value: Any, account_id: str) -> Position:
+    if isinstance(value, Position):
+      data = value.to_dict()
+      data["stock_code"] = value.stock_code
+      data["account_id"] = account_id
+      data["account_type"] = (
+        value.account_type.to_int() if value.account_type else None
+      )
+    elif isinstance(value, dict):
+      data = dict(value)
+      data["account_id"] = account_id
+      account_type = data.get("account_type")
+      if hasattr(account_type, "to_int"):
+        data["account_type"] = account_type.to_int()
+    else:
+      fields = {
+        "account_type",
+        "stock_code",
+        "instrument_name",
+        "volume",
+        "can_use_volume",
+        "open_price",
+        "market_value",
+        "frozen_volume",
+        "on_road_volume",
+        "yesterday_volume",
+        "avg_price",
+        "direction",
+      }
+      data = {key: getattr(value, key, None) for key in fields}
+      data["account_id"] = account_id
+    if not data.get("stock_code"):
+      raise ValueError("持仓快照包含缺少股票代码的记录")
+    return Position.from_dict(data)
 
   async def calculate_portfolio_summary(
     self, account_id: str, positions: List[Position]

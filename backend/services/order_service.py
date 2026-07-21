@@ -23,16 +23,43 @@ trading_registry = XTTradingManagerRegistry()
 class OrderService:
   """订单服务类"""
 
-  def __init__(self, account_id: str = "300000013250"):
-    self.trading_manager = trading_registry.get_manager(account_id)
+  def __init__(self, account_id: Optional[str] = None):
+    normalized_account_id = (account_id or "").strip()
+    self.trading_manager = (
+      trading_registry.get_manager(normalized_account_id)
+      if normalized_account_id
+      else None
+    )
 
   async def get_today_orders(self, account_id: str) -> List[Order]:
     """从 trading_manager 获取当日委托"""
-    if not self.trading_manager:
-      return []
+    if not self.trading_manager or not self.trading_manager.is_connected:
+      raise ValueError("miniQMT 交易连接未建立，无法同步当日委托")
 
-    xt_orders = self.trading_manager.get_orders()
+    xt_orders = self.trading_manager.get_orders(cancelable_only=False)
     return [self._convert_xt_order(xt_order) for xt_order in xt_orders]
+
+  async def sync_today_orders(self, account_id: str) -> BulkSaveResult:
+    """将 miniQMT 当日委托幂等同步到 orders 表。"""
+    if account_id != getattr(self.trading_manager, "account_id", account_id):
+      raise ValueError("委托同步账户与交易连接账户不一致")
+    orders = await self.get_today_orders(account_id)
+    if not orders:
+      return BulkSaveResult([], 0, 0, 0)
+    return await self.save_orders(orders)
+
+  async def upsert_xt_order(self, xt_order: XtOrder) -> Order:
+    """持久化单笔 miniQMT 委托回报，缺失时插入、存在时更新。"""
+    order = self._convert_xt_order(xt_order)
+    result = await self.save_orders([order])
+    return result.saved_entities[0]
+
+  async def sync_order(self, order_id: int) -> Optional[Order]:
+    """从 miniQMT 重新读取并持久化单笔委托。"""
+    if not self.trading_manager or not self.trading_manager.is_connected:
+      return None
+    xt_order = self.trading_manager.get_order(order_id)
+    return await self.upsert_xt_order(xt_order) if xt_order else None
 
   async def get_history_orders(
     self, account_id: str, start_date: str, end_date: str

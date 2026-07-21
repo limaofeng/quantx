@@ -58,3 +58,50 @@ def test_ordinary_sell_still_rejects_odd_lot_volume():
     order_type=OrderType.SELL,
     close_position=False,
   )
+
+
+@pytest.mark.asyncio
+async def test_buy_capacity_check_uses_default_fee_config_without_service_config():
+  service = TradingService.__new__(TradingService)
+  account = SimpleNamespace(cash=10000)
+
+  await service._check_trading_capacity(
+    OrderType.BUY,
+    100,
+    10,
+    make_stock_info(),
+    account,
+  )
+
+
+def test_calculate_commission_uses_default_fee_constants():
+  service = TradingService.__new__(TradingService)
+
+  assert service._calculate_commission(Decimal("6041"), OrderType.BUY) == Decimal(
+    "5.06041"
+  )
+
+
+@pytest.mark.asyncio
+async def test_try_execute_order_preserves_manager_failure_message():
+  service = TradingService.__new__(TradingService)
+
+  class TradingManagerStub:
+    def place_order(self, **kwargs):
+      return {"success": False, "message": "交易连接未建立"}
+
+  service.trading_manager = TradingManagerStub()
+
+  result = await service._try_execute_order(
+    stock_code="000001.SZ",
+    order_type=OrderType.BUY,
+    order_volume=100,
+    price_type=PriceType.FIX_PRICE,
+    price=10,
+  )
+
+  assert result == {
+    "success": False,
+    "order_id": None,
+    "message": "交易连接未建立",
+  }

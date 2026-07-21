@@ -3,6 +3,7 @@
 处理成交记录相关的数据访问
 """
 
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, func, select
@@ -86,8 +87,10 @@ class TradeRepository(BaseRepository[Trade]):
     self, start_date: str, end_date: str, account_id: str = None
   ) -> List[Trade]:
     """获取日期范围内的成交记录"""
+    start_value = date.fromisoformat(start_date) if isinstance(start_date, str) else start_date
+    end_value = date.fromisoformat(end_date) if isinstance(end_date, str) else end_date
     query = select(Trade).filter(
-      and_(func.date(Trade.time) >= start_date, func.date(Trade.time) <= end_date)
+      and_(func.date(Trade.time) >= start_value, func.date(Trade.time) <= end_value)
     )
 
     if account_id:

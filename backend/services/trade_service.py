@@ -22,16 +22,33 @@ trading_registry = XTTradingManagerRegistry()
 class TradeService:
   """成交服务类"""
 
-  def __init__(self, account_id: str = "300000013250"):
-    self.trading_manager = trading_registry.get_manager(account_id)
+  def __init__(self, account_id: Optional[str] = None):
+    self.account_id = account_id
+    self.trading_manager = (
+      trading_registry.get_manager(account_id, reconnect=False)
+      if account_id
+      else None
+    )
 
   async def get_today_trades(self, account_id: str) -> List[Trade]:
     """从 trading_manager 获取当日成交"""
-    if not self.trading_manager:
+    manager = self.trading_manager
+    if manager is None or self.account_id != account_id:
+      manager = trading_registry.get_manager(account_id, reconnect=False)
+    if not manager:
       return []
 
-    xt_trades = self.trading_manager.get_trades()
+    xt_trades = manager.get_trades()
     return [self._convert_xt_trade(xt_trade) for xt_trade in xt_trades]
+
+  async def upsert_xt_trade(self, xt_trade: XtTrade) -> Trade:
+    """Persist a broker trade idempotently before downstream reconciliation."""
+    trade = self._convert_xt_trade(xt_trade)
+    async for db in get_async_db():
+      repository = TradeRepository(db)
+      saved = await repository.save(trade)
+      return saved
+    raise RuntimeError("成交数据库不可用")
 
   async def get_history_trades(
     self, account_id: str, start_date: str, end_date: str

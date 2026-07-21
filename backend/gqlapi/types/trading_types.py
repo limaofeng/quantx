@@ -45,11 +45,16 @@ class Order:
   time: datetime = strawberry.field(description="报单时间")
 
   @strawberry.field(description="成交明细列表")
-  async def trades(self, account_id: str = "300000013250") -> List["Trade"]:
+  async def trades(
+    self, account_id: Optional[str] = None
+  ) -> List["Trade"]:
     """懒加载成交明细 - 只在前端请求时查询"""
     from services.trade_service import TradeService
 
-    service = TradeService(account_id)
+    resolved_account_id = account_id or getattr(self, "account_id", None)
+    if not resolved_account_id:
+      return []
+    service = TradeService(resolved_account_id)
     return await service.get_trades_by_order_id(int(self.id))
 
 
@@ -64,6 +69,13 @@ class Trade:
 
   account_id: str = strawberry.field(description="资金账号")
   stock_code: str = strawberry.field(description="证券代码")
+
+  @strawberry.field(description="证券名称")
+  def stock_name(self) -> str:
+    from miniqmt.utils.helpers import get_stock_name
+
+    return get_stock_name(self.stock_code) or self.stock_code
+
   order_type: int = strawberry.field(description="委托类型")
 
   @strawberry.field(description="成交编号")

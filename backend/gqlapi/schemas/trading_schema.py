@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 
 import strawberry
@@ -8,6 +9,7 @@ from services.order_service import OrderService
 from services.trading_service import TradingService
 
 from ..resolvers.orders import OrderResolver
+from ..resolvers.account import AccountResolver
 from ..types import (
   CancelOrderInput,
   CancelOrderResult,
@@ -17,7 +19,6 @@ from ..types import (
   Trade,
 )
 
-DEFAULT_ACCOUNT_ID = "300000013250"
 _PRICE_TYPE_ALIASES = {
   "LIMIT": PriceType.FIX_PRICE,
   "FIX_PRICE": PriceType.FIX_PRICE,
@@ -29,6 +30,24 @@ _PRICE_TYPE_ALIASES = {
   "MARKET_PEER_PRICE_FIRST": PriceType.MARKET_PEER_PRICE_FIRST,
   "MARKET_MINE_PRICE_FIRST": PriceType.MARKET_MINE_PRICE_FIRST,
 }
+
+
+async def _resolve_account_id(account_id: Optional[str]) -> str:
+  if account_id and account_id.strip():
+    return account_id.strip()
+  current = await AccountResolver.get_current_account_async()
+  if current is None:
+    raise ValueError("当前未连接资金账户")
+  return current.id
+
+
+def _validate_history_range(start_date: str, end_date: str) -> None:
+  start = date.fromisoformat(start_date)
+  end = date.fromisoformat(end_date)
+  if start > end:
+    raise ValueError("开始日期不能晚于结束日期")
+  if (end - start).days > 365:
+    raise ValueError("历史委托和成交最多查询 365 日")
 
 
 def _parse_order_type(value: str) -> OrderType:
@@ -82,45 +101,56 @@ async def _fetch_order(order_id: int, account_id: str) -> Optional[Order]:
 class TradingQuery:
   @strawberry.field(description="获取当日委托列表")
   async def today_orders(self, account_id: Optional[str] = None) -> List[Order]:
-    return await OrderResolver.get_today_orders(account_id or DEFAULT_ACCOUNT_ID)
+    return await OrderResolver.get_today_orders(await _resolve_account_id(account_id))
 
   @strawberry.field(description="获取历史委托列表")
   async def history_orders(
     self, start_date: str, end_date: str, account_id: Optional[str] = None
   ) -> List[Order]:
+    _validate_history_range(start_date, end_date)
+    resolved_account_id = await _resolve_account_id(account_id)
     return await OrderResolver.get_history_orders(
-      account_id or DEFAULT_ACCOUNT_ID, start_date, end_date
+      resolved_account_id, start_date, end_date
     )
 
   @strawberry.field(description="获取单个委托")
   async def order(
-    self, order_id: int, account_id: str = "300000013250"
+    self, order_id: int, account_id: Optional[str] = None
   ) -> Optional[Order]:
-    return await OrderResolver.get_order(order_id, account_id)
+    return await OrderResolver.get_order(
+      order_id, await _resolve_account_id(account_id)
+    )
 
   @strawberry.field(description="获取当日成交列表")
-  async def today_trades(self, account_id: str = "300000013250") -> List[Trade]:
-    return await OrderResolver.get_today_trades(account_id)
+  async def today_trades(
+    self, account_id: Optional[str] = None
+  ) -> List[Trade]:
+    return await OrderResolver.get_today_trades(
+      await _resolve_account_id(account_id)
+    )
 
   @strawberry.field(description="获取历史成交列表")
   async def history_trades(
     self, account_id: str, start_date: str, end_date: str
   ) -> List[Trade]:
+    _validate_history_range(start_date, end_date)
     return await OrderResolver.get_history_trades(account_id, start_date, end_date)
 
   @strawberry.field(description="获取单个成交记录")
   async def trade(
-    self, trade_id: str, account_id: str = "300000013250"
+    self, trade_id: str, account_id: Optional[str] = None
   ) -> Optional[Trade]:
-    return await OrderResolver.get_trade(trade_id, account_id)
+    return await OrderResolver.get_trade(
+      trade_id, await _resolve_account_id(account_id)
+    )
 
 
 @strawberry.type(description="订单交易相关变更")
 class TradingMutation:
   @strawberry.mutation(description="下单")
   async def place_order(self, input: OrderInput) -> OrderMutationResult:
-    account_id = input.account_id or DEFAULT_ACCOUNT_ID
     try:
+      account_id = await _resolve_account_id(input.account_id)
       order_type = _parse_order_type(input.type)
       price_type = _parse_price_type(input.price_type)
       price = input.price or 0
@@ -154,8 +184,8 @@ class TradingMutation:
 
   @strawberry.mutation(description="撤单")
   async def cancel_order(self, input: CancelOrderInput) -> CancelOrderResult:
-    account_id = input.account_id or DEFAULT_ACCOUNT_ID
     try:
+      account_id = await _resolve_account_id(input.account_id)
       registry = XTTradingManagerRegistry()
       trading_manager = registry.get_manager(account_id)
       order = trading_manager.get_order(input.order_id)

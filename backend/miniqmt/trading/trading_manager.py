@@ -242,6 +242,15 @@ class XTTradingManager:
       logger.error(f"获取持仓失败: {e}")
       return []
 
+  def query_positions_snapshot(self) -> List[XtPosition]:
+    """Return one complete broker snapshot or raise; never blur failure into []."""
+    if not self.is_connected:
+      raise TradingConnectionError("交易连接未建立")
+    positions = self.xttrader.query_stock_positions(self.acc)
+    if positions is None:
+      raise TradingConnectionError("miniQMT 持仓查询未返回完整结果")
+    return list(positions)
+
   def get_position(self, stock_code: str) -> Optional[XtPosition]:
     """
     获取单个持仓信息

@@ -25,6 +25,10 @@ from core.utils import time_utils
 
 logger = logging.getLogger(__name__)
 DEFAULT_ACCOUNT_ID = "300000013250"
+DEFAULT_COMMISSION_RATE = Decimal("0.0003")
+DEFAULT_MIN_COMMISSION = Decimal("5")
+DEFAULT_STAMP_TAX_RATE = Decimal("0.0005")
+DEFAULT_TRANSFER_FEE_RATE = Decimal("0.00001")
 
 
 class TradingStatus:
@@ -162,7 +166,7 @@ class TradingService:
       )
 
       # 6. 调用 MiniQMT 下单接口立即执行（如果是市价单或条件满足）
-      order_id = await self._try_execute_order(
+      execution_result = await self._try_execute_order(
         stock_code=stock_code,
         order_type=order_type,
         order_volume=order_volume,
@@ -171,16 +175,20 @@ class TradingService:
         strategy_name=strategy_name,
         order_remark=order_remark,
       )
+      order_id = execution_result.get("order_id")
+      success = bool(execution_result.get("success"))
 
       return {
-        "success": order_id != -1,
-        "order_id": order_id,
-        "message": "订单提交成功",
+        "success": success,
+        "order_id": order_id if success else None,
+        "message": execution_result.get("message")
+        or ("订单提交成功" if success else "下单失败"),
       }
 
     except Exception as e:
       logger.error(f"下单失败 - 错误: {str(e)}")
-      return {"success": False, "error": str(e), "message": "下单失败"}
+      message = str(e) or "下单失败"
+      return {"success": False, "error": message, "message": message}
 
   async def check_order_status(
     self, order_id: int, wait_time: int = 5
@@ -450,7 +458,7 @@ class TradingService:
     price: float = 0,
     strategy_name: str = "",
     order_remark: str = "",
-  ) -> int:
+  ) -> Dict[str, Any]:
     """尝试执行订单"""
     result = self.trading_manager.place_order(
       stock_code=stock_code,
@@ -461,7 +469,11 @@ class TradingService:
       strategy_name=strategy_name,
       order_remark=order_remark,
     )
-    return result.get("order_id", -1)
+    return {
+      "success": bool(result.get("success")),
+      "order_id": result.get("order_id"),
+      "message": result.get("message", ""),
+    }
 
   async def _get_user_order(self, user_id: str, order_id: int) -> Order:
     """获取用户订单"""
@@ -548,20 +560,22 @@ class TradingService:
 
     return min_order_volume <= volume <= max_order_volume and volume % lot_size == 0
 
-  def _calculate_commission(self, amount: Decimal, order_type: str) -> Decimal:
+  def _calculate_commission(self, amount: Decimal, order_type: OrderType) -> Decimal:
     """计算手续费"""
+    order_type_name = str(getattr(order_type, "name", order_type)).upper()
+
     # 佣金
-    commission = max(amount * self.config.COMMISSION_RATE, self.config.MIN_COMMISSION)
+    commission = max(amount * DEFAULT_COMMISSION_RATE, DEFAULT_MIN_COMMISSION)
 
     # 印花税 (仅卖出收取)
     stamp_tax = (
-      amount * self.config.STAMP_TAX_RATE
-      if order_type == OrderType.SELL
+      amount * DEFAULT_STAMP_TAX_RATE
+      if order_type_name == "SELL"
       else Decimal("0")
     )
 
     # 过户费
-    transfer_fee = amount * self.config.TRANSFER_FEE_RATE
+    transfer_fee = amount * DEFAULT_TRANSFER_FEE_RATE
 
     total_fee = commission + stamp_tax + transfer_fee
     return total_fee
@@ -625,30 +639,12 @@ class TradingService:
       position: XtPosition 对象
     """
     try:
-      from database.connection import get_async_db
-      from repositories.position_repository import PositionRepository
+      from services.position_service import PositionService
 
-      async for db in get_async_db():
-        position_repo = PositionRepository(db)
-        # 查找或创建持仓记录
-        existing_position = await position_repo.find_by_stock_code(
-          position.stock_code,
-          account_id=self.account_id,
-          account_type=self.account_type,
-        )
-
-        if existing_position:
-          # 更新持仓信息
-          existing_position.volume = position.volume
-          existing_position.can_use_volume = position.can_use_volume
-          existing_position.open_price = position.open_price
-          existing_position.market_value = position.market_value
-          await position_repo.save(existing_position)
-          logger.info(f"持仓已更新 - {position.stock_code}: 数量={position.volume}")
-        else:
-          # 创建新持仓记录
-          # TODO: 需要根据实际的 Position 模型结构创建
-          logger.info(f"检测到新持仓 - {position.stock_code}")
+      await PositionService().apply_position_delta(position, self.account_id)
+      logger.info(
+        f"miniQMT 持仓回调已落库 - {position.stock_code}: 数量={position.volume}"
+      )
     except Exception as e:
       logger.error(f"同步持仓到数据库失败: {e}")
 
@@ -662,30 +658,16 @@ class TradingService:
     try:
       from core.events import TradingEventType, trading_event_manager
       from core.events.types import OrderEvent
-      from database.connection import get_async_db
-      from repositories.order_repository import OrderRepository
 
-      # 1. 同步订单状态到数据库
-      async for db in get_async_db():
-        order_repo = OrderRepository(db)
-        existing_order = await order_repo.find_by_order_id(order.order_id)
-
-        if existing_order:
-          # 更新订单状态
-          existing_order.order_status = OrderStatus(order.order_status)
-          existing_order.traded_volume = order.traded_volume
-          existing_order.traded_price = order.traded_price
-          await order_repo.save(existing_order)
-
-          # 2. 发布订单事件
-          event = OrderEvent(
-            event_type=TradingEventType.ORDER_CREATED,
-            order=existing_order,
-            timestamp=time_utils.now(),
-            changes=f"订单状态变更为: {order.order_status}",
-          )
-          await trading_event_manager.publish(TradingEventType.ORDER_CREATED, event)
-          logger.info(f"订单事件已发布 - 订单ID: {order.order_id}")
+      persisted_order = await self.order_service.upsert_xt_order(order)
+      event = OrderEvent(
+        event_type=TradingEventType.ORDER_CREATED,
+        order=persisted_order,
+        timestamp=time_utils.now(),
+        changes=f"订单状态变更为: {order.order_status}",
+      )
+      await trading_event_manager.publish(TradingEventType.ORDER_CREATED, event)
+      logger.info(f"miniQMT 委托回报已落库 - 订单ID: {order.order_id}")
     except Exception as e:
       logger.error(f"处理委托回报失败: {e}")
 
@@ -699,32 +681,27 @@ class TradingService:
     try:
       from core.events import TradingEventType, trading_event_manager
       from core.events.types import OrderEvent
-      from database.connection import get_async_db
-      from repositories.order_repository import OrderRepository
+      from services.closed_position_cycle_service import ClosedPositionCycleService
+      from services.trade_service import TradeService
 
-      # 1. 更新订单成交信息
-      async for db in get_async_db():
-        order_repo = OrderRepository(db)
-        order = await order_repo.find_by_order_id(trade.order_id)
-
-        if order:
-          # 更新成交信息
-          order.traded_volume = trade.traded_volume
-          order.traded_price = trade.traded_price
-          order.order_status = OrderStatus(trade.order_status)
-          await order_repo.save(order)
-
-          # 2. 发布成交事件
-          event = OrderEvent(
-            event_type=TradingEventType.ORDER_FILLED,
-            order=order,
-            timestamp=time_utils.now(),
-            changes=f"订单成交 - 成交价: {trade.traded_price}, 成交量: {trade.traded_volume}",
-          )
-          await trading_event_manager.publish(TradingEventType.ORDER_FILLED, event)
-          logger.info(
-            f"成交事件已发布 - 订单ID: {trade.order_id}, 成交量: {trade.traded_volume}"
-          )
+      persisted_trade = await TradeService(self.account_id).upsert_xt_trade(trade)
+      await ClosedPositionCycleService().reconcile_latest_cycle(
+        persisted_trade.account_id, persisted_trade.stock_code
+      )
+      order = await self.order_service.sync_order(int(trade.order_id))
+      if order:
+        event = OrderEvent(
+          event_type=TradingEventType.ORDER_FILLED,
+          order=order,
+          timestamp=time_utils.now(),
+          changes=f"订单成交 - 成交价: {trade.traded_price}, 成交量: {trade.traded_volume}",
+        )
+        await trading_event_manager.publish(TradingEventType.ORDER_FILLED, event)
+        logger.info(
+          f"成交回报及对应委托已落库 - 成交ID: {persisted_trade.id}, "
+          f"订单ID: {trade.order_id}, "
+          f"成交量: {trade.traded_volume}"
+        )
     except Exception as e:
       logger.error(f"处理成交回报失败: {e}")
 

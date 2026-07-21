@@ -3,6 +3,7 @@
 处理订单相关的数据访问
 """
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
@@ -121,7 +122,7 @@ class OrderRepository(BaseRepository[Order]):
 
   async def find_by_id(self, order_id: int) -> Optional[Order]:
     """根据ID获取订单"""
-    return await self.find_by_id(order_id)
+    return await super().find_by_id(order_id)
 
   async def find_all_by_date_range(
     self, account_id: str, start_date: str, end_date: str
@@ -129,13 +130,16 @@ class OrderRepository(BaseRepository[Order]):
     """根据日期范围查询委托"""
     from sqlalchemy import and_
 
+    start_at = datetime.strptime(start_date, "%Y-%m-%d")
+    end_before = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+
     result = await self.db.execute(
       select(Order)
       .filter(
         and_(
           Order.account_id == account_id,
-          Order.time >= start_date,
-          Order.time <= end_date,
+          Order.time >= start_at,
+          Order.time < end_before,
         )
       )
       .order_by(Order.time.desc())
