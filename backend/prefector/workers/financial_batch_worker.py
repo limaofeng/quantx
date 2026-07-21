@@ -10,7 +10,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from miniqmt import XTDataManagerRegistry
 from services.financial_service import FinancialService
@@ -18,13 +18,18 @@ from services.financial_service import FinancialService
 logger = logging.getLogger(__name__)
 
 
-async def sync_financial_batch(stock_codes: List[str]) -> Dict[str, Any]:
+async def sync_financial_batch(
+  stock_codes: List[str],
+  request_id: Optional[str] = None,
+) -> Dict[str, Any]:
   result: Dict[str, Any] = {
     "total": len(stock_codes),
     "success": 0,
     "failed": 0,
     "saved_count": 0,
     "status": "success",
+    "request_id": request_id,
+    "stock_codes": stock_codes,
   }
 
   if not stock_codes:
@@ -77,7 +82,10 @@ def main() -> int:
   try:
     payload = _read_input(input_path)
     stock_codes = payload.get("stock_codes") or []
-    result = asyncio.run(sync_financial_batch(stock_codes))
+    request_id = payload.get("request_id")
+    result = asyncio.run(
+      sync_financial_batch(stock_codes, request_id=request_id)
+    )
     _write_output(output_path, result)
     return 0
   except Exception as exc:
@@ -90,6 +98,8 @@ def main() -> int:
         "success": 0,
         "failed": len(stock_codes),
         "saved_count": 0,
+        "request_id": payload.get("request_id") if "payload" in locals() else None,
+        "stock_codes": stock_codes,
         "error": str(exc),
       },
     )

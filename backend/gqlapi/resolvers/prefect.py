@@ -111,6 +111,17 @@ def _convert_to_graphql_deployed_flow(prefect_deployment) -> DeploymentFlowRun:
   elif isinstance(prefect_deployment.get("last_run_time"), datetime):
     last_run_time = prefect_deployment["last_run_time"]
 
+  latest_activity_time = None
+  if isinstance(prefect_deployment.get("latest_activity_time"), str):
+    try:
+      latest_activity_time = datetime.fromisoformat(
+        prefect_deployment["latest_activity_time"].replace("Z", "+00:00")
+      )
+    except (ValueError, TypeError):
+      latest_activity_time = None
+  elif isinstance(prefect_deployment.get("latest_activity_time"), datetime):
+    latest_activity_time = prefect_deployment["latest_activity_time"]
+
   return DeploymentFlowRun(
     id=prefect_deployment.get("id", ""),
     name=prefect_deployment.get("name", ""),
@@ -122,6 +133,11 @@ def _convert_to_graphql_deployed_flow(prefect_deployment) -> DeploymentFlowRun:
     next_run_time=next_run_time,
     last_run_time=last_run_time,
     status=prefect_deployment.get("status"),
+    active_run_id=prefect_deployment.get("active_run_id"),
+    active_run_status=prefect_deployment.get("active_run_status"),
+    is_stale=bool(prefect_deployment.get("is_stale", False)),
+    stale_reason=prefect_deployment.get("stale_reason"),
+    latest_activity_time=latest_activity_time,
     created=created,
     updated=updated,
   )
@@ -191,6 +207,35 @@ class PrefectResolver:
     manager = prefect_registry.get_manager()
     result = await manager.retry_flow_run(run_id)
     return _convert_to_graphql_flow_run(result)
+
+  @staticmethod
+  async def set_deployment_schedule_active(
+    id: str, active: bool
+  ) -> DeploymentFlowRun:
+    """启用或暂停部署的自动调度。"""
+    from prefector.flow_deployment_manager import flow_deployment_registry
+
+    deployment_manager = flow_deployment_registry.get_manager()
+    result = await deployment_manager.set_deployment_schedule_active(id, active)
+
+    try:
+      from database.redis_pubsub import redis_pubsub, get_deployment_channel
+
+      deployment_name = result.get("name", "")
+      if deployment_name:
+        await redis_pubsub.publish(
+          get_deployment_channel(deployment_name),
+          {
+            "deployment_name": deployment_name,
+            "schedule_active": active,
+            "message": f"Deployment schedule {'resumed' if active else 'paused'}",
+          },
+        )
+    except Exception:
+      # 订阅刷新失败不影响调度状态变更本身。
+      pass
+
+    return _convert_to_graphql_deployed_flow(result)
 
   @staticmethod
   async def get_flow_run(run_id: str) -> Optional[FlowRun]:

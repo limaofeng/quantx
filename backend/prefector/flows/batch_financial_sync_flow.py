@@ -23,6 +23,7 @@ from services.instrument_service import InstrumentService
 
 # 调度配置 - 工作日早上9点（在市场数据同步后）
 FINANCIAL_SYNC_SCHEDULE = CronSchedule(cron="0 9 * * 1-5")
+FINANCIAL_BATCH_FLOW_TIMEOUT_GRACE_SECONDS = 30
 
 
 @flow(
@@ -38,6 +39,7 @@ async def batch_financial_sync_flow(
   stock_codes: Optional[List[str]] = None,
   batch_size: int = 25,
   batch_timeout_seconds: int = 300,
+  fail_on_batch_error: bool = True,
 ) -> Dict[str, Any]:
   """
   全市场财务数据同步流程
@@ -48,6 +50,7 @@ async def batch_financial_sync_flow(
       stock_codes: 指定股票代码列表；为空时同步全市场股票财务数据
       batch_size: 每个财务同步批次包含的股票数量
       batch_timeout_seconds: 单个批次允许的最大运行秒数
+      fail_on_batch_error: 任一批次异常时是否让 Prefect FlowRun 失败
   """
   logger = get_run_logger()
   start_time = time_utils.now()
@@ -104,10 +107,25 @@ async def batch_financial_sync_flow(
     max_concurrency = max(1, min(max_concurrency, 10))
     batch_size = max(1, min(batch_size, 200))
     batch_timeout_seconds = max(30, min(batch_timeout_seconds, 900))
+    outer_batch_timeout_seconds = (
+      batch_timeout_seconds + FINANCIAL_BATCH_FLOW_TIMEOUT_GRACE_SECONDS
+    )
 
     chunks = [
       stock_codes[i:i + batch_size]
       for i in range(0, len(stock_codes), batch_size)
+    ]
+    batch_plans = [
+      {
+        "batch_index": index,
+        "batch_total": len(chunks),
+        "batch_label": f"{index}/{len(chunks)}",
+        "stock_codes": chunk,
+        "total": len(chunk),
+        "stock_range_start": chunk[0],
+        "stock_range_end": chunk[-1],
+      }
+      for index, chunk in enumerate(chunks, start=1)
     ]
     logger.info(
       f"将 {total_stocks} 只股票分为 {len(chunks)} 个批次，每批 {batch_size}，"
@@ -116,22 +134,37 @@ async def batch_financial_sync_flow(
     
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def process_chunk(batch_index, chunk_codes):
+    async def process_chunk(plan):
       async with semaphore:
+        chunk_codes = plan["stock_codes"]
         logger.info(
-          f"开始财务同步批次 {batch_index}/{len(chunks)}，"
+          f"开始财务同步批次 {plan['batch_label']}，"
           f"股票数 {len(chunk_codes)}，范围 {chunk_codes[0]} ~ {chunk_codes[-1]}"
         )
-        return await sync_financial_batch_task(
-          chunk_codes,
-          batch_index=batch_index,
-          batch_total=len(chunks),
-          timeout_seconds=batch_timeout_seconds,
+        task = asyncio.create_task(
+          sync_financial_batch_task(
+            chunk_codes,
+            batch_index=plan["batch_index"],
+            batch_total=plan["batch_total"],
+            timeout_seconds=batch_timeout_seconds,
+          )
         )
+        done, pending = await asyncio.wait(
+          {task},
+          timeout=outer_batch_timeout_seconds,
+        )
+        if pending:
+          task.cancel()
+          raise TimeoutError(
+            f"财务同步批次 {plan['batch_label']} 超过外层超时 "
+            f"{outer_batch_timeout_seconds}s，范围 "
+            f"{chunk_codes[0]}~{chunk_codes[-1]}"
+          )
+        return await done.pop()
 
     tasks = [
-      asyncio.create_task(process_chunk(index, chunk))
-      for index, chunk in enumerate(chunks, start=1)
+      asyncio.create_task(process_chunk(plan))
+      for plan in batch_plans
     ]
     
     logger.info("任务创建完成，等待执行...")
@@ -147,29 +180,53 @@ async def batch_financial_sync_flow(
     
     failed_batches = []
     
-    for i, res in enumerate(results):
-        if isinstance(res, Exception):
-            error_count += 1
-            failed_batches.append(f"Batch {i}: {str(res)}")
-            continue
-            
-        status = res.get("status")
-        if status == "failed":
-            error_count += 1
-            failed_batches.append(f"Batch {i}: {res.get('error')}")
-        elif status == "partial":
-            failed_batches.append(
-              f"Batch {i}: success={res.get('success', 0)}, "
-              f"failed={res.get('failed', 0)}"
-            )
-            
-        success_count += res.get("success", 0)
-        failed_count += res.get("failed", 0)
-        total_saved += res.get("saved_count", 0)
+    for plan, res in zip(batch_plans, results):
+      batch_label = plan["batch_label"]
+      planned_total = plan["total"]
+
+      if isinstance(res, Exception):
+        error_count += 1
+        failed_count += planned_total
+        failed_batches.append(f"Batch {batch_label}: {str(res)}")
+        continue
+
+      if not isinstance(res, dict):
+        error_count += 1
+        failed_count += planned_total
+        failed_batches.append(f"Batch {batch_label}: 返回结果类型异常 {type(res).__name__}")
+        continue
+
+      validation_errors = _validate_financial_batch_result(plan, res)
+      if validation_errors:
+        error_count += 1
+        failed_count += planned_total
+        failed_batches.append(
+          f"Batch {batch_label}: 返回结果不匹配: {'; '.join(validation_errors)}"
+        )
+        continue
+
+      status = res.get("status") or (
+        "success" if _to_int(res.get("failed", 0)) == 0 else "partial"
+      )
+      batch_success = _to_int(res.get("success", 0))
+      batch_failed = _to_int(res.get("failed", 0))
+
+      if status != "success":
+        error_count += 1
+        failed_batches.append(
+          f"Batch {batch_label}: status={status}, success={batch_success}, "
+          f"failed={batch_failed}, error={res.get('error')}"
+        )
+
+      success_count += batch_success
+      failed_count += batch_failed
+      total_saved += _to_int(res.get("saved_count", 0))
 
     # 计算整体状态
     if failed_count == 0 and error_count == 0:
       overall_status = "success"
+    elif success_count == 0:
+      overall_status = "failed"
     else:
       overall_status = "partial"
 
@@ -217,8 +274,75 @@ async def batch_financial_sync_flow(
     logger.info(f"总耗时: {total_elapsed:.1f}s, Batch Errors: {error_count}")
     logger.info("=" * 60)
 
+    if fail_on_batch_error and error_count > 0:
+      error_preview = "; ".join(failed_batches[:3])
+      if len(failed_batches) > 3:
+        error_preview = f"{error_preview}; ... 共 {len(failed_batches)} 个异常批次"
+      raise RuntimeError(
+        f"财务数据同步存在异常批次，status={overall_status}, "
+        f"success={success_count}, failed={failed_count}, "
+        f"errors={error_count}: {error_preview}"
+      )
+
     return report
 
   except Exception as e:
     logger.error(f"财务数据同步流程失败: {e}")
     raise
+
+
+def _validate_financial_batch_result(
+  plan: Dict[str, Any],
+  result: Dict[str, Any],
+) -> List[str]:
+  errors = []
+
+  expected_index = plan["batch_index"]
+  actual_index = result.get("batch_index")
+  if actual_index is not None and actual_index != expected_index:
+    errors.append(f"batch_index expected={expected_index}, actual={actual_index}")
+
+  expected_total = plan["batch_total"]
+  actual_total = result.get("batch_total")
+  if actual_total is not None and actual_total != expected_total:
+    errors.append(f"batch_total expected={expected_total}, actual={actual_total}")
+
+  expected_count = plan["total"]
+  actual_count = result.get("total")
+  if actual_count is not None and _to_int(actual_count) != expected_count:
+    errors.append(f"total expected={expected_count}, actual={actual_count}")
+
+  expected_start = plan["stock_range_start"]
+  actual_start = result.get("stock_range_start")
+  if actual_start is not None and actual_start != expected_start:
+    errors.append(f"range_start expected={expected_start}, actual={actual_start}")
+
+  expected_end = plan["stock_range_end"]
+  actual_end = result.get("stock_range_end")
+  if actual_end is not None and actual_end != expected_end:
+    errors.append(f"range_end expected={expected_end}, actual={actual_end}")
+
+  actual_stock_codes = result.get("stock_codes")
+  if actual_stock_codes is not None and actual_stock_codes != plan["stock_codes"]:
+    errors.append("stock_codes 与计划批次不一致")
+
+  batch_success = _to_int(result.get("success", 0))
+  batch_failed = _to_int(result.get("failed", 0))
+  if batch_success < 0 or batch_failed < 0:
+    errors.append(
+      f"success/failed 不能为负数: success={batch_success}, failed={batch_failed}"
+    )
+  elif batch_success + batch_failed != expected_count:
+    errors.append(
+      f"success+failed expected={expected_count}, "
+      f"actual={batch_success + batch_failed}"
+    )
+
+  return errors
+
+
+def _to_int(value: Any) -> int:
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return 0

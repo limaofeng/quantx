@@ -49,11 +49,17 @@ class RedisClient:
     """获取 Redis 客户端"""
     return self._client
 
-  def set(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
+  def set(
+    self,
+    key: str,
+    value: Any,
+    ex: Optional[int] = None,
+    nx: bool = False,
+  ) -> bool:
     """设置键值对"""
     if isinstance(value, (dict, list)):
       value = json.dumps(value)
-    return self._client.set(key, value, ex=ex)
+    return self._client.set(key, value, ex=ex, nx=nx)
 
   def get(self, key: str) -> Optional[Any]:
     """获取键值"""

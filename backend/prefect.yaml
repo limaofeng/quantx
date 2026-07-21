@@ -32,7 +32,7 @@ deployments:
     schedules:
       - cron: "0 9 * * 1-5"
         timezone: Asia/Shanghai
-    version: "0.1.1"
+    version: "0.1.2"
   - name: bond-repo-sync
     entrypoint: prefector/flows/bond_repo_flow.py:bond_repo_sync_flow
     work_queue_name: default
@@ -83,6 +83,10 @@ deployments:
     entrypoint: prefector/flows/daily_market_data_sync_flow.py:daily_market_data_sync_flow
     work_queue_name: default
     description: 每日市场数据同步（K线/tick数据）
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
     schedules:
       - cron: "5 15 * * 1-5"
         timezone: Asia/Shanghai

@@ -6,12 +6,13 @@
 
 import asyncio
 import datetime
+import hashlib
 import json
 import random
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from prefect import get_run_logger, task
 from prefect.cache_policies import INPUTS
@@ -619,21 +620,16 @@ async def sync_financial_batch_task(
     """批量分片同步财务数据任务"""
     logger = get_run_logger()
     
-    result = {
-        "total": len(stock_codes),
-        "success": 0,
-        "failed": 0,
-        "saved_count": 0,
-    }
+    result = _financial_batch_result_base(
+        stock_codes=stock_codes,
+        batch_index=batch_index,
+        batch_total=batch_total,
+    )
     
     if not stock_codes:
         return result
         
-    batch_label = (
-        f"{batch_index}/{batch_total}"
-        if batch_index is not None and batch_total is not None
-        else "unknown"
-    )
+    batch_label = result["batch_label"]
     logger.info(
         f"开始财务分片同步: batch={batch_label}, 股票数={len(stock_codes)}, "
         f"范围={stock_codes[0]}~{stock_codes[-1]}, 超时={timeout_seconds}s"
@@ -644,8 +640,22 @@ async def sync_financial_batch_task(
             stock_codes=stock_codes,
             timeout_seconds=timeout_seconds,
         )
+        worker_result = {
+            **_financial_batch_result_base(
+                stock_codes=stock_codes,
+                batch_index=batch_index,
+                batch_total=batch_total,
+            ),
+            **worker_result,
+            "batch_index": batch_index,
+            "batch_total": batch_total,
+            "batch_label": batch_label,
+            "stock_range_start": stock_codes[0],
+            "stock_range_end": stock_codes[-1],
+        }
         logger.info(
             f"财务分片同步完成: batch={batch_label}, "
+            f"range={stock_codes[0]}~{stock_codes[-1]}, "
             f"success={worker_result.get('success', 0)}, "
             f"failed={worker_result.get('failed', 0)}, "
             f"saved={worker_result.get('saved_count', 0)}, "
@@ -657,20 +667,62 @@ async def sync_financial_batch_task(
         raise
 
 
+def _financial_batch_result_base(
+    stock_codes: List[str],
+    batch_index: Optional[int],
+    batch_total: Optional[int],
+) -> Dict[str, Any]:
+    batch_label = (
+        f"{batch_index}/{batch_total}"
+        if batch_index is not None and batch_total is not None
+        else "unknown"
+    )
+    return {
+        "total": len(stock_codes),
+        "success": 0,
+        "failed": 0,
+        "saved_count": 0,
+        "status": "success",
+        "batch_index": batch_index,
+        "batch_total": batch_total,
+        "batch_label": batch_label,
+        "stock_range_start": stock_codes[0] if stock_codes else None,
+        "stock_range_end": stock_codes[-1] if stock_codes else None,
+        "stock_codes": stock_codes,
+    }
+
+
+def _financial_batch_request_id(stock_codes: List[str]) -> str:
+    payload = json.dumps(
+        stock_codes,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 async def _run_financial_batch_worker(
     stock_codes: List[str],
     timeout_seconds: int,
 ) -> Dict[str, Any]:
     backend_root = Path(__file__).resolve().parents[2]
+    request_id = _financial_batch_request_id(stock_codes)
 
     with tempfile.TemporaryDirectory(prefix="quantx_financial_sync_") as tmp_dir:
         input_path = Path(tmp_dir) / "input.json"
         output_path = Path(tmp_dir) / "output.json"
         input_path.write_text(
-            json.dumps({"stock_codes": stock_codes}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "stock_codes": stock_codes,
+                    "request_id": request_id,
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
 
+        process = None
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
@@ -690,14 +742,16 @@ async def _run_financial_batch_worker(
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
-            process.kill()
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await _kill_financial_batch_process(process)
             raise TimeoutError(
                 f"财务批次 worker 超时 {timeout_seconds}s，"
                 f"股票范围 {stock_codes[0]}~{stock_codes[-1]}，"
                 f"stdout={_decode_worker_output(stdout)}, "
                 f"stderr={_decode_worker_output(stderr)}"
             ) from exc
+        except asyncio.CancelledError:
+            await _kill_financial_batch_process(process)
+            raise
 
         if output_path.exists():
             result = json.loads(output_path.read_text(encoding="utf-8"))
@@ -717,7 +771,36 @@ async def _run_financial_batch_worker(
                 f"stderr={_decode_worker_output(stderr)}"
             )
 
+        if result.get("request_id") != request_id:
+            raise RuntimeError(
+                f"财务批次 worker 返回 request_id 不匹配，"
+                f"expected={request_id}, actual={result.get('request_id')}"
+            )
+
+        if result.get("stock_codes") != stock_codes:
+            raise RuntimeError(
+                f"财务批次 worker 返回股票列表不匹配，"
+                f"expected={stock_codes[0]}~{stock_codes[-1]}, "
+                f"actual={result.get('stock_codes')}"
+            )
+
         return result
+
+
+async def _kill_financial_batch_process(process) -> Tuple[bytes, bytes]:
+    if process is None:
+        return b"", b""
+
+    if process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+    try:
+        return await asyncio.wait_for(process.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        return b"", b"worker killed but output collection timed out"
 
 
 def _decode_worker_output(output: bytes) -> str:

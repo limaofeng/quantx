@@ -5,8 +5,10 @@
 同时仍可在需要时替换为真实环境以做端到端验收。
 """
 
+import importlib
 from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -19,24 +21,53 @@ from prefector.flows.daily_market_data_sync_flow import (
 )
 from services.instrument_service import InstrumentService
 
+daily_market_data_sync_module = importlib.import_module(
+  "prefector.flows.daily_market_data_sync_flow"
+)
+
 
 @pytest.fixture
 def redis_stub(monkeypatch):
   """
   记录并控制 Redis exists/set 行为，避免真正写入外部缓存。
   """
-  state = {"exists": False, "exists_calls": [], "set_calls": []}
+  state = {
+    "exists": False,
+    "exists_calls": [],
+    "set_calls": [],
+    "get_calls": [],
+    "delete_calls": [],
+    "values": {},
+  }
 
   def fake_exists(key: str) -> bool:
     state["exists_calls"].append(key)
     return state["exists"]
 
-  def fake_set(key: str, value: str) -> bool:
-    state["set_calls"].append((key, value))
+  def fake_set(key: str, value: str, ex=None, nx=False) -> bool:
+    state["set_calls"].append((key, value, ex, nx))
+    if nx and key in state["values"]:
+      return False
+    state["values"][key] = value
     return True
+
+  def fake_get(key: str):
+    state["get_calls"].append(key)
+    return state["values"].get(key)
+
+  def fake_delete(*keys: str) -> int:
+    state["delete_calls"].append(keys)
+    deleted = 0
+    for key in keys:
+      if key in state["values"]:
+        deleted += 1
+        del state["values"][key]
+    return deleted
 
   monkeypatch.setattr(redis_client, "exists", fake_exists)
   monkeypatch.setattr(redis_client, "set", fake_set)
+  monkeypatch.setattr(redis_client, "get", fake_get)
+  monkeypatch.setattr(redis_client, "delete", fake_delete)
   return state
 
 
@@ -102,11 +133,13 @@ def report_tasks_stub(monkeypatch):
     report_state["saved"].append({"report": report, "type": report_type})
 
   monkeypatch.setattr(
-    "prefector.flows.daily_market_data_sync_flow.generate_sync_report",
+    daily_market_data_sync_module,
+    "generate_sync_report",
     fake_generate_sync_report,
   )
   monkeypatch.setattr(
-    "prefector.flows.daily_market_data_sync_flow.save_report_to_file",
+    daily_market_data_sync_module,
+    "save_report_to_file",
     fake_save_report_to_file,
   )
   return report_state
@@ -139,7 +172,79 @@ class TestDailyMarketDataSyncFlowIntegration:
     assert "cache_key" in result
     assert result["stock_count"] == len(instrument_stub["return"])
     assert redis_stub["exists_calls"], "应查询整体缓存标记"
-    assert not redis_stub["set_calls"], "跳过时不应写入完成标记"
+    assert not redis_stub["set_calls"], "跳过时不应写入完成标记或运行锁"
+
+  @pytest.mark.asyncio
+  async def test_skip_when_same_scope_is_already_running(
+    self,
+    monkeypatch,
+    redis_stub,
+    instrument_stub,
+    trading_calendar_stub,
+  ):
+    trading_calendar_stub["dates"] = [datetime(2025, 1, 8).date()]
+
+    monkeypatch.setattr(
+      daily_market_data_sync_module,
+      "_acquire_sync_lock",
+      lambda lock_key, lock_token: False,
+    )
+
+    result = await daily_market_data_sync_flow(
+      sectors=["测试板块"],
+      start_time="20250108",
+      end_time="20250108",
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "already_running"
+    assert "lock_key" in result
+
+  @pytest.mark.asyncio
+  async def test_empty_time_uses_prefect_scheduled_day(
+    self,
+    monkeypatch,
+    redis_stub,
+    instrument_stub,
+    trading_calendar_stub,
+  ):
+    trading_calendar_stub["dates"] = [datetime(2025, 1, 8).date()]
+    call_state = {}
+
+    monkeypatch.setattr(
+      daily_market_data_sync_module,
+      "_get_prefect_scheduled_start_time",
+      lambda: datetime(2025, 1, 8, 15, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    async def fake_process_single_day_data(
+      stock_list,
+      single_day_time,
+      periods,
+      skip_download=False,
+    ):
+      call_state["single_day_time"] = single_day_time
+      return {
+        "success_count": len(stock_list),
+        "failed_count": 0,
+        "errors": [],
+        "chunk_results": [],
+        "duration_seconds": 0,
+      }
+
+    monkeypatch.setattr(
+      daily_market_data_sync_module,
+      "_process_single_day_data",
+      fake_process_single_day_data,
+    )
+
+    result = await daily_market_data_sync_flow(
+      sectors=["测试板块"],
+      periods=["1m"],
+    )
+
+    assert result["status"] == "success"
+    assert call_state["single_day_time"] == "20250108"
 
   @pytest.mark.asyncio
   async def test_fail_on_invalid_periods(self, redis_stub):
@@ -197,7 +302,8 @@ class TestDailyMarketDataSyncFlowIntegration:
       }
 
     monkeypatch.setattr(
-      "prefector.flows.daily_market_data_sync_flow._process_single_day_data",
+      daily_market_data_sync_module,
+      "_process_single_day_data",
       fake_process_single_day_data,
     )
 
@@ -235,7 +341,8 @@ class TestDailyMarketDataSyncFlowIntegration:
       error=lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-      "prefector.flows.daily_market_data_sync_flow.get_run_logger",
+      daily_market_data_sync_module,
+      "get_run_logger",
       lambda: logger,
     )
 
@@ -250,11 +357,13 @@ class TestDailyMarketDataSyncFlowIntegration:
         return {"562500.SH": pd.DataFrame()}
 
     monkeypatch.setattr(
-      "prefector.flows.daily_market_data_sync_flow.download_market_data",
+      daily_market_data_sync_module,
+      "download_market_data",
       fake_download_market_data,
     )
     monkeypatch.setattr(
-      "prefector.flows.daily_market_data_sync_flow.save_market_data",
+      daily_market_data_sync_module,
+      "save_market_data",
       fake_save_market_data,
     )
     monkeypatch.setattr(
@@ -282,4 +391,6 @@ class TestDailyMarketDataSyncFlowIntegration:
     assert (
       "daily_market_data_stock:562500.SH:20260407:tick",
       "done",
+      None,
+      False,
     ) not in redis_stub["set_calls"]

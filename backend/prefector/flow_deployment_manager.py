@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import logging
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +19,117 @@ from prefect.schedules import Cron, Schedule
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+ACTIVE_FLOW_RUN_STATE_NAMES = {
+  "Running",
+  "Pending",
+  "Cancelling",
+  "Scheduled",
+  "Late",
+}
+DEFAULT_STALE_ACTIVITY_SECONDS = 12 * 60 * 60
+DEFAULT_MAX_ACTIVE_RUN_SECONDS = 24 * 60 * 60
+DEPLOYMENT_STALE_ACTIVITY_SECONDS = {
+  "financial-sync": 30 * 60,
+}
+DEPLOYMENT_MAX_ACTIVE_RUN_SECONDS = {
+  "financial-sync": 8 * 60 * 60,
+}
+
+
+def _to_aware_utc(value: Any) -> Optional[datetime]:
+  if value is None:
+    return None
+
+  parsed = value
+  if isinstance(value, str):
+    try:
+      parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+      return None
+
+  if not isinstance(parsed, datetime):
+    return None
+
+  if parsed.tzinfo is None:
+    return parsed.replace(tzinfo=timezone.utc)
+
+  return parsed.astimezone(timezone.utc)
+
+
+def _state_timestamp(obj: Any) -> Optional[datetime]:
+  state = getattr(obj, "state", None)
+  return _to_aware_utc(getattr(state, "timestamp", None)) if state else None
+
+
+def _latest_activity_time(flow_run: Any, task_runs: List[Any]) -> Optional[datetime]:
+  candidates = [
+    _to_aware_utc(getattr(flow_run, "updated", None)),
+    _state_timestamp(flow_run),
+    _to_aware_utc(getattr(flow_run, "end_time", None)),
+    _to_aware_utc(getattr(flow_run, "start_time", None)),
+    _to_aware_utc(getattr(flow_run, "expected_start_time", None)),
+    _to_aware_utc(getattr(flow_run, "created", None)),
+  ]
+
+  for task_run in task_runs:
+    candidates.extend(
+      [
+        _to_aware_utc(getattr(task_run, "updated", None)),
+        _state_timestamp(task_run),
+        _to_aware_utc(getattr(task_run, "end_time", None)),
+        _to_aware_utc(getattr(task_run, "start_time", None)),
+        _to_aware_utc(getattr(task_run, "created", None)),
+      ]
+    )
+
+  valid = [candidate for candidate in candidates if candidate is not None]
+  return max(valid) if valid else None
+
+
+def _active_run_diagnostics(
+  deployment_name: str,
+  flow_run: Any,
+  task_runs: List[Any],
+) -> Dict[str, Any]:
+  now = datetime.now(timezone.utc)
+  latest_activity = _latest_activity_time(flow_run, task_runs)
+  activity_limit = DEPLOYMENT_STALE_ACTIVITY_SECONDS.get(
+    deployment_name,
+    DEFAULT_STALE_ACTIVITY_SECONDS,
+  )
+
+  if latest_activity and (now - latest_activity).total_seconds() > activity_limit:
+    minutes = int(activity_limit / 60)
+    return {
+      "is_stale": True,
+      "latest_activity_time": latest_activity,
+      "stale_reason": f"运行中但超过 {minutes} 分钟无状态活动",
+    }
+
+  start_time = (
+    _to_aware_utc(getattr(flow_run, "start_time", None))
+    or _to_aware_utc(getattr(flow_run, "expected_start_time", None))
+    or _to_aware_utc(getattr(flow_run, "created", None))
+  )
+  max_active_seconds = DEPLOYMENT_MAX_ACTIVE_RUN_SECONDS.get(
+    deployment_name,
+    DEFAULT_MAX_ACTIVE_RUN_SECONDS,
+  )
+
+  if start_time and (now - start_time).total_seconds() > max_active_seconds:
+    hours = round(max_active_seconds / 3600, 1)
+    return {
+      "is_stale": True,
+      "latest_activity_time": latest_activity,
+      "stale_reason": f"运行中但总时长超过 {hours:g} 小时",
+    }
+
+  return {
+    "is_stale": False,
+    "latest_activity_time": latest_activity,
+    "stale_reason": None,
+  }
 
 
 def get_project_root():
@@ -496,6 +608,56 @@ class FlowDeploymentManager:
       logger.error(f"根据ID获取部署失败 {deployment_id}: {e}")
       return None
 
+  async def set_deployment_schedule_active(
+    self, deployment_id: str, active: bool
+  ) -> Dict[str, Any]:
+    """启用或暂停一个部署的所有自动调度。"""
+    try:
+      client = get_client()
+      target_dep = await self._get_deployment_by_id(deployment_id)
+
+      if not target_dep:
+        raise ValueError(f"Deployment '{deployment_id}' not found")
+
+      schedules = await client.read_deployment_schedules(target_dep.id)
+      if not schedules:
+        raise ValueError(f"Deployment '{target_dep.name}' has no schedules")
+
+      updated = 0
+      for schedule in schedules:
+        schedule_id = getattr(schedule, "id", None)
+        if not schedule_id:
+          continue
+        if getattr(schedule, "active", None) != active:
+          await client.update_deployment_schedule(
+            target_dep.id,
+            schedule_id,
+            active=active,
+          )
+          updated += 1
+
+      logger.info(
+        "部署 %s 的自动调度已%s，更新 schedules=%s",
+        target_dep.name,
+        "恢复" if active else "暂停",
+        updated,
+      )
+
+      refreshed_dep = await self._get_deployment_by_id(str(target_dep.id))
+      return await self._format_deployment_to_dict(
+        client,
+        refreshed_dep or target_dep,
+      )
+
+    except Exception as e:
+      logger.error(
+        "设置部署调度状态失败 deployment_id=%s active=%s: %s",
+        deployment_id,
+        active,
+        e,
+      )
+      raise
+
   async def _format_deployment_to_dict(self, client, target_dep, flow_map: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
       """统一格式化部署对象为字典"""
       
@@ -508,28 +670,48 @@ class FlowDeploymentManager:
            logger.warning(f"获取 flows 失败: {e}")
            flow_map = {}
 
-      # 2. 获取下次调度时间 (SCHEDULED)
-      next_run_time = None
+      # 2. 获取调度激活状态
+      is_schedule_active = getattr(target_dep, "is_schedule_active", None)
       try:
-        from prefect.client.schemas.filters import FlowRunFilter
-        upcoming_runs = await client.read_flow_runs(
-            flow_run_filter=FlowRunFilter(
-                deployment_id={"any_": [target_dep.id]},
-                state={"type": {"any_": ["SCHEDULED"]}}
-            ),
-            limit=1,
-            sort="EXPECTED_START_TIME_ASC"
-        )
-        if upcoming_runs:
-            next_run_time = upcoming_runs[0].expected_start_time
-            if next_run_time:
-                next_run_time = next_run_time.astimezone().isoformat()
+        schedules = await client.read_deployment_schedules(target_dep.id)
+        if schedules:
+          is_schedule_active = any(
+            bool(getattr(schedule, "active", False)) for schedule in schedules
+          )
       except Exception as e:
-        logger.warning(f"获取部署 {target_dep.name} 的下次运行时间失败: {e}")
+        logger.warning(f"获取部署 {target_dep.name} 的调度状态失败: {e}")
 
-      # 3. 获取最后运行 和 当前状态 (合并查询)
+      if is_schedule_active is None:
+        is_schedule_active = False
+
+      # 3. 获取下次调度时间 (SCHEDULED)
+      next_run_time = None
+      if is_schedule_active:
+        try:
+          from prefect.client.schemas.filters import FlowRunFilter
+          upcoming_runs = await client.read_flow_runs(
+              flow_run_filter=FlowRunFilter(
+                  deployment_id={"any_": [target_dep.id]},
+                  state={"type": {"any_": ["SCHEDULED"]}}
+              ),
+              limit=1,
+              sort="EXPECTED_START_TIME_ASC"
+          )
+          if upcoming_runs:
+              next_run_time = upcoming_runs[0].expected_start_time
+              if next_run_time:
+                  next_run_time = next_run_time.astimezone().isoformat()
+        except Exception as e:
+          logger.warning(f"获取部署 {target_dep.name} 的下次运行时间失败: {e}")
+
+      # 4. 获取最后运行 和 当前状态 (合并查询)
       last_run_time = None
       status = None
+      active_run_id = None
+      active_run_status = None
+      is_stale = False
+      stale_reason = None
+      latest_activity_time = None
       
       try:
         from prefect.client.schemas.filters import FlowRunFilter
@@ -551,9 +733,45 @@ class FlowDeploymentManager:
             if last_run_time:
                 last_run_time = last_run_time.astimezone().isoformat()
             
-            # 设置当前状态 (如果是活跃状态)
-            if latest_run.state_name in ["Running", "Pending", "Cancelling", "Scheduled", "Late"]:
-                 status = latest_run.state_name
+            # 设置当前状态；长时间无活动的活跃 run 视为孤儿运行，避免前端永久锁在“同步中”。
+            if latest_run.state_name in ACTIVE_FLOW_RUN_STATE_NAMES:
+              status = latest_run.state_name
+              active_run_id = str(latest_run.id)
+              active_run_status = latest_run.state_name
+              task_runs = []
+              try:
+                from prefect.client.schemas.filters import TaskRunFilter
+
+                task_runs = await client.read_task_runs(
+                  task_run_filter=TaskRunFilter(
+                    flow_run_id={"any_": [latest_run.id]}
+                  ),
+                  limit=200,
+                )
+              except Exception as e:
+                logger.warning(
+                  f"获取部署 {target_dep.name} 最近任务活动失败: {e}"
+                )
+
+              diagnostics = _active_run_diagnostics(
+                target_dep.name,
+                latest_run,
+                task_runs,
+              )
+              is_stale = diagnostics["is_stale"]
+              stale_reason = diagnostics["stale_reason"]
+              latest_activity = diagnostics["latest_activity_time"]
+              if latest_activity:
+                latest_activity_time = latest_activity.astimezone().isoformat()
+
+              if is_stale:
+                logger.warning(
+                  "部署 %s 的最新运行 %s 仍为 %s，但已长时间无活动: %s",
+                  target_dep.name,
+                  latest_run.id,
+                  latest_run.state_name,
+                  stale_reason,
+                )
                  
       except Exception as e:
         logger.warning(f"获取部署 {target_dep.name} 的运行信息失败: {e}")
@@ -565,10 +783,15 @@ class FlowDeploymentManager:
         "description": getattr(target_dep, "description", None),
         "work_pool_name": getattr(target_dep, "work_pool_name", None),
         "work_queue_name": getattr(target_dep, "work_queue_name", "default"),
-        "is_schedule_active": getattr(target_dep, "is_schedule_active", False),
+        "is_schedule_active": is_schedule_active,
         "next_run_time": next_run_time,
         "last_run_time": last_run_time,
         "status": status,
+        "active_run_id": active_run_id,
+        "active_run_status": active_run_status,
+        "is_stale": is_stale,
+        "stale_reason": stale_reason,
+        "latest_activity_time": latest_activity_time,
         "created": target_dep.created.isoformat() if hasattr(target_dep, "created") and target_dep.created else None,
         "updated": target_dep.updated.isoformat() if hasattr(target_dep, "updated") and target_dep.updated else None,
       }

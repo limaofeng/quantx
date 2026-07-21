@@ -55,6 +55,11 @@ class DeploymentFlowRun:
   next_run_time: Optional[datetime] = strawberry.field(description="下次运行时间")
   last_run_time: Optional[datetime] = strawberry.field(description="最后运行时间")
   status: Optional[str] = strawberry.field(description="当前状态 (由最近一次运行决定)")
+  active_run_id: Optional[str] = strawberry.field(description="当前活跃运行ID")
+  active_run_status: Optional[str] = strawberry.field(description="当前活跃运行状态")
+  is_stale: bool = strawberry.field(description="当前运行是否疑似卡死")
+  stale_reason: Optional[str] = strawberry.field(description="疑似卡死原因")
+  latest_activity_time: Optional[datetime] = strawberry.field(description="最近运行活动时间")
   created: Optional[datetime] = strawberry.field(description="创建时间")
   updated: Optional[datetime] = strawberry.field(description="更新时间")
 

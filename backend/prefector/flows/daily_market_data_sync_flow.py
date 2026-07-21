@@ -4,10 +4,13 @@
 支持股票（包括指数、ETF等）K线与tick数据的批量同步
 """
 
+import hashlib
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from prefect import flow, get_run_logger
+from prefect.runtime import flow_run as flow_run_runtime
 
 from prefector.flow_hooks import STANDARD_FLOW_HOOKS
 from database.connection import redis_client
@@ -22,6 +25,9 @@ from prefector.tasks import (
 from repositories.instrument_where_builder import InstrumentWhereBuilder
 from services.instrument_service import InstrumentService
 from prefector.flows.daily_indicator_snapshot_flow import daily_indicator_snapshot_flow
+
+
+SYNC_LOCK_TTL_SECONDS = 12 * 60 * 60
 
 
 def _validate_periods(periods: List[str]) -> None:
@@ -88,6 +94,82 @@ def _format_cache_key_for_log(cache_key: str, max_length: int = 160) -> str:
   head_len = max(0, max_length // 2 - 10)
   tail_len = max(0, max_length - head_len - 5)
   return f"{cache_key[:head_len]}...{cache_key[-tail_len:]}"
+
+
+def _get_prefect_scheduled_start_time() -> Optional[datetime]:
+  """Return Prefect's scheduled start time when available."""
+  try:
+    return flow_run_runtime.get_scheduled_start_time()
+  except Exception:
+    return None
+
+
+def _resolve_time_range_from_schedule(
+  start_time: str,
+  end_time: str,
+) -> Dict[str, str]:
+  """
+  Resolve empty sync dates from the current Prefect run's scheduled time.
+
+  For scheduled deployments this prevents catch-up runs from downloading the
+  worker recovery date. Manual calls can still override either side explicitly.
+  """
+  start_time = (start_time or "").strip()
+  end_time = (end_time or "").strip()
+
+  if start_time and end_time:
+    return {
+      "start_time": start_time,
+      "end_time": end_time,
+      "source": "explicit",
+    }
+
+  if start_time:
+    return {
+      "start_time": start_time,
+      "end_time": start_time,
+      "source": "explicit_start",
+    }
+
+  if end_time:
+    return {
+      "start_time": end_time,
+      "end_time": end_time,
+      "source": "explicit_end",
+    }
+
+  scheduled_start = _get_prefect_scheduled_start_time()
+  if scheduled_start is None:
+    scheduled_start = time_utils.now_aware()
+
+  scheduled_start = time_utils.to_shanghai(scheduled_start)
+  target_day = scheduled_start.strftime("%Y%m%d")
+  return {
+    "start_time": target_day,
+    "end_time": target_day,
+    "source": "prefect_scheduled_start_time",
+  }
+
+
+def _build_sync_lock_key(cache_key: str) -> str:
+  digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+  return f"daily_market_data_sync_lock:{digest}"
+
+
+def _acquire_sync_lock(lock_key: str, lock_token: str) -> bool:
+  return bool(
+    redis_client.set(
+      lock_key,
+      lock_token,
+      ex=SYNC_LOCK_TTL_SECONDS,
+      nx=True,
+    )
+  )
+
+
+def _release_sync_lock(lock_key: str, lock_token: str) -> None:
+  if redis_client.get(lock_key) == lock_token:
+    redis_client.delete(lock_key)
 
 
 def _split_date_ranges(start_time: str, end_time: str) -> List[str]:
@@ -462,17 +544,17 @@ async def daily_market_data_sync_flow(
   """
   logger = get_run_logger()
   start_sync_time = time_utils.now()
+  periods = periods or ["1m"]
 
-  # 处理空时间默认值 - 默认为当天
-  if not start_time:
-    start_time = start_sync_time.strftime("%Y%m%d")
-  if not end_time:
-    end_time = start_sync_time.strftime("%Y%m%d")
+  time_range = _resolve_time_range_from_schedule(start_time, end_time)
+  start_time = time_range["start_time"]
+  end_time = time_range["end_time"]
 
   logger.info("=" * 60)
   logger.info("开始市场数据同步流程")
   logger.info(f"数据周期: {periods}")
   logger.info(f"时间范围: {start_time} ~ {end_time}")
+  logger.info(f"时间范围来源: {time_range['source']}")
   logger.info("=" * 60)
 
   # 1. 验证periods参数
@@ -481,7 +563,14 @@ async def daily_market_data_sync_flow(
     logger.info(f"periods参数验证通过: {periods}")
   except ValueError as e:
     logger.error(f"periods参数验证失败: {e}")
-    raise
+    return {
+      "status": "failed",
+      "reason": "invalid_periods",
+      "error": str(e),
+      "start_time": start_sync_time,
+      "end_time": time_utils.now(),
+      "periods": periods,
+    }
 
   # 2. 时间拆分处理
   try:
@@ -494,7 +583,14 @@ async def daily_market_data_sync_flow(
     logger.info(f"时间拆分结果: 共 {len(date_list)} 个日期 - {preview}")
   except ValueError as e:
     logger.error(f"时间拆分失败: {e}")
-    raise
+    return {
+      "status": "failed",
+      "reason": "invalid_time_range",
+      "error": str(e),
+      "start_time": start_sync_time,
+      "end_time": time_utils.now(),
+      "periods": periods,
+    }
 
   # 3. 准备待同步股票列表
   normalized_sectors = None
@@ -515,7 +611,14 @@ async def daily_market_data_sync_flow(
   else:
     error_msg = "必须提供 sectors 或 stock_list"
     logger.error(error_msg)
-    raise ValueError(error_msg)
+    return {
+      "status": "failed",
+      "reason": "missing_target",
+      "error": error_msg,
+      "start_time": start_sync_time,
+      "end_time": time_utils.now(),
+      "periods": periods,
+    }
 
   resolved_stock_list = list(dict.fromkeys(resolved_stock_list))
   logger.info(f"{stock_source_desc}，共 {len(resolved_stock_list)} 只股票")
@@ -537,6 +640,26 @@ async def daily_market_data_sync_flow(
       "status": "skipped",
       "reason": "already_completed",
       "cache_key": overall_cache_key,
+      "start_time": start_sync_time,
+      "end_time": time_utils.now(),
+      "periods": periods,
+      "stock_count": len(resolved_stock_list),
+      "stock_list": resolved_stock_list,
+    }
+
+  sync_lock_key = _build_sync_lock_key(overall_cache_key)
+  sync_lock_token = str(uuid.uuid4())
+  if not _acquire_sync_lock(sync_lock_key, sync_lock_token):
+    cache_key_log = _format_cache_key_for_log(overall_cache_key)
+    logger.warning(
+      "检测到同一时间范围与股票集合正在同步，将跳过本次运行。"
+      f" 缓存键: {cache_key_log}, 锁: {sync_lock_key}"
+    )
+    return {
+      "status": "skipped",
+      "reason": "already_running",
+      "cache_key": overall_cache_key,
+      "lock_key": sync_lock_key,
       "start_time": start_sync_time,
       "end_time": time_utils.now(),
       "periods": periods,
@@ -741,4 +864,5 @@ async def daily_market_data_sync_flow(
   logger.info(f"错误数量: {len(global_aggregate_results['errors'])}")
   logger.info("=" * 60)
 
+  _release_sync_lock(sync_lock_key, sync_lock_token)
   return global_aggregate_results

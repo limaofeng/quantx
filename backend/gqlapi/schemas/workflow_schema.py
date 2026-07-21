@@ -69,3 +69,13 @@ class WorkflowMutation:
   async def retry_flow_run(self, run_id: str) -> FlowRun:
     return await PrefectResolver.retry_flow_run(run_id)
 
+  @strawberry.field(description="启用或暂停部署的自动调度")
+  async def set_deployment_schedule_active(
+    self,
+    deployment_id: str,
+    active: bool,
+  ) -> DeploymentFlowRun:
+    return await PrefectResolver.set_deployment_schedule_active(
+      deployment_id,
+      active,
+    )
