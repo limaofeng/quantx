@@ -31,6 +31,7 @@ import {
 } from '@/components/ui/tooltip';
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
 import type { Position } from '@/features/portfolio/types';
+import { StockDetailWorkbench } from '@/features/stocks/components';
 import { useIsMobile } from '@/hooks/use-mobile';
 import type { Stock } from '@/shared/types';
 import { cn } from '@/utils/cn';
@@ -52,6 +53,8 @@ type TradingStudioMode = 'ACCOUNT' | 'CHART' | 'ORDER' | 'ORDERS' | 'TRADES';
 type TradingLayoutMode = 'standard' | 'wide';
 type OrderLike = { status?: string | null };
 
+const TRADING_COMPACT_BREAKPOINT = 900;
+
 const studioModes: StudioMode[] = [
   { id: 'CHART', icon: BarChart3, label: '图表盘口' },
   { id: 'ORDER', icon: ArrowLeftRight, label: '下单' },
@@ -60,14 +63,16 @@ const studioModes: StudioMode[] = [
   { id: 'ACCOUNT', icon: Wallet, label: '账户' },
 ];
 
-const layoutModes: {
-  icon: React.ElementType;
-  id: TradingLayoutMode;
-  label: string;
-}[] = [
-  { id: 'wide', icon: Columns, label: '三栏' },
-  { id: 'standard', icon: PanelLeft, label: '两栏' },
-];
+const layoutModeMeta: Record<
+  TradingLayoutMode,
+  {
+    icon: React.ElementType;
+    label: string;
+  }
+> = {
+  standard: { icon: PanelLeft, label: '两栏' },
+  wide: { icon: Columns, label: '三栏' },
+};
 
 const compactTabTriggerClass =
   'h-7 rounded-md px-3 text-[11px] font-bold text-slate-500 transition-colors data-[state=active]:bg-red-500 data-[state=active]:text-white dark:text-slate-400 dark:data-[state=active]:text-white';
@@ -82,6 +87,12 @@ function normalizeSymbol(value: unknown) {
 
 function getUrlSymbol(search: string) {
   return normalizeSymbol(new URLSearchParams(search).get('symbol'));
+}
+
+function getUrlSide(search: string): 'BUY' | 'SELL' {
+  return new URLSearchParams(search).get('side')?.toUpperCase() === 'SELL'
+    ? 'SELL'
+    : 'BUY';
 }
 
 function makeSymbolStock(symbol: string): Stock {
@@ -132,140 +143,47 @@ function isTerminalMode(mode: TradingStudioMode) {
   return mode === 'CHART' || mode === 'ORDER';
 }
 
-function toFiniteNumber(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+function getNextLayoutMode(mode: TradingLayoutMode): TradingLayoutMode {
+  return mode === 'wide' ? 'standard' : 'wide';
 }
 
-function formatCompactCurrency(value: unknown) {
-  const amount = toFiniteNumber(value);
-  if (amount === null) return '--';
-
-  const abs = Math.abs(amount);
-  const sign = amount < 0 ? '-' : '';
-  if (abs >= 100000000) return `${sign}¥${(abs / 100000000).toFixed(2)}亿`;
-  if (abs >= 10000) return `${sign}¥${(abs / 10000).toFixed(2)}万`;
-  return `${sign}¥${abs.toFixed(2)}`;
-}
-
-function formatSignedCurrency(value: unknown) {
-  const amount = toFiniteNumber(value);
-  if (amount === null) return '--';
-  return `${amount >= 0 ? '+' : ''}${formatCompactCurrency(amount)}`;
-}
-
-function formatShares(value: unknown) {
-  const amount = toFiniteNumber(value);
-  if (amount === null) return '--';
-  return Math.round(amount).toLocaleString('zh-CN');
-}
-
-function formatPriceMetric(value: unknown) {
-  const price = toFiniteNumber(value);
-  if (price === null || price <= 0) return '--';
-  return `¥${price.toFixed(price >= 10 ? 2 : 3)}`;
-}
-
-function formatPercentMetric(value: unknown, signed = true) {
-  const percent = toFiniteNumber(value);
-  if (percent === null) return '--';
-  const prefix = signed && percent > 0 ? '+' : '';
-  return `${prefix}${percent.toFixed(2)}%`;
-}
-
-function formatDateTime(value: unknown) {
-  if (typeof value !== 'string' || !value) return '--';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-
-  return date.toLocaleString('zh-CN', {
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    month: '2-digit',
-    second: '2-digit',
-    year: 'numeric',
-  });
-}
-
-function getToneClass(value: unknown) {
-  const amount = toFiniteNumber(value);
-  if (amount === null || amount === 0) return 'text-slate-200';
-  return amount > 0 ? 'text-rose-300' : 'text-emerald-300';
-}
-
-function getProgressPercent(part: unknown, total: unknown) {
-  const partNumber = toFiniteNumber(part);
-  const totalNumber = toFiniteNumber(total);
-  if (partNumber === null || totalNumber === null || totalNumber <= 0) return 0;
-  return Math.max(0, Math.min(100, (partNumber / totalNumber) * 100));
-}
-
-function DetailMetricCard({
-  label,
-  subValue,
-  toneValue,
-  value,
-}: {
-  label: string;
-  subValue?: string;
-  toneValue?: unknown;
-  value: string;
-}) {
-  return (
-    <div className="min-w-0 rounded-md border border-white/5 bg-white/[0.03] px-3 py-2.5">
-      <div className="truncate text-[10px] font-bold text-slate-500">
-        {label}
-      </div>
-      <div
-        className={cn(
-          'mt-1 truncate font-mono text-sm font-black tabular-nums',
-          toneValue === undefined ? 'text-slate-100' : getToneClass(toneValue)
-        )}
-      >
-        {value}
-      </div>
-      {subValue && (
-        <div className="mt-1 truncate text-[10px] font-bold text-slate-600">
-          {subValue}
-        </div>
-      )}
-    </div>
+function useCompactTradingLayout() {
+  const [isCompact, setIsCompact] = React.useState<boolean | undefined>(
+    undefined
   );
-}
 
-function DetailPanel({
-  children,
-  icon: Icon,
-  title,
-}: {
-  children: React.ReactNode;
-  icon: React.ElementType;
-  title: string;
-}) {
-  return (
-    <section className="min-w-0 border border-white/5 bg-[#0b1120]/70">
-      <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3">
-        <Icon className="h-3.5 w-3.5 text-red-300" />
-        <h3 className="truncate text-xs font-black text-slate-200">{title}</h3>
-      </div>
-      <div className="p-3">{children}</div>
-    </section>
-  );
+  React.useEffect(() => {
+    const mql = window.matchMedia(
+      `(max-width: ${TRADING_COMPACT_BREAKPOINT}px)`
+    );
+    const onChange = () => {
+      setIsCompact(window.innerWidth <= TRADING_COMPACT_BREAKPOINT);
+    };
+
+    mql.addEventListener('change', onChange);
+    onChange();
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  return !!isCompact;
 }
 
 export default function TradingPage() {
   const isMobile = useIsMobile();
+  const isCompactTrading = useCompactTradingLayout();
   const itemsPerPage = 10;
   const search = useSearch();
   const urlSymbol = React.useMemo(() => getUrlSymbol(search), [search]);
-  const [activeMode, setActiveMode] =
-    React.useState<TradingStudioMode>('CHART');
+  const urlSide = React.useMemo(() => getUrlSide(search), [search]);
+  const [activeMode, setActiveMode] = React.useState<TradingStudioMode>(() =>
+    new URLSearchParams(search).get('mode')?.toUpperCase() === 'ORDER'
+      ? 'ORDER'
+      : 'CHART'
+  );
   const [selectedStock, setSelectedStock] = React.useState<Stock | null>(() =>
     urlSymbol ? makeSymbolStock(urlSymbol) : null
   );
-  const [layoutMode, setLayoutMode] =
-    React.useState<TradingLayoutMode>('wide');
+  const [layoutMode, setLayoutMode] = React.useState<TradingLayoutMode>('wide');
   const [priceUpdate, setPriceUpdate] = React.useState<{
     price: string;
     timestamp: number;
@@ -351,402 +269,132 @@ export default function TradingPage() {
     [handleSelectedStockChange, openTradingTab]
   );
 
-  const renderTradingToolbar = () => (
-    <TooltipProvider delayDuration={120}>
-      <div className="flex h-12 shrink-0 items-center justify-between gap-2 overflow-hidden bg-[#07111f]/95 px-3 shadow-[inset_0_-1px_0_rgba(148,163,184,0.05)]">
-        <nav
-          className="flex h-full min-w-0 flex-1 items-stretch"
-          aria-label="交易工作区"
-        >
-          <Tabs
-            value={activeMode}
-            onValueChange={mode => openTradingTab(mode as TradingStudioMode)}
-            className="flex h-full min-w-0 max-w-full"
-          >
-            <TabsList className="flex h-full min-w-0 justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0 text-slate-500 no-scrollbar">
-              {studioModes.map(mode => {
-                const isActive = activeMode === mode.id;
-
-                return (
-                  <TabsTrigger
-                    key={mode.id}
-                    value={mode.id}
-                    className={cn(
-                      'relative h-full shrink-0 rounded-none bg-transparent px-0 text-[12px] font-bold text-slate-500 shadow-none transition-colors after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-transparent hover:text-slate-200 focus-visible:ring-red-500/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-red-200 data-[state=active]:shadow-none data-[state=active]:after:bg-red-400',
-                      isActive
-                        ? 'text-red-200'
-                        : 'text-slate-500 hover:text-slate-200'
-                    )}
-                  >
-                    {mode.label}
-                  </TabsTrigger>
-                );
-              })}
-            </TabsList>
-          </Tabs>
-        </nav>
-
-        <div className="flex min-w-0 shrink-0 items-center gap-2">
-          <div className="hidden h-8 items-center gap-2 rounded-md bg-white/[0.025] px-2.5 lg:flex">
-            <span className="max-w-24 truncate font-mono text-[10px] font-bold text-slate-300">
-              {selectedStockCode || '待选标的'}
-            </span>
-            <span className="h-3 w-px bg-white/10" />
-            <span
-              className={cn(
-                'inline-flex items-center gap-1.5 whitespace-nowrap text-[10px] font-bold',
-                hasActiveOrders ? 'text-amber-200' : 'text-slate-500'
-              )}
-            >
-              <span
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full',
-                  hasActiveOrders
-                    ? 'bg-amber-300 shadow-[0_0_8px_rgba(252,211,77,0.65)]'
-                    : 'bg-slate-600'
-                )}
-              />
-              委托 {activeOrderCount}
-            </span>
-          </div>
-
-          {isTerminalMode(activeMode) && (
-            <div
-              className="hidden items-center gap-1 rounded-md bg-white/[0.025] p-1 sm:flex"
-              role="group"
-              aria-label="布局切换"
-            >
-              {layoutModes.map(mode => {
-                const Icon = mode.icon;
-                const isActive = layoutMode === mode.id;
-
-                return (
-                  <Tooltip key={mode.id}>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => setLayoutMode(mode.id)}
-                        className={cn(
-                          'flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
-                          isActive
-                            ? 'bg-red-500/15 text-red-100'
-                            : 'hover:bg-white/[0.05] hover:text-slate-200'
-                        )}
-                        aria-label={`${mode.label}布局`}
-                        aria-pressed={isActive}
-                      >
-                        <Icon className="h-3.5 w-3.5" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom">
-                      {mode.label}布局
-                    </TooltipContent>
-                  </Tooltip>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    </TooltipProvider>
-  );
-
-  const renderDetailSections = () => {
-    const account = accountData?.currentAccount;
-    const displayName =
-      selectedHolding?.instrumentName ||
-      selectedDisplayStock?.name ||
-      selectedStockCode ||
-      '待选标的';
-    const displayCode = selectedStockCode || '--';
-    const lastPrice =
-      selectedHolding?.lastPrice ??
-      selectedDisplayStock?.quote?.lastPrice ??
-      selectedDisplayStock?.currentPrice ??
-      null;
-    const changePercent =
-      selectedHolding?.changePercent ??
-      selectedDisplayStock?.quote?.changePercent ??
-      null;
-    const profitLoss = selectedHolding?.profitLoss ?? null;
-    const profitRate = selectedHolding?.profitRate ?? null;
-    const todayProfitLoss = selectedHolding?.todayProfitLoss ?? null;
-    const todayProfitRate =
-      selectedHolding?.todayProfitRate ?? changePercent ?? null;
-    const volume = selectedHolding?.volume ?? null;
-    const canUseVolume = selectedHolding?.canUseVolume ?? null;
-    const frozenVolume = selectedHolding?.frozenVolume ?? null;
-    const onRoadVolume = selectedHolding?.onRoadVolume ?? null;
-    const yesterdayVolume = selectedHolding?.yesterdayVolume ?? null;
-    const avgPrice = selectedHolding?.avgPrice ?? null;
-    const volumeNumber = toFiniteNumber(volume);
-    const avgPriceNumber = toFiniteNumber(avgPrice);
-    const costAmount =
-      volumeNumber !== null && avgPriceNumber !== null
-        ? volumeNumber * avgPriceNumber
-        : null;
-    const portfolioMarketValue =
-      portfolioSummary?.totalMarketValue ?? account?.marketValue ?? null;
-    const portfolioMarketValueNumber = toFiniteNumber(portfolioMarketValue);
-    const marketValue = selectedHolding?.marketValue ?? null;
-    const marketValueNumber = toFiniteNumber(marketValue);
-    const marketValuePercent =
-      selectedHolding?.marketValuePercent ??
-      (marketValueNumber !== null &&
-      portfolioMarketValueNumber !== null &&
-      portfolioMarketValueNumber > 0
-        ? (marketValueNumber / portfolioMarketValueNumber) * 100
-        : null);
-    const availablePercent = getProgressPercent(canUseVolume, volume);
-    const frozenPercent = getProgressPercent(frozenVolume, volume);
-    const totalPortfolioAsset =
-      totalAsset ?? portfolioSummary?.totalAsset ?? account?.totalAsset ?? null;
-    const cashAmount = portfolioSummary?.cash ?? account?.cash ?? null;
-    const frozenCash = account?.frozenCash ?? null;
-    const totalPortfolioProfit =
-      portfolioSummary?.totalProfitLoss ?? account?.totalProfitLoss ?? null;
-    const totalPortfolioProfitPercent =
-      portfolioSummary?.totalProfitLossPercent ??
-      account?.profitLossPercent ??
-      null;
-
-    const summaryMetrics = [
-      {
-        label: '最新价',
-        subValue: `涨跌幅 ${formatPercentMetric(changePercent)}`,
-        toneValue: changePercent,
-        value: formatPriceMetric(lastPrice),
-      },
-      {
-        label: '持仓市值',
-        subValue: `组合占比 ${formatPercentMetric(marketValuePercent, false)}`,
-        value: formatCompactCurrency(marketValue),
-      },
-      {
-        label: '浮动盈亏',
-        subValue: `收益率 ${formatPercentMetric(profitRate)}`,
-        toneValue: profitLoss ?? profitRate,
-        value: formatSignedCurrency(profitLoss),
-      },
-      {
-        label: '可用库存',
-        subValue: `冻结 ${formatShares(frozenVolume)} 股`,
-        value: `${formatShares(canUseVolume)} 股`,
-      },
-    ];
-
-    const holdingRows = [
-      { label: '证券代码', value: displayCode },
-      { label: '持仓数量', value: `${formatShares(volume)} 股` },
-      { label: '可用数量', value: `${formatShares(canUseVolume)} 股` },
-      { label: '冻结数量', value: `${formatShares(frozenVolume)} 股` },
-      { label: '在途数量', value: `${formatShares(onRoadVolume)} 股` },
-      { label: '昨日持仓', value: `${formatShares(yesterdayVolume)} 股` },
-      { label: '平均成本', value: formatPriceMetric(avgPrice) },
-      { label: '持仓成本', value: formatCompactCurrency(costAmount) },
-      {
-        label: '更新时间',
-        value: formatDateTime(
-          selectedHolding?.quoteTime ?? selectedHolding?.updatedAt
-        ),
-      },
-    ];
-
-    const executionRows = [
-      { label: '账户', value: accountName },
-      { label: '总资产', value: formatCompactCurrency(totalPortfolioAsset) },
-      { label: '可用资金', value: formatCompactCurrency(cashAmount) },
-      { label: '冻结资金', value: formatCompactCurrency(frozenCash) },
-      {
-        label: '组合盈亏',
-        toneValue: totalPortfolioProfit,
-        value: formatSignedCurrency(totalPortfolioProfit),
-      },
-      {
-        label: '组合收益率',
-        toneValue: totalPortfolioProfitPercent,
-        value: formatPercentMetric(totalPortfolioProfitPercent),
-      },
-    ];
+  const renderTradingToolbar = () => {
+    const currentLayout = layoutModeMeta[layoutMode];
+    const nextLayoutMode = getNextLayoutMode(layoutMode);
+    const nextLayout = layoutModeMeta[nextLayoutMode];
+    const LayoutIcon = currentLayout.icon;
 
     return (
-      <div className="border-t border-white/5 bg-[#08101d] px-4 py-4">
-        <div className="mx-auto flex max-w-[1480px] flex-col gap-4">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[10px] font-black uppercase text-red-300">
-                Detail
-              </div>
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-                <h2 className="truncate text-lg font-black text-slate-100">
-                  {displayName} 详情
-                </h2>
-                <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[10px] font-bold text-slate-500">
-                  {displayCode}
-                </span>
-                <span
-                  className={cn(
-                    'rounded border px-2 py-1 text-[10px] font-black',
-                    selectedHolding
-                      ? 'border-red-500/25 bg-red-500/10 text-red-200'
-                      : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-                  )}
-                >
-                  {selectedHolding ? '已持仓' : '未持仓'}
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              disabled={!selectedStockCode}
-              onClick={() => {
-                if (selectedStockCode)
-                  openStudioTab(`/stock/${selectedStockCode}`);
-              }}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-bold text-slate-300 transition-colors hover:border-red-500/35 hover:bg-red-500/10 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 disabled:cursor-not-allowed disabled:opacity-50"
+      <TooltipProvider delayDuration={120}>
+        <div className="flex h-12 shrink-0 items-center justify-between gap-2 overflow-hidden bg-[#07111f]/95 px-3 shadow-[inset_0_-1px_0_rgba(148,163,184,0.05)]">
+          <nav
+            className="flex h-full min-w-0 flex-1 items-stretch"
+            aria-label="交易工作区"
+          >
+            <Tabs
+              value={activeMode}
+              onValueChange={mode => openTradingTab(mode as TradingStudioMode)}
+              className="flex h-full min-w-0 max-w-full"
             >
-              <BarChart3 className="h-3.5 w-3.5" />
-              个股信息
-            </button>
-          </div>
+              <TabsList className="flex h-full min-w-0 justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0 text-slate-500 no-scrollbar">
+                {studioModes.map(mode => {
+                  const isActive = activeMode === mode.id;
 
-          <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
-            {summaryMetrics.map(metric => (
-              <DetailMetricCard
-                key={metric.label}
-                label={metric.label}
-                subValue={metric.subValue}
-                toneValue={metric.toneValue}
-                value={metric.value}
-              />
-            ))}
-          </div>
-
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
-            <DetailPanel icon={ClipboardList} title="持仓明细">
-              <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
-                {holdingRows.map(row => (
-                  <div
-                    key={row.label}
-                    className="min-w-0 rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2"
-                  >
-                    <div className="truncate text-[10px] font-bold text-slate-500">
-                      {row.label}
-                    </div>
-                    <div className="mt-1 truncate font-mono text-xs font-black text-slate-200">
-                      {row.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-3 border-t border-white/5 pt-3">
-                <div className="flex items-center justify-between gap-3 text-[10px] font-bold text-slate-500">
-                  <span>可用库存</span>
-                  <span className="font-mono text-slate-300">
-                    {availablePercent.toFixed(0)}%
-                  </span>
-                </div>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-                  <div
-                    className="h-full rounded-full bg-red-400"
-                    style={{ width: `${availablePercent}%` }}
-                  />
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold text-slate-600">
-                  <span>冻结库存</span>
-                  <span className="font-mono">{frozenPercent.toFixed(0)}%</span>
-                </div>
-              </div>
-            </DetailPanel>
-
-            <DetailPanel icon={Wallet} title="账户与执行">
-              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
-                {executionRows.map(row => (
-                  <div
-                    key={row.label}
-                    className="min-w-0 rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2"
-                  >
-                    <div className="truncate text-[10px] font-bold text-slate-500">
-                      {row.label}
-                    </div>
-                    <div
+                  return (
+                    <TabsTrigger
+                      key={mode.id}
+                      value={mode.id}
                       className={cn(
-                        'mt-1 truncate font-mono text-xs font-black',
-                        row.toneValue === undefined
-                          ? 'text-slate-200'
-                          : getToneClass(row.toneValue)
+                        'relative h-full shrink-0 rounded-none bg-transparent px-0 text-[12px] font-bold text-slate-500 shadow-none transition-colors after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:bg-transparent hover:text-slate-200 focus-visible:ring-red-500/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-red-200 data-[state=active]:shadow-none data-[state=active]:after:bg-red-400',
+                        isActive
+                          ? 'text-red-200'
+                          : 'text-slate-500 hover:text-slate-200'
                       )}
                     >
-                      {row.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </DetailPanel>
+                      {mode.label}
+                    </TabsTrigger>
+                  );
+                })}
+              </TabsList>
+            </Tabs>
+          </nav>
+
+          <div className="flex min-w-0 shrink-0 items-center gap-2">
+            <div className="hidden h-8 items-center gap-2 rounded-md bg-white/[0.025] px-2.5 lg:flex">
+              <span className="max-w-24 truncate font-mono text-[10px] font-bold text-slate-300">
+                {selectedStockCode || '待选标的'}
+              </span>
+              <span className="h-3 w-px bg-white/10" />
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 whitespace-nowrap text-[10px] font-bold',
+                  hasActiveOrders ? 'text-amber-200' : 'text-slate-500'
+                )}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    hasActiveOrders
+                      ? 'bg-amber-300 shadow-[0_0_8px_rgba(252,211,77,0.65)]'
+                      : 'bg-slate-600'
+                  )}
+                />
+                委托 {activeOrderCount}
+              </span>
+            </div>
+
+            {isTerminalMode(activeMode) && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => setLayoutMode(nextLayoutMode)}
+                    className="hidden h-8 w-8 items-center justify-center text-slate-500 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 sm:flex"
+                    aria-label={`当前${currentLayout.label}布局，切换为${nextLayout.label}布局`}
+                  >
+                    <LayoutIcon className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  切换为{nextLayout.label}布局
+                </TooltipContent>
+              </Tooltip>
+            )}
           </div>
-
-          <DetailPanel icon={Activity} title="交易视图">
-            <div className="grid gap-2 md:grid-cols-3">
-              <DetailMetricCard
-                label="当前模块"
-                subValue="固定高度交易插件"
-                value={getTradingStudioMode(activeMode).label}
-              />
-              <DetailMetricCard
-                label="盘口布局"
-                subValue="图表、五档、下单区"
-                value={layoutMode === 'wide' ? '三栏' : '两栏'}
-              />
-              <DetailMetricCard
-                label="活跃委托"
-                subValue={hasActiveOrders ? '待处理委托' : '执行队列空闲'}
-                value={`${activeOrderCount} 笔`}
-              />
-            </div>
-
-            <div className="mt-3 grid gap-2 md:grid-cols-3">
-              <div className="rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2">
-                <div className="text-[10px] font-bold text-slate-500">
-                  当日盈亏
-                </div>
-                <div
-                  className={cn(
-                    'mt-1 font-mono text-xs font-black',
-                    getToneClass(todayProfitLoss)
-                  )}
-                >
-                  {formatSignedCurrency(todayProfitLoss)}
-                </div>
-              </div>
-              <div className="rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2">
-                <div className="text-[10px] font-bold text-slate-500">
-                  当日涨跌幅
-                </div>
-                <div
-                  className={cn(
-                    'mt-1 font-mono text-xs font-black',
-                    getToneClass(todayProfitRate)
-                  )}
-                >
-                  {formatPercentMetric(todayProfitRate)}
-                </div>
-              </div>
-              <div className="rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2">
-                <div className="text-[10px] font-bold text-slate-500">
-                  账户类型
-                </div>
-                <div className="mt-1 truncate font-mono text-xs font-black text-slate-200">
-                  {account?.accountType || selectedHolding?.accountType || '--'}
-                </div>
-              </div>
-            </div>
-          </DetailPanel>
         </div>
-      </div>
+      </TooltipProvider>
     );
   };
+
+  const renderDetailSections = () => (
+    <StockDetailWorkbench
+      accountName={accountName}
+      accountType={
+        accountData?.currentAccount?.accountType || selectedHolding?.accountType
+      }
+      activeModeLabel={getTradingStudioMode(activeMode).label}
+      activeOrderCount={activeOrderCount}
+      cash={portfolioSummary?.cash ?? accountData?.currentAccount?.cash}
+      changePercent={
+        selectedHolding?.changePercent ??
+        selectedDisplayStock?.quote?.changePercent ??
+        null
+      }
+      displayName={
+        selectedHolding?.instrumentName ||
+        selectedDisplayStock?.name ||
+        selectedStockCode ||
+        '待选标的'
+      }
+      frozenCash={accountData?.currentAccount?.frozenCash}
+      hasActiveOrders={hasActiveOrders}
+      holding={selectedHolding}
+      lastPrice={
+        selectedHolding?.lastPrice ??
+        selectedDisplayStock?.quote?.lastPrice ??
+        selectedDisplayStock?.currentPrice ??
+        null
+      }
+      layoutLabel={layoutMode === 'wide' ? '三栏' : '两栏'}
+      onOpenStockInfo={() => {
+        if (selectedStockCode) openStudioTab(`/stock/${selectedStockCode}`);
+      }}
+      portfolioSummary={portfolioSummary}
+      stockCode={selectedStockCode}
+      totalAsset={totalAsset ?? portfolioSummary?.totalAsset}
+    />
+  );
 
   const renderTerminalLayout = () => (
     <div className="h-full min-h-0 overflow-y-auto bg-[#08101d] custom-scrollbar">
@@ -818,6 +466,7 @@ export default function TradingPage() {
                         <div className="h-full w-full overflow-y-auto custom-scrollbar bg-[#0b1120]/60">
                           <TradingCard
                             initialStockCode={urlSymbol}
+                            initialSide={urlSide}
                             onStockSelect={handleSelectedStockChange}
                             priceUpdate={priceUpdate}
                           />
@@ -882,6 +531,7 @@ export default function TradingPage() {
                       <div className="h-full w-full overflow-y-auto custom-scrollbar bg-[#0b1120]/60">
                         <TradingCard
                           initialStockCode={urlSymbol}
+                          initialSide={urlSide}
                           onStockSelect={handleSelectedStockChange}
                           priceUpdate={priceUpdate}
                         />
@@ -977,13 +627,18 @@ export default function TradingPage() {
           value="today_trades"
           className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
         >
-          <TradeRecords initialTimeFilter="today" itemsPerPage={itemsPerPage} />
+          <TradeRecords
+            accountId={accountData?.currentAccount?.id}
+            initialTimeFilter="today"
+            itemsPerPage={itemsPerPage}
+          />
         </TabsContent>
         <TabsContent
           value="history_trades"
           className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
         >
           <TradeRecords
+            accountId={accountData?.currentAccount?.id}
             initialTimeFilter="30days"
             itemsPerPage={itemsPerPage}
           />
@@ -1067,7 +722,7 @@ export default function TradingPage() {
     [activeOrderCount, layoutMode, selectedStockCode]
   );
 
-  if (isMobile) {
+  if (isMobile || isCompactTrading) {
     return <MobileTradingPage />;
   }
 

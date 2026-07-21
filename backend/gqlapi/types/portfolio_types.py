@@ -9,6 +9,7 @@ from strawberry.scalars import JSON
 from gqlapi.types.market_data_types import StockQuote
 from models.daily_asset_snapshot import DailyAssetSnapshot as DailyAssetSnapshotModel
 from models.position import Position as PositionModel
+from models.closed_position_cycle import ClosedPositionCycle as ClosedPositionCycleModel
 
 from .instrument_types import Instrument
 
@@ -22,8 +23,8 @@ class Account:
   cash: float = strawberry.field(description="可用余额")
   frozen_cash: float = strawberry.field(description="冻结资金")
   market_value: float = strawberry.field(description="持仓市值")
-  total_profit_loss: float = strawberry.field(description="总盈亏")
-  profit_loss_percent: float = strawberry.field(description="盈亏百分比")
+  total_profit_loss: Optional[float] = strawberry.field(description="总盈亏")
+  profit_loss_percent: Optional[float] = strawberry.field(description="盈亏百分比")
   create_time: datetime = strawberry.field(description="创建时间")
   update_time: datetime = strawberry.field(description="更新时间")
 
@@ -63,7 +64,7 @@ class Position:
   async def quote(
     self,
     info: strawberry.types.Info,
-  ) -> Annotated["StockQuote", strawberry.lazy(".market_data_types")]:
+  ) -> Optional[Annotated["StockQuote", strawberry.lazy(".market_data_types")]]:
     """延迟加载股票实时行情数据，使用 DataLoader 批量加载避免 N+1 查询"""
     loader: DataLoader[str, StockQuote] = info.context["quote_loader"]
     return await loader.load(self.stock_code)
@@ -206,3 +207,65 @@ class PortfolioSummary:
 
   # 更新时间
   update_time: datetime = strawberry.field(description="数据更新时间")
+
+
+@strawberry.type(description="已清仓持仓周期")
+class ClosedPositionCycle:
+  id: str
+  account_id: str
+  account_type: Optional[str]
+  stock_code: str
+  instrument_name: Optional[str]
+  opened_at: Optional[datetime]
+  closed_at: datetime
+  buy_volume: int
+  sell_volume: int
+  average_buy_price: Optional[float]
+  average_sell_price: Optional[float]
+  gross_buy_amount: float
+  gross_sell_amount: float
+  gross_realized_pnl: Optional[float]
+  gross_realized_pnl_percent: Optional[float]
+  related_trade_ids: List[str]
+  source: str
+  pnl_quality: str
+  quality_flags: List[str]
+
+  @staticmethod
+  def from_model(model: ClosedPositionCycleModel) -> "ClosedPositionCycle":
+    return ClosedPositionCycle(
+      id=model.id,
+      account_id=model.account_id,
+      account_type=model.account_type,
+      stock_code=model.stock_code,
+      instrument_name=model.instrument_name,
+      opened_at=model.opened_at,
+      closed_at=model.closed_at,
+      buy_volume=int(model.buy_volume or 0),
+      sell_volume=int(model.sell_volume or 0),
+      average_buy_price=float(model.average_buy_price)
+      if model.average_buy_price is not None
+      else None,
+      average_sell_price=float(model.average_sell_price)
+      if model.average_sell_price is not None
+      else None,
+      gross_buy_amount=float(model.gross_buy_amount or 0),
+      gross_sell_amount=float(model.gross_sell_amount or 0),
+      gross_realized_pnl=float(model.gross_realized_pnl)
+      if model.gross_realized_pnl is not None
+      else None,
+      gross_realized_pnl_percent=float(model.gross_realized_pnl_percent)
+      if model.gross_realized_pnl_percent is not None
+      else None,
+      related_trade_ids=list(model.related_trade_ids or []),
+      source=model.source,
+      pnl_quality=model.pnl_quality,
+      quality_flags=list(model.quality_flags or []),
+    )
+
+
+@strawberry.type(description="已清仓持仓周期分页")
+class ClosedPositionCyclePage:
+  items: List[ClosedPositionCycle]
+  total_count: int
+  has_more: bool

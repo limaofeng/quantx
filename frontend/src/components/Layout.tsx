@@ -35,7 +35,7 @@ function getInitialSidebarCollapsed() {
 }
 
 export default function Layout({ children }: LayoutProps) {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const currentTitle = getPageTitle(location);
   const isMobile = useIsMobile();
   const isStudioRoute = isStudioWorkspacePath(location);
@@ -100,7 +100,12 @@ export default function Layout({ children }: LayoutProps) {
 
             <div className="flex items-center gap-2">
               {/* Asset Insight Card */}
-              <div className="hidden sm:flex items-center gap-3 px-4 py-2 rounded-lg bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/5 shadow-sm group hover:border-blue-500/30 transition-all duration-300">
+              <button
+                type="button"
+                onClick={() => setLocation('/account')}
+                className="hidden sm:flex items-center gap-3 px-4 py-2 rounded-lg bg-slate-50 dark:bg-white/[0.03] border border-slate-200 dark:border-white/5 shadow-sm group hover:border-blue-500/30 transition-all duration-300"
+                aria-label="打开账户中心"
+              >
                 <div className="p-1.5 rounded-md bg-blue-600/10 text-blue-600 dark:text-blue-400 group-hover:scale-105 transition-transform">
                   <Wallet size={17} strokeWidth={2.5} />
                 </div>
@@ -112,12 +117,12 @@ export default function Layout({ children }: LayoutProps) {
                     className="text-sm font-semibold text-slate-900 dark:text-white font-mono leading-none"
                     data-testid="total-assets"
                   >
-                    ¥
-                    {accountData?.currentAccount?.totalAsset?.toLocaleString() ||
-                      '1,248,560.00'}
+                    {typeof accountData?.currentAccount?.totalAsset === 'number'
+                      ? `¥${accountData.currentAccount.totalAsset.toLocaleString()}`
+                      : '--'}
                   </p>
                 </div>
-              </div>
+              </button>
 
               <div className="h-6 w-px bg-slate-200 dark:bg-white/10 hidden sm:block mx-1" />
 

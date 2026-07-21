@@ -44,8 +44,8 @@ export function useStudioGlobalActions() {
         icon: Wallet,
         id: 'utility:assets',
         label: formatAssetLabel(totalAsset),
-        onHover: () => void preloadRoute('/holdings'),
-        onSelect: () => setLocation('/holdings'),
+        onHover: () => void preloadRoute('/account'),
+        onSelect: () => setLocation('/account'),
       },
       {
         badge: true,

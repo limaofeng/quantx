@@ -47,9 +47,7 @@ export function OrderRecords({
 }: OrderRecordsProps) {
   const [, setLocation] = useLocation();
   const { closeMenu, menu, openAtPointer } = useStudioMenu<any>();
-  // Today's orders
-  // 暂时使用 '300000013250' 作为默认 accountId，如果 props 没传
-  const actualAccountId = accountId || '300000013250';
+  const actualAccountId = accountId || '';
 
   const { orders: todayOrders, loading: todayLoading } =
     useTodayOrders(actualAccountId);
@@ -137,6 +135,7 @@ export function OrderRecords({
 
   // Handle cancel using numeric orderId if possible, logic handled in hook but we pass string here
   const handleCancel = async (orderId: string) => {
+    if (!actualAccountId) return;
     try {
       await cancelOrder(orderId, actualAccountId);
     } catch (_error) {

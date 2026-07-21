@@ -25,18 +25,20 @@ import { useTradingSubmit } from './hooks/useTradingSubmit';
 
 interface TradingCardProps {
   initialStockCode?: string;
-  userId?: string;
+  initialSide?: 'BUY' | 'SELL';
   onSuccess?: () => void;
   onStockSelect?: (stock: Stock | null) => void;
   priceUpdate?: { price: string; timestamp: number } | null;
 }
 
 interface HoldingLike {
+  canUseVolume?: number | null;
   instrumentName?: string | null;
   lastPrice?: number | null;
   name?: string | null;
   profitRate?: number | null;
   stockCode?: string | null;
+  volume?: number | null;
   [key: string]: unknown;
 }
 
@@ -47,6 +49,22 @@ const getStockCode = (stock: unknown) => {
   if (!stock || typeof stock !== 'object') return '';
   const candidate = stock as { id?: unknown; stockCode?: unknown };
   return normalizeStockCode(candidate.stockCode || candidate.id);
+};
+
+const toPositiveNumber = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+const toNonNegativeInteger = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+};
+
+const clampQuantity = (value: number, maxQuantity: number) => {
+  const quantity = toNonNegativeInteger(value);
+  if (quantity <= 0) return 0;
+  return maxQuantity > 0 ? Math.min(quantity, maxQuantity) : quantity;
 };
 
 const stockFromHolding = (holding: HoldingLike, stockCode: string) => ({
@@ -75,7 +93,7 @@ const fallbackStock = (stockCode: string) => ({
  */
 export function TradingCard({
   initialStockCode,
-  userId = 'demo-user',
+  initialSide = 'BUY',
   onSuccess,
   onStockSelect,
   priceUpdate,
@@ -91,7 +109,7 @@ export function TradingCard({
     price,
     setPrice,
     resetForm,
-  } = useFormState();
+  } = useFormState(initialSide === 'SELL' ? 'sell' : 'buy');
 
   const { holdings, portfolioSummary } = useHoldings();
 
@@ -105,6 +123,13 @@ export function TradingCard({
 
   const normalizedInitialStockCode = normalizeStockCode(initialStockCode);
   const selectedStockCode = getStockCode(selectedStock);
+  const selectedHolding = React.useMemo(
+    () =>
+      holdings.find(
+        item => normalizeStockCode(item?.stockCode) === selectedStockCode
+      ) || null,
+    [holdings, selectedStockCode]
+  );
 
   const selectStock = React.useCallback(
     (stock: Stock) => {
@@ -177,10 +202,46 @@ export function TradingCard({
     price
   );
 
-  const { handleSubmit, isSubmitting } = useTradingSubmit(userId, () => {
+  const { handleSubmit, isSubmitting } = useTradingSubmit(() => {
     resetForm();
     onSuccess?.();
   });
+
+  const currentOrderPrice = React.useMemo(() => {
+    return (
+      toPositiveNumber(price) ||
+      toPositiveNumber(selectedStock?.quote?.lastPrice) ||
+      toPositiveNumber(selectedStock?.currentPrice)
+    );
+  }, [price, selectedStock?.currentPrice, selectedStock?.quote?.lastPrice]);
+
+  const buyAvailableQuantity =
+    currentOrderPrice > 0
+      ? toNonNegativeInteger((portfolioSummary?.cash ?? 0) / currentOrderPrice)
+      : 0;
+  const sellAvailableQuantity = toNonNegativeInteger(
+    selectedHolding?.canUseVolume
+  );
+  const availableQuantity =
+    tradeType === 'buy' ? buyAvailableQuantity : sellAvailableQuantity;
+  const availableQuantityLabel =
+    tradeType === 'buy'
+      ? currentOrderPrice > 0
+        ? buyAvailableQuantity.toLocaleString()
+        : '--'
+      : selectedHolding
+        ? sellAvailableQuantity.toLocaleString()
+        : '0';
+  const quantityMax = availableQuantity > 0 ? availableQuantity : undefined;
+  const quantityMin = tradeType === 'buy' ? 100 : 1;
+  const quantityStep = tradeType === 'buy' ? 100 : 1;
+  const quantityNumber = toNonNegativeInteger(quantity);
+  const canSubmitPrice = toPositiveNumber(price) > 0;
+  const canSubmitQuantity =
+    quantityNumber > 0 &&
+    (tradeType === 'buy'
+      ? buyAvailableQuantity > 0 && quantityNumber <= buyAvailableQuantity
+      : sellAvailableQuantity > 0 && quantityNumber <= sellAvailableQuantity);
 
   React.useEffect(() => {
     if (priceUpdate?.price) {
@@ -188,16 +249,66 @@ export function TradingCard({
     }
   }, [priceUpdate, setPrice]);
 
+  React.useEffect(() => {
+    if (!quantity) return;
+    const parsedQuantity = toNonNegativeInteger(quantity);
+    if (parsedQuantity <= 0) {
+      setQuantity('');
+      return;
+    }
+    if (tradeType === 'sell') {
+      const nextQuantity =
+        sellAvailableQuantity > 0
+          ? clampQuantity(parsedQuantity, sellAvailableQuantity)
+          : 0;
+      if (nextQuantity !== parsedQuantity) {
+        setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
+      }
+      return;
+    }
+    if (buyAvailableQuantity > 0 && parsedQuantity > buyAvailableQuantity) {
+      setQuantity(buyAvailableQuantity.toString());
+    }
+  }, [
+    buyAvailableQuantity,
+    quantity,
+    sellAvailableQuantity,
+    setQuantity,
+    tradeType,
+  ]);
+
+  const handleQuantityChange = (value: string) => {
+    if (!value) {
+      setQuantity('');
+      return;
+    }
+    const parsedQuantity = toNonNegativeInteger(value);
+    if (parsedQuantity <= 0) {
+      setQuantity('');
+      return;
+    }
+    if (tradeType === 'sell' && sellAvailableQuantity <= 0) {
+      setQuantity('');
+      return;
+    }
+    setQuantity(clampQuantity(parsedQuantity, availableQuantity).toString());
+  };
+
   const handlePercentClick = (percent: number) => {
-    const maxQty = 10000;
-    setQuantity(Math.floor(maxQty * percent).toString());
+    const nextQuantity = clampQuantity(
+      availableQuantity * percent,
+      availableQuantity
+    );
+    setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
   };
 
   const handleAmountClick = (amount: number) => {
-    const currentPrice =
-      parseFloat(price) || (selectedStock?.quote?.lastPrice ?? 0);
-    if (currentPrice > 0) {
-      setQuantity(Math.floor(amount / currentPrice).toString());
+    if (currentOrderPrice > 0) {
+      const nextQuantity = clampQuantity(
+        Math.floor(amount / currentOrderPrice),
+        availableQuantity
+      );
+      setQuantity(nextQuantity > 0 ? nextQuantity.toString() : '');
     }
   };
 
@@ -393,19 +504,7 @@ export function TradingCard({
                 <div className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-tighter">
                   <span className="text-muted-foreground/50">可用</span>
                   <span className="text-primary tabular-nums">
-                    {tradeType === 'buy'
-                      ? price && Number(price) > 0
-                        ? Math.floor(
-                            (portfolioSummary?.cash ?? 0) / Number(price)
-                          ).toLocaleString()
-                        : '--'
-                      : (holdings
-                          .find(
-                            h =>
-                              h.stockCode ===
-                              (selectedStock?.stockCode || selectedStock?.id)
-                          )
-                          ?.volume?.toLocaleString() ?? 0)}
+                    {availableQuantityLabel}
                   </span>
                   <span className="text-muted-foreground/30">股</span>
                 </div>
@@ -417,9 +516,10 @@ export function TradingCard({
                   type="number"
                   placeholder="100"
                   value={quantity}
-                  onChange={e => setQuantity(e.target.value)}
-                  min="100"
-                  step="100"
+                  onChange={e => handleQuantityChange(e.target.value)}
+                  min={quantityMin}
+                  max={quantityMax}
+                  step={quantityStep}
                 />
                 <div className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-bold text-muted-foreground/30 uppercase">
                   股
@@ -486,7 +586,12 @@ export function TradingCard({
                 ? 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/20 hover:shadow-rose-500/40'
                 : 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20 hover:shadow-emerald-500/40'
             )}
-            disabled={!selectedStock || !quantity || !price || isSubmitting}
+            disabled={
+              !selectedStock ||
+              !canSubmitPrice ||
+              !canSubmitQuantity ||
+              isSubmitting
+            }
           >
             {isSubmitting ? (
               <div className="flex items-center gap-2">

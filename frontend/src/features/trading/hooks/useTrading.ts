@@ -3,6 +3,11 @@ import { gql as urqlGql, useQuery, useMutation } from 'urql';
 import type { RequestPolicy } from 'urql';
 
 import { gql } from '@/generated/gql';
+import { KLinePeriod, PageDirection } from '@/generated/gql/graphql';
+
+function resolveKLinePeriod(period: string): KLinePeriod | undefined {
+  return Object.values(KLinePeriod).find(value => value === period);
+}
 
 /**
  * 获取今日委托列表
@@ -36,6 +41,7 @@ export const GetTodayTradesQuery = gql(`
       tradedId
       orderId
       stockCode
+      stockName
       orderType
       direction
       tradedPrice
@@ -78,6 +84,7 @@ export const GetHistoryTradesQuery = gql(`
       tradedId
       orderId
       stockCode
+      stockName
       orderType
       direction
       tradedPrice
@@ -164,7 +171,7 @@ export const CancelOrderMutation = gql(`
  */
 export function useTodayOrders(accountId?: string) {
   const [result, reexecuteQuery] = useQuery({
-    query: GetTodayOrdersQuery as any,
+    query: GetTodayOrdersQuery,
     variables: { accountId },
     pause: !accountId,
   });
@@ -189,7 +196,7 @@ export function useTodayOrders(accountId?: string) {
  */
 export function useTodayTrades(accountId?: string) {
   const [result, reexecuteQuery] = useQuery({
-    query: GetTodayTradesQuery as any,
+    query: GetTodayTradesQuery,
     variables: { accountId },
     pause: !accountId,
   });
@@ -217,19 +224,25 @@ export function useHistoryOrders(
   startDate: string,
   endDate: string
 ) {
-  const [result] = useQuery({
-    query: GetHistoryOrdersQuery as any,
+  const [result, reexecuteQuery] = useQuery({
+    query: GetHistoryOrdersQuery,
     variables: { accountId, startDate, endDate },
     pause: !accountId || !startDate || !endDate,
   });
+
+  const refresh = useCallback(() => {
+    if (!accountId) return;
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [accountId, reexecuteQuery]);
 
   return useMemo(
     () => ({
       orders: result.data?.historyOrders || [],
       loading: result.fetching,
       error: result.error,
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 
@@ -241,19 +254,25 @@ export function useHistoryTrades(
   startDate: string,
   endDate: string
 ) {
-  const [result] = useQuery({
-    query: GetHistoryTradesQuery as any,
+  const [result, reexecuteQuery] = useQuery({
+    query: GetHistoryTradesQuery,
     variables: { accountId, startDate, endDate },
     pause: !accountId || !startDate || !endDate,
   });
+
+  const refresh = useCallback(() => {
+    if (!accountId) return;
+    reexecuteQuery({ requestPolicy: 'network-only' });
+  }, [accountId, reexecuteQuery]);
 
   return useMemo(
     () => ({
       trades: result.data?.historyTrades || [],
       loading: result.fetching,
       error: result.error,
+      refresh,
     }),
-    [result.data, result.fetching, result.error]
+    [result.data, result.fetching, result.error, refresh]
   );
 }
 
@@ -261,7 +280,7 @@ export function useHistoryTrades(
  * 撤销订单 Hook
  */
 export function useCancelOrder() {
-  const [result, executeMutation] = useMutation(CancelOrderMutation as any);
+  const [result, executeMutation] = useMutation(CancelOrderMutation);
 
   const cancelOrder = useCallback(
     async (orderId: string | number, accountId?: string) => {
@@ -293,7 +312,7 @@ export function useCancelOrder() {
  * 创建订单 Hook
  */
 export function useCreateOrder() {
-  const [result, executeMutation] = useMutation(PlaceOrderMutation as any);
+  const [result, executeMutation] = useMutation(PlaceOrderMutation);
 
   const createOrder = useCallback(
     async (input: {
@@ -337,7 +356,7 @@ export function useTicks(
   } = {}
 ) {
   const [result, reexecuteQuery] = useQuery({
-    query: GetTicksQuery as any,
+    query: GetTicksQuery,
     variables: {
       stockCode,
       startTime,
@@ -403,16 +422,17 @@ export function useKLines(
     requestPolicy?: RequestPolicy;
   } = {}
 ) {
+  const resolvedPeriod = resolveKLinePeriod(period);
   const [result, reexecuteQuery] = useQuery({
-    query: GetKLinesQuery as any,
+    query: GetKLinesQuery,
     variables: {
       stockCode,
-      period,
+      period: resolvedPeriod ?? KLinePeriod.Day_1,
       startTime,
       endTime,
       order: options.order || 'desc',
     },
-    pause: options.pause || !stockCode || !period,
+    pause: options.pause || !stockCode || !resolvedPeriod,
     requestPolicy: options.requestPolicy || 'cache-and-network',
   });
 
@@ -445,18 +465,19 @@ export function useKLinesPage(
   limit: number = 200,
   cursor?: string | null
 ) {
+  const resolvedPeriod = resolveKLinePeriod(period);
   const [result] = useQuery({
-    query: GetKLinesPageQuery as any,
+    query: GetKLinesPageQuery,
     variables: {
       page: {
         stockCode,
-        period,
+        period: resolvedPeriod,
         limit,
         cursor,
-        direction: 'PREV', // Default to fetching history
+        direction: PageDirection.Prev, // Default to fetching history
       },
     },
-    pause: !stockCode || !period,
+    pause: !stockCode || !resolvedPeriod,
   });
 
   return useMemo(

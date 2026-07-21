@@ -29,7 +29,7 @@ export const GetCurrentAccountQuery = gql(`
  */
 export function useCurrentAccount() {
   const [result] = useQuery({
-    query: GetCurrentAccountQuery as any,
+    query: GetCurrentAccountQuery,
   });
 
   return useMemo(

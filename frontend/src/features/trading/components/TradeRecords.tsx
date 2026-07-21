@@ -12,12 +12,11 @@ import {
 } from '@/components/ui/select';
 import type { EnrichedTransaction } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
-import { cn } from '@/utils/cn';
 
 import { useTradeRecords } from '../hooks/useTradeRecords';
 
 interface TradeRecordsProps {
-  userId?: string;
+  accountId?: string;
   itemsPerPage?: number;
   initialTimeFilter?: string;
 }
@@ -38,7 +37,7 @@ function getTransactionStockName(transaction?: EnrichedTransaction | null) {
 }
 
 export function TradeRecords({
-  userId = 'demo-user',
+  accountId,
   itemsPerPage = 10,
   initialTimeFilter = '30days',
 }: TradeRecordsProps) {
@@ -52,14 +51,13 @@ export function TradeRecords({
     setTimeFilter,
     filteredTransactions,
     paginatedTransactions,
-    isTransactionsLoading,
-    winRate,
-    totalProfit,
+    isLoading: isTransactionsLoading,
+    totalAmount,
     totalPages,
     currentPage,
     setCurrentPage,
     startIndex,
-  } = useTradeRecords(userId, itemsPerPage, initialTimeFilter) as any; // Cast for now, fix type later
+  } = useTradeRecords(accountId, itemsPerPage, initialTimeFilter);
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'completed':
@@ -137,20 +135,12 @@ export function TradeRecords({
       <div className="flex justify-between items-center gap-4 px-1">
         <div className="flex gap-4 items-center">
           <div className="flex items-center gap-1.5 text-[10px] font-mono">
-            <span className="text-muted-foreground uppercase">胜率:</span>
-            <span className="font-bold">{winRate.toFixed(1)}%</span>
+            <span className="text-muted-foreground uppercase">成交笔数:</span>
+            <span className="font-bold">{filteredTransactions.length}</span>
           </div>
           <div className="flex items-center gap-1.5 text-[10px] font-mono">
-            <span className="text-muted-foreground uppercase">累计收益:</span>
-            <span
-              className={cn(
-                'font-bold',
-                totalProfit >= 0 ? 'text-success' : 'text-destructive'
-              )}
-            >
-              {totalProfit >= 0 ? '+' : ''}
-              {formatCurrency(totalProfit)}
-            </span>
+            <span className="text-muted-foreground uppercase">成交金额:</span>
+            <span className="font-bold">{formatCurrency(totalAmount)}</span>
           </div>
         </div>
 
@@ -213,7 +203,7 @@ export function TradeRecords({
                     属性/状态
                   </th>
                   <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
-                    预计盈亏
+                    盈亏口径
                   </th>
                 </tr>
               </thead>
@@ -251,11 +241,6 @@ export function TradeRecords({
                     (transaction: EnrichedTransaction) => {
                       const stock = transaction.stock;
                       if (!stock) return null;
-
-                      // Mock P&L calculation
-                      const mockPnL =
-                        parseFloat(String(transaction.totalAmount || 0)) *
-                        (transaction.id.charCodeAt(0) % 2 === 0 ? 0.03 : -0.02);
 
                       return (
                         <tr
@@ -304,23 +289,9 @@ export function TradeRecords({
                             {getStatusBadge(transaction.status)}
                           </td>
                           <td className="px-3 py-1 text-right">
-                            {transaction.type === 'sell' ? (
-                              <span
-                                className={cn(
-                                  'text-[11px] font-mono font-bold',
-                                  mockPnL >= 0
-                                    ? 'text-success'
-                                    : 'text-destructive'
-                                )}
-                              >
-                                {mockPnL >= 0 ? '+' : ''}
-                                {formatCurrency(mockPnL)}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-muted-foreground opacity-50">
-                                -
-                              </span>
-                            )}
+                            <span className="text-[10px] text-muted-foreground">
+                              --
+                            </span>
                           </td>
                         </tr>
                       );

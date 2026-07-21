@@ -1,7 +1,18 @@
 import { formatCurrency } from '@/shared/utils/format';
 
 interface AccountInfoProps {
-  summary: any;
+  summary?: {
+    cash: number;
+    frozenCash: number;
+    totalAsset: number;
+    marketValue: number;
+    totalProfitLoss?: number | null;
+    profitLossPercent?: number | null;
+  } | null;
+}
+
+function displayCurrency(value?: number | null) {
+  return typeof value === 'number' ? formatCurrency(value) : '--';
 }
 
 export function AccountInfo({ summary }: AccountInfoProps) {
@@ -16,7 +27,7 @@ export function AccountInfo({ summary }: AccountInfoProps) {
             className="text-[12px] font-mono font-bold"
             data-testid="available-cash"
           >
-            {formatCurrency(summary?.availableCash || 0)}
+            {displayCurrency(summary?.cash)}
           </span>
         </div>
         <div className="flex justify-between items-center px-1">
@@ -27,7 +38,7 @@ export function AccountInfo({ summary }: AccountInfoProps) {
             className="text-[12px] font-mono text-muted-foreground"
             data-testid="frozen-funds"
           >
-            {formatCurrency(summary?.frozenFunds || 0)}
+            {displayCurrency(summary?.frozenCash)}
           </span>
         </div>
         <div className="flex justify-between items-center px-1">
@@ -38,7 +49,7 @@ export function AccountInfo({ summary }: AccountInfoProps) {
             className="text-[12px] font-mono font-bold text-primary"
             data-testid="account-total-assets"
           >
-            {formatCurrency(summary?.totalAssets || 0)}
+            {displayCurrency(summary?.totalAsset)}
           </span>
         </div>
 
@@ -52,26 +63,32 @@ export function AccountInfo({ summary }: AccountInfoProps) {
             className="text-[14px] font-mono font-black text-primary"
             data-testid="buying-power"
           >
-            {formatCurrency(
-              (summary?.availableCash || 0) - (summary?.frozenFunds || 0)
-            )}
+            {displayCurrency(summary?.cash)}
           </span>
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2">
           <div className="p-2 bg-muted/10 rounded flex flex-col gap-1">
             <span className="text-[9px] text-muted-foreground uppercase">
-              当日盈亏
+              持仓市值
             </span>
-            <span className="text-[11px] font-mono font-bold text-success">
-              +¥1,240.00
+            <span className="text-[11px] font-mono font-bold">
+              {displayCurrency(summary?.marketValue)}
             </span>
           </div>
           <div className="p-2 bg-muted/10 rounded flex flex-col gap-1">
             <span className="text-[9px] text-muted-foreground uppercase">
-              当日胜率
+              总盈亏
             </span>
-            <span className="text-[11px] font-mono font-bold">68.5%</span>
+            <span className="text-[11px] font-mono font-bold">
+              {typeof summary?.totalProfitLoss === 'number'
+                ? `${displayCurrency(summary.totalProfitLoss)}${
+                    typeof summary.profitLossPercent === 'number'
+                      ? ` (${summary.profitLossPercent.toFixed(2)}%)`
+                      : ''
+                  }`
+                : '--'}
+            </span>
           </div>
         </div>
       </div>

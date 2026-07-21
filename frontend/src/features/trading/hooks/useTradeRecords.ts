@@ -7,7 +7,17 @@ import {
 import type { EnrichedTransaction } from '@/shared/types';
 
 import { useTodayTrades, useHistoryTrades } from './useTrading';
-import { useTradingStats } from './useTradingStats';
+
+interface TradeRecordInput {
+  tradedId: string;
+  stockCode: string;
+  stockName: string;
+  orderType: number;
+  tradedTime: number;
+  tradedPrice: number;
+  tradedVolume: number;
+  tradedAmount: number;
+}
 
 interface UseTradeRecordsResult {
   // 原始数据
@@ -30,17 +40,15 @@ interface UseTradeRecordsResult {
   totalPages: number;
   startIndex: number;
 
-  // 统计属性
-  winRate: number;
-  totalProfit: number;
+  totalAmount: number;
 }
 
 /**
  * 将 GraphQL Trade 类型转换为 EnrichedTransaction 类型
  */
-function tradeToTransaction(trade: any): EnrichedTransaction {
+function tradeToTransaction(trade: TradeRecordInput): EnrichedTransaction {
   const stockName = trade.stockName || trade.stockCode || '';
-  const tradedTimestamp = trade.tradedTime ?? trade.tradeTime;
+  const tradedTimestamp = trade.tradedTime;
   const normalizedTimestamp = Number(tradedTimestamp);
   const tradedTimeValue =
     tradedTimestamp == null || Number.isNaN(normalizedTimestamp)
@@ -54,53 +62,31 @@ function tradeToTransaction(trade: any): EnrichedTransaction {
           return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
         })();
 
-  const directionText = String(trade.direction || '').toUpperCase();
-  const orderTypeValue = Number.isFinite(Number(trade.orderType))
-    ? Number(trade.orderType)
-    : Number.NEGATIVE_INFINITY;
-  const directionValue = Number.isFinite(Number(trade.direction))
-    ? Number(trade.direction)
-    : Number.NEGATIVE_INFINITY;
-
-  const type =
-    directionText === 'BUY' ||
-    directionText === 'BUY_OPEN' ||
-    directionText === 'BUY_TO_COVER' ||
-    directionValue > 0
-      ? 'buy'
-      : directionText === 'SELL' ||
-          directionText === 'SELL_SHORT' ||
-          directionText === 'SELL_TO_CLOSE' ||
-          directionValue < 0 ||
-          orderTypeValue < 0
-        ? 'sell'
-        : orderTypeValue > 0
-          ? 'buy'
-          : 'sell';
+  const type = Number(trade.orderType) === 23 ? 'buy' : 'sell';
 
   return {
-    id: trade.tradedId ?? trade.id,
+    id: trade.tradedId,
     type,
     stockCode: trade.stockCode,
     stockName,
-    quantity: trade.tradedVolume ?? trade.quantity ?? 0,
-    price: trade.tradedPrice ?? trade.price ?? 0,
-    totalAmount: trade.tradedAmount ?? trade.amount ?? 0,
+    quantity: trade.tradedVolume,
+    price: trade.tradedPrice,
+    totalAmount: trade.tradedAmount,
     status: 'filled',
     orderTime: tradedTimeValue,
     fillTime: tradedTimeValue,
-    commission: trade.fee || trade.commission || 0,
+    createdAt: tradedTimeValue,
     stock: {
       id: trade.stockCode,
       stockCode: trade.stockCode,
       code: trade.stockCode,
       name: stockName,
-    } as any,
+    },
   };
 }
 
 export function useTradeRecords(
-  userId: string = 'demo-user',
+  accountId: string | undefined,
   itemsPerPage: number = 10,
   initialTimeFilter: string = '30days'
 ): UseTradeRecordsResult {
@@ -108,9 +94,6 @@ export function useTradeRecords(
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [timeFilter, setTimeFilter] = useState<string>(initialTimeFilter);
   const [currentPage, setCurrentPage] = useState(1);
-
-  // 暂时使用 '300000013250' 作为默认 accountId，如果传入 demo-user
-  const accountId = userId === 'demo-user' ? '300000013250' : userId;
 
   // Calculate date range for history query
   const dateRange = useMemo(() => {
@@ -140,7 +123,7 @@ export function useTradeRecords(
   const { trades: todayTrades, loading: todayLoading } =
     useTodayTrades(accountId);
   const { trades: historyTrades, loading: historyLoading } = useHistoryTrades(
-    accountId,
+    accountId || '',
     dateRange.startDate,
     dateRange.endDate
   );
@@ -157,9 +140,6 @@ export function useTradeRecords(
   }, [todayTrades, historyTrades, timeFilter]);
 
   const isLoading = timeFilter === 'today' ? todayLoading : historyLoading;
-
-  // 统计逻辑
-  const stats = useTradingStats(recentTransactions);
 
   // 应用筛选逻辑
   const filteredTransactions = useMemo(() => {
@@ -193,8 +173,10 @@ export function useTradeRecords(
       paginatedTransactions,
       totalPages,
       startIndex,
-      winRate: stats.winRate,
-      totalProfit: stats.totalProfit,
+      totalAmount: filteredTransactions.reduce(
+        (sum, transaction) => sum + transaction.totalAmount,
+        0
+      ),
     }),
     [
       recentTransactions,
@@ -206,8 +188,6 @@ export function useTradeRecords(
       paginatedTransactions,
       totalPages,
       startIndex,
-      stats.winRate,
-      stats.totalProfit,
     ]
   );
 }

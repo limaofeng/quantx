@@ -41,14 +41,6 @@ function getSnapshotTrendRange() {
  * 组合了持仓数据和账户汇总信息
  */
 export function useHoldings() {
-  const [holdingsResult, executeHoldingsQuery] = useQuery({
-    query: GetHoldingsQuery,
-  });
-
-  const [liquidateResult, executeLiquidate] = useMutation(
-    LiquidatePositionMutation
-  );
-
   const {
     data: accountData,
     loading: accountLoading,
@@ -58,6 +50,16 @@ export function useHoldings() {
   const account = accountData?.currentAccount;
   const accountId = account?.id;
   const snapshotRange = useMemo(() => getSnapshotTrendRange(), []);
+
+  const [holdingsResult, executeHoldingsQuery] = useQuery({
+    query: GetHoldingsQuery,
+    variables: { accountId },
+    pause: !accountId,
+  });
+
+  const [liquidateResult, executeLiquidate] = useMutation(
+    LiquidatePositionMutation
+  );
 
   const [summaryResult, executeSummaryQuery] = useQuery({
     query: GetPortfolioSummaryQuery,

@@ -26,7 +26,7 @@ function copyText(text: string) {
 export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
   const [, setLocation] = useLocation();
   const { closeMenu, menu, openAtPointer } = useStudioMenu<any>();
-  const actualAccountId = accountId || '300000013250';
+  const actualAccountId = accountId || '';
   const { orders, loading } = useTodayOrders(actualAccountId);
   const { cancelOrder, fetching: isCancelling } = useCancelOrder();
 
@@ -52,6 +52,7 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
   }
 
   const handleCancel = async (orderId: string) => {
+    if (!actualAccountId) return;
     try {
       await cancelOrder(orderId, actualAccountId);
     } catch (_error) {

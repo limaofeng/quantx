@@ -26,6 +26,13 @@ class AccountRepository(BaseRepository[Account]):
     result = await self.db.execute(select(Account))
     return list(result.scalars().all())
 
+  async def find_default(self) -> Optional[Account]:
+    """Return the most recently refreshed account without inventing an ID."""
+    result = await self.db.execute(
+      select(Account).order_by(Account.updated_at.desc()).limit(1)
+    )
+    return result.scalar_one_or_none()
+
   async def find_by_account_id(
     self, account_id: str, account_type: AccountType = AccountType.STOCK
   ) -> Optional[Account]:

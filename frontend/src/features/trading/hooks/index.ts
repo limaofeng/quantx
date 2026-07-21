@@ -4,4 +4,3 @@
 
 export * from './useTrading';
 export { useTradeRecords } from './useTradeRecords';
-export { useTradingStats } from './useTradingStats';

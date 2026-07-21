@@ -1,6 +1,8 @@
 import * as React from 'react';
+import { useSearch } from 'wouter';
 
 import { StockSelector } from '@/components/StockSelector';
+import { useStudioNavigate } from '@/components/studio-workspace';
 import { TradingChart } from '@/components/trading-chart';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +16,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useCurrentAccount } from '@/features/dashboard/hooks';
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
+import type { Position } from '@/features/portfolio/types';
+import { StockDetailWorkbench } from '@/features/stocks/components';
 import { useStockSearch } from '@/hooks/useStockSearch';
+import type { Stock } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
 import { cn } from '@/utils/cn';
 
@@ -22,11 +27,62 @@ import { OrderRecords } from '../components/OrderRecords';
 import { useFormState } from '../components/TradingCard/hooks/useFormState';
 import { useTradingCalculation } from '../components/TradingCard/hooks/useTradingCalculation';
 import { useTradingSubmit } from '../components/TradingCard/hooks/useTradingSubmit';
+import { useTodayOrders } from '../hooks';
+
+type OrderLike = { status?: string | null };
+
+function normalizeSymbol(value: unknown) {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getUrlSymbol(search: string) {
+  return normalizeSymbol(new URLSearchParams(search).get('symbol'));
+}
+
+function getSelectedStockCode(selectedStock: unknown) {
+  if (typeof selectedStock === 'string') return selectedStock;
+  if (!selectedStock || typeof selectedStock !== 'object') return undefined;
+
+  const candidate = selectedStock as { id?: unknown; stockCode?: unknown };
+  if (typeof candidate.stockCode === 'string') return candidate.stockCode;
+  if (typeof candidate.id === 'string') return candidate.id;
+  return undefined;
+}
+
+function makeSymbolStock(symbol: string): Stock {
+  return {
+    id: symbol,
+    name: symbol,
+    quote: {
+      changePercent: 0,
+      lastPrice: 0,
+    },
+    stockCode: symbol,
+  };
+}
+
+function makeHoldingStock(holding: Position): Stock {
+  const stockCode = normalizeSymbol(holding.stockCode);
+  const lastPrice = holding.lastPrice ?? 0;
+
+  return {
+    currentPrice: lastPrice,
+    id: stockCode,
+    name: holding.instrumentName || stockCode,
+    quote: {
+      changePercent: holding.changePercent ?? holding.profitRate ?? 0,
+      lastPrice,
+    },
+    stockCode,
+  };
+}
 
 export default function MobileTradingPage() {
   const [activeTab, setActiveTab] = React.useState('trade');
   const { data: accountData } = useCurrentAccount();
-  const userId = 'demo-user';
+  const search = useSearch();
+  const urlSymbol = React.useMemo(() => getUrlSymbol(search), [search]);
+  const openStudioTab = useStudioNavigate();
 
   // ---------------------------------------------------------------------------
   // Trading Logic (Reused from TradingCard)
@@ -41,7 +97,11 @@ export default function MobileTradingPage() {
     price,
     setPrice,
     resetForm,
-  } = useFormState();
+  } = useFormState(
+    new URLSearchParams(search).get('side')?.toUpperCase() === 'SELL'
+      ? 'sell'
+      : 'buy'
+  );
 
   const { holdings, portfolioSummary } = useHoldings();
 
@@ -52,32 +112,65 @@ export default function MobileTradingPage() {
     filteredStocks,
     handleStockSelect,
   } = useStockSearch(holdings);
+  const selectedStockSymbol = normalizeSymbol(
+    getSelectedStockCode(selectedStock)
+  );
+  const selectedStockCode = urlSymbol || selectedStockSymbol;
+  const selectedHolding = React.useMemo(
+    () =>
+      holdings.find(
+        holding => normalizeSymbol(holding.stockCode) === selectedStockCode
+      ) || null,
+    [holdings, selectedStockCode]
+  );
+  const { orders } = useTodayOrders(accountData?.currentAccount?.id);
+  const activeOrderCount = React.useMemo(() => {
+    return ((orders || []) as OrderLike[]).filter(order =>
+      ['UNREPORTED', 'WAIT_REPORTING', 'REPORTED', 'PART_SUCC'].includes(
+        order.status || ''
+      )
+    ).length;
+  }, [orders]);
+  const hasActiveOrders = activeOrderCount > 0;
 
   // Initialize with first holding if available
   const hasAutoSelectedRef = React.useRef(false);
   React.useEffect(() => {
+    if (urlSymbol) return;
     if (!hasAutoSelectedRef.current && !selectedStock && holdings.length > 0) {
       const first = holdings[0];
-      handleStockSelect(
-        {
-          ...first,
-          id: first.stockCode,
-          stockCode: first.stockCode,
-          name: first.instrumentName || '',
-          quote: {
-            lastPrice: first.lastPrice || 0,
-            changePercent: first.profitRate || 0,
-          },
-        },
-        setPrice
-      );
+      handleStockSelect(makeHoldingStock(first), setPrice);
       hasAutoSelectedRef.current = true;
     }
-  }, [holdings, selectedStock, handleStockSelect, setPrice]);
+  }, [holdings, selectedStock, handleStockSelect, setPrice, urlSymbol]);
+
+  React.useEffect(() => {
+    if (!urlSymbol) return;
+
+    const nextStock = selectedHolding
+      ? makeHoldingStock(selectedHolding)
+      : makeSymbolStock(urlSymbol);
+    const shouldRefreshSelection =
+      selectedStockSymbol !== urlSymbol ||
+      (selectedHolding && selectedStock?.name === selectedStock?.stockCode);
+
+    if (shouldRefreshSelection) {
+      handleStockSelect(nextStock, setPrice);
+      hasAutoSelectedRef.current = true;
+    }
+  }, [
+    handleStockSelect,
+    selectedHolding,
+    selectedStock?.name,
+    selectedStock?.stockCode,
+    selectedStockSymbol,
+    setPrice,
+    urlSymbol,
+  ]);
 
   const { estimatedAmount } = useTradingCalculation(quantity, price);
 
-  const { handleSubmit, isSubmitting } = useTradingSubmit(userId, () => {
+  const { handleSubmit, isSubmitting } = useTradingSubmit(() => {
     resetForm();
     // Optional: Show toast
   });
@@ -87,8 +180,16 @@ export default function MobileTradingPage() {
     setQuantity(Math.floor(maxQty * percent).toString());
   };
 
-  const priceChange = selectedStock?.quote?.changePercent ?? 0;
-  const isUp = priceChange >= 0;
+  const priceChange = Number(selectedStock?.quote?.changePercent ?? 0);
+  const safePriceChange = Number.isFinite(priceChange) ? priceChange : 0;
+  const isUp = safePriceChange >= 0;
+  const formattedPriceChange = safePriceChange.toFixed(2);
+  const accountName = accountData?.currentAccount?.accountName || 'DEMO_ACC';
+  const selectedDisplayName =
+    selectedHolding?.instrumentName ||
+    selectedStock?.name ||
+    selectedStockCode ||
+    '待选标的';
 
   return (
     <div className="flex flex-col h-full bg-background">
@@ -187,7 +288,7 @@ export default function MobileTradingPage() {
                       )}
                     >
                       {isUp ? '+' : ''}
-                      {priceChange}%
+                      {formattedPriceChange}%
                     </span>
                   </div>
                 </div>
@@ -363,6 +464,52 @@ export default function MobileTradingPage() {
                 ? 'Processing...'
                 : `${tradeType === 'buy' ? 'Buy' : 'Sell'} ${selectedStock?.stockCode || ''}`}
             </Button>
+
+            {selectedStockCode && (
+              <StockDetailWorkbench
+                accountName={accountName}
+                accountType={
+                  accountData?.currentAccount?.accountType ||
+                  selectedHolding?.accountType
+                }
+                activeModeLabel={
+                  activeTab === 'trade'
+                    ? '移动下单'
+                    : activeTab === 'chart'
+                      ? '移动图表'
+                      : '移动委托'
+                }
+                activeOrderCount={activeOrderCount}
+                cash={
+                  portfolioSummary?.cash ?? accountData?.currentAccount?.cash
+                }
+                changePercent={
+                  selectedHolding?.changePercent ??
+                  selectedStock?.quote?.changePercent ??
+                  null
+                }
+                displayName={selectedDisplayName}
+                frozenCash={accountData?.currentAccount?.frozenCash}
+                hasActiveOrders={hasActiveOrders}
+                holding={selectedHolding}
+                lastPrice={
+                  selectedHolding?.lastPrice ??
+                  selectedStock?.quote?.lastPrice ??
+                  selectedStock?.currentPrice ??
+                  null
+                }
+                layoutLabel="移动"
+                onOpenStockInfo={() =>
+                  openStudioTab(`/stock/${selectedStockCode}`)
+                }
+                portfolioSummary={portfolioSummary}
+                stockCode={selectedStockCode}
+                totalAsset={
+                  accountData?.currentAccount?.totalAsset ??
+                  portfolioSummary?.totalAsset
+                }
+              />
+            )}
           </TabsContent>
 
           {/* Tab: Chart */}

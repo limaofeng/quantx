@@ -7,16 +7,29 @@ import type { Stock } from '@/shared/types';
 import { useCurrentAccount } from '../../../../dashboard/hooks';
 import { useCreateOrder } from '../../../hooks';
 
+function getSelectedStockCode(stock: Stock) {
+  return stock.code || stock.stockCode || stock.id || '';
+}
+
+function getOrderRemark(tradeType: 'buy' | 'sell', stockCode: string) {
+  return `交易控制台${tradeType === 'buy' ? '买入' : '平仓'}: ${stockCode}`;
+}
+
 /**
  * 交易提交逻辑
  */
 export function useTradingSubmit(
-  _userId: string = 'demo-user',
-  onSuccess?: () => void
+  onSuccessOrLegacyUserId?: (() => void) | string,
+  legacyOnSuccess?: () => void
 ) {
+  const onSuccess =
+    typeof onSuccessOrLegacyUserId === 'function'
+      ? onSuccessOrLegacyUserId
+      : legacyOnSuccess;
   const { toast } = useToast();
   const { loading: isSubmitting, createOrder } = useCreateOrder();
-  const { data: _accountData } = useCurrentAccount(); // 获取账号数据用于刷新等逻辑
+  const { data: accountData } = useCurrentAccount();
+  const accountId = accountData?.currentAccount?.id;
 
   const handleSubmit = useCallback(
     async (
@@ -30,6 +43,15 @@ export function useTradingSubmit(
     ) => {
       e.preventDefault();
 
+      if (!accountId) {
+        toast({
+          title: '账户不可用',
+          description: '未连接资金账户，无法提交委托',
+          variant: 'destructive',
+        });
+        return;
+      }
+
       if (!selectedStock || !quantity || !price) {
         toast({
           title: '信息不完整',
@@ -39,22 +61,45 @@ export function useTradingSubmit(
         return;
       }
 
-      const quantityNum = parseInt(quantity);
+      const stockCode = getSelectedStockCode(selectedStock);
+      const quantityNum = parseInt(quantity, 10);
       const priceNum = parseFloat(price);
+
+      if (
+        !stockCode ||
+        !Number.isFinite(quantityNum) ||
+        quantityNum <= 0 ||
+        !Number.isFinite(priceNum) ||
+        priceNum <= 0
+      ) {
+        toast({
+          title: '交易参数无效',
+          description: '请检查证券代码、价格和委托数量',
+          variant: 'destructive',
+        });
+        return;
+      }
 
       try {
         const result = await createOrder({
-          stockCode: selectedStock.code!,
+          stockCode,
           type: tradeType.toUpperCase(), // BUY or SELL
           priceType: orderType.toUpperCase(), // LIMIT/MARKET/VWAP
           price: priceNum,
           volume: quantityNum,
+          strategyName: '手动交易',
+          orderRemark: getOrderRemark(tradeType, stockCode),
+          accountId,
         });
+        const orderResult = result.data?.placeOrder;
 
-        if (result.error) {
+        if (result.error || orderResult?.success === false) {
           toast({
             title: '交易失败',
-            description: result.error.message || '请检查输入信息后重试',
+            description:
+              result.error?.message ||
+              orderResult?.message ||
+              '请检查输入信息后重试',
             variant: 'destructive',
           });
         } else {
@@ -73,7 +118,7 @@ export function useTradingSubmit(
         });
       }
     },
-    [createOrder, toast, onSuccess]
+    [accountId, createOrder, toast, onSuccess]
   );
 
   return useMemo(

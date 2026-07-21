@@ -1,6 +1,9 @@
 // Dashboard 主页面组件
 import { Wallet, TrendingUp, PieChart, Bot } from 'lucide-react';
 
+import { useAccountOverview } from '@/features/account/hooks/useAccountCenter';
+import { daysAgoKey, shanghaiDateKey } from '@/features/account/utils';
+import { useTodayTrades } from '@/features/trading/hooks/useTrading';
 import type { EnrichedHolding } from '@/shared/types';
 import { formatCurrency } from '@/shared/utils/format';
 
@@ -13,26 +16,44 @@ import { useCurrentAccount } from '../hooks';
 
 export default function DashboardPage() {
   const { data: accountData, loading: accountLoading } = useCurrentAccount();
+  const account = accountData?.currentAccount;
+  const overview = useAccountOverview(
+    account?.id,
+    daysAgoKey(7),
+    shanghaiDateKey()
+  );
+  const trades = useTodayTrades(account?.id);
+  const topHoldings: EnrichedHolding[] = overview.positions
+    .slice(0, 5)
+    .map(position => {
+      const lastPrice = position.quote?.lastPrice ?? position.lastPrice ?? 0;
+      return {
+        id: position.id,
+        stockCode: position.stockCode,
+        stockName: position.instrumentName || position.stockCode,
+        volume: position.volume,
+        canUseVolume: position.canUseVolume,
+        openPrice: position.avgPrice ?? 0,
+        marketValue: position.marketValue ?? 0,
+        frozenVolume: 0,
+        onRoadVolume: 0,
+        yesterdayVolume: 0,
+        avgPrice: position.avgPrice ?? 0,
+        lastPrice,
+        profitRate: position.profitRate ?? 0,
+        profitLoss: position.profitLoss ?? 0,
+        stock: {
+          id: position.stockCode,
+          stockCode: position.stockCode,
+          code: position.stockCode,
+          name: position.instrumentName || position.stockCode,
+          currentPrice: lastPrice,
+        },
+      };
+    });
+  const isLoading = accountLoading || overview.loading;
 
-  // 仪表板汇总信息暂时使用模拟数据，待后端支持相关查询
-  const summary = {
-    totalAsset: accountData?.currentAccount?.totalAsset || 1248560,
-    todayPnL: 12480,
-    todayPnLPercent: 1.25,
-    totalReturn: 156000,
-    totalReturnPercent: 14.2,
-    activePositions: 12,
-    todayTrades: 3,
-    marketStatus: '交易中',
-  };
-
-  const isLoading = accountLoading;
-
-  // 模拟的 holdings 数据和加载状态
-  const topHoldings: EnrichedHolding[] = [];
-  const holdingsLoading = false;
-
-  if (isLoading && !summary) {
+  if (isLoading && !account) {
     return <div>加载中...</div>;
   }
 
@@ -52,33 +73,39 @@ export default function DashboardPage() {
             <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-wider text-slate-500">
               <span className="inline-flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                {summary.marketStatus}
+                {account ? '账户已连接' : '账户未连接'}
               </span>
               <span className="text-slate-700">|</span>
-              <span>Mock Snapshot</span>
+              <span>miniQMT 实时账户</span>
             </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <MetricCard
                 title="总资产"
-                value={formatCurrency(summary.totalAsset)}
-                change="+2.4%"
-                changeLabel="较昨日"
+                value={
+                  typeof account?.totalAsset === 'number'
+                    ? formatCurrency(account.totalAsset)
+                    : '--'
+                }
                 icon={Wallet}
                 testId="metric-total-assets"
               />
 
               <MetricCard
-                title="今日盈亏"
+                title="总盈亏"
                 value={
-                  summary.todayPnL
-                    ? `+${formatCurrency(summary.todayPnL)}`
-                    : '+¥12,480'
+                  typeof account?.totalProfitLoss === 'number'
+                    ? formatCurrency(account.totalProfitLoss)
+                    : '--'
                 }
-                change={`${summary.todayPnLPercent}%`}
-                changeLabel="收益率"
+                change={
+                  typeof account?.profitLossPercent === 'number'
+                    ? `${account.profitLossPercent.toFixed(2)}%`
+                    : undefined
+                }
+                changeLabel="券商账户口径"
                 icon={TrendingUp}
                 variant="success"
                 testId="metric-today-pnl"
@@ -86,14 +113,14 @@ export default function DashboardPage() {
 
               <MetricCard
                 title="持仓股票"
-                value={String(summary.activePositions)}
+                value={account ? String(overview.positions.length) : '--'}
                 icon={PieChart}
                 testId="metric-holdings-count"
               />
 
               <MetricCard
                 title="今日交易"
-                value={String(summary.todayTrades)}
+                value={account ? String(trades.trades.length) : '--'}
                 icon={Bot}
                 variant="warning"
                 testId="metric-strategies-count"
@@ -103,7 +130,7 @@ export default function DashboardPage() {
                   className="ml-1 font-semibold text-emerald-300"
                   data-testid="metric-today-trades"
                 >
-                  {summary.todayTrades}
+                  {account ? trades.trades.length : '--'}
                 </span>
               </MetricCard>
             </div>
@@ -114,7 +141,10 @@ export default function DashboardPage() {
             </div>
 
             <div className="mt-3">
-              <TopHoldings holdings={topHoldings} isLoading={holdingsLoading} />
+              <TopHoldings
+                holdings={topHoldings}
+                isLoading={overview.loading}
+              />
             </div>
           </div>
         </div>
@@ -126,14 +156,19 @@ export default function DashboardPage() {
             仪表板在线
           </span>
           <span className="text-slate-700">|</span>
-          <span>市场状态: {summary.marketStatus}</span>
+          <span>账户状态: {account ? '已连接' : '未连接'}</span>
         </>
       }
       statusBarRight={
         <>
-          <span>总资产 {formatCurrency(summary.totalAsset)}</span>
+          <span>
+            总资产{' '}
+            {typeof account?.totalAsset === 'number'
+              ? formatCurrency(account.totalAsset)
+              : '--'}
+          </span>
           <span className="text-slate-700">|</span>
-          <span>今日交易 {summary.todayTrades}</span>
+          <span>今日交易 {account ? trades.trades.length : '--'}</span>
         </>
       }
     />
