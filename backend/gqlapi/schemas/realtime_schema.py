@@ -24,9 +24,43 @@ from ..types import (
   TickData,
   TradingEventType,
   DeploymentFlowRun,
+  LogLine,
 )
 
 logger = logging.getLogger(__name__)
+
+FLOW_RUN_LOG_POLL_SECONDS = 1.0
+LIVE_FLOW_RUN_STATES = {
+  "PENDING",
+  "SCHEDULED",
+  "RUNNING",
+  "LATE",
+  "PAUSED",
+  "CANCELLING",
+}
+
+
+def _flow_run_log_key(log) -> tuple[str, int, str]:
+  timestamp = getattr(log, "timestamp", None)
+  timestamp_key = timestamp.isoformat() if timestamp else ""
+  return (
+    timestamp_key,
+    int(getattr(log, "level", 0) or 0),
+    str(getattr(log, "message", "") or ""),
+  )
+
+
+def _to_graphql_log_line(log) -> LogLine:
+  timestamp = getattr(log, "timestamp", None) or time_utils.now()
+  return LogLine(
+    time=timestamp,
+    level=int(getattr(log, "level", 0) or 0),
+    message=str(getattr(log, "message", "") or ""),
+  )
+
+
+def _is_live_flow_run_state(state: Optional[str]) -> bool:
+  return (state or "").upper() in LIVE_FLOW_RUN_STATES
 
 
 class SubscriptionError(Exception):
@@ -737,6 +771,80 @@ class RealtimeSubscription:
       raise
     except Exception as e:
       logger.error(f"部署状态订阅出错: {e}")
+      raise
+
+  @strawberry.subscription(description="订阅 Prefect 流程运行日志")
+  async def flow_run_logs(
+    self,
+    run_id: str,
+    include_history: bool = True,
+  ) -> AsyncIterator[LogLine]:
+    """
+    订阅指定流程运行的日志。
+
+    Prefect 日志目前落在 Prefect API/数据库侧，尚未接入 QuantX 自己的事件总线；
+    因此这里在后端做轻量增量检查，前端通过 WebSocket 接收新增日志。
+
+    Args:
+        run_id: Prefect flow run ID
+        include_history: 是否先推送已存在的历史日志
+    """
+    if not run_id or not run_id.strip():
+      raise ValidationError("运行 ID 不能为空")
+
+    from prefector import PrefectManagerRegistry
+
+    manager = PrefectManagerRegistry().get_manager()
+    flow_run = await manager.get_flow_run(run_id)
+    if not flow_run:
+      raise ValidationError(f"流程运行不存在: {run_id}")
+
+    seen_logs = set()
+    initialized = False
+    terminal_empty_reads = 0
+
+    try:
+      while True:
+        raw_logs = await manager.get_flow_run_logs(run_id)
+        ordered_logs = sorted(
+          raw_logs,
+          key=lambda item: _flow_run_log_key(item),
+        )
+        new_logs = []
+
+        for log in ordered_logs:
+          key = _flow_run_log_key(log)
+          if key in seen_logs:
+            continue
+
+          seen_logs.add(key)
+          if initialized or include_history:
+            new_logs.append(log)
+
+        initialized = True
+
+        for log in new_logs:
+          yield _to_graphql_log_line(log)
+
+        flow_run = await manager.get_flow_run(run_id)
+        state = flow_run.state if flow_run else None
+        if _is_live_flow_run_state(state):
+          terminal_empty_reads = 0
+        elif new_logs:
+          terminal_empty_reads = 0
+        else:
+          terminal_empty_reads += 1
+          if terminal_empty_reads >= 2:
+            logger.info("流程运行日志订阅结束: %s, state=%s", run_id, state)
+            break
+
+        await asyncio.sleep(FLOW_RUN_LOG_POLL_SECONDS)
+
+    except asyncio.CancelledError:
+      logger.info("流程运行日志订阅被取消: %s", run_id)
+      raise
+    except Exception as e:
+      logger.error("流程运行日志订阅出错 run_id=%s: %s", run_id, e)
       raise
 
   # ==================== 策略运行时订阅 ====================

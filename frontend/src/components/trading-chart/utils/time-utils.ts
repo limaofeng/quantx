@@ -114,8 +114,7 @@ export const isCallAuctionTimestamp = (
   if (!date) return false;
   const { minutes } = getShanghaiDateParts(date);
   return (
-    minutes >= CALL_AUCTION_START_MINUTES &&
-    minutes <= CALL_AUCTION_END_MINUTES
+    minutes >= CALL_AUCTION_START_MINUTES && minutes <= CALL_AUCTION_END_MINUTES
   );
 };
 

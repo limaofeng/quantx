@@ -191,11 +191,7 @@ const buildCallAuctionTickBars = (ticks: any[]): any[] => {
       open,
       price
     );
-    const low = Math.min(
-      toValidPrice(tick?.low, price) || price,
-      open,
-      price
-    );
+    const low = Math.min(toValidPrice(tick?.low, price) || price, open, price);
     const currentVolume = toFiniteNumber(tick?.volume);
     const currentAmount = toFiniteNumber(tick?.amount);
     const volume = resolveTickDeltaMetric(currentVolume, previousVolume);

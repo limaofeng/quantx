@@ -41,9 +41,7 @@ describe('useIntradayKLines helpers', () => {
     ]);
 
     expect(bars).toHaveLength(2);
-    expect(getMinuteMs(bars[0].time)).toBe(
-      getMinuteMs('2026-06-03T09:15:00')
-    );
+    expect(getMinuteMs(bars[0].time)).toBe(getMinuteMs('2026-06-03T09:15:00'));
     expect(bars[0]).toMatchObject({
       close: 29.46,
       isAuction: true,

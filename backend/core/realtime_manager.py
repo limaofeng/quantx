@@ -16,12 +16,14 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
 from config.settings import settings
 from core.data.unified_subscription_manager import unified_subscription_manager
+from services.divid_factor_service import DividFactorService
 from services.historical_market_data_service import HistoricalMarketDataService
+from services.trading_time_service import TradingTimeService
 from models.kline import KLine
 from models.market_depth import MarketDepth
 from models.realtime_price import RealTimePrice
@@ -71,7 +73,15 @@ class RealTimeDataManager:
       ),
     )
     self.historical_market_data_service = HistoricalMarketDataService()
+    self.divid_factor_service = DividFactorService()
+    self.trading_time_service = TradingTimeService()
     self._started_loop: Optional[asyncio.AbstractEventLoop] = None
+
+  def _previous_daily_close_cache_key(
+    self, stock_code: str, tick_time: datetime
+  ) -> str:
+    tick_date = time_utils.to_shanghai(tick_time).date()
+    return f"{stock_code}:{tick_date.isoformat()}"
 
   async def start(self):
     """启动实时数据管理器"""
@@ -350,21 +360,29 @@ class RealTimeDataManager:
     self, stock_code: str, tick_time: datetime
   ) -> Optional[float]:
     tick_date = time_utils.to_shanghai(tick_time).date()
-    cache_key = f"{stock_code}:{tick_date.isoformat()}"
+    cache_key = self._previous_daily_close_cache_key(stock_code, tick_time)
     cached = self.previous_daily_close_cache.get(cache_key)
     if cached is not None:
       return cached.get("close")
 
+    market = stock_code.split(".")[-1] if "." in stock_code else "SH"
     try:
+      previous_trading_date = await self.trading_time_service.get_previous_trading_day(
+        market, tick_date
+      )
+      start_time = datetime.combine(previous_trading_date, time.min)
+      end_time = start_time + timedelta(days=1)
       klines = await self.historical_market_data_service.get_kline_data(
         stock_code=stock_code,
         period="1d",
-        limit=5,
-        order="desc",
+        start_time=start_time,
+        end_time=end_time,
+        limit=None,
+        order="asc",
         dividend_type="none",
       )
     except Exception as exc:
-      logger.warning("查询昨收日K失败: %s, %s", stock_code, exc)
+      logger.warning("查询昨日收盘日K失败: %s, %s", stock_code, exc)
       self.previous_daily_close_cache[cache_key] = {"close": None}
       return None
 
@@ -375,17 +393,86 @@ class RealTimeDataManager:
         close = float(getattr(kline, "close", 0.0) or 0.0)
       except Exception:
         continue
-      if kline_date < tick_date and close > 0:
+      if kline_date == previous_trading_date and close > 0:
         previous_close = close
         break
 
+    if previous_close is None:
+      logger.warning(
+        "时间序列库缺少上一交易日日K: %s, trading_date=%s",
+        stock_code,
+        previous_trading_date.isoformat(),
+      )
+    else:
+      previous_close = await self._front_adjust_previous_daily_close(
+        stock_code,
+        previous_close,
+        previous_trading_date,
+        tick_date,
+      )
+
     self.previous_daily_close_cache[cache_key] = {"close": previous_close}
     return previous_close
+
+  async def _front_adjust_previous_daily_close(
+    self,
+    stock_code: str,
+    previous_close: float,
+    previous_trading_date,
+    tick_date,
+  ) -> float:
+    try:
+      factors = await asyncio.wait_for(
+        self.divid_factor_service.get_divid_factors(
+          stock_code=stock_code,
+          start_time=datetime.combine(
+            previous_trading_date + timedelta(days=1), time.min
+          ),
+          end_time=datetime.combine(tick_date, time.max),
+          limit=None,
+        ),
+        timeout=1.0,
+      )
+    except Exception as exc:
+      logger.warning("查询前复权因子失败: %s, %s", stock_code, exc)
+      return previous_close
+
+    adjust_factor = 1.0
+    for factor in factors:
+      try:
+        factor_date = time_utils.to_shanghai(factor.time).date()
+        dr = float(getattr(factor, "dr", 0.0) or 0.0)
+      except Exception:
+        continue
+      if previous_trading_date < factor_date <= tick_date and dr > 0:
+        adjust_factor /= dr
+
+    return previous_close * adjust_factor
 
   async def _normalize_tick_pre_close(self, stock_code: str, tick: Tick) -> Tick:
     previous_close = await self._get_previous_daily_close(stock_code, tick.time)
     if previous_close and previous_close > 0:
       tick.last_close = previous_close
+      return tick
+
+    try:
+      native_pre_close = float(getattr(tick, "last_close", 0.0) or 0.0)
+    except (TypeError, ValueError):
+      native_pre_close = 0.0
+    if native_pre_close <= 0:
+      return tick
+
+    cache_key = self._previous_daily_close_cache_key(stock_code, tick.time)
+    self.previous_daily_close_cache[cache_key] = {
+      "close": native_pre_close,
+      "source": "tick",
+    }
+    logger.info(
+      "昨日收盘价使用tick兜底: %s, tick_time=%s, last_close=%s",
+      stock_code,
+      tick.time,
+      native_pre_close,
+    )
     return tick
 
   def _build_tick_generated_kline(self, stock_code: str, tick: Tick) -> Optional[KLine]:

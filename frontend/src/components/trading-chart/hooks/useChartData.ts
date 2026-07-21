@@ -57,10 +57,8 @@ const isLunchBreakGap = (previousTime: number, currentTime: number) => {
 const isCallAuctionChartTime = (time: number) =>
   isCallAuctionTimestamp(new Date(time * 1000));
 
-const isCallAuctionInternalGap = (
-  previousTime: number,
-  currentTime: number
-) => isCallAuctionChartTime(previousTime) && isCallAuctionChartTime(currentTime);
+const isCallAuctionInternalGap = (previousTime: number, currentTime: number) =>
+  isCallAuctionChartTime(previousTime) && isCallAuctionChartTime(currentTime);
 
 export function useChartData(
   isTimeMode: boolean,

@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -67,6 +68,19 @@ def _tick(
     ask_vol=[0.0] * 5,
     bid_vol=[0.0] * 5,
   )
+
+
+class FakeTradingTimeService:
+  async def get_previous_trading_day(self, market="SH", from_date=None):
+    return from_date - timedelta(days=1)
+
+
+class FakeDividFactorService:
+  def __init__(self, factors=None):
+    self.factors = list(factors or [])
+
+  async def get_divid_factors(self, **kwargs):
+    return self.factors
 
 
 @pytest.mark.asyncio
@@ -382,6 +396,46 @@ async def test_warm_cache_initializes_symbol_once_per_trading_day(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_warm_cache_query_sources_do_not_start_initial_download(monkeypatch):
+  from core.data import intraday_warm_cache as warm_cache_module
+
+  service = warm_cache_module.IntradayWarmCacheService()
+  subscribe_calls = []
+  download_calls = []
+
+  class FakeSubscriptionManager:
+    def set_main_loop(self, loop=None):
+      pass
+
+    async def subscribe(self, **kwargs):
+      subscribe_calls.append((kwargs["stock_code"], kwargs["period"]))
+      return True
+
+    async def unsubscribe(self, *args, **kwargs):
+      return True
+
+    async def unsubscribe_all(self, *args, **kwargs):
+      return True
+
+  service.subscription_manager = FakeSubscriptionManager()
+  monkeypatch.setattr(
+    warm_cache_module.time_utils, "today", lambda: date(2026, 6, 1)
+  )
+
+  async def fake_run_initial_download(stock_code, trading_date):
+    download_calls.append((stock_code, trading_date))
+
+  monkeypatch.setattr(service, "_run_initial_download", fake_run_initial_download)
+
+  await service.ensure_symbol("600900.SH", source="chart_query")
+  await service.ensure_symbol("600900.SH", source="tick_query")
+  await asyncio.sleep(0)
+
+  assert subscribe_calls == [("600900.SH", "tick"), ("600900.SH", "1m")]
+  assert download_calls == []
+
+
+@pytest.mark.asyncio
 async def test_publish_kline_backfill_pushes_missing_bars_in_order():
   manager = RealTimeDataManager()
   queue = manager._create_optimized_queue()
@@ -433,15 +487,112 @@ async def test_warm_cache_initial_tick_push_uses_initialization_log(caplog):
 
 
 @pytest.mark.asyncio
-async def test_tick_pre_close_uses_previous_daily_close(monkeypatch):
+async def test_tick_pre_close_uses_native_when_database_previous_close_missing(
+  monkeypatch,
+):
   stock_code = "603118.SH"
   manager = RealTimeDataManager()
   manager.previous_daily_close_cache = {}
+  manager.trading_time_service = FakeTradingTimeService()
+  manager.divid_factor_service = FakeDividFactorService()
 
   class FakeHistoricalMarketDataService:
     async def get_kline_data(self, **kwargs):
       assert kwargs["stock_code"] == stock_code
       assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 3)
+      return []
+
+  monkeypatch.setattr(
+    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+  )
+
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 35),
+    price=13.31,
+    volume=1000,
+    amount=13310,
+    tickvol=20,
+  )
+  tick.last_close = 12.68
+
+  normalized = await manager._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == 12.68
+
+
+@pytest.mark.asyncio
+async def test_tick_pre_close_caches_native_fallback_and_logs_once(
+  monkeypatch,
+  caplog,
+):
+  stock_code = "603118.SH"
+  manager = RealTimeDataManager()
+  manager.previous_daily_close_cache = {}
+  manager.trading_time_service = FakeTradingTimeService()
+  manager.divid_factor_service = FakeDividFactorService()
+  calls = {"count": 0}
+
+  class FakeHistoricalMarketDataService:
+    async def get_kline_data(self, **kwargs):
+      calls["count"] += 1
+      assert kwargs["stock_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      return []
+
+  monkeypatch.setattr(
+    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+  )
+
+  first_tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 35),
+    price=13.31,
+    volume=1000,
+    amount=13310,
+    tickvol=20,
+  )
+  first_tick.last_close = 12.68
+  second_tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 36),
+    price=13.32,
+    volume=1200,
+    amount=15984,
+    tickvol=10,
+  )
+  second_tick.last_close = 12.68
+
+  with caplog.at_level(logging.INFO, logger="core.realtime_manager"):
+    first_normalized = await manager._normalize_tick_pre_close(
+      stock_code, first_tick
+    )
+    second_normalized = await manager._normalize_tick_pre_close(
+      stock_code, second_tick
+    )
+
+  cache_key = manager._previous_daily_close_cache_key(stock_code, first_tick.time)
+  assert calls["count"] == 1
+  assert first_normalized.last_close == 12.68
+  assert second_normalized.last_close == 12.68
+  assert manager.previous_daily_close_cache[cache_key]["source"] == "tick"
+  assert caplog.text.count("昨日收盘价使用tick兜底") == 1
+
+
+@pytest.mark.asyncio
+async def test_tick_pre_close_uses_database_previous_daily_close(monkeypatch):
+  stock_code = "603118.SH"
+  manager = RealTimeDataManager()
+  manager.previous_daily_close_cache = {}
+  manager.trading_time_service = FakeTradingTimeService()
+  manager.divid_factor_service = FakeDividFactorService()
+
+  class FakeHistoricalMarketDataService:
+    async def get_kline_data(self, **kwargs):
+      assert kwargs["stock_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 3)
       return [
         KLine(
           stock_code=stock_code,
@@ -495,16 +646,228 @@ async def test_tick_pre_close_uses_previous_daily_close(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_market_data_service_tick_pre_close_uses_previous_daily_close():
+async def test_tick_pre_close_uses_database_yesterday_close_not_today_pre_close(
+  monkeypatch,
+):
+  stock_code = "002216.SZ"
+  manager = RealTimeDataManager()
+  manager.previous_daily_close_cache = {}
+  manager.trading_time_service = FakeTradingTimeService()
+  manager.divid_factor_service = FakeDividFactorService(
+    [SimpleNamespace(time=datetime(2026, 6, 5), dr=1.047894)]
+  )
+
+  class FakeHistoricalMarketDataService:
+    async def get_kline_data(self, **kwargs):
+      assert kwargs["stock_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 4)
+      return [
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 5, 0, 0),
+          open=12.26,
+          high=12.66,
+          low=12.13,
+          close=12.34,
+          pre_close=12.12,
+          volume=100,
+          amount=1234.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        ),
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 4, 0, 0),
+          open=12.8,
+          high=12.93,
+          low=12.54,
+          close=12.69,
+          pre_close=12.8,
+          volume=100,
+          amount=1269.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        ),
+      ]
+
+  monkeypatch.setattr(
+    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+  )
+
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 5, 9, 35),
+    price=12.28,
+    volume=1000,
+    amount=12280,
+    tickvol=20,
+  )
+  tick.last_close = 12.12
+
+  normalized = await manager._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == pytest.approx(12.69 / 1.047894)
+
+
+@pytest.mark.asyncio
+async def test_tick_pre_close_does_not_use_stale_older_daily_close(monkeypatch):
+  stock_code = "605499.SH"
+  manager = RealTimeDataManager()
+  manager.previous_daily_close_cache = {}
+  manager.trading_time_service = FakeTradingTimeService()
+  manager.divid_factor_service = FakeDividFactorService()
+
+  class FakeHistoricalMarketDataService:
+    async def get_kline_data(self, **kwargs):
+      assert kwargs["stock_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 4)
+      return [
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 3, 0, 0),
+          open=148.35,
+          high=148.39,
+          low=142.5,
+          close=143.96,
+          pre_close=149.6,
+          volume=100,
+          amount=14396.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        )
+      ]
+
+  monkeypatch.setattr(
+    manager, "historical_market_data_service", FakeHistoricalMarketDataService()
+  )
+
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 5, 9, 35),
+    price=138.53,
+    volume=1000,
+    amount=138530,
+    tickvol=20,
+  )
+  tick.last_close = 139.43
+
+  normalized = await manager._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == 139.43
+
+
+@pytest.mark.asyncio
+async def test_market_data_service_tick_pre_close_uses_native_when_database_missing():
   stock_code = "603118.SH"
   service = MarketDataService()
   service.previous_daily_close_cache = {}
+  service.trading_time_service = FakeTradingTimeService()
+  service.divid_factor_service = FakeDividFactorService()
 
   class FakeHistoricalAdapter:
     async def get_klines(self, **kwargs):
       assert kwargs["instrument_code"] == stock_code
       assert kwargs["period"] == "1d"
-      assert kwargs["start_time"] is None
+      assert kwargs["start_time"].date() == date(2026, 6, 3)
+      return []
+
+  class FakeAdapterManager:
+    historical_adapter = FakeHistoricalAdapter()
+
+  service.adapter_manager = FakeAdapterManager()
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 35),
+    price=13.31,
+    volume=1000,
+    amount=13310,
+    tickvol=20,
+  )
+  tick.last_close = 12.68
+
+  normalized = await service._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == 12.68
+
+
+@pytest.mark.asyncio
+async def test_market_data_service_tick_pre_close_caches_native_fallback_and_logs_once(
+  caplog,
+):
+  stock_code = "603118.SH"
+  service = MarketDataService()
+  service.previous_daily_close_cache = {}
+  service.trading_time_service = FakeTradingTimeService()
+  service.divid_factor_service = FakeDividFactorService()
+  calls = {"count": 0}
+
+  class FakeHistoricalAdapter:
+    async def get_klines(self, **kwargs):
+      calls["count"] += 1
+      assert kwargs["instrument_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      return []
+
+  class FakeAdapterManager:
+    historical_adapter = FakeHistoricalAdapter()
+
+  service.adapter_manager = FakeAdapterManager()
+  first_tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 35),
+    price=13.31,
+    volume=1000,
+    amount=13310,
+    tickvol=20,
+  )
+  first_tick.last_close = 12.68
+  second_tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 4, 9, 36),
+    price=13.32,
+    volume=1200,
+    amount=15984,
+    tickvol=10,
+  )
+  second_tick.last_close = 12.68
+
+  with caplog.at_level(logging.INFO, logger="core.data.market_data_service"):
+    first_normalized = await service._normalize_tick_pre_close(
+      stock_code, first_tick
+    )
+    second_normalized = await service._normalize_tick_pre_close(
+      stock_code, second_tick
+    )
+
+  cache_key = service._previous_daily_close_cache_key(stock_code, first_tick.time)
+  assert calls["count"] == 1
+  assert first_normalized.last_close == 12.68
+  assert second_normalized.last_close == 12.68
+  assert service.previous_daily_close_cache[cache_key]["source"] == "tick"
+  assert caplog.text.count("昨日收盘价使用tick兜底") == 1
+
+
+@pytest.mark.asyncio
+async def test_market_data_service_tick_pre_close_uses_database_previous_daily_close():
+  stock_code = "603118.SH"
+  service = MarketDataService()
+  service.previous_daily_close_cache = {}
+  service.trading_time_service = FakeTradingTimeService()
+  service.divid_factor_service = FakeDividFactorService()
+
+  class FakeHistoricalAdapter:
+    async def get_klines(self, **kwargs):
+      assert kwargs["instrument_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 3)
       return [
         KLine(
           stock_code=stock_code,
@@ -555,6 +918,123 @@ async def test_market_data_service_tick_pre_close_uses_previous_daily_close():
   normalized = await service._normalize_tick_pre_close(stock_code, tick)
 
   assert normalized.last_close == 12.98
+
+
+@pytest.mark.asyncio
+async def test_market_data_service_tick_pre_close_uses_yesterday_close_not_today_pre_close():
+  stock_code = "002216.SZ"
+  service = MarketDataService()
+  service.previous_daily_close_cache = {}
+  service.trading_time_service = FakeTradingTimeService()
+  service.divid_factor_service = FakeDividFactorService(
+    [SimpleNamespace(time=datetime(2026, 6, 5), dr=1.047894)]
+  )
+
+  class FakeHistoricalAdapter:
+    async def get_klines(self, **kwargs):
+      assert kwargs["instrument_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 4)
+      return [
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 5, 0, 0),
+          open=12.26,
+          high=12.66,
+          low=12.13,
+          close=12.34,
+          pre_close=12.12,
+          volume=100,
+          amount=1234.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        ),
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 4, 0, 0),
+          open=12.8,
+          high=12.93,
+          low=12.54,
+          close=12.69,
+          pre_close=12.8,
+          volume=100,
+          amount=1269.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        ),
+      ]
+
+  class FakeAdapterManager:
+    historical_adapter = FakeHistoricalAdapter()
+
+  service.adapter_manager = FakeAdapterManager()
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 5, 9, 35),
+    price=12.28,
+    volume=1000,
+    amount=12280,
+    tickvol=20,
+  )
+  tick.last_close = 12.12
+
+  normalized = await service._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == pytest.approx(12.69 / 1.047894)
+
+
+@pytest.mark.asyncio
+async def test_market_data_service_tick_pre_close_does_not_use_stale_older_daily_close():
+  stock_code = "605499.SH"
+  service = MarketDataService()
+  service.previous_daily_close_cache = {}
+  service.trading_time_service = FakeTradingTimeService()
+  service.divid_factor_service = FakeDividFactorService()
+
+  class FakeHistoricalAdapter:
+    async def get_klines(self, **kwargs):
+      assert kwargs["instrument_code"] == stock_code
+      assert kwargs["period"] == "1d"
+      assert kwargs["start_time"].date() == date(2026, 6, 4)
+      return [
+        KLine(
+          stock_code=stock_code,
+          period="1d",
+          time=datetime(2026, 6, 3, 0, 0),
+          open=148.35,
+          high=148.39,
+          low=142.5,
+          close=143.96,
+          pre_close=149.6,
+          volume=100,
+          amount=14396.0,
+          settelement_price=0.0,
+          open_interest=0,
+          suspend_flag=0,
+        )
+      ]
+
+  class FakeAdapterManager:
+    historical_adapter = FakeHistoricalAdapter()
+
+  service.adapter_manager = FakeAdapterManager()
+  tick = _tick(
+    stock_code=stock_code,
+    value_time=datetime(2026, 6, 5, 9, 35),
+    price=138.53,
+    volume=1000,
+    amount=138530,
+    tickvol=20,
+  )
+  tick.last_close = 139.43
+
+  normalized = await service._normalize_tick_pre_close(stock_code, tick)
+
+  assert normalized.last_close == 139.43
 
 
 @pytest.mark.asyncio
