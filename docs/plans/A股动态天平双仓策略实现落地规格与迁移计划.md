@@ -260,9 +260,9 @@ Market Data / Order Event / Trade Event
 先完成：
 
 1. 新增本文档。
-2. 更新 `A股个人量化开发文档索引.md` 和 `系统架构设计.md`，把本文档作为实施入口。
-3. 清理 `A股单标的动态天平双仓策略.md` 末尾重复 `0.2`。
-4. 修正 `A股单标的环境层设计.md` 的小节编号。
+2. 更新 [A 股个人量化开发文档索引](../trading/README.md)和[系统架构设计](../architecture/系统架构设计.md)，把本文档作为实施入口。
+3. 清理 [A 股单标的动态天平双仓策略](../trading/strategies/dynamic-balance/A股单标的动态天平双仓策略.md)末尾重复 `0.2`。
+4. 修正 [A 股单标的环境层设计](../trading/strategies/dynamic-balance/A股单标的环境层设计.md)的小节编号。
 5. 搜索旧 `Signal` / `on_bar` / `on_tick` 文字，确认哪些是历史说明，哪些必须改为目标契约。
 
 退出标准：

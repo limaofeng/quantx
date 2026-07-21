@@ -10,38 +10,38 @@
 
 | 文档 | 定位 |
 |---|---|
-| `系统架构设计.md` | SaaS / LocalAgent / Lab 三端架构、状态真源、生命周期、miniQMT 执行端 |
-| `进化文档.md` | A 股 GA 进化黑盒、多窗口坩埚、Ghost DCA、challenger/champion 流程 |
+| [系统架构设计](../architecture/系统架构设计.md) | SaaS / LocalAgent / Lab 三端架构、状态真源、生命周期、miniQMT 执行端 |
+| [进化文档](../research/进化文档.md) | A 股 GA 进化黑盒、多窗口坩埚、Ghost DCA、challenger/champion 流程 |
 
 ### 1.2 实施级
 
 | 文档 | 定位 |
 |---|---|
-| `A股动态天平双仓策略实现落地规格与迁移计划.md` | 从当前 Python 策略框架迁移到 `StrategyBase.step()`、`TradeIntent`、`OrderRiskDecision` 和 `BucketLedger` 的破坏性实施路线 |
+| [A 股动态天平双仓策略实现落地规格与迁移计划](../plans/A股动态天平双仓策略实现落地规格与迁移计划.md) | 从当前 Python 策略框架迁移到 `StrategyBase.step()`、`TradeIntent`、`OrderRiskDecision` 和 `BucketLedger` 的破坏性实施路线 |
 
 ### 1.3 当前策略级
 
 | 文档 | 定位 |
 |---|---|
-| `A股单标的动态天平双仓策略.md` | 当前主线策略公式、动态基准、Sigmoid 天平、core/swing/locked_core、网格逻辑 |
-| `A股单标的环境层设计.md` | 当前策略使用的环境层规则：大盘、行业、概念、宽度、流动性、量价结构 |
-| `A股单标的风控层设计.md` | 当前策略使用的风控规则：交易时段、T+1、涨跌停、停牌、熔断、miniQMT 真源 |
-| `A股单标的仓位调节层设计.md` | 当前策略使用的仓位 profile：MinPct/MaxPct、core/swing、现金缓冲、beta/gamma |
+| [A 股单标的动态天平双仓策略](strategies/dynamic-balance/A股单标的动态天平双仓策略.md) | 当前主线策略公式、动态基准、Sigmoid 天平、core/swing/locked_core、网格逻辑 |
+| [A 股单标的环境层设计](strategies/dynamic-balance/A股单标的环境层设计.md) | 当前策略使用的环境层规则：大盘、行业、概念、宽度、流动性、量价结构 |
+| [A 股单标的风控层设计](strategies/dynamic-balance/A股单标的风控层设计.md) | 当前策略使用的风控规则：交易时段、T+1、涨跌停、停牌、熔断、miniQMT 真源 |
+| [A 股单标的仓位调节层设计](strategies/dynamic-balance/A股单标的仓位调节层设计.md) | 当前策略使用的仓位 profile：MinPct/MaxPct、core/swing、现金缓冲、beta/gamma |
 
 ### 1.4 新补齐的通用交易域文档
 
 | 文档 | 解决的问题 | 策略通用性 |
 |---|---|---|
-| `A股三层协作与执行契约.md` | 三层调用顺序、双阶段风控、策略接入、执行闭环 | 所有 A 股策略共用 |
-| `A股交易域数据结构与状态机.md` | schema、枚举、订单状态机、bucket 账本、T+1 置换、审计 | 所有 A 股策略共用；bucket 可选 |
-| `A股数据源与公司行为契约.md` | 数据源映射、数据质量、时点可得、复权、公司行为、证券状态 | 所有 A 股策略共用 |
-| `A股回测Broker与成交撮合契约.md` | 回测 broker、撮合、成本、T+1、涨跌停、成交约束统计 | 所有 A 股策略共用 |
+| [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md) | 三层调用顺序、双阶段风控、策略接入、执行闭环 | 所有 A 股策略共用 |
+| [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md) | schema、枚举、订单状态机、bucket 账本、T+1 置换、审计 | 所有 A 股策略共用；bucket 可选 |
+| [A 股数据源与公司行为契约](contracts/A股数据源与公司行为契约.md) | 数据源映射、数据质量、时点可得、复权、公司行为、证券状态 | 所有 A 股策略共用 |
+| [A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md) | 回测 broker、撮合、成本、T+1、涨跌停、成交约束统计 | 所有 A 股策略共用 |
 
 ---
 
 ## 2. 推荐开发顺序
 
-破坏性迁移必须先读 `A股动态天平双仓策略实现落地规格与迁移计划.md`。本节保留模块顺序，具体接口替换、旧路径删除和验收矩阵以实施级文档为准。
+破坏性迁移必须先读 [A 股动态天平双仓策略实现落地规格与迁移计划](../plans/A股动态天平双仓策略实现落地规格与迁移计划.md)。本节保留模块顺序，具体接口替换、旧路径删除和验收矩阵以实施级文档为准。
 
 ### Phase A：交易域基础结构
 
@@ -60,7 +60,7 @@
 11. `BrokerExecutionReport`
 12. `DecisionTrace`
 
-验收依据：`A股交易域数据结构与状态机.md`。
+验收依据：[A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)。
 
 ### Phase B：数据源与日历
 
@@ -75,7 +75,7 @@
 7. 公司行为。
 8. 时点可得复权因子。
 
-验收依据：`A股数据源与公司行为契约.md`。
+验收依据：[A 股数据源与公司行为契约](contracts/A股数据源与公司行为契约.md)。
 
 ### Phase C：状态管理与订单状态机
 
@@ -88,7 +88,7 @@
 5. ReconciliationManager。
 6. DecisionTraceLogger。
 
-验收依据：`A股交易域数据结构与状态机.md`。
+验收依据：[A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)。
 
 ### Phase D：环境层、前置风控、仓位调节层
 
@@ -101,10 +101,10 @@
 
 验收依据：
 
-- `A股三层协作与执行契约.md`
-- `A股单标的环境层设计.md`
-- `A股单标的风控层设计.md`
-- `A股单标的仓位调节层设计.md`
+- [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
+- [A 股单标的环境层设计](strategies/dynamic-balance/A股单标的环境层设计.md)
+- [A 股单标的风控层设计](strategies/dynamic-balance/A股单标的风控层设计.md)
+- [A 股单标的仓位调节层设计](strategies/dynamic-balance/A股单标的仓位调节层设计.md)
 
 ### Phase E：当前双仓策略 Step
 
@@ -119,7 +119,7 @@
 7. TradeIntent 输出。
 8. on_order / on_trade 事件回调。
 
-验收依据：`A股单标的动态天平双仓策略.md`。
+验收依据：[A 股单标的动态天平双仓策略](strategies/dynamic-balance/A股单标的动态天平双仓策略.md)。
 
 ### Phase F：OrderSizer + 后置订单风控
 
@@ -134,7 +134,7 @@
 7. 涨跌停、停牌、交易时段。
 8. 后置 `OrderRiskDecision`。
 
-验收依据：`A股三层协作与执行契约.md` 与 `A股交易域数据结构与状态机.md`。
+验收依据：[A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)与[A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)。
 
 ### Phase G：BacktestBroker
 
@@ -150,7 +150,7 @@
 8. Ghost DCA A 股基准。
 9. 成交约束统计。
 
-验收依据：`A股回测Broker与成交撮合契约.md`。
+验收依据：[A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md)。
 
 ### Phase H：miniQMT LocalAgent
 
@@ -165,7 +165,7 @@
 7. DeltaReport 上报。
 8. 重连后完整对账。
 
-验收依据：`系统架构设计.md`、`A股交易域数据结构与状态机.md`。
+验收依据：[系统架构设计](../architecture/系统架构设计.md)、[A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)。
 
 ### Phase I：GA 进化与冠军复核
 
@@ -178,7 +178,7 @@
 5. 适应度加入成交约束统计。
 6. challenger/champion 人工晋升。
 
-验收依据：`进化文档.md` 与 `A股回测Broker与成交撮合契约.md`。
+验收依据：[进化文档](../research/进化文档.md)与[A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md)。
 
 ---
 
@@ -362,49 +362,49 @@ internal/strategies/ashare_dynamic_balance_dual_bucket/
 
 先读：
 
-1. `A股动态天平双仓策略实现落地规格与迁移计划.md`
-2. `A股三层协作与执行契约.md`
-3. `A股交易域数据结构与状态机.md`
+1. [A 股动态天平双仓策略实现落地规格与迁移计划](../plans/A股动态天平双仓策略实现落地规格与迁移计划.md)
+2. [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
+3. [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)
 
 ### 做策略公式
 
 先读：
 
-1. `A股单标的动态天平双仓策略.md`
-2. `A股单标的仓位调节层设计.md`
-3. `A股三层协作与执行契约.md`
+1. [A 股单标的动态天平双仓策略](strategies/dynamic-balance/A股单标的动态天平双仓策略.md)
+2. [A 股单标的仓位调节层设计](strategies/dynamic-balance/A股单标的仓位调节层设计.md)
+3. [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
 
 ### 做风控和订单
 
 先读：
 
-1. `A股三层协作与执行契约.md`
-2. `A股交易域数据结构与状态机.md`
-3. `A股单标的风控层设计.md`
+1. [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
+2. [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)
+3. [A 股单标的风控层设计](strategies/dynamic-balance/A股单标的风控层设计.md)
 
 ### 做数据
 
 先读：
 
-1. `A股数据源与公司行为契约.md`
-2. `A股单标的环境层设计.md`
-3. `系统架构设计.md`
+1. [A 股数据源与公司行为契约](contracts/A股数据源与公司行为契约.md)
+2. [A 股单标的环境层设计](strategies/dynamic-balance/A股单标的环境层设计.md)
+3. [系统架构设计](../architecture/系统架构设计.md)
 
 ### 做回测和 GA
 
 先读：
 
-1. `A股回测Broker与成交撮合契约.md`
-2. `进化文档.md`
-3. `A股单标的动态天平双仓策略.md`
+1. [A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md)
+2. [进化文档](../research/进化文档.md)
+3. [A 股单标的动态天平双仓策略](strategies/dynamic-balance/A股单标的动态天平双仓策略.md)
 
 ### 做 miniQMT 实盘
 
 先读：
 
-1. `系统架构设计.md`
-2. `A股交易域数据结构与状态机.md`
-3. `A股三层协作与执行契约.md`
+1. [系统架构设计](../architecture/系统架构设计.md)
+2. [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md)
+3. [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md)
 
 ---
 

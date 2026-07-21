@@ -6,7 +6,7 @@
 
 - `backend/` 是 QuantX 后端，技术栈为 FastAPI + Strawberry GraphQL，主入口是 `backend/main.py`。
 - `frontend/` 是 QuantX 前端，技术栈为 Vite + React + TypeScript。
-- `交易系统文档/` 是 A 股交易域、策略契约、miniQMT 执行端和回测/进化设计的主要来源。
+- `docs/` 是项目级文档入口；`docs/trading/` 保存 A 股交易域与策略文档，`docs/plans/` 保存实施计划，`docs/research/` 保存回测与进化研究。
 - `backend/docs/` 是后端工程文档，覆盖架构、API、测试、部署、策略系统和编码规范。
 - `backend/core/strategies/base.py` 当前主策略接口是 `StrategyInput -> StrategyBase.step() -> StrategyOutput / TradeIntent`。
 - 当前策略主线包括 `ashare_dynamic_balance_dual_bucket`、`ashare_supermarket`、`pullback_grid`，实现位于 `backend/core/strategies/`。
@@ -84,6 +84,15 @@ npm run lint
 npm run test:run
 ```
 
+Codex 截图产物约束：
+
+- Codex 做 UI 验证、Browser 截图、Playwright 截图或视觉回归检查时，必须把临时截图保存到项目根目录的 `.codex_screenshots/`。
+- 截图前先确保 `.codex_screenshots/` 存在；目录不存在时创建目录。
+- 不要把截图、trace、video 等测试产物直接保存到项目根目录。
+- 截图命名建议使用 `<YYYYMMDD-HHMMSS>-<scope>-<viewport>.png`，例如 `.codex_screenshots/20260616-143000-trading-orders-desktop.png`。
+- 如果测试工具默认输出到根目录，优先修改配置；无法配置时，验证后把本轮生成的截图移动到 `.codex_screenshots/`。
+- `.codex_screenshots/` 是本地临时产物，默认不提交。
+
 测试安全要求：
 
 - 单元测试优先，集成测试谨慎。
@@ -97,21 +106,21 @@ npm run test:run
 
 做策略接口、交易域迁移或执行链路改造，先读：
 
-1. `交易系统文档/A股动态天平双仓策略实现落地规格与迁移计划.md`
-2. `交易系统文档/A股三层协作与执行契约.md`
-3. `交易系统文档/A股交易域数据结构与状态机.md`
+1. `docs/plans/A股动态天平双仓策略实现落地规格与迁移计划.md`
+2. `docs/trading/contracts/A股三层协作与执行契约.md`
+3. `docs/trading/contracts/A股交易域数据结构与状态机.md`
 
 做策略公式或 A 股双仓策略，先读：
 
-1. `交易系统文档/A股单标的动态天平双仓策略.md`
-2. `交易系统文档/A股单标的仓位调节层设计.md`
-3. `交易系统文档/A股单标的环境层设计.md`
+1. `docs/trading/strategies/dynamic-balance/A股单标的动态天平双仓策略.md`
+2. `docs/trading/strategies/dynamic-balance/A股单标的仓位调节层设计.md`
+3. `docs/trading/strategies/dynamic-balance/A股单标的环境层设计.md`
 
 做实盘、miniQMT 或 LocalAgent 相关工作，先读：
 
-1. `交易系统文档/系统架构设计.md`
-2. `交易系统文档/A股交易域数据结构与状态机.md`
-3. `交易系统文档/A股三层协作与执行契约.md`
+1. `docs/architecture/系统架构设计.md`
+2. `docs/trading/contracts/A股交易域数据结构与状态机.md`
+3. `docs/trading/contracts/A股三层协作与执行契约.md`
 
 做后端架构、API 或测试，先读：
 
@@ -130,7 +139,7 @@ npm run test:run
 
 - 回测与实盘必须调用同一个 `StrategyBase.step()` 实现。
 - 策略内部禁止 `if isBacktest` 这类破坏同构的分支。
-- 一个 A 股实例只绑定一个 `instrument_code`，不得在运行中自行换股。
+- 固定标的 A 股策略实例只绑定一个 `instrument_code`，不得在运行中自行换股。仅显式声明 `INSTRUMENT_SCOPE=MULTI` 且 `INSTRUMENT_UNIVERSE_MODE=ACCOUNT_HOLDINGS` 的账户级策略可由外部持仓协调器动态增删标的；策略自身仍不得选股、读取账户或调用 miniQMT。
 - 仓位归因使用 `locked_core / core / swing`；面向用户展示时应使用“封存仓 / 核心仓 / 活跃仓”。
 - `locked_core` 默认不能方向性卖出；如用于 T+1 同标的库存置换，必须可审计、可回滚。
 - 回测不得使用未来复权因子、未来公司行为、未来停牌、未来涨跌停或未来订单结果。
