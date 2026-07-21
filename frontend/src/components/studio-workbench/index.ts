@@ -5,6 +5,8 @@ export {
   StudioStatusBarProvider,
 } from './StudioStatusBarProvider';
 export { StudioMenu } from './StudioMenu';
+export { StudioDataGrid } from './StudioDataGrid';
+export { StudioDataTable } from './StudioDataTable';
 export { StudioTabContextMenu } from './StudioTabContextMenu';
 export { StudioWorkbench } from './StudioWorkbench';
 export { TabBar } from './TabBar';
@@ -25,6 +27,11 @@ export type {
   StudioWorkbenchProps,
 } from './types';
 export type { TabBarProps } from './TabBar';
+export type {
+  StudioDataTableApi,
+  StudioDataTableColumn,
+  StudioDataTableAlign,
+} from './StudioDataTable';
 export type {
   StudioMenuActionItem,
   StudioMenuAnchor,

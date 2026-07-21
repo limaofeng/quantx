@@ -35,6 +35,11 @@ class StockScreenSortField(Enum):
   KDJ_J = "kdj_j"
   RSI12 = "rsi12"
   VOLUME_RATIO = "volume_ratio"
+  VOLUME_RATIO_5 = "volume_ratio_5"
+  AMOUNT_RATIO_20 = "amount_ratio_20"
+  TURNOVER_RATE = "turnover_rate_pct"
+  VOLUME_PERCENTILE_60 = "volume_percentile_60"
+  AMOUNT_PERCENTILE_60 = "amount_percentile_60"
   PRICE_DROP_PCT = "price_drop_pct"
   DAYS_SINCE_PEAK = "days_since_peak"
   ROE = "roe_ttm"
@@ -106,6 +111,13 @@ class StockScreenItem:
   volume: float
   volume_ratio: float
   avg_volume_20: float
+  avg_volume_5: float
+  volume_ratio_5: float
+  avg_amount_20: float
+  amount_ratio_20: float
+  turnover_rate_pct: Optional[float]
+  volume_percentile_60: float
+  amount_percentile_60: float
   is_bullish: bool
   peak_price: float
   days_since_peak: int
@@ -159,6 +171,59 @@ class StockScreenPage:
   calculated_at: Optional[datetime]
   has_stale_data: bool
   is_complete: bool
+  warnings: List[str]
+
+
+@strawberry.input(description="盘中全市场量能筛选输入")
+class IntradayVolumeScreenInput:
+  universe: StockScreenUniverse = strawberry.field(
+    default=StockScreenUniverse.STOCK,
+    description="标的范围：默认股票，可切换 ETF 或股票+ETF",
+  )
+  include_industries: Optional[List[str]] = strawberry.field(default=None, description="包含行业")
+  exclude_industries: Optional[List[str]] = strawberry.field(default=None, description="排除行业")
+  exclude_st: bool = strawberry.field(default=True, description="是否排除 ST/*ST 风险警示股票")
+  min_volume_pace_ratio: Optional[float] = strawberry.field(default=None, description="最小盘中量能进度倍数")
+  min_amount_pace_ratio: Optional[float] = strawberry.field(default=None, description="最小盘中成交额进度倍数")
+  min_last_5m_volume_ratio: Optional[float] = strawberry.field(default=None, description="最小近5分钟放量倍数")
+  min_intraday_turnover_rate: Optional[float] = strawberry.field(default=None, description="最小盘中换手率 %")
+  min_depth_imbalance_5: Optional[float] = strawberry.field(default=None, description="最小五档盘口量失衡")
+  stale_after_seconds: int = strawberry.field(default=10, description="超过该秒数未更新标记为 stale")
+  limit: int = strawberry.field(default=200, description="每页数量，最大200")
+  offset: int = strawberry.field(default=0, description="偏移量")
+
+
+@strawberry.type(description="盘中全市场量能筛选结果项")
+class IntradayVolumeScreenItem:
+  code: str
+  name: str
+  industry: Optional[str]
+  instrument_type: str
+  current_price: float
+  change_pct: float
+  volume: float
+  amount: float
+  volume_ratio: float
+  amount_ratio: float
+  volume_pace_ratio: float
+  amount_pace_ratio: float
+  last_5m_volume_ratio: float
+  intraday_turnover_rate_pct: Optional[float]
+  depth_imbalance_5: float
+  avg_trade_amount_proxy: Optional[float]
+  matched_signals: List[str]
+  updated_at: datetime
+  is_stale: bool
+
+
+@strawberry.type(description="盘中全市场量能筛选分页结果")
+class IntradayVolumeScreenPage:
+  items: List[IntradayVolumeScreenItem]
+  total: int
+  limit: int
+  offset: int
+  updated_at: Optional[datetime]
+  is_scanner_running: bool
   warnings: List[str]
 
 

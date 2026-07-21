@@ -33,6 +33,13 @@ class IndicatorSnapshot(Base, TimestampMixin):
   # ── 量比 ─────────────────────────────────────────
   volume_ratio = Column(Float, comment="量比 = 当日量 / 近20日均量")
   avg_volume_20 = Column(Float, comment="近20日均量")
+  avg_volume_5 = Column(Float, comment="近5日均量")
+  volume_ratio_5 = Column(Float, comment="5日量比 = 当日量 / 近5日均量")
+  avg_amount_20 = Column(Float, comment="近20日均成交额")
+  amount_ratio_20 = Column(Float, comment="成交额倍数 = 当日成交额 / 近20日均成交额")
+  turnover_rate_pct = Column(Float, comment="换手率 %，按流通股本估算")
+  volume_percentile_60 = Column(Float, comment="近60日成交量分位 0~100")
+  amount_percentile_60 = Column(Float, comment="近60日成交额分位 0~100")
 
   # ── 移动均线 ──────────────────────────────────────
   ma5 = Column(Float, comment="MA5")

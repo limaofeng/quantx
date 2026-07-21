@@ -8,10 +8,8 @@ import {
   Copy,
   Download,
   Eye,
-  GripVertical,
   LayoutList,
   MoreHorizontal,
-  MoreVertical,
   Pin,
   PinOff,
   RotateCcw,
@@ -19,19 +17,14 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import {
-  type CSSProperties,
-  type DragEvent,
-  type MouseEvent,
-  type PointerEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
 import { useLocation } from 'wouter';
 
-import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
+import {
+  StudioDataTable,
+  StudioMenu,
+  useStudioMenu,
+  type StudioDataTableApi,
+} from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/utils/cn';
@@ -123,6 +116,51 @@ const SORTABLE_COLUMNS: ScreeningColumn[] = [
     widthClass: 'min-w-[100px] w-[100px]',
   },
   {
+    align: 'center',
+    id: 'amountRatio',
+    label: '额比',
+    sortField: 'AMOUNT_RATIO_20',
+    width: 90,
+    widthClass: 'min-w-[90px] w-[90px]',
+  },
+  {
+    align: 'center',
+    id: 'turnoverRate',
+    label: '换手',
+    sortField: 'TURNOVER_RATE',
+    width: 90,
+    widthClass: 'min-w-[90px] w-[90px]',
+  },
+  {
+    align: 'center',
+    id: 'intradayPace',
+    label: '盘中量速',
+    sortField: 'VOLUME_RATIO',
+    width: 110,
+    widthClass: 'min-w-[110px] w-[110px]',
+  },
+  {
+    align: 'center',
+    id: 'last5mVolume',
+    label: '5m放量',
+    width: 100,
+    widthClass: 'min-w-[100px] w-[100px]',
+  },
+  {
+    align: 'center',
+    id: 'depthImbalance',
+    label: '盘口',
+    width: 90,
+    widthClass: 'min-w-[90px] w-[90px]',
+  },
+  {
+    align: 'right',
+    id: 'updateTime',
+    label: '更新',
+    width: 118,
+    widthClass: 'min-w-[118px] w-[118px]',
+  },
+  {
     align: 'right',
     defaultDirection: 'ASC',
     id: 'drawdown',
@@ -184,18 +222,6 @@ const OPPOSITE_DIRECTION: Record<
   DESC: 'ASC',
 };
 
-const SCROLLBAR_ACTIVE_CLASS = 'scrollbar-active';
-const SCROLLBAR_HIDE_DELAY_MS = 1000;
-
-interface GridDragScrollState {
-  isDragging: boolean;
-  pointerId: number;
-  previousCursor: string;
-  previousUserSelect: string;
-  startScrollLeft: number;
-  startX: number;
-}
-
 export function ScreeningResults({
   screeningLoading,
   results,
@@ -218,73 +244,9 @@ export function ScreeningResults({
     openAtPointer: openColumnMenuAtPointer,
     openFromElement: openSortMenuFromElement,
   } = useStudioMenu<ScreeningColumn>();
-  const [columnOrder, setColumnOrder] = useState(() =>
-    SORTABLE_COLUMNS.map(column => column.id)
-  );
-  const [frozenColumnIds, setFrozenColumnIds] = useState<Set<string>>(
-    () => new Set(DEFAULT_FROZEN_COLUMN_IDS)
-  );
-  const [draggingColumnId, setDraggingColumnId] = useState<string | null>(null);
-  const [isGridDragScrolling, setIsGridDragScrolling] = useState(false);
-  const [isGridScrollbarActive, setIsGridScrollbarActive] = useState(false);
-  const gridDragScrollRef = useRef<GridDragScrollState | null>(null);
-  const gridScrollbarTimerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (gridScrollbarTimerRef.current !== null) {
-        window.clearTimeout(gridScrollbarTimerRef.current);
-      }
-    };
-  }, []);
 
   const displayData =
     results && results.length > 0 ? results : screeningLoading ? [] : [];
-
-  const orderedColumns = useMemo(() => {
-    const columnsById = new Map(
-      SORTABLE_COLUMNS.map(column => [column.id, column])
-    );
-    const normalizedIds = [
-      ...columnOrder.filter(id => columnsById.has(id)),
-      ...SORTABLE_COLUMNS.map(column => column.id).filter(
-        id => !columnOrder.includes(id)
-      ),
-    ];
-    const columns = normalizedIds
-      .map(id => columnsById.get(id))
-      .filter((column): column is ScreeningColumn => Boolean(column));
-    const lockedColumns = columns.filter(column => column.locked);
-    const movableColumns = columns.filter(column => !column.locked);
-    const frozenColumns = movableColumns.filter(
-      column => column.alwaysFrozen || frozenColumnIds.has(column.id)
-    );
-    const regularColumns = movableColumns.filter(
-      column => !column.alwaysFrozen && !frozenColumnIds.has(column.id)
-    );
-
-    return [...frozenColumns, ...regularColumns, ...lockedColumns];
-  }, [columnOrder, frozenColumnIds]);
-
-  const frozenColumnOffsets = useMemo(() => {
-    const offsets = new Map<string, number>();
-    let left = 0;
-
-    orderedColumns.forEach(column => {
-      if (!column.alwaysFrozen && !frozenColumnIds.has(column.id)) return;
-      offsets.set(column.id, left);
-      left += column.width;
-    });
-
-    return offsets;
-  }, [frozenColumnIds, orderedColumns]);
-
-  const lastFrozenColumnId = useMemo(() => {
-    const frozenColumns = orderedColumns.filter(
-      column => column.alwaysFrozen || frozenColumnIds.has(column.id)
-    );
-    return frozenColumns[frozenColumns.length - 1]?.id;
-  }, [frozenColumnIds, orderedColumns]);
 
   const handleExport = () => {
     toast({
@@ -309,8 +271,7 @@ export function ScreeningResults({
     toast({
       title: result?.success ? '已加入自选' : '加入自选失败',
       description:
-        result?.message ||
-        `${stock.name} (${stock.code}) 已提交到后端自选池`,
+        result?.message || `${stock.name} (${stock.code}) 已提交到后端自选池`,
       variant: result?.success === false ? 'destructive' : 'default',
     });
   };
@@ -318,194 +279,6 @@ export function ScreeningResults({
   const copyText = (text: string) => {
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(text);
-  };
-
-  const isFrozenColumn = (column: ScreeningColumn) =>
-    column.alwaysFrozen || frozenColumnIds.has(column.id);
-
-  const canMoveColumn = (column: ScreeningColumn) =>
-    !column.locked && !column.alwaysFrozen;
-
-  const getColumnStyle = (
-    column: ScreeningColumn,
-    layer: 'body' | 'header'
-  ): CSSProperties => {
-    const baseStyle: CSSProperties = {
-      maxWidth: column.width,
-      minWidth: column.width,
-      width: column.width,
-    };
-    const left = frozenColumnOffsets.get(column.id);
-    if (left === undefined) return baseStyle;
-
-    return {
-      ...baseStyle,
-      left,
-      position: 'sticky',
-      zIndex: layer === 'header' ? 30 : 20,
-    };
-  };
-
-  const getFrozenClass = (
-    column: ScreeningColumn,
-    backgroundClass = 'bg-[#08101d]'
-  ) => {
-    if (!isFrozenColumn(column)) return '';
-    return cn(
-      backgroundClass,
-      lastFrozenColumnId === column.id &&
-        'shadow-[8px_0_14px_-12px_rgba(16,185,129,0.95)]'
-    );
-  };
-
-  const toggleFrozenColumn = (column: ScreeningColumn) => {
-    if (column.locked || column.alwaysFrozen) return;
-    setFrozenColumnIds(current => {
-      const next = new Set(current);
-      if (next.has(column.id)) next.delete(column.id);
-      else next.add(column.id);
-      return next;
-    });
-  };
-
-  const resetColumnLayout = () => {
-    setColumnOrder(SORTABLE_COLUMNS.map(column => column.id));
-    setFrozenColumnIds(new Set(DEFAULT_FROZEN_COLUMN_IDS));
-  };
-
-  const activateGridScrollbar = () => {
-    if (gridScrollbarTimerRef.current !== null) {
-      window.clearTimeout(gridScrollbarTimerRef.current);
-    }
-
-    setIsGridScrollbarActive(true);
-    gridScrollbarTimerRef.current = window.setTimeout(() => {
-      setIsGridScrollbarActive(false);
-      gridScrollbarTimerRef.current = null;
-    }, SCROLLBAR_HIDE_DELAY_MS);
-  };
-
-  const shouldIgnoreGridDragScroll = (target: EventTarget | null) => {
-    if (!(target instanceof HTMLElement)) return true;
-    return Boolean(
-      target.closest(
-        'thead, button, a, input, textarea, select, [role="button"], [data-drag-scroll-ignore="true"]'
-      )
-    );
-  };
-
-  const endGridDragScroll = (event: PointerEvent<HTMLDivElement>) => {
-    const dragState = gridDragScrollRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // Synthetic pointer events may not have an active browser capture target.
-    }
-    document.body.style.cursor = dragState.previousCursor;
-    document.body.style.userSelect = dragState.previousUserSelect;
-    gridDragScrollRef.current = null;
-    setIsGridDragScrolling(false);
-  };
-
-  const handleGridPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || shouldIgnoreGridDragScroll(event.target)) return;
-
-    gridDragScrollRef.current = {
-      isDragging: false,
-      pointerId: event.pointerId,
-      previousCursor: document.body.style.cursor,
-      previousUserSelect: document.body.style.userSelect,
-      startScrollLeft: event.currentTarget.scrollLeft,
-      startX: event.clientX,
-    };
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Non-native pointer events can still drive scroll math in tests/tools.
-    }
-  };
-
-  const handleGridPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    const dragState = gridDragScrollRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-
-    const deltaX = event.clientX - dragState.startX;
-    if (!dragState.isDragging && Math.abs(deltaX) < 4) return;
-
-    if (!dragState.isDragging) {
-      dragState.isDragging = true;
-      document.body.style.cursor = 'grabbing';
-      document.body.style.userSelect = 'none';
-      setIsGridDragScrolling(true);
-    }
-
-    event.preventDefault();
-    event.currentTarget.scrollLeft = dragState.startScrollLeft - deltaX;
-    activateGridScrollbar();
-    event.currentTarget.dispatchEvent(new Event('scroll'));
-  };
-
-  const moveColumn = (sourceId: string, targetId: string) => {
-    if (sourceId === targetId || targetId === 'actions') return;
-    const sourceColumn = SORTABLE_COLUMNS.find(column => column.id === sourceId);
-    const targetColumn = SORTABLE_COLUMNS.find(column => column.id === targetId);
-    if (
-      !sourceColumn ||
-      !targetColumn ||
-      !canMoveColumn(sourceColumn) ||
-      !canMoveColumn(targetColumn)
-    )
-      return;
-
-    setColumnOrder(current => {
-      const baseOrder = [
-        ...current.filter(id => id !== 'actions'),
-        ...SORTABLE_COLUMNS.map(column => column.id).filter(
-          id => id !== 'actions' && !current.includes(id)
-        ),
-      ];
-      const sourceIndex = baseOrder.indexOf(sourceId);
-      const targetIndex = baseOrder.indexOf(targetId);
-      if (sourceIndex === -1 || targetIndex === -1) return current;
-
-      const nextOrder = [...baseOrder];
-      nextOrder.splice(sourceIndex, 1);
-      nextOrder.splice(targetIndex, 0, sourceId);
-      return [...nextOrder, 'actions'];
-    });
-  };
-
-  const handleColumnDragStart = (
-    event: DragEvent<HTMLTableCellElement>,
-    column: ScreeningColumn
-  ) => {
-    if (!canMoveColumn(column)) return;
-    setDraggingColumnId(column.id);
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', column.id);
-  };
-
-  const handleColumnDrop = (
-    event: DragEvent<HTMLTableCellElement>,
-    targetColumn: ScreeningColumn
-  ) => {
-    event.preventDefault();
-    const sourceId = event.dataTransfer.getData('text/plain') || draggingColumnId;
-    if (sourceId) moveColumn(sourceId, targetColumn.id);
-    setDraggingColumnId(null);
-  };
-
-  const handleColumnMenuOpen = (
-    event: MouseEvent,
-    column: ScreeningColumn
-  ) => {
-    if (column.locked) return;
-    openColumnMenuAtPointer(event, column);
-    closeMenu();
   };
 
   const setColumnSort = (
@@ -569,6 +342,24 @@ export function ScreeningResults({
     return `${value.toFixed(1)}%`;
   };
 
+  const formatOptionalRatio = (value?: number | null) => {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      return '--';
+    }
+    return value.toFixed(1);
+  };
+
+  const formatUpdateTime = (value?: string | null) => {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--';
+    return date.toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  };
+
   const getFinancialValueClass = (value?: number | null) => {
     if (value === null || value === undefined || !Number.isFinite(value)) {
       return 'text-slate-700';
@@ -599,9 +390,13 @@ export function ScreeningResults({
       parts.push(`公告日: ${stock.financialAnnounceDate}`);
     }
     parts.push(`净利单季同比: ${formatOptionalPercent(stock.netProfitGrowth)}`);
-    parts.push(`净利累计同比: ${formatOptionalPercent(stock.netProfitAccumGrowth)}`);
+    parts.push(
+      `净利累计同比: ${formatOptionalPercent(stock.netProfitAccumGrowth)}`
+    );
     parts.push(`营收单季同比: ${formatOptionalPercent(stock.yoyGrowth)}`);
-    parts.push(`营收累计同比: ${formatOptionalPercent(stock.revenueAccumGrowth)}`);
+    parts.push(
+      `营收累计同比: ${formatOptionalPercent(stock.revenueAccumGrowth)}`
+    );
     if (stock.financialQualityFlags?.length) {
       parts.push(`质量标记: ${stock.financialQualityFlags.join(', ')}`);
     }
@@ -621,13 +416,30 @@ export function ScreeningResults({
   };
 
   const getSignalBadgeClass = (signal: string) => {
-    const oversold = ['超跌反弹', '布林下轨反弹', 'RSI 超卖'];
-    const momentum = ['强势股', '布林上轨突破', 'RSI 强势', '放量突破'];
+    const oversold = ['超跌反弹', '布林下轨反弹', 'RSI 超卖', '缩量调整'];
+    const momentum = [
+      '强势股',
+      '布林上轨突破',
+      'RSI 强势',
+      '放量突破',
+      '放量上涨',
+      '成交额放大',
+      '高换手',
+      '盘中放量',
+      '成交额加速',
+      '近5分钟放量',
+      '盘中高换手',
+      '买盘占优',
+      '成交活跃',
+    ];
+    const risk = ['放量下跌', '高位放量滞涨', '卖盘占优'];
     const crossover = ['KDJ 金叉', '均线金叉'];
     if (oversold.includes(signal))
       return 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10';
     if (momentum.includes(signal))
       return 'border-rose-500/30 text-rose-400 bg-rose-500/10';
+    if (risk.includes(signal))
+      return 'border-cyan-500/30 text-cyan-300 bg-cyan-500/10';
     if (crossover.includes(signal))
       return 'border-amber-500/30 text-amber-400 bg-amber-500/10';
     return 'border-purple-500/30 text-purple-400 bg-purple-500/10';
@@ -687,109 +499,12 @@ export function ScreeningResults({
     );
   };
 
-  const renderHeaderCell = (column: ScreeningColumn) => {
-    const isSorted = Boolean(column.sortField && sort?.field === column.sortField);
-    const textAlign =
-      column.align === 'right'
-        ? 'text-right'
-        : column.align === 'center'
-          ? 'text-center'
-          : 'text-left';
-    const ariaSort =
-      isSorted && sort?.direction === 'ASC'
-        ? 'ascending'
-        : isSorted && sort?.direction === 'DESC'
-          ? 'descending'
-          : 'none';
-
-    return (
-      <th
-        key={column.id}
-        aria-sort={ariaSort}
-        draggable={canMoveColumn(column)}
-        onContextMenu={event => handleColumnMenuOpen(event, column)}
-        onDragEnd={() => setDraggingColumnId(null)}
-        onDragOver={event => {
-          if (canMoveColumn(column)) {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'move';
-          }
-        }}
-        onDragStart={event => handleColumnDragStart(event, column)}
-        onDrop={event => handleColumnDrop(event, column)}
-        style={getColumnStyle(column, 'header')}
-        className={cn(
-          'group/header sticky top-0 z-10 border-b border-r border-white/10 bg-slate-900/95 px-3 py-2.5 text-[10px] font-bold text-slate-500 backdrop-blur last:border-r-0',
-          column.widthClass,
-          textAlign,
-          canMoveColumn(column) && 'cursor-grab active:cursor-grabbing',
-          draggingColumnId === column.id && 'opacity-60',
-          isSorted && 'bg-[#0c222a] text-emerald-100',
-          isFrozenColumn(column) &&
-            getFrozenClass(
-              column,
-              isSorted ? 'bg-[#0c222a]' : 'bg-slate-900'
-            )
-        )}
-        scope="col"
-      >
-        <div className="relative min-w-0 pr-7">
-          <button
-            type="button"
-            data-testid={`screening-sort-${column.id}`}
-            disabled={!column.sortField || !onSortChange}
-            onClick={() => toggleColumnSort(column)}
-            className={cn(
-              'flex min-w-0 items-center gap-1.5 leading-3 outline-none transition-colors disabled:cursor-default',
-              column.align === 'right' && 'ml-auto justify-end',
-              column.align === 'center' && 'mx-auto justify-center',
-              column.sortField &&
-                onSortChange &&
-                'cursor-pointer hover:text-slate-200 focus-visible:text-slate-100'
-            )}
-            title={column.sortField ? `${column.label} 排序` : column.label}
-          >
-            {canMoveColumn(column) && (
-              <GripVertical className="h-3 w-3 shrink-0 text-slate-700 opacity-0 transition-opacity group-hover/header:opacity-100" />
-            )}
-            {isFrozenColumn(column) && (
-              <Pin className="h-3 w-3 shrink-0 text-emerald-300" />
-            )}
-            <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
-              {column.label}
-            </span>
-            {renderSortIndicator(column)}
-          </button>
-          {!column.locked && (
-            <button
-              type="button"
-              data-testid={`screening-sort-menu-${column.id}`}
-              onClick={event =>
-                openSortMenuFromElement(event, column, {
-                  offset: 6,
-                  placement: 'bottom-end',
-                })
-              }
-              className={cn(
-                'absolute right-0 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[4px] text-slate-500 opacity-0 transition-all duration-150 hover:bg-white/[0.08] hover:text-slate-100 focus:bg-white/[0.08] focus:text-slate-100 focus:opacity-100 focus:outline-none group-hover/header:opacity-100',
-                sortMenu?.payload.id === column.id && 'opacity-100'
-              )}
-              aria-label={`${column.label || '操作列'} 列菜单`}
-              title={`${column.label || '操作列'} 列菜单`}
-            >
-              <MoreVertical className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
-      </th>
-    );
-  };
-
   const renderBodyCell = (
     stock: StockScreeningResult,
-    column: ScreeningColumn
+    column: ScreeningColumn,
+    table: StudioDataTableApi<StockScreeningResult, ScreeningColumn>
   ) => {
-    const bodyStyle = getColumnStyle(column, 'body');
+    const bodyStyle = table.getColumnStyle(column, 'body');
     const baseCellClass =
       'h-[33px] overflow-hidden whitespace-nowrap border-b border-r border-white/5 px-3 py-1.5';
 
@@ -801,7 +516,7 @@ export function ScreeningResults({
             style={bodyStyle}
             className={cn(
               baseCellClass,
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             <div
@@ -836,7 +551,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right font-medium text-slate-300',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             {formatPrice(stock.currentPrice)}
@@ -850,7 +565,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             {formatPercent(stock.changePct, true)}
@@ -861,7 +576,10 @@ export function ScreeningResults({
           <td
             key={column.id}
             style={bodyStyle}
-            className={cn(baseCellClass, getFrozenClass(column, 'bg-[#08101d]'))}
+            className={cn(
+              baseCellClass,
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
           >
             {renderSignalBadges(stock.matchedStrategies)}
           </td>
@@ -879,7 +597,7 @@ export function ScreeningResults({
               baseCellClass,
               'text-center',
               backgroundClass,
-              getFrozenClass(column, backgroundClass)
+              table.getFrozenClass(column, backgroundClass)
             )}
           >
             <div className="flex items-center justify-center gap-3 text-[11px]">
@@ -911,7 +629,7 @@ export function ScreeningResults({
               baseCellClass,
               'text-center',
               backgroundClass,
-              getFrozenClass(column, backgroundClass)
+              table.getFrozenClass(column, backgroundClass)
             )}
           >
             <div className="flex items-center justify-center gap-2 text-[11px]">
@@ -929,7 +647,9 @@ export function ScreeningResults({
         );
       }
       case 'volumeRatio': {
-        const backgroundClass = stock.matchedStrategies.includes('放量突破')
+        const backgroundClass = stock.matchedStrategies.some(signal =>
+          ['放量突破', '放量上涨', '放量下跌', '盘中放量'].includes(signal)
+        )
           ? 'bg-amber-500/5 ring-1 ring-inset ring-amber-500/20'
           : 'bg-white/[0.02]';
 
@@ -941,7 +661,7 @@ export function ScreeningResults({
               baseCellClass,
               'text-center',
               backgroundClass,
-              getFrozenClass(column, backgroundClass)
+              table.getFrozenClass(column, backgroundClass)
             )}
           >
             <span
@@ -955,6 +675,141 @@ export function ScreeningResults({
           </td>
         );
       }
+      case 'amountRatio':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                (stock.amountRatio20 ?? 0) > 1.5
+                  ? 'text-amber-500'
+                  : 'text-slate-500'
+              )}
+            >
+              {formatOptionalRatio(stock.amountRatio20)}
+            </span>
+          </td>
+        );
+      case 'turnoverRate':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                (stock.turnoverRatePct ?? stock.intradayTurnoverRatePct ?? 0) >
+                  3
+                  ? 'text-rose-400'
+                  : 'text-slate-500'
+              )}
+            >
+              {formatOptionalPercent(
+                stock.turnoverRatePct ?? stock.intradayTurnoverRatePct
+              )}
+            </span>
+          </td>
+        );
+      case 'intradayPace':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                (stock.volumePaceRatio ?? 0) > 2
+                  ? 'text-cyan-300'
+                  : 'text-slate-500'
+              )}
+            >
+              {formatOptionalRatio(stock.volumePaceRatio)}
+            </span>
+          </td>
+        );
+      case 'last5mVolume':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                (stock.last5mVolumeRatio ?? 0) > 2
+                  ? 'text-cyan-300'
+                  : 'text-slate-500'
+              )}
+            >
+              {formatOptionalRatio(stock.last5mVolumeRatio)}
+            </span>
+          </td>
+        );
+      case 'depthImbalance':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-center',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            <span
+              className={cn(
+                'font-medium',
+                (stock.depthImbalance5 ?? 0) > 0.2
+                  ? 'text-red-300'
+                  : (stock.depthImbalance5 ?? 0) < -0.2
+                    ? 'text-emerald-300'
+                    : 'text-slate-500'
+              )}
+            >
+              {formatOptionalRatio(stock.depthImbalance5)}
+            </span>
+          </td>
+        );
+      case 'updateTime':
+        return (
+          <td
+            key={column.id}
+            style={bodyStyle}
+            className={cn(
+              baseCellClass,
+              'text-right text-slate-500',
+              stock.isStale && 'text-amber-300',
+              table.getFrozenClass(column, 'bg-[#08101d]')
+            )}
+          >
+            {formatUpdateTime(stock.updatedAt ?? stock.calculatedAt)}
+          </td>
+        );
       case 'drawdown':
         return (
           <td
@@ -963,7 +818,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             <span
@@ -984,7 +839,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right text-slate-500',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             {stock.daysSincePeak}天
@@ -998,7 +853,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             <span
@@ -1017,7 +872,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             <span
@@ -1039,7 +894,7 @@ export function ScreeningResults({
             className={cn(
               baseCellClass,
               'text-right',
-              getFrozenClass(column, 'bg-[#08101d]')
+              table.getFrozenClass(column, 'bg-[#08101d]')
             )}
           >
             <span
@@ -1077,9 +932,230 @@ export function ScreeningResults({
   };
 
   return (
-    <div className="flex h-full flex-col bg-transparent">
-      <div className="flex items-center justify-between border-b border-white/5 bg-slate-900/40 px-4 py-2">
-        <div className="flex min-w-0 items-center gap-2">
+    <StudioDataTable<StockScreeningResult, ScreeningColumn>
+      ariaLabel="筛选结果列表"
+      className="h-full min-h-0 rounded-none border-0 bg-transparent"
+      columns={SORTABLE_COLUMNS}
+      columnMenuTestIdPrefix="screening-sort-menu"
+      defaultFrozenColumnIds={DEFAULT_FROZEN_COLUMN_IDS}
+      emptyState={
+        <tr>
+          <td
+            colSpan={SORTABLE_COLUMNS.length}
+            className="h-[400px] border-b border-white/5 text-center"
+          >
+            <div className="flex flex-col items-center justify-center space-y-3 text-slate-500">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
+                <Search className="h-6 w-6 text-slate-400" />
+              </div>
+              <div className="space-y-1">
+                <p className="font-bold text-slate-300">未找到符合条件的股票</p>
+                <p className="text-xs">
+                  请尝试放宽筛选条件，或减少选定的信号策略
+                </p>
+              </div>
+            </div>
+          </td>
+        </tr>
+      }
+      getRowKey={stock => stock.code}
+      isColumnSorted={column =>
+        Boolean(column.sortField && sort?.field === column.sortField)
+      }
+      loading={screeningLoading}
+      loadingOverlay={
+        screeningLoading && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/60 backdrop-blur-[2px]">
+            <div className="flex flex-col items-center">
+              <div className="mb-2 h-8 w-8 animate-spin rounded-full border-2 border-slate-700 border-t-purple-500" />
+              <p className="flex items-center gap-2 font-mono text-xs text-slate-400">
+                <Zap className="h-3 w-3" /> 正在执行筛选...
+              </p>
+            </div>
+          </div>
+        )
+      }
+      notice={
+        (error || meta?.warnings?.length) && (
+          <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-[11px] text-amber-200">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">
+              {error || meta?.warnings?.join('；')}
+            </span>
+          </div>
+        )
+      }
+      onColumnContextMenu={(event, column) => {
+        if (column.locked) return;
+        openColumnMenuAtPointer(event, column);
+        closeMenu();
+      }}
+      onColumnMenuOpen={(event, column) => {
+        openSortMenuFromElement(event, column, {
+          offset: 6,
+          placement: 'bottom-end',
+        });
+        closeMenu();
+      }}
+      onColumnSortToggle={onSortChange ? toggleColumnSort : undefined}
+      onRowContextMenu={(event, stock) => openAtPointer(event, stock)}
+      renderCell={() => null}
+      renderCellElement={({ column, row, table }) =>
+        renderBodyCell(row, column, table)
+      }
+      renderOverlays={table => (
+        <>
+          <StudioMenu
+            ariaLabel="筛选列菜单"
+            items={[
+              {
+                checked: Boolean(
+                  sort &&
+                    sortMenu?.payload.sortField &&
+                    sort.field === sortMenu.payload.sortField &&
+                    sort.direction === 'ASC'
+                ),
+                disabled: !sortMenu?.payload.sortField,
+                icon: <ArrowUpAZ className="h-3.5 w-3.5 text-cyan-300" />,
+                id: 'sort-asc',
+                label: '升序',
+                onSelect: () => {
+                  if (sortMenu?.payload) setColumnSort(sortMenu.payload, 'ASC');
+                },
+              },
+              {
+                checked: Boolean(
+                  sort &&
+                    sortMenu?.payload.sortField &&
+                    sort.field === sortMenu.payload.sortField &&
+                    sort.direction === 'DESC'
+                ),
+                disabled: !sortMenu?.payload.sortField,
+                icon: <ArrowDownZA className="h-3.5 w-3.5 text-cyan-300" />,
+                id: 'sort-desc',
+                label: '降序',
+                onSelect: () => {
+                  if (sortMenu?.payload)
+                    setColumnSort(sortMenu.payload, 'DESC');
+                },
+              },
+              { id: 'sort-separator', type: 'separator' },
+              {
+                disabled: !sort,
+                icon: sort ? (
+                  <X className="h-3.5 w-3.5 text-slate-500" />
+                ) : (
+                  <Check className="h-3.5 w-3.5 text-slate-600" />
+                ),
+                id: 'clear-sort',
+                label: '清除排序',
+                onSelect: () => onSortChange?.(null),
+              },
+              { id: 'pin-separator', type: 'separator' },
+              {
+                disabled:
+                  !sortMenu?.payload ||
+                  sortMenu.payload.locked ||
+                  sortMenu.payload.alwaysFrozen,
+                icon:
+                  sortMenu?.payload &&
+                  table.isFrozenColumn(sortMenu.payload) ? (
+                    <PinOff className="h-3.5 w-3.5 text-emerald-300" />
+                  ) : (
+                    <Pin className="h-3.5 w-3.5 text-emerald-300" />
+                  ),
+                id: 'toggle-frozen',
+                label: sortMenu?.payload?.alwaysFrozen
+                  ? '已固定'
+                  : sortMenu?.payload && table.isFrozenColumn(sortMenu.payload)
+                    ? '取消固定列'
+                    : '固定列',
+                onSelect: () => {
+                  if (sortMenu?.payload)
+                    table.toggleFrozenColumn(sortMenu.payload);
+                },
+              },
+              {
+                icon: <RotateCcw className="h-3.5 w-3.5 text-slate-500" />,
+                id: 'reset-column-layout',
+                label: '重置列布局',
+                onSelect: table.resetColumnLayout,
+              },
+            ]}
+            menu={sortMenu}
+            onClose={closeSortMenu}
+            width={150}
+          />
+
+          <StudioMenu
+            ariaLabel="筛选结果菜单"
+            items={[
+              {
+                disabled: !rowMenu?.payload,
+                icon: <Eye className="h-3.5 w-3.5" />,
+                id: 'open-detail',
+                label: '打开个股详情',
+                onSelect: () => {
+                  if (rowMenu?.payload)
+                    setLocation(`/stock/${rowMenu.payload.code}`);
+                },
+              },
+              {
+                disabled: !rowMenu?.payload,
+                icon: <Copy className="h-3.5 w-3.5" />,
+                id: 'copy-code',
+                label: '复制股票代码',
+                onSelect: () => {
+                  if (rowMenu?.payload) copyText(rowMenu.payload.code);
+                },
+              },
+              {
+                disabled: !rowMenu?.payload,
+                icon: <Copy className="h-3.5 w-3.5" />,
+                id: 'copy-name',
+                label: '复制股票名称',
+                onSelect: () => {
+                  if (rowMenu?.payload) copyText(rowMenu.payload.name);
+                },
+              },
+              { id: 'separator-actions', type: 'separator' },
+              {
+                disabled: !rowMenu?.payload,
+                id: 'watchlist',
+                label: '加入自选',
+                onSelect: () => {
+                  if (rowMenu?.payload) {
+                    void handleAddWatchlist(rowMenu.payload);
+                  }
+                },
+              },
+              {
+                disabled: !rowMenu?.payload,
+                id: 'trend',
+                label: '趋势分析',
+                onSelect: () => {
+                  if (rowMenu?.payload) {
+                    handleAction(
+                      '趋势分析',
+                      rowMenu.payload.code,
+                      rowMenu.payload.name
+                    );
+                  }
+                },
+              },
+            ]}
+            menu={rowMenu}
+            onClose={closeMenu}
+            width={180}
+          />
+        </>
+      )}
+      renderSortIndicator={renderSortIndicator}
+      rows={displayData}
+      sortTestIdPrefix="screening-sort"
+      testId="screening-results-grid"
+      toolbarLeft={
+        <>
           <LayoutList className="h-4 w-4 shrink-0 text-slate-400" />
           <Badge
             variant="outline"
@@ -1112,7 +1188,9 @@ export function ScreeningResults({
               非今日快照
             </Badge>
           )}
-        </div>
+        </>
+      }
+      toolbarRight={
         <button
           type="button"
           onClick={handleExport}
@@ -1121,228 +1199,8 @@ export function ScreeningResults({
           <Download className="h-3.5 w-3.5" />
           导出
         </button>
-      </div>
-
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        {(error || meta?.warnings?.length) && (
-          <div className="flex items-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-[11px] text-amber-200">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate">
-              {error || meta?.warnings?.join('；')}
-            </span>
-          </div>
-        )}
-
-        {screeningLoading && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/60 backdrop-blur-[2px]">
-            <div className="flex flex-col items-center">
-              <div className="mb-2 h-8 w-8 animate-spin rounded-full border-2 border-slate-700 border-t-purple-500" />
-              <p className="flex items-center gap-2 font-mono text-xs text-slate-400">
-                <Zap className="h-3 w-3" /> 正在执行筛选...
-              </p>
-            </div>
-          </div>
-        )}
-
-        <div
-          data-testid="screening-results-grid"
-          onPointerCancel={endGridDragScroll}
-          onPointerDown={handleGridPointerDown}
-          onPointerLeave={endGridDragScroll}
-          onPointerMove={handleGridPointerMove}
-          onPointerUp={endGridDragScroll}
-          className={cn(
-            'custom-scrollbar min-h-0 flex-1 overflow-auto bg-[#08101d] [touch-action:pan-y]',
-            isGridDragScrolling ? 'cursor-grabbing' : 'cursor-grab',
-            isGridScrollbarActive && SCROLLBAR_ACTIVE_CLASS
-          )}
-        >
-          <table className="w-max min-w-full border-collapse text-xs">
-            <thead className="sticky top-0 z-10 bg-slate-900/95 backdrop-blur">
-              <tr>{orderedColumns.map(renderHeaderCell)}</tr>
-            </thead>
-            <tbody className="font-mono">
-              {displayData.length === 0 && !screeningLoading && (
-                <tr>
-                  <td
-                    colSpan={orderedColumns.length}
-                    className="h-[400px] border-b border-white/5 text-center"
-                  >
-                    <div className="flex flex-col items-center justify-center space-y-3 text-slate-500">
-                      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
-                        <Search className="h-6 w-6 text-slate-400" />
-                      </div>
-                      <div className="space-y-1">
-                        <p className="font-bold text-slate-300">
-                          未找到符合条件的股票
-                        </p>
-                        <p className="text-xs">
-                          请尝试放宽筛选条件，或减少选定的信号策略
-                        </p>
-                      </div>
-                    </div>
-                  </td>
-                </tr>
-              )}
-
-              {displayData.map(stock => (
-                <tr
-                  key={stock.code}
-                  onContextMenu={event => openAtPointer(event, stock)}
-                  className="group transition-colors hover:bg-white/[0.02]"
-                >
-                  {orderedColumns.map(column => renderBodyCell(stock, column))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <StudioMenu
-        ariaLabel="筛选列菜单"
-        items={[
-          {
-            checked:
-              Boolean(
-                sort &&
-                  sortMenu?.payload.sortField &&
-                  sort.field === sortMenu.payload.sortField &&
-                  sort.direction === 'ASC'
-              ),
-            disabled: !sortMenu?.payload.sortField,
-            icon: <ArrowUpAZ className="h-3.5 w-3.5 text-cyan-300" />,
-            id: 'sort-asc',
-            label: '升序',
-            onSelect: () => {
-              if (sortMenu?.payload) setColumnSort(sortMenu.payload, 'ASC');
-            },
-          },
-          {
-            checked:
-              Boolean(
-                sort &&
-                  sortMenu?.payload.sortField &&
-                  sort.field === sortMenu.payload.sortField &&
-                  sort.direction === 'DESC'
-              ),
-            disabled: !sortMenu?.payload.sortField,
-            icon: <ArrowDownZA className="h-3.5 w-3.5 text-cyan-300" />,
-            id: 'sort-desc',
-            label: '降序',
-            onSelect: () => {
-              if (sortMenu?.payload) setColumnSort(sortMenu.payload, 'DESC');
-            },
-          },
-          { id: 'sort-separator', type: 'separator' },
-          {
-            disabled: !sort,
-            icon: sort ? (
-              <X className="h-3.5 w-3.5 text-slate-500" />
-            ) : (
-              <Check className="h-3.5 w-3.5 text-slate-600" />
-            ),
-            id: 'clear-sort',
-            label: '清除排序',
-            onSelect: () => onSortChange?.(null),
-          },
-          { id: 'pin-separator', type: 'separator' },
-          {
-            disabled:
-              !sortMenu?.payload ||
-              sortMenu.payload.locked ||
-              sortMenu.payload.alwaysFrozen,
-            icon:
-              sortMenu?.payload && isFrozenColumn(sortMenu.payload) ? (
-                <PinOff className="h-3.5 w-3.5 text-emerald-300" />
-              ) : (
-                <Pin className="h-3.5 w-3.5 text-emerald-300" />
-              ),
-            id: 'toggle-frozen',
-            label:
-              sortMenu?.payload?.alwaysFrozen
-                ? '已固定'
-                : sortMenu?.payload && isFrozenColumn(sortMenu.payload)
-                ? '取消固定列'
-                : '固定列',
-            onSelect: () => {
-              if (sortMenu?.payload) toggleFrozenColumn(sortMenu.payload);
-            },
-          },
-          {
-            icon: <RotateCcw className="h-3.5 w-3.5 text-slate-500" />,
-            id: 'reset-column-layout',
-            label: '重置列布局',
-            onSelect: resetColumnLayout,
-          },
-        ]}
-        menu={sortMenu}
-        onClose={closeSortMenu}
-        width={150}
-      />
-
-      <StudioMenu
-        ariaLabel="筛选结果菜单"
-        items={[
-          {
-            disabled: !rowMenu?.payload,
-            icon: <Eye className="h-3.5 w-3.5" />,
-            id: 'open-detail',
-            label: '打开个股详情',
-            onSelect: () => {
-              if (rowMenu?.payload)
-                setLocation(`/stock/${rowMenu.payload.code}`);
-            },
-          },
-          {
-            disabled: !rowMenu?.payload,
-            icon: <Copy className="h-3.5 w-3.5" />,
-            id: 'copy-code',
-            label: '复制股票代码',
-            onSelect: () => {
-              if (rowMenu?.payload) copyText(rowMenu.payload.code);
-            },
-          },
-          {
-            disabled: !rowMenu?.payload,
-            icon: <Copy className="h-3.5 w-3.5" />,
-            id: 'copy-name',
-            label: '复制股票名称',
-            onSelect: () => {
-              if (rowMenu?.payload) copyText(rowMenu.payload.name);
-            },
-          },
-          { id: 'separator-actions', type: 'separator' },
-          {
-            disabled: !rowMenu?.payload,
-            id: 'watchlist',
-            label: '加入自选',
-            onSelect: () => {
-              if (rowMenu?.payload) {
-                void handleAddWatchlist(rowMenu.payload);
-              }
-            },
-          },
-          {
-            disabled: !rowMenu?.payload,
-            id: 'trend',
-            label: '趋势分析',
-            onSelect: () => {
-              if (rowMenu?.payload) {
-                handleAction(
-                  '趋势分析',
-                  rowMenu.payload.code,
-                  rowMenu.payload.name
-                );
-              }
-            },
-          },
-        ]}
-        menu={rowMenu}
-        onClose={closeMenu}
-        width={180}
-      />
-    </div>
+      }
+    />
   );
 }
 

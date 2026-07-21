@@ -55,11 +55,30 @@ export default function StockScreeningPage() {
     ].filter(Boolean).length;
   }, [localCriteria]);
   const activeIndustryCount = localCriteria.includeIndustries?.length || 0;
-  const snapshotTone = meta.snapshotDate
-    ? meta.hasStaleData
-      ? 'bg-amber-400'
-      : 'bg-emerald-400'
-    : 'bg-slate-500';
+  const isIntradayMode =
+    (localCriteria.screeningMode ?? 'DAILY') === 'INTRADAY';
+  const snapshotTone = isIntradayMode
+    ? meta.calculatedAt
+      ? 'bg-cyan-400'
+      : 'bg-slate-500'
+    : meta.snapshotDate
+      ? meta.hasStaleData
+        ? 'bg-amber-400'
+        : 'bg-emerald-400'
+      : 'bg-slate-500';
+  const dataStateLabel = isIntradayMode ? '盘中状态' : '快照状态';
+  const dataStateValue = isIntradayMode
+    ? meta.calculatedAt
+      ? new Date(meta.calculatedAt).toLocaleTimeString()
+      : '待接入'
+    : meta.snapshotDate || '待计算';
+  const dataStateHint = isIntradayMode
+    ? meta.isComplete
+      ? '全市场扫描中'
+      : '等待实时行情'
+    : meta.hasStaleData
+      ? '历史快照'
+      : '最新可用数据';
 
   return (
     <DataStudioShell
@@ -120,13 +139,13 @@ export default function StockScreeningPage() {
           <div className="rounded-md border border-white/5 bg-white/[0.03] p-2">
             <div className="mb-2 flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-slate-500">
               <span className={cn('h-1.5 w-1.5 rounded-full', snapshotTone)} />
-              快照状态
+              {dataStateLabel}
             </div>
             <div className="truncate font-mono text-[11px] text-slate-300">
-              {meta.snapshotDate || '待计算'}
+              {dataStateValue}
             </div>
             <div className="mt-1 text-[10px] text-slate-600">
-              {meta.hasStaleData ? '历史快照' : '最新可用数据'}
+              {dataStateHint}
             </div>
           </div>
 
@@ -155,7 +174,7 @@ export default function StockScreeningPage() {
         <>
           <span className="inline-flex items-center gap-2">
             <span className={cn('h-1.5 w-1.5 rounded-full', snapshotTone)} />
-            股票筛选
+            {isIntradayMode ? '盘中筛选' : '股票筛选'}
           </span>
           <span className="text-slate-700">|</span>
           <span>命中 {meta.total || results?.length || 0}</span>

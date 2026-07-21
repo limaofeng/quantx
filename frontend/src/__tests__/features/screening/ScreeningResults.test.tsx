@@ -140,7 +140,9 @@ describe('ScreeningResults', () => {
       }),
     };
 
-    const priceHeader = screen.getByTestId('screening-sort-price').closest('th')!;
+    const priceHeader = screen
+      .getByTestId('screening-sort-price')
+      .closest('th')!;
     const signalsHeader = screen
       .getByTestId('screening-sort-signals')
       .closest('th')!;
@@ -167,9 +169,7 @@ describe('ScreeningResults', () => {
   it('supports horizontal drag scrolling from the table body', () => {
     renderResults();
 
-    const grid = screen.getByTestId(
-      'screening-results-grid'
-    ) as HTMLDivElement;
+    const grid = screen.getByTestId('screening-results-grid') as HTMLDivElement;
     grid.scrollLeft = 20;
     grid.setPointerCapture = vi.fn();
     grid.releasePointerCapture = vi.fn();

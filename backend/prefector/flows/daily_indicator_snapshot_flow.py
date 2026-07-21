@@ -188,6 +188,7 @@ async def daily_indicator_snapshot_flow(
   # ── 步骤2：从数据库加载名称映射 ──────────────────────────
   logger.info("步骤2: 从数据库加载标的名称")
   name_map: Dict[str, str] = {}
+  float_volume_map: Dict[str, float] = {}
 
   try:
     instrument_service = InstrumentService()
@@ -195,10 +196,12 @@ async def daily_indicator_snapshot_flow(
     instruments = await instrument_service.find_all(where=where, limit=20000)
     for inst in instruments:
       name_map[inst.id] = inst.name or ""
+      if inst.float_volume:
+        float_volume_map[inst.id] = float(inst.float_volume)
       instrument_type = _normalize_instrument_type(inst.type)
       if instrument_type in {"stock", "etf", "index"}:
         instrument_type_map[inst.id] = instrument_type
-    logger.info(f"  加载到 {len(name_map)} 条名称")
+    logger.info(f"  加载到 {len(name_map)} 条名称，{len(float_volume_map)} 条流通股本")
   except Exception as e:
     logger.warning(f"  加载名称失败（将以空名称继续）: {e}")
 
@@ -224,6 +227,7 @@ async def daily_indicator_snapshot_flow(
       snapshot_date=snapshot_date,
       instrument_type_map=instrument_type_map,
       name_map=name_map,
+      float_volume_map=float_volume_map,
     )
     total_saved += batch_result.get("saved", 0)
     total_skipped += batch_result.get("skipped", 0)

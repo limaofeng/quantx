@@ -140,6 +140,19 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
         type_map[code] = normalized
     return type_map
 
+  async def find_float_volume_by_codes(self, codes: List[str]) -> Dict[str, float]:
+    """批量获取流通股本，用于换手率估算。"""
+    if not codes:
+      return {}
+    result = await self.db.execute(
+      select(Instrument.id, Instrument.float_volume).where(Instrument.id.in_(codes))
+    )
+    float_volume_map: Dict[str, float] = {}
+    for code, float_volume in result.all():
+      if float_volume:
+        float_volume_map[code] = float(float_volume)
+    return float_volume_map
+
   def _universe_condition(self, universe: str):
     universe = (universe or "stock").lower()
     snapshot_type = func.lower(func.coalesce(IndicatorSnapshot.instrument_type, "stock"))
@@ -205,6 +218,14 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       "current_price": IndicatorSnapshot.current_price,
       "change_pct": IndicatorSnapshot.change_pct,
       "volume_ratio": IndicatorSnapshot.volume_ratio,
+      "avg_volume_5": IndicatorSnapshot.avg_volume_5,
+      "avg_volume_20": IndicatorSnapshot.avg_volume_20,
+      "volume_ratio_5": IndicatorSnapshot.volume_ratio_5,
+      "avg_amount_20": IndicatorSnapshot.avg_amount_20,
+      "amount_ratio_20": IndicatorSnapshot.amount_ratio_20,
+      "turnover_rate_pct": IndicatorSnapshot.turnover_rate_pct,
+      "volume_percentile_60": IndicatorSnapshot.volume_percentile_60,
+      "amount_percentile_60": IndicatorSnapshot.amount_percentile_60,
       "price_drop_pct": IndicatorSnapshot.price_drop_pct,
       "price_rise_pct": IndicatorSnapshot.price_rise_pct,
       "days_since_peak": IndicatorSnapshot.days_since_peak,
@@ -326,6 +347,11 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       "kdj_j": IndicatorSnapshot.kdj_j,
       "rsi12": IndicatorSnapshot.rsi12,
       "volume_ratio": IndicatorSnapshot.volume_ratio,
+      "volume_ratio_5": IndicatorSnapshot.volume_ratio_5,
+      "amount_ratio_20": IndicatorSnapshot.amount_ratio_20,
+      "turnover_rate_pct": IndicatorSnapshot.turnover_rate_pct,
+      "volume_percentile_60": IndicatorSnapshot.volume_percentile_60,
+      "amount_percentile_60": IndicatorSnapshot.amount_percentile_60,
       "price_drop_pct": IndicatorSnapshot.price_drop_pct,
       "days_since_peak": IndicatorSnapshot.days_since_peak,
       "roe_ttm": FinancialMetricSnapshot.roe_ttm,

@@ -1,7 +1,9 @@
 export type StockScreenUniverse = 'STOCK' | 'ETF' | 'STOCK_AND_ETF';
+export type ScreeningMode = 'DAILY' | 'INTRADAY';
 
 export interface ScreeningCriteria {
   // --- Universe ---
+  screeningMode?: ScreeningMode;
   universe?: StockScreenUniverse;
   excludeST?: boolean;
   includeIndustries?: string[];
@@ -31,6 +33,15 @@ export interface ScreeningCriteria {
   maShort?: number; // Default 5
   maLong?: number; // Default 10
   volumeRatioMin?: number;
+  volumeRatioMax?: number;
+  volumeRatio5Min?: number;
+  amountRatioMin?: number;
+  turnoverRateMin?: number;
+  intradayVolumePaceMin?: number;
+  intradayAmountPaceMin?: number;
+  intradayLast5mVolumeRatioMin?: number;
+  intradayTurnoverRateMin?: number;
+  intradayDepthImbalanceMin?: number;
   bollingerUpperProximity?: number; // Default 0.95
   bollingerLowerProximity?: number; // Default 1.0
   requireFresh?: boolean;
@@ -49,7 +60,25 @@ export interface StockScreeningResult {
   volume: number;
   volumeRatio: number; // Current / Avg20
   avgVolume20: number;
+  avgVolume5?: number;
+  volumeRatio5?: number;
+  avgAmount20?: number;
+  amountRatio20?: number;
+  turnoverRatePct?: number | null;
+  volumePercentile60?: number;
+  amountPercentile60?: number;
   isBullish: boolean; // Close > Open
+  amount?: number;
+
+  // Intraday volume scan
+  volumePaceRatio?: number;
+  amountPaceRatio?: number;
+  last5mVolumeRatio?: number;
+  intradayTurnoverRatePct?: number | null;
+  depthImbalance5?: number;
+  avgTradeAmountProxy?: number | null;
+  updatedAt?: string | null;
+  isStale?: boolean;
 
   // Fundamentals
   roe?: number;
@@ -128,6 +157,11 @@ export type StockScreenSortField =
   | 'KDJ_J'
   | 'RSI12'
   | 'VOLUME_RATIO'
+  | 'VOLUME_RATIO_5'
+  | 'AMOUNT_RATIO_20'
+  | 'TURNOVER_RATE'
+  | 'VOLUME_PERCENTILE_60'
+  | 'AMOUNT_PERCENTILE_60'
   | 'PRICE_DROP_PCT'
   | 'DAYS_SINCE_PEAK'
   | 'ROE'

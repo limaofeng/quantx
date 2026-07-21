@@ -1,7 +1,7 @@
 """技术指标计算 Prefect tasks。"""
 
 from datetime import date
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from prefect import get_run_logger, task
 
@@ -19,6 +19,7 @@ async def compute_and_save_indicator_batch(
   snapshot_date: date,
   instrument_type_map: Dict[str, str],
   name_map: Dict[str, str],
+  float_volume_map: Optional[Dict[str, float]] = None,
   lookback_days: int = 310,
 ) -> Dict[str, Any]:
   """为一批标的计算技术指标快照并写入数据库。"""
@@ -28,6 +29,7 @@ async def compute_and_save_indicator_batch(
     snapshot_date=snapshot_date,
     instrument_type_map=instrument_type_map,
     name_map=name_map,
+    float_volume_map=float_volume_map,
     lookback_days=lookback_days,
   )
 

@@ -15,6 +15,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 
 import {
   type ScreeningCriteria,
+  type ScreeningMode,
   type StockScreenUniverse,
   type StockScreeningMeta,
 } from '../types';
@@ -51,6 +52,11 @@ const UNIVERSE_OPTIONS: Array<{ label: string; value: StockScreenUniverse }> = [
   { label: '股票+ETF', value: 'STOCK_AND_ETF' },
 ];
 
+const MODE_OPTIONS: Array<{ label: string; value: ScreeningMode }> = [
+  { label: '日级', value: 'DAILY' },
+  { label: '盘中', value: 'INTRADAY' },
+];
+
 export function ScreeningTopBar({
   screeningCriteria,
   setScreeningCriteria,
@@ -61,25 +67,39 @@ export function ScreeningTopBar({
   onReset,
 }: ScreeningTopBarProps) {
   const [industrySearch, setIndustrySearch] = useState('');
+  const screeningMode = screeningCriteria.screeningMode ?? 'DAILY';
+  const isIntradayMode = screeningMode === 'INTRADAY';
   const universe = screeningCriteria.universe ?? 'STOCK';
   const stockUniverseEnabled = universe !== 'ETF';
   const stockOnlyFiltersEnabled = universe === 'STOCK';
   const excludeST = screeningCriteria.excludeST !== false;
-  const snapshotStateLabel = meta.snapshotDate
-    ? meta.hasStaleData
-      ? '历史快照'
-      : '快照数据'
-    : '待计算';
-  const snapshotStateClass = meta.snapshotDate
-    ? meta.hasStaleData
-      ? 'text-amber-400'
-      : 'text-emerald-400'
-    : 'text-slate-400';
-  const snapshotDotClass = meta.snapshotDate
-    ? meta.hasStaleData
-      ? 'bg-amber-500'
-      : 'bg-emerald-500'
-    : 'bg-slate-500';
+  const snapshotStateLabel = isIntradayMode
+    ? meta.calculatedAt
+      ? '盘中扫描'
+      : '待接入'
+    : meta.snapshotDate
+      ? meta.hasStaleData
+        ? '历史快照'
+        : '快照数据'
+      : '待计算';
+  const snapshotStateClass = isIntradayMode
+    ? meta.calculatedAt
+      ? 'text-cyan-300'
+      : 'text-slate-400'
+    : meta.snapshotDate
+      ? meta.hasStaleData
+        ? 'text-amber-400'
+        : 'text-emerald-400'
+      : 'text-slate-400';
+  const snapshotDotClass = isIntradayMode
+    ? meta.calculatedAt
+      ? 'bg-cyan-400'
+      : 'bg-slate-500'
+    : meta.snapshotDate
+      ? meta.hasStaleData
+        ? 'bg-amber-500'
+        : 'bg-emerald-500'
+      : 'bg-slate-500';
 
   // --- Helpers for updating state ---
   const updateCriteria = <K extends keyof ScreeningCriteria>(
@@ -131,9 +151,26 @@ export function ScreeningTopBar({
   // --- Active Tags Rendering ---
   const activeTags: React.ReactNode[] = [];
 
+  if (isIntradayMode) {
+    activeTags.push(
+      <Badge
+        key="screeningMode"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        模式: 盘中
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => updateCriteria('screeningMode', 'DAILY')}
+        />
+      </Badge>
+    );
+  }
+
   if (universe !== 'STOCK') {
     const universeLabel =
-      UNIVERSE_OPTIONS.find(option => option.value === universe)?.label || '股票';
+      UNIVERSE_OPTIONS.find(option => option.value === universe)?.label ||
+      '股票';
     activeTags.push(
       <Badge
         key="universe"
@@ -223,7 +260,7 @@ export function ScreeningTopBar({
     );
   }
 
-  if (screeningCriteria.requireFresh) {
+  if (!isIntradayMode && screeningCriteria.requireFresh) {
     activeTags.push(
       <Badge
         key="requireFresh"
@@ -269,6 +306,168 @@ export function ScreeningTopBar({
         <X
           className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
           onClick={() => removeTag('volumeRatioMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.volumeRatioMax &&
+    screeningCriteria.volumeRatioMax > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="volumeRatioMax"
+        variant="secondary"
+        className="bg-amber-500/10 text-amber-400 border border-amber-500/20"
+      >
+        量比 &lt; {screeningCriteria.volumeRatioMax}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('volumeRatioMax')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.volumeRatio5Min &&
+    screeningCriteria.volumeRatio5Min > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="volumeRatio5Min"
+        variant="secondary"
+        className="bg-amber-500/10 text-amber-400 border border-amber-500/20"
+      >
+        5日量比 &gt; {screeningCriteria.volumeRatio5Min}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('volumeRatio5Min')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.amountRatioMin &&
+    screeningCriteria.amountRatioMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="amountRatioMin"
+        variant="secondary"
+        className="bg-amber-500/10 text-amber-400 border border-amber-500/20"
+      >
+        额比 &gt; {screeningCriteria.amountRatioMin}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('amountRatioMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.turnoverRateMin &&
+    screeningCriteria.turnoverRateMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="turnoverRateMin"
+        variant="secondary"
+        className="bg-amber-500/10 text-amber-400 border border-amber-500/20"
+      >
+        换手 &gt; {screeningCriteria.turnoverRateMin}%
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('turnoverRateMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.intradayVolumePaceMin &&
+    screeningCriteria.intradayVolumePaceMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="intradayVolumePaceMin"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        盘中量速 &gt; {screeningCriteria.intradayVolumePaceMin}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('intradayVolumePaceMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.intradayAmountPaceMin &&
+    screeningCriteria.intradayAmountPaceMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="intradayAmountPaceMin"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        盘中额速 &gt; {screeningCriteria.intradayAmountPaceMin}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('intradayAmountPaceMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.intradayLast5mVolumeRatioMin &&
+    screeningCriteria.intradayLast5mVolumeRatioMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="intradayLast5mVolumeRatioMin"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        5m放量 &gt; {screeningCriteria.intradayLast5mVolumeRatioMin}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('intradayLast5mVolumeRatioMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.intradayTurnoverRateMin &&
+    screeningCriteria.intradayTurnoverRateMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="intradayTurnoverRateMin"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        盘中换手 &gt; {screeningCriteria.intradayTurnoverRateMin}%
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('intradayTurnoverRateMin')}
+        />
+      </Badge>
+    );
+  }
+  if (
+    screeningCriteria.intradayDepthImbalanceMin &&
+    screeningCriteria.intradayDepthImbalanceMin > 0
+  ) {
+    activeTags.push(
+      <Badge
+        key="intradayDepthImbalanceMin"
+        variant="secondary"
+        className="bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+      >
+        买盘失衡 &gt; {screeningCriteria.intradayDepthImbalanceMin}
+        <X
+          className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
+          onClick={() => removeTag('intradayDepthImbalanceMin')}
         />
       </Badge>
     );
@@ -336,6 +535,28 @@ export function ScreeningTopBar({
           </div>
 
           <div className="w-[1px] h-6 bg-white/10 mx-2" />
+
+          <div className="flex h-8 items-center rounded-lg border border-white/10 bg-slate-950/50 p-0.5">
+            {MODE_OPTIONS.map(option => {
+              const isSelected = screeningMode === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => updateCriteria('screeningMode', option.value)}
+                  className={`h-6 rounded-md px-2.5 text-[11px] font-medium transition-colors ${
+                    isSelected
+                      ? option.value === 'INTRADAY'
+                        ? 'bg-cyan-500/15 text-cyan-200 shadow-[0_0_10px_rgba(34,211,238,0.12)]'
+                        : 'bg-purple-500/15 text-purple-200 shadow-[0_0_10px_rgba(168,85,247,0.12)]'
+                      : 'text-slate-500 hover:bg-white/5 hover:text-slate-200'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
 
           <div className="flex h-8 items-center rounded-lg border border-white/10 bg-slate-950/50 p-0.5">
             {UNIVERSE_OPTIONS.map(option => {
@@ -580,6 +801,7 @@ export function ScreeningTopBar({
                         <Input
                           type="number"
                           value={screeningCriteria.priceDropMin || ''}
+                          disabled={isIntradayMode}
                           onChange={e =>
                             updateCriteria(
                               'priceDropMin',
@@ -598,6 +820,7 @@ export function ScreeningTopBar({
                           type="number"
                           step="0.1"
                           value={screeningCriteria.volumeRatioMin || ''}
+                          disabled={isIntradayMode}
                           onChange={e =>
                             updateCriteria(
                               'volumeRatioMin',
@@ -605,6 +828,199 @@ export function ScreeningTopBar({
                             )
                           }
                           placeholder="例如: 1.5"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h5 className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">
+                      日级量能
+                    </h5>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最大量比
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.volumeRatioMax || ''}
+                          disabled={isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'volumeRatioMax',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 3"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小5日量比
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.volumeRatio5Min || ''}
+                          disabled={isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'volumeRatio5Min',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 1.3"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小额比
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.amountRatioMin || ''}
+                          disabled={isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'amountRatioMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 1.5"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小换手 (%)
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.turnoverRateMin || ''}
+                          disabled={isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'turnoverRateMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 3"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h5 className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">
+                      盘中量能
+                    </h5>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小量速
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.intradayVolumePaceMin || ''}
+                          disabled={!isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'intradayVolumePaceMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 2"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小额速
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={screeningCriteria.intradayAmountPaceMin || ''}
+                          disabled={!isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'intradayAmountPaceMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 2"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小5m放量
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={
+                            screeningCriteria.intradayLast5mVolumeRatioMin || ''
+                          }
+                          disabled={!isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'intradayLast5mVolumeRatioMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 2"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-[10px] text-slate-400">
+                          最小盘中换手
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          value={
+                            screeningCriteria.intradayTurnoverRateMin || ''
+                          }
+                          disabled={!isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'intradayTurnoverRateMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 2"
+                          className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5 col-span-2">
+                        <Label className="text-[10px] text-slate-400">
+                          最小买盘失衡
+                        </Label>
+                        <Input
+                          type="number"
+                          step="0.05"
+                          value={
+                            screeningCriteria.intradayDepthImbalanceMin || ''
+                          }
+                          disabled={!isIntradayMode}
+                          onChange={e =>
+                            updateCriteria(
+                              'intradayDepthImbalanceMin',
+                              Number(e.target.value)
+                            )
+                          }
+                          placeholder="例如: 0.2"
                           className="h-8 bg-slate-900/50 border-white/10 text-slate-200 text-xs"
                         />
                       </div>
@@ -859,16 +1275,18 @@ export function ScreeningTopBar({
             </span>
           </div>
 
-          <label className="hidden lg:flex items-center gap-2 text-[11px] text-slate-400 select-none">
-            <Checkbox
-              checked={Boolean(screeningCriteria.requireFresh)}
-              onCheckedChange={checked =>
-                updateCriteria('requireFresh', Boolean(checked))
-              }
-              className="data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500"
-            />
-            只看今日信号
-          </label>
+          {!isIntradayMode && (
+            <label className="hidden lg:flex items-center gap-2 text-[11px] text-slate-400 select-none">
+              <Checkbox
+                checked={Boolean(screeningCriteria.requireFresh)}
+                onCheckedChange={checked =>
+                  updateCriteria('requireFresh', Boolean(checked))
+                }
+                className="data-[state=checked]:bg-emerald-500 data-[state=checked]:border-emerald-500"
+              />
+              只看今日信号
+            </label>
+          )}
 
           <Button
             onClick={onRunScreening}
@@ -881,7 +1299,7 @@ export function ScreeningTopBar({
             ) : (
               <Search className="mr-2 h-4 w-4" />
             )}
-            开始智能选股
+            {isIntradayMode ? '开始盘中扫描' : '开始智能选股'}
           </Button>
         </div>
       </div>

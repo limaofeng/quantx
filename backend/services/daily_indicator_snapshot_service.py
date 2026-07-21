@@ -70,6 +70,28 @@ def detect_daily_signals(snap: Dict[str, Any]) -> List[str]:
   if (_f("volume_ratio") or 0) > 1.5:
     signals.append("放量突破")
 
+  if (_f("change_pct") or 0) > 0 and (_f("volume_ratio") or 0) >= 1.5:
+    signals.append("放量上涨")
+
+  if (_f("change_pct") or 0) < 0 and (_f("volume_ratio") or 0) >= 1.5:
+    signals.append("放量下跌")
+
+  if (_f("amount_ratio_20") or 0) >= 1.5:
+    signals.append("成交额放大")
+
+  if (_f("turnover_rate_pct") is not None) and (_f("turnover_rate_pct") or 0) >= 3.0:
+    signals.append("高换手")
+
+  if (_f("change_pct") or 0) < 0 and 0 < (_f("volume_ratio") or 0) <= 0.8:
+    signals.append("缩量调整")
+
+  if (
+    (_f("volume_ratio") or 0) >= 1.5
+    and (_f("boll_percent_b") or 0) >= 0.8
+    and -1.0 <= (_f("change_pct") or 0) <= 1.0
+  ):
+    signals.append("高位放量滞涨")
+
   ma5, ma10 = _f("ma5"), _f("ma10")
   ma5p, ma10p = _f("ma5_prev"), _f("ma10_prev")
   if all(v is not None for v in (ma5, ma10, ma5p, ma10p)) and ma5 > ma10 and ma5p <= ma10p:
@@ -93,12 +115,37 @@ def detect_daily_signals(snap: Dict[str, Any]) -> List[str]:
   return signals
 
 
+def _average(values: List[float], fallback: float = 0.0) -> float:
+  cleaned = [float(value or 0.0) for value in values]
+  return sum(cleaned) / len(cleaned) if cleaned else fallback
+
+
+def _ratio(value: float, denominator: float, default: float = 1.0) -> float:
+  return value / denominator if denominator > 0 else default
+
+
+def _percentile_rank(values: List[float], current: float) -> float:
+  if not values:
+    return 0.0
+  below_or_equal = sum(1 for value in values if float(value or 0.0) <= current)
+  return below_or_equal / len(values) * 100
+
+
+def _turnover_rate_pct(volume: float, float_volume: Optional[float]) -> Optional[float]:
+  if not float_volume or float_volume <= 0:
+    return None
+  # xtdata A-share K-line volume is stored in this project as lots/hands.
+  traded_shares = volume * 100
+  return traded_shares / float_volume * 100
+
+
 def build_snapshot_record(
   code: str,
   instrument_type: str,
   name: str,
   snapshot_date: date,
   df,
+  float_volume: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
   """从单只标的日线 DataFrame 计算指标快照。"""
   try:
@@ -118,8 +165,17 @@ def build_snapshot_record(
 
     vol_today = volumes[-1]
     recent_vols = volumes[-21:-1]
-    avg_vol_20 = sum(recent_vols) / len(recent_vols) if recent_vols else vol_today
-    volume_ratio = vol_today / avg_vol_20 if avg_vol_20 > 0 else 1.0
+    recent_vols_5 = volumes[-6:-1]
+    recent_amounts_20 = amounts[-21:-1]
+    avg_vol_20 = _average(recent_vols, vol_today)
+    avg_vol_5 = _average(recent_vols_5, vol_today)
+    avg_amount_20 = _average(recent_amounts_20, amounts[-1])
+    volume_ratio = _ratio(vol_today, avg_vol_20)
+    volume_ratio_5 = _ratio(vol_today, avg_vol_5)
+    amount_ratio_20 = _ratio(amounts[-1], avg_amount_20)
+    turnover_rate_pct = _turnover_rate_pct(vol_today, float_volume)
+    volume_percentile_60 = _percentile_rank(volumes[-60:], vol_today)
+    amount_percentile_60 = _percentile_rank(amounts[-60:], amounts[-1])
 
     ma5 = SMA(5).calculate(closes)
     ma10 = SMA(10).calculate(closes)
@@ -183,6 +239,15 @@ def build_snapshot_record(
       "amount": round(amounts[-1], 2),
       "volume_ratio": round(volume_ratio, 4),
       "avg_volume_20": round(avg_vol_20, 2),
+      "avg_volume_5": round(avg_vol_5, 2),
+      "volume_ratio_5": round(volume_ratio_5, 4),
+      "avg_amount_20": round(avg_amount_20, 2),
+      "amount_ratio_20": round(amount_ratio_20, 4),
+      "turnover_rate_pct": round(turnover_rate_pct, 4)
+      if turnover_rate_pct is not None
+      else None,
+      "volume_percentile_60": round(volume_percentile_60, 4),
+      "amount_percentile_60": round(amount_percentile_60, 4),
       "ma5": round(ma5, 4) if ma5 is not None else None,
       "ma10": round(ma10, 4) if ma10 is not None else None,
       "ma20": round(ma20, 4) if ma20 is not None else None,
@@ -239,6 +304,7 @@ class DailyIndicatorSnapshotService:
     snapshot_date: date,
     instrument_type_map: Dict[str, str],
     name_map: Dict[str, str],
+    float_volume_map: Optional[Dict[str, float]] = None,
     lookback_days: int = 310,
   ) -> Dict[str, Any]:
     """计算并保存一批标的的日级技术指标快照。"""
@@ -289,6 +355,7 @@ class DailyIndicatorSnapshotService:
         name=name_map.get(code, ""),
         snapshot_date=snapshot_date,
         df=df,
+        float_volume=(float_volume_map or {}).get(code),
       )
       if snap is None:
         result["skipped"] += 1

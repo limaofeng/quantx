@@ -8,8 +8,12 @@ from database.relational_connection import get_async_db
 from repositories.daily_signal_run_repository import DailySignalRunRepository
 from repositories.indicator_snapshot_repository import IndicatorSnapshotRepository
 from services.trading_time_service import TradingTimeService
+from services.intraday_volume_scanner import intraday_volume_scanner
 
 from ..types.stock_screening_types import (
+  IntradayVolumeScreenInput,
+  IntradayVolumeScreenItem,
+  IntradayVolumeScreenPage,
   SignalMeta,
   StockScreenInput,
   StockScreenItem,
@@ -25,6 +29,12 @@ SIGNAL_DEFINITIONS = [
   ("强势股", "强势股", "technical", "价格接近强势区间且量能放大", 252),
   ("KDJ 金叉", "KDJ 金叉", "technical", "K值向上穿越D值", 9),
   ("放量突破", "放量突破", "technical", "当日量比显著放大", 20),
+  ("放量上涨", "放量上涨", "technical", "上涨且20日量比显著放大", 20),
+  ("放量下跌", "放量下跌", "technical", "下跌且20日量比显著放大", 20),
+  ("成交额放大", "成交额放大", "technical", "当日成交额相对20日均额放大", 20),
+  ("高换手", "高换手", "technical", "按流通股本估算的换手率较高", 20),
+  ("缩量调整", "缩量调整", "technical", "下跌但成交量低于20日均量", 20),
+  ("高位放量滞涨", "高位放量滞涨", "technical", "高位区域放量但涨跌幅有限", 20),
   ("均线金叉", "均线金叉", "technical", "MA5向上穿越MA10", 10),
   ("布林下轨反弹", "布林下轨反弹", "technical", "价格靠近布林下轨", 20),
   ("布林上轨突破", "布林上轨突破", "technical", "价格靠近布林上轨", 20),
@@ -270,6 +280,19 @@ class StockScreeningResolver:
             volume=_finite_float(record.volume),
             volume_ratio=_finite_float(record.volume_ratio),
             avg_volume_20=_finite_float(record.avg_volume_20),
+            avg_volume_5=_finite_float(getattr(record, "avg_volume_5", None)),
+            volume_ratio_5=_finite_float(getattr(record, "volume_ratio_5", None)),
+            avg_amount_20=_finite_float(getattr(record, "avg_amount_20", None)),
+            amount_ratio_20=_finite_float(getattr(record, "amount_ratio_20", None)),
+            turnover_rate_pct=_finite_optional_float(
+              getattr(record, "turnover_rate_pct", None)
+            ),
+            volume_percentile_60=_finite_float(
+              getattr(record, "volume_percentile_60", None)
+            ),
+            amount_percentile_60=_finite_float(
+              getattr(record, "amount_percentile_60", None)
+            ),
             is_bullish=current_price > open_price,
             peak_price=_finite_float(record.peak_price),
             days_since_peak=_finite_int(record.days_since_peak),
@@ -337,6 +360,109 @@ class StockScreeningResolver:
         calculated_at=calculated_at,
         has_stale_data=has_stale_data,
         is_complete=metadata_run is not None and metadata_run.status == "success",
+        warnings=warnings,
+      )
+
+    raise RuntimeError("数据库连接不可用")
+
+  @staticmethod
+  async def intraday_volume_screen(
+    input: IntradayVolumeScreenInput,
+  ) -> IntradayVolumeScreenPage:
+    limit = min(max(input.limit or 200, 1), 200)
+    offset = min(max(input.offset or 0, 0), 200 * 1000)
+    warnings: List[str] = []
+    scanner_started = await intraday_volume_scanner.start()
+    if not scanner_started:
+      warnings.append("盘中全市场量能扫描未启动，可能是 xtquant 行情连接不可用")
+
+    async for db in get_async_db():
+      snapshot_repo = IndicatorSnapshotRepository(db)
+      snapshot_date = await snapshot_repo.get_latest_snapshot_date()
+      if snapshot_date is None:
+        return IntradayVolumeScreenPage(
+          items=[],
+          total=0,
+          limit=limit,
+          offset=offset,
+          updated_at=None,
+          is_scanner_running=intraday_volume_scanner.is_running,
+          warnings=warnings + ["尚无可用日级基线快照，无法计算盘中量能进度"],
+        )
+
+      records, _ = await snapshot_repo.screen_snapshots(
+        snapshot_date=snapshot_date,
+        include_industries=input.include_industries,
+        exclude_industries=input.exclude_industries,
+        limit=20000,
+        offset=0,
+        universe=input.universe.value,
+        exclude_st=input.exclude_st,
+      )
+      codes = [record.code for record in records]
+      industry_map = await snapshot_repo.find_industry_names_by_codes(codes)
+      instrument_type_map = await snapshot_repo.find_instrument_types_by_codes(codes)
+      float_volume_map = await snapshot_repo.find_float_volume_by_codes(codes)
+      baselines = [
+        {
+          "code": record.code,
+          "name": record.name or record.code,
+          "industry": industry_map.get(record.code),
+          "instrument_type": _instrument_type_value(
+            instrument_type_map.get(record.code)
+            or getattr(record, "instrument_type", None)
+          ),
+          "avg_volume_20": _finite_float(record.avg_volume_20),
+          "avg_amount_20": _finite_float(
+            getattr(record, "avg_amount_20", None)
+          ),
+          "float_volume": float_volume_map.get(record.code),
+        }
+        for record in records
+      ]
+      page = intraday_volume_scanner.screen(
+        baselines,
+        min_volume_pace_ratio=input.min_volume_pace_ratio,
+        min_amount_pace_ratio=input.min_amount_pace_ratio,
+        min_last_5m_volume_ratio=input.min_last_5m_volume_ratio,
+        min_intraday_turnover_rate=input.min_intraday_turnover_rate,
+        min_depth_imbalance_5=input.min_depth_imbalance_5,
+        stale_after_seconds=input.stale_after_seconds,
+        limit=limit,
+        offset=offset,
+      )
+      if not page["items"]:
+        warnings.append("尚未收到匹配条件的全市场实时 tick，盘中扫描会在行情推送后更新")
+      return IntradayVolumeScreenPage(
+        items=[
+          IntradayVolumeScreenItem(
+            code=item["code"],
+            name=item["name"],
+            industry=item["industry"],
+            instrument_type=item["instrument_type"],
+            current_price=item["current_price"],
+            change_pct=item["change_pct"],
+            volume=item["volume"],
+            amount=item["amount"],
+            volume_ratio=item["volume_ratio"],
+            amount_ratio=item["amount_ratio"],
+            volume_pace_ratio=item["volume_pace_ratio"],
+            amount_pace_ratio=item["amount_pace_ratio"],
+            last_5m_volume_ratio=item["last_5m_volume_ratio"],
+            intraday_turnover_rate_pct=item["intraday_turnover_rate_pct"],
+            depth_imbalance_5=item["depth_imbalance_5"],
+            avg_trade_amount_proxy=item["avg_trade_amount_proxy"],
+            matched_signals=item["matched_signals"],
+            updated_at=item["updated_at"],
+            is_stale=item["is_stale"],
+          )
+          for item in page["items"]
+        ],
+        total=page["total"],
+        limit=limit,
+        offset=offset,
+        updated_at=page["updated_at"],
+        is_scanner_running=page["is_scanner_running"],
         warnings=warnings,
       )
 
