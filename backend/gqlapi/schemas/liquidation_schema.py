@@ -7,6 +7,7 @@ from typing import List, Optional
 import strawberry
 
 from ..resolvers.liquidation import LiquidationResolver
+from ..security import authorized_account_id
 from ..types import MessageResponse
 from ..types.liquidation_types import (
   ConditionalLiquidationEvaluationResult,
@@ -28,45 +29,59 @@ from ..types.liquidation_types import (
 class LiquidationQuery:
   @strawberry.field(description="获取清仓概况")
   async def liquidation_summary(
-    self, account_id: Optional[str] = None
+    self,
+    info: strawberry.types.Info,
+    account_id: Optional[str] = None,
   ) -> LiquidationSummary:
-    return await LiquidationResolver.get_liquidation_summary(account_id)
+    return await LiquidationResolver.get_liquidation_summary(
+      authorized_account_id(info, account_id)
+    )
 
   @strawberry.field(description="获取条件清仓单列表")
   async def conditional_liquidation_orders(
     self,
+    info: strawberry.types.Info,
     account_id: Optional[str] = None,
     stock_code: Optional[str] = None,
     include_cancelled: bool = False,
   ) -> List[ConditionalLiquidationOrder]:
     return await LiquidationResolver.get_conditional_liquidation_orders(
-      account_id,
+      authorized_account_id(info, account_id),
       stock_code,
       include_cancelled,
     )
 
   @strawberry.field(description="获取清仓订单列表")
   async def liquidation_orders(
-    self, account_id: str = "300000013250", limit: int = 20, offset: int = 0
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    limit: int = 20,
+    offset: int = 0,
   ) -> List[LiquidationOrder]:
-    return await LiquidationResolver.get_liquidation_orders(account_id, limit, offset)
+    return await LiquidationResolver.get_liquidation_orders(
+      authorized_account_id(info, account_id), limit, offset
+    )
 
   @strawberry.field(description="获取单个清仓订单")
   async def liquidation_order(
-    self, order_id: str, account_id: str = "300000013250"
+    self, info: strawberry.types.Info, order_id: str, account_id: str
   ) -> LiquidationOrder:
-    return await LiquidationResolver.get_liquidation_order(order_id, account_id)
+    return await LiquidationResolver.get_liquidation_order(
+      order_id, authorized_account_id(info, account_id)
+    )
 
   @strawberry.field(description="获取赎回记录列表")
   async def redemption_records(
     self,
-    account_id: str = "300000013250",
+    info: strawberry.types.Info,
+    account_id: str,
     stock_code: str = None,
     limit: int = 20,
     offset: int = 0,
   ) -> List[RedemptionRecord]:
     return await LiquidationResolver.get_redemption_records(
-      account_id, stock_code, limit, offset
+      authorized_account_id(info, account_id), stock_code, limit, offset
     )
 
 
@@ -128,6 +143,8 @@ class LiquidationMutation:
 
   @strawberry.mutation(description="取消清仓订单")
   async def cancel_liquidation_order(
-    self, order_id: str, account_id: str = "300000013250"
+    self, info: strawberry.types.Info, order_id: str, account_id: str
   ) -> MessageResponse:
-    return await LiquidationResolver.cancel_liquidation_order(order_id, account_id)
+    return await LiquidationResolver.cancel_liquidation_order(
+      order_id, authorized_account_id(info, account_id)
+    )

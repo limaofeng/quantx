@@ -3,6 +3,7 @@ from typing import List, Optional
 import strawberry
 
 from gqlapi.resolvers.watchlist import WatchlistResolver
+from gqlapi.security import authorized_account_id
 from gqlapi.types.watchlist_types import (
   AddWatchlistItemInput,
   ReorderWatchlistInput,
@@ -14,8 +15,12 @@ from gqlapi.types.watchlist_types import (
 @strawberry.type(description="自选股查询")
 class WatchlistQuery:
   @strawberry.field(description="获取自选股列表")
-  async def watchlist(self, account_id: Optional[str] = None) -> List[WatchlistItem]:
-    return await WatchlistResolver.get_watchlist(account_id)
+  async def watchlist(
+    self, info: strawberry.types.Info, account_id: Optional[str] = None
+  ) -> List[WatchlistItem]:
+    return await WatchlistResolver.get_watchlist(
+      authorized_account_id(info, account_id)
+    )
 
 
 @strawberry.type(description="自选股变更")

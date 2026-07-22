@@ -3,29 +3,30 @@ import strawberry
 from .schemas import (
   AnnouncementMutation,
   AnnouncementQuery,
-  TTradeMutation,
-  TTradeQuery,
   DividFactorQuery,
   FinancialQuery,
+  HolidayMutation,
+  HolidayQuery,
   InstrumentQuery,
   LiquidationMutation,
   LiquidationQuery,
   MarketDataQuery,
   PortfolioQuery,
   RealtimeSubscription,
+  SectorQuery,
+  StockScreeningQuery,
   StrategyMutation,
   StrategyQuery,
   TradingMutation,
   TradingQuery,
-  WorkflowMutation,
-  WorkflowQuery,
-  SectorQuery,
-  HolidayQuery,
-  HolidayMutation,
-  StockScreeningQuery,
+  TTradeMutation,
+  TTradeQuery,
   WatchlistMutation,
   WatchlistQuery,
+  WorkflowMutation,
+  WorkflowQuery,
 )
+from .security import AuthorizationExtension
 
 
 @strawberry.type(
@@ -140,4 +141,9 @@ class Subscription(RealtimeSubscription):
   pass
 
 
-schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
+schema = strawberry.Schema(
+  query=Query,
+  mutation=Mutation,
+  subscription=Subscription,
+  extensions=[AuthorizationExtension],
+)

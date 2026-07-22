@@ -42,20 +42,26 @@ Authorization: Bearer <jwt_token>
 ```
 
 ### 获取 Token
-```graphql
-mutation Login {
-  login(username: "admin", password: "password") {
-    token
-    expiresAt
-    user {
-      id
-      username
-      role
-    }
-  }
-}
+会话使用独立 REST 接口，不通过 GraphQL Mutation 传递密码：
+
+```http
+POST /auth/session
+Content-Type: application/json
+
+{"username":"<local-user>","password":"<password>","deviceName":"iPhone"}
 ```
 
+成功响应包含短期 `accessToken`、一次性轮换的 `refreshToken`、两个过期时间、设备会话 ID、只读权限和授权账户集合。刷新、查询和撤销接口为：
+
+```text
+POST   /auth/session/refresh
+GET    /auth/session
+DELETE /auth/session?allDevices=false
+```
+
+Refresh Token 只以 HMAC 摘要保存；访问 Token 不携带资金账号。GraphQL HTTP 使用 Bearer Header，WebSocket 在 `connection_init` 的 `Authorization` 字段发送同一 Bearer Token。首版引导用户默认只有只读权限，不具备 `mutation:write`。
+
+运行前端 GraphQL codegen 时，需通过 `CODEGEN_GRAPHQL_TOKEN` 注入短期 Access Token；生成配置只从进程环境读取该值，不得将 Token 写入代码、`.env` 示例或生成产物。
 
 ## 🔍 查询接口 (Query)
 
@@ -667,6 +673,8 @@ type MarketData {
       "path": ["strategy"],
       "extensions": {
         "code": "STRATEGY_NOT_FOUND",
+        "requestId": "req-example",
+        "retryable": false,
         "details": {
           "strategyId": 123
         }
@@ -681,7 +689,7 @@ type MarketData {
 
 | 错误代码 | 说明 | 解决方案 |
 |---------|------|---------|
-| `UNAUTHORIZED` | 未认证 | 提供有效的 JWT Token |
+| `UNAUTHENTICATED` | 未认证或会话已过期 | 提供有效的 Access Token 或刷新会话 |
 | `FORBIDDEN` | 权限不足 | 检查用户权限 |
 | `VALIDATION_ERROR` | 参数验证失败 | 检查输入参数格式 |
 | `STRATEGY_NOT_FOUND` | 策略未找到 | 检查策略 ID |

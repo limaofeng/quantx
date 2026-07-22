@@ -6,11 +6,12 @@ from typing import List, Optional
 import strawberry
 
 from ..resolvers.t_trade import TTradeResolver
+from ..security import authorized_account_id
 from ..types.t_trade_types import (
+  TTradeExternalEntryInput,
   TTradeGlobalMonitor,
   TTradeGlobalMutationResult,
   TTradeGlobalSettingsInput,
-  TTradeExternalEntryInput,
   TTradeImportedEntry,
   TTradeMutationResult,
   TTradeReplay,
@@ -26,14 +27,20 @@ from ..types.t_trade_types import (
 @strawberry.type(description="持仓做 T 查询")
 class TTradeQuery:
   @strawberry.field(description="查询已纳入自动卖出的来源成交台账")
-  async def t_trade_imported_entries(self, account_id: str) -> List[TTradeImportedEntry]:
-    return await TTradeResolver.list_imported_entries(account_id)
+  async def t_trade_imported_entries(
+    self, info: strawberry.types.Info, account_id: str
+  ) -> List[TTradeImportedEntry]:
+    return await TTradeResolver.list_imported_entries(
+      authorized_account_id(info, account_id)
+    )
 
   @strawberry.field(description="查询账户级全局持仓做 T 监控")
   async def t_trade_global_monitor(
-    self, account_id: str
+    self, info: strawberry.types.Info, account_id: str
   ) -> TTradeGlobalMonitor:
-    return await TTradeResolver.get_global_monitor(account_id)
+    return await TTradeResolver.get_global_monitor(
+      authorized_account_id(info, account_id)
+    )
 
   @strawberry.field(description="查询单个做 T 会话")
   async def t_trade_session(
@@ -44,17 +51,25 @@ class TTradeQuery:
   @strawberry.field(description="查询做 T 会话列表")
   async def t_trade_sessions(
     self,
+    info: strawberry.types.Info,
     account_id: Optional[str] = None,
     stock_code: Optional[str] = None,
     active_only: bool = False,
   ) -> List[TTradeSession]:
-    return await TTradeResolver.list_sessions(account_id, stock_code, active_only)
+    return await TTradeResolver.list_sessions(
+      authorized_account_id(info, account_id), stock_code, active_only
+    )
 
   @strawberry.field(description="读取做 T 历史回放所需的初始账户快照")
   async def t_trade_replay_preparation(
-    self, account_id: str, start_time: datetime
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    start_time: datetime,
   ) -> TTradeReplayPreparation:
-    return await TTradeResolver.prepare_replay(account_id, start_time)
+    return await TTradeResolver.prepare_replay(
+      authorized_account_id(info, account_id), start_time
+    )
 
   @strawberry.field(description="查询单个做 T 历史回放")
   async def t_trade_replay(self, run_id: str) -> Optional[TTradeReplay]:
@@ -62,9 +77,11 @@ class TTradeQuery:
 
   @strawberry.field(description="查询账户做 T 历史回放记录")
   async def t_trade_replay_history(
-    self, account_id: str, limit: int = 20
+    self, info: strawberry.types.Info, account_id: str, limit: int = 20
   ) -> List[TTradeReplay]:
-    return await TTradeResolver.replay_history(account_id, limit)
+    return await TTradeResolver.replay_history(
+      authorized_account_id(info, account_id), limit
+    )
 
   @strawberry.field(description="分页查询做 T 历史回放批次")
   async def t_trade_replay_cycles(
@@ -112,9 +129,7 @@ class TTradeMutation:
     return await TTradeResolver.import_external_entry(input)
 
   @strawberry.mutation(description="同步 miniQMT 当日委托到委托表")
-  async def sync_t_trade_source_orders(
-    self, account_id: str
-  ) -> TTradeMutationResult:
+  async def sync_t_trade_source_orders(self, account_id: str) -> TTradeMutationResult:
     return await TTradeResolver.sync_source_orders(account_id)
 
   @strawberry.mutation(description="安全停止做 T 会话")
@@ -128,7 +143,5 @@ class TTradeMutation:
     return await TTradeResolver.start_replay(input)
 
   @strawberry.mutation(description="取消正在执行的做 T 历史回放")
-  async def cancel_t_trade_replay(
-    self, run_id: str
-  ) -> TTradeReplayMutationResult:
+  async def cancel_t_trade_replay(self, run_id: str) -> TTradeReplayMutationResult:
     return await TTradeResolver.cancel_replay(run_id)

@@ -117,7 +117,38 @@ class Settings(BaseSettings):
   access_token_expire_minutes: int = Field(
     default=30, description="访问令牌过期时间(分钟)"
   )
+  refresh_token_expire_days: int = Field(default=30, description="刷新令牌过期时间(天)")
   algorithm: str = Field(default="HS256", description="JWT算法")
+  auth_issuer: str = Field(default="quantx", description="访问令牌签发方")
+  auth_audience: str = Field(default="quantx-clients", description="访问令牌受众")
+  auth_bootstrap_username: str = Field(
+    default="", description="首次启动时创建的本地用户；为空则不创建"
+  )
+  auth_bootstrap_password: str = Field(
+    default="", description="首次启动用户密码；只允许通过环境变量注入"
+  )
+  auth_bootstrap_display_name: str = Field(
+    default="QuantX 用户", description="首次启动用户显示名"
+  )
+  auth_bootstrap_account_ids: List[str] = Field(
+    default_factory=list, description="首次启动用户有权访问的资金账号列表"
+  )
+  auth_bootstrap_permissions: List[str] = Field(
+    default_factory=lambda: [
+      "portfolio:read",
+      "market:read",
+      "strategy:read",
+      "orders:read",
+      "system-status:read",
+    ],
+    description="首次启动用户权限；首版默认仅授予只读权限",
+  )
+  auth_login_rate_limit_attempts: int = Field(
+    default=5, description="登录失败窗口内最大尝试次数"
+  )
+  auth_login_rate_limit_window_seconds: int = Field(
+    default=300, description="登录失败限流窗口秒数"
+  )
 
   # 监控配置
   metrics_enabled: bool = Field(default=True, description="是否启用监控指标")

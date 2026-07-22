@@ -5,22 +5,26 @@ import signal
 import sys
 import threading
 import time
+
 # Trigger reload
 from contextlib import asynccontextmanager
 from ipaddress import ip_address
 from typing import Callable
 
 import uvicorn
+from core.data.intraday_warm_cache import intraday_warm_cache
+from core.data.market_data_service import market_data_service
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from auth.router import auth_router
+from auth.service import AuthService
 from config.settings import create_log_directory, settings
-from core.data.intraday_warm_cache import intraday_warm_cache
-from core.data.market_data_service import market_data_service
 from core.realtime_manager import realtime_manager
 from core.strategy_manager import strategy_manager
 from database.manager import db_manager
+from database.relational_connection import get_async_db
 from gqlapi import setup_graphql
 from monitoring import get_prometheus_metrics
 from monitoring.metrics import REQUEST_COUNT, REQUEST_DURATION
@@ -35,7 +39,6 @@ create_log_directory()
 logging.config.dictConfig(settings.get_log_config())
 logger = logging.getLogger(__name__)
 
-MINIQMT_HEALTH_ACCOUNT_ID = "300000013250"
 SHUTDOWN_WATCHDOG_SECONDS = 40.0
 RELOAD_WORKER_EXIT_SECONDS = 10.0
 WINDOWS_CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
@@ -332,7 +335,6 @@ def _probe_miniqmt_health() -> dict:
   not merely when the XTQuant trader reports a connected session.
   """
   from miniqmt.manager_registry import XTDataManagerRegistry, XTTradingManagerRegistry
-  from miniqmt.trading.trading_manager import XTTradingManager
 
   data_registry = XTDataManagerRegistry()
   trading_registry = XTTradingManagerRegistry()
@@ -345,21 +347,13 @@ def _probe_miniqmt_health() -> dict:
 
   try:
     with trading_registry._lock:
-      trading_manager = trading_registry._managers.get(MINIQMT_HEALTH_ACCOUNT_ID)
+      trading_manager = next(iter(trading_registry._managers.values()), None)
 
-    if trading_manager is None or not getattr(trading_manager, "is_connected", False):
-      previous_manager = trading_manager
-      trading_manager = XTTradingManager(MINIQMT_HEALTH_ACCOUNT_ID)
-      with trading_registry._lock:
-        trading_registry._managers[MINIQMT_HEALTH_ACCOUNT_ID] = trading_manager
-      if previous_manager is not None:
-        previous_manager.close_connection()
-
-    account_checked = True
+    account_checked = trading_manager is not None
     account_connected = (
       trading_manager.is_account_status_ok() if trading_manager else False
     )
-    if not account_connected:
+    if account_checked and not account_connected:
       account_error = "account_status_not_ok"
   except Exception as exc:
     account_checked = True
@@ -401,6 +395,9 @@ async def lifespan(app: FastAPI):
   try:
     await db_manager.initialize()
     logger.info("数据库初始化完成")
+    async for auth_db in get_async_db():
+      await AuthService.bootstrap_from_settings(auth_db)
+      break
   except Exception as e:
     logger.error(f"数据库初始化失败: {e}")
     raise
@@ -527,6 +524,19 @@ app.add_middleware(
   allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+  """Attach a bounded request ID without logging credentials or request bodies."""
+  incoming = request.headers.get("x-request-id", "").strip()
+  if not incoming or len(incoming) > 64 or not incoming.replace("-", "").isalnum():
+    incoming = f"req-{time.time_ns():x}"
+  request.state.request_id = incoming
+  response = await call_next(request)
+  response.headers["X-Request-ID"] = incoming
+  return response
+
+
 if settings.metrics_enabled:
 
   @app.middleware("http")
@@ -603,7 +613,9 @@ async def error_handler_middleware(request: Request, call_next):
       },
     )
 
-# 设置GraphQL
+
+# 设置认证 REST API 与 GraphQL
+app.include_router(auth_router)
 setup_graphql(app)
 
 

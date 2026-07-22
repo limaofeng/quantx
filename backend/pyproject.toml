@@ -23,7 +23,8 @@ dependencies = [
     # Strawberry GraphQL
     "strawberry-graphql[fastapi]",
     # 数据库
-    "sqlalchemy>=1.4.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29.0",                       # PostgreSQL 异步驱动
     "psycopg2-binary>=2.9.0",               # PostgreSQL驱动
     "influxdb3-python>=0.13.0",             # InfluxDB 3.x时间序列数据库
     "pyarrow>=10.0.0",                      # InfluxDB 3.x依赖
@@ -140,6 +141,7 @@ indent-style = "space"                  # 使用空格缩进
 
 [project.optional-dependencies]
 dev = [
+    "aiosqlite>=0.20.0",
     "ruff>=0.13.0",
     "pre-commit>=4.3.0",
     "pytest-env>=1.1.5",

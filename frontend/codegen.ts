@@ -5,10 +5,19 @@ const graphqlSchemaEndpoint =
   process.env.GRAPHQL_ENDPOINT ??
   process.env.VITE_GRAPHQL_ENDPOINT ??
   'http://localhost:8080/graphql';
+const graphqlSchemaToken = process.env.CODEGEN_GRAPHQL_TOKEN?.trim();
 
 const config: CodegenConfig = {
   // 从后端获取实时 Schema
-  schema: graphqlSchemaEndpoint,
+  schema: graphqlSchemaToken
+    ? {
+        [graphqlSchemaEndpoint]: {
+          headers: {
+            Authorization: `Bearer ${graphqlSchemaToken}`,
+          },
+        },
+      }
+    : graphqlSchemaEndpoint,
   // 扫描所有 ts/tsx 文件中的 gql 标签
   documents: [
     'src/**/*.tsx',

@@ -4,6 +4,12 @@
 
 # 枚举类型 (用于业务逻辑)
 from .account import Account
+from .auth import (
+  AuthAuditEvent,
+  AuthDeviceSession,
+  AuthUser,
+  AuthUserAccountAccess,
+)
 from .enums import (
   AccountType,
   InstrumentType,
@@ -97,6 +103,10 @@ __all__ = [
   "TTradeImportedEntry",
   "WatchlistItem",
   "Account",
+  "AuthUser",
+  "AuthUserAccountAccess",
+  "AuthDeviceSession",
+  "AuthAuditEvent",
   "Holiday",
   "Sector",
   "SectorStock",
