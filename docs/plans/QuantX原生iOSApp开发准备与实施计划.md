@@ -2,6 +2,7 @@
 
 > 文档状态：规划稿
 > 编制日期：2026-07-21
+> 状态校正：2026-07-30，服务端原生会话与 GraphQL HTTP/WS 授权已落地
 > 当前环境：Windows，仅编写和维护本文档
 > 实施环境：后续在 macOS + Xcode 环境执行
 
@@ -76,19 +77,23 @@ QuantX 后端已经采用 FastAPI + Strawberry GraphQL，具备以下可复用�
 
 ### 3.2 不能直接复用的部分
 
-现有 `frontend/src/features/trading/pages/MobileTradingPage.tsx` 是移动网页原型，不是原生 iOS 产品规格，并包含固定最大数量、模拟盘口、`demo-user` 等占位逻辑。iOS 不复制其中的交易写入能力，只参考信息层级和已有查询。
+现有 `apps/web/src/features/trading/pages/MobileTradingPage.tsx` 是移动网页原型，不是原生 iOS 产品规格，并包含固定最大数量、模拟盘口、`demo-user` 等占位逻辑。iOS 不复制其中的交易写入能力，只参考信息层级和已有查询。
 
-### 3.3 必须先解决的后端问题
+### 3.3 当前后端准备状态
 
-当前代码虽然包含 JWT 配置字段，但 GraphQL 上下文尚未真正接入用户认证和授权；WebSocket 连接参数也未发送 Token。因此在 iOS 接入前必须完成：
+服务端已经完成原生会话、Refresh Token 单次轮换与吊销、GraphQL HTTP/WS
+Bearer 认证、用户账户归属校验、根字段权限和标准错误扩展。WebSocket 使用
+`graphql-transport-ws`，在 `connection_init.Authorization` 中发送 Token，
+并在 Access Token 过期时以 4401 关闭。
 
-- HTTP 和 WebSocket 统一认证。
-- 用户与账户的归属校验。
-- 查询权限和未来交易权限分离。
-- Token 吊销、轮换和设备会话管理。
-- 请求审计、错误编号和敏感字段脱敏。
+仍需在 iOS 实施阶段完成：
 
-在这些能力完成前，iOS 只能连接隔离的开发或模拟环境，不能连接真实账户服务。
+- 使用只读权限账号，不把客户端隐藏入口当成写权限边界。
+- Staging 的 VPN、HTTPS/WSS、证书与弱网恢复验收。
+- iOS Keychain、刷新并发去重、日志脱敏和任务切换隐私遮罩。
+- 若需要按设备收缩权限，另行增加原生会话 scope 机制；当前会话继承用户权限。
+
+当前客户端契约和接入边界通过 `/docs/` 在线发布。
 
 ---
 
@@ -143,7 +148,7 @@ QuantX 后端已经采用 FastAPI + Strawberry GraphQL，具备以下可复用�
 - 股票详情：行情摘要、分时或 K 线、持仓摘要、相关委托成交。
 - 策略详情：运行状态、指标、最近决策摘要、日志和数据更新时间。
 - 委托详情：券商委托状态、已成交数量、成交明细和状态说明。
-- 服务状态：GraphQL、WebSocket、行情、LocalAgent 和 miniQMT 状态，只展示后端确认的事实。
+- 服务状态：GraphQL、WebSocket、行情、QMT Agent 和 miniQMT 状态，只展示后端确认的事实。
 
 ### 5.3 展示约束
 
@@ -221,11 +226,11 @@ iOS App 进入后台后通常会被挂起，因此：
 
 ---
 
-## 7. 后端认证与公共接口准备
+## 7. 后端认证与公共接口
 
 ### 7.1 会话接口
 
-计划增加独立 REST 会话接口：
+当前已经提供独立 REST 会话接口：
 
 ```text
 POST   /auth/session
@@ -276,10 +281,10 @@ system-status:read
 
 ### 8.1 单一契约
 
-后续增加仓库级 Schema 快照：
+仓库与发布包提供自动生成的 Schema 快照：
 
 ```text
-contracts/graphql/schema.graphql
+apps/docs/public/contracts/graphql-schema.graphql
 ```
 
 该文件由实际 QuantX 后端 Schema 生成，不手工维护。Web 前端和 iOS 都以它作为可审查的契约快照。
@@ -291,10 +296,10 @@ contracts/graphql/schema.graphql
 1. 使用项目 Python 重启后端并固定运行在 8080。
 2. 确认 `http://127.0.0.1:8080/health` 健康。
 3. 前端以 `CODEGEN_GRAPHQL_ENDPOINT=http://127.0.0.1:8080/graphql` 运行 `npm run codegen`。
-4. 更新 `contracts/graphql/schema.graphql`。
+4. 运行 `npm run docs:contracts`，刷新 SDL、权限和 Client OpenAPI。
 5. 运行 Apollo iOS codegen，生成 Swift 类型。
 6. 运行前端 `npm run check` 和 iOS 单元测试。
-7. 审查 Schema diff，禁止用 `as any`、手写 JSON 字典或 Swift 强制转换掩盖契约错误。
+7. 审查契约 diff，禁止用 `as any`、手写 JSON 字典或 Swift 强制转换掩盖契约错误。
 
 ### 8.3 首版优先复用的查询
 
@@ -497,5 +502,5 @@ contracts/graphql/schema.graphql
 - [系统架构设计](../architecture/系统架构设计.md)
 - [A 股交易域数据结构与状态机](../trading/contracts/A股交易域数据结构与状态机.md)
 - [A 股三层协作与执行契约](../trading/contracts/A股三层协作与执行契约.md)
-- [后端架构](../../backend/docs/ARCHITECTURE.md)
-- [后端 API](../../backend/docs/API.md)
+- [API 架构](../engineering/api/ARCHITECTURE.md)
+- [API 文档](../engineering/api/API.md)

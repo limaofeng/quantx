@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>{{ title }}</title>
+    <style>
+      :root {
+        --ink: #17202a;
+        --muted: #64748b;
+        --line: #dbe3ea;
+        --paper: #ffffff;
+        --canvas: #f3f5f7;
+        --accent: #a62d26;
+        --accent-soft: #fff2ef;
+        --teal: #0f766e;
+        --teal-soft: #ecfdf5;
+        --amber: #a16207;
+        --amber-soft: #fffbeb;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--canvas);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+          "PingFang SC", sans-serif;
+        font-size: 14px;
+        line-height: 1.65;
+      }
+
+      a {
+        color: #34506f;
+        text-decoration: none;
+      }
+
+      a:hover {
+        color: var(--accent);
+      }
+
+      .page {
+        width: min(1220px, calc(100% - 32px));
+        margin: 26px auto 64px;
+      }
+
+      .hero {
+        position: relative;
+        overflow: hidden;
+        padding: 42px 46px 36px;
+        color: #fff;
+        border-radius: 20px;
+        background:
+          linear-gradient(120deg, rgba(166, 45, 38, 0.97), rgba(88, 25, 28, 0.97)),
+          #7b211e;
+        box-shadow: 0 18px 50px rgba(71, 27, 27, 0.18);
+      }
+
+      .hero::after {
+        position: absolute;
+        right: -90px;
+        top: -115px;
+        width: 330px;
+        height: 330px;
+        border: 55px solid rgba(255, 255, 255, 0.06);
+        border-radius: 50%;
+        content: "";
+      }
+
+      .eyebrow {
+        margin: 0 0 10px;
+        color: rgba(255, 255, 255, 0.78);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        position: relative;
+        z-index: 1;
+        max-width: 850px;
+        margin: 0;
+        font-size: clamp(28px, 4vw, 48px);
+        line-height: 1.18;
+        letter-spacing: -0.03em;
+      }
+
+      .hero-meta {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 22px;
+        margin-top: 20px;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 13px;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 3px 10px;
+        color: #fff;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        border-radius: 99px;
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .status::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #cbd5e1;
+        content: "";
+      }
+
+      .status.success::before {
+        background: #5ee0ac;
+      }
+
+      .status.warning::before {
+        background: #fbbf24;
+      }
+
+      .status.danger::before {
+        background: #fecaca;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 218px minmax(0, 1fr);
+        gap: 24px;
+        align-items: start;
+        margin-top: 26px;
+      }
+
+      .toc {
+        position: sticky;
+        top: 22px;
+        padding: 19px 18px;
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        background: rgba(255, 255, 255, 0.94);
+      }
+
+      .toc-title {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+      }
+
+      .toc a {
+        display: block;
+        padding: 6px 8px;
+        border-left: 2px solid transparent;
+        font-size: 13px;
+      }
+
+      .toc a:hover {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      main {
+        min-width: 0;
+      }
+
+      section {
+        margin-bottom: 22px;
+        padding: 28px 30px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: var(--paper);
+        box-shadow: 0 8px 28px rgba(38, 50, 56, 0.04);
+      }
+
+      section > h2 {
+        margin: 0 0 6px;
+        font-size: 22px;
+        line-height: 1.35;
+        letter-spacing: -0.02em;
+      }
+
+      .section-intro {
+        margin: 0 0 22px;
+        color: var(--muted);
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .metric-card {
+        min-height: 118px;
+        padding: 17px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fbfcfd;
+      }
+
+      .metric-label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .metric-value {
+        overflow-wrap: anywhere;
+        margin-top: 6px;
+        font-size: 22px;
+        font-weight: 760;
+        line-height: 1.3;
+      }
+
+      .metric-detail {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .callout {
+        margin-top: 18px;
+        padding: 16px 18px;
+        border-left: 4px solid var(--accent);
+        border-radius: 8px;
+        background: var(--accent-soft);
+      }
+
+      .callout h3 {
+        margin: 0 0 8px;
+        color: #7f1d1d;
+        font-size: 14px;
+      }
+
+      .callout ul {
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      .callout.warning {
+        border-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .callout.warning h3 {
+        color: #854d0e;
+      }
+
+      .method-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .method-card {
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      .method-card h3 {
+        margin: 0 0 9px;
+        font-size: 15px;
+      }
+
+      .formula {
+        overflow-x: auto;
+        margin: 0 0 10px;
+        padding: 10px 11px;
+        color: #244257;
+        border-radius: 8px;
+        background: #edf4f7;
+        font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .method-detail {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .chart {
+        overflow-x: auto;
+        margin: 14px 0 4px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .chart svg {
+        display: block;
+        width: 100%;
+        min-width: 720px;
+        height: auto;
+      }
+
+      .chart-note {
+        margin: 9px 4px 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .table-block {
+        margin-top: 22px;
+      }
+
+      .table-title-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 9px;
+      }
+
+      .table-title-row h3 {
+        margin: 0;
+        font-size: 16px;
+      }
+
+      .table-note {
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: right;
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      th,
+      td {
+        padding: 9px 11px;
+        border-bottom: 1px solid #e7ecf0;
+        text-align: right;
+        vertical-align: top;
+      }
+
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        color: #475569;
+        background: #f7f9fb;
+        font-size: 11px;
+        font-weight: 750;
+      }
+
+      td {
+        font-size: 12px;
+      }
+
+      tbody tr:nth-child(even) {
+        background: #fbfcfd;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .empty {
+        padding: 26px !important;
+        color: var(--muted);
+        text-align: center !important;
+      }
+
+      details {
+        margin-top: 14px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: #fff;
+      }
+
+      summary {
+        padding: 13px 15px;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      details .table-block {
+        margin: 0 14px 14px;
+      }
+
+      .artifact-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin: 14px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .artifact-list li {
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #f8fafc;
+        font-family: "Cascadia Code", Consolas, monospace;
+        font-size: 11px;
+      }
+
+      footer {
+        padding: 20px 10px;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: center;
+      }
+
+      @media (max-width: 920px) {
+        .layout {
+          display: block;
+        }
+
+        .toc {
+          position: static;
+          margin-bottom: 20px;
+          columns: 2;
+        }
+
+        .toc-title {
+          column-span: all;
+        }
+
+        .cards,
+        .method-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 600px) {
+        .page {
+          width: min(100% - 18px, 1220px);
+          margin-top: 9px;
+        }
+
+        .hero {
+          padding: 30px 23px;
+          border-radius: 14px;
+        }
+
+        section {
+          padding: 22px 17px;
+        }
+
+        .cards,
+        .method-grid,
+        .artifact-list {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          columns: 1;
+        }
+      }
+
+      @media print {
+        @page {
+          size: A4 landscape;
+          margin: 12mm;
+        }
+
+        body {
+          background: #fff;
+          font-size: 11px;
+        }
+
+        .page {
+          width: 100%;
+          margin: 0;
+        }
+
+        .hero {
+          color: #17202a;
+          border: 1px solid #adb5bd;
+          background: #fff;
+          box-shadow: none;
+        }
+
+        .hero-meta,
+        .eyebrow {
+          color: #475569;
+        }
+
+        .status {
+          color: #17202a;
+          border-color: #94a3b8;
+        }
+
+        .layout {
+          display: block;
+          margin-top: 12px;
+        }
+
+        .toc {
+          display: none;
+        }
+
+        section {
+          break-inside: avoid;
+          box-shadow: none;
+        }
+
+        .table-scroll {
+          overflow: visible;
+        }
+
+        th {
+          position: static;
+        }
+
+        .chart {
+          overflow: visible;
+        }
+
+        .chart svg {
+          min-width: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    {% macro render_table(table) -%}
+      <div class="table-block">
+        <div class="table-title-row">
+          <h3>{{ table.title }}</h3>
+          {% if table.note %}<p class="table-note">{{ table.note }}</p>{% endif %}
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                {% for header in table.headers %}<th scope="col">{{ header }}</th>{% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% if table.rows %}
+                {% for row in table.rows %}
+                  <tr>
+                    {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td class="empty" colspan="{{ table.headers | length }}">
+                    {{ table.empty_message }}
+                  </td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {%- endmacro %}
+
+    <div class="page">
+      <header class="hero">
+        <p class="eyebrow">QuantX · Offline Event Research</p>
+        <h1>{{ title }}</h1>
+        <div class="hero-meta">
+          <span>{{ study_id }} / {{ version }}</span>
+          <span>运行标识：{{ run_id }}</span>
+          <span>报告时间：{{ generated_at }}</span>
+          <span class="status {{ status.class }}">{{ status.label }}</span>
+        </div>
+      </header>
+
+      <div class="layout">
+        <nav class="toc" aria-label="报告目录">
+          <p class="toc-title">报告目录</p>
+          <a href="#summary">01 结论摘要</a>
+          <a href="#method">02 研究口径</a>
+          <a href="#curves">03 后续走势</a>
+          <a href="#comparison">04 正常量对照</a>
+          <a href="#interaction">05 条件交互</a>
+          <a href="#regression">06 回归分析</a>
+          <a href="#robustness">07 稳健性</a>
+          <a href="#quality">08 数据质量</a>
+          <a href="#reproducibility">09 可复现信息</a>
+        </nav>
+
+        <main>
+          <section id="summary">
+            <h2>结论摘要</h2>
+            <p class="section-intro">
+              报告从结构化研究结果生成；摘要用于快速定位信号，不替代分组明细与数据质量检查。
+            </p>
+            <div class="cards">
+              {% for card in summary_cards %}
+                <article class="metric-card">
+                  <div class="metric-label">{{ card.label }}</div>
+                  <div class="metric-value">{{ card.value }}</div>
+                  <div class="metric-detail">{{ card.detail }}</div>
+                </article>
+              {% endfor %}
+            </div>
+            <div class="callout">
+              <h3>主要观察</h3>
+              <ul>
+                {% for finding in findings %}<li>{{ finding }}</li>{% endfor %}
+              </ul>
+            </div>
+            {% if warnings %}
+              <div class="callout warning">
+                <h3>解释限制与运行警告</h3>
+                <ul>
+                  {% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+          </section>
+
+          <section id="method">
+            <h2>研究口径</h2>
+            <p class="section-intro">
+              所有条件变量遵守时点可得原则；事件日为 T，事前位置只使用 T−1 及更早数据。
+            </p>
+            <div class="method-grid">
+              {% for item in methodology %}
+                <article class="method-card">
+                  <h3>{{ item.title }}</h3>
+                  <p class="formula">{{ item.formula }}</p>
+                  <p class="method-detail">{{ item.detail }}</p>
+                </article>
+              {% endfor %}
+            </div>
+            <details>
+              <summary>查看完整解析配置</summary>
+              {{ render_table(config_table) }}
+            </details>
+          </section>
+
+          <section id="curves">
+            <h2>事件后的价格走势</h2>
+            <p class="section-intro">
+              比较事件日收盘响应与次日开盘入场收益，并区分绝对收益和基准调整收益。
+            </p>
+            <div class="chart">{{ event_curve_svg | safe }}</div>
+            <p class="chart-note">
+              图形直接嵌入 HTML，同时保存在 figures/event_curve.svg。缺失期限不做前向填充。
+            </p>
+            {{ render_table(event_curve_table) }}
+          </section>
+
+          <section id="comparison">
+            <h2>异常成交量与正常成交量对照</h2>
+            <p class="section-intro">
+              正常量预注册为 0.8 ≤ RVOL20 &lt; 1.2；异常量组只采用配置冷却后事件。
+              每个交易日先在相同事前价格位置内做截面等权，再计算异常量减正常量；
+              高位减低位的 spread 差是主交互。结果表示历史条件关联，不是因果效应。
+            </p>
+            {{ render_table(comparison_table) }}
+            {% for table in comparison_sensitivity_tables %}
+              <details>
+                <summary>{{ table.title }}</summary>
+                {{ render_table(table) }}
+              </details>
+            {% endfor %}
+          </section>
+
+          <section id="interaction">
+            <h2>异常放量与价格位置的条件交互</h2>
+            <p class="section-intro">
+              热力图优先展示 T+20，并在可用收益口径中选择有效样本最多的基准。
+            </p>
+            <div class="chart">{{ heatmap_svg | safe }}</div>
+            <p class="chart-note">
+              红色表示正收益，青绿色表示负收益；悬停单元格可查看分组与样本数。
+            </p>
+            {{ render_table(grouped_table) }}
+          </section>
+
+          <section id="regression">
+            <h2>交互回归</h2>
+            <p class="section-intro">
+              主模型使用全 eligible 样本，检验异常量指标、中心化事前价格位置及其交互；
+              仅加入事前控制与日期固定效应。交互显著性跨期限和收益口径统一 FDR 校正，
+              仍不等同于经济显著或因果关系。
+            </p>
+            <div class="chart">{{ regression_svg | safe }}</div>
+            <p class="chart-note">
+              点为系数估计，横线为 {{ confidence_label }}；图形优先选择 T+20 的事件日收盘响应模型。
+            </p>
+            {{ render_table(regression_table) }}
+          </section>
+
+          <section id="robustness">
+            <h2>稳健性检查</h2>
+            <p class="section-intro">
+              对成交额放大、对数成交量 z-score 和其他配置变体进行对照，检查结论是否依赖单一口径。
+            </p>
+            {% if robustness_tables %}
+              {% for table in robustness_tables %}
+                <details{% if loop.first %} open{% endif %}>
+                  <summary>{{ table.title }}</summary>
+                  {{ render_table(table) }}
+                </details>
+              {% endfor %}
+            {% else %}
+              <div class="callout warning">
+                <h3>未提供稳健性结果</h3>
+                <p>metrics.robustness 为空；本报告不据此推断主结果稳定。</p>
+              </div>
+            {% endif %}
+          </section>
+
+          <section id="quality">
+            <h2>数据质量与样本边界</h2>
+            <p class="section-intro">
+              样本覆盖、排除原因与缺失情况决定结论可解释范围，应在阅读收益结果前复核。
+            </p>
+            {{ render_table(quality_table) }}
+          </section>
+
+          <section id="reproducibility">
+            <h2>可复现信息</h2>
+            <p class="section-intro">
+              运行清单记录代码状态、配置哈希和数据指纹；结构化结果是报告的事实来源。
+            </p>
+            {{ render_table(manifest_table) }}
+            <h3>本次报告产物</h3>
+            <ul class="artifact-list">
+              {% for artifact in artifacts %}<li>{{ artifact }}</li>{% endfor %}
+            </ul>
+          </section>
+        </main>
+      </div>
+
+      <footer>
+        QuantX 离线研究报告 · 仅供研究复核，不构成投资建议 ·
+        {{ study_id }} / {{ version }}
+      </footer>
+    </div>
+  </body>
+</html>

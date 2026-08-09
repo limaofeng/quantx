@@ -1,0 +1,23 @@
+<service>
+  <id>QuantXCaddy</id>
+  <name>QuantX Caddy</name>
+  <description>QuantX loopback HTTPS gateway and static web server.</description>
+  <executable>{{RUNTIME}}\tools\caddy\caddy.exe</executable>
+  <arguments>run --config "{{ROOT}}\ops\caddy\Caddyfile.prod" --adapter caddyfile</arguments>
+  <workingdirectory>{{ROOT}}</workingdirectory>
+  <env name="QUANTX_ROOT" value="{{ROOT}}" />
+  <env name="XDG_CONFIG_HOME" value="{{RUNTIME}}\caddy-config" />
+  <env name="XDG_DATA_HOME" value="{{RUNTIME}}\caddy-data" />
+  <depend>QuantXApi</depend>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>30 sec</stoptimeout>
+  <logpath>{{RUNTIME}}\logs\services\caddy</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

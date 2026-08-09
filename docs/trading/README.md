@@ -10,7 +10,7 @@
 
 | 文档 | 定位 |
 |---|---|
-| [系统架构设计](../architecture/系统架构设计.md) | SaaS / LocalAgent / Lab 三端架构、状态真源、生命周期、miniQMT 执行端 |
+| [系统架构设计](../architecture/系统架构设计.md) | 服务端 / QMT Agent / Lab 三端架构、状态真源、生命周期、miniQMT 执行端 |
 | [进化文档](../research/进化文档.md) | A 股 GA 进化黑盒、多窗口坩埚、Ghost DCA、challenger/champion 流程 |
 
 ### 1.2 实施级
@@ -24,6 +24,7 @@
 | 文档 | 定位 |
 |---|---|
 | [A 股单标的动态天平双仓策略](strategies/dynamic-balance/A股单标的动态天平双仓策略.md) | 当前主线策略公式、动态基准、Sigmoid 天平、core/swing/locked_core、网格逻辑 |
+| [A 股单标的打板策略](strategies/A股单标的打板策略.md) | 临近涨停扫板入场、单次意图、防重复、破板/回撤/持有期统一退出计划 |
 | [A 股单标的环境层设计](strategies/dynamic-balance/A股单标的环境层设计.md) | 当前策略使用的环境层规则：大盘、行业、概念、宽度、流动性、量价结构 |
 | [A 股单标的风控层设计](strategies/dynamic-balance/A股单标的风控层设计.md) | 当前策略使用的风控规则：交易时段、T+1、涨跌停、停牌、熔断、miniQMT 真源 |
 | [A 股单标的仓位调节层设计](strategies/dynamic-balance/A股单标的仓位调节层设计.md) | 当前策略使用的仓位 profile：MinPct/MaxPct、core/swing、现金缓冲、beta/gamma |
@@ -34,6 +35,7 @@
 |---|---|---|
 | [A 股三层协作与执行契约](contracts/A股三层协作与执行契约.md) | 三层调用顺序、双阶段风控、策略接入、执行闭环 | 所有 A 股策略共用 |
 | [A 股交易域数据结构与状态机](contracts/A股交易域数据结构与状态机.md) | schema、枚举、订单状态机、bucket 账本、T+1 置换、审计 | 所有 A 股策略共用；bucket 可选 |
+| [A 股自动退出计划与卖出策略契约](contracts/A股自动退出计划与卖出策略契约.md) | 入场成交后的破板、止盈止损、持有期与统一卖出状态机 | 所有带自动退出规则的入场策略共用 |
 | [A 股数据源与公司行为契约](contracts/A股数据源与公司行为契约.md) | 数据源映射、数据质量、时点可得、复权、公司行为、证券状态 | 所有 A 股策略共用 |
 | [A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md) | 回测 broker、撮合、成本、T+1、涨跌停、成交约束统计 | 所有 A 股策略共用 |
 
@@ -152,7 +154,7 @@
 
 验收依据：[A 股回测 Broker 与成交撮合契约](contracts/A股回测Broker与成交撮合契约.md)。
 
-### Phase H：miniQMT LocalAgent
+### Phase H：miniQMT QMT Agent
 
 实现实盘执行端。
 
@@ -269,7 +271,7 @@ BalanceSignal 公式
 10. 分钟线
 11. swing 网格
 12. T+1 库存置换
-13. miniQMT LocalAgent
+13. miniQMT QMT Agent
 14. 公司行为完整处理
 15. GA 多窗口进化
 ```

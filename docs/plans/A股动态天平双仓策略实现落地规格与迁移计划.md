@@ -76,7 +76,8 @@ KLine / Tick
 
 已落地内容：
 
-- `Signal` / `SignalType` 不再作为 `backend/core` 与 `backend/tests` 主路径接口出现。
+- `Signal` / `SignalType` 不再作为 `packages/domain/src/quantx_domain` 与
+  `tests/{domain,engine}` 主路径接口出现。
 - `TradeIntent` 已补齐 `intent_type`、`target_volume`、`trace_id`、`expiry_policy` 等交易域字段。
 - `StrategyInput` 已包含 `input_id`、`trace_id`、`decision_time_ms`、`trade_date` 和前置 `risk_caps` 快照。
 - `EnvironmentLayer` 已落地，能把参数化环境输入、行情事件字段和当前个股行情合成为 `MarketContextSnapshot`，输出环境状态、评分、风险标签、数据质量和审计指纹。
@@ -354,12 +355,14 @@ BucketLedgerSnapshot
 
 文档同步：
 
-- 更新 `backend/docs/STRATEGY.md`、`backend/docs/MODULES.md`、`backend/docs/EXAMPLES.md` 中旧接口示例。
+- 更新 `docs/engineering/api/STRATEGY.md`、`docs/engineering/api/MODULES.md`、
+  `docs/engineering/api/EXAMPLES.md` 中旧接口示例。
 - `Signal` 只允许作为历史迁移说明出现，不作为当前开发示例。
 
 退出标准：
 
-- `rg -n "generate_signal|on_bar\\(|on_tick\\(|SignalType|from core.strategies.base import Signal" backend/core backend/tests` 不应命中主路径代码。
+- `rg -n "generate_signal|on_bar\\(|on_tick\\(|SignalType|from core.strategies.base import Signal" packages/domain/src apps/engine/src tests/domain tests/engine`
+  不应命中主路径代码。
 - 策略相关单元测试和执行器链路测试通过。
 
 ---
@@ -389,7 +392,7 @@ BucketLedgerSnapshot
 - 不提供旧 `Signal` 到新 `TradeIntent` 的长期兼容层。
 - 不让策略直接计算真实合法订单数量。
 - 不让策略直接读写真实账户状态。
-- 不在 LocalAgent 中运行策略代码。
+- 不在 QMT Agent 中运行策略代码。
 
 ---
 

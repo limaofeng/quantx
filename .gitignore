@@ -9,6 +9,9 @@
 
 # Runtime data
 data/
+# `data/` above is for runtime payloads; the research data-source package is code.
+!apps/research/src/quantx_research/data/
+!apps/research/src/quantx_research/data/**
 logs/
 *.log
 *.pid
@@ -30,6 +33,7 @@ htmlcov/
 build/
 dist/
 site/
+*.egg-info/
 
 # Node and frontend build artifacts
 node_modules/
@@ -41,8 +45,11 @@ pnpm-debug.log*
 test-results/
 playwright-report/
 coverage/
+apps/docs/content/reference/graphql-api/
+apps/docs/.vitepress/cache/
 
 # QuantX local services and caches
+.runtime/
 .prefect/
 .prefect-test/
 .pytest-tmp*/

@@ -1,0 +1,628 @@
+import logging
+import math
+from datetime import date, datetime, time, timedelta
+from typing import Any, Dict, List, Optional
+
+from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.database.relational_connection import get_async_db
+from quantx_infrastructure.repositories.daily_signal_run_repository import (
+  DailySignalRunRepository,
+)
+from quantx_infrastructure.repositories.indicator_snapshot_repository import (
+  IndicatorSnapshotRepository,
+)
+from quantx_infrastructure.services.intraday_volume_scanner import (
+  intraday_volume_scanner,
+)
+from quantx_infrastructure.services.trading_time_service import (
+  TradingDateHelper,
+  TradingTimeService,
+)
+
+from ..types.stock_screening_types import (
+  IntradayVolumeScreenInput,
+  IntradayVolumeScreenItem,
+  IntradayVolumeScreenPage,
+  SignalMeta,
+  StockScreenInput,
+  StockScreenItem,
+  StockScreenPage,
+  StockScreenSnapshotStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+
+SIGNAL_DEFINITIONS = [
+  ("超跌反弹", "超跌反弹", "technical", "回撤、RSI、布林位置联合低位信号", 252),
+  ("强势股", "强势股", "technical", "价格接近强势区间且量能放大", 252),
+  ("KDJ 金叉", "KDJ 金叉", "technical", "K值向上穿越D值", 9),
+  ("放量突破", "放量突破", "technical", "当日量比显著放大", 20),
+  ("放量上涨", "放量上涨", "technical", "上涨且20日量比显著放大", 20),
+  ("放量下跌", "放量下跌", "technical", "下跌且20日量比显著放大", 20),
+  ("成交额放大", "成交额放大", "technical", "当日成交额相对20日均额放大", 20),
+  ("高换手", "高换手", "technical", "按流通股本估算的换手率较高", 20),
+  ("缩量调整", "缩量调整", "technical", "下跌但成交量低于20日均量", 20),
+  ("高位放量滞涨", "高位放量滞涨", "technical", "高位区域放量但涨跌幅有限", 20),
+  ("均线金叉", "均线金叉", "technical", "MA5向上穿越MA10", 10),
+  ("布林下轨反弹", "布林下轨反弹", "technical", "价格靠近布林下轨", 20),
+  ("布林上轨突破", "布林上轨突破", "technical", "价格靠近布林上轨", 20),
+  ("RSI 超卖", "RSI 超卖", "technical", "RSI12低位", 24),
+  ("RSI 强势", "RSI 强势", "technical", "RSI12强势区间", 24),
+]
+
+
+def _finite_float(value: Any, default: float = 0.0) -> float:
+  if value is None:
+    return default
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return default
+  return number if math.isfinite(number) else default
+
+
+def _finite_optional_float(value: Any) -> Optional[float]:
+  if value is None:
+    return None
+  try:
+    number = float(value)
+  except (TypeError, ValueError):
+    return None
+  return number if math.isfinite(number) else None
+
+
+def _finite_int(value: Any, default: int = 0) -> int:
+  number = _finite_optional_float(value)
+  return default if number is None else int(number)
+
+
+def _instrument_type_value(value: Any) -> str:
+  enum_value = getattr(value, "value", None)
+  if enum_value is not None:
+    value = enum_value
+  text = str(value or "stock")
+  if "." in text:
+    text = text.rsplit(".", 1)[-1]
+  text = text.lower()
+  return text if text in {"stock", "etf"} else "stock"
+
+
+class StockScreeningResolver:
+  SNAPSHOT_CUTOFF = time(15, 35)
+
+  @staticmethod
+  def _today() -> date:
+    return time_utils.today()
+
+  @staticmethod
+  def _now() -> datetime:
+    return time_utils.now()
+
+  @staticmethod
+  async def _expected_snapshot_date(today: date) -> date:
+    """Return the trading date that should have a completed signal snapshot."""
+    trading_time_service = TradingTimeService()
+    try:
+      now = StockScreeningResolver._now()
+      if (
+        await trading_time_service.is_trading_day("SH", today)
+        and (
+          today < now.date()
+          or (
+            today == now.date()
+            and now.time() >= StockScreeningResolver.SNAPSHOT_CUTOFF
+          )
+        )
+      ):
+        return today
+      return await trading_time_service.get_previous_trading_day("SH", today)
+    except Exception as exc:
+      logger.warning("交易日历判断失败，使用自然日判断选股快照新鲜度: %s", exc)
+      return today
+
+  @staticmethod
+  def _stale_snapshot_warning(expected_snapshot_date: date, today: date) -> str:
+    if expected_snapshot_date == today:
+      return "今日快照未完成，结果来自最近可用信号快照"
+    return f"{expected_snapshot_date.isoformat()} 交易日快照未完成，结果来自最近可用信号快照"
+
+  @staticmethod
+  def _score(matched: List[str], weights: Dict[str, float], volume_ratio: float, price_drop_pct: float) -> float:
+    if weights:
+      return round(
+        sum(_finite_float(weights.get(signal, 0.0)) for signal in matched),
+        4,
+      )
+    volume_ratio = _finite_float(volume_ratio)
+    price_drop_pct = _finite_float(price_drop_pct)
+    signal_score = len(matched) * 10.0
+    volume_score = min(max(volume_ratio, 0.0), 3.0) * 2.0
+    drawdown_score = min(abs(price_drop_pct) / 10.0, 5.0) if price_drop_pct < 0 else 0.0
+    return round(signal_score + volume_score + drawdown_score, 4)
+
+  @staticmethod
+  async def stock_screen_snapshot_status(
+    lookback_days: int = 30,
+  ) -> StockScreenSnapshotStatus:
+    """返回当前应有快照、缺失交易日和最近运行状态。"""
+    normalized_lookback = min(max(int(lookback_days or 30), 1), 30)
+    today = StockScreeningResolver._today()
+    expected_date = await StockScreeningResolver._expected_snapshot_date(today)
+    window_start = expected_date - timedelta(days=normalized_lookback - 1)
+    warnings: List[str] = []
+
+    async for db in get_async_db():
+      snapshot_repo = IndicatorSnapshotRepository(db)
+      run_repo = DailySignalRunRepository(db)
+      latest_snapshot_date = await snapshot_repo.get_latest_snapshot_date()
+      latest_run = await run_repo.find_latest()
+      successful_expected_run = await run_repo.find_latest_completed(
+        expected_date
+      )
+
+      if latest_snapshot_date is None:
+        missing_dates = [expected_date]
+        warnings.append("尚无可用日级信号快照")
+        latest_calculated_at = (
+          latest_run.completed_at if latest_run is not None else None
+        )
+      else:
+        snapshot_dates = set(
+          await snapshot_repo.find_snapshot_dates(
+            window_start,
+            expected_date,
+          )
+        )
+        completed_dates = set(
+          await run_repo.find_completed_dates(
+            window_start,
+            expected_date,
+          )
+        )
+        available_dates = snapshot_dates & completed_dates
+        history_anchor = min(
+          available_dates or snapshot_dates or {expected_date}
+        )
+        calendar_start = max(window_start, min(history_anchor, expected_date))
+        helper = TradingDateHelper()
+        trading_dates = await helper.get_trading_calendar(
+          "SH",
+          start_date=calendar_start,
+          end_date=expected_date,
+        )
+        missing_dates = [
+          target for target in trading_dates if target not in available_dates
+        ]
+        latest_snapshot_run = await run_repo.find_latest(latest_snapshot_date)
+        latest_calculated_at = (
+          latest_snapshot_run.completed_at
+          if latest_snapshot_run is not None
+          else await snapshot_repo.get_latest_calculated_at(
+            latest_snapshot_date
+          )
+        )
+
+      if latest_run is not None and latest_run.status in {
+        "failed",
+        "partial_failure",
+      }:
+        warnings.append(
+          "最近快照运行未成功: "
+          f"{latest_run.warnings or latest_run.status}"
+        )
+      if missing_dates:
+        warnings.append(
+          f"缺少 {len(missing_dates)} 个交易日快照"
+        )
+
+      return StockScreenSnapshotStatus(
+        latest_snapshot_date=latest_snapshot_date,
+        expected_snapshot_date=expected_date,
+        missing_snapshot_dates=missing_dates,
+        is_complete=(
+          not missing_dates
+          and latest_snapshot_date == expected_date
+          and successful_expected_run is not None
+        ),
+        latest_run_status=(
+          latest_run.status if latest_run is not None else None
+        ),
+        latest_calculated_at=latest_calculated_at,
+        warnings=warnings,
+      )
+
+    raise RuntimeError("数据库连接不可用")
+
+  @staticmethod
+  async def stock_screen(input: StockScreenInput) -> StockScreenPage:
+    limit = min(max(input.limit or 200, 1), 200)
+    offset = min(max(input.offset or 0, 0), 200 * 1000)
+    warnings: List[str] = []
+
+    async for db in get_async_db():
+      snapshot_repo = IndicatorSnapshotRepository(db)
+      run_repo = DailySignalRunRepository(db)
+
+      today = StockScreeningResolver._today()
+      expected_snapshot_date = await StockScreeningResolver._expected_snapshot_date(today)
+      run = await run_repo.find_latest_completed(
+        expected_snapshot_date if input.require_fresh else None
+      )
+      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_snapshot_date()
+      if run is not None:
+        latest_run = run
+      elif snapshot_date is not None:
+        latest_run = await run_repo.find_latest(snapshot_date)
+      else:
+        latest_run = await run_repo.find_latest()
+
+      if input.require_fresh and (
+        run is None or snapshot_date != expected_snapshot_date
+      ):
+        warnings.append(
+          f"{expected_snapshot_date.isoformat()} 交易日信号快照尚未完成，"
+          "requireFresh=true 时不返回上次快照结果"
+        )
+        return StockScreenPage(
+          items=[],
+          total=0,
+          limit=limit,
+          offset=offset,
+          snapshot_date=snapshot_date,
+          score_version="score-v1",
+          signal_version="daily-signal-v2",
+          calculated_at=None,
+          has_stale_data=True,
+          is_complete=False,
+          warnings=warnings,
+        )
+
+      if snapshot_date is None:
+        if latest_run and latest_run.status in {"failed", "partial_failure"}:
+          warnings.append(
+            f"最近日级信号快照运行未成功: {latest_run.warnings or latest_run.status}"
+          )
+        if not warnings:
+          warnings.append("尚无可用日级信号快照")
+        return StockScreenPage(
+          items=[],
+          total=0,
+          limit=limit,
+          offset=offset,
+          snapshot_date=None,
+          score_version="score-v1",
+          signal_version="daily-signal-v2",
+          calculated_at=None,
+          has_stale_data=True,
+          is_complete=False,
+          warnings=warnings,
+        )
+
+      metadata_run = latest_run if latest_run and latest_run.snapshot_date == snapshot_date else run
+      calculated_at = metadata_run.completed_at if metadata_run else await snapshot_repo.get_latest_calculated_at(snapshot_date)
+      signal_version = metadata_run.signal_version if metadata_run else f"indicator-snapshot:{snapshot_date.isoformat()}"
+      score_version = metadata_run.score_version if metadata_run else "score-v1"
+      has_stale_data = snapshot_date != expected_snapshot_date
+      if has_stale_data:
+        warnings.append(
+          StockScreeningResolver._stale_snapshot_warning(
+            expected_snapshot_date,
+            today,
+          )
+        )
+      if metadata_run is None:
+        warnings.append("未找到信号运行元信息，已回退到快照更新时间")
+      elif metadata_run.status == "partial_failure":
+        warnings.append(f"日级信号快照部分完成: {metadata_run.warnings or '部分标的未成功'}")
+      elif metadata_run.status == "failed":
+        warnings.append(f"最近日级信号快照运行失败: {metadata_run.warnings or '未保存任何快照'}")
+      required_signals = [
+        item.signal_code for item in input.signal_conditions or [] if item.required
+      ]
+      field_conditions = [
+        {
+          "field": item.field,
+          "operator": item.operator,
+          "value": item.value,
+          "value_to": item.value_to,
+        }
+        for item in input.field_conditions or []
+      ]
+      sort = (
+        {
+          "field": input.sort.field.value,
+          "direction": input.sort.direction.value,
+        }
+        if input.sort
+        else None
+      )
+      records, total = await snapshot_repo.screen_snapshots(
+        snapshot_date=snapshot_date,
+        signal_codes=required_signals,
+        field_conditions=field_conditions,
+        include_industries=input.include_industries,
+        exclude_industries=input.exclude_industries,
+        sort=sort,
+        min_roe=input.min_roe,
+        min_net_profit_growth=input.min_net_profit_growth,
+        min_yoy_growth=input.min_yoy_growth,
+        limit=limit,
+        offset=offset,
+        universe=input.universe.value,
+        exclude_st=input.exclude_st,
+      )
+      financial_filter_active = any(
+        value is not None
+        for value in [
+          input.min_roe,
+          input.min_net_profit_growth,
+          input.min_yoy_growth,
+        ]
+      )
+      if financial_filter_active and total == 0:
+        warnings.append("未找到满足财务指标条件的标的，未公告或质量异常的财报不会通过财务筛选")
+      industry_map = await snapshot_repo.find_industry_names_by_codes([record.code for record in records])
+      instrument_type_map = (
+        await snapshot_repo.find_instrument_types_by_codes([record.code for record in records])
+        if hasattr(snapshot_repo, "find_instrument_types_by_codes")
+        else {}
+      )
+      weights = {item.signal_code: item.weight for item in input.score_rules or []}
+
+      items: List[StockScreenItem] = []
+      for record in records:
+        matched = list(record.matched_signals or [])
+        missing = [signal for signal in required_signals if signal not in matched]
+        score = StockScreeningResolver._score(
+          matched,
+          weights,
+          record.volume_ratio,
+          record.price_drop_pct,
+        )
+        current_price = _finite_float(record.current_price)
+        open_price = _finite_float(record.open_price)
+        financial_metric = getattr(record, "financial_metric", None)
+        items.append(
+          StockScreenItem(
+            code=record.code,
+            name=record.name or record.code,
+            industry=industry_map.get(record.code),
+            instrument_type=_instrument_type_value(
+              instrument_type_map.get(record.code)
+              or getattr(record, "instrument_type", None)
+            ),
+            current_price=current_price,
+            open_price=open_price,
+            change_pct=_finite_float(record.change_pct),
+            volume=_finite_float(record.volume),
+            volume_ratio=_finite_float(record.volume_ratio),
+            avg_volume_20=_finite_float(record.avg_volume_20),
+            avg_volume_5=_finite_float(getattr(record, "avg_volume_5", None)),
+            volume_ratio_5=_finite_float(getattr(record, "volume_ratio_5", None)),
+            avg_amount_20=_finite_float(getattr(record, "avg_amount_20", None)),
+            amount_ratio_20=_finite_float(getattr(record, "amount_ratio_20", None)),
+            turnover_rate_pct=_finite_optional_float(
+              getattr(record, "turnover_rate_pct", None)
+            ),
+            volume_percentile_60=_finite_float(
+              getattr(record, "volume_percentile_60", None)
+            ),
+            amount_percentile_60=_finite_float(
+              getattr(record, "amount_percentile_60", None)
+            ),
+            is_bullish=current_price > open_price,
+            peak_price=_finite_float(record.peak_price),
+            days_since_peak=_finite_int(record.days_since_peak),
+            price_drop_pct=_finite_float(record.price_drop_pct),
+            low_price=_finite_float(record.low_price_252),
+            days_since_low=_finite_int(record.days_since_low),
+            price_rise_pct=_finite_float(record.price_rise_pct),
+            consecutive_down_days=_finite_int(record.consecutive_down_days),
+            consecutive_down_pct=_finite_float(record.consecutive_down_pct),
+            k=_finite_float(record.kdj_k),
+            d=_finite_float(record.kdj_d),
+            j=_finite_float(record.kdj_j),
+            rsi6=_finite_float(record.rsi6),
+            rsi12=_finite_float(record.rsi12),
+            rsi24=_finite_float(record.rsi24),
+            upper_band=_finite_float(record.boll_upper),
+            middle_band=_finite_float(record.boll_mid),
+            lower_band=_finite_float(record.boll_lower),
+            ma5=_finite_float(record.ma5),
+            ma10=_finite_float(record.ma10),
+            ma20=_finite_float(record.ma20),
+            ma5_prev=_finite_optional_float(record.ma5_prev),
+            ma10_prev=_finite_optional_float(record.ma10_prev),
+            roe=_finite_optional_float(
+              getattr(financial_metric, "roe_ttm", None)
+            ),
+            net_profit_growth=_finite_optional_float(
+              getattr(financial_metric, "net_profit_quarter_growth_pct", None)
+            ),
+            yoy_growth=_finite_optional_float(
+              getattr(financial_metric, "revenue_quarter_growth_pct", None)
+            ),
+            net_profit_accum_growth=_finite_optional_float(
+              getattr(financial_metric, "net_profit_growth_pct", None)
+            ),
+            revenue_accum_growth=_finite_optional_float(
+              getattr(financial_metric, "revenue_growth_pct", None)
+            ),
+            financial_report_date=getattr(financial_metric, "report_date", None),
+            financial_announce_date=getattr(financial_metric, "announce_date", None),
+            financial_quality_flags=list(
+              getattr(financial_metric, "quality_flags", None) or []
+            ),
+            matched_strategies=matched,
+            score=score,
+            score_version=score_version,
+            signal_version=signal_version,
+            calculated_at=calculated_at,
+            has_stale_data=has_stale_data,
+            signal_missing=bool(missing),
+            missing_signals=missing,
+          )
+        )
+
+      if sort is None:
+        items.sort(key=lambda item: (item.score, item.change_pct), reverse=True)
+      return StockScreenPage(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        snapshot_date=snapshot_date,
+        score_version=score_version,
+        signal_version=signal_version,
+        calculated_at=calculated_at,
+        has_stale_data=has_stale_data,
+        is_complete=(
+          not has_stale_data
+          and metadata_run is not None
+          and metadata_run.status == "success"
+        ),
+        warnings=warnings,
+      )
+
+    raise RuntimeError("数据库连接不可用")
+
+  @staticmethod
+  async def intraday_volume_screen(
+    input: IntradayVolumeScreenInput,
+  ) -> IntradayVolumeScreenPage:
+    limit = min(max(input.limit or 200, 1), 200)
+    offset = min(max(input.offset or 0, 0), 200 * 1000)
+    warnings: List[str] = []
+    scanner_started = await intraday_volume_scanner.start()
+    if not scanner_started:
+      warnings.append(
+        "盘中全市场量能扫描未启动，可能是 QMT Agent 行情能力不可用"
+      )
+
+    async for db in get_async_db():
+      snapshot_repo = IndicatorSnapshotRepository(db)
+      snapshot_date = await snapshot_repo.get_latest_snapshot_date()
+      if snapshot_date is None:
+        return IntradayVolumeScreenPage(
+          items=[],
+          total=0,
+          limit=limit,
+          offset=offset,
+          updated_at=None,
+          is_scanner_running=intraday_volume_scanner.is_running,
+          warnings=warnings + ["尚无可用日级基线快照，无法计算盘中量能进度"],
+        )
+
+      records, _ = await snapshot_repo.screen_snapshots(
+        snapshot_date=snapshot_date,
+        include_industries=input.include_industries,
+        exclude_industries=input.exclude_industries,
+        limit=20000,
+        offset=0,
+        universe=input.universe.value,
+        exclude_st=input.exclude_st,
+      )
+      codes = [record.code for record in records]
+      industry_map = await snapshot_repo.find_industry_names_by_codes(codes)
+      instrument_type_map = await snapshot_repo.find_instrument_types_by_codes(codes)
+      float_volume_map = await snapshot_repo.find_float_volume_by_codes(codes)
+      baselines = [
+        {
+          "code": record.code,
+          "name": record.name or record.code,
+          "industry": industry_map.get(record.code),
+          "instrument_type": _instrument_type_value(
+            instrument_type_map.get(record.code)
+            or getattr(record, "instrument_type", None)
+          ),
+          "avg_volume_20": _finite_float(record.avg_volume_20),
+          "avg_amount_20": _finite_float(
+            getattr(record, "avg_amount_20", None)
+          ),
+          "float_volume": float_volume_map.get(record.code),
+        }
+        for record in records
+      ]
+      page = intraday_volume_scanner.screen(
+        baselines,
+        min_volume_pace_ratio=input.min_volume_pace_ratio,
+        min_amount_pace_ratio=input.min_amount_pace_ratio,
+        min_last_5m_volume_ratio=input.min_last_5m_volume_ratio,
+        min_intraday_turnover_rate=input.min_intraday_turnover_rate,
+        min_depth_imbalance_5=input.min_depth_imbalance_5,
+        stale_after_seconds=input.stale_after_seconds,
+        limit=limit,
+        offset=offset,
+      )
+      if not page["items"]:
+        warnings.append("尚未收到匹配条件的全市场实时 tick，盘中扫描会在行情推送后更新")
+      return IntradayVolumeScreenPage(
+        items=[
+          IntradayVolumeScreenItem(
+            code=item["code"],
+            name=item["name"],
+            industry=item["industry"],
+            instrument_type=item["instrument_type"],
+            current_price=item["current_price"],
+            change_pct=item["change_pct"],
+            volume=item["volume"],
+            amount=item["amount"],
+            volume_ratio=item["volume_ratio"],
+            amount_ratio=item["amount_ratio"],
+            volume_pace_ratio=item["volume_pace_ratio"],
+            amount_pace_ratio=item["amount_pace_ratio"],
+            last_5m_volume_ratio=item["last_5m_volume_ratio"],
+            intraday_turnover_rate_pct=item["intraday_turnover_rate_pct"],
+            depth_imbalance_5=item["depth_imbalance_5"],
+            avg_trade_amount_proxy=item["avg_trade_amount_proxy"],
+            matched_signals=item["matched_signals"],
+            updated_at=item["updated_at"],
+            is_stale=item["is_stale"],
+          )
+          for item in page["items"]
+        ],
+        total=page["total"],
+        limit=limit,
+        offset=offset,
+        updated_at=page["updated_at"],
+        is_scanner_running=page["is_scanner_running"],
+        warnings=warnings,
+      )
+
+    raise RuntimeError("数据库连接不可用")
+
+  @staticmethod
+  async def stock_signal_snapshot_meta() -> List[SignalMeta]:
+    async for db in get_async_db():
+      snapshot_repo = IndicatorSnapshotRepository(db)
+      run_repo = DailySignalRunRepository(db)
+      run = await run_repo.find_latest_completed()
+      snapshot_date = run.snapshot_date if run else await snapshot_repo.get_latest_snapshot_date()
+      if run is not None:
+        latest_run = run
+      elif snapshot_date is not None:
+        latest_run = await run_repo.find_latest(snapshot_date)
+      else:
+        latest_run = await run_repo.find_latest()
+      calculated_at = latest_run.completed_at if latest_run else (
+        await snapshot_repo.get_latest_calculated_at(snapshot_date)
+        if snapshot_date is not None
+        else None
+      )
+      signal_version = latest_run.signal_version if latest_run else "daily-signal-v2"
+      return [
+        SignalMeta(
+          signal_code=code,
+          display_name=name,
+          category=category,
+          description=description,
+          max_window=max_window,
+          signal_version=signal_version,
+          calculated_at=calculated_at,
+          available_snapshot_date=snapshot_date,
+          enabled=True,
+        )
+        for code, name, category, description, max_window in SIGNAL_DEFINITIONS
+      ]
+    return []

@@ -35,7 +35,7 @@ TradeIntent
   -> OrderRiskDecision
   -> OrderRequest
   -> TradeCommand
-  -> LocalAgent
+  -> QMT Agent
   -> miniQMT
   -> OrderReport
   -> TradeReport
@@ -773,4 +773,3 @@ GA 适应度可以惩罚：
 - [ ] RuntimeStateManager 同时可消费实盘和回测事件。
 - [ ] 策略 Step 内无 `isBacktest` 分支。
 - [ ] 相同数据和参数回测两次结果完全一致。
-

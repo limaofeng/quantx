@@ -1,0 +1,579 @@
+import json
+from pathlib import Path
+from xml.etree import ElementTree
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+OPS = ROOT / "ops"
+
+
+def test_legacy_layout_and_root_launchers_are_removed() -> None:
+  for relative_path in (
+    "backend",
+    "frontend",
+    "start-dev.bat",
+    "stop-dev.bat",
+  ):
+    assert not (ROOT / relative_path).exists()
+
+
+def test_active_guidance_does_not_reference_legacy_layout() -> None:
+  documents = [ROOT / "README.md", ROOT / "AGENTS.md"]
+  documents.extend(
+    path
+    for path in (ROOT / "docs").rglob("*.md")
+    if "archive" not in path.parts
+  )
+  forbidden = (
+    "backend/",
+    "backend\\",
+    "\\backend",
+    "frontend/",
+    "frontend\\",
+    "\\frontend",
+    "start-dev.bat",
+    "stop-dev.bat",
+    "LocalAgent",
+  )
+  violations = {
+    str(path.relative_to(ROOT)): token
+    for path in documents
+    for token in forbidden
+    if token in path.read_text(encoding="utf-8")
+  }
+  assert violations == {}
+
+
+def test_active_engineering_guidance_uses_monorepo_imports() -> None:
+  documents = [
+    path
+    for path in (ROOT / "docs" / "engineering").rglob("*.md")
+    if "archive" not in path.parts
+  ]
+  forbidden = (
+    "from core.",
+    "from services.",
+    "from database.",
+    "from repositories.",
+    "from models.",
+    "from miniqmt.",
+    "import miniqmt",
+  )
+  violations = {
+    str(path.relative_to(ROOT)): token
+    for path in documents
+    for token in forbidden
+    if token in path.read_text(encoding="utf-8")
+  }
+  assert violations == {}
+
+
+def test_caddy_is_the_only_public_http_entrypoint() -> None:
+  development = (OPS / "caddy" / "Caddyfile.dev").read_text(encoding="utf-8")
+  production = (OPS / "caddy" / "Caddyfile.prod").read_text(encoding="utf-8")
+
+  for config in (development, production):
+    assert "reverse_proxy @api 127.0.0.1:18081" in config
+    for path in (
+      "/graphql*",
+      "/auth*",
+      "/health*",
+      "/metrics*",
+      "/ws/agent*",
+      "/agent/*",
+    ):
+      assert path in config
+
+  assert "reverse_proxy 127.0.0.1:5250" in development
+  assert "reverse_proxy @docs 127.0.0.1:5251" in development
+  assert "redir @docs_root /docs/ 308" in development
+  assert "http://:8080" in development
+  assert "bind 0.0.0.0" in development
+  assert "admin 127.0.0.1:2019" in development
+  assert "bind 127.0.0.1" in production
+  assert "admin off" in production
+  assert "https://127.0.0.1:8080" in production
+  assert "tls internal" in production
+  assert "apps/web/dist" in production
+  assert "apps/docs/dist" in production
+  assert "handle_path /docs/*" in production
+  assert "try_files {path} {path}.html {path}/index.html /404.html" in production
+  assert "try_files {path} /index.html" in production
+
+
+def test_locked_tool_versions_and_hashes_are_complete() -> None:
+  lock = json.loads((OPS / "tools.lock.json").read_text(encoding="utf-8"))
+  caddy = lock["tools"]["caddy"]
+  winsw = lock["tools"]["winsw"]
+
+  assert caddy["version"] == "2.11.4"
+  assert winsw["version"] == "2.12.0"
+  for tool in (caddy, winsw):
+    assert len(tool["sha256"]) == 64
+  assert len(caddy["installedSha256"]) == 64
+
+
+def test_windows_services_are_independently_supervised() -> None:
+  expected = {
+    "quantx-api.xml",
+    "quantx-caddy.xml",
+    "quantx-engine.xml",
+    "quantx-qmt-agent.xml",
+    "quantx-worker.xml",
+  }
+  templates = {path.name: path for path in (OPS / "windows").glob("*.xml")}
+  assert set(templates) == expected
+
+  for path in templates.values():
+    root = ElementTree.fromstring(path.read_text(encoding="utf-8"))
+    assert root.findtext("id")
+    assert root.findtext("executable")
+    assert root.findtext("startmode") == "Automatic"
+    assert root.findall("onfailure")
+    assert root.findtext("logpath")
+
+  qmt_arguments = ElementTree.parse(
+    templates["quantx-qmt-agent.xml"]
+  ).getroot().findtext("arguments")
+  assert qmt_arguments is not None
+  assert "--mode {{QMT_AGENT_MODE}}" in qmt_arguments
+  assert "--mode live" not in qmt_arguments
+  qmt_environment = {
+    node.attrib["name"]: node.attrib["value"]
+    for node in ElementTree.parse(
+      templates["quantx-qmt-agent.xml"]
+    ).getroot().findall("env")
+  }
+  assert qmt_environment["PYTHONPATH"] == "{{QMT_PYTHONPATH}}"
+  assert qmt_environment["SSL_CERT_FILE"] == "{{CADDY_ROOT_CERT}}"
+  assert qmt_environment["QMT_USERDATA_PATH"] == "{{QMT_USERDATA_PATH}}"
+
+  api_environment = {
+    node.attrib["name"]: node.attrib["value"]
+    for node in ElementTree.parse(
+      templates["quantx-api.xml"]
+    ).getroot().findall("env")
+  }
+  assert api_environment["RUNTIME_PROFILE"] == "full"
+  assert api_environment["PREFECT_ENABLED"] == "true"
+
+  caddy_environment = {
+    node.attrib["name"]: node.attrib["value"]
+    for node in ElementTree.parse(
+      templates["quantx-caddy.xml"]
+    ).getroot().findall("env")
+  }
+  assert caddy_environment["XDG_CONFIG_HOME"] == (
+    r"{{RUNTIME}}\caddy-config"
+  )
+  assert caddy_environment["XDG_DATA_HOME"] == (
+    r"{{RUNTIME}}\caddy-data"
+  )
+
+
+def test_winsw_212_uses_adjacent_same_name_wrappers() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert '"$($template.BaseName).exe"' in script
+  assert "& $wrapper install" in script
+  assert "& $wrapper uninstall" in script
+  assert "& $winsw install" not in script
+  assert "function Get-QmtAgentPythonPath" in script
+  assert '"{{QMT_PYTHONPATH}}"' in script
+
+
+def test_dev_runtime_defaults_to_full_profile() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert '[string]$Profile = "full",' in script
+
+
+def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  api_service = (OPS / "windows" / "quantx-api.xml").read_text(
+    encoding="utf-8"
+  )
+
+  assert "$AgentWebSocketPingTimeoutSeconds = 960" in script
+  assert '"--ws-ping-interval", "20"' in script
+  assert (
+    '"--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds'
+    in script
+  )
+  assert "--ws-ping-interval 20 --ws-ping-timeout 960" in api_service
+
+
+def test_server_runtime_path_excludes_qmt_agent_source() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  workspace_path = script.split(
+    "function Get-WorkspacePythonPath",
+    1,
+  )[1].split("function Get-QmtAgentPythonPath", 1)[0]
+  qmt_path = script.split(
+    "function Get-QmtAgentPythonPath",
+    1,
+  )[1].split("function Import-QuantXEnvironment", 1)[0]
+
+  assert 'apps\\qmt-agent\\src' not in workspace_path
+  assert 'apps\\qmt-agent\\src' in qmt_path
+  assert 'packages\\contracts\\src' in qmt_path
+  assert 'packages\\infrastructure\\src' not in qmt_path
+
+
+def test_down_only_targets_pid_and_start_time_from_state() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  stop_tracked = script.split("function Stop-TrackedProcesses", 1)[1].split(
+    "function Start-DevCaddy",
+    1,
+  )[0]
+
+  assert "function Get-TrackedProcess" in script
+  assert "[string]$Entry.startedAt" in script
+  assert "$Entry.startedAt -is [datetime]" in script
+  assert "([datetime]$Entry.startedAt).ToUniversalTime()" in script
+  assert "Stop-TrackedProcesses -Entries" in script
+  assert "[object[]]$PreservedEntries = @()" in script
+  assert "Write-State -Processes $nextState" in script
+  assert "their verified PID/start-time entries remain in the state file" in script
+  assert "QuantX did not stop or replace untracked port owners." in script
+  assert "function Request-ManagedProcessShutdown" in script
+  assert "$ApiPort = 18081" in script
+  assert "127.0.0.1:$ApiPort/_dev/shutdown" in script
+  assert 'stop --address "127.0.0.1:2019"' in script
+  assert "$gracefulWaitMilliseconds = if ($shutdownRequested) { 10000 } else { 0 }" in script
+  assert "has no graceful dev stop channel" in script
+  assert "did not exit after the graceful stop window" in script
+  assert "$process.Kill()" in stop_tracked
+  assert "Stop-Process -Id $process.Id" not in stop_tracked
+
+
+def test_dev_up_only_self_heals_a_missing_or_stale_managed_caddy() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  recovery = script.split("function Invoke-CaddyRecovery", 1)[1].split(
+    "function Invoke-BoundedCliCommand",
+    1,
+  )[0]
+  invoke_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Invoke-Down",
+    1,
+  )[0]
+
+  assert 'if ($Component -ne "caddy")' in invoke_up
+  assert "Invoke-CaddyRecovery" in invoke_up
+  assert '$Command -notin @("up", "logs")' in script
+  assert "-Component is only supported by up and logs." in script
+  assert "Caddy component recovery is limited to the dev/full profile." in recovery
+  for component in (
+    "api",
+    "engine",
+    "web",
+    "docs",
+    "worker",
+    "qmt-agent",
+  ):
+    assert f'"{component}"' in recovery
+  assert "Get-TrackedProcess -Entry $matches[0]" in recovery
+  assert "Managed Caddy is already running" in recovery
+  assert "duplicate managed Caddy entries" in recovery
+  assert "Assert-PortsAvailable -Ports @(8080)" in recovery
+  assert "Start-DevCaddy -Executable $caddy" in recovery
+  assert "Wait-DevCaddyReady" in recovery
+  assert "-PreservedEntries $preserved" in recovery
+  assert "Write-State -Processes $script:ManagedProcesses" in recovery
+
+
+def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  start = script.split("function Start-DevCaddy", 1)[1].split(
+    "function Wait-DevCaddyReady",
+    1,
+  )[0]
+  readiness = script.split("function Wait-DevCaddyReady", 1)[1].split(
+    "function Invoke-CaddyRecovery",
+    1,
+  )[0]
+  writer = script.split("function Write-State", 1)[1].split(
+    "function Get-TrackedProcess",
+    1,
+  )[0]
+  ordinary_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Invoke-Down",
+    1,
+  )[0]
+
+  assert '$env:QUANTX_ROOT = $Root.Replace("\\", "/")' in start
+  assert "Initialize-CaddyEnvironment" in start
+  assert '-Name "caddy"' in start
+  assert '"run",' in start
+  assert r'"ops\caddy\Caddyfile.dev"' in start
+  assert '"--adapter", "caddyfile"' in start
+  assert "Start-DevCaddy -Executable $caddy" in ordinary_up
+  assert "Wait-DevCaddyReady" in ordinary_up
+  assert "Stop-OnFailure" in ordinary_up
+  for endpoint in (
+    "http://127.0.0.1:8080/health/live",
+    "http://127.0.0.1:8080/health/ready",
+    "http://127.0.0.1:8080/docs/",
+  ):
+    assert endpoint in readiness
+  assert "dev-processes.{0}.{1}.tmp" in writer
+  assert "dev-processes.{0}.{1}.replace-backup.tmp" in writer
+  assert "[IO.File]::Replace(" in writer
+  assert "$replacementBackupFile," in writer
+  assert "$null" not in writer
+  assert "Remove-Item -LiteralPath $replacementBackupFile -Force" in writer
+  assert "[IO.File]::Move(" in writer
+
+
+def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert "function Assert-QmtAgentEnrollment" in script
+  assert "Assert-QmtAgentEnrollment -Python $qmtPython" in script
+  assert "function Set-DevTradingModeEnvironment" in script
+  assert '$agentMode = Set-DevTradingModeEnvironment' in script
+  assert "Live mode requires -ConfirmLive '$expected'." in script
+  assert '$env:QMT_ACCOUNT_WHITELIST = if' in script
+  assert '$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json' in script
+  assert '$env:ENV = "testing"' in script
+  assert '$env:ENV = $serverEnvironment' in script
+  assert '$DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"' in script
+  assert '$DefaultPrefectWorkerPool = "quantx-pool"' in script
+  assert "PREFECT_SERVER_UI_STATIC_DIRECTORY" not in script
+  assert '$env:PYTHONUTF8 = "1"' in script
+  assert "function Initialize-CaddyEnvironment" in script
+  assert "Initialize-CaddyEnvironment" in script
+  assert "function Invoke-BoundedCliCommand" in script
+  assert '-Name "Prefect work-pool inspect"' in script
+  assert '-Name "Prefect deploy"' in script
+  assert "-TimeoutSeconds 180" in script
+  assert "timed out after $TimeoutSeconds seconds" in script
+
+  prefect = ElementTree.parse(OPS / "windows" / "quantx-worker.xml").getroot()
+  environment = {
+    node.attrib["name"]: node.attrib["value"]
+    for node in prefect.findall("env")
+  }
+  assert environment["PREFECT_HOME"] == r"{{RUNTIME}}\prefect"
+  assert environment["PREFECT_API_URL"] == "{{PREFECT_API_URL}}"
+  assert environment["PREFECT_WORKER_POOL"] == "{{PREFECT_WORKER_POOL}}"
+  assert environment["PYTHONUTF8"] == "1"
+  assert environment["PYTHONIOENCODING"] == "utf-8"
+  assert prefect.find("depend") is None
+
+
+def test_all_python_processes_force_utf8_logs() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert "function Initialize-PythonEnvironment" in script
+  invoke_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Install-LockedTool",
+    1,
+  )[0]
+  assert "Initialize-PythonEnvironment" in invoke_up
+
+  for filename in (
+    "quantx-api.xml",
+    "quantx-engine.xml",
+    "quantx-worker.xml",
+    "quantx-qmt-agent.xml",
+  ):
+    service = ElementTree.parse(OPS / "windows" / filename).getroot()
+    environment = {
+      node.attrib["name"]: node.attrib["value"]
+      for node in service.findall("env")
+    }
+    assert environment["PYTHONUTF8"] == "1", filename
+    assert environment["PYTHONIOENCODING"] == "utf-8", filename
+
+
+def test_public_caddy_origins_are_allowed_for_web_sessions() -> None:
+  settings_source = (
+    ROOT
+    / "packages"
+    / "infrastructure"
+    / "src"
+    / "quantx_infrastructure"
+    / "config"
+    / "settings.py"
+  ).read_text(encoding="utf-8")
+  environment_examples = (
+    ROOT / "apps" / "api" / ".env.example"
+  ).read_text(encoding="utf-8")
+
+  for origin in ("http://127.0.0.1:8080", "http://localhost:8080"):
+    assert origin in settings_source
+    assert origin in environment_examples
+
+
+def test_conda_resolution_supports_powershell_hook_commands() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert "$conda.Name" in script
+  assert "$conda.Path" not in script
+  assert r"miniconda3\envs\$condaEnvironment\python.exe" in script
+  assert r"anaconda3\envs\$condaEnvironment\python.exe" in script
+  assert '"CONDA_EXE"' in script
+
+
+def test_environment_precedence_keeps_process_values_and_later_files_win() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  importer = script.split(
+    "function Import-QuantXEnvironment",
+    1,
+  )[1].split("function Read-State", 1)[0]
+
+  assert '$Environment -eq "dev"' in importer
+  assert '"development"' in importer
+  assert importer.index(r'apps\api\.env"') < importer.index(
+    r'apps\api\.env.$environmentName'
+  )
+  assert "$processOverrides.Contains($name)" in importer
+  assert "$files += $ProductionConfigFile" in importer
+
+
+def test_winsw_install_starts_services_and_rolls_back_partial_failure() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  install = script.split("function Install-AndStartServices", 1)[1].split(
+    "function Register-ProductionMaintenance",
+    1,
+  )[0]
+
+  assert "$installed += $wrapper" in install
+  assert "$started += $wrapper" in install
+  assert "& $wrapper start" in install
+  assert "[array]::Reverse($started)" in install
+  assert "[array]::Reverse($installed)" in install
+  assert "& $wrapper uninstall" in install
+
+
+def test_every_prefect_deployment_targets_the_external_process_pool() -> None:
+  configuration = yaml.safe_load(
+    (ROOT / "apps" / "worker" / "prefect.yaml").read_text(encoding="utf-8")
+  )
+
+  deployments = configuration["deployments"]
+  assert deployments
+  assert {
+    deployment["work_pool"]["name"] for deployment in deployments
+  } == {"quantx-pool"}
+  assert {
+    deployment["work_pool"]["work_queue_name"] for deployment in deployments
+  } == {"default"}
+
+
+def test_web_ci_uses_the_root_workspace_lockfile() -> None:
+  runtime = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  release = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+    encoding="utf-8"
+  )
+  checks = (ROOT / ".github" / "workflows" / "pr-checks.yml").read_text(
+    encoding="utf-8"
+  )
+
+  assert "cache-dependency-path: package-lock.json" in release
+  assert "apps/web/package-lock.json" not in release
+  assert "apps/web/package-lock.json" not in checks
+  assert "root package-lock.json" in checks
+  assert r'node_modules\vite\bin\vite.js' in runtime
+  assert r'node_modules\vitepress\bin\vitepress.js' in runtime
+  assert r'apps\web\node_modules\vite\bin\vite.js' not in runtime
+
+
+def test_web_package_metadata_targets_the_monorepo() -> None:
+  root_package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+  web_package = json.loads(
+    (ROOT / "apps" / "web" / "package.json").read_text(encoding="utf-8")
+  )
+  lockfile = (ROOT / "package-lock.json").read_text(encoding="utf-8")
+
+  assert root_package["workspaces"] == ["apps/web", "apps/docs"]
+  assert web_package["name"] == "@quantx/web"
+  assert web_package["repository"]["directory"] == "apps/web"
+  assert web_package["repository"]["url"].endswith("/quantx.git")
+  assert all(
+    "quantx-frontend" not in command
+    for command in root_package["scripts"].values()
+  )
+  assert "QuantFrontend" not in lockfile
+  assert "quantx-frontend" not in lockfile
+
+
+def test_monorepo_ci_enforces_root_python_lint_gate() -> None:
+  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+    encoding="utf-8"
+  )
+
+  assert "uv run ruff check apps packages tests" in workflow
+  assert "npm run lint:strict" in workflow
+  assert "--fail-under=85" in workflow
+  assert "diff-cover coverage.xml" in workflow
+  assert "--fail-under=80" in workflow
+
+
+def test_monorepo_ci_result_cannot_hide_failed_or_cancelled_prerequisites() -> None:
+  workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+    encoding="utf-8"
+  )
+  result_job = workflow.split("  result:", 1)[1]
+
+  for prerequisite in (
+    "changes",
+    "python-boundaries",
+    "windows-runtime",
+    "python-coverage",
+    "web",
+  ):
+    assert prerequisite in result_job
+  assert 'needs.changes.result }}" = "success"' in result_job
+  assert "success|skipped)" in result_job
+  assert '!= "failure"' not in result_job
+
+
+def test_external_dependencies_are_checked_without_lifecycle_ownership() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  diagnostic = (
+    ROOT
+    / "packages"
+    / "infrastructure"
+    / "src"
+    / "quantx_infrastructure"
+    / "diagnostics"
+    / "external_dependencies.py"
+  ).read_text(encoding="utf-8")
+
+  assert "quantx_infrastructure.diagnostics.external_dependencies" in script
+  assert 'version={3} (externally managed)' in script
+  assert '"SHOW server_version"' in diagnostic
+  assert 'client.info("server")' in diagnostic
+  assert 'client.get(f"{host}/health")' in diagnostic
+  assert "subprocess" not in diagnostic
+
+
+def test_release_bundle_is_versioned_offline_and_checksum_verified() -> None:
+  build = (OPS / "build-release.ps1").read_text(encoding="utf-8")
+  install = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+
+  assert "Production release must be built with Node 20.x" in build
+  assert "node = $nodeVersion" in build
+  assert "docsVersion = $Version" in build
+  assert '"apps\\docs\\dist"' in build
+  assert '"apps\\docs\\dist\\index.html"' in install
+  assert "$releaseNodeVersion.Major -ne 20" in install
+  assert "uv build --quiet --all-packages --wheel" in build
+  assert "--no-emit-workspace" in build
+  assert "--no-hashes" in build
+  assert "pip wheel" in build
+  assert '"wheelhouse\\server"' in build
+  assert '"wheelhouse\\qmt"' in build
+  assert "Remove-PythonBuildArtifacts -Root $staging" in build
+  assert '"__pycache__"' in build
+  assert '@(".pyc", ".pyo")' in build
+  assert "checksums.json" in build
+  assert "Test-ReleaseContents" in install
+  assert "--no-index" in install
+  assert "--target $qmtTarget" in install
+  assert "--ignore-installed" in install
+  assert "New-Item -ItemType Junction" in install
+  assert "automatic database downgrade is forbidden" in install

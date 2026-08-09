@@ -1,0 +1,126 @@
+name: quantx-worker
+deployments:
+  - name: market-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:market_universe_request_flow
+    work_pool: &quantx_process_pool
+      name: quantx-pool
+      work_queue_name: default
+    description: 全市场基础数据同步（A股/ETF/指数）
+    schedules:
+      - cron: "0 8 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+  - name: position-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:agent_convergence_flow
+    work_pool: *quantx_process_pool
+    description: 同步持仓，并可选同步持仓标的 tick 数据
+    schedules:
+      - cron: "0 8 * * 1-5"
+        timezone: Asia/Shanghai
+        parameters:
+          sync_market_data: false
+      - cron: "30 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.2"
+  - name: instrument-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:instrument_request_flow
+    work_pool: *quantx_process_pool
+    description: 单个标的数据同步（基础信息+财务数据）
+    version: "0.0.1"
+  - name: financial-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:financial_request_flow
+    work_pool: *quantx_process_pool
+    description: 财务数据同步（支持全市场或指定股票列表）
+    schedules:
+      - cron: "0 9 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.1.2"
+  - name: bond-repo-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:market_universe_request_flow
+    work_pool: *quantx_process_pool
+    description: 批量同步国债逆回购数据
+    schedules:
+      - cron: "0 8 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+    parameters:
+      sectors: ["国债逆回购"]
+  - name: bond-repo-auto-trade
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:bond_repo_trade_command_flow
+    work_pool: *quantx_process_pool
+    description: 国债逆回购自动交易
+    schedules:
+      - cron: "10 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+  - name: daily-trading-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:agent_convergence_flow
+    work_pool: *quantx_process_pool
+    description: 每日交易数据同步（委托、成交、持仓）
+    schedules:
+      - cron: "30 11 * * 1-5"
+        timezone: Asia/Shanghai
+      - cron: "30 15 * * 1-5"
+        timezone: Asia/Shanghai
+      - cron: "00 16 * * 1-5"
+        timezone: Asia/Shanghai
+      - cron: "00 23 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+  - name: sector-data-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:market_universe_request_flow
+    work_pool: *quantx_process_pool
+    description: 同步行业板块数据
+    schedules:
+      - cron: "0 18 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+  - name: holiday-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/holiday_sync_flow.py:holiday_sync_flow
+    work_pool: *quantx_process_pool
+    description: 节假日休市安排同步
+    schedules:
+      - cron: "30 7 1 * *"
+        timezone: Asia/Shanghai
+    version: "0.0.1"
+  - name: daily-market-data-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/daily_market_data_sync_flow.py:daily_market_data_sync_flow
+    work_pool: *quantx_process_pool
+    description: 每日市场数据同步（K线/tick数据）
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "5 15 * * 1-5"
+        timezone: Asia/Shanghai
+        parameters:
+          periods: ["1m", "1d"]
+          sectors: ["沪深A股", "沪深ETF", "沪深指数"]
+          skip_download: false
+          compute_daily_signals: false
+    version: "0.1.0"
+  - name: daily-indicator-snapshot
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/daily_indicator_snapshot_flow.py:daily_indicator_snapshot_flow
+    work_pool: *quantx_process_pool
+    description: 每日技术指标快照（A股+ETF）MA/RSI/KDJ/BOLL，供选股引擎使用
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "35 15 * * 1-5"
+        timezone: Asia/Shanghai
+        parameters:
+          sectors: ["沪深A股", "沪深ETF"]
+          batch_size: 300
+          retain_days: 30
+    version: "0.2.0"
+  - name: announcement-sync
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/announcement_sync_flow.py:announcement_sync_flow
+    work_pool: *quantx_process_pool
+    description: 每日同步持仓股/自选股上市公司公告与股票回购事件
+    schedules:
+      - cron: "45 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.1.0"

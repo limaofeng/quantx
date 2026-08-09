@@ -394,7 +394,7 @@ reason_tags
 当前后端已实现独立仓位调节层：
 
 ```text
-backend/core/trading/position_adjustment.py
+packages/domain/src/quantx_domain/trading/position_adjustment.py
 ```
 
 已落地内容：

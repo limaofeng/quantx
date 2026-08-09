@@ -1,0 +1,31 @@
+<service>
+  <id>QuantXQmtAgent</id>
+  <name>QuantX QMT Agent</name>
+  <description>Outbound-only XTData and XTTrading Agent for QuantX.</description>
+  <executable>{{QMT_PYTHON}}</executable>
+  <arguments>-m quantx_qmt_agent.main run --mode {{QMT_AGENT_MODE}}</arguments>
+  <workingdirectory>{{ROOT}}</workingdirectory>
+  <env name="PYTHONUTF8" value="1" />
+  <env name="PYTHONIOENCODING" value="utf-8" />
+  <env name="PYTHONPATH" value="{{QMT_PYTHONPATH}}" />
+  <env name="SSL_CERT_FILE" value="{{CADDY_ROOT_CERT}}" />
+  <env name="ENV" value="production" />
+  <env name="QUANTX_AGENT_STATE_DIR" value="{{RUNTIME}}\qmt-agent" />
+  <env name="QMT_AGENT_MODE" value="{{QMT_AGENT_MODE}}" />
+  <env name="QMT_ACCOUNT_WHITELIST" value="{{QMT_ACCOUNT_WHITELIST}}" />
+  <env name="QMT_USERDATA_PATH" value="{{QMT_USERDATA_PATH}}" />
+  <env name="ENABLE_REAL_TRADING" value="{{ENABLE_REAL_TRADING}}" />
+  <env name="QMT_REAL_TRADING_ENABLED" value="{{QMT_REAL_TRADING_ENABLED}}" />
+  <env name="T_TRADE_LIVE_ENABLED" value="{{T_TRADE_LIVE_ENABLED}}" />
+  <depend>QuantXCaddy</depend>
+  <startmode>Automatic</startmode>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>60 sec</stoptimeout>
+  <logpath>{{RUNTIME}}\logs\services\qmt-agent</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

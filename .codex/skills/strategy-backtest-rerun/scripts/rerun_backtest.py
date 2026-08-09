@@ -123,14 +123,14 @@ def main() -> int:
   parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
   parser.add_argument("--start", default=DEFAULT_START)
   parser.add_argument("--end", default=DEFAULT_END)
-  parser.add_argument("--backend", type=Path, default=_repo_root() / "backend")
+  parser.add_argument("--api", type=Path, default=_repo_root() / "apps" / "api")
   parser.add_argument("--python", dest="python_exe", default=None)
   parser.add_argument("--basetemp", type=Path, default=Path(r"C:\tmp\quantx-pytest"))
   parser.add_argument("--dry-run", action="store_true")
   parser.add_argument("--summary-only", action="store_true")
   args = parser.parse_args()
 
-  backend = args.backend.resolve()
+  api_root = args.api.resolve()
   python_exe = _python_executable(args.python_exe)
   command = _build_pytest_command(args, python_exe)
 
@@ -139,7 +139,7 @@ def main() -> int:
   env["PULLBACK_GRID_RERUN_BACKTEST_START_TIME"] = args.start
   env["PULLBACK_GRID_RERUN_BACKTEST_END_TIME"] = args.end
 
-  print(f"Backend: {backend}")
+  print(f"API root: {api_root}")
   print(f"Python: {python_exe}")
   print(f"Run ID: {args.run_id}")
   print(f"Window: {args.start} -> {args.end}")
@@ -151,12 +151,12 @@ def main() -> int:
 
   return_code = 0
   if not args.summary_only:
-    completed = subprocess.run(command, cwd=backend, env=env, check=False)
+    completed = subprocess.run(command, cwd=api_root, env=env, check=False)
     return_code = completed.returncode
 
-  sys.path.insert(0, str(backend))
+  sys.path.insert(0, str(api_root))
   old_cwd = Path.cwd()
-  os.chdir(backend)
+  os.chdir(api_root)
   try:
     summary = asyncio.run(_query_latest_summary(args.run_id))
     _print_summary(summary)

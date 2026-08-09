@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "tools": {
+    "caddy": {
+      "version": "2.11.4",
+      "url": "https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_windows_amd64.zip",
+      "sha256": "1708333f79e274c7697285afe6d592ab39314e0b131e9ec6bea08ad27df62ebf",
+      "installedSha256": "5cb9ab71e5756ce72840b8234177a2f40c8b4ab47a806b8e841e2b784e9df62b",
+      "archive": true,
+      "executable": "caddy.exe"
+    },
+    "winsw": {
+      "version": "2.12.0",
+      "url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+      "sha256": "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da",
+      "archive": false,
+      "executable": "WinSW-x64.exe"
+    }
+  }
+}

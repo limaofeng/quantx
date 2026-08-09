@@ -1,0 +1,50 @@
+query ResearchRuns($limit: Int = 50, $offset: Int = 0, $status: String) {
+  researchRuns(limit: $limit, offset: $offset, status: $status) {
+    items {
+      key
+      runId
+      studyId
+      version
+      status
+      startedAt
+      completedAt
+      eventCount
+      elapsedSeconds
+      configHash
+      hasMetrics
+      artifactErrors
+    }
+    total
+    limit
+    offset
+  }
+}
+
+query ResearchRun($key: String!) {
+  researchRun(key: $key) {
+    summary {
+      key
+      runId
+      studyId
+      version
+      status
+      startedAt
+      completedAt
+      eventCount
+      elapsedSeconds
+      configHash
+      hasMetrics
+      artifactErrors
+    }
+    analysisSampleCount
+    dataQuality
+    eventCurve
+    interactionHeatmap
+    comparison
+    comparisonSensitivity
+    regressions
+    robustness
+    warnings
+    artifactErrors
+  }
+}

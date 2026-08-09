@@ -1,0 +1,197 @@
+name: Monorepo CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      web: ${{ steps.filter.outputs.web }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'apps/api/**'
+              - 'apps/engine/**'
+              - 'apps/worker/**'
+              - 'apps/qmt-agent/**'
+              - 'packages/**'
+              - 'ops/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
+            web:
+              - 'apps/web/**'
+              - 'apps/docs/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.github/workflows/ci.yml'
+
+  python-boundaries:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.10.10'
+      - name: Verify and install the locked workspace
+        run: |
+          uv lock --check
+          uv sync --locked --all-packages --group dev
+      - name: Verify package and runtime dependency boundaries
+        run: >-
+          uv run pytest
+          tests/contracts
+          tests/domain
+          tests/application
+          tests/infrastructure/test_dependency_boundaries.py
+      - name: Lint Python workspace
+        run: uv run ruff check apps packages tests
+      - name: Run safe Python test suite
+        env:
+          ENV: testing
+          ENABLE_REAL_TRADING: 'false'
+          QMT_REAL_TRADING_ENABLED: 'false'
+        run: >-
+          uv run pytest
+          tests/api
+          tests/engine
+          tests/worker
+          tests/qmt_agent
+          tests/infrastructure
+          tests/integration
+          -m "not dangerous and not real_trading and not e2e"
+
+  windows-runtime:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.9'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.10.10'
+      - name: Verify and install the locked workspace
+        run: |
+          uv lock --check
+          uv sync --locked --all-packages --group dev
+      - name: Run Windows and QMT simulator smoke tests
+        shell: pwsh
+        run: |
+          uv run pytest tests/contracts tests/qmt_agent tests/infrastructure/test_dependency_boundaries.py
+          .\ops\quantx.ps1 doctor -Environment dev -SkipExternal
+
+  python-coverage:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.10.10'
+      - name: Install locked workspace
+        run: uv sync --locked --all-packages --group dev
+      - name: Collect safe-suite coverage
+        env:
+          ENV: testing
+          ENABLE_REAL_TRADING: 'false'
+          QMT_REAL_TRADING_ENABLED: 'false'
+          T_TRADE_LIVE_ENABLED: 'false'
+        run: |
+          uv run pytest \
+            tests/contracts tests/domain tests/application tests/api \
+            tests/engine tests/worker tests/qmt_agent tests/infrastructure \
+            tests/integration \
+            -m "not dangerous and not real_trading and not e2e" \
+            --cov=quantx_contracts \
+            --cov=quantx_domain \
+            --cov=quantx_application \
+            --cov=quantx_infrastructure \
+            --cov=quantx_engine \
+            --cov=quantx_worker \
+            --cov=quantx_qmt_agent \
+            --cov-report=xml:coverage.xml
+      - name: Enforce critical safety-path coverage
+        run: >-
+          uv run coverage report
+          --include="*/quantx_contracts/agent.py,*/quantx_contracts/order_lifecycle.py,*/quantx_qmt_agent/emergency.py"
+          --fail-under=85
+      - name: Enforce changed-line coverage
+        run: >-
+          uv run diff-cover coverage.xml
+          --compare-branch=origin/${{ github.event.repository.default_branch }}
+          --fail-under=80
+
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint:strict
+      - run: npm run test:run
+      - run: npm run build
+
+  result:
+    if: always()
+    needs:
+      [changes, python-boundaries, windows-runtime, python-coverage, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all selected jobs
+        shell: bash
+        run: |
+          test "${{ needs.changes.result }}" = "success"
+          case "${{ needs.python-boundaries.result }}" in
+            success|skipped) ;;
+            *) exit 1 ;;
+          esac
+          case "${{ needs.windows-runtime.result }}" in
+            success|skipped) ;;
+            *) exit 1 ;;
+          esac
+          case "${{ needs.python-coverage.result }}" in
+            success|skipped) ;;
+            *) exit 1 ;;
+          esac
+          case "${{ needs.web.result }}" in
+            success|skipped) ;;
+            *) exit 1 ;;
+          esac

@@ -367,7 +367,7 @@ OrderRequest
 
 ### 7.3 TradeCommand
 
-SaaS 下发给 LocalAgent 的指令。
+服务端下发给 QMT Agent 的指令。
 
 ```json
 {
@@ -994,4 +994,3 @@ InstanceStatus =
 - `SUBMITTED -> BROKER_REJECTED` 释放冻结。
 - `ACCEPTED -> PARTIALLY_FILLED -> PARTIALLY_CANCELED`。
 - `REPORT_TIMEOUT -> RECONCILE_REQUIRED`。
-

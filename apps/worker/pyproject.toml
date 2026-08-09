@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantx-worker"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "prefect>=3.6.10",
+  "quantx-application",
+  "quantx-infrastructure",
+]
+
+[project.scripts]
+quantx-worker-bootstrap = "quantx_worker.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

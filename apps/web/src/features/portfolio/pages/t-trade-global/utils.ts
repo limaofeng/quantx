@@ -1,0 +1,225 @@
+import type { SignalHistoryFilter } from './types';
+
+export const statusPresentation: Record<
+  string,
+  { label: string; className: string }
+> = {
+  DRAINING: {
+    label: '退出中',
+    className: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
+  },
+  IGNORED: {
+    label: '已忽略',
+    className: 'border-slate-400/20 bg-slate-400/10 text-slate-400',
+  },
+  INELIGIBLE: {
+    label: '暂不可用',
+    className: 'border-slate-400/20 bg-slate-400/10 text-slate-400',
+  },
+  MONITORED: {
+    label: '监控中',
+    className: 'border-red-400/25 bg-red-400/10 text-red-200',
+  },
+  PENDING_START: {
+    label: '待启动',
+    className: 'border-blue-400/25 bg-blue-400/10 text-blue-200',
+  },
+  STOPPED: {
+    label: '未启动',
+    className: 'border-white/10 bg-white/[0.04] text-slate-500',
+  },
+};
+
+const signalReasonLabels: Record<string, string> = {
+  APPROVAL_TTL_EXPIRED: '超过确认有效期，系统自动忽略',
+  PRICE_DEVIATION_EXCEEDED: '确认时价格已偏离信号价',
+  USER_REJECTED: '人工忽略本次信号',
+  GLOBAL_CONFIG_CHANGED: '策略参数变更，原信号自动撤销',
+  HOLDING_NOT_ELIGIBLE: '持仓不再满足做 T 条件',
+  GLOBAL_MONITOR_STOPPED: '全局监控停止，信号自动撤销',
+};
+
+export const batchStatusLabels: Record<string, string> = {
+  ENTRY_QUEUED: '买入排队',
+  ENTRY_SUBMITTED: '买入已报',
+  ENTRY_PARTIAL: '买入部分成交',
+  OPEN: '持仓保护中',
+  EXIT_TRIGGERED: '待卖出',
+  EXIT_SUBMITTED: '卖出已报',
+  EXIT_PARTIAL: '卖出部分成交',
+  CLOSED: '已完成',
+  ENTRY_EXPIRED: '买入已过期',
+  ENTRY_REJECTED: '买入失败',
+  EXIT_REJECTED: '卖出异常',
+  RECONCILE_REQUIRED: '需要对账',
+  KILL_SWITCHED: '人工处置',
+};
+
+export function signalStatusPresentation(status: string, reason: string) {
+  const normalizedStatus = status.toUpperCase();
+  const normalizedReason = reason.toUpperCase();
+  if (normalizedStatus === 'EXPIRED') {
+    return {
+      label:
+        normalizedReason === 'PRICE_DEVIATION_EXCEEDED'
+          ? '价格偏离'
+          : '确认超时',
+      className: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
+    };
+  }
+  if (normalizedStatus === 'REJECTED') {
+    return {
+      label: normalizedReason === 'USER_REJECTED' ? '已忽略' : '已撤销',
+      className: 'border-slate-400/20 bg-slate-400/10 text-slate-400',
+    };
+  }
+  if (normalizedStatus === 'CANCELLED') {
+    return {
+      label: '已撤单',
+      className: 'border-slate-400/20 bg-slate-400/10 text-slate-400',
+    };
+  }
+  if (normalizedStatus === 'FILLED') {
+    return {
+      label: '已成交',
+      className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200',
+    };
+  }
+  if (normalizedStatus === 'PARTIAL_FILLED') {
+    return {
+      label: '部分成交',
+      className: 'border-cyan-400/25 bg-cyan-400/10 text-cyan-200',
+    };
+  }
+  if (normalizedStatus === 'AWAITING_APPROVAL') {
+    return {
+      label: '待确认',
+      className: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
+    };
+  }
+  return {
+    label: '已确认',
+    className: 'border-blue-400/25 bg-blue-400/10 text-blue-200',
+  };
+}
+
+export function signalHistoryCategory(
+  status: string
+): Exclude<SignalHistoryFilter, 'ALL'> {
+  const normalized = status.toUpperCase();
+  if (normalized === 'EXPIRED') return 'EXPIRED';
+  if (['REJECTED', 'CANCELLED'].includes(normalized)) return 'IGNORED';
+  return 'CONFIRMED';
+}
+
+export function signalReasonLabel(reason: string, status: string) {
+  const normalizedReason = reason.toUpperCase();
+  if (signalReasonLabels[normalizedReason]) {
+    return signalReasonLabels[normalizedReason];
+  }
+  if (status.toUpperCase() === 'FILLED') return '确认后已完成买入成交';
+  if (status.toUpperCase() === 'PARTIAL_FILLED') return '确认后部分成交';
+  return reason || '信号已确认并进入执行流程';
+}
+
+export function numberValue(value: string, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function integerValue(value: string, fallback: number) {
+  return Math.trunc(numberValue(value, fallback));
+}
+
+export function formatNumber(value: number, digits = 2) {
+  return Number(value || 0).toLocaleString('zh-CN', {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  });
+}
+
+export function formatTime(value?: string | null) {
+  if (!value) return '尚未同步';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString('zh-CN', { hour12: false });
+}
+
+export function formatQuoteTime(value?: string | null) {
+  if (!value) return '行情接收中';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : `更新于 ${date.toLocaleTimeString('zh-CN', { hour12: false })}`;
+}
+
+export function formatSignedPercent(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return '--';
+  return `${value > 0 ? '+' : ''}${formatNumber(value)}%`;
+}
+
+export function quoteTone(value?: number | null) {
+  if (value == null || !Number.isFinite(value) || value === 0) {
+    return 'text-slate-300';
+  }
+  return value > 0 ? 'text-red-300' : 'text-emerald-300';
+}
+
+export function hasInstrumentName(
+  stockCode: string,
+  candidate?: string | null
+) {
+  const value = String(candidate || '').trim();
+  const normalizedCode = stockCode.trim().toUpperCase();
+  const codeWithoutExchange = normalizedCode.split('.', 1)[0];
+  return Boolean(
+    value &&
+    ![normalizedCode, codeWithoutExchange].includes(value.toUpperCase())
+  );
+}
+
+export function resolveInstrumentName(
+  stockCode: string,
+  positionName?: string | null,
+  monitorName?: string | null
+) {
+  if (hasInstrumentName(stockCode, positionName)) {
+    return String(positionName).trim();
+  }
+  if (hasInstrumentName(stockCode, monitorName)) {
+    return String(monitorName).trim();
+  }
+  return stockCode;
+}
+
+export function replayDatePreset(tradingDays: 1 | 5 | 20) {
+  const end = new Date();
+  const start = new Date(end);
+  let counted = 1;
+  while (counted < tradingDays) {
+    start.setDate(start.getDate() - 1);
+    const day = start.getDay();
+    if (day !== 0 && day !== 6) counted += 1;
+  }
+  const format = (value: Date) => {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+  return { start: format(start), end: format(end) };
+}
+
+export function replayStatusLabel(status?: string | null) {
+  const labels: Record<string, string> = {
+    CANCELLED: '已取消',
+    COMPLETED: '已完成',
+    ERROR: '失败',
+    PENDING: '等待中',
+    RUNNING: '回放中',
+    STARTING: '启动中',
+    STOPPED: '已停止',
+  };
+  return labels[String(status || '').toUpperCase()] || status || '未知';
+}

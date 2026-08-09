@@ -65,7 +65,7 @@ Market Data / Portfolio Snapshot / Order Reports / Security Status
        将目标仓位/金额转换为候选订单数量和价格
     -> 后置订单风控 OrderRiskDecision
        校验交易时段、停牌、涨跌停、T+1、可卖量、冻结、现金、库存置换
-    -> OrderRouter / LocalAgent
+    -> OrderRouter / QMT Agent
     -> miniQMT / BacktestBroker
     -> RuntimeStateManager / BucketLedger
     -> Strategy on_order / on_trade

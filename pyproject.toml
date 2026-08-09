@@ -1,0 +1,102 @@
+[project]
+name = "quantx-workspace"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "quantx-api",
+  "quantx-engine",
+  "quantx-research",
+  "quantx-worker",
+  "quantx-qmt-agent",
+]
+
+[dependency-groups]
+dev = [
+  "aiosqlite>=0.20.0",
+  "build>=1.2.0",
+  "diff-cover>=9.0.0",
+  "pre-commit>=4.3.0",
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=5.0.0",
+  "pytest-env>=1.1.5",
+  "pytest-xdist>=3.6.0",
+  "ruff>=0.13.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+quantx-api = { workspace = true }
+quantx-engine = { workspace = true }
+quantx-research = { workspace = true }
+quantx-worker = { workspace = true }
+quantx-qmt-agent = { workspace = true }
+quantx-application = { workspace = true }
+quantx-contracts = { workspace = true }
+quantx-domain = { workspace = true }
+quantx-infrastructure = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+  "apps/api",
+  "apps/engine",
+  "apps/qmt-agent",
+  "apps/research",
+  "apps/worker",
+  "packages/*",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --tb=short --import-mode=importlib"
+asyncio_mode = "auto"
+env = ["ENV=testing"]
+testpaths = ["tests"]
+pythonpath = [
+  "apps/api/src",
+  "apps/engine/src",
+  "apps/worker/src",
+  "apps/qmt-agent/src",
+  "apps/research/src",
+  "packages/contracts/src",
+  "packages/domain/src",
+  "packages/application/src",
+  "packages/infrastructure/src",
+]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+  "slow: marks tests as slow",
+  "integration: marks integration tests",
+  "unit: marks unit tests",
+  "api: marks API tests",
+  "graphql: marks GraphQL tests",
+  "middleware: marks middleware tests",
+  "mcp: marks MCP protocol tests",
+  "qmt: marks QMT-agent tests",
+  "e2e: marks end-to-end tests",
+  "dangerous: marks tests with external side effects",
+  "real_trading: marks tests that may access a real broker and are disabled by default",
+]
+
+[tool.ruff]
+indent-width = 2
+line-length = 88
+target-version = "py311"
+exclude = [
+  ".runtime",
+  "apps/web",
+  "migrations",
+  "node_modules",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

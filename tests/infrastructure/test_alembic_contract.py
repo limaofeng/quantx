@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import importlib.util
+import re
+import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+VERSIONS = ROOT / "packages" / "infrastructure" / "alembic" / "versions"
+
+
+def _load_revision(filename: str, module_name: str) -> ModuleType:
+  path = VERSIONS / filename
+  spec = importlib.util.spec_from_file_location(module_name, path)
+  assert spec is not None
+  assert spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def test_baseline_metadata_is_fingerprint_locked() -> None:
+  revision_path = (
+    VERSIONS / "20260729_0001_production_baseline.py"
+  ).as_posix()
+  script = (
+    "import importlib.util;"
+    f"spec=importlib.util.spec_from_file_location('baseline',{revision_path!r});"
+    "module=importlib.util.module_from_spec(spec);"
+    "spec.loader.exec_module(module);"
+    "print(module.metadata_sha256());"
+    "print(module.EXPECTED_METADATA_SHA256)"
+  )
+  result = subprocess.run(
+    [sys.executable, "-c", script],
+    cwd=ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  actual, expected = result.stdout.splitlines()
+
+  assert actual == expected
+  assert len(expected) == 64
+
+
+def test_live_safety_revision_is_additive_and_downgrade_is_refused() -> None:
+  revision = _load_revision(
+    "20260729_0002_live_safety.py",
+    "quantx_test_live_safety_revision",
+  )
+
+  assert revision.down_revision == "20260729_0001"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
+
+
+def test_asyncpg_trigger_ddl_is_split_into_single_commands() -> None:
+  source = (
+    VERSIONS / "20260729_0002_live_safety.py"
+  ).read_text(encoding="utf-8")
+
+  assert "ON pending_trade_orders;\n      CREATE TRIGGER" not in source
+  assert source.count("op.execute(") >= 3
+
+
+def test_all_relational_tables_have_chinese_comments() -> None:
+  import quantx_infrastructure.models  # noqa: F401
+  from quantx_infrastructure.database.relational_base import Base
+  from quantx_infrastructure.models.divid_factor import DividFactorTable
+  from quantx_infrastructure.models.table_comments import TABLE_COMMENTS
+
+  assert DividFactorTable.__table__.name == "divid_factors"
+  assert set(Base.metadata.tables) == set(TABLE_COMMENTS)
+  for table in Base.metadata.tables.values():
+    assert table.comment == TABLE_COMMENTS[table.name]
+    assert re.search(r"[\u4e00-\u9fff]", table.comment)
+
+
+def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  import quantx_infrastructure.models  # noqa: F401
+  from quantx_infrastructure.database.relational_base import Base
+  from quantx_infrastructure.models.divid_factor import DividFactorTable
+
+  revision = _load_revision(
+    "20260730_0003_table_comments.py",
+    "quantx_test_table_comment_revision",
+  )
+  calls: list[tuple[str, str]] = []
+  statements: list[str] = []
+  monkeypatch.setattr(
+    revision.op,
+    "create_table_comment",
+    lambda table_name, comment: calls.append((table_name, comment)),
+  )
+  monkeypatch.setattr(revision.op, "execute", statements.append)
+
+  assert revision.down_revision == "20260729_0002"
+  assert DividFactorTable.__table__.name == "divid_factors"
+  assert set(revision.TABLE_COMMENTS) == set(Base.metadata.tables)
+  revision.upgrade()
+  assert calls == list(revision.REQUIRED_TABLE_COMMENTS.items())
+  assert len(statements) == len(revision.OPTIONAL_TABLE_COMMENTS)
+  assert "divid_factors" in statements[0]
+  assert revision.OPTIONAL_TABLE_COMMENTS["divid_factors"] in statements[0]
+  for table_name, comment in revision.TABLE_COMMENTS.items():
+    assert Base.metadata.tables[table_name].comment == comment
+    assert re.search(r"[\u4e00-\u9fff]", comment)
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()

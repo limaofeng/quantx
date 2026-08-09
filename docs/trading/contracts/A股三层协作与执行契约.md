@@ -14,6 +14,7 @@
 - 策略如何消费公共快照并输出交易意图。
 - 风控如何拆分为“前置上下文风控”和“后置订单风控”。
 - 订单、成交、bucket 归因、T+1 库存置换如何收敛到统一账本。
+- 自动退出计划如何组合不同卖出策略并生成标准卖出意图。
 - 实盘 miniQMT 与回测 broker 如何保持状态流同构。
 - 后续策略如何接入而不破坏当前双仓策略。
 
@@ -95,7 +96,7 @@ A 股系统必须使用双阶段风控，避免“风控既需要交易意图又
 
 - 策略发出信号。
 - SaaS 下发指令。
-- LocalAgent 收到指令。
+- QMT Agent 收到指令。
 - miniQMT 接受委托。
 - 委托状态为已报。
 
@@ -124,6 +125,16 @@ TradeIntent
 ```
 
 否则 GA 会利用假成交漏洞，尤其是涨停买入、跌停卖出、日线 high/low 触达和 T+1 场景。
+
+### 1.6 自动卖出是 Engine 公共能力
+
+做 T、打板、趋势和条件清仓不得各自实现一套自动卖出状态机。入场策略可以
+随 BUY `TradeIntent` 提交 `ExitPlanTemplate`，但只有真实买入成交可以激活
+计划。Engine 统一评估卖出触发策略、数量策略、T+1 策略与执行策略，再生成
+标准 SELL `TradeIntent` 进入本文规定的后置风控和执行链路。
+
+退出计划的详细生命周期、扩展注册方式与审计字段见
+[A 股自动退出计划与卖出策略契约](A股自动退出计划与卖出策略契约.md)。
 
 ---
 
@@ -171,7 +182,7 @@ OrderDraft[] + PortfolioState + BucketLedger + OrderState + BrokerSnapshot
 OrderRiskDecision[ALLOW/CAP]
     -> OrderRouter
     -> TradeCommand
-    -> LocalAgent
+    -> QMT Agent
     -> miniQMT / BacktestBroker
     -> BrokerExecutionReport
     -> RuntimeStateManager
@@ -243,7 +254,7 @@ OrderRiskDecision[ALLOW/CAP]
 对账动作用于修复本地账本与 broker 真实快照差异。
 
 ```text
-1. LocalAgent 重连、每日收盘后、系统启动后、异常回报后触发。
+1. QMT Agent 重连、每日收盘后、系统启动后、异常回报后触发。
 2. 拉取 miniQMT 资金、持仓、可卖量、冻结、未完成委托、当日成交。
 3. 与 SaaS PortfolioState / BucketLedger / OrderState 比较。
 4. 在容忍范围内自动修正冻结和可卖量。
@@ -368,15 +379,15 @@ OrderSizer 只做尺寸与格式修正，不做环境判断和策略判断。
 
 它可以改变订单数量或拒绝订单，但不得改变交易方向。
 
-### 3.8 OrderRouter / LocalAgent
+### 3.8 OrderRouter / QMT Agent
 
-OrderRouter 和 LocalAgent 职责：
+OrderRouter 和 QMT Agent 职责：
 
 - 把 SaaS 侧 `TradeCommand` 转换为本地 miniQMT 下单参数。
 - 执行本地保护检查。
 - 上报委托状态、成交状态、账户快照。
 
-LocalAgent 不含策略代码，不生成新交易意图。
+QMT Agent 不含策略代码，不生成新交易意图。
 
 ### 3.9 RuntimeStateManager
 

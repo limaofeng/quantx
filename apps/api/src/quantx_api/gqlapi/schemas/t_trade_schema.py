@@ -1,0 +1,436 @@
+"""GraphQL fields for the existing-position intraday T assistant."""
+
+from datetime import datetime
+from typing import List, Optional
+
+import strawberry
+
+from ..resolvers.t_trade import TTradeResolver
+from ..security import authorized_account_id, principal_from_context
+from ..types.t_trade_types import (
+  OperationalAlert,
+  TTradeBatch,
+  TTradeBatchEvent,
+  TTradeBatchEventPage,
+  TTradeBatchPage,
+  TTradeExternalEntryInput,
+  TTradeGlobalMonitor,
+  TTradeGlobalMutationResult,
+  TTradeGlobalSettingsInput,
+  TTradeImportedEntry,
+  TTradeLiveReadiness,
+  TTradeMutationResult,
+  TTradeOperationsMutationResult,
+  TTradeReplay,
+  TTradeReplayCyclePage,
+  TTradeReplayMutationResult,
+  TTradeReplayPreparation,
+  TTradeReplayStartInput,
+  TTradeSession,
+  TTradeSignalHistoryEntry,
+  TTradeSignalHistoryPage,
+  TTradeStartInput,
+)
+
+
+@strawberry.type(description="持仓做 T 查询")
+class TTradeQuery:
+  @strawberry.field(description="游标分页查询持久化做 T 批次")
+  async def t_trade_batches_page(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    status_group: Optional[str] = None,
+    first: int = 30,
+    after: Optional[str] = None,
+  ) -> TTradeBatchPage:
+    return await TTradeResolver.list_batches_page(
+      authorized_account_id(info, account_id),
+      status_group,
+      first,
+      after,
+    )
+
+  @strawberry.field(description="游标分页查询做 T 委托和成交事件")
+  async def t_trade_batch_events_page(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    batch_id: Optional[str] = None,
+    first: int = 30,
+    after: Optional[str] = None,
+  ) -> TTradeBatchEventPage:
+    return await TTradeResolver.list_batch_events_page(
+      authorized_account_id(info, account_id),
+      batch_id,
+      first,
+      after,
+    )
+
+  @strawberry.field(description="游标分页查询做 T 信号历史")
+  async def t_trade_signal_history_page(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    first: int = 30,
+    after: Optional[str] = None,
+  ) -> TTradeSignalHistoryPage:
+    return await TTradeResolver.list_signal_history_page(
+      authorized_account_id(info, account_id),
+      first,
+      after,
+    )
+
+  @strawberry.field(description="查询做 T 生产就绪和灰度状态")
+  async def validate_t_trade_live_readiness(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> TTradeLiveReadiness:
+    return await TTradeResolver.readiness(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.field(description="账户级实盘安全状态")
+  async def live_safety_status(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> TTradeLiveReadiness:
+    return await TTradeResolver.readiness(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.field(description="查询持久化运行告警")
+  async def operational_alerts(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    status: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 100,
+  ) -> List[OperationalAlert]:
+    return await TTradeResolver.operational_alerts(
+      authorized_account_id(info, account_id),
+      status=status,
+      severity=severity,
+      limit=limit,
+    )
+
+  @strawberry.field(description="分页查询持久化做 T 批次")
+  async def t_trade_batches(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    status_group: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 100,
+  ) -> List[TTradeBatch]:
+    return await TTradeResolver.list_batches(
+      authorized_account_id(info, account_id),
+      status_group,
+      offset,
+      limit,
+    )
+
+  @strawberry.field(description="查询做 T 批次的委托和成交事件")
+  async def t_trade_batch_events(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    batch_id: Optional[str] = None,
+    limit: int = 100,
+  ) -> List[TTradeBatchEvent]:
+    return await TTradeResolver.list_batch_events(
+      authorized_account_id(info, account_id),
+      batch_id,
+      limit,
+    )
+
+  @strawberry.field(description="查询已纳入自动卖出的来源成交台账")
+  async def t_trade_imported_entries(
+    self, info: strawberry.types.Info, account_id: str
+  ) -> List[TTradeImportedEntry]:
+    return await TTradeResolver.list_imported_entries(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.field(description="查询账户级全局持仓做 T 监控")
+  async def t_trade_global_monitor(
+    self, info: strawberry.types.Info, account_id: str
+  ) -> TTradeGlobalMonitor:
+    return await TTradeResolver.get_global_monitor(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.field(description="查询账户最近的做 T 买入确认信号历史")
+  async def t_trade_signal_history(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    limit: int = 50,
+  ) -> List[TTradeSignalHistoryEntry]:
+    return await TTradeResolver.list_signal_history(
+      authorized_account_id(info, account_id),
+      limit,
+    )
+
+  @strawberry.field(description="查询单个做 T 会话")
+  async def t_trade_session(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    stock_code: Optional[str] = None,
+  ) -> Optional[TTradeSession]:
+    owner_account_id = await TTradeResolver.session_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.get_session(run_id, stock_code)
+
+  @strawberry.field(description="查询做 T 会话列表")
+  async def t_trade_sessions(
+    self,
+    info: strawberry.types.Info,
+    account_id: Optional[str] = None,
+    stock_code: Optional[str] = None,
+    active_only: bool = False,
+  ) -> List[TTradeSession]:
+    return await TTradeResolver.list_sessions(
+      authorized_account_id(info, account_id), stock_code, active_only
+    )
+
+  @strawberry.field(description="读取做 T 历史回放所需的初始账户快照")
+  async def t_trade_replay_preparation(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    start_time: datetime,
+  ) -> TTradeReplayPreparation:
+    return await TTradeResolver.prepare_replay(
+      authorized_account_id(info, account_id), start_time
+    )
+
+  @strawberry.field(description="查询单个做 T 历史回放")
+  async def t_trade_replay(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> Optional[TTradeReplay]:
+    owner_account_id = await TTradeResolver.replay_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.get_replay(run_id)
+
+  @strawberry.field(description="查询账户做 T 历史回放记录")
+  async def t_trade_replay_history(
+    self, info: strawberry.types.Info, account_id: str, limit: int = 20
+  ) -> List[TTradeReplay]:
+    return await TTradeResolver.replay_history(
+      authorized_account_id(info, account_id), limit
+    )
+
+  @strawberry.field(description="分页查询做 T 历史回放批次")
+  async def t_trade_replay_cycles(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    offset: int = 0,
+    limit: int = 50,
+  ) -> TTradeReplayCyclePage:
+    owner_account_id = await TTradeResolver.replay_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.replay_cycles(run_id, offset, limit)
+
+
+@strawberry.type(description="持仓做 T 操作")
+class TTradeMutation:
+  @strawberry.mutation(description="确认已查看运行告警")
+  async def acknowledge_operational_alert(
+    self,
+    info: strawberry.types.Info,
+    id: strawberry.ID,
+  ) -> OperationalAlert:
+    principal = principal_from_context(info.context)
+    alert_id = str(id)
+    account_id = await TTradeResolver.operational_alert_account_id(alert_id)
+    if account_id:
+      principal.require_account(account_id)
+    return await TTradeResolver.acknowledge_operational_alert(
+      alert_id,
+      actor_id=principal.user_id,
+    )
+
+  @strawberry.mutation(description="解决运行告警并记录处置结果")
+  async def resolve_operational_alert(
+    self,
+    info: strawberry.types.Info,
+    id: strawberry.ID,
+    resolution: str,
+  ) -> OperationalAlert:
+    principal = principal_from_context(info.context)
+    alert_id = str(id)
+    account_id = await TTradeResolver.operational_alert_account_id(alert_id)
+    if account_id:
+      principal.require_account(account_id)
+    return await TTradeResolver.resolve_operational_alert(
+      alert_id,
+      actor_id=principal.user_id,
+      resolution=resolution,
+    )
+
+  @strawberry.mutation(description="保存并协调全局持仓做 T 监控")
+  async def save_t_trade_global_monitor(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeGlobalSettingsInput,
+  ) -> TTradeGlobalMutationResult:
+    authorized_account_id(info, input.account_id)
+    return await TTradeResolver.save_global_monitor(input)
+
+  @strawberry.mutation(description="立即重新同步全局做 T 持仓")
+  async def reconcile_t_trade_global_monitor(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> TTradeGlobalMutationResult:
+    return await TTradeResolver.reconcile_global_monitor(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.mutation(description="启动持仓做 T 会话")
+  async def start_t_trade_session(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeStartInput,
+  ) -> TTradeMutationResult:
+    authorized_account_id(info, input.account_id)
+    return await TTradeResolver.start_session(input)
+
+  @strawberry.mutation(description="确认做 T 买入信号")
+  async def approve_t_trade_entry(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+    expected_signal_version: int = 0,
+    idempotency_key: str = "",
+  ) -> TTradeMutationResult:
+    owner_account_id = await TTradeResolver.session_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.approve_entry(
+      run_id,
+      intent_id,
+      expected_signal_version=expected_signal_version,
+      idempotency_key=idempotency_key,
+    )
+
+  @strawberry.mutation(description="完成门禁检查并启用严格 Canary 实盘")
+  async def activate_t_trade_live(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    policy_version: int,
+  ) -> TTradeOperationsMutationResult:
+    resolved = authorized_account_id(info, account_id)
+    principal = principal_from_context(info.context)
+    return await TTradeResolver.activate_live(
+      resolved,
+      user_id=principal.user_id,
+      policy_version=policy_version,
+    )
+
+  @strawberry.mutation(description="停止做 T 新买入，继续保护已有批次")
+  async def pause_t_trade_entries(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    reason: str = "manual pause",
+  ) -> TTradeOperationsMutationResult:
+    return await TTradeResolver.pause_entries(
+      authorized_account_id(info, account_id),
+      reason,
+    )
+
+  @strawberry.mutation(description="触发做 T 紧急停止并转人工处置")
+  async def trigger_t_trade_kill_switch(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    reason: str,
+  ) -> TTradeOperationsMutationResult:
+    return await TTradeResolver.trigger_kill_switch(
+      authorized_account_id(info, account_id),
+      reason,
+    )
+
+  @strawberry.mutation(description="撤销当前仍可撤的做 T 委托")
+  async def cancel_t_trade_order(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    client_order_id: str,
+  ) -> TTradeOperationsMutationResult:
+    return await TTradeResolver.cancel_order(
+      authorized_account_id(info, account_id),
+      client_order_id,
+    )
+
+  @strawberry.mutation(description="忽略做 T 买入信号")
+  async def reject_t_trade_entry(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+  ) -> TTradeMutationResult:
+    owner_account_id = await TTradeResolver.session_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.reject_entry(run_id, intent_id)
+
+  @strawberry.mutation(description="导入外部已成交买单并启用做 T 自动退出")
+  async def import_t_trade_external_entry(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeExternalEntryInput,
+  ) -> TTradeMutationResult:
+    owner_account_id = await TTradeResolver.session_account_id(input.run_id)
+    resolved_account_id = authorized_account_id(info, owner_account_id)
+    if resolved_account_id != authorized_account_id(info, input.account_id):
+      raise ValueError("做 T 会话与输入资金账户不一致")
+    return await TTradeResolver.import_external_entry(input)
+
+  @strawberry.mutation(description="读取 QMT Agent 已收敛的当日委托")
+  async def sync_t_trade_source_orders(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> TTradeMutationResult:
+    return await TTradeResolver.sync_source_orders(
+      authorized_account_id(info, account_id)
+    )
+
+  @strawberry.mutation(description="安全停止做 T 会话")
+  async def stop_t_trade_session(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> TTradeMutationResult:
+    owner_account_id = await TTradeResolver.session_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.stop_session(run_id)
+
+  @strawberry.mutation(description="启动隔离的做 T 历史回放")
+  async def start_t_trade_replay(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeReplayStartInput,
+  ) -> TTradeReplayMutationResult:
+    authorized_account_id(info, input.account_id)
+    return await TTradeResolver.start_replay(input)
+
+  @strawberry.mutation(description="取消正在执行的做 T 历史回放")
+  async def cancel_t_trade_replay(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> TTradeReplayMutationResult:
+    owner_account_id = await TTradeResolver.replay_account_id(run_id)
+    authorized_account_id(info, owner_account_id)
+    return await TTradeResolver.cancel_replay(run_id)

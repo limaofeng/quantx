@@ -1,7 +1,6 @@
 ---
 name: code-review
 description: Review code changes for security, performance, and correctness. Trigger with a PR URL, commit hash, diff, "review this before I merge", "is this code safe?", or when checking a change for N+1 queries, injection risks, missing edge cases, or error handling gaps.
-argument-hint: "<PR URL, commit hash, diff, or file path>"
 ---
 
 # /code-review
@@ -28,7 +27,8 @@ QuantX gating rules (project-level override):
 
 - Apply QuantX checklist only when the target context appears QuantX-related:
   - `AGENTS.md` exists and contains the QuantX memory prompt
-  - targets include `backend/core/strategies`, `backend/core/strategy_executor.py`, `backend/main.py`, `backend/docs`, or `交易系统文档`
+  - targets include `packages/domain`, `packages/application`, `apps/engine`,
+    `apps/api`, `apps/qmt-agent`, `docs/trading`, or `交易系统文档`
 - If no QuantX signals are detected, skip QuantX-specific items and keep only generic Security/Performance/Correctness/Maintainability review.
 
 ## How It Works
@@ -100,8 +100,14 @@ When reviewing QuantX-related code, additionally check:
    - No logic that assumes future bars/future actions.
    - Edge cases around empty/missing market data handled conservatively.
 5. **Contract consistency**
-   - If API/GraphQL or backend contracts changed, verify no temporary `as any` or type bypass was used to compensate.
-6. **Commit/Review alignment**
+   - If API/GraphQL contracts changed, verify codegen used the Caddy endpoint
+     and no temporary `as any` or type bypass was used.
+6. **Process and QMT boundaries**
+   - API must not start Engine, Prefect Worker, or QMT processes.
+   - Only `apps/qmt-agent` may import `xtquant`; it must not import server ORM,
+     repositories, or strategy code.
+   - Redis wakeups must not replace PostgreSQL inbox/outbox state.
+7. **Commit/Review alignment**
    - Flag long patch sequences that look like incremental fixes for the same root issue.
    - Recommend refactor to reduce churn before final merge.
 

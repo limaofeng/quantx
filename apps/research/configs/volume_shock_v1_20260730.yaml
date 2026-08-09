@@ -1,0 +1,60 @@
+study: volume-shock
+version: v1
+date_range: [2021-07-30, 2026-07-30]
+
+universe:
+  instrument_type: stock
+  lookback_years: 5
+  end_date: 2026-07-30
+  benchmark_code: 000300.SH
+  minimum_listing_days: 120
+
+event:
+  relative_volume_window: 20
+  relative_amount_window: 20
+  log_volume_zscore_window: 60
+  relative_volume_threshold: 1.5
+  normal_relative_volume_min: 0.8
+  normal_relative_volume_max: 1.2
+  relative_volume_bins: [0.0, 1.0, 1.5, 2.0, 3.0]
+  cooldown_days: 10
+  flat_return_threshold_pct: 1.0
+  breakout_window: 20
+
+conditioning:
+  price_position_window: 252
+  price_position_bins: [0.0, 0.3, 0.7, 1.0]
+
+outcomes:
+  horizons: [1, 3, 5, 10, 20]
+  include_close_response: true
+  include_next_open_return: true
+  include_benchmark_excess: true
+  include_cross_section_excess: true
+
+statistics:
+  bootstrap_method: moving_block
+  bootstrap_samples: 1000
+  moving_block_length: horizon
+  random_seed: 42
+  confidence_level: 0.95
+  minimum_cell_samples: 30
+  minimum_inference_dates: 30
+  fdr_alpha: 0.05
+  run_regression: true
+  regression_benchmark: csi300
+
+quality:
+  minimum_history_rows: 252
+  minimum_total_events: 100
+  minimum_usable_symbols: 100
+  minimum_history_coverage_ratio: 0.8
+  minimum_end_coverage_ratio: 0.9
+  minimum_benchmark_coverage_ratio: 0.9
+  exclude_corporate_action_windows_without_adjustment: true
+
+runtime:
+  batch_size: 300
+  output_root: .runtime/research-runs
+  minimum_available_memory_gib: 8
+  memory_sample_interval_seconds: 0.25

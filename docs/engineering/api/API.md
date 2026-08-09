@@ -1,0 +1,113 @@
+# QuantX API
+
+## 公共入口
+
+开发和本机部署只公开 Caddy：
+
+```text
+http://127.0.0.1:8080
+```
+
+API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部客户端的
+稳定地址。Caddy 转发：
+
+- `/docs/*`（静态客户端开发文档，不转发给 API）
+- `/graphql`
+- `/auth/*`
+- `/health`、`/health/live`、`/health/ready`、`/health/components`
+- `/metrics`
+- `/ws/agent`
+- `/agent/market-data/*`
+
+## 健康检查
+
+| 路径 | 语义 |
+| --- | --- |
+| `/health/live` | 只证明 API 事件循环可响应 |
+| `/health/ready` | 按 `web/full` profile 检查必要组件 |
+| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情分项状态 |
+| `/health` | `/health/ready` 的兼容别名 |
+
+`full` profile 中，Prefect Worker、QMT Agent 和行情 capability 也必须 ready。
+
+## 用户认证
+
+Web 使用 HttpOnly refresh cookie 和短期 access token：
+
+```text
+POST   /auth/web/session
+POST   /auth/web/session/refresh
+DELETE /auth/web/session
+```
+
+原生客户端使用显式 token 响应：
+
+```text
+POST   /auth/session
+POST   /auth/session/refresh
+GET    /auth/session
+DELETE /auth/session
+```
+
+GraphQL HTTP 使用 Bearer token；GraphQL WebSocket 在
+`connection_init.Authorization` 中发送同一短期 token。服务端按用户权限和
+账户授权再次校验，前端状态不是安全边界。
+
+## QMT Agent 设备接口
+
+```text
+POST   /auth/agent/enrollments
+POST   /auth/agent/enrollments/exchange
+POST   /auth/agent/token
+DELETE /auth/agent/devices/{device_id}
+WS     /ws/agent
+PUT    /agent/market-data/{request_id}/chunks/{chunk_index}
+```
+
+登记码一次性且十分钟过期；服务端只保存登记码和设备密钥的摘要。设备密钥
+由 Agent 写入 Windows Credential Manager，换取短期 JWT 后主动建立
+WebSocket。
+
+GraphQL 同时提供 `agentDevices`、`createAgentEnrollment` 和
+`revokeAgentDevice`，供 Web 管理设备状态。
+
+## 交易 mutation 语义
+
+手工下单、撤单、策略交易、条件清仓、全局做 T 和国债逆回购都必须进入
+统一应用命令/`TradeCommand` 链路。mutation 返回
+`clientOrderId` 与排队状态，不得把“已排队”或 `command_ack` 表示成成交。
+
+状态推进顺序：
+
+```text
+pending Order + outbox
+  -> Agent command
+  -> command_ack（仅投递）
+  -> order/execution/delta report
+  -> inbox
+  -> Engine 收敛
+```
+
+## GraphQL codegen
+
+schema 或 Web operation 变化后，保持 `web` profile 运行并执行：
+
+```powershell
+$env:CODEGEN_GRAPHQL_ENDPOINT="http://127.0.0.1:8080/graphql"
+npm run codegen
+npm run check
+npm run lint
+npm run test:run
+npm run build
+```
+
+生成类型是契约真源，不使用 `as any` 掩盖不一致。
+
+同一轮还必须刷新在线客户端契约：
+
+```powershell
+npm run docs:contracts
+```
+
+发布文件位于 `/docs/contracts/`。生产环境关闭运行时 OpenAPI、Swagger、
+ReDoc、GraphiQL 和 GraphQL 内省。

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantx-engine"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "quantx-application",
+  "quantx-contracts",
+  "quantx-domain",
+  "quantx-infrastructure",
+]
+
+[project.scripts]
+quantx-engine = "quantx_engine.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

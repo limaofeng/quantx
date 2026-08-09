@@ -31,7 +31,7 @@
 - `StudioMenu`：负责右键菜单、列菜单、资源菜单等上下文动作。
 - `StatusBar`：负责连接状态、账户状态、运行状态、数据时效等低占用信息。
 
-QuantX 迁移时应建立自己的 `frontend/src/components/studio-workbench/`，保持组件命名和心智模型相近，但样式 token、交易语义和状态字段按 QuantX 重定义。
+QuantX 迁移时应建立自己的 `apps/web/src/components/studio-workbench/`，保持组件命名和心智模型相近，但样式 token、交易语义和状态字段按 QuantX 重定义。
 
 ### 1.2 空间利用率优先
 
@@ -108,16 +108,16 @@ QuantX 迁移时应建立自己的 `frontend/src/components/studio-workbench/`�
 
 建议路径：
 
-- `frontend/src/components/studio-workbench/StudioWorkbench.tsx`
-- `frontend/src/components/studio-workbench/ActivityBar.tsx`
-- `frontend/src/components/studio-workbench/TabBar.tsx`
-- `frontend/src/components/studio-workbench/StudioMenu.tsx`
-- `frontend/src/components/studio-workbench/StudioTabContextMenu.tsx`
-- `frontend/src/components/studio-workbench/StatusBar.tsx`
-- `frontend/src/components/studio-workbench/themeStyles.ts`
-- `frontend/src/components/studio-workbench/types.ts`
-- `frontend/src/components/studio-workbench/useStudioMenu.ts`
-- `frontend/src/components/studio-workbench/useStudioTabs.ts`
+- `apps/web/src/components/studio-workbench/StudioWorkbench.tsx`
+- `apps/web/src/components/studio-workbench/ActivityBar.tsx`
+- `apps/web/src/components/studio-workbench/TabBar.tsx`
+- `apps/web/src/components/studio-workbench/StudioMenu.tsx`
+- `apps/web/src/components/studio-workbench/StudioTabContextMenu.tsx`
+- `apps/web/src/components/studio-workbench/StatusBar.tsx`
+- `apps/web/src/components/studio-workbench/themeStyles.ts`
+- `apps/web/src/components/studio-workbench/types.ts`
+- `apps/web/src/components/studio-workbench/useStudioMenu.ts`
+- `apps/web/src/components/studio-workbench/useStudioTabs.ts`
 
 QuantX 可以复制 Nexus 的 `StudioMenu` 思路，但需要补齐：
 
@@ -325,7 +325,7 @@ Tailwind 使用上优先通过 CSS 变量或集中 class helper 组合，不在�
 每阶段至少执行：
 
 ```powershell
-cd frontend
+cd apps/web
 npm run check
 npm run lint
 ```
@@ -333,7 +333,7 @@ npm run lint
 涉及 GraphQL 查询或 schema 变更时，按项目规则额外执行：
 
 ```powershell
-cd frontend
+cd apps/web
 npm run codegen
 npm run check
 ```
@@ -432,7 +432,7 @@ npm run check
 ### 11.1 已完成
 
 - Studio 基础设施：
-  - 已新增 `frontend/src/components/studio-workbench/`。
+  - 已新增 `apps/web/src/components/studio-workbench/`。
   - 已落地 `StudioWorkbench`、`ActivityBar`、`TabBar`、`StudioMenu`、`StudioTabContextMenu`、`StatusBar`、主题 token 与菜单 hook。
   - `StudioMenu` 已具备 viewport clamp、Esc 关闭、键盘方向键导航、focus 回收与 `role=menu/menuitem`。
 - 全局壳层：

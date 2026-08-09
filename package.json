@@ -1,0 +1,30 @@
+{
+  "name": "quantx-workspace",
+  "private": true,
+  "engines": {
+    "node": "20.x",
+    "npm": ">=10"
+  },
+  "workspaces": [
+    "apps/web",
+    "apps/docs"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @quantx/web",
+    "build": "npm run build:web && npm run build:docs",
+    "check": "npm run check:web && npm run check:docs",
+    "lint": "npm run lint --workspace @quantx/web",
+    "lint:strict": "npm run lint:strict --workspace @quantx/web",
+    "test:run": "npm run test:run --workspace @quantx/web",
+    "dev:web": "npm run dev --workspace @quantx/web",
+    "dev:docs": "npm run dev --workspace @quantx/docs",
+    "build:web": "npm run build --workspace @quantx/web",
+    "build:docs": "npm run build --workspace @quantx/docs",
+    "check:web": "npm run check --workspace @quantx/web",
+    "check:docs": "npm run check --workspace @quantx/docs",
+    "lint:web": "npm run lint --workspace @quantx/web",
+    "test:web": "npm run test:run --workspace @quantx/web",
+    "codegen": "npm run codegen --workspace @quantx/web",
+    "docs:contracts": "uv run python -m quantx_api.client_contracts --output apps/docs/public/contracts"
+  }
+}

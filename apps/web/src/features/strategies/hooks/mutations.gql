@@ -1,0 +1,116 @@
+# Strategies 模块变更操作
+
+# 运行策略（创建运行实例）
+mutation RunStrategy($input: StrategyRunInput!, $autoStart: Boolean! = true) {
+  runStrategy(input: $input, autoStart: $autoStart) {
+    id
+    name
+    status
+    strategy {
+      id
+      name
+    }
+    createTime
+  }
+}
+
+# 启动策略
+mutation StartStrategy($runId: String!) {
+  startStrategy(runId: $runId) {
+    success
+    message
+  }
+}
+
+# 停止策略
+mutation StopStrategy($runId: String!) {
+  stopStrategy(runId: $runId) {
+    success
+    message
+  }
+}
+
+# 暂停策略
+mutation PauseStrategy($runId: String!) {
+  pauseStrategy(runId: $runId) {
+    success
+    message
+  }
+}
+
+# 恢复策略
+mutation ResumeStrategy($runId: String!) {
+  resumeStrategy(runId: $runId) {
+    success
+    message
+  }
+}
+
+mutation ApproveStrategyTradeIntent($runId: String!, $intentId: String!) {
+  approveStrategyTradeIntent(runId: $runId, intentId: $intentId) {
+    success
+    message
+    data
+  }
+}
+
+mutation RejectStrategyTradeIntent(
+  $runId: String!
+  $intentId: String!
+  $reason: String! = "USER_REJECTED"
+) {
+  rejectStrategyTradeIntent(
+    runId: $runId
+    intentId: $intentId
+    reason: $reason
+  ) {
+    success
+    message
+    data
+  }
+}
+
+# TODO: Uncomment when backend is restarted
+# mutation RestartStrategy($runId: String!) {
+#   restartStrategy(runId: $runId) {
+#     success
+#     message
+#   }
+# }
+
+# 在当前回测实例下新增一个回测版本
+mutation RerunBacktestVersion(
+  $runId: String!
+  $backtestStartTime: DateTime
+  $backtestEndTime: DateTime
+) {
+  rerunBacktestVersion(
+    runId: $runId
+    backtestStartTime: $backtestStartTime
+    backtestEndTime: $backtestEndTime
+  ) {
+    id
+    strategyRunId
+    version
+    backtestStartTime
+    backtestEndTime
+    status
+    createdAt
+  }
+}
+
+# 删除策略运行实例
+mutation DeleteStrategyRun($runId: String!) {
+  deleteStrategyRun(runId: $runId) {
+    success
+    message
+  }
+}
+
+# 更新策略运行（目前仅支持更新参数）
+mutation UpdateStrategyRun($runId: String!, $parameters: JSON) {
+  updateStrategyRun(runId: $runId, runUpdate: { parameters: $parameters }) {
+    id
+    parameters
+  }
+}

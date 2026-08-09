@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantx-research"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "jinja2>=3.1.0",
+  "numpy>=1.26.0",
+  "pandas>=2.2.0",
+  "pyarrow>=15.0.0",
+  "pydantic>=2.0",
+  "pyyaml>=6.0",
+  "quantx-infrastructure",
+]
+
+[project.scripts]
+quantx-research = "quantx_research.cli:main"
+
+[tool.setuptools.package-data]
+quantx_research = ["reporting/templates/*.j2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

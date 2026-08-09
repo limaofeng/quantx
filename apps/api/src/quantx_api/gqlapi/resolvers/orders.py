@@ -1,0 +1,58 @@
+"""
+Order & Trade Resolver
+处理委托和成交相关的 GraphQL 查询
+"""
+
+from typing import List, Optional
+
+from quantx_infrastructure.models import Order, Trade
+from quantx_infrastructure.services.order_service import OrderService
+from quantx_infrastructure.services.trade_service import TradeService
+
+
+class OrderResolver:
+  """委托与成交 Resolver"""
+
+  @staticmethod
+  async def get_today_orders(account_id: str) -> List[Order]:
+    """获取当日委托"""
+    service = OrderService(account_id)
+    return await service.get_today_orders(account_id)
+
+  @staticmethod
+  async def get_history_orders(
+    account_id: str, start_date: str, end_date: str
+  ) -> List[Order]:
+    """获取历史委托"""
+    service = OrderService(account_id)
+    return await service.get_history_orders(account_id, start_date, end_date)
+
+  @staticmethod
+  async def get_order(
+    order_id: int, account_id: str
+  ) -> Optional[Order]:
+    """获取单个委托(智能查询)"""
+    service = OrderService(account_id)
+    return await service.get_order_by_id(order_id)
+
+  @staticmethod
+  async def get_today_trades(account_id: str) -> List[Trade]:
+    """获取当日成交"""
+    service = TradeService(account_id)
+    return await service.get_today_trades(account_id)
+
+  @staticmethod
+  async def get_history_trades(
+    account_id: str, start_date: str, end_date: str
+  ) -> List[Trade]:
+    """获取历史成交"""
+    service = TradeService(account_id)
+    return await service.get_history_trades(account_id, start_date, end_date)
+
+  @staticmethod
+  async def get_trade(
+    trade_id: str, account_id: str
+  ) -> Optional[Trade]:
+    """获取单个成交"""
+    service = TradeService(account_id)
+    return await service.get_trade_by_id(trade_id)

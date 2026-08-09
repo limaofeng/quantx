@@ -1,0 +1,217 @@
+# Strategies 模块查询操作
+
+# 获取所有策略
+query strategies {
+  strategies {
+    id
+    name
+    description
+    className
+    filePath
+    category
+    riskLevel
+    status
+    tags
+    version
+    codeHash
+    instrumentScope
+    instrumentUniverseMode
+    parameterSchema {
+      type
+      required
+      additionalProperties
+      properties {
+        key
+        value {
+          type
+          title
+          description
+          default
+          minimum
+          maximum
+          step
+          enum
+          enumDescriptions
+          placeholder
+          unit
+          widget
+          group
+        }
+      }
+    }
+    defaultParameters
+    isActive
+    createdAt
+    updatedAt
+  }
+}
+
+# 获取单个策略详情
+query strategy($strategyId: Int!) {
+  strategy(strategyId: $strategyId) {
+    id
+    name
+    description
+    riskLevel
+    category
+    status
+    instrumentScope
+    instrumentUniverseMode
+    defaultParameters
+    parameterSchema {
+      type
+      required
+      additionalProperties
+      properties {
+        key
+        value {
+          type
+          title
+          description
+          default
+          minimum
+          maximum
+          step
+          enum
+          enumDescriptions
+          placeholder
+          unit
+          widget
+          group
+        }
+      }
+    }
+  }
+}
+
+# 获取策略运行状态
+query strategyRuns {
+  strategyRuns {
+    id
+    name
+    strategy {
+      id
+      name
+    }
+    instruments
+    parameters
+    mode
+    status
+    profitLoss
+    totalTrades
+    metrics
+    errorMessage
+    createTime
+    startTime
+    stopTime
+  }
+}
+
+# 获取单个策略运行详情
+query strategyRun($runId: String!) {
+  strategyRun(runId: $runId) {
+    id
+    name
+    strategy {
+      id
+      name
+    }
+    instruments
+    parameters
+    mode
+    status
+    profitLoss
+    totalTrades
+    metrics
+    errorMessage
+    createTime
+    startTime
+    stopTime
+  }
+}
+
+query LimitUpBoardWorkbench(
+  $runId: String!
+  $backtestId: String
+  $includePerformance: Boolean!
+) {
+  strategyPendingTradeIntents(runId: $runId) {
+    id
+    runId
+    instrumentCode
+    side
+    bucket
+    reason
+    status
+    executionMode
+    confidence
+    limitPriceHint
+    targetPositionPct
+    targetAmount
+    targetVolume
+    signalPrice
+    limitUpPrice
+    distanceToLimitTicks
+    approvalExpiresAt
+    createdAt
+    metadata
+  }
+  strategyExitPlans(runId: $runId) {
+    id
+    instrumentCode
+    sourceType
+    bucket
+    status
+    entryFilledVolume
+    entryAvgPrice
+    exitedVolume
+    exitAvgPrice
+    remainingVolume
+    peakPrice
+    lastPrice
+    lastNetProfitPct
+    peakNetProfitPct
+    holdingTradingDays
+    pendingIntentId
+    pendingOrderId
+    lastExitReason
+    t1Policy
+    executionMode
+    autoExitAuthorized
+    ruleTypes
+    raw
+  }
+  strategyPerformance(
+    runId: $runId
+    backtestId: $backtestId
+    limit: 2000
+  ) @include(if: $includePerformance) {
+    summary
+    executionQuality
+    dataQuality {
+      status
+      warning
+      sampleCount
+    }
+  }
+}
+
+# TODO: Uncomment when backend is restarted
+# query backtestHistory($runId: String!) {
+#   backtestHistory(runId: $runId) {
+#     id
+#     strategyRunId
+#     version
+#     parameters
+#     instruments
+#     backtestStartTime
+#     backtestEndTime
+#     startTime
+#     endTime
+#     metrics
+#     status
+#     errorMessage
+#     resultPath
+#     createdAt
+#   }
+# }

@@ -1,0 +1,20 @@
+{
+  "name": "@quantx/docs",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "20.x",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "generate": "node scripts/generate-graphql-reference.mjs",
+    "dev": "npm run generate && vitepress dev --host 127.0.0.1 --port 5251 --strictPort",
+    "build": "npm run generate && vitepress build",
+    "check": "npm run build"
+  },
+  "dependencies": {
+    "graphql": "^16.11.0",
+    "vitepress": "1.6.4"
+  }
+}

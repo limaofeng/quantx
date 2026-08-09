@@ -1,0 +1,4501 @@
+"""账户信息"""
+type Account {
+  """账户ID"""
+  id: String!
+
+  """账户名称"""
+  accountName: String!
+
+  """账户类型"""
+  accountType: String!
+
+  """总资产"""
+  totalAsset: Float!
+
+  """可用余额"""
+  cash: Float!
+
+  """冻结资金"""
+  frozenCash: Float!
+
+  """持仓市值"""
+  marketValue: Float!
+
+  """总盈亏"""
+  totalProfitLoss: Float
+
+  """盈亏百分比"""
+  profitLossPercent: Float
+
+  """创建时间"""
+  createTime: DateTime!
+
+  """更新时间"""
+  updateTime: DateTime!
+}
+
+"""添加自选股输入"""
+input AddWatchlistItemInput {
+  """证券代码"""
+  stockCode: String!
+
+  """资金账号"""
+  accountId: String = null
+
+  """证券名称"""
+  instrumentName: String = null
+
+  """排序"""
+  displayOrder: Int = null
+
+  """分组"""
+  groupName: String = null
+
+  """备注"""
+  note: String = null
+}
+
+"""已登记的 QMT Agent 设备"""
+type AgentDevice {
+  id: String!
+  name: String!
+  status: String!
+  authorizedAccountIds: [String!]!
+  capabilities: [String!]!
+  lastSeenAt: DateTime
+  revokedAt: DateTime
+  requiresReconciliation: Boolean!
+}
+
+"""QMT Agent 设备操作结果"""
+type AgentDeviceMutationResult {
+  success: Boolean!
+  message: String!
+  deviceId: String
+}
+
+"""一次性 QMT Agent 登记码"""
+type AgentEnrollment {
+  enrollmentCode: String!
+  expiresAt: DateTime!
+}
+
+"""公告同步状态"""
+type AnnouncementSyncStatus {
+  """是否成功"""
+  success: Boolean!
+
+  """证券代码"""
+  stockCode: String!
+
+  """数据源状态"""
+  sourceStatus: String!
+
+  """状态摘要"""
+  message: String
+
+  """开始时间"""
+  startedAt: DateTime
+
+  """结束时间"""
+  finishedAt: DateTime
+
+  """公告数量"""
+  announcementCount: Int!
+
+  """回购事件数量"""
+  repurchaseCount: Int!
+
+  """错误信息"""
+  errorMessage: String
+}
+
+"""券商完整持仓快照元数据"""
+type BrokerPositionSnapshotInfo {
+  """券商快照单调序列"""
+  sequence: String!
+
+  """快照来源"""
+  source: String!
+
+  """券商上报时间"""
+  reportedAt: DateTime
+
+  """服务端接收时间"""
+  receivedAt: DateTime
+
+  """快照持仓数量"""
+  positionCount: Int!
+
+  """是否为完整快照"""
+  isComplete: Boolean!
+
+  """最近一次快照错误"""
+  lastError: String
+}
+
+"""策略三仓归因视图"""
+type BucketLedgerView {
+  lockedCore: Float!
+  core: Float!
+  swing: Float!
+  updatedAt: DateTime
+  raw: JSON!
+}
+
+"""撤单输入参数"""
+input CancelOrderInput {
+  """资金账号"""
+  accountId: String = null
+
+  """订单ID"""
+  orderId: Int!
+
+  """用户ID"""
+  userId: String! = "default"
+}
+
+"""撤单结果"""
+type CancelOrderResult {
+  """是否成功"""
+  success: Boolean!
+
+  """结果消息"""
+  message: String!
+
+  """订单ID"""
+  orderId: Int
+
+  """撤单命令幂等ID"""
+  clientOrderId: String
+
+  """命令状态"""
+  status: String
+}
+
+"""已清仓持仓周期"""
+type ClosedPositionCycle {
+  id: String!
+  accountId: String!
+  accountType: String
+  stockCode: String!
+  instrumentName: String
+  openedAt: DateTime
+  closedAt: DateTime!
+  buyVolume: Int!
+  sellVolume: Int!
+  averageBuyPrice: Float
+  averageSellPrice: Float
+  grossBuyAmount: Float!
+  grossSellAmount: Float!
+  grossRealizedPnl: Float
+  grossRealizedPnlPercent: Float
+  relatedTradeIds: [String!]!
+  source: String!
+  pnlQuality: String!
+  qualityFlags: [String!]!
+}
+
+"""已清仓持仓周期分页"""
+type ClosedPositionCyclePage {
+  items: [ClosedPositionCycle!]!
+  totalCount: Int!
+  hasMore: Boolean!
+}
+
+"""条件清仓单评估结果"""
+type ConditionalLiquidationEvaluationResult {
+  """条件清仓单"""
+  order: ConditionalLiquidationOrder!
+
+  """是否触发"""
+  triggered: Boolean!
+
+  """是否提交委托"""
+  submitted: Boolean!
+
+  """评估说明"""
+  message: String!
+
+  """计划卖出数量"""
+  sellVolume: Int!
+
+  """提交委托编号"""
+  orderId: String
+
+  """评估价格"""
+  latestPrice: Float
+
+  """评估收益率"""
+  profitPct: Float
+
+  """错误信息"""
+  error: String
+}
+
+"""条件清仓单"""
+type ConditionalLiquidationOrder {
+  """条件清仓单ID"""
+  id: String!
+
+  """资金账号"""
+  accountId: String!
+
+  """证券代码"""
+  stockCode: String!
+
+  """证券名称"""
+  instrumentName: String
+
+  """是否启用"""
+  enabled: Boolean!
+
+  """状态"""
+  status: String!
+
+  """目标收益率百分比"""
+  targetProfitPct: Float
+
+  """目标触发价"""
+  targetPrice: Float
+
+  """卖出数量模式"""
+  sellMode: String!
+
+  """卖出可卖数量比例"""
+  sellRatioPct: Float
+
+  """固定卖出股数"""
+  sellVolume: Int
+
+  """触发时间"""
+  triggeredAt: DateTime
+
+  """触发价格"""
+  triggeredPrice: Float
+
+  """触发收益率"""
+  triggeredProfitPct: Float
+
+  """提交委托编号"""
+  submittedOrderId: String
+
+  """提交委托数量"""
+  submittedVolume: Int
+
+  """最近检查时间"""
+  lastCheckedAt: DateTime
+
+  """最近错误"""
+  lastError: String
+
+  """备注"""
+  remark: String
+
+  """创建时间"""
+  createdAt: DateTime
+
+  """更新时间"""
+  updatedAt: DateTime
+}
+
+"""条件清仓单输入"""
+input ConditionalLiquidationOrderInput {
+  """条件清仓单ID"""
+  id: String = null
+
+  """证券代码"""
+  stockCode: String!
+
+  """资金账号"""
+  accountId: String = null
+
+  """证券名称"""
+  instrumentName: String = null
+
+  """是否启用"""
+  enabled: Boolean! = true
+
+  """目标收益率百分比"""
+  targetProfitPct: Float = null
+
+  """目标触发价"""
+  targetPrice: Float = null
+
+  """卖出数量模式"""
+  sellMode: String! = "ALL_AVAILABLE"
+
+  """卖出可卖数量比例"""
+  sellRatioPct: Float = null
+
+  """固定卖出股数"""
+  sellVolume: Int = null
+
+  """备注"""
+  remark: String = null
+}
+
+"""每日收盘资产快照"""
+type DailyAssetSnapshot {
+  """快照ID"""
+  id: String!
+
+  """快照层级：ACCOUNT 或 STRATEGY"""
+  scopeType: String!
+
+  """快照层级唯一键"""
+  scopeKey: String!
+
+  """资金账号"""
+  accountId: String
+
+  """账户类型"""
+  accountType: String
+
+  """策略运行实例ID"""
+  strategyRunId: String
+
+  """交易日"""
+  tradeDate: Date!
+
+  """快照时间"""
+  snapshotAt: DateTime!
+
+  """数据来源"""
+  source: String!
+
+  """总资产"""
+  totalAssetCny: Float!
+
+  """可用资金"""
+  cashAvailableCny: Float!
+
+  """冻结资金"""
+  cashFrozenCny: Float!
+
+  """持仓市值"""
+  marketValueCny: Float!
+
+  """总资产变动"""
+  grossAssetDeltaCny: Float
+
+  """出入金等资本流净额"""
+  netCapitalFlowCny: Float!
+
+  """当日盈亏"""
+  dailyPnlCny: Float
+
+  """当日收益率百分比"""
+  dailyReturnPct: Float
+
+  """上一日快照ID"""
+  previousSnapshotId: String
+
+  """数据质量"""
+  dataQuality: String!
+
+  """快照元数据"""
+  metadata: JSON!
+}
+
+"""每日资产快照游标分页"""
+type DailyAssetSnapshotPage {
+  """当前页快照"""
+  items: [DailyAssetSnapshot!]!
+
+  """分页信息"""
+  pageInfo: PageInfo!
+}
+
+"""Date (isoformat)"""
+scalar Date
+
+"""Date with time (isoformat)"""
+scalar DateTime
+
+"""已部署的流程"""
+type DeploymentFlowRun {
+  """部署ID"""
+  id: String!
+
+  """部署名称"""
+  name: String!
+
+  """流程名称"""
+  flowName: String!
+
+  """详细描述"""
+  description: String
+
+  """工作池名称"""
+  workPoolName: String
+
+  """工作队列名称"""
+  workQueueName: String!
+
+  """调度是否激活"""
+  isScheduleActive: Boolean!
+
+  """下次运行时间"""
+  nextRunTime: DateTime
+
+  """最后运行时间"""
+  lastRunTime: DateTime
+
+  """当前状态 (由最近一次运行决定)"""
+  status: String
+
+  """当前活跃运行ID"""
+  activeRunId: String
+
+  """当前活跃运行状态"""
+  activeRunStatus: String
+
+  """当前运行是否疑似卡死"""
+  isStale: Boolean!
+
+  """疑似卡死原因"""
+  staleReason: String
+
+  """最近运行活动时间"""
+  latestActivityTime: DateTime
+
+  """创建时间"""
+  created: DateTime
+
+  """更新时间"""
+  updated: DateTime
+
+  """该部署的运行记录"""
+  runs(limit: Int! = 10, offset: Int! = 0): [FlowRun!]!
+}
+
+"""除权因子"""
+type DividFactorData {
+  """股票代码"""
+  stockCode: String!
+
+  """除权除息日"""
+  exDate: String!
+
+  """时间"""
+  time: DateTime!
+
+  """分红"""
+  interest: Float!
+
+  """送股比例"""
+  stockBonus: Float!
+
+  """转增比例"""
+  stockGift: Float!
+
+  """配股数量"""
+  allotNum: Float!
+
+  """配股价格"""
+  allotPrice: Float!
+
+  """股改"""
+  gugai: Float!
+
+  """除权因子"""
+  dr: Float!
+}
+
+"""复权类型"""
+enum DividendType {
+  NONE
+  FRONT
+  BACK
+  FRONT_RATIO
+  BACK_RATIO
+}
+
+"""策略意图到成交的执行跟踪视图"""
+type ExecutionTraceView {
+  id: String!
+  intentId: String!
+  instrumentCode: String!
+  side: String!
+  orderId: String
+  riskDecision: String
+  sizingResult: String
+  orderStatus: String
+  fillStatus: String
+  executedPrice: Float
+  executedVolume: Int
+  executedTime: DateTime
+  reason: String
+  traceId: String
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+"""资产负债表核心字段"""
+type FinancialBalanceSheetData {
+  """标的代码"""
+  stockCode: String!
+
+  """报告截止日"""
+  reportDate: Date!
+
+  """公告日期"""
+  announceDate: Date
+
+  """资产总计"""
+  totalAssets: Float
+
+  """流动资产合计"""
+  totalCurrentAssets: Float
+
+  """非流动资产合计"""
+  totalNonCurrentAssets: Float
+
+  """货币资金"""
+  cashEquivalents: Float
+
+  """存货"""
+  inventories: Float
+
+  """负债合计"""
+  totalLiabilities: Float
+
+  """流动负债合计"""
+  totalCurrentLiability: Float
+
+  """非流动负债合计"""
+  nonCurrentLiabilities: Float
+
+  """所有者权益合计"""
+  totalEquity: Float
+
+  """归母股东权益合计"""
+  shareholderEquity: Float
+}
+
+"""股本结构核心字段"""
+type FinancialCapitalData {
+  """标的代码"""
+  stockCode: String!
+
+  """报告截止日"""
+  reportDate: Date!
+
+  """公告日期"""
+  announceDate: Date
+
+  """总股本"""
+  totalCapital: Float
+
+  """流通A股"""
+  circulatingCapital: Float
+
+  """限售流通股"""
+  restrictCirculatingCapital: Float
+
+  """自由流通股本"""
+  freeFloatCapital: Float
+}
+
+"""现金流量表核心字段"""
+type FinancialCashFlowData {
+  """标的代码"""
+  stockCode: String!
+
+  """报告截止日"""
+  reportDate: Date!
+
+  """公告日期"""
+  announceDate: Date
+
+  """经营活动现金流净额"""
+  netCashFlowsOperAct: Float
+
+  """投资活动现金流净额"""
+  netCashFlowsInvAct: Float
+
+  """筹资活动现金流净额"""
+  netCashFlowsFncAct: Float
+
+  """现金及现金等价物净增加额"""
+  netIncrCashCashEqu: Float
+
+  """期末现金及现金等价物余额"""
+  cashCashEquEndPeriod: Float
+}
+
+"""利润表核心字段"""
+type FinancialIncomeStatementData {
+  """标的代码"""
+  stockCode: String!
+
+  """报告截止日"""
+  reportDate: Date!
+
+  """公告日期"""
+  announceDate: Date
+
+  """营业总收入"""
+  revenue: Float
+
+  """营业收入"""
+  revenueInc: Float
+
+  """营业总成本"""
+  totalOperatingCost: Float
+
+  """营业利润"""
+  operProfit: Float
+
+  """利润总额"""
+  totalProfit: Float
+
+  """净利润"""
+  netProfit: Float
+
+  """归母净利润"""
+  netProfitExclMinIntInc: Float
+
+  """基本每股收益"""
+  epsBasic: Float
+}
+
+"""财务数据页整体统计"""
+type FinancialOverview {
+  """利润表记录数"""
+  reportCount: Int!
+
+  """覆盖标的数"""
+  instrumentCount: Int!
+
+  """最新报告期"""
+  latestReportDate: Date
+
+  """最新公告日"""
+  latestAnnounceDate: Date
+}
+
+"""财务数据页报表分页"""
+type FinancialReportPage {
+  """报表行"""
+  items: [FinancialReportSummary!]!
+
+  """总数"""
+  total: Int!
+}
+
+"""财务数据页报表行"""
+type FinancialReportSummary {
+  """标的代码"""
+  stockCode: String!
+
+  """标的名称"""
+  stockName: String
+
+  """报告截止日"""
+  reportDate: Date!
+
+  """公告日期"""
+  announceDate: Date
+
+  """营业总收入"""
+  revenue: Float
+
+  """归母净利润"""
+  netProfitExclMinIntInc: Float
+
+  """基本每股收益"""
+  epsBasic: Float
+}
+
+"""单票财务四表"""
+type FinancialStatements {
+  """标的代码"""
+  stockCode: String!
+
+  """利润表"""
+  income: [FinancialIncomeStatementData!]!
+
+  """资产负债表"""
+  balance: [FinancialBalanceSheetData!]!
+
+  """现金流量表"""
+  cashFlow: [FinancialCashFlowData!]!
+
+  """股本结构"""
+  capital: [FinancialCapitalData!]!
+}
+
+"""单票财务摘要"""
+type FinancialSummary {
+  """标的代码"""
+  stockCode: String!
+
+  """最新报告期"""
+  latestReportDate: Date
+
+  """最新公告日"""
+  latestAnnounceDate: Date
+
+  """营业总收入"""
+  revenue: Float
+
+  """归母净利润"""
+  netProfitExclMinIntInc: Float
+
+  """基本每股收益"""
+  epsBasic: Float
+
+  """资产总计"""
+  totalAssets: Float
+
+  """负债合计"""
+  totalLiabilities: Float
+
+  """所有者权益合计"""
+  totalEquity: Float
+
+  """经营现金流"""
+  operatingCashFlow: Float
+
+  """期末现金余额"""
+  cashBalance: Float
+
+  """总股本"""
+  totalCapital: Float
+
+  """流通A股"""
+  circulatingCapital: Float
+
+  """利润表记录数"""
+  incomeCount: Int!
+
+  """资产负债表记录数"""
+  balanceCount: Int!
+
+  """现金流记录数"""
+  cashFlowCount: Int!
+
+  """股本结构记录数"""
+  capitalCount: Int!
+}
+
+"""Prefect流程运行状态"""
+type FlowRun {
+  """运行ID"""
+  id: String!
+
+  """流程名称"""
+  flowName: String!
+
+  """运行状态"""
+  state: String!
+
+  """预期开始时间"""
+  expectedStartTime: DateTime
+
+  """创建时间"""
+  created: DateTime
+
+  """开始时间"""
+  startedAt: DateTime
+
+  """结束时间"""
+  finishedAt: DateTime
+
+  """总运行时间(秒)"""
+  totalRunTime: Float
+
+  """运行参数"""
+  parameters: String
+
+  """简略日志(已弃用)"""
+  logs: [String!]!
+
+  """任务运行列表"""
+  taskRuns: [TaskRun!]!
+
+  """详细日志"""
+  detailedLogs: [LogLine!]!
+}
+
+"""节假日信息"""
+type Holiday {
+  id: Int!
+  market: String!
+  year: Int!
+  holidayDate: Date!
+  description: String
+}
+
+"""节假日输入"""
+input HolidayInput {
+  date: Date!
+  description: String = null
+}
+
+"""节假日操作结果"""
+type HolidayMutationResult {
+  success: Boolean!
+  message: String!
+  holiday: Holiday
+}
+
+"""节假日查询结果"""
+type HolidayQueryResult {
+  items: [Holiday!]!
+  total: Int!
+}
+
+"""金融产品基本信息"""
+type Instrument {
+  """产品代码(主键)"""
+  id: String!
+
+  """合约市场代码"""
+  market: String
+
+  """合约代码"""
+  instrumentId: String!
+
+  """合约名称"""
+  name: String
+
+  """合约类型"""
+  type: InstrumentType
+
+  """合约名称的拼音简写"""
+  abbreviation: String
+
+  """合约的品种ID"""
+  productId: String
+
+  """合约的品种名称"""
+  productName: String
+
+  """交易所代码"""
+  exchangeCode: String
+
+  """前收盘价格"""
+  preClose: Float
+
+  """当日涨停价"""
+  upStopPrice: Float
+
+  """当日跌停价"""
+  downStopPrice: Float
+
+  """流通股本"""
+  floatVolume: Float
+
+  """总股本"""
+  totalVolume: Float
+
+  """最小变价单位"""
+  priceTick: Float
+
+  """合约是否可交易"""
+  isTrading: Boolean
+
+  """计息天数"""
+  interestAccrualDays: Int
+
+  """创建时间"""
+  createdAt: DateTime
+
+  """更新时间"""
+  updatedAt: DateTime
+
+  """获取股票最新实时行情"""
+  quote: StockQuote
+}
+
+type InstrumentConnection {
+  """节点边列表"""
+  edges: [InstrumentEdge!]!
+
+  """分页信息"""
+  pageInfo: PageInfo!
+
+  """列表中的项目总数"""
+  totalCount: Int!
+}
+
+type InstrumentEdge {
+  """数据节点"""
+  node: Instrument!
+
+  """节点的唯一光标"""
+  cursor: String!
+}
+
+input InstrumentOrder {
+  """排序字段"""
+  field: InstrumentOrderField!
+
+  """排序方向"""
+  direction: OrderDirection! = ASC
+}
+
+enum InstrumentOrderField {
+  CODE
+  NAME
+  MARKET
+  INSTRUMENT_TYPE
+  PRE_CLOSE
+  LIST_DATE
+  DELIST_DATE
+  IS_TRADING
+}
+
+"""
+金融产品类型
+
+- INDEX: 指数 - 股票市场的一个重要组成部分
+- STOCK: 股票 - 代表公司所有权的金融工具
+- FUND: 基金 - 由多个投资者共同投资的集合投资工具
+- ETF: 交易型开放式指数基金
+- TRR: 国债逆回购 - 一种短期融资工具
+"""
+enum InstrumentType {
+  INDEX
+  STOCK
+  FUND
+  ETF
+  TRR
+}
+
+input InstrumentWhereInput {
+  """按板块名称过滤"""
+  sector: String = null
+
+  """按工具类型过滤 (e.g., 'STOCK', 'FUND')"""
+  type: InstrumentType = null
+
+  """按多个工具类型过滤"""
+  type_in: [InstrumentType!] = null
+
+  """按市场过滤 (e.g., 'SH', 'SZ')"""
+  market: String = null
+
+  """按名称模糊搜索"""
+  name_contains: String = null
+
+  """按股票代码模糊搜索"""
+  stockCode_contains: String = null
+
+  """是否可交易"""
+  isTrading: Boolean = null
+}
+
+"""盘中全市场量能筛选输入"""
+input IntradayVolumeScreenInput {
+  """标的范围：默认股票，可切换 ETF 或股票+ETF"""
+  universe: StockScreenUniverse! = STOCK
+
+  """包含行业"""
+  includeIndustries: [String!] = null
+
+  """排除行业"""
+  excludeIndustries: [String!] = null
+
+  """是否排除 ST/*ST 风险警示股票"""
+  excludeSt: Boolean! = true
+
+  """最小盘中量能进度倍数"""
+  minVolumePaceRatio: Float = null
+
+  """最小盘中成交额进度倍数"""
+  minAmountPaceRatio: Float = null
+
+  """最小近5分钟放量倍数"""
+  minLast5mVolumeRatio: Float = null
+
+  """最小盘中换手率 %"""
+  minIntradayTurnoverRate: Float = null
+
+  """最小五档盘口量失衡"""
+  minDepthImbalance5: Float = null
+
+  """超过该秒数未更新标记为 stale"""
+  staleAfterSeconds: Int! = 10
+
+  """每页数量，最大200"""
+  limit: Int! = 200
+
+  """偏移量"""
+  offset: Int! = 0
+}
+
+"""盘中全市场量能筛选结果项"""
+type IntradayVolumeScreenItem {
+  code: String!
+  name: String!
+  industry: String
+  instrumentType: String!
+  currentPrice: Float!
+  changePct: Float!
+  volume: Float!
+  amount: Float!
+  volumeRatio: Float!
+  amountRatio: Float!
+  volumePaceRatio: Float!
+  amountPaceRatio: Float!
+  last5mVolumeRatio: Float!
+  intradayTurnoverRatePct: Float
+  depthImbalance5: Float!
+  avgTradeAmountProxy: Float
+  matchedSignals: [String!]!
+  updatedAt: DateTime!
+  isStale: Boolean!
+}
+
+"""盘中全市场量能筛选分页结果"""
+type IntradayVolumeScreenPage {
+  items: [IntradayVolumeScreenItem!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+  updatedAt: DateTime
+  isScannerRunning: Boolean!
+  warnings: [String!]!
+}
+
+"""日内热缓存状态"""
+type IntradayWarmCacheStatus {
+  """股票代码"""
+  stockCode: String!
+
+  """热池来源"""
+  sources: [String!]!
+
+  """是否已订阅 tick"""
+  tickSubscribed: Boolean!
+
+  """是否已订阅 1m K线"""
+  klineSubscribed: Boolean!
+
+  """首次初始化下载所属交易日"""
+  initializedDate: Date
+
+  """是否正在初始化下载"""
+  initializing: Boolean!
+
+  """初始化下载错误"""
+  initializationError: String
+
+  """最近 tick 时间"""
+  lastTickAt: DateTime
+
+  """最近 1m K线时间"""
+  lastKlineAt: DateTime
+
+  """缓存 tick 数量"""
+  tickCount: Int!
+
+  """缓存 1m K线数量"""
+  klineCount: Int!
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
+"""K线数据"""
+type KLineData {
+  """股票代码"""
+  stockCode: String!
+
+  """K线周期"""
+  period: String!
+
+  """时间戳"""
+  time: DateTime!
+
+  """开盘价"""
+  open: Float!
+
+  """最高价"""
+  high: Float!
+
+  """最低价"""
+  low: Float!
+
+  """收盘价"""
+  close: Float!
+
+  """前收盘价"""
+  preClose: Float!
+
+  """成交量"""
+  volume: Int!
+
+  """成交额"""
+  amount: Float!
+}
+
+"""K线分页结果"""
+type KLinePage {
+  """K线列表(按 order 排序)"""
+  items: [KLineData!]!
+
+  """分页信息"""
+  pageInfo: PageInfo!
+}
+
+"""K线分页参数"""
+input KLinePageInput {
+  """股票代码"""
+  stockCode: String!
+
+  """K线周期"""
+  period: KLinePeriod! = MIN_1
+
+  """复权类型"""
+  dividendType: DividendType! = NONE
+
+  """游标时间(不包含)"""
+  cursor: DateTime = null
+
+  """分页方向"""
+  direction: PageDirection! = PREV
+
+  """返回排序方向，可选 asc 或 desc"""
+  order: String! = "desc"
+
+  """每页数量"""
+  limit: Int! = 200
+}
+
+"""K线周期"""
+enum KLinePeriod {
+  MIN_1
+  MIN_5
+  MIN_15
+  MIN_30
+  MIN_60
+  HOUR_1
+  DAY_1
+  WEEK_1
+  MONTH_1
+  QUARTER_1
+  HALF_YEAR_1
+  YEAR_1
+}
+
+"""可清仓持仓"""
+type LiquidatablePosition {
+  """股票代码"""
+  stockCode: String!
+
+  """证券名称"""
+  instrumentName: String
+
+  """持仓数量"""
+  volume: Int!
+
+  """可用数量"""
+  canUseVolume: Int!
+
+  """市值"""
+  marketValue: Float!
+
+  """平均成本价"""
+  avgPrice: Float
+}
+
+"""一键清仓输入"""
+input LiquidateAllPositionsInput {
+  """风险确认"""
+  confirm: Boolean!
+
+  """最大重试次数"""
+  maxRetry: Int! = 3
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""个股清仓输入"""
+input LiquidatePositionInput {
+  """股票代码"""
+  stockCode: String!
+
+  """风险确认"""
+  confirm: Boolean!
+
+  """最大重试次数"""
+  maxRetry: Int! = 3
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""清仓错误"""
+type LiquidationError {
+  """股票代码"""
+  stockCode: String!
+
+  """错误信息"""
+  error: String!
+}
+
+"""清仓订单"""
+type LiquidationOrder {
+  """清仓订单ID"""
+  id: String!
+
+  """资金账号"""
+  accountId: String!
+
+  """清仓类型"""
+  liquidationType: String!
+
+  """清仓状态"""
+  status: String!
+
+  """股票代码"""
+  stockCode: String
+
+  """证券名称"""
+  instrumentName: String
+
+  """目标清仓数量"""
+  targetVolume: Int
+
+  """已完成数量"""
+  completedVolume: Int!
+
+  """目标清仓金额"""
+  targetAmount: Float
+
+  """已完成金额"""
+  completedAmount: Float!
+
+  """开始执行时间"""
+  startTime: String
+
+  """结束时间"""
+  endTime: String
+
+  """重试次数"""
+  retryCount: Int!
+
+  """备注信息"""
+  remark: String
+
+  """错误信息"""
+  errorMessage: String
+
+  """创建时间"""
+  createdAt: String
+}
+
+"""清仓结果"""
+type LiquidationResult {
+  """是否成功"""
+  success: Boolean!
+
+  """总持仓数量"""
+  totalPositions: Int!
+
+  """已清仓数量"""
+  liquidatedPositions: Int!
+
+  """失败数量"""
+  failedPositions: Int!
+
+  """结果消息"""
+  message: String!
+
+  """订单列表"""
+  orders: [String!]!
+
+  """错误列表"""
+  errors: [LiquidationError!]!
+}
+
+"""清仓概况"""
+type LiquidationSummary {
+  """总持仓数量"""
+  totalPositions: Int!
+
+  """可清仓持仓数量"""
+  liquidatablePositions: Int!
+
+  """总市值"""
+  totalMarketValue: Float!
+
+  """持仓列表"""
+  positions: [LiquidatablePosition!]!
+}
+
+"""日志级别"""
+enum LogLevel {
+  DEBUG
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+"""日志行"""
+type LogLine {
+  """时间戳"""
+  time: DateTime!
+
+  """日志级别"""
+  level: Int!
+
+  """日志内容"""
+  message: String!
+}
+
+"""市场深度数据"""
+type MarketDepth {
+  """股票代码"""
+  stockCode: String!
+
+  """时间戳"""
+  time: DateTime!
+
+  """买盘数据"""
+  bids: [MarketDepthLevel!]!
+
+  """卖盘数据"""
+  asks: [MarketDepthLevel!]!
+}
+
+"""市场深度档位"""
+type MarketDepthLevel {
+  """价格"""
+  price: Float!
+
+  """数量"""
+  volume: Int!
+}
+
+"""消息响应"""
+type MessageResponse {
+  """操作是否成功"""
+  success: Boolean!
+
+  """响应消息"""
+  message: String!
+}
+
+"QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 清仓管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
+type Mutation {
+  """创建十分钟内有效的一次性设备登记码"""
+  createAgentEnrollment(name: String! = "QuantX QMT Agent", authorizedAccountIds: [String!]! = []): AgentEnrollment!
+
+  """撤销 Agent 设备"""
+  revokeAgentDevice(deviceId: String!): AgentDeviceMutationResult!
+
+  """刷新单票公告与回购数据"""
+  refreshStockDisclosures(stockCode: String!, force: Boolean! = false): AnnouncementSyncStatus!
+
+  """下单"""
+  placeOrder(input: OrderInput!): OrderMutationResult!
+
+  """撤单"""
+  cancelOrder(input: CancelOrderInput!): CancelOrderResult!
+
+  """一键清仓"""
+  liquidateAllPositions(input: LiquidateAllPositionsInput!): LiquidationResult!
+
+  """个股清仓"""
+  liquidatePosition(input: LiquidatePositionInput!): PositionLiquidationResult!
+
+  """创建或更新条件清仓单"""
+  upsertConditionalLiquidationOrder(input: ConditionalLiquidationOrderInput!): ConditionalLiquidationOrder!
+
+  """启用或停用条件清仓单"""
+  setConditionalLiquidationOrderEnabled(orderId: String!, enabled: Boolean!): ConditionalLiquidationOrder
+
+  """取消条件清仓单"""
+  cancelConditionalLiquidationOrder(orderId: String!): ConditionalLiquidationOrder
+
+  """立即评估条件清仓单"""
+  evaluateConditionalLiquidationOrders(accountId: String = null, stockCode: String = null): [ConditionalLiquidationEvaluationResult!]!
+
+  """已清仓股票资金赎回"""
+  redeemClearedPosition(input: RedeemPositionInput!): RedemptionResult!
+
+  """取消清仓订单"""
+  cancelLiquidationOrder(orderId: String!, accountId: String!): MessageResponse!
+
+  """运行策略（创建并启动）"""
+  runStrategy(input: StrategyRunInput!, autoStart: Boolean! = true): StrategyRun!
+
+  """更新策略运行配置"""
+  updateStrategyRun(runId: String!, runUpdate: StrategyRunUpdateInput!): StrategyRun
+
+  """删除策略运行"""
+  deleteStrategyRun(runId: String!): MessageResponse!
+
+  """启动或重启策略"""
+  startStrategy(runId: String!): OperationResult!
+
+  """停止策略"""
+  stopStrategy(runId: String!): OperationResult!
+
+  """暂停策略"""
+  pauseStrategy(runId: String!): OperationResult!
+
+  """恢复策略"""
+  resumeStrategy(runId: String!): OperationResult!
+
+  """重启策略(仅限回测)"""
+  restartStrategy(runId: String!): OperationResult!
+
+  """在当前回测实例下新增一个回测版本并启动"""
+  rerunBacktestVersion(runId: String!, backtestStartTime: DateTime = null, backtestEndTime: DateTime = null): StrategyBacktest!
+
+  """删除指定回测版本"""
+  deleteBacktestVersion(runId: String!, backtestId: String!): OperationResult!
+
+  """克隆策略运行(转模拟盘/实盘)"""
+  cloneStrategy(runId: String!, targetMode: StrategyRunMode!, parameterOverrides: JSON = null): OperationResult!
+
+  """创建策略实例"""
+  createStrategyInstance(input: StrategyInstanceCreateInput!, autoStart: Boolean! = true): StrategyInstance!
+
+  """更新策略实例参数"""
+  updateStrategyInstanceParameters(instanceId: String!, input: StrategyInstanceParameterUpdateInput!): StrategyInstance
+
+  """更新 Pullback Grid 网格簿"""
+  updateStrategyGridBook(instanceId: String!, input: StrategyGridBookUpdateInput!): StrategyGridBook!
+
+  """暂停策略实例"""
+  pauseStrategyInstance(instanceId: String!): OperationResult!
+
+  """恢复策略实例"""
+  resumeStrategyInstance(instanceId: String!): OperationResult!
+
+  """确认一个等待人工授权的策略交易意图"""
+  approveStrategyTradeIntent(runId: String!, intentId: String!): OperationResult!
+
+  """拒绝一个等待人工授权的策略交易意图"""
+  rejectStrategyTradeIntent(runId: String!, intentId: String!, reason: String! = "USER_REJECTED"): OperationResult!
+
+  """归档策略实例"""
+  archiveStrategyInstance(instanceId: String!): StrategyInstance
+
+  """复制策略实例并绑定新标的"""
+  cloneStrategyInstance(sourceId: String!, instrumentCode: String!): StrategyInstance!
+
+  """@deprecated 使用 run_strategy() 替代"""
+  createStrategyRun(input: StrategyRunInput!): StrategyRun!
+
+  """@deprecated 使用 start_strategy() 替代"""
+  startStrategyRun(runId: String!): OperationResult!
+
+  """@deprecated 使用 stop_strategy() 替代"""
+  stopStrategyRun(runId: String!): OperationResult!
+
+  """@deprecated 使用 pause_strategy() 替代"""
+  pauseStrategyRun(runId: String!): OperationResult!
+
+  """@deprecated 使用 resume_strategy() 替代"""
+  resumeStrategyRun(runId: String!): OperationResult!
+
+  """运行部署"""
+  runDeployment(deploymentId: String!, parameters: JSON = null): FlowRun!
+
+  """取消流程运行"""
+  cancelFlowRun(runId: String!): OperationResult!
+
+  """重试流程运行"""
+  retryFlowRun(runId: String!): FlowRun!
+
+  """启用或暂停部署的自动调度"""
+  setDeploymentScheduleActive(deploymentId: String!, active: Boolean!): DeploymentFlowRun!
+
+  """添加节假日"""
+  addHoliday(market: String!, holidayDate: Date!, description: String = null): HolidayMutationResult!
+
+  """删除节假日"""
+  deleteHoliday(id: Int!): HolidayMutationResult!
+
+  """批量保存节假日（覆盖整年）"""
+  bulkSaveHolidays(market: String!, year: Int!, holidays: [HolidayInput!]!): HolidayMutationResult!
+
+  """添加或更新自选股"""
+  addWatchlistItem(input: AddWatchlistItemInput!): WatchlistMutationResult!
+
+  """删除自选股"""
+  removeWatchlistItem(stockCode: String!, accountId: String = null): WatchlistMutationResult!
+
+  """替换自选股列表"""
+  replaceWatchlist(symbols: [String!]!, accountId: String = null): WatchlistMutationResult!
+
+  """更新自选股排序"""
+  reorderWatchlist(input: ReorderWatchlistInput!): WatchlistMutationResult!
+
+  """确认已查看运行告警"""
+  acknowledgeOperationalAlert(id: ID!): OperationalAlert!
+
+  """解决运行告警并记录处置结果"""
+  resolveOperationalAlert(id: ID!, resolution: String!): OperationalAlert!
+
+  """保存并协调全局持仓做 T 监控"""
+  saveTTradeGlobalMonitor(input: TTradeGlobalSettingsInput!): TTradeGlobalMutationResult!
+
+  """立即重新同步全局做 T 持仓"""
+  reconcileTTradeGlobalMonitor(accountId: String!): TTradeGlobalMutationResult!
+
+  """启动持仓做 T 会话"""
+  startTTradeSession(input: TTradeStartInput!): TTradeMutationResult!
+
+  """确认做 T 买入信号"""
+  approveTTradeEntry(runId: String!, intentId: String!, expectedSignalVersion: Int! = 0, idempotencyKey: String! = ""): TTradeMutationResult!
+
+  """完成门禁检查并启用严格 Canary 实盘"""
+  activateTTradeLive(accountId: String!, policyVersion: Int!): TTradeOperationsMutationResult!
+
+  """停止做 T 新买入，继续保护已有批次"""
+  pauseTTradeEntries(accountId: String!, reason: String! = "manual pause"): TTradeOperationsMutationResult!
+
+  """触发做 T 紧急停止并转人工处置"""
+  triggerTTradeKillSwitch(accountId: String!, reason: String!): TTradeOperationsMutationResult!
+
+  """撤销当前仍可撤的做 T 委托"""
+  cancelTTradeOrder(accountId: String!, clientOrderId: String!): TTradeOperationsMutationResult!
+
+  """忽略做 T 买入信号"""
+  rejectTTradeEntry(runId: String!, intentId: String!): TTradeMutationResult!
+
+  """导入外部已成交买单并启用做 T 自动退出"""
+  importTTradeExternalEntry(input: TTradeExternalEntryInput!): TTradeMutationResult!
+
+  """读取 QMT Agent 已收敛的当日委托"""
+  syncTTradeSourceOrders(accountId: String!): TTradeMutationResult!
+
+  """安全停止做 T 会话"""
+  stopTTradeSession(runId: String!): TTradeMutationResult!
+
+  """启动隔离的做 T 历史回放"""
+  startTTradeReplay(input: TTradeReplayStartInput!): TTradeReplayMutationResult!
+
+  """取消正在执行的做 T 历史回放"""
+  cancelTTradeReplay(runId: String!): TTradeReplayMutationResult!
+}
+
+"""操作结果"""
+type OperationResult {
+  """操作是否成功"""
+  success: Boolean!
+
+  """结果消息"""
+  message: String!
+
+  """额外数据"""
+  data: String
+}
+
+"""可确认并闭环的持久化运行告警"""
+type OperationalAlert {
+  id: String!
+  severity: String!
+  source: String!
+  code: String!
+  accountId: String
+  businessId: String
+  message: String!
+  details: JSON!
+  status: String!
+  occurrences: Int!
+  firstSeenAt: DateTime!
+  lastSeenAt: DateTime!
+  acknowledgedBy: String
+  acknowledgedAt: DateTime
+  resolvedBy: String
+  resolvedAt: DateTime
+  resolution: String
+}
+
+"""订单信息"""
+type Order {
+  """订单编号"""
+  id: String!
+
+  """柜台合同编号"""
+  sysid: String!
+
+  """股票代码"""
+  stockCode: String!
+
+  """委托类型"""
+  type: OrderType!
+
+  """委托数量"""
+  volume: Int!
+
+  """报价类型"""
+  priceType: OrderPriceType!
+
+  """委托价格"""
+  price: Float!
+
+  """成交数量"""
+  tradedVolume: Int!
+
+  """成交均价"""
+  tradedPrice: Float!
+
+  """订单状态"""
+  status: OrderStatus!
+
+  """状态信息"""
+  statusMsg: String
+
+  """策略名称"""
+  strategyName: String
+
+  """报单时间"""
+  time: DateTime!
+
+  """股票名称"""
+  stockName: String!
+
+  """订单备注"""
+  orderRemark: String
+
+  """成交明细列表"""
+  trades(accountId: String = null): [Trade!]!
+}
+
+enum OrderDirection {
+  ASC
+  DESC
+}
+
+"""订单事件 (个人量化软件专用)"""
+type OrderEvent {
+  """事件类型"""
+  eventType: TradingEventType!
+
+  """订单信息"""
+  order: Order!
+
+  """事件时间戳"""
+  time: DateTime!
+
+  """变更描述"""
+  changes: String
+}
+
+"""订单输入参数"""
+input OrderInput {
+  """资金账号"""
+  accountId: String = null
+
+  """股票代码"""
+  stockCode: String!
+
+  """委托类型: BUY/SELL"""
+  type: String!
+
+  """报价类型: LIMIT/MARKET/BEST"""
+  priceType: String!
+
+  """委托数量"""
+  volume: Int!
+
+  """委托价格"""
+  price: Float!
+
+  """策略名称"""
+  strategyName: String
+
+  """订单备注"""
+  orderRemark: String
+
+  """调用方生成的业务幂等键"""
+  idempotencyKey: String = null
+}
+
+"""下单结果"""
+type OrderMutationResult {
+  """是否成功"""
+  success: Boolean!
+
+  """结果消息"""
+  message: String!
+
+  """订单ID"""
+  orderId: Int
+
+  """服务端幂等订单ID"""
+  clientOrderId: String
+
+  """命令状态"""
+  status: String
+
+  """订单详情"""
+  order: Order
+}
+
+enum OrderPriceType {
+  ANY
+  LIMIT
+  BEST
+  PROP_ALLOTMENT
+  PROP_REFER
+  PROP_SUBSCRIBE
+  PROP_BUYBACK
+  PROP_PLACING
+  PROP_DECIDE
+  PROP_EQUITY
+  PROP_SELLBACK
+  PROP_DIVIDEND
+  PROP_SHENZHEN_PLACING
+  PROP_CANCEL_PLACING
+  PROP_WDZY
+  PROP_DJZY
+  PROP_WDJY
+  PROP_JDJY
+  PROP_ETF
+  PROP_VOTE
+  PROP_YYSGYS
+  PROP_YSYYJC
+  PROP_FUND_DEVIDEND
+  PROP_FUND_ENTRUST
+  PROP_CROSS_MARKET
+  PROP_EXERCIS
+  PROP_PEER_PRICE_FIRST
+  PROP_L5_FIRST_LIMITPX
+  PROP_MIME_PRICE_FIRST
+  PROP_INSTBUSI_RESTCANCEL
+  PROP_L5_FIRST_CANCEL
+  PROP_FULL_REAL_CANCEL
+  PROP_DIRECT_SECU_REPAY
+  PROP_FUND_CHAIHE
+  PROP_DEBT_CONVERSION
+  ENHANCED_LIMIT
+  RETAIL_LIMIT
+  PROP_INCREASE_SHARE
+  PROP_COLLATERAL_TRANSFER
+  PROP_NEEQ_PRICING
+  PROP_NEEQ_MATCH_CONFIRM
+  PROP_NEEQ_MUTUAL_MATCH_CONFIRM
+  PROP_NEEQ_LIMIT
+}
+
+enum OrderStatus {
+  UNREPORTED
+  WAIT_REPORTING
+  REPORTED
+  REPORTED_CANCEL
+  PARTSUCC_CANCEL
+  PART_CANCEL
+  CANCELED
+  PART_SUCC
+  SUCCEEDED
+  JUNK
+  UNKNOWN
+}
+
+"""
+委托类型
+
+- BUY: 买入 - 买入股票的委托类型
+- SELL: 卖出 - 卖出股票的委托类型
+"""
+enum OrderType {
+  BUY
+  SELL
+}
+
+"""时间序列分页方向"""
+enum PageDirection {
+  PREV
+  NEXT
+}
+
+type PageInfo {
+  """是否有下一页"""
+  hasNextPage: Boolean!
+
+  """是否有上一页"""
+  hasPreviousPage: Boolean!
+
+  """当前页的起始光标"""
+  startCursor: String
+
+  """当前页的结束光标"""
+  endCursor: String
+}
+
+"""分页的流程运行记录"""
+type PaginatedFlowRuns {
+  """总记录数"""
+  total: Int!
+
+  """当前页记录"""
+  items: [FlowRun!]!
+}
+
+"""参数属性定义（支持递归嵌套）"""
+type ParameterProperty {
+  """参数类型: integer, number, string, boolean, array, object"""
+  type: String!
+
+  """嵌套对象属性列表（type=object 时使用）"""
+  properties: [ParameterPropertyEntry!]
+
+  """数组元素定义（type=array 时使用）"""
+  items: ParameterProperty
+
+  """嵌套对象必填字段"""
+  required: [String!]
+
+  """默认值"""
+  default: JSON
+
+  """最小值"""
+  minimum: Float
+
+  """最大值"""
+  maximum: Float
+
+  """枚举值列表"""
+  enum: [String!]
+
+  """参数标题"""
+  title: String
+
+  """参数描述"""
+  description: String
+
+  """参数分组"""
+  group: String
+
+  """参数单位"""
+  unit: String
+
+  """数值步长"""
+  step: Float
+
+  """枚举值说明（JSON 对象）"""
+  enumDescriptions: JSON
+
+  """表单控件类型"""
+  widget: String
+
+  """占位符文本"""
+  placeholder: String
+}
+
+"""参数属性键值对"""
+type ParameterPropertyEntry {
+  """参数名称"""
+  key: String!
+
+  """参数属性定义"""
+  value: ParameterProperty!
+}
+
+"""参数 Schema 定义（GraphQL）"""
+type ParameterSchema {
+  """Schema 类型（通常为 'object'）"""
+  type: String!
+
+  """参数属性定义列表（支持嵌套对象和数组）"""
+  properties: [ParameterPropertyEntry!]!
+
+  """必填字段列表"""
+  required: [String!]!
+
+  """是否允许额外属性"""
+  additionalProperties: Boolean!
+}
+
+"""账户持仓首屏一致性读模型"""
+type PortfolioOverview {
+  """账户资产快照"""
+  account: Account!
+
+  """同一快照下的持仓"""
+  positions: [Position!]!
+
+  """基于同一持仓集合的汇总"""
+  summary: PortfolioSummary!
+
+  """券商持仓快照元数据"""
+  positionSnapshot: BrokerPositionSnapshotInfo
+
+  """首屏数据时间"""
+  asOf: DateTime!
+}
+
+"""持仓表现汇总"""
+type PortfolioSummary {
+  """账户ID"""
+  accountId: String!
+
+  """账户名称"""
+  accountName: String!
+
+  """总资产"""
+  totalAsset: Float!
+
+  """总持仓市值"""
+  totalMarketValue: Float!
+
+  """可用现金"""
+  cash: Float!
+
+  """现金占比（%）"""
+  cashRatio: Float!
+
+  """总盈亏"""
+  totalProfitLoss: Float!
+
+  """总盈亏比例（%）"""
+  totalProfitLossPercent: Float!
+
+  """当日盈亏"""
+  todayProfitLoss: Float
+
+  """当日盈亏比例（%）"""
+  todayProfitLossPercent: Float
+
+  """持仓品种数量"""
+  positionCount: Int!
+
+  """盈利品种数量"""
+  profitPositionCount: Int!
+
+  """亏损品种数量"""
+  lossPositionCount: Int!
+
+  """前10大持仓"""
+  topHoldings: [Position!]!
+
+  """数据更新时间"""
+  updateTime: DateTime!
+}
+
+"""持仓信息"""
+type Position {
+  """持仓ID"""
+  id: String!
+
+  """资金账号"""
+  accountId: String!
+
+  """账户类型"""
+  accountType: String
+
+  """证券代码"""
+  stockCode: String!
+
+  """证券名称"""
+  instrumentName: String
+
+  """持仓数量,股票以'股'为单位, 债券以'张'为单位"""
+  volume: Int!
+
+  """可用数量, 股票以'股'为单位, 债券以'张'为单位"""
+  canUseVolume: Int!
+
+  """冻结数量"""
+  frozenVolume: Int!
+
+  """在途股份"""
+  onRoadVolume: Int!
+
+  """昨夜拥股"""
+  yesterdayVolume: Int!
+
+  """开仓价"""
+  openPrice: Float
+
+  """成本价"""
+  avgPrice: Float
+
+  """市值"""
+  marketValue: Float
+
+  """多空, 股票不需要"""
+  direction: Int
+
+  """创建时间"""
+  createdAt: DateTime
+
+  """更新时间"""
+  updatedAt: DateTime
+
+  """当前价"""
+  lastPrice: Float
+
+  """盈亏比例"""
+  profitRate: Float
+
+  """盈亏金额"""
+  profitLoss: Float
+
+  """市值占比（%）- 仅在汇总查询中有值"""
+  marketValuePercent: Float
+
+  """获取股票最新实时行情"""
+  quote: StockQuote
+
+  """证券产品详细信息"""
+  instrument: Instrument
+}
+
+"""个股清仓结果"""
+type PositionLiquidationResult {
+  """是否成功"""
+  success: Boolean!
+
+  """股票代码"""
+  stockCode: String!
+
+  """清仓数量"""
+  volume: Int
+
+  """订单ID"""
+  orderId: String
+
+  """结果消息"""
+  message: String!
+
+  """错误信息"""
+  error: String
+}
+
+"QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 清仓管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
+type Query {
+  """当前用户登记的 Agent 设备"""
+  agentDevices(includeRevoked: Boolean! = false): [AgentDevice!]!
+
+  """获取单票公告与回购摘要"""
+  stockDisclosureSummary(stockCode: String!, limit: Int! = 20): StockDisclosureSummary!
+
+  """获取除权因子数据"""
+  dividFactors(stockCode: String!, startTime: DateTime = null, endTime: DateTime = null, limit: Int = null): [DividFactorData!]!
+
+  """获取财务数据页整体统计"""
+  financialOverview: FinancialOverview!
+
+  """获取最新财报列表"""
+  financialReports(search: String = null, limit: Int! = 50, offset: Int! = 0): FinancialReportPage!
+
+  """获取单票最新财务摘要"""
+  financialSummary(stockCode: String!): FinancialSummary!
+
+  """获取单票财务四表"""
+  financialStatements(stockCode: String!, limit: Int! = 20): FinancialStatements!
+
+  """获取单个金融工具信息"""
+  instrument(stockCode: String!): Instrument
+
+  """获取金融工具列表（非分页，有数量限制）"""
+  instruments(limit: Int! = 100, where: InstrumentWhereInput = null, orderBy: InstrumentOrder = null): [Instrument!]!
+
+  """获取金融工具列表（光标分页）"""
+  instrumentsConnection(first: Int! = 20, last: Int! = 20, after: String = null, before: String = null, where: InstrumentWhereInput = null, orderBy: InstrumentOrder = null): InstrumentConnection!
+
+  """批量读取 Engine 热缓存中的最新行情"""
+  latestMarketQuotes(stockList: [String!]!): [StockQuote!]!
+
+  """获取历史K线数据"""
+  klines(stockCode: String!, period: KLinePeriod! = MIN_1, startTime: DateTime = null, endTime: DateTime = null, limit: Int = null, dividendType: DividendType! = NONE, order: String! = "desc"): [KLineData!]!
+
+  """分页获取历史K线数据"""
+  klinesPage(page: KLinePageInput!): KLinePage!
+
+  """获取历史Tick数据"""
+  ticks(stockCode: String!, startTime: DateTime = null, endTime: DateTime = null, limit: Int = null, order: String! = "desc"): [TickData!]!
+
+  """查看日内热缓存状态"""
+  intradayWarmCacheStatus(symbols: [String!] = null): [IntradayWarmCacheStatus!]!
+
+  """获取交易日历（指定区间内的交易日列表）"""
+  tradingCalendar(market: String! = "SH", startDate: Date = null, endDate: Date = null): [Date!]!
+
+  """获取当日委托列表"""
+  todayOrders(accountId: String = null): [Order!]!
+
+  """获取历史委托列表"""
+  historyOrders(startDate: String!, endDate: String!, accountId: String = null): [Order!]!
+
+  """获取单个委托"""
+  order(orderId: Int!, accountId: String = null): Order
+
+  """获取当日成交列表"""
+  todayTrades(accountId: String = null): [Trade!]!
+
+  """获取历史成交列表"""
+  historyTrades(accountId: String!, startDate: String!, endDate: String!): [Trade!]!
+
+  """获取单个成交记录"""
+  trade(tradeId: String!, accountId: String = null): Trade
+
+  """一次读取账户、持仓、汇总和券商快照元数据"""
+  portfolioOverview(accountId: String!): PortfolioOverview!
+
+  """获取持仓列表"""
+  positions(accountId: String = null): [Position!]!
+
+  """获取单个持仓信息"""
+  position(stockCode: String!, accountId: String = null): Position
+
+  """获取账户信息"""
+  account(accountId: String!): Account
+
+  """获取当前账户信息"""
+  currentAccount: Account
+
+  """获取持仓表现汇总"""
+  portfolioSummary(accountId: String = null): PortfolioSummary!
+
+  """获取每日收盘资产快照"""
+  dailyAssetSnapshots(accountId: String = null, strategyRunId: String = null, scopeType: String = null, startDate: String = null, endDate: String = null, limit: Int! = 366): [DailyAssetSnapshot!]!
+
+  """按日期和稳定游标分页获取每日资产快照"""
+  dailyAssetSnapshotsPage(accountId: String = null, strategyRunId: String = null, scopeType: String = null, startDate: String = null, endDate: String = null, first: Int! = 60, after: String = null): DailyAssetSnapshotPage!
+
+  """分页获取已清仓持仓周期"""
+  closedPositionCycles(accountId: String!, startDate: String = null, endDate: String = null, limit: Int! = 50, offset: Int! = 0): ClosedPositionCyclePage!
+
+  """获取清仓概况"""
+  liquidationSummary(accountId: String = null): LiquidationSummary!
+
+  """获取条件清仓单列表"""
+  conditionalLiquidationOrders(accountId: String = null, stockCode: String = null, includeCancelled: Boolean! = false): [ConditionalLiquidationOrder!]!
+
+  """获取清仓订单列表"""
+  liquidationOrders(accountId: String!, limit: Int! = 20, offset: Int! = 0): [LiquidationOrder!]!
+
+  """获取单个清仓订单"""
+  liquidationOrder(orderId: String!, accountId: String!): LiquidationOrder!
+
+  """获取赎回记录列表"""
+  redemptionRecords(accountId: String!, stockCode: String!, limit: Int! = 20, offset: Int! = 0): [RedemptionRecord!]!
+
+  """获取策略模板列表"""
+  strategies: [Strategy!]!
+
+  """获取单个策略模板"""
+  strategy(strategyId: Int!): Strategy
+
+  """获取策略运行列表"""
+  strategyRuns: [StrategyRun!]!
+
+  """获取单个策略运行"""
+  strategyRun(runId: String!): StrategyRun
+
+  """获取策略运行的回测历史"""
+  backtestHistory(runId: String!): [StrategyBacktest!]!
+
+  """获取策略库定义列表"""
+  strategyDefinitions: [StrategyDefinition!]!
+
+  """获取策略实例列表"""
+  strategyInstances(status: String = null, strategyKey: String = null, instrumentCode: String = null): [StrategyInstance!]!
+
+  """获取单个策略实例"""
+  strategyInstance(id: String!): StrategyInstance
+
+  """获取策略运行中等待人工确认的交易意图"""
+  strategyPendingTradeIntents(runId: String!): [StrategyApprovalIntent!]!
+
+  """获取策略运行的统一自动退出计划"""
+  strategyExitPlans(runId: String!): [StrategyExitPlanView!]!
+
+  """获取策略实例决策审计历史"""
+  strategyDecisionHistory(instanceId: String!, cursor: String = null, limit: Int! = 50, backtestId: String = null): [StrategyDecision!]!
+
+  """获取策略实例执行跟踪"""
+  strategyExecutionTrace(instanceId: String!, decisionId: String = null, backtestId: String = null, cursor: String = null, limit: Int! = 50): [ExecutionTraceView!]!
+
+  """获取策略实例三仓归因"""
+  strategyBucketLedger(instanceId: String!): BucketLedgerView!
+
+  """获取 Pullback Grid 网格簿"""
+  strategyGridBook(instanceId: String!, backtestId: String = null, version: Int = null): StrategyGridBook!
+
+  """获取策略绩效"""
+  strategyPerformance(runId: String!, backtestId: String = null, benchmarkCode: String = null, cursor: String = null, limit: Int! = 2000): StrategyPerformance!
+
+  """分页读取策略执行日志文件"""
+  strategyExecutionLogs(runId: String!, backtestId: String = null, version: Int = null, cursor: Int = null, limit: Int! = 200, before: Boolean! = false, tail: Boolean! = true): StrategyLogPage!
+
+  """获取流程运行详情"""
+  flowRun(runId: String!): FlowRun
+
+  """列出流程运行记录"""
+  flowRuns(flowName: String = null, flowId: String = null, deploymentId: String = null, limit: Int! = 20, offset: Int! = 0): PaginatedFlowRuns!
+
+  """列出所有已部署的流程"""
+  listDeployments(limit: Int! = 20, offset: Int! = 0): [DeploymentFlowRun!]!
+
+  """根据名称获取部署详情"""
+  getDeploymentByName(name: String!): DeploymentFlowRun
+
+  """根据ID获取部署详情"""
+  getDeploymentById(id: String!): DeploymentFlowRun
+
+  """获取所有板块 (带分页与搜索)"""
+  sectors(classification: String = null, search: String = null, limit: Int! = 50, offset: Int! = 0): SectorQueryResult!
+
+  """获取板块统计信息"""
+  sectorStats: [SectorStats!]!
+
+  """获取根板块"""
+  rootSectors(classification: String = null): [Sector!]!
+
+  """根据代码获取板块"""
+  sector(code: String!): Sector
+
+  """获取股票所属板块"""
+  stockSectors(stockCode: String!): [Sector!]!
+
+  """获取指定市场年度的节假日列表"""
+  holidays(market: String! = "CN", year: Int = null): HolidayQueryResult!
+
+  """基于日级信号快照执行条件选股"""
+  stockScreen(input: StockScreenInput!): StockScreenPage!
+
+  """获取选股日级快照完整性及缺失交易日"""
+  stockScreenSnapshotStatus(lookbackDays: Int! = 30): StockScreenSnapshotStatus!
+
+  """基于 QMT Agent 全市场实时行情执行盘中量能筛选"""
+  intradayVolumeScreen(input: IntradayVolumeScreenInput!): IntradayVolumeScreenPage!
+
+  """获取可用日级信号及快照元信息"""
+  stockSignalSnapshotMeta: [SignalMeta!]!
+
+  """获取自选股列表"""
+  watchlist(accountId: String = null): [WatchlistItem!]!
+
+  """游标分页查询持久化做 T 批次"""
+  tTradeBatchesPage(accountId: String!, statusGroup: String = null, first: Int! = 30, after: String = null): TTradeBatchPage!
+
+  """游标分页查询做 T 委托和成交事件"""
+  tTradeBatchEventsPage(accountId: String!, batchId: String = null, first: Int! = 30, after: String = null): TTradeBatchEventPage!
+
+  """游标分页查询做 T 信号历史"""
+  tTradeSignalHistoryPage(accountId: String!, first: Int! = 30, after: String = null): TTradeSignalHistoryPage!
+
+  """查询做 T 生产就绪和灰度状态"""
+  validateTTradeLiveReadiness(accountId: String!): TTradeLiveReadiness!
+
+  """账户级实盘安全状态"""
+  liveSafetyStatus(accountId: String!): TTradeLiveReadiness!
+
+  """查询持久化运行告警"""
+  operationalAlerts(accountId: String!, status: String = null, severity: String = null, limit: Int! = 100): [OperationalAlert!]!
+
+  """分页查询持久化做 T 批次"""
+  tTradeBatches(accountId: String!, statusGroup: String = null, offset: Int! = 0, limit: Int! = 100): [TTradeBatch!]!
+
+  """查询做 T 批次的委托和成交事件"""
+  tTradeBatchEvents(accountId: String!, batchId: String = null, limit: Int! = 100): [TTradeBatchEvent!]!
+
+  """查询已纳入自动卖出的来源成交台账"""
+  tTradeImportedEntries(accountId: String!): [TTradeImportedEntry!]!
+
+  """查询账户级全局持仓做 T 监控"""
+  tTradeGlobalMonitor(accountId: String!): TTradeGlobalMonitor!
+
+  """查询账户最近的做 T 买入确认信号历史"""
+  tTradeSignalHistory(accountId: String!, limit: Int! = 50): [TTradeSignalHistoryEntry!]!
+
+  """查询单个做 T 会话"""
+  tTradeSession(runId: String!, stockCode: String = null): TTradeSession
+
+  """查询做 T 会话列表"""
+  tTradeSessions(accountId: String = null, stockCode: String = null, activeOnly: Boolean! = false): [TTradeSession!]!
+
+  """读取做 T 历史回放所需的初始账户快照"""
+  tTradeReplayPreparation(accountId: String!, startTime: DateTime!): TTradeReplayPreparation!
+
+  """查询单个做 T 历史回放"""
+  tTradeReplay(runId: String!): TTradeReplay
+
+  """查询账户做 T 历史回放记录"""
+  tTradeReplayHistory(accountId: String!, limit: Int! = 20): [TTradeReplay!]!
+
+  """分页查询做 T 历史回放批次"""
+  tTradeReplayCycles(runId: String!, offset: Int! = 0, limit: Int! = 50): TTradeReplayCyclePage!
+
+  """分页列出已完成的研究运行"""
+  researchRuns(limit: Int! = 50, offset: Int! = 0, status: String = null): ResearchRunPage!
+
+  """按不透明稳定 key 获取一次研究运行详情"""
+  researchRun(key: String!): ResearchRunDetail
+}
+
+"""实时价格数据"""
+type RealTimePrice {
+  """股票代码"""
+  stockCode: String!
+
+  """当前价格"""
+  currentPrice: Float!
+
+  """涨跌额"""
+  change: Float
+
+  """涨跌幅"""
+  changePercent: Float
+
+  """成交量"""
+  volume: Float!
+
+  """成交额"""
+  amount: Float!
+
+  """时间戳"""
+  time: DateTime!
+
+  """买一价"""
+  bidPrice: Float!
+
+  """卖一价"""
+  askPrice: Float!
+
+  """买一量"""
+  bidVolume: Int!
+
+  """卖一量"""
+  askVolume: Int!
+
+  """最高价"""
+  high: Float!
+
+  """最低价"""
+  low: Float!
+
+  """开盘价"""
+  open: Float!
+
+  """前收盘价"""
+  preClose: Float
+}
+
+"""资金赎回输入"""
+input RedeemPositionInput {
+  """股票代码"""
+  stockCode: String!
+
+  """赎回金额，为空则赎回全部"""
+  amount: Float = null
+}
+
+"""赎回记录"""
+type RedemptionRecord {
+  """赎回记录ID"""
+  id: String!
+
+  """资金账号"""
+  accountId: String!
+
+  """股票代码"""
+  stockCode: String!
+
+  """证券名称"""
+  instrumentName: String
+
+  """赎回金额"""
+  redemptionAmount: Float!
+
+  """可赎回金额"""
+  availableAmount: Float
+
+  """已赎回金额"""
+  redeemedAmount: Float!
+
+  """赎回状态"""
+  status: String!
+
+  """赎回日期"""
+  redemptionDate: String
+
+  """预计到账日期"""
+  expectedArrivalDate: String
+
+  """实际到账日期"""
+  actualArrivalDate: String
+
+  """赎回费用"""
+  redemptionFee: Float!
+
+  """备注信息"""
+  remark: String
+
+  """创建时间"""
+  createdAt: String
+}
+
+"""资金赎回结果"""
+type RedemptionResult {
+  """是否成功"""
+  success: Boolean!
+
+  """股票代码"""
+  stockCode: String!
+
+  """赎回金额"""
+  redeemedAmount: Float
+
+  """剩余金额"""
+  remainingAmount: Float
+
+  """结果消息"""
+  message: String!
+
+  """错误信息"""
+  error: String
+}
+
+"""自选股排序输入"""
+input ReorderWatchlistInput {
+  """排序后的证券代码列表"""
+  symbols: [String!]!
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""一次离线研究运行的安全统计投影"""
+type ResearchRunDetail {
+  summary: ResearchRunSummary!
+
+  """白名单化的数据质量指标"""
+  dataQuality: JSON
+
+  """进入对照与回归分析的全量有效样本数"""
+  analysisSampleCount: Int
+
+  """不同持有期的事件收益曲线"""
+  eventCurve: JSON!
+
+  """成交量冲击与价格位置的分组统计"""
+  interactionHeatmap: JSON!
+
+  """异常放量相对正常成交量的日期配对对照估计"""
+  comparison: JSON!
+
+  """不同事件冷却期下的对照估计敏感性"""
+  comparisonSensitivity: JSON!
+
+  """面板回归结果"""
+  regressions: JSON!
+
+  """稳健性检验结果"""
+  robustness: JSON!
+
+  """研究方法与结果告警"""
+  warnings: [String!]!
+
+  """产物读取告警"""
+  artifactErrors: [String!]!
+}
+
+"""离线研究运行分页结果"""
+type ResearchRunPage {
+  items: [ResearchRunSummary!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+}
+
+"""一次已完成的离线研究运行"""
+type ResearchRunSummary {
+  """不透明且稳定的运行标识"""
+  key: String!
+
+  """研究运行 ID"""
+  runId: String!
+
+  """研究类型 ID"""
+  studyId: String!
+
+  """研究定义版本"""
+  version: String!
+
+  """success、failed 或 failed_preflight"""
+  status: String!
+
+  """开始时间"""
+  startedAt: DateTime
+
+  """完成时间"""
+  completedAt: DateTime
+
+  """有效事件数量"""
+  eventCount: Int
+
+  """运行耗时（秒）"""
+  elapsedSeconds: Float
+
+  """研究配置内容指纹"""
+  configHash: String
+
+  """是否存在满足路径与大小边界的指标产物；格式在详情读取时校验"""
+  hasMetrics: Boolean!
+
+  """产物读取告警"""
+  artifactErrors: [String!]!
+}
+
+"""
+策略风险等级
+
+- LOW: 低风险 - 保守型策略,适合风险厌恶型投资者
+- MEDIUM: 中风险 - 平衡型策略,风险和收益相对均衡
+- HIGH: 高风险 - 激进型策略,追求高收益但承担较高风险
+- VERY_HIGH: 极高风险 - 高杠杆或高频策略,需要专业投资者
+"""
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  VERY_HIGH
+}
+
+"""行业/概念板块"""
+type Sector {
+  """板块ID"""
+  id: Int!
+
+  """板块名称"""
+  name: String!
+
+  """板块代码"""
+  code: String!
+
+  """描述"""
+  description: String
+
+  """分类 (SW/TGN/DY等)"""
+  classification: String!
+
+  """市场"""
+  market: String
+
+  """层级"""
+  level: Int!
+
+  """父板块ID"""
+  parentId: Int
+
+  """子板块"""
+  children: [Sector!]!
+
+  """成分股代码"""
+  stockCodes: [String!]!
+}
+
+"""板块查询结果"""
+type SectorQueryResult {
+  """板块列表"""
+  items: [Sector!]!
+
+  """总数"""
+  total: Int!
+}
+
+"""板块分类统计"""
+type SectorStats {
+  """分类代码"""
+  classification: String!
+
+  """数量"""
+  count: Int!
+}
+
+"""日级信号元信息"""
+type SignalMeta {
+  signalCode: String!
+  displayName: String!
+  category: String!
+  description: String!
+  maxWindow: Int!
+  signalVersion: String!
+  calculatedAt: DateTime
+  availableSnapshotDate: Date
+  enabled: Boolean!
+}
+
+"""上市公司公告"""
+type StockAnnouncement {
+  """公告ID"""
+  id: String!
+
+  """证券代码"""
+  stockCode: String!
+
+  """证券简称"""
+  stockName: String
+
+  """公告标题"""
+  title: String!
+
+  """公告类型"""
+  announcementType: String
+
+  """公告日期"""
+  announceDate: Date
+
+  """数据来源"""
+  source: String!
+
+  """公告来源链接"""
+  sourceUrl: String
+
+  """PDF链接"""
+  pdfUrl: String
+
+  """是否回购相关"""
+  isRepurchaseRelated: Boolean!
+
+  """抓取时间"""
+  fetchedAt: DateTime!
+
+  """来源原始字段"""
+  rawPayload: JSON!
+}
+
+"""单票公告与回购摘要"""
+type StockDisclosureSummary {
+  """证券代码"""
+  stockCode: String!
+
+  """数据源状态"""
+  sourceStatus: String!
+
+  """数据源状态说明"""
+  sourceMessage: String
+
+  """最新公告日期"""
+  latestAnnouncementDate: Date
+
+  """最新回购公告日期"""
+  latestRepurchaseDate: Date
+
+  """最近同步"""
+  latestSync: AnnouncementSyncStatus
+
+  """公告列表"""
+  announcements: [StockAnnouncement!]!
+
+  """回购事件列表"""
+  repurchaseEvents: [StockRepurchaseEvent!]!
+}
+
+"""选股字段条件"""
+input StockFieldConditionInput {
+  """快照字段名"""
+  field: String!
+
+  """操作符: gte/lte/gt/lt/eq/between"""
+  operator: String! = "gte"
+
+  """比较值"""
+  value: Float!
+
+  """区间结束值"""
+  valueTo: Float = null
+}
+
+"""股票行情报价"""
+type StockQuote {
+  """股票代码"""
+  stockCode: String!
+
+  """行情时间"""
+  time: DateTime!
+
+  """最新价"""
+  lastPrice: Float!
+
+  """开盘价"""
+  open: Float!
+
+  """最高价"""
+  high: Float!
+
+  """最低价"""
+  low: Float!
+
+  """前收盘价"""
+  preClose: Float!
+
+  """涨跌额"""
+  change: Float
+
+  """涨跌幅（%）"""
+  changePercent: Float
+
+  """成交量"""
+  volume: Float!
+
+  """成交额"""
+  amount: Float!
+
+  """换手率（%）"""
+  turnoverRate: Float
+}
+
+"""股票回购事件摘要"""
+type StockRepurchaseEvent {
+  """回购事件ID"""
+  id: String!
+
+  """证券代码"""
+  stockCode: String!
+
+  """证券简称"""
+  stockName: String
+
+  """数据来源"""
+  source: String!
+
+  """来源链接"""
+  sourceUrl: String
+
+  """最新公告日期"""
+  latestAnnounceDate: Date
+
+  """实施进度"""
+  progressStatus: String
+
+  """计划回购价格下限"""
+  priceFloor: Float
+
+  """计划回购价格上限"""
+  priceCeiling: Float
+
+  """计划数量下限"""
+  plannedQuantityLower: Float
+
+  """计划数量均值"""
+  plannedQuantityAverage: Float
+
+  """计划数量上限"""
+  plannedQuantityUpper: Float
+
+  """计划金额下限"""
+  plannedAmountLower: Float
+
+  """计划金额上限"""
+  plannedAmountUpper: Float
+
+  """已回购数量"""
+  repurchasedQuantity: Float
+
+  """已回购金额"""
+  repurchasedAmount: Float
+
+  """已回购比例"""
+  repurchasedRatio: Float
+
+  """抓取时间"""
+  fetchedAt: DateTime!
+
+  """来源原始字段"""
+  rawPayload: JSON!
+}
+
+"""条件选股输入"""
+input StockScreenInput {
+  """包含行业"""
+  includeIndustries: [String!] = null
+
+  """排除行业"""
+  excludeIndustries: [String!] = null
+
+  """基础字段条件"""
+  fieldConditions: [StockFieldConditionInput!] = null
+
+  """信号条件"""
+  signalConditions: [StockSignalConditionInput!] = null
+
+  """评分规则"""
+  scoreRules: [StockSignalWeightInput!] = null
+
+  """标的范围：默认股票，可切换 ETF 或股票+ETF"""
+  universe: StockScreenUniverse! = STOCK
+
+  """是否排除 ST/*ST 风险警示股票"""
+  excludeSt: Boolean! = true
+
+  """是否要求当日信号完成"""
+  requireFresh: Boolean! = false
+
+  """排序配置"""
+  sort: StockScreenSortInput = null
+
+  """每页数量，最大200"""
+  limit: Int! = 200
+
+  """偏移量"""
+  offset: Int! = 0
+
+  """最小TTM归母ROE"""
+  minRoe: Float = null
+
+  """最小归母净利润单季同比增速"""
+  minNetProfitGrowth: Float = null
+
+  """最小营收单季同比增速"""
+  minYoyGrowth: Float = null
+}
+
+"""条件选股结果项"""
+type StockScreenItem {
+  code: String!
+  name: String!
+  industry: String
+  instrumentType: String!
+  currentPrice: Float!
+  openPrice: Float!
+  changePct: Float!
+  volume: Float!
+  volumeRatio: Float!
+  avgVolume20: Float!
+  avgVolume5: Float!
+  volumeRatio5: Float!
+  avgAmount20: Float!
+  amountRatio20: Float!
+  turnoverRatePct: Float
+  volumePercentile60: Float!
+  amountPercentile60: Float!
+  isBullish: Boolean!
+  peakPrice: Float!
+  daysSincePeak: Int!
+  priceDropPct: Float!
+  lowPrice: Float!
+  daysSinceLow: Int!
+  priceRisePct: Float!
+  consecutiveDownDays: Int!
+  consecutiveDownPct: Float!
+  k: Float!
+  d: Float!
+  j: Float!
+  rsi6: Float!
+  rsi12: Float!
+  rsi24: Float!
+  upperBand: Float!
+  middleBand: Float!
+  lowerBand: Float!
+  ma5: Float!
+  ma10: Float!
+  ma20: Float!
+  ma5Prev: Float
+  ma10Prev: Float
+  roe: Float
+  netProfitGrowth: Float
+  yoyGrowth: Float
+  netProfitAccumGrowth: Float
+  revenueAccumGrowth: Float
+  financialReportDate: Date
+  financialAnnounceDate: Date
+  financialQualityFlags: [String!]!
+  matchedStrategies: [String!]!
+  score: Float!
+  scoreVersion: String!
+  signalVersion: String!
+  calculatedAt: DateTime
+  hasStaleData: Boolean!
+  signalMissing: Boolean!
+  missingSignals: [String!]!
+}
+
+"""条件选股分页结果"""
+type StockScreenPage {
+  items: [StockScreenItem!]!
+  total: Int!
+  limit: Int!
+  offset: Int!
+  snapshotDate: Date
+  scoreVersion: String!
+  signalVersion: String!
+  calculatedAt: DateTime
+  hasStaleData: Boolean!
+  isComplete: Boolean!
+  warnings: [String!]!
+}
+
+"""选股日级快照完整性状态"""
+type StockScreenSnapshotStatus {
+  latestSnapshotDate: Date
+  expectedSnapshotDate: Date!
+  missingSnapshotDates: [Date!]!
+  isComplete: Boolean!
+  latestRunStatus: String
+  latestCalculatedAt: DateTime
+  warnings: [String!]!
+}
+
+"""条件选股排序方向"""
+enum StockScreenSortDirection {
+  ASC
+  DESC
+}
+
+"""条件选股排序字段"""
+enum StockScreenSortField {
+  CODE
+  NAME
+  CURRENT_PRICE
+  CHANGE_PCT
+  SIGNAL_COUNT
+  KDJ_J
+  RSI12
+  VOLUME_RATIO
+  VOLUME_RATIO_5
+  AMOUNT_RATIO_20
+  TURNOVER_RATE
+  VOLUME_PERCENTILE_60
+  AMOUNT_PERCENTILE_60
+  PRICE_DROP_PCT
+  DAYS_SINCE_PEAK
+  ROE
+  NET_PROFIT_GROWTH
+  YOY_GROWTH
+}
+
+"""条件选股排序输入"""
+input StockScreenSortInput {
+  """排序字段"""
+  field: StockScreenSortField!
+
+  """排序方向"""
+  direction: StockScreenSortDirection! = DESC
+}
+
+"""条件选股标的范围"""
+enum StockScreenUniverse {
+  STOCK
+  ETF
+  STOCK_AND_ETF
+}
+
+"""选股信号条件"""
+input StockSignalConditionInput {
+  """信号码"""
+  signalCode: String!
+
+  """是否必须命中"""
+  required: Boolean! = true
+}
+
+"""选股评分规则"""
+input StockSignalWeightInput {
+  """信号码"""
+  signalCode: String!
+
+  """命中权重"""
+  weight: Float! = 1
+}
+
+"""策略模板信息"""
+type Strategy {
+  """策略ID"""
+  id: Int!
+
+  """策略名称"""
+  name: String!
+
+  """策略描述"""
+  description: String!
+
+  """文件路径"""
+  filePath: String!
+
+  """类名"""
+  className: String!
+
+  """策略分类"""
+  category: StrategyCategory
+
+  """风险等级"""
+  riskLevel: RiskLevel
+
+  """策略标签列表"""
+  tags: [String!]!
+
+  """参数 Schema 定义（结构化类型，支持前端表单生成）"""
+  parameterSchema: ParameterSchema
+
+  """策略版本号"""
+  version: String
+
+  """代码哈希值（SHA256）"""
+  codeHash: String
+
+  """策略状态"""
+  status: StrategyStatus!
+
+  """是否激活（仅 ACTIVE 状态为激活）"""
+  isActive: Boolean!
+
+  """默认参数配置（从 parameter_schema 提取）"""
+  defaultParameters: JSON!
+
+  """创建时间"""
+  createdAt: DateTime!
+
+  """更新时间"""
+  updatedAt: DateTime!
+
+  """标的范围（单标的/多标的）"""
+  instrumentScope: StrategyInstrumentScope
+
+  """标的池来源（固定配置/账户持仓）"""
+  instrumentUniverseMode: StrategyInstrumentUniverseMode!
+}
+
+"""等待人工确认的策略交易意图"""
+type StrategyApprovalIntent {
+  id: String!
+  runId: String!
+  instrumentCode: String!
+  side: String!
+  bucket: String!
+  reason: String!
+  status: String!
+  executionMode: String!
+  confidence: Float!
+  limitPriceHint: Float
+  targetPositionPct: Float
+  targetAmount: Float
+  targetVolume: Int
+  signalPrice: Float
+  limitUpPrice: Float
+  distanceToLimitTicks: Float
+  approvalExpiresAt: DateTime
+  createdAt: DateTime
+  metadata: JSON!
+}
+
+"""回测历史记录"""
+type StrategyBacktest {
+  """回测ID"""
+  id: String!
+
+  """关联的策略运行ID"""
+  strategyRunId: String!
+
+  """版本号"""
+  version: Int!
+
+  """回测参数"""
+  parameters: JSON
+
+  """交易标的"""
+  instruments: [String!]
+
+  """回测数据起始时间"""
+  backtestStartTime: DateTime
+
+  """回测数据结束时间"""
+  backtestEndTime: DateTime
+
+  """执行开始时间"""
+  startTime: DateTime
+
+  """执行结束时间"""
+  endTime: DateTime
+
+  """回测绩效指标"""
+  metrics: JSON
+
+  """状态"""
+  status: String!
+
+  """错误信息"""
+  errorMessage: String
+
+  """结果文件路径"""
+  resultPath: String
+
+  """创建时间"""
+  createdAt: DateTime
+}
+
+"""
+策略分类
+
+- TREND_FOLLOWING: 趋势跟随 - 跟随市场趋势方向进行交易
+- MEAN_REVERSION: 均值回归 - 基于价格向均值回归的特性进行交易
+- ARBITRAGE: 套利策略 - 利用价格差异进行无风险套利
+- MARKET_MAKING: 做市策略 - 提供流动性并赚取买卖价差
+- OTHER: 其他策略 - 不属于上述分类的策略
+"""
+enum StrategyCategory {
+  TREND_FOLLOWING
+  MEAN_REVERSION
+  ARBITRAGE
+  MARKET_MAKING
+  OTHER
+}
+
+"""策略决策审计记录"""
+type StrategyDecision {
+  id: String!
+  instanceId: String!
+  traceId: String!
+  decidedAt: DateTime!
+  inputSummary: JSON!
+  outputSummary: JSON!
+  tradeIntents: [TradeIntentView!]!
+  statePatch: JSON!
+  decisionTrace: JSON!
+  reason: String
+  tags: [String!]!
+}
+
+"""策略定义，供策略库展示和创建实例使用"""
+type StrategyDefinition {
+  """策略稳定 key"""
+  key: String!
+
+  """策略模板 ID"""
+  strategyId: Int!
+
+  """策略展示名称"""
+  displayName: String!
+
+  """适用市场"""
+  market: String!
+
+  """策略说明"""
+  description: String!
+  parameterSchema: ParameterSchema
+  supportedInstruments: [String!]!
+  riskLevel: RiskLevel
+  category: StrategyCategory
+  instrumentUniverseMode: StrategyInstrumentUniverseMode!
+}
+
+"""Engine 统一自动退出计划投影"""
+type StrategyExitPlanView {
+  id: String!
+  instrumentCode: String!
+  sourceType: String!
+  bucket: String!
+  status: String!
+  entryFilledVolume: Int!
+  entryAvgPrice: Float!
+  exitedVolume: Int!
+  exitAvgPrice: Float!
+  remainingVolume: Int!
+  peakPrice: Float!
+  lastPrice: Float!
+  lastNetProfitPct: Float!
+  peakNetProfitPct: Float!
+  holdingTradingDays: Int!
+  pendingIntentId: String
+  pendingOrderId: String
+  lastExitReason: String
+  t1Policy: String!
+  executionMode: String!
+  autoExitAuthorized: Boolean!
+  ruleTypes: [String!]!
+  raw: JSON!
+}
+
+"""Pullback Grid 网格簿"""
+type StrategyGridBook {
+  runId: String!
+  instrumentCode: String!
+  basePrice: Float!
+  parameterVersion: String!
+  version: Int!
+  modelVersion: Int!
+  inventoryModel: String!
+  releaseRule: String!
+  sellEmptyBehavior: String!
+  editable: Boolean!
+  needsBacktest: Boolean!
+  summary: StrategyGridBookSummary!
+  levels: [StrategyGridBookLevel!]!
+  inventoryLots: [StrategyGridInventoryLot!]!
+  releaseEvents: [StrategyGridReleaseEvent!]!
+  updatedAt: String
+}
+
+"""Pullback Grid 网格簿档位"""
+type StrategyGridBookLevel {
+  gridId: String!
+  levelIndex: Int!
+  side: String!
+  role: String!
+  price: Float!
+  plannedShares: Int!
+  amount: Float!
+  pctFromBase: Float
+  expectedProfit: Float
+  enabled: Boolean!
+  status: String!
+  monitoring: Boolean!
+  pendingShares: Int!
+  filledShares: Int!
+  availableInventoryShares: Int!
+  reservedInventoryShares: Int!
+  cycleCount: Int!
+  waitingReason: String
+  orderId: String
+  entryPrice: Float
+  entryTime: String
+  lastIntentId: String
+  lastTraceId: String
+  reason: String
+  updatedAt: String
+}
+
+"""Pullback Grid 网格簿档位更新"""
+input StrategyGridBookLevelInput {
+  gridId: String = null
+  levelIndex: Int!
+  side: String!
+  price: Float!
+  plannedShares: Int!
+  pctFromBase: Float = null
+  expectedProfit: Float = null
+  enabled: Boolean! = true
+}
+
+"""Pullback Grid 网格簿摘要"""
+type StrategyGridBookSummary {
+  totalLevels: Int!
+  enabledLevels: Int!
+  pendingLevels: Int!
+  filledLevels: Int!
+  disabledLevels: Int!
+  plannedAmount: Float!
+  buySlotCount: Int!
+  sellWaterlineCount: Int!
+  openLotShares: Int!
+  reservedLotShares: Int!
+  waitingInventoryLevels: Int!
+  completedCycles: Int!
+  releaseEventCount: Int!
+}
+
+"""Pullback Grid 网格簿更新输入"""
+input StrategyGridBookUpdateInput {
+  levels: [StrategyGridBookLevelInput!]!
+  basePrice: Float = null
+}
+
+"""Pullback Grid 库存批次"""
+type StrategyGridInventoryLot {
+  lotId: String!
+  sourceLevelId: String
+  sourceLevelIndex: Int
+  source: String!
+  bucket: String!
+  entryPrice: Float!
+  originalShares: Int!
+  remainingShares: Int!
+  reservedShares: Int!
+  reservedForLevelId: String
+  reservedOrderId: String
+  status: String!
+  createdAt: String
+  updatedAt: String
+}
+
+"""Pullback Grid 释放记录"""
+type StrategyGridReleaseEvent {
+  eventId: String!
+  sellLevelId: String
+  sellLevelIndex: Int
+  releasedLevelId: String
+  releasedLevelIndex: Int
+  lotIds: [String!]!
+  orderId: String
+  intentId: String
+  tradeId: String
+  price: Float!
+  shares: Int!
+  createdAt: String
+}
+
+"""策略实例中心视图"""
+type StrategyInstance {
+  id: String!
+  strategyKey: String!
+  strategyId: Int
+  strategyName: String
+  instrumentCode: String!
+  displayName: String!
+  status: StrategyRunStatus!
+  mode: StrategyRunMode!
+  parameters: JSON!
+  parameterVersion: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  lastDecisionAt: DateTime
+  latestExecutionStatus: String
+}
+
+"""创建策略实例输入"""
+input StrategyInstanceCreateInput {
+  strategyKey: String!
+  instrumentCode: String!
+  displayName: String = null
+  mode: StrategyRunMode! = PAPER
+  parameters: JSON = null
+  startTime: DateTime = null
+  endTime: DateTime = null
+}
+
+"""策略实例事件"""
+type StrategyInstanceEvent {
+  instanceId: String!
+  eventType: String!
+  timestamp: DateTime!
+  payload: JSON!
+}
+
+"""更新策略实例参数输入"""
+input StrategyInstanceParameterUpdateInput {
+  parameters: JSON!
+  applyImmediately: Boolean! = false
+}
+
+"""
+策略标的范围
+
+- SINGLE: 单标的 - 仅支持单只股票/标的
+- MULTI: 多标的 - 支持多只股票/标的
+"""
+enum StrategyInstrumentScope {
+  SINGLE
+  MULTI
+}
+
+"""
+策略标的池来源
+
+- STATIC: 创建运行实例时固定指定标的
+- ACCOUNT_HOLDINGS: 由账户持仓快照动态维护标的池
+"""
+enum StrategyInstrumentUniverseMode {
+  STATIC
+  ACCOUNT_HOLDINGS
+}
+
+"""策略 K线数据"""
+type StrategyKLineData {
+  """股票代码"""
+  stockCode: String!
+
+  """周期，如 1m, 5m, 1d"""
+  period: String!
+
+  """开盘价"""
+  open: Float!
+
+  """收盘价"""
+  close: Float!
+
+  """最高价"""
+  high: Float!
+
+  """最低价"""
+  low: Float!
+
+  """成交量"""
+  volume: Int!
+
+  """成交额"""
+  amount: Float!
+
+  """时间戳"""
+  time: DateTime!
+}
+
+"""策略日志条目"""
+type StrategyLogEntry {
+  """策略运行实例ID"""
+  runId: String!
+
+  """日志时间戳"""
+  timestamp: DateTime!
+
+  """日志级别"""
+  level: LogLevel!
+
+  """日志消息"""
+  message: String!
+
+  """日志来源（策略名称/模块）"""
+  source: String!
+}
+
+"""策略执行日志分页结果"""
+type StrategyLogPage {
+  """策略运行实例ID"""
+  runId: String!
+
+  """运行模式"""
+  mode: String
+
+  """回测ID"""
+  backtestId: String
+
+  """回测版本"""
+  backtestVersion: Int
+
+  """日志文件相对路径"""
+  sourcePath: String
+
+  """本页第一行游标"""
+  startCursor: Int!
+
+  """本页后一行游标"""
+  endCursor: Int!
+
+  """是否还有更早日志"""
+  hasPreviousPage: Boolean!
+
+  """是否还有更新日志"""
+  hasNextPage: Boolean!
+
+  """日志文件总行数"""
+  totalLines: Int!
+
+  """日志文件大小"""
+  fileSizeBytes: Int!
+
+  """日志条目"""
+  entries: [StrategyLogEntry!]!
+}
+
+"""策略月度收益"""
+type StrategyMonthlyReturn {
+  month: String!
+  returnPct: Float!
+}
+
+"""策略绩效视图"""
+type StrategyPerformance {
+  runId: String!
+  backtestId: String
+  mode: String!
+  benchmarkCode: String
+  source: String!
+  generatedAt: String!
+  summaryOnly: Boolean!
+  summary: JSON!
+  risk: JSON!
+  tradeStats: JSON!
+  executionQuality: JSON!
+  equityCurve: [StrategyPerformancePoint!]!
+  drawdownCurve: [StrategyPerformancePoint!]!
+  monthlyReturns: [StrategyMonthlyReturn!]!
+  dataQuality: StrategyPerformanceDataQuality!
+  pageInfo: StrategyPerformancePageInfo!
+}
+
+"""策略绩效数据质量"""
+type StrategyPerformanceDataQuality {
+  status: String!
+  warning: String
+  sampleCount: Int!
+  returnedSampleCount: Int!
+  truncated: Boolean!
+  rawSampleCount: Int!
+  compressedSampleCount: Int!
+  compressionPolicy: String
+}
+
+"""策略绩效分页信息"""
+type StrategyPerformancePageInfo {
+  hasMore: Boolean!
+  nextCursor: String
+}
+
+"""策略绩效曲线点"""
+type StrategyPerformancePoint {
+  sequence: Int!
+  timestamp: String!
+  equity: Float!
+  value: Float!
+  benchmarkValue: Float
+  eventType: String!
+}
+
+"""策略运行实例信息"""
+type StrategyRun {
+  """实例ID"""
+  id: String!
+
+  """运行实例名称"""
+  name: String!
+
+  """关联的策略模板"""
+  strategy: Strategy!
+
+  """运行模式"""
+  mode: StrategyRunMode!
+
+  """交易标的列表"""
+  instruments: [String!]!
+
+  """策略参数"""
+  parameters: JSON!
+
+  """运行状态"""
+  status: StrategyRunStatus!
+
+  """启动时间"""
+  startTime: DateTime
+
+  """停止时间"""
+  stopTime: DateTime
+
+  """策略指标"""
+  metrics: JSON
+
+  """错误信息"""
+  errorMessage: String
+
+  """创建时间"""
+  createTime: DateTime!
+
+  """股票代码（已废弃，请使用instruments）"""
+  stockCode: String!
+
+  """股票名称（已废弃）"""
+  stockName: String!
+
+  """累计盈亏"""
+  profitLoss: Float!
+
+  """总交易次数"""
+  totalTrades: Int!
+}
+
+"""策略运行实例输入参数"""
+input StrategyRunInput {
+  """运行实例名称（可选）"""
+  name: String = null
+
+  """策略模板ID"""
+  strategyId: Int!
+
+  """运行模式"""
+  mode: StrategyRunMode!
+
+  """交易标的列表"""
+  instruments: [String!]!
+
+  """策略参数"""
+  parameters: JSON!
+
+  """开始时间（回测模式必需）"""
+  startTime: DateTime = null
+
+  """结束时间（回测模式必需）"""
+  endTime: DateTime = null
+}
+
+"""
+策略运行模式
+
+- BACKTEST: 回测模式 - 使用历史数据进行策略回测
+- PAPER: 模拟盘 - 使用实时数据进行虚拟交易（Paper Trading）
+- LIVE: 实盘模式 - 真实交易环境（Live Trading）
+"""
+enum StrategyRunMode {
+  BACKTEST
+  PAPER
+  LIVE
+}
+
+"""
+策略运行状态
+
+- PENDING: 待启动 - 策略实例已创建但尚未开始运行
+- RUNNING: 运行中 - 策略正在执行
+- PAUSED: 暂停 - 策略运行已暂停
+- STOPPED: 已停止 - 策略运行已手动停止
+- COMPLETED: 已完成 - 策略运行正常结束（如回测完成）
+- ERROR: 错误 - 策略运行出错
+"""
+enum StrategyRunStatus {
+  PENDING
+  RUNNING
+  PAUSED
+  STOPPED
+  COMPLETED
+  ERROR
+}
+
+"""策略运行实例更新输入参数"""
+input StrategyRunUpdateInput {
+  """策略参数"""
+  parameters: JSON
+}
+
+"""
+策略模板状态
+
+- ACTIVE: 激活 - 策略可用，可创建运行实例
+- UPGRADING: 待升级 - 策略代码已更新，待确认升级
+- DEPRECATED: 已弃用 - 策略已删除，不可创建新实例
+"""
+enum StrategyStatus {
+  ACTIVE
+  UPGRADING
+  DEPRECATED
+}
+
+"""策略状态信息"""
+type StrategyStatusInfo {
+  """策略ID"""
+  strategyId: Int!
+
+  """策略名称"""
+  name: String!
+
+  """运行状态"""
+  status: String!
+
+  """状态更新时间"""
+  time: DateTime!
+
+  """状态消息"""
+  message: String
+
+  """收益率"""
+  performance: Float
+}
+
+"""策略 Tick 数据"""
+type StrategyTickData {
+  """股票代码"""
+  stockCode: String!
+
+  """最新价"""
+  lastPrice: Float!
+
+  """成交量"""
+  volume: Int!
+
+  """成交额"""
+  amount: Float!
+
+  """买一价"""
+  bidPrice: Float
+
+  """卖一价"""
+  askPrice: Float
+
+  """买一量"""
+  bidVolume: Int
+
+  """卖一量"""
+  askVolume: Int
+
+  """开盘价"""
+  openPrice: Float
+
+  """最高价"""
+  highPrice: Float
+
+  """最低价"""
+  lowPrice: Float
+
+  """昨收价"""
+  preClose: Float
+
+  """时间戳"""
+  time: DateTime!
+}
+
+"QuantX 系统实时数据订阅接口\n\n## 主要功能\n\n### 实时行情订阅\n- 金融工具实时价格更新\n- K线数据实时推送\n- 市场深度数据订阅\n\n### 交易数据订阅\n- 订单状态变更通知\n- 成交记录实时推送\n\n### 多金融工具监控\n- 同时订阅多个金融工具的价格\n"
+type Subscription {
+  """订阅账户做 T 监控投影更新"""
+  tTradeUpdates(accountId: String!): TTradeUpdateNotice!
+
+  """订阅股票实时报价流"""
+  marketQuotes(stockList: [String!]!): RealTimePrice!
+
+  """订阅K线数据流"""
+  marketKlines(stockList: [String!]!, periods: [String!]!): KLineData!
+
+  """订阅市场深度数据流"""
+  marketDepth(stockList: [String!]!, levels: Int = 5): MarketDepth!
+
+  """订阅逐笔成交数据流"""
+  marketTicks(stockList: [String!]!): TickData!
+
+  """订阅交易事件流"""
+  tradingEvents(eventTypes: [TradingEventType!] = null, stockCodes: [String!] = null, strategyNames: [String!] = null): OrderEvent!
+
+  """订阅策略状态流"""
+  systemStrategies(strategyIds: [Int!] = null): StrategyStatusInfo!
+
+  """订阅系统告警流"""
+  systemAlerts(severityLevel: String = null): SystemAlert!
+
+  """订阅部署状态流"""
+  deploymentStatus(name: String!): DeploymentFlowRun!
+
+  """订阅 Prefect 流程运行日志"""
+  flowRunLogs(runId: String!, includeHistory: Boolean! = true): LogLine!
+
+  """订阅策略实例事件流"""
+  strategyInstanceEvents(instanceId: String!): StrategyInstanceEvent!
+
+  """订阅策略运行实例的日志"""
+  strategyLogs(runId: String!, levels: [String!] = null, includeHistory: Boolean! = true): StrategyLogEntry!
+
+  """订阅策略运行实例的 Tick 数据（分时图）"""
+  strategyTicks(runId: String!): StrategyTickData!
+
+  """订阅策略运行实例的 K线 数据"""
+  strategyKlines(runId: String!, periods: [String!] = null): StrategyKLineData!
+}
+
+"""系统告警"""
+type SystemAlert {
+  """告警ID"""
+  alertId: String!
+
+  """告警级别"""
+  severity: String!
+
+  """告警标题"""
+  title: String!
+
+  """告警消息"""
+  message: String!
+
+  """告警时间"""
+  time: DateTime!
+
+  """告警源"""
+  source: String!
+
+  """是否已解决"""
+  resolved: Boolean!
+}
+
+"""持久化做 T 批次"""
+type TTradeBatch {
+  batchId: String!
+  accountId: String!
+  stockCode: String!
+  strategyRunId: String!
+  status: String!
+  entryIntentId: String
+  exitIntentId: String
+  entryClientOrderId: String
+  exitClientOrderId: String
+  entryBrokerOrderId: String
+  exitBrokerOrderId: String
+  targetVolume: Int!
+  entryFilledVolume: Int!
+  entryAvgPrice: Float!
+  exitFilledVolume: Int!
+  exitAvgPrice: Float!
+  activeVolume: Int!
+  lastPrice: Float!
+  lastNetProfitPct: Float!
+  peakNetProfitPct: Float!
+  trailingFloorPct: Float
+  exitReason: String
+  exceptionReason: String
+  policyVersion: Int!
+  version: Int!
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+"""做 T 批次委托与成交事件"""
+type TTradeBatchEvent {
+  eventId: String!
+  batchId: String!
+  eventType: String!
+  status: String!
+  clientOrderId: String!
+  brokerOrderId: String
+  payload: JSON!
+  createdAt: DateTime!
+  appliedAt: DateTime
+  error: String
+}
+
+"""做 T 委托与成交事件游标分页"""
+type TTradeBatchEventPage {
+  items: [TTradeBatchEvent!]!
+  pageInfo: PageInfo!
+}
+
+"""做 T 批次游标分页"""
+type TTradeBatchPage {
+  items: [TTradeBatch!]!
+  pageInfo: PageInfo!
+}
+
+"""导入外部已成交的做 T 买入批次"""
+input TTradeExternalEntryInput {
+  runId: String!
+  accountId: String!
+  orderId: String!
+}
+
+"""全局做 T 监控中的单只持仓"""
+type TTradeGlobalHolding {
+  stockCode: String!
+  instrumentName: String!
+  volume: Int!
+  availableVolume: Int!
+  ignored: Boolean!
+  eligible: Boolean!
+  status: String!
+  reason: String!
+  session: TTradeSession
+}
+
+"""账户级全局持仓做 T 监控"""
+type TTradeGlobalMonitor {
+  configId: String
+  strategyRunId: String
+  universeRevision: Int!
+  accountId: String!
+  enabled: Boolean!
+  mode: String!
+  autoExitAcknowledged: Boolean!
+  ignoredStockCodes: [String!]!
+  configVersion: Int!
+  targetTradeAmount: Float!
+  maxTradeAmount: Float!
+  maxConcurrentBatches: Int!
+  maxTotalTExposurePct: Float!
+  signalLookbackSeconds: Int!
+  stabilizationSeconds: Int!
+  pullbackThresholdPct: Float!
+  reboundThresholdPct: Float!
+  maxSpreadTicks: Int!
+  approvalTtlSeconds: Int!
+  maxPriceDeviationPct: Float!
+  targetProfitPct: Float!
+  baseFloorPct: Float!
+  initialGapPct: Float!
+  trailingGapSlope: Float!
+  maxGapPct: Float!
+  hardStopEnabled: Boolean!
+  hardStopPct: Float!
+  timeExitMode: TTradeTimeExitMode!
+  timeExitTime: String!
+  maxHoldingTradingDays: Int!
+  cooldownSeconds: Int!
+  holdingCount: Int!
+  eligibleCount: Int!
+  ignoredCount: Int!
+  monitoredCount: Int!
+  pendingSignalCount: Int!
+  activeBatchCount: Int!
+  drainingCount: Int!
+  holdings: [TTradeGlobalHolding!]!
+  sessions: [TTradeSession!]!
+  positionSnapshotSource: String
+  positionSnapshotSequence: String!
+  positionSnapshotReportedAt: DateTime
+  positionSnapshotReceivedAt: DateTime
+  positionSnapshotComplete: Boolean!
+  positionSnapshotError: String
+  lastReconciledAt: DateTime
+  lastError: String
+  createdAt: DateTime
+  updatedAt: DateTime
+  rolloutStage: String!
+  engineStatus: String!
+  agentStatus: String!
+  reconcileStatus: String!
+  killSwitch: Boolean!
+  canApprove: Boolean!
+  canActivateLive: Boolean!
+  blockedReasons: [String!]!
+  projectionVersion: String!
+  projectionGeneratedAt: DateTime
+  readiness: TTradeLiveReadiness
+}
+
+"""全局做 T 监控操作结果"""
+type TTradeGlobalMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  monitor: TTradeGlobalMonitor
+}
+
+"""保存全局持仓做 T 监控设置"""
+input TTradeGlobalSettingsInput {
+  accountId: String!
+  enabled: Boolean! = false
+  mode: String! = "paper"
+  autoExitAcknowledged: Boolean! = false
+  ignoredStockCodes: [String!]!
+  targetTradeAmount: Float! = 10000
+  maxTradeAmount: Float! = 12000
+  maxConcurrentBatches: Int! = 3
+  maxTotalTExposurePct: Float! = 0.1
+  signalLookbackSeconds: Int! = 300
+  stabilizationSeconds: Int! = 15
+  pullbackThresholdPct: Float! = 0.8
+  reboundThresholdPct: Float! = 0.2
+  maxSpreadTicks: Int! = 3
+  approvalTtlSeconds: Int! = 30
+  maxPriceDeviationPct: Float! = 0.3
+  targetProfitPct: Float! = 2
+  baseFloorPct: Float! = 0.5
+  initialGapPct: Float! = 1.5
+  trailingGapSlope: Float! = 0.25
+  maxGapPct: Float! = 3
+  hardStopEnabled: Boolean! = false
+  hardStopPct: Float! = -0.8
+  timeExitMode: TTradeTimeExitMode! = UNLIMITED
+  timeExitTime: String! = "14:50"
+  maxHoldingTradingDays: Int! = 5
+  cooldownSeconds: Int! = 300
+}
+
+"""已纳入做 T 自动退出的来源成交"""
+type TTradeImportedEntry {
+  sourceTradeId: String!
+  sourceOrderId: String
+  stockCode: String!
+  volume: Int!
+  price: Float!
+  status: String!
+  sourceTradeTime: DateTime
+  strategyRunId: String!
+  batchId: String!
+}
+
+"""做 T 生产就绪与灰度状态"""
+type TTradeLiveReadiness {
+  accountId: String!
+  ready: Boolean!
+  stage: String!
+  engineStatus: String!
+  agentStatus: String!
+  agentDeviceId: String
+  agentMode: String!
+  protocolVersion: String!
+  reconcileStatus: String!
+  killSwitch: Boolean!
+  policyVersion: Int!
+  canApprove: Boolean!
+  canActivateLive: Boolean!
+  blockedReasons: [String!]!
+  checks: [TTradeReadinessCheck!]!
+  snapshotId: String
+  snapshotHash: String
+  snapshotAt: DateTime
+  reconciliationAgeSeconds: Float
+  queuedCommandCount: Int!
+  queueDelaySeconds: Float!
+  deadLetterCount: Int!
+  unresolvedCriticalAlertCount: Int!
+  journalIntegrity: String!
+  journalSizeBytes: Int!
+  journalPendingReports: Int!
+  lastBackupAt: DateTime
+  checkedAt: DateTime!
+}
+
+"""持仓做 T 操作结果"""
+type TTradeMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  session: TTradeSession
+}
+
+"""做 T 生产操作结果"""
+type TTradeOperationsMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  readiness: TTradeLiveReadiness
+}
+
+"""做 T 生产就绪检查项"""
+type TTradeReadinessCheck {
+  code: String!
+  passed: Boolean!
+  message: String!
+}
+
+"""做 T 历史回放运行"""
+type TTradeReplay {
+  runId: String!
+  backtestId: String
+  accountId: String!
+  status: String!
+  progressPct: Float!
+  startTime: DateTime!
+  endTime: DateTime!
+  snapshotId: String
+  snapshotDate: String
+  createdAt: DateTime
+  updatedAt: DateTime
+  errorMessage: String
+  dataQuality: String!
+  dataQualityMessage: String!
+  skippedStockCodes: [String!]!
+  summary: TTradeReplaySummary
+  instruments: [TTradeReplayInstrumentResult!]!
+  curve: [TTradeReplayCurvePoint!]!
+}
+
+"""做 T 回放权益曲线点"""
+type TTradeReplayCurvePoint {
+  timestamp: DateTime!
+  equity: Float!
+  passiveEquity: Float!
+  tNetProfit: Float!
+  returnPct: Float!
+  passiveReturnPct: Float!
+  excessReturnPct: Float!
+}
+
+"""做 T 回放批次"""
+type TTradeReplayCycle {
+  batchId: String!
+  stockCode: String!
+  status: String!
+  entryTime: DateTime
+  exitTime: DateTime
+  entryVolume: Int!
+  exitVolume: Int!
+  openVolume: Int!
+  entryAvgPrice: Float!
+  exitAvgPrice: Float!
+  totalFees: Float!
+  netProfit: Float!
+  netReturnPct: Float!
+  exitReason: String!
+}
+
+"""做 T 历史回放批次分页"""
+type TTradeReplayCyclePage {
+  runId: String!
+  total: Int!
+  offset: Int!
+  limit: Int!
+  hasMore: Boolean!
+  items: [TTradeReplayCycle!]!
+}
+
+"""做 T 回放单标的结果"""
+type TTradeReplayInstrumentResult {
+  stockCode: String!
+  instrumentName: String!
+  status: String!
+  reason: String!
+  tNetProfit: Float!
+  totalFees: Float!
+  completedCycles: Int!
+  openCycles: Int!
+  winningCycles: Int!
+  winRatePct: Float!
+}
+
+"""做 T 历史回放操作结果"""
+type TTradeReplayMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  replay: TTradeReplay
+}
+
+"""历史回放初始持仓"""
+type TTradeReplayPosition {
+  stockCode: String!
+  instrumentName: String!
+  volume: Int!
+  availableVolume: Int!
+  avgPrice: Float!
+  lastPrice: Float!
+  marketValue: Float!
+}
+
+"""做 T 历史回放的手工初始持仓"""
+input TTradeReplayPositionInput {
+  stockCode: String!
+  volume: Int!
+  availableVolume: Int!
+  instrumentName: String! = ""
+  avgPrice: Float! = 0
+  lastPrice: Float! = 0
+  marketValue: Float! = 0
+}
+
+"""做 T 历史回放准备信息"""
+type TTradeReplayPreparation {
+  accountId: String!
+  startTime: DateTime!
+  snapshotId: String
+  snapshotDate: String
+  snapshotSource: String
+  initialCash: Float!
+  initialTotalAsset: Float!
+  requiresManualPortfolio: Boolean!
+  message: String!
+  positions: [TTradeReplayPosition!]!
+}
+
+"""启动做 T 历史回放"""
+input TTradeReplayStartInput {
+  accountId: String!
+  startTime: DateTime!
+  endTime: DateTime!
+  initialCash: Float = null
+  initialTotalAsset: Float = null
+  initialPositions: [TTradeReplayPositionInput!]!
+  targetTradeAmount: Float! = 10000
+  maxTradeAmount: Float! = 12000
+  maxConcurrentBatches: Int! = 3
+  maxTotalTExposurePct: Float! = 0.1
+  signalLookbackSeconds: Int! = 300
+  stabilizationSeconds: Int! = 15
+  pullbackThresholdPct: Float! = 0.8
+  reboundThresholdPct: Float! = 0.2
+  maxSpreadTicks: Int! = 3
+  approvalTtlSeconds: Int! = 30
+  maxPriceDeviationPct: Float! = 0.3
+  targetProfitPct: Float! = 2
+  baseFloorPct: Float! = 0.5
+  initialGapPct: Float! = 1.5
+  trailingGapSlope: Float! = 0.25
+  maxGapPct: Float! = 3
+  hardStopEnabled: Boolean! = false
+  hardStopPct: Float! = -0.8
+  timeExitMode: TTradeTimeExitMode! = UNLIMITED
+  timeExitTime: String! = "14:50"
+  maxHoldingTradingDays: Int! = 5
+  cooldownSeconds: Int! = 300
+  commissionRate: Float! = 0.0003
+  minimumCommission: Float! = 5
+  stampTaxRate: Float! = 0.0005
+  transferFeeRate: Float! = 1e-05
+  slippageRate: Float! = 0.0001
+}
+
+"""做 T 回放收益摘要"""
+type TTradeReplaySummary {
+  initialEquity: Float!
+  finalEquity: Float!
+  tNetProfit: Float!
+  totalReturnPct: Float!
+  passiveFinalEquity: Float!
+  passiveReturnPct: Float!
+  excessReturnPct: Float!
+  maxDrawdownPct: Float!
+  totalFees: Float!
+  turnover: Float!
+  completedCycles: Int!
+  openCycles: Int!
+  winningCycles: Int!
+  winRatePct: Float!
+}
+
+"""持仓做 T 会话"""
+type TTradeSession {
+  runId: String!
+  accountId: String!
+  stockCode: String!
+  mode: String!
+  runStatus: String!
+  status: String!
+  positionShares: Int!
+  positionAvailableShares: Int!
+  targetTradeAmount: Float!
+  maxTradeAmount: Float!
+  plannedEntryVolume: Int!
+  targetProfitPct: Float!
+  baseFloorPct: Float!
+  hardStopEnabled: Boolean!
+  hardStopPct: Float!
+  timeExitMode: TTradeTimeExitMode!
+  timeExitTime: String!
+  maxHoldingTradingDays: Int!
+  currentSignal: JSON!
+  pendingEntryIntentId: String
+  pendingExitIntentId: String
+  entryOrderStatus: String!
+  exitOrderStatus: String!
+  entryFilledVolume: Int!
+  entryAvgPrice: Float!
+  exitFilledVolume: Int!
+  exitAvgPrice: Float!
+  activeVolume: Int!
+  lastPrice: Float!
+  lastNetProfitPct: Float!
+  peakNetProfitPct: Float!
+  trailingFloorPct: Float
+  profitArmed: Boolean!
+  lastExitReason: String!
+  completedCycles: Int!
+  latestIntent: JSON
+  canCancel: Boolean!
+  errorMessage: String
+  createdAt: DateTime
+  updatedAt: DateTime
+  globalMonitorId: String
+  globalConfigVersion: Int!
+}
+
+"""做 T 买入确认信号历史"""
+type TTradeSignalHistoryEntry {
+  intentId: String!
+  runId: String!
+  stockCode: String!
+  status: String!
+  statusReason: String!
+  signalPrice: Float!
+  pullbackPct: Float!
+  reboundPct: Float!
+  requestedVolume: Int!
+  createdAt: DateTime
+  expiresAt: DateTime
+  updatedAt: DateTime
+}
+
+"""做 T 信号历史游标分页"""
+type TTradeSignalHistoryPage {
+  items: [TTradeSignalHistoryEntry!]!
+  pageInfo: PageInfo!
+}
+
+"""启动持仓做 T 会话"""
+input TTradeStartInput {
+  accountId: String!
+  stockCode: String!
+  mode: String! = "live"
+  autoExitAcknowledged: Boolean! = false
+  targetTradeAmount: Float! = 10000
+  maxTradeAmount: Float! = 12000
+  maxConcurrentBatches: Int! = 3
+  maxTotalTExposurePct: Float! = 0.1
+  signalLookbackSeconds: Int! = 300
+  stabilizationSeconds: Int! = 15
+  pullbackThresholdPct: Float! = 0.8
+  reboundThresholdPct: Float! = 0.2
+  maxSpreadTicks: Int! = 3
+  approvalTtlSeconds: Int! = 30
+  maxPriceDeviationPct: Float! = 0.3
+  targetProfitPct: Float! = 2
+  baseFloorPct: Float! = 0.5
+  initialGapPct: Float! = 1.5
+  trailingGapSlope: Float! = 0.25
+  maxGapPct: Float! = 3
+  hardStopEnabled: Boolean! = false
+  hardStopPct: Float! = -0.8
+  timeExitMode: TTradeTimeExitMode! = UNLIMITED
+  timeExitTime: String! = "14:50"
+  maxHoldingTradingDays: Int! = 5
+  cooldownSeconds: Int! = 300
+}
+
+"""T 批次时间退出模式"""
+enum TTradeTimeExitMode {
+  UNLIMITED
+  END_OF_DAY
+  MAX_HOLDING_DAYS
+}
+
+"""做 T 监控读投影更新通知"""
+type TTradeUpdateNotice {
+  accountId: String!
+  version: String!
+  occurredAt: DateTime!
+}
+
+"""任务运行状态"""
+type TaskRun {
+  """任务ID"""
+  id: String!
+
+  """任务名称"""
+  name: String!
+
+  """任务状态"""
+  state: String!
+
+  """开始时间"""
+  startedAt: DateTime
+
+  """结束时间"""
+  finishedAt: DateTime
+
+  """总运行时间(秒)"""
+  totalRunTime: Float
+
+  """任务输入"""
+  taskInputs: String
+}
+
+"""逐笔数据"""
+type TickData {
+  """股票代码"""
+  stockCode: String!
+
+  """周期"""
+  period: String!
+
+  """时间"""
+  time: DateTime!
+
+  """最新价"""
+  lastPrice: Float!
+
+  """开盘价"""
+  open: Float!
+
+  """最高价"""
+  high: Float!
+
+  """最低价"""
+  low: Float!
+
+  """昨收价"""
+  preClose: Float!
+
+  """成交量"""
+  volume: Int!
+
+  """成交额"""
+  amount: Float!
+}
+
+"""成交记录信息"""
+type Trade {
+  """资金账号"""
+  accountId: String!
+
+  """证券代码"""
+  stockCode: String!
+
+  """委托类型"""
+  orderType: Int!
+
+  """订单编号"""
+  orderId: Int!
+
+  """柜台合同编号"""
+  orderSysid: String!
+
+  """策略名称"""
+  strategyName: String
+
+  """委托备注"""
+  orderRemark: String
+
+  """多空方向"""
+  direction: Int
+
+  """交易操作"""
+  offsetFlag: Int
+
+  """账号类型"""
+  accountType: Int!
+
+  """证券名称"""
+  stockName: String!
+
+  """成交编号"""
+  tradedId: String!
+
+  """成交时间(时间戳)"""
+  tradedTime: Int!
+
+  """成交均价"""
+  tradedPrice: Float!
+
+  """成交数量"""
+  tradedVolume: Int!
+
+  """成交金额"""
+  tradedAmount: Float!
+}
+
+"""策略 TradeIntent 前端视图"""
+type TradeIntentView {
+  id: String!
+  side: String!
+  instrumentCode: String!
+  targetBucket: String
+  priceIntent: JSON
+  quantityIntent: JSON
+  reason: String
+  traceId: String
+  status: String
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+"""交易事件类型 (个人量化软件专用)"""
+enum TradingEventType {
+  ORDER_CREATED
+  ORDER_FILLED
+  ORDER_CANCELLED
+  ORDER_REJECTED
+}
+
+"""自选股"""
+type WatchlistItem {
+  """自选记录ID"""
+  id: String!
+
+  """资金账号"""
+  accountId: String!
+
+  """证券代码"""
+  stockCode: String!
+
+  """证券名称"""
+  instrumentName: String
+
+  """展示排序"""
+  displayOrder: Int!
+
+  """分组"""
+  groupName: String
+
+  """备注"""
+  note: String
+
+  """创建时间"""
+  createdAt: DateTime
+
+  """更新时间"""
+  updatedAt: DateTime
+}
+
+"""自选股变更结果"""
+type WatchlistMutationResult {
+  """是否成功"""
+  success: Boolean!
+
+  """结果说明"""
+  message: String!
+
+  """单条自选股"""
+  item: WatchlistItem
+
+  """自选股列表"""
+  items: [WatchlistItem!]!
+}
