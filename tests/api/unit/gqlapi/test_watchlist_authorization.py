@@ -7,6 +7,7 @@ from quantx_api.auth.errors import AuthError
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.resolvers.watchlist import WatchlistResolver
 from quantx_api.gqlapi.schemas.watchlist_schema import WatchlistMutation
+from quantx_api.gqlapi.security import required_permission
 from quantx_api.gqlapi.types.watchlist_types import (
   AddWatchlistItemInput,
   ReorderWatchlistInput,
@@ -26,6 +27,19 @@ def _info(*, account_id: str = "ACCOUNT-1") -> SimpleNamespace:
     authorized_account_ids=(account_id,),
   )
   return SimpleNamespace(context={"principal": principal})
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  [
+    "addWatchlistItem",
+    "removeWatchlistItem",
+    "replaceWatchlist",
+    "reorderWatchlist",
+  ],
+)
+def test_watchlist_mutations_require_dedicated_scope(field_name: str):
+  assert required_permission("Mutation", field_name) == "watchlist:write"
 
 
 @pytest.mark.asyncio

@@ -151,21 +151,12 @@ _ASSISTANT_MUTATION_FIELDS = {
 _ASSISTANT_SUBSCRIPTION_FIELDS = {"aiassistantevents"}
 _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
 _TRADE_APPROVAL_MUTATION_FIELDS = {
-  "activatettradelive",
-  "approvestrategytradeintent",
-  "approvettradeentry",
-  "beginttradecontrolledwindow",
   "confirmstrategytradeintentapproval",
   "confirmexitintent",
   "confirmttradeentryapproval",
   "previewstrategytradeintentapproval",
   "previewexitintent",
   "previewttradeentryapproval",
-  "pausettradeentries",
-  "rejectstrategytradeintent",
-  "rejectexitintent",
-  "rejectttradeentry",
-  "triggerttradekillswitch",
 }
 _MANUAL_TRADE_MUTATION_FIELDS = {
   "cancelorder",
@@ -173,6 +164,38 @@ _MANUAL_TRADE_MUTATION_FIELDS = {
   "previewmanualorder",
 }
 _DIRECT_TRADE_MUTATION_FIELDS = {"placeorder"}
+_WATCHLIST_MUTATION_FIELDS = {
+  "addwatchlistitem",
+  "removewatchlistitem",
+  "replacewatchlist",
+  "reorderwatchlist",
+}
+_STRATEGY_CONTROL_MUTATION_FIELDS = {
+  # These lifecycle operations do not create a broker order.  Mobile parameter
+  # editing remains on the legacy permission until its allowlist/version
+  # contract is enforced by the resolver.
+  "pausestrategyinstance",
+  "resumestrategyinstance",
+  "rejectstrategytradeintent",
+}
+_T_TRADE_CONTROL_MUTATION_FIELDS = {
+  "acknowledgeoperationalalert",
+  "cancelttradeorder",
+  "reconcilettradeglobalmonitor",
+  "rejectttradeentry",
+  "resolveoperationalalert",
+  "savettradeglobalmonitor",
+  "startttradesession",
+  "stopttradesession",
+}
+_LIMIT_UP_CONTROL_MUTATION_FIELDS = {
+  "armlimitupboardcandidate",
+  "disarmlimitupboardcandidate",
+  "reconcilelimitupboardassistant",
+  "savefirstboardassistant",
+  "savelimitupboardassistant",
+  "setfirstboardcandidatepreference",
+}
 
 _NORMALIZED_PORTFOLIO_FIELDS = {
   re.sub(r"[^a-z0-9]", "", value.lower()) for value in _PORTFOLIO_FIELDS
@@ -196,6 +219,14 @@ def required_permission(operation_name: str, field_name: str) -> str:
       return "trade:manual"
     if normalized in _DIRECT_TRADE_MUTATION_FIELDS:
       return "trade:direct"
+    if normalized in _WATCHLIST_MUTATION_FIELDS:
+      return "watchlist:write"
+    if normalized in _STRATEGY_CONTROL_MUTATION_FIELDS:
+      return "strategy:control"
+    if normalized in _T_TRADE_CONTROL_MUTATION_FIELDS:
+      return "t-trade:control"
+    if normalized in _LIMIT_UP_CONTROL_MUTATION_FIELDS:
+      return "limit-up:control"
     return "mutation:write"
   if normalized in _NORMALIZED_PORTFOLIO_FIELDS:
     return "portfolio:read"

@@ -31,18 +31,10 @@ _AUTHORIZATION_SCHEMA = strawberry.Schema(
 @pytest.mark.parametrize(
   "field_name",
   [
-    "approveTTradeEntry",
-    "rejectTTradeEntry",
     "previewTTradeEntryApproval",
     "confirmTTradeEntryApproval",
-    "approveStrategyTradeIntent",
-    "rejectStrategyTradeIntent",
     "previewStrategyTradeIntentApproval",
     "confirmStrategyTradeIntentApproval",
-    "beginTTradeControlledWindow",
-    "activateTTradeLive",
-    "pauseTTradeEntries",
-    "triggerTTradeKillSwitch",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -51,8 +43,24 @@ def test_trade_approval_mutations_require_independent_permission(
   assert required_permission("Mutation", field_name) == "trade:approve"
 
 
-def test_other_mutations_keep_general_write_permission():
-  assert required_permission("Mutation", "pauseStrategyInstance") == "mutation:write"
+def test_strategy_lifecycle_uses_narrow_control_permission():
+  assert required_permission("Mutation", "pauseStrategyInstance") == "strategy:control"
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  [
+    "approveTTradeEntry",
+    "approveStrategyTradeIntent",
+    "beginTTradeControlledWindow",
+    "activateTTradeLive",
+    "triggerTTradeKillSwitch",
+  ],
+)
+def test_legacy_or_unchallenged_risk_writes_are_not_native_capabilities(
+  field_name: str,
+):
+  assert required_permission("Mutation", field_name) == "mutation:write"
 
 
 @pytest.mark.parametrize(

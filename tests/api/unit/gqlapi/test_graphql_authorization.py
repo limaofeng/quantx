@@ -64,18 +64,10 @@ def test_ai_runtime_settings_use_dedicated_system_permissions():
 @pytest.mark.parametrize(
   "field_name",
   [
-    "approveTTradeEntry",
-    "rejectTTradeEntry",
     "previewTTradeEntryApproval",
     "confirmTTradeEntryApproval",
-    "approveStrategyTradeIntent",
-    "rejectStrategyTradeIntent",
     "previewStrategyTradeIntentApproval",
     "confirmStrategyTradeIntentApproval",
-    "beginTTradeControlledWindow",
-    "activateTTradeLive",
-    "pauseTTradeEntries",
-    "triggerTTradeKillSwitch",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -84,8 +76,49 @@ def test_trade_approval_mutations_require_independent_permission(
   assert required_permission("Mutation", field_name) == "trade:approve"
 
 
-def test_unrelated_mutation_keeps_general_write_permission():
-  assert required_permission("Mutation", "pauseStrategyInstance") == "mutation:write"
+@pytest.mark.parametrize(
+  ("field_name", "permission"),
+  [
+    ("addWatchlistItem", "watchlist:write"),
+    ("removeWatchlistItem", "watchlist:write"),
+    ("replaceWatchlist", "watchlist:write"),
+    ("reorderWatchlist", "watchlist:write"),
+    ("pauseStrategyInstance", "strategy:control"),
+    ("resumeStrategyInstance", "strategy:control"),
+    ("rejectStrategyTradeIntent", "strategy:control"),
+    ("saveTTradeGlobalMonitor", "t-trade:control"),
+    ("reconcileTTradeGlobalMonitor", "t-trade:control"),
+    ("startTTradeSession", "t-trade:control"),
+    ("stopTTradeSession", "t-trade:control"),
+    ("cancelTTradeOrder", "t-trade:control"),
+    ("rejectTTradeEntry", "t-trade:control"),
+    ("saveLimitUpBoardAssistant", "limit-up:control"),
+    ("armLimitUpBoardCandidate", "limit-up:control"),
+    ("setFirstBoardCandidatePreference", "limit-up:control"),
+  ],
+)
+def test_mobile_non_order_mutations_use_narrow_permissions(
+  field_name: str,
+  permission: str,
+):
+  assert required_permission("Mutation", field_name) == permission
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  [
+    "approveTTradeEntry",
+    "approveStrategyTradeIntent",
+    "beginTTradeControlledWindow",
+    "activateTTradeLive",
+    "triggerTTradeKillSwitch",
+    "updateStrategyInstanceParameters",
+  ],
+)
+def test_legacy_or_not_yet_challenged_risk_writes_stay_out_of_native_scopes(
+  field_name: str,
+):
+  assert required_permission("Mutation", field_name) == "mutation:write"
 
 
 @pytest.mark.parametrize(
@@ -135,8 +168,8 @@ async def test_mobile_manual_principal_cannot_call_legacy_direct_order():
     ("Subscription", "aiAssistantEvents", "assistant:read"),
     ("Mutation", "sendAiAssistantMessage", "assistant:write"),
     ("Mutation", "resolveAiAssistantApproval", "assistant:write"),
-    ("Mutation", "saveFirstBoardAssistant", "mutation:write"),
-    ("Mutation", "setFirstBoardCandidatePreference", "mutation:write"),
+    ("Mutation", "saveFirstBoardAssistant", "limit-up:control"),
+    ("Mutation", "setFirstBoardCandidatePreference", "limit-up:control"),
   ],
 )
 def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(
