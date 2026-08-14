@@ -42,6 +42,34 @@ from ..types.trade_approval_types import (
 )
 
 
+def _native_active_account_id(info: strawberry.types.Info) -> Optional[str]:
+  """Return the one account selected by a scoped native session.
+
+  Legacy Web sessions intentionally have no active account and retain their
+  existing multi-account management surface.  Native sessions never receive an
+  unfiltered strategy-run list.
+  """
+
+  principal = principal_from_context(info.context)
+  if principal.active_account_id is None:
+    return None
+  return principal.require_account(principal.active_account_id)
+
+
+async def _authorize_native_strategy_run(
+  info: strawberry.types.Info,
+  run_id: str,
+) -> None:
+  active_account_id = _native_active_account_id(info)
+  if active_account_id is None:
+    return
+  bound_account_id = await StrategyResolver.strategy_run_account_id(run_id)
+  if bound_account_id != active_account_id:
+    # Use the shared authorization error rather than revealing whether a
+    # cross-account run identifier exists.
+    principal_from_context(info.context).require_account(bound_account_id)
+
+
 @strawberry.type(description="策略相关查询")
 class StrategyQuery:
   @strawberry.field(description="获取策略模板列表")
@@ -60,18 +88,30 @@ class StrategyQuery:
   @strawberry.field(description="获取策略运行列表")
   async def strategy_runs(
     self,
+    info: strawberry.types.Info,
     include_assistant_managed: bool = False,
   ) -> List[StrategyRun]:
     return await StrategyResolver.get_strategy_runs(
-      include_assistant_managed=include_assistant_managed
+      include_assistant_managed=include_assistant_managed,
+      account_id=_native_active_account_id(info),
     )
 
   @strawberry.field(description="获取单个策略运行")
-  async def strategy_run(self, run_id: str) -> Optional[StrategyRun]:
+  async def strategy_run(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> Optional[StrategyRun]:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_strategy_run(run_id)
 
   @strawberry.field(description="获取策略运行的回测历史")
-  async def backtest_history(self, run_id: str) -> List[StrategyBacktest]:
+  async def backtest_history(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> List[StrategyBacktest]:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_backtest_history(run_id)
 
   @strawberry.field(description="获取策略库定义列表")
@@ -86,6 +126,7 @@ class StrategyQuery:
   @strawberry.field(description="获取策略实例列表")
   async def strategy_instances(
     self,
+    info: strawberry.types.Info,
     status: Optional[str] = None,
     strategy_key: Optional[str] = None,
     instrument_code: Optional[str] = None,
@@ -96,34 +137,46 @@ class StrategyQuery:
       strategy_key=strategy_key,
       instrument_code=instrument_code,
       include_assistant_managed=include_assistant_managed,
+      account_id=_native_active_account_id(info),
     )
 
   @strawberry.field(description="获取单个策略实例")
-  async def strategy_instance(self, id: str) -> Optional[StrategyInstance]:
+  async def strategy_instance(
+    self,
+    info: strawberry.types.Info,
+    id: str,
+  ) -> Optional[StrategyInstance]:
+    await _authorize_native_strategy_run(info, id)
     return await StrategyResolver.get_strategy_instance(id)
 
   @strawberry.field(description="获取策略运行中等待人工确认的交易意图")
   async def strategy_pending_trade_intents(
     self,
+    info: strawberry.types.Info,
     run_id: str,
   ) -> List[StrategyApprovalIntent]:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_strategy_pending_trade_intents(run_id)
 
   @strawberry.field(description="获取策略运行的统一自动退出计划")
   async def strategy_exit_plans(
     self,
+    info: strawberry.types.Info,
     run_id: str,
   ) -> List[StrategyExitPlanView]:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_strategy_exit_plans(run_id)
 
   @strawberry.field(description="获取策略实例决策审计历史")
   async def strategy_decision_history(
     self,
+    info: strawberry.types.Info,
     instance_id: str,
     cursor: Optional[str] = None,
     limit: int = 50,
     backtest_id: Optional[str] = None,
   ) -> List[StrategyDecision]:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.get_strategy_decision_history(
       instance_id=instance_id,
       cursor=cursor,
@@ -134,12 +187,14 @@ class StrategyQuery:
   @strawberry.field(description="获取策略实例执行跟踪")
   async def strategy_execution_trace(
     self,
+    info: strawberry.types.Info,
     instance_id: str,
     decision_id: Optional[str] = None,
     backtest_id: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: int = 50,
   ) -> List[ExecutionTraceView]:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.get_strategy_execution_trace(
       instance_id=instance_id,
       decision_id=decision_id,
@@ -149,16 +204,23 @@ class StrategyQuery:
     )
 
   @strawberry.field(description="获取策略实例三仓归因")
-  async def strategy_bucket_ledger(self, instance_id: str) -> BucketLedgerView:
+  async def strategy_bucket_ledger(
+    self,
+    info: strawberry.types.Info,
+    instance_id: str,
+  ) -> BucketLedgerView:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.get_strategy_bucket_ledger(instance_id)
 
   @strawberry.field(description="获取 Pullback Grid 网格簿")
   async def strategy_grid_book(
     self,
+    info: strawberry.types.Info,
     instance_id: str,
     backtest_id: Optional[str] = None,
     version: Optional[int] = None,
   ) -> StrategyGridBook:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.get_strategy_grid_book(
       instance_id,
       backtest_id=backtest_id,
@@ -168,12 +230,14 @@ class StrategyQuery:
   @strawberry.field(description="获取策略绩效")
   async def strategy_performance(
     self,
+    info: strawberry.types.Info,
     run_id: str,
     backtest_id: Optional[str] = None,
     benchmark_code: Optional[str] = None,
     cursor: Optional[str] = None,
     limit: int = 2000,
   ) -> StrategyPerformance:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_strategy_performance(
       run_id=run_id,
       backtest_id=backtest_id,
@@ -185,6 +249,7 @@ class StrategyQuery:
   @strawberry.field(description="分页读取策略执行日志文件")
   async def strategy_execution_logs(
     self,
+    info: strawberry.types.Info,
     run_id: str,
     backtest_id: Optional[str] = None,
     version: Optional[int] = None,
@@ -193,6 +258,7 @@ class StrategyQuery:
     before: bool = False,
     tail: bool = True,
   ) -> StrategyLogPage:
+    await _authorize_native_strategy_run(info, run_id)
     return await StrategyResolver.get_strategy_execution_logs(
       run_id=run_id,
       backtest_id=backtest_id,
@@ -312,11 +378,21 @@ class StrategyMutation:
     return await StrategyResolver.update_strategy_grid_book(instance_id, input)
 
   @strawberry.field(description="暂停策略实例")
-  async def pause_strategy_instance(self, instance_id: str) -> OperationResult:
+  async def pause_strategy_instance(
+    self,
+    info: strawberry.types.Info,
+    instance_id: str,
+  ) -> OperationResult:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.pause_strategy_instance(instance_id)
 
   @strawberry.field(description="恢复策略实例")
-  async def resume_strategy_instance(self, instance_id: str) -> OperationResult:
+  async def resume_strategy_instance(
+    self,
+    info: strawberry.types.Info,
+    instance_id: str,
+  ) -> OperationResult:
+    await _authorize_native_strategy_run(info, instance_id)
     return await StrategyResolver.resume_strategy_instance(instance_id)
 
   @strawberry.field(description="确认一个等待人工授权的策略交易意图")

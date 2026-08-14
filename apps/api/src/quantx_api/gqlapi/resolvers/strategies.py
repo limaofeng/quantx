@@ -953,6 +953,7 @@ class StrategyResolver:
     strategy_key: Optional[str] = None,
     instrument_code: Optional[str] = None,
     include_assistant_managed: bool = False,
+    account_id: Optional[str] = None,
   ) -> List[StrategyInstance]:
     instances: List[StrategyInstance] = []
     async for db in get_async_db():
@@ -961,6 +962,13 @@ class StrategyResolver:
       for run in runs:
         if not include_assistant_managed and is_assistant_managed_strategy(run):
           continue
+        if account_id is not None:
+          parameters = StrategyResolver._json_object(run.parameters)
+          bound_account_id = str(
+            parameters.get("account_id") or parameters.get("accountId") or ""
+          ).strip()
+          if bound_account_id != account_id:
+            continue
         if status and str(getattr(run.status, "value", run.status)).lower() != status.lower():
           continue
         if strategy_key:
@@ -1021,15 +1029,15 @@ class StrategyResolver:
   async def get_strategy_exit_plans(run_id: str) -> List[StrategyExitPlanView]:
     from quantx_domain.trading.exit_plan import (
       EXIT_PLAN_BOOK_STATE_KEY,
+      ExitPlan,
       ExitPlanBook,
-    )
-    from quantx_infrastructure.repositories.strategy_run_state_repository import (
-      StrategyRunStateRepository,
     )
     from quantx_infrastructure.repositories.auto_exit_plan_repository import (
       AutoExitPlanRepository,
     )
-    from quantx_domain.trading.exit_plan import ExitPlan
+    from quantx_infrastructure.repositories.strategy_run_state_repository import (
+      StrategyRunStateRepository,
+    )
 
     async for db in get_async_db():
       run = await StrategyRunRepository(db).find_run_by_id(run_id)
@@ -1722,6 +1730,7 @@ class StrategyResolver:
   @staticmethod
   async def get_strategy_runs(
     include_assistant_managed: bool = False,
+    account_id: Optional[str] = None,
   ) -> List[StrategyRun]:
     """获取所有策略运行"""
     runs = []
@@ -1734,6 +1743,13 @@ class StrategyResolver:
       for model in db_runs:
         if not include_assistant_managed and is_assistant_managed_strategy(model):
           continue
+        if account_id is not None:
+          parameters = StrategyResolver._json_object(model.parameters)
+          bound_account_id = str(
+            parameters.get("account_id") or parameters.get("accountId") or ""
+          ).strip()
+          if bound_account_id != account_id:
+            continue
         if model.strategy_id not in strategy_cache:
           strategy_cache[model.strategy_id] = await StrategyResolver._get_strategy_by_id(
             model.strategy_id
