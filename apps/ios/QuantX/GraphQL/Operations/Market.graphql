@@ -11,6 +11,47 @@ query IOSMarketWatchlist($accountId: String) {
   }
 }
 
+mutation IOSAddWatchlistItem($input: AddWatchlistItemInput!) {
+  addWatchlistItem(input: $input) {
+    success
+    message
+    item {
+      id
+      accountId
+      stockCode
+      instrumentName
+      displayOrder
+      groupName
+      note
+      updatedAt
+    }
+  }
+}
+
+mutation IOSRemoveWatchlistItem($stockCode: String!, $accountId: String!) {
+  removeWatchlistItem(stockCode: $stockCode, accountId: $accountId) {
+    success
+    message
+  }
+}
+
+mutation IOSReorderWatchlist($input: ReorderWatchlistInput!) {
+  reorderWatchlist(input: $input) {
+    success
+    message
+    items {
+      id
+      accountId
+      stockCode
+      instrumentName
+      displayOrder
+      groupName
+      note
+      updatedAt
+    }
+  }
+}
+
 query IOSLatestMarketQuotes($stockList: [String!]!) {
   latestMarketQuotes(stockList: $stockList) {
     stockCode

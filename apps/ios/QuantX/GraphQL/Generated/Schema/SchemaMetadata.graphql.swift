@@ -61,7 +61,8 @@ extension QuantXAPI {
       "TradeApprovalConfirmationResult": QuantXAPI.Objects.TradeApprovalConfirmationResult,
       "TradeApprovalPreview": QuantXAPI.Objects.TradeApprovalPreview,
       "TradeApprovalPreviewResult": QuantXAPI.Objects.TradeApprovalPreviewResult,
-      "WatchlistItem": QuantXAPI.Objects.WatchlistItem
+      "WatchlistItem": QuantXAPI.Objects.WatchlistItem,
+      "WatchlistMutationResult": QuantXAPI.Objects.WatchlistMutationResult
     ]
 
     static func objectType(forTypename typename: String) -> ApolloAPI.Object? {

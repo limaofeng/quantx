@@ -29,7 +29,7 @@ xcodebuild -project QuantX.xcodeproj -scheme QuantX -configuration Debug \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-当前回归基线覆盖五入口信息架构、真实认证 JSON 字段映射、Token 并发轮换、成功与失败恢复、后台隐私遮罩与本地锁定、远端登出失败后的本机清理、GraphQL 模型映射、行情代码主键、无时区历史数据兼容、空账户/无持仓、委托部分成交与未知券商状态、助手权限隔离与数值校验、独立交易权限、手动委托主账户绑定与 UUID 幂等、短时确认过期、生物识别先于 mutation、健康服务失败、数据过期、Debug HTTP/WS 账户连接和今日页无障碍审计。
+当前回归基线覆盖五入口信息架构、真实认证 JSON 字段映射、Token 并发轮换、成功与失败恢复、后台隐私遮罩与本地锁定、远端登出失败后的本机清理、GraphQL 模型映射、行情代码主键、自选 scope 隔离与乐观回滚、无时区历史数据兼容、空账户/无持仓、委托部分成交与未知券商状态、助手权限隔离与数值校验、独立交易权限、手动委托主账户绑定与 UUID 幂等、短时确认过期、生物识别先于 mutation、健康服务失败、数据过期、Debug HTTP/WS 账户连接和今日页无障碍审计。
 
 真实开发后端只读集成使用单独 Scheme，必须由后端显式启用开发临时会话。该测试只读取账户、策略、委托成交与做T投影，完成后注销临时会话，不调用 Mutation：
 
@@ -102,6 +102,7 @@ Apollo codegen 直接读取同一 monorepo 中发布的 `apps/docs/public/contra
 - Keychain 只保存 Access/Refresh Token、到期时间与设备会话 ID。主账户和获准 scope 不持久化，冷启动通过 `GET /auth/session` 重新恢复；登出即清除令牌、内存账户/scope、Apollo 缓存与订阅。
 - 账户摘要、组合汇总和每条持仓会再次进行客户端 `accountId` 范围一致性校验；发现跨账户数据时整页拒绝展示。
 - 行情搜索使用 `Instrument.id` 作为带市场后缀的统一 `stockCode`；六位 `instrumentId` 仅用于展示，不能作为交易请求标的。自选、批量报价、K 线与 WebSocket 行情均校验证券代码和有限数值。
+- 自选添加、移除和排序只接受设备会话实际获授的 `watchlist:write`，宽泛 `permissions` 或 `mutation:write` 不能代替。每次 Mutation 都显式携带并再次校验唯一 `activeAccountId`；UI 先乐观更新，失败恢复上次服务端快照，成功后立即刷新并以服务端返回顺序为最终事实。没有该 scope 时行情和自选读取保持可用，维护入口明确显示不可用。
 - 委托与成交查询按当前账户发起；成交结果会再次校验 `accountId`，未知券商方向或状态保持“未知”，不会推断为卖出或成交完成。
 - 兼容后端遗留的 Asia/Shanghai 无时区数据库时间；新 API 输出会携带明确时区，客户端不会按设备时区猜测。
 - 做T助手校验账户作用域、可用量关系、生产就绪门禁、Kill Switch、信号与批次数值；打板助手仅处理明确识别的打板策略实例、待确认意图和退出计划。

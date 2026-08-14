@@ -50,6 +50,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var pendingManualOrderDraft: ManualOrderDraftLink?
   @Published private(set) var marketState: MarketWorkspaceState = .idle
   @Published private(set) var marketRefreshInProgress = false
+  @Published private(set) var watchlistMutationInProgress = false
+  @Published private(set) var watchlistMutationErrorMessage: String?
 
   let configuration: APIConfiguration?
   let configurationErrorMessage: String?
@@ -288,6 +290,43 @@ final class AppModel: ObservableObject {
     return nil
   }
 
+  var watchlistEditingUnavailableReason: String? {
+    guard accountDataEnabled else {
+      return "账户服务尚未开放，自选保持只读"
+    }
+    guard hasPermission("watchlist:write") else {
+      return "当前会话没有 watchlist:write 权限，自选保持只读"
+    }
+    guard hasPermission("market:read"), hasPermission("portfolio:read") else {
+      return "自选维护需要 market:read 与 portfolio:read 权限"
+    }
+    guard !localSessionLocked else {
+      return "本机会话已锁定，解锁后才能维护自选"
+    }
+    guard
+      let activeAccountID = authenticatedUser?.activeAccountID,
+      portfolioState.snapshot?.account.id == activeAccountID,
+      marketState.snapshot?.accountID == activeAccountID,
+      marketRepository != nil
+    else {
+      return "当前主账户上下文不可用，自选保持只读"
+    }
+    return nil
+  }
+
+  var canEditWatchlist: Bool {
+    watchlistEditingUnavailableReason == nil
+  }
+
+  func isInWatchlist(stockCode: String) -> Bool {
+    let normalized = stockCode
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .uppercased()
+    return marketState.snapshot?.watchlist.contains {
+      $0.stockCode == normalized
+    } == true
+  }
+
   func start() async {
 #if DEBUG
     if ProcessInfo.processInfo.arguments.contains("-QuantXLoginUITesting") {
@@ -296,6 +335,10 @@ final class AppModel: ObservableObject {
     }
     if usesTransientRealBackendUITestSession {
       await startTransientRealBackendUITestSession()
+      return
+    }
+    if ProcessInfo.processInfo.arguments.contains("-QuantXWatchlistReadOnlyUITesting") {
+      startWatchlistReadOnlyUITestFixture()
       return
     }
     if ProcessInfo.processInfo.arguments.contains("-QuantXUITesting") {
@@ -548,13 +591,12 @@ final class AppModel: ObservableObject {
     defer { marketRefreshInProgress = false }
 
     do {
-      marketState = .loaded(
-        try await repository.loadWatchlist(
-          accountID: accountID,
-          authorizedAccountIDs: activeAccountIDs(for: user)
-        ),
-        refreshWarning: nil
+      let snapshot = try await repository.loadWatchlist(
+        accountID: accountID,
+        authorizedAccountIDs: activeAccountIDs(for: user)
       )
+      marketState = .loaded(snapshot, refreshWarning: nil)
+      watchlistMutationErrorMessage = nil
     } catch is CancellationError {
       marketState = previousSnapshot.map { .loaded($0, refreshWarning: nil) } ?? .idle
     } catch ReadOnlyRepositoryError.unauthenticated {
@@ -571,13 +613,12 @@ final class AppModel: ObservableObject {
         else {
           throw ReadOnlyRepositoryError.accountScopeMismatch
         }
-        marketState = .loaded(
-          try await refreshedRepository.loadWatchlist(
-            accountID: refreshedAccountID,
-            authorizedAccountIDs: activeAccountIDs(for: refreshedUser)
-          ),
-          refreshWarning: nil
+        let snapshot = try await refreshedRepository.loadWatchlist(
+          accountID: refreshedAccountID,
+          authorizedAccountIDs: activeAccountIDs(for: refreshedUser)
         )
+        marketState = .loaded(snapshot, refreshWarning: nil)
+        watchlistMutationErrorMessage = nil
       } catch {
         await handleReadOnlyRetryFailure(
           error,
@@ -591,6 +632,172 @@ final class AppModel: ObservableObject {
         .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
       } ?? .failed(message)
     }
+  }
+
+  func addToWatchlist(_ instrument: MarketInstrument) async throws {
+    let context = try prepareWatchlistMutation()
+    let normalizedCode: String
+    do {
+      normalizedCode = try MarketRepository.normalizedAStockCode(instrument.stockCode)
+      guard !context.snapshot.watchlist.contains(where: { $0.stockCode == normalizedCode }) else {
+        throw WatchlistMutationError.invalidRequest("该证券已在自选列表中")
+      }
+    } catch {
+      failWatchlistPreparation(error)
+      throw error
+    }
+
+    let currentMaximumOrder = context.snapshot.watchlist.map(\.displayOrder).max() ?? 0
+    guard currentMaximumOrder < Int(Int32.max) else {
+      let error = WatchlistMutationError.invalidRequest("自选排序超出有效范围")
+      failWatchlistPreparation(error)
+      throw error
+    }
+    let displayOrder = currentMaximumOrder + 1
+    let optimisticItem = MarketWatchItem(
+      id: "optimistic-\(UUID().uuidString.lowercased())",
+      accountID: context.accountID,
+      stockCode: normalizedCode,
+      instrumentName: instrument.name,
+      displayOrder: displayOrder,
+      groupName: nil,
+      note: nil,
+      updatedAt: Date(),
+      quote: instrument.quote
+    )
+    let optimisticSnapshot = context.snapshot.replacingWatchlist(
+      context.snapshot.watchlist + [optimisticItem]
+    )
+    marketState = .loaded(optimisticSnapshot, refreshWarning: nil)
+    defer { watchlistMutationInProgress = false }
+
+    do {
+      let serverItem = try await performWatchlistMutation(
+        context: context,
+        optimisticSnapshot: optimisticSnapshot
+      ) { repository, authorizedAccountIDs in
+        try await repository.addWatchlistItem(
+          accountID: context.accountID,
+          stockCode: normalizedCode,
+          instrumentName: instrument.name,
+          displayOrder: displayOrder,
+          authorizedAccountIDs: authorizedAccountIDs
+        )
+      }
+      let authoritative = optimisticSnapshot.watchlist.map { item in
+        item.stockCode == normalizedCode
+          ? serverItem.hydrated(with: item.quote)
+          : item
+      }
+      marketState = .loaded(
+        optimisticSnapshot.replacingWatchlist(authoritative),
+        refreshWarning: nil
+      )
+      watchlistMutationErrorMessage = nil
+      await refreshMarket()
+    } catch {
+      rollbackWatchlistMutation(error, to: context.snapshot)
+      throw error
+    }
+  }
+
+  func removeFromWatchlist(stockCode: String) async throws {
+    let context = try prepareWatchlistMutation()
+    let normalizedCode: String
+    do {
+      normalizedCode = try MarketRepository.normalizedAStockCode(stockCode)
+      guard context.snapshot.watchlist.contains(where: { $0.stockCode == normalizedCode }) else {
+        throw WatchlistMutationError.invalidRequest("该证券不在当前自选列表中")
+      }
+    } catch {
+      failWatchlistPreparation(error)
+      throw error
+    }
+
+    let optimisticItems = context.snapshot.watchlist
+      .filter { $0.stockCode != normalizedCode }
+      .enumerated()
+      .map { index, item in item.ordered(at: index + 1) }
+    let optimisticSnapshot = context.snapshot.replacingWatchlist(optimisticItems)
+    marketState = .loaded(optimisticSnapshot, refreshWarning: nil)
+    defer { watchlistMutationInProgress = false }
+
+    do {
+      try await performWatchlistMutation(
+        context: context,
+        optimisticSnapshot: optimisticSnapshot
+      ) { repository, authorizedAccountIDs in
+        try await repository.removeWatchlistItem(
+          accountID: context.accountID,
+          stockCode: normalizedCode,
+          authorizedAccountIDs: authorizedAccountIDs
+        )
+      }
+      watchlistMutationErrorMessage = nil
+      await refreshMarket()
+    } catch {
+      rollbackWatchlistMutation(error, to: context.snapshot)
+      throw error
+    }
+  }
+
+  func reorderWatchlist(stockCodes: [String]) async throws {
+    let context = try prepareWatchlistMutation()
+    let normalizedCodes: [String]
+    do {
+      normalizedCodes = try MarketRepository.validateReorderStockCodes(stockCodes)
+      guard
+        normalizedCodes.count == context.snapshot.watchlist.count,
+        Set(normalizedCodes) == Set(context.snapshot.watchlist.map(\.stockCode))
+      else {
+        throw WatchlistMutationError.contextMismatch
+      }
+    } catch {
+      failWatchlistPreparation(error)
+      throw error
+    }
+
+    let currentByCode = Dictionary(
+      uniqueKeysWithValues: context.snapshot.watchlist.map { ($0.stockCode, $0) }
+    )
+    let optimisticItems = normalizedCodes.enumerated().compactMap { index, code in
+      currentByCode[code]?.ordered(at: index + 1)
+    }
+    let optimisticSnapshot = context.snapshot.replacingWatchlist(optimisticItems)
+    marketState = .loaded(optimisticSnapshot, refreshWarning: nil)
+    defer { watchlistMutationInProgress = false }
+
+    do {
+      let serverItems = try await performWatchlistMutation(
+        context: context,
+        optimisticSnapshot: optimisticSnapshot
+      ) { repository, authorizedAccountIDs in
+        try await repository.reorderWatchlist(
+          accountID: context.accountID,
+          stockCodes: normalizedCodes,
+          authorizedAccountIDs: authorizedAccountIDs
+        )
+      }
+      let optimisticByCode = Dictionary(
+        uniqueKeysWithValues: optimisticItems.map { ($0.stockCode, $0) }
+      )
+      let authoritative = serverItems.map { item in
+        item.hydrated(with: optimisticByCode[item.stockCode]?.quote)
+      }
+      marketState = .loaded(
+        optimisticSnapshot.replacingWatchlist(authoritative),
+        refreshWarning: nil
+      )
+      watchlistMutationErrorMessage = nil
+      await refreshMarket()
+    } catch {
+      rollbackWatchlistMutation(error, to: context.snapshot)
+      throw error
+    }
+  }
+
+  func clearWatchlistMutationError() {
+    watchlistMutationErrorMessage = nil
   }
 
   func searchMarket(term: String) async throws -> [MarketInstrument] {
@@ -1242,6 +1449,113 @@ final class AppModel: ObservableObject {
     .rejected(code: "MANUAL_ORDER_UNAVAILABLE", message: message)
   }
 
+  private struct WatchlistMutationContext {
+    let accountID: String
+    let authorizedAccountIDs: Set<String>
+    let repository: any MarketDataLoading
+    let snapshot: MarketWorkspaceSnapshot
+  }
+
+  private func prepareWatchlistMutation() throws -> WatchlistMutationContext {
+    if watchlistMutationInProgress {
+      throw WatchlistMutationError.alreadyInProgress
+    }
+    guard !marketRefreshInProgress else {
+      let error = WatchlistMutationError.unavailable("行情正在刷新，请稍后再调整自选")
+      watchlistMutationErrorMessage = error.localizedDescription
+      throw error
+    }
+    if let reason = watchlistEditingUnavailableReason {
+      let error = WatchlistMutationError.unavailable(reason)
+      watchlistMutationErrorMessage = error.localizedDescription
+      throw error
+    }
+    guard
+      let user = authenticatedUser,
+      let accountID = user.activeAccountID,
+      user.authorizedAccountIDs == [accountID],
+      let repository = marketRepository,
+      let snapshot = marketState.snapshot,
+      snapshot.accountID == accountID,
+      portfolioState.snapshot?.account.id == accountID
+    else {
+      let error = WatchlistMutationError.accountScopeMismatch
+      watchlistMutationErrorMessage = error.localizedDescription
+      throw error
+    }
+    watchlistMutationInProgress = true
+    watchlistMutationErrorMessage = nil
+    return WatchlistMutationContext(
+      accountID: accountID,
+      authorizedAccountIDs: [accountID],
+      repository: repository,
+      snapshot: snapshot
+    )
+  }
+
+  private func failWatchlistPreparation(_ error: Error) {
+    watchlistMutationInProgress = false
+    watchlistMutationErrorMessage = watchlistMutationMessage(error)
+  }
+
+  private func performWatchlistMutation<Result>(
+    context: WatchlistMutationContext,
+    optimisticSnapshot: MarketWorkspaceSnapshot,
+    operation: @MainActor (any MarketDataLoading, Set<String>) async throws -> Result
+  ) async throws -> Result {
+    do {
+      return try await operation(context.repository, context.authorizedAccountIDs)
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      try await refreshAccessSession()
+      guard
+        hasPermission("watchlist:write"),
+        hasPermission("market:read"),
+        hasPermission("portfolio:read"),
+        let user = authenticatedUser,
+        user.activeAccountID == context.accountID,
+        user.authorizedAccountIDs == [context.accountID],
+        let repository = marketRepository
+      else {
+        throw WatchlistMutationError.unavailable(
+          "会话刷新后不再具有 watchlist:write 权限，自选保持只读"
+        )
+      }
+      await refreshPortfolio()
+      guard portfolioState.snapshot?.account.id == context.accountID else {
+        throw WatchlistMutationError.accountScopeMismatch
+      }
+      marketState = .loaded(optimisticSnapshot, refreshWarning: nil)
+      return try await operation(repository, [context.accountID])
+    }
+  }
+
+  private func rollbackWatchlistMutation(
+    _ error: Error,
+    to previousSnapshot: MarketWorkspaceSnapshot
+  ) {
+    if
+      hasPermission("market:read"),
+      hasPermission("portfolio:read"),
+      authenticatedUser?.activeAccountID == previousSnapshot.accountID
+    {
+      if error is CancellationError {
+        marketState = .loaded(previousSnapshot, refreshWarning: nil)
+      } else {
+        marketState = .loaded(
+          previousSnapshot,
+          refreshWarning: "自选变更失败，已恢复服务端上次确认的列表。\(watchlistMutationMessage(error))"
+        )
+      }
+    }
+    watchlistMutationErrorMessage = error is CancellationError
+      ? nil
+      : watchlistMutationMessage(error)
+  }
+
+  private func watchlistMutationMessage(_ error: Error) -> String {
+    (error as? LocalizedError)?.errorDescription ?? "自选变更暂时不可用"
+  }
+
   private func activate(
     _ session: AuthenticatedSession,
     configuration: APIConfiguration,
@@ -1310,6 +1624,9 @@ final class AppModel: ObservableObject {
       marketState = .unavailable("自选列表需要 portfolio:read 权限")
     } else {
       marketState = .idle
+    }
+    if !watchlistMutationInProgress {
+      watchlistMutationErrorMessage = nil
     }
     localSessionLocked = false
     localUnlockErrorMessage = nil
@@ -1413,6 +1730,8 @@ final class AppModel: ObservableObject {
     marketRepository = nil
     tradeApprovalInProgress = false
     manualOrderInProgress = false
+    watchlistMutationInProgress = false
+    watchlistMutationErrorMessage = nil
     pendingManualOrderDraft = nil
     portfolioState =
       accountDataEnabled
@@ -1520,6 +1839,69 @@ final class AppModel: ObservableObject {
   }
 
 #if DEBUG
+  private func startWatchlistReadOnlyUITestFixture() {
+    let accountID = "UI-WATCHLIST-ACCOUNT"
+    let updatedAt = Date(timeIntervalSince1970: 1_786_752_000)
+    authenticationState = .authenticated(
+      SessionUser(
+        id: "watchlist-ui-user",
+        username: "watchlist-ui-user",
+        displayName: "自选只读测试用户",
+        permissions: ["portfolio:read", "market:read", "watchlist:write"],
+        authorizedAccountIDs: [accountID],
+        activeAccountID: accountID,
+        grantedScopes: ["portfolio:read", "market:read"]
+      )
+    )
+    serviceState = .failed("UI 测试未连接服务")
+    portfolioState = .failed("UI 测试未连接账户服务")
+    marketState = .loaded(
+      MarketWorkspaceSnapshot(
+        accountID: accountID,
+        watchlist: [
+          MarketWatchItem(
+            id: "watchlist-ui-1",
+            accountID: accountID,
+            stockCode: "600519.SH",
+            instrumentName: "贵州茅台",
+            displayOrder: 1,
+            groupName: nil,
+            note: nil,
+            updatedAt: updatedAt,
+            quote: MarketQuote(
+              stockCode: "600519.SH",
+              time: updatedAt,
+              lastPrice: 1_598.50,
+              open: 1_590,
+              high: 1_605,
+              low: 1_582,
+              preClose: 1_588,
+              change: 10.50,
+              changePercent: 0.0066,
+              volume: 12_300,
+              amount: 1_965_000_000,
+              turnoverRate: 0.004
+            )
+          ),
+          MarketWatchItem(
+            id: "watchlist-ui-2",
+            accountID: accountID,
+            stockCode: "000001.SZ",
+            instrumentName: "平安银行",
+            displayOrder: 2,
+            groupName: nil,
+            note: nil,
+            updatedAt: updatedAt,
+            quote: nil
+          ),
+        ],
+        fetchedAt: updatedAt
+      ),
+      refreshWarning: nil
+    )
+    selectedTab = .market
+  }
+
   private func startTransientRealBackendUITestSession() async {
     await refreshHealth()
     guard let configuration else {

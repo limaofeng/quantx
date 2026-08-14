@@ -12,6 +12,23 @@ protocol MarketDataLoading: AnyObject {
     stockCode: String,
     period: MarketPeriod
   ) async throws -> MarketInstrumentSnapshot?
+  func addWatchlistItem(
+    accountID: String,
+    stockCode: String,
+    instrumentName: String?,
+    displayOrder: Int,
+    authorizedAccountIDs: Set<String>
+  ) async throws -> MarketWatchItem
+  func removeWatchlistItem(
+    accountID: String,
+    stockCode: String,
+    authorizedAccountIDs: Set<String>
+  ) async throws
+  func reorderWatchlist(
+    accountID: String,
+    stockCodes: [String],
+    authorizedAccountIDs: Set<String>
+  ) async throws -> [MarketWatchItem]
   func quoteUpdates(stockCode: String) throws -> AsyncThrowingStream<MarketLiveQuote, any Error>
   func depthUpdates(stockCode: String) throws
     -> AsyncThrowingStream<MarketDepthSnapshot, any Error>
@@ -20,6 +37,7 @@ protocol MarketDataLoading: AnyObject {
 @MainActor
 final class MarketRepository: MarketDataLoading {
   private let client: ApolloClient
+  private let noCache = RequestConfiguration(writeResultsToCache: false)
 
   init(client: ApolloClient) {
     self.client = client
@@ -119,6 +137,138 @@ final class MarketRepository: MarketDataLoading {
       return unique.values.sorted {
         $0.stockCode.localizedStandardCompare($1.stockCode) == .orderedAscending
       }
+    } catch {
+      throw map(error)
+    }
+  }
+
+  func addWatchlistItem(
+    accountID: String,
+    stockCode: String,
+    instrumentName: String?,
+    displayOrder: Int,
+    authorizedAccountIDs: Set<String>
+  ) async throws -> MarketWatchItem {
+    do {
+      try Self.validateWriteAccount(
+        accountID,
+        authorizedAccountIDs: authorizedAccountIDs
+      )
+      let normalizedCode = try Self.normalizedAStockCode(stockCode)
+      guard displayOrder >= 0, displayOrder <= Int(Int32.max) else {
+        throw WatchlistMutationError.invalidRequest("自选排序超出有效范围")
+      }
+      let normalizedName = instrumentName.flatMap(Self.nonempty)
+      let response = try await client.perform(
+        mutation: QuantXAPI.IOSAddWatchlistItemMutation(
+          input: QuantXAPI.AddWatchlistItemInput(
+            stockCode: normalizedCode,
+            accountId: .some(accountID),
+            instrumentName: normalizedName.map(GraphQLNullable.some) ?? .null,
+            displayOrder: .some(Int32(displayOrder))
+          )
+        ),
+        requestConfiguration: noCache
+      )
+      try ApolloReadOnlyResponseValidator.validate(response.errors)
+      guard let result = response.data?.addWatchlistItem else {
+        throw WatchlistMutationError.invalidResponse
+      }
+      guard result.success, let item = result.item else {
+        throw Self.rejected(result.message)
+      }
+      return try Self.mapMutationItem(
+        id: item.id,
+        accountID: item.accountId,
+        stockCode: item.stockCode,
+        instrumentName: item.instrumentName,
+        displayOrder: item.displayOrder,
+        groupName: item.groupName,
+        note: item.note,
+        updatedAt: item.updatedAt,
+        expectedAccountID: accountID,
+        expectedStockCode: normalizedCode
+      )
+    } catch {
+      throw map(error)
+    }
+  }
+
+  func removeWatchlistItem(
+    accountID: String,
+    stockCode: String,
+    authorizedAccountIDs: Set<String>
+  ) async throws {
+    do {
+      try Self.validateWriteAccount(
+        accountID,
+        authorizedAccountIDs: authorizedAccountIDs
+      )
+      let normalizedCode = try Self.normalizedAStockCode(stockCode)
+      let response = try await client.perform(
+        mutation: QuantXAPI.IOSRemoveWatchlistItemMutation(
+          stockCode: normalizedCode,
+          accountId: accountID
+        ),
+        requestConfiguration: noCache
+      )
+      try ApolloReadOnlyResponseValidator.validate(response.errors)
+      guard let result = response.data?.removeWatchlistItem else {
+        throw WatchlistMutationError.invalidResponse
+      }
+      guard result.success else {
+        throw Self.rejected(result.message)
+      }
+    } catch {
+      throw map(error)
+    }
+  }
+
+  func reorderWatchlist(
+    accountID: String,
+    stockCodes: [String],
+    authorizedAccountIDs: Set<String>
+  ) async throws -> [MarketWatchItem] {
+    do {
+      try Self.validateWriteAccount(
+        accountID,
+        authorizedAccountIDs: authorizedAccountIDs
+      )
+      let normalizedCodes = try Self.validateReorderStockCodes(stockCodes)
+      let response = try await client.perform(
+        mutation: QuantXAPI.IOSReorderWatchlistMutation(
+          input: QuantXAPI.ReorderWatchlistInput(
+            symbols: normalizedCodes,
+            accountId: .some(accountID)
+          )
+        ),
+        requestConfiguration: noCache
+      )
+      try ApolloReadOnlyResponseValidator.validate(response.errors)
+      guard let result = response.data?.reorderWatchlist else {
+        throw WatchlistMutationError.invalidResponse
+      }
+      guard result.success else {
+        throw Self.rejected(result.message)
+      }
+      let items = try result.items.map { item in
+        try Self.mapMutationItem(
+          id: item.id,
+          accountID: item.accountId,
+          stockCode: item.stockCode,
+          instrumentName: item.instrumentName,
+          displayOrder: item.displayOrder,
+          groupName: item.groupName,
+          note: item.note,
+          updatedAt: item.updatedAt,
+          expectedAccountID: accountID,
+          expectedStockCode: nil
+        )
+      }
+      return try Self.validateAuthoritativeReorder(
+        items,
+        requestedStockCodes: normalizedCodes
+      )
     } catch {
       throw map(error)
     }
@@ -436,8 +586,118 @@ final class MarketRepository: MarketDataLoading {
     return MarketDepthLevel(price: price, volume: volume)
   }
 
+  static func validateWriteAccount(
+    _ accountID: String,
+    authorizedAccountIDs: Set<String>
+  ) throws {
+    let trimmed = accountID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard
+      !trimmed.isEmpty,
+      trimmed == accountID,
+      authorizedAccountIDs == Set([accountID])
+    else {
+      throw WatchlistMutationError.accountScopeMismatch
+    }
+  }
+
+  static func normalizedAStockCode(_ stockCode: String) throws -> String {
+    let normalized = stockCode
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .uppercased()
+    guard
+      normalized.range(
+        of: #"^[0-9]{6}\.(SH|SZ|BJ)$"#,
+        options: .regularExpression
+      ) != nil
+    else {
+      throw WatchlistMutationError.invalidRequest(
+        "请输入带市场后缀的 A 股代码，例如 600519.SH"
+      )
+    }
+    return normalized
+  }
+
+  static func validateReorderStockCodes(_ stockCodes: [String]) throws -> [String] {
+    guard !stockCodes.isEmpty else {
+      throw WatchlistMutationError.invalidRequest("自选列表为空，无需调整顺序")
+    }
+    let normalized = try stockCodes.map(normalizedAStockCode)
+    guard Set(normalized).count == normalized.count else {
+      throw WatchlistMutationError.invalidRequest("自选排序不能包含重复证券")
+    }
+    return normalized
+  }
+
+  static func mapMutationItem(
+    id: String,
+    accountID: String,
+    stockCode: String,
+    instrumentName: String?,
+    displayOrder: Int,
+    groupName: String?,
+    note: String?,
+    updatedAt: String?,
+    expectedAccountID: String,
+    expectedStockCode: String?
+  ) throws -> MarketWatchItem {
+    try ReadOnlyModelValidator.requireNonempty(id, field: "watchlist.item.id")
+    guard accountID == expectedAccountID else {
+      throw WatchlistMutationError.accountScopeMismatch
+    }
+    let normalizedCode = try normalizedAStockCode(stockCode)
+    guard normalizedCode == stockCode, displayOrder >= 0 else {
+      throw WatchlistMutationError.invalidResponse
+    }
+    if let expectedStockCode, normalizedCode != expectedStockCode {
+      throw WatchlistMutationError.contextMismatch
+    }
+    let parsedUpdatedAt = try updatedAt.map {
+      try ReadOnlyModelValidator.requireDate($0, field: "watchlist.item.updatedAt")
+    }
+    return MarketWatchItem(
+      id: id,
+      accountID: accountID,
+      stockCode: normalizedCode,
+      instrumentName: instrumentName,
+      displayOrder: displayOrder,
+      groupName: groupName,
+      note: note,
+      updatedAt: parsedUpdatedAt,
+      quote: nil
+    )
+  }
+
+  static func validateAuthoritativeReorder(
+    _ items: [MarketWatchItem],
+    requestedStockCodes: [String]
+  ) throws -> [MarketWatchItem] {
+    let returnedCodes = items.map(\.stockCode)
+    guard
+      returnedCodes.count == requestedStockCodes.count,
+      Set(returnedCodes).count == returnedCodes.count,
+      Set(returnedCodes) == Set(requestedStockCodes),
+      zip(items, items.dropFirst()).allSatisfy({ $0.displayOrder < $1.displayOrder })
+    else {
+      throw WatchlistMutationError.contextMismatch
+    }
+    return items
+  }
+
+  private static func rejected(_ message: String) -> WatchlistMutationError {
+    let sanitized = String(
+      message.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300)
+    )
+    return .rejected(sanitized.isEmpty ? "自选变更被服务端拒绝" : sanitized)
+  }
+
+  private static func nonempty(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : String(trimmed.prefix(120))
+  }
+
   private func map(_ error: Error) -> Error {
     if error is CancellationError { return CancellationError() }
+    if let error = error as? WatchlistMutationError { return error }
     if let error = error as? ReadOnlyRepositoryError { return error }
     if error is ReadOnlyMappingError { return ReadOnlyRepositoryError.invalidResponse }
     if let error = error as? ResponseCodeInterceptor.ResponseCodeError {

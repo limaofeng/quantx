@@ -87,6 +87,34 @@ struct MarketWatchItem: Equatable, Hashable, Identifiable, Sendable {
     }
     return value
   }
+
+  func ordered(at displayOrder: Int) -> Self {
+    Self(
+      id: id,
+      accountID: accountID,
+      stockCode: stockCode,
+      instrumentName: instrumentName,
+      displayOrder: displayOrder,
+      groupName: groupName,
+      note: note,
+      updatedAt: updatedAt,
+      quote: quote
+    )
+  }
+
+  func hydrated(with quote: MarketQuote?) -> Self {
+    Self(
+      id: id,
+      accountID: accountID,
+      stockCode: stockCode,
+      instrumentName: instrumentName,
+      displayOrder: displayOrder,
+      groupName: groupName,
+      note: note,
+      updatedAt: updatedAt,
+      quote: quote
+    )
+  }
 }
 
 struct MarketCandle: Equatable, Hashable, Identifiable, Sendable {
@@ -141,6 +169,38 @@ struct MarketWorkspaceSnapshot: Equatable, Sendable {
 
   var sourceUpdatedAt: Date? {
     watchlist.compactMap { $0.quote?.time ?? $0.updatedAt }.min()
+  }
+
+  func replacingWatchlist(
+    _ watchlist: [MarketWatchItem],
+    fetchedAt: Date = Date()
+  ) -> Self {
+    Self(accountID: accountID, watchlist: watchlist, fetchedAt: fetchedAt)
+  }
+}
+
+enum WatchlistMutationError: Error, Equatable, LocalizedError {
+  case unavailable(String)
+  case alreadyInProgress
+  case invalidRequest(String)
+  case rejected(String)
+  case invalidResponse
+  case accountScopeMismatch
+  case contextMismatch
+
+  var errorDescription: String? {
+    switch self {
+    case .unavailable(let message), .invalidRequest(let message), .rejected(let message):
+      return message
+    case .alreadyInProgress:
+      return "另一项自选变更正在处理中"
+    case .invalidResponse:
+      return "自选服务返回了无法验证的数据，变更已撤销"
+    case .accountScopeMismatch:
+      return "自选账户与当前主账户不一致，变更已停止"
+    case .contextMismatch:
+      return "自选列表已变化，请刷新后重试"
+    }
   }
 }
 

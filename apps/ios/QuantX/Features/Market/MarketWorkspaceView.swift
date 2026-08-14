@@ -11,6 +11,7 @@ struct MarketWorkspaceView: View {
   @State private var searchText = ""
   @State private var searchState: MarketSearchState = .idle
   @State private var searchTask: Task<Void, Never>?
+  @State private var isManagingWatchlist = false
 
   var body: some View {
     NavigationStack {
@@ -67,6 +68,11 @@ struct MarketWorkspaceView: View {
       .refreshable {
         await model.refreshMarket()
       }
+      .onChange(of: model.canEditWatchlist) { _, canEdit in
+        if !canEdit {
+          isManagingWatchlist = false
+        }
+      }
     }
     .task {
       if case .idle = model.marketState {
@@ -98,6 +104,9 @@ struct MarketWorkspaceView: View {
         systemImage: "person.crop.circle.badge.questionmark"
       )
     case .loaded(let snapshot, let refreshWarning):
+      if let message = model.watchlistMutationErrorMessage, refreshWarning == nil {
+        RefreshWarningView(message: message)
+      }
       if let refreshWarning {
         RefreshWarningView(message: refreshWarning)
       }
@@ -194,30 +203,83 @@ struct MarketWorkspaceView: View {
   private func watchlist(_ snapshot: MarketWorkspaceSnapshot) -> some View {
     VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
       SectionTitle(title: "自选", subtitle: "按个人账户排序") {
-        Text("\(snapshot.watchlist.count) 只")
-          .font(.subheadline)
-          .foregroundStyle(QuantXTheme.secondaryText)
-          .monospacedDigit()
+        HStack(spacing: QuantXTheme.Spacing.small) {
+          Text("\(snapshot.watchlist.count) 只")
+            .font(.subheadline)
+            .foregroundStyle(QuantXTheme.secondaryText)
+            .monospacedDigit()
+          if model.canEditWatchlist, !snapshot.watchlist.isEmpty {
+            Button(isManagingWatchlist ? "完成" : "管理") {
+              withAnimation(.snappy) {
+                isManagingWatchlist.toggle()
+              }
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(minHeight: 44)
+            .disabled(model.watchlistMutationInProgress)
+            .accessibilityHint(
+              isManagingWatchlist ? "结束自选排序和移除" : "调整自选顺序或移除证券"
+            )
+          }
+        }
+      }
+
+      if let reason = model.watchlistEditingUnavailableReason {
+        QuantXStatusBanner(
+          title: "自选维护不可用",
+          message: reason,
+          status: .attention
+        )
       }
 
       if snapshot.watchlist.isEmpty {
         unavailableCard(
           title: "自选列表为空",
-          message: "可先搜索证券查看详情；自选维护需独立写权限开放后启用。",
+          message: model.canEditWatchlist
+            ? "搜索证券并进入详情，即可加入当前个人账户的自选列表。"
+            : "仍可搜索和查看行情；当前会话只能读取自选。",
           systemImage: "star"
         )
       } else {
-        ForEach(snapshot.watchlist) { item in
-          NavigationLink(
-            value: Route(stockCode: item.stockCode, displayName: item.displayName)
-          ) {
-            MarketWatchlistRow(item: item)
+        ForEach(Array(snapshot.watchlist.enumerated()), id: \.element.id) { index, item in
+          if isManagingWatchlist {
+            MarketWatchlistManagementRow(
+              item: item,
+              canMoveUp: index > 0,
+              canMoveDown: index < snapshot.watchlist.count - 1,
+              isBusy: model.watchlistMutationInProgress,
+              moveUp: { moveWatchlistItem(in: snapshot, from: index, to: index - 1) },
+              moveDown: { moveWatchlistItem(in: snapshot, from: index, to: index + 1) },
+              remove: {
+                Task { try? await model.removeFromWatchlist(stockCode: item.stockCode) }
+              }
+            )
+          } else {
+            NavigationLink(
+              value: Route(stockCode: item.stockCode, displayName: item.displayName)
+            ) {
+              MarketWatchlistRow(item: item)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("查看行情、K线和五档盘口")
           }
-          .buttonStyle(.plain)
-          .accessibilityHint("查看行情、K线和五档盘口")
         }
+        .animation(.snappy, value: snapshot.watchlist.map(\.stockCode))
       }
     }
+  }
+
+  private func moveWatchlistItem(
+    in snapshot: MarketWorkspaceSnapshot,
+    from source: Int,
+    to destination: Int
+  ) {
+    guard snapshot.watchlist.indices.contains(source),
+      snapshot.watchlist.indices.contains(destination)
+    else { return }
+    var stockCodes = snapshot.watchlist.map(\.stockCode)
+    stockCodes.swapAt(source, destination)
+    Task { try? await model.reorderWatchlist(stockCodes: stockCodes) }
   }
 
   @ViewBuilder
@@ -328,45 +390,99 @@ private struct MarketWatchlistRow: View {
 
   var body: some View {
     QuantXCard {
-      HStack(alignment: .firstTextBaseline, spacing: 12) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text(item.displayName)
-            .font(.headline)
-          Text(item.stockCode)
-            .font(.caption)
-            .foregroundStyle(QuantXTheme.secondaryText)
-            .monospacedDigit()
-          if let groupName = item.groupName, !groupName.isEmpty {
-            Text(groupName)
-              .font(.caption2)
-              .foregroundStyle(QuantXTheme.secondaryText)
+      MarketWatchlistRowContent(item: item)
+    }
+  }
+}
+
+private struct MarketWatchlistManagementRow: View {
+  let item: MarketWatchItem
+  let canMoveUp: Bool
+  let canMoveDown: Bool
+  let isBusy: Bool
+  let moveUp: () -> Void
+  let moveDown: () -> Void
+  let remove: () -> Void
+
+  var body: some View {
+    QuantXCard {
+      VStack(spacing: QuantXTheme.Spacing.medium) {
+        MarketWatchlistRowContent(item: item)
+        Divider()
+        HStack(spacing: QuantXTheme.Spacing.small) {
+          Button(action: moveUp) {
+            Label("上移", systemImage: "arrow.up")
           }
+          .frame(minWidth: 64, minHeight: 44)
+          .disabled(!canMoveUp || isBusy)
+          .accessibilityLabel("上移 \(item.displayName)")
+
+          Button(action: moveDown) {
+            Label("下移", systemImage: "arrow.down")
+          }
+          .frame(minWidth: 64, minHeight: 44)
+          .disabled(!canMoveDown || isBusy)
+          .accessibilityLabel("下移 \(item.displayName)")
+
+          Spacer(minLength: 4)
+
+          Button(role: .destructive, action: remove) {
+            Label("移除", systemImage: "trash")
+          }
+          .frame(minWidth: 64, minHeight: 44)
+          .disabled(isBusy)
+          .accessibilityLabel("从自选移除 \(item.displayName)")
         }
-        Spacer(minLength: 8)
-        if let quote = item.quote {
-          VStack(alignment: .trailing, spacing: 4) {
-            Text(PortfolioFormatters.decimal(quote.lastPrice))
-              .font(.headline)
-              .monospacedDigit()
-            Text(PortfolioFormatters.signedPercentage(quote.changePercent))
-              .font(.subheadline.weight(.semibold))
-              .monospacedDigit()
-            Text(quote.time.formatted(date: .omitted, time: .standard))
-              .font(.caption2)
-              .foregroundStyle(QuantXTheme.secondaryText)
-              .monospacedDigit()
-          }
-          .foregroundStyle(QuantXTheme.trendColor(quote.trend))
-        } else {
-          StatusBadge(
-            title: "暂无报价",
-            systemImage: "clock.badge.questionmark",
-            color: QuantXTheme.secondaryText
-          )
+        .font(.subheadline.weight(.semibold))
+        .buttonStyle(.borderless)
+        .frame(minHeight: 44)
+      }
+    }
+  }
+}
+
+private struct MarketWatchlistRowContent: View {
+  let item: MarketWatchItem
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline, spacing: 12) {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(item.displayName)
+          .font(.headline)
+        Text(item.stockCode)
+          .font(.caption)
+          .foregroundStyle(QuantXTheme.secondaryText)
+          .monospacedDigit()
+        if let groupName = item.groupName, !groupName.isEmpty {
+          Text(groupName)
+            .font(.caption2)
+            .foregroundStyle(QuantXTheme.secondaryText)
         }
       }
-      .accessibilityElement(children: .combine)
+      Spacer(minLength: 8)
+      if let quote = item.quote {
+        VStack(alignment: .trailing, spacing: 4) {
+          Text(PortfolioFormatters.decimal(quote.lastPrice))
+            .font(.headline)
+            .monospacedDigit()
+          Text(PortfolioFormatters.signedPercentage(quote.changePercent))
+            .font(.subheadline.weight(.semibold))
+            .monospacedDigit()
+          Text(quote.time.formatted(date: .omitted, time: .standard))
+            .font(.caption2)
+            .foregroundStyle(QuantXTheme.secondaryText)
+            .monospacedDigit()
+        }
+        .foregroundStyle(QuantXTheme.trendColor(quote.trend))
+      } else {
+        StatusBadge(
+          title: "暂无报价",
+          systemImage: "clock.badge.questionmark",
+          color: QuantXTheme.secondaryText
+        )
+      }
     }
+    .accessibilityElement(children: .combine)
   }
 }
 
@@ -465,6 +581,7 @@ private struct MarketInstrumentDetailView: View {
       }
     case .loaded(let snapshot):
       quoteHero(snapshot)
+      watchlistControl(snapshot.instrument)
       if let streamWarning {
         QuantXStatusBanner(
           title: "实时流暂时中断",
@@ -522,6 +639,57 @@ private struct MarketInstrumentDetailView: View {
         }
         .foregroundStyle(QuantXTheme.trendColor(change))
         .accessibilityElement(children: .combine)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private func watchlistControl(_ instrument: MarketInstrument) -> some View {
+    if let message = model.watchlistMutationErrorMessage {
+      RefreshWarningView(message: message)
+    }
+    if let reason = model.watchlistEditingUnavailableReason {
+      QuantXStatusBanner(
+        title: "自选维护不可用",
+        message: reason,
+        status: .attention
+      )
+    } else {
+      let isSaved = model.isInWatchlist(stockCode: instrument.stockCode)
+      QuantXCard {
+        HStack(spacing: QuantXTheme.Spacing.medium) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text(isSaved ? "已加入个人自选" : "加入个人自选")
+              .font(.headline)
+            Text("仅修改当前主账户的自选列表，不会发起任何交易。")
+              .font(.caption)
+              .foregroundStyle(QuantXTheme.secondaryText)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          Spacer(minLength: 8)
+          Button {
+            Task {
+              if isSaved {
+                try? await model.removeFromWatchlist(stockCode: instrument.stockCode)
+              } else {
+                try? await model.addToWatchlist(instrument)
+              }
+            }
+          } label: {
+            if model.watchlistMutationInProgress {
+              ProgressView()
+                .frame(minWidth: 24, minHeight: 24)
+            } else {
+              Image(systemName: isSaved ? "star.slash" : "star.fill")
+            }
+          }
+          .buttonStyle(.borderedProminent)
+          .tint(isSaved ? QuantXTheme.warning : QuantXTheme.accent)
+          .frame(minWidth: 44, minHeight: 44)
+          .disabled(model.watchlistMutationInProgress)
+          .accessibilityLabel(isSaved ? "从自选移除 \(instrument.displayName)" : "加入自选 \(instrument.displayName)")
+          .accessibilityHint("只更新当前个人账户的自选列表")
+        }
       }
     }
   }
