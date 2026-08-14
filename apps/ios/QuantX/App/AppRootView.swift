@@ -16,31 +16,31 @@ struct AppRootView: View {
         TabView(selection: $model.selectedTab) {
           DashboardView()
             .tabItem {
-              Label(AppTab.today.title, systemImage: AppTab.today.systemImage)
+              AppTabLabel(tab: .today)
             }
             .tag(AppTab.today)
 
           MarketWorkspaceView()
             .tabItem {
-              Label(AppTab.market.title, systemImage: AppTab.market.systemImage)
+              AppTabLabel(tab: .market)
             }
             .tag(AppTab.market)
 
           TradeWorkspaceView()
             .tabItem {
-              Label(AppTab.trade.title, systemImage: AppTab.trade.systemImage)
+              AppTabLabel(tab: .trade)
             }
             .tag(AppTab.trade)
 
           QuantWorkspaceView()
             .tabItem {
-              Label(AppTab.quant.title, systemImage: AppTab.quant.systemImage)
+              AppTabLabel(tab: .quant)
             }
             .tag(AppTab.quant)
 
           PortfolioView()
             .tabItem {
-              Label(AppTab.assets.title, systemImage: AppTab.assets.systemImage)
+              AppTabLabel(tab: .assets)
             }
             .tag(AppTab.assets)
         }
@@ -57,5 +57,18 @@ struct AppRootView: View {
       reduceMotion ? nil : .easeOut(duration: 0.16),
       value: model.privacyShieldVisible
     )
+  }
+}
+
+private struct AppTabLabel: View {
+  let tab: AppTab
+
+  var body: some View {
+    Label {
+      Text(tab.title)
+    } icon: {
+      Image(systemName: tab.systemImage)
+        .symbolRenderingMode(.monochrome)
+    }
   }
 }

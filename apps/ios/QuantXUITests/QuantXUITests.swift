@@ -53,14 +53,15 @@ final class QuantXUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["账户概览暂不可用"].exists)
 
-    XCTAssertTrue(app.staticTexts["运行监控"].exists)
-    XCTAssertTrue(app.staticTexts["策略监控"].exists)
-    XCTAssertTrue(app.staticTexts["今日动态"].exists)
+    scrollToElement(app.staticTexts["执行总览"], in: app, preloadSwipes: 2)
+    XCTAssertTrue(app.staticTexts["执行总览"].exists)
+    XCTAssertTrue(app.buttons["策略执行"].exists)
+    XCTAssertTrue(app.buttons["今日动态"].exists)
 
-    scrollToElement(app.staticTexts["交易助手"], in: app)
+    scrollToElement(app.staticTexts["交易助手"], in: app, preloadSwipes: 1)
     XCTAssertTrue(app.staticTexts["交易助手"].exists)
-    XCTAssertTrue(app.staticTexts["做T助手"].exists)
-    XCTAssertTrue(app.staticTexts["打板助手"].exists)
+    XCTAssertTrue(app.buttons["做T助手"].exists)
+    XCTAssertTrue(app.buttons["打板助手"].exists)
 
     let portfolioTab = app.tabBars.buttons["资产"]
     XCTAssertTrue(portfolioTab.isHittable)
@@ -73,8 +74,8 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    let tTrade = app.staticTexts["做T助手"]
-    scrollToElement(tTrade, in: app)
+    let tTrade = app.buttons["做T助手"]
+    scrollToElement(tTrade, in: app, preloadSwipes: 2)
     XCTAssertTrue(tTrade.isHittable)
     tTrade.tap()
     XCTAssertTrue(app.staticTexts["无法读取做T助手"].waitForExistence(timeout: 3))
@@ -82,7 +83,7 @@ final class QuantXUITests: XCTestCase {
 
     app.navigationBars.buttons.firstMatch.tap()
 
-    let limitUp = app.staticTexts["打板助手"]
+    let limitUp = app.buttons["打板助手"]
     scrollToElement(limitUp, in: app)
     XCTAssertTrue(limitUp.isHittable)
     limitUp.tap()
@@ -202,6 +203,24 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
+  func testWatchlistWithoutWriteScopeIsExplicitlyReadOnly() throws {
+    let app = XCUIApplication()
+    app.launchArguments.append(contentsOf: [
+      "-QuantXUITesting",
+      "-QuantXWatchlistReadOnlyUITesting",
+    ])
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["自选维护不可用"].waitForExistence(timeout: 5))
+    XCTAssertTrue(
+      app.staticTexts["当前会话没有 watchlist:write 权限，自选保持只读"].exists
+    )
+    XCTAssertTrue(app.staticTexts["贵州茅台"].exists)
+    XCTAssertTrue(app.staticTexts["平安银行"].exists)
+    XCTAssertFalse(app.buttons["管理"].exists)
+  }
+
+  @MainActor
   private func makeApp() -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments.append("-QuantXUITesting")
@@ -209,9 +228,26 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
-  private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {
+  private func scrollToElement(
+    _ element: XCUIElement,
+    in app: XCUIApplication,
+    preloadSwipes: Int = 0
+  ) {
     let scrollView = app.scrollViews.firstMatch
-    for _ in 0..<5 where !element.isHittable {
+    let tabBar = app.tabBars.firstMatch
+    for _ in 0..<preloadSwipes {
+      scrollView.swipeUp()
+    }
+    for _ in 0..<8 {
+      if element.waitForExistence(timeout: 0.25) {
+        let elementFrame = element.frame
+        let visibleBottom = tabBar.exists ? tabBar.frame.minY : scrollView.frame.maxY
+        let isFullyVisible = elementFrame.width > 0
+          && elementFrame.height > 0
+          && elementFrame.minY >= scrollView.frame.minY
+          && elementFrame.maxY <= visibleBottom
+        if isFullyVisible { return }
+      }
       scrollView.swipeUp()
     }
   }

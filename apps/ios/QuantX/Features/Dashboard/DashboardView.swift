@@ -11,10 +11,6 @@ struct DashboardView: View {
   @EnvironmentObject private var model: AppModel
   @State private var path: [Route] = []
 
-  private let overviewColumns = [
-    GridItem(.adaptive(minimum: 156), spacing: 12, alignment: .top)
-  ]
-
   var body: some View {
     NavigationStack(path: $path) {
       ScrollView {
@@ -74,7 +70,7 @@ struct DashboardView: View {
 
   private var actionInbox: some View {
     let actions = dashboardActions
-    return VStack(alignment: .leading, spacing: 10) {
+    return VStack(alignment: .leading, spacing: 8) {
       SectionTitle(
         title: "行动收件箱",
         subtitle: actions.isEmpty
@@ -114,7 +110,7 @@ struct DashboardView: View {
           Button {
             open(item.destination)
           } label: {
-            QuantXCard {
+            QuantXCard(contentPadding: QuantXTheme.Spacing.small) {
               HStack(spacing: 12) {
                 Image(systemName: item.systemImage)
                   .font(.body.weight(.semibold))
@@ -129,8 +125,10 @@ struct DashboardView: View {
                   Text(item.detail)
                     .font(.caption)
                     .foregroundStyle(QuantXTheme.secondaryText)
-                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
                   .font(.caption.weight(.semibold))
@@ -427,9 +425,10 @@ struct DashboardView: View {
     VStack(alignment: .leading, spacing: 10) {
       SectionTitle(title: "执行总览", subtitle: "策略与今日交易动态")
 
-      LazyVGrid(columns: overviewColumns, spacing: 12) {
+      DashboardFeatureGrid {
         DashboardFeatureCard(
           title: "策略执行",
+          accessibilityIdentifier: "dashboard-feature-strategy",
           systemImage: "waveform.path.ecg.rectangle.fill",
           color: QuantXTheme.accent,
           primaryValue: strategyPrimaryValue,
@@ -441,6 +440,7 @@ struct DashboardView: View {
 
         DashboardFeatureCard(
           title: "今日动态",
+          accessibilityIdentifier: "dashboard-feature-trading",
           systemImage: "doc.text.magnifyingglass",
           color: QuantXTheme.warning,
           primaryValue: tradingPrimaryValue,
@@ -457,9 +457,10 @@ struct DashboardView: View {
     VStack(alignment: .leading, spacing: 10) {
       SectionTitle(title: "交易助手", subtitle: "服务端策略投影与统一执行状态")
 
-      LazyVGrid(columns: overviewColumns, spacing: 12) {
+      DashboardFeatureGrid {
         DashboardFeatureCard(
           title: "做T助手",
+          accessibilityIdentifier: "dashboard-feature-ttrade",
           systemImage: "arrow.triangle.2.circlepath.circle.fill",
           color: QuantXTheme.accent,
           primaryValue: tTradePrimaryValue,
@@ -471,6 +472,7 @@ struct DashboardView: View {
 
         DashboardFeatureCard(
           title: "打板助手",
+          accessibilityIdentifier: "dashboard-feature-limitup",
           systemImage: "scope",
           color: QuantXTheme.positive,
           primaryValue: limitUpPrimaryValue,
@@ -935,7 +937,7 @@ private struct AccountEmptyCard: View {
   var retry: (() -> Void)?
 
   var body: some View {
-    QuantXCard {
+    QuantXCard(contentPadding: QuantXTheme.Spacing.medium) {
       VStack(alignment: .leading, spacing: 12) {
         Label(title, systemImage: systemImage)
           .font(.headline)
@@ -945,7 +947,7 @@ private struct AccountEmptyCard: View {
         if let retry {
           Button("重新加载", action: retry)
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .frame(minHeight: 44)
             .tint(Color(red: 0.04, green: 0.25, blue: 0.62))
         }
       }
@@ -1044,10 +1046,42 @@ private enum DashboardFeatureStatus {
   case loading
   case ready
   case warning
+
+  var accessibilityTitle: String {
+    switch self {
+    case .locked: "待连接"
+    case .loading: "正在读取"
+    case .ready: "已同步"
+    case .warning: "需要关注"
+    }
+  }
+}
+
+private struct DashboardFeatureGrid<Content: View>: View {
+  @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+  @ViewBuilder let content: Content
+
+  init(@ViewBuilder content: () -> Content) {
+    self.content = content()
+  }
+
+  @ViewBuilder
+  var body: some View {
+    if dynamicTypeSize.isAccessibilitySize {
+      VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
+        content
+      }
+    } else {
+      HStack(alignment: .top, spacing: QuantXTheme.Spacing.medium) {
+        content
+      }
+    }
+  }
 }
 
 private struct DashboardFeatureCard: View {
   let title: String
+  let accessibilityIdentifier: String
   let systemImage: String
   let color: Color
   let primaryValue: String
@@ -1057,12 +1091,12 @@ private struct DashboardFeatureCard: View {
 
   var body: some View {
     Button(action: action) {
-      VStack(alignment: .leading, spacing: 14) {
+      VStack(alignment: .leading, spacing: QuantXTheme.Spacing.small) {
         HStack {
           Image(systemName: systemImage)
             .font(.body.weight(.semibold))
             .foregroundStyle(color)
-            .frame(width: 36, height: 36)
+            .frame(width: 32, height: 32)
             .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityHidden(true)
           Spacer()
@@ -1074,25 +1108,31 @@ private struct DashboardFeatureCard: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(QuantXTheme.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
+            .accessibilityHidden(true)
           Text(primaryValue)
             .font(.title3.bold())
             .monospacedDigit()
             .foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)
+            .accessibilityHidden(true)
           Text(detail)
             .font(.caption)
             .foregroundStyle(QuantXTheme.secondaryText)
             .fixedSize(horizontal: false, vertical: true)
+            .accessibilityHidden(true)
         }
       }
-      .frame(maxWidth: .infinity, minHeight: 126, alignment: .leading)
-      .padding(14)
+      .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
+      .padding(QuantXTheme.Spacing.medium)
       .background(QuantXTheme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
       .contentShape(RoundedRectangle(cornerRadius: 18))
-      .accessibilityElement(children: .combine)
     }
     .buttonStyle(.plain)
+    .accessibilityLabel(title)
+    .accessibilityValue("\(primaryValue)，\(detail)，\(status.accessibilityTitle)")
     .accessibilityHint("打开\(title)")
+    .accessibilityIdentifier(accessibilityIdentifier)
+    .frame(maxWidth: .infinity, alignment: .top)
   }
 
   @ViewBuilder
@@ -1101,18 +1141,18 @@ private struct DashboardFeatureCard: View {
     case .locked:
       Image(systemName: "lock.fill")
         .foregroundStyle(QuantXTheme.secondaryText)
-        .accessibilityLabel("待连接")
+        .accessibilityHidden(true)
     case .loading:
       ProgressView()
-        .accessibilityLabel("正在读取")
+        .accessibilityHidden(true)
     case .ready:
       Image(systemName: "checkmark.circle.fill")
         .foregroundStyle(QuantXTheme.online)
-        .accessibilityLabel("已同步")
+        .accessibilityHidden(true)
     case .warning:
       Image(systemName: "exclamationmark.triangle.fill")
         .foregroundStyle(QuantXTheme.warning)
-        .accessibilityLabel("需要关注")
+        .accessibilityHidden(true)
     }
   }
 }

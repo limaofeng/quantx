@@ -17,8 +17,8 @@ enum QuantXTheme {
   }
 
   static let accent = adaptiveColor(
-    light: UIColor(red: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
-    dark: UIColor(red: 110 / 255, green: 168 / 255, blue: 255 / 255, alpha: 1)
+    light: UIColor(red: 36 / 255, green: 87 / 255, blue: 214 / 255, alpha: 1),
+    dark: UIColor(red: 111 / 255, green: 149 / 255, blue: 255 / 255, alpha: 1)
   )
   static let positive = adaptiveColor(
     light: UIColor(red: 201 / 255, green: 42 / 255, blue: 42 / 255, alpha: 1),
@@ -71,12 +71,21 @@ enum QuantXTheme {
 }
 
 struct QuantXCard<Content: View>: View {
+  let contentPadding: CGFloat
   @ViewBuilder let content: Content
+
+  init(
+    contentPadding: CGFloat = QuantXTheme.Spacing.large,
+    @ViewBuilder content: () -> Content
+  ) {
+    self.contentPadding = contentPadding
+    self.content = content()
+  }
 
   var body: some View {
     content
       .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(16)
+      .padding(contentPadding)
       .background(
         QuantXTheme.cardBackground,
         in: RoundedRectangle(cornerRadius: QuantXTheme.Radius.card)

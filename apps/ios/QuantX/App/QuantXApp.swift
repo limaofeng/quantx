@@ -21,7 +21,9 @@ struct QuantXApp: App {
   @ViewBuilder
   private var rootContent: some View {
 #if DEBUG
-    if ProcessInfo.processInfo.arguments.contains("-QuantXTradeApprovalUITesting") {
+    if ProcessInfo.processInfo.arguments.contains("-QuantXWatchlistReadOnlyUITesting") {
+      MarketWorkspaceView()
+    } else if ProcessInfo.processInfo.arguments.contains("-QuantXTradeApprovalUITesting") {
       TradeApprovalSheet(preview: .uiTestFixture) {}
     } else {
       AppRootView()
