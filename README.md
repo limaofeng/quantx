@@ -35,8 +35,11 @@ Windows 本机从仓库根目录使用唯一入口：
 .\ops\quantx.ps1 down
 ```
 
-`web` 启动 Caddy、API、Engine、Vite 和 VitePress；完成设备登记后可使用 `full`
-额外启动 Prefect Server、Worker 和默认 `data-only` 的 QMT Agent。
+普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
+`full/live`：启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和
+QMT Agent；Prefect Server 由外部管理。只有操作者明确要求纯行情运行时才使用
+`-Mode data-only`，启动失败、权限不足和自动化验收都不得把 live 静默降级为
+data-only。
 开发 Caddy 在所有本机 IPv4 接口的 `8080` 端口提供统一入口。本机可访问
 `http://127.0.0.1:8080`，局域网设备使用 `http://<开发机局域网 IP>:8080`；
 API 自身仍只监听 `127.0.0.1:18081`。
@@ -67,8 +70,9 @@ npm run build
 ```
 
 GraphQL schema 或前端查询变化后，先通过运行中的 Caddy 公共入口执行
-`npm run codegen`。真实交易默认关闭，普通开发和自动测试使用
-fake/simulator broker。
+`npm run codegen`。普通开发运行保持 `full/live` 连接；是否能够自动下单仍由
+账户白名单、快照、对账、灰度阶段、受控窗口与 kill switch 独立决定。自动测试
+继续使用 fake/simulator broker，禁止真实交易。
 
 架构、进程边界、Agent 登记和部署细节参见
 [工程文档](docs/engineering/README.md)；项目约束参见 [AGENTS.md](AGENTS.md)。

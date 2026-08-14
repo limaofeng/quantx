@@ -50,9 +50,48 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:ModeWasExplicitlySpecified = $PSBoundParameters.ContainsKey("Mode")
 
-$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Root = [System.IO.Path]::GetFullPath((Join-Path $ScriptRoot ".."))
+function Resolve-PhysicalDirectoryPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $resolved = [System.IO.Path]::GetFullPath($Path)
+  $visited = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+  )
+  for ($hop = 0; $hop -lt 16; $hop++) {
+    if (-not $visited.Add($resolved)) {
+      throw "Directory link cycle detected while resolving '$Path'."
+    }
+    $item = Get-Item -LiteralPath $resolved -Force
+    if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      return $resolved
+    }
+
+    $targetProperty = $item.PSObject.Properties["Target"]
+    [array]$targets = if ($targetProperty -and $targetProperty.Value) {
+      @($targetProperty.Value)
+    } else {
+      @()
+    }
+    if ($targets.Count -ne 1 -or -not ([string]$targets[0]).Trim()) {
+      throw "Directory link target is unavailable for '$resolved'."
+    }
+
+    $target = ([string]$targets[0]).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($target)) {
+      $target = Join-Path (Split-Path -Parent $resolved) $target
+    }
+    $resolved = [System.IO.Path]::GetFullPath($target)
+  }
+  throw "Directory link chain is too deep while resolving '$Path'."
+}
+
+$InvokedScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Resolve-PhysicalDirectoryPath -Path (
+  Join-Path $InvokedScriptRoot ".."
+)
+$ScriptRoot = Join-Path $Root "ops"
 $Runtime = Join-Path $Root ".runtime"
 $StateDirectory = Join-Path $Runtime "state"
 $LogDirectory = Join-Path $Runtime "logs"
@@ -412,7 +451,14 @@ function Read-State {
   if (-not $raw.Trim()) {
     return @()
   }
-  return @(ConvertFrom-Json -InputObject $raw)
+  $parsed = ConvertFrom-Json -InputObject $raw
+  if ($parsed -is [System.Array]) {
+    foreach ($entry in $parsed) {
+      $entry
+    }
+    return
+  }
+  return @($parsed)
 }
 
 function Write-State {
@@ -496,10 +542,20 @@ function Get-PortOwner {
   $null = $listenerLine -match "LISTENING\s+(?<pid>\d+)\s*$"
   $ownerPid = [int]$Matches.pid
   $processInfo = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-  $commandLine = if ($processInfo -and $processInfo.CommandLine) {
-    $processInfo.CommandLine
-  } elseif ($processInfo -and $processInfo.Path) {
-    "$($processInfo.Path) (arguments unavailable)"
+  $commandLineProperty = if ($processInfo) {
+    $processInfo.PSObject.Properties["CommandLine"]
+  } else {
+    $null
+  }
+  $pathProperty = if ($processInfo) {
+    $processInfo.PSObject.Properties["Path"]
+  } else {
+    $null
+  }
+  $commandLine = if ($commandLineProperty -and $commandLineProperty.Value) {
+    [string]$commandLineProperty.Value
+  } elseif ($pathProperty -and $pathProperty.Value) {
+    "$($pathProperty.Value) (arguments unavailable)"
   } else {
     "<unavailable>"
   }
@@ -858,11 +914,15 @@ function Get-DevGatewayUrls {
 }
 
 function Wait-DevCaddyReady {
+  param([bool]$RequireRuntimeReadiness = $true)
+
   Wait-HttpReady -Name "Caddy" -Url "http://127.0.0.1:8080/health/live"
-  Wait-HttpReady `
-    -Name "QuantX readiness" `
-    -Url "http://127.0.0.1:8080/health/ready" `
-    -TimeoutSeconds 90
+  if ($RequireRuntimeReadiness) {
+    Wait-HttpReady `
+      -Name "QuantX readiness" `
+      -Url "http://127.0.0.1:8080/health/ready" `
+      -TimeoutSeconds 90
+  }
   Wait-HttpReady `
     -Name "Developer docs" `
     -Url "http://127.0.0.1:8080/docs/"
@@ -880,13 +940,18 @@ function Show-QmtAgentRuntimeHealth {
     }
     $summary = (
       "QMT runtime: agent={0}, marketData={1}, connectedDevices={2}, " +
-      "onlineDevices={3}, reconcilingDevices={4}"
+      "onlineDevices={3}, reconcilingDevices={4}, modes={5}, accounts={6}, " +
+      "protocols={7}, snapshotAgeSeconds={8}"
     ) -f @(
       $qmt.status,
       $marketData.status,
       $qmt.connectedDevices,
       $qmt.onlineDevices,
-      $qmt.reconcilingDevices
+      $qmt.reconcilingDevices,
+      (@($qmt.modes) -join ","),
+      (@($qmt.accountIds) -join ","),
+      (@($qmt.protocolVersions) -join ","),
+      $qmt.latestSnapshotAgeSeconds
     )
     if ([string]$qmt.status -eq "ready") {
       Write-Host $summary -ForegroundColor Green
@@ -902,6 +967,50 @@ function Show-QmtAgentRuntimeHealth {
       "Could not read QMT runtime health: $($_.Exception.Message)"
     )
   }
+}
+
+function Wait-QmtAgentRuntimeReady {
+  param(
+    [Parameter(Mandatory = $true)][string]$AccountId,
+    [int]$TimeoutSeconds = 60
+  )
+
+  $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+  do {
+    try {
+      $runtime = Invoke-RestMethod `
+        -Uri "http://127.0.0.1:8080/health/components" `
+        -TimeoutSec 5
+      $qmt = $runtime.components.qmtAgent
+      $modes = @($qmt.modes | ForEach-Object { [string]$_ })
+      $protocols = @(
+        $qmt.protocolVersions | ForEach-Object { [string]$_ }
+      )
+      $accounts = @($qmt.accountIds | ForEach-Object { [string]$_ })
+      $snapshotAge = if ($null -eq $qmt.latestSnapshotAgeSeconds) {
+        [double]::PositiveInfinity
+      } else {
+        [double]$qmt.latestSnapshotAgeSeconds
+      }
+      if (
+        [string]$qmt.status -eq "ready" -and
+        [int]$qmt.readyDevices -ge 1 -and
+        $modes -contains "live" -and
+        $protocols -contains "1.1" -and
+        $accounts -contains $AccountId -and
+        $snapshotAge -le 90
+      ) {
+        Show-QmtAgentRuntimeHealth
+        return $true
+      }
+    } catch {
+      Write-Verbose "Waiting for live QMT runtime: $($_.Exception.Message)"
+    }
+    Start-Sleep -Seconds 2
+  } while ([datetime]::UtcNow -lt $deadline)
+
+  Show-QmtAgentRuntimeHealth
+  return $false
 }
 
 function Invoke-CaddyRecovery {
@@ -1093,18 +1202,51 @@ function Invoke-PrefectPreparation {
   }
 }
 
+function Resolve-DevLaunchProfile {
+  param(
+    [string]$RequestedProfile,
+    [bool]$ModeExplicitlySpecified,
+    [string]$RequestedMode
+  )
+
+  if (
+    $RequestedProfile -eq "web" -and
+    (
+      -not $ModeExplicitlySpecified -or
+      $RequestedMode -ne "data-only"
+    )
+  ) {
+    return "full"
+  }
+  return $RequestedProfile
+}
+
 function Set-DevTradingModeEnvironment {
   if ($Profile -ne "full") {
-    if ($Mode -ne "data-only") {
+    if ($script:ModeWasExplicitlySpecified -and $Mode -ne "data-only") {
       throw "QMT Agent modes require the dev/full profile."
     }
+    $env:QMT_AGENT_MODE = "data-only"
+    $env:QMT_ACCOUNT_WHITELIST = ""
+    $env:ENABLE_REAL_TRADING = "false"
+    $env:QMT_REAL_TRADING_ENABLED = "false"
+    $env:T_TRADE_LIVE_ENABLED = "false"
+    $env:REAL_TRADING_ACCOUNT_ALLOWLIST = "[]"
     return "data-only"
   }
 
-  $agentMode = $Mode
-  $account = $AccountId.Trim()
-  if ($agentMode -ne "data-only" -and -not $account) {
-    throw "$agentMode mode requires -AccountId."
+  if ($script:ModeWasExplicitlySpecified -and $Mode -eq "paper") {
+    throw (
+      "Dev up supports full/live by default and -Mode data-only as the " +
+      "only non-live entry; paper mode is not supported by dev up."
+    )
+  }
+
+  $agentMode = if ($script:ModeWasExplicitlySpecified) { $Mode } else { "live" }
+  $account = if ($agentMode -eq "data-only") {
+    ""
+  } else {
+    Resolve-DevTradingAccountId -RequestedAccountId $AccountId
   }
 
   $env:QMT_AGENT_MODE = $agentMode
@@ -1115,10 +1257,6 @@ function Set-DevTradingModeEnvironment {
   }
 
   if ($agentMode -eq "live") {
-    $expected = "LIVE:$account"
-    if ($ConfirmLive -cne $expected) {
-      throw "Live mode requires -ConfirmLive '$expected'."
-    }
     $env:ENABLE_REAL_TRADING = "true"
     $env:QMT_REAL_TRADING_ENABLED = "true"
     $env:T_TRADE_LIVE_ENABLED = "true"
@@ -1135,6 +1273,46 @@ function Set-DevTradingModeEnvironment {
   return $agentMode
 }
 
+function Resolve-DevTradingAccountId {
+  param([AllowEmptyString()][string]$RequestedAccountId)
+
+  $requested = $RequestedAccountId.Trim()
+  if ($requested) {
+    return $requested
+  }
+
+  $candidates = [Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+  )
+  foreach ($name in @(
+    "QMT_ACCOUNT_WHITELIST",
+    "REAL_TRADING_ACCOUNT_ALLOWLIST",
+    "AUTH_BOOTSTRAP_ACCOUNT_IDS"
+  )) {
+    $setting = [Environment]::GetEnvironmentVariable($name)
+    if (-not $setting) {
+      continue
+    }
+    foreach ($value in @(ConvertFrom-ListSetting -Value $setting)) {
+      $null = $candidates.Add($value)
+    }
+  }
+
+  if ($candidates.Count -eq 1) {
+    return [string](@($candidates)[0])
+  }
+  if ($candidates.Count -eq 0) {
+    throw (
+      "Dev full defaults to live mode. Configure one account in " +
+      "QMT_ACCOUNT_WHITELIST or pass -AccountId."
+    )
+  }
+  throw (
+    "Multiple development trading accounts are configured; pass -AccountId " +
+    "to select one."
+  )
+}
+
 function Invoke-Up {
   if ($Environment -ne "dev") {
     throw "Use install for local production services; up supports dev only."
@@ -1147,6 +1325,18 @@ function Invoke-Up {
     return
   }
   Import-QuantXEnvironment
+  $resolvedProfile = Resolve-DevLaunchProfile `
+    -RequestedProfile $Profile `
+    -ModeExplicitlySpecified $script:ModeWasExplicitlySpecified `
+    -RequestedMode $Mode
+  if ($resolvedProfile -ne $Profile) {
+    Write-Host (
+      "Dev web without an explicit mode is promoted to full/live so the " +
+      "single-account trading runtime remains connected. Use " +
+      "-Profile web -Mode data-only for an explicit non-trading launch."
+    ) -ForegroundColor Cyan
+  }
+  $Profile = $resolvedProfile
   Initialize-PythonEnvironment
   $existing = @(Read-State)
   $live = @($existing | Where-Object { Get-TrackedProcess -Entry $_ })
@@ -1159,16 +1349,21 @@ function Invoke-Up {
   Show-ExternalDependencies -Python $python
   $node = Resolve-Node
   $qmtPython = $null
-  $agentMode = $null
+  $agentMode = Set-DevTradingModeEnvironment
+  $liveAccount = ""
+  if ($agentMode -eq "live") {
+    $liveAccounts = @(ConvertFrom-ListSetting -Value $env:QMT_ACCOUNT_WHITELIST)
+    if ($liveAccounts.Count -ne 1) {
+      throw "Live development startup requires exactly one resolved account."
+    }
+    $liveAccount = [string]$liveAccounts[0]
+  }
   if ($Profile -eq "full") {
     # API health aggregation and Prefect CLI/Worker must share the same
     # canonical API base from the moment each process is spawned.
     $qmtPython = Resolve-Python -Qmt
-    $agentMode = Set-DevTradingModeEnvironment
     Assert-QmtAgentEnrollment -Python $qmtPython
     Initialize-PrefectEnvironment
-  } elseif ($Mode -ne "data-only") {
-    $null = Set-DevTradingModeEnvironment
   }
   $caddy = Join-Path $ToolsDirectory "caddy\caddy.exe"
   if (-not (Test-Path -LiteralPath $caddy -PathType Leaf)) {
@@ -1194,6 +1389,7 @@ function Invoke-Up {
   $env:PREFECT_ENABLED = if ($Profile -eq "full") { "true" } else { "false" }
   $env:PYTHONPATH = Get-WorkspacePythonPath
   $script:ManagedProcesses = @()
+  $liveRuntimeReady = $true
   try {
     Start-ManagedProcess `
       -Name "api" `
@@ -1280,9 +1476,13 @@ function Invoke-Up {
     }
 
     Start-DevCaddy -Executable $caddy
-    Wait-DevCaddyReady
+    Wait-DevCaddyReady -RequireRuntimeReadiness ($Profile -ne "full")
     if ($Profile -eq "full") {
-      Show-QmtAgentRuntimeHealth
+      if ($agentMode -eq "live") {
+        $liveRuntimeReady = Wait-QmtAgentRuntimeReady -AccountId $liveAccount
+      } else {
+        Show-QmtAgentRuntimeHealth
+      }
     }
     $modeLabel = if ($Profile -eq "full") { " ($agentMode)" } else { "" }
     Write-Host (
@@ -1292,6 +1492,15 @@ function Invoke-Up {
   } catch {
     Stop-OnFailure
     throw
+  }
+  if (-not $liveRuntimeReady) {
+    throw (
+      "QuantX services remain running, but the live QMT Agent did not become " +
+      "READY with a fresh snapshot within 60 seconds. Complete the MiniQMT " +
+      "login and run .\ops\quantx.ps1 status; then rerun " +
+      ".\ops\quantx.ps1 up -Environment dev -Profile web if the processes " +
+      "were stopped manually."
+    )
   }
 }
 
@@ -1320,6 +1529,35 @@ function Invoke-Status {
       }
     }
     $rows | Format-Table -AutoSize
+    $runningNames = @(
+      $entries |
+        Where-Object { Get-TrackedProcess -Entry $_ } |
+        ForEach-Object { [string]$_.name }
+    )
+    $actualProfile = if (
+      $runningNames -contains "worker" -and
+      $runningNames -contains "qmt-agent"
+    ) { "full" } else { "web" }
+    $agentEntry = @(
+      $entries | Where-Object { [string]$_.name -eq "qmt-agent" }
+    ) | Select-Object -First 1
+    $actualMode = "data-only"
+    if ($agentEntry) {
+      $arguments = @($agentEntry.arguments | ForEach-Object { [string]$_ })
+      $modeIndex = [array]::IndexOf($arguments, "--mode")
+      if ($modeIndex -ge 0 -and $modeIndex + 1 -lt $arguments.Count) {
+        $actualMode = $arguments[$modeIndex + 1]
+      }
+    }
+    $configuredAccounts = @(ConvertFrom-ListSetting -Value (
+      [string][Environment]::GetEnvironmentVariable("QMT_ACCOUNT_WHITELIST")
+    ))
+    Write-Host (
+      "Runtime profile={0}, agentMode={1}, configuredAccounts={2}" -f
+        $actualProfile,
+        $actualMode,
+        ($configuredAccounts -join ",")
+    )
   }
   foreach ($port in @(8080, $ApiPort, 5250, 5251)) {
     $owner = Get-PortOwner -Port $port

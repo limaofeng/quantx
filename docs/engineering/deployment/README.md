@@ -4,21 +4,33 @@
 
 ```powershell
 .\ops\quantx.ps1 up -Environment dev -Profile web
-.\ops\quantx.ps1 up -Environment dev -Profile full
-.\ops\quantx.ps1 up -Environment dev -Profile full -Mode live `
-  -AccountId <账户> -ConfirmLive "LIVE:<账户>"
+.\ops\quantx.ps1 up -Environment dev -Profile full -AccountId <账户>
+.\ops\quantx.ps1 up -Environment dev -Profile web -Mode data-only
 .\ops\quantx.ps1 status
 .\ops\quantx.ps1 logs
 .\ops\quantx.ps1 down
 ```
 
-`web` 启动 Caddy、API、Engine、Vite 和 VitePress；`full` 额外启动 Prefect
-Worker 和默认 `data-only` 的 QMT Agent。Prefect Server 由外部管理。开发
-`full` 可通过 `-Mode paper/live`
-显式选择执行模式；`paper/live` 必须指定账户，`live` 还必须精确确认。API、Engine
-和前端仍以 `development` 运行，只有 QMT Agent 子进程在 `live` 时使用受支持的
-`ENV=testing` 安全门。数据库、Redis 和 InfluxDB 始终复用开发配置，不额外安装。
+普通开发 `up`（包括未显式指定模式的 `-Profile web`）会提升为 `full/live`，
+启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和 QMT Agent。
+Prefect Server 由外部管理。开发实盘优先使用 `-AccountId`，未传时从 `QMT_ACCOUNT_WHITELIST`、
+`REAL_TRADING_ACCOUNT_ALLOWLIST` 或 `AUTH_BOOTSTRAP_ACCOUNT_IDS` 中自动解析唯一账户；
+多个账户仍需显式选择。开发启动不要求 `-ConfirmLive`；`-Mode data-only` 是唯一
+显式非实盘入口。API、Engine 和前端仍以 `development` 运行，只有 QMT Agent
+子进程在 `live` 时使用受支持的 `ENV=testing` 运行门。数据库、Redis 和 InfluxDB
+始终复用开发配置，不额外安装。
+除非操作者明确要求纯行情模式，否则启动、恢复和验收不得把 `full/live` 的凭据、
+权限或安全审批失败自动降级为 `data-only`；失败时应停止并请求明确授权。
+默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REAL_TRADING` 与
+`T_TRADE_LIVE_ENABLED` 能力门，并注入同一账户白名单；这不会
+绕过账户白名单、live Agent、快照、对账或 `SHADOW / CANARY / LIVE` 灰度门禁。
+显式使用 `-Mode data-only` 时，两道服务端交易能力门会关闭。
 `down` 仅停止状态文件记录且启动时间匹配的进程。
+
+启动器会在读取 `.runtime` 状态或创建子进程前，将仓库根目录的 Junction / 符号
+链接解析为真实物理路径。即使从工作区目录联接调用 `ops/quantx.ps1`，Vite、API、
+Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径，避免 Windows
+下因联接路径与依赖真实路径不一致而跳过 TSX 转译并出现白屏。
 
 公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
@@ -63,6 +75,18 @@ python -m quantx_qmt_agent.main status
 `T_TRADE_LIVE_ENABLED=true`；服务端同时检查
 `REAL_TRADING_ACCOUNT_ALLOWLIST`、账户灰度阶段、Agent READY、快照新鲜度、
 对账状态和自动退出策略授权。
+
+实盘安全状态分层展示：`PREPARING` 表示 `SHADOW` 下账户观察、QMT 手工交易
+分类和完整快照对账已经就绪，但自动交易仍因备份、外部活动或灰度授权保持
+关闭；`READY` 才表示可申请进入受控 Canary；`BLOCKED` 表示观察/对账链路
+本身不安全。QMT 手工活动在准备阶段不会单独制造 `BLOCKED`。
+
+受控窗口建立后，以当时完整快照中的历史外部委托/成交作为审计基线；只有
+基线之后新增的外部活动才使窗口失效并暂停自动执行。开发环境允许账户从
+`SHADOW` 直接进入 `LIVE`，但必须同时满足新鲜受控窗口、24 小时内成功备份、
+全部 readiness 门禁、`trade:approve` 权限，并精确确认
+`LIVE:<账户>`。生产环境仍禁止 `SHADOW` 直升 `LIVE`，继续使用既有 Canary
+流程。建立窗口、启用、暂停和失败尝试均写入追加式审计事件。
 
 ## 端口与进程安全
 
