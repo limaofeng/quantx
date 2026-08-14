@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
+import { createClientId } from '@/utils/clientId';
 import { cn } from '@/utils/cn';
 
 import type {
@@ -347,9 +348,9 @@ function ManualPlanEditor({
   );
   const [authorized, setAuthorized] = React.useState(false);
   const [remark, setRemark] = React.useState('');
-  const [rules, setRules] = React.useState<ExitPlanRuleDraft[]>([
+  const [rules, setRules] = React.useState<ExitPlanRuleDraft[]>(() => [
     {
-      id: crypto.randomUUID(),
+      id: createClientId('exit-rule'),
       parametersText: '{"target_price": 0}',
       priority: 500,
       ruleType: 'TARGET_PRICE',
@@ -397,7 +398,7 @@ function ManualPlanEditor({
           }))
         : [
             {
-              id: crypto.randomUUID(),
+              id: createClientId('exit-rule'),
               parametersText: '{"target_price": 0}',
               priority: 500,
               ruleType: 'TARGET_PRICE',
@@ -624,7 +625,7 @@ function ManualPlanEditor({
             setRules(current => [
               ...current,
               {
-                id: crypto.randomUUID(),
+                id: createClientId('exit-rule'),
                 parametersText: '{}',
                 priority: 500,
                 ruleType: ruleTypes[0]?.ruleType || 'TARGET_PRICE',
