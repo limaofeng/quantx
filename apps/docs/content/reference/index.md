@@ -25,5 +25,6 @@
 ## GraphQL 参考
 
 在线可搜索的字段和类型页面见[GraphQL Schema 参考](./graphql-api/)。
-完整 Schema 包含 Query、Mutation 和 Subscription，以便标准工具正确生成
-类型；iOS 首版仍按[权限模型](../concepts/permissions)限制为只读操作。
+完整 Schema 包含 Query、Mutation 和 Subscription，以便标准工具正确生成类型。
+iOS 按[权限模型](../concepts/permissions)和服务端 capability 只启用已发布的专用
+能力；通用 `mutation:write` 不得替代移动端交易安全契约。

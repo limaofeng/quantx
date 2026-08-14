@@ -40,6 +40,20 @@ Content-Type: application/json
 
 响应包含 `Cache-Control: no-store`。Token、密码和完整响应不得进入应用日志。
 
+## 设备 scope 与单一主账户
+
+iOS v1 交易版本的目标会话会增加可选请求字段
+`requestedScopes/requestedAccountId`，并返回实际
+`grantedScopes/activeAccountId`。服务端只签发用户权限、设备允许范围和请求
+scope 的交集；Refresh Token 轮换保持同一 scope 和主账户，不得扩权。
+
+这些字段尚未出现在当前 Client OpenAPI 时，客户端继续按现有响应安全登录，但
+必须关闭依赖设备 scope 的手动下单、清仓、策略控制和通知写入。不能依靠客户端
+隐藏入口弥补会话继承用户全部权限的问题。
+
+v1 不提供账户切换。授权账户无法唯一解析、响应对象属于其他账户或刷新后的主
+账户发生变化时，清除业务状态并要求重新建立会话。
+
 ## 刷新与单次轮换
 
 ```http
@@ -96,7 +110,8 @@ Authorization: Bearer <access-token>
 | --- | --- |
 | Access/Refresh Token | Keychain |
 | 主题、排序、脱敏开关 | UserDefaults |
-| 账户资产、持仓、订单 | 首版仅内存 |
+| 账户资产、持仓、订单 | 仅内存；失败刷新可保留并标记 stale |
+| 短时交易确认令牌 | 仅内存，过期/后台/登出即丢弃 |
 | 密码、券商凭证、QMT 配置 | 不保存 |
 
 App 进入后台时暂停订阅并遮蔽任务切换快照中的金额与账号；回到前台后先刷新

@@ -31,7 +31,11 @@ X-Request-ID: ios-optional-correlation-id
 - 每个根字段按权限映射进行默认拒绝授权。
 - `accountId` 只是筛选参数，服务端仍会验证它属于当前 Principal。
 - 客户端隐藏入口不能替代服务端权限。
-- 所有 Mutation 当前统一要求 `mutation:write`。
+- 当前大多数通用 Mutation 要求 `mutation:write`，受控交易批准使用独立
+  `trade:approve`。每个字段的事实映射以
+  [权限 JSON](/contracts/graphql-permissions.json)为准。
+- iOS 目标写能力使用按设备的专用 scope；通用 `mutation:write` 不得作为移动端
+  手动交易、清仓或策略控制权限。目标接口尚未发布时保持功能关闭。
 
 ## 错误结构
 
@@ -62,3 +66,12 @@ GraphQL 业务和授权错误通常仍使用 HTTP 200，并出现在 `errors`：
 - `.graphql` operation 与生成 Swift 类型一起接受代码审查。
 - Schema 更新后重新生成，不使用字典、强制转换或手写模型掩盖差异。
 - Generated GraphQL Model 先映射为 App Domain Model，再进入 SwiftUI。
+
+## Mutation 安全模式
+
+新增实盘风险不得直接调用现有宽泛写接口。目标模式先由服务端预览并签发绑定
+设备会话、主账户、完整输入指纹和过期时间的一次性挑战；客户端核对预览、完成
+Face ID/Touch ID 后才确认。确认时服务端重新校验行情、账户、风控和运行门禁。
+
+确认成功只表示命令持久化并进入统一执行链。客户端随后查询订单/计划并等待 QMT
+回报，不能把 GraphQL 成功或 `command_ack` 显示为券商已报或成交。

@@ -43,6 +43,7 @@ export default defineConfig({
     },
     lightModeSwitchTitle: '切换到浅色主题',
     nav: [
+      { text: 'iOS 产品契约', link: '/guide/ios-product-contract' },
       { text: 'iOS 快速开始', link: '/guide/ios-quickstart' },
       { text: 'API 参考', link: '/reference/' },
       {
@@ -86,6 +87,7 @@ export default defineConfig({
         text: '开始',
         items: [
           { text: '文档首页', link: '/' },
+          { text: 'iOS 产品契约', link: '/guide/ios-product-contract' },
           { text: 'iOS 快速开始', link: '/guide/ios-quickstart' },
           { text: '原生客户端会话', link: '/guide/native-session' },
           { text: 'GraphQL HTTP', link: '/guide/graphql-http' },
