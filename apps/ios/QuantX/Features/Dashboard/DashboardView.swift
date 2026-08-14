@@ -6,7 +6,6 @@ struct DashboardView: View {
     case position(PortfolioPosition)
     case tTradeAssistant
     case limitUpBoardAssistant
-    case settings
   }
 
   @EnvironmentObject private var model: AppModel
@@ -27,6 +26,7 @@ struct DashboardView: View {
           }
 
           accountContent
+          actionInbox
           monitoringOverview
           tradingAssistantsOverview
           positionContent
@@ -48,20 +48,9 @@ struct DashboardView: View {
           TTradeAssistantView()
         case .limitUpBoardAssistant:
           LimitUpBoardAssistantView()
-        case .settings:
-          SettingsView(embeddedInNavigation: true)
         }
       }
       .toolbar {
-        ToolbarItem(placement: .topBarLeading) {
-          Button {
-            path.append(.settings)
-          } label: {
-            Image(systemName: "person.crop.circle")
-          }
-          .frame(minWidth: 44, minHeight: 44)
-          .accessibilityLabel("账户与设置")
-        }
         ToolbarItem(placement: .topBarTrailing) {
           Button {
             Task { await refreshDashboard() }
@@ -80,6 +69,254 @@ struct DashboardView: View {
       .refreshable {
         await refreshDashboard()
       }
+    }
+  }
+
+  private var actionInbox: some View {
+    let actions = dashboardActions
+    return VStack(alignment: .leading, spacing: 10) {
+      SectionTitle(
+        title: "行动收件箱",
+        subtitle: actions.isEmpty
+          ? (actionInboxIsAuthoritative ? "当前没有需要处理的事项" : "正在汇总已授权业务状态")
+          : "按风险与时效集中处理"
+      )
+
+      if actions.isEmpty {
+        QuantXCard {
+          HStack(spacing: 12) {
+            Image(systemName: actionInboxIsAuthoritative ? "checkmark.shield.fill" : "clock.arrow.circlepath")
+              .font(.title3)
+              .foregroundStyle(actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText)
+              .frame(width: 38, height: 38)
+              .background(
+                (actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText)
+                  .opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 11)
+              )
+              .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+              Text(actionInboxIsAuthoritative ? "当前无需处理" : "行动状态待同步")
+                .font(.subheadline.weight(.semibold))
+              Text(
+                actionInboxIsAuthoritative
+                  ? "新的待确认信号、活动委托或风险异常会显示在这里。"
+                  : "尚未拿到全部已授权快照，不会把未知状态显示为正常。"
+              )
+                .font(.caption)
+                .foregroundStyle(QuantXTheme.secondaryText)
+            }
+          }
+          .accessibilityElement(children: .combine)
+        }
+      } else {
+        ForEach(actions.prefix(5)) { item in
+          Button {
+            open(item.destination)
+          } label: {
+            QuantXCard {
+              HStack(spacing: 12) {
+                Image(systemName: item.systemImage)
+                  .font(.body.weight(.semibold))
+                  .foregroundStyle(item.color)
+                  .frame(width: 38, height: 38)
+                  .background(item.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+                  .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                  Text(item.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                  Text(item.detail)
+                    .font(.caption)
+                    .foregroundStyle(QuantXTheme.secondaryText)
+                    .lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                  .font(.caption.weight(.semibold))
+                  .foregroundStyle(.tertiary)
+                  .accessibilityHidden(true)
+              }
+              .accessibilityElement(children: .combine)
+            }
+          }
+          .buttonStyle(.plain)
+          .accessibilityHint("打开对应处理页面")
+        }
+      }
+    }
+  }
+
+  private var actionInboxIsAuthoritative: Bool {
+    model.tradingState.snapshot != nil
+      && model.strategyState.snapshot != nil
+      && model.tTradeAssistantState.snapshot != nil
+      && model.limitUpBoardState.snapshot != nil
+  }
+
+  private var dashboardActions: [DashboardActionItem] {
+    var actions: [DashboardActionItem] = []
+
+    if let snapshot = model.tTradeAssistantState.snapshot {
+      if snapshot.killSwitch {
+        actions.append(
+          DashboardActionItem(
+            id: "t-trade-kill-switch-\(snapshot.accountID)",
+            priority: 0,
+            title: "做T交易已熔断",
+            detail: "停止新增风险并核对账户、委托和成交快照。",
+            systemImage: "exclamationmark.octagon.fill",
+            color: QuantXTheme.warning,
+            destination: .tTrade
+          )
+        )
+      }
+      let pendingSignals = snapshot.signals.filter {
+        ["PENDING", "AWAITING_APPROVAL", "WAITING_APPROVAL"].contains($0.status.uppercased())
+      }
+      if !pendingSignals.isEmpty {
+        actions.append(
+          DashboardActionItem(
+            id: "t-trade-signals-\(pendingSignals.map(\.id).sorted().joined(separator: ","))",
+            priority: 1,
+            title: "\(pendingSignals.count) 个做T信号待核对",
+            detail: "过期信号不会补确认；进入后逐笔查看服务端预览。",
+            systemImage: "arrow.triangle.2.circlepath.circle.fill",
+            color: QuantXTheme.accent,
+            destination: .tTrade
+          )
+        )
+      }
+      if let lastError = snapshot.lastError, !lastError.isEmpty {
+        actions.append(
+          DashboardActionItem(
+            id: "t-trade-error-\(snapshot.accountID)-\(lastError)",
+            priority: 0,
+            title: "做T执行异常",
+            detail: lastError,
+            systemImage: "exclamationmark.triangle.fill",
+            color: QuantXTheme.warning,
+            destination: .tTrade
+          )
+        )
+      }
+    } else if case .failed(let message) = model.tTradeAssistantState {
+      actions.append(
+        DashboardActionItem(
+          id: "t-trade-sync-failed",
+          priority: 0,
+          title: "做T状态同步失败",
+          detail: message,
+          systemImage: "wifi.exclamationmark",
+          color: QuantXTheme.warning,
+          destination: .tTrade
+        )
+      )
+    }
+
+    if let snapshot = model.limitUpBoardState.snapshot, !snapshot.approvals.isEmpty {
+      actions.append(
+        DashboardActionItem(
+          id: "limit-up-approvals-\(snapshot.approvals.map(\.id).sorted().joined(separator: ","))",
+          priority: 1,
+          title: "\(snapshot.approvals.count) 个打板意图待核对",
+          detail: "确认前会重新检查信号有效期、风险门禁和合法数量。",
+          systemImage: "scope",
+          color: QuantXTheme.positive,
+          destination: .limitUp
+        )
+      )
+    } else if case .failed(let message) = model.limitUpBoardState {
+      actions.append(
+        DashboardActionItem(
+          id: "limit-up-sync-failed",
+          priority: 0,
+          title: "打板状态同步失败",
+          detail: message,
+          systemImage: "wifi.exclamationmark",
+          color: QuantXTheme.warning,
+          destination: .limitUp
+        )
+      )
+    }
+
+    if let snapshot = model.tradingState.snapshot {
+      let activeOrders = snapshot.todayOrders.filter {
+        ["UNREPORTED", "WAIT_REPORTING", "REPORTED", "REPORTED_CANCEL", "PART_SUCC"]
+          .contains($0.status.uppercased())
+      }
+      if !activeOrders.isEmpty {
+        actions.append(
+          DashboardActionItem(
+            id: "active-orders-\(activeOrders.map(\.id).sorted().joined(separator: ","))",
+            priority: 2,
+            title: "\(activeOrders.count) 笔活动委托",
+            detail: "排队、券商已报与成交是不同状态，请查看最新回报。",
+            systemImage: "clock.arrow.circlepath",
+            color: QuantXTheme.accent,
+            destination: .trading
+          )
+        )
+      }
+    } else if case .failed(let message) = model.tradingState {
+      actions.append(
+        DashboardActionItem(
+          id: "trading-sync-failed",
+          priority: 0,
+          title: "委托成交同步失败",
+          detail: message,
+          systemImage: "wifi.exclamationmark",
+          color: QuantXTheme.warning,
+          destination: .trading
+        )
+      )
+    }
+
+    if let snapshot = model.strategyState.snapshot {
+      let errors = snapshot.instances.filter { $0.status == "ERROR" }
+      if !errors.isEmpty {
+        actions.append(
+          DashboardActionItem(
+            id: "strategy-errors-\(errors.map(\.id).sorted().joined(separator: ","))",
+            priority: 0,
+            title: "\(errors.count) 个策略实例异常",
+            detail: "查看运行事实和最近执行状态后再决定是否处置。",
+            systemImage: "waveform.path.ecg.rectangle.fill",
+            color: QuantXTheme.warning,
+            destination: .strategies
+          )
+        )
+      }
+    } else if case .failed(let message) = model.strategyState {
+      actions.append(
+        DashboardActionItem(
+          id: "strategy-sync-failed",
+          priority: 0,
+          title: "策略状态同步失败",
+          detail: message,
+          systemImage: "wifi.exclamationmark",
+          color: QuantXTheme.warning,
+          destination: .strategies
+        )
+      )
+    }
+
+    return actions.sorted {
+      if $0.priority != $1.priority { return $0.priority < $1.priority }
+      return $0.id < $1.id
+    }
+  }
+
+  private func open(_ destination: DashboardActionDestination) {
+    switch destination {
+    case .trading:
+      model.selectedTab = .trade
+    case .strategies:
+      model.selectedTab = .quant
+    case .tTrade:
+      path.append(.tTradeAssistant)
+    case .limitUp:
+      path.append(.limitUpBoardAssistant)
     }
   }
 
@@ -188,11 +425,11 @@ struct DashboardView: View {
 
   private var monitoringOverview: some View {
     VStack(alignment: .leading, spacing: 10) {
-      SectionTitle(title: "运行监控", subtitle: "策略与今日交易动态")
+      SectionTitle(title: "执行总览", subtitle: "策略与今日交易动态")
 
       LazyVGrid(columns: overviewColumns, spacing: 12) {
         DashboardFeatureCard(
-          title: "策略监控",
+          title: "策略执行",
           systemImage: "waveform.path.ecg.rectangle.fill",
           color: QuantXTheme.accent,
           primaryValue: strategyPrimaryValue,
@@ -385,7 +622,7 @@ struct DashboardView: View {
   private var tTradeDetail: String {
     switch model.tTradeAssistantState {
     case .loaded(let snapshot, _):
-      "\(snapshot.pendingSignalCount) 个待确认 · \(snapshot.eligibleCount) 只可监控"
+      "\(snapshot.pendingSignalCount) 个待确认 · \(snapshot.eligibleCount) 只符合条件"
     case .failed(let message), .unavailable(let message): message
     case .noAccount: "当前会话没有授权账户"
     case .idle: "等待读取"
@@ -490,6 +727,23 @@ struct DashboardView: View {
     await model.refreshTTradeAssistant()
     await model.refreshLimitUpBoard()
   }
+}
+
+private enum DashboardActionDestination {
+  case trading
+  case strategies
+  case tTrade
+  case limitUp
+}
+
+private struct DashboardActionItem: Identifiable {
+  let id: String
+  let priority: Int
+  let title: String
+  let detail: String
+  let systemImage: String
+  let color: Color
+  let destination: DashboardActionDestination
 }
 
 private struct AccountHeroCard: View {
