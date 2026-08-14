@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -621,3 +622,257 @@ async def test_kill_scans_and_cancels_manual_order_committed_before_it(
   assert pending.status_reason == "hard kill before broker order id"
   assert db.get.await_args.kwargs == {"with_for_update": True}
   db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_kill_operation_id_replay_does_not_repeat_any_side_effect(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout(
+    stage="LIVE",
+    enabled=True,
+    controlled_window_active=True,
+    controlled_window_snapshot_id="snapshot-1",
+  )
+  pending = SimpleNamespace(
+    client_order_id="manual-client-idempotent",
+    broker_order_id="broker-order-idempotent",
+    execution_mode="live",
+    status="SUBMITTED",
+    status_reason=None,
+  )
+  source = SimpleNamespace(
+    client_order_id="manual-client-idempotent",
+    device_id="device-1",
+    delivery_status="DELIVERED",
+    last_error=None,
+    payload={"command_kind": "PLACE_ORDER"},
+  )
+
+  def result(rows):
+    value = MagicMock()
+    value.scalars.return_value.all.return_value = rows
+    return value
+
+  added: list = []
+  marker_lookups = 0
+
+  async def get(model, key, **kwargs):
+    nonlocal marker_lookups
+    if model is operations_module.AccountTradingRollout:
+      assert key == "account-1"
+      assert kwargs == {"with_for_update": True}
+      return rollout
+    assert model is operations_module.AccountTradingRolloutEvent
+    assert key == "kill-operation-1"
+    marker_lookups += 1
+    if marker_lookups == 1:
+      return None
+    return next(
+      item
+      for item in added
+      if isinstance(item, operations_module.AccountTradingRolloutEvent)
+    )
+
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=get),
+    execute=AsyncMock(
+      side_effect=[result([]), result([pending]), result([source])]
+    ),
+    add=MagicMock(side_effect=added.append),
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  alert_service = SimpleNamespace(raise_alert=AsyncMock())
+  monkeypatch.setattr(
+    operations_module,
+    "OperationalAlertService",
+    lambda _db: alert_service,
+  )
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(return_value={"status": "HARD_KILL"})
+
+  first = await service.kill(
+    "account-1",
+    "idempotent emergency",
+    user_id="user-1",
+    operation_id="kill-operation-1",
+  )
+  first_added_count = len(added)
+  first_execute_count = db.execute.await_count
+  first_alert_count = alert_service.raise_alert.await_count
+  second = await service.kill(
+    "account-1",
+    "idempotent emergency",
+    user_id="user-1",
+    operation_id="kill-operation-1",
+  )
+
+  assert first == second == {"status": "HARD_KILL"}
+  assert marker_lookups == 2
+  assert len(added) == first_added_count == 3
+  assert db.execute.await_count == first_execute_count == 3
+  assert alert_service.raise_alert.await_count == first_alert_count == 1
+  assert db.commit.await_count == 1
+  assert db.rollback.await_count == 1
+  events = [
+    item
+    for item in added
+    if isinstance(item, operations_module.AccountTradingRolloutEvent)
+  ]
+  cancel_commands = [
+    item
+    for item in added
+    if isinstance(item, operations_module.TradeCommandOutbox)
+    and item.payload.get("command_kind") == "CANCEL_ORDER"
+  ]
+  emergency_commands = [
+    item
+    for item in added
+    if isinstance(item, operations_module.TradeCommandOutbox)
+    and item.payload.get("command_kind") == "EMERGENCY_STOP"
+  ]
+  assert len(events) == 1
+  assert events[0].event_id == "kill-operation-1"
+  assert len(cancel_commands) == 1
+  assert len(emergency_commands) == 1
+  assert cancel_commands[0].idempotency_key == hashlib.sha256(
+    b"hard-kill-cancel:account-1:device-1:broker-order-idempotent:kill-operation-1"
+  ).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_begin_controlled_window_operation_id_replay_is_a_noop(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout()
+  added: list = []
+  marker_lookups = 0
+
+  async def get(model, key, **kwargs):
+    nonlocal marker_lookups
+    if model is operations_module.AccountTradingRollout:
+      return rollout
+    marker_lookups += 1
+    if marker_lookups == 1:
+      return None
+    return next(
+      item
+      for item in added
+      if isinstance(item, operations_module.AccountTradingRolloutEvent)
+    )
+
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=get),
+    add=MagicMock(side_effect=added.append),
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(
+    return_value=_window_readiness(controlled_window_active=False)
+  )
+  service._latest_full_snapshot = AsyncMock(return_value={"is_complete": True})
+  service._external_snapshot_activity = AsyncMock(
+    return_value={"orders": [], "trades": []}
+  )
+
+  await service.begin_controlled_window(
+    "account-1",
+    user_id="user-1",
+    snapshot_id="snapshot-1",
+    operation_id="begin-operation-1",
+  )
+  await service.begin_controlled_window(
+    "account-1",
+    user_id="user-1",
+    snapshot_id="snapshot-1",
+    operation_id="begin-operation-1",
+  )
+
+  assert marker_lookups == 2
+  assert len(added) == 1
+  assert added[0].event_id == "begin-operation-1"
+  assert added[0].details["operationId"] == "begin-operation-1"
+  service._latest_full_snapshot.assert_awaited_once()
+  service._external_snapshot_activity.assert_awaited_once()
+  db.commit.assert_awaited_once()
+  db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_activate_rollout_operation_id_replay_is_a_noop(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout(
+    controlled_window_active=True,
+    controlled_window_snapshot_id="snapshot-1",
+  )
+  added: list = []
+  marker_lookups = 0
+
+  async def get(model, key, **kwargs):
+    nonlocal marker_lookups
+    if model is operations_module.AccountTradingRollout:
+      return rollout
+    marker_lookups += 1
+    if marker_lookups == 1:
+      return None
+    return next(
+      item
+      for item in added
+      if isinstance(item, operations_module.AccountTradingRolloutEvent)
+    )
+
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=get),
+    add=MagicMock(side_effect=added.append),
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(return_value=_window_readiness())
+
+  await service.activate_rollout(
+    "account-1",
+    user_id="user-1",
+    acknowledged_policy_version=3,
+    target_stage="CANARY",
+    operation_id="activate-operation-1",
+  )
+  await service.activate_rollout(
+    "account-1",
+    user_id="user-1",
+    acknowledged_policy_version=3,
+    target_stage="CANARY",
+    operation_id="activate-operation-1",
+  )
+
+  assert marker_lookups == 2
+  assert len(added) == 1
+  assert added[0].event_id == "activate-operation-1"
+  assert added[0].details == {
+    "operationId": "activate-operation-1",
+    "policyVersion": 3,
+    "targetStage": "CANARY",
+  }
+  db.commit.assert_awaited_once()
+  db.rollback.assert_awaited_once()

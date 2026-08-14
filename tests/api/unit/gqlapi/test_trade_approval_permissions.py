@@ -37,6 +37,8 @@ _AUTHORIZATION_SCHEMA = strawberry.Schema(
     "confirmStrategyTradeIntentApproval",
     "previewStrategyControl",
     "confirmStrategyControl",
+    "previewTTradeControl",
+    "confirmTTradeControl",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -47,6 +49,10 @@ def test_trade_approval_mutations_require_independent_permission(
 
 def test_strategy_lifecycle_uses_narrow_control_permission():
   assert required_permission("Mutation", "pauseStrategyInstance") == "strategy:control"
+
+
+def test_t_trade_risk_reduction_uses_narrow_control_permission():
+  assert required_permission("Mutation", "pauseTTradeEntries") == "t-trade:control"
 
 
 @pytest.mark.parametrize(

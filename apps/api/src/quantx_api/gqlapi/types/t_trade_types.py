@@ -24,6 +24,31 @@ class TTradeRolloutTarget(Enum):
   LIVE = "LIVE"
 
 
+@strawberry.enum(description="原生端两阶段做 T 安全控制动作")
+class TTradeControlAction(Enum):
+  BEGIN_CONTROLLED_WINDOW = "BEGIN_CONTROLLED_WINDOW"
+  ACTIVATE_CANARY = "ACTIVATE_CANARY"
+  ACTIVATE_LIVE = "ACTIVATE_LIVE"
+  KILL_SWITCH = "KILL_SWITCH"
+
+
+@strawberry.input(description="生成原生端做 T 安全控制确认预览")
+class TTradeControlPreviewInput:
+  account_id: str
+  action: TTradeControlAction
+  policy_version: int
+  idempotency_key: str
+  snapshot_id: str = ""
+  target_stage: Optional[TTradeRolloutTarget] = None
+  reason: str = ""
+
+
+@strawberry.input(description="消费原生端做 T 安全控制确认凭据")
+class TTradeControlConfirmationInput:
+  challenge_id: strawberry.ID
+  confirmation_token: str
+
+
 @strawberry.input(description="启动持仓做 T 会话")
 class TTradeStartInput:
   account_id: str
@@ -305,6 +330,48 @@ class TTradeLiveReadiness:
   journal_pending_reports: int
   last_backup_at: Optional[datetime]
   checked_at: datetime
+
+
+@strawberry.type(description="原生端两阶段做 T 安全控制预览")
+class TTradeControlPreview:
+  challenge_id: strawberry.ID
+  confirmation_token: Optional[str]
+  token_issued: bool
+  account_id: str
+  action: TTradeControlAction
+  policy_version: int
+  snapshot_id: str
+  target_stage: Optional[TTradeRolloutTarget]
+  reason: str
+  current_stage: str
+  readiness_status: str
+  readiness_fingerprint: str
+  challenge_expires_at: datetime
+  challenge_status: str
+  operation_status: str
+  checks: List[TTradeReadinessCheck]
+  warnings: List[str]
+
+
+@strawberry.type(description="原生端做 T 安全控制预览结果")
+class TTradeControlPreviewResult:
+  success: bool
+  code: str
+  message: str
+  preview: Optional[TTradeControlPreview] = None
+
+
+@strawberry.type(description="原生端做 T 安全控制确认结果")
+class TTradeControlConfirmationResult:
+  success: bool
+  code: str
+  message: str
+  challenge_id: Optional[strawberry.ID] = None
+  account_id: Optional[str] = None
+  action: Optional[TTradeControlAction] = None
+  challenge_consumed: bool = False
+  operation_status: str = "NOT_CONSUMED"
+  readiness: Optional[TTradeLiveReadiness] = None
 
 
 @strawberry.type(description="可确认并闭环的持久化运行告警")

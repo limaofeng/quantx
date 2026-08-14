@@ -101,6 +101,7 @@ def test_client_contract_contains_session_bound_push_fields():
 
 
 def test_client_contract_contains_narrow_mobile_control_permissions():
+  schema_sdl = (CONTRACT_DIRECTORY / "graphql-schema.graphql").read_text("utf-8")
   permissions = json.loads(
     (CONTRACT_DIRECTORY / "graphql-permissions.json").read_text("utf-8")
   )
@@ -118,6 +119,22 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
   )
   assert permissions["Mutation"]["previewStrategyControl"] == "trade:approve"
   assert permissions["Mutation"]["confirmStrategyControl"] == "trade:approve"
+  assert permissions["Mutation"]["previewTTradeControl"] == "trade:approve"
+  assert permissions["Mutation"]["confirmTTradeControl"] == "trade:approve"
+  assert permissions["Mutation"]["pauseTTradeEntries"] == "t-trade:control"
+
+  assert "enum TTradeControlAction" in schema_sdl
+  for action in (
+    "BEGIN_CONTROLLED_WINDOW",
+    "ACTIVATE_CANARY",
+    "ACTIVATE_LIVE",
+    "KILL_SWITCH",
+  ):
+    assert action in schema_sdl
+  assert "previewTTradeControl(input: TTradeControlPreviewInput!)" in schema_sdl
+  assert (
+    "confirmTTradeControl(input: TTradeControlConfirmationInput!)" in schema_sdl
+  )
 
 
 def test_client_openapi_contains_only_allowlisted_paths_and_models():

@@ -88,6 +88,8 @@ def test_ai_runtime_settings_use_dedicated_system_permissions():
     "confirmStrategyTradeIntentApproval",
     "previewStrategyControl",
     "confirmStrategyControl",
+    "previewTTradeControl",
+    "confirmTTradeControl",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -117,6 +119,7 @@ def test_trade_approval_mutations_require_independent_permission(
     ("stopTTradeSession", "t-trade:control"),
     ("cancelTTradeOrder", "t-trade:control"),
     ("rejectTTradeEntry", "t-trade:control"),
+    ("pauseTTradeEntries", "t-trade:control"),
     ("saveLimitUpBoardAssistant", "limit-up:control"),
     ("armLimitUpBoardCandidate", "limit-up:control"),
     ("setFirstBoardCandidatePreference", "limit-up:control"),

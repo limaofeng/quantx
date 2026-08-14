@@ -7,6 +7,10 @@ import strawberry
 
 from ..resolvers.t_trade import TTradeResolver
 from ..security import authorized_account_id, principal_from_context
+from ..t_trade_control import (
+  TTradeControlChallengeService,
+  normalize_t_trade_control_request,
+)
 from ..trade_approval import (
   T_TRADE_ENTRY_APPROVAL,
   TradeApprovalChallengeError,
@@ -18,6 +22,11 @@ from ..types.t_trade_types import (
   TTradeBatchEvent,
   TTradeBatchEventPage,
   TTradeBatchPage,
+  TTradeControlConfirmationInput,
+  TTradeControlConfirmationResult,
+  TTradeControlPreview,
+  TTradeControlPreviewInput,
+  TTradeControlPreviewResult,
   TTradeExternalEntryInput,
   TTradeGlobalMonitor,
   TTradeGlobalMutationResult,
@@ -26,6 +35,7 @@ from ..types.t_trade_types import (
   TTradeLiveReadiness,
   TTradeMutationResult,
   TTradeOperationsMutationResult,
+  TTradeReadinessCheck,
   TTradeReplay,
   TTradeReplayCyclePage,
   TTradeReplayMutationResult,
@@ -98,9 +108,7 @@ class TTradeQuery:
     info: strawberry.types.Info,
     account_id: str,
   ) -> TTradeLiveReadiness:
-    return await TTradeResolver.readiness(
-      authorized_account_id(info, account_id)
-    )
+    return await TTradeResolver.readiness(authorized_account_id(info, account_id))
 
   @strawberry.field(description="账户级实盘安全状态")
   async def live_safety_status(
@@ -108,9 +116,7 @@ class TTradeQuery:
     info: strawberry.types.Info,
     account_id: str,
   ) -> TTradeLiveReadiness:
-    return await TTradeResolver.readiness(
-      authorized_account_id(info, account_id)
-    )
+    return await TTradeResolver.readiness(authorized_account_id(info, account_id))
 
   @strawberry.field(description="查询持久化运行告警")
   async def operational_alerts(
@@ -406,6 +412,126 @@ class TTradeMutation:
       return TradeApprovalConfirmationResult(False, exc.code, exc.message)
     except ValueError as exc:
       return TradeApprovalConfirmationResult(False, "VALIDATION_FAILED", str(exc))
+
+  @strawberry.mutation(
+    name="previewTTradeControl",
+    description="生成一次绑定设备、主账户与安全快照的做 T 控制确认",
+  )
+  async def preview_t_trade_control(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeControlPreviewInput,
+  ) -> TTradeControlPreviewResult:
+    principal = principal_from_context(info.context)
+    try:
+      request = normalize_t_trade_control_request(
+        account_id=input.account_id,
+        action=input.action,
+        policy_version=input.policy_version,
+        snapshot_id=input.snapshot_id,
+        target_stage=input.target_stage,
+        reason=input.reason,
+        idempotency_key=input.idempotency_key,
+      )
+      preview = await TTradeControlChallengeService.issue(
+        principal=principal,
+        request=request,
+      )
+      readiness = dict(preview.readiness or {})
+      checks = [
+        TTradeReadinessCheck(
+          code=str(item.get("code") or ""),
+          passed=bool(item.get("passed")),
+          message=str(item.get("message") or ""),
+          scope=str(item.get("scope") or "AUTOMATION"),
+        )
+        for item in list(readiness.get("checks") or [])
+      ]
+      return TTradeControlPreviewResult(
+        success=True,
+        code="T_TRADE_CONTROL_PREVIEW_READY",
+        message=(
+          "请核对控制动作，并在 60 秒内完成本机认证"
+          if preview.token_issued
+          else "该幂等预览已存在；原始确认凭据不会再次返回"
+        ),
+        preview=TTradeControlPreview(
+          challenge_id=strawberry.ID(preview.challenge_id),
+          confirmation_token=preview.confirmation_token,
+          token_issued=preview.token_issued,
+          account_id=request.account_id,
+          action=request.action,
+          policy_version=request.policy_version,
+          snapshot_id=request.snapshot_id,
+          target_stage=request.target_stage,
+          reason=request.reason,
+          current_stage=preview.current_stage,
+          readiness_status=str(readiness.get("status") or "UNKNOWN"),
+          readiness_fingerprint=preview.readiness_fingerprint,
+          challenge_expires_at=preview.challenge_expires_at,
+          challenge_status=preview.challenge_status,
+          operation_status=preview.operation_status,
+          checks=checks,
+          warnings=[
+            "确认只应用账户级控制，不代表任何委托已报送或成交",
+            "委托与成交终态必须以 QMT Agent 上报的券商回报为准",
+          ],
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return TTradeControlPreviewResult(False, exc.code, exc.message)
+    except ValueError as exc:
+      return TTradeControlPreviewResult(False, "VALIDATION_FAILED", str(exc))
+
+  @strawberry.mutation(
+    name="confirmTTradeControl",
+    description="消费一次性凭据并重新校验门禁后应用做 T 控制",
+  )
+  async def confirm_t_trade_control(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeControlConfirmationInput,
+  ) -> TTradeControlConfirmationResult:
+    principal = principal_from_context(info.context)
+    try:
+      result = await TTradeControlChallengeService.confirm(
+        principal=principal,
+        challenge_id=str(input.challenge_id),
+        confirmation_token=input.confirmation_token,
+      )
+      return TTradeControlConfirmationResult(
+        success=result.applied,
+        code=result.operation_code,
+        message=result.message,
+        challenge_id=strawberry.ID(result.challenge_id),
+        account_id=result.account_id,
+        action=result.action,
+        challenge_consumed=result.challenge_consumed,
+        operation_status=result.operation_status,
+        readiness=(
+          TTradeResolver._readiness_type(result.readiness)
+          if result.readiness is not None
+          else None
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return TTradeControlConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+        challenge_id=strawberry.ID(str(input.challenge_id)),
+        challenge_consumed=False,
+        operation_status="NOT_CONSUMED",
+      )
+    except ValueError as exc:
+      return TTradeControlConfirmationResult(
+        success=False,
+        code="VALIDATION_FAILED",
+        message=str(exc),
+        challenge_id=strawberry.ID(str(input.challenge_id)),
+        challenge_consumed=False,
+        operation_status="NOT_CONSUMED",
+      )
 
   @strawberry.mutation(description="基于最新完整快照建立受控交易窗口")
   async def begin_t_trade_controlled_window(

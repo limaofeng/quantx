@@ -155,10 +155,12 @@ _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
 _TRADE_APPROVAL_MUTATION_FIELDS = {
   "confirmstrategytradeintentapproval",
   "confirmstrategycontrol",
+  "confirmttradecontrol",
   "confirmexitintent",
   "confirmttradeentryapproval",
   "previewstrategytradeintentapproval",
   "previewstrategycontrol",
+  "previewttradecontrol",
   "previewexitintent",
   "previewttradeentryapproval",
 }
@@ -186,6 +188,7 @@ _STRATEGY_CONTROL_MUTATION_FIELDS = {
 _T_TRADE_CONTROL_MUTATION_FIELDS = {
   "acknowledgeoperationalalert",
   "cancelttradeorder",
+  "pausettradeentries",
   "reconcilettradeglobalmonitor",
   "rejectttradeentry",
   "resolveoperationalalert",

@@ -2758,6 +2758,12 @@ type Mutation {
   """消费短时凭据并确认一个做 T 买入信号"""
   confirmTTradeEntryApproval(runId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
 
+  """生成一次绑定设备、主账户与安全快照的做 T 控制确认"""
+  previewTTradeControl(input: TTradeControlPreviewInput!): TTradeControlPreviewResult!
+
+  """消费一次性凭据并重新校验门禁后应用做 T 控制"""
+  confirmTTradeControl(input: TTradeControlConfirmationInput!): TTradeControlConfirmationResult!
+
   """基于最新完整快照建立受控交易窗口"""
   beginTTradeControlledWindow(accountId: String!, snapshotId: String!): TTradeOperationsMutationResult!
 
@@ -5335,6 +5341,73 @@ type TTradeBatchEventPage {
 type TTradeBatchPage {
   items: [TTradeBatch!]!
   pageInfo: PageInfo!
+}
+
+"""原生端两阶段做 T 安全控制动作"""
+enum TTradeControlAction {
+  BEGIN_CONTROLLED_WINDOW
+  ACTIVATE_CANARY
+  ACTIVATE_LIVE
+  KILL_SWITCH
+}
+
+"""消费原生端做 T 安全控制确认凭据"""
+input TTradeControlConfirmationInput {
+  challengeId: ID!
+  confirmationToken: String!
+}
+
+"""原生端做 T 安全控制确认结果"""
+type TTradeControlConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: ID
+  accountId: String
+  action: TTradeControlAction
+  challengeConsumed: Boolean!
+  operationStatus: String!
+  readiness: TTradeLiveReadiness
+}
+
+"""原生端两阶段做 T 安全控制预览"""
+type TTradeControlPreview {
+  challengeId: ID!
+  confirmationToken: String
+  tokenIssued: Boolean!
+  accountId: String!
+  action: TTradeControlAction!
+  policyVersion: Int!
+  snapshotId: String!
+  targetStage: TTradeRolloutTarget
+  reason: String!
+  currentStage: String!
+  readinessStatus: String!
+  readinessFingerprint: String!
+  challengeExpiresAt: DateTime!
+  challengeStatus: String!
+  operationStatus: String!
+  checks: [TTradeReadinessCheck!]!
+  warnings: [String!]!
+}
+
+"""生成原生端做 T 安全控制确认预览"""
+input TTradeControlPreviewInput {
+  accountId: String!
+  action: TTradeControlAction!
+  policyVersion: Int!
+  idempotencyKey: String!
+  snapshotId: String! = ""
+  targetStage: TTradeRolloutTarget = null
+  reason: String! = ""
+}
+
+"""原生端做 T 安全控制预览结果"""
+type TTradeControlPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: TTradeControlPreview
 }
 
 """做 T 单标的最新策略评估遥测"""

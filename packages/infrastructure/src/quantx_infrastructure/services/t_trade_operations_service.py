@@ -80,6 +80,7 @@ class TTradeOperationsService:
   def _append_rollout_event(
     db,
     *,
+    event_id: str | None = None,
     account_id: str,
     event_type: str,
     actor_user_id: str | None = None,
@@ -90,7 +91,7 @@ class TTradeOperationsService:
   ) -> None:
     db.add(
       AccountTradingRolloutEvent(
-        event_id=str(uuid.uuid4()),
+        event_id=event_id or str(uuid.uuid4()),
         account_id=account_id,
         event_type=event_type,
         actor_user_id=actor_user_id,
@@ -773,6 +774,7 @@ class TTradeOperationsService:
     *,
     user_id: str,
     snapshot_id: str,
+    operation_id: str | None = None,
   ) -> dict[str, Any]:
     await self.ensure_rollout(account_id)
     readiness = await self.readiness(account_id)
@@ -804,6 +806,19 @@ class TTradeOperationsService:
       )
       if rollout is None:
         raise ValueError("账户灰度配置不存在")
+      if operation_id:
+        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        if applied is not None:
+          details = dict(applied.details or {})
+          if (
+            str(applied.account_id) != account_id
+            or str(applied.event_type) != "CONTROLLED_WINDOW_STARTED"
+            or str(applied.snapshot_id or "") != snapshot_id
+            or str(details.get("operationId") or "") != operation_id
+          ):
+            raise ValueError("做 T 控制幂等标识已绑定其他操作")
+          await db.rollback()
+          return await self.readiness(account_id)
       if str(rollout.stage).upper() not in {"SHADOW", "PAUSED"}:
         raise ValueError("只能在 SHADOW 或 PAUSED 阶段建立受控交易窗口")
       if rollout.enabled:
@@ -853,6 +868,7 @@ class TTradeOperationsService:
         rollout.paused_reason = None
       self._append_rollout_event(
         db,
+        event_id=operation_id,
         account_id=account_id,
         event_type="CONTROLLED_WINDOW_STARTED",
         actor_user_id=user_id,
@@ -860,6 +876,7 @@ class TTradeOperationsService:
         next_stage=str(rollout.stage),
         snapshot_id=snapshot_id,
         details={
+          **({"operationId": operation_id} if operation_id else {}),
           "acknowledgedExternalOrderCount": len(activity["orders"]),
           "acknowledgedExternalTradeCount": len(activity["trades"]),
         },
@@ -875,6 +892,7 @@ class TTradeOperationsService:
     acknowledged_policy_version: int,
     target_stage: str = "CANARY",
     confirmation: str = "",
+    operation_id: str | None = None,
   ) -> dict[str, Any]:
     await self.ensure_rollout(account_id)
     target = str(target_stage or "CANARY").strip().upper()
@@ -898,6 +916,24 @@ class TTradeOperationsService:
       )
       if rollout is None:
         raise ValueError("账户灰度配置不存在")
+      if operation_id:
+        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        if applied is not None:
+          details = dict(applied.details or {})
+          expected_event_types = (
+            {"LIVE_ACTIVATED"}
+            if target == "LIVE"
+            else {"CANARY_ACTIVATED", "LIVE_ACTIVATED"}
+          )
+          if (
+            str(applied.account_id) != account_id
+            or str(applied.event_type) not in expected_event_types
+            or str(details.get("operationId") or "") != operation_id
+            or str(details.get("targetStage") or "") != target
+          ):
+            raise ValueError("做 T 控制幂等标识已绑定其他操作")
+          await db.rollback()
+          return await self.readiness(account_id)
       if rollout.kill_switch:
         raise ValueError("账户 kill switch 已触发")
       if str(rollout.reconcile_status).upper() != "READY":
@@ -929,13 +965,18 @@ class TTradeOperationsService:
       rollout.paused_reason = None
       self._append_rollout_event(
         db,
+        event_id=operation_id,
         account_id=account_id,
         event_type=f"{next_stage}_ACTIVATED",
         actor_user_id=user_id,
         previous_stage=previous_stage,
         next_stage=next_stage,
         snapshot_id=str(rollout.controlled_window_snapshot_id or "") or None,
-        details={"policyVersion": acknowledged_policy_version},
+        details={
+          **({"operationId": operation_id} if operation_id else {}),
+          "policyVersion": acknowledged_policy_version,
+          **({"targetStage": target} if operation_id else {}),
+        },
       )
       await db.commit()
     return await self.readiness(account_id)
@@ -991,6 +1032,7 @@ class TTradeOperationsService:
     reason: str,
     *,
     user_id: str | None = None,
+    operation_id: str | None = None,
   ) -> dict[str, Any]:
     await self.ensure_rollout(account_id)
     async with AsyncSessionLocal() as db:
@@ -999,9 +1041,23 @@ class TTradeOperationsService:
         account_id,
         with_for_update=True,
       )
+      if operation_id:
+        applied = await db.get(AccountTradingRolloutEvent, operation_id)
+        if applied is not None:
+          details = dict(applied.details or {})
+          if (
+            str(applied.account_id) != account_id
+            or str(applied.event_type) != "KILL_SWITCHED"
+            or str(details.get("operationId") or "") != operation_id
+            or str(details.get("reason") or "")
+            != (reason[:2000] or "manual kill switch")
+          ):
+            raise ValueError("做 T 控制幂等标识已绑定其他操作")
+          await db.rollback()
+          return await self.readiness(account_id)
       was_killed = bool(rollout.kill_switch)
       previous_stage = str(rollout.stage)
-      kill_event_id = str(uuid.uuid4())
+      kill_event_id = operation_id or str(uuid.uuid4())
       now = utcnow()
       rollout.enabled = False
       rollout.kill_switch = True
@@ -1010,12 +1066,16 @@ class TTradeOperationsService:
       self._invalidate_controlled_window(rollout)
       self._append_rollout_event(
         db,
+        event_id=operation_id,
         account_id=account_id,
         event_type="KILL_SWITCHED",
         actor_user_id=user_id,
         previous_stage=previous_stage,
         next_stage="KILL_SWITCHED",
-        details={"reason": rollout.paused_reason},
+        details={
+          **({"operationId": operation_id} if operation_id else {}),
+          "reason": rollout.paused_reason,
+        },
       )
       rows = (
         await db.execute(
