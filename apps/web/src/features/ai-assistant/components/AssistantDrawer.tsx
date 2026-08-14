@@ -87,7 +87,10 @@ export function AssistantDrawer({
   };
 
   return (
-    <aside className="flex h-full w-[420px] min-w-[360px] max-w-[46vw] shrink-0 flex-col border-l border-white/10 bg-[#080e1b] shadow-2xl shadow-black/40">
+    <aside
+      aria-label="AI 助手"
+      className="flex h-full w-full min-w-0 flex-col border-l border-white/10 bg-[#080e1b]"
+    >
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-white/10 px-3">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
           <Bot className="h-4 w-4" />
@@ -116,6 +119,7 @@ export function AssistantDrawer({
           size="icon"
           className="h-8 w-8 text-slate-400"
           onClick={onClose}
+          aria-label="关闭 AI 助手"
           title="关闭"
         >
           <X className="h-4 w-4" />

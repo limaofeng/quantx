@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -49,6 +50,14 @@ const AssistantDrawer = lazy(async () => {
 const STORAGE_KEY = 'quantx-studio-workspace-tabs';
 const DEFAULT_WORKSPACE_PATH = '/';
 const MAX_PERSISTED_TABS = 12;
+const ASSISTANT_PANEL_ID = 'studio-ai-assistant-panel';
+const ASSISTANT_PANEL_STORAGE_SCOPE = 'studio-ai-assistant-panel';
+const ASSISTANT_PANEL_SIZING = {
+  defaultWidth: 400,
+  maxWidth: 560,
+  minWidth: 360,
+  storageScope: ASSISTANT_PANEL_STORAGE_SCOPE,
+};
 const studioWorkspaceModes: StudioMode[] = [];
 const studioWorkspaceTheme: StudioTheme = {
   icon: TrendingUp,
@@ -167,6 +176,144 @@ function StudioWorkspaceSidebarDock({
         {sidebar.content}
       </div>
     </aside>
+  );
+}
+
+function StudioAssistantToolRail({
+  isOpen,
+  onKeyDown,
+  onToggle,
+  triggerRef,
+}: {
+  isOpen: boolean;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  onToggle: () => void;
+  triggerRef: React.RefObject<HTMLButtonElement>;
+}) {
+  return (
+    <aside
+      aria-label="工作区工具"
+      className="absolute inset-y-0 right-0 z-30 flex h-full w-10 flex-col items-center border-l border-white/5 bg-[#0b1120]"
+      data-testid="studio-assistant-tool-rail"
+    >
+      <div
+        aria-label="工作区工具"
+        className="flex w-full flex-col items-center"
+        role="toolbar"
+      >
+        <button
+          ref={triggerRef}
+          type="button"
+          aria-controls={ASSISTANT_PANEL_ID}
+          aria-expanded={isOpen}
+          aria-label="AI 助手"
+          aria-pressed={isOpen}
+          className={cn(
+            'group relative flex h-10 w-10 cursor-pointer items-center justify-center text-slate-500 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/80 motion-reduce:transition-none',
+            isOpen
+              ? 'bg-cyan-400/10 text-cyan-300'
+              : 'hover:bg-white/5 hover:text-slate-200'
+          )}
+          data-testid="studio-assistant-trigger"
+          onClick={onToggle}
+          onKeyDown={onKeyDown}
+          title={isOpen ? '关闭 AI 助手' : '打开 AI 助手'}
+        >
+          {isOpen && (
+            <span className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-cyan-400" />
+          )}
+          <Bot aria-hidden="true" className="h-[18px] w-[18px]" />
+          {!isOpen && (
+            <span className="pointer-events-none absolute right-full z-50 mr-2 whitespace-nowrap rounded-md border border-white/10 bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-white opacity-0 shadow-xl transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none">
+              AI 助手
+            </span>
+          )}
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function StudioAssistantDock({
+  currentPath,
+  isOpen,
+  onClose,
+  onKeyDown,
+}: {
+  currentPath: string;
+  isOpen: boolean;
+  onClose: () => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void;
+}) {
+  const {
+    handleSidebarResizeKeyDown,
+    handleSidebarResizeStart,
+    isResizingSidebar,
+    maxSidebarWidth,
+    minSidebarWidth,
+    sidebarWidth,
+  } = useStudioSidebarSizing({
+    resizeEdge: 'left',
+    sizing: ASSISTANT_PANEL_SIZING,
+    storageFallback: ASSISTANT_PANEL_STORAGE_SCOPE,
+  });
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      id={ASSISTANT_PANEL_ID}
+      className={cn(
+        'absolute inset-y-0 right-10 z-40 flex h-full min-w-0 max-w-[calc(100vw-2.5rem)] shrink-0 flex-col shadow-2xl shadow-black/40 2xl:relative 2xl:inset-y-auto 2xl:right-auto 2xl:z-auto 2xl:max-w-none',
+        !isResizingSidebar &&
+          'transition-[width] duration-150 motion-reduce:transition-none'
+      )}
+      data-testid="studio-assistant-panel"
+      onKeyDown={onKeyDown}
+      style={{ width: sidebarWidth }}
+    >
+      <div
+        role="separator"
+        aria-label="AI 助手面板宽度"
+        aria-orientation="vertical"
+        aria-valuemin={minSidebarWidth}
+        aria-valuemax={maxSidebarWidth}
+        aria-valuenow={sidebarWidth}
+        className={cn(
+          'group absolute -left-1.5 top-0 z-50 h-full w-3 cursor-col-resize touch-none outline-none',
+          isResizingSidebar && 'bg-cyan-500/5'
+        )}
+        data-testid="studio-assistant-resizer"
+        tabIndex={0}
+        onKeyDown={handleSidebarResizeKeyDown}
+        onPointerDown={handleSidebarResizeStart}
+      >
+        <div
+          className={cn(
+            'absolute left-1/2 top-0 h-full w-px -translate-x-1/2 transition-colors duration-150 motion-reduce:transition-none',
+            isResizingSidebar
+              ? 'bg-cyan-400'
+              : 'bg-white/5 group-hover:bg-cyan-400/70 group-focus-visible:bg-cyan-400/70'
+          )}
+        />
+        <div
+          className={cn(
+            'absolute left-1/2 top-1/2 h-12 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full transition-opacity duration-150 motion-reduce:transition-none',
+            isResizingSidebar
+              ? 'bg-cyan-400 opacity-100'
+              : 'bg-slate-500/60 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100'
+          )}
+        />
+      </div>
+
+      <Suspense
+        fallback={
+          <aside className="h-full w-full min-w-0 border-l border-white/10 bg-[#080e1b]" />
+        }
+      >
+        <AssistantDrawer currentPath={currentPath} onClose={onClose} />
+      </Suspense>
+    </div>
   );
 }
 
@@ -304,6 +451,7 @@ export function StudioWorkspace({
   const [workspaceSidebar, setWorkspaceSidebarState] =
     useState<StudioWorkspaceSidebarConfig | null>(null);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
+  const assistantTriggerRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const currentTab = buildStudioWorkspaceTab(currentPath);
@@ -423,6 +571,29 @@ export function StudioWorkspace({
     );
   }, []);
 
+  const closeAssistant = useCallback(() => {
+    setIsAssistantOpen(false);
+    assistantTriggerRef.current?.focus();
+  }, []);
+
+  const toggleAssistant = useCallback(() => {
+    if (isAssistantOpen) {
+      closeAssistant();
+      return;
+    }
+    setIsAssistantOpen(true);
+  }, [closeAssistant, isAssistantOpen]);
+
+  const handleAssistantKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key !== 'Escape' || !isAssistantOpen) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeAssistant();
+    },
+    [closeAssistant, isAssistantOpen]
+  );
+
   const workspaceTabBar = useMemo(() => {
     const displayTabs = normalizeStudioWorkspaceTabTitles(tabs);
 
@@ -459,20 +630,6 @@ export function StudioWorkspace({
     );
   }, [activeTabId, handleTabChange, handleTabClose, handleTabPin, tabs]);
 
-  const workspaceUtilityActions = useMemo(
-    () => [
-      {
-        active: isAssistantOpen,
-        icon: Bot,
-        id: 'utility:ai-assistant',
-        label: 'AI Assistant',
-        onSelect: () => setIsAssistantOpen(value => !value),
-      },
-      ...utilityActions,
-    ],
-    [isAssistantOpen, utilityActions]
-  );
-
   const contextValue = useMemo(
     () => ({
       activeTabId,
@@ -506,7 +663,7 @@ export function StudioWorkspace({
             modes={studioWorkspaceModes}
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
-            utilityActions={workspaceUtilityActions}
+            utilityActions={utilityActions}
           />
 
           <div
@@ -518,25 +675,25 @@ export function StudioWorkspace({
             </div>
 
             <div
-              className="relative flex min-h-0 flex-1"
+              className="relative flex min-h-0 min-w-0 flex-1 pr-10"
               data-testid="studio-workspace-content"
             >
               <StudioWorkspaceSidebarDock sidebar={workspaceSidebar} />
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {children}
               </div>
-              {isAssistantOpen && (
-                <Suspense
-                  fallback={
-                    <aside className="h-full w-[420px] min-w-[360px] max-w-[46vw] shrink-0 border-l border-white/10 bg-[#080e1b]" />
-                  }
-                >
-                  <AssistantDrawer
-                    currentPath={currentPath}
-                    onClose={() => setIsAssistantOpen(false)}
-                  />
-                </Suspense>
-              )}
+              <StudioAssistantDock
+                currentPath={currentPath}
+                isOpen={isAssistantOpen}
+                onClose={closeAssistant}
+                onKeyDown={handleAssistantKeyDown}
+              />
+              <StudioAssistantToolRail
+                isOpen={isAssistantOpen}
+                onKeyDown={handleAssistantKeyDown}
+                onToggle={toggleAssistant}
+                triggerRef={assistantTriggerRef}
+              />
             </div>
           </div>
         </div>
