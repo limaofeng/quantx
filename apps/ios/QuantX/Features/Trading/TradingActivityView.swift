@@ -25,35 +25,48 @@ struct TradingActivityView: View {
   @EnvironmentObject private var model: AppModel
   @State private var timeScope: TimeScope = .today
   @State private var recordKind: RecordKind = .orders
+  var embeddedInNavigation = false
 
+  @ViewBuilder
   var body: some View {
-    NavigationStack {
-      content
-        .background(QuantXTheme.canvasBackground)
-        .navigationTitle("委托成交")
-        .navigationDestination(for: Route.self) { route in
-          switch route {
-          case .order(let order):
-            OrderRecordDetailView(order: order)
-          case .trade(let trade):
-            TradeRecordDetailView(trade: trade)
-          }
-        }
-        .toolbar {
-          if model.tradingRefreshInProgress,
-            model.tradingState.snapshot != nil
-          {
-            ToolbarItem(placement: .topBarTrailing) {
-              ProgressView()
-                .accessibilityLabel("正在刷新委托成交")
-            }
-          }
-        }
-    }
-    .task {
-      if case .idle = model.tradingState {
-        await model.refreshTradingActivity()
+    if embeddedInNavigation {
+      rootContent
+        .task { await loadIfNeeded() }
+    } else {
+      NavigationStack {
+        rootContent
       }
+      .task { await loadIfNeeded() }
+    }
+  }
+
+  private var rootContent: some View {
+    content
+      .background(QuantXTheme.canvasBackground)
+      .navigationTitle("委托成交")
+      .navigationDestination(for: Route.self) { route in
+        switch route {
+        case .order(let order):
+          OrderRecordDetailView(order: order)
+        case .trade(let trade):
+          TradeRecordDetailView(trade: trade)
+        }
+      }
+      .toolbar {
+        if model.tradingRefreshInProgress,
+          model.tradingState.snapshot != nil
+        {
+          ToolbarItem(placement: .topBarTrailing) {
+            ProgressView()
+              .accessibilityLabel("正在刷新委托成交")
+          }
+        }
+      }
+  }
+
+  private func loadIfNeeded() async {
+    if case .idle = model.tradingState {
+      await model.refreshTradingActivity()
     }
   }
 

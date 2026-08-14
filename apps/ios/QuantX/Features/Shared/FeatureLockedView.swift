@@ -8,7 +8,7 @@ struct FeatureLockedView: View {
       ContentUnavailableView {
         Label(feature.title, systemImage: "lock.shield.fill")
       } description: {
-        Text("后端完成统一认证、账户归属与只读权限验收后启用。")
+        Text("后端完成统一认证、账户归属与对应作用域权限验收后启用。")
       }
       .navigationTitle(feature.title)
     }

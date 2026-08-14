@@ -2,30 +2,58 @@ import SwiftUI
 
 struct PortfolioView: View {
   @EnvironmentObject private var model: AppModel
+  @State private var showsSettings = false
+  var embeddedInNavigation = false
 
+  @ViewBuilder
   var body: some View {
-    NavigationStack {
-      content
-        .background(QuantXTheme.canvasBackground)
-        .navigationTitle("持仓")
-        .navigationDestination(for: PortfolioPosition.self) { position in
-          PortfolioPositionDetailView(position: position)
-        }
-        .toolbar {
-          if model.portfolioRefreshInProgress,
-            model.portfolioState.snapshot != nil
-          {
-            ToolbarItem(placement: .topBarTrailing) {
-              ProgressView()
-                .accessibilityLabel("正在刷新持仓")
+    if embeddedInNavigation {
+      rootContent
+        .task { await loadIfNeeded() }
+    } else {
+      NavigationStack {
+        rootContent
+      }
+      .task { await loadIfNeeded() }
+    }
+  }
+
+  private var rootContent: some View {
+    content
+      .background(QuantXTheme.canvasBackground)
+      .navigationTitle("资产")
+      .navigationDestination(for: PortfolioPosition.self) { position in
+        PortfolioPositionDetailView(position: position)
+      }
+      .navigationDestination(isPresented: $showsSettings) {
+        SettingsView(embeddedInNavigation: true)
+      }
+      .toolbar {
+        if !embeddedInNavigation {
+          ToolbarItem(placement: .topBarTrailing) {
+            Button {
+              showsSettings = true
+            } label: {
+              Image(systemName: "person.crop.circle")
             }
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("账户与设置")
           }
         }
-    }
-    .task {
-      if case .idle = model.portfolioState {
-        await model.refreshPortfolio()
+        if model.portfolioRefreshInProgress,
+          model.portfolioState.snapshot != nil
+        {
+          ToolbarItem(placement: .topBarTrailing) {
+            ProgressView()
+              .accessibilityLabel("正在刷新资产")
+          }
+        }
       }
+  }
+
+  private func loadIfNeeded() async {
+    if case .idle = model.portfolioState {
+      await model.refreshPortfolio()
     }
   }
 

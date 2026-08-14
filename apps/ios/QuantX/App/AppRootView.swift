@@ -16,33 +16,33 @@ struct AppRootView: View {
         TabView(selection: $model.selectedTab) {
           DashboardView()
             .tabItem {
-              Label(AppTab.dashboard.title, systemImage: AppTab.dashboard.systemImage)
+              Label(AppTab.today.title, systemImage: AppTab.today.systemImage)
             }
-            .tag(AppTab.dashboard)
+            .tag(AppTab.today)
+
+          MarketWorkspaceView()
+            .tabItem {
+              Label(AppTab.market.title, systemImage: AppTab.market.systemImage)
+            }
+            .tag(AppTab.market)
+
+          TradeWorkspaceView()
+            .tabItem {
+              Label(AppTab.trade.title, systemImage: AppTab.trade.systemImage)
+            }
+            .tag(AppTab.trade)
+
+          QuantWorkspaceView()
+            .tabItem {
+              Label(AppTab.quant.title, systemImage: AppTab.quant.systemImage)
+            }
+            .tag(AppTab.quant)
 
           PortfolioView()
             .tabItem {
-              Label(AppTab.portfolio.title, systemImage: AppTab.portfolio.systemImage)
+              Label(AppTab.assets.title, systemImage: AppTab.assets.systemImage)
             }
-            .tag(AppTab.portfolio)
-
-          StrategiesView()
-            .tabItem {
-              Label(AppTab.strategies.title, systemImage: AppTab.strategies.systemImage)
-            }
-            .tag(AppTab.strategies)
-
-          TradingActivityView()
-            .tabItem {
-              Label(AppTab.orders.title, systemImage: AppTab.orders.systemImage)
-            }
-            .tag(AppTab.orders)
-
-          SettingsView()
-            .tabItem {
-              Label(AppTab.settings.title, systemImage: AppTab.settings.systemImage)
-            }
-            .tag(AppTab.settings)
+            .tag(AppTab.assets)
         }
         .tint(QuantXTheme.accent)
       }

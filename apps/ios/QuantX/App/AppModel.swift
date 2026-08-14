@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
   typealias TTradeAssistantLoaderFactory = (ApolloSession) -> any TTradeAssistantLoading
   typealias LimitUpBoardLoaderFactory = (ApolloSession) -> any LimitUpBoardLoading
   typealias TradeApprovalLoaderFactory = (ApolloSession) -> any TradeApprovalLoading
+  typealias MarketLoaderFactory = (ApolloSession) -> any MarketDataLoading
 
   enum ServiceState: Equatable {
     case idle
@@ -27,7 +28,7 @@ final class AppModel: ObservableObject {
     case failed(String)
   }
 
-  @Published var selectedTab: AppTab = .dashboard
+  @Published var selectedTab: AppTab = .today
   @Published private(set) var serviceState: ServiceState = .idle
   @Published private(set) var privacyShieldVisible = false
   @Published private(set) var authenticationState: AuthenticationState
@@ -44,6 +45,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var limitUpBoardState: LimitUpBoardState = .idle
   @Published private(set) var limitUpBoardRefreshInProgress = false
   @Published private(set) var tradeApprovalInProgress = false
+  @Published private(set) var marketState: MarketWorkspaceState = .idle
+  @Published private(set) var marketRefreshInProgress = false
 
   let configuration: APIConfiguration?
   let configurationErrorMessage: String?
@@ -58,6 +61,7 @@ final class AppModel: ObservableObject {
   private let tTradeAssistantLoaderFactory: TTradeAssistantLoaderFactory
   private let limitUpBoardLoaderFactory: LimitUpBoardLoaderFactory
   private let tradeApprovalLoaderFactory: TradeApprovalLoaderFactory
+  private let marketLoaderFactory: MarketLoaderFactory
   private var apolloSession: ApolloSession?
   private var portfolioRepository: (any PortfolioLoading)?
   private var strategyRepository: (any StrategyMonitoringLoading)?
@@ -65,6 +69,7 @@ final class AppModel: ObservableObject {
   private var tTradeAssistantRepository: (any TTradeAssistantLoading)?
   private var limitUpBoardRepository: (any LimitUpBoardLoading)?
   private var tradeApprovalRepository: (any TradeApprovalLoading)?
+  private var marketRepository: (any MarketDataLoading)?
 #if DEBUG
   private let usesTransientRealBackendUITestSession =
     ProcessInfo.processInfo.arguments.contains(
@@ -101,6 +106,9 @@ final class AppModel: ObservableObject {
     tradeApprovalLoaderFactory = { session in
       TradeApprovalRepository(client: session.client)
     }
+    marketLoaderFactory = { session in
+      MarketRepository(client: session.client)
+    }
     tokenStore = KeychainSessionTokenStore(
       service: bundle.bundleIdentifier ?? "com.limaofeng.quantx"
     )
@@ -124,6 +132,7 @@ final class AppModel: ObservableObject {
           tradingState = .unavailable("认证地址不满足安全传输要求")
           tTradeAssistantState = .unavailable("认证地址不满足安全传输要求")
           limitUpBoardState = .unavailable("认证地址不满足安全传输要求")
+          marketState = .unavailable("认证地址不满足安全传输要求")
         }
       } else {
         sessionClient = nil
@@ -133,6 +142,7 @@ final class AppModel: ObservableObject {
         tradingState = .unavailable("等待 TLS、认证与只读授权部署验收")
         tTradeAssistantState = .unavailable("等待 TLS、认证与只读授权部署验收")
         limitUpBoardState = .unavailable("等待 TLS、认证与只读授权部署验收")
+        marketState = .unavailable("等待 TLS、认证与行情授权部署验收")
       }
     } catch {
       configuration = nil
@@ -145,6 +155,7 @@ final class AppModel: ObservableObject {
       tradingState = .unavailable("环境配置无效，委托成交连接保持关闭")
       tTradeAssistantState = .unavailable("环境配置无效，做T助手连接保持关闭")
       limitUpBoardState = .unavailable("环境配置无效，打板助手连接保持关闭")
+      marketState = .unavailable("环境配置无效，行情连接保持关闭")
     }
   }
 
@@ -177,6 +188,9 @@ final class AppModel: ObservableObject {
     },
     tradeApprovalLoaderFactory: @escaping TradeApprovalLoaderFactory = { session in
       TradeApprovalRepository(client: session.client)
+    },
+    marketLoaderFactory: @escaping MarketLoaderFactory = { session in
+      MarketRepository(client: session.client)
     }
   ) {
     self.configuration = configuration
@@ -192,6 +206,7 @@ final class AppModel: ObservableObject {
     self.tTradeAssistantLoaderFactory = tTradeAssistantLoaderFactory
     self.limitUpBoardLoaderFactory = limitUpBoardLoaderFactory
     self.tradeApprovalLoaderFactory = tradeApprovalLoaderFactory
+    self.marketLoaderFactory = marketLoaderFactory
 
     if configuration.accountDataEnabled, sessionClient != nil {
       authenticationState = .signedOut
@@ -203,6 +218,7 @@ final class AppModel: ObservableObject {
       tradingState = .unavailable("认证客户端不可用")
       tTradeAssistantState = .unavailable("认证客户端不可用")
       limitUpBoardState = .unavailable("认证客户端不可用")
+      marketState = .unavailable("认证客户端不可用")
     } else {
       authenticationState = .disabled("后端认证、TLS 与只读授权尚未完成验收")
       portfolioState = .unavailable("等待 TLS、认证与只读授权部署验收")
@@ -210,6 +226,7 @@ final class AppModel: ObservableObject {
       tradingState = .unavailable("等待 TLS、认证与只读授权部署验收")
       tTradeAssistantState = .unavailable("等待 TLS、认证与只读授权部署验收")
       limitUpBoardState = .unavailable("等待 TLS、认证与只读授权部署验收")
+      marketState = .unavailable("等待 TLS、认证与行情授权部署验收")
     }
   }
 
@@ -272,6 +289,7 @@ final class AppModel: ObservableObject {
       tradingState = .failed("UI 测试未连接委托成交服务")
       tTradeAssistantState = .failed("UI 测试未连接做T服务")
       limitUpBoardState = .failed("UI 测试未连接打板服务")
+      marketState = .failed("UI 测试未连接行情服务")
       return
     }
 #endif
@@ -310,7 +328,7 @@ final class AppModel: ObservableObject {
         localSessionLocked = true
         do {
           try await localAuthentication.unlock(
-            reason: "解锁 QuantX 只读账户会话"
+            reason: "解锁 QuantX 个人量化会话"
           )
           localSessionLocked = false
           localUnlockErrorMessage = nil
@@ -352,7 +370,7 @@ final class AppModel: ObservableObject {
 
   func unlockLocalSession() async {
     do {
-      try await localAuthentication.unlock(reason: "解锁 QuantX 只读账户会话")
+      try await localAuthentication.unlock(reason: "解锁 QuantX 个人量化会话")
       localSessionLocked = false
       localUnlockErrorMessage = nil
       if case .restoring = authenticationState {
@@ -459,6 +477,148 @@ final class AppModel: ObservableObject {
         portfolioState = .failed(message)
       }
     }
+  }
+
+  func refreshMarket() async {
+    guard accountDataEnabled else {
+      marketState = .unavailable("等待 TLS、认证与行情授权部署验收")
+      return
+    }
+    guard hasPermission("market:read") else {
+      marketState = .unavailable("当前会话没有 market:read 权限")
+      return
+    }
+    guard hasPermission("portfolio:read") else {
+      marketState = .unavailable("自选列表需要 portfolio:read 权限")
+      return
+    }
+    guard !marketRefreshInProgress, !localSessionLocked else { return }
+
+    if portfolioState.snapshot == nil {
+      await refreshPortfolio()
+    }
+    guard let accountID = portfolioState.snapshot?.account.id else {
+      if case .noAccount = portfolioState {
+        marketState = .noAccount
+      }
+      return
+    }
+    guard let repository = marketRepository, let user = authenticatedUser else { return }
+
+    let previousSnapshot = marketState.snapshot
+    marketRefreshInProgress = true
+    if previousSnapshot == nil {
+      marketState = .loading
+    }
+    defer { marketRefreshInProgress = false }
+
+    do {
+      marketState = .loaded(
+        try await repository.loadWatchlist(
+          accountID: accountID,
+          authorizedAccountIDs: Set(user.authorizedAccountIDs)
+        ),
+        refreshWarning: nil
+      )
+    } catch is CancellationError {
+      marketState = previousSnapshot.map { .loaded($0, refreshWarning: nil) } ?? .idle
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      do {
+        try await refreshAccessSession()
+        await refreshPortfolio()
+        guard let refreshedAccountID = portfolioState.snapshot?.account.id,
+          refreshedAccountID == accountID,
+          let refreshedRepository = marketRepository,
+          let refreshedUser = authenticatedUser
+        else {
+          throw ReadOnlyRepositoryError.accountScopeMismatch
+        }
+        marketState = .loaded(
+          try await refreshedRepository.loadWatchlist(
+            accountID: refreshedAccountID,
+            authorizedAccountIDs: Set(refreshedUser.authorizedAccountIDs)
+          ),
+          refreshWarning: nil
+        )
+      } catch {
+        await handleReadOnlyRetryFailure(
+          error,
+          previousSnapshot: previousSnapshot,
+          feature: .market
+        )
+      }
+    } catch {
+      let message = readOnlyErrorMessage(error, fallback: "行情与自选暂时无法读取")
+      marketState = previousSnapshot.map {
+        .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
+      } ?? .failed(message)
+    }
+  }
+
+  func searchMarket(term: String) async throws -> [MarketInstrument] {
+    guard hasPermission("market:read"), !localSessionLocked else {
+      throw ReadOnlyRepositoryError.forbidden
+    }
+    guard let repository = marketRepository else {
+      throw ReadOnlyRepositoryError.transport
+    }
+    do {
+      return try await repository.search(term: term)
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      try await refreshAccessSession()
+      guard let refreshedRepository = marketRepository else {
+        throw ReadOnlyRepositoryError.unauthenticated
+      }
+      return try await refreshedRepository.search(term: term)
+    }
+  }
+
+  func loadMarketInstrument(
+    stockCode: String,
+    period: MarketPeriod
+  ) async throws -> MarketInstrumentSnapshot? {
+    guard hasPermission("market:read"), !localSessionLocked else {
+      throw ReadOnlyRepositoryError.forbidden
+    }
+    guard let repository = marketRepository else {
+      throw ReadOnlyRepositoryError.transport
+    }
+    do {
+      return try await repository.loadInstrument(stockCode: stockCode, period: period)
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      try await refreshAccessSession()
+      guard let refreshedRepository = marketRepository else {
+        throw ReadOnlyRepositoryError.unauthenticated
+      }
+      return try await refreshedRepository.loadInstrument(
+        stockCode: stockCode,
+        period: period
+      )
+    }
+  }
+
+  func marketQuoteUpdates(
+    stockCode: String
+  ) throws -> AsyncThrowingStream<MarketLiveQuote, any Error> {
+    guard hasPermission("market:read"), !localSessionLocked else {
+      throw ReadOnlyRepositoryError.forbidden
+    }
+    guard let repository = marketRepository else {
+      throw ReadOnlyRepositoryError.transport
+    }
+    return try repository.quoteUpdates(stockCode: stockCode)
+  }
+
+  func marketDepthUpdates(
+    stockCode: String
+  ) throws -> AsyncThrowingStream<MarketDepthSnapshot, any Error> {
+    guard hasPermission("market:read"), !localSessionLocked else {
+      throw ReadOnlyRepositoryError.forbidden
+    }
+    guard let repository = marketRepository else {
+      throw ReadOnlyRepositoryError.transport
+    }
+    return try repository.depthUpdates(stockCode: stockCode)
   }
 
   func refreshStrategies() async {
@@ -876,6 +1036,7 @@ final class AppModel: ObservableObject {
     tTradeAssistantRepository = tTradeAssistantLoaderFactory(newApolloSession)
     limitUpBoardRepository = limitUpBoardLoaderFactory(newApolloSession)
     tradeApprovalRepository = tradeApprovalLoaderFactory(newApolloSession)
+    marketRepository = marketLoaderFactory(newApolloSession)
     portfolioState = session.user.permissions.contains("portfolio:read")
       ? .idle
       : .unavailable("当前会话没有 portfolio:read 权限")
@@ -891,6 +1052,13 @@ final class AppModel: ObservableObject {
     limitUpBoardState = session.user.permissions.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
+    if !session.user.permissions.contains("market:read") {
+      marketState = .unavailable("当前会话没有 market:read 权限")
+    } else if !session.user.permissions.contains("portfolio:read") {
+      marketState = .unavailable("自选列表需要 portfolio:read 权限")
+    } else {
+      marketState = .idle
+    }
     localSessionLocked = false
     localUnlockErrorMessage = nil
     authenticationState = .authenticated(session.user)
@@ -942,6 +1110,7 @@ final class AppModel: ObservableObject {
     tTradeAssistantRepository = nil
     limitUpBoardRepository = nil
     tradeApprovalRepository = nil
+    marketRepository = nil
     tradeApprovalInProgress = false
     portfolioState =
       accountDataEnabled
@@ -963,6 +1132,10 @@ final class AppModel: ObservableObject {
       accountDataEnabled
       ? .idle
       : .unavailable("等待 TLS、认证与只读授权部署验收")
+    marketState =
+      accountDataEnabled
+      ? .idle
+      : .unavailable("等待 TLS、认证与行情授权部署验收")
     localSessionLocked = false
     localUnlockErrorMessage = nil
     try? await tokenStore.delete()
@@ -1028,6 +1201,7 @@ final class AppModel: ObservableObject {
   }
 
   private enum ReadOnlyFeature {
+    case market
     case strategy
     case trading
     case tTrade
@@ -1036,6 +1210,7 @@ final class AppModel: ObservableObject {
 
   private func refreshAllReadOnlySnapshots() async {
     await refreshPortfolio()
+    await refreshMarket()
     await refreshStrategies()
     await refreshTradingActivity()
     await refreshTTradeAssistant()
@@ -1098,6 +1273,12 @@ final class AppModel: ObservableObject {
 
     let message = "会话刷新或数据重试失败，请检查私网连接后重试"
     switch feature {
+    case .market:
+      if let snapshot = previousSnapshot as? MarketWorkspaceSnapshot {
+        marketState = .loaded(snapshot, refreshWarning: message)
+      } else {
+        marketState = .failed(message)
+      }
     case .strategy:
       if let snapshot = previousSnapshot as? StrategyMonitorSnapshot {
         strategyState = .loaded(snapshot, refreshWarning: message)

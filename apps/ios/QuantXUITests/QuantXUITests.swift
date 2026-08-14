@@ -10,7 +10,7 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    XCTAssertTrue(app.staticTexts["投资概览"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["账户概览暂不可用"].exists)
   }
 
@@ -19,7 +19,7 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    let portfolioTab = app.tabBars.buttons["持仓"]
+    let portfolioTab = app.tabBars.buttons["资产"]
     XCTAssertTrue(portfolioTab.waitForExistence(timeout: 5))
     portfolioTab.tap()
 
@@ -32,7 +32,7 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    XCTAssertTrue(app.staticTexts["投资概览"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 5))
     try app.performAccessibilityAudit(
       for: [
         .contrast,
@@ -50,7 +50,7 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    XCTAssertTrue(app.staticTexts["投资概览"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 5))
     XCTAssertTrue(app.staticTexts["账户概览暂不可用"].exists)
 
     XCTAssertTrue(app.staticTexts["运行监控"].exists)
@@ -62,7 +62,7 @@ final class QuantXUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["做T助手"].exists)
     XCTAssertTrue(app.staticTexts["打板助手"].exists)
 
-    let portfolioTab = app.tabBars.buttons["持仓"]
+    let portfolioTab = app.tabBars.buttons["资产"]
     XCTAssertTrue(portfolioTab.isHittable)
     portfolioTab.tap()
     XCTAssertTrue(app.staticTexts["无法读取持仓"].waitForExistence(timeout: 3))
@@ -95,7 +95,7 @@ final class QuantXUITests: XCTestCase {
     let app = makeApp()
     app.launch()
 
-    XCTAssertTrue(app.staticTexts["投资概览"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 5))
 
     let scrollView = app.scrollViews.firstMatch
     let tabBar = app.tabBars.firstMatch
@@ -106,6 +106,25 @@ final class QuantXUITests: XCTestCase {
       tabBar.frame.minY,
       "滚动内容应延伸到浮动 Tab Bar 下方，不能在其上方留下空白区域"
     )
+  }
+
+  @MainActor
+  func testPrimaryNavigationMatchesPersonalQuantProduct() throws {
+    let app = makeApp()
+    app.launch()
+
+    for title in ["今日", "行情", "交易", "量化", "资产"] {
+      XCTAssertTrue(app.tabBars.buttons[title].waitForExistence(timeout: 5))
+    }
+    XCTAssertFalse(app.tabBars.buttons["设置"].exists)
+
+    app.tabBars.buttons["交易"].tap()
+    XCTAssertTrue(app.staticTexts["统一交易安全链路"].waitForExistence(timeout: 3))
+    XCTAssertTrue(app.staticTexts["手动交易"].exists)
+
+    app.tabBars.buttons["行情"].tap()
+    XCTAssertTrue(app.staticTexts["A 股行情工作台"].waitForExistence(timeout: 3))
+    XCTAssertTrue(app.staticTexts["无法读取行情"].exists)
   }
 
   @MainActor

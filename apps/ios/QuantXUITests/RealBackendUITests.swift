@@ -48,22 +48,22 @@ final class RealBackendUITests: XCTestCase {
     app.launchEnvironment["QUANTX_IOS_REAL_UI_GRANT"] = rawGrant.base64EncodedString()
     app.launch()
 
-    XCTAssertTrue(app.staticTexts["投资概览"].waitForExistence(timeout: 20))
+    XCTAssertTrue(app.staticTexts["今日概览"].waitForExistence(timeout: 20))
     XCTAssertTrue(app.staticTexts["服务正常"].exists)
     let accountSummary = app.staticTexts.matching(
       NSPredicate(format: "label CONTAINS %@", accountID)
     ).firstMatch
     XCTAssertTrue(accountSummary.exists)
-    attachScreenshot(app, name: "真实后端-首页")
+    attachScreenshot(app, name: "真实后端-今日")
 
-    let portfolioTab = app.tabBars.buttons["持仓"]
+    let portfolioTab = app.tabBars.buttons["资产"]
     XCTAssertTrue(portfolioTab.isHittable)
     portfolioTab.tap()
     XCTAssertTrue(app.staticTexts["全部持仓"].waitForExistence(timeout: 10))
     XCTAssertFalse(app.staticTexts["无法读取持仓"].exists)
     attachScreenshot(app, name: "真实后端-持仓")
 
-    let homeTab = app.tabBars.buttons["首页"]
+    let homeTab = app.tabBars.buttons["今日"]
     homeTab.tap()
     let tTrade = app.staticTexts["做T助手"].firstMatch
     scrollToElement(tTrade, in: app)

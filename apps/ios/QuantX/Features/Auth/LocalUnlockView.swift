@@ -15,7 +15,7 @@ struct LocalUnlockView: View {
           .accessibilityHidden(true)
         Text("QuantX 已锁定")
           .font(.title2.bold())
-        Text("验证设备身份后恢复只读账户会话。")
+        Text("验证设备身份后恢复个人量化会话。")
           .font(.subheadline)
           .foregroundStyle(QuantXTheme.secondaryText)
           .multilineTextAlignment(.center)

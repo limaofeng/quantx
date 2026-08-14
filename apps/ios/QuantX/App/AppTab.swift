@@ -1,31 +1,31 @@
 import SwiftUI
 
 enum AppTab: String, CaseIterable, Identifiable {
-  case dashboard
-  case portfolio
-  case strategies
-  case orders
-  case settings
+  case today
+  case market
+  case trade
+  case quant
+  case assets
 
   var id: Self { self }
 
   var title: String {
     switch self {
-    case .dashboard: "首页"
-    case .portfolio: "持仓"
-    case .strategies: "策略"
-    case .orders: "委托成交"
-    case .settings: "设置"
+    case .today: "今日"
+    case .market: "行情"
+    case .trade: "交易"
+    case .quant: "量化"
+    case .assets: "资产"
     }
   }
 
   var systemImage: String {
     switch self {
-    case .dashboard: "chart.pie.fill"
-    case .portfolio: "list.bullet.rectangle.portrait.fill"
-    case .strategies: "waveform.path.ecg.rectangle.fill"
-    case .orders: "doc.text.magnifyingglass"
-    case .settings: "gearshape.fill"
+    case .today: "sparkles.rectangle.stack.fill"
+    case .market: "chart.xyaxis.line"
+    case .trade: "arrow.left.arrow.right.circle.fill"
+    case .quant: "waveform.path.ecg.rectangle.fill"
+    case .assets: "chart.pie.fill"
     }
   }
 }

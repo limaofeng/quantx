@@ -2,10 +2,21 @@ import SwiftUI
 
 struct SettingsView: View {
   @EnvironmentObject private var model: AppModel
+  var embeddedInNavigation = false
 
+  @ViewBuilder
   var body: some View {
-    NavigationStack {
-      List {
+    if embeddedInNavigation {
+      content
+    } else {
+      NavigationStack {
+        content
+      }
+    }
+  }
+
+  private var content: some View {
+    List {
         Section("环境") {
           if let configuration = model.configuration {
             LabeledContent("当前环境", value: configuration.environment.displayName)
@@ -21,13 +32,13 @@ struct SettingsView: View {
         Section("安全") {
           Label("Token 仅存 Keychain", systemImage: "key.fill")
           Label("切入后台自动遮蔽", systemImage: "rectangle.inset.filled.and.person.filled")
-          Label("不包含交易写入能力", systemImage: "hand.raised.fill")
+          Label("实盘操作使用预览与生物识别", systemImage: "faceid")
         }
 
-        Section("产品边界") {
-          Label("账户、持仓与交易事实只读展示", systemImage: "eye.fill")
-          Label("不提供下单与撤单", systemImage: "arrow.left.arrow.right")
-          Label("不提供策略控制与参数修改", systemImage: "slider.horizontal.3")
+        Section("个人量化边界") {
+          Label("iOS 只连接 QuantX 私有服务", systemImage: "network.badge.shield.half.filled")
+          Label("不直接访问 QMT 或券商凭证", systemImage: "building.columns.fill")
+          Label("成交只认券商回报收敛结果", systemImage: "checkmark.seal.fill")
         }
 
         if let user = model.authenticatedUser {
@@ -47,9 +58,8 @@ struct SettingsView: View {
           LabeledContent("App", value: appVersion)
           LabeledContent("最低系统", value: "iOS 17")
         }
-      }
-      .navigationTitle("设置")
     }
+    .navigationTitle("账户与设置")
   }
 
   private var appVersion: String {

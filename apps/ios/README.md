@@ -1,6 +1,8 @@
 # QuantX iOS
 
-QuantX 原生 iOS 客户端最低支持 iOS 17，默认是只读监控端。当前已具备登录、Keychain 恢复、Token 刷新、登出、Apollo 会话重建、账户概览、持仓列表/详情、策略运行监控、今日/近 30 日委托成交、做T助手、打板助手和数据过期提示。两个助手展示服务端策略投影、就绪门禁、信号、批次、退出计划与券商回报状态；只有服务端显式授予独立 `trade:approve` 权限时，才允许通过短时服务端预览和 Face ID/Touch ID 二次确认批准待处理买入意图。确认只把意图送入统一交易域和风控链路，不表示下单成功或成交，也不会在移动端直接访问券商。Debug 环境允许连接配置的私网 HTTP/WS 开发服务；Staging 与 Release 仍只允许 HTTPS/WSS。
+QuantX 原生 iOS 客户端最低支持 iOS 17，定位为个人 A 股量化移动控制中心。主导航按用户任务组织为“今日 / 行情 / 交易 / 量化 / 资产”，设置从今日或资产页的账户入口进入。当前具备登录、Keychain 恢复、Token 刷新、后台隐私遮蔽、账户与持仓、证券搜索、自选、实时行情、K 线、五档盘口、委托成交、策略、做T助手和打板助手。所有页面只展示真实服务端数据；缺少安全接口或权限时明确显示不可用，不生成模拟账户事实或假成交。
+
+移动端不会直接访问 QMT。助手买入确认继续使用独立 `trade:approve` 权限、短时服务端预览及 Face ID/Touch ID；确认只表示意图重新进入统一交易域与风控链路。手动交易只允许接入独立 `trade:manual` 两阶段契约，绝不调用遗留 `placeOrder` 绕过预览。委托投递、券商受理与成交严格区分，最终事实只认 QMT Agent 回报经 Engine 持久化和收敛后的结果。Debug 可连接配置的私网 HTTP/WS 开发服务；Staging 与 Release 仍只允许 HTTPS/WSS。
 
 ## 环境
 
@@ -25,7 +27,7 @@ xcodebuild -project QuantX.xcodeproj -scheme QuantX -configuration Debug \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test
 ```
 
-当前回归基线覆盖真实认证 JSON 请求/响应字段映射、Token 并发轮换、成功与失败恢复、后台隐私遮罩与本地锁定、远端登出失败后的本机清理、GraphQL 模型映射、无时区历史数据兼容、空账户/无持仓、委托部分成交与未知券商状态、助手权限隔离与数值校验、独立交易权限、短时确认过期、生物识别先于 mutation、健康服务失败、数据过期、Debug HTTP/WS 账户连接和首页无障碍审计。
+当前回归基线覆盖五入口信息架构、真实认证 JSON 字段映射、Token 并发轮换、成功与失败恢复、后台隐私遮罩与本地锁定、远端登出失败后的本机清理、GraphQL 模型映射、行情代码主键、无时区历史数据兼容、空账户/无持仓、委托部分成交与未知券商状态、助手权限隔离与数值校验、独立交易权限、短时确认过期、生物识别先于 mutation、健康服务失败、数据过期、Debug HTTP/WS 账户连接和今日页无障碍审计。
 
 真实开发后端只读集成使用单独 Scheme，必须由后端显式启用开发临时会话。该测试只读取账户、策略、委托成交与做T投影，完成后注销临时会话，不调用 Mutation：
 
@@ -36,7 +38,7 @@ xcodebuild -project QuantX.xcodeproj -scheme QuantXRealBackend \
   -only-testing:QuantXTests/RealBackendReadOnlyTests test
 ```
 
-真实开发后端的 UI 端到端验收使用独立的 `QuantXRealBackendUI` Scheme。它会创建仅驻留内存的临时会话，在模拟器依次验证首页、持仓、做T助手和打板助手，保留验收截图并在结束时注销会话；该路径同样不会调用交易 Mutation：
+真实开发后端的 UI 端到端验收使用独立的 `QuantXRealBackendUI` Scheme。它会创建仅驻留内存的临时会话，在模拟器依次验证今日、资产、做T助手和打板助手，保留验收截图并在结束时注销会话；该路径同样不会调用交易 Mutation：
 
 ```bash
 cd apps/ios
@@ -95,6 +97,7 @@ Apollo codegen 直接读取同一 monorepo 中发布的 `apps/docs/public/contra
 - Debug 默认将 `QUANTX_ACCOUNT_DATA_ENABLED` 设为 `YES`；Staging/Release 是否启用仍由各自部署验收决定。
 - `SessionClient` 仅在 Debug 环境允许通过配置的 HTTP 地址登录；Staging 与 Release 仍拒绝非 HTTPS 认证地址。
 - 账户摘要、组合汇总和每条持仓会再次进行客户端 `accountId` 范围一致性校验；发现跨账户数据时整页拒绝展示。
+- 行情搜索使用 `Instrument.id` 作为带市场后缀的统一 `stockCode`；六位 `instrumentId` 仅用于展示，不能作为交易请求标的。自选、批量报价、K 线与 WebSocket 行情均校验证券代码和有限数值。
 - 委托与成交查询按当前账户发起；成交结果会再次校验 `accountId`，未知券商方向或状态保持“未知”，不会推断为卖出或成交完成。
 - 兼容后端遗留的 Asia/Shanghai 无时区数据库时间；新 API 输出会携带明确时区，客户端不会按设备时区猜测。
 - 做T助手校验账户作用域、可用量关系、生产就绪门禁、Kill Switch、信号与批次数值；打板助手仅处理明确识别的打板策略实例、待确认意图和退出计划。

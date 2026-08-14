@@ -2,30 +2,43 @@ import SwiftUI
 
 struct StrategiesView: View {
   @EnvironmentObject private var model: AppModel
+  var embeddedInNavigation = false
 
+  @ViewBuilder
   var body: some View {
-    NavigationStack {
-      content
-        .background(QuantXTheme.canvasBackground)
-        .navigationTitle("策略")
-        .navigationDestination(for: StrategyMonitorItem.self) { instance in
-          StrategyMonitorDetailView(instance: instance)
-        }
-        .toolbar {
-          if model.strategyRefreshInProgress,
-            model.strategyState.snapshot != nil
-          {
-            ToolbarItem(placement: .topBarTrailing) {
-              ProgressView()
-                .accessibilityLabel("正在刷新策略")
-            }
+    if embeddedInNavigation {
+      rootContent
+        .task { await loadIfNeeded() }
+    } else {
+      NavigationStack {
+        rootContent
+      }
+      .task { await loadIfNeeded() }
+    }
+  }
+
+  private var rootContent: some View {
+    content
+      .background(QuantXTheme.canvasBackground)
+      .navigationTitle("策略")
+      .navigationDestination(for: StrategyMonitorItem.self) { instance in
+        StrategyMonitorDetailView(instance: instance)
+      }
+      .toolbar {
+        if model.strategyRefreshInProgress,
+          model.strategyState.snapshot != nil
+        {
+          ToolbarItem(placement: .topBarTrailing) {
+            ProgressView()
+              .accessibilityLabel("正在刷新策略")
           }
         }
-    }
-    .task {
-      if case .idle = model.strategyState {
-        await model.refreshStrategies()
       }
+  }
+
+  private func loadIfNeeded() async {
+    if case .idle = model.strategyState {
+      await model.refreshStrategies()
     }
   }
 

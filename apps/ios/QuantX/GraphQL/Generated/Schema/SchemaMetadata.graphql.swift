@@ -29,15 +29,22 @@ extension QuantXAPI {
 
     private static let objectTypeMap: [String: ApolloAPI.Object] = [
       "Account": QuantXAPI.Objects.Account,
+      "Instrument": QuantXAPI.Objects.Instrument,
+      "KLineData": QuantXAPI.Objects.KLineData,
+      "MarketDepth": QuantXAPI.Objects.MarketDepth,
+      "MarketDepthLevel": QuantXAPI.Objects.MarketDepthLevel,
       "Mutation": QuantXAPI.Objects.Mutation,
       "Order": QuantXAPI.Objects.Order,
       "PageInfo": QuantXAPI.Objects.PageInfo,
       "PortfolioSummary": QuantXAPI.Objects.PortfolioSummary,
       "Position": QuantXAPI.Objects.Position,
       "Query": QuantXAPI.Objects.Query,
+      "RealTimePrice": QuantXAPI.Objects.RealTimePrice,
+      "StockQuote": QuantXAPI.Objects.StockQuote,
       "StrategyApprovalIntent": QuantXAPI.Objects.StrategyApprovalIntent,
       "StrategyExitPlanView": QuantXAPI.Objects.StrategyExitPlanView,
       "StrategyInstance": QuantXAPI.Objects.StrategyInstance,
+      "Subscription": QuantXAPI.Objects.Subscription,
       "TTradeBatch": QuantXAPI.Objects.TTradeBatch,
       "TTradeBatchPage": QuantXAPI.Objects.TTradeBatchPage,
       "TTradeGlobalHolding": QuantXAPI.Objects.TTradeGlobalHolding,
@@ -50,7 +57,8 @@ extension QuantXAPI {
       "Trade": QuantXAPI.Objects.Trade,
       "TradeApprovalConfirmationResult": QuantXAPI.Objects.TradeApprovalConfirmationResult,
       "TradeApprovalPreview": QuantXAPI.Objects.TradeApprovalPreview,
-      "TradeApprovalPreviewResult": QuantXAPI.Objects.TradeApprovalPreviewResult
+      "TradeApprovalPreviewResult": QuantXAPI.Objects.TradeApprovalPreviewResult,
+      "WatchlistItem": QuantXAPI.Objects.WatchlistItem
     ]
 
     static func objectType(forTypename typename: String) -> ApolloAPI.Object? {

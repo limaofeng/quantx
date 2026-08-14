@@ -6,6 +6,7 @@ struct DashboardView: View {
     case position(PortfolioPosition)
     case tTradeAssistant
     case limitUpBoardAssistant
+    case settings
   }
 
   @EnvironmentObject private var model: AppModel
@@ -35,7 +36,7 @@ struct DashboardView: View {
         .padding(.bottom, 24)
       }
       .background(QuantXTheme.canvasBackground)
-      .navigationTitle("首页")
+      .navigationTitle("今日")
       .navigationBarTitleDisplayMode(.inline)
       .navigationDestination(for: Route.self) { route in
         switch route {
@@ -47,9 +48,20 @@ struct DashboardView: View {
           TTradeAssistantView()
         case .limitUpBoardAssistant:
           LimitUpBoardAssistantView()
+        case .settings:
+          SettingsView(embeddedInNavigation: true)
         }
       }
       .toolbar {
+        ToolbarItem(placement: .topBarLeading) {
+          Button {
+            path.append(.settings)
+          } label: {
+            Image(systemName: "person.crop.circle")
+          }
+          .frame(minWidth: 44, minHeight: 44)
+          .accessibilityLabel("账户与设置")
+        }
         ToolbarItem(placement: .topBarTrailing) {
           Button {
             Task { await refreshDashboard() }
@@ -61,7 +73,7 @@ struct DashboardView: View {
             }
           }
           .frame(minWidth: 44, minHeight: 44)
-          .accessibilityLabel(isRefreshing ? "正在刷新首页" : "刷新首页")
+          .accessibilityLabel(isRefreshing ? "正在刷新今日" : "刷新今日")
           .disabled(isRefreshing)
         }
       }
@@ -74,7 +86,7 @@ struct DashboardView: View {
   private var dashboardHeader: some View {
     HStack(alignment: .top, spacing: 12) {
       VStack(alignment: .leading, spacing: 5) {
-        Text("投资概览")
+        Text("今日概览")
           .font(.title2.bold())
         Text(Date.now.formatted(.dateTime.month().day().weekday(.wide)))
           .font(.subheadline)
@@ -187,7 +199,7 @@ struct DashboardView: View {
           detail: strategyDetail,
           status: strategyStatus
         ) {
-          model.selectedTab = .strategies
+          model.selectedTab = .quant
         }
 
         DashboardFeatureCard(
@@ -198,7 +210,7 @@ struct DashboardView: View {
           detail: tradingDetail,
           status: tradingStatus
         ) {
-          model.selectedTab = .orders
+          model.selectedTab = .trade
         }
       }
     }
@@ -253,7 +265,7 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 4) {
               Text("持仓数据待连接")
                 .font(.subheadline.weight(.semibold))
-              Text("连接只读账户后显示持仓市值、数量与盈亏")
+              Text("连接个人量化账户后显示持仓市值、数量与盈亏")
                 .font(.caption)
                 .foregroundStyle(QuantXTheme.secondaryText)
             }
@@ -271,11 +283,11 @@ struct DashboardView: View {
     VStack(alignment: .leading, spacing: 10) {
       SectionTitle(title: "主要持仓", subtitle: "按当前组合顺序展示") {
         Button("查看全部") {
-          model.selectedTab = .portfolio
+          model.selectedTab = .assets
         }
         .font(.subheadline.weight(.semibold))
         .frame(minHeight: 44)
-        .accessibilityHint("切换到持仓标签页")
+        .accessibilityHint("切换到资产标签页")
       }
 
       if positions.isEmpty {
@@ -427,6 +439,7 @@ struct DashboardView: View {
       || model.tradingRefreshInProgress
       || model.tTradeAssistantRefreshInProgress
       || model.limitUpBoardRefreshInProgress
+      || model.marketRefreshInProgress
   }
 
   private func stateDetail(for state: StrategyMonitorState) -> String {
@@ -471,6 +484,7 @@ struct DashboardView: View {
   private func refreshDashboard() async {
     await model.refreshHealth()
     await model.refreshPortfolio()
+    await model.refreshMarket()
     await model.refreshStrategies()
     await model.refreshTradingActivity()
     await model.refreshTTradeAssistant()

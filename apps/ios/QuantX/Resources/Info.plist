@@ -23,7 +23,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>QuantX 需要通过您的私有网络连接只读监控服务。</string>
+	<string>QuantX 需要通过您的私有网络连接个人量化服务并获取行情、资产、策略与交易状态。</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>QuantX 使用 Face ID 解锁本机会话。每笔移动端交易确认都需要独立授权。</string>
 	<key>NSAppTransportSecurity</key>

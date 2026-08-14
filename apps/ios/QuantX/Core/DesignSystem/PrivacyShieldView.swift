@@ -15,7 +15,7 @@ struct PrivacyShieldView: View {
         Text("QuantX 已保护")
           .font(.title2.bold())
 
-        Text("返回 App 后刷新只读监控数据")
+        Text("返回 App 后验证身份并刷新量化数据")
           .font(.subheadline)
           .foregroundStyle(QuantXTheme.secondaryText)
       }

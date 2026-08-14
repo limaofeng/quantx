@@ -83,9 +83,9 @@ struct LoginView: View {
 
   private var loginDescription: String {
     if usesInsecureDevelopmentTransport {
-      return "开发环境将通过局域网服务加载真实只读账户数据。"
+      return "开发环境将通过局域网加载真实行情、账户与量化状态。"
     }
-    return "登录后加载已授权的真实只读账户数据。"
+    return "登录后加载已授权的真实行情、账户与量化能力。"
   }
 
   private var sessionNotice: String {

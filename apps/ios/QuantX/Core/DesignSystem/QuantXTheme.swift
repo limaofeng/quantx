@@ -1,6 +1,21 @@
 import SwiftUI
 
 enum QuantXTheme {
+  enum Spacing {
+    static let xSmall: CGFloat = 4
+    static let small: CGFloat = 8
+    static let medium: CGFloat = 12
+    static let large: CGFloat = 16
+    static let xLarge: CGFloat = 24
+  }
+
+  enum Radius {
+    static let compact: CGFloat = 10
+    static let control: CGFloat = 12
+    static let card: CGFloat = 16
+    static let hero: CGFloat = 22
+  }
+
   static let accent = adaptiveColor(
     light: UIColor(red: 37 / 255, green: 99 / 255, blue: 235 / 255, alpha: 1),
     dark: UIColor(red: 110 / 255, green: 168 / 255, blue: 255 / 255, alpha: 1)
@@ -17,6 +32,10 @@ enum QuantXTheme {
     light: UIColor(red: 154 / 255, green: 91 / 255, blue: 0 / 255, alpha: 1),
     dark: UIColor(red: 255 / 255, green: 193 / 255, blue: 90 / 255, alpha: 1)
   )
+  static let critical = adaptiveColor(
+    light: UIColor(red: 180 / 255, green: 35 / 255, blue: 24 / 255, alpha: 1),
+    dark: UIColor(red: 255 / 255, green: 125 / 255, blue: 115 / 255, alpha: 1)
+  )
   static let approvalAction = adaptiveColor(
     light: UIColor(red: 138 / 255, green: 75 / 255, blue: 0 / 255, alpha: 1),
     dark: UIColor(red: 138 / 255, green: 75 / 255, blue: 0 / 255, alpha: 1)
@@ -32,6 +51,15 @@ enum QuantXTheme {
 
   static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
   static let canvasBackground = Color(uiColor: .systemGroupedBackground)
+  static let elevatedBackground = Color(uiColor: .tertiarySystemGroupedBackground)
+  static let separator = Color(uiColor: .separator)
+
+  static func trendColor(_ value: Double?) -> Color {
+    guard let value else { return secondaryText }
+    if value > 0 { return positive }
+    if value < 0 { return negative }
+    return secondaryText
+  }
 
   private static func adaptiveColor(light: UIColor, dark: UIColor) -> Color {
     Color(
@@ -49,7 +77,116 @@ struct QuantXCard<Content: View>: View {
     content
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(16)
-      .background(QuantXTheme.cardBackground, in: RoundedRectangle(cornerRadius: 18))
+      .background(
+        QuantXTheme.cardBackground,
+        in: RoundedRectangle(cornerRadius: QuantXTheme.Radius.card)
+      )
+      .overlay {
+        RoundedRectangle(cornerRadius: QuantXTheme.Radius.card)
+          .stroke(QuantXTheme.separator.opacity(0.16), lineWidth: 0.5)
+      }
+  }
+}
+
+enum QuantXSemanticStatus: Sendable {
+  case ready
+  case working
+  case attention
+  case blocked
+  case unavailable
+
+  var title: String {
+    switch self {
+    case .ready: "正常"
+    case .working: "处理中"
+    case .attention: "需关注"
+    case .blocked: "已阻止"
+    case .unavailable: "不可用"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .ready: "checkmark.circle.fill"
+    case .working: "clock.arrow.circlepath"
+    case .attention: "exclamationmark.triangle.fill"
+    case .blocked: "hand.raised.fill"
+    case .unavailable: "slash.circle.fill"
+    }
+  }
+
+  var color: Color {
+    switch self {
+    case .ready: QuantXTheme.online
+    case .working: QuantXTheme.accent
+    case .attention: QuantXTheme.warning
+    case .blocked: QuantXTheme.critical
+    case .unavailable: QuantXTheme.secondaryText
+    }
+  }
+}
+
+struct QuantXStatusBanner: View {
+  let title: String
+  let message: String
+  let status: QuantXSemanticStatus
+
+  var body: some View {
+    HStack(alignment: .top, spacing: QuantXTheme.Spacing.medium) {
+      Image(systemName: status.systemImage)
+        .font(.body.weight(.semibold))
+        .foregroundStyle(status.color)
+        .frame(width: 32, height: 32)
+        .background(status.color.opacity(0.12), in: Circle())
+        .accessibilityHidden(true)
+
+      VStack(alignment: .leading, spacing: QuantXTheme.Spacing.xSmall) {
+        Text(title)
+          .font(.subheadline.weight(.semibold))
+        Text(message)
+          .font(.caption)
+          .foregroundStyle(QuantXTheme.secondaryText)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(QuantXTheme.Spacing.medium)
+    .background(status.color.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+    .overlay {
+      RoundedRectangle(cornerRadius: 14)
+        .stroke(status.color.opacity(0.20), lineWidth: 1)
+    }
+    .accessibilityElement(children: .combine)
+  }
+}
+
+struct QuantXMetricTile: View {
+  let title: String
+  let value: String
+  var detail: String?
+  var trend: Double?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: QuantXTheme.Spacing.xSmall) {
+      Text(title)
+        .font(.caption)
+        .foregroundStyle(QuantXTheme.secondaryText)
+      Text(value)
+        .font(.headline)
+        .monospacedDigit()
+        .foregroundStyle(trend == nil ? Color.primary : QuantXTheme.trendColor(trend))
+        .minimumScaleFactor(0.72)
+      if let detail {
+        Text(detail)
+          .font(.caption2)
+          .monospacedDigit()
+          .foregroundStyle(trend == nil ? QuantXTheme.secondaryText : QuantXTheme.trendColor(trend))
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(QuantXTheme.Spacing.medium)
+    .background(QuantXTheme.elevatedBackground, in: RoundedRectangle(cornerRadius: 12))
+    .accessibilityElement(children: .combine)
   }
 }
 

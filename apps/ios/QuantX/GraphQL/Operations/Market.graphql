@@ -1,0 +1,176 @@
+query IOSMarketWatchlist($accountId: String) {
+  watchlist(accountId: $accountId) {
+    id
+    accountId
+    stockCode
+    instrumentName
+    displayOrder
+    groupName
+    note
+    updatedAt
+  }
+}
+
+query IOSLatestMarketQuotes($stockList: [String!]!) {
+  latestMarketQuotes(stockList: $stockList) {
+    stockCode
+    time
+    lastPrice
+    open
+    high
+    low
+    preClose
+    change
+    changePercent
+    volume
+    amount
+    turnoverRate
+  }
+}
+
+query IOSMarketSearch($term: String!) {
+  byCode: instruments(
+    limit: 20
+    where: { type: STOCK, stockCode_contains: $term }
+    orderBy: { field: CODE, direction: ASC }
+  ) {
+    id
+    market
+    instrumentId
+    name
+    abbreviation
+    exchangeCode
+    preClose
+    upStopPrice
+    downStopPrice
+    priceTick
+    isTrading
+    quote {
+      stockCode
+      time
+      lastPrice
+      open
+      high
+      low
+      preClose
+      change
+      changePercent
+      volume
+      amount
+      turnoverRate
+    }
+  }
+  byName: instruments(
+    limit: 20
+    where: { type: STOCK, name_contains: $term }
+    orderBy: { field: CODE, direction: ASC }
+  ) {
+    id
+    market
+    instrumentId
+    name
+    abbreviation
+    exchangeCode
+    preClose
+    upStopPrice
+    downStopPrice
+    priceTick
+    isTrading
+    quote {
+      stockCode
+      time
+      lastPrice
+      open
+      high
+      low
+      preClose
+      change
+      changePercent
+      volume
+      amount
+      turnoverRate
+    }
+  }
+}
+
+query IOSMarketInstrumentDetail($stockCode: String!, $period: KLinePeriod!) {
+  instrument(stockCode: $stockCode) {
+    id
+    market
+    instrumentId
+    name
+    abbreviation
+    exchangeCode
+    preClose
+    upStopPrice
+    downStopPrice
+    priceTick
+    isTrading
+    quote {
+      stockCode
+      time
+      lastPrice
+      open
+      high
+      low
+      preClose
+      change
+      changePercent
+      volume
+      amount
+      turnoverRate
+    }
+  }
+  klines(
+    stockCode: $stockCode
+    period: $period
+    limit: 120
+    order: "asc"
+  ) {
+    stockCode
+    period
+    time
+    open
+    high
+    low
+    close
+    preClose
+    volume
+    amount
+  }
+}
+
+subscription IOSMarketQuoteUpdates($stockList: [String!]!) {
+  marketQuotes(stockList: $stockList) {
+    stockCode
+    currentPrice
+    change
+    changePercent
+    volume
+    amount
+    time
+    bidPrice
+    askPrice
+    bidVolume
+    askVolume
+    high
+    low
+    open
+    preClose
+  }
+}
+
+subscription IOSMarketDepthUpdates($stockList: [String!]!, $levels: Int = 5) {
+  marketDepth(stockList: $stockList, levels: $levels) {
+    stockCode
+    time
+    bids {
+      price
+      volume
+    }
+    asks {
+      price
+      volume
+    }
+  }
+}
