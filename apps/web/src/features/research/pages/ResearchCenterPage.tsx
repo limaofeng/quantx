@@ -79,59 +79,6 @@ function QualityBadge({ run }: { run: ResearchRunListItem }) {
   );
 }
 
-function ResearchRunCard({ run }: { run: ResearchRunListItem }) {
-  const href = buildResearchRunPath(
-    run.studyId,
-    run.version,
-    run.runId,
-    run.key
-  );
-  return (
-    <Link
-      href={href}
-      className="block cursor-pointer rounded-lg border border-white/[0.07] bg-[#0d1728]/80 p-4 transition-colors hover:border-red-500/30 hover:bg-red-500/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-bold text-slate-100">
-            {STUDY_LABELS[run.studyId] || run.studyId}
-          </div>
-          <div className="mt-1 font-mono text-[10px] text-slate-600">
-            {run.runId}
-          </div>
-        </div>
-        <ResearchStatusBadge status={run.status} />
-      </div>
-      <dl className="mt-4 grid grid-cols-2 gap-3 text-[10px]">
-        <div>
-          <dt className="text-slate-600">版本</dt>
-          <dd className="mt-1 font-mono text-slate-300">{run.version}</dd>
-        </div>
-        <div>
-          <dt className="text-slate-600">事件数</dt>
-          <dd className="mt-1 font-mono text-slate-300">
-            {run.eventCount?.toLocaleString() ?? '—'}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-slate-600">完成时间</dt>
-          <dd className="mt-1 text-slate-400">{formatDate(run.completedAt)}</dd>
-        </div>
-        <div>
-          <dt className="text-slate-600">质量</dt>
-          <dd className="mt-1">
-            <QualityBadge run={run} />
-          </dd>
-        </div>
-      </dl>
-      <div className="mt-4 flex items-center justify-end gap-1 text-[10px] font-bold text-red-300">
-        查看结果
-        <ArrowRight className="h-3 w-3" />
-      </div>
-    </Link>
-  );
-}
-
 export function ResearchRunsView({
   fetching,
   runs,
@@ -160,7 +107,7 @@ export function ResearchRunsView({
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-2 border-b border-white/[0.06] p-3 md:grid-cols-4">
+      <div className="grid grid-cols-4 gap-2 border-b border-white/[0.06] p-3">
         {[
           { icon: Rows3, label: '运行总数', value: total.toLocaleString() },
           { icon: CheckCircle2, label: '本页成功', value: successful },
@@ -193,13 +140,7 @@ export function ResearchRunsView({
         })}
       </div>
 
-      <div className="grid gap-2 p-3 md:hidden">
-        {runs.map(run => (
-          <ResearchRunCard key={run.key} run={run} />
-        ))}
-      </div>
-
-      <div className="hidden min-h-0 flex-1 overflow-auto md:block">
+      <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full min-w-[860px] text-left text-[11px]">
           <caption className="sr-only">研究运行列表</caption>
           <thead className="sticky top-0 z-10 bg-[#0b1423] text-[9px] uppercase tracking-wider text-slate-600">

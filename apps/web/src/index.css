@@ -26,6 +26,11 @@
   --ring: hsl(221, 83%, 53%);
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
+  /* A 股行情语义色：红涨、绿跌；持仓下跌使用淡蓝色。 */
+  --market-up: 220 38 38;
+  --market-down: 21 128 61;
+  --holding-down: 2 132 199;
+  --market-flat: 71 85 105;
   /* Amber/Gold */
   --font-sans: Inter, system-ui, sans-serif;
   --font-serif: Georgia, serif;
@@ -50,6 +55,8 @@
   --scrollbar-thumb-active: rgba(37, 99, 235, 0.82);
   --scrollbar-thumb-ring: rgba(255, 255, 255, 0.55);
   --scrollbar-corner: transparent;
+  --skeleton-base: rgba(100, 116, 139, 0.14);
+  --skeleton-highlight: rgba(255, 255, 255, 0.42);
 
   /* Studio Workbench tokens */
   --studio-bg: #0b1120;
@@ -91,6 +98,10 @@
   --ring: hsl(210, 100%, 66%);
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
+  --market-up: 248 113 113;
+  --market-down: 74 222 128;
+  --holding-down: 125 211 252;
+  --market-flat: 148 163 184;
 
   --shadow-blue: 0 0 15px rgba(37, 99, 235, 0.1);
   --shadow-blue-lg: 0 0 30px rgba(37, 99, 235, 0.2);
@@ -104,6 +115,8 @@
   --scrollbar-thumb-active: rgba(34, 211, 238, 0.82);
   --scrollbar-thumb-ring: rgba(255, 255, 255, 0.12);
   --scrollbar-corner: transparent;
+  --skeleton-base: rgba(148, 163, 184, 0.07);
+  --skeleton-highlight: rgba(226, 232, 240, 0.075);
 
   --studio-bg: #0b1120;
   --studio-panel: #0f172a;
@@ -121,6 +134,18 @@
 }
 
 @layer base {
+  html,
+  body,
+  #root {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
   * {
     @apply border-border;
     scrollbar-width: thin;
@@ -376,6 +401,37 @@
   }
 }
 
+@keyframes skeleton-shimmer {
+  from {
+    transform: translateX(-115%);
+  }
+
+  to {
+    transform: translateX(215%);
+  }
+}
+
+.skeleton-shimmer {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--skeleton-base);
+  pointer-events: none;
+}
+
+.skeleton-shimmer::after {
+  position: absolute;
+  inset: 0;
+  width: 48%;
+  content: '';
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--skeleton-highlight),
+    transparent
+  );
+  animation: skeleton-shimmer 1.8s linear infinite;
+}
+
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out;
 }
@@ -397,6 +453,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer::after {
+    display: none;
+  }
+
   [data-studio-workbench] *,
   [data-studio-workbench] *::before,
   [data-studio-workbench] *::after {

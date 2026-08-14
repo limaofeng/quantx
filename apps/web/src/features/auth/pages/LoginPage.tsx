@@ -80,8 +80,8 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
         <div className="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.035)_1px,transparent_1px)] bg-[size:48px_48px]" />
       </div>
 
-      <section className="relative grid w-full max-w-5xl overflow-hidden rounded-2xl border border-white/10 bg-[#0a1020]/95 shadow-2xl shadow-black/40 backdrop-blur-xl lg:grid-cols-[1.05fr_0.95fr]">
-        <div className="hidden min-h-[620px] flex-col justify-between border-r border-white/10 bg-[#080e1b] p-10 lg:flex">
+      <section className="relative grid w-full max-w-5xl grid-cols-[1.05fr_0.95fr] overflow-hidden rounded-2xl border border-white/10 bg-[#0a1020]/95 shadow-2xl shadow-black/40 backdrop-blur-xl">
+        <div className="flex min-h-[620px] flex-col justify-between border-r border-white/10 bg-[#080e1b] p-10">
           <div>
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 text-red-400">
@@ -123,22 +123,8 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
           </div>
         </div>
 
-        <div className="flex min-h-[560px] items-center p-6 sm:p-10 lg:p-12">
+        <div className="flex min-h-[560px] items-center p-12">
           <div className="mx-auto w-full max-w-sm">
-            <div className="mb-8 lg:hidden">
-              <div className="flex items-center gap-3">
-                <ShieldCheck className="h-7 w-7 text-red-400" />
-                <div>
-                  <p className="font-mono text-[10px] tracking-[0.25em] text-red-400">
-                    QUANTX SECURE
-                  </p>
-                  <p className="mt-1 text-sm font-semibold text-white">
-                    本地交易工作台
-                  </p>
-                </div>
-              </div>
-            </div>
-
             <div>
               <h2 className="text-2xl font-semibold tracking-tight text-white">
                 登录 QuantX

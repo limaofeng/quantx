@@ -6,9 +6,12 @@ import {
 } from '@/core/graphql/websocket-close';
 
 describe('GraphQL WebSocket close classification', () => {
-  it('treats only protocol normal closure as expected lifecycle noise', () => {
+  it('treats normal closure and planned token rotation as expected', () => {
     expect(
       isNormalWebSocketClose({ code: 1000, reason: 'Normal Closure' })
+    ).toBe(true);
+    expect(
+      isNormalWebSocketClose({ code: 4205, reason: 'Access token rotated' })
     ).toBe(true);
     expect(isNormalWebSocketClose({ code: 1006, reason: '' })).toBe(false);
     expect(isNormalWebSocketClose(undefined)).toBe(false);

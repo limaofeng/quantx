@@ -55,6 +55,14 @@ export default {
         },
         success: 'var(--success)',
         warning: 'var(--warning)',
+        market: {
+          up: 'rgb(var(--market-up) / <alpha-value>)',
+          down: 'rgb(var(--market-down) / <alpha-value>)',
+          flat: 'rgb(var(--market-flat) / <alpha-value>)',
+        },
+        holding: {
+          down: 'rgb(var(--holding-down) / <alpha-value>)',
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],

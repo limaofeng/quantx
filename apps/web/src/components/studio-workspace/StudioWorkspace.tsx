@@ -1,10 +1,4 @@
-import {
-  BarChart3,
-  PanelLeftOpen,
-  TrendingUp,
-  UserRound,
-  X,
-} from 'lucide-react';
+import { BarChart3, TrendingUp, UserRound } from 'lucide-react';
 import {
   useCallback,
   useEffect,
@@ -93,12 +87,8 @@ function StudioWorkspaceStatusBar({
 }
 
 function StudioWorkspaceSidebarDock({
-  isMobileOpen,
-  onMobileClose,
   sidebar,
 }: {
-  isMobileOpen: boolean;
-  onMobileClose: () => void;
   sidebar: StudioWorkspaceSidebarConfig | null;
 }) {
   const {
@@ -110,8 +100,10 @@ function StudioWorkspaceSidebarDock({
     sidebarWidth,
   } = useStudioSidebarSizing({
     resizeEdge: 'right',
-    sizing: STUDIO_WORKSPACE_SIDEBAR_SIZING,
-    storageFallback: STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
+    sizing: sidebar?.sizing ?? STUDIO_WORKSPACE_SIDEBAR_SIZING,
+    storageFallback: sidebar?.sizing
+      ? sidebar.title
+      : STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
   });
   const themeStyles = getStudioThemeStyles(sidebar?.themeName ?? 'red');
 
@@ -121,23 +113,13 @@ function StudioWorkspaceSidebarDock({
     <aside
       data-testid="studio-sidebar-dock"
       className={cn(
-        'absolute inset-y-0 left-0 z-40 h-full min-h-0 shrink-0 flex-col border-r border-white/5 bg-[#0b1120] shadow-2xl md:relative md:inset-auto md:z-auto md:flex md:bg-[#0b1120]/70 md:shadow-none',
-        isMobileOpen ? 'flex' : 'hidden',
+        'relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/5 bg-[#0b1120]/70',
         !isResizingSidebar && 'transition-[width] duration-150'
       )}
       style={{
-        maxWidth: 'calc(100vw - 3rem)',
         width: sidebarWidth,
       }}
     >
-      <button
-        type="button"
-        onClick={onMobileClose}
-        className="absolute right-2 top-2 z-40 flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-white/10 bg-slate-950/80 text-slate-400 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 md:hidden"
-        aria-label={`关闭${sidebar.title}侧边栏`}
-      >
-        <X className="h-4 w-4" />
-      </button>
       <div
         role="separator"
         aria-label={`${sidebar.title} 侧边栏宽度`}
@@ -171,7 +153,12 @@ function StudioWorkspaceSidebarDock({
           )}
         />
       </div>
-      {sidebar.content}
+      <div
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
+        data-testid="studio-sidebar-content"
+      >
+        {sidebar.content}
+      </div>
     </aside>
   );
 }
@@ -309,11 +296,9 @@ export function StudioWorkspace({
   );
   const [workspaceSidebar, setWorkspaceSidebarState] =
     useState<StudioWorkspaceSidebarConfig | null>(null);
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   useEffect(() => {
     const currentTab = buildStudioWorkspaceTab(currentPath);
-    setIsMobileSidebarOpen(false);
 
     setTabs(currentTabs =>
       normalizeStudioWorkspaceTabs(
@@ -502,37 +487,19 @@ export function StudioWorkspace({
             utilityActions={utilityActions}
           />
 
-          <div className="relative flex min-w-0 flex-1">
-            {isMobileSidebarOpen && workspaceSidebar?.showSidebar && (
-              <button
-                type="button"
-                className="absolute inset-0 z-30 cursor-pointer bg-slate-950/70 backdrop-blur-sm md:hidden"
-                onClick={() => setIsMobileSidebarOpen(false)}
-                aria-label={`关闭${workspaceSidebar.title}侧边栏`}
-              />
-            )}
-            <StudioWorkspaceSidebarDock
-              isMobileOpen={isMobileSidebarOpen}
-              onMobileClose={() => setIsMobileSidebarOpen(false)}
-              sidebar={workspaceSidebar}
-            />
+          <div
+            className="flex min-w-0 flex-1 flex-col bg-[#0b1120]/20"
+            data-testid="studio-workspace-main"
+          >
+            <div className="flex h-10 shrink-0">
+              <div className="min-w-0 flex-1">{workspaceTabBar}</div>
+            </div>
+
             <div
-              className="flex min-w-0 flex-1 flex-col bg-[#0b1120]/20"
-              data-testid="studio-workspace-main"
+              className="relative flex min-h-0 flex-1"
+              data-testid="studio-workspace-content"
             >
-              <div className="flex h-10 shrink-0">
-                {workspaceSidebar?.showSidebar && workspaceSidebar.content && (
-                  <button
-                    type="button"
-                    onClick={() => setIsMobileSidebarOpen(true)}
-                    className="flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center border-b border-r border-white/5 bg-[#0b1120]/70 text-slate-400 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500 md:hidden"
-                    aria-label={`打开${workspaceSidebar.title}侧边栏`}
-                  >
-                    <PanelLeftOpen className="h-4 w-4" />
-                  </button>
-                )}
-                <div className="min-w-0 flex-1">{workspaceTabBar}</div>
-              </div>
+              <StudioWorkspaceSidebarDock sidebar={workspaceSidebar} />
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {children}
               </div>

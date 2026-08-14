@@ -34,11 +34,11 @@ describe('studio workspace tabs', () => {
     expect(unknownTab.name).toBe('页面未找到');
   });
 
-  it('hosts the market shortcuts page in the studio workspace', () => {
+  it('hosts the market workbench in the studio workspace', () => {
     const tab = buildStudioWorkspaceTab('/market-shortcuts');
 
     expect(tab?.id).toBe('page:/market-shortcuts');
-    expect(tab?.name).toBe('行情快捷方式');
+    expect(tab?.name).toBe('行情工作台');
     expect(tab?.path).toBe('/market-shortcuts');
   });
 
@@ -48,6 +48,14 @@ describe('studio workspace tabs', () => {
     expect(tab?.id).toBe('page:/t-trade');
     expect(tab?.name).toBe('做T助手');
     expect(tab?.path).toBe('/t-trade');
+  });
+
+  it('hosts the limit-up board assistant in the studio workspace', () => {
+    const tab = buildStudioWorkspaceTab('/limit-up-board');
+
+    expect(tab?.id).toBe('page:/limit-up-board');
+    expect(tab?.name).toBe('打板助手');
+    expect(tab?.path).toBe('/limit-up-board');
   });
 
   it('gives research list and run details meaningful workspace tabs', () => {

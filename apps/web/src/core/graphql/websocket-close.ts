@@ -3,6 +3,8 @@ export type WebSocketCloseDetails = {
   reason?: string;
 };
 
+const EXPECTED_CLOSE_CODES = new Set([1000, 4205]);
+
 export function webSocketCloseDetails(event: unknown): WebSocketCloseDetails {
   if (typeof event !== 'object' || event === null) return {};
   const candidate = event as Record<string, unknown>;
@@ -13,5 +15,6 @@ export function webSocketCloseDetails(event: unknown): WebSocketCloseDetails {
 }
 
 export function isNormalWebSocketClose(event: unknown): boolean {
-  return webSocketCloseDetails(event).code === 1000;
+  const code = webSocketCloseDetails(event).code;
+  return code !== undefined && EXPECTED_CLOSE_CODES.has(code);
 }

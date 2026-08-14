@@ -96,7 +96,7 @@ npm run preview
 - 📊 **数据可视化**: Recharts + Lightweight Charts
 - 🔌 **GraphQL 集成**: Apollo Client + GraphQL WebSocket
 - 🧪 **测试框架**: Vitest + Testing Library
-- 📱 **响应式设计**: 移动端适配
+- 🖥️ **桌面工作台**: 面向 PC，最低支持 1280px 视口宽度
 - 🌙 **主题切换**: 明暗主题支持
 - ⚡ **性能优化**: 代码分割、懒加载
 - 🔧 **开发体验**: ESLint + Prettier + Husky

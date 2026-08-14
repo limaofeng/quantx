@@ -65,7 +65,7 @@ describe('StudioWorkspace', () => {
     });
   });
 
-  it('renders the registered page sidebar as a left-side workspace dock', () => {
+  it('renders the registered page sidebar inside the active tab content', () => {
     render(
       <StudioWorkspace>
         <RegisteredSidebarPage />
@@ -73,8 +73,11 @@ describe('StudioWorkspace', () => {
     );
 
     const main = screen.getByTestId('studio-workspace-main');
+    const content = screen.getByTestId('studio-workspace-content');
     const dock = screen.getByTestId('studio-sidebar-dock');
     const resizer = screen.getByTestId('studio-sidebar-resizer');
+    const tabBar = screen.getByTestId('studio-tab-bar');
+    const pageContent = screen.getByText('Workspace page content');
 
     expect(screen.getByText('Workspace page content')).toBeInTheDocument();
     expect(screen.getByText('Registered sidebar')).toBeInTheDocument();
@@ -82,12 +85,32 @@ describe('StudioWorkspace', () => {
       'QuantX 开发用户'
     );
     expect(screen.getAllByTestId('studio-sidebar-dock')).toHaveLength(1);
-    expect(dock).toHaveStyle({ width: '360px' });
-    expect(resizer).toHaveAttribute('aria-valuenow', '360');
-    expect(main).not.toContainElement(dock);
+    expect(dock).toHaveStyle({ width: '280px' });
+    expect(resizer).toHaveAttribute('aria-valuemin', '248');
+    expect(resizer).toHaveAttribute('aria-valuemax', '420');
+    expect(resizer).toHaveAttribute('aria-valuenow', '280');
+    expect(screen.getByTestId('studio-sidebar-content')).toHaveClass(
+      'min-h-0',
+      'min-w-0',
+      'overflow-hidden'
+    );
+    expect(main).toContainElement(dock);
+    expect(content).toContainElement(dock);
+    expect(content).toContainElement(pageContent);
     expect(
-      dock.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING
+      tabBar.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
+    expect(
+      dock.compareDocumentPosition(pageContent) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    expect(
+      screen.queryByRole('button', { name: '打开Test Studio侧边栏' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '关闭Test Studio侧边栏' })
+    ).not.toBeInTheDocument();
   });
 
   it('renders a supplied global status bar in the workspace bottom slot', () => {

@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/utils/cn';
 
@@ -8,133 +10,140 @@ interface RouteSkeletonProps {
   variant?: RouteSkeletonVariant;
 }
 
+const panelClass =
+  'rounded-lg border border-white/[0.07] bg-[#0d1727]/75 shadow-[inset_0_1px_0_rgba(255,255,255,0.015)]';
+
+function SkeletonPanel({
+  children,
+  className,
+}: {
+  children?: ReactNode;
+  className?: string;
+}) {
+  return <div className={cn(panelClass, className)}>{children}</div>;
+}
+
+function ContentHeaderSkeleton() {
+  return (
+    <div className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] bg-[#0b1120]/90 px-4">
+      <div className="min-w-0 space-y-1.5">
+        <Skeleton className="h-3 w-32 max-w-[42vw]" />
+        <Skeleton className="h-2 w-56 max-w-[58vw]" />
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <Skeleton className="hidden h-2.5 w-24 sm:block" />
+        <Skeleton className="h-7 w-16 rounded-md" />
+      </div>
+    </div>
+  );
+}
+
 function MetricSkeletonGrid() {
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {Array.from({ length: 4 }).map((_, index) => (
-        <div
+        <SkeletonPanel
           key={index}
-          className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm dark:border-white/5 dark:bg-white/[0.03]"
+          className="flex min-h-[90px] flex-col justify-between p-4"
         >
-          <div className="flex items-center justify-between">
-            <Skeleton className="h-3 w-24" />
+          <div className="flex items-center justify-between gap-4">
+            <Skeleton className="h-2.5 w-20" />
             <Skeleton className="h-8 w-8 rounded-lg" />
           </div>
-          <Skeleton className="mt-5 h-7 w-32" />
-          <Skeleton className="mt-3 h-2.5 w-20" />
+          <div className="space-y-2">
+            <Skeleton className="h-6 w-28 max-w-[65%]" />
+            <Skeleton className="h-2 w-16" />
+          </div>
+        </SkeletonPanel>
+      ))}
+    </div>
+  );
+}
+
+function CompactListSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="divide-y divide-white/[0.045]">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div key={index} className="flex items-center gap-3 px-3 py-2.5">
+          <Skeleton className="h-7 w-7 shrink-0 rounded-md" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <Skeleton className="h-2.5 w-3/5" />
+            <Skeleton className="h-2 w-2/5" />
+          </div>
+          <Skeleton className="h-2.5 w-12 shrink-0" />
         </div>
       ))}
     </div>
   );
 }
 
-function TableSkeleton() {
+function TablePanelSkeleton({ rows = 8 }: { rows?: number }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-white/[0.03]">
-      <div className="flex flex-col gap-4 border-b border-slate-200 p-5 dark:border-white/5 md:flex-row md:items-center md:justify-between">
-        <div className="space-y-2">
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-3 w-64 max-w-full" />
-        </div>
-        <div className="flex gap-2">
-          <Skeleton className="h-9 w-28" />
-          <Skeleton className="h-9 w-20" />
+    <SkeletonPanel className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex h-10 shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-3">
+        <Skeleton className="h-2.5 w-28" />
+        <div className="flex items-center gap-2">
+          <Skeleton className="hidden h-7 w-36 rounded-md sm:block" />
+          <Skeleton className="h-7 w-16 rounded-md" />
         </div>
       </div>
-      <div className="divide-y divide-slate-100 dark:divide-white/5">
-        {Array.from({ length: 8 }).map((_, index) => (
+      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_4.5rem] gap-3 border-b border-white/[0.05] bg-black/10 px-3 py-2 sm:grid-cols-[1.4fr_1fr_1fr_5rem]">
+        <Skeleton className="h-2 w-20" />
+        <Skeleton className="hidden h-2 w-16 sm:block" />
+        <Skeleton className="hidden h-2 w-16 sm:block" />
+        <Skeleton className="h-2 w-10 justify-self-end" />
+      </div>
+      <div className="min-h-0 flex-1 divide-y divide-white/[0.045] overflow-hidden">
+        {Array.from({ length: rows }).map((_, index) => (
           <div
             key={index}
-            className="grid grid-cols-[1.4fr_1fr_1fr_0.8fr] gap-4 px-5 py-4"
+            className="grid grid-cols-[minmax(0,1fr)_4.5rem] items-center gap-3 px-3 py-3 sm:grid-cols-[1.4fr_1fr_1fr_5rem]"
           >
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-4/5" />
-            <Skeleton className="h-4 w-3/5" />
-            <Skeleton className="h-4 w-16 justify-self-end" />
+            <Skeleton className="h-2.5 w-4/5" />
+            <Skeleton className="hidden h-2.5 w-3/5 sm:block" />
+            <Skeleton className="hidden h-2.5 w-2/3 sm:block" />
+            <Skeleton className="h-2.5 w-12 justify-self-end" />
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function DetailSkeleton() {
-  return (
-    <div className="space-y-5">
-      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm dark:border-white/5 dark:bg-white/[0.03]">
-        <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
-          <div className="flex min-w-0 items-center gap-4">
-            <Skeleton className="h-14 w-14 rounded-xl" />
-            <div className="min-w-0 space-y-3">
-              <Skeleton className="h-7 w-64 max-w-full" />
-              <Skeleton className="h-3 w-96 max-w-full" />
-            </div>
-          </div>
-          <Skeleton className="h-10 w-32" />
-        </div>
-      </div>
-      <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
-        <Skeleton className="h-72 rounded-lg" />
-        <div className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 dark:border-white/5 dark:bg-white/[0.03]">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <div
-              key={index}
-              className="flex items-center justify-between gap-4"
-            >
-              <Skeleton className="h-3 w-24" />
-              <Skeleton className="h-4 w-28" />
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FormSkeleton() {
-  return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm dark:border-white/5 dark:bg-white/[0.03]">
-        <Skeleton className="h-4 w-28" />
-        <Skeleton className="mt-4 h-9 w-80 max-w-full" />
-        <Skeleton className="mt-3 h-3 w-[30rem] max-w-full" />
-      </div>
-      <div className="grid gap-5 lg:grid-cols-[1fr_22rem]">
-        <div className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 dark:border-white/5 dark:bg-white/[0.03]">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <div key={index} className="space-y-2">
-              <Skeleton className="h-3 w-28" />
-              <Skeleton className="h-11 w-full" />
-            </div>
-          ))}
-        </div>
-        <div className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 dark:border-white/5 dark:bg-white/[0.03]">
-          <Skeleton className="h-5 w-32" />
-          <Skeleton className="h-24 w-full" />
-          <Skeleton className="h-10 w-full" />
-        </div>
-      </div>
-    </div>
+    </SkeletonPanel>
   );
 }
 
 function DashboardSkeleton() {
   return (
-    <div className="space-y-5">
-      <MetricSkeletonGrid />
-      <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]">
-        <Skeleton className="h-80 rounded-lg" />
-        <div className="space-y-4 rounded-lg border border-slate-200 bg-white p-5 dark:border-white/5 dark:bg-white/[0.03]">
-          <Skeleton className="h-5 w-36" />
-          {Array.from({ length: 5 }).map((_, index) => (
-            <div key={index} className="flex items-center gap-3">
-              <Skeleton className="h-9 w-9 rounded-lg" />
-              <div className="flex-1 space-y-2">
-                <Skeleton className="h-3 w-3/5" />
-                <Skeleton className="h-2.5 w-2/5" />
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="min-h-0 flex-1 overflow-hidden p-3">
+        <div className="space-y-3">
+          <MetricSkeletonGrid />
+          <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(18rem,0.8fr)_minmax(28rem,1.2fr)]">
+            <SkeletonPanel className="h-36 p-4">
+              <Skeleton className="h-3 w-24" />
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <Skeleton key={index} className="h-9 rounded-md" />
+                ))}
               </div>
+            </SkeletonPanel>
+            <SkeletonPanel className="h-36 overflow-hidden">
+              <div className="flex h-10 items-center justify-between border-b border-white/[0.05] px-3">
+                <Skeleton className="h-3 w-24" />
+                <Skeleton className="h-2.5 w-16" />
+              </div>
+              <div className="grid grid-cols-1 gap-2 p-3 sm:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <Skeleton key={index} className="h-16 rounded-md" />
+                ))}
+              </div>
+            </SkeletonPanel>
+          </div>
+          <SkeletonPanel className="min-h-[172px] overflow-hidden">
+            <div className="flex h-10 items-center border-b border-white/[0.05] px-3">
+              <Skeleton className="h-3 w-24" />
             </div>
-          ))}
+            <CompactListSkeleton rows={4} />
+          </SkeletonPanel>
         </div>
       </div>
     </div>
@@ -143,55 +152,143 @@ function DashboardSkeleton() {
 
 function StudioSkeleton() {
   return (
-    <div
-      data-studio-workbench
-      className="flex h-full min-h-[30rem] overflow-hidden bg-[var(--studio-bg)] text-slate-200"
-    >
-      <div className="flex w-12 shrink-0 flex-col items-center gap-2.5 border-r border-white/5 bg-[#0b1120] py-4">
-        {Array.from({ length: 6 }).map((_, index) => (
-          <Skeleton
-            key={index}
-            className="h-8 w-8 rounded-lg bg-white/[0.04]"
-          />
-        ))}
-        <div className="mt-auto flex w-full flex-col items-center gap-2.5 border-t border-white/5 pt-2.5">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <Skeleton
-              key={index}
-              className="h-8 w-8 rounded-lg bg-white/[0.04]"
-            />
-          ))}
-          <Skeleton className="h-8 w-8 rounded-lg border border-red-500/20 bg-red-500/10" />
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="min-h-0 flex-1 overflow-hidden p-3">
+        <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="flex min-h-0 min-w-0 flex-col gap-3">
+            <SkeletonPanel className="h-36 shrink-0 p-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-3 w-28" />
+                <Skeleton className="h-7 w-20 rounded-md" />
+              </div>
+              <Skeleton className="mt-5 h-16 w-full rounded-md" />
+            </SkeletonPanel>
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {Array.from({ length: 8 }).map((_, index) => (
+                <SkeletonPanel key={index} className="min-h-[96px] p-3">
+                  <Skeleton className="h-2.5 w-2/5" />
+                  <Skeleton className="mt-4 h-5 w-3/5" />
+                  <Skeleton className="mt-3 h-2 w-4/5" />
+                </SkeletonPanel>
+              ))}
+            </div>
+          </div>
+          <SkeletonPanel className="hidden min-h-0 overflow-hidden lg:block">
+            <div className="flex h-10 items-center border-b border-white/[0.05] px-3">
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <CompactListSkeleton rows={7} />
+          </SkeletonPanel>
         </div>
       </div>
+    </div>
+  );
+}
 
-      <div className="flex min-w-0 flex-1 flex-col bg-[#0b1120]/20">
-        <div className="flex h-10 shrink-0 items-center border-b border-white/5 bg-[#0f172a] px-3">
-          <Skeleton className="h-7 w-28 rounded-md bg-red-500/10" />
-        </div>
-        <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/5 bg-[#0b1120]/70 px-4">
-          <div className="min-w-0 space-y-2">
-            <Skeleton className="h-3 w-32 bg-white/[0.06]" />
-            <Skeleton className="h-2.5 w-64 max-w-full bg-white/[0.04]" />
-          </div>
-          <Skeleton className="hidden h-3 w-36 bg-white/[0.04] md:block" />
-        </div>
-        <div className="min-h-0 flex-1 overflow-hidden p-3">
-          <div className="grid h-full grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-            <div className="min-w-0 space-y-3">
-              <Skeleton className="h-36 rounded-lg border border-white/10 bg-white/[0.03]" />
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                {Array.from({ length: 7 }).map((_, index) => (
-                  <Skeleton
-                    key={index}
-                    className="h-[104px] rounded-lg border border-white/5 bg-white/[0.025]"
-                  />
-                ))}
+function TableSkeleton() {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="flex min-h-0 flex-1 p-3">
+        <TablePanelSkeleton />
+      </div>
+    </div>
+  );
+}
+
+function DetailSkeleton() {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="min-h-0 flex-1 overflow-hidden p-3">
+        <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)]">
+          <div className="flex min-h-0 flex-col gap-3">
+            <SkeletonPanel className="flex h-20 shrink-0 items-center gap-3 p-3">
+              <Skeleton className="h-12 w-12 shrink-0 rounded-lg" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Skeleton className="h-4 w-48 max-w-[70%]" />
+                <Skeleton className="h-2.5 w-72 max-w-[90%]" />
               </div>
+              <Skeleton className="hidden h-8 w-24 rounded-md sm:block" />
+            </SkeletonPanel>
+            <SkeletonPanel className="min-h-[180px] flex-1 p-3">
+              <div className="flex items-center justify-between">
+                <Skeleton className="h-3 w-28" />
+                <Skeleton className="h-7 w-24 rounded-md" />
+              </div>
+              <Skeleton className="mt-4 h-[calc(100%_-_2.75rem)] min-h-28 w-full rounded-md" />
+            </SkeletonPanel>
+            <div className="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <SkeletonPanel key={index} className="h-16 p-3">
+                  <Skeleton className="h-2 w-3/5" />
+                  <Skeleton className="mt-3 h-3.5 w-4/5" />
+                </SkeletonPanel>
+              ))}
             </div>
-            <Skeleton className="hidden rounded-lg border border-white/10 bg-white/[0.03] lg:block" />
           </div>
+          <SkeletonPanel className="hidden min-h-0 overflow-hidden lg:block">
+            <div className="flex h-10 items-center border-b border-white/[0.05] px-3">
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <CompactListSkeleton rows={8} />
+          </SkeletonPanel>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function FormFieldsSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <div className="space-y-4">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div key={index} className="space-y-2">
+          <Skeleton className="h-2.5 w-24" />
+          <Skeleton className="h-9 w-full rounded-md" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FormSkeleton() {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="min-h-0 flex-1 overflow-hidden p-3">
+        <div className="mx-auto grid h-full min-h-0 max-w-6xl grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <SkeletonPanel className="min-h-0 p-4">
+            <div className="mb-5 space-y-2 border-b border-white/[0.05] pb-4">
+              <Skeleton className="h-4 w-36" />
+              <Skeleton className="h-2.5 w-72 max-w-full" />
+            </div>
+            <FormFieldsSkeleton />
+          </SkeletonPanel>
+          <SkeletonPanel className="hidden min-h-0 p-4 lg:block">
+            <Skeleton className="h-4 w-28" />
+            <Skeleton className="mt-4 h-24 w-full rounded-md" />
+            <div className="mt-4 space-y-3">
+              <Skeleton className="h-2.5 w-4/5" />
+              <Skeleton className="h-2.5 w-3/5" />
+              <Skeleton className="h-2.5 w-2/3" />
+            </div>
+            <Skeleton className="mt-6 h-9 w-full rounded-md" />
+          </SkeletonPanel>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DefaultSkeleton() {
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+      <ContentHeaderSkeleton />
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+        <MetricSkeletonGrid />
+        <TablePanelSkeleton rows={5} />
       </div>
     </div>
   );
@@ -200,28 +297,21 @@ function StudioSkeleton() {
 export function RouteSkeleton({ variant = 'default' }: RouteSkeletonProps) {
   return (
     <div
-      className={cn(
-        'w-full animate-in fade-in duration-200',
-        variant === 'studio'
-          ? 'h-full space-y-0'
-          : variant === 'form'
-            ? 'pb-16'
-            : 'space-y-5'
-      )}
-      aria-label="页面加载中"
+      aria-busy="true"
+      aria-live="polite"
+      className="h-full min-h-0 w-full overflow-hidden"
+      data-testid={`route-skeleton-${variant}`}
       role="status"
     >
-      {variant === 'dashboard' && <DashboardSkeleton />}
-      {variant === 'studio' && <StudioSkeleton />}
-      {variant === 'table' && <TableSkeleton />}
-      {variant === 'detail' && <DetailSkeleton />}
-      {variant === 'form' && <FormSkeleton />}
-      {variant === 'default' && (
-        <>
-          <MetricSkeletonGrid />
-          <TableSkeleton />
-        </>
-      )}
+      <span className="sr-only">页面加载中</span>
+      <div aria-hidden="true" className="h-full min-h-0">
+        {variant === 'dashboard' && <DashboardSkeleton />}
+        {variant === 'studio' && <StudioSkeleton />}
+        {variant === 'table' && <TableSkeleton />}
+        {variant === 'detail' && <DetailSkeleton />}
+        {variant === 'form' && <FormSkeleton />}
+        {variant === 'default' && <DefaultSkeleton />}
+      </div>
     </div>
   );
 }

@@ -255,7 +255,10 @@ export function StudioDataTable<TRow, TColumn extends StudioDataTableColumn>({
       ...baseStyle,
       left,
       position: 'sticky',
-      zIndex: layer === 'header' ? 30 : 20,
+      // Frozen body cells only need to sit above horizontally scrolling cells.
+      // Keep them below the sticky thead (z-10), otherwise they cover frozen
+      // column headers while the grid scrolls vertically.
+      zIndex: layer === 'header' ? 30 : 5,
     };
   };
 

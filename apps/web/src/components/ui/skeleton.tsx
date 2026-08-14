@@ -8,7 +8,8 @@ function Skeleton({
 }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('animate-pulse rounded-md bg-muted', className)}
+      aria-hidden="true"
+      className={cn('skeleton-shimmer rounded-md', className)}
       {...props}
     />
   );
