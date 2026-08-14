@@ -12,6 +12,7 @@ final class AppModel: ObservableObject {
   typealias TradeApprovalLoaderFactory = (ApolloSession) -> any TradeApprovalLoading
   typealias ManualOrderLoaderFactory = (ApolloSession) -> any ManualOrderLoading
   typealias MarketLoaderFactory = (ApolloSession) -> any MarketDataLoading
+  typealias LiquidationLoaderFactory = (ApolloSession) -> any LiquidationLoading
 
   enum ServiceState: Equatable {
     case idle
@@ -55,6 +56,7 @@ final class AppModel: ObservableObject {
 
   let configuration: APIConfiguration?
   let configurationErrorMessage: String?
+  let liquidationStore: LiquidationStore
   private let healthClient: (any HealthChecking)?
   private let sessionClient: (any SessionServing)?
   private let tokenStore: any SessionTokenStore
@@ -68,6 +70,7 @@ final class AppModel: ObservableObject {
   private let tradeApprovalLoaderFactory: TradeApprovalLoaderFactory
   private let manualOrderLoaderFactory: ManualOrderLoaderFactory
   private let marketLoaderFactory: MarketLoaderFactory
+  private let liquidationLoaderFactory: LiquidationLoaderFactory
   private var apolloSession: ApolloSession?
   private var portfolioRepository: (any PortfolioLoading)?
   private var strategyRepository: (any StrategyMonitoringLoading)?
@@ -89,6 +92,7 @@ final class AppModel: ObservableObject {
     localAuthentication: any LocalAuthenticationProviding = LocalAuthenticationGate()
   ) {
     self.localAuthentication = localAuthentication
+    liquidationStore = LiquidationStore(localAuthentication: localAuthentication)
     apolloSessionFactory = { configuration, accessToken in
       try ApolloClientFactory.make(
         configuration: configuration,
@@ -118,6 +122,9 @@ final class AppModel: ObservableObject {
     }
     marketLoaderFactory = { session in
       MarketRepository(client: session.client)
+    }
+    liquidationLoaderFactory = { session in
+      LiquidationRepository(client: session.client)
     }
     tokenStore = KeychainSessionTokenStore(
       service: bundle.bundleIdentifier ?? "com.limaofeng.quantx"
@@ -167,6 +174,7 @@ final class AppModel: ObservableObject {
       limitUpBoardState = .unavailable("环境配置无效，打板助手连接保持关闭")
       marketState = .unavailable("环境配置无效，行情连接保持关闭")
     }
+    configureLiquidationStore()
   }
 
   init(
@@ -204,6 +212,9 @@ final class AppModel: ObservableObject {
     },
     marketLoaderFactory: @escaping MarketLoaderFactory = { session in
       MarketRepository(client: session.client)
+    },
+    liquidationLoaderFactory: @escaping LiquidationLoaderFactory = { session in
+      LiquidationRepository(client: session.client)
     }
   ) {
     self.configuration = configuration
@@ -212,6 +223,7 @@ final class AppModel: ObservableObject {
     self.sessionClient = sessionClient
     self.tokenStore = tokenStore
     self.localAuthentication = localAuthentication
+    liquidationStore = LiquidationStore(localAuthentication: localAuthentication)
     self.apolloSessionFactory = apolloSessionFactory
     self.portfolioLoaderFactory = portfolioLoaderFactory
     self.strategyLoaderFactory = strategyLoaderFactory
@@ -221,6 +233,7 @@ final class AppModel: ObservableObject {
     self.tradeApprovalLoaderFactory = tradeApprovalLoaderFactory
     self.manualOrderLoaderFactory = manualOrderLoaderFactory
     self.marketLoaderFactory = marketLoaderFactory
+    self.liquidationLoaderFactory = liquidationLoaderFactory
 
     if configuration.accountDataEnabled, sessionClient != nil {
       authenticationState = .signedOut
@@ -242,6 +255,7 @@ final class AppModel: ObservableObject {
       limitUpBoardState = .unavailable("等待 TLS、认证与只读授权部署验收")
       marketState = .unavailable("等待 TLS、认证与行情授权部署验收")
     }
+    configureLiquidationStore()
   }
 
   var accountDataEnabled: Bool {
@@ -1603,6 +1617,18 @@ final class AppModel: ObservableObject {
     marketRepository = grantedScopes.contains("market:read")
       ? marketLoaderFactory(newApolloSession)
       : nil
+    liquidationStore.activate(
+      identity: LiquidationStore.SessionIdentity(
+        userID: session.user.id,
+        deviceSessionID: session.tokens.deviceSessionID,
+        activeAccountID: session.user.activeAccountID,
+        authorizedAccountIDs: Set(session.user.authorizedAccountIDs),
+        grantedScopes: grantedScopes
+      ),
+      repository: grantedScopes.contains("liquidation:control")
+        ? liquidationLoaderFactory(newApolloSession)
+        : nil
+    )
     portfolioState = grantedScopes.contains("portfolio:read")
       ? .idle
       : .unavailable("当前会话没有 portfolio:read 权限")
@@ -1728,6 +1754,7 @@ final class AppModel: ObservableObject {
     tradeApprovalRepository = nil
     manualOrderRepository = nil
     marketRepository = nil
+    liquidationStore.clearSession()
     tradeApprovalInProgress = false
     manualOrderInProgress = false
     watchlistMutationInProgress = false
@@ -1792,6 +1819,9 @@ final class AppModel: ObservableObject {
         }
       case .inactive, .background:
         privacyShieldVisible = true
+        if phase == .background {
+          liquidationStore.invalidateChallengeContext()
+        }
         Task { await apolloSession?.pauseSubscriptions() }
       @unknown default:
         privacyShieldVisible = true
@@ -1812,6 +1842,9 @@ final class AppModel: ObservableObject {
       }
     case .inactive, .background:
       privacyShieldVisible = true
+      if phase == .background {
+        liquidationStore.invalidateChallengeContext()
+      }
       if case .authenticated = authenticationState {
         localSessionLocked = true
       }
@@ -1819,6 +1852,44 @@ final class AppModel: ObservableObject {
     @unknown default:
       privacyShieldVisible = true
     }
+  }
+
+  private func configureLiquidationStore() {
+    liquidationStore.configure(
+      contextProvider: { [weak self] in
+        guard let self else {
+          return LiquidationPortfolioContext(
+            accountID: nil,
+            instrumentCodes: [],
+            localSessionLocked: true,
+            accountDataEnabled: false
+          )
+        }
+        let snapshot = self.portfolioState.snapshot
+        return LiquidationPortfolioContext(
+          accountID: snapshot?.account.id,
+          instrumentCodes: Set(
+            snapshot?.positions
+              .filter { $0.volume > 0 }
+              .map(\.stockCode) ?? []
+          ),
+          localSessionLocked: self.localSessionLocked,
+          accountDataEnabled: self.accountDataEnabled
+        )
+      },
+      refreshSession: { [weak self] in
+        guard let self else {
+          throw LiquidationStoreError.unavailable("个人账户会话已释放")
+        }
+        try await self.refreshAccessSession()
+        await self.refreshPortfolio()
+      },
+      refreshReadModels: { [weak self] in
+        guard let self else { return }
+        await self.refreshPortfolio()
+        await self.refreshTradingActivity()
+      }
+    )
   }
 
   private enum ReadOnlyFeature {

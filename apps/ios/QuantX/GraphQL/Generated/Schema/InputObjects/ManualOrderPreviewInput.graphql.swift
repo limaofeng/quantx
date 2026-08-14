@@ -18,6 +18,7 @@ extension QuantXAPI {
       priceType: GraphQLEnum<ManualOrderPriceType>,
       volume: Int32,
       idempotencyKey: String,
+      executionMode: GraphQLEnum<ManualOrderExecutionMode>? = nil,
       limitPrice: GraphQLNullable<Double> = nil
     ) {
       __data = InputDict([
@@ -27,6 +28,7 @@ extension QuantXAPI {
         "priceType": priceType,
         "volume": volume,
         "idempotencyKey": idempotencyKey,
+        "executionMode": executionMode ?? GraphQLNullable.none,
         "limitPrice": limitPrice
       ])
     }
@@ -59,6 +61,11 @@ extension QuantXAPI {
     var idempotencyKey: String {
       get { __data["idempotencyKey"] }
       set { __data["idempotencyKey"] = newValue }
+    }
+
+    var executionMode: GraphQLEnum<ManualOrderExecutionMode>? {
+      get { __data["executionMode"] }
+      set { __data["executionMode"] = newValue }
     }
 
     var limitPrice: GraphQLNullable<Double> {

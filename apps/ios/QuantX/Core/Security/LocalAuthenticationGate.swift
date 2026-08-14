@@ -2,11 +2,14 @@ import LocalAuthentication
 
 @MainActor
 protocol LocalAuthenticationProviding {
+  var tradeAuthorizationAvailable: Bool { get }
   func unlock(reason: String) async throws
   func authorizeTrade(reason: String) async throws
 }
 
 extension LocalAuthenticationProviding {
+  var tradeAuthorizationAvailable: Bool { false }
+
   func authorizeTrade(reason: String) async throws {
     try await unlock(reason: reason)
   }
@@ -26,6 +29,15 @@ final class LocalAuthenticationGate: LocalAuthenticationProviding {
         "交易确认要求启用 Face ID 或 Touch ID"
       }
     }
+  }
+
+  var tradeAuthorizationAvailable: Bool {
+    let context = LAContext()
+    var evaluationError: NSError?
+    return context.canEvaluatePolicy(
+      .deviceOwnerAuthenticationWithBiometrics,
+      error: &evaluationError
+    )
   }
 
   func unlock(reason: String) async throws {

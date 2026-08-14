@@ -1,0 +1,72 @@
+mutation IOSPreviewLiquidation($input: LiquidationPreviewInput!) {
+  previewLiquidation(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      groupId
+      accountId
+      scope
+      instrumentCodes
+      completionStrategy
+      conflictStrategy
+      executionMode
+      idempotencyKey
+      snapshotVersion
+      accountUpdatedAt
+      rolloutSnapshotId
+      rolloutSnapshotHash
+      challengeExpiresAt
+      includedCount
+      skippedCount
+      items {
+        instrumentCode
+        instrumentName
+        totalVolume
+        availableVolume
+        frozenVolume
+        t1UnavailableVolume
+        protectedVolume
+        pendingSellVolume
+        maxProtectedVolume
+        included
+        reasonCode
+        reasonDetail
+        positionUpdatedAt
+        conflicts {
+          planId
+          sourceType
+          status
+          remainingVolume
+          configVersion
+          pending
+        }
+      }
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmLiquidation($input: LiquidationConfirmationInput!) {
+  confirmLiquidation(input: $input) {
+    success
+    code
+    message
+    challengeId
+    groupId
+    commandId
+    status
+    createdCount
+    failedCount
+    plans {
+      instrumentCode
+      success
+      planId
+      protectedVolume
+      conflictPlanIds
+      error
+    }
+  }
+}

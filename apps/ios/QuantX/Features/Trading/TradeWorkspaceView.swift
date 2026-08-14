@@ -43,7 +43,7 @@ struct TradeWorkspaceView: View {
         case .activity:
           TradingActivityView(embeddedInNavigation: true)
         case .liquidation:
-          SafeLiquidationUnavailableView()
+          LiquidationWorkspaceView()
         }
       }
       .refreshable {
@@ -143,10 +143,10 @@ struct TradeWorkspaceView: View {
             .background(QuantXTheme.warning.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
             .accessibilityHidden(true)
           VStack(alignment: .leading, spacing: 5) {
-            Text("清仓与退出")
+            Text("卖出管理")
               .font(.headline)
               .foregroundStyle(.primary)
-            Text("个股、选中持仓、条件退出与统一进度")
+            Text("单只、选中或全部持仓的两阶段清仓")
               .font(.subheadline)
               .foregroundStyle(QuantXTheme.secondaryText)
           }
@@ -160,7 +160,7 @@ struct TradeWorkspaceView: View {
       }
     }
     .buttonStyle(.plain)
-    .accessibilityHint("查看清仓安全能力状态")
+    .accessibilityHint("进入先预览、后生物识别确认的卖出管理")
   }
 
   private var activityDetail: String {
@@ -691,17 +691,5 @@ private struct ManualOrderConfirmationSheet: View {
     } catch {
       errorMessage = (error as? LocalizedError)?.errorDescription ?? "手动委托确认失败，请重新预览"
     }
-  }
-}
-
-private struct SafeLiquidationUnavailableView: View {
-  var body: some View {
-    ContentUnavailableView {
-      Label("清仓安全契约待部署", systemImage: "lock.shield.fill")
-    } description: {
-      Text("现有清仓 Mutation 会直接执行且没有统一短时预览挑战，因此 iOS 不暴露该路径。安全预览与确认接口完成后再启用。")
-    }
-    .navigationTitle("清仓与退出")
-    .navigationBarTitleDisplayMode(.inline)
   }
 }
