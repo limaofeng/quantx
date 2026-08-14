@@ -176,6 +176,8 @@ class AiAssistantRepository:
     model: str,
     context_refs: Sequence[dict[str, Any]],
     account_id: Optional[str],
+    runtime_config_version: int = 0,
+    runtime_config_snapshot: Optional[dict[str, Any]] = None,
   ) -> tuple[AiAssistantMessage, AiAssistantRun, bool]:
     locked_thread = await self.db.scalar(
       select(AiAssistantThread)
@@ -229,8 +231,10 @@ class AiAssistantRepository:
       user_message_id=message.id,
       request_id=request_id[:64],
       status="QUEUED",
-      model=model[:80],
+      model=model[:120],
       prompt_version="v1",
+      runtime_config_version=max(0, int(runtime_config_version)),
+      runtime_config_snapshot=dict(runtime_config_snapshot or {}),
       account_id=account_id,
       context_refs=list(context_refs),
       external_search_enabled=bool(thread.external_search_enabled),
@@ -250,6 +254,9 @@ class AiAssistantRepository:
     *,
     previous: AiAssistantRun,
     request_id: str,
+    model: Optional[str] = None,
+    runtime_config_version: Optional[int] = None,
+    runtime_config_snapshot: Optional[dict[str, Any]] = None,
   ) -> AiAssistantRun:
     await self.db.execute(
       select(AiAssistantThread)
@@ -270,8 +277,18 @@ class AiAssistantRepository:
       user_message_id=previous.user_message_id,
       request_id=request_id[:64],
       status="QUEUED",
-      model=previous.model,
+      model=(model or previous.model)[:120],
       prompt_version=previous.prompt_version,
+      runtime_config_version=(
+        max(0, int(runtime_config_version))
+        if runtime_config_version is not None
+        else int(previous.runtime_config_version or 0)
+      ),
+      runtime_config_snapshot=(
+        dict(runtime_config_snapshot)
+        if runtime_config_snapshot is not None
+        else dict(previous.runtime_config_snapshot or {})
+      ),
       account_id=previous.account_id,
       context_refs=list(previous.context_refs or []),
       external_search_enabled=previous.external_search_enabled,

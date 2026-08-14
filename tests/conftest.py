@@ -204,6 +204,7 @@ def authorized_graphql_context():
                     "orders:read",
                     "portfolio:read",
                     "strategy:read",
+                    "system-config:write",
                     "system-status:read",
                     "trade:approve",
                     "mutation:write",

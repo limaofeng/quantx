@@ -92,6 +92,7 @@ _SYSTEM_FIELDS = {
   "schema",
   "type",
   "agentdevices",
+  "airuntimesettings",
   "flowrun",
   "flowruns",
   "getdeploymentbyid",
@@ -99,6 +100,7 @@ _SYSTEM_FIELDS = {
   "intradaywarmcachestatus",
   "listdeployments",
 }
+_SYSTEM_CONFIG_MUTATION_FIELDS = {"updateairuntimesettings"}
 _MARKET_FIELDS = {
   "dividfactors",
   "financialoverview",
@@ -178,6 +180,8 @@ def normalize_field_name(value: str) -> str:
 def required_permission(operation_name: str, field_name: str) -> str:
   normalized = normalize_field_name(field_name)
   if operation_name == "Mutation":
+    if normalized in _SYSTEM_CONFIG_MUTATION_FIELDS:
+      return "system-config:write"
     if normalized in _ASSISTANT_MUTATION_FIELDS:
       return "assistant:write"
     if normalized in _TRADE_APPROVAL_MUTATION_FIELDS:

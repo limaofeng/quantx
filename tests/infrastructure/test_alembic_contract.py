@@ -224,3 +224,12 @@ def test_first_board_release_gate_follows_market_facts_and_refuses_downgrade() -
   assert revision.down_revision == "20260814_0012"
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()
+
+
+def test_ai_runtime_settings_revision_follows_first_board_release() -> None:
+  revision = _load_revision(
+    "20260814_0014_ai_runtime_settings.py",
+    "quantx_test_ai_runtime_settings_revision",
+  )
+
+  assert revision.down_revision == "20260814_0013"

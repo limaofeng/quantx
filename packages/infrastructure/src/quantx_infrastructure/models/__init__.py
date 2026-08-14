@@ -32,6 +32,7 @@ from .ai_assistant import (
   AiAssistantThread,
   AiAssistantToolCall,
 )
+from .ai_runtime_settings import AiRuntimeSettingsAudit, AiRuntimeSettingsRecord
 from .auth import (
   AuthAuditEvent,
   AuthConsumedRefreshToken,
@@ -171,6 +172,8 @@ __all__ = [
   "AiAssistantSessionItem",
   "AiAssistantThread",
   "AiAssistantToolCall",
+  "AiRuntimeSettingsAudit",
+  "AiRuntimeSettingsRecord",
   "AgentDevice",
   "AccountTradingRollout",
   "AccountTradingRolloutEvent",

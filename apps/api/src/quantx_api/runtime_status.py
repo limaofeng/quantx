@@ -228,6 +228,14 @@ async def component_status() -> dict[str, dict[str, Any]]:
     _component_heartbeats(),
     _prefect_status(),
   )
+  raw_ai_runtime = heartbeats.get("ai-runtime", {"status": "offline"})
+  ai_runtime = {
+    "status": raw_ai_runtime.get("status", "offline"),
+    "ageSeconds": raw_ai_runtime.get("ageSeconds"),
+  }
+  details = dict(raw_ai_runtime.get("details") or {})
+  if details.get("configVersion") is not None:
+    ai_runtime["configVersion"] = details.get("configVersion")
   return {
     "api": {"status": "ready"},
     "database": database,
@@ -240,6 +248,7 @@ async def component_status() -> dict[str, dict[str, Any]]:
       "workers": prefect.get("workers", []),
     },
     "qmtAgent": heartbeats["qmt-agent"],
+    "aiRuntime": ai_runtime,
     "marketData": heartbeats.get("market-data", {"status": "offline"}),
     "prefect": prefect,
   }

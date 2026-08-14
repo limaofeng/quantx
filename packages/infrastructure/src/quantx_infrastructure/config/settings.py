@@ -196,6 +196,7 @@ class Settings(BaseSettings):
       "strategy:read",
       "orders:read",
       "system-status:read",
+      "system-config:write",
       "mutation:write",
       "assistant:read",
       "assistant:write",
@@ -281,6 +282,8 @@ class Settings(BaseSettings):
   )
   quantx_ai_model: str = Field(
     default="gpt-5.6",
+    min_length=1,
+    max_length=120,
     description="AI Assistant 使用的 OpenAI 模型",
   )
   ai_assistant_max_concurrent_runs: int = Field(default=2, ge=1, le=16)

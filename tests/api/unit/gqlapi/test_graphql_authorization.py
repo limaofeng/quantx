@@ -53,6 +53,14 @@ def test_agent_device_query_requires_system_status_permission():
   assert required_permission("Query", "agentDevices") == "system-status:read"
 
 
+def test_ai_runtime_settings_use_dedicated_system_permissions():
+  assert required_permission("Query", "aiRuntimeSettings") == "system-status:read"
+  assert (
+    required_permission("Mutation", "updateAiRuntimeSettings")
+    == "system-config:write"
+  )
+
+
 @pytest.mark.parametrize(
   "field_name",
   [

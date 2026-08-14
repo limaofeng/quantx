@@ -24,6 +24,8 @@ TABLE_COMMENTS: dict[str, str] = {
   "ai_assistant_events": "AI Assistant 持久化流式事件",
   "ai_assistant_tool_calls": "AI Assistant 工具调用与审批审计",
   "ai_assistant_deletion_audits": "AI Assistant 对话删除无内容审计",
+  "ai_runtime_settings": "AI Runtime 全局非敏感动态配置",
+  "ai_runtime_settings_audits": "AI Runtime 配置变更审计",
   "broker_position_snapshots": "券商持仓全量快照",
   "closed_position_cycles": "已平仓持仓周期记录",
   "conditional_liquidation_orders": "条件清仓任务",

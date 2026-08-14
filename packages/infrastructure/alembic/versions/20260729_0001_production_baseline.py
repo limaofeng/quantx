@@ -40,6 +40,8 @@ POST_BASELINE_TABLES = {
   "ai_assistant_session_items",
   "ai_assistant_threads",
   "ai_assistant_tool_calls",
+  "ai_runtime_settings",
+  "ai_runtime_settings_audits",
   "auto_exit_plan_events",
   "auto_exit_plans",
   "financial_metric_roe_qualities",

@@ -12,7 +12,6 @@ from typing import AsyncGenerator, Optional
 import strawberry
 from graphql import GraphQLError
 from quantx_domain.clock import utcnow
-from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
@@ -20,10 +19,19 @@ from quantx_infrastructure.repositories.ai_assistant_repository import (
   AiAssistantRepository,
   AssistantRunAlreadyActiveError,
 )
+from quantx_infrastructure.repositories.ai_runtime_settings_repository import (
+  AiRuntimeEditableValues,
+  AiRuntimeSettingsRepository,
+  AiRuntimeSettingsVersionConflict,
+  EffectiveAiRuntimeSettings,
+)
 from quantx_infrastructure.services.ai_assistant_event_bus import (
   ai_assistant_event_channel,
   notify_ai_assistant_event,
   notify_ai_assistant_run,
+)
+from quantx_infrastructure.services.ai_runtime_settings_event_bus import (
+  notify_ai_runtime_settings,
 )
 
 from ..security import principal_from_context
@@ -42,6 +50,13 @@ from ..types.ai_assistant_types import (
   ResolveAiAssistantApprovalInput,
   SendAiAssistantMessageInput,
   UpdateAiAssistantThreadInput,
+)
+from ..types.ai_runtime_settings_types import (
+  AiRuntimeApplyState,
+  AiRuntimeSettings,
+  AiRuntimeSettingsSource,
+  AiRuntimeStatus,
+  UpdateAiRuntimeSettingsInput,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,17 +104,66 @@ def _validate_thread_account(principal, thread) -> None:
     principal.require_account(thread.account_id)
 
 
-def _assistant_configured() -> bool:
-  return bool(settings.ai_assistant_enabled and settings.openai_api_key.strip())
+def _assistant_configured(config: EffectiveAiRuntimeSettings) -> bool:
+  return bool(config.values.enabled and config.api_key_configured)
 
 
-def _require_assistant_configured() -> None:
-  if not _assistant_configured():
+def _require_assistant_configured(config: EffectiveAiRuntimeSettings) -> None:
+  if not _assistant_configured(config):
     raise _error(
       "AI_ASSISTANT_UNAVAILABLE",
       "AI Assistant 尚未配置，QuantX 其他功能不受影响",
       retryable=False,
     )
+
+
+async def _runtime_settings_view(
+  db,
+  config: EffectiveAiRuntimeSettings,
+) -> AiRuntimeSettings:
+  heartbeat = await db.get(RuntimeComponentHeartbeat, "ai-runtime")
+  applied_version: int | None = None
+  runtime_status = AiRuntimeStatus.OFFLINE
+  apply_state = AiRuntimeApplyState.OFFLINE
+  if heartbeat is not None:
+    age_seconds = (utcnow() - heartbeat.updated_at).total_seconds()
+    if age_seconds <= 45:
+      details = dict(heartbeat.details or {})
+      raw_version = details.get("configVersion")
+      if raw_version is not None:
+        try:
+          applied_version = max(0, int(raw_version))
+        except (TypeError, ValueError):
+          applied_version = None
+      raw_status = str(heartbeat.status or "unavailable").upper()
+      runtime_status = {
+        "READY": AiRuntimeStatus.READY,
+        "DISABLED": AiRuntimeStatus.DISABLED,
+        "UNCONFIGURED": AiRuntimeStatus.UNCONFIGURED,
+        "UNAVAILABLE": AiRuntimeStatus.UNAVAILABLE,
+      }.get(raw_status, AiRuntimeStatus.UNAVAILABLE)
+      apply_state = (
+        AiRuntimeApplyState.APPLIED
+        if applied_version == config.version
+        else AiRuntimeApplyState.PENDING
+      )
+  return AiRuntimeSettings(
+    version=config.version,
+    source=AiRuntimeSettingsSource(config.source),
+    enabled=config.values.enabled,
+    api_key_configured=config.api_key_configured,
+    model=config.values.model,
+    max_concurrent_runs=config.values.max_concurrent_runs,
+    max_turns=config.values.max_turns,
+    max_tool_calls=config.values.max_tool_calls,
+    run_timeout_seconds=config.values.run_timeout_seconds,
+    tracing_enabled=config.tracing_enabled,
+    lease_seconds=config.lease_seconds,
+    runtime_status=runtime_status,
+    applied_version=applied_version,
+    apply_state=apply_state,
+    updated_at=config.updated_at,
+  )
 
 
 def _run_payload(run) -> dict:
@@ -158,6 +222,16 @@ async def _safe_notify_run(run_id: str) -> None:
     logger.warning("AI assistant Redis wake-up failed: %s", exc.__class__.__name__)
 
 
+async def _safe_notify_runtime_settings(version: int) -> None:
+  try:
+    await notify_ai_runtime_settings(version)
+  except Exception as exc:
+    logger.warning(
+      "AI Runtime settings wake-up failed: %s",
+      exc.__class__.__name__,
+    )
+
+
 async def _safe_notify_event(thread_id: str, sequence: int) -> None:
   try:
     await notify_ai_assistant_event(thread_id=thread_id, sequence=sequence)
@@ -167,25 +241,30 @@ async def _safe_notify_event(thread_id: str, sequence: int) -> None:
 
 @strawberry.type(description="产品内 AI Assistant 查询")
 class AiAssistantQuery:
+  @strawberry.field(description="AI Runtime 全局非敏感配置与应用状态")
+  async def ai_runtime_settings(
+    self,
+    info: strawberry.types.Info,
+  ) -> AiRuntimeSettings:
+    principal_from_context(info.context)
+    async with AsyncSessionLocal() as db:
+      config = await AiRuntimeSettingsRepository(db).get_effective()
+      return await _runtime_settings_view(db, config)
+
   @strawberry.field
   async def ai_assistant_capabilities(
     self,
     info: strawberry.types.Info,
   ) -> AiAssistantCapabilities:
     principal_from_context(info.context)
-    status = "unconfigured"
     async with AsyncSessionLocal() as db:
-      heartbeat = await db.get(RuntimeComponentHeartbeat, "ai-runtime")
-      if heartbeat is not None:
-        status = str(heartbeat.status or "unavailable").lower()
-        age_seconds = (utcnow() - heartbeat.updated_at).total_seconds()
-        if age_seconds > 45:
-          status = "unavailable"
-    enabled = _assistant_configured()
+      config = await AiRuntimeSettingsRepository(db).get_effective()
+      runtime_view = await _runtime_settings_view(db, config)
+    enabled = _assistant_configured(config)
     return AiAssistantCapabilities(
       enabled=enabled,
-      runtime_status=status,
-      model=settings.quantx_ai_model,
+      runtime_status=runtime_view.runtime_status.value.lower(),
+      model=config.values.model,
       external_search_available=enabled,
       agents=["research_assistant"],
       tools=[
@@ -216,7 +295,7 @@ class AiAssistantQuery:
       ],
       max_message_length=MAX_MESSAGE_LENGTH,
       max_context_refs=MAX_CONTEXT_REFS,
-      max_concurrent_runs=settings.ai_assistant_max_concurrent_runs,
+      max_concurrent_runs=config.values.max_concurrent_runs,
     )
 
   @strawberry.field
@@ -300,6 +379,53 @@ class AiAssistantQuery:
 
 @strawberry.type(description="产品内 AI Assistant 变更")
 class AiAssistantMutation:
+  @strawberry.mutation(description="更新 AI Runtime 全局非敏感配置")
+  async def update_ai_runtime_settings(
+    self,
+    info: strawberry.types.Info,
+    input: UpdateAiRuntimeSettingsInput,
+  ) -> AiRuntimeSettings:
+    principal = principal_from_context(info.context)
+    model = input.model.strip()
+    if input.expected_version < 0:
+      raise _error("AI_RUNTIME_INVALID_VERSION", "配置版本不能小于 0")
+    if not model or len(model) > 120:
+      raise _error("AI_RUNTIME_INVALID_MODEL", "模型名称必须为 1 至 120 个字符")
+    if not 1 <= input.max_concurrent_runs <= 16:
+      raise _error("AI_RUNTIME_INVALID_CONCURRENCY", "最大并发必须为 1 至 16")
+    if not 1 <= input.max_turns <= 64:
+      raise _error("AI_RUNTIME_INVALID_TURNS", "最大轮次必须为 1 至 64")
+    if not 1 <= input.max_tool_calls <= 64:
+      raise _error("AI_RUNTIME_INVALID_TOOL_CALLS", "工具调用上限必须为 1 至 64")
+    if not 30 <= input.run_timeout_seconds <= 3600:
+      raise _error("AI_RUNTIME_INVALID_TIMEOUT", "运行超时必须为 30 至 3600 秒")
+    values = AiRuntimeEditableValues(
+      enabled=input.enabled,
+      model=model,
+      max_concurrent_runs=input.max_concurrent_runs,
+      max_turns=input.max_turns,
+      max_tool_calls=input.max_tool_calls,
+      run_timeout_seconds=input.run_timeout_seconds,
+    )
+    async with AsyncSessionLocal() as db:
+      repository = AiRuntimeSettingsRepository(db)
+      try:
+        config = await repository.update(
+          expected_version=input.expected_version,
+          values=values,
+          user_id=principal.user_id,
+          request_id=str(info.context.get("request_id") or "graphql"),
+        )
+      except AiRuntimeSettingsVersionConflict as exc:
+        raise _error(
+          "AI_RUNTIME_SETTINGS_VERSION_CONFLICT",
+          f"配置已更新，请刷新后重试（当前版本 {exc.current_version}）",
+          retryable=True,
+        ) from None
+      view = await _runtime_settings_view(db, config)
+    await _safe_notify_runtime_settings(config.version)
+    return view
+
   @strawberry.mutation
   async def create_ai_assistant_thread(
     self,
@@ -327,7 +453,6 @@ class AiAssistantMutation:
     info: strawberry.types.Info,
     input: SendAiAssistantMessageInput,
   ) -> AiAssistantRun:
-    _require_assistant_configured()
     principal = principal_from_context(info.context)
     text = input.text.strip()
     client_message_id = input.client_message_id.strip()
@@ -337,6 +462,8 @@ class AiAssistantMutation:
       raise _error("AI_INVALID_CLIENT_MESSAGE_ID", "消息幂等标识无效")
     refs = _context_refs(input)
     async with AsyncSessionLocal() as db:
+      config = await AiRuntimeSettingsRepository(db).get_effective()
+      _require_assistant_configured(config)
       repository = AiAssistantRepository(db)
       thread = await repository.get_thread(
         str(input.thread_id), user_id=principal.user_id
@@ -373,9 +500,11 @@ class AiAssistantMutation:
           text=text,
           client_message_id=client_message_id,
           request_id=str(info.context.get("request_id") or "graphql"),
-          model=settings.quantx_ai_model,
+          model=config.values.model,
           context_refs=refs,
           account_id=selected_account_id,
+          runtime_config_version=config.version,
+          runtime_config_snapshot=config.values.to_run_snapshot(),
         )
       except AssistantRunAlreadyActiveError as exc:
         raise _error(
@@ -428,9 +557,10 @@ class AiAssistantMutation:
     info: strawberry.types.Info,
     run_id: strawberry.ID,
   ) -> AiAssistantRun:
-    _require_assistant_configured()
     principal = principal_from_context(info.context)
     async with AsyncSessionLocal() as db:
+      config = await AiRuntimeSettingsRepository(db).get_effective()
+      _require_assistant_configured(config)
       repository = AiAssistantRepository(db)
       previous = await repository.get_run(str(run_id), user_id=principal.user_id)
       if previous is None:
@@ -446,6 +576,9 @@ class AiAssistantMutation:
         run = await repository.retry_run(
           previous=previous,
           request_id=str(info.context.get("request_id") or "graphql"),
+          model=config.values.model,
+          runtime_config_version=config.version,
+          runtime_config_snapshot=config.values.to_run_snapshot(),
         )
       except AssistantRunAlreadyActiveError:
         raise _error("AI_RUN_ALREADY_ACTIVE", "当前对话已有执行中的任务") from None
@@ -465,7 +598,6 @@ class AiAssistantMutation:
     info: strawberry.types.Info,
     input: ResolveAiAssistantApprovalInput,
   ) -> AiAssistantRun:
-    _require_assistant_configured()
     principal = principal_from_context(info.context)
     async with AsyncSessionLocal() as db:
       repository = AiAssistantRepository(db)

@@ -99,6 +99,15 @@ async def test_component_status_exposes_worker_registration_counts(
       "qmt-agent": {"status": "ready"},
       "engine": {"status": "ready"},
       "market-data": {"status": "ready"},
+      "ai-runtime": {
+        "status": "ready",
+        "ageSeconds": 2.5,
+        "details": {
+          "configVersion": 3,
+          "host": "must-not-be-public",
+          "pid": 123,
+        },
+      },
     }
 
   async def fake_prefect_status():
@@ -128,6 +137,13 @@ async def test_component_status_exposes_worker_registration_counts(
     "offlineWorkers": 2,
     "workers": [{"name": "worker-1", "status": "ONLINE"}],
   }
+  assert components["aiRuntime"] == {
+    "status": "ready",
+    "ageSeconds": 2.5,
+    "configVersion": 3,
+  }
+  assert "host" not in components["aiRuntime"]
+  assert "aiRuntime" not in runtime_status.required_components()
 
 
 @pytest.mark.asyncio
