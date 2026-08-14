@@ -164,6 +164,11 @@ class LiquidationService:
     auto_exit_authorized: bool = False,
   ) -> ConditionalLiquidationOrder:
     """创建或更新某只持仓的条件清仓单。"""
+    if bool(auto_exit_authorized):
+      raise LiquidationError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: "
+        "布尔字段不能开启自动实盘退出"
+      )
     normalized_stock_code = self._normalize_stock_code(stock_code)
     normalized_sell_mode = self._normalize_sell_mode(sell_mode)
     normalized_strategy = self._normalize_conditional_strategy(strategy)
@@ -223,7 +228,7 @@ class LiquidationService:
       "strategy": normalized_strategy,
       "dynamic_policy": dict(dynamic_policy or {}),
       "execution_mode": normalized_execution_mode,
-      "auto_exit_authorized": bool(auto_exit_authorized),
+      "auto_exit_authorized": False,
       "sell_mode": normalized_sell_mode,
       "sell_ratio_pct": sell_ratio_pct,
       "sell_volume": int(sell_volume) if sell_volume is not None else None,
@@ -589,7 +594,9 @@ class LiquidationService:
         bucket="default",
         rules=rules,
         t1_policy=ExitT1Policy.WAIT_UNTIL_SELLABLE,
-        auto_exit_authorized=True,
+        # This transient book is used only to evaluate whether a condition
+        # fired; it must not mint execution authority from a legacy boolean.
+        auto_exit_authorized=False,
       ),
       volume=max(
         1,

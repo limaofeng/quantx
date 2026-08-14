@@ -112,7 +112,9 @@ class ConditionalLiquidationMonitor:
             strategy=order.strategy,
             dynamic_policy=dict(order.dynamic_policy or {}),
             execution_mode=order.execution_mode,
-            auto_exit_authorized=bool(order.auto_exit_authorized),
+            # Legacy rows cannot carry autonomous LIVE authority into the
+            # unified monitor without a device-bound exact challenge.
+            auto_exit_authorized=False,
             sell_mode=order.sell_mode,
             sell_ratio_pct=order.sell_ratio_pct,
             sell_volume=order.sell_volume,

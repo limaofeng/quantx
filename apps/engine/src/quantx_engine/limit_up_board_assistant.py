@@ -500,10 +500,11 @@ class LimitUpBoardAssistantService:
       {
         "account_id": account_id,
         "entry_execution_mode": "MANUAL_CONFIRM",
-        "auto_exit_authorized": (
-          str(config.mode).lower() != "live"
-          or bool(config.auto_exit_acknowledged)
-        ),
+        # An acknowledgement stored in strategy configuration is not an
+        # exact, device-bound authorization for a LIVE exit plan.  PAPER does
+        # not need the flag and LIVE authorization is granted after the plan
+        # has been persisted and previewed.
+        "auto_exit_authorized": False,
         "global_config_version": int(config.config_version or 0),
         "position_profile_overrides": {
           "max_position_pct": max_position,

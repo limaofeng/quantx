@@ -124,6 +124,12 @@ class TradingService:
           or 0
         ),
         request_metadata=context,
+        require_risk_reducing_live_authorization=bool(
+          context.get("exact_auto_exit_authorized")
+        ),
+        authorization_user_id=str(
+          context.get("auto_exit_authorization_user_id") or ""
+        ),
       )
     return {
       "success": True,

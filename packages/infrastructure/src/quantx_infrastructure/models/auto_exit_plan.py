@@ -3,6 +3,7 @@
 from sqlalchemy import (
   JSON,
   Boolean,
+  CheckConstraint,
   Column,
   DateTime,
   Float,
@@ -37,6 +38,25 @@ class AutoExitPlanRecord(Base, TimestampMixin):
       "instrument_code",
       "status",
     ),
+    CheckConstraint(
+      "(auto_exit_authorized = false AND "
+      "auto_exit_authorization_fingerprint IS NULL AND "
+      "auto_exit_authorization_config_version IS NULL AND "
+      "auto_exit_authorized_at IS NULL AND "
+      "auto_exit_authorization_expires_at IS NULL AND "
+      "auto_exit_authorization_challenge_id IS NULL AND "
+      "auto_exit_authorization_user_id IS NULL AND "
+      "auto_exit_authorization_device_session_id IS NULL) OR "
+      "(auto_exit_authorized = true AND "
+      "auto_exit_authorization_fingerprint IS NOT NULL AND "
+      "auto_exit_authorization_config_version IS NOT NULL AND "
+      "auto_exit_authorized_at IS NOT NULL AND "
+      "auto_exit_authorization_expires_at IS NOT NULL AND "
+      "auto_exit_authorization_challenge_id IS NOT NULL AND "
+      "auto_exit_authorization_user_id IS NOT NULL AND "
+      "auto_exit_authorization_device_session_id IS NOT NULL)",
+      name="ck_auto_exit_plan_exact_authorization",
+    ),
   )
 
   plan_id = Column(String(128), primary_key=True)
@@ -51,6 +71,13 @@ class AutoExitPlanRecord(Base, TimestampMixin):
   status = Column(String(32), nullable=False, default="ACTIVE")
   execution_mode = Column(String(16), nullable=False, default="paper")
   auto_exit_authorized = Column(Boolean, nullable=False, default=False)
+  auto_exit_authorization_fingerprint = Column(String(64), nullable=True)
+  auto_exit_authorization_config_version = Column(Integer, nullable=True)
+  auto_exit_authorized_at = Column(DateTime, nullable=True)
+  auto_exit_authorization_expires_at = Column(DateTime, nullable=True)
+  auto_exit_authorization_challenge_id = Column(String(36), nullable=True)
+  auto_exit_authorization_user_id = Column(String(36), nullable=True)
+  auto_exit_authorization_device_session_id = Column(String(36), nullable=True)
   config_version = Column(Integer, nullable=False, default=1)
   completion_strategy = Column(String(32), nullable=True)
 

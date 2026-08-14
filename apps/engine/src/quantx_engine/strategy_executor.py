@@ -1841,10 +1841,11 @@ class StrategyExecutor:
       execution_mode = TradeIntentExecutionMode(
         str(execution.execution_mode or "AUTO").upper()
       )
-      if (
-        runtime.context.mode == StrategyRunMode.LIVE
-        and not plan.template.auto_exit_authorized
-      ):
+      if runtime.context.mode == StrategyRunMode.LIVE:
+        # LIVE automation is granted only to the persisted plan version by
+        # ExitPlanAuthorizationChallengeService.  This in-memory fallback has
+        # no durable challenge envelope to validate, so it must fail closed
+        # even when an old strategy template contains the legacy boolean.
         execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
       priority = (
         TradeIntentPriority.URGENT

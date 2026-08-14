@@ -9,6 +9,10 @@ import strawberry
 
 from quantx_api.auth.errors import AuthError, forbidden
 
+from ..exit_plan_authorization import (
+  ExitPlanAuthorizationChallengeService,
+  normalize_exit_plan_authorization_request,
+)
 from ..liquidation_approval import (
   LiquidationChallengeService,
   normalize_liquidation_request,
@@ -26,6 +30,12 @@ from ..types.liquidation_types import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationOrderInput,
   CreateManualExitPlanInput,
+  ExitPlanAuthorizationConfirmationInput,
+  ExitPlanAuthorizationConfirmationResult,
+  ExitPlanAuthorizationPositionSnapshot,
+  ExitPlanAuthorizationPreview,
+  ExitPlanAuthorizationPreviewInput,
+  ExitPlanAuthorizationPreviewResult,
   ExitPlanCapabilities,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
@@ -129,6 +139,59 @@ def _native_liquidation_preview(data) -> LiquidationPreview:
     skipped_count=sum(1 for item in items if not item.included),
     items=items,
     warnings=list(data.snapshot.warnings),
+  )
+
+
+def _exit_plan_authorization_preview(data) -> ExitPlanAuthorizationPreview:
+  plan = dict(data.plan_binding or {})
+  template = dict(plan.get("template") or {})
+  position = dict(data.safety_subject.get("position") or {})
+  protections = [
+    LiquidationConflictPreview(
+      plan_id=str(item.get("plan_id") or ""),
+      source_type=str(item.get("source_type") or ""),
+      status=str(item.get("status") or ""),
+      remaining_volume=int(item.get("remaining_volume") or 0),
+      config_version=int(item.get("config_version") or 0),
+      pending=bool(item.get("pending")),
+    )
+    for item in list(data.safety_subject.get("other_protections") or [])
+  ]
+  return ExitPlanAuthorizationPreview(
+    challenge_id=data.challenge_id,
+    confirmation_token=data.confirmation_token,
+    account_id=data.request.account_id,
+    plan_id=data.request.plan_id,
+    instrument_code=str(plan.get("instrument_code") or ""),
+    bucket=str(plan.get("bucket") or ""),
+    source_type=str(plan.get("source_type") or ""),
+    execution_mode=str(plan.get("execution_mode") or ""),
+    config_version=int(plan.get("config_version") or 0),
+    protected_volume=int(plan.get("protected_volume") or 0),
+    exited_volume=int(plan.get("exited_volume") or 0),
+    remaining_volume=int(plan.get("remaining_volume") or 0),
+    rules=list(template.get("rules") or []),
+    t1_policy=str(template.get("t1_policy") or ""),
+    execution_policy=dict(template.get("execution") or {}),
+    position=ExitPlanAuthorizationPositionSnapshot(
+      total_volume=int(position.get("total_volume") or 0),
+      available_volume=int(position.get("available_volume") or 0),
+      frozen_volume=int(position.get("frozen_volume") or 0),
+      yesterday_volume=int(position.get("yesterday_volume") or 0),
+      t1_unavailable_volume=int(position.get("t1_unavailable_volume") or 0),
+      position_updated_at=data.position_updated_at,
+    ),
+    other_protections=protections,
+    readiness=dict(data.readiness or {}),
+    authorization_fingerprint=data.authorization_fingerprint,
+    authorization_expires_at=data.authorization_expires_at,
+    challenge_expires_at=data.challenge_expires_at,
+    warnings=[
+      "确认仅授权该计划当前版本和固定安全快照，不创建委托或成交",
+      "规则、数量、配置版本、持仓/T+1、冲突或待成交 SELL 变化后授权失效",
+      "授权有效期为服务端固定 7 天；到期后 SELL 意图降级为逐次人工确认",
+      "每次触发仍重新经过实时风控、实盘开关、对账和唯一 QMT Agent 门禁",
+    ],
   )
 
 
@@ -252,6 +315,94 @@ class LiquidationQuery:
 
 @strawberry.type(description="卖出管理与统一退出计划变更")
 class LiquidationMutation:
+  @strawberry.mutation(description="预览既有 LIVE 退出计划的精确自动实盘授权")
+  async def preview_exit_plan_authorization(
+    self,
+    info: strawberry.types.Info,
+    input: ExitPlanAuthorizationPreviewInput,
+  ) -> ExitPlanAuthorizationPreviewResult:
+    try:
+      principal = principal_from_context(info.context)
+      request = normalize_exit_plan_authorization_request(
+        account_id=authorized_account_id(info, input.account_id),
+        plan_id=input.plan_id,
+        expected_config_version=input.expected_config_version,
+        idempotency_key=input.idempotency_key,
+      )
+      preview = await ExitPlanAuthorizationChallengeService.issue(
+        principal=principal,
+        request=request,
+      )
+      return ExitPlanAuthorizationPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对规则、保护量、T+1、委托策略和 7 天授权期限后进行本机确认",
+        preview=_exit_plan_authorization_preview(preview),
+      )
+    except TradeApprovalChallengeError as exc:
+      return ExitPlanAuthorizationPreviewResult(False, exc.code, exc.message)
+    except AuthError as exc:
+      return ExitPlanAuthorizationPreviewResult(False, exc.code, exc.message)
+    except Exception:
+      logger.exception("退出计划自动实盘授权预览失败")
+      return ExitPlanAuthorizationPreviewResult(
+        False,
+        "EXIT_PLAN_AUTHORIZATION_UNAVAILABLE",
+        "授权预览暂不可用，请刷新退出计划和账户快照后重试",
+      )
+
+  @strawberry.mutation(description="确认精确计划版本的自动实盘退出授权")
+  async def confirm_exit_plan_authorization(
+    self,
+    info: strawberry.types.Info,
+    input: ExitPlanAuthorizationConfirmationInput,
+  ) -> ExitPlanAuthorizationConfirmationResult:
+    try:
+      principal = principal_from_context(info.context)
+      principal.require_permission("trade:approve")
+      request = normalize_exit_plan_authorization_request(
+        account_id=authorized_account_id(info, input.account_id),
+        plan_id=input.plan_id,
+        expected_config_version=input.expected_config_version,
+        idempotency_key=input.idempotency_key,
+      )
+      result = await ExitPlanAuthorizationChallengeService.confirm(
+        principal=principal,
+        request=request,
+        challenge_id=input.challenge_id,
+        confirmation_token=input.confirmation_token,
+      )
+      return ExitPlanAuthorizationConfirmationResult(
+        success=True,
+        code="AUTHORIZED",
+        message="该退出计划版本已获得精确自动实盘授权；本次确认未创建任何委托",
+        challenge_id=result.challenge_id,
+        plan_id=result.plan_id,
+        config_version=result.config_version,
+        authorized=True,
+        authorization_expires_at=result.authorization_expires_at,
+        audit_event_id=result.audit_event_id,
+      )
+    except TradeApprovalChallengeError as exc:
+      return ExitPlanAuthorizationConfirmationResult(
+        False,
+        exc.code,
+        exc.message,
+      )
+    except AuthError as exc:
+      return ExitPlanAuthorizationConfirmationResult(
+        False,
+        exc.code,
+        exc.message,
+      )
+    except Exception:
+      logger.exception("退出计划自动实盘授权确认失败")
+      return ExitPlanAuthorizationConfirmationResult(
+        False,
+        "EXIT_PLAN_AUTHORIZATION_REJECTED",
+        "授权确认未能安全提交，请刷新退出计划后重试",
+      )
+
   @strawberry.mutation(description="预览固定持仓快照并签发组级清仓确认挑战")
   async def preview_liquidation(
     self,

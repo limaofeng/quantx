@@ -6,7 +6,11 @@ from typing import Any, Optional
 
 from quantx_domain.brokers.base import (
   OrderRequest,
+)
+from quantx_domain.brokers.base import (
   OrderType as BrokerOrderType,
+)
+from quantx_domain.brokers.base import (
   PriceType as BrokerPriceType,
 )
 from quantx_domain.strategies.base import (
@@ -22,11 +26,15 @@ from quantx_domain.trading import (
   TradingRiskChecker,
 )
 from quantx_domain.trading.exit_plan import ExitDecision, ExitEvaluationContext
+
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.enums import AccountType, OrderType, PriceType
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.exit_plan_authorization_service import (
+  AutoExitAuthorizationGuard,
+)
 from quantx_infrastructure.services.trading_service import TradingService
 
 
@@ -43,6 +51,17 @@ class TradeIntentProcessor:
     position: Optional[Position],
     limit_price: float,
   ) -> dict[str, Any]:
+    authorization_code = "PAPER_NOT_REQUIRED"
+    exact_auto_authorized = plan.execution_mode != "live"
+    if plan.execution_mode == "live":
+      if bool(plan.auto_exit_authorized):
+        authorization = await AutoExitAuthorizationGuard.validate_or_invalidate(
+          plan.plan_id
+        )
+        exact_auto_authorized = authorization.valid
+        authorization_code = authorization.code
+      else:
+        authorization_code = "AUTO_EXIT_NOT_AUTHORIZED"
     metadata = {
       "owner_type": "EXIT_PLAN",
       "owner_id": plan.plan_id,
@@ -57,6 +76,18 @@ class TradeIntentProcessor:
       "group_id": plan.group_id,
       "completion_strategy": plan.completion_strategy,
       "price_type": "LIMIT",
+      "auto_exit_authorization_code": authorization_code,
+      "exact_auto_exit_authorized": bool(exact_auto_authorized),
+      "auto_exit_authorization_user_id": (
+        str(plan.auto_exit_authorization_user_id or "")
+        if exact_auto_authorized and plan.execution_mode == "live"
+        else ""
+      ),
+      "auto_exit_authorization_fingerprint": (
+        str(plan.auto_exit_authorization_fingerprint or "")
+        if exact_auto_authorized and plan.execution_mode == "live"
+        else ""
+      ),
     }
     intent = TradeIntent(
       intent_id=intent_id,
@@ -72,7 +103,9 @@ class TradeIntentProcessor:
       metadata=metadata,
       trace_id=intent_id,
     )
-    approval_required = plan.execution_mode == "live" and not plan.auto_exit_authorized
+    approval_required = (
+      plan.execution_mode == "live" and not exact_auto_authorized
+    )
     await self._create_intent_record(
       plan,
       intent,

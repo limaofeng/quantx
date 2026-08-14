@@ -24,6 +24,12 @@ from quantx_infrastructure.models.agent_runtime import (
   TradeCommandOutbox,
   TTradeBatch,
 )
+from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
+from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.services.exit_plan_authorization_service import (
+  validate_exact_auto_exit_authorization,
+)
 
 
 class AgentUnavailableError(RuntimeError):
@@ -503,8 +509,121 @@ class TradeCommandService:
     substitution_plan: dict[str, Any] | None = None,
     policy_version: int = 0,
     request_metadata: dict[str, Any] | None = None,
+    require_risk_reducing_live_authorization: bool = False,
+    authorization_user_id: str = "",
   ) -> QueuedTradeCommand:
-    device = await self._device_for_account(account_id, execution_mode)
+    normalized_execution_mode = str(execution_mode or "paper").lower()
+    if require_risk_reducing_live_authorization:
+      metadata = dict(request_metadata or {})
+      authorization_plan_id = str(metadata.get("exit_plan_id") or "").strip()
+      authorization_fingerprint = str(
+        metadata.get("auto_exit_authorization_fingerprint") or ""
+      ).strip()
+      if normalized_execution_mode != "live" or str(side or "").upper() != "SELL":
+        raise AgentUnavailableError(
+          "精确自动退出门禁只能用于 LIVE 风险降低卖单"
+        )
+      if not str(authorization_user_id or "").strip():
+        raise AgentUnavailableError("自动退出授权缺少确认用户绑定")
+      if not authorization_plan_id or not authorization_fingerprint:
+        raise AgentUnavailableError("自动退出命令缺少精确计划授权绑定")
+      plan = (
+        await self.db.execute(
+          select(AutoExitPlanRecord)
+          .where(AutoExitPlanRecord.plan_id == authorization_plan_id)
+          .with_for_update()
+        )
+      ).scalar_one_or_none()
+      if (
+        plan is None
+        or str(plan.account_id) != str(account_id)
+        or str(plan.instrument_code) != str(instrument_code)
+        or int(plan.config_version or 0) != int(policy_version or 0)
+        or str(plan.auto_exit_authorization_user_id or "")
+        != str(authorization_user_id)
+        or str(plan.auto_exit_authorization_fingerprint or "")
+        != authorization_fingerprint
+      ):
+        raise AgentUnavailableError("自动退出计划、版本、标的或授权人绑定不匹配")
+      validation = await validate_exact_auto_exit_authorization(
+        self.db,
+        plan,
+        lock_mutable_rows=True,
+      )
+      if not validation.valid:
+        raise AgentUnavailableError(
+          f"自动退出授权已失效：{validation.code}"
+        )
+      intent = await self.db.get(
+        TradeIntentRecord,
+        str(intent_id or ""),
+        with_for_update=True,
+      )
+      intent_metadata = (
+        dict(intent.intent_metadata or {}) if intent is not None else {}
+      )
+      plan_state = dict(plan.plan_state or {})
+      if (
+        intent is None
+        or str(intent.owner_type or "") != "EXIT_PLAN"
+        or str(intent.owner_id or "") != authorization_plan_id
+        or str(intent.account_id or "") != str(account_id)
+        or str(intent.instrument_code or "") != str(instrument_code)
+        or str(intent.direction or "").upper() != "SELL"
+        or str(intent.status or "").upper() != "PENDING"
+        or str(plan_state.get("pending_intent_id") or "") != str(intent_id or "")
+        or not bool(intent_metadata.get("exact_auto_exit_authorized"))
+        or str(intent_metadata.get("auto_exit_authorization_fingerprint") or "")
+        != authorization_fingerprint
+        or str(intent_metadata.get("auto_exit_authorization_user_id") or "")
+        != str(authorization_user_id)
+        or int(intent.target_volume or 0) < int(volume)
+      ):
+        raise AgentUnavailableError("自动退出意图与精确计划授权不匹配")
+      position = await self.db.scalar(
+        select(Position)
+        .where(
+          Position.account_id == account_id,
+          Position.stock_code == instrument_code,
+        )
+        .with_for_update()
+      )
+      if (
+        int(volume) > int(plan.remaining_volume or 0)
+        or position is None
+        or int(volume) > int(position.can_use_volume or 0)
+      ):
+        raise AgentUnavailableError("自动退出委托超过当前计划剩余量或实时可卖量")
+      await self._require_manual_live_authorization(
+        account_id,
+        risk_reducing=True,
+      )
+      device = await self._device_for(
+        user_id=str(authorization_user_id),
+        account_id=account_id,
+        execution_mode="live",
+      )
+      heartbeat = await self.db.get(
+        RuntimeComponentHeartbeat,
+        f"qmt-agent:{device.id}",
+      )
+      details = dict(heartbeat.details or {}) if heartbeat is not None else {}
+      capabilities = {
+        str(value).strip().lower()
+        for value in list(details.get("capabilities") or [])
+        if str(value).strip()
+      }
+      if (
+        heartbeat is None
+        or str(heartbeat.status or "").upper() != "READY"
+        or "live" not in capabilities
+        or str(details.get("protocolVersion") or "") != "1.1"
+      ):
+        raise AgentUnavailableError(
+          "自动退出要求唯一 READY、live、协议 1.1 的 QMT Agent"
+        )
+    else:
+      device = await self._device_for_account(account_id, normalized_execution_mode)
     return await self.enqueue_order(
       user_id=device.user_id,
       account_id=account_id,
@@ -517,7 +636,7 @@ class TradeCommandService:
       order_remark=order_remark,
       trace_id=trace_id,
       idempotency_key=idempotency_key,
-      execution_mode=execution_mode,
+      execution_mode=normalized_execution_mode,
       strategy_run_id=strategy_run_id,
       strategy_order_id=strategy_order_id,
       intent_id=intent_id,

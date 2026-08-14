@@ -40,10 +40,21 @@ from quantx_infrastructure.models.liquidation import (
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
+from quantx_infrastructure.models.trade_confirmation_challenge import (
+  TradeConfirmationChallenge,
+)
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
+from quantx_infrastructure.services.exit_plan_authorization_service import (
+  authorization_expiry_for_challenge,
+  build_exit_plan_authorization_snapshot,
+  clear_exact_auto_exit_authorization,
+  grant_exact_auto_exit_authorization,
+  validate_exact_auto_exit_authorization,
+)
+from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trade_intent_processor import TradeIntentProcessor
 
 ADAPTIVE_RULE_ID_SUFFIX = "adaptive-volume-price"
@@ -199,7 +210,14 @@ class AutoExitPlanService:
     async with AsyncSessionLocal() as db:
       repo = AutoExitPlanRepository(db)
       for plan in book.plans.values():
-        template = plan.template
+        template = ExitPlanTemplate.from_dict(
+          {
+            **plan.template.to_dict(),
+            # Strategy templates may request automation, but a LIVE plan only
+            # receives that authority from a durable device challenge.
+            "auto_exit_authorized": False,
+          }
+        )
         if not template.account_id or plan.status in {
           ExitPlanStatus.CANCELLED,
           ExitPlanStatus.COMPLETED,
@@ -212,10 +230,12 @@ class AutoExitPlanService:
           persistent_plan = ExitPlan.from_dict(dict(record.plan_state or {}))
           persistent_plan.apply_template(template)
           record.config_version = int(template.config_version)
-          record.auto_exit_authorized = bool(template.auto_exit_authorized)
+          clear_exact_auto_exit_authorization(record)
           self._sync_record(record, persistent_plan)
           event_type = "STRATEGY_PLAN_POLICY_UPDATED"
         else:
+          persistent_plan = ExitPlan.from_dict(plan.to_dict())
+          persistent_plan.apply_template(template)
           record = AutoExitPlanRecord(
             plan_id=plan.plan_id,
             account_id=template.account_id,
@@ -227,15 +247,15 @@ class AutoExitPlanService:
             enabled=plan.status != ExitPlanStatus.PAUSED,
             status=plan.status.value,
             execution_mode=self._execution_mode(execution_mode),
-            auto_exit_authorized=bool(template.auto_exit_authorized),
+            auto_exit_authorized=False,
             config_version=int(template.config_version),
             protected_volume=int(plan.entry_filled_volume or 0),
             exited_volume=int(plan.exited_volume or 0),
             remaining_volume=int(plan.remaining_volume or 0),
             entry_avg_price=float(plan.entry_avg_price or 0.0),
-            plan_state=plan.to_dict(),
+            plan_state=persistent_plan.to_dict(),
           )
-          self._sync_record(record, plan)
+          self._sync_record(record, persistent_plan)
           db.add(record)
           event_type = "STRATEGY_PLAN_PERSISTED"
         await self._append_event(
@@ -288,6 +308,11 @@ class AutoExitPlanService:
   ) -> AutoExitPlanRecord:
     """Create an operator-owned plan while atomically claiming holding capacity."""
 
+    if bool(payload.get("auto_exit_authorized", False)):
+      raise ValueError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: "
+        "布尔字段不能开启自动实盘退出"
+      )
     account_id = str(payload.get("account_id") or "").strip()
     instrument_code = str(payload.get("instrument_code") or "").strip().upper()
     if not account_id or not instrument_code:
@@ -331,7 +356,7 @@ class AutoExitPlanService:
           "available_volume_snapshot": int(position.can_use_volume or 0),
           "remark": str(payload.get("remark") or ""),
         },
-        auto_exit_authorized=bool(payload.get("auto_exit_authorized", False)),
+        auto_exit_authorized=False,
       )
       plan = ExitPlanBook().register_entry_fill(
         template,
@@ -348,7 +373,7 @@ class AutoExitPlanService:
         source_id=template.source_id,
         enabled=bool(payload.get("enabled", True)),
         execution_mode=self._execution_mode(payload.get("execution_mode")),
-        auto_exit_authorized=bool(payload.get("auto_exit_authorized", False)),
+        auto_exit_authorized=False,
         config_version=1,
         protected_volume=requested,
         exited_volume=0,
@@ -375,6 +400,11 @@ class AutoExitPlanService:
     self,
     payload: Mapping[str, Any],
   ) -> AutoExitPlanRecord:
+    if bool(payload.get("auto_exit_authorized", False)):
+      raise ValueError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: "
+        "布尔字段不能开启自动实盘退出"
+      )
     plan_id = str(payload.get("plan_id") or "")
     expected_version = int(payload.get("config_version") or 0)
     async with AsyncSessionLocal() as db:
@@ -448,9 +478,7 @@ class AutoExitPlanService:
           **dict(plan.template.metadata or {}),
           "remark": str(payload.get("remark") or ""),
         },
-        auto_exit_authorized=bool(
-          payload.get("auto_exit_authorized", record.auto_exit_authorized)
-        ),
+        auto_exit_authorized=False,
       )
       plan.apply_template(template)
       plan.entry_filled_volume = protected_volume
@@ -460,7 +488,7 @@ class AutoExitPlanService:
       record.execution_mode = self._execution_mode(
         payload.get("execution_mode", record.execution_mode)
       )
-      record.auto_exit_authorized = template.auto_exit_authorized
+      clear_exact_auto_exit_authorization(record)
       self._sync_record(record, plan)
       await self._append_event(
         db,
@@ -492,7 +520,12 @@ class AutoExitPlanService:
     if not bool(payload.get("confirm")):
       raise ValueError("必须确认卖出风险")
     execution_mode = self._execution_mode(payload.get("execution_mode"))
-    auto_exit_authorized = bool(payload.get("auto_exit_authorized", False))
+    auto_exit_authorization_requested = bool(
+      payload.get("auto_exit_authorized", False)
+    )
+    auto_exit_authorized = bool(
+      execution_mode == "live" and auto_exit_authorization_requested
+    )
     selected = {
       str(item or "").strip().upper()
       for item in list(payload.get("instrument_codes") or [])
@@ -527,7 +560,7 @@ class AutoExitPlanService:
     ):
       raise ValueError("移动端清仓命令缺少完整快照授权")
     if not native_confirmation and (
-      execution_mode != "paper" or auto_exit_authorized
+      execution_mode != "paper" or auto_exit_authorization_requested
     ):
       raise ValueError(
         "LEGACY_LIQUIDATION_UNSAFE_MODE: "
@@ -739,6 +772,15 @@ class AutoExitPlanService:
             old_plan.status = ExitPlanStatus.CANCELLED
             old_plan.error_message = f"REPLACED_BY_LIQUIDATION_GROUP:{group_id}"
             existing.enabled = False
+            existing.config_version = int(existing.config_version or 0) + 1
+            old_plan.template = ExitPlanTemplate.from_dict(
+              {
+                **old_plan.template.to_dict(),
+                "config_version": existing.config_version,
+                "auto_exit_authorized": False,
+              }
+            )
+            clear_exact_auto_exit_authorization(existing)
             self._sync_record(existing, old_plan)
             await self._append_event(
               db,
@@ -778,7 +820,7 @@ class AutoExitPlanService:
               else None
             ),
           },
-          auto_exit_authorized=auto_exit_authorized,
+          auto_exit_authorized=False,
         )
         plan = ExitPlanBook().register_entry_fill(
           template,
@@ -796,7 +838,7 @@ class AutoExitPlanService:
           source_id=plan_id,
           enabled=True,
           execution_mode=execution_mode,
-          auto_exit_authorized=auto_exit_authorized,
+          auto_exit_authorized=False,
           config_version=1,
           completion_strategy=completion,
           protected_volume=target,
@@ -807,6 +849,14 @@ class AutoExitPlanService:
         )
         self._sync_record(record, plan)
         db.add(record)
+        if auto_exit_authorized:
+          await self._grant_liquidation_group_authorization(
+            db,
+            record=record,
+            challenge_id=authorization_challenge_id,
+            snapshot_version=snapshot_version,
+            group_id=group_id,
+          )
         await self._append_event(
           db,
           business_key=f"liquidation-plan-created:{plan_id}",
@@ -834,6 +884,85 @@ class AutoExitPlanService:
       "success": bool(results) and all(item.get("success") for item in results),
       "items": results,
     }
+
+  async def _grant_liquidation_group_authorization(
+    self,
+    db,
+    *,
+    record: AutoExitPlanRecord,
+    challenge_id: str,
+    snapshot_version: str,
+    group_id: str,
+  ) -> None:
+    """Carry an already-consumed native liquidation challenge into the plan."""
+
+    challenge = await db.get(TradeConfirmationChallenge, challenge_id)
+    payload = dict(challenge.payload or {}) if challenge is not None else {}
+    signed_snapshot = dict(payload.get("snapshot") or {})
+    if (
+      challenge is None
+      or challenge.consumed_at is None
+      or str(challenge.action) != "LIQUIDATION_GROUP"
+      or str(challenge.account_id) != str(record.account_id)
+      or str(payload.get("group_id") or "") != group_id
+      or str(signed_snapshot.get("snapshot_version") or "") != snapshot_version
+    ):
+      raise ValueError("清仓计划缺少已消费且精确匹配的设备确认挑战")
+    command_service = TradeCommandService(db)
+    await command_service._require_manual_live_authorization(
+      record.account_id,
+      risk_reducing=True,
+    )
+    await command_service._require_live_authorization(
+      record.account_id,
+      risk_reducing=True,
+    )
+    await command_service._device_for(
+      user_id=str(challenge.user_id),
+      account_id=record.account_id,
+      execution_mode="live",
+    )
+    authorization_snapshot = await build_exit_plan_authorization_snapshot(
+      db,
+      record,
+      lock_mutable_rows=True,
+    )
+    authorization_expires_at = authorization_expiry_for_challenge(
+      challenge.expires_at
+    )
+    grant_exact_auto_exit_authorization(
+      record,
+      fingerprint=authorization_snapshot.fingerprint,
+      challenge_id=str(challenge.id),
+      user_id=str(challenge.user_id),
+      device_session_id=str(challenge.device_session_id),
+      authorized_at=time_utils.now(),
+      authorization_expires_at=authorization_expires_at,
+    )
+    validation = await validate_exact_auto_exit_authorization(
+      db,
+      record,
+      lock_mutable_rows=True,
+    )
+    if not validation.valid:
+      raise ValueError(
+        f"清仓计划自动退出授权已失效：{validation.code}"
+      )
+    await self._append_event(
+      db,
+      business_key=f"auto-exit-authorized:{record.plan_id}:{challenge.id}",
+      plan_id=record.plan_id,
+      event_type="AUTO_EXIT_AUTHORIZED",
+      payload={
+        "actor_user_id": str(challenge.user_id),
+        "device_session_id": str(challenge.device_session_id),
+        "challenge_id": str(challenge.id),
+        "plan_id": str(record.plan_id),
+        "config_version": int(record.config_version or 0),
+        "authorization_fingerprint": authorization_snapshot.fingerprint,
+        "authorization_expires_at": authorization_expires_at.isoformat(),
+      },
+    )
 
   async def create_or_update_manual_plan(
     self,
@@ -894,6 +1023,7 @@ class AutoExitPlanService:
         plan.entry_filled_volume = volume
         plan.entry_avg_price = entry_price
         plan.status = ExitPlanStatus.ACTIVE if order.enabled else ExitPlanStatus.PAUSED
+        clear_exact_auto_exit_authorization(record)
       else:
         book = ExitPlanBook()
         plan = book.register_entry_fill(
@@ -922,7 +1052,7 @@ class AutoExitPlanService:
       record.instrument_code = order.stock_code
       record.enabled = bool(order.enabled)
       record.execution_mode = str(order.execution_mode or "paper").lower()
-      record.auto_exit_authorized = bool(order.auto_exit_authorized)
+      record.auto_exit_authorized = False
       record.config_version = config_version
       record.protected_volume = volume
       record.entry_avg_price = entry_price
@@ -964,8 +1094,13 @@ class AutoExitPlanService:
       record.enabled = bool(enabled)
       record.config_version = int(record.config_version) + 1
       plan.template = ExitPlanTemplate.from_dict(
-        {**plan.template.to_dict(), "config_version": record.config_version}
+        {
+          **plan.template.to_dict(),
+          "config_version": record.config_version,
+          "auto_exit_authorized": False,
+        }
       )
+      clear_exact_auto_exit_authorization(record)
       self._sync_record(record, plan)
       await self._append_event(
         db,
@@ -1007,6 +1142,14 @@ class AutoExitPlanService:
       plan.error_message = reason
       record.enabled = False
       record.config_version = int(record.config_version) + 1
+      plan.template = ExitPlanTemplate.from_dict(
+        {
+          **plan.template.to_dict(),
+          "config_version": record.config_version,
+          "auto_exit_authorized": False,
+        }
+      )
+      clear_exact_auto_exit_authorization(record)
       self._sync_record(record, plan)
       await self._append_event(
         db,
@@ -1463,6 +1606,13 @@ class AutoExitPlanService:
           plan.status = ExitPlanStatus.ERROR
           record.enabled = False
           record.last_error = error
+          plan.template = ExitPlanTemplate.from_dict(
+            {
+              **plan.template.to_dict(),
+              "auto_exit_authorized": False,
+            }
+          )
+          clear_exact_auto_exit_authorization(record)
           self._sync_record(record, plan)
         else:
           record.last_error = error
@@ -1610,7 +1760,7 @@ class AutoExitPlanService:
         execution_mode="AUTO",
       ),
       metadata={"conditional_order_id": str(order.id), "policy": dict(policy)},
-      auto_exit_authorized=bool(order.auto_exit_authorized),
+      auto_exit_authorized=False,
     )
 
   @staticmethod
@@ -1620,6 +1770,20 @@ class AutoExitPlanService:
     *,
     evaluated_at: Optional[datetime] = None,
   ) -> None:
+    if bool(record.auto_exit_authorized) and (
+      int(record.exited_volume or 0) != int(plan.exited_volume or 0)
+      or int(record.remaining_volume or 0) != int(plan.remaining_volume or 0)
+    ):
+      # A fill changes the exact quantity/account facts covered by the grant.
+      # Persist the fill, keep the plan alive, and require a fresh grant before
+      # another autonomous LIVE order.
+      plan.template = ExitPlanTemplate.from_dict(
+        {
+          **plan.template.to_dict(),
+          "auto_exit_authorized": False,
+        }
+      )
+      clear_exact_auto_exit_authorization(record)
     adaptive_state = next(
       (
         dict(value or {})

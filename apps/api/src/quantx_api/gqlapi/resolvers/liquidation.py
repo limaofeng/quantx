@@ -422,6 +422,12 @@ class LiquidationResolver:
     input: CreateManualExitPlanInput,
     account_id: str,
   ) -> ExitPlanView:
+    if bool(input.auto_exit_authorized):
+      raise AuthError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE",
+        "创建计划不能通过布尔字段开启自动实盘，请使用预览—确认授权",
+        status_code=400,
+      )
     result = await LiquidationResolver._request_engine(
       "EXIT_PLAN_CREATE_MANUAL",
       {
@@ -432,7 +438,7 @@ class LiquidationResolver:
         "bucket": input.bucket,
         "enabled": input.enabled,
         "execution_mode": input.execution_mode,
-        "auto_exit_authorized": input.auto_exit_authorized,
+        "auto_exit_authorized": False,
         "remark": input.remark,
       },
       aggregate_id=f"{account_id}:{input.instrument_code.upper()}",
@@ -449,6 +455,12 @@ class LiquidationResolver:
     input: UpdateManualExitPlanInput,
     account_id: str,
   ) -> ExitPlanView:
+    if bool(input.auto_exit_authorized):
+      raise AuthError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE",
+        "修改计划不能通过布尔字段开启自动实盘，请重新预览并确认授权",
+        status_code=400,
+      )
     payload = {
       "account_id": account_id,
       "plan_id": input.plan_id,
@@ -461,7 +473,7 @@ class LiquidationResolver:
     if input.execution_mode is not None:
       payload["execution_mode"] = input.execution_mode
     if input.auto_exit_authorized is not None:
-      payload["auto_exit_authorized"] = input.auto_exit_authorized
+      payload["auto_exit_authorized"] = False
     await LiquidationResolver._request_engine(
       "EXIT_PLAN_UPDATE_MANUAL",
       payload,
@@ -702,6 +714,12 @@ class LiquidationResolver:
     input: ConditionalLiquidationOrderInput,
     account_id: str,
   ) -> ConditionalLiquidationOrder:
+    if bool(input.auto_exit_authorized):
+      raise AuthError(
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE",
+        "条件退出规则不能通过布尔字段开启自动实盘，请先创建计划再精确授权",
+        status_code=400,
+      )
     service = LiquidationService(account_id=account_id)
     order = await service.upsert_conditional_liquidation_order(
       order_id=input.id,
@@ -717,7 +735,7 @@ class LiquidationResolver:
       strategy=input.strategy,
       dynamic_policy=input.dynamic_policy,
       execution_mode=input.execution_mode,
-      auto_exit_authorized=input.auto_exit_authorized,
+      auto_exit_authorized=False,
     )
     plans = await LiquidationResolver._exit_plan_map([order])
     return ConditionalLiquidationOrder.from_model(

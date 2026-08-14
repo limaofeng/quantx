@@ -270,6 +270,8 @@ class ExitPlanView:
   status: str
   execution_mode: str
   auto_exit_authorized: bool
+  auto_exit_authorization_config_version: Optional[int]
+  auto_exit_authorization_expires_at: Optional[datetime]
   config_version: int
   completion_strategy: Optional[str]
   completion_note: Optional[str]
@@ -316,6 +318,12 @@ class ExitPlanView:
       status=model.status,
       execution_mode=model.execution_mode,
       auto_exit_authorized=bool(model.auto_exit_authorized),
+      auto_exit_authorization_config_version=getattr(
+        model, "auto_exit_authorization_config_version", None
+      ),
+      auto_exit_authorization_expires_at=getattr(
+        model, "auto_exit_authorization_expires_at", None
+      ),
       config_version=int(model.config_version or 0),
       completion_strategy=getattr(model, "completion_strategy", None),
       completion_note=(
@@ -490,6 +498,63 @@ class LiquidationConfirmationResult:
   plans: List[LiquidationPlanResult] = strawberry.field(default_factory=list)
 
 
+@strawberry.type(description="自动实盘退出授权绑定的持仓与 T+1 快照")
+class ExitPlanAuthorizationPositionSnapshot:
+  total_volume: int
+  available_volume: int
+  frozen_volume: int
+  yesterday_volume: int
+  t1_unavailable_volume: int
+  position_updated_at: Optional[datetime]
+
+
+@strawberry.type(description="既有 LIVE 退出计划的精确自动实盘授权预览")
+class ExitPlanAuthorizationPreview:
+  challenge_id: str
+  confirmation_token: str
+  account_id: str
+  plan_id: str
+  instrument_code: str
+  bucket: str
+  source_type: str
+  execution_mode: str
+  config_version: int
+  protected_volume: int
+  exited_volume: int
+  remaining_volume: int
+  rules: JSON
+  t1_policy: str
+  execution_policy: JSON
+  position: ExitPlanAuthorizationPositionSnapshot
+  other_protections: List[LiquidationConflictPreview]
+  readiness: JSON
+  authorization_fingerprint: str
+  authorization_expires_at: datetime
+  challenge_expires_at: datetime
+  warnings: List[str]
+
+
+@strawberry.type(description="退出计划精确自动实盘授权预览结果")
+class ExitPlanAuthorizationPreviewResult:
+  success: bool
+  code: str
+  message: str
+  preview: Optional[ExitPlanAuthorizationPreview] = None
+
+
+@strawberry.type(description="退出计划精确自动实盘授权确认结果")
+class ExitPlanAuthorizationConfirmationResult:
+  success: bool
+  code: str
+  message: str
+  challenge_id: Optional[str] = None
+  plan_id: Optional[str] = None
+  config_version: Optional[int] = None
+  authorized: bool = False
+  authorization_expires_at: Optional[datetime] = None
+  audit_event_id: Optional[str] = None
+
+
 @strawberry.input(description="移动端组级清仓预览输入")
 class LiquidationPreviewInput:
   account_id: str = strawberry.field(description="必填资金账号")
@@ -513,6 +578,24 @@ class LiquidationPreviewInput:
 
 @strawberry.input(description="移动端组级清仓确认输入")
 class LiquidationConfirmationInput:
+  challenge_id: str = strawberry.field(description="预览返回的确认挑战 ID")
+  confirmation_token: str = strawberry.field(description="预览返回的一次性确认凭据")
+
+
+@strawberry.input(description="预览既有 LIVE 退出计划的精确自动实盘授权")
+class ExitPlanAuthorizationPreviewInput:
+  account_id: str = strawberry.field(description="当前原生设备会话的唯一主账户")
+  plan_id: str = strawberry.field(description="既有退出计划 ID")
+  expected_config_version: int = strawberry.field(description="预期配置版本")
+  idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
+
+
+@strawberry.input(description="确认既有 LIVE 退出计划的精确自动实盘授权")
+class ExitPlanAuthorizationConfirmationInput:
+  account_id: str = strawberry.field(description="预览时的主账户")
+  plan_id: str = strawberry.field(description="预览时的退出计划 ID")
+  expected_config_version: int = strawberry.field(description="预览时的配置版本")
+  idempotency_key: str = strawberry.field(description="预览时的业务幂等键")
   challenge_id: str = strawberry.field(description="预览返回的确认挑战 ID")
   confirmation_token: str = strawberry.field(description="预览返回的一次性确认凭据")
 

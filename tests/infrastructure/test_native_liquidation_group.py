@@ -148,7 +148,9 @@ async def test_native_group_caps_post_confirmation_position_growth_and_is_idempo
     assert len(records) == 1
     assert records[0].instrument_code == "600000.SH"
     assert records[0].protected_volume == 300
-    assert records[0].auto_exit_authorized
+    # PAPER plans need no live execution authorization and must not preserve
+    # the legacy boolean as if it were a durable device-bound grant.
+    assert not records[0].auto_exit_authorized
     metadata = records[0].plan_state["template"]["metadata"]
     assert metadata["authorization_challenge_id"] == "challenge-1"
     assert metadata["authorization_snapshot_version"] == "snapshot-v1"
