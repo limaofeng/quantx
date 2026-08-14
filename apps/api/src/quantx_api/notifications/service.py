@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 from typing import Iterable, Mapping, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
-from quantx_infrastructure.models.auth import AuthDeviceSession
 from quantx_infrastructure.models.ios_notifications import (
   NOTIFICATION_ROUTE_TYPES,
   PUSH_CATEGORIES,
@@ -21,6 +20,9 @@ from quantx_infrastructure.models.ios_notifications import (
   IosNotificationOutbox,
   IosPushCategoryPreference,
   IosPushRegistration,
+)
+from quantx_infrastructure.services.ios_notification_enqueue_service import (
+  IosNotificationEnqueueService,
 )
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -469,65 +471,22 @@ class PushNotificationService:
         status_code=400,
       )
 
-    registrations = (
-      await self.db.execute(
-        select(IosPushRegistration)
-        .join(
-          IosPushCategoryPreference,
-          IosPushCategoryPreference.registration_id == IosPushRegistration.id,
-        )
-        .join(
-          AuthDeviceSession,
-          AuthDeviceSession.id == IosPushRegistration.device_session_id,
-        )
-        .where(
-          IosPushRegistration.user_id == user_id,
-          IosPushRegistration.account_id == account_id,
-          IosPushRegistration.invalidated_at.is_(None),
-          IosPushRegistration.token_ciphertext.is_not(None),
-          IosPushCategoryPreference.category == normalized_category,
-          IosPushCategoryPreference.enabled.is_(True),
-          AuthDeviceSession.revoked_at.is_(None),
-          AuthDeviceSession.expires_at > now,
-        )
+    persisted = await IosNotificationEnqueueService(self.db).enqueue_event(
+      user_id=user_id,
+      account_id=account_id,
+      category=normalized_category,
+      route_type=normalized_route,
+      occurred_at=occurred,
+      expires_at=expires,
+    )
+    return tuple(
+      QueuedNotification(
+        event_id=item.event_id,
+        outbox_id=item.outbox_id,
+        registration_id=item.registration_id,
       )
-    ).scalars().all()
-
-    queued: list[QueuedNotification] = []
-    for registration in registrations:
-      event_id = str(uuid.uuid4())
-      outbox_id = str(uuid.uuid4())
-      self.db.add(
-        IosNotificationEvent(
-          id=event_id,
-          user_id=user_id,
-          device_session_id=registration.device_session_id,
-          account_id=account_id,
-          category=normalized_category,
-          route_type=normalized_route,
-          occurred_at=occurred,
-          expires_at=expires,
-        )
-      )
-      self.db.add(
-        IosNotificationOutbox(
-          id=outbox_id,
-          event_id=event_id,
-          registration_id=registration.id,
-          status="PENDING",
-          attempt_count=0,
-          available_at=now,
-        )
-      )
-      queued.append(
-        QueuedNotification(
-          event_id=event_id,
-          outbox_id=outbox_id,
-          registration_id=registration.id,
-        )
-      )
-    await self.db.flush()
-    return tuple(queued)
+      for item in persisted
+    )
 
   def decrypt_device_token(self, ciphertext: str) -> str:
     """Decrypt only at the future injected transport boundary."""

@@ -133,3 +133,15 @@ deployments:
       - cron: "* * * * *"
         timezone: Asia/Shanghai
     version: "0.1.0"
+  - name: ios-business-notification-projection
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/ios_notification_projection_flow.py:ios_notification_projection_flow
+    work_pool: *quantx_process_pool
+    description: 从数据库业务真源幂等投影账户级 iOS 通知事件；不执行 APNs 网络投递
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 60
+    schedules:
+      - cron: "* * * * *"
+        timezone: Asia/Shanghai
+    version: "0.1.0"

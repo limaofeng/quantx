@@ -53,6 +53,7 @@ TABLE_COMMENTS: dict[str, str] = {
   "holidays": "证券市场节假日与交易日历",
   "indicator_snapshots": "证券日级技术指标快照",
   "instruments": "证券标的基础信息",
+  "ios_business_notification_receipts": "iOS 业务通知全局幂等投影回执",
   "ios_notification_events": "iOS 随机通知事件与解锁后路由元数据",
   "ios_notification_outbox": "iOS 最小隐私推送持久化发件箱",
   "ios_push_category_preferences": "iOS 安装实例通知类别偏好",

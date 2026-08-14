@@ -84,6 +84,7 @@ from .indicator_snapshot import IndicatorSnapshot
 # 数据库模型 (统一的数据实体)
 from .instrument import Instrument
 from .ios_notifications import (
+  IosBusinessNotificationReceipt,
   IosNotificationEvent,
   IosNotificationOutbox,
   IosPushCategoryPreference,
@@ -174,6 +175,7 @@ __all__ = [
   "AuthAuditEvent",
   "IosPushRegistration",
   "IosPushCategoryPreference",
+  "IosBusinessNotificationReceipt",
   "IosNotificationEvent",
   "IosNotificationOutbox",
   "TradeConfirmationChallenge",

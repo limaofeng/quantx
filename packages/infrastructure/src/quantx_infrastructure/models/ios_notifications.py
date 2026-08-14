@@ -173,6 +173,45 @@ class IosNotificationEvent(Base, TimestampMixin):
   expires_at = Column(DateTime, nullable=False)
 
 
+class IosBusinessNotificationReceipt(Base):
+  """Global receipt proving that one durable business event was projected."""
+
+  __tablename__ = "ios_business_notification_receipts"
+  __table_args__ = (
+    CheckConstraint(
+      f"category IN ({_quoted(PUSH_CATEGORIES)})",
+      name="ck_ios_business_notification_receipt_category",
+    ),
+    CheckConstraint(
+      "queued_event_count >= 0",
+      name="ck_ios_business_notification_receipt_queued_count",
+    ),
+    UniqueConstraint(
+      "source_kind",
+      "source_event_id",
+      name="uq_ios_business_notification_receipt_source",
+    ),
+    Index(
+      "ix_ios_business_notification_receipt_account_projected",
+      "account_id",
+      "projected_at",
+    ),
+  )
+
+  # This is a server-keyed HMAC. The controlled kind and technical event ID
+  # support starvation-free scans; order, symbol, amount, and payload details
+  # are deliberately never copied into the notification persistence boundary.
+  source_event_key_hash = Column(String(64), primary_key=True)
+  source_kind = Column(String(48), nullable=False)
+  source_event_id = Column(String(128), nullable=False)
+  account_id = Column(String(50), nullable=False)
+  category = Column(String(32), nullable=False)
+  occurred_at = Column(DateTime, nullable=False)
+  expires_at = Column(DateTime, nullable=False)
+  projected_at = Column(DateTime, nullable=False)
+  queued_event_count = Column(Integer, nullable=False, default=0)
+
+
 class IosNotificationOutbox(Base, TimestampMixin):
   """Delivery intent without device tokens or business payload details."""
 
@@ -218,6 +257,7 @@ class IosNotificationOutbox(Base, TimestampMixin):
 
 
 __all__ = [
+  "IosBusinessNotificationReceipt",
   "IosNotificationEvent",
   "IosNotificationOutbox",
   "IosPushCategoryPreference",
