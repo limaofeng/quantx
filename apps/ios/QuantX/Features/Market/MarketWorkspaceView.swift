@@ -655,7 +655,7 @@ private struct MarketInstrumentDetailView: View {
         SectionTitle(title: "交易", subtitle: "进入安全票据后再填写数量与报价")
         HStack(spacing: QuantXTheme.Spacing.medium) {
           Button {
-            model.selectedTab = .trade
+            model.openManualOrder(instrumentCode: stockCode, direction: .buy)
           } label: {
             Label("买入", systemImage: "arrow.down.circle.fill")
               .frame(maxWidth: .infinity)
@@ -664,7 +664,7 @@ private struct MarketInstrumentDetailView: View {
           .tint(QuantXTheme.positive)
 
           Button {
-            model.selectedTab = .trade
+            model.openManualOrder(instrumentCode: stockCode, direction: .sell)
           } label: {
             Label("卖出", systemImage: "arrow.up.circle.fill")
               .frame(maxWidth: .infinity)

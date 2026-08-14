@@ -1,0 +1,44 @@
+mutation IOSPreviewManualOrder($input: ManualOrderPreviewInput!) {
+  previewManualOrder(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      accountId
+      instrumentCode
+      side
+      priceType
+      volume
+      requestedVolume
+      finalVolume
+      limitPrice
+      referencePrice
+      estimatedAmount
+      estimatedFees
+      availableCash
+      availableVolume
+      idempotencyKey
+      executionMode
+      quoteTimestamp
+      challengeExpiresAt
+      riskDecisionId
+      riskAction
+      riskReasonCode
+      riskReasonDetail
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmManualOrder($input: ManualOrderConfirmationInput!) {
+  confirmManualOrder(input: $input) {
+    success
+    code
+    message
+    challengeId
+    clientOrderId
+    status
+  }
+}

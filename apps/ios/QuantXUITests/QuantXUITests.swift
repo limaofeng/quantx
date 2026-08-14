@@ -128,6 +128,25 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
+  func testManualOrderTicketUsesSafePreviewFirstFlow() throws {
+    let app = makeApp()
+    app.launch()
+
+    app.tabBars.buttons["交易"].tap()
+    let buyButton = app.buttons["买入"]
+    XCTAssertTrue(buyButton.waitForExistence(timeout: 5))
+    buyButton.tap()
+
+    XCTAssertTrue(app.staticTexts["委托票据"].waitForExistence(timeout: 3))
+    XCTAssertTrue(app.staticTexts["当前主账户"].exists)
+    XCTAssertTrue(app.buttons["对手方最优价"].exists)
+    let previewButton = app.buttons["获取服务器预览"]
+    XCTAssertTrue(previewButton.exists)
+    XCTAssertFalse(previewButton.isEnabled)
+    XCTAssertFalse(app.buttons["确认买入"].exists)
+  }
+
+  @MainActor
   func testTradeApprovalSheetShowsBoundScopeWithoutLeakingToken() throws {
     let app = XCUIApplication()
     app.launchArguments.append(contentsOf: [

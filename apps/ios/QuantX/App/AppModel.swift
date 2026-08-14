@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
   typealias TTradeAssistantLoaderFactory = (ApolloSession) -> any TTradeAssistantLoading
   typealias LimitUpBoardLoaderFactory = (ApolloSession) -> any LimitUpBoardLoading
   typealias TradeApprovalLoaderFactory = (ApolloSession) -> any TradeApprovalLoading
+  typealias ManualOrderLoaderFactory = (ApolloSession) -> any ManualOrderLoading
   typealias MarketLoaderFactory = (ApolloSession) -> any MarketDataLoading
 
   enum ServiceState: Equatable {
@@ -45,6 +46,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var limitUpBoardState: LimitUpBoardState = .idle
   @Published private(set) var limitUpBoardRefreshInProgress = false
   @Published private(set) var tradeApprovalInProgress = false
+  @Published private(set) var manualOrderInProgress = false
+  @Published private(set) var pendingManualOrderDraft: ManualOrderDraftLink?
   @Published private(set) var marketState: MarketWorkspaceState = .idle
   @Published private(set) var marketRefreshInProgress = false
 
@@ -61,6 +64,7 @@ final class AppModel: ObservableObject {
   private let tTradeAssistantLoaderFactory: TTradeAssistantLoaderFactory
   private let limitUpBoardLoaderFactory: LimitUpBoardLoaderFactory
   private let tradeApprovalLoaderFactory: TradeApprovalLoaderFactory
+  private let manualOrderLoaderFactory: ManualOrderLoaderFactory
   private let marketLoaderFactory: MarketLoaderFactory
   private var apolloSession: ApolloSession?
   private var portfolioRepository: (any PortfolioLoading)?
@@ -69,6 +73,7 @@ final class AppModel: ObservableObject {
   private var tTradeAssistantRepository: (any TTradeAssistantLoading)?
   private var limitUpBoardRepository: (any LimitUpBoardLoading)?
   private var tradeApprovalRepository: (any TradeApprovalLoading)?
+  private var manualOrderRepository: (any ManualOrderLoading)?
   private var marketRepository: (any MarketDataLoading)?
 #if DEBUG
   private let usesTransientRealBackendUITestSession =
@@ -105,6 +110,9 @@ final class AppModel: ObservableObject {
     }
     tradeApprovalLoaderFactory = { session in
       TradeApprovalRepository(client: session.client)
+    }
+    manualOrderLoaderFactory = { session in
+      ManualOrderRepository(client: session.client)
     }
     marketLoaderFactory = { session in
       MarketRepository(client: session.client)
@@ -189,6 +197,9 @@ final class AppModel: ObservableObject {
     tradeApprovalLoaderFactory: @escaping TradeApprovalLoaderFactory = { session in
       TradeApprovalRepository(client: session.client)
     },
+    manualOrderLoaderFactory: @escaping ManualOrderLoaderFactory = { session in
+      ManualOrderRepository(client: session.client)
+    },
     marketLoaderFactory: @escaping MarketLoaderFactory = { session in
       MarketRepository(client: session.client)
     }
@@ -206,6 +217,7 @@ final class AppModel: ObservableObject {
     self.tTradeAssistantLoaderFactory = tTradeAssistantLoaderFactory
     self.limitUpBoardLoaderFactory = limitUpBoardLoaderFactory
     self.tradeApprovalLoaderFactory = tradeApprovalLoaderFactory
+    self.manualOrderLoaderFactory = manualOrderLoaderFactory
     self.marketLoaderFactory = marketLoaderFactory
 
     if configuration.accountDataEnabled, sessionClient != nil {
@@ -1013,6 +1025,176 @@ final class AppModel: ObservableObject {
     .rejected(code: "TRADE_APPROVAL_UNAVAILABLE", message: message)
   }
 
+  var canPlaceManualOrders: Bool {
+    accountDataEnabled
+      && hasPermission("trade:manual")
+      && !localSessionLocked
+      && manualOrderRepository != nil
+      && primaryTradingAccountID != nil
+  }
+
+  var manualOrderAvailabilityMessage: String? {
+    guard accountDataEnabled else { return "账户能力尚未启用" }
+    guard hasPermission("trade:manual") else {
+      return "当前会话没有 trade:manual 手动交易权限"
+    }
+    guard !localSessionLocked else { return "请先解锁个人量化会话" }
+    guard manualOrderRepository != nil else { return "手动委托服务尚未连接" }
+    guard primaryTradingAccountID != nil else {
+      return switch portfolioState {
+      case .noAccount:
+        "当前会话没有后端确认的主账户"
+      case .failed:
+        "主账户同步失败，请刷新后重试"
+      case .unavailable(let message):
+        message
+      case .idle, .loading:
+        "主账户正在安全同步"
+      case .loaded:
+        "主账户不在当前会话授权范围内"
+      }
+    }
+    return nil
+  }
+
+  var primaryTradingAccountID: String? {
+    guard let accountID = portfolioState.snapshot?.account.id,
+      authenticatedUser?.authorizedAccountIDs.contains(accountID) == true
+    else {
+      return nil
+    }
+    return accountID
+  }
+
+  func openManualOrder(
+    instrumentCode: String,
+    direction: ManualOrderDirection
+  ) {
+    pendingManualOrderDraft = ManualOrderDraftLink(
+      id: UUID(),
+      instrumentCode: instrumentCode,
+      direction: direction
+    )
+    selectedTab = .trade
+  }
+
+  func consumePendingManualOrderDraft() -> ManualOrderDraftLink? {
+    defer { pendingManualOrderDraft = nil }
+    return pendingManualOrderDraft
+  }
+
+  func previewManualOrder(
+    instrumentCode: String,
+    direction: ManualOrderDirection,
+    quoteType: ManualOrderQuoteType,
+    volume: Int,
+    limitPrice: Double?,
+    idempotencyKey: UUID
+  ) async throws -> ManualOrderPreviewTicket {
+    let context = try manualOrderContext()
+    let request = ManualOrderRequest(
+      accountID: context.accountID,
+      instrumentCode: instrumentCode,
+      direction: direction,
+      quoteType: quoteType,
+      volume: volume,
+      limitPrice: limitPrice,
+      idempotencyKey: idempotencyKey
+    )
+    guard let repository = manualOrderRepository else {
+      throw manualOrderUnavailable("手动委托服务尚未连接")
+    }
+    do {
+      return try await repository.preview(
+        request,
+        authorizedAccountIDs: context.authorizedAccountIDs
+      )
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      try await refreshAccessSession()
+      await refreshPortfolio()
+      let refreshedContext = try manualOrderContext()
+      guard refreshedContext.accountID == request.accountID,
+        let refreshedRepository = manualOrderRepository
+      else {
+        throw ManualOrderRepositoryError.accountScopeMismatch
+      }
+      return try await refreshedRepository.preview(
+        request,
+        authorizedAccountIDs: refreshedContext.authorizedAccountIDs
+      )
+    }
+  }
+
+  func confirmManualOrder(
+    _ preview: ManualOrderPreviewTicket
+  ) async throws -> ManualOrderQueueConfirmation {
+    let context = try manualOrderContext()
+    guard context.accountID == preview.accountID else {
+      throw ManualOrderRepositoryError.accountScopeMismatch
+    }
+    guard !manualOrderInProgress, !preview.isExpired() else {
+      throw manualOrderUnavailable("确认凭据已过期或正在处理，请重新预览")
+    }
+
+    manualOrderInProgress = true
+    defer { manualOrderInProgress = false }
+    let biometricReason = "确认\(preview.instrumentCode)\(preview.direction.title)委托并提交统一交易风控"
+    try await localAuthentication.authorizeTrade(reason: biometricReason)
+    guard !preview.isExpired() else {
+      throw manualOrderUnavailable("本机认证完成时确认凭据已过期，请重新预览")
+    }
+
+    let confirmation: ManualOrderQueueConfirmation
+    do {
+      confirmation = try await performManualOrderConfirmation(preview)
+    } catch ReadOnlyRepositoryError.unauthenticated {
+      try await refreshAccessSession()
+      await refreshPortfolio()
+      let refreshedContext = try manualOrderContext()
+      guard refreshedContext.accountID == preview.accountID else {
+        throw ManualOrderRepositoryError.accountScopeMismatch
+      }
+      try await localAuthentication.authorizeTrade(reason: biometricReason)
+      guard !preview.isExpired() else {
+        throw manualOrderUnavailable("本机认证完成时确认凭据已过期，请重新预览")
+      }
+      confirmation = try await performManualOrderConfirmation(preview)
+    }
+    await refreshTradingActivity()
+    await refreshPortfolio()
+    return confirmation
+  }
+
+  private func performManualOrderConfirmation(
+    _ preview: ManualOrderPreviewTicket
+  ) async throws -> ManualOrderQueueConfirmation {
+    guard let repository = manualOrderRepository else {
+      throw manualOrderUnavailable("手动委托服务尚未连接")
+    }
+    return try await repository.confirm(preview)
+  }
+
+  private func manualOrderContext() throws -> (accountID: String, authorizedAccountIDs: Set<String>) {
+    guard hasPermission("trade:manual") else {
+      throw manualOrderUnavailable("当前会话没有 trade:manual 手动交易权限")
+    }
+    guard !localSessionLocked, let user = authenticatedUser else {
+      throw manualOrderUnavailable("请先解锁并恢复账户会话")
+    }
+    let authorizedAccountIDs = Set(user.authorizedAccountIDs)
+    guard let accountID = portfolioState.snapshot?.account.id else {
+      throw manualOrderUnavailable("主账户尚未完成安全同步")
+    }
+    guard authorizedAccountIDs.contains(accountID) else {
+      throw ManualOrderRepositoryError.accountScopeMismatch
+    }
+    return (accountID, authorizedAccountIDs)
+  }
+
+  private func manualOrderUnavailable(_ message: String) -> ManualOrderRepositoryError {
+    .rejected(code: "MANUAL_ORDER_UNAVAILABLE", message: message)
+  }
+
   private func activate(
     _ session: AuthenticatedSession,
     configuration: APIConfiguration,
@@ -1036,6 +1218,7 @@ final class AppModel: ObservableObject {
     tTradeAssistantRepository = tTradeAssistantLoaderFactory(newApolloSession)
     limitUpBoardRepository = limitUpBoardLoaderFactory(newApolloSession)
     tradeApprovalRepository = tradeApprovalLoaderFactory(newApolloSession)
+    manualOrderRepository = manualOrderLoaderFactory(newApolloSession)
     marketRepository = marketLoaderFactory(newApolloSession)
     portfolioState = session.user.permissions.contains("portfolio:read")
       ? .idle
@@ -1110,8 +1293,11 @@ final class AppModel: ObservableObject {
     tTradeAssistantRepository = nil
     limitUpBoardRepository = nil
     tradeApprovalRepository = nil
+    manualOrderRepository = nil
     marketRepository = nil
     tradeApprovalInProgress = false
+    manualOrderInProgress = false
+    pendingManualOrderDraft = nil
     portfolioState =
       accountDataEnabled
       ? .idle
