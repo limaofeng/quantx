@@ -207,6 +207,7 @@ def authorized_graphql_context():
                     "system-config:write",
                     "system-status:read",
                     "trade:approve",
+                    "trade:manual",
                     "mutation:write",
                     "assistant:read",
                     "assistant:write",

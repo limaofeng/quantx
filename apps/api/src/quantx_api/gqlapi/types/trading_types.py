@@ -21,6 +21,18 @@ class TradingEventType(str, Enum):
   ORDER_REJECTED = "ORDER_REJECTED"  # 订单被拒绝
 
 
+@strawberry.enum(description="移动端手动委托方向")
+class ManualOrderSide(str, Enum):
+  BUY = "BUY"
+  SELL = "SELL"
+
+
+@strawberry.enum(description="移动端手动委托报价类型")
+class ManualOrderPriceType(str, Enum):
+  LIMIT = "LIMIT"
+  BEST = "BEST"
+
+
 @strawberry.type(description="订单信息")
 class Order:
   id: str = strawberry.field(description="订单编号")
@@ -124,11 +136,74 @@ class OrderInput:
   )
 
 
+@strawberry.input(description="移动端手动委托预览输入")
+class ManualOrderPreviewInput:
+  instrument_code: str = strawberry.field(description="带市场后缀的证券代码")
+  side: ManualOrderSide = strawberry.field(description="BUY 或 SELL")
+  price_type: ManualOrderPriceType = strawberry.field(description="LIMIT 或 BEST")
+  volume: int = strawberry.field(description="请求委托数量")
+  idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
+  account_id: Optional[str] = strawberry.field(description="资金账号", default=None)
+  limit_price: Optional[float] = strawberry.field(
+    description="LIMIT 必填；BEST 必须为空",
+    default=None,
+  )
+
+
+@strawberry.input(description="移动端手动委托确认输入")
+class ManualOrderConfirmationInput:
+  challenge_id: str = strawberry.field(description="预览返回的确认挑战 ID")
+  confirmation_token: str = strawberry.field(description="预览返回的一次性确认凭据")
+
+
+@strawberry.type(description="移动端手动委托服务器预览")
+class ManualOrderPreview:
+  challenge_id: str
+  confirmation_token: str
+  account_id: str
+  instrument_code: str
+  side: ManualOrderSide
+  price_type: ManualOrderPriceType
+  volume: int
+  limit_price: Optional[float]
+  reference_price: float
+  estimated_amount: float
+  estimated_fees: Optional[float]
+  available_cash: float
+  available_volume: Optional[int]
+  idempotency_key: str
+  execution_mode: str
+  quote_timestamp: datetime
+  challenge_expires_at: datetime
+  warnings: List[str]
+
+
+@strawberry.type(description="移动端手动委托预览结果")
+class ManualOrderPreviewResult:
+  success: bool
+  code: str
+  message: str
+  preview: Optional[ManualOrderPreview] = None
+
+
+@strawberry.type(description="移动端手动委托确认结果；成功只表示命令已排队")
+class ManualOrderConfirmationResult:
+  success: bool
+  code: str
+  message: str
+  challenge_id: Optional[str] = None
+  client_order_id: Optional[str] = None
+  status: Optional[str] = None
+
+
 @strawberry.input(description="撤单输入参数")
 class CancelOrderInput:
   account_id: Optional[str] = strawberry.field(description="资金账号", default=None)
   order_id: int = strawberry.field(description="订单ID")
-  user_id: str = strawberry.field(description="用户ID", default="default")
+  idempotency_key: Optional[str] = strawberry.field(
+    description="调用方生成的撤单幂等键",
+    default=None,
+  )
 
 
 @strawberry.type(description="下单结果")

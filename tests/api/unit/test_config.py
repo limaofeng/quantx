@@ -99,6 +99,13 @@ def test_safe_production_configuration_passes_fail_closed_validator():
     _production_settings().validate_production()
 
 
+def test_manual_trade_permission_is_never_granted_by_default():
+    configured = _production_settings()
+
+    assert "trade:manual" not in configured.auth_bootstrap_permissions
+    assert "trade:direct" not in configured.auth_bootstrap_permissions
+
+
 def test_unsafe_production_configuration_reports_every_gate_without_secrets():
     secret = "do-not-log-this-secret"
     configured = _production_settings(

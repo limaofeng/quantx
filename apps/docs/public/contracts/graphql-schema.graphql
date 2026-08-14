@@ -362,8 +362,8 @@ input CancelOrderInput {
   """订单ID"""
   orderId: Int!
 
-  """用户ID"""
-  userId: String! = "default"
+  """调用方生成的撤单幂等键"""
+  idempotencyKey: String = null
 }
 
 """撤单结果"""
@@ -2127,6 +2127,91 @@ type LogLine {
   message: String!
 }
 
+"""移动端手动委托确认输入"""
+input ManualOrderConfirmationInput {
+  """预览返回的确认挑战 ID"""
+  challengeId: String!
+
+  """预览返回的一次性确认凭据"""
+  confirmationToken: String!
+}
+
+"""移动端手动委托确认结果；成功只表示命令已排队"""
+type ManualOrderConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: String
+  clientOrderId: String
+  status: String
+}
+
+"""移动端手动委托服务器预览"""
+type ManualOrderPreview {
+  challengeId: String!
+  confirmationToken: String!
+  accountId: String!
+  instrumentCode: String!
+  side: ManualOrderSide!
+  priceType: ManualOrderPriceType!
+  volume: Int!
+  limitPrice: Float
+  referencePrice: Float!
+  estimatedAmount: Float!
+  estimatedFees: Float
+  availableCash: Float!
+  availableVolume: Int
+  idempotencyKey: String!
+  executionMode: String!
+  quoteTimestamp: DateTime!
+  challengeExpiresAt: DateTime!
+  warnings: [String!]!
+}
+
+"""移动端手动委托预览输入"""
+input ManualOrderPreviewInput {
+  """带市场后缀的证券代码"""
+  instrumentCode: String!
+
+  """BUY 或 SELL"""
+  side: ManualOrderSide!
+
+  """LIMIT 或 BEST"""
+  priceType: ManualOrderPriceType!
+
+  """请求委托数量"""
+  volume: Int!
+
+  """调用方生成的业务幂等键"""
+  idempotencyKey: String!
+
+  """资金账号"""
+  accountId: String = null
+
+  """LIMIT 必填；BEST 必须为空"""
+  limitPrice: Float = null
+}
+
+"""移动端手动委托预览结果"""
+type ManualOrderPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: ManualOrderPreview
+}
+
+"""移动端手动委托报价类型"""
+enum ManualOrderPriceType {
+  LIMIT
+  BEST
+}
+
+"""移动端手动委托方向"""
+enum ManualOrderSide {
+  BUY
+  SELL
+}
+
 """市场深度数据"""
 type MarketDepth {
   """股票代码"""
@@ -2180,6 +2265,12 @@ type Mutation {
 
   """刷新单票公告与回购数据"""
   refreshStockDisclosures(stockCode: String!, force: Boolean! = false): AnnouncementSyncStatus!
+
+  """预览移动端手动委托并签发一次性确认挑战"""
+  previewManualOrder(input: ManualOrderPreviewInput!): ManualOrderPreviewResult!
+
+  """消费一次性挑战并排队移动端手动委托"""
+  confirmManualOrder(input: ManualOrderConfirmationInput!): ManualOrderConfirmationResult!
 
   """下单"""
   placeOrder(input: OrderInput!): OrderMutationResult!

@@ -42,6 +42,16 @@ class TradeCommandService:
     self.db = db
 
   @staticmethod
+  def order_idempotency_digest(
+    *, user_id: str, account_id: str, idempotency_key: str
+  ) -> str:
+    """Return the persisted business key used to recover queued order results."""
+
+    return hashlib.sha256(
+      f"order:{user_id}:{account_id}:{idempotency_key.strip()}".encode("utf-8")
+    ).hexdigest()
+
+  @staticmethod
   def _heartbeat_fresh(heartbeat: RuntimeComponentHeartbeat) -> bool:
     updated_at = to_naive_utc(heartbeat.updated_at)
     return (utcnow() - updated_at).total_seconds() <= 90
@@ -73,6 +83,26 @@ class TradeCommandService:
       raise AgentUnavailableError("账户快照或仓位对账未就绪")
     if rollout.acknowledged_policy_version < rollout.policy_version:
       raise AgentUnavailableError("当前自动退出策略版本尚未确认")
+
+  async def _require_manual_live_authorization(
+    self,
+    account_id: str,
+    *,
+    risk_reducing: bool,
+  ) -> None:
+    """Authorize an explicitly confirmed manual order without automation rollout."""
+
+    if not settings.enable_real_trading:
+      raise AgentUnavailableError("服务端真实交易总开关未启用")
+    if account_id not in set(settings.real_trading_account_allowlist or []):
+      raise AgentUnavailableError("账户不在服务端真实交易白名单")
+    rollout = await self.db.get(AccountTradingRollout, account_id)
+    if (
+      rollout is not None
+      and (rollout.kill_switch or rollout.stage == "KILL_SWITCHED")
+      and not risk_reducing
+    ):
+      raise AgentUnavailableError("账户交易 kill switch 已触发，禁止新增风险")
 
   async def _device_for(
     self,
@@ -177,14 +207,17 @@ class TradeCommandService:
     substitution_plan: dict[str, Any] | None = None,
     policy_version: int = 0,
     request_metadata: dict[str, Any] | None = None,
+    manual_live: bool = False,
   ) -> QueuedTradeCommand:
     if volume <= 0:
       raise ValueError("委托数量必须大于 0")
     raw_idempotency_key = idempotency_key.strip() or trace_id.strip()
     if raw_idempotency_key:
-      business_idempotency_key = hashlib.sha256(
-        f"order:{user_id}:{account_id}:{raw_idempotency_key}".encode("utf-8")
-      ).hexdigest()
+      business_idempotency_key = self.order_idempotency_digest(
+        user_id=user_id,
+        account_id=account_id,
+        idempotency_key=raw_idempotency_key,
+      )
       existing = (
         await self.db.execute(
           select(TradeCommandOutbox).where(
@@ -208,11 +241,20 @@ class TradeCommandService:
     if normalized_role not in {"", "ENTRY", "EXIT"}:
       raise ValueError("做 T 订单角色必须是 ENTRY 或 EXIT")
     immutable_metadata = dict(request_metadata or {})
+    if manual_live and normalized_mode != "live":
+      raise ValueError("手动实盘授权只能用于 live 交易命令")
     if normalized_mode == "live":
-      await self._require_live_authorization(
-        account_id,
-        risk_reducing=normalized_role == "EXIT" or side.upper() == "SELL",
-      )
+      risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
+      if manual_live:
+        await self._require_manual_live_authorization(
+          account_id,
+          risk_reducing=risk_reducing,
+        )
+      else:
+        await self._require_live_authorization(
+          account_id,
+          risk_reducing=risk_reducing,
+        )
     device = await self._device_for(
       user_id=user_id,
       account_id=account_id,

@@ -89,6 +89,32 @@ def test_unrelated_mutation_keeps_general_write_permission():
 
 
 @pytest.mark.parametrize(
+  "field_name",
+  ["previewManualOrder", "confirmManualOrder", "cancelOrder"],
+)
+def test_manual_trade_mutations_require_manual_permission(field_name: str):
+  assert required_permission("Mutation", field_name) == "trade:manual"
+
+
+def test_legacy_direct_order_requires_distinct_permission():
+  assert required_permission("Mutation", "placeOrder") == "trade:direct"
+
+
+@pytest.mark.asyncio
+async def test_mobile_manual_principal_cannot_call_legacy_direct_order():
+  result = await SCHEMA.execute(
+    "mutation { placeOrder }",
+    context_value={
+      "principal": _principal(permissions={"trade:manual"}),
+      "request_id": "request-direct-order",
+    },
+  )
+
+  assert result.data is None
+  assert result.errors[0].extensions["code"] == "FORBIDDEN"
+
+
+@pytest.mark.parametrize(
   ("operation", "field_name", "permission"),
   [
     ("Query", "portfolioOverview", "portfolio:read"),

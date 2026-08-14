@@ -8,11 +8,21 @@ from quantx_infrastructure.models.enums import OrderStatus, OrderType, PriceType
 from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 
+from ..manual_order import (
+  ManualOrderChallengeService,
+  normalize_manual_order_request,
+)
 from ..resolvers.orders import OrderResolver
 from ..security import authorized_account_id, principal_from_context
+from ..trade_approval import TradeApprovalChallengeError
 from ..types import (
   CancelOrderInput,
   CancelOrderResult,
+  ManualOrderConfirmationInput,
+  ManualOrderConfirmationResult,
+  ManualOrderPreview,
+  ManualOrderPreviewInput,
+  ManualOrderPreviewResult,
   Order,
   OrderInput,
   OrderMutationResult,
@@ -166,6 +176,94 @@ class TradingQuery:
 
 @strawberry.type(description="订单交易相关变更")
 class TradingMutation:
+  @strawberry.mutation(description="预览移动端手动委托并签发一次性确认挑战")
+  async def preview_manual_order(
+    self,
+    info: strawberry.types.Info,
+    input: ManualOrderPreviewInput,
+  ) -> ManualOrderPreviewResult:
+    try:
+      principal = principal_from_context(info.context)
+      account_id = await _resolve_account_id(info, input.account_id)
+      request = normalize_manual_order_request(
+        account_id=account_id,
+        instrument_code=input.instrument_code,
+        side=input.side,
+        price_type=input.price_type,
+        volume=input.volume,
+        limit_price=input.limit_price,
+        idempotency_key=input.idempotency_key,
+      )
+      issued = await ManualOrderChallengeService.issue(
+        principal=principal,
+        request=request,
+      )
+      return ManualOrderPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对委托、行情时间和风险提示后进行本机生物确认",
+        preview=ManualOrderPreview(
+          challenge_id=issued.challenge_id,
+          confirmation_token=issued.confirmation_token,
+          account_id=request.account_id,
+          instrument_code=request.instrument_code,
+          side=input.side,
+          price_type=input.price_type,
+          volume=request.volume,
+          limit_price=request.limit_price,
+          reference_price=issued.preflight.reference_price,
+          estimated_amount=issued.preflight.estimated_amount,
+          estimated_fees=issued.preflight.estimated_fees,
+          available_cash=issued.preflight.available_cash,
+          available_volume=issued.preflight.available_volume,
+          idempotency_key=request.idempotency_key,
+          execution_mode="LIVE",
+          quote_timestamp=issued.preflight.quote_timestamp,
+          challenge_expires_at=issued.challenge_expires_at,
+          warnings=issued.preflight.warnings,
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return ManualOrderPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+        preview=None,
+      )
+
+  @strawberry.mutation(description="消费一次性挑战并排队移动端手动委托")
+  async def confirm_manual_order(
+    self,
+    info: strawberry.types.Info,
+    input: ManualOrderConfirmationInput,
+  ) -> ManualOrderConfirmationResult:
+    try:
+      result = await ManualOrderChallengeService.confirm(
+        principal=principal_from_context(info.context),
+        challenge_id=input.challenge_id,
+        confirmation_token=input.confirmation_token,
+      )
+      return ManualOrderConfirmationResult(
+        success=True,
+        code="MANUAL_ORDER_QUEUED",
+        message="交易命令已排队；请等待 QMT Agent 券商回报",
+        challenge_id=result.challenge_id,
+        client_order_id=result.client_order_id,
+        status=result.status,
+      )
+    except TradeApprovalChallengeError as exc:
+      return ManualOrderConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+    except Exception:
+      return ManualOrderConfirmationResult(
+        success=False,
+        code="MANUAL_ORDER_REJECTED",
+        message="手动委托未能进入交易命令队列，请检查交易就绪状态",
+      )
+
   @strawberry.mutation(description="下单")
   async def place_order(
     self, info: strawberry.types.Info, input: OrderInput
@@ -222,12 +320,7 @@ class TradingMutation:
           status="REJECTED",
         )
       status = order.status
-      if status in [
-        OrderStatus.CANCELED,
-        OrderStatus.SUCCEEDED,
-        OrderStatus.JUNK,
-        OrderStatus.UNKNOWN,
-      ]:
+      if status not in {OrderStatus.REPORTED, OrderStatus.PART_SUCC}:
         return CancelOrderResult(
           success=False,
           message=f"订单状态 {status.name} 不允许撤单",
@@ -241,10 +334,12 @@ class TradingMutation:
           user_id=principal.user_id,
           account_id=account_id,
           broker_order_id=str(input.order_id),
+          idempotency_key=input.idempotency_key or "",
+          execution_mode="live",
         )
       return CancelOrderResult(
         success=True,
-        message="撤单命令已排队",
+        message="撤单命令已排队；请等待 QMT Agent 券商回报",
         order_id=input.order_id,
         client_order_id=queued.client_order_id,
         status=queued.status,

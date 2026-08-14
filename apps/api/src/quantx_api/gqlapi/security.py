@@ -167,6 +167,12 @@ _TRADE_APPROVAL_MUTATION_FIELDS = {
   "rejectttradeentry",
   "triggerttradekillswitch",
 }
+_MANUAL_TRADE_MUTATION_FIELDS = {
+  "cancelorder",
+  "confirmmanualorder",
+  "previewmanualorder",
+}
+_DIRECT_TRADE_MUTATION_FIELDS = {"placeorder"}
 
 _NORMALIZED_PORTFOLIO_FIELDS = {
   re.sub(r"[^a-z0-9]", "", value.lower()) for value in _PORTFOLIO_FIELDS
@@ -186,6 +192,10 @@ def required_permission(operation_name: str, field_name: str) -> str:
       return "assistant:write"
     if normalized in _TRADE_APPROVAL_MUTATION_FIELDS:
       return "trade:approve"
+    if normalized in _MANUAL_TRADE_MUTATION_FIELDS:
+      return "trade:manual"
+    if normalized in _DIRECT_TRADE_MUTATION_FIELDS:
+      return "trade:direct"
     return "mutation:write"
   if normalized in _NORMALIZED_PORTFOLIO_FIELDS:
     return "portfolio:read"

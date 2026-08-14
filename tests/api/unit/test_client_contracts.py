@@ -56,6 +56,8 @@ def test_graphql_contract_uses_only_public_permission_categories():
     "system-status:read",
     "system-config:write",
     "trade:approve",
+    "trade:direct",
+    "trade:manual",
   }
 
 

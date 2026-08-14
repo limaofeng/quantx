@@ -65,6 +65,7 @@ TABLE_COMMENTS: dict[str, str] = {
   "limit_up_research_jobs": "首板候选AI研究任务",
   "market_data_request": "行情数据传输请求",
   "market_data_transfer": "行情数据分片传输记录",
+  "trade_confirmation_challenges": "敏感交易操作一次性确认挑战",
   "operational_alerts": "运行异常告警及处置状态",
   "orders": "券商委托订单",
   "pending_trade_orders": "券商委托编号生成前的待处理订单",

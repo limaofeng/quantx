@@ -1,4 +1,6 @@
 from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_infrastructure.database.relational_base import Base
@@ -10,6 +12,7 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
+from quantx_infrastructure.services import trade_command_service as command_module
 from quantx_infrastructure.services.trade_command_service import (
   AgentUnavailableError,
   TradeCommandService,
@@ -25,6 +28,60 @@ TABLES = [
   TTradeBatch.__table__,
   TradeCommandOutbox.__table__,
 ]
+
+
+@pytest.mark.asyncio
+async def test_manual_live_authorization_requires_global_gate_and_allowlist(
+  monkeypatch,
+) -> None:
+  db = SimpleNamespace(get=AsyncMock(return_value=None))
+  service = TradeCommandService(db)
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", False)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+
+  with pytest.raises(AgentUnavailableError, match="总开关"):
+    await service._require_manual_live_authorization(
+      "account-1",
+      risk_reducing=False,
+    )
+
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(command_module.settings, "real_trading_account_allowlist", [])
+  with pytest.raises(AgentUnavailableError, match="白名单"):
+    await service._require_manual_live_authorization(
+      "account-1",
+      risk_reducing=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
+  monkeypatch,
+) -> None:
+  rollout = SimpleNamespace(kill_switch=True, stage="KILL_SWITCHED")
+  db = SimpleNamespace(get=AsyncMock(return_value=rollout))
+  service = TradeCommandService(db)
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(
+    command_module.settings,
+    "real_trading_account_allowlist",
+    ["account-1"],
+  )
+
+  with pytest.raises(AgentUnavailableError, match="禁止新增风险"):
+    await service._require_manual_live_authorization(
+      "account-1",
+      risk_reducing=False,
+    )
+
+  await service._require_manual_live_authorization(
+    "account-1",
+    risk_reducing=True,
+  )
 
 
 @pytest.mark.asyncio

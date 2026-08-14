@@ -130,9 +130,86 @@ def _intent_fingerprint(record: TradeIntentRecord) -> str:
   return hashlib.sha256(encoded).hexdigest()
 
 
-def _token_digest(token: str) -> str:
+def challenge_token_digest(token: str) -> str:
+  """Return an HMAC digest suitable for persisting a confirmation token."""
+
   key = require_signing_key(settings)
   return hmac.new(key, token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def signed_payload_fingerprint(payload: dict[str, Any]) -> str:
+  """Bind a canonical payload to the server signing key without storing secrets."""
+
+  encoded = json.dumps(
+    payload,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+    default=str,
+  ).encode("utf-8")
+  key = require_signing_key(settings)
+  return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+
+def validate_persistent_trade_challenge(
+  *,
+  challenge: Any,
+  principal: Principal,
+  action: str,
+  confirmation_token: str,
+  now: datetime,
+  payload: dict[str, Any],
+  allow_consumed: bool = False,
+) -> None:
+  """Validate the common binding contract for a durable one-time challenge.
+
+  The persistence model deliberately remains action-neutral so later liquidation
+  confirmations can reuse the same binding and replay rules.
+  """
+
+  principal.require_account(str(challenge.account_id))
+  if (
+    str(challenge.action) != action
+    or str(challenge.user_id) != principal.user_id
+    or str(challenge.device_session_id) != principal.device_session_id
+  ):
+    raise TradeApprovalChallengeError(
+      "CONFIRMATION_CONTEXT_MISMATCH",
+      "确认凭据不属于当前用户、设备会话、账户或交易动作",
+    )
+  if not hmac.compare_digest(
+    str(challenge.token_digest or ""),
+    challenge_token_digest(confirmation_token),
+  ):
+    raise TradeApprovalChallengeError(
+      "INVALID_CONFIRMATION_TOKEN", "确认凭据无效，请重新获取预览"
+    )
+  if challenge.consumed_at is not None and not allow_consumed:
+    raise TradeApprovalChallengeError(
+      "CONFIRMATION_ALREADY_USED", "确认凭据已使用，请刷新交易状态"
+    )
+  expires_at = _parse_local_datetime(challenge.expires_at)
+  # Once a command has been durably queued, the challenge TTL must not turn a
+  # client timeout into an ambiguous result.  A consumed replay still has to
+  # match the original principal, device, token and signed payload above, but
+  # it can only recover the persisted result; it cannot enqueue again.
+  if (
+    expires_at is None
+    or (
+      expires_at <= now
+      and not (allow_consumed and challenge.consumed_at is not None)
+    )
+  ):
+    raise TradeApprovalChallengeError(
+      "CONFIRMATION_EXPIRED", "确认凭据已过期，请重新获取预览"
+    )
+  if not hmac.compare_digest(
+    str(challenge.payload_fingerprint or ""),
+    signed_payload_fingerprint(payload),
+  ):
+    raise TradeApprovalChallengeError(
+      "TRADE_PAYLOAD_CHANGED", "交易内容已变化，请重新获取预览"
+    )
 
 
 def _aware_shanghai(value: datetime) -> datetime:
@@ -219,7 +296,7 @@ class TradeApprovalChallengeService:
       challenge_id = str(uuid.uuid4())
       challenge = {
         "challenge_id": challenge_id,
-        "token_digest": _token_digest(raw_token),
+        "token_digest": challenge_token_digest(raw_token),
         "action": action,
         "user_id": principal.user_id,
         "device_session_id": principal.device_session_id,
@@ -331,7 +408,7 @@ class TradeApprovalChallengeService:
       stored_digest = str(challenge.get("token_digest") or "")
       if not stored_digest or not hmac.compare_digest(
         stored_digest,
-        _token_digest(token),
+        challenge_token_digest(token),
       ):
         raise TradeApprovalChallengeError(
           "INVALID_CONFIRMATION_TOKEN",

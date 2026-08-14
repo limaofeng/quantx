@@ -233,3 +233,14 @@ def test_ai_runtime_settings_revision_follows_first_board_release() -> None:
   )
 
   assert revision.down_revision == "20260814_0013"
+
+
+def test_trade_confirmation_revision_follows_ai_runtime_and_refuses_downgrade() -> None:
+  revision = _load_revision(
+    "20260815_0015_trade_confirmation_challenges.py",
+    "quantx_test_trade_confirmation_challenge_revision",
+  )
+
+  assert revision.down_revision == "20260814_0014"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()

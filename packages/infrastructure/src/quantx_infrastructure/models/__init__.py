@@ -126,6 +126,7 @@ from .t_trade_imported_entry import TTradeImportedEntry
 from .table_comments import apply_table_comments
 from .tick import Tick
 from .trade import Trade
+from .trade_confirmation_challenge import TradeConfirmationChallenge
 from .trade_intent_record import TradeIntentRecord
 from .watchlist_item import WatchlistItem
 
@@ -165,6 +166,7 @@ __all__ = [
   "AuthDeviceSession",
   "AuthConsumedRefreshToken",
   "AuthAuditEvent",
+  "TradeConfirmationChallenge",
   "AiAssistantDeletionAudit",
   "AiAssistantEvent",
   "AiAssistantMessage",

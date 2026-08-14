@@ -58,6 +58,7 @@ POST_BASELINE_TABLES = {
   "limit_up_board_assistant_configs",
   "limit_up_board_assistant_projections",
   "limit_up_board_candidate_arms",
+  "trade_confirmation_challenges",
 }
 POST_BASELINE_COLUMNS = {
   "account_trading_rollouts": {
