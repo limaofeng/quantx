@@ -73,6 +73,21 @@ def test_manual_trade_mutations_require_independent_permission(field_name: str):
   assert required_permission("Mutation", field_name) == "trade:manual"
 
 
+@pytest.mark.parametrize(
+  "field_name",
+  [
+    "previewLiquidation",
+    "confirmLiquidation",
+    "previewExitPlanAuthorization",
+    "confirmExitPlanAuthorization",
+  ],
+)
+def test_liquidation_mutations_require_independent_control_permission(
+  field_name: str,
+):
+  assert required_permission("Mutation", field_name) == "liquidation:control"
+
+
 def test_legacy_direct_order_does_not_share_mobile_manual_permission():
   assert required_permission("Mutation", "placeOrder") == "trade:direct"
 

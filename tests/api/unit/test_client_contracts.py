@@ -108,6 +108,14 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
   assert permissions["Query"]["orderEntryCapabilities"] == "market:read"
   assert permissions["Mutation"]["previewLiquidation"] == "liquidation:control"
   assert permissions["Mutation"]["confirmLiquidation"] == "liquidation:control"
+  assert (
+    permissions["Mutation"]["previewExitPlanAuthorization"]
+    == "liquidation:control"
+  )
+  assert (
+    permissions["Mutation"]["confirmExitPlanAuthorization"]
+    == "liquidation:control"
+  )
   assert permissions["Mutation"]["previewStrategyControl"] == "trade:approve"
   assert permissions["Mutation"]["confirmStrategyControl"] == "trade:approve"
 

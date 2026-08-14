@@ -825,6 +825,99 @@ type ExecutionTraceView {
   updatedAt: DateTime
 }
 
+"""确认既有 LIVE 退出计划的精确自动实盘授权"""
+input ExitPlanAuthorizationConfirmationInput {
+  """预览时的主账户"""
+  accountId: String!
+
+  """预览时的退出计划 ID"""
+  planId: String!
+
+  """预览时的配置版本"""
+  expectedConfigVersion: Int!
+
+  """预览时的业务幂等键"""
+  idempotencyKey: String!
+
+  """预览返回的确认挑战 ID"""
+  challengeId: String!
+
+  """预览返回的一次性确认凭据"""
+  confirmationToken: String!
+}
+
+"""退出计划精确自动实盘授权确认结果"""
+type ExitPlanAuthorizationConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: String
+  planId: String
+  configVersion: Int
+  authorized: Boolean!
+  authorizationExpiresAt: DateTime
+  auditEventId: String
+}
+
+"""自动实盘退出授权绑定的持仓与 T+1 快照"""
+type ExitPlanAuthorizationPositionSnapshot {
+  totalVolume: Int!
+  availableVolume: Int!
+  frozenVolume: Int!
+  yesterdayVolume: Int!
+  t1UnavailableVolume: Int!
+  positionUpdatedAt: DateTime
+}
+
+"""既有 LIVE 退出计划的精确自动实盘授权预览"""
+type ExitPlanAuthorizationPreview {
+  challengeId: String!
+  confirmationToken: String!
+  accountId: String!
+  planId: String!
+  instrumentCode: String!
+  bucket: String!
+  sourceType: String!
+  executionMode: String!
+  configVersion: Int!
+  protectedVolume: Int!
+  exitedVolume: Int!
+  remainingVolume: Int!
+  rules: JSON!
+  t1Policy: String!
+  executionPolicy: JSON!
+  position: ExitPlanAuthorizationPositionSnapshot!
+  otherProtections: [LiquidationConflictPreview!]!
+  readiness: JSON!
+  authorizationFingerprint: String!
+  authorizationExpiresAt: DateTime!
+  challengeExpiresAt: DateTime!
+  warnings: [String!]!
+}
+
+"""预览既有 LIVE 退出计划的精确自动实盘授权"""
+input ExitPlanAuthorizationPreviewInput {
+  """当前原生设备会话的唯一主账户"""
+  accountId: String!
+
+  """既有退出计划 ID"""
+  planId: String!
+
+  """预期配置版本"""
+  expectedConfigVersion: Int!
+
+  """调用方生成的业务幂等键"""
+  idempotencyKey: String!
+}
+
+"""退出计划精确自动实盘授权预览结果"""
+type ExitPlanAuthorizationPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: ExitPlanAuthorizationPreview
+}
+
 """退出计划能力"""
 type ExitPlanCapabilities {
   ruleTypes: [ExitPlanRuleCapability!]!
@@ -887,6 +980,8 @@ type ExitPlanView {
   status: String!
   executionMode: String!
   autoExitAuthorized: Boolean!
+  autoExitAuthorizationConfigVersion: Int
+  autoExitAuthorizationExpiresAt: DateTime
   configVersion: Int!
   completionStrategy: String
   completionNote: String
@@ -2437,6 +2532,12 @@ type Mutation {
 
   """撤单"""
   cancelOrder(input: CancelOrderInput!): CancelOrderResult!
+
+  """预览既有 LIVE 退出计划的精确自动实盘授权"""
+  previewExitPlanAuthorization(input: ExitPlanAuthorizationPreviewInput!): ExitPlanAuthorizationPreviewResult!
+
+  """确认精确计划版本的自动实盘退出授权"""
+  confirmExitPlanAuthorization(input: ExitPlanAuthorizationConfirmationInput!): ExitPlanAuthorizationConfirmationResult!
 
   """预览固定持仓快照并签发组级清仓确认挑战"""
   previewLiquidation(input: LiquidationPreviewInput!): LiquidationPreviewResult!

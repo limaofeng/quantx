@@ -202,7 +202,9 @@ _LIMIT_UP_CONTROL_MUTATION_FIELDS = {
   "setfirstboardcandidatepreference",
 }
 _LIQUIDATION_CONTROL_MUTATION_FIELDS = {
+  "confirmexitplanauthorization",
   "confirmliquidation",
+  "previewexitplanauthorization",
   "previewliquidation",
 }
 _NOTIFICATION_MUTATION_FIELDS = {
