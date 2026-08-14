@@ -34,6 +34,17 @@ struct OrderRecord: Equatable, Hashable, Identifiable, Sendable {
     max(0, volume - tradedVolume)
   }
 
+  var brokerOrderID: Int? {
+    guard let value = Int(id), value > 0, value <= Int(Int32.max) else { return nil }
+    return value
+  }
+
+  var canCancel: Bool {
+    brokerOrderID != nil
+      && ["REPORTED", "PART_SUCC"].contains(status)
+      && remainingVolume > 0
+  }
+
   var statusDisplayName: String {
     switch status {
     case "UNREPORTED": "未报"
@@ -49,6 +60,21 @@ struct OrderRecord: Equatable, Hashable, Identifiable, Sendable {
     default: "未知（\(status)）"
     }
   }
+}
+
+struct OrderCancellationRequest: Equatable, Sendable {
+  let accountID: String
+  let orderID: Int
+  let idempotencyKey: UUID
+}
+
+struct OrderCancellationQueueConfirmation: Equatable, Sendable {
+  let orderID: Int
+  let clientOrderID: String
+  let status: String
+
+  static let title = "撤单命令已排队"
+  static let message = "等待券商委托投影更新；排队不代表订单已经撤销。"
 }
 
 struct TradeRecord: Equatable, Hashable, Identifiable, Sendable {

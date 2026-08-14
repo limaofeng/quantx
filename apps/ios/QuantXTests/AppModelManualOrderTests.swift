@@ -27,17 +27,19 @@ final class AppModelManualOrderTests: XCTestCase {
     let manualOrder = ManualOrderLoaderSpy(preview: preview)
     let authentication = ManualOrderAuthenticationSpy()
     let model = makeModel(
-      permissions: ["portfolio:read", "trade:manual"],
+      permissions: ["portfolio:read", "market:read", "trade:manual"],
       portfolioAccountID: "ACCOUNT-1",
       manualOrder: manualOrder,
       authentication: authentication
     )
     await model.restoreSession(requireLocalUnlock: false)
+    await model.manualTradingStore.loadCapabilities(instrumentCode: "600519.SH")
 
     let loaded = try await model.previewManualOrder(
       instrumentCode: "600519.sh",
       direction: .buy,
       quoteType: .limit,
+      executionMode: .live,
       volume: 100,
       limitPrice: 1_500,
       idempotencyKey: idempotencyKey
@@ -70,18 +72,16 @@ final class AppModelManualOrderTests: XCTestCase {
         instrumentCode: "600519.SH",
         direction: .buy,
         quoteType: .best,
+        executionMode: .paper,
         volume: 100,
         limitPrice: nil,
         idempotencyKey: UUID()
       )
       XCTFail("缺少 trade:manual 时不应请求手动委托预览")
-    } catch let error as ManualOrderRepositoryError {
+    } catch let error as ManualTradingStoreError {
       XCTAssertEqual(
         error,
-        .rejected(
-          code: "MANUAL_ORDER_UNAVAILABLE",
-          message: "当前会话没有 trade:manual 手动交易权限"
-        )
+        .unavailable("当前会话没有 trade:manual 手动交易权限")
       )
     } catch {
       XCTFail("收到意外错误：\(error)")
@@ -95,7 +95,7 @@ final class AppModelManualOrderTests: XCTestCase {
       preview: makePreview(expiresAt: Date().addingTimeInterval(-1))
     )
     let model = makeModel(
-      permissions: ["portfolio:read", "trade:manual"],
+      permissions: ["portfolio:read", "market:read", "trade:manual"],
       portfolioAccountID: "ACCOUNT-1",
       manualOrder: manualOrder,
       authentication: authentication
@@ -117,12 +117,13 @@ final class AppModelManualOrderTests: XCTestCase {
     )
     let manualOrder = ManualOrderLoaderSpy(preview: preview)
     let model = makeModel(
-      permissions: ["portfolio:read", "trade:manual"],
+      permissions: ["portfolio:read", "market:read", "trade:manual"],
       portfolioAccountID: "ACCOUNT-1",
       manualOrder: manualOrder,
       authentication: ManualOrderAuthenticationSpy()
     )
     await model.restoreSession(requireLocalUnlock: false)
+    await model.manualTradingStore.loadCapabilities(instrumentCode: "600519.SH")
 
     _ = try await model.confirmManualOrder(preview)
 
@@ -134,7 +135,7 @@ final class AppModelManualOrderTests: XCTestCase {
   func testUnverifiedMainAccountCannotCreatePreview() async {
     let manualOrder = ManualOrderLoaderSpy(preview: makePreview())
     let model = makeModel(
-      permissions: ["portfolio:read", "trade:manual"],
+      permissions: ["portfolio:read", "market:read", "trade:manual"],
       authorizedAccountIDs: ["ACCOUNT-1"],
       portfolioAccountID: "ACCOUNT-2",
       manualOrder: manualOrder,
@@ -147,6 +148,7 @@ final class AppModelManualOrderTests: XCTestCase {
         instrumentCode: "600519.SH",
         direction: .sell,
         quoteType: .best,
+        executionMode: .paper,
         volume: 100,
         limitPrice: nil,
         idempotencyKey: UUID()
@@ -217,7 +219,7 @@ final class AppModelManualOrderTests: XCTestCase {
       availableCash: 200_000,
       availableVolume: nil,
       idempotencyKey: idempotencyKey,
-      executionMode: "LIVE",
+      executionMode: .live,
       quoteTimestamp: Date(),
       challengeExpiresAt: expiresAt,
       riskDecisionID: "risk-decision-1",
@@ -276,6 +278,24 @@ private final class ManualOrderLoaderSpy: ManualOrderLoading {
     previewResult = preview
   }
 
+  func capabilities(
+    instrumentCode: String,
+    accountID: String,
+    authorizedAccountIDs _: Set<String>
+  ) async throws -> ManualOrderEntryCapabilities {
+    ManualOrderEntryCapabilities(
+      accountID: accountID,
+      instrumentCode: instrumentCode,
+      canManualTrade: true,
+      executionModes: [.paper, .live],
+      supportedDirections: [.buy, .sell],
+      supportedQuoteTypes: [.limit, .best],
+      liveReady: true,
+      liveBlockedReasons: [],
+      warnings: []
+    )
+  }
+
   func preview(
     _ request: ManualOrderRequest,
     authorizedAccountIDs _: Set<String>
@@ -314,6 +334,8 @@ private final class ManualOrderPortfolioLoader: PortfolioLoading {
 @MainActor
 private final class ManualOrderAuthenticationSpy: LocalAuthenticationProviding {
   private(set) var tradeAuthorizationCount = 0
+
+  var tradeAuthorizationAvailable: Bool { true }
 
   func unlock(reason _: String) async throws {}
 

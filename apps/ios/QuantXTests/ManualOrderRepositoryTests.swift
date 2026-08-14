@@ -22,6 +22,18 @@ final class ManualOrderRepositoryTests: XCTestCase {
     }
   }
 
+  func testPreviewInputAlwaysCarriesExplicitExecutionMode() {
+    let paperInput = ManualOrderRepository.graphQLInput(
+      makeRequest(executionMode: .paper)
+    )
+    let liveInput = ManualOrderRepository.graphQLInput(
+      makeRequest(executionMode: .live)
+    )
+
+    XCTAssertEqual(paperInput.executionMode?.rawValue, "PAPER")
+    XCTAssertEqual(liveInput.executionMode?.rawValue, "LIVE")
+  }
+
   func testBestPriceRequestCannotCarryLimitPrice() {
     XCTAssertThrowsError(
       try ManualOrderRepository.validate(
@@ -32,6 +44,24 @@ final class ManualOrderRepositoryTests: XCTestCase {
       XCTAssertEqual(
         error as? ManualOrderRepositoryError,
         .invalidRequest("对手方最优价委托不能携带限价")
+      )
+    }
+  }
+
+  func testBeijingBestPriceRequestIsRejectedEvenIfForgedLocally() {
+    XCTAssertThrowsError(
+      try ManualOrderRepository.validate(
+        makeRequest(
+          instrumentCode: "920001.BJ",
+          quoteType: .best,
+          limitPrice: nil
+        ),
+        authorizedAccountIDs: ["ACCOUNT-1"]
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? ManualOrderRepositoryError,
+        .invalidRequest("北交所暂不支持对手方最优价委托")
       )
     }
   }
@@ -65,7 +95,25 @@ final class ManualOrderRepositoryTests: XCTestCase {
     XCTAssertEqual(preview.finalVolume, 100)
     XCTAssertFalse(preview.wasCapped)
     XCTAssertEqual(preview.idempotencyKey, request.idempotencyKey)
+    XCTAssertEqual(preview.executionMode, .paper)
     XCTAssertFalse(preview.isExpired())
+  }
+
+  func testPreviewMappingRejectsExecutionModeSubstitution() {
+    let request = makeRequest(executionMode: .paper)
+    XCTAssertThrowsError(
+      try ManualOrderRepository.mapPreview(
+        makeGraphQLPreview(
+          accountID: request.accountID,
+          request: request,
+          executionMode: "LIVE"
+        ),
+        request: request,
+        authorizedAccountIDs: [request.accountID]
+      )
+    ) { error in
+      XCTAssertEqual(error as? ManualOrderRepositoryError, .contextMismatch)
+    }
   }
 
   func testSellPreviewRequiresAuthoritativeAvailableVolume() {
@@ -99,11 +147,89 @@ final class ManualOrderRepositoryTests: XCTestCase {
     XCTAssertTrue(preview.wasCapped)
   }
 
+  func testCapabilitiesKeepPaperAsOnlyDefaultAndExposeReadyLive() throws {
+    let capabilities = try ManualOrderRepository.mapCapabilities(
+      makeGraphQLCapabilities(
+        executionModes: [.paper, .live],
+        liveReady: true
+      ),
+      requestedInstrumentCode: "600519.SH",
+      requestedAccountID: "ACCOUNT-1",
+      authorizedAccountIDs: ["ACCOUNT-1"]
+    )
+
+    XCTAssertEqual(capabilities.defaultExecutionMode, .paper)
+    XCTAssertEqual(capabilities.selectableExecutionModes, [.paper, .live])
+    XCTAssertTrue(
+      capabilities.supports(
+        direction: .buy,
+        quoteType: .best,
+        executionMode: .live
+      )
+    )
+  }
+
+  func testCapabilitiesHideLiveWhenServerDoesNotReturnReadyLive() throws {
+    let capabilities = try ManualOrderRepository.mapCapabilities(
+      makeGraphQLCapabilities(executionModes: [.paper], liveReady: false),
+      requestedInstrumentCode: "600519.SH",
+      requestedAccountID: "ACCOUNT-1",
+      authorizedAccountIDs: ["ACCOUNT-1"]
+    )
+
+    XCTAssertEqual(capabilities.selectableExecutionModes, [.paper])
+    XCTAssertFalse(capabilities.canSelectLive)
+  }
+
+  func testCapabilitiesFailClosedForUnknownEnum() {
+    let value = makeGraphQLCapabilities(
+      rawExecutionModes: [
+        GraphQLEnum(QuantXAPI.ManualOrderExecutionMode.paper),
+        GraphQLEnum<QuantXAPI.ManualOrderExecutionMode>(rawValue: "SHADOW"),
+      ],
+      liveReady: false
+    )
+
+    XCTAssertThrowsError(
+      try ManualOrderRepository.mapCapabilities(
+        value,
+        requestedInstrumentCode: "600519.SH",
+        requestedAccountID: "ACCOUNT-1",
+        authorizedAccountIDs: ["ACCOUNT-1"]
+      )
+    ) { error in
+      XCTAssertEqual(error as? ManualOrderRepositoryError, .invalidResponse)
+    }
+  }
+
+  func testBeijingCapabilitiesNeverPermitBest() throws {
+    let capabilities = try ManualOrderRepository.mapCapabilities(
+      makeGraphQLCapabilities(
+        instrumentCode: "920001.BJ",
+        executionModes: [.paper],
+        supportedPriceTypes: [.limit, .best],
+        liveReady: false
+      ),
+      requestedInstrumentCode: "920001.BJ",
+      requestedAccountID: "ACCOUNT-1",
+      authorizedAccountIDs: ["ACCOUNT-1"]
+    )
+
+    XCTAssertFalse(
+      capabilities.supports(
+        direction: .buy,
+        quoteType: .best,
+        executionMode: .paper
+      )
+    )
+  }
+
   private func makeRequest(
     accountID: String = "ACCOUNT-1",
     instrumentCode: String = "600519.SH",
     direction: ManualOrderDirection = .buy,
     quoteType: ManualOrderQuoteType = .limit,
+    executionMode: ManualOrderExecutionMode = .paper,
     volume: Int = 100,
     limitPrice: Double? = 1_500
   ) -> ManualOrderRequest {
@@ -112,6 +238,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
       instrumentCode: instrumentCode,
       direction: direction,
       quoteType: quoteType,
+      executionMode: executionMode,
       volume: volume,
       limitPrice: limitPrice,
       idempotencyKey: UUID()
@@ -122,7 +249,8 @@ final class ManualOrderRepositoryTests: XCTestCase {
     accountID: String,
     request: ManualOrderRequest,
     finalVolume: Int? = nil,
-    riskAction: String = "ALLOW"
+    riskAction: String = "ALLOW",
+    executionMode: String? = nil
   ) -> QuantXAPI.IOSPreviewManualOrderMutation.Data.PreviewManualOrder.Preview {
     QuantXAPI.IOSPreviewManualOrderMutation.Data.PreviewManualOrder.Preview(
       _dataDict: DataDict(
@@ -143,7 +271,7 @@ final class ManualOrderRepositoryTests: XCTestCase {
           "estimatedFees": 18.0,
           "availableCash": 200_000.0,
           "idempotencyKey": request.idempotencyKey.uuidString.lowercased(),
-          "executionMode": "LIVE",
+          "executionMode": executionMode ?? request.executionMode.rawValue,
           "quoteTimestamp": ISO8601DateFormatter().string(from: Date()),
           "challengeExpiresAt": ISO8601DateFormatter().string(
             from: Date().addingTimeInterval(60)
@@ -159,6 +287,44 @@ final class ManualOrderRepositoryTests: XCTestCase {
         fulfilledFragments: [
           ObjectIdentifier(
             QuantXAPI.IOSPreviewManualOrderMutation.Data.PreviewManualOrder.Preview.self
+          )
+        ]
+      )
+    )
+  }
+
+  private func makeGraphQLCapabilities(
+    accountID: String = "ACCOUNT-1",
+    instrumentCode: String = "600519.SH",
+    executionModes: [QuantXAPI.ManualOrderExecutionMode] = [.paper],
+    rawExecutionModes: [GraphQLEnum<QuantXAPI.ManualOrderExecutionMode>]? = nil,
+    supportedPriceTypes: [QuantXAPI.ManualOrderPriceType] = [.limit, .best],
+    liveReady: Bool
+  ) -> QuantXAPI.IOSOrderEntryCapabilitiesQuery.Data.OrderEntryCapabilities {
+    QuantXAPI.IOSOrderEntryCapabilitiesQuery.Data.OrderEntryCapabilities(
+      _dataDict: DataDict(
+        data: [
+          "__typename": "OrderEntryCapabilities",
+          "accountId": accountID,
+          "instrumentCode": instrumentCode,
+          "canManualTrade": true,
+          "defaultExecutionMode": GraphQLEnum(
+            QuantXAPI.ManualOrderExecutionMode.paper
+          ),
+          "executionModes": rawExecutionModes
+            ?? executionModes.map(GraphQLEnum.init),
+          "supportedSides": [
+            GraphQLEnum(QuantXAPI.ManualOrderSide.buy),
+            GraphQLEnum(QuantXAPI.ManualOrderSide.sell),
+          ],
+          "supportedPriceTypes": supportedPriceTypes.map(GraphQLEnum.init),
+          "liveReady": liveReady,
+          "liveBlockedReasons": liveReady ? [] : ["实盘未就绪"],
+          "warnings": ["能力只决定可展示选项"],
+        ],
+        fulfilledFragments: [
+          ObjectIdentifier(
+            QuantXAPI.IOSOrderEntryCapabilitiesQuery.Data.OrderEntryCapabilities.self
           )
         ]
       )

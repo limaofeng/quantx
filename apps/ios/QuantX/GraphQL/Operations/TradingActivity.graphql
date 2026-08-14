@@ -73,3 +73,13 @@ query IOSHistoryTrades($accountId: String!, $startDate: String!, $endDate: Strin
     orderRemark
   }
 }
+
+mutation IOSCancelOrder($input: CancelOrderInput!) {
+  cancelOrder(input: $input) {
+    success
+    message
+    orderId
+    clientOrderId
+    status
+  }
+}

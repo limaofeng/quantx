@@ -1,3 +1,18 @@
+query IOSOrderEntryCapabilities($instrumentCode: String!, $accountId: String!) {
+  orderEntryCapabilities(instrumentCode: $instrumentCode, accountId: $accountId) {
+    accountId
+    instrumentCode
+    canManualTrade
+    defaultExecutionMode
+    executionModes
+    supportedSides
+    supportedPriceTypes
+    liveReady
+    liveBlockedReasons
+    warnings
+  }
+}
+
 mutation IOSPreviewManualOrder($input: ManualOrderPreviewInput!) {
   previewManualOrder(input: $input) {
     success

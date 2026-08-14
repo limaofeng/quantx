@@ -29,6 +29,7 @@ extension QuantXAPI {
 
     private static let objectTypeMap: [String: ApolloAPI.Object] = [
       "Account": QuantXAPI.Objects.Account,
+      "CancelOrderResult": QuantXAPI.Objects.CancelOrderResult,
       "Instrument": QuantXAPI.Objects.Instrument,
       "KLineData": QuantXAPI.Objects.KLineData,
       "LiquidationConfirmationResult": QuantXAPI.Objects.LiquidationConfirmationResult,
@@ -44,6 +45,7 @@ extension QuantXAPI {
       "MarketDepthLevel": QuantXAPI.Objects.MarketDepthLevel,
       "Mutation": QuantXAPI.Objects.Mutation,
       "Order": QuantXAPI.Objects.Order,
+      "OrderEntryCapabilities": QuantXAPI.Objects.OrderEntryCapabilities,
       "PageInfo": QuantXAPI.Objects.PageInfo,
       "PortfolioSummary": QuantXAPI.Objects.PortfolioSummary,
       "Position": QuantXAPI.Objects.Position,

@@ -38,7 +38,8 @@ struct TradeWorkspaceView: View {
         case .orderTicket(let direction, let instrumentCode):
           ManualOrderTicketView(
             direction: direction,
-            initialInstrumentCode: instrumentCode ?? ""
+            initialInstrumentCode: instrumentCode ?? "",
+            store: model.manualTradingStore
           )
         case .activity:
           TradingActivityView(embeddedInNavigation: true)
@@ -192,11 +193,13 @@ private struct ManualOrderTicketView: View {
   @EnvironmentObject private var model: AppModel
   @Environment(\.dynamicTypeSize) private var dynamicTypeSize
   @Environment(\.scenePhase) private var scenePhase
+  @ObservedObject var store: ManualTradingStore
 
   let direction: ManualOrderDirection
 
   @State private var instrumentCode: String
   @State private var quoteType = ManualOrderQuoteType.limit
+  @State private var executionMode = ManualOrderExecutionMode.paper
   @State private var volumeText = ""
   @State private var limitPriceText = ""
   @State private var previewInProgress = false
@@ -204,8 +207,13 @@ private struct ManualOrderTicketView: View {
   @State private var errorMessage: String?
   @State private var queued = false
 
-  init(direction: ManualOrderDirection, initialInstrumentCode: String) {
+  init(
+    direction: ManualOrderDirection,
+    initialInstrumentCode: String,
+    store: ManualTradingStore
+  ) {
     self.direction = direction
+    self.store = store
     _instrumentCode = State(initialValue: initialInstrumentCode)
   }
 
@@ -217,7 +225,7 @@ private struct ManualOrderTicketView: View {
 
         if queued {
           QuantXStatusBanner(
-            title: "已排队",
+            title: "委托命令已排队",
             message: "等待 QMT Agent 委托回报；排队不代表券商受理或成交。",
             status: .ready
           )
@@ -245,7 +253,7 @@ private struct ManualOrderTicketView: View {
       previewAction
     }
     .sheet(item: $previewTicket) { preview in
-      ManualOrderConfirmationSheet(preview: preview) {
+      ManualOrderConfirmationSheet(store: store, preview: preview) {
         queued = true
       }
     }
@@ -256,11 +264,30 @@ private struct ManualOrderTicketView: View {
     }
     .onChange(of: volumeText) { _, _ in invalidateQueuedState() }
     .onChange(of: limitPriceText) { _, _ in invalidateQueuedState() }
+    .onChange(of: executionMode) { _, _ in invalidateQueuedState() }
+    .onChange(of: store.capabilityState) { _, _ in
+      normalizeSelectionsForCapabilities()
+    }
+    .task(id: normalizedInstrumentCode) {
+      executionMode = .paper
+      quoteType = .limit
+      previewTicket = nil
+      store.clearCapabilities()
+      guard ManualOrderInstrument.isCanonicalCode(normalizedInstrumentCode) else {
+        return
+      }
+      do {
+        try await Task.sleep(for: .milliseconds(250))
+      } catch {
+        return
+      }
+      await store.loadCapabilities(instrumentCode: normalizedInstrumentCode)
+    }
     .onDisappear {
       previewTicket = nil
     }
     .onChange(of: scenePhase) { _, newPhase in
-      if newPhase == .background, !model.manualOrderInProgress {
+      if newPhase == .background, !store.manualOrderInProgress {
         previewTicket = nil
       }
     }
@@ -318,40 +345,62 @@ private struct ManualOrderTicketView: View {
             .foregroundStyle(QuantXTheme.secondaryText)
         }
 
-        VStack(alignment: .leading, spacing: 7) {
-          Text("报价方式")
-            .font(.subheadline.weight(.semibold))
-          Picker("报价方式", selection: $quoteType) {
-            ForEach(ManualOrderQuoteType.allCases) { type in
-              Text(type.title).tag(type)
-            }
-          }
-          .pickerStyle(.segmented)
-          Text(
-            quoteType == .best
-              ? "不携带限价，由服务端按 A 股合法对手方最优价规则校验。"
-              : "服务端仍会校验价格步长、涨跌停与行情新鲜度。"
-          )
-          .font(.caption)
-          .foregroundStyle(QuantXTheme.secondaryText)
-          .fixedSize(horizontal: false, vertical: true)
-        }
+        capabilityStatus
 
-        if quoteType == .limit, !dynamicTypeSize.isAccessibilitySize {
-          HStack(alignment: .top, spacing: QuantXTheme.Spacing.medium) {
-            volumeInput
-            inputField(
-              title: "限价（元）",
-              placeholder: "0.00",
-              text: $limitPriceText,
-              keyboardType: .decimalPad,
-              identifier: "manual-order-limit-price"
+        if let capabilities = currentCapabilities,
+          capabilities.canManualTrade,
+          capabilities.supportedDirections.contains(direction)
+        {
+          VStack(alignment: .leading, spacing: 7) {
+            Text("执行模式")
+              .font(.subheadline.weight(.semibold))
+            if capabilities.canSelectLive {
+              Picker("执行模式", selection: $executionMode) {
+                ForEach(capabilities.selectableExecutionModes) { mode in
+                  Text(mode.title).tag(mode)
+                }
+              }
+              .pickerStyle(.segmented)
+              .accessibilityIdentifier("manual-order-execution-mode")
+            } else {
+              Label("模拟盘（默认）", systemImage: "checkmark.shield.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(QuantXTheme.accent)
+            }
+            Text(
+              executionMode == .live
+                ? "高风险：本次预览将明确请求实盘；确认时必须逐次通过 Face ID / Touch ID。"
+                : "默认只进入模拟执行链路，不会切换为实盘。"
             )
+            .font(.caption)
+            .foregroundStyle(
+              executionMode == .live ? QuantXTheme.warning : QuantXTheme.secondaryText
+            )
+            .fixedSize(horizontal: false, vertical: true)
           }
-        } else {
-          VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
-            volumeInput
-            if quoteType == .limit {
+
+          VStack(alignment: .leading, spacing: 7) {
+            Text("报价方式")
+              .font(.subheadline.weight(.semibold))
+            Picker("报价方式", selection: $quoteType) {
+              ForEach(selectableQuoteTypes) { type in
+                Text(type.title).tag(type)
+              }
+            }
+            .pickerStyle(.segmented)
+            Text(
+              quoteType == .best
+                ? "仅在服务端 capability 明确开放时展示；不携带限价。"
+                : "服务端仍会校验价格步长、涨跌停与行情新鲜度。"
+            )
+            .font(.caption)
+            .foregroundStyle(QuantXTheme.secondaryText)
+            .fixedSize(horizontal: false, vertical: true)
+          }
+
+          if quoteType == .limit, !dynamicTypeSize.isAccessibilitySize {
+            HStack(alignment: .top, spacing: QuantXTheme.Spacing.medium) {
+              volumeInput
               inputField(
                 title: "限价（元）",
                 placeholder: "0.00",
@@ -360,8 +409,67 @@ private struct ManualOrderTicketView: View {
                 identifier: "manual-order-limit-price"
               )
             }
+          } else {
+            VStack(alignment: .leading, spacing: QuantXTheme.Spacing.medium) {
+              volumeInput
+              if quoteType == .limit {
+                inputField(
+                  title: "限价（元）",
+                  placeholder: "0.00",
+                  text: $limitPriceText,
+                  keyboardType: .decimalPad,
+                  identifier: "manual-order-limit-price"
+                )
+              }
+            }
           }
         }
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var capabilityStatus: some View {
+    switch store.capabilityState {
+    case .idle:
+      if !normalizedInstrumentCode.isEmpty {
+        Label("输入合法代码后读取服务端下单能力", systemImage: "info.circle")
+          .font(.caption)
+          .foregroundStyle(QuantXTheme.secondaryText)
+      }
+    case .loading(let code):
+      HStack(spacing: 8) {
+        ProgressView()
+        Text("正在核对 \(code) 的下单能力…")
+      }
+      .font(.caption)
+      .accessibilityElement(children: .combine)
+      .accessibilityLabel("正在核对下单能力")
+    case .failed(let code, let message):
+      QuantXStatusBanner(
+        title: "\(code) 下单能力不可用",
+        message: message,
+        status: .blocked
+      )
+    case .loaded(let capabilities):
+      if !capabilities.canManualTrade {
+        QuantXStatusBanner(
+          title: "当前证券不可手动交易",
+          message: capabilities.liveBlockedReasons.first ?? "请检查证券状态与会话权限。",
+          status: .blocked
+        )
+      } else if !capabilities.supportedDirections.contains(direction) {
+        QuantXStatusBanner(
+          title: "当前方向未开放",
+          message: "服务端 capability 未允许\(direction.title)。",
+          status: .blocked
+        )
+      } else if executionMode == .live {
+        QuantXStatusBanner(
+          title: "实盘高风险模式",
+          message: "本次只会按 LIVE 预览并逐次生物确认；任何模式回包不一致都会停止提交。",
+          status: .attention
+        )
       }
     }
   }
@@ -411,7 +519,12 @@ private struct ManualOrderTicketView: View {
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
       .tint(direction == .buy ? QuantXTheme.positive : QuantXTheme.negative)
-      .disabled(previewInProgress || model.manualOrderInProgress || !model.canPlaceManualOrders)
+      .disabled(
+        previewInProgress
+          || store.manualOrderInProgress
+          || !store.canPlaceManualOrders
+          || !currentCapabilitySupportsSelection
+      )
       .accessibilityHint("只请求短时预览票据，不会提交委托")
 
       Text("每次预览使用独立幂等键；预览前不会提交委托。")
@@ -445,10 +558,11 @@ private struct ManualOrderTicketView: View {
     previewInProgress = true
     defer { previewInProgress = false }
     do {
-      previewTicket = try await model.previewManualOrder(
+      previewTicket = try await store.preview(
         instrumentCode: instrumentCode,
         direction: direction,
         quoteType: quoteType,
+        executionMode: executionMode,
         volume: volume,
         limitPrice: limitPrice,
         idempotencyKey: UUID()
@@ -463,6 +577,50 @@ private struct ManualOrderTicketView: View {
   private func invalidateQueuedState() {
     queued = false
     errorMessage = nil
+  }
+
+  private var normalizedInstrumentCode: String {
+    instrumentCode
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .uppercased()
+  }
+
+  private var currentCapabilities: ManualOrderEntryCapabilities? {
+    guard let capabilities = store.capabilityState.capabilities,
+      capabilities.instrumentCode == normalizedInstrumentCode
+    else {
+      return nil
+    }
+    return capabilities
+  }
+
+  private var selectableQuoteTypes: [ManualOrderQuoteType] {
+    guard let capabilities = currentCapabilities else { return [] }
+    return ManualOrderQuoteType.allCases.filter { quoteType in
+      capabilities.supportedQuoteTypes.contains(quoteType)
+        && !(quoteType == .best
+          && ManualOrderInstrument.isBeijing(capabilities.instrumentCode))
+    }
+  }
+
+  private var currentCapabilitySupportsSelection: Bool {
+    currentCapabilities?.supports(
+      direction: direction,
+      quoteType: quoteType,
+      executionMode: executionMode
+    ) == true
+  }
+
+  private func normalizeSelectionsForCapabilities() {
+    executionMode = .paper
+    guard currentCapabilities != nil else {
+      quoteType = .limit
+      return
+    }
+    if !selectableQuoteTypes.contains(quoteType) {
+      quoteType = selectableQuoteTypes.first ?? .limit
+      limitPriceText = quoteType == .best ? "" : limitPriceText
+    }
   }
 
   private func masked(_ accountID: String) -> String {
@@ -480,7 +638,7 @@ private struct ManualOrderTicketView: View {
 
 private struct ManualOrderConfirmationSheet: View {
   @Environment(\.dismiss) private var dismiss
-  @EnvironmentObject private var model: AppModel
+  @ObservedObject var store: ManualTradingStore
 
   let preview: ManualOrderPreviewTicket
   let onQueued: () -> Void
@@ -494,7 +652,9 @@ private struct ManualOrderConfirmationSheet: View {
         VStack(alignment: .leading, spacing: QuantXTheme.Spacing.large) {
           QuantXStatusBanner(
             title: "核对服务器预览",
-            message: "Face ID / Touch ID 只确认本票据；排队不代表券商受理或成交。",
+            message: preview.executionMode == .live
+              ? "实盘票据必须逐次通过 Face ID / Touch ID；排队不代表券商受理或成交。"
+              : "这是模拟盘票据；排队只表示进入模拟执行链路。",
             status: .attention
           )
           if preview.wasCapped {
@@ -516,13 +676,13 @@ private struct ManualOrderConfirmationSheet: View {
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
           Button("取消") { dismiss() }
-            .disabled(model.manualOrderInProgress)
+            .disabled(store.manualOrderInProgress)
         }
       }
       .safeAreaInset(edge: .bottom) {
         actionBar
       }
-      .interactiveDismissDisabled(model.manualOrderInProgress)
+      .interactiveDismissDisabled(store.manualOrderInProgress)
     }
   }
 
@@ -555,7 +715,7 @@ private struct ManualOrderConfirmationSheet: View {
         if let availableVolume = preview.availableVolume {
           detailRow("可卖数量", "\(availableVolume.formatted()) 股")
         }
-        detailRow("执行模式", preview.executionMode)
+        detailRow("执行模式", preview.executionMode.title)
         detailRow("风控结果", preview.wasCapped ? "已缩量" : "允许")
         detailRow("风控原因", preview.riskReasonCode)
         detailRow("风控编号", preview.riskDecisionID)
@@ -602,8 +762,8 @@ private struct ManualOrderConfirmationSheet: View {
   private var outcome: some View {
     if confirmation != nil {
       QuantXStatusBanner(
-        title: "已排队",
-        message: "请返回委托与成交页面等待 QMT Agent 回报。",
+        title: "委托命令已排队",
+        message: "请返回委托与成交页面等待券商投影更新；这不表示券商已受理或成交。",
         status: .ready
       )
       .accessibilityIdentifier("manual-order-queued")
@@ -623,13 +783,15 @@ private struct ManualOrderConfirmationSheet: View {
           Button {
             Task { await confirm() }
           } label: {
-            if model.manualOrderInProgress {
+            if store.manualOrderInProgress {
               ProgressView()
                 .frame(maxWidth: .infinity)
             } else {
               Label(
-                "Face ID / Touch ID 确认 \(preview.finalVolume.formatted()) 股",
-                systemImage: "faceid"
+                preview.executionMode == .live
+                  ? "生物识别确认实盘 \(preview.finalVolume.formatted()) 股"
+                  : "确认模拟委托 \(preview.finalVolume.formatted()) 股",
+                systemImage: preview.executionMode == .live ? "faceid" : "checkmark.shield"
               )
                 .frame(maxWidth: .infinity)
             }
@@ -637,8 +799,12 @@ private struct ManualOrderConfirmationSheet: View {
           .buttonStyle(.borderedProminent)
           .controlSize(.large)
           .tint(QuantXTheme.approvalAction)
-          .disabled(model.manualOrderInProgress || preview.isExpired(at: context.date))
-          .accessibilityHint("生物识别成功后消费一次性票据并将委托加入队列")
+          .disabled(store.manualOrderInProgress || preview.isExpired(at: context.date))
+          .accessibilityHint(
+            preview.executionMode == .live
+              ? "逐次生物识别成功后消费一次性实盘票据并加入队列"
+              : "消费一次性模拟盘票据并加入队列"
+          )
         }
       } else {
         Button("完成") {
@@ -685,7 +851,7 @@ private struct ManualOrderConfirmationSheet: View {
   private func confirm() async {
     errorMessage = nil
     do {
-      confirmation = try await model.confirmManualOrder(preview)
+      confirmation = try await store.confirm(preview)
     } catch is CancellationError {
       return
     } catch {

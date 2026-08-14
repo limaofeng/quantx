@@ -26,6 +26,12 @@ enum ManualOrderRepositoryError: Error, Equatable, LocalizedError {
 
 @MainActor
 protocol ManualOrderLoading: AnyObject {
+  func capabilities(
+    instrumentCode: String,
+    accountID: String,
+    authorizedAccountIDs: Set<String>
+  ) async throws -> ManualOrderEntryCapabilities
+
   func preview(
     _ request: ManualOrderRequest,
     authorizedAccountIDs: Set<String>
@@ -44,6 +50,46 @@ final class ManualOrderRepository: ManualOrderLoading {
     self.client = client
   }
 
+  func capabilities(
+    instrumentCode: String,
+    accountID: String,
+    authorizedAccountIDs: Set<String>
+  ) async throws -> ManualOrderEntryCapabilities {
+    let normalizedCode = try ManualOrderInstrument.canonicalCode(instrumentCode)
+    guard authorizedAccountIDs == Set([accountID]) else {
+      throw ManualOrderRepositoryError.accountScopeMismatch
+    }
+    do {
+      let response = try await client.fetch(
+        query: QuantXAPI.IOSOrderEntryCapabilitiesQuery(
+          instrumentCode: normalizedCode,
+          accountId: accountID
+        ),
+        cachePolicy: .networkOnly
+      )
+      try ApolloReadOnlyResponseValidator.validate(response.errors)
+      guard let value = response.data?.orderEntryCapabilities else {
+        throw ManualOrderRepositoryError.invalidResponse
+      }
+      return try Self.mapCapabilities(
+        value,
+        requestedInstrumentCode: normalizedCode,
+        requestedAccountID: accountID,
+        authorizedAccountIDs: authorizedAccountIDs
+      )
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch let error as ManualOrderRepositoryError {
+      throw error
+    } catch let error as ReadOnlyRepositoryError {
+      throw error
+    } catch let error as ResponseCodeInterceptor.ResponseCodeError {
+      throw ApolloReadOnlyResponseValidator.mapResponseCode(error)
+    } catch {
+      throw ReadOnlyRepositoryError.transport
+    }
+  }
+
   func preview(
     _ request: ManualOrderRequest,
     authorizedAccountIDs: Set<String>
@@ -52,15 +98,7 @@ final class ManualOrderRepository: ManualOrderLoading {
     do {
       let response = try await client.perform(
         mutation: QuantXAPI.IOSPreviewManualOrderMutation(
-          input: QuantXAPI.ManualOrderPreviewInput(
-            accountId: request.accountID,
-            instrumentCode: request.normalizedInstrumentCode,
-            side: .init(request.direction.graphQLValue),
-            priceType: .init(request.quoteType.graphQLValue),
-            volume: Int32(request.volume),
-            idempotencyKey: request.idempotencyKey.uuidString.lowercased(),
-            limitPrice: request.limitPrice.map(GraphQLNullable.some) ?? .null
-          )
+          input: Self.graphQLInput(request)
         ),
         requestConfiguration: noCache
       )
@@ -144,12 +182,10 @@ final class ManualOrderRepository: ManualOrderLoading {
     _ request: ManualOrderRequest,
     authorizedAccountIDs: Set<String>
   ) throws {
-    guard authorizedAccountIDs.contains(request.accountID) else {
+    guard authorizedAccountIDs == Set([request.accountID]) else {
       throw ManualOrderRepositoryError.accountScopeMismatch
     }
-    guard isCanonicalAStockCode(request.normalizedInstrumentCode) else {
-      throw ManualOrderRepositoryError.invalidRequest("请输入带市场后缀的 A 股代码，例如 600519.SH")
-    }
+    _ = try ManualOrderInstrument.canonicalCode(request.normalizedInstrumentCode)
     guard request.volume > 0, request.volume <= Int(Int32.max) else {
       throw ManualOrderRepositoryError.invalidRequest("委托数量必须为正整数")
     }
@@ -159,10 +195,28 @@ final class ManualOrderRepository: ManualOrderLoading {
         throw ManualOrderRepositoryError.invalidRequest("限价委托必须填写有效价格")
       }
     case .best:
+      guard !ManualOrderInstrument.isBeijing(request.normalizedInstrumentCode) else {
+        throw ManualOrderRepositoryError.invalidRequest("北交所暂不支持对手方最优价委托")
+      }
       guard request.limitPrice == nil else {
         throw ManualOrderRepositoryError.invalidRequest("对手方最优价委托不能携带限价")
       }
     }
+  }
+
+  static func graphQLInput(
+    _ request: ManualOrderRequest
+  ) -> QuantXAPI.ManualOrderPreviewInput {
+    QuantXAPI.ManualOrderPreviewInput(
+      accountId: request.accountID,
+      instrumentCode: request.normalizedInstrumentCode,
+      side: .init(request.direction.graphQLValue),
+      priceType: .init(request.quoteType.graphQLValue),
+      volume: Int32(request.volume),
+      idempotencyKey: request.idempotencyKey.uuidString.lowercased(),
+      executionMode: .init(request.executionMode.graphQLValue),
+      limitPrice: request.limitPrice.map(GraphQLNullable.some) ?? .null
+    )
   }
 
   static func mapPreview(
@@ -171,20 +225,21 @@ final class ManualOrderRepository: ManualOrderLoading {
     authorizedAccountIDs: Set<String>
   ) throws -> ManualOrderPreviewTicket {
     guard
-      authorizedAccountIDs.contains(value.accountId),
+      authorizedAccountIDs == Set([request.accountID]),
       value.accountId == request.accountID
     else {
       throw ManualOrderRepositoryError.accountScopeMismatch
     }
     guard
-      value.instrumentCode.uppercased() == request.normalizedInstrumentCode,
+      value.instrumentCode == request.normalizedInstrumentCode,
       value.side == request.direction.graphQLValue,
       value.priceType == request.quoteType.graphQLValue,
       value.volume == request.volume,
       value.requestedVolume == request.volume,
       value.finalVolume > 0,
       value.finalVolume <= value.requestedVolume,
-      value.idempotencyKey.lowercased() == request.idempotencyKey.uuidString.lowercased()
+      value.idempotencyKey.lowercased() == request.idempotencyKey.uuidString.lowercased(),
+      value.executionMode == request.executionMode.rawValue
     else {
       throw ManualOrderRepositoryError.contextMismatch
     }
@@ -207,7 +262,6 @@ final class ManualOrderRepository: ManualOrderLoading {
     guard
       nonempty(value.challengeId) != nil,
       nonempty(value.confirmationToken) != nil,
-      nonempty(value.executionMode) != nil,
       let riskDecisionID = nonempty(value.riskDecisionId),
       let riskReasonCode = nonempty(value.riskReasonCode),
       ["ALLOW", "CAP"].contains(riskAction),
@@ -252,7 +306,7 @@ final class ManualOrderRepository: ManualOrderLoading {
       availableCash: value.availableCash,
       availableVolume: value.availableVolume,
       idempotencyKey: request.idempotencyKey,
-      executionMode: value.executionMode,
+      executionMode: request.executionMode,
       quoteTimestamp: quoteTimestamp,
       challengeExpiresAt: challengeExpiresAt,
       riskDecisionID: String(riskDecisionID.prefix(120)),
@@ -267,8 +321,76 @@ final class ManualOrderRepository: ManualOrderLoading {
     )
   }
 
-  private static func isCanonicalAStockCode(_ value: String) -> Bool {
-    value.range(of: #"^[0-9]{6}\.(SH|SZ|BJ)$"#, options: .regularExpression) != nil
+  static func mapCapabilities(
+    _ value: QuantXAPI.IOSOrderEntryCapabilitiesQuery.Data.OrderEntryCapabilities,
+    requestedInstrumentCode: String,
+    requestedAccountID: String,
+    authorizedAccountIDs: Set<String>
+  ) throws -> ManualOrderEntryCapabilities {
+    guard
+      authorizedAccountIDs == Set([requestedAccountID]),
+      value.accountId == requestedAccountID
+    else {
+      throw ManualOrderRepositoryError.accountScopeMismatch
+    }
+    guard value.instrumentCode == requestedInstrumentCode,
+      value.defaultExecutionMode.rawValue == ManualOrderExecutionMode.paper.rawValue
+    else {
+      throw ManualOrderRepositoryError.contextMismatch
+    }
+
+    let modes = try strictSet(
+      value.executionModes.map(\.rawValue),
+      mapping: { ManualOrderExecutionMode(rawValue: $0) }
+    )
+    let directions = try strictSet(
+      value.supportedSides.map(\.rawValue),
+      mapping: { ManualOrderDirection(rawValue: $0) }
+    )
+    let quoteTypes = try strictSet(
+      value.supportedPriceTypes.map(\.rawValue),
+      mapping: { ManualOrderQuoteType(rawValue: $0) }
+    )
+    guard
+      !value.canManualTrade
+        || (modes.contains(.paper) && !directions.isEmpty && !quoteTypes.isEmpty),
+      value.liveReady == modes.contains(.live)
+    else {
+      throw ManualOrderRepositoryError.invalidResponse
+    }
+    return ManualOrderEntryCapabilities(
+      accountID: value.accountId,
+      instrumentCode: value.instrumentCode,
+      canManualTrade: value.canManualTrade,
+      executionModes: modes,
+      supportedDirections: directions,
+      supportedQuoteTypes: quoteTypes,
+      liveReady: value.liveReady,
+      liveBlockedReasons: sanitizedMessages(value.liveBlockedReasons),
+      warnings: sanitizedMessages(value.warnings)
+    )
+  }
+
+  private static func strictSet<Value: Hashable>(
+    _ rawValues: [String],
+    mapping: (String) -> Value?
+  ) throws -> Set<Value> {
+    let values = try rawValues.map { rawValue in
+      guard let value = mapping(rawValue) else {
+        throw ManualOrderRepositoryError.invalidResponse
+      }
+      return value
+    }
+    guard Set(values).count == values.count else {
+      throw ManualOrderRepositoryError.invalidResponse
+    }
+    return Set(values)
+  }
+
+  private static func sanitizedMessages(_ values: [String]) -> [String] {
+    values.compactMap { value in
+      nonempty(value).map { String($0.prefix(300)) }
+    }
   }
 
   private static func rejected(code: String, message: String) -> ManualOrderRepositoryError {

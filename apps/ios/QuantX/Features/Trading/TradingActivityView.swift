@@ -47,7 +47,10 @@ struct TradingActivityView: View {
       .navigationDestination(for: Route.self) { route in
         switch route {
         case .order(let order):
-          OrderRecordDetailView(order: order)
+          OrderRecordDetailView(
+            store: model.manualTradingStore,
+            order: order
+          )
         case .trade(let trade):
           TradeRecordDetailView(trade: trade)
         }
@@ -327,7 +330,12 @@ private struct TradeRecordRow: View {
 }
 
 private struct OrderRecordDetailView: View {
+  @EnvironmentObject private var model: AppModel
+  @ObservedObject var store: ManualTradingStore
+
   let order: OrderRecord
+  @State private var confirmsCancellation = false
+  @State private var cancellationErrorMessage: String?
 
   var body: some View {
     List {
@@ -367,9 +375,90 @@ private struct OrderRecordDetailView: View {
           .font(.footnote)
           .foregroundStyle(QuantXTheme.secondaryText)
       }
+
+      if let confirmation = store.cancellationConfirmation(orderID: order.id) {
+        Section {
+          QuantXStatusBanner(
+            title: OrderCancellationQueueConfirmation.title,
+            message: OrderCancellationQueueConfirmation.message,
+            status: .attention
+          )
+          .accessibilityIdentifier("cancel-order-queued")
+          Text("命令编号：\(confirmation.clientOrderID)")
+            .font(.caption.monospaced())
+            .foregroundStyle(QuantXTheme.secondaryText)
+        }
+      }
+
+      if let cancellationErrorMessage {
+        Section {
+          QuantXStatusBanner(
+            title: "撤单请求未排队",
+            message: cancellationErrorMessage,
+            status: .blocked
+          )
+        }
+      }
+
+      if let latestOrder, store.canCancel(latestOrder) {
+        Section("撤单") {
+          Button(role: .destructive) {
+            confirmsCancellation = true
+          } label: {
+            if store.isCancelling(orderID: latestOrder.id) {
+              HStack {
+                ProgressView()
+                Text("正在发送撤单命令…")
+              }
+              .frame(maxWidth: .infinity)
+            } else {
+              Label("发送撤单命令", systemImage: "xmark.circle")
+                .frame(maxWidth: .infinity)
+            }
+          }
+          .disabled(store.isCancelling(orderID: latestOrder.id))
+          .accessibilityHint("无需生物识别；发送后仍需等待券商委托投影确认终态")
+
+          Text("仅“券商已报”或“部分成交”且仍有剩余数量时可发送；排队不等于已经撤单。")
+            .font(.footnote)
+            .foregroundStyle(QuantXTheme.secondaryText)
+        }
+      }
     }
     .navigationTitle("委托详情")
     .navigationBarTitleDisplayMode(.inline)
+    .confirmationDialog(
+      "确认发送撤单命令？",
+      isPresented: $confirmsCancellation,
+      titleVisibility: .visible
+    ) {
+      Button("发送撤单命令", role: .destructive) {
+        Task { await cancelLatestOrder() }
+      }
+    } message: {
+      Text("命令排队后仍以券商委托投影为准；本操作不会显示为“已撤单”。")
+    }
+  }
+
+  private var latestOrder: OrderRecord? {
+    model.tradingState.snapshot?.todayOrders.first { $0.id == order.id }
+  }
+
+  private func cancelLatestOrder() async {
+    cancellationErrorMessage = nil
+    guard let latestOrder else {
+      cancellationErrorMessage = "最新券商委托投影中已找不到该委托，请刷新后重试。"
+      return
+    }
+    do {
+      _ = try await store.cancel(latestOrder)
+    } catch is CancellationError {
+      return
+    } catch {
+      cancellationErrorMessage =
+        (error as? LocalizedError)?.errorDescription
+        ?? "撤单服务暂时不可用；已刷新券商委托投影。"
+    }
   }
 }
 
