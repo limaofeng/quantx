@@ -179,6 +179,29 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
+  func testLoginExplainsSingleAccountBindingWithoutPersistingSecrets() throws {
+    let app = XCUIApplication()
+    app.launchArguments.append("-QuantXLoginUITesting")
+    app.launch()
+
+    XCTAssertTrue(app.staticTexts["登录 QuantX"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.textFields["用户名"].exists)
+    XCTAssertTrue(app.secureTextFields["密码"].exists)
+    XCTAssertTrue(app.textFields["login-requested-account-id"].exists)
+    XCTAssertTrue(
+      app.staticTexts[
+        "每个移动会话只绑定一个主账户；留空时仅在服务端确认唯一账户后自动选择。"
+      ].exists
+    )
+    let keychainNotice = app.staticTexts.matching(
+      NSPredicate(format: "label CONTAINS %@", "Keychain")
+    ).firstMatch
+    scrollToElement(keychainNotice, in: app)
+    XCTAssertTrue(keychainNotice.exists)
+    XCTAssertFalse(app.tabBars.firstMatch.exists)
+  }
+
+  @MainActor
   private func makeApp() -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments.append("-QuantXUITesting")

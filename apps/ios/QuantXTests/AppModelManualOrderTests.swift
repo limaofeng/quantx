@@ -344,7 +344,8 @@ private actor ManualOrderSessionService: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String
+    deviceName _: String,
+    requestedAccountID _: String?
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }

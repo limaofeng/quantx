@@ -290,6 +290,10 @@ final class AppModel: ObservableObject {
 
   func start() async {
 #if DEBUG
+    if ProcessInfo.processInfo.arguments.contains("-QuantXLoginUITesting") {
+      authenticationState = .signedOut
+      return
+    }
     if usesTransientRealBackendUITestSession {
       await startTransientRealBackendUITestSession()
       return
@@ -355,23 +359,41 @@ final class AppModel: ObservableObject {
         let user = try await sessionClient.current(accessToken: tokens.accessToken)
         restored = AuthenticatedSession(tokens: tokens, user: user)
       } else {
-        restored = try await sessionClient.refresh(refreshToken: tokens.refreshToken)
+        let refreshed = try await sessionClient.refresh(refreshToken: tokens.refreshToken)
+        try validateNativeSessionUser(
+          refreshed.user,
+          previousAuthorization: nil
+        )
+        try await tokenStore.save(refreshed.tokens)
+        let user = try await sessionClient.current(
+          accessToken: refreshed.tokens.accessToken
+        )
+        restored = AuthenticatedSession(tokens: refreshed.tokens, user: user)
       }
-      try await activate(restored, configuration: configuration)
+      try await activate(
+        restored,
+        configuration: configuration,
+        persistTokens: false
+      )
       await refreshAllReadOnlySnapshots()
     } catch {
       await handleAuthenticationFailure(error)
     }
   }
 
-  func login(username: String, password: String) async {
+  func login(
+    username: String,
+    password: String,
+    requestedAccountID: String? = nil
+  ) async {
     guard let sessionClient, let configuration else { return }
     authenticationState = .authenticating
     do {
       let session = try await sessionClient.login(
         username: username,
         password: password,
-        deviceName: UIDevice.current.model
+        deviceName: UIDevice.current.model,
+        requestedAccountID: requestedAccountID
       )
       try await activate(session, configuration: configuration)
       await refreshAllReadOnlySnapshots()
@@ -434,7 +456,7 @@ final class AppModel: ObservableObject {
 
     do {
       let result = try await repository.load(
-        authorizedAccountIDs: Set(user.authorizedAccountIDs)
+        authorizedAccountIDs: activeAccountIDs(for: user)
       )
       switch result {
       case .noAccount(let fetchedAt):
@@ -451,13 +473,14 @@ final class AppModel: ObservableObject {
     } catch PortfolioRepository.RepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("portfolio:read") else { return }
         guard let refreshedRepository = portfolioRepository,
           let refreshedUser = authenticatedUser
         else {
           throw PortfolioRepository.RepositoryError.unauthenticated
         }
         let result = try await refreshedRepository.load(
-          authorizedAccountIDs: Set(refreshedUser.authorizedAccountIDs)
+          authorizedAccountIDs: activeAccountIDs(for: refreshedUser)
         )
         applyPortfolioLoadResult(result)
       } catch let SessionClient.ClientError.server(code, _, _, _)
@@ -528,7 +551,7 @@ final class AppModel: ObservableObject {
       marketState = .loaded(
         try await repository.loadWatchlist(
           accountID: accountID,
-          authorizedAccountIDs: Set(user.authorizedAccountIDs)
+          authorizedAccountIDs: activeAccountIDs(for: user)
         ),
         refreshWarning: nil
       )
@@ -537,6 +560,9 @@ final class AppModel: ObservableObject {
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("market:read"), hasPermission("portfolio:read") else {
+          return
+        }
         await refreshPortfolio()
         guard let refreshedAccountID = portfolioState.snapshot?.account.id,
           refreshedAccountID == accountID,
@@ -548,7 +574,7 @@ final class AppModel: ObservableObject {
         marketState = .loaded(
           try await refreshedRepository.loadWatchlist(
             accountID: refreshedAccountID,
-            authorizedAccountIDs: Set(refreshedUser.authorizedAccountIDs)
+            authorizedAccountIDs: activeAccountIDs(for: refreshedUser)
           ),
           refreshWarning: nil
         )
@@ -578,6 +604,9 @@ final class AppModel: ObservableObject {
       return try await repository.search(term: term)
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard hasPermission("market:read") else {
+        throw ReadOnlyRepositoryError.forbidden
+      }
       guard let refreshedRepository = marketRepository else {
         throw ReadOnlyRepositoryError.unauthenticated
       }
@@ -599,6 +628,9 @@ final class AppModel: ObservableObject {
       return try await repository.loadInstrument(stockCode: stockCode, period: period)
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard hasPermission("market:read") else {
+        throw ReadOnlyRepositoryError.forbidden
+      }
       guard let refreshedRepository = marketRepository else {
         throw ReadOnlyRepositoryError.unauthenticated
       }
@@ -663,6 +695,7 @@ final class AppModel: ObservableObject {
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("strategy:read") else { return }
         await refreshPortfolio()
         guard let refreshedRepository = strategyRepository else {
           throw ReadOnlyRepositoryError.unauthenticated
@@ -735,6 +768,7 @@ final class AppModel: ObservableObject {
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("orders:read") else { return }
         await refreshPortfolio()
         guard let refreshedAccountID = portfolioState.snapshot?.account.id,
           refreshedAccountID == accountID,
@@ -810,6 +844,7 @@ final class AppModel: ObservableObject {
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("strategy:read") else { return }
         await refreshPortfolio()
         guard let refreshedAccountID = portfolioState.snapshot?.account.id,
           refreshedAccountID == accountID,
@@ -875,6 +910,7 @@ final class AppModel: ObservableObject {
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
+        guard hasPermission("strategy:read") else { return }
         guard let refreshedRepository = limitUpBoardRepository else {
           throw ReadOnlyRepositoryError.unauthenticated
         }
@@ -920,6 +956,9 @@ final class AppModel: ObservableObject {
       )
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard canApproveTrades else {
+        throw tradeApprovalUnavailable("当前会话没有 trade:approve 权限")
+      }
       guard let refreshedRepository = tradeApprovalRepository else {
         throw tradeApprovalUnavailable("交易确认服务尚未连接")
       }
@@ -947,6 +986,9 @@ final class AppModel: ObservableObject {
       )
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard canApproveTrades else {
+        throw tradeApprovalUnavailable("当前会话没有 trade:approve 权限")
+      }
       guard let refreshedRepository = tradeApprovalRepository else {
         throw tradeApprovalUnavailable("交易确认服务尚未连接")
       }
@@ -982,6 +1024,9 @@ final class AppModel: ObservableObject {
       confirmation = try await performTradeApprovalConfirmation(preview)
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard canApproveTrades else {
+        throw tradeApprovalUnavailable("当前会话没有 trade:approve 权限")
+      }
       confirmation = try await performTradeApprovalConfirmation(preview)
     }
     switch preview.kind {
@@ -1011,14 +1056,10 @@ final class AppModel: ObservableObject {
     guard hasPermission("trade:approve") else {
       throw tradeApprovalUnavailable("当前会话没有 trade:approve 权限")
     }
-    guard !localSessionLocked, let user = authenticatedUser else {
+    guard !localSessionLocked, let activeAccountID = authenticatedUser?.activeAccountID else {
       throw tradeApprovalUnavailable("请先解锁并恢复账户会话")
     }
-    let accountIDs = Set(user.authorizedAccountIDs)
-    guard !accountIDs.isEmpty else {
-      throw tradeApprovalUnavailable("当前用户未授权任何资金账户")
-    }
-    return accountIDs
+    return [activeAccountID]
   }
 
   private func tradeApprovalUnavailable(_ message: String) -> TradeApprovalRepositoryError {
@@ -1059,7 +1100,7 @@ final class AppModel: ObservableObject {
 
   var primaryTradingAccountID: String? {
     guard let accountID = portfolioState.snapshot?.account.id,
-      authenticatedUser?.authorizedAccountIDs.contains(accountID) == true
+      authenticatedUser?.activeAccountID == accountID
     else {
       return nil
     }
@@ -1111,6 +1152,9 @@ final class AppModel: ObservableObject {
       )
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard hasPermission("trade:manual") else {
+        throw manualOrderUnavailable("当前会话没有 trade:manual 手动交易权限")
+      }
       await refreshPortfolio()
       let refreshedContext = try manualOrderContext()
       guard refreshedContext.accountID == request.accountID,
@@ -1149,6 +1193,9 @@ final class AppModel: ObservableObject {
       confirmation = try await performManualOrderConfirmation(preview)
     } catch ReadOnlyRepositoryError.unauthenticated {
       try await refreshAccessSession()
+      guard hasPermission("trade:manual") else {
+        throw manualOrderUnavailable("当前会话没有 trade:manual 手动交易权限")
+      }
       await refreshPortfolio()
       let refreshedContext = try manualOrderContext()
       guard refreshedContext.accountID == preview.accountID else {
@@ -1178,14 +1225,14 @@ final class AppModel: ObservableObject {
     guard hasPermission("trade:manual") else {
       throw manualOrderUnavailable("当前会话没有 trade:manual 手动交易权限")
     }
-    guard !localSessionLocked, let user = authenticatedUser else {
+    guard !localSessionLocked, let activeAccountID = authenticatedUser?.activeAccountID else {
       throw manualOrderUnavailable("请先解锁并恢复账户会话")
     }
-    let authorizedAccountIDs = Set(user.authorizedAccountIDs)
+    let authorizedAccountIDs: Set<String> = [activeAccountID]
     guard let accountID = portfolioState.snapshot?.account.id else {
       throw manualOrderUnavailable("主账户尚未完成安全同步")
     }
-    guard authorizedAccountIDs.contains(accountID) else {
+    guard accountID == activeAccountID else {
       throw ManualOrderRepositoryError.accountScopeMismatch
     }
     return (accountID, authorizedAccountIDs)
@@ -1198,8 +1245,14 @@ final class AppModel: ObservableObject {
   private func activate(
     _ session: AuthenticatedSession,
     configuration: APIConfiguration,
-    persistTokens: Bool = true
+    persistTokens: Bool = true,
+    previousAuthorization: SessionUser? = nil
   ) async throws {
+    try validateNativeSessionUser(
+      session.user,
+      previousAuthorization: previousAuthorization
+    )
+    let grantedScopes = Set(session.user.grantedScopes)
     let newApolloSession = try apolloSessionFactory(
       configuration,
       session.tokens.accessToken
@@ -1212,32 +1265,48 @@ final class AppModel: ObservableObject {
       await oldApolloSession.pauseSubscriptions()
     }
     apolloSession = newApolloSession
-    portfolioRepository = portfolioLoaderFactory(newApolloSession)
-    strategyRepository = strategyLoaderFactory(newApolloSession)
-    tradingRepository = tradingLoaderFactory(newApolloSession)
-    tTradeAssistantRepository = tTradeAssistantLoaderFactory(newApolloSession)
-    limitUpBoardRepository = limitUpBoardLoaderFactory(newApolloSession)
-    tradeApprovalRepository = tradeApprovalLoaderFactory(newApolloSession)
-    manualOrderRepository = manualOrderLoaderFactory(newApolloSession)
-    marketRepository = marketLoaderFactory(newApolloSession)
-    portfolioState = session.user.permissions.contains("portfolio:read")
+    portfolioRepository = grantedScopes.contains("portfolio:read")
+      ? portfolioLoaderFactory(newApolloSession)
+      : nil
+    strategyRepository = grantedScopes.contains("strategy:read")
+      ? strategyLoaderFactory(newApolloSession)
+      : nil
+    tradingRepository = grantedScopes.contains("orders:read")
+      ? tradingLoaderFactory(newApolloSession)
+      : nil
+    tTradeAssistantRepository = grantedScopes.contains("strategy:read")
+      ? tTradeAssistantLoaderFactory(newApolloSession)
+      : nil
+    limitUpBoardRepository = grantedScopes.contains("strategy:read")
+      ? limitUpBoardLoaderFactory(newApolloSession)
+      : nil
+    tradeApprovalRepository = grantedScopes.contains("trade:approve")
+      ? tradeApprovalLoaderFactory(newApolloSession)
+      : nil
+    manualOrderRepository = grantedScopes.contains("trade:manual")
+      ? manualOrderLoaderFactory(newApolloSession)
+      : nil
+    marketRepository = grantedScopes.contains("market:read")
+      ? marketLoaderFactory(newApolloSession)
+      : nil
+    portfolioState = grantedScopes.contains("portfolio:read")
       ? .idle
       : .unavailable("当前会话没有 portfolio:read 权限")
-    strategyState = session.user.permissions.contains("strategy:read")
+    strategyState = grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
-    tradingState = session.user.permissions.contains("orders:read")
+    tradingState = grantedScopes.contains("orders:read")
       ? .idle
       : .unavailable("当前会话没有 orders:read 权限")
-    tTradeAssistantState = session.user.permissions.contains("strategy:read")
+    tTradeAssistantState = grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
-    limitUpBoardState = session.user.permissions.contains("strategy:read")
+    limitUpBoardState = grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
-    if !session.user.permissions.contains("market:read") {
+    if !grantedScopes.contains("market:read") {
       marketState = .unavailable("当前会话没有 market:read 权限")
-    } else if !session.user.permissions.contains("portfolio:read") {
+    } else if !grantedScopes.contains("portfolio:read") {
       marketState = .unavailable("自选列表需要 portfolio:read 权限")
     } else {
       marketState = .idle
@@ -1255,10 +1324,52 @@ final class AppModel: ObservableObject {
     else {
       throw PortfolioRepository.RepositoryError.unauthenticated
     }
+    let previousAuthorization = authenticatedUser
     let refreshed = try await sessionClient.refresh(
       refreshToken: tokens.refreshToken
     )
-    try await activate(refreshed, configuration: configuration)
+    try validateNativeSessionUser(
+      refreshed.user,
+      previousAuthorization: previousAuthorization
+    )
+    try await tokenStore.save(refreshed.tokens)
+    let currentUser = try await sessionClient.current(
+      accessToken: refreshed.tokens.accessToken
+    )
+    let verified = AuthenticatedSession(
+      tokens: refreshed.tokens,
+      user: currentUser
+    )
+    try await activate(
+      verified,
+      configuration: configuration,
+      persistTokens: false,
+      previousAuthorization: previousAuthorization
+    )
+  }
+
+  private func validateNativeSessionUser(
+    _ user: SessionUser,
+    previousAuthorization: SessionUser?
+  ) throws {
+    guard
+      let activeAccountID = user.activeAccountID,
+      !activeAccountID.isEmpty,
+      activeAccountID == activeAccountID.trimmingCharacters(in: .whitespacesAndNewlines),
+      user.authorizedAccountIDs == [activeAccountID],
+      Set(user.grantedScopes).count == user.grantedScopes.count,
+      user.grantedScopes.allSatisfy({ NativeSessionScope.v1AllowedValues.contains($0) })
+    else {
+      throw SessionClient.ClientError.invalidResponse
+    }
+    if let previousAuthorization {
+      guard
+        previousAuthorization.activeAccountID == activeAccountID,
+        Set(user.grantedScopes).isSubset(of: Set(previousAuthorization.grantedScopes))
+      else {
+        throw SessionClient.ClientError.invalidResponse
+      }
+    }
   }
 
   private func applyPortfolioLoadResult(_ result: PortfolioLoadResult) {
@@ -1276,6 +1387,11 @@ final class AppModel: ObservableObject {
     {
       await clearLocalSession()
       authenticationState = .signedOut
+      return
+    }
+    if case SessionClient.ClientError.invalidResponse = error {
+      await clearLocalSession()
+      authenticationState = .failed(error.localizedDescription)
       return
     }
     authenticationState = .failed(error.localizedDescription)
@@ -1431,7 +1547,11 @@ final class AppModel: ObservableObject {
 #endif
 
   private func hasPermission(_ permission: String) -> Bool {
-    authenticatedUser?.permissions.contains(permission) == true
+    authenticatedUser?.grantedScopes.contains(permission) == true
+  }
+
+  private func activeAccountIDs(for user: SessionUser) -> Set<String> {
+    user.activeAccountID.map { [$0] } ?? []
   }
 
   private func readOnlyErrorMessage(_ error: Error, fallback: String) -> String {

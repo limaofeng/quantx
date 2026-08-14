@@ -74,6 +74,34 @@ final class AppModelAuthenticationTests: XCTestCase {
     XCTAssertNotNil(storedTokens)
   }
 
+  func testInvalidNativeAccountContextClearsStoredSession() async throws {
+    let invalidUser = SessionUser(
+      id: "user-id",
+      username: "ios-user",
+      displayName: "iOS 用户",
+      permissions: ["portfolio:read"],
+      authorizedAccountIDs: ["account-id"],
+      activeAccountID: "other-account",
+      grantedScopes: ["portfolio:read"]
+    )
+    let store = MemorySessionTokenStore(tokens: makeTokens())
+    let model = makeModel(
+      tokenStore: store,
+      sessionClient: SessionServiceStub(currentBehavior: .user(invalidUser))
+    )
+
+    await model.restoreSession(requireLocalUnlock: false)
+
+    let storedTokens = await store.load()
+    let deleteCount = await store.deleteCount()
+    XCTAssertEqual(
+      model.authenticationState,
+      .failed("认证服务返回了无法识别的响应")
+    )
+    XCTAssertNil(storedTokens)
+    XCTAssertEqual(deleteCount, 1)
+  }
+
   func testLocalUnlockFailureKeepsSessionLockedWithoutNetworkAccess() async throws {
     let store = MemorySessionTokenStore(tokens: makeTokens())
     let session = SessionServiceStub(currentBehavior: .unexpectedCall)
@@ -131,7 +159,7 @@ final class AppModelAuthenticationTests: XCTestCase {
     let refreshedSession = AuthenticatedSession(tokens: newTokens, user: Self.user)
     let store = MemorySessionTokenStore(tokens: oldTokens)
     let session = SessionServiceStub(
-      currentBehavior: .unexpectedCall,
+      currentBehavior: .user(Self.user),
       refreshBehavior: .session(refreshedSession)
     )
     let loader = PortfolioLoaderStub(result: .noAccount(fetchedAt: Date()))
@@ -149,7 +177,61 @@ final class AppModelAuthenticationTests: XCTestCase {
     XCTAssertEqual(model.authenticationState, .authenticated(Self.user))
     XCTAssertEqual(storedTokens, newTokens)
     XCTAssertEqual(refreshCallCount, 1)
-    XCTAssertEqual(currentCallCount, 0)
+    XCTAssertEqual(currentCallCount, 1)
+  }
+
+  func testScopeShrinkKeepsIdentitySessionAndImmediatelyClosesPortfolio() async throws {
+    let fullUser = SessionUser(
+      id: "user-id",
+      username: "ios-user",
+      displayName: "iOS 用户",
+      permissions: ["portfolio:read", "trade:manual"],
+      authorizedAccountIDs: ["account-id"],
+      activeAccountID: "account-id",
+      grantedScopes: ["portfolio:read", "trade:manual"]
+    )
+    let reducedUser = SessionUser(
+      id: "user-id",
+      username: "ios-user",
+      displayName: "iOS 用户",
+      permissions: ["portfolio:read", "trade:manual"],
+      authorizedAccountIDs: ["account-id"],
+      activeAccountID: "account-id",
+      grantedScopes: []
+    )
+    let refreshedTokens = makeTokens(accessExpiresIn: 1_200, refreshExpiresIn: 7_200)
+    let store = MemorySessionTokenStore(tokens: makeTokens())
+    let session = SessionServiceStub(
+      currentBehavior: .users([fullUser, reducedUser]),
+      refreshBehavior: .session(
+        AuthenticatedSession(tokens: refreshedTokens, user: reducedUser)
+      )
+    )
+    let loader = PortfolioSequenceLoader(
+      results: [
+        .success(.noAccount(fetchedAt: Date())),
+        .failure(.unauthenticated),
+      ]
+    )
+    let model = makeModel(
+      tokenStore: store,
+      sessionClient: session,
+      portfolioLoader: loader
+    )
+    await model.restoreSession(requireLocalUnlock: false)
+
+    await model.refreshPortfolio()
+
+    let refreshCallCount = await session.refreshCallCount()
+    let currentCallCount = await session.currentCallCount()
+    XCTAssertEqual(model.authenticationState, .authenticated(reducedUser))
+    XCTAssertEqual(
+      model.portfolioState,
+      .unavailable("当前会话没有 portfolio:read 权限")
+    )
+    XCTAssertFalse(model.canPlaceManualOrders)
+    XCTAssertEqual(refreshCallCount, 1)
+    XCTAssertEqual(currentCallCount, 2)
   }
 
   func testRemoteLogoutFailureStillClearsLocalSensitiveState() async throws {
@@ -289,6 +371,7 @@ private actor MemorySessionTokenStore: SessionTokenStore {
 private actor SessionServiceStub: SessionServing {
   enum CurrentBehavior: Sendable {
     case user(SessionUser)
+    case users([SessionUser])
     case failure(SessionClient.ClientError)
     case unexpectedCall
   }
@@ -304,7 +387,7 @@ private actor SessionServiceStub: SessionServing {
     case failure(SessionClient.ClientError)
   }
 
-  private let currentBehavior: CurrentBehavior
+  private var currentBehavior: CurrentBehavior
   private let refreshBehavior: RefreshBehavior
   private let logoutBehavior: LogoutBehavior
   private var currentCalls = 0
@@ -324,7 +407,8 @@ private actor SessionServiceStub: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String
+    deviceName _: String,
+    requestedAccountID _: String?
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }
@@ -345,6 +429,13 @@ private actor SessionServiceStub: SessionServing {
     currentCalls += 1
     switch currentBehavior {
     case .user(let user):
+      return user
+    case .users(var users):
+      guard !users.isEmpty else {
+        throw SessionClient.ClientError.invalidResponse
+      }
+      let user = users.removeFirst()
+      currentBehavior = .users(users)
       return user
     case .failure(let error):
       throw error
@@ -370,6 +461,31 @@ private actor SessionServiceStub: SessionServing {
 
   func logoutCallCount() -> Int {
     logoutCalls
+  }
+}
+
+@MainActor
+private final class PortfolioSequenceLoader: PortfolioLoading {
+  enum Failure: Error {
+    case unauthenticated
+  }
+
+  private var results: [Result<PortfolioLoadResult, Failure>]
+
+  init(results: [Result<PortfolioLoadResult, Failure>]) {
+    self.results = results
+  }
+
+  func load(authorizedAccountIDs _: Set<String>) async throws -> PortfolioLoadResult {
+    guard !results.isEmpty else {
+      throw PortfolioRepository.RepositoryError.unauthenticated
+    }
+    switch results.removeFirst() {
+    case .success(let result):
+      return result
+    case .failure:
+      throw PortfolioRepository.RepositoryError.unauthenticated
+    }
   }
 }
 

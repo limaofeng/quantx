@@ -4,6 +4,7 @@ struct LoginView: View {
   @EnvironmentObject private var model: AppModel
   @State private var username = ""
   @State private var password = ""
+  @State private var requestedAccountID = ""
 
   var body: some View {
     NavigationStack {
@@ -32,9 +33,21 @@ struct LoginView: View {
 
             SecureField("密码", text: $password)
               .textContentType(.password)
+              .submitLabel(.next)
+              .textFieldStyle(.roundedBorder)
+
+            TextField("主账户 ID（单账户可留空）", text: $requestedAccountID)
+              .textInputAutocapitalization(.characters)
+              .autocorrectionDisabled()
               .submitLabel(.go)
               .textFieldStyle(.roundedBorder)
+              .accessibilityIdentifier("login-requested-account-id")
               .onSubmit(login)
+
+            Text("每个移动会话只绑定一个主账户；留空时仅在服务端确认唯一账户后自动选择。")
+              .font(.caption)
+              .foregroundStyle(QuantXTheme.secondaryText)
+              .frame(maxWidth: .infinity, alignment: .leading)
           }
 
           if let message = model.authenticationErrorMessage {
@@ -104,7 +117,14 @@ struct LoginView: View {
     let submittedPassword = password
     password = ""
     Task {
-      await model.login(username: submittedUsername, password: submittedPassword)
+      let accountID = requestedAccountID.trimmingCharacters(
+        in: .whitespacesAndNewlines
+      )
+      await model.login(
+        username: submittedUsername,
+        password: submittedPassword,
+        requestedAccountID: accountID.isEmpty ? nil : accountID
+      )
     }
   }
 }

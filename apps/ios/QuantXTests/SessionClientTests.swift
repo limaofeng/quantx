@@ -23,15 +23,26 @@ final class SessionClientTests: XCTestCase {
 
       let body = try XCTUnwrap(URLProtocolStub.bodyData(for: request))
       let json = try XCTUnwrap(
-        JSONSerialization.jsonObject(with: body) as? [String: String]
+        JSONSerialization.jsonObject(with: body) as? [String: Any]
       )
+      XCTAssertEqual(json["username"] as? String, "ios-user")
+      XCTAssertEqual(json["password"] as? String, "safe-test-password")
+      XCTAssertEqual(json["deviceName"] as? String, "iPhone 17 Pro")
+      XCTAssertNil(json["requestedAccountId"])
       XCTAssertEqual(
-        json,
-        [
-          "username": "ios-user",
-          "password": "safe-test-password",
-          "deviceName": "iPhone 17 Pro",
-        ]
+        json["requestedScopes"] as? [String],
+        NativeSessionScope.v1RequestedValues
+      )
+      XCTAssertFalse(
+        (json["requestedScopes"] as? [String] ?? []).contains("mutation:write")
+      )
+      XCTAssertFalse(
+        (json["requestedScopes"] as? [String] ?? []).contains("trade:direct")
+      )
+      XCTAssertFalse(
+        (json["requestedScopes"] as? [String] ?? []).contains {
+          $0.hasPrefix("assistant:")
+        }
       )
       return URLProtocolStub.Response(statusCode: 200, body: Self.grantPayload)
     }
@@ -45,6 +56,27 @@ final class SessionClientTests: XCTestCase {
 
     XCTAssertEqual(session.user.username, "ios-user")
     XCTAssertEqual(session.tokens.deviceSessionID, "device-session-id")
+    XCTAssertEqual(session.user.activeAccountID, "account-id")
+    XCTAssertEqual(session.user.grantedScopes, ["portfolio:read"])
+  }
+
+  func testLoginSendsExplicitTrimmedMainAccountWhenProvided() async throws {
+    URLProtocolStub.install { request in
+      let body = try XCTUnwrap(URLProtocolStub.bodyData(for: request))
+      let json = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: body) as? [String: Any]
+      )
+      XCTAssertEqual(json["requestedAccountId"] as? String, "account-id")
+      return URLProtocolStub.Response(statusCode: 200, body: Self.grantPayload)
+    }
+    let client = try makeClient()
+
+    _ = try await client.login(
+      username: "ios-user",
+      password: "safe-test-password",
+      deviceName: "iPhone",
+      requestedAccountID: "  account-id  "
+    )
   }
 
   func testLogoutUsesBearerAndAllDevicesQuery() async throws {
@@ -119,6 +151,138 @@ final class SessionClientTests: XCTestCase {
 
     XCTAssertEqual(user.id, "user-id")
     XCTAssertEqual(user.authorizedAccountIDs, ["account-id"])
+    XCTAssertEqual(user.activeAccountID, "account-id")
+    XCTAssertEqual(user.grantedScopes, ["portfolio:read"])
+  }
+
+  func testMissingRequestedScopesDegradesCapabilitiesWithoutFailingSession() async throws {
+    URLProtocolStub.install { _ in
+      URLProtocolStub.Response(
+        statusCode: 200,
+        body: Self.makeGrantPayload(
+          grantedScopes: [],
+          permissions: ["portfolio:read", "mutation:write", "trade:direct"]
+        )
+      )
+    }
+    let client = try makeClient()
+
+    let session = try await client.login(
+      username: "ios-user",
+      password: "safe-test-password",
+      deviceName: "iPhone"
+    )
+
+    XCTAssertEqual(
+      session.user.permissions,
+      ["portfolio:read", "mutation:write", "trade:direct"]
+    )
+    XCTAssertTrue(session.user.grantedScopes.isEmpty)
+  }
+
+  func testSessionRejectsNonUniqueOrSubstitutedAccountContext() async throws {
+    URLProtocolStub.install { _ in
+      URLProtocolStub.Response(
+        statusCode: 200,
+        body: Self.makeGrantPayload(
+          activeAccountID: "account-id",
+          authorizedAccountIDs: ["account-id", "other-account"]
+        )
+      )
+    }
+    let client = try makeClient()
+
+    do {
+      _ = try await client.login(
+        username: "ios-user",
+        password: "safe-test-password",
+        deviceName: "iPhone"
+      )
+      XCTFail("Expected invalidResponse")
+    } catch let error as SessionClient.ClientError {
+      XCTAssertEqual(error, .invalidResponse)
+    }
+  }
+
+  func testSessionRejectsServerGrantedScopeOutsideNativeAllowlist() async throws {
+    URLProtocolStub.install { _ in
+      URLProtocolStub.Response(
+        statusCode: 200,
+        body: Self.makeGrantPayload(grantedScopes: ["mutation:write"])
+      )
+    }
+    let client = try makeClient()
+
+    do {
+      _ = try await client.login(
+        username: "ios-user",
+        password: "safe-test-password",
+        deviceName: "iPhone"
+      )
+      XCTFail("Expected invalidResponse")
+    } catch let error as SessionClient.ClientError {
+      XCTAssertEqual(error, .invalidResponse)
+    }
+  }
+
+  func testRefreshMayShrinkButNeverExpandGrantedScopes() async throws {
+    URLProtocolStub.install { request in
+      switch request.url?.path {
+      case "/auth/session":
+        return URLProtocolStub.Response(
+          statusCode: 200,
+          body: Self.makeGrantPayload(
+            grantedScopes: ["portfolio:read", "market:read"]
+          )
+        )
+      case "/auth/session/refresh":
+        return URLProtocolStub.Response(
+          statusCode: 200,
+          body: Self.makeGrantPayload(grantedScopes: ["portfolio:read"])
+        )
+      default:
+        throw URLError(.badURL)
+      }
+    }
+    let client = try makeClient()
+    _ = try await client.login(
+      username: "ios-user",
+      password: "safe-test-password",
+      deviceName: "iPhone"
+    )
+
+    let refreshed = try await client.refresh(refreshToken: "old-refresh-token")
+
+    XCTAssertEqual(refreshed.user.grantedScopes, ["portfolio:read"])
+
+    URLProtocolStub.install { request in
+      switch request.url?.path {
+      case "/auth/session":
+        return URLProtocolStub.Response(statusCode: 200, body: Self.grantPayload)
+      case "/auth/session/refresh":
+        return URLProtocolStub.Response(
+          statusCode: 200,
+          body: Self.makeGrantPayload(
+            grantedScopes: ["portfolio:read", "market:read"]
+          )
+        )
+      default:
+        throw URLError(.badURL)
+      }
+    }
+    let expansionClient = try makeClient()
+    _ = try await expansionClient.login(
+      username: "ios-user",
+      password: "safe-test-password",
+      deviceName: "iPhone"
+    )
+
+    do {
+      _ = try await expansionClient.refresh(refreshToken: "old-refresh-token")
+      XCTFail("Expected scope expansion to be rejected")
+    } catch let error as SessionClient.ClientError {
+      XCTAssertEqual(error, .invalidResponse)
+    }
   }
 
   func testStructuredAuthenticationErrorKeepsSafeCodeAndRequestID() async throws {
@@ -198,15 +362,69 @@ final class SessionClientTests: XCTestCase {
     )
   }
 
-  private static let grantPayload = Data(
-    #"{"accessToken":"new-access-token","refreshToken":"new-refresh-token","accessTokenExpiresAt":"2026-07-21T12:00:00Z","refreshTokenExpiresAt":"2026-08-20T12:00:00Z","deviceSessionId":"device-session-id","tokenType":"Bearer","user":{"id":"user-id","username":"ios-user","displayName":"iOS 用户","permissions":["portfolio:read"],"authorizedAccountIds":["account-id"]}}"#
-      .utf8
-  )
+  private static let grantPayload = makeGrantPayload()
 
-  private static let statePayload = Data(
-    #"{"accessTokenExpiresAt":"2026-07-21T12:00:00Z","deviceSessionId":"device-session-id","user":{"id":"user-id","username":"ios-user","displayName":"iOS 用户","permissions":["portfolio:read"],"authorizedAccountIds":["account-id"]}}"#
-      .utf8
-  )
+  private static let statePayload = makeStatePayload()
+
+  private static func makeGrantPayload(
+    activeAccountID: String = "account-id",
+    authorizedAccountIDs: [String] = ["account-id"],
+    grantedScopes: [String] = ["portfolio:read"],
+    permissions: [String] = ["portfolio:read"]
+  ) -> Data {
+    payload(
+      base: [
+        "accessToken": "new-access-token",
+        "refreshToken": "new-refresh-token",
+        "accessTokenExpiresAt": "2026-07-21T12:00:00Z",
+        "refreshTokenExpiresAt": "2026-08-20T12:00:00Z",
+        "deviceSessionId": "device-session-id",
+        "tokenType": "Bearer",
+      ],
+      activeAccountID: activeAccountID,
+      authorizedAccountIDs: authorizedAccountIDs,
+      grantedScopes: grantedScopes,
+      permissions: permissions
+    )
+  }
+
+  private static func makeStatePayload(
+    activeAccountID: String = "account-id",
+    authorizedAccountIDs: [String] = ["account-id"],
+    grantedScopes: [String] = ["portfolio:read"],
+    permissions: [String] = ["portfolio:read"]
+  ) -> Data {
+    payload(
+      base: [
+        "accessTokenExpiresAt": "2026-07-21T12:00:00Z",
+        "deviceSessionId": "device-session-id",
+      ],
+      activeAccountID: activeAccountID,
+      authorizedAccountIDs: authorizedAccountIDs,
+      grantedScopes: grantedScopes,
+      permissions: permissions
+    )
+  }
+
+  private static func payload(
+    base: [String: Any],
+    activeAccountID: String,
+    authorizedAccountIDs: [String],
+    grantedScopes: [String],
+    permissions: [String]
+  ) -> Data {
+    var value = base
+    value["activeAccountId"] = activeAccountID
+    value["grantedScopes"] = grantedScopes
+    value["user"] = [
+      "id": "user-id",
+      "username": "ios-user",
+      "displayName": "iOS 用户",
+      "permissions": permissions,
+      "authorizedAccountIds": authorizedAccountIDs,
+    ]
+    return try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+  }
 }
 
 private final class URLProtocolStub: URLProtocol, @unchecked Sendable {
