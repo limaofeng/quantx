@@ -1,5 +1,6 @@
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.principal import Principal
@@ -44,19 +45,36 @@ async def test_order_service_hides_order_owned_by_another_account(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancel_rejects_terminal_order_before_command_queue(monkeypatch):
-  class TerminalOrderService:
-    def __init__(self, account_id):
-      assert account_id == "ACCOUNT-1"
-
-    async def get_order_by_id(self, order_id):
-      assert order_id == 12345
+  class Result:
+    def scalar_one_or_none(self):
       return SimpleNamespace(status=OrderStatus.SUCCEEDED)
+
+  db = SimpleNamespace(execute=AsyncMock(return_value=Result()))
+
+  class SessionContext:
+    async def __aenter__(self):
+      return db
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  class Auth:
+    def __init__(self, current_db):
+      assert current_db is db
+
+    async def lock_and_validate_session(self, principal, **kwargs):
+      assert kwargs == {
+        "required_permission": "trade:manual",
+        "account_id": "ACCOUNT-1",
+      }
+      return principal
 
   class QueueMustNotBeReached:
     def __init__(self, _db):
       raise AssertionError("terminal order must not reach the command queue")
 
-  monkeypatch.setattr(trading_schema, "OrderService", TerminalOrderService)
+  monkeypatch.setattr(trading_schema, "AsyncSessionLocal", SessionContext)
+  monkeypatch.setattr(trading_schema, "AuthService", Auth)
   monkeypatch.setattr(
     trading_schema,
     "TradeCommandService",

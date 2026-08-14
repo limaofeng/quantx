@@ -33,6 +33,12 @@ class ManualOrderPriceType(str, Enum):
   BEST = "BEST"
 
 
+@strawberry.enum(description="移动端手动委托执行模式")
+class ManualOrderExecutionMode(str, Enum):
+  PAPER = "PAPER"
+  LIVE = "LIVE"
+
+
 @strawberry.type(description="订单信息")
 class Order:
   id: str = strawberry.field(description="订单编号")
@@ -144,6 +150,10 @@ class ManualOrderPreviewInput:
   price_type: ManualOrderPriceType = strawberry.field(description="LIMIT 或 BEST")
   volume: int = strawberry.field(description="请求委托数量")
   idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
+  execution_mode: ManualOrderExecutionMode = strawberry.field(
+    description="默认 PAPER；LIVE 额外要求实盘灰度、对账和唯一 Agent 就绪",
+    default=ManualOrderExecutionMode.PAPER,
+  )
   limit_price: Optional[float] = strawberry.field(
     description="LIMIT 必填；BEST 必须为空",
     default=None,
@@ -200,6 +210,20 @@ class ManualOrderConfirmationResult:
   challenge_id: Optional[str] = None
   client_order_id: Optional[str] = None
   status: Optional[str] = None
+
+
+@strawberry.type(description="服务端计算的移动端手动委托能力")
+class OrderEntryCapabilities:
+  account_id: str
+  instrument_code: str
+  can_manual_trade: bool
+  default_execution_mode: ManualOrderExecutionMode
+  execution_modes: List[ManualOrderExecutionMode]
+  supported_sides: List[ManualOrderSide]
+  supported_price_types: List[ManualOrderPriceType]
+  live_ready: bool
+  live_blocked_reasons: List[str]
+  warnings: List[str]
 
 
 @strawberry.input(description="撤单输入参数")

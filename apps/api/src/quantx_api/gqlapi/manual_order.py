@@ -67,6 +67,7 @@ _MAX_TOKEN_LENGTH = 256
 _INSTRUMENT_CODE = re.compile(r"^[0-9]{6}\.(SH|SZ|BJ)$")
 _SIDES = frozenset({"BUY", "SELL"})
 _PRICE_TYPES = frozenset({"LIMIT", "BEST"})
+_EXECUTION_MODES = frozenset({"PAPER", "LIVE"})
 _trading_time_service = TradingTimeService()
 
 
@@ -79,6 +80,7 @@ class ManualOrderRequestData:
   volume: int
   limit_price: Optional[float]
   idempotency_key: str
+  execution_mode: str
 
   def payload(self) -> dict[str, Any]:
     return {
@@ -90,7 +92,7 @@ class ManualOrderRequestData:
       "volume": self.volume,
       "limit_price": self.limit_price,
       "idempotency_key": self.idempotency_key,
-      "execution_mode": "live",
+      "execution_mode": self.execution_mode.lower(),
     }
 
   @classmethod
@@ -108,6 +110,7 @@ class ManualOrderRequestData:
       volume=int(payload.get("volume") or 0),
       limit_price=payload.get("limit_price"),
       idempotency_key=str(payload.get("idempotency_key") or ""),
+      execution_mode=str(payload.get("execution_mode") or ""),
     )
 
 
@@ -167,6 +170,7 @@ def normalize_manual_order_request(
   volume: int,
   limit_price: Any,
   idempotency_key: str,
+  execution_mode: Any = "PAPER",
 ) -> ManualOrderRequestData:
   normalized_account_id = str(account_id or "").strip()
   normalized_code = str(instrument_code or "").strip().upper()
@@ -175,6 +179,11 @@ def normalize_manual_order_request(
     str(getattr(price_type, "value", price_type) or "").strip().upper()
   )
   normalized_key = str(idempotency_key or "").strip()
+  normalized_execution_mode = (
+    str(getattr(execution_mode, "value", execution_mode) or "")
+    .strip()
+    .upper()
+  )
   try:
     normalized_volume = int(volume)
   except (TypeError, ValueError) as exc:
@@ -200,6 +209,11 @@ def normalize_manual_order_request(
   if not normalized_key or len(normalized_key) > 128:
     raise TradeApprovalChallengeError(
       "INVALID_IDEMPOTENCY_KEY", "幂等键不能为空且不能超过 128 个字符"
+    )
+  if normalized_execution_mode not in _EXECUTION_MODES:
+    raise TradeApprovalChallengeError(
+      "INVALID_EXECUTION_MODE",
+      "执行模式必须是 PAPER 或 LIVE",
     )
 
   parsed_price: Optional[float]
@@ -241,6 +255,7 @@ def normalize_manual_order_request(
     volume=normalized_volume,
     limit_price=parsed_price,
     idempotency_key=normalized_key,
+    execution_mode=normalized_execution_mode,
   )
 
 
@@ -285,6 +300,38 @@ def _version_token(value: Optional[datetime]) -> Optional[str]:
   if value is None:
     return None
   return value.isoformat(timespec="microseconds")
+
+
+def _paper_snapshot_binding(account: Any, position: Any) -> tuple[str, str]:
+  """Bind paper rehearsal to the same account/position facts used by sizing."""
+
+  payload = {
+    "account_id": str(getattr(account, "account_id", "") or ""),
+    "cash": _canonical_number(getattr(account, "cash", None)),
+    "total_asset": _canonical_number(getattr(account, "total_asset", None)),
+    "account_updated_at": _version_token(getattr(account, "updated_at", None)),
+    "position_volume": (
+      int(getattr(position, "volume", 0) or 0) if position is not None else None
+    ),
+    "position_available_volume": (
+      int(getattr(position, "can_use_volume", 0) or 0)
+      if position is not None
+      else None
+    ),
+    "position_updated_at": (
+      _version_token(getattr(position, "updated_at", None))
+      if position is not None
+      else None
+    ),
+  }
+  encoded = json.dumps(
+    payload,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+  ).encode("utf-8")
+  digest = hashlib.sha256(encoded).hexdigest()
+  return f"paper-{digest[:24]}", digest
 
 
 def _quote_fingerprint(
@@ -463,16 +510,18 @@ async def _preflight(
         risk_decision_id=risk_decision_id,
       )
 
-  try:
-    rollout = await TradeCommandService(db)._require_manual_live_authorization(
-      request.account_id,
-      risk_reducing=request.side == "SELL",
-    )
-  except AgentUnavailableError as exc:
-    raise TradeApprovalChallengeError(
-      "LIVE_AUTHORIZATION_REJECTED",
-      str(exc),
-    ) from exc
+  rollout = None
+  if request.execution_mode == "LIVE":
+    try:
+      rollout = await TradeCommandService(db)._require_manual_live_authorization(
+        request.account_id,
+        risk_reducing=request.side == "SELL",
+      )
+    except AgentUnavailableError as exc:
+      raise TradeApprovalChallengeError(
+        "LIVE_AUTHORIZATION_REJECTED",
+        str(exc),
+      ) from exc
   ticks = await latest_market_quote_cache.get_ticks([request.instrument_code])
   tick = next(
     (
@@ -694,6 +743,24 @@ async def _preflight(
 
   estimated_amount = float(price) * float(final_volume)
   available_cash = float(account.cash or 0)
+  if request.execution_mode == "PAPER":
+    snapshot_id, snapshot_hash = _paper_snapshot_binding(account, position)
+    mode_warnings = [
+      "当前为 PAPER 演练：不会向券商发送真实委托",
+      "PAPER 结果不代表真实盘口排队、成交价格或真实费用",
+    ]
+  else:
+    if rollout is None:
+      raise TradeApprovalChallengeError(
+        "LIVE_AUTHORIZATION_REJECTED",
+        "实盘灰度快照不存在",
+      )
+    snapshot_id = str(rollout.last_snapshot_id or "")
+    snapshot_hash = str(rollout.last_snapshot_hash or "")
+    mode_warnings = [
+      "确认只会将命令排队，不表示券商受理、委托成功或成交",
+      "最终状态只能以 QMT Agent 上报并由 Engine 收敛的券商回报为准",
+    ]
 
   return ManualOrderPreflightData(
     quote_timestamp=_aware_local(quote_timestamp),
@@ -709,8 +776,8 @@ async def _preflight(
     estimated_fees=None,
     available_cash=available_cash,
     available_volume=available_volume if request.side == "SELL" else None,
-    rollout_snapshot_id=str(rollout.last_snapshot_id or ""),
-    rollout_snapshot_hash=str(rollout.last_snapshot_hash or ""),
+    rollout_snapshot_id=snapshot_id,
+    rollout_snapshot_hash=snapshot_hash,
     account_updated_at=account.updated_at,
     position_updated_at=(position.updated_at if position is not None else None),
     risk_decision_id=decision.risk_decision_id,
@@ -719,9 +786,8 @@ async def _preflight(
     risk_reason_detail=decision.reason_detail,
     warnings=[
       "风控已使用保守手续费缓冲校验购买力；预览不展示非权威费用报价",
-      "确认只会将命令排队，不表示券商受理、委托成功或成交",
-      "确认时会锁定并复核设备会话、对账、账户、持仓和风控快照",
-      "最终状态只能以 QMT Agent 上报并由 Engine 收敛的券商回报为准",
+      "确认时会锁定并复核设备会话、账户、持仓和风控快照",
+      *mode_warnings,
     ],
   )
 
@@ -895,9 +961,9 @@ class ManualOrderChallengeService:
           order_remark="QuantX iOS 手动委托",
           trace_id=challenge.id,
           idempotency_key=_command_idempotency_key(challenge.id, request),
-          execution_mode="live",
+          execution_mode=request.execution_mode.lower(),
           bucket="manual",
-          manual_live=True,
+          manual_live=request.execution_mode == "LIVE",
           risk_decision_id=risk_decision_id,
           reason_tags=["MOBILE_MANUAL_ORDER", preflight.risk_reason_code],
           commit_transaction=False,

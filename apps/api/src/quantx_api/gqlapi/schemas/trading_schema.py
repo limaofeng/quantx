@@ -4,9 +4,18 @@ from typing import List, Optional
 
 import strawberry
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
+from quantx_infrastructure.models import Instrument, PendingTradeOrder
 from quantx_infrastructure.models.enums import OrderStatus, OrderType, PriceType
+from quantx_infrastructure.models.order import Order as OrderModel
 from quantx_infrastructure.services.order_service import OrderService
+from quantx_infrastructure.services.t_trade_operations_service import (
+  TTradeOperationsService,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
+from sqlalchemy import select
+
+from quantx_api.auth.errors import AuthError
+from quantx_api.auth.service import AuthService
 
 from ..manual_order import (
   ManualOrderChallengeService,
@@ -27,6 +36,12 @@ from ..types import (
   OrderInput,
   OrderMutationResult,
   Trade,
+)
+from ..types.trading_types import (
+  ManualOrderExecutionMode,
+  ManualOrderPriceType,
+  ManualOrderSide,
+  OrderEntryCapabilities,
 )
 
 _PRICE_TYPE_ALIASES = {
@@ -106,6 +121,84 @@ async def _fetch_order(order_id: int, account_id: str) -> Optional[Order]:
 
 @strawberry.type(description="订单交易相关查询")
 class TradingQuery:
+  @strawberry.field(description="查询当前账户与标的的移动端下单能力")
+  async def order_entry_capabilities(
+    self,
+    info: strawberry.types.Info,
+    instrument_code: str,
+    account_id: Optional[str] = None,
+  ) -> OrderEntryCapabilities:
+    principal = principal_from_context(info.context)
+    resolved_account_id = await _resolve_account_id(info, account_id)
+    normalized_code = str(instrument_code or "").strip().upper()
+    valid_code = (
+      len(normalized_code) == 9
+      and normalized_code[:6].isdigit()
+      and normalized_code[6:] in {".SH", ".SZ", ".BJ"}
+    )
+    instrument = None
+    if valid_code:
+      async with AsyncSessionLocal() as db:
+        instrument = await db.get(Instrument, normalized_code)
+    instrument_available = bool(
+      instrument is not None and getattr(instrument, "is_trading", True) is not False
+    )
+    has_manual_scope = "trade:manual" in principal.permissions
+    can_manual_trade = bool(valid_code and instrument_available and has_manual_scope)
+    execution_modes = (
+      [ManualOrderExecutionMode.PAPER] if can_manual_trade else []
+    )
+    live_ready = False
+    live_blocked_reasons: List[str] = []
+    if can_manual_trade:
+      try:
+        readiness = await TTradeOperationsService().readiness(
+          resolved_account_id
+        )
+        relevant_checks = [
+          item
+          for item in list(readiness.get("checks") or [])
+          if str(item.get("code") or "") != "T_TRADE_LIVE_ENABLED"
+        ]
+        live_blocked_reasons = [
+          str(item.get("message") or item.get("code") or "实盘未就绪")
+          for item in relevant_checks
+          if not bool(item.get("passed"))
+        ]
+        if int(readiness.get("ready_live_agent_count") or 0) != 1:
+          live_blocked_reasons.append("实盘要求当前账户恰好一个 READY live Agent")
+        live_ready = not live_blocked_reasons
+      except Exception:
+        live_blocked_reasons = ["实盘安全状态暂不可用"]
+      if live_ready:
+        execution_modes.append(ManualOrderExecutionMode.LIVE)
+    elif not has_manual_scope:
+      live_blocked_reasons = ["当前设备会话未获授 trade:manual"]
+    elif not valid_code:
+      live_blocked_reasons = ["证券代码格式无效"]
+    else:
+      live_blocked_reasons = ["证券主数据不存在或当前不可交易"]
+    supported_price_types = (
+      [ManualOrderPriceType.LIMIT, ManualOrderPriceType.BEST]
+      if normalized_code.endswith((".SH", ".SZ"))
+      else [ManualOrderPriceType.LIMIT]
+    )
+    return OrderEntryCapabilities(
+      account_id=resolved_account_id,
+      instrument_code=normalized_code,
+      can_manual_trade=can_manual_trade,
+      default_execution_mode=ManualOrderExecutionMode.PAPER,
+      execution_modes=execution_modes,
+      supported_sides=[ManualOrderSide.BUY, ManualOrderSide.SELL],
+      supported_price_types=supported_price_types,
+      live_ready=live_ready,
+      live_blocked_reasons=list(dict.fromkeys(live_blocked_reasons)),
+      warnings=[
+        "能力只决定可展示的票据选项；每次预览和确认仍重新执行服务端风控",
+        "北交所暂不提供 BEST；沪深 BEST 仅映射对手方最优价",
+      ],
+    )
+
   @strawberry.field(description="获取当日委托列表")
   async def today_orders(
     self, info: strawberry.types.Info, account_id: Optional[str] = None
@@ -193,6 +286,7 @@ class TradingMutation:
         volume=input.volume,
         limit_price=input.limit_price,
         idempotency_key=input.idempotency_key,
+        execution_mode=input.execution_mode,
       )
       issued = await ManualOrderChallengeService.issue(
         principal=principal,
@@ -219,7 +313,7 @@ class TradingMutation:
           available_cash=issued.preflight.available_cash,
           available_volume=issued.preflight.available_volume,
           idempotency_key=request.idempotency_key,
-          execution_mode="LIVE",
+          execution_mode=request.execution_mode,
           quote_timestamp=issued.preflight.quote_timestamp,
           challenge_expires_at=issued.challenge_expires_at,
           risk_decision_id=issued.preflight.risk_decision_id,
@@ -316,33 +410,87 @@ class TradingMutation:
   ) -> CancelOrderResult:
     try:
       account_id = await _resolve_account_id(info, input.account_id)
-      order = await OrderService(account_id).get_order_by_id(input.order_id)
-      if not order:
-        return CancelOrderResult(
-          success=False,
-          message=f"订单 {input.order_id} 不存在",
-          order_id=None,
-          client_order_id=None,
-          status="REJECTED",
-        )
-      status = order.status
-      if status not in {OrderStatus.REPORTED, OrderStatus.PART_SUCC}:
-        return CancelOrderResult(
-          success=False,
-          message=f"订单状态 {status.name} 不允许撤单",
-          order_id=None,
-          client_order_id=None,
-          status="REJECTED",
-        )
       principal = principal_from_context(info.context)
+      idempotency_key = str(input.idempotency_key or "").strip()
+      if principal.active_account_id is not None and (
+        not idempotency_key or len(idempotency_key) > 128
+      ):
+        return CancelOrderResult(
+          success=False,
+          message="原生移动端撤单必须提供不超过 128 个字符的幂等键",
+          order_id=input.order_id,
+          status="REJECTED",
+        )
       async with AsyncSessionLocal() as db:
+        try:
+          current = await AuthService(db).lock_and_validate_session(
+            principal,
+            required_permission="trade:manual",
+            account_id=account_id,
+          )
+        except AuthError as exc:
+          return CancelOrderResult(
+            success=False,
+            message=exc.message,
+            order_id=input.order_id,
+            status="REJECTED",
+          )
+        order = (
+          await db.execute(
+            select(OrderModel)
+            .where(
+              OrderModel.id == input.order_id,
+              OrderModel.account_id == account_id,
+            )
+            .with_for_update()
+          )
+        ).scalar_one_or_none()
+        if order is None:
+          return CancelOrderResult(
+            success=False,
+            message=f"订单 {input.order_id} 不存在",
+            order_id=input.order_id,
+            status="REJECTED",
+          )
+        status = order.status
+        if status not in {OrderStatus.REPORTED, OrderStatus.PART_SUCC}:
+          return CancelOrderResult(
+            success=False,
+            message=f"订单状态 {status.name} 不允许撤单",
+            order_id=input.order_id,
+            status="REJECTED",
+          )
+        pending = (
+          await db.execute(
+            select(PendingTradeOrder)
+            .where(
+              PendingTradeOrder.account_id == account_id,
+              PendingTradeOrder.broker_order_id == str(input.order_id),
+            )
+            .order_by(PendingTradeOrder.updated_at.desc())
+            .limit(1)
+            .with_for_update()
+          )
+        ).scalar_one_or_none()
+        if principal.active_account_id is not None and pending is None:
+          return CancelOrderResult(
+            success=False,
+            message="订单缺少 QuantX 命令关联，原生端拒绝撤销未追踪委托",
+            order_id=input.order_id,
+            status="REJECTED",
+          )
+        execution_mode = str(
+          getattr(pending, "execution_mode", None) or "live"
+        ).lower()
         queued = await TradeCommandService(db).enqueue_cancel(
-          user_id=principal.user_id,
+          user_id=current.user_id,
           account_id=account_id,
           broker_order_id=str(input.order_id),
-          idempotency_key=input.idempotency_key or "",
-          execution_mode="live",
+          idempotency_key=idempotency_key,
+          execution_mode=execution_mode,
+          commit_transaction=False,
         )
+        await db.commit()
       return CancelOrderResult(
         success=True,
         message="撤单命令已排队；请等待 QMT Agent 券商回报",

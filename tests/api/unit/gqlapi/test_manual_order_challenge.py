@@ -55,6 +55,7 @@ def _request(*, key: str = "ios-order-1"):
     volume=100,
     limit_price=10.5,
     idempotency_key=key,
+    execution_mode="LIVE",
   )
 
 
@@ -210,7 +211,6 @@ async def test_manual_order_challenge_is_bound_consumed_once_and_queues_once(
   assert queued_calls[0]["idempotency_key"] == (
     f"manual-order:{preview.challenge_id}:ios-order-1"
   )
-
   async with challenge_database() as db:
     stored = await db.get(TradeConfirmationChallenge, preview.challenge_id)
     assert stored.consumed_at is not None
@@ -227,6 +227,49 @@ async def test_manual_order_challenge_is_bound_consumed_once_and_queues_once(
   )
   assert replay == result
   assert len(queued_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_paper_confirmation_never_requests_manual_live_routing(
+  challenge_database,
+  monkeypatch,
+):
+  async def preflight(_request, **_kwargs):
+    return _preflight_data(
+      rollout_snapshot_id="paper-snapshot-1",
+      rollout_snapshot_hash="paper-hash-1",
+    )
+
+  queued_calls = []
+
+  async def enqueue(_service, **kwargs):
+    queued_calls.append(kwargs)
+    return QueuedTradeCommand("paper-order-1", "paper-message-1", "QUEUED")
+
+  monkeypatch.setattr(manual_order, "_preflight", preflight)
+  monkeypatch.setattr(manual_order.TradeCommandService, "enqueue_order", enqueue)
+  request = normalize_manual_order_request(
+    account_id="ACCOUNT-1",
+    instrument_code="600000.SH",
+    side="BUY",
+    price_type="LIMIT",
+    volume=100,
+    limit_price=10.5,
+    idempotency_key="ios-paper-1",
+  )
+  preview = await ManualOrderChallengeService.issue(
+    principal=_principal(), request=request
+  )
+
+  await ManualOrderChallengeService.confirm(
+    principal=_principal(),
+    challenge_id=preview.challenge_id,
+    confirmation_token=preview.confirmation_token,
+  )
+
+  assert request.execution_mode == "PAPER"
+  assert queued_calls[0]["execution_mode"] == "paper"
+  assert queued_calls[0]["manual_live"] is False
 
 
 @pytest.mark.asyncio
@@ -998,15 +1041,20 @@ async def test_preflight_uses_fresh_quote_account_instrument_and_order_sizer(
     limit_price=10.5,
     idempotency_key="ios-cap-real-preflight-1",
   )
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", False)
   capped = await manual_order._preflight(
     capped_request,
     risk_decision_id="risk-cap-1",
   )
+  assert capped_request.execution_mode == "PAPER"
+  assert capped.rollout_snapshot_id.startswith("paper-")
+  assert any("不会向券商发送真实委托" in item for item in capped.warnings)
   assert capped.requested_volume == 150
   assert capped.final_volume == 100
   assert capped.risk_action == "CAP"
   assert capped.risk_reason_code == "BUY_LOT_NORMALIZED"
   assert capped.risk_decision_id == "risk-cap-1"
+  monkeypatch.setattr(command_module.settings, "enable_real_trading", True)
 
   manual_order._trading_time_service.is_trading_hours.return_value = False
   with pytest.raises(TradeApprovalChallengeError) as outside_hours:

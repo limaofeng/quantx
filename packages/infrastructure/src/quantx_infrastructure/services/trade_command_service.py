@@ -538,6 +538,7 @@ class TradeCommandService:
     broker_order_id: str,
     idempotency_key: str = "",
     execution_mode: str = "paper",
+    commit_transaction: bool = True,
   ) -> QueuedTradeCommand:
     business_idempotency_key = hashlib.sha256(
       (
@@ -590,24 +591,27 @@ class TradeCommandService:
         attempts=0,
       )
     )
-    try:
-      await self.db.commit()
-    except IntegrityError:
-      await self.db.rollback()
-      existing = (
-        await self.db.execute(
-          select(TradeCommandOutbox).where(
-            TradeCommandOutbox.idempotency_key == business_idempotency_key
+    if commit_transaction:
+      try:
+        await self.db.commit()
+      except IntegrityError:
+        await self.db.rollback()
+        existing = (
+          await self.db.execute(
+            select(TradeCommandOutbox).where(
+              TradeCommandOutbox.idempotency_key == business_idempotency_key
+            )
           )
+        ).scalar_one_or_none()
+        if existing is None:
+          raise
+        return QueuedTradeCommand(
+          existing.client_order_id,
+          existing.message_id,
+          existing.delivery_status,
         )
-      ).scalar_one_or_none()
-      if existing is None:
-        raise
-      return QueuedTradeCommand(
-        existing.client_order_id,
-        existing.message_id,
-        existing.delivery_status,
-      )
+    else:
+      await self.db.flush()
     return QueuedTradeCommand(client_order_id, message_id, "QUEUED")
 
   async def enqueue_cancel_for_account(
