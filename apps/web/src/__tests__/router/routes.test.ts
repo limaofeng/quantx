@@ -99,10 +99,7 @@ describe('router configuration', () => {
       '/research',
       '/screening',
     ]);
-    expect(settings?.items.map(item => item.href)).toEqual([
-      '/settings/data',
-      '/settings/agents',
-    ]);
+    expect(settings?.items.map(item => item.href)).toEqual(['/settings']);
     expect(main?.items.map(item => item.href)).not.toContain('/account');
     expect(main?.items.map(item => item.label)).toContain('行情');
     expect(main?.items.map(item => item.label)).not.toContain('仪表板');
@@ -113,6 +110,11 @@ describe('router configuration', () => {
     expect(
       isNavigationItemActive('/settings/data', '/settings/data/market')
     ).toBe(true);
+    expect(isNavigationItemActive('/settings', '/settings/qmt')).toBe(true);
+    expect(isNavigationItemActive('/settings', '/settings/ai-runtime')).toBe(
+      true
+    );
+    expect(isNavigationItemActive('/settings', '/settings/data')).toBe(false);
     expect(isNavigationItemActive('/', '/settings/data')).toBe(false);
   });
 });

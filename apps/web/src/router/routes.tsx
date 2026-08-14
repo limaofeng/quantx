@@ -2,12 +2,11 @@ import {
   BarChart3,
   Bot,
   Briefcase,
-  Cable,
-  Database,
   Filter,
   FlaskConical,
   Hand,
   Radar,
+  Settings,
   Target,
   type LucideIcon,
 } from 'lucide-react';
@@ -282,6 +281,48 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'detail',
   }),
   route({
+    path: '/settings',
+    title: '系统设置',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+    nav: {
+      label: '系统设置',
+      icon: Settings,
+      group: SETTINGS_GROUP,
+      order: 10,
+    },
+  }),
+  route({
+    path: '/settings/qmt',
+    title: '系统设置',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
+    path: '/settings/ai-runtime',
+    title: '系统设置',
+    importer: toDefaultExport(
+      () => import('@/features/settings'),
+      'SystemSettingsPage'
+    ),
+    skeleton: 'dashboard',
+  }),
+  route({
+    path: '/settings/agents',
+    title: '系统设置',
+    importer: toDefaultExport(
+      () => import('./redirects'),
+      'LegacyAgentSettingsRedirect'
+    ),
+    skeleton: 'default',
+  }),
+  route({
     path: '/settings/data',
     title: '数据管理门户',
     importer: toDefaultExport(
@@ -289,27 +330,6 @@ export const appRoutes: AppRouteConfig[] = [
       'DataManagementPage'
     ),
     skeleton: 'dashboard',
-    nav: {
-      label: '数据管理',
-      icon: Database,
-      group: SETTINGS_GROUP,
-      order: 10,
-    },
-  }),
-  route({
-    path: '/settings/agents',
-    title: 'QMT Agent 管理',
-    importer: toDefaultExport(
-      () => import('@/features/agents'),
-      'AgentManagementPage'
-    ),
-    skeleton: 'dashboard',
-    nav: {
-      label: 'QMT Agent',
-      icon: Cable,
-      group: SETTINGS_GROUP,
-      order: 20,
-    },
   }),
   route({
     path: '/settings/data/market',
@@ -474,6 +494,14 @@ export function isNavigationItemActive(
   const normalizedPathname = normalizePath(pathname);
 
   if (normalizedHref === '/') return normalizedPathname === '/';
+  if (normalizedHref === '/settings') {
+    return [
+      '/settings',
+      '/settings/qmt',
+      '/settings/ai-runtime',
+      '/settings/agents',
+    ].includes(normalizedPathname);
+  }
   return (
     normalizedPathname === normalizedHref ||
     normalizedPathname.startsWith(`${normalizedHref}/`)

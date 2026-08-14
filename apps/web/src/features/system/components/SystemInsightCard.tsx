@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  Bot,
   CheckCircle2,
   Database,
   RefreshCw,
@@ -20,11 +21,13 @@ interface ServiceStatus {
   status: SystemStatus;
   metric: string;
   icon: React.ElementType;
+  optional?: boolean;
 }
 
 interface ComponentStatus {
   status?: string;
   version?: string;
+  configVersion?: number;
   connectedDevices?: number;
   readyDevices?: number;
   onlineDevices?: number;
@@ -39,6 +42,7 @@ interface HealthComponents {
   engine?: ComponentStatus;
   worker?: ComponentStatus;
   qmtAgent?: ComponentStatus;
+  aiRuntime?: ComponentStatus;
   marketData?: ComponentStatus;
   prefect?: ComponentStatus;
 }
@@ -53,7 +57,10 @@ function toSystemStatus(
 ): SystemStatus {
   const status = component?.status?.toLowerCase();
   if (status === 'ready') return 'healthy';
-  if (optional && (status === 'disabled' || status === 'offline')) {
+  if (
+    optional &&
+    (status === 'disabled' || status === 'offline' || status === 'unconfigured')
+  ) {
     return 'warning';
   }
   if (status === 'starting' || status === 'reconciling') return 'warning';
@@ -124,6 +131,12 @@ export function SystemInsightCard() {
           metric: 'Checking',
           icon: ShieldCheck,
         },
+        {
+          name: 'AI Runtime',
+          status: 'warning',
+          metric: 'Checking',
+          icon: Bot,
+        },
       ];
     }
 
@@ -160,11 +173,25 @@ export function SystemInsightCard() {
           metric: 'Unavailable',
           icon: ShieldCheck,
         },
+        {
+          name: 'AI Runtime',
+          status: 'error',
+          metric: 'Unavailable',
+          icon: Bot,
+        },
       ];
     }
 
-    const { api, database, engine, marketData, prefect, qmtAgent, worker } =
-      health.components;
+    const {
+      aiRuntime,
+      api,
+      database,
+      engine,
+      marketData,
+      prefect,
+      qmtAgent,
+      worker,
+    } = health.components;
     const schedulerStatus =
       prefect?.status === 'disabled'
         ? 'warning'
@@ -225,12 +252,25 @@ export function SystemInsightCard() {
             : (qmtAgent?.status ?? 'Offline'),
         icon: ShieldCheck,
       },
+      {
+        name: 'AI Runtime',
+        status: toSystemStatus(aiRuntime, true),
+        metric:
+          aiRuntime?.status === 'ready'
+            ? `Config v${aiRuntime.version ?? aiRuntime.configVersion ?? 0}`
+            : (aiRuntime?.status ?? 'Offline'),
+        icon: Bot,
+        optional: true,
+      },
     ];
   }, [health, healthError]);
 
-  const overallStatus: SystemStatus = services.some(s => s.status === 'error')
+  const requiredServices = services.filter(service => !service.optional);
+  const overallStatus: SystemStatus = requiredServices.some(
+    service => service.status === 'error'
+  )
     ? 'error'
-    : services.some(s => s.status === 'warning')
+    : requiredServices.some(service => service.status === 'warning')
       ? 'warning'
       : 'healthy';
 
@@ -303,7 +343,7 @@ export function SystemInsightCard() {
         <div className="hidden md:block w-px h-12 bg-slate-200/50 dark:bg-slate-800/50" />
 
         {/* Middle: Service Grid */}
-        <div className="flex-1 grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 w-full">
+        <div className="flex-1 grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 w-full">
           {services.map(svc => (
             <div
               key={svc.name}

@@ -27,10 +27,15 @@ describe('studio workspace tabs', () => {
 
   it('hosts every authenticated route in the Studio workspace', () => {
     const agentTab = buildStudioWorkspaceTab('/settings/agents');
+    const overviewTab = buildStudioWorkspaceTab('/settings');
+    const runtimeTab = buildStudioWorkspaceTab('/settings/ai-runtime');
     const unknownTab = buildStudioWorkspaceTab('/missing-page');
 
-    expect(agentTab.name).toBe('QMT Agent 管理');
+    expect(agentTab.name).toBe('系统设置');
     expect(agentTab.path).toBe('/settings/agents');
+    expect(agentTab.id).toBe('settings');
+    expect(overviewTab.id).toBe('settings');
+    expect(runtimeTab.id).toBe('settings');
     expect(unknownTab.name).toBe('页面未找到');
   });
 

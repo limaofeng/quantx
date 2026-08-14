@@ -1,1 +1,4 @@
-export { AgentManagementPage } from './pages/AgentManagementPage';
+export {
+  AgentManagementPage,
+  AgentManagementPanel,
+} from './pages/AgentManagementPage';

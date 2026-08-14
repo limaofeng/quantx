@@ -7,6 +7,7 @@ import {
   Hand,
   LayoutDashboard,
   LineChart,
+  Settings,
   Wallet,
   type LucideIcon,
 } from 'lucide-react';
@@ -100,6 +101,17 @@ export function getStudioWorkspaceTabId(rawPath: string) {
     return 'account';
   }
 
+  if (
+    [
+      '/settings',
+      '/settings/qmt',
+      '/settings/ai-runtime',
+      '/settings/agents',
+    ].includes(normalizedPath)
+  ) {
+    return 'settings';
+  }
+
   if (normalizedPath === '/liquidation') {
     const manualTabId = normalizeSymbol(getSearchParam(search, 'workspaceTab'));
     return manualTabId ? `liquidation:${manualTabId}` : 'liquidation';
@@ -123,6 +135,16 @@ function getTabIcon(pathname: string): LucideIcon {
   if (pathname.startsWith('/stock/')) return LineChart;
   if (pathname.startsWith('/strategies')) return Bot;
   if (
+    [
+      '/settings',
+      '/settings/qmt',
+      '/settings/ai-runtime',
+      '/settings/agents',
+    ].includes(pathname)
+  ) {
+    return Settings;
+  }
+  if (
     pathname.startsWith('/settings/data') ||
     pathname.startsWith('/system/flow-runs')
   ) {
@@ -134,6 +156,16 @@ function getTabIcon(pathname: string): LucideIcon {
 function getTabTitle(pathname: string, search = '') {
   if (pathname === '/holdings') return '持仓';
   if (pathname === '/account') return '账户概览';
+  if (
+    [
+      '/settings',
+      '/settings/qmt',
+      '/settings/ai-runtime',
+      '/settings/agents',
+    ].includes(pathname)
+  ) {
+    return '系统设置';
+  }
 
   if (pathname === '/liquidation' && getSearchParam(search, 'workspaceTab')) {
     const stockName = (getSearchParam(search, 'name') || '').trim();

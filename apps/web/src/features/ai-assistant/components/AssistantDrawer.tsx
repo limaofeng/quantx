@@ -53,7 +53,11 @@ export function AssistantDrawer({
     Boolean(draft.trim()) &&
     !isRunning;
   const statusLabel = useMemo(() => {
-    if (!assistant.capabilities?.enabled) return '未配置';
+    if (!assistant.capabilities?.enabled) {
+      return assistant.capabilities?.runtimeStatus === 'disabled'
+        ? '已停用'
+        : '未配置';
+    }
     if (assistant.activeRun?.status === AiAssistantRunStatus.WaitingApproval)
       return '等待批准';
     if (isRunning) return '分析中';
