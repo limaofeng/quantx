@@ -254,6 +254,43 @@ type AiAssistantToolResultBlock {
   summary: String
 }
 
+enum AiRuntimeApplyState {
+  APPLIED
+  PENDING
+  OFFLINE
+}
+
+type AiRuntimeSettings {
+  version: Int!
+  source: AiRuntimeSettingsSource!
+  enabled: Boolean!
+  apiKeyConfigured: Boolean!
+  model: String!
+  maxConcurrentRuns: Int!
+  maxTurns: Int!
+  maxToolCalls: Int!
+  runTimeoutSeconds: Int!
+  tracingEnabled: Boolean!
+  leaseSeconds: Int!
+  runtimeStatus: AiRuntimeStatus!
+  appliedVersion: Int
+  applyState: AiRuntimeApplyState!
+  updatedAt: DateTime
+}
+
+enum AiRuntimeSettingsSource {
+  ENVIRONMENT
+  DATABASE_OVERRIDE
+}
+
+enum AiRuntimeStatus {
+  READY
+  DISABLED
+  UNCONFIGURED
+  UNAVAILABLE
+  OFFLINE
+}
+
 """公告同步状态"""
 type AnnouncementSyncStatus {
   """是否成功"""
@@ -1151,6 +1188,22 @@ enum FinancialSyncHealthStatus {
   STALE
 }
 
+"""首板候选账户偏好；偏好不能绕过硬否决"""
+input FirstBoardCandidatePreferenceInput {
+  accountId: String!
+  instrumentCode: String!
+  preference: String!
+  idempotencyKey: String! = ""
+}
+
+"""首板晋级可解释因子"""
+type FirstBoardPromotionFactor {
+  code: String!
+  label: String!
+  contribution: Float!
+  explanation: String!
+}
+
 """Prefect流程运行状态"""
 type FlowRun {
   """运行ID"""
@@ -1581,6 +1634,11 @@ type LimitUpBoardAssistant {
   targetEntryAmount: Float!
   maxSinglePositionPct: Float!
   autoSignalMinScore: Float!
+  maxDailyExposurePct: Float!
+  plannedTailLossPct: Float!
+  maxOpenPositions: Int!
+  maxRankedCandidates: Int!
+  promotionModelMode: String!
   entryDistanceTicks: Int!
   entryStartTime: String!
   entryEndTime: String!
@@ -1630,9 +1688,14 @@ input LimitUpBoardAssistantSettingsInput {
   enabled: Boolean! = false
   mode: String! = "paper"
   autoExitAcknowledged: Boolean! = false
-  targetEntryAmount: Float! = 10000
-  maxSinglePositionPct: Float! = 0.05
-  autoSignalMinScore: Float! = 70
+  targetEntryAmount: Float! = 0 @deprecated(reason: "V2 使用风险预算和 targetPositionPct，不再使用固定金额")
+  maxSinglePositionPct: Float! = 0.02
+  autoSignalMinScore: Float! = 0 @deprecated(reason: "V2 使用冻结晋级模型，不开放普通评分阈值")
+  maxDailyExposurePct: Float! = 0.06
+  plannedTailLossPct: Float! = 0.0015
+  maxOpenPositions: Int! = 2
+  maxRankedCandidates: Int! = 5
+  promotionModelMode: String! = "SHADOW"
   entryDistanceTicks: Int! = 1
   entryStartTime: String! = "09:30"
   entryEndTime: String! = "14:50"
@@ -1663,6 +1726,28 @@ input LimitUpBoardCandidateActionInput {
   accountId: String!
   instrumentCode: String!
   idempotencyKey: String! = ""
+}
+
+"""连板梯队市场快照"""
+type LimitUpChainSummary {
+  snapshotVersion: String!
+  maxBoardCount: Int!
+  firstBoardCount: Int!
+  sealedCount: Int!
+  brokenCount: Int!
+  breakRate: Float!
+  promotionRate: Float!
+}
+
+"""首板生命周期不可变快照"""
+type LimitUpLifecycleSnapshotType {
+  snapshotVersion: String!
+  featureVersion: String!
+  code: String!
+  stage: String!
+  everTouchedLimit: Boolean!
+  breakCount: Int!
+  asOf: DateTime!
 }
 
 """打板雷达阶段事件"""
@@ -1737,6 +1822,23 @@ type LimitUpRadarItem {
   radarScore: Float!
   scoreVersion: String!
   scoreBreakdown: [LimitUpRadarScoreFactor!]!
+  boardSegment: String!
+  promotionObserved: Boolean!
+  promotionEligible: Boolean!
+  promotionScore: Float!
+  promotionModelVersion: String!
+  exitPolicyVersion: String!
+  promotionSnapshotVersion: String!
+  normalizedLimitProgress: Float!
+  firstBoardCloseProbability: Float!
+  nextDayLimitTouchProbability: Float!
+  nextDayLimitSealProbability: Float!
+  expectedNetReturnPct: Float!
+  cvar95LossPct: Float!
+  highPositionType: String!
+  promotionFactors: [FirstBoardPromotionFactor!]!
+  candidatePreference: String
+  researchArtifact: LimitUpResearchArtifactType
   breakCount: Int!
   firstTouchAt: DateTime
   firstSealedAt: DateTime
@@ -1760,6 +1862,8 @@ type LimitUpRadarPage {
   limit: Int!
   offset: Int!
   scoreVersion: String!
+  promotionModelVersion: String!
+  chain: LimitUpChainSummary!
   updatedAt: DateTime
   isScannerRunning: Boolean!
   warnings: [String!]!
@@ -1777,6 +1881,9 @@ type LimitUpRadarScoreFactor {
 """打板雷达排序字段"""
 enum LimitUpRadarSortField {
   SCORE
+  PROMOTION_SCORE
+  EXPECTED_NET_RETURN
+  CVAR95
   DISTANCE_TO_LIMIT
   AMOUNT
   UPDATED_AT
@@ -1802,6 +1909,24 @@ type LimitUpRadarSummary {
   brokenCount: Int!
   staleCount: Int!
   excludedCount: Int!
+  discoveredCount: Int!
+  eligibleCount: Int!
+}
+
+"""市场级共享首板研究产物"""
+type LimitUpResearchArtifactType {
+  artifactId: String!
+  status: String!
+  summary: String!
+  catalysts: [String!]!
+  announcementRisks: [String!]!
+  citations: [String!]!
+  dataGaps: [String!]!
+  confidenceNote: String!
+  inputSnapshotVersion: String!
+  agentId: String!
+  model: String!
+  generatedAt: DateTime!
 }
 
 """可清仓持仓"""
@@ -2037,6 +2162,8 @@ type MessageResponse {
 
 "QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
 type Mutation {
+  """更新 AI Runtime 全局非敏感配置"""
+  updateAiRuntimeSettings(input: UpdateAiRuntimeSettingsInput!): AiRuntimeSettings!
   createAiAssistantThread(input: CreateAiAssistantThreadInput!): AiAssistantThread!
   sendAiAssistantMessage(input: SendAiAssistantMessageInput!): AiAssistantRun!
   cancelAiAssistantRun(runId: ID!): AiAssistantRun!
@@ -2114,6 +2241,9 @@ type Mutation {
   """保存并协调账户级打板助手"""
   saveLimitUpBoardAssistant(input: LimitUpBoardAssistantSettingsInput!): LimitUpBoardAssistantMutationResult!
 
+  """保存并协调首板晋级 V2 助手"""
+  saveFirstBoardAssistant(input: LimitUpBoardAssistantSettingsInput!): LimitUpBoardAssistantMutationResult!
+
   """立即重新协调账户级打板助手"""
   reconcileLimitUpBoardAssistant(accountId: String!): LimitUpBoardAssistantMutationResult!
 
@@ -2122,6 +2252,9 @@ type Mutation {
 
   """取消雷达候选的当日人工布防"""
   disarmLimitUpBoardCandidate(input: LimitUpBoardCandidateActionInput!): LimitUpBoardAssistantMutationResult!
+
+  """设置首板候选优先关注或忽略偏好"""
+  setFirstBoardCandidatePreference(input: FirstBoardCandidatePreferenceInput!): LimitUpBoardAssistantMutationResult!
 
   """运行策略（创建并启动）"""
   runStrategy(input: StrategyRunInput!, autoStart: Boolean! = true): StrategyRun!
@@ -2783,6 +2916,8 @@ type PositionLiquidationResult {
 
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
+  """AI Runtime 全局非敏感配置与应用状态"""
+  aiRuntimeSettings: AiRuntimeSettings!
   aiAssistantCapabilities: AiAssistantCapabilities!
   aiAssistantThreads(first: Int! = 30, after: String = null): AiAssistantThreadConnection!
   aiAssistantThread(id: ID!): AiAssistantThread
@@ -3006,6 +3141,12 @@ type Query {
 
   """沪深全市场打板机会雷达"""
   limitUpRadar(input: LimitUpRadarInput!): LimitUpRadarPage!
+
+  """首板晋级工作台（V2 影子模型）"""
+  firstBoardPromotionDesk(accountId: String!, input: LimitUpRadarInput!): LimitUpRadarPage!
+
+  """读取指定交易日的首板生命周期快照"""
+  limitUpLifecycle(code: String!, tradeDate: Date!): [LimitUpLifecycleSnapshotType!]!
 
   """获取可用日级信号及快照元信息"""
   stockSignalSnapshotMeta: [SignalMeta!]!
@@ -4503,6 +4644,9 @@ type StrategyTickData {
 type Subscription {
   aiAssistantEvents(threadId: ID!, afterSequence: Int! = 0): AiAssistantEvent!
 
+  """订阅首板晋级工作台版本通知"""
+  firstBoardPromotionUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
+
   """订阅账户级打板助手投影更新"""
   limitUpBoardAssistantUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
 
@@ -5406,6 +5550,16 @@ input UpdateAiAssistantThreadInput {
   threadId: ID!
   title: String = null
   externalSearchEnabled: Boolean = null
+}
+
+input UpdateAiRuntimeSettingsInput {
+  expectedVersion: Int!
+  enabled: Boolean!
+  model: String!
+  maxConcurrentRuns: Int!
+  maxTurns: Int!
+  maxToolCalls: Int!
+  runTimeoutSeconds: Int!
 }
 
 """更新人工计划"""
