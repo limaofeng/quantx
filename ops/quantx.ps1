@@ -2552,7 +2552,10 @@ function Get-PostgreSqlConnectionParts {
 }
 
 function Resolve-PostgreSqlTool {
-  param([string]$Name)
+  param(
+    [ValidateSet("pg_dump", "pg_restore", "createdb", "dropdb")]
+    [string]$Name
+  )
 
   $command = Get-Command $Name -ErrorAction SilentlyContinue
   if ($command) {
@@ -2571,6 +2574,14 @@ function Resolve-PostgreSqlTool {
     ) | Select-Object -First 1
     if ($candidate) {
       return [System.IO.Path]::GetFullPath($candidate)
+    }
+  }
+  $wslWrapper = Join-Path $PSScriptRoot "tools\postgresql-wsl\$Name.ps1"
+  $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+  if ($wsl -and (Test-Path -LiteralPath $wslWrapper -PathType Leaf)) {
+    & $wsl.Source sh -lc "command -v '$Name' >/dev/null 2>&1"
+    if ($LASTEXITCODE -eq 0) {
+      return [System.IO.Path]::GetFullPath($wslWrapper)
     }
   }
   throw "$Name was not found. Install PostgreSQL client tools."
