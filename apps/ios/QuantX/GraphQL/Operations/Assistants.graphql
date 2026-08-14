@@ -1,0 +1,131 @@
+query IOSTTradeAssistant($accountId: String!) {
+  tTradeGlobalMonitor(accountId: $accountId) {
+    accountId
+    enabled
+    mode
+    holdingCount
+    eligibleCount
+    ignoredCount
+    monitoredCount
+    pendingSignalCount
+    activeBatchCount
+    drainingCount
+    lastReconciledAt
+    lastError
+    updatedAt
+    positionSnapshotSource
+    positionSnapshotReportedAt
+    positionSnapshotReceivedAt
+    positionSnapshotComplete
+    positionSnapshotError
+    rolloutStage
+    engineStatus
+    agentStatus
+    reconcileStatus
+    killSwitch
+    canApprove
+    canActivateLive
+    blockedReasons
+    projectionGeneratedAt
+    readiness {
+      accountId
+      ready
+      stage
+      engineStatus
+      agentStatus
+      agentDeviceId
+      reconcileStatus
+      killSwitch
+      policyVersion
+      canApprove
+      canActivateLive
+      blockedReasons
+      checkedAt
+      checks {
+        code
+        passed
+        message
+      }
+    }
+    holdings {
+      stockCode
+      instrumentName
+      volume
+      availableVolume
+      ignored
+      eligible
+      status
+      reason
+      session {
+        runId
+        runStatus
+        status
+        mode
+        activeVolume
+        lastPrice
+        lastNetProfitPct
+        peakNetProfitPct
+        trailingFloorPct
+        completedCycles
+        pendingEntryIntentId
+        pendingExitIntentId
+        entryOrderStatus
+        exitOrderStatus
+        entryFilledVolume
+        entryAvgPrice
+        exitFilledVolume
+        exitAvgPrice
+        profitArmed
+        lastExitReason
+        canCancel
+        errorMessage
+      }
+    }
+  }
+  tTradeBatchesPage(accountId: $accountId, first: 20) {
+    items {
+      batchId
+      accountId
+      stockCode
+      status
+      targetVolume
+      entryFilledVolume
+      entryAvgPrice
+      exitFilledVolume
+      exitAvgPrice
+      activeVolume
+      lastPrice
+      lastNetProfitPct
+      peakNetProfitPct
+      trailingFloorPct
+      exitReason
+      exceptionReason
+      createdAt
+      updatedAt
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+  tTradeSignalHistoryPage(accountId: $accountId, first: 20) {
+    items {
+      intentId
+      runId
+      stockCode
+      status
+      statusReason
+      signalPrice
+      pullbackPct
+      reboundPct
+      requestedVolume
+      createdAt
+      expiresAt
+      updatedAt
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}

@@ -1,0 +1,17 @@
+query IOSPositions {
+  positions {
+    id
+    accountId
+    stockCode
+    instrumentName
+    volume
+    canUseVolume
+    avgPrice
+    lastPrice
+    marketValue
+    marketValuePercent
+    profitLoss
+    profitRate
+    updatedAt
+  }
+}

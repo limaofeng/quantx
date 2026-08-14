@@ -1,0 +1,14 @@
+// Copy to Release.local.xcconfig and replace values for this Mac only.
+// Do not add credentials, tokens, certificate private keys, or broker details.
+
+DEVELOPMENT_TEAM = REPLACE_WITH_APPLE_TEAM_ID
+CODE_SIGN_STYLE = Automatic
+
+URL_SEPARATOR = /
+QUANTX_GRAPHQL_HTTP_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)replace-with-production-host/graphql
+QUANTX_GRAPHQL_WEBSOCKET_URL = wss:$(URL_SEPARATOR)$(URL_SEPARATOR)replace-with-production-host/graphql
+QUANTX_HEALTH_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)replace-with-production-host/health
+QUANTX_AUTH_BASE_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)replace-with-production-host
+
+// Change to YES only after an independent production security review.
+QUANTX_ACCOUNT_DATA_ENABLED = NO

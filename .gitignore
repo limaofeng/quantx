@@ -55,6 +55,8 @@ apps/docs/.vitepress/cache/
 DerivedData/
 *.xcresult
 *.ipa
+xcuserdata/
+*.xcuserstate
 apps/ios/apollo-ios-cli
 apps/ios/.build/
 apps/ios/.swiftpm/

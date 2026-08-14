@@ -1,0 +1,64 @@
+query IOSStrategyInstances {
+  strategyInstances {
+    id
+    strategyKey
+    strategyId
+    strategyName
+    instrumentCode
+    displayName
+    status
+    mode
+    parameterVersion
+    createdAt
+    updatedAt
+    lastDecisionAt
+    latestExecutionStatus
+  }
+}
+
+query IOSLimitUpBoardAssistant($runId: String!) {
+  strategyPendingTradeIntents(runId: $runId) {
+    id
+    runId
+    instrumentCode
+    side
+    bucket
+    reason
+    status
+    executionMode
+    confidence
+    limitPriceHint
+    targetPositionPct
+    targetAmount
+    targetVolume
+    signalPrice
+    limitUpPrice
+    distanceToLimitTicks
+    approvalExpiresAt
+    createdAt
+  }
+  strategyExitPlans(runId: $runId) {
+    id
+    instrumentCode
+    sourceType
+    bucket
+    status
+    entryFilledVolume
+    entryAvgPrice
+    exitedVolume
+    exitAvgPrice
+    remainingVolume
+    peakPrice
+    lastPrice
+    lastNetProfitPct
+    peakNetProfitPct
+    holdingTradingDays
+    pendingIntentId
+    pendingOrderId
+    lastExitReason
+    t1Policy
+    executionMode
+    autoExitAuthorized
+    ruleTypes
+  }
+}

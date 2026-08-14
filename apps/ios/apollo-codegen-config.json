@@ -1,0 +1,31 @@
+{
+  "schemaNamespace": "QuantXAPI",
+  "input": {
+    "operationSearchPaths": [
+      "QuantX/GraphQL/Operations/**/*.graphql"
+    ],
+    "schemaSearchPaths": [
+      "../docs/public/contracts/graphql-schema.graphql"
+    ]
+  },
+  "output": {
+    "testMocks": {
+      "none": {}
+    },
+    "schemaTypes": {
+      "path": "QuantX/GraphQL/Generated",
+      "moduleType": {
+        "embeddedInTarget": {
+          "name": "QuantX"
+        }
+      }
+    },
+    "operations": {
+      "inSchemaModule": {}
+    }
+  },
+  "options": {
+    "schemaDocumentation": "exclude",
+    "warningsOnDeprecatedUsage": "include"
+  }
+}

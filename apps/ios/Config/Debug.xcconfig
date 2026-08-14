@@ -1,0 +1,15 @@
+#include "Base.xcconfig"
+
+QUANTX_ENVIRONMENT = debug
+QUANTX_GRAPHQL_HTTP_URL = http:$(URL_SEPARATOR)$(URL_SEPARATOR)192.168.5.6:8080/graphql
+QUANTX_GRAPHQL_WEBSOCKET_URL = ws:$(URL_SEPARATOR)$(URL_SEPARATOR)192.168.5.6:8080/graphql
+QUANTX_HEALTH_URL = http:$(URL_SEPARATOR)$(URL_SEPARATOR)192.168.5.6:8080/health
+QUANTX_AUTH_BASE_URL = http:$(URL_SEPARATOR)$(URL_SEPARATOR)192.168.5.6:8080
+
+// This exception is intentionally Debug-only. Release builds preprocess it out.
+DEBUG_HTTP_ALLOWED = 1
+QUANTX_ACCOUNT_DATA_ENABLED = YES
+QUANTX_LOG_LEVEL = debug
+
+// Optional machine-local signing overrides. This file is ignored by Git.
+#include? "Debug.local.xcconfig"

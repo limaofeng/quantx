@@ -1,0 +1,8 @@
+// Copy to Debug.local.xcconfig and replace values for this Mac only.
+// Do not add credentials, tokens, certificate private keys, or broker details.
+
+DEVELOPMENT_TEAM = REPLACE_WITH_APPLE_TEAM_ID
+CODE_SIGN_STYLE = Automatic
+
+// Debug may load real read-only data from the configured private HTTP/WS backend.
+QUANTX_ACCOUNT_DATA_ENABLED = YES

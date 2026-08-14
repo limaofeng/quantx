@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>$(QUANTX_APP_DISPLAY_NAME)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>QuantX 需要通过您的私有网络连接只读监控服务。</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>QuantX 使用 Face ID 解锁本机会话。每笔移动端交易确认都需要独立授权。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+#if DEBUG_HTTP_ALLOWED
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>192.168.5.6</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+#endif
+	</dict>
+	<key>QuantXEnvironment</key>
+	<string>$(QUANTX_ENVIRONMENT)</string>
+	<key>QuantXGraphQLHTTPURL</key>
+	<string>$(QUANTX_GRAPHQL_HTTP_URL)</string>
+	<key>QuantXGraphQLWebSocketURL</key>
+	<string>$(QUANTX_GRAPHQL_WEBSOCKET_URL)</string>
+	<key>QuantXHealthURL</key>
+	<string>$(QUANTX_HEALTH_URL)</string>
+	<key>QuantXAuthBaseURL</key>
+	<string>$(QUANTX_AUTH_BASE_URL)</string>
+	<key>QuantXAccountDataEnabled</key>
+	<string>$(QUANTX_ACCOUNT_DATA_ENABLED)</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+</dict>
+</plist>

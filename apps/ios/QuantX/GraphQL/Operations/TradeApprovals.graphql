@@ -1,0 +1,88 @@
+mutation IOSPreviewTTradeEntryApproval($runId: String!, $intentId: String!) {
+  previewTTradeEntryApproval(runId: $runId, intentId: $intentId) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      action
+      accountId
+      runId
+      intentId
+      instrumentCode
+      side
+      bucket
+      reason
+      targetVolume
+      referencePrice
+      estimatedAmount
+      signalExpiresAt
+      challengeExpiresAt
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmTTradeEntryApproval(
+  $runId: String!
+  $intentId: String!
+  $confirmationToken: String!
+) {
+  confirmTTradeEntryApproval(
+    runId: $runId
+    intentId: $intentId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+    challengeId
+  }
+}
+
+mutation IOSPreviewStrategyTradeIntentApproval(
+  $runId: String!
+  $intentId: String!
+) {
+  previewStrategyTradeIntentApproval(runId: $runId, intentId: $intentId) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      action
+      accountId
+      runId
+      intentId
+      instrumentCode
+      side
+      bucket
+      reason
+      targetVolume
+      referencePrice
+      estimatedAmount
+      signalExpiresAt
+      challengeExpiresAt
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmStrategyTradeIntentApproval(
+  $runId: String!
+  $intentId: String!
+  $confirmationToken: String!
+) {
+  confirmStrategyTradeIntentApproval(
+    runId: $runId
+    intentId: $intentId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+    challengeId
+  }
+}

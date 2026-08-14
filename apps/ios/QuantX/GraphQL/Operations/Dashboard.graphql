@@ -1,0 +1,30 @@
+query IOSCurrentAccount {
+  currentAccount {
+    id
+    accountName
+    accountType
+    totalAsset
+    cash
+    frozenCash
+    marketValue
+    totalProfitLoss
+    profitLossPercent
+    updateTime
+  }
+}
+
+query IOSPortfolioSummary($accountId: String) {
+  portfolioSummary(accountId: $accountId) {
+    accountId
+    accountName
+    totalAsset
+    cash
+    totalMarketValue
+    totalProfitLoss
+    totalProfitLossPercent
+    todayProfitLoss
+    todayProfitLossPercent
+    positionCount
+    updateTime
+  }
+}

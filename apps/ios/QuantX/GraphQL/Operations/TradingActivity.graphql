@@ -1,0 +1,75 @@
+query IOSTodayOrders($accountId: String!) {
+  todayOrders(accountId: $accountId) {
+    id
+    sysid
+    stockCode
+    stockName
+    type
+    status
+    statusMsg
+    price
+    volume
+    tradedVolume
+    tradedPrice
+    strategyName
+    orderRemark
+    time
+  }
+}
+
+query IOSTodayTrades($accountId: String!) {
+  todayTrades(accountId: $accountId) {
+    accountId
+    tradedId
+    orderId
+    orderSysid
+    stockCode
+    stockName
+    orderType
+    direction
+    tradedPrice
+    tradedVolume
+    tradedAmount
+    tradedTime
+    strategyName
+    orderRemark
+  }
+}
+
+query IOSHistoryOrders($accountId: String!, $startDate: String!, $endDate: String!) {
+  historyOrders(accountId: $accountId, startDate: $startDate, endDate: $endDate) {
+    id
+    sysid
+    stockCode
+    stockName
+    type
+    status
+    statusMsg
+    price
+    volume
+    tradedVolume
+    tradedPrice
+    strategyName
+    orderRemark
+    time
+  }
+}
+
+query IOSHistoryTrades($accountId: String!, $startDate: String!, $endDate: String!) {
+  historyTrades(accountId: $accountId, startDate: $startDate, endDate: $endDate) {
+    accountId
+    tradedId
+    orderId
+    orderSysid
+    stockCode
+    stockName
+    orderType
+    direction
+    tradedPrice
+    tradedVolume
+    tradedAmount
+    tradedTime
+    strategyName
+    orderRemark
+  }
+}

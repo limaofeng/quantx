@@ -1,0 +1,14 @@
+#include "Base.xcconfig"
+
+QUANTX_ENVIRONMENT = production
+QUANTX_GRAPHQL_HTTP_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)quantx.invalid/graphql
+QUANTX_GRAPHQL_WEBSOCKET_URL = wss:$(URL_SEPARATOR)$(URL_SEPARATOR)quantx.invalid/graphql
+QUANTX_HEALTH_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)quantx.invalid/health
+QUANTX_AUTH_BASE_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)quantx.invalid
+
+DEBUG_HTTP_ALLOWED = 0
+QUANTX_ACCOUNT_DATA_ENABLED = NO
+QUANTX_LOG_LEVEL = error
+
+// Optional machine-local endpoint and signing overrides. This file is ignored by Git.
+#include? "Release.local.xcconfig"

@@ -1,0 +1,14 @@
+// Non-sensitive settings shared by all environments.
+// Tokens, passwords, certificates, and signing secrets must never be added here.
+
+QUANTX_BUNDLE_IDENTIFIER = com.limaofeng.quantx
+QUANTX_APP_DISPLAY_NAME = QuantX
+
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+
+URL_SEPARATOR = /
+
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+GCC_TREAT_WARNINGS_AS_ERRORS = YES
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
