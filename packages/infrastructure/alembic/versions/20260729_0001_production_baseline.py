@@ -58,6 +58,10 @@ POST_BASELINE_TABLES = {
   "limit_up_board_assistant_configs",
   "limit_up_board_assistant_projections",
   "limit_up_board_candidate_arms",
+  "ios_notification_events",
+  "ios_notification_outbox",
+  "ios_push_category_preferences",
+  "ios_push_registrations",
   "trade_confirmation_challenges",
 }
 POST_BASELINE_COLUMNS = {

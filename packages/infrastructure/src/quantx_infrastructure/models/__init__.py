@@ -83,6 +83,12 @@ from .indicator_snapshot import IndicatorSnapshot
 
 # 数据库模型 (统一的数据实体)
 from .instrument import Instrument
+from .ios_notifications import (
+  IosNotificationEvent,
+  IosNotificationOutbox,
+  IosPushCategoryPreference,
+  IosPushRegistration,
+)
 from .kline import KLine
 from .limit_up_board_assistant import (
   LimitUpBoardAssistantConfig,
@@ -166,6 +172,10 @@ __all__ = [
   "AuthDeviceSession",
   "AuthConsumedRefreshToken",
   "AuthAuditEvent",
+  "IosPushRegistration",
+  "IosPushCategoryPreference",
+  "IosNotificationEvent",
+  "IosNotificationOutbox",
   "TradeConfirmationChallenge",
   "AiAssistantDeletionAudit",
   "AiAssistantEvent",

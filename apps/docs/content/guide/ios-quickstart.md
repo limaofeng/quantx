@@ -138,9 +138,22 @@ preview Mutation
 [委托与成交状态](../concepts/order-lifecycle)为准。
 
 当前已部署的做 T/策略买入意图批准已经使用该模式和独立 `trade:approve`，可作为
-实现基线；手动下单、清仓、策略控制和 APNs 必须等待其目标公共契约落地。
+实现基线。手动下单和 APNs 服务端基础已进入公共契约；清仓和策略控制仍以当前
+Schema/权限 JSON 为准，不得调用兼容接口回退。
 
-## 8. 验证
+## 8. 接入普通 APNs
+
+取得系统设备 Token 后调用 `registerPushDevice`；Token 轮换、App 重装或环境变化时
+重复调用同一 Mutation。通知偏好和注销分别使用 `updatePushPreferences` 与
+`unregisterPushDevice`。这些接口不接受 `accountId`，服务端强制使用原生会话绑定的
+唯一主账户。
+
+通知 payload 只用于唤醒用户。点击后先完成本地解锁，再调用
+`notificationEventRoute(eventId)`，随后按返回的非敏感路由重新查询业务真源；
+不得从锁屏文案或 payload 推断委托、成交和风险终态。完整操作、默认类别和隐私
+边界见[普通 APNs 与通知路由](./ios-notifications)。
+
+## 9. 验证
 
 ```bash
 cd apps/ios
@@ -158,5 +171,6 @@ xcodebuild -project QuantX.xcodeproj -scheme QuantX \
 - [原生客户端会话](./native-session)
 - [GraphQL HTTP](./graphql-http)
 - [GraphQL WebSocket](./graphql-websocket)
+- [普通 APNs 与通知路由](./ios-notifications)
 - [权限模型](../concepts/permissions)
 - [委托与成交状态](../concepts/order-lifecycle)

@@ -91,6 +91,7 @@ export default defineConfig({
           { text: 'iOS 快速开始', link: '/guide/ios-quickstart' },
           { text: '原生客户端会话', link: '/guide/native-session' },
           { text: 'GraphQL HTTP', link: '/guide/graphql-http' },
+          { text: '普通 APNs 与通知路由', link: '/guide/ios-notifications' },
           {
             text: 'GraphQL WebSocket',
             link: '/guide/graphql-websocket',

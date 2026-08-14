@@ -15,6 +15,7 @@ QuantX 对 GraphQL 根字段默认拒绝。客户端必须同时满足根字段�
 | `trade:approve` | 已支持的策略/做 T 短时交易意图预览与确认，以及受控实盘动作 |
 | `trade:manual` | 两阶段移动手动委托预览/确认与撤单 |
 | `trade:direct` | 兼容直写 `placeOrder`；禁止 iOS 使用 |
+| `notification:manage` | 当前会话 APNs 注册、类别偏好和随机事件路由解析 |
 | `system-config:write` | Web 管理端修改全局非敏感系统配置 |
 | `mutation:write` | 现有大多数通用 GraphQL Mutation 的兼容权限 |
 
