@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import strawberry
 
-from quantx_api.auth.errors import AuthError
+from quantx_api.auth.errors import AuthError, forbidden
 
 from ..liquidation_approval import (
   LiquidationChallengeService,
@@ -62,6 +62,19 @@ from ..types.trade_approval_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _require_legacy_web_liquidation_session(
+  info: strawberry.types.Info,
+) -> None:
+  """Keep native clients on the snapshot-bound liquidation contract."""
+
+  principal = principal_from_context(info.context)
+  if principal.active_account_id is not None:
+    raise forbidden(
+      "原生设备会话必须使用 previewLiquidation/confirmLiquidation 清仓"
+    )
+  principal.require_permission("mutation:write")
 
 
 def _native_liquidation_preview(data) -> LiquidationPreview:
@@ -531,6 +544,7 @@ class LiquidationMutation:
     info: strawberry.types.Info,
     input: LiquidatePositionsInput,
   ) -> LiquidationGroupResult:
+    _require_legacy_web_liquidation_session(info)
     return await LiquidationResolver.liquidate_positions(
       input, authorized_account_id(info, input.account_id)
     )
@@ -541,6 +555,7 @@ class LiquidationMutation:
     info: strawberry.types.Info,
     input: LiquidateAllPositionsInput,
   ) -> LiquidationResult:
+    _require_legacy_web_liquidation_session(info)
     return await LiquidationResolver.liquidate_all_positions(
       input,
       authorized_account_id(info, input.account_id),
@@ -552,6 +567,7 @@ class LiquidationMutation:
     info: strawberry.types.Info,
     input: LiquidatePositionInput,
   ) -> PositionLiquidationResult:
+    _require_legacy_web_liquidation_session(info)
     return await LiquidationResolver.liquidate_position(
       input,
       authorized_account_id(info, input.account_id),

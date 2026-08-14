@@ -491,6 +491,8 @@ class AutoExitPlanService:
       raise ValueError("必须显式选择计划冲突处理策略")
     if not bool(payload.get("confirm")):
       raise ValueError("必须确认卖出风险")
+    execution_mode = self._execution_mode(payload.get("execution_mode"))
+    auto_exit_authorized = bool(payload.get("auto_exit_authorized", False))
     selected = {
       str(item or "").strip().upper()
       for item in list(payload.get("instrument_codes") or [])
@@ -524,6 +526,13 @@ class AutoExitPlanService:
       not expected_items or not snapshot_version or not authorization_challenge_id
     ):
       raise ValueError("移动端清仓命令缺少完整快照授权")
+    if not native_confirmation and (
+      execution_mode != "paper" or auto_exit_authorized
+    ):
+      raise ValueError(
+        "LEGACY_LIQUIDATION_UNSAFE_MODE: "
+        "未携带移动端清仓确认挑战，只允许 PAPER 且禁止自动卖出授权"
+      )
     results: list[dict[str, Any]] = []
     async with AsyncSessionLocal() as db:
       if native_confirmation:
@@ -769,7 +778,7 @@ class AutoExitPlanService:
               else None
             ),
           },
-          auto_exit_authorized=bool(payload.get("auto_exit_authorized", False)),
+          auto_exit_authorized=auto_exit_authorized,
         )
         plan = ExitPlanBook().register_entry_fill(
           template,
@@ -786,8 +795,8 @@ class AutoExitPlanService:
           source_type=MANUAL_LIQUIDATION_SOURCE,
           source_id=plan_id,
           enabled=True,
-          execution_mode=self._execution_mode(payload.get("execution_mode")),
-          auto_exit_authorized=bool(payload.get("auto_exit_authorized", False)),
+          execution_mode=execution_mode,
+          auto_exit_authorized=auto_exit_authorized,
           config_version=1,
           completion_strategy=completion,
           protected_volume=target,

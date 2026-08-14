@@ -9,6 +9,7 @@ from quantx_infrastructure.models.auto_exit_plan import (
 )
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.services import auto_exit_plan_service as service_module
+from quantx_infrastructure.services import trade_command_service
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -58,6 +59,41 @@ def _payload(group_id: str) -> dict:
       }
     ],
   }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("execution_mode", "auto_exit_authorized"),
+  [("live", False), ("paper", True), ("live", True)],
+)
+async def test_engine_rejects_unsafe_challenge_less_liquidation(
+  monkeypatch,
+  execution_mode,
+  auto_exit_authorized,
+):
+  monkeypatch.setattr(
+    trade_command_service.settings,
+    "enable_real_trading",
+    False,
+  )
+  monkeypatch.setattr(
+    trade_command_service.settings,
+    "t_trade_live_enabled",
+    False,
+  )
+  payload = {
+    "account_id": "ACCOUNT-1",
+    "completion_strategy": "AVAILABLE_NOW",
+    "conflict_strategy": "UNALLOCATED_ONLY",
+    "confirm": True,
+    "scope": "SELECTED",
+    "instrument_codes": ["600000.SH"],
+    "execution_mode": execution_mode,
+    "auto_exit_authorized": auto_exit_authorized,
+  }
+
+  with pytest.raises(ValueError, match="^LEGACY_LIQUIDATION_UNSAFE_MODE:"):
+    await AutoExitPlanService().create_liquidation_group(payload)
 
 
 @pytest.mark.asyncio

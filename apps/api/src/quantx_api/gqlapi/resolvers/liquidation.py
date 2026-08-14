@@ -8,16 +8,9 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from quantx_infrastructure.database.connection import get_async_db
-from quantx_infrastructure.models.auto_exit_plan import (
-  AutoExitPlanEvent,
-  AutoExitPlanRecord,
-)
+from quantx_infrastructure.models.auto_exit_plan import AutoExitPlanRecord
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder as ConditionalLiquidationOrderModel,
-)
-from quantx_infrastructure.models.position import Position
-from quantx_infrastructure.repositories.auto_exit_plan_repository import (
-  AutoExitPlanRepository,
 )
 from quantx_infrastructure.models.liquidation import (
   LiquidationOrder as LiquidationOrderModel,
@@ -28,9 +21,15 @@ from quantx_infrastructure.models.liquidation import (
 from quantx_infrastructure.models.liquidation import (
   RedemptionRecord as RedemptionRecordModel,
 )
+from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+  AutoExitPlanRepository,
+)
 from quantx_infrastructure.services.engine_command_service import engine_command_service
 from quantx_infrastructure.services.liquidation_service import LiquidationService
 from sqlalchemy import desc, select
+
+from quantx_api.auth.errors import AuthError
 
 from ..types import MessageResponse
 from ..types.liquidation_types import (
@@ -548,6 +547,13 @@ class LiquidationResolver:
     input: LiquidatePositionsInput,
     account_id: str,
   ) -> LiquidationGroupResult:
+    execution_mode = str(input.execution_mode or "paper").strip().lower()
+    if execution_mode != "paper" or bool(input.auto_exit_authorized):
+      raise AuthError(
+        "LEGACY_LIQUIDATION_UNSAFE_MODE",
+        "旧清仓接口仅支持 PAPER 且不允许自动卖出授权",
+        status_code=400,
+      )
     result = await LiquidationResolver._request_engine(
       "EXIT_PLAN_LIQUIDATE_POSITIONS",
       {
@@ -556,8 +562,10 @@ class LiquidationResolver:
         "instrument_codes": list(input.instrument_codes or []),
         "completion_strategy": input.completion_strategy,
         "conflict_strategy": input.conflict_strategy,
-        "execution_mode": input.execution_mode,
-        "auto_exit_authorized": input.auto_exit_authorized,
+        # Preserve a hard safety invariant even after validating the legacy
+        # compatibility input above.
+        "execution_mode": "paper",
+        "auto_exit_authorized": False,
         "confirm": input.confirm,
       },
       aggregate_id=account_id,
