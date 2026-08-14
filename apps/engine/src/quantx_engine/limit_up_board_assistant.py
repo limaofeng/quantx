@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from quantx_domain.strategies import AshareLimitUpBoardAssistantStrategy
+from quantx_domain.trading.first_board_promotion import FIRST_BOARD_MODEL_VERSION
 from quantx_infrastructure.core.assistant_strategy_policy import (
   LIMIT_UP_BOARD_ASSISTANT_STRATEGY_CLASS_NAME,
   LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
@@ -18,6 +19,9 @@ from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.models.limit_up_board_assistant import (
   LimitUpBoardAssistantConfig,
   LimitUpBoardCandidateArm,
+)
+from quantx_infrastructure.repositories.first_board_promotion_repository import (
+  FirstBoardPromotionRepository,
 )
 from quantx_infrastructure.repositories.limit_up_board_assistant_repository import (
   LimitUpBoardAssistantConfigRepository,
@@ -38,9 +42,16 @@ from quantx_infrastructure.services.t_trade_operations_service import (
 logger = logging.getLogger(__name__)
 
 ASSISTANT_DEFAULTS: Dict[str, Any] = {
-  "target_entry_amount": 10_000.0,
-  "max_single_position_pct": 0.05,
-  "auto_signal_min_score": 70.0,
+  # Read-only compatibility fields for the V1 GraphQL projection.  V2 sizing
+  # never consumes them.
+  "target_entry_amount": 0.0,
+  "auto_signal_min_score": 0.0,
+  "max_single_position_pct": 0.02,
+  "max_daily_exposure_pct": 0.06,
+  "planned_tail_loss_pct": 0.0015,
+  "liquidity_participation_pct": 0.005,
+  "max_open_positions": 2,
+  "max_ranked_candidates": 5,
   "entry_distance_ticks": 1,
   "entry_start_time": "09:30",
   "entry_end_time": "14:50",
@@ -59,6 +70,7 @@ ASSISTANT_DEFAULTS: Dict[str, Any] = {
   "max_holding_trading_days": 2,
   "max_holding_exit_time": "14:50",
   "exit_max_slippage_bps": 50.0,
+  "promotion_model_mode": "SHADOW",
 }
 
 
@@ -107,6 +119,7 @@ class LimitUpBoardAssistantService:
       for key, default in ASSISTANT_DEFAULTS.items()
     }
     self._validate_settings(settings)
+    await self._validate_rollout_gate(settings)
     async for db in get_async_db():
       repo = LimitUpBoardAssistantConfigRepository(db)
       config = await repo.find_by_account(account_id)
@@ -173,6 +186,25 @@ class LimitUpBoardAssistantService:
         arm.arm_version = int(arm.arm_version or 0) + 1
         arm.disarmed_at = time_utils.now()
         await repo.save(arm)
+      break
+    return await self.reconcile_account(account_id)
+
+  async def set_candidate_preference(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    account_id = self._account_id(payload)
+    code = self._instrument_code(payload.get("instrument_code"))
+    preference = str(payload.get("preference") or "PREFER").upper()
+    if preference not in {"PREFER", "IGNORE"}:
+      raise ValueError("候选偏好只能是 PREFER 或 IGNORE")
+    trade_date = time_utils.to_shanghai(time_utils.now()).date()
+    async for db in get_async_db():
+      await FirstBoardPromotionRepository(db).upsert_preference(
+        account_id=account_id,
+        trade_date=trade_date,
+        instrument_code=code,
+        preference=preference,
+        actor_id=str(payload.get("actor_id") or ""),
+        idempotency_key=str(payload.get("idempotency_key") or ""),
+      )
       break
     return await self.reconcile_account(account_id)
 
@@ -264,7 +296,13 @@ class LimitUpBoardAssistantService:
       account_id,
       time_utils.to_shanghai(time_utils.now()).date(),
     )
-    metadata, desired = self._build_universe(config, radar, arms, runtime)
+    preferences = await self._load_preferences(
+      account_id,
+      time_utils.to_shanghai(time_utils.now()).date(),
+    )
+    metadata, desired = self._build_universe(
+      config, radar, arms, runtime, preferences
+    )
 
     if runtime and not config.enabled:
       for intent_id in list(runtime.pending_approvals):
@@ -277,10 +315,9 @@ class LimitUpBoardAssistantService:
         runtime.run_id,
         reason="BOARD_ASSISTANT_DISABLED",
       )
-      metadata, desired = self._build_universe(config, radar, [], runtime)
-
-    if legacy_conflict:
-      metadata, desired = self._draining_universe(runtime)
+      metadata, desired = self._build_universe(
+        config, radar, [], runtime, preferences
+      )
 
     if runtime and str(runtime.context.mode.value) != str(config.mode).lower():
       if self._runtime_has_open_work(runtime):
@@ -290,7 +327,7 @@ class LimitUpBoardAssistantService:
         config.strategy_run_id = None
         runtime = None
 
-    if not runtime and config.enabled and not legacy_conflict:
+    if not runtime and config.enabled:
       try:
         config.strategy_run_id = await self._start_runtime(config, account_id)
         runtime = self._runtime(config.strategy_run_id)
@@ -334,31 +371,54 @@ class LimitUpBoardAssistantService:
     radar: Dict[str, Any],
     arms: List[LimitUpBoardCandidateArm],
     runtime: Any,
+    preferences: Optional[Dict[str, Any]] = None,
   ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    preferences = preferences or {}
     items = {
       str(item.get("code") or "").upper(): dict(item)
       for item in list(radar.get("items") or [])
       if item.get("code")
     }
-    min_score = float(
-      dict(config.settings or {}).get("auto_signal_min_score", 70) or 70
-    )
     manual = {arm.instrument_code: arm for arm in arms if arm.armed}
     desired: set[str] = set()
     source_by_code: Dict[str, str] = {}
     if config.enabled:
+      qualified = []
       for code, item in items.items():
+        preference = str(
+          getattr(preferences.get(code), "preference", "") or ""
+        ).upper()
         if (
           str(item.get("stage") or "") == "NEAR_LIMIT"
-          and float(item.get("radar_score", 0.0) or 0.0) >= min_score
+          and bool(item.get("promotion_eligible"))
           and not bool(item.get("is_stale"))
           and not list(item.get("blocked_reasons") or [])
+          and preference != "IGNORE"
+        ):
+          qualified.append((code, item, preference))
+      ranked = sorted(
+        qualified,
+        key=lambda entry: (
+          entry[2] == "PREFER",
+          float(entry[1].get("promotion_score", 0.0) or 0.0),
+        ),
+        reverse=True,
+      )
+      max_candidates = int(
+        dict(config.settings or {}).get("max_ranked_candidates", 5) or 5
+      )
+      for code, _item, preference in ranked[:max_candidates]:
+        desired.add(code)
+        source_by_code[code] = "PREFERRED" if preference == "PREFER" else "AUTO"
+      for code in manual:
+        # Legacy manual arms are interpreted as attention preferences only;
+        # they can no longer bypass a V2 hard veto.
+        item = items.get(code, {})
+        if bool(item.get("promotion_eligible")) and not list(
+          item.get("blocked_reasons") or []
         ):
           desired.add(code)
-          source_by_code[code] = "AUTO"
-      for code in manual:
-        desired.add(code)
-        source_by_code[code] = "MANUAL"
+          source_by_code[code] = "PREFERRED"
 
     sticky = self._runtime_open_codes(runtime)
     desired.update(sticky)
@@ -370,7 +430,7 @@ class LimitUpBoardAssistantService:
       source = source_by_code.get(code, "DRAINING")
       eligible = bool(
         config.enabled
-        and source in {"AUTO", "MANUAL"}
+        and source in {"AUTO", "PREFERRED"}
         and item
         and not bool(item.get("is_stale"))
         and not blocked
@@ -385,6 +445,23 @@ class LimitUpBoardAssistantService:
         "radar_stage": str(item.get("stage", "") or ""),
         "radar_updated_at": str(item.get("updated_at", "") or ""),
         "radar_is_stale": bool(item.get("is_stale", False)),
+        "promotion_eligible": bool(item.get("promotion_eligible", False)),
+        "promotion_score": float(item.get("promotion_score", 0.0) or 0.0),
+        "promotion_snapshot_version": str(
+          item.get("promotion_snapshot_version", "") or ""
+        ),
+        "promotion_model_version": str(
+          item.get("promotion_model_version", "") or ""
+        ),
+        "exit_policy_version": str(item.get("exit_policy_version", "") or ""),
+        "board_segment": str(item.get("board_segment", "") or ""),
+        "cvar95_loss_pct": float(item.get("cvar95_loss_pct", 0.0) or 0.0),
+        "expected_net_return_pct": float(
+          item.get("expected_net_return_pct", 0.0) or 0.0
+        ),
+        "target_position_pct": self._target_position_pct(config, item),
+        "liquidity_cap_amount": self._liquidity_cap_amount(config, item),
+        "high_position_type": str(item.get("high_position_type", "") or ""),
       }
     return metadata, sorted(desired)
 
@@ -433,6 +510,13 @@ class LimitUpBoardAssistantService:
           "swing_max_pct": max_position,
           "allow_swing_buy": True,
         },
+        "risk_caps": {
+          "max_position_pct": max_position,
+          "max_new_buy_pct_today": float(
+            settings.get("max_daily_exposure_pct", 0.06) or 0.06
+          ),
+          "max_open_positions": int(settings.get("max_open_positions", 2) or 2),
+        },
         "enable_reserve": True,
         "enforce_trading_hours": True,
       }
@@ -466,12 +550,25 @@ class LimitUpBoardAssistantService:
       if bound_account and bound_account != account_id:
         continue
       runtime = self._runtime(str(run.id))
-      if runtime is None or self._runtime_has_open_work(runtime):
+      if runtime is None:
+        blocked.append(str(run.id))
+        continue
+      for intent_id in list(runtime.pending_approvals):
+        await self.runtime_manager.executor.reject_trade_intent(
+          runtime.run_id,
+          intent_id,
+          reason="FIRST_BOARD_V2_MIGRATION",
+        )
+      await self.runtime_manager.executor.cancel_open_buy_orders(
+        runtime.run_id,
+        reason="FIRST_BOARD_V2_MIGRATION",
+      )
+      if runtime.exit_plan_book.active_plans():
         blocked.append(str(run.id))
         continue
       await self.runtime_manager.stop_strategy(str(run.id))
     if blocked:
-      return "旧单标的打板实例仍有风险敞口，已阻止新助手开仓：" + "、".join(blocked)
+      return "旧打板实例已停止新买入，已有仓位继续排水：" + "、".join(blocked)
     return ""
 
   def _runtime(self, run_id: Optional[str]) -> Any:
@@ -567,6 +664,38 @@ class LimitUpBoardAssistantService:
       )
     return []
 
+  async def _load_preferences(self, account_id: str, trade_date: date) -> Dict[str, Any]:
+    async for db in get_async_db():
+      return await FirstBoardPromotionRepository(db).list_preferences(
+        account_id, trade_date
+      )
+    return {}
+
+  @staticmethod
+  def _target_position_pct(
+    config: LimitUpBoardAssistantConfig, item: Dict[str, Any]
+  ) -> float:
+    settings = {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}
+    single_cap = float(settings.get("max_single_position_pct", 0.02) or 0.02)
+    tail_budget = float(settings.get("planned_tail_loss_pct", 0.0015) or 0.0015)
+    cvar_ratio = float(item.get("cvar95_loss_pct", 0.0) or 0.0) / 100.0
+    if cvar_ratio <= 0:
+      return 0.0
+    return max(0.0, min(single_cap, tail_budget / cvar_ratio))
+
+  @staticmethod
+  def _liquidity_cap_amount(
+    config: LimitUpBoardAssistantConfig, item: Dict[str, Any]
+  ) -> float:
+    settings = {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}
+    participation = float(
+      settings.get("liquidity_participation_pct", 0.005) or 0.0
+    )
+    traded_amount = float(item.get("amount", 0.0) or 0.0)
+    if participation <= 0 or traded_amount <= 0:
+      return 0.0
+    return max(0.0, traded_amount * participation)
+
   async def _radar_item(self, code: str) -> Optional[Dict[str, Any]]:
     radar = await limit_up_radar_store.read_radar() or {}
     return next(
@@ -660,12 +789,51 @@ class LimitUpBoardAssistantService:
 
   @staticmethod
   def _validate_settings(settings: Dict[str, Any]) -> None:
-    if float(settings["target_entry_amount"]) <= 0:
-      raise ValueError("单笔目标金额必须大于 0")
     if not 0 < float(settings["max_single_position_pct"]) <= 0.30:
       raise ValueError("单标的资产上限必须在 0% 到 30% 之间")
-    if not 0 <= float(settings["auto_signal_min_score"]) <= 100:
-      raise ValueError("自动布防分数必须在 0 到 100 之间")
+    if not 0 < float(settings["max_daily_exposure_pct"]) <= 0.30:
+      raise ValueError("当日新增风险敞口必须在 0% 到 30% 之间")
+    if not 0 < float(settings["planned_tail_loss_pct"]) <= 0.02:
+      raise ValueError("单笔计划尾损必须在 0% 到 2% 之间")
+    if not 0 < float(settings["liquidity_participation_pct"]) <= 0.05:
+      raise ValueError("流动性参与率必须在 0% 到 5% 之间")
+    if not 1 <= int(settings["max_open_positions"]) <= 10:
+      raise ValueError("同时持仓数必须在 1 到 10 之间")
+
+  @staticmethod
+  async def _validate_rollout_gate(settings: Dict[str, Any]) -> None:
+    requested = str(settings.get("promotion_model_mode") or "SHADOW").upper()
+    if requested == "SHADOW":
+      return
+    if requested not in {"PAPER", "LIVE"}:
+      raise ValueError("首板模型发布阶段只能是 SHADOW、PAPER 或 LIVE")
+    async for db in get_async_db():
+      release = await FirstBoardPromotionRepository(db).get_model_release(
+        FIRST_BOARD_MODEL_VERSION
+      )
+      break
+    else:
+      release = None
+    if release is None:
+      raise ValueError("首板模型尚无发布证据，只能运行影子阶段")
+    paper_ready = bool(
+      str(release.stage or "SHADOW").upper() in {"PAPER", "LIVE"}
+      and int(release.sample_trading_days or 0) >= 20
+      and int(release.main_board_eligible_samples or 0) >= 100
+      and int(release.growth_board_eligible_samples or 0) >= 100
+      and release.bootstrap_ci_lower_pct is not None
+      and float(release.bootstrap_ci_lower_pct) > 0
+      and bool(release.tail_loss_budget_passed)
+      and bool(release.historical_rules_complete)
+    )
+    if not paper_ready:
+      raise ValueError("影子样本、Bootstrap 置信区间或尾损门禁尚未通过")
+    if requested == "LIVE" and not (
+      str(release.stage or "").upper() == "LIVE"
+      and bool(release.simulation_verified)
+      and bool(release.live_reconciliation_verified)
+    ):
+      raise ValueError("模拟撮合、T+1 恢复或实盘对账门禁尚未通过")
 
 
 __all__ = ["ASSISTANT_DEFAULTS", "LimitUpBoardAssistantService"]

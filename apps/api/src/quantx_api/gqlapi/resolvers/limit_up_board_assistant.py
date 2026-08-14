@@ -10,6 +10,7 @@ from quantx_infrastructure.services.limit_up_board_assistant_projection_service 
 )
 
 from quantx_api.gqlapi.types.limit_up_board_assistant_types import (
+  FirstBoardCandidatePreferenceInput,
   LimitUpBoardArmedCandidate,
   LimitUpBoardAssistant,
   LimitUpBoardAssistantMutationResult,
@@ -132,6 +133,22 @@ class LimitUpBoardAssistantResolver:
       input.account_id,
       "BOARD_CANDIDATE_DISARMED",
       f"{input.instrument_code} 已取消当日布防",
+      idempotency_key=input.idempotency_key,
+    )
+
+  @classmethod
+  async def set_preference(
+    cls,
+    input: FirstBoardCandidatePreferenceInput,
+    *,
+    actor_id: str,
+  ) -> LimitUpBoardAssistantMutationResult:
+    return await cls._mutation(
+      "FIRST_BOARD_CANDIDATE_PREFERENCE_SET",
+      {**vars(input), "actor_id": actor_id},
+      input.account_id,
+      "FIRST_BOARD_CANDIDATE_PREFERENCE_SAVED",
+      f"{input.instrument_code} 候选偏好已保存",
       idempotency_key=input.idempotency_key,
     )
 

@@ -21,9 +21,9 @@ from quantx_infrastructure.repositories.strategy_repository import StrategyRepos
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
 from quantx_infrastructure.services.t_trade_service import TTradeService
-from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import select, update
 
 from quantx_engine.strategy_manager import strategy_manager
@@ -292,6 +292,10 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
     return _json_value(await limit_up_board_assistant.arm_candidate(payload))
   if command_type == "LIMIT_UP_BOARD_CANDIDATE_DISARM":
     return _json_value(await limit_up_board_assistant.disarm_candidate(payload))
+  if command_type == "FIRST_BOARD_CANDIDATE_PREFERENCE_SET":
+    return _json_value(
+      await limit_up_board_assistant.set_candidate_preference(payload)
+    )
 
   t_trade_service = TTradeService(strategy_manager)
   if command_type == "T_TRADE_START_SESSION":

@@ -287,6 +287,9 @@ class LimitUpRadarStage(Enum):
 @strawberry.enum(description="打板雷达排序字段")
 class LimitUpRadarSortField(Enum):
   SCORE = "score"
+  PROMOTION_SCORE = "promotion_score"
+  EXPECTED_NET_RETURN = "expected_net_return"
+  CVAR95 = "cvar95"
   DISTANCE_TO_LIMIT = "distance_to_limit"
   AMOUNT = "amount"
   UPDATED_AT = "updated_at"
@@ -325,6 +328,41 @@ class LimitUpRadarScoreFactor:
   explanation: str
 
 
+@strawberry.type(description="首板晋级可解释因子")
+class FirstBoardPromotionFactor:
+  code: str
+  label: str
+  contribution: float
+  explanation: str
+
+
+@strawberry.type(description="市场级共享首板研究产物")
+class LimitUpResearchArtifactType:
+  artifact_id: str
+  status: str
+  summary: str
+  catalysts: List[str]
+  announcement_risks: List[str]
+  citations: List[str]
+  data_gaps: List[str]
+  confidence_note: str
+  input_snapshot_version: str
+  agent_id: str
+  model: str
+  generated_at: datetime
+
+
+@strawberry.type(description="连板梯队市场快照")
+class LimitUpChainSummary:
+  snapshot_version: str
+  max_board_count: int
+  first_board_count: int
+  sealed_count: int
+  broken_count: int
+  break_rate: float
+  promotion_rate: float
+
+
 @strawberry.type(description="打板雷达阶段事件")
 class LimitUpRadarEvent:
   event_id: str
@@ -352,6 +390,8 @@ class LimitUpRadarSummary:
   broken_count: int
   stale_count: int
   excluded_count: int
+  discovered_count: int
+  eligible_count: int
 
 
 @strawberry.type(description="打板雷达候选股")
@@ -381,6 +421,23 @@ class LimitUpRadarItem:
   radar_score: float
   score_version: str
   score_breakdown: List[LimitUpRadarScoreFactor]
+  board_segment: str
+  promotion_observed: bool
+  promotion_eligible: bool
+  promotion_score: float
+  promotion_model_version: str
+  exit_policy_version: str
+  promotion_snapshot_version: str
+  normalized_limit_progress: float
+  first_board_close_probability: float
+  next_day_limit_touch_probability: float
+  next_day_limit_seal_probability: float
+  expected_net_return_pct: float
+  cvar95_loss_pct: float
+  high_position_type: str
+  promotion_factors: List[FirstBoardPromotionFactor]
+  candidate_preference: Optional[str]
+  research_artifact: Optional[LimitUpResearchArtifactType]
   break_count: int
   first_touch_at: Optional[datetime]
   first_sealed_at: Optional[datetime]
@@ -404,9 +461,22 @@ class LimitUpRadarPage:
   limit: int
   offset: int
   score_version: str
+  promotion_model_version: str
+  chain: LimitUpChainSummary
   updated_at: Optional[datetime]
   is_scanner_running: bool
   warnings: List[str]
+
+
+@strawberry.type(description="首板生命周期不可变快照")
+class LimitUpLifecycleSnapshotType:
+  snapshot_version: str
+  feature_version: str
+  code: str
+  stage: str
+  ever_touched_limit: bool
+  break_count: int
+  as_of: datetime
 
 
 @strawberry.type(description="日级信号元信息")

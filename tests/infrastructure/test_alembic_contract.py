@@ -202,3 +202,25 @@ def test_ai_assistant_revision_follows_sell_management_and_refuses_downgrade() -
   assert "Partial AI assistant schema detected" in source
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()
+
+
+def test_first_board_revision_follows_ai_assistant_and_refuses_downgrade() -> None:
+  revision = _load_revision(
+    "20260814_0012_first_board_promotion.py",
+    "quantx_test_first_board_revision",
+  )
+
+  assert revision.down_revision == "20260814_0011"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
+
+
+def test_first_board_release_gate_follows_market_facts_and_refuses_downgrade() -> None:
+  revision = _load_revision(
+    "20260814_0013_first_board_model_release.py",
+    "quantx_test_first_board_release_gate_revision",
+  )
+
+  assert revision.down_revision == "20260814_0012"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()

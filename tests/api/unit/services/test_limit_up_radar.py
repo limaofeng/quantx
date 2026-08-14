@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from quantx_infrastructure.services.intraday_volume_scanner import (
@@ -6,8 +6,32 @@ from quantx_infrastructure.services.intraday_volume_scanner import (
 )
 from quantx_infrastructure.services.limit_up_radar import (
   LimitUpRadarBuilder,
+  _resolved_listing_history_days,
   select_latest_intraday_projection,
 )
+
+
+def test_listing_history_falls_back_to_conservative_open_date_tenure() -> None:
+  established = SimpleNamespace(
+    day_count_from_ipo=0,
+    open_date=date(2020, 1, 1),
+  )
+  recent = SimpleNamespace(
+    day_count_from_ipo=None,
+    open_date=date(2026, 6, 1),
+  )
+
+  assert _resolved_listing_history_days(established, date(2026, 8, 14)) > 120
+  assert _resolved_listing_history_days(recent, date(2026, 8, 14)) < 120
+
+
+def test_listing_history_prefers_qmt_trading_day_counter() -> None:
+  instrument = SimpleNamespace(
+    day_count_from_ipo=121,
+    open_date=date(2026, 6, 1),
+  )
+
+  assert _resolved_listing_history_days(instrument, date(2026, 8, 14)) == 121
 
 
 def baseline(name: str = "雷达科技"):
@@ -130,6 +154,47 @@ def test_limit_up_radar_score_is_explainable_and_bounded():
     "INDUSTRY_HEAT",
   }
   assert all(factor["explanation"] for factor in item["score_breakdown"])
+
+
+def test_discovery_starts_at_thirty_percent_without_a_momentum_gate() -> None:
+  scanner = IntradayVolumeScanner()
+  builder = LimitUpRadarBuilder()
+  quiet = baseline()
+  quiet.update(
+    {
+      "history_trading_days": 300,
+      "price_position_252": 0.4,
+      "ma20_deviation_pct": 2.0,
+      "prior_20d_return_pct": 3.0,
+    }
+  )
+  value = tick(10.3, "20260810 10:00:00")
+  value["amount"] = 1_000
+  value["volume"] = 1_000
+  scanner.update_tick("000001.SZ", value)
+  intraday = scanner.screen([quiet], stale_after_seconds=10**9, limit=20000)
+
+  result = builder.build(
+    baselines=[quiet],
+    states=scanner.snapshot_states(),
+    intraday_items=intraday["items"],
+    scanner_running=True,
+    now=datetime(2026, 8, 10, 10, 0),
+  )
+
+  assert result["summary"]["discovered_count"] == 1
+  assert result["items"][0]["normalized_limit_progress"] >= 0.30
+
+
+def test_chain_snapshot_version_ignores_wall_clock_when_state_is_unchanged() -> None:
+  scanner = IntradayVolumeScanner()
+  builder = LimitUpRadarBuilder()
+  scanner.update_tick("000001.SZ", tick(10.95, "20260810 10:00:00"))
+
+  first = build(builder, scanner, datetime(2026, 8, 10, 10, 0))
+  second = build(builder, scanner, datetime(2026, 8, 10, 10, 0, 30))
+
+  assert first["chain"]["snapshot_version"] == second["chain"]["snapshot_version"]
 
 
 def test_limit_up_radar_blocks_one_word_and_excludes_st():

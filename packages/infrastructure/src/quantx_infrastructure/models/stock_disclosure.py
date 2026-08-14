@@ -14,6 +14,7 @@ from sqlalchemy import (
   Integer,
   Numeric,
   String,
+  Text,
 )
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
@@ -43,6 +44,10 @@ class StockAnnouncement(Base, TimestampMixin):
   is_repurchase_related = Column(Boolean, nullable=False, default=False)
   fetched_at = Column(DateTime, nullable=False, comment="抓取时间")
   source_payload = Column("raw_payload", JSON, nullable=False, default=dict)
+  source_authority = Column(String(40), nullable=True, comment="权威来源标识")
+  content_text = Column(Text, nullable=True, comment="公告正文纯文本")
+  content_hash = Column(String(64), nullable=True, comment="公告正文SHA-256")
+  content_fetched_at = Column(DateTime, nullable=True, comment="公告正文抓取时间")
 
   @staticmethod
   def make_id(
@@ -80,6 +85,12 @@ class StockAnnouncement(Base, TimestampMixin):
       "is_repurchase_related": bool(self.is_repurchase_related),
       "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
       "raw_payload": self.source_payload or {},
+      "source_authority": self.source_authority,
+      "content_text": self.content_text,
+      "content_hash": self.content_hash,
+      "content_fetched_at": self.content_fetched_at.isoformat()
+      if self.content_fetched_at
+      else None,
     }
 
 

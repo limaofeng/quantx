@@ -51,6 +51,8 @@ _ORDER_FIELDS = {
 }
 _STRATEGY_FIELDS = {
   "backtesthistory",
+  "firstboardpromotiondesk",
+  "firstboardpromotionupdates",
   "strategies",
   "strategy",
   "strategybucketledger",
@@ -111,6 +113,7 @@ _MARKET_FIELDS = {
   "klines",
   "klinespage",
   "latestmarketquotes",
+  "limituplifecycle",
   "marketindexintradaytrend",
   "limitupradar",
   "rootsectors",

@@ -2,11 +2,12 @@
 
 import strawberry
 
-from quantx_api.gqlapi.security import authorized_account_id, principal_from_context
 from quantx_api.gqlapi.resolvers.limit_up_board_assistant import (
   LimitUpBoardAssistantResolver,
 )
+from quantx_api.gqlapi.security import authorized_account_id, principal_from_context
 from quantx_api.gqlapi.types.limit_up_board_assistant_types import (
+  FirstBoardCandidatePreferenceInput,
   LimitUpBoardAssistant,
   LimitUpBoardAssistantMutationResult,
   LimitUpBoardAssistantSettingsInput,
@@ -31,6 +32,15 @@ class LimitUpBoardAssistantQuery:
 class LimitUpBoardAssistantMutation:
   @strawberry.mutation(description="保存并协调账户级打板助手")
   async def save_limit_up_board_assistant(
+    self,
+    info: strawberry.types.Info,
+    input: LimitUpBoardAssistantSettingsInput,
+  ) -> LimitUpBoardAssistantMutationResult:
+    authorized_account_id(info, input.account_id)
+    return await LimitUpBoardAssistantResolver.save(input)
+
+  @strawberry.mutation(description="保存并协调首板晋级 V2 助手")
+  async def save_first_board_assistant(
     self,
     info: strawberry.types.Info,
     input: LimitUpBoardAssistantSettingsInput,
@@ -70,6 +80,19 @@ class LimitUpBoardAssistantMutation:
     authorized_account_id(info, input.account_id)
     principal = principal_from_context(info.context)
     return await LimitUpBoardAssistantResolver.disarm(
+      input,
+      actor_id=principal.user_id,
+    )
+
+  @strawberry.mutation(description="设置首板候选优先关注或忽略偏好")
+  async def set_first_board_candidate_preference(
+    self,
+    info: strawberry.types.Info,
+    input: FirstBoardCandidatePreferenceInput,
+  ) -> LimitUpBoardAssistantMutationResult:
+    authorized_account_id(info, input.account_id)
+    principal = principal_from_context(info.context)
+    return await LimitUpBoardAssistantResolver.set_preference(
       input,
       actor_id=principal.user_id,
     )

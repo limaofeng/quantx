@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import timedelta
@@ -238,6 +239,24 @@ def _announcement_model_from_record(
   *,
   fetched_at,
 ) -> StockAnnouncement:
+  payload = dict(record.raw_payload or {})
+  content = next(
+    (
+      str(payload.get(key) or "").strip()
+      for key in (
+        "公告内容",
+        "公告正文",
+        "正文",
+        "content",
+        "announcementContent",
+        "adjunctContent",
+      )
+      if str(payload.get(key) or "").strip()
+    ),
+    "",
+  )
+  source = str(record.source or "").upper()
+  source_authority = "CNINFO" if "CNINFO" in source else None
   return StockAnnouncement(
     id=StockAnnouncement.make_id(
       source=record.source,
@@ -256,7 +275,13 @@ def _announcement_model_from_record(
     pdf_url=record.pdf_url,
     is_repurchase_related=record.is_repurchase_related,
     fetched_at=fetched_at,
-    source_payload=record.raw_payload,
+    source_payload=payload,
+    source_authority=source_authority,
+    content_text=content or None,
+    content_hash=(
+      hashlib.sha256(content.encode("utf-8")).hexdigest() if content else None
+    ),
+    content_fetched_at=fetched_at if content else None,
   )
 
 

@@ -14,6 +14,7 @@ from quantx_domain.strategies.base import (
   StrategyContext,
   StrategyInput,
   StrategyRunMode,
+  TradeExecutionEvent,
   TradeIntentExecutionMode,
 )
 from quantx_domain.trading.exit_plan import ExitPlanTemplate, ExitRuleType
@@ -30,7 +31,7 @@ def make_strategy(**parameters) -> AshareLimitUpBoardAssistantStrategy:
       instruments=[],
       parameters={
         "account_id": "account-1",
-        "target_entry_amount": 10_000,
+        "promotion_model_mode": "PAPER",
         "auto_exit_authorized": True,
         **parameters,
       },
@@ -66,6 +67,16 @@ async def reconcile(
             "radar_stage": "NEAR_LIMIT",
             "radar_updated_at": "2026-08-14T10:00:00",
             "radar_is_stale": False,
+            "promotion_eligible": eligible,
+            "promotion_score": score,
+            "promotion_snapshot_version": "snapshot-v1",
+            "promotion_model_version": "first-board-promotion-v2-shadow-1",
+            "exit_policy_version": "first-board-exit-v2-shadow-1",
+            "board_segment": "MAIN",
+            "cvar95_loss_pct": 7.0,
+            "expected_net_return_pct": 1.2,
+            "target_position_pct": 0.02,
+            "high_position_type": "BASE_BREAKOUT",
           }
         },
       },
@@ -116,7 +127,7 @@ def tick_input(
 
 
 @pytest.mark.asyncio
-async def test_account_assistant_uses_dynamic_radar_universe_and_manual_amount():
+async def test_account_assistant_uses_dynamic_radar_universe_and_risk_position():
   strategy = make_strategy()
   await strategy.start()
   await reconcile(strategy)
@@ -130,18 +141,132 @@ async def test_account_assistant_uses_dynamic_radar_universe_and_manual_amount()
   )
   assert len(output.trade_intents) == 1
   intent = output.trade_intents[0]
-  assert intent.target_amount == pytest.approx(10_000)
-  assert intent.target_position_pct is None
+  assert intent.target_amount is None
+  assert intent.target_position_pct == pytest.approx(0.02)
   assert intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
   assert intent.approval_ttl_ms == 15_000
-  assert intent.metadata["max_single_position_pct"] == pytest.approx(0.05)
+  assert intent.metadata["max_single_position_pct"] == pytest.approx(0.02)
+  assert intent.metadata["liquidity_cap_amount"] == 0
   template = ExitPlanTemplate.from_dict(intent.metadata["exit_plan_template"])
   assert template.auto_exit_authorized is True
   assert [rule.strategy for rule in template.rules] == [
+    ExitRuleType.LIMIT_UP_TOUCH.value,
+    ExitRuleType.HARD_STOP.value,
     ExitRuleType.LIMIT_UP_BREAK.value,
     ExitRuleType.TRAILING_PRICE_DRAWDOWN.value,
     ExitRuleType.MAX_HOLDING_DAYS.value,
   ]
+  assert template.rules[1].parameters == {
+    "min_holding_trading_days": 2,
+    "stop_loss_pct": -7.0,
+    "reason": "FIRST_BOARD_T1_TAIL_LOSS",
+  }
+  assert template.rules[3].parameters["min_holding_trading_days"] == 2
+
+
+@pytest.mark.asyncio
+async def test_daily_exposure_reserves_fills_and_reduces_next_target():
+  strategy = make_strategy(max_daily_exposure_pct=0.05)
+  await strategy.start()
+  await reconcile(strategy)
+  states = strategy._instrument_states()
+  states["000002.SZ"] = {
+    **strategy._empty_instrument_state(),
+    "trade_date": "2026-08-14",
+    "last_entry_trade_date": "2026-08-14",
+    "last_entry_price": 20.0,
+    "last_entry_volume": 200,
+    "target_position_pct": 0.04,
+  }
+  strategy.state.update({"instrument_states": states})
+  candidate = tick_input(strategy)
+  candidate.portfolio_state = {
+    "account": {"total_asset": 100_000},
+    "positions": {},
+  }
+
+  output = await strategy.step(candidate)
+
+  intent = output.trade_intents[0]
+  assert intent.target_position_pct == pytest.approx(0.01)
+  assert intent.metadata["daily_exposure_used_pct"] == pytest.approx(0.04)
+  assert intent.metadata["daily_exposure_cap_pct"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_multiple_buy_reports_accumulate_daily_filled_exposure():
+  strategy = make_strategy()
+  await strategy.start()
+  await reconcile(strategy)
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="order-1",
+      instrument_code="000001.SZ",
+      trade_type="BUY",
+      volume=100,
+      price=10.0,
+      trade_time=datetime(2026, 8, 14, 10, 0, 2),
+    )
+  )
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="order-1",
+      instrument_code="000001.SZ",
+      trade_type="BUY",
+      volume=200,
+      price=11.0,
+      trade_time=datetime(2026, 8, 14, 10, 0, 3),
+    )
+  )
+
+  state = strategy._instrument_states()["000001.SZ"]
+  assert state["last_entry_volume"] == 300
+  assert state["last_entry_price"] == pytest.approx(32 / 3)
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="exit-1",
+      instrument_code="000001.SZ",
+      trade_type="SELL",
+      volume=100,
+      price=12.0,
+      trade_time=datetime(2026, 8, 15, 10, 0, 3),
+    )
+  )
+  assert strategy._instrument_states()["000001.SZ"]["last_entry_volume"] == 200
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="exit-2",
+      instrument_code="000001.SZ",
+      trade_type="SELL",
+      volume=200,
+      price=12.1,
+      trade_time=datetime(2026, 8, 15, 10, 0, 4),
+    )
+  )
+  closed = strategy._instrument_states()["000001.SZ"]
+  assert closed["last_entry_volume"] == 0
+  assert closed["draining"] is False
+
+
+@pytest.mark.asyncio
+async def test_unrelated_long_term_account_positions_do_not_consume_strategy_slots():
+  strategy = make_strategy(max_open_positions=2)
+  await strategy.start()
+  await reconcile(strategy)
+  candidate = tick_input(strategy)
+  candidate.portfolio_state = {
+    "account": {"total_asset": 100_000},
+    "positions": {
+      "600000.SH": {"long_volume": 1_000},
+      "600519.SH": {"long_volume": 100},
+    },
+  }
+
+  output = await strategy.step(candidate)
+
+  assert len(output.trade_intents) == 1
 
 
 @pytest.mark.asyncio
@@ -235,6 +360,9 @@ async def test_manual_approval_rechecks_latest_board_state():
   await strategy.start()
   await reconcile(strategy)
   intent = (await strategy.step(tick_input(strategy))).trade_intents[0]
+  states = strategy._instrument_states()
+  states["000001.SZ"]["promotion_snapshot_version"] = "snapshot-v2"
+  strategy.state.update({"instrument_states": states})
   left_band = tick_input(strategy, price=10.95).market_data
   sealed = tick_input(strategy, price=11).market_data
   sealed.ask_price = [0]
@@ -244,3 +372,4 @@ async def test_manual_approval_rechecks_latest_board_state():
     "股票已离开临板价位，请等待新信号",
   )
   assert strategy.validate_manual_approval(intent, sealed)[0] == "BOARD_ALREADY_AT_LIMIT"
+  assert strategy.validate_manual_approval(intent, tick_input(strategy).market_data) is None

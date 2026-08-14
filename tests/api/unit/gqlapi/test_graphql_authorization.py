@@ -87,6 +87,8 @@ def test_unrelated_mutation_keeps_general_write_permission():
     ("Query", "dailyAssetSnapshotsPage", "portfolio:read"),
     ("Query", "latestMarketQuotes", "market:read"),
     ("Query", "limitUpRadar", "market:read"),
+    ("Query", "limitUpLifecycle", "market:read"),
+    ("Query", "firstBoardPromotionDesk", "strategy:read"),
     ("Query", "stockScreenSnapshotStatus", "market:read"),
     ("Query", "researchRuns", "market:read"),
     ("Query", "researchRun", "market:read"),
@@ -94,10 +96,13 @@ def test_unrelated_mutation_keeps_general_write_permission():
     ("Query", "tTradeBatchEventsPage", "strategy:read"),
     ("Query", "tTradeSignalHistoryPage", "strategy:read"),
     ("Subscription", "tTradeUpdates", "strategy:read"),
+    ("Subscription", "firstBoardPromotionUpdates", "strategy:read"),
     ("Query", "aiAssistantThreads", "assistant:read"),
     ("Subscription", "aiAssistantEvents", "assistant:read"),
     ("Mutation", "sendAiAssistantMessage", "assistant:write"),
     ("Mutation", "resolveAiAssistantApproval", "assistant:write"),
+    ("Mutation", "saveFirstBoardAssistant", "mutation:write"),
+    ("Mutation", "setFirstBoardCandidatePreference", "mutation:write"),
   ],
 )
 def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(

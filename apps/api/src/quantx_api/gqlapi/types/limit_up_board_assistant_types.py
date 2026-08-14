@@ -13,9 +13,20 @@ class LimitUpBoardAssistantSettingsInput:
   enabled: bool = False
   mode: str = "paper"
   auto_exit_acknowledged: bool = False
-  target_entry_amount: float = 10_000.0
-  max_single_position_pct: float = 0.05
-  auto_signal_min_score: float = 70.0
+  target_entry_amount: float = strawberry.field(
+    default=0.0,
+    deprecation_reason="V2 使用风险预算和 targetPositionPct，不再使用固定金额",
+  )
+  max_single_position_pct: float = 0.02
+  auto_signal_min_score: float = strawberry.field(
+    default=0.0,
+    deprecation_reason="V2 使用冻结晋级模型，不开放普通评分阈值",
+  )
+  max_daily_exposure_pct: float = 0.06
+  planned_tail_loss_pct: float = 0.0015
+  max_open_positions: int = 2
+  max_ranked_candidates: int = 5
+  promotion_model_mode: str = "SHADOW"
   entry_distance_ticks: int = 1
   entry_start_time: str = "09:30"
   entry_end_time: str = "14:50"
@@ -41,6 +52,14 @@ class LimitUpBoardCandidateActionInput:
   idempotency_key: str = ""
 
 
+@strawberry.input(description="首板候选账户偏好；偏好不能绕过硬否决")
+class FirstBoardCandidatePreferenceInput:
+  account_id: str
+  instrument_code: str
+  preference: str
+  idempotency_key: str = ""
+
+
 @strawberry.type(description="账户当日人工布防候选")
 class LimitUpBoardArmedCandidate:
   instrument_code: str
@@ -62,6 +81,11 @@ class LimitUpBoardAssistant:
   target_entry_amount: float
   max_single_position_pct: float
   auto_signal_min_score: float
+  max_daily_exposure_pct: float
+  planned_tail_loss_pct: float
+  max_open_positions: int
+  max_ranked_candidates: int
+  promotion_model_mode: str
   entry_distance_ticks: int
   entry_start_time: str
   entry_end_time: str

@@ -1509,6 +1509,9 @@ def _rapid_profit_reversal(
 def _trailing_price_drawdown(
   rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
 ) -> ExitRuleMatch:
+  min_holding_days = max(
+    1, int(rule.parameters.get("min_holding_trading_days", 1) or 1)
+  )
   arm_profit = _threshold(rule, "arm_profit_pct", 0.0)
   drawdown = _threshold(rule, "drawdown_pct", 3.0)
   gross = (
@@ -1527,7 +1530,9 @@ def _trailing_price_drawdown(
     else 0.0
   )
   return ExitRuleMatch(
-    peak_gross >= arm_profit and peak_drawdown >= drawdown,
+    plan.holding_trading_days >= min_holding_days
+    and peak_gross >= arm_profit
+    and peak_drawdown >= drawdown,
     _reason(rule, "TRAILING_PRICE_DRAWDOWN_REACHED"),
     {
       "gross_profit_pct": gross,
@@ -1535,6 +1540,7 @@ def _trailing_price_drawdown(
       "arm_profit_pct": arm_profit,
       "peak_drawdown_pct": peak_drawdown,
       "drawdown_pct": drawdown,
+      "min_holding_trading_days": min_holding_days,
     },
   )
 
@@ -1543,10 +1549,17 @@ def _hard_stop(
   rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
 ) -> ExitRuleMatch:
   stop = _threshold(rule, "stop_loss_pct", -0.8)
+  min_holding_days = max(
+    1, int(rule.parameters.get("min_holding_trading_days", 1) or 1)
+  )
   return ExitRuleMatch(
-    plan.last_net_profit_pct <= stop,
+    plan.holding_trading_days >= min_holding_days
+    and plan.last_net_profit_pct <= stop,
     _reason(rule, "HARD_STOP"),
-    {"stop_loss_pct": stop},
+    {
+      "stop_loss_pct": stop,
+      "min_holding_trading_days": min_holding_days,
+    },
   )
 
 
@@ -1591,10 +1604,16 @@ def _limit_up_touch(
   limit_up = float(context.limit_up or 0.0)
   price_tick = max(float(context.price_tick or 0.01), 1e-8)
   tolerance_ticks = max(0, int(rule.parameters.get("tolerance_ticks", 0) or 0))
+  min_holding_days = max(
+    1, int(rule.parameters.get("min_holding_trading_days", 1) or 1)
+  )
   trigger_price = limit_up - tolerance_ticks * price_tick
   executable_bid = float(context.bid_price or 0.0)
   triggered = bool(
-    limit_up > 0 and executable_bid > 0 and executable_bid >= trigger_price - 1e-8
+    limit_up > 0
+    and plan.holding_trading_days >= min_holding_days
+    and executable_bid > 0
+    and executable_bid >= trigger_price - 1e-8
   )
   return ExitRuleMatch(
     triggered,
@@ -1605,6 +1624,7 @@ def _limit_up_touch(
       "tolerance_ticks": tolerance_ticks,
       "trigger_price": trigger_price,
       "executable_bid": executable_bid,
+      "min_holding_trading_days": min_holding_days,
     },
   )
 

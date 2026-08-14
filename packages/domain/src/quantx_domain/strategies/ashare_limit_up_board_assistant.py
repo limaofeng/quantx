@@ -31,6 +31,7 @@ from quantx_domain.strategies.base import (
   TradeIntentExecutionMode,
   TradeIntentPriority,
 )
+from quantx_domain.trading.exit_plan import ExitPlanTemplate
 
 
 class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
@@ -46,7 +47,7 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
 
   @property
   def version(self) -> str:
-    return "1.0.0"
+    return "2.0.0"
 
   @property
   def description(self) -> str:
@@ -64,31 +65,55 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
         "account_id": ParameterProperty(
           type="string", default="", title="交易账户", group="binding"
         ),
-        "target_entry_amount": ParameterProperty(
-          type="number",
-          minimum=100,
-          maximum=1_000_000,
-          default=10_000,
-          title="单笔目标金额",
-          group="sizing",
-          unit="CNY",
-        ),
         "max_single_position_pct": ParameterProperty(
           type="number",
           minimum=0.005,
           maximum=0.30,
-          default=0.05,
+          default=0.02,
           title="单标的资产上限",
           group="sizing",
           unit="ratio",
         ),
-        "auto_signal_min_score": ParameterProperty(
+        "max_daily_exposure_pct": ParameterProperty(
           type="number",
-          minimum=0,
-          maximum=100,
-          default=70,
-          title="自动布防最低分",
-          group="signal",
+          minimum=0.005,
+          maximum=0.30,
+          default=0.06,
+          title="当日新增风险敞口上限",
+          group="sizing",
+          unit="ratio",
+        ),
+        "planned_tail_loss_pct": ParameterProperty(
+          type="number",
+          minimum=0.0001,
+          maximum=0.02,
+          default=0.0015,
+          title="单笔计划尾损",
+          group="sizing",
+          unit="ratio",
+        ),
+        "liquidity_participation_pct": ParameterProperty(
+          type="number",
+          minimum=0.0001,
+          maximum=0.05,
+          default=0.005,
+          title="成交额参与上限",
+          group="sizing",
+          unit="ratio",
+        ),
+        "max_open_positions": ParameterProperty(
+          type="integer",
+          minimum=1,
+          maximum=10,
+          default=2,
+          title="最多同时持仓",
+          group="sizing",
+        ),
+        "promotion_model_mode": ParameterProperty(
+          type="string",
+          default="SHADOW",
+          title="发布阶段",
+          group="binding",
         ),
         "execution_quote_max_age_seconds": ParameterProperty(
           type="number",
@@ -106,7 +131,7 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     )
     # Account assistants never auto-enter, including in live mode.
     schema.properties["entry_execution_mode"].default = "MANUAL_CONFIRM"
-    schema.properties["target_position_pct"].default = 0.05
+    schema.properties["target_position_pct"].default = 0.02
     return schema
 
   @classmethod
@@ -147,6 +172,17 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
       "radar_stage": "",
       "radar_updated_at": "",
       "radar_is_stale": False,
+      "promotion_eligible": False,
+      "promotion_score": 0.0,
+      "promotion_snapshot_version": "",
+      "promotion_model_version": "",
+      "exit_policy_version": "",
+      "board_segment": "",
+      "cvar95_loss_pct": 0.0,
+      "expected_net_return_pct": 0.0,
+      "target_position_pct": 0.0,
+      "liquidity_cap_amount": 0.0,
+      "high_position_type": "",
       "draining": False,
     }
 
@@ -192,9 +228,16 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     if state.get("inside_entry_band"):
       return self._state_output(code, states, state, "entry_band_already_seen", snapshot)
 
-    target_amount = float(self.get_parameter("target_entry_amount", 10_000) or 0.0)
-    if target_amount <= 0:
-      return self._state_output(code, states, state, "target_amount_zero", snapshot)
+    daily_cap = self._daily_exposure_cap(input)
+    daily_used = self._daily_exposure_pct(states, input)
+    target_position_pct = min(
+      float(state.get("target_position_pct", 0.0) or 0.0),
+      max(0.0, daily_cap - daily_used),
+    )
+    if target_position_pct <= 0:
+      return self._state_output(
+        code, states, state, "risk_budget_zero", snapshot
+      )
 
     signal_sequence = int(state.get("signal_sequence", 0) or 0) + 1
     plan = self._build_exit_plan(
@@ -211,7 +254,7 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
       reason="limit_up_board_assistant_entry",
       priority=TradeIntentPriority.HIGH,
       confidence=self._entry_confidence(snapshot),
-      target_amount=target_amount,
+      target_position_pct=target_position_pct,
       limit_price_hint=float(snapshot["limit_up"]),
       execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
       approval_ttl_ms=int(self.get_parameter("approval_ttl_ms", 15_000) or 15_000),
@@ -233,10 +276,26 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
         "signal_price": float(snapshot["price"]),
         "limit_up": float(snapshot["limit_up"]),
         "distance_to_limit_ticks": float(snapshot["distance_to_limit_ticks"]),
-        "target_amount": target_amount,
-        "max_single_position_pct": float(
-          self.get_parameter("max_single_position_pct", 0.05) or 0.05
+        "target_position_pct": target_position_pct,
+        "daily_exposure_cap_pct": daily_cap,
+        "daily_exposure_used_pct": daily_used,
+        "liquidity_cap_amount": float(
+          state.get("liquidity_cap_amount", 0.0) or 0.0
         ),
+        "max_single_position_pct": float(
+          self.get_parameter("max_single_position_pct", 0.02) or 0.02
+        ),
+        "planned_tail_loss_pct": float(
+          self.get_parameter("planned_tail_loss_pct", 0.0015) or 0.0015
+        ),
+        "cvar95_loss_pct": float(state.get("cvar95_loss_pct", 0.0) or 0.0),
+        "promotion_snapshot_version": str(
+          state.get("promotion_snapshot_version") or ""
+        ),
+        "promotion_model_version": str(state.get("promotion_model_version") or ""),
+        "exit_policy_version": str(state.get("exit_policy_version") or ""),
+        "board_segment": str(state.get("board_segment") or ""),
+        "high_position_type": str(state.get("high_position_type") or ""),
         "price_type": "LIMIT",
         "order_ttl_ms": int(
           self.get_parameter("entry_order_ttl_ms", 15_000) or 15_000
@@ -294,25 +353,62 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     return None
 
   async def on_trade(self, event: TradeExecutionEvent) -> Optional[RuntimeStatePatch]:
-    if str(event.trade_type or "").upper() != "BUY" or event.volume <= 0:
+    trade_type = str(event.trade_type or "").upper()
+    if trade_type not in {"BUY", "SELL"} or event.volume <= 0:
       return None
     code = str(event.instrument_code or "").upper()
     states = self._instrument_states()
     if code not in states:
       return None
     state = dict(states[code])
+    if trade_type == "SELL":
+      remaining = max(
+        0, int(state.get("last_entry_volume", 0) or 0) - int(event.volume)
+      )
+      state.update(
+        {
+          "last_entry_volume": remaining,
+          "last_entry_price": (
+            float(state.get("last_entry_price", 0.0) or 0.0)
+            if remaining > 0
+            else 0.0
+          ),
+          "draining": remaining > 0,
+          "entry_eligible": False,
+          "eligibility_reason": (
+            "ACTIVE_EXIT_PLAN" if remaining > 0 else "POSITION_EXITED"
+          ),
+        }
+      )
+      states[code] = state
+      patch = {"instrument_states": states}
+      self.state.update(patch)
+      return RuntimeStatePatch(set=patch)
     trade_date = (
       event.trade_time.date().isoformat()
       if event.trade_time is not None
       else str(state.get("trade_date", "") or "")
+    )
+    previous_volume = (
+      int(state.get("last_entry_volume", 0) or 0)
+      if str(state.get("last_entry_trade_date", "") or "") == trade_date
+      else 0
+    )
+    previous_price = float(state.get("last_entry_price", 0.0) or 0.0)
+    filled_volume = previous_volume + int(event.volume)
+    average_price = (
+      (previous_price * previous_volume + float(event.price) * int(event.volume))
+      / filled_volume
+      if filled_volume > 0
+      else float(event.price)
     )
     state.update(
       {
         "pending_entry_intent_id": "",
         "pending_entry_status": "",
         "last_entry_trade_date": trade_date,
-        "last_entry_price": float(event.price),
-        "last_entry_volume": int(event.volume),
+        "last_entry_price": average_price,
+        "last_entry_volume": filled_volume,
         "draining": True,
         "entry_eligible": False,
         "eligibility_reason": "ACTIVE_EXIT_PLAN",
@@ -330,6 +426,14 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
 
     if intent.direction != TradeIntentDirection.BUY or market_data is None:
       return None
+    code = str(intent.instrument_code or "").upper()
+    state = self._instrument_states().get(code, {})
+    if not state.get("promotion_eligible") or not state.get("entry_eligible"):
+      return "PROMOTION_NO_LONGER_ELIGIBLE", "候选已失去首板晋级资格"
+    if str(intent.metadata.get("promotion_model_version") or "") != str(
+      state.get("promotion_model_version") or ""
+    ):
+      return "PROMOTION_MODEL_CHANGED", "晋级模型版本已经变化，请重新确认"
     price = float(
       getattr(market_data, "price", 0.0)
       or getattr(market_data, "last_price", 0.0)
@@ -377,6 +481,27 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
           "radar_stage": str(item.get("radar_stage", "") or ""),
           "radar_updated_at": str(item.get("radar_updated_at", "") or ""),
           "radar_is_stale": bool(item.get("radar_is_stale", False)),
+          "promotion_eligible": bool(item.get("promotion_eligible", False)),
+          "promotion_score": float(item.get("promotion_score", 0.0) or 0.0),
+          "promotion_snapshot_version": str(
+            item.get("promotion_snapshot_version", "") or ""
+          ),
+          "promotion_model_version": str(
+            item.get("promotion_model_version", "") or ""
+          ),
+          "exit_policy_version": str(item.get("exit_policy_version", "") or ""),
+          "board_segment": str(item.get("board_segment", "") or ""),
+          "cvar95_loss_pct": float(item.get("cvar95_loss_pct", 0.0) or 0.0),
+          "expected_net_return_pct": float(
+            item.get("expected_net_return_pct", 0.0) or 0.0
+          ),
+          "target_position_pct": float(
+            item.get("target_position_pct", 0.0) or 0.0
+          ),
+          "liquidity_cap_amount": float(
+            item.get("liquidity_cap_amount", 0.0) or 0.0
+          ),
+          "high_position_type": str(item.get("high_position_type", "") or ""),
           "draining": bool(item.get("draining", False)),
           "last_arm_version": arm_version,
         }
@@ -423,6 +548,14 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     snapshot: Dict[str, Any],
     state: Dict[str, Any],
   ) -> str:
+    rollout = str(
+      self.get_parameter("promotion_model_mode", "SHADOW") or "SHADOW"
+    ).upper()
+    runtime_mode = str(getattr(self.context.mode, "value", self.context.mode)).upper()
+    if rollout not in {"PAPER", "LIVE"}:
+      return "shadow_mode_hypothetical_only"
+    if runtime_mode == "LIVE" and rollout != "LIVE":
+      return "live_rollout_gate_not_passed"
     if state.get("draining") or not state.get("entry_eligible"):
       return str(state.get("eligibility_reason") or "candidate_not_eligible")
     if state.get("pending_entry_intent_id"):
@@ -441,6 +574,11 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
       return "active_exit_plan"
     if _position_volume(input.portfolio_state, input.instrument_code) > 0:
       return "position_exists"
+    instrument_states = self._instrument_states()
+    open_slots = self._managed_open_position_count(instrument_states)
+    open_slots += self._pending_entry_count(instrument_states, input.trade_date)
+    if open_slots >= int(self.get_parameter("max_open_positions", 2) or 2):
+      return "max_open_positions_reached"
     if _has_open_buy(input.open_orders, input.instrument_code):
       return "open_buy_order_exists"
 
@@ -451,6 +589,8 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
       return "risk_reduction_only"
     if risk_caps.get("allow_buy") is False:
       return "risk_disallow_buy"
+    if self._daily_exposure_cap(input) <= 0:
+      return "daily_exposure_budget_zero"
     if (
       risk_caps.get("allow_swing_buy") is False
       or risk_caps.get("allow_intraday_swing_buy") is False
@@ -494,6 +634,129 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     if snapshot["amount"] < float(self.get_parameter("min_daily_amount", 0) or 0.0):
       return "insufficient_daily_amount"
     return ""
+
+  def _build_exit_plan(
+    self, input: StrategyInput, snapshot: Dict[str, Any], attempt: int
+  ) -> ExitPlanTemplate:
+    template = super()._build_exit_plan(input, snapshot, attempt)
+    payload = template.to_dict()
+    payload["source_type"] = "FIRST_BOARD_PROMOTION_V2"
+    payload["config_version"] = 2
+    payload["metadata"].update(
+      {
+        "promotion_model_version": self._instrument_states()
+        .get(str(input.instrument_code or "").upper(), {})
+        .get("promotion_model_version", ""),
+        "exit_policy_version": self._instrument_states()
+        .get(str(input.instrument_code or "").upper(), {})
+        .get("exit_policy_version", ""),
+        "t_plus_one_locked": True,
+      }
+    )
+    rules = list(payload["rules"])
+    rules.insert(
+      0,
+      {
+        "strategy": "LIMIT_UP_TOUCH",
+        "priority": 1100,
+        "sizing": {"mode": "ALL_REMAINING"},
+        "parameters": {
+          "min_holding_trading_days": 2,
+          "reason": "SECOND_BOARD_LIMIT_TOUCH",
+        },
+      },
+    )
+    cvar95_loss_pct = float(
+      self._instrument_states()
+      .get(str(input.instrument_code or "").upper(), {})
+      .get("cvar95_loss_pct", 0.0)
+      or 0.0
+    )
+    if cvar95_loss_pct > 0:
+      rules.insert(
+        1,
+        {
+          "strategy": "HARD_STOP",
+          "priority": 1050,
+          "sizing": {"mode": "ALL_REMAINING"},
+          "parameters": {
+            "min_holding_trading_days": 2,
+            "stop_loss_pct": -cvar95_loss_pct,
+            "reason": "FIRST_BOARD_T1_TAIL_LOSS",
+          },
+        },
+      )
+    for rule in rules:
+      if rule["strategy"] in {
+        "LIMIT_UP_BREAK",
+        "TRAILING_PRICE_DRAWDOWN",
+        "MAX_HOLDING_DAYS",
+      }:
+        rule["sizing"] = {"mode": "ALL_REMAINING"}
+      if rule["strategy"] == "TRAILING_PRICE_DRAWDOWN":
+        rule["parameters"]["reason"] = "FIRST_BOARD_T1_WEAKNESS_EXIT"
+        rule["parameters"]["min_holding_trading_days"] = 2
+    payload["rules"] = rules
+    return ExitPlanTemplate.from_dict(payload)
+
+  @staticmethod
+  def _managed_open_position_count(states: Dict[str, Dict[str, Any]]) -> int:
+    return sum(
+      1
+      for state in states.values()
+      if int(state.get("last_entry_volume", 0) or 0) > 0
+    )
+
+  @staticmethod
+  def _pending_entry_count(
+    states: Dict[str, Dict[str, Any]], trade_date: str
+  ) -> int:
+    return sum(
+      1
+      for state in states.values()
+      if str(state.get("trade_date", "") or "") == trade_date
+      and bool(state.get("pending_entry_intent_id"))
+    )
+
+  def _daily_exposure_cap(self, input: StrategyInput) -> float:
+    caps = [float(self.get_parameter("max_daily_exposure_pct", 0.06) or 0.0)]
+    risk_cap = dict(input.risk_caps or {}).get("max_new_buy_pct_today")
+    if risk_cap is not None:
+      try:
+        caps.append(max(0.0, float(risk_cap)))
+      except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(caps))
+
+  @staticmethod
+  def _daily_exposure_pct(
+    states: Dict[str, Dict[str, Any]], input: StrategyInput
+  ) -> float:
+    account = dict((input.portfolio_state or {}).get("account") or {})
+    total_asset = float(
+      account.get("total_asset")
+      or account.get("total_value")
+      or account.get("cash_total")
+      or 0.0
+    )
+    used = 0.0
+    for state in states.values():
+      target_pct = max(0.0, float(state.get("target_position_pct", 0.0) or 0.0))
+      if (
+        str(state.get("trade_date", "") or "") == input.trade_date
+        and state.get("pending_entry_intent_id")
+      ):
+        used += target_pct
+      if str(state.get("last_entry_trade_date", "") or "") != input.trade_date:
+        continue
+      price = float(state.get("last_entry_price", 0.0) or 0.0)
+      volume = int(state.get("last_entry_volume", 0) or 0)
+      used += (
+        price * volume / total_asset
+        if total_asset > 0 and price > 0 and volume > 0
+        else target_pct
+      )
+    return max(0.0, used)
 
   def _is_entry_band(self, snapshot: Dict[str, Any]) -> bool:
     distance = float(snapshot.get("distance_to_limit_ticks", 0.0) or 0.0)

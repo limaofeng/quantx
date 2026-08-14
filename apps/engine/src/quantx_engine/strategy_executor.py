@@ -3862,6 +3862,12 @@ class StrategyExecutor:
       sizer = OrderSizer(rules)
       draft = sizer.draft_intent(intent, order_type, price, account, position)
       if draft.sized_volume <= 0:
+        size_reasons = list(getattr(draft, "size_reason_codes", []) or [])
+        rejection_reason = (
+          "MIN_LOT_EXCEEDS_RISK_BUDGET"
+          if "MIN_LOT_EXCEEDS_RISK_BUDGET" in size_reasons
+          else "ZERO_SIZED_VOLUME"
+        )
         if runtime.state_manager:
           await runtime.state_manager.update_trade_intent_status(
             intent.intent_id,
@@ -3869,12 +3875,10 @@ class StrategyExecutor:
             metadata={
               **dict(intent.metadata or {}),
               "order_draft_id": getattr(draft, "draft_id", None),
-              "order_draft_size_reasons": list(
-                getattr(draft, "size_reason_codes", []) or []
-              ),
+              "order_draft_size_reasons": size_reasons,
               "sized_volume": getattr(draft, "sized_volume", None),
             },
-            notes="ZERO_SIZED_VOLUME",
+            notes=rejection_reason,
           )
         self._record_decision_trace(
           runtime,
@@ -3883,8 +3887,8 @@ class StrategyExecutor:
           risk_caps=context_snapshot.risk_caps,
           position_profile=context_snapshot.position_profile,
           order_draft=draft,
-          tags=["zero_sized_volume"],
-          reason="ZERO_SIZED_VOLUME",
+          tags=[rejection_reason.lower()],
+          reason=rejection_reason,
         )
         await self._notify_strategy_order(
           runtime,

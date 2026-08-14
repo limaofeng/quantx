@@ -84,6 +84,7 @@ function PendingSignalCard({
     limitUpPrice?: number | null;
     signalPrice?: number | null;
     targetAmount?: number | null;
+    targetPositionPct?: number | null;
   };
   onApprove: () => void;
   onReject: () => void;
@@ -102,7 +103,11 @@ function PendingSignalCard({
             </Badge>
           </div>
           <div className="mt-1 text-[10px] text-slate-500">
-            {formatMoney(intent.targetAmount)} · 涨停价{' '}
+            目标仓位{' '}
+            {intent.targetPositionPct != null
+              ? `${(intent.targetPositionPct * 100).toFixed(2)}%`
+              : formatMoney(intent.targetAmount)}{' '}
+            · 涨停价{' '}
             {intent.limitUpPrice?.toFixed(2) ?? '--'}
           </div>
         </div>
@@ -194,9 +199,10 @@ function ExitPlanCard({
   const today = new Date().toLocaleDateString('en-CA');
   const waitingT1 = plan.entryTradeDate === today;
   const rules = [
-    plan.ruleTypes.includes('LIMIT_UP_BREAK') ? '破板 1 档全卖' : null,
-    plan.ruleTypes.includes('TRAILING_PRICE_DRAWDOWN') ? '+2% 后回撤 3% 减半' : null,
-    plan.ruleTypes.includes('MAX_HOLDING_DAYS') ? '第 2 日 14:50 清仓' : null,
+    plan.ruleTypes.includes('LIMIT_UP_TOUCH') ? 'T+1 触及二板全卖' : null,
+    plan.ruleTypes.includes('LIMIT_UP_BREAK') ? '二板炸板全卖' : null,
+    plan.ruleTypes.includes('TRAILING_PRICE_DRAWDOWN') ? '弱势回撤全卖' : null,
+    plan.ruleTypes.includes('MAX_HOLDING_DAYS') ? 'T+1 14:50 清仓' : null,
   ].filter(Boolean);
   return (
     <article className="rounded-lg border border-emerald-400/20 bg-emerald-400/[0.045] p-3">
@@ -259,23 +265,29 @@ export default function LimitUpBoardPage() {
   const accountResult = useCurrentAccount();
   const account = accountResult.data?.currentAccount;
   const accountId = account?.id;
-  const radar = useLimitUpRadar(true);
+  const radar = useLimitUpRadar(true, accountId);
   const assistant = useLimitUpBoardAssistant(accountId);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [targetAmount, setTargetAmount] = useState(10_000);
-  const [positionCap, setPositionCap] = useState(5);
-  const [scoreThreshold, setScoreThreshold] = useState(70);
+  const [positionCap, setPositionCap] = useState(2);
+  const [dailyExposureCap, setDailyExposureCap] = useState(6);
+  const [tailLossBudget, setTailLossBudget] = useState(0.15);
+  const [maxOpenPositions, setMaxOpenPositions] = useState(2);
   const [mode, setMode] = useState('paper');
   const [autoExitAcknowledged, setAutoExitAcknowledged] = useState(false);
 
   useEffect(() => {
     if (!settingsOpen) return;
-    setTargetAmount(assistant.currentSettings.targetEntryAmount ?? 10_000);
     setPositionCap(
-      (assistant.currentSettings.maxSinglePositionPct ?? 0.05) * 100
+      (assistant.currentSettings.maxSinglePositionPct ?? 0.02) * 100
     );
-    setScoreThreshold(assistant.currentSettings.autoSignalMinScore ?? 70);
+    setDailyExposureCap(
+      (assistant.currentSettings.maxDailyExposurePct ?? 0.06) * 100
+    );
+    setTailLossBudget(
+      (assistant.currentSettings.plannedTailLossPct ?? 0.0015) * 100
+    );
+    setMaxOpenPositions(assistant.currentSettings.maxOpenPositions ?? 2);
     setMode(assistant.currentSettings.mode ?? 'paper');
     setAutoExitAcknowledged(
       assistant.currentSettings.autoExitAcknowledged ?? false
@@ -285,9 +297,11 @@ export default function LimitUpBoardPage() {
   const armedCodes = useMemo(
     () =>
       new Set(
-        assistant.assistant?.armedCandidates.map(item => item.instrumentCode) ?? []
+        radar.candidates
+          .filter(item => item.candidatePreference === 'PREFER')
+          .map(item => item.code)
       ),
-    [assistant.assistant?.armedCandidates]
+    [radar.candidates]
   );
   const pendingCodes = useMemo(
     () => new Set(assistant.pendingIntents.map(item => item.instrumentCode)),
@@ -328,10 +342,11 @@ export default function LimitUpBoardPage() {
     act('settings', async () => {
       const payload = await assistant.save({
         autoExitAcknowledged,
-        autoSignalMinScore: scoreThreshold,
+        maxDailyExposurePct: dailyExposureCap / 100,
+        maxOpenPositions,
         maxSinglePositionPct: positionCap / 100,
         mode,
-        targetEntryAmount: targetAmount,
+        plannedTailLossPct: tailLossBudget / 100,
       });
       setSettingsOpen(false);
       toast({ title: '设置已保存', description: payload.message });
@@ -349,7 +364,7 @@ export default function LimitUpBoardPage() {
               <Target className="h-4 w-4 shrink-0 text-red-400" />
               <div className="min-w-0">
                 <div className="truncate text-xs font-black text-slate-100">
-                  {account?.accountName || '未选择账户'}
+                  首板晋级工作台 · {account?.accountName || '未选择账户'}
                 </div>
                 <div className="truncate font-mono text-[9px] text-slate-600">
                   {accountId || '--'}
@@ -367,6 +382,11 @@ export default function LimitUpBoardPage() {
             >
               {assistant.currentSettings.mode === 'live' ? '实盘' : '模拟'}
             </Badge>
+            <Badge className="border-violet-400/25 bg-violet-400/10 text-[9px] text-violet-200 hover:bg-violet-400/10">
+              {assistant.currentSettings.promotionModelMode === 'SHADOW'
+                ? '影子观察'
+                : assistant.currentSettings.promotionModelMode}
+            </Badge>
             <label className="flex items-center gap-2 text-[10px] text-slate-400">
               <Switch
                 checked={enabled}
@@ -374,7 +394,7 @@ export default function LimitUpBoardPage() {
                 onCheckedChange={checked =>
                   act('toggle', () => assistant.save({ enabled: checked }))
                 }
-                aria-label="启用打板助手"
+              aria-label="启用首板晋级助手"
                 className="scale-75 data-[state=checked]:bg-emerald-500"
               />
               助手{enabled ? '运行中' : '已关闭'}
@@ -431,11 +451,14 @@ export default function LimitUpBoardPage() {
           </div>
           <div className="grid grid-cols-5 gap-px border-t border-white/[0.06] bg-white/[0.06]">
             {[
-              ['市场候选', radar.summary.candidateCount],
-              ['临板触板', radar.summary.nearLimitCount],
-              ['监控标的', assistant.assistant?.monitoredCount ?? 0],
+              ['发现', radar.summary.discoveredCount],
+              ['合格', radar.summary.eligibleCount],
               ['待确认', assistant.pendingIntents.length],
-              ['卖出托管', assistant.exitPlans.length],
+              ['T+1 持仓', assistant.exitPlans.length],
+              [
+                '退出异常',
+                assistant.exitPlans.filter(plan => plan.status === 'ERROR').length,
+              ],
             ].map(([label, value]) => (
               <div key={label} className="bg-[#0b1423] px-3 py-2">
                 <span className="text-[9px] text-slate-600">{label}</span>
@@ -464,7 +487,6 @@ export default function LimitUpBoardPage() {
           <LimitUpRadarPanel
             armedCodes={armedCodes}
             assistantEnabled={enabled}
-            autoScore={assistant.assistant?.autoSignalMinScore ?? 70}
             busyCode={busyAction?.startsWith('candidate:') ? busyAction.slice(10) : null}
             candidates={radar.candidates}
             errorMessage={radar.error?.message}
@@ -531,7 +553,7 @@ export default function LimitUpBoardPage() {
               <div className="flex items-center justify-between border-b border-white/[0.07] px-3 py-2.5">
                 <h2 className="flex items-center gap-2 text-xs font-black">
                   <WalletCards className="h-3.5 w-3.5 text-emerald-300" />
-                  打板退出计划
+                  T+1 自适应退出
                 </h2>
                 <Badge className="border-emerald-400/20 bg-emerald-400/10 text-[9px] text-emerald-200 hover:bg-emerald-400/10">
                   {assistant.exitPlans.length}
@@ -566,22 +588,12 @@ export default function LimitUpBoardPage() {
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="border-white/10 bg-[#0d1626] text-slate-100 sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>打板助手设置</DialogTitle>
+            <DialogTitle>首板晋级风险设置</DialogTitle>
             <DialogDescription className="text-slate-500">
-              每个账户只有一个助手。买入始终人工确认，成交后由 Engine 托管退出。
+              模型阈值冻结且不可调。买入始终人工确认，成交后由 Engine 按 T+1 计划托管退出。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2 sm:grid-cols-2">
-            <SettingField label="单笔目标金额（元）">
-              <Input
-                type="number"
-                min={100}
-                step={100}
-                value={targetAmount}
-                onChange={event => setTargetAmount(Number(event.target.value))}
-                className="border-white/10 bg-[#08111f]"
-              />
-            </SettingField>
             <SettingField label="单标的资产上限（%）">
               <Input
                 type="number"
@@ -593,14 +605,36 @@ export default function LimitUpBoardPage() {
                 className="border-white/10 bg-[#08111f]"
               />
             </SettingField>
-            <SettingField label="自动布防评分">
+            <SettingField label="当日总暴露上限（%）">
               <Input
                 type="number"
-                min={0}
-                max={100}
+                min={0.5}
+                max={30}
+                step={0.5}
+                value={dailyExposureCap}
+                onChange={event => setDailyExposureCap(Number(event.target.value))}
+                className="border-white/10 bg-[#08111f]"
+              />
+            </SettingField>
+            <SettingField label="单笔计划尾损（净资产 %）">
+              <Input
+                type="number"
+                min={0.01}
+                max={2}
+                step={0.01}
+                value={tailLossBudget}
+                onChange={event => setTailLossBudget(Number(event.target.value))}
+                className="border-white/10 bg-[#08111f]"
+              />
+            </SettingField>
+            <SettingField label="最多同时持有（只）">
+              <Input
+                type="number"
+                min={1}
+                max={10}
                 step={1}
-                value={scoreThreshold}
-                onChange={event => setScoreThreshold(Number(event.target.value))}
+                value={maxOpenPositions}
+                onChange={event => setMaxOpenPositions(Number(event.target.value))}
                 className="border-white/10 bg-[#08111f]"
               />
             </SettingField>
@@ -625,12 +659,12 @@ export default function LimitUpBoardPage() {
                 className="mt-0.5"
               />
               <span>
-                我确认：买入仍需人工点击，但真实成交后 Engine 将按破板、回撤和最长持有规则自动卖出。
+                我确认：T 日买入不可卖；真实成交后 Engine 会在 T+1 触及二板、破板、弱势或 14:50 时全量退出。
               </span>
             </label>
           ) : null}
           <div className="rounded-lg border border-white/[0.06] bg-white/[0.025] p-3 text-[10px] leading-5 text-slate-500">
-            固定约束：09:30–14:50、距涨停不超过 1 档、执行行情 ≤3 秒、确认/委托各 15 秒、价格偏离 ≤20bps。
+            默认保守档：单票 2%、当日 6%、单笔尾损 0.15%、最多 2 只。若一手成本超过风险预算会直接拒绝，不向上取整。
           </div>
           <DialogFooter>
             <Button
@@ -644,11 +678,14 @@ export default function LimitUpBoardPage() {
               onClick={saveSettings}
               disabled={
                 busyAction === 'settings' ||
-                targetAmount <= 0 ||
                 positionCap <= 0 ||
                 positionCap > 30 ||
-                scoreThreshold < 0 ||
-                scoreThreshold > 100 ||
+                dailyExposureCap <= 0 ||
+                dailyExposureCap > 30 ||
+                tailLossBudget <= 0 ||
+                tailLossBudget > 2 ||
+                maxOpenPositions < 1 ||
+                maxOpenPositions > 10 ||
                 (mode === 'live' && !autoExitAcknowledged)
               }
               className="bg-red-500 text-white hover:bg-red-400"

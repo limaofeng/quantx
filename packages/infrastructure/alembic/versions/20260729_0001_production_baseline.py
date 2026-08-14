@@ -45,6 +45,13 @@ POST_BASELINE_TABLES = {
   "financial_metric_roe_qualities",
   "financial_sync_code_audits",
   "financial_sync_runs",
+  "first_board_candidate_preferences",
+  "first_board_model_releases",
+  "first_board_promotion_assessments",
+  "limit_up_chain_snapshots",
+  "limit_up_lifecycle_snapshots",
+  "limit_up_research_artifacts",
+  "limit_up_research_jobs",
   "limit_up_radar_events",
   "limit_up_board_assistant_configs",
   "limit_up_board_assistant_projections",
@@ -71,6 +78,12 @@ POST_BASELINE_COLUMNS = {
     "account_id",
     "owner_id",
     "owner_type",
+  },
+  "stock_announcements": {
+    "content_fetched_at",
+    "content_hash",
+    "content_text",
+    "source_authority",
   },
 }
 

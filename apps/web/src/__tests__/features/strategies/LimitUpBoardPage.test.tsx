@@ -23,6 +23,11 @@ vi.mock('@/hooks/use-toast', () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
 
+vi.mock(
+  '@/features/strategies/components/LimitUpRadarMiniChart',
+  () => ({ LimitUpRadarMiniChart: () => <div data-testid="radar-mini-chart" /> })
+);
+
 vi.mock('@/features/dashboard/hooks/useDashboard', () => ({
   useCurrentAccount: () => ({
     data: {
@@ -48,6 +53,7 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
         bid1Price: 19.69,
         bid1Volume: 120_000,
         blockedReasons: [],
+        boardSegment: 'GROWTH',
         breakCount: 0,
         canCreateInstance: true,
         changePct: 8.8,
@@ -57,22 +63,37 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
         distanceToLimitPct: 0.15,
         distanceToLimitTicks: 1,
         events: [],
+        exitPolicyVersion: 'first-board-exit-v2-shadow-1',
+        expectedNetReturnPct: 1.25,
         existingInstanceId: null,
+        firstBoardCloseProbability: 0.72,
         industry: '软件服务',
         intradayTurnoverRatePct: 7.1,
         isStale: false,
         last5mVolumeRatio: 3.2,
         limitUpPrice: 19.71,
         name: '特锐德',
+        nextDayLimitSealProbability: 0.28,
+        nextDayLimitTouchProbability: 0.43,
+        normalizedLimitProgress: 0.88,
         oneWordLimitUp: false,
         priceChange5mPct: 2.1,
+        promotionEligible: true,
+        promotionFactors: [],
+        promotionModelVersion: 'first-board-promotion-v2-shadow-1',
+        promotionObserved: true,
+        promotionScore: 76,
+        promotionSnapshotVersion: 'snapshot-1',
         radarScore: 88,
+        researchArtifact: null,
         scoreBreakdown: [],
         scoreVersion: 'limit-up-radar-v1',
         stage: 'NEAR_LIMIT',
         stageLabel: '临板',
+        highPositionType: 'BASE_BREAKOUT',
         updatedAt: new Date().toISOString(),
         volumePaceRatio: 2.1,
+        cvar95LossPct: 5.5,
       },
     ],
     error: null,
@@ -89,6 +110,8 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
     summary: {
       brokenCount: 0,
       candidateCount: 1,
+      discoveredCount: 1,
+      eligibleCount: 1,
       excludedCount: 80,
       nearLimitCount: 1,
       scannedCount: 5200,
@@ -115,6 +138,7 @@ vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
       lastError: null,
       monitoredCount: 1,
       pendingSignalCount: 1,
+      promotionModelMode: 'SHADOW',
     },
     currentSettings: {
       accountId: 'account-1',
@@ -122,8 +146,12 @@ vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
       autoSignalMinScore: 70,
       enabled: true,
       maxSinglePositionPct: 0.05,
+      maxDailyExposurePct: 0.06,
+      maxOpenPositions: 2,
+      maxRankedCandidates: 5,
       mode: 'paper',
-      targetEntryAmount: 10_000,
+      plannedTailLossPct: 0.0015,
+      promotionModelMode: 'SHADOW',
     },
     disarm: mocks.disarm,
     error: null,
@@ -140,6 +168,7 @@ vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
         pendingOrderId: null,
         remainingVolume: 1000,
         ruleTypes: [
+          'LIMIT_UP_TOUCH',
           'LIMIT_UP_BREAK',
           'TRAILING_PRICE_DRAWDOWN',
           'MAX_HOLDING_DAYS',
@@ -157,6 +186,7 @@ vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
         limitUpPrice: 19.71,
         signalPrice: 19.7,
         targetAmount: 10_000,
+        targetPositionPct: 0.02,
       },
     ],
     reconcile: mocks.reconcile,
@@ -174,10 +204,10 @@ describe('LimitUpBoardPage', () => {
     render(<LimitUpBoardPage />);
 
     expect(screen.getByTestId('limit-up-board-page')).toBeVisible();
-    expect(screen.getAllByText('市场候选').length).toBeGreaterThan(0);
+    expect(screen.getByText('首板晋级候选')).toBeVisible();
     expect(screen.getByText('特锐德')).toBeVisible();
     expect(screen.getByText('待确认信号')).toBeVisible();
-    expect(screen.getByText('打板退出计划')).toBeVisible();
+    expect(screen.getByText('T+1 自适应退出')).toBeVisible();
     expect(screen.queryByText('全市场打板雷达')).not.toBeInTheDocument();
     expect(screen.queryByText('手动新建实例')).not.toBeInTheDocument();
     expect(screen.queryByText('实例管理')).not.toBeInTheDocument();
@@ -193,11 +223,11 @@ describe('LimitUpBoardPage', () => {
     expect(mocks.approve).toHaveBeenCalledWith('intent-1');
   });
 
-  it('keeps an automatic candidate manually armed through the close', async () => {
+  it('marks an automatic candidate as preferred without bypassing rules', async () => {
     const user = userEvent.setup();
     render(<LimitUpBoardPage />);
 
-    await user.click(screen.getByRole('button', { name: '保留至收盘' }));
+    await user.click(screen.getByRole('button', { name: '优先关注' }));
 
     expect(mocks.arm).toHaveBeenCalledWith('300001.SZ');
   });

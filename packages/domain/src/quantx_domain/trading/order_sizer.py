@@ -49,6 +49,21 @@ class OrderSizer:
     raw_target_amount = self._raw_target_amount(intent, price, account, metadata)
     raw_target_volume = requested_volume
     reason_codes: list[str] = []
+    liquidity_cap = _optional_positive_number(metadata.get("liquidity_cap_amount"))
+    if (
+      order_type == OrderType.BUY
+      and liquidity_cap is not None
+      and raw_target_amount is not None
+      and raw_target_amount > liquidity_cap
+    ):
+      metadata["uncapped_target_amount"] = raw_target_amount
+      raw_target_amount = liquidity_cap
+      raw_target_volume = (
+        min(raw_target_volume, int(liquidity_cap // price))
+        if raw_target_volume and price > 0
+        else None
+      )
+      reason_codes.append("LIQUIDITY_PARTICIPATION_CAP")
 
     if price <= 0:
       reason_codes.append("INVALID_PRICE")
@@ -81,6 +96,13 @@ class OrderSizer:
       reason_codes.append("UNSUPPORTED_ORDER_TYPE")
 
     if sized_volume <= 0:
+      if (
+        order_type == OrderType.BUY
+        and raw_target_amount is not None
+        and raw_target_amount > 0
+        and price * self.rules.lot_size > raw_target_amount
+      ):
+        reason_codes.append("MIN_LOT_EXCEEDS_RISK_BUDGET")
       reason_codes.append("ZERO_SIZED_VOLUME")
 
     return OrderDraft(
@@ -106,29 +128,9 @@ class OrderSizer:
     account: Dict[str, Any],
     position: Optional[Dict[str, Any]] = None,
   ) -> int:
-    if price <= 0:
-      return 0
-
-    metadata = dict(intent.metadata or {})
-    requested_volume = int(
-      intent.target_volume
-      or metadata.get("requested_volume", metadata.get("volume", 0))
-      or 0
-    )
-
-    if order_type == OrderType.BUY:
-      raw_volume = requested_volume
-      if raw_volume <= 0:
-        raw_volume = self._target_buy_volume(intent, price, account, metadata)
-      return self.rules.normalize_buy_volume(raw_volume)
-
-    if order_type == OrderType.SELL:
-      available = int((position or {}).get("available_volume", 0) or 0)
-      if metadata.get("sell_all") or metadata.get("close_position") or requested_volume <= 0:
-        requested_volume = available
-      return self.rules.normalize_sell_volume(requested_volume, available)
-
-    return 0
+    return self.draft_intent(
+      intent, order_type, price, account, position
+    ).sized_volume
 
   def _target_buy_volume(
     self,
@@ -215,3 +217,11 @@ def _optional_int(value: Any) -> Optional[int]:
     return int(value)
   except (TypeError, ValueError):
     return None
+
+
+def _optional_positive_number(value: Any) -> Optional[float]:
+  try:
+    parsed = float(value)
+  except (TypeError, ValueError):
+    return None
+  return parsed if parsed > 0 else None

@@ -8,7 +8,6 @@ describe('LimitUpRadarPanel empty and error states', () => {
       <LimitUpRadarPanel
         armedCodes={new Set()}
         assistantEnabled={false}
-        autoScore={70}
         candidates={[]}
         errorMessage="行情服务暂不可用"
         exitPlanCodes={new Set()}
@@ -33,6 +32,8 @@ describe('LimitUpRadarPanel empty and error states', () => {
           scannedCount: 0,
           sealedCount: 0,
           staleCount: 0,
+          discoveredCount: 0,
+          eligibleCount: 0,
         }}
         systemWarnings={['Engine 全市场打板雷达尚未就绪']}
       />

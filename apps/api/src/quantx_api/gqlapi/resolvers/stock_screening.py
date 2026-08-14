@@ -12,6 +12,9 @@ from quantx_infrastructure.database.relational_connection import get_async_db
 from quantx_infrastructure.repositories.daily_signal_run_repository import (
   DailySignalRunRepository,
 )
+from quantx_infrastructure.repositories.first_board_promotion_repository import (
+  FirstBoardPromotionRepository,
+)
 from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   IndicatorSnapshotRepository,
 )
@@ -32,9 +35,12 @@ from quantx_infrastructure.services.trading_time_service import (
 
 from ..types.financial_types import FinancialSyncHealthStatus
 from ..types.stock_screening_types import (
+  FirstBoardPromotionFactor,
   IntradayVolumeScreenInput,
   IntradayVolumeScreenItem,
   IntradayVolumeScreenPage,
+  LimitUpChainSummary,
+  LimitUpLifecycleSnapshotType,
   LimitUpRadarEvent,
   LimitUpRadarIndustryHeat,
   LimitUpRadarInput,
@@ -44,6 +50,7 @@ from ..types.stock_screening_types import (
   LimitUpRadarSortField,
   LimitUpRadarStage,
   LimitUpRadarSummary,
+  LimitUpResearchArtifactType,
   RoeQualityStatus,
   SignalMeta,
   StockScreenFinancialHealth,
@@ -734,6 +741,7 @@ class StockScreeningResolver:
     input: LimitUpRadarInput,
     *,
     user_id: Optional[str] = None,
+    account_id: Optional[str] = None,
   ) -> LimitUpRadarPage:
     limit = min(max(input.limit or 200, 1), 200)
     offset = min(max(input.offset or 0, 0), 200 * 1000)
@@ -750,17 +758,31 @@ class StockScreeningResolver:
           broken_count=0,
           stale_count=0,
           excluded_count=0,
+          discovered_count=0,
+          eligible_count=0,
         ),
         total=0,
         limit=limit,
         offset=offset,
         score_version=RADAR_SCORE_VERSION,
+        promotion_model_version="first-board-promotion-v2-shadow-1",
+        chain=LimitUpChainSummary(
+          snapshot_version="",
+          max_board_count=0,
+          first_board_count=0,
+          sealed_count=0,
+          broken_count=0,
+          break_rate=0.0,
+          promotion_rate=0.0,
+        ),
         updated_at=None,
         is_scanner_running=False,
         warnings=["Engine 全市场打板雷达尚未就绪，请检查 Engine 与 QMT Agent"],
       )
 
     existing_instances: Dict[str, str] = {}
+    preferences: Dict[str, Any] = {}
+    research_artifacts: Dict[str, Any] = {}
     if user_id:
       async for db in get_async_db():
         runs = await StrategyRunRepository(db).find_all_strategy_runs(user_id)
@@ -789,6 +811,23 @@ class StockScreeningResolver:
             )
         break
 
+    if account_id or projection.get("items"):
+      try:
+        trade_date = time_utils.to_shanghai(time_utils.now()).date()
+        codes = [
+          str(item.get("code") or "").upper()
+          for item in list(projection.get("items") or [])
+          if item.get("code")
+        ]
+        async for db in get_async_db():
+          repository = FirstBoardPromotionRepository(db)
+          if account_id:
+            preferences = await repository.list_preferences(account_id, trade_date)
+          research_artifacts = await repository.latest_artifacts(trade_date, codes)
+          break
+      except (AttributeError, RuntimeError):
+        logger.warning("首板偏好或研究投影暂不可用，返回确定性工作台")
+
     stages = {stage.value for stage in input.stages or []}
     industries = set(input.include_industries or [])
     search = str(input.search or "").strip().lower()
@@ -812,6 +851,9 @@ class StockScreeningResolver:
     sort_field = input.sort_field
     sort_key = {
       LimitUpRadarSortField.SCORE: "radar_score",
+      LimitUpRadarSortField.PROMOTION_SCORE: "promotion_score",
+      LimitUpRadarSortField.EXPECTED_NET_RETURN: "expected_net_return_pct",
+      LimitUpRadarSortField.CVAR95: "cvar95_loss_pct",
       LimitUpRadarSortField.DISTANCE_TO_LIMIT: "distance_to_limit_pct",
       LimitUpRadarSortField.AMOUNT: "amount",
       LimitUpRadarSortField.UPDATED_AT: "updated_at",
@@ -829,6 +871,8 @@ class StockScreeningResolver:
 
     def item_type(raw: Dict[str, Any]) -> LimitUpRadarItem:
       code = str(raw.get("code") or "").upper()
+      artifact = research_artifacts.get(code)
+      artifact_content = dict(getattr(artifact, "content", None) or {})
       return LimitUpRadarItem(
         code=code,
         name=str(raw.get("name") or code),
@@ -866,6 +910,62 @@ class StockScreeningResolver:
           )
           for factor in list(raw.get("score_breakdown") or [])
         ],
+        board_segment=str(raw.get("board_segment") or "UNSUPPORTED"),
+        promotion_observed=bool(raw.get("promotion_observed")),
+        promotion_eligible=bool(raw.get("promotion_eligible")),
+        promotion_score=_finite_float(raw.get("promotion_score")),
+        promotion_model_version=str(raw.get("promotion_model_version") or ""),
+        exit_policy_version=str(raw.get("exit_policy_version") or ""),
+        promotion_snapshot_version=str(
+          raw.get("promotion_snapshot_version") or ""
+        ),
+        normalized_limit_progress=_finite_float(
+          raw.get("normalized_limit_progress")
+        ),
+        first_board_close_probability=_finite_float(
+          raw.get("first_board_close_probability")
+        ),
+        next_day_limit_touch_probability=_finite_float(
+          raw.get("next_day_limit_touch_probability")
+        ),
+        next_day_limit_seal_probability=_finite_float(
+          raw.get("next_day_limit_seal_probability")
+        ),
+        expected_net_return_pct=_finite_float(raw.get("expected_net_return_pct")),
+        cvar95_loss_pct=_finite_float(raw.get("cvar95_loss_pct")),
+        high_position_type=str(raw.get("high_position_type") or "DATA_UNKNOWN"),
+        promotion_factors=[
+          FirstBoardPromotionFactor(
+            code=str(factor.get("code") or ""),
+            label=str(factor.get("label") or ""),
+            contribution=_finite_float(factor.get("contribution")),
+            explanation=str(factor.get("explanation") or ""),
+          )
+          for factor in list(raw.get("promotion_factors") or [])
+        ],
+        candidate_preference=(
+          str(getattr(preferences.get(code), "preference", "") or "") or None
+        ),
+        research_artifact=(
+          LimitUpResearchArtifactType(
+            artifact_id=str(artifact.id),
+            status=str(artifact.status),
+            summary=str(artifact.summary or ""),
+            catalysts=list(artifact_content.get("catalysts") or []),
+            announcement_risks=list(
+              artifact_content.get("announcement_risks") or []
+            ),
+            citations=[str(value) for value in list(artifact.citations or [])],
+            data_gaps=list(artifact_content.get("data_gaps") or []),
+            confidence_note=str(artifact_content.get("confidence_note") or ""),
+            input_snapshot_version=str(artifact.input_snapshot_version),
+            agent_id=str(artifact.agent_id),
+            model=str(artifact.model),
+            generated_at=artifact.generated_at,
+          )
+          if artifact is not None
+          else None
+        ),
         break_count=_finite_int(raw.get("break_count")),
         first_touch_at=_parse_datetime(raw.get("first_touch_at")),
         first_sealed_at=_parse_datetime(raw.get("first_sealed_at")),
@@ -912,15 +1012,60 @@ class StockScreeningResolver:
         broken_count=_finite_int(summary.get("broken_count")),
         stale_count=_finite_int(summary.get("stale_count")),
         excluded_count=_finite_int(summary.get("excluded_count")),
+        discovered_count=_finite_int(
+          summary.get("discovered_count", summary.get("candidate_count"))
+        ),
+        eligible_count=_finite_int(summary.get("eligible_count")),
       ),
       total=total,
       limit=limit,
       offset=offset,
       score_version=str(projection.get("score_version") or RADAR_SCORE_VERSION),
+      promotion_model_version=str(projection.get("promotion_model_version") or ""),
+      chain=LimitUpChainSummary(
+        snapshot_version=str(dict(projection.get("chain") or {}).get("snapshot_version") or ""),
+        max_board_count=_finite_int(
+          dict(projection.get("chain") or {}).get("max_board_count")
+        ),
+        first_board_count=_finite_int(
+          dict(projection.get("chain") or {}).get("first_board_count")
+        ),
+        sealed_count=_finite_int(dict(projection.get("chain") or {}).get("sealed_count")),
+        broken_count=_finite_int(dict(projection.get("chain") or {}).get("broken_count")),
+        break_rate=_finite_float(dict(projection.get("chain") or {}).get("break_rate")),
+        promotion_rate=_finite_float(
+          dict(projection.get("chain") or {}).get("promotion_rate")
+        ),
+      ),
       updated_at=_parse_datetime(projection.get("updated_at")),
       is_scanner_running=bool(projection.get("is_scanner_running")),
       warnings=list(projection.get("warnings") or []),
     )
+
+  @staticmethod
+  async def limit_up_lifecycle(
+    code: str, trade_date: date
+  ) -> List[LimitUpLifecycleSnapshotType]:
+    normalized = str(code or "").strip().upper()
+    if not normalized:
+      raise ValueError("股票代码不能为空")
+    async for db in get_async_db():
+      rows = await FirstBoardPromotionRepository(db).list_lifecycle(
+        trade_date, normalized
+      )
+      return [
+        LimitUpLifecycleSnapshotType(
+          snapshot_version=str(row.snapshot_version),
+          feature_version=str(row.feature_version),
+          code=str(row.instrument_code),
+          stage=str(row.stage),
+          ever_touched_limit=bool(row.ever_touched_limit),
+          break_count=int(row.break_count or 0),
+          as_of=row.as_of,
+        )
+        for row in rows
+      ]
+    return []
 
   @staticmethod
   async def stock_signal_snapshot_meta() -> List[SignalMeta]:

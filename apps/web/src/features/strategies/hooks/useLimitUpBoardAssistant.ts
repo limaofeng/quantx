@@ -3,14 +3,13 @@ import { useMutation, useQuery, useSubscription } from 'urql';
 
 import {
   ApproveStrategyTradeIntentDocument,
-  ArmLimitUpBoardCandidateDocument,
-  DisarmLimitUpBoardCandidateDocument,
+  FirstBoardPromotionUpdatesDocument,
   LimitUpBoardAssistantDeskDocument,
   LimitUpBoardAssistantRuntimeDocument,
-  LimitUpBoardAssistantUpdatesDocument,
   ReconcileLimitUpBoardAssistantDocument,
   RejectStrategyTradeIntentDocument,
-  SaveLimitUpBoardAssistantDocument,
+  SaveFirstBoardAssistantDocument,
+  SetFirstBoardCandidatePreferenceDocument,
   type LimitUpBoardAssistantSettingsInput,
 } from '@/generated/gql/graphql';
 
@@ -20,7 +19,6 @@ const DEFAULT_SETTINGS: Omit<
 > = {
   approvalTtlMs: 15_000,
   autoExitAcknowledged: false,
-  autoSignalMinScore: 70,
   enabled: false,
   entryDistanceTicks: 1,
   entryEndTime: '14:50',
@@ -37,9 +35,13 @@ const DEFAULT_SETTINGS: Omit<
   maxHoldingExitTime: '14:50',
   maxHoldingTradingDays: 2,
   maxPriceDeviationBps: 20,
-  maxSinglePositionPct: 0.05,
+  maxDailyExposurePct: 0.06,
+  maxOpenPositions: 2,
+  maxRankedCandidates: 5,
+  maxSinglePositionPct: 0.02,
   mode: 'paper',
-  targetEntryAmount: 10_000,
+  plannedTailLossPct: 0.0015,
+  promotionModelMode: 'SHADOW',
 };
 
 function idempotencyKey(action: string, accountId: string, code: string) {
@@ -66,16 +68,17 @@ export function useLimitUpBoardAssistant(accountId?: string) {
     requestPolicy: 'cache-and-network',
   });
   const [updatesResult] = useSubscription({
-    query: LimitUpBoardAssistantUpdatesDocument,
+    query: FirstBoardPromotionUpdatesDocument,
     variables: { accountId: accountId || '' },
     pause: !accountId,
   });
-  const [, saveMutation] = useMutation(SaveLimitUpBoardAssistantDocument);
+  const [, saveMutation] = useMutation(SaveFirstBoardAssistantDocument);
   const [, reconcileMutation] = useMutation(
     ReconcileLimitUpBoardAssistantDocument
   );
-  const [, armMutation] = useMutation(ArmLimitUpBoardCandidateDocument);
-  const [, disarmMutation] = useMutation(DisarmLimitUpBoardCandidateDocument);
+  const [, preferenceMutation] = useMutation(
+    SetFirstBoardCandidatePreferenceDocument
+  );
   const [, approveMutation] = useMutation(
     ApproveStrategyTradeIntentDocument
   );
@@ -87,9 +90,9 @@ export function useLimitUpBoardAssistant(accountId?: string) {
   }, [refreshAssistant, refreshRuntime, runId]);
 
   useEffect(() => {
-    if (!updatesResult.data?.limitUpBoardAssistantUpdates.version) return;
+    if (!updatesResult.data?.firstBoardPromotionUpdates.version) return;
     refresh();
-  }, [refresh, updatesResult.data?.limitUpBoardAssistantUpdates.version]);
+  }, [refresh, updatesResult.data?.firstBoardPromotionUpdates.version]);
 
   useEffect(() => {
     if (!accountId) return;
@@ -107,8 +110,6 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       autoExitAcknowledged:
         assistant?.autoExitAcknowledged ??
         DEFAULT_SETTINGS.autoExitAcknowledged,
-      autoSignalMinScore:
-        assistant?.autoSignalMinScore ?? DEFAULT_SETTINGS.autoSignalMinScore,
       enabled: assistant?.enabled ?? DEFAULT_SETTINGS.enabled,
       entryDistanceTicks:
         assistant?.entryDistanceTicks ?? DEFAULT_SETTINGS.entryDistanceTicks,
@@ -148,9 +149,18 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       maxSinglePositionPct:
         assistant?.maxSinglePositionPct ??
         DEFAULT_SETTINGS.maxSinglePositionPct,
+      maxDailyExposurePct:
+        assistant?.maxDailyExposurePct ??
+        DEFAULT_SETTINGS.maxDailyExposurePct,
+      plannedTailLossPct:
+        assistant?.plannedTailLossPct ?? DEFAULT_SETTINGS.plannedTailLossPct,
+      maxOpenPositions:
+        assistant?.maxOpenPositions ?? DEFAULT_SETTINGS.maxOpenPositions,
+      maxRankedCandidates:
+        assistant?.maxRankedCandidates ?? DEFAULT_SETTINGS.maxRankedCandidates,
+      promotionModelMode:
+        assistant?.promotionModelMode ?? DEFAULT_SETTINGS.promotionModelMode,
       mode: assistant?.mode ?? DEFAULT_SETTINGS.mode,
-      targetEntryAmount:
-        assistant?.targetEntryAmount ?? DEFAULT_SETTINGS.targetEntryAmount,
     }),
     [accountId, assistant]
   );
@@ -161,7 +171,7 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       const result = await saveMutation({
         input: { ...currentSettings, ...patch, accountId },
       });
-      const payload = result.data?.saveLimitUpBoardAssistant;
+      const payload = result.data?.saveFirstBoardAssistant;
       if (result.error || !payload?.success) {
         throw new Error(result.error?.message || payload?.message || '保存失败');
       }
@@ -182,44 +192,39 @@ export function useLimitUpBoardAssistant(accountId?: string) {
     return payload;
   }, [accountId, reconcileMutation, refresh]);
 
-  const arm = useCallback(
-    async (instrumentCode: string) => {
+  const setPreference = useCallback(
+    async (instrumentCode: string, preference: 'PREFER' | 'IGNORE') => {
       if (!accountId) throw new Error('未选择交易账户');
-      const result = await armMutation({
+      const result = await preferenceMutation({
         input: {
           accountId,
           instrumentCode,
-          idempotencyKey: idempotencyKey('arm', accountId, instrumentCode),
+          preference,
+          idempotencyKey: idempotencyKey(
+            `preference:${preference}`,
+            accountId,
+            instrumentCode
+          ),
         },
       });
-      const payload = result.data?.armLimitUpBoardCandidate;
+      const payload = result.data?.setFirstBoardCandidatePreference;
       if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '布防失败');
+        throw new Error(result.error?.message || payload?.message || '偏好保存失败');
       }
       refresh();
       return payload;
     },
-    [accountId, armMutation, refresh]
+    [accountId, preferenceMutation, refresh]
+  );
+
+  const arm = useCallback(
+    (instrumentCode: string) => setPreference(instrumentCode, 'PREFER'),
+    [setPreference]
   );
 
   const disarm = useCallback(
-    async (instrumentCode: string) => {
-      if (!accountId) throw new Error('未选择交易账户');
-      const result = await disarmMutation({
-        input: {
-          accountId,
-          instrumentCode,
-          idempotencyKey: idempotencyKey('disarm', accountId, instrumentCode),
-        },
-      });
-      const payload = result.data?.disarmLimitUpBoardCandidate;
-      if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '取消布防失败');
-      }
-      refresh();
-      return payload;
-    },
-    [accountId, disarmMutation, refresh]
+    (instrumentCode: string) => setPreference(instrumentCode, 'IGNORE'),
+    [setPreference]
   );
 
   const approve = useCallback(

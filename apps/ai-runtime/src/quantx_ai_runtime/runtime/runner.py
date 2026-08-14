@@ -397,7 +397,9 @@ async def execute_run(
     tool_call_count=prior_tool_call_count,
     max_tool_calls=config.max_tool_calls,
   )
-  agent = build_agent(runtime_context, model=config.model)
+  agent = build_agent(
+    runtime_context, model=config.model, agent_id=str(run.agent_id or "research_assistant")
+  )
   resume_state = await _resume_state(run, agent)
   input_value: Any = resume_state
   if input_value is None:

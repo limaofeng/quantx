@@ -69,6 +69,39 @@ export interface RadarCandidate {
   stageLabel: string;
   updatedAt: string;
   volumePaceRatio: number;
+  boardSegment: string;
+  promotionObserved: boolean;
+  promotionEligible: boolean;
+  promotionScore: number;
+  promotionModelVersion: string;
+  exitPolicyVersion: string;
+  promotionSnapshotVersion: string;
+  normalizedLimitProgress: number;
+  firstBoardCloseProbability: number;
+  nextDayLimitTouchProbability: number;
+  nextDayLimitSealProbability: number;
+  expectedNetReturnPct: number;
+  cvar95LossPct: number;
+  highPositionType: string;
+  candidatePreference?: string | null;
+  promotionFactors: Array<{
+    code: string;
+    contribution: number;
+    explanation: string;
+    label: string;
+  }>;
+  researchArtifact?: {
+    artifactId: string;
+    status: string;
+    summary: string;
+    catalysts: string[];
+    announcementRisks: string[];
+    citations: string[];
+    dataGaps: string[];
+    confidenceNote: string;
+    inputSnapshotVersion: string;
+    generatedAt: string;
+  } | null;
 }
 
 export interface RadarIndustryHeat {
@@ -87,16 +120,28 @@ export interface RadarSummary {
   scannedCount: number;
   sealedCount: number;
   staleCount: number;
+  discoveredCount: number;
+  eligibleCount: number;
 }
 
 const LIMIT_UP_RADAR_QUERY = gql(`
-  query LimitUpRadar($input: LimitUpRadarInput!) {
-    limitUpRadar(input: $input) {
+  query FirstBoardPromotionDesk($accountId: String!, $input: LimitUpRadarInput!) {
+    firstBoardPromotionDesk(accountId: $accountId, input: $input) {
       total
       scoreVersion
+      promotionModelVersion
       updatedAt
       isScannerRunning
       warnings
+      chain {
+        snapshotVersion
+        maxBoardCount
+        firstBoardCount
+        sealedCount
+        brokenCount
+        breakRate
+        promotionRate
+      }
       summary {
         scannedCount
         candidateCount
@@ -105,6 +150,8 @@ const LIMIT_UP_RADAR_QUERY = gql(`
         brokenCount
         staleCount
         excludedCount
+        discoveredCount
+        eligibleCount
       }
       industries {
         industry
@@ -137,6 +184,39 @@ const LIMIT_UP_RADAR_QUERY = gql(`
         stageLabel
         radarScore
         scoreVersion
+        boardSegment
+        promotionObserved
+        promotionEligible
+        promotionScore
+        promotionModelVersion
+        exitPolicyVersion
+        promotionSnapshotVersion
+        normalizedLimitProgress
+        firstBoardCloseProbability
+        nextDayLimitTouchProbability
+        nextDayLimitSealProbability
+        expectedNetReturnPct
+        cvar95LossPct
+        highPositionType
+        candidatePreference
+        promotionFactors {
+          code
+          label
+          contribution
+          explanation
+        }
+        researchArtifact {
+          artifactId
+          status
+          summary
+          catalysts
+          announcementRisks
+          citations
+          dataGaps
+          confidenceNote
+          inputSnapshotVersion
+          generatedAt
+        }
         scoreBreakdown {
           code
           label
@@ -184,9 +264,11 @@ const EMPTY_SUMMARY: RadarSummary = {
   scannedCount: 0,
   sealedCount: 0,
   staleCount: 0,
+  discoveredCount: 0,
+  eligibleCount: 0,
 };
 
-export function useLimitUpRadar(active: boolean) {
+export function useLimitUpRadar(active: boolean, accountId?: string) {
   const [stage, setStage] = useState<RadarStage | 'ALL'>('ALL');
   const [industry, setIndustry] = useState('ALL');
   const [search, setSearch] = useState('');
@@ -205,7 +287,7 @@ export function useLimitUpRadar(active: boolean) {
   );
   const [result, refresh] = useQuery({
     query: LIMIT_UP_RADAR_QUERY,
-    variables: { input },
+    variables: { accountId: accountId || '__MARKET_ONLY__', input },
     pause: !active,
     requestPolicy: 'network-only',
   });
@@ -220,7 +302,7 @@ export function useLimitUpRadar(active: boolean) {
     return () => window.clearInterval(intervalId);
   }, [active, refresh]);
 
-  const page = result.data?.limitUpRadar;
+  const page = result.data?.firstBoardPromotionDesk;
   return {
     candidates: (page?.items ?? []) as RadarCandidate[],
     error: result.error,
@@ -228,8 +310,11 @@ export function useLimitUpRadar(active: boolean) {
     industries: (page?.industries ?? []) as RadarIndustryHeat[],
     industry,
     isScannerRunning: Boolean(page?.isScannerRunning),
+    chain: page?.chain ?? null,
     refresh,
     scoreVersion: page?.scoreVersion ?? 'limit-up-radar-v1',
+    promotionModelVersion:
+      page?.promotionModelVersion ?? 'first-board-promotion-v2-shadow-1',
     search,
     setIndustry,
     setSearch,

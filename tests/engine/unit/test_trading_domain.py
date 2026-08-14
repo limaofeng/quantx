@@ -466,6 +466,55 @@ def test_order_sizer_builds_order_draft_with_traceable_size_reason():
   assert "BUY_LOT_NORMALIZED" in draft.size_reason_codes
 
 
+def test_order_sizer_rejects_minimum_lot_above_risk_budget_without_rounding_up():
+  intent = TradeIntent(
+    strategy_id="s",
+    run_id="r",
+    instrument_code="688001.SH",
+    direction=TradeIntentDirection.BUY,
+    bucket="swing",
+    reason="first_board_risk_budget",
+    target_position_pct=0.01,
+  )
+
+  draft = OrderSizer().draft_intent(
+    intent,
+    OrderType.BUY,
+    price=120.0,
+    account={"available_cash": 100_000, "total_asset": 100_000},
+  )
+
+  assert draft.raw_target_amount == 1_000
+  assert draft.sized_volume == 0
+  assert "MIN_LOT_EXCEEDS_RISK_BUDGET" in draft.size_reason_codes
+
+
+def test_order_sizer_applies_liquidity_participation_before_lot_normalization():
+  intent = TradeIntent(
+    strategy_id="s",
+    run_id="r",
+    instrument_code="000001.SZ",
+    direction=TradeIntentDirection.BUY,
+    bucket="swing",
+    reason="first_board_liquidity_budget",
+    target_position_pct=0.02,
+    metadata={"liquidity_cap_amount": 1_250.0},
+  )
+
+  draft = OrderSizer().draft_intent(
+    intent,
+    OrderType.BUY,
+    price=10.0,
+    account={"available_cash": 100_000, "total_asset": 100_000},
+  )
+
+  assert draft.raw_target_amount == 1_250
+  assert draft.sized_volume == 100
+  assert draft.sized_amount == 1_000
+  assert draft.metadata["uncapped_target_amount"] == 2_000
+  assert "LIQUIDITY_PARTICIPATION_CAP" in draft.size_reason_codes
+
+
 def test_order_risk_decision_caps_buy_by_context_caps():
   checker = TradingRiskChecker()
   request = OrderRequest(

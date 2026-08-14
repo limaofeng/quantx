@@ -148,6 +148,7 @@ query LimitUpBoardWorkbench(
     limitPriceHint
     targetPositionPct
     targetAmount
+    targetPositionPct
     targetVolume
     signalPrice
     limitUpPrice
@@ -207,9 +208,12 @@ query LimitUpBoardAssistantDesk($accountId: String!) {
     autoExitAcknowledged
     configVersion
     universeRevision
-    targetEntryAmount
     maxSinglePositionPct
-    autoSignalMinScore
+    maxDailyExposurePct
+    plannedTailLossPct
+    maxOpenPositions
+    maxRankedCandidates
+    promotionModelMode
     entryDistanceTicks
     entryStartTime
     entryEndTime
@@ -298,6 +302,22 @@ mutation SaveLimitUpBoardAssistant($input: LimitUpBoardAssistantSettingsInput!) 
   }
 }
 
+mutation SaveFirstBoardAssistant($input: LimitUpBoardAssistantSettingsInput!) {
+  saveFirstBoardAssistant(input: $input) {
+    success
+    code
+    message
+  }
+}
+
+mutation SetFirstBoardCandidatePreference($input: FirstBoardCandidatePreferenceInput!) {
+  setFirstBoardCandidatePreference(input: $input) {
+    success
+    code
+    message
+  }
+}
+
 mutation ReconcileLimitUpBoardAssistant($accountId: String!) {
   reconcileLimitUpBoardAssistant(accountId: $accountId) {
     success
@@ -324,6 +344,14 @@ mutation DisarmLimitUpBoardCandidate($input: LimitUpBoardCandidateActionInput!) 
 
 subscription LimitUpBoardAssistantUpdates($accountId: String!) {
   limitUpBoardAssistantUpdates(accountId: $accountId) {
+    accountId
+    version
+    occurredAt
+  }
+}
+
+subscription FirstBoardPromotionUpdates($accountId: String!) {
+  firstBoardPromotionUpdates(accountId: $accountId) {
     accountId
     version
     occurredAt

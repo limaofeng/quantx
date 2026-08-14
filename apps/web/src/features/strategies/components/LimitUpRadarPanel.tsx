@@ -7,6 +7,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
+  useEffect,
   useMemo,
   useState,
   type CSSProperties,
@@ -24,8 +25,10 @@ import type {
   RadarSummary,
 } from '../hooks/useLimitUpRadar';
 
-const ROW_HEIGHT = 64;
-const VIEWPORT_HEIGHT = 610;
+import { LimitUpRadarMiniChart } from './LimitUpRadarMiniChart';
+
+const ROW_HEIGHT = 76;
+const VIEWPORT_HEIGHT = 624;
 const OVERSCAN = 5;
 
 const stageTone: Record<RadarStage, string> = {
@@ -52,7 +55,6 @@ const stages: Array<{ label: string; value: RadarStage | 'ALL' }> = [
 function CandidateRow({
   armed,
   assistantEnabled,
-  autoScore,
   busy,
   candidate,
   managed,
@@ -64,7 +66,6 @@ function CandidateRow({
 }: {
   armed: boolean;
   assistantEnabled: boolean;
-  autoScore: number;
   busy: boolean;
   candidate: RadarCandidate;
   managed: boolean;
@@ -77,13 +78,11 @@ function CandidateRow({
   const hardBlocked =
     candidate.isStale ||
     candidate.oneWordLimitUp ||
-    candidate.blockedReasons.some(reason =>
-      ['ONE_WORD_LIMIT_UP', 'LIMIT_UP_ALREADY_REACHED'].includes(reason)
-    );
+    !candidate.promotionEligible;
   const autoTracked =
     assistantEnabled &&
     candidate.stage === 'NEAR_LIMIT' &&
-    candidate.radarScore >= autoScore &&
+    candidate.promotionEligible &&
     !hardBlocked;
   const stateLabel = managed
     ? '已托管'
@@ -91,17 +90,17 @@ function CandidateRow({
       ? '待确认'
       : armed
         ? candidate.stage === 'NEAR_LIMIT'
-          ? '人工布防'
+          ? '优先关注'
           : '等待临板'
         : autoTracked
-          ? '自动布防'
+          ? '晋级候选'
           : '仅观察';
 
   return (
     <div
       style={style}
       className={cn(
-        'absolute left-0 top-0 grid w-full grid-cols-[minmax(150px,1.35fr)_74px_70px_72px_70px_62px_96px] items-center gap-2 rounded-md border px-3 text-left focus-within:ring-2 focus-within:ring-cyan-400/60',
+        'absolute left-0 top-0 grid w-full grid-cols-[minmax(170px,1.35fr)_76px_76px_84px_90px_88px_82px_88px_98px] items-center gap-2 rounded-md border px-3 text-left focus-within:ring-2 focus-within:ring-cyan-400/60',
         candidate.isStale
           ? 'border-white/[0.04] bg-slate-950/70 opacity-55'
           : pending
@@ -127,33 +126,66 @@ function CandidateRow({
           ) : null}
         </span>
         <span className="mt-1 block truncate font-mono text-[10px] text-slate-500">
-          {candidate.code} · {candidate.industry || '未分类'}
+          {candidate.code} · {candidate.boardSegment === 'GROWTH' ? '双创' : '主板'} ·{' '}
+          {candidate.industry || '未分类'}
         </span>
       </button>
-      <span className="text-right font-mono text-xs font-black text-red-300">
-        {candidate.currentPrice.toFixed(2)}
-        <span className="block text-[9px] text-red-400/75">
-          +{candidate.changePct.toFixed(2)}%
+      <span className="text-center">
+        <span
+          className={cn(
+            'inline-flex rounded border px-1.5 py-1 text-[10px] font-black',
+            stageTone[candidate.stage]
+          )}
+        >
+          {candidate.stageLabel}
+        </span>
+        <span className="mt-1 block text-[9px] text-slate-600">
+          进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
         </span>
       </span>
-      <span className="text-right font-mono text-[11px] text-slate-300">
-        {candidate.distanceToLimitPct.toFixed(2)}%
-        <span className="block text-[9px] text-slate-600">距涨停</span>
-      </span>
-      <span className="text-right font-mono text-[11px] text-slate-300">
-        {candidate.last5mVolumeRatio.toFixed(1)}x
-        <span className="block text-[9px] text-slate-600">5m 量比</span>
-      </span>
-      <span
-        className={cn(
-          'rounded border px-1.5 py-1 text-center text-[10px] font-black',
-          stageTone[candidate.stage]
-        )}
-      >
-        {candidate.stageLabel}
-      </span>
       <span className="text-center font-mono text-sm font-black text-cyan-200">
-        {candidate.radarScore.toFixed(1)}
+        {(candidate.firstBoardCloseProbability * 100).toFixed(0)}%
+        <span className="block text-[9px] font-normal text-slate-600">首板封住</span>
+      </span>
+      <span className="text-center font-mono text-[12px] font-black text-violet-200">
+        {(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%
+        <span className="block text-[9px] font-normal text-slate-600">
+          二板触及 / {(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住
+        </span>
+      </span>
+      <span className="text-center font-mono text-[11px] font-black text-red-300">
+        {candidate.expectedNetReturnPct >= 0 ? '+' : ''}
+        {candidate.expectedNetReturnPct.toFixed(2)}%
+        <span className="block text-[9px] font-normal text-slate-600">
+          净期望 / CVaR {candidate.cvar95LossPct.toFixed(1)}%
+        </span>
+      </span>
+      <span className="text-center text-[10px] font-black text-slate-300">
+        {{
+          BASE_BREAKOUT: '基底突破',
+          HIGH_BREAKOUT: '高位突破',
+          OVERHEATED: '过热加速',
+          DATA_UNKNOWN: '数据未知',
+        }[candidate.highPositionType] ?? candidate.highPositionType}
+        <span className="mt-1 block font-mono text-[9px] font-normal text-slate-600">
+          晋级分 {candidate.promotionScore.toFixed(1)}
+        </span>
+      </span>
+      <span className="text-center text-[10px] font-black text-slate-300">
+        {candidate.researchArtifact ? '研究已生成' : '等待研究'}
+        <span className="mt-1 block text-[9px] font-normal text-slate-600">
+          {candidate.researchArtifact?.dataGaps.length
+            ? `${candidate.researchArtifact.dataGaps.length} 项缺口`
+            : candidate.researchArtifact
+              ? '公告证据已附'
+              : 'AI 不影响资格'}
+        </span>
+      </span>
+      <span className="text-center text-[10px] text-slate-400">
+        {candidate.promotionEligible ? '资格通过' : '硬否决'}
+        <span className="mt-1 block truncate text-[9px] text-slate-600">
+          {candidate.blockedReasons[0] || '确定性规则'}
+        </span>
       </span>
       {candidate.isStale ? (
         <span className="rounded-md border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1.5 text-center text-[10px] font-black text-amber-200/80">
@@ -179,7 +211,7 @@ function CandidateRow({
           onClick={() => onDisarm(candidate.code)}
           className="h-7 border-white/10 bg-white/[0.03] px-2 text-[10px] text-slate-300 hover:bg-white/[0.07]"
         >
-          {busy ? '处理中' : '取消布防'}
+          {busy ? '处理中' : '取消关注'}
         </Button>
       ) : (
         <Button
@@ -188,11 +220,11 @@ function CandidateRow({
           disabled={busy || hardBlocked}
           onClick={() => onArm(candidate.code)}
           title={
-            candidate.isStale ? '报价超过15秒，仅供观察' : '加入当日人工布防'
+            candidate.isStale ? '报价超过15秒，仅供观察' : '提高账户候选关注优先级'
           }
           className="h-7 bg-red-500 px-2 text-[10px] font-black text-white hover:bg-red-400"
         >
-          {busy ? '处理中' : autoTracked ? '保留至收盘' : '当日布防'}
+          {busy ? '处理中' : autoTracked ? '优先关注' : '关注'}
         </Button>
       )}
     </div>
@@ -202,7 +234,6 @@ function CandidateRow({
 export function LimitUpRadarPanel({
   armedCodes,
   assistantEnabled,
-  autoScore,
   busyCode,
   candidates,
   errorMessage,
@@ -225,7 +256,6 @@ export function LimitUpRadarPanel({
 }: {
   armedCodes: Set<string>;
   assistantEnabled: boolean;
-  autoScore: number;
   busyCode?: string | null;
   candidates: RadarCandidate[];
   errorMessage?: string;
@@ -247,6 +277,17 @@ export function LimitUpRadarPanel({
   systemWarnings: string[];
 }) {
   const [scrollTop, setScrollTop] = useState(0);
+  const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const selected = useMemo(
+    () =>
+      candidates.find(item => item.code === selectedCode) ?? candidates[0] ?? null,
+    [candidates, selectedCode]
+  );
+  useEffect(() => {
+    if (selectedCode && !candidates.some(item => item.code === selectedCode)) {
+      setSelectedCode(null);
+    }
+  }, [candidates, selectedCode]);
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const visibleCount = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + OVERSCAN * 2;
   const visible = useMemo(
@@ -266,10 +307,11 @@ export function LimitUpRadarPanel({
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 text-sm font-black text-slate-100">
             <Radar className="h-4 w-4 text-cyan-300" />
-            市场候选
+            首板晋级候选
           </div>
           <span className="font-mono text-[10px] text-slate-500">
-            {summary.candidateCount} 候选 · {summary.scannedCount} 已扫描
+            {summary.discoveredCount} 发现 · {summary.eligibleCount} 合格 ·{' '}
+            {summary.scannedCount} 已扫描
           </span>
           <span className="flex items-center gap-1.5 text-[10px] text-slate-500">
             <span
@@ -340,15 +382,17 @@ export function LimitUpRadarPanel({
       ) : null}
 
       <div className="overflow-x-auto px-3 pb-3 custom-scrollbar">
-        <div className="min-w-[760px]">
-          <div className="grid grid-cols-[minmax(150px,1.35fr)_74px_70px_72px_70px_62px_96px] gap-2 border-b border-white/[0.06] px-3 py-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
+        <div className="min-w-[1080px]">
+          <div className="grid grid-cols-[minmax(170px,1.35fr)_76px_76px_84px_90px_88px_82px_88px_98px] gap-2 border-b border-white/[0.06] px-3 py-2 text-[9px] font-black tracking-wider text-slate-600">
             <span>候选标的</span>
-            <span className="text-right">价格</span>
-            <span className="text-right">距离</span>
-            <span className="text-right">量能</span>
-            <span className="text-center">阶段</span>
-            <span className="text-center">评分</span>
-            <span className="text-center">状态 / 操作</span>
+            <span className="text-center">生命周期</span>
+            <span className="text-center">首板封住</span>
+            <span className="text-center">T+1 晋级</span>
+            <span className="text-center">收益 / 尾损</span>
+            <span className="text-center">价格位置</span>
+            <span className="text-center">AI 研究</span>
+            <span className="text-center">资格</span>
+            <span className="text-center">操作</span>
           </div>
           {candidates.length ? (
             <div
@@ -370,13 +414,12 @@ export function LimitUpRadarPanel({
                     }}
                     armed={armedCodes.has(candidate.code)}
                     assistantEnabled={assistantEnabled}
-                    autoScore={autoScore}
                     busy={busyCode === candidate.code}
                     managed={exitPlanCodes.has(candidate.code)}
                     pending={pendingCodes.has(candidate.code)}
                     onArm={onArm}
                     onDisarm={onDisarm}
-                    onOpenStock={onOpenStock}
+                    onOpenStock={setSelectedCode}
                   />
                 ))}
               </div>
@@ -394,13 +437,118 @@ export function LimitUpRadarPanel({
           )}
         </div>
       </div>
+      {selected ? (
+        <div className="grid gap-px border-t border-white/[0.06] bg-white/[0.06] lg:grid-cols-[220px_1fr_1fr]">
+          <section className="bg-[#0a1322] p-3" aria-label="候选走势">
+            <div className="mb-2 flex items-center justify-between">
+              <div>
+                <h3 className="text-[11px] font-black text-slate-200">
+                  {selected.name} · 生命周期
+                </h3>
+                <p className="mt-0.5 font-mono text-[9px] text-slate-600">
+                  数据 {new Date(selected.updatedAt).toLocaleTimeString('zh-CN')}
+                </p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 text-[9px]"
+                onClick={() => onOpenStock(selected.code)}
+              >
+                打开 K 线
+              </Button>
+            </div>
+            <LimitUpRadarMiniChart code={selected.code} />
+          </section>
+          <section className="bg-[#0a1322] p-3" aria-label="晋级因子证据">
+            <h3 className="text-[11px] font-black text-slate-200">因子与判断依据</h3>
+            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
+              {selected.promotionFactors.map(factor => (
+                <div
+                  key={factor.code}
+                  className="rounded border border-white/[0.06] bg-white/[0.025] px-2 py-1.5"
+                >
+                  <div className="flex justify-between text-[9px]">
+                    <span className="font-black text-slate-300">{factor.label}</span>
+                    <span className="font-mono text-cyan-300">
+                      {factor.contribution.toFixed(2)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[9px] leading-4 text-slate-600">
+                    {factor.explanation}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1">
+              {selected.events.slice(0, 6).map(event => (
+                <span
+                  key={event.eventId}
+                  className="rounded border border-white/[0.06] px-1.5 py-1 text-[9px] text-slate-500"
+                >
+                  {event.stageLabel} ·{' '}
+                  {new Date(event.occurredAt).toLocaleTimeString('zh-CN')}
+                </span>
+              ))}
+            </div>
+          </section>
+          <section className="bg-[#0a1322] p-3" aria-label="AI 公告研究">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[11px] font-black text-slate-200">AI 公告研究</h3>
+              <span className="text-[9px] text-slate-600">不参与交易资格</span>
+            </div>
+            {selected.researchArtifact ? (
+              <div className="mt-2 space-y-2 text-[9px] leading-4">
+                <p className="text-slate-400">{selected.researchArtifact.summary}</p>
+                {selected.researchArtifact.announcementRisks.length ? (
+                  <p className="text-amber-200/80">
+                    公告风险：{selected.researchArtifact.announcementRisks.join('；')}
+                  </p>
+                ) : null}
+                {selected.researchArtifact.dataGaps.length ? (
+                  <p className="text-slate-600">
+                    数据缺口：{selected.researchArtifact.dataGaps.join('；')}
+                  </p>
+                ) : null}
+                <div className="flex flex-wrap gap-1">
+                  {selected.researchArtifact.citations.slice(0, 5).map(citation =>
+                    /^https?:\/\//i.test(citation) ? (
+                      <a
+                        key={citation}
+                        href={citation}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="max-w-[180px] truncate rounded border border-cyan-400/15 px-1.5 py-1 text-cyan-300 hover:bg-cyan-400/10"
+                      >
+                        公告引用
+                      </a>
+                    ) : (
+                      <span
+                        key={citation}
+                        className="max-w-[240px] truncate rounded border border-white/10 px-1.5 py-1 text-slate-500"
+                        title={citation}
+                      >
+                        {citation}
+                      </span>
+                    ),
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="mt-3 rounded border border-dashed border-white/10 p-3 text-[9px] leading-4 text-slate-600">
+                候选进入动态 Top 5 后会生成一次市场级共享研究。AI Runtime 离线或公告缺失不会改变资格。
+              </p>
+            )}
+          </section>
+        </div>
+      ) : null}
       <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2 text-[9px] text-slate-600">
         <span>稳定行高 · 超过 100 条自动虚拟滚动</span>
         <button
           type="button"
           className="flex items-center gap-1 rounded px-1.5 py-1 text-slate-500 hover:bg-white/[0.05] hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          onClick={() => candidates[0] && onOpenStock(candidates[0].code)}
-          disabled={!candidates.length}
+          onClick={() => selected && onOpenStock(selected.code)}
+          disabled={!selected}
         >
           <ExternalLink className="h-3 w-3" />
           打开首位候选

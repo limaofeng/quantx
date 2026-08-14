@@ -68,6 +68,15 @@ from .financial_metric_roe_quality import FinancialMetricRoeQuality
 from .financial_metric_snapshot import FinancialMetricSnapshot
 from .financial_sync_code_audit import FinancialSyncCodeAudit
 from .financial_sync_run import FinancialSyncRun
+from .first_board_promotion import (
+  FirstBoardCandidatePreference,
+  FirstBoardModelRelease,
+  FirstBoardPromotionAssessmentRecord,
+  LimitUpChainSnapshot,
+  LimitUpLifecycleSnapshot,
+  LimitUpResearchArtifact,
+  LimitUpResearchJob,
+)
 from .holidays import Holiday
 from .indicator_snapshot import IndicatorSnapshot
 
@@ -200,6 +209,13 @@ __all__ = [
   "FinancialMetricRoeQuality",
   "FinancialSyncCodeAudit",
   "FinancialSyncRun",
+  "FirstBoardCandidatePreference",
+  "FirstBoardModelRelease",
+  "FirstBoardPromotionAssessmentRecord",
+  "LimitUpChainSnapshot",
+  "LimitUpLifecycleSnapshot",
+  "LimitUpResearchArtifact",
+  "LimitUpResearchJob",
   "DailySignalDefinition",
   "DailySignalRun",
   "DailyAssetSnapshot",

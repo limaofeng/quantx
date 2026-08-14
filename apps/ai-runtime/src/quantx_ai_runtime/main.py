@@ -35,16 +35,19 @@ async def run_runtime() -> None:
       )
 
   consumer = None
+  research_consumer = None
   status = "unconfigured"
   if config.configured:
     try:
       from agents import set_tracing_disabled
 
       from .runtime.consumer import run_consumer
+      from .runtime.limit_up_research import run_limit_up_research_consumer
 
       os.environ["OPENAI_API_KEY"] = config.api_key
       set_tracing_disabled(not config.tracing_enabled)
       consumer = run_consumer
+      research_consumer = run_limit_up_research_consumer
       status = "ready"
     except ModuleNotFoundError as exc:
       if exc.name != "agents":
@@ -71,6 +74,12 @@ async def run_runtime() -> None:
       asyncio.create_task(
         consumer(stopped, instance_id=instance_id, config=config),
         name="ai-runtime-consumer",
+      )
+    )
+    tasks.append(
+      asyncio.create_task(
+        research_consumer(stopped, instance_id=instance_id, config=config),
+        name="limit-up-research-consumer",
       )
     )
   try:
