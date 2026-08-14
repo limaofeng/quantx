@@ -23,7 +23,7 @@ from quantx_infrastructure.repositories.first_board_promotion_repository import 
 )
 from sqlalchemy import select
 
-from quantx_ai_runtime.config import AiRuntimeConfig
+from quantx_ai_runtime.config import AiRuntimeConfig, AiRuntimeConfigController
 
 logger = logging.getLogger(__name__)
 PROMPT_VERSION = "limit-up-research-v1"
@@ -115,12 +115,13 @@ async def execute_limit_up_research_job(
     ),
     tools=[],
   )
-  result = await Runner.run(
-    agent,
-    "请生成市场级共享研究产物：\n"
-    + json.dumps(facts, ensure_ascii=False, default=str),
-    max_turns=2,
-  )
+  async with asyncio.timeout(config.run_timeout_seconds):
+    result = await Runner.run(
+      agent,
+      "请生成市场级共享研究产物：\n"
+      + json.dumps(facts, ensure_ascii=False, default=str),
+      max_turns=min(2, config.max_turns),
+    )
   output = result.final_output
   if not isinstance(output, LimitUpResearchOutput):
     output = LimitUpResearchOutput.model_validate(output)
@@ -162,9 +163,16 @@ async def run_limit_up_research_consumer(
   stopped: asyncio.Event,
   *,
   instance_id: str,
-  config: AiRuntimeConfig,
+  controller: AiRuntimeConfigController,
 ) -> None:
   while not stopped.is_set():
+    config = controller.snapshot()
+    if not config.configured:
+      try:
+        await asyncio.wait_for(stopped.wait(), timeout=1.0)
+      except asyncio.TimeoutError:
+        pass
+      continue
     async with AsyncSessionLocal() as db:
       job = await FirstBoardPromotionRepository(db).claim_next_research_job(
         instance_id=instance_id,

@@ -14,7 +14,7 @@ from quantx_infrastructure.services.ai_assistant_event_bus import (
   AI_ASSISTANT_RUN_WAKE_CHANNEL,
 )
 
-from quantx_ai_runtime.config import AiRuntimeConfig
+from quantx_ai_runtime.config import AiRuntimeConfig, AiRuntimeConfigController
 
 from .runner import execute_run, settle_run_failure
 
@@ -91,13 +91,32 @@ async def run_consumer(
   stopped: asyncio.Event,
   *,
   instance_id: str,
-  config: AiRuntimeConfig,
+  controller: AiRuntimeConfigController,
 ) -> None:
-  subscription = await redis_pubsub.open_subscription(AI_ASSISTANT_RUN_WAKE_CHANNEL)
+  subscription = None
+  try:
+    subscription = await redis_pubsub.open_subscription(
+      AI_ASSISTANT_RUN_WAKE_CHANNEL
+    )
+  except Exception as exc:
+    logger.warning(
+      "AI assistant run wake subscription unavailable: %s",
+      exc.__class__.__name__,
+    )
   tasks: set[asyncio.Task] = set()
   try:
     while not stopped.is_set():
       tasks = {task for task in tasks if not task.done()}
+      config = controller.snapshot()
+      if not config.configured:
+        if subscription is not None:
+          await subscription.wait_for_message(timeout=1.0)
+        else:
+          try:
+            await asyncio.wait_for(stopped.wait(), timeout=1.0)
+          except asyncio.TimeoutError:
+            pass
+        continue
       while len(tasks) < config.max_concurrent_runs:
         async with AsyncSessionLocal() as db:
           run = await AiAssistantRepository(db).claim_next_run(
@@ -106,8 +125,14 @@ async def run_consumer(
           )
         if run is None:
           break
+        snapshot = dict(run.runtime_config_snapshot or {})
+        snapshot.setdefault("model", run.model)
+        run_config = config.for_run(
+          version=int(run.runtime_config_version or 0),
+          snapshot=snapshot,
+        )
         task = asyncio.create_task(
-          _execute_guarded(run.id, config, instance_id),
+          _execute_guarded(run.id, run_config, instance_id),
           name=f"ai-assistant-run:{run.id}",
         )
         tasks.add(task)
@@ -115,9 +140,27 @@ async def run_consumer(
         done, _ = await asyncio.wait(tasks, timeout=0.5)
         tasks.difference_update(done)
       else:
-        await subscription.wait_for_message(timeout=1.0)
+        if subscription is not None:
+          try:
+            await subscription.wait_for_message(timeout=1.0)
+          except Exception as exc:
+            logger.warning(
+              "AI assistant run wake subscription lost: %s",
+              exc.__class__.__name__,
+            )
+            try:
+              await subscription.close()
+            except Exception:
+              pass
+            subscription = None
+        else:
+          try:
+            await asyncio.wait_for(stopped.wait(), timeout=1.0)
+          except asyncio.TimeoutError:
+            pass
   finally:
-    await subscription.close()
+    if subscription is not None:
+      await subscription.close()
     if tasks:
       for task in tasks:
         task.cancel()

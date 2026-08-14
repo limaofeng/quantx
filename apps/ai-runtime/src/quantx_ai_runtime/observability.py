@@ -10,7 +10,7 @@ from quantx_domain.clock import utcnow
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 
-from .config import AiRuntimeConfig
+from .config import AiRuntimeConfig, AiRuntimeConfigController, runtime_status
 
 
 async def write_heartbeat(
@@ -27,6 +27,10 @@ async def write_heartbeat(
       "model": config.model,
       "maxConcurrentRuns": config.max_concurrent_runs,
       "externalSearchDefault": False,
+      "configVersion": config.version,
+      "configSource": config.source,
+      "enabled": config.enabled,
+      "apiKeyConfigured": config.provider_configured,
     }
     if heartbeat is None:
       heartbeat = RuntimeComponentHeartbeat(
@@ -49,11 +53,19 @@ async def heartbeat_loop(
   stopped: asyncio.Event,
   *,
   instance_id: str,
-  config: AiRuntimeConfig,
-  status: str,
+  controller: AiRuntimeConfigController,
+  dependencies_available: bool,
 ) -> None:
   while not stopped.is_set():
-    await write_heartbeat(instance_id=instance_id, config=config, status=status)
+    config = controller.snapshot()
+    await write_heartbeat(
+      instance_id=instance_id,
+      config=config,
+      status=runtime_status(
+        config,
+        dependencies_available=dependencies_available,
+      ),
+    )
     try:
       await asyncio.wait_for(stopped.wait(), timeout=15.0)
     except asyncio.TimeoutError:

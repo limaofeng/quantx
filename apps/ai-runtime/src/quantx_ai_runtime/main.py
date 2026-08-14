@@ -11,14 +11,27 @@ import uuid
 
 from quantx_infrastructure.database.relational_connection import close_database
 
-from .config import load_config
+from .config import (
+  AiRuntimeConfigController,
+  config_refresh_loop,
+  load_config,
+  runtime_status,
+)
 from .observability import heartbeat_loop, write_heartbeat
 
 logger = logging.getLogger(__name__)
 
 
 async def run_runtime() -> None:
-  config = load_config()
+  controller = AiRuntimeConfigController(load_config())
+  try:
+    await controller.refresh()
+  except Exception as exc:
+    logger.warning(
+      "AI Runtime initial config refresh failed: %s",
+      exc.__class__.__name__,
+    )
+  config = controller.snapshot()
   instance_id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
   stopped = asyncio.Event()
   loop = asyncio.get_running_loop()
@@ -36,8 +49,8 @@ async def run_runtime() -> None:
 
   consumer = None
   research_consumer = None
-  status = "unconfigured"
-  if config.configured:
+  dependencies_available = False
+  if config.provider_configured:
     try:
       from agents import set_tracing_disabled
 
@@ -48,23 +61,33 @@ async def run_runtime() -> None:
       set_tracing_disabled(not config.tracing_enabled)
       consumer = run_consumer
       research_consumer = run_limit_up_research_consumer
-      status = "ready"
+      dependencies_available = True
     except ModuleNotFoundError as exc:
       if exc.name != "agents":
         raise
-      status = "unavailable"
       logger.error(
         "AI Runtime dependency is unavailable; run uv sync or configure "
         "QUANTX_AI_RUNTIME_PYTHON_EXE"
       )
-  await write_heartbeat(instance_id=instance_id, config=config, status=status)
+  await write_heartbeat(
+    instance_id=instance_id,
+    config=config,
+    status=runtime_status(
+      config,
+      dependencies_available=dependencies_available,
+    ),
+  )
   tasks = [
+    asyncio.create_task(
+      config_refresh_loop(stopped, controller=controller),
+      name="ai-runtime-config-refresh",
+    ),
     asyncio.create_task(
       heartbeat_loop(
         stopped,
         instance_id=instance_id,
-        config=config,
-        status=status,
+        controller=controller,
+        dependencies_available=dependencies_available,
       ),
       name="ai-runtime-heartbeat",
     )
@@ -72,13 +95,13 @@ async def run_runtime() -> None:
   if consumer is not None:
     tasks.append(
       asyncio.create_task(
-        consumer(stopped, instance_id=instance_id, config=config),
+        consumer(stopped, instance_id=instance_id, controller=controller),
         name="ai-runtime-consumer",
       )
     )
     tasks.append(
       asyncio.create_task(
-        research_consumer(stopped, instance_id=instance_id, config=config),
+        research_consumer(stopped, instance_id=instance_id, controller=controller),
         name="limit-up-research-consumer",
       )
     )
@@ -105,7 +128,7 @@ async def run_runtime() -> None:
     try:
       await write_heartbeat(
         instance_id=instance_id,
-        config=config,
+        config=controller.snapshot(),
         status="offline",
       )
     finally:
