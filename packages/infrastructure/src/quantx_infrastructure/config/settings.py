@@ -210,6 +210,31 @@ class Settings(BaseSettings):
     default=300, description="登录失败限流窗口秒数"
   )
 
+  # iOS APNs 投递。默认关闭；私钥只从部署主机上的文件读取，不进入环境值、
+  # 数据库、日志或 GraphQL。
+  apns_delivery_enabled: bool = Field(
+    default=False,
+    description="是否启用 iOS APNs outbox 投递，默认关闭",
+  )
+  apns_team_id: str = Field(default="", description="Apple Developer Team ID")
+  apns_key_id: str = Field(default="", description="APNs Auth Key ID")
+  apns_topic: str = Field(default="", description="iOS App bundle identifier")
+  apns_private_key_file: str = Field(
+    default="",
+    description="APNs .p8 私钥文件路径；不得填写私钥正文",
+  )
+  apns_batch_size: int = Field(default=50, ge=1, le=500)
+  apns_max_attempts: int = Field(default=5, ge=1, le=20)
+  apns_lease_seconds: int = Field(default=120, ge=15, le=900)
+  apns_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+  apns_poll_interval_seconds: float = Field(default=10.0, ge=1, le=60)
+  apns_delivery_window_seconds: int = Field(
+    default=3000,
+    ge=60,
+    le=3300,
+    description="单次 Worker run 的固定持续投递窗口，默认 50 分钟",
+  )
+
   # 监控配置
   metrics_enabled: bool = Field(default=True, description="是否启用监控指标")
   metrics_endpoint: str = Field(default="/metrics", description="监控指标端点")
@@ -441,6 +466,17 @@ class Settings(BaseSettings):
       errors.append(
         "REAL_TRADING_ACCOUNT_ALLOWLIST is required when live trading is enabled"
       )
+    if self.apns_delivery_enabled:
+      if not all(
+        value.strip()
+        for value in (self.apns_team_id, self.apns_key_id, self.apns_topic)
+      ):
+        errors.append("APNs team, key and topic identifiers must be configured")
+      private_key_path = Path(self.apns_private_key_file).expanduser()
+      if not self.apns_private_key_file or not private_key_path.is_file():
+        errors.append("APNS_PRIVATE_KEY_FILE must reference a readable .p8 file")
+      if self.apns_lease_seconds < (2 * self.apns_timeout_seconds) + 15:
+        errors.append("APNS_LEASE_SECONDS must exceed two provider timeouts")
     return errors
 
   def validate_production(self) -> None:

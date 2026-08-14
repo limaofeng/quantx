@@ -121,3 +121,15 @@ deployments:
       - cron: "45 15 * * 1-5"
         timezone: Asia/Shanghai
     version: "0.1.0"
+  - name: ios-apns-delivery
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/apns_delivery_flow.py:apns_delivery_flow
+    work_pool: *quantx_process_pool
+    description: iOS 最小隐私通知 outbox 持续投递；默认关闭，单 run 复用 APNs provider token
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 60
+    schedules:
+      - cron: "* * * * *"
+        timezone: Asia/Shanghai
+    version: "0.1.0"
