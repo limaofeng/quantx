@@ -1,3 +1,5 @@
+import { financialToneClass } from '@/shared/utils/financialColors';
+
 import type { SignalHistoryFilter } from './types';
 
 export const statusPresentation: Record<
@@ -37,6 +39,8 @@ const signalReasonLabels: Record<string, string> = {
   GLOBAL_CONFIG_CHANGED: '策略参数变更，原信号自动撤销',
   HOLDING_NOT_ELIGIBLE: '持仓不再满足做 T 条件',
   GLOBAL_MONITOR_STOPPED: '全局监控停止，信号自动撤销',
+  T_TRADE_MOMENTUM_ACCELERATION_ENTRY: '快速拉升与成交加速确认后买入',
+  T_TRADE_PULLBACK_REBOUND_ENTRY: '回撤企稳并反弹确认后买入',
 };
 
 export const batchStatusLabels: Record<string, string> = {
@@ -163,7 +167,7 @@ export function quoteTone(value?: number | null) {
   if (value == null || !Number.isFinite(value) || value === 0) {
     return 'text-slate-300';
   }
-  return value > 0 ? 'text-red-300' : 'text-emerald-300';
+  return financialToneClass(value, 'holding');
 }
 
 export function hasInstrumentName(

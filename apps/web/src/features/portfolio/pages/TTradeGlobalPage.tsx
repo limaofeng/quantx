@@ -2,7 +2,6 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  Ban,
   CalendarDays,
   Check,
   CircleDollarSign,
@@ -41,6 +40,8 @@ import {
   StudioWorkbench,
   type StudioMode,
 } from '@/components/studio-workbench';
+import { useStudioNavigate } from '@/components/studio-workspace';
+import { getShanghaiDateKey } from '@/components/trading-chart/utils/time-utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -51,14 +52,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { useGraphqlWsStatus } from '@/core/graphql/ws-status';
 import {
+  TTradeRolloutTarget,
   TTradeTimeExitMode,
   type TTradeBatch,
   type TTradeBatchEvent,
   type TTradeSignalHistoryEntry,
 } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
+import { useTradingDays } from '@/hooks/useTradingDays';
 import { tradingAccountConfig } from '@/shared/utils/env';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import {
@@ -72,6 +77,7 @@ import {
   CancelTTradeReplayMutation,
   CancelTTradeOrderMutation,
   ActivateTTradeLiveMutation,
+  BeginTTradeControlledWindowMutation,
   ImportTTradeExternalEntryMutation,
   ReconcileTTradeGlobalMonitorMutation,
   PauseTTradeEntriesMutation,
@@ -92,12 +98,17 @@ import {
   TriggerTTradeKillSwitchMutation,
 } from '../hooks/useTTradeGlobal';
 
+import {
+  TTradeHealthConsole,
+  TTradeLiveBoard,
+} from './t-trade-global/TTradeLiveMonitor';
 import type {
   SettingsForm,
   SignalHistoryFilter,
   SignalPanelMode,
   TTradeStudioMode,
 } from './t-trade-global/types';
+import { useLiveQuoteHistory } from './t-trade-global/useLiveQuoteHistory';
 import {
   batchStatusLabels,
   formatNumber,
@@ -114,7 +125,6 @@ import {
   signalHistoryCategory,
   signalReasonLabel,
   signalStatusPresentation,
-  statusPresentation,
 } from './t-trade-global/utils';
 
 const tTradeModes: StudioMode[] = [
@@ -137,6 +147,13 @@ const defaultForm: SettingsForm = {
   initialGapPct: '1.5',
   trailingGapSlope: '0.25',
   maxGapPct: '3',
+  highProfitLockEnabled: true,
+  highProfitArmPct: '4',
+  highProfitMaxDrawdownPct: '1.2',
+  rapidReversalEnabled: true,
+  rapidReversalWindowSeconds: '15',
+  rapidReversalDrawdownPct: '0.8',
+  rapidReversalConfirmTicks: '2',
   hardStopEnabled: false,
   hardStopPct: '-0.8',
   signalLookbackSeconds: '300',
@@ -144,8 +161,21 @@ const defaultForm: SettingsForm = {
   pullbackThresholdPct: '0.8',
   reboundThresholdPct: '0.2',
   maxSpreadTicks: '3',
+  momentumEnabled: true,
+  momentumWindowSeconds: '60',
+  momentumMinRisePct: '0.8',
+  momentumMinMoveSeconds: '15',
+  momentumBaselineSeconds: '300',
+  momentumMinAmountVelocityRatio: '2',
+  momentumMinVwapPremiumPct: '2',
+  momentumMaxVwapPremiumPct: '3.5',
+  momentumHighToleranceTicks: '1',
+  momentumMaxSpreadTicks: '10',
+  momentumMaxSpreadPct: '0.3',
   approvalTtlSeconds: '30',
   maxPriceDeviationPct: '0.3',
+  limitUpTouchExitEnabled: true,
+  limitUpTouchToleranceTicks: '0',
   timeExitMode: TTradeTimeExitMode.Unlimited,
   timeExitTime: '14:50',
   maxHoldingTradingDays: '5',
@@ -184,13 +214,14 @@ function MetricCard({
 }: {
   icon: React.ElementType;
   label: string;
-  tone?: 'amber' | 'emerald' | 'red' | 'slate';
+  tone?: 'amber' | 'emerald' | 'red' | 'sky' | 'slate';
   value: string | number;
 }) {
   const tones = {
     amber: 'border-amber-400/15 bg-amber-400/[0.06] text-amber-200',
     emerald: 'border-emerald-400/15 bg-emerald-400/[0.06] text-emerald-200',
     red: 'border-red-400/15 bg-red-400/[0.06] text-red-200',
+    sky: 'border-sky-300/15 bg-sky-300/[0.06] text-sky-200',
     slate: 'border-white/[0.07] bg-white/[0.025] text-slate-200',
   };
   return (
@@ -385,6 +416,44 @@ function TTradeReplayPanel({
           pullbackThresholdPct: numberValue(form.pullbackThresholdPct, 0.8),
           reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
           maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
+          momentumEnabled: form.momentumEnabled,
+          momentumWindowSeconds: integerValue(
+            form.momentumWindowSeconds,
+            60
+          ),
+          momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
+          momentumMinMoveSeconds: integerValue(
+            form.momentumMinMoveSeconds,
+            15
+          ),
+          momentumBaselineSeconds: integerValue(
+            form.momentumBaselineSeconds,
+            300
+          ),
+          momentumMinAmountVelocityRatio: numberValue(
+            form.momentumMinAmountVelocityRatio,
+            2
+          ),
+          momentumMinVwapPremiumPct: numberValue(
+            form.momentumMinVwapPremiumPct,
+            2
+          ),
+          momentumMaxVwapPremiumPct: numberValue(
+            form.momentumMaxVwapPremiumPct,
+            3.5
+          ),
+          momentumHighToleranceTicks: integerValue(
+            form.momentumHighToleranceTicks,
+            1
+          ),
+          momentumMaxSpreadTicks: integerValue(
+            form.momentumMaxSpreadTicks,
+            10
+          ),
+          momentumMaxSpreadPct: numberValue(
+            form.momentumMaxSpreadPct,
+            0.3
+          ),
           approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
           maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
           targetProfitPct: numberValue(form.targetProfitPct, 2),
@@ -392,6 +461,30 @@ function TTradeReplayPanel({
           initialGapPct: numberValue(form.initialGapPct, 1.5),
           trailingGapSlope: numberValue(form.trailingGapSlope, 0.25),
           maxGapPct: numberValue(form.maxGapPct, 3),
+          highProfitLockEnabled: form.highProfitLockEnabled,
+          highProfitArmPct: numberValue(form.highProfitArmPct, 4),
+          highProfitMaxDrawdownPct: numberValue(
+            form.highProfitMaxDrawdownPct,
+            1.2
+          ),
+          rapidReversalEnabled: form.rapidReversalEnabled,
+          rapidReversalWindowSeconds: integerValue(
+            form.rapidReversalWindowSeconds,
+            15
+          ),
+          rapidReversalDrawdownPct: numberValue(
+            form.rapidReversalDrawdownPct,
+            0.8
+          ),
+          rapidReversalConfirmTicks: integerValue(
+            form.rapidReversalConfirmTicks,
+            2
+          ),
+          limitUpTouchExitEnabled: form.limitUpTouchExitEnabled,
+          limitUpTouchToleranceTicks: integerValue(
+            form.limitUpTouchToleranceTicks,
+            0
+          ),
           hardStopEnabled: form.hardStopEnabled,
           hardStopPct: numberValue(form.hardStopPct, -0.8),
           timeExitMode: form.timeExitMode,
@@ -664,7 +757,7 @@ function TTradeReplayPanel({
                 icon={CircleDollarSign}
                 label="做 T 税费后增量"
                 tone={
-                  (replay.summary?.tNetProfit || 0) >= 0 ? 'red' : 'emerald'
+                  (replay.summary?.tNetProfit || 0) >= 0 ? 'red' : 'sky'
                 }
                 value={
                   replay.summary
@@ -678,7 +771,7 @@ function TTradeReplayPanel({
                 tone={
                   (replay.summary?.excessReturnPct || 0) >= 0
                     ? 'red'
-                    : 'emerald'
+                    : 'sky'
                 }
                 value={
                   replay.summary
@@ -950,10 +1043,16 @@ function TTradeReplayPanel({
 
 export function TTradeGlobalPage() {
   const { toast } = useToast();
+  const openStudioTab = useStudioNavigate();
   const accountId = tradingAccountConfig.defaultAccountId;
   const [workspaceMode, setWorkspaceMode] = React.useState<
     'REALTIME' | 'REPLAY'
   >('REALTIME');
+  const { tradingDays } = useTradingDays('SH', 3);
+  const currentShanghaiDate = getShanghaiDateKey(new Date());
+  const isCurrentTradingDay = tradingDays.length
+    ? tradingDays.includes(currentShanghaiDate)
+    : undefined;
   const [activeMode, setActiveMode] =
     React.useState<TTradeStudioMode>('MONITOR');
   const [signalPanelMode, setSignalPanelMode] =
@@ -994,17 +1093,20 @@ export function TTradeGlobalPage() {
   const quoteStockCodes = React.useMemo(
     () =>
       Array.from(
-        new Set((monitor?.sessions || []).map(session => session.stockCode))
+        new Set((monitor?.holdings || []).map(holding => holding.stockCode))
       ),
-    [monitor?.sessions]
+    [monitor?.holdings]
   );
-  const { quotes: realTimeQuotesByCode } = useLatestMarketQuotes({
+  const liveQuoteState = useLatestMarketQuotes({
     stockCodes: quoteStockCodes,
-    enabled:
-      Boolean(accountId) &&
-      workspaceMode === 'REALTIME' &&
-      activeMode === 'SIGNALS',
+    enabled: Boolean(accountId) && workspaceMode === 'REALTIME',
   });
+  const realTimeQuotesByCode = liveQuoteState.quotes;
+  const quoteHistoryByCode = useLiveQuoteHistory(
+    realTimeQuotesByCode,
+    workspaceMode === 'REALTIME' && activeMode === 'MONITOR'
+  );
+  const graphqlWsStatus = useGraphqlWsStatus();
 
   const [batchAfter, setBatchAfter] = React.useState<string | null>(null);
   const [eventAfter, setEventAfter] = React.useState<string | null>(null);
@@ -1064,6 +1166,9 @@ export function TTradeGlobalPage() {
   );
   const [activateLiveResult, activateLive] = useMutation(
     ActivateTTradeLiveMutation
+  );
+  const [controlledWindowResult, beginControlledWindow] = useMutation(
+    BeginTTradeControlledWindowMutation
   );
   const [pauseEntriesResult, pauseEntries] = useMutation(
     PauseTTradeEntriesMutation
@@ -1277,6 +1382,21 @@ export function TTradeGlobalPage() {
       initialGapPct: String(monitor.initialGapPct),
       trailingGapSlope: String(monitor.trailingGapSlope),
       maxGapPct: String(monitor.maxGapPct),
+      highProfitLockEnabled: monitor.highProfitLockEnabled,
+      highProfitArmPct: String(monitor.highProfitArmPct),
+      highProfitMaxDrawdownPct: String(
+        monitor.highProfitMaxDrawdownPct
+      ),
+      rapidReversalEnabled: monitor.rapidReversalEnabled,
+      rapidReversalWindowSeconds: String(
+        monitor.rapidReversalWindowSeconds
+      ),
+      rapidReversalDrawdownPct: String(
+        monitor.rapidReversalDrawdownPct
+      ),
+      rapidReversalConfirmTicks: String(
+        monitor.rapidReversalConfirmTicks
+      ),
       hardStopEnabled: monitor.hardStopEnabled,
       hardStopPct: String(monitor.hardStopPct),
       signalLookbackSeconds: String(monitor.signalLookbackSeconds),
@@ -1284,8 +1404,27 @@ export function TTradeGlobalPage() {
       pullbackThresholdPct: String(monitor.pullbackThresholdPct),
       reboundThresholdPct: String(monitor.reboundThresholdPct),
       maxSpreadTicks: String(monitor.maxSpreadTicks),
+      momentumEnabled: monitor.momentumEnabled,
+      momentumWindowSeconds: String(monitor.momentumWindowSeconds),
+      momentumMinRisePct: String(monitor.momentumMinRisePct),
+      momentumMinMoveSeconds: String(monitor.momentumMinMoveSeconds),
+      momentumBaselineSeconds: String(monitor.momentumBaselineSeconds),
+      momentumMinAmountVelocityRatio: String(
+        monitor.momentumMinAmountVelocityRatio
+      ),
+      momentumMinVwapPremiumPct: String(monitor.momentumMinVwapPremiumPct),
+      momentumMaxVwapPremiumPct: String(monitor.momentumMaxVwapPremiumPct),
+      momentumHighToleranceTicks: String(
+        monitor.momentumHighToleranceTicks
+      ),
+      momentumMaxSpreadTicks: String(monitor.momentumMaxSpreadTicks),
+      momentumMaxSpreadPct: String(monitor.momentumMaxSpreadPct),
       approvalTtlSeconds: String(monitor.approvalTtlSeconds),
       maxPriceDeviationPct: String(monitor.maxPriceDeviationPct),
+      limitUpTouchExitEnabled: monitor.limitUpTouchExitEnabled,
+      limitUpTouchToleranceTicks: String(
+        monitor.limitUpTouchToleranceTicks
+      ),
       timeExitMode: monitor.timeExitMode,
       timeExitTime: monitor.timeExitTime,
       maxHoldingTradingDays: String(monitor.maxHoldingTradingDays),
@@ -1322,6 +1461,44 @@ export function TTradeGlobalPage() {
           pullbackThresholdPct: numberValue(form.pullbackThresholdPct, 0.8),
           reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
           maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
+          momentumEnabled: form.momentumEnabled,
+          momentumWindowSeconds: integerValue(
+            form.momentumWindowSeconds,
+            60
+          ),
+          momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
+          momentumMinMoveSeconds: integerValue(
+            form.momentumMinMoveSeconds,
+            15
+          ),
+          momentumBaselineSeconds: integerValue(
+            form.momentumBaselineSeconds,
+            300
+          ),
+          momentumMinAmountVelocityRatio: numberValue(
+            form.momentumMinAmountVelocityRatio,
+            2
+          ),
+          momentumMinVwapPremiumPct: numberValue(
+            form.momentumMinVwapPremiumPct,
+            2
+          ),
+          momentumMaxVwapPremiumPct: numberValue(
+            form.momentumMaxVwapPremiumPct,
+            3.5
+          ),
+          momentumHighToleranceTicks: integerValue(
+            form.momentumHighToleranceTicks,
+            1
+          ),
+          momentumMaxSpreadTicks: integerValue(
+            form.momentumMaxSpreadTicks,
+            10
+          ),
+          momentumMaxSpreadPct: numberValue(
+            form.momentumMaxSpreadPct,
+            0.3
+          ),
           approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
           maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
           targetProfitPct: numberValue(form.targetProfitPct, 2),
@@ -1329,6 +1506,30 @@ export function TTradeGlobalPage() {
           initialGapPct: numberValue(form.initialGapPct, 1.5),
           trailingGapSlope: numberValue(form.trailingGapSlope, 0.25),
           maxGapPct: numberValue(form.maxGapPct, 3),
+          highProfitLockEnabled: form.highProfitLockEnabled,
+          highProfitArmPct: numberValue(form.highProfitArmPct, 4),
+          highProfitMaxDrawdownPct: numberValue(
+            form.highProfitMaxDrawdownPct,
+            1.2
+          ),
+          rapidReversalEnabled: form.rapidReversalEnabled,
+          rapidReversalWindowSeconds: integerValue(
+            form.rapidReversalWindowSeconds,
+            15
+          ),
+          rapidReversalDrawdownPct: numberValue(
+            form.rapidReversalDrawdownPct,
+            0.8
+          ),
+          rapidReversalConfirmTicks: integerValue(
+            form.rapidReversalConfirmTicks,
+            2
+          ),
+          limitUpTouchExitEnabled: form.limitUpTouchExitEnabled,
+          limitUpTouchToleranceTicks: integerValue(
+            form.limitUpTouchToleranceTicks,
+            0
+          ),
           hardStopEnabled: form.hardStopEnabled,
           hardStopPct: numberValue(form.hardStopPct, -0.8),
           timeExitMode: form.timeExitMode,
@@ -1436,19 +1637,61 @@ export function TTradeGlobalPage() {
     refreshVisibleData();
   }, [refreshVisibleData]);
 
-  const handleActivateLive = async () => {
-    if (!accountId || !readiness?.canActivateLive) return;
+  const handleBeginControlledWindow = async () => {
+    if (!accountId || !readiness?.snapshotId) return;
     const confirmed = window.confirm(
-      '确认进入严格 Canary 实盘？买入仍需人工确认；买入真实成交后，止盈、止损和时间退出会自动提交卖单。'
+      `确认以快照 ${readiness.snapshotId} 建立受控交易窗口？历史已终结的手工记录会保留审计；窗口建立后新增 QMT 手工委托或成交会自动暂停 QuantX。`
     );
     if (!confirmed) return;
+    const result = await beginControlledWindow({
+      accountId,
+      snapshotId: readiness.snapshotId,
+    });
+    const payload = result.data?.beginTTradeControlledWindow;
+    toast({
+      title: payload?.success ? '受控窗口已建立' : '受控窗口未建立',
+      description: payload?.message || result.error?.message || '请求失败',
+      variant: payload?.success ? 'default' : 'destructive',
+    });
+    refreshOperationalState();
+  };
+
+  const handleActivateLive = async (targetStage: TTradeRolloutTarget) => {
+    if (!accountId || !readiness?.canActivateLive) return;
+    let confirmation = '';
+    if (targetStage === TTradeRolloutTarget.Live) {
+      const expected = `LIVE:${accountId}`;
+      confirmation =
+        window.prompt(
+          `正式 LIVE 将授权该账户执行实盘命令。请输入 ${expected} 完成精确确认。`
+        ) || '';
+      if (confirmation !== expected) {
+        toast({
+          title: '精确确认不匹配',
+          description: `必须完整输入 ${expected}`,
+          variant: 'destructive',
+        });
+        return;
+      }
+    } else {
+      const confirmed = window.confirm(
+        '确认进入严格 Canary 实盘？买入仍需人工确认；买入真实成交后，止盈、止损和时间退出会自动提交卖单。'
+      );
+      if (!confirmed) return;
+    }
     const result = await activateLive({
       accountId,
       policyVersion: readiness.policyVersion,
+      targetStage,
+      confirmation,
     });
     const payload = result.data?.activateTTradeLive;
     toast({
-      title: payload?.success ? 'Canary 已启用' : '实盘未启用',
+      title: payload?.success
+        ? targetStage === TTradeRolloutTarget.Live
+          ? '正式 LIVE 已启用'
+          : 'Canary 已启用'
+        : '实盘未启用',
       description: payload?.message || result.error?.message || '请求失败',
       variant: payload?.success ? 'default' : 'destructive',
     });
@@ -1527,6 +1770,7 @@ export function TTradeGlobalPage() {
     rejectResult.fetching ||
     importResult.fetching ||
     syncSourceOrdersResult.fetching ||
+    controlledWindowResult.fetching ||
     activateLiveResult.fetching ||
     pauseEntriesResult.fetching ||
     killSwitchResult.fetching ||
@@ -1548,139 +1792,23 @@ export function TTradeGlobalPage() {
   );
 
   const sidebar = (
-    <aside className="flex h-full min-h-0 flex-col bg-[#0b1628]">
-      <div className="flex h-[68px] shrink-0 items-center justify-between border-b border-white/[0.05] px-4">
-        <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-300">
-            T Trade
-          </div>
-          <h1 className="mt-1 text-base font-black text-slate-100">做T助手</h1>
-        </div>
-        <button
-          type="button"
-          aria-label="刷新做 T 监控"
-          disabled={!accountId || actionLoading}
-          onClick={handleMonitorRefresh}
-          className="flex h-8 w-8 items-center justify-center rounded-md border border-white/[0.07] text-slate-500 transition-colors hover:border-red-400/25 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
-        >
-          <RefreshCw
-            className={cn('h-4 w-4', manualRefreshPending && 'animate-spin')}
-          />
-        </button>
-      </div>
-
-      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/[0.05] p-3">
-        <MetricCard
-          icon={Radar}
-          label="合格持仓"
-          value={monitor?.eligibleCount ?? 0}
-          tone="red"
-        />
-        <MetricCard
-          icon={Activity}
-          label="待确认"
-          value={monitor?.pendingSignalCount ?? 0}
-          tone={monitor?.pendingSignalCount ? 'amber' : 'slate'}
-        />
-        <MetricCard
-          icon={TrendingUp}
-          label="活跃批次"
-          value={monitor?.activeBatchCount ?? 0}
-          tone={monitor?.activeBatchCount ? 'emerald' : 'slate'}
-        />
-        <MetricCard
-          icon={Ban}
-          label="忽略 / 退出"
-          value={`${monitor?.ignoredCount ?? 0} / ${monitor?.drainingCount ?? 0}`}
-        />
-      </div>
-
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.05] px-4 text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
-        <span>动态持仓</span>
-        <span className="font-mono text-slate-600">
-          {monitor?.holdings.length ?? 0} 只
-        </span>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
-        {(monitor?.holdings || []).map(holding => {
-          const presentation =
-            statusPresentation[holding.status] || statusPresentation.STOPPED;
-          return (
-            <div
-              key={holding.stockCode}
-              className="border-b border-white/[0.04] px-4 py-3 transition-colors hover:bg-white/[0.025]"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <InstrumentNameLabel
-                    className="truncate text-xs font-black text-slate-200"
-                    stockCode={holding.stockCode}
-                    knownName={resolveInstrumentName(
-                      holding.stockCode,
-                      positionNamesByCode.get(holding.stockCode.toUpperCase()),
-                      holding.instrumentName
-                    )}
-                  />
-                  <div className="mt-0.5 font-mono text-[10px] text-slate-600">
-                    {holding.stockCode}
-                  </div>
-                </div>
-                <span
-                  className={cn(
-                    'shrink-0 border px-1.5 py-0.5 text-[9px] font-black',
-                    presentation.className
-                  )}
-                >
-                  {presentation.label}
-                </span>
-              </div>
-              <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-slate-500">
-                <span>
-                  {holding.availableVolume.toLocaleString()} /{' '}
-                  {holding.volume.toLocaleString()} 股
-                </span>
-                <span
-                  className={cn(
-                    'font-bold',
-                    (holding.session?.lastNetProfitPct || 0) >= 0
-                      ? 'text-red-300'
-                      : 'text-emerald-300'
-                  )}
-                >
-                  {holding.session?.activeVolume
-                    ? `${formatNumber(holding.session.lastNetProfitPct)}%`
-                    : '--'}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-
-        {!monitorResult.fetching &&
-          !monitorResult.error &&
-          (monitor?.holdings.length || 0) === 0 && (
-            <div className="flex h-40 flex-col items-center justify-center px-6 text-center">
-              <Radar className="h-8 w-8 text-slate-700" />
-              <div className="mt-3 text-xs font-bold text-slate-500">
-                暂无持仓监控对象
-              </div>
-              <div className="mt-1 text-[10px] leading-4 text-slate-700">
-                同步账户持仓后自动生成标的范围
-              </div>
-            </div>
-          )}
-      </div>
-
-      <div className="shrink-0 border-t border-white/[0.06] bg-[#091322] p-3">
-        <div className="mb-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600">
-          默认账户
-        </div>
-        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-xs text-slate-300">
-          {accountId || '未配置'}
-        </div>
-      </div>
-    </aside>
+    <TTradeHealthConsole
+      accountId={accountId}
+      actionLoading={actionLoading}
+      isCurrentTradingDay={isCurrentTradingDay}
+      monitor={monitor}
+      onRefresh={handleMonitorRefresh}
+      onReconcile={handleReconcile}
+      onToggleMonitoring={() => void persist(!monitor?.enabled)}
+      quoteConnected={liveQuoteState.isConnected}
+      quoteError={liveQuoteState.error}
+      quotes={realTimeQuotesByCode}
+      refreshing={manualRefreshPending || monitorResult.fetching}
+      toggleDisabled={
+        !monitor?.enabled && form.mode === 'live' && !form.acknowledged
+      }
+      wsStatus={graphqlWsStatus}
+    />
   );
 
   const replaySidebar = (
@@ -1790,6 +1918,18 @@ export function TTradeGlobalPage() {
       </nav>
 
       <div className="flex shrink-0 items-center gap-2">
+        {workspaceMode === 'REALTIME' && (
+          <Button
+            className="h-7 px-2 text-[10px]"
+            onClick={() => openStudioTab('/liquidation')}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <WalletCards className="h-3.5 w-3.5" />
+            T 批次退出
+          </Button>
+        )}
         {workspaceMode === 'REPLAY' ? (
           <span className="hidden items-center gap-1.5 text-[10px] font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
@@ -1814,47 +1954,9 @@ export function TTradeGlobalPage() {
               {monitor?.enabled ? '全局监控运行中' : '全局监控已停止'}
             </span>
             <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
-            <button
-              type="button"
-              disabled={!accountId || actionLoading}
-              onClick={handleReconcile}
-              className="flex h-8 items-center gap-1.5 px-2 text-[10px] font-bold text-slate-500 transition-colors hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
-            >
-              <RefreshCw
-                className={cn(
-                  'h-3.5 w-3.5',
-                  reconcileResult.fetching && 'animate-spin'
-                )}
-              />
-              <span className="hidden sm:inline">同步持仓</span>
-            </button>
-            <Button
-              type="button"
-              size="sm"
-              className={cn(
-                'h-8 rounded-sm px-3 text-[10px] font-black',
-                monitor?.enabled
-                  ? 'bg-slate-700 text-slate-100 hover:bg-slate-600'
-                  : 'bg-red-500 text-white hover:bg-red-400'
-              )}
-              disabled={
-                !accountId ||
-                actionLoading ||
-                (!monitor?.enabled &&
-                  form.mode === 'live' &&
-                  !form.acknowledged)
-              }
-              onClick={() => persist(!monitor?.enabled)}
-            >
-              {saveResult.fetching ? (
-                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              ) : monitor?.enabled ? (
-                <Square className="mr-1.5 h-3 w-3" />
-              ) : (
-                <Play className="mr-1.5 h-3.5 w-3.5" />
-              )}
-              {monitor?.enabled ? '停止监控' : '启动监控'}
-            </Button>
+            <span className="hidden font-mono text-[9px] text-slate-600 sm:inline">
+              行情 WS {graphqlWsStatus} · 策略投影约 10s
+            </span>
           </>
         )}
       </div>
@@ -1880,26 +1982,33 @@ export function TTradeGlobalPage() {
           aria-live="polite"
           className={cn(
             'flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3',
-            readiness.ready
+            readiness.automationReady
               ? 'border-emerald-400/15 bg-emerald-400/[0.05]'
-              : 'border-amber-400/15 bg-amber-400/[0.05]'
+              : readiness.preparationReady
+                ? 'border-sky-400/15 bg-sky-400/[0.05]'
+                : 'border-amber-400/15 bg-amber-400/[0.05]'
           )}
         >
           <div className="flex min-w-0 items-start gap-2">
-            {readiness.ready ? (
+            {readiness.preparationReady ? (
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
             ) : (
               <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
             )}
             <div>
               <div className="text-xs font-black text-slate-100">
-                {readiness.stage} · Engine {readiness.engineStatus} · Agent{' '}
+                {readiness.status === 'PREPARING'
+                  ? '准备阶段（SHADOW）'
+                  : readiness.stage}{' '}
+                · Engine {readiness.engineStatus} · Agent{' '}
                 {readiness.agentStatus}
               </div>
               <div className="mt-1 text-[10px] leading-4 text-slate-400">
-                {readiness.blockedReasons.length
-                  ? readiness.blockedReasons.join('；')
-                  : '生产门禁检查已通过，可按当前灰度阶段处理交易。'}
+                {readiness.preparationReady && !readiness.automationReady
+                  ? `账户事实已收敛；自动交易仍关闭。受控窗口${readiness.controlledWindowActive ? '已建立' : '未建立'}，当前快照识别手工委托 ${readiness.externalOrderCount} 笔、成交 ${readiness.externalTradeCount} 笔，窗口后新增 ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} 笔，活动委托 ${readiness.workingExternalOrderCount} 笔。${readiness.blockedReasons[0] || ''}`
+                  : readiness.blockedReasons.length
+                    ? readiness.blockedReasons.join('；')
+                    : '生产门禁检查已通过，可按当前灰度阶段处理交易。'}
               </div>
             </div>
           </div>
@@ -1916,15 +2025,47 @@ export function TTradeGlobalPage() {
                 暂停新买入
               </Button>
             ) : (
-              <Button
-                type="button"
-                size="sm"
-                disabled={!readiness.canActivateLive || actionLoading}
-                onClick={handleActivateLive}
-                className="h-8 rounded-sm bg-emerald-500 px-3 text-[10px] font-black text-slate-950 hover:bg-emerald-400"
-              >
-                启用严格 Canary
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={
+                    actionLoading ||
+                    readiness.controlledWindowActive ||
+                    !readiness.preparationReady ||
+                    !readiness.snapshotId ||
+                    readiness.workingExternalOrderCount > 0
+                  }
+                  onClick={handleBeginControlledWindow}
+                  className="h-8 rounded-sm border-sky-400/20 text-[10px] text-sky-200"
+                >
+                  {readiness.controlledWindowActive
+                    ? '受控窗口已建立'
+                    : '开始受控窗口'}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!readiness.canActivateLive || actionLoading}
+                  onClick={() =>
+                    handleActivateLive(TTradeRolloutTarget.Canary)
+                  }
+                  className="h-8 rounded-sm border-emerald-400/20 text-[10px] text-emerald-200"
+                >
+                  启用严格 Canary
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!readiness.canActivateLive || actionLoading}
+                  onClick={() => handleActivateLive(TTradeRolloutTarget.Live)}
+                  className="h-8 rounded-sm bg-emerald-500 px-3 text-[10px] font-black text-slate-950 hover:bg-emerald-400"
+                >
+                  启用正式 LIVE
+                </Button>
+              </>
             )}
             <Button
               type="button"
@@ -1957,11 +2098,9 @@ export function TTradeGlobalPage() {
 
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3">
         <div>
-          <h2 className="text-sm font-black text-slate-100">
-            全部持仓监控范围
-          </h2>
+          <h2 className="text-sm font-black text-slate-100">实时作战表</h2>
           <p className="mt-0.5 text-[10px] text-slate-600">
-            账户持仓动态生成 · A 股代码且昨日可用库存不少于 100 股时自动纳入
+            行情流与策略流独立标时 · 默认按需要关注程度排序
           </p>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-bold text-slate-600">
@@ -2201,138 +2340,14 @@ export function TTradeGlobalPage() {
         </section>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
-        <table className="w-full min-w-[780px] text-left text-xs">
-          <thead className="sticky top-0 z-10 bg-[#0b1628] text-[10px] font-black uppercase tracking-[0.1em] text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.05)]">
-            <tr>
-              <th className="px-4 py-2.5">标的</th>
-              <th className="px-3 py-2.5 text-right">持仓 / 可用</th>
-              <th className="px-3 py-2.5">状态</th>
-              <th className="px-3 py-2.5 text-right">活跃仓</th>
-              <th className="px-3 py-2.5 text-right">本批净收益</th>
-              <th className="px-3 py-2.5 text-right">完成次数</th>
-              <th className="px-4 py-2.5 text-right">范围设置</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(monitor?.holdings || []).map(holding => {
-              const presentation =
-                statusPresentation[holding.status] ||
-                statusPresentation.STOPPED;
-              return (
-                <tr
-                  key={holding.stockCode}
-                  className="border-b border-white/[0.04] transition-colors hover:bg-white/[0.025]"
-                >
-                  <td className="px-4 py-3">
-                    <InstrumentNameLabel
-                      className="font-black text-slate-100"
-                      stockCode={holding.stockCode}
-                      knownName={resolveInstrumentName(
-                        holding.stockCode,
-                        positionNamesByCode.get(
-                          holding.stockCode.toUpperCase()
-                        ),
-                        holding.instrumentName
-                      )}
-                    />
-                    <div className="mt-0.5 font-mono text-[10px] text-slate-600">
-                      {holding.stockCode}
-                    </div>
-                  </td>
-                  <td className="px-3 py-3 text-right font-mono tabular-nums text-slate-300">
-                    {holding.volume.toLocaleString()}
-                    <span className="mx-1 text-slate-700">/</span>
-                    {holding.availableVolume.toLocaleString()}
-                  </td>
-                  <td className="px-3 py-3">
-                    <span
-                      className={cn(
-                        'inline-flex border px-2 py-0.5 text-[10px] font-black',
-                        presentation.className
-                      )}
-                    >
-                      {presentation.label}
-                    </span>
-                    <div
-                      className="mt-1 max-w-[260px] truncate text-[10px] text-slate-600"
-                      title={holding.reason}
-                    >
-                      {holding.reason}
-                    </div>
-                  </td>
-                  <td className="px-3 py-3 text-right font-mono text-slate-400">
-                    {holding.session?.activeVolume?.toLocaleString() || '--'}
-                  </td>
-                  <td
-                    className={cn(
-                      'px-3 py-3 text-right font-mono font-bold tabular-nums',
-                      (holding.session?.lastNetProfitPct || 0) >= 0
-                        ? 'text-red-300'
-                        : 'text-emerald-300'
-                    )}
-                  >
-                    {holding.session?.activeVolume
-                      ? `${formatNumber(holding.session.lastNetProfitPct)}%`
-                      : '--'}
-                  </td>
-                  <td className="px-3 py-3 text-right font-mono text-slate-400">
-                    {holding.session?.completedCycles ?? 0}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className={cn(
-                        'h-7 rounded-sm px-2 text-[10px]',
-                        holding.ignored
-                          ? 'text-red-300 hover:text-red-200'
-                          : 'text-slate-500 hover:text-rose-200'
-                      )}
-                      disabled={actionLoading}
-                      onClick={() =>
-                        handleIgnore(holding.stockCode, !holding.ignored)
-                      }
-                    >
-                      {holding.ignored ? '恢复监控' : '忽略股票'}
-                    </Button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-
-        {!monitorResult.fetching &&
-          !monitorResult.error &&
-          (monitor?.holdings.length || 0) === 0 && (
-            <div className="flex min-h-64 flex-col items-center justify-center text-center">
-              <Radar className="h-10 w-10 text-slate-800" />
-              <div className="mt-3 text-sm font-bold text-slate-500">
-                该账户暂无可监控持仓
-              </div>
-              <div className="mt-1 text-[10px] text-slate-700">
-                做 T 标的由账户持仓动态生成，不需要逐只启动
-              </div>
-            </div>
-          )}
-      </div>
-
-      <div className="grid shrink-0 gap-px border-t border-white/[0.05] bg-white/[0.05] text-[10px] leading-4 text-slate-600 md:grid-cols-3">
-        <div className="flex items-start gap-2 bg-[#091322] px-4 py-2.5">
-          <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
-          买入机会人工确认后，仍重新校验价格、资金和合法数量。
-        </div>
-        <div className="flex items-start gap-2 bg-[#091322] px-4 py-2.5">
-          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
-          动态持仓在同一策略运行中隔离状态，成交真源来自券商回报。
-        </div>
-        <div className="flex items-start gap-2 bg-[#091322] px-4 py-2.5">
-          <TrendingUp className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
-          忽略或停用时，活跃 T 批次先完成退出再停止会话。
-        </div>
-      </div>
+      <TTradeLiveBoard
+        historyByCode={quoteHistoryByCode}
+        isCurrentTradingDay={isCurrentTradingDay}
+        loading={monitorResult.fetching}
+        monitor={monitor}
+        onIgnore={handleIgnore}
+        quotes={realTimeQuotesByCode}
+      />
     </div>
   );
 
@@ -2425,9 +2440,10 @@ export function TTradeGlobalPage() {
                   <td
                     className={cn(
                       'px-3 py-3 text-right font-mono tabular-nums',
-                      batch.lastNetProfitPct >= 0
-                        ? 'text-emerald-300'
-                        : 'text-rose-300'
+                      financialToneClass(
+                        batch.lastNetProfitPct,
+                        'holding'
+                      )
                     )}
                   >
                     {formatSignedPercent(batch.lastNetProfitPct)}
@@ -2698,6 +2714,9 @@ export function TTradeGlobalPage() {
                   string,
                   unknown
                 >;
+                const isMomentumSignal =
+                  String(signal.signal_type || '').toUpperCase() ===
+                  'MOMENTUM_ACCELERATION';
                 const monitorHolding = monitor?.holdings.find(
                   holding => holding.stockCode === session.stockCode
                 );
@@ -2781,15 +2800,41 @@ export function TTradeGlobalPage() {
                           </div>
                         </div>
                         <div>
-                          <div className="text-slate-600">回撤</div>
-                          <div className="mt-1 text-emerald-300">
-                            {formatNumber(Number(signal.pullback_pct || 0))}%
+                          <div className="text-slate-600">
+                            {isMomentumSignal ? '快速拉升' : '回撤'}
+                          </div>
+                          <div
+                            className={cn(
+                              'mt-1',
+                              financialToneClass(
+                                isMomentumSignal ? 1 : -1,
+                                'holding'
+                              )
+                            )}
+                          >
+                            {formatNumber(
+                              Number(
+                                isMomentumSignal
+                                  ? signal.momentum_rise_pct || 0
+                                  : signal.pullback_pct || 0
+                              )
+                            )}
+                            %
                           </div>
                         </div>
                         <div>
-                          <div className="text-slate-600">反弹</div>
+                          <div className="text-slate-600">
+                            {isMomentumSignal ? '成交加速' : '反弹'}
+                          </div>
                           <div className="mt-1 text-red-300">
-                            {formatNumber(Number(signal.rebound_pct || 0))}%
+                            {formatNumber(
+                              Number(
+                                isMomentumSignal
+                                  ? signal.momentum_amount_velocity_ratio || 0
+                                  : signal.rebound_pct || 0
+                              )
+                            )}
+                            {isMomentumSignal ? 'x' : '%'}
                           </div>
                         </div>
                         <div>
@@ -2798,9 +2843,6 @@ export function TTradeGlobalPage() {
                             {session.plannedEntryVolume.toLocaleString()} 股
                           </div>
                         </div>
-                      </div>
-                      <div className="mt-2 text-[9px] text-slate-700 sm:hidden">
-                        {formatQuoteTime(realTimeQuote?.time)}
                       </div>
                     </div>
                     <div className="mt-4 flex justify-end gap-2 border-t border-white/[0.05] pt-3">
@@ -2950,11 +2992,11 @@ export function TTradeGlobalPage() {
                         <div>
                           <div className="text-slate-600">回撤 / 反弹</div>
                           <div className="mt-1 text-slate-300">
-                            <span className="text-emerald-300">
+                            <span className="text-holding-down">
                               {formatNumber(signal.pullbackPct)}%
                             </span>
                             <span className="mx-1 text-slate-700">/</span>
-                            <span className="text-red-300">
+                            <span className="text-market-up">
                               {formatNumber(signal.reboundPct)}%
                             </span>
                           </div>
@@ -3147,6 +3189,151 @@ export function TTradeGlobalPage() {
                 </div>
               </div>
 
+              <div className="border border-emerald-400/15 bg-emerald-400/[0.03] p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <Label
+                      htmlFor="t-trade-high-profit-lock-enabled"
+                      className="text-xs font-bold text-slate-300"
+                    >
+                      高利润保护
+                    </Label>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      按可执行买一计算峰值；进入高利润区后限制最大利润回吐
+                    </p>
+                  </div>
+                  <input
+                    id="t-trade-high-profit-lock-enabled"
+                    type="checkbox"
+                    checked={form.highProfitLockEnabled}
+                    onChange={event =>
+                      setField(
+                        'highProfitLockEnabled',
+                        event.target.checked
+                      )
+                    }
+                    className="h-4 w-4 cursor-pointer accent-emerald-500 focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+                  />
+                </div>
+                {form.highProfitLockEnabled && (
+                  <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3">
+                    <NumericField
+                      id="t-trade-high-profit-arm"
+                      label="高利润武装线"
+                      suffix="%"
+                      value={form.highProfitArmPct}
+                      onChange={value => setField('highProfitArmPct', value)}
+                    />
+                    <NumericField
+                      id="t-trade-high-profit-drawdown"
+                      label="峰值最大回吐"
+                      suffix="%"
+                      value={form.highProfitMaxDrawdownPct}
+                      onChange={value =>
+                        setField('highProfitMaxDrawdownPct', value)
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="border border-amber-400/15 bg-amber-400/[0.03] p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <Label
+                      htmlFor="t-trade-rapid-reversal-enabled"
+                      className="text-xs font-bold text-slate-300"
+                    >
+                      极速反转退出
+                    </Label>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      高利润峰值形成后，短时间内连续确认买一收益快速回落即紧急退出
+                    </p>
+                  </div>
+                  <input
+                    id="t-trade-rapid-reversal-enabled"
+                    type="checkbox"
+                    checked={form.rapidReversalEnabled}
+                    onChange={event =>
+                      setField('rapidReversalEnabled', event.target.checked)
+                    }
+                    className="h-4 w-4 cursor-pointer accent-amber-500 focus-visible:ring-2 focus-visible:ring-amber-500/60"
+                  />
+                </div>
+                {form.rapidReversalEnabled && (
+                  <div className="mt-3 grid grid-cols-3 gap-3 border-t border-white/[0.05] pt-3">
+                    <NumericField
+                      id="t-trade-rapid-reversal-window"
+                      label="反转窗口"
+                      suffix="秒"
+                      value={form.rapidReversalWindowSeconds}
+                      onChange={value =>
+                        setField('rapidReversalWindowSeconds', value)
+                      }
+                    />
+                    <NumericField
+                      id="t-trade-rapid-reversal-drawdown"
+                      label="回吐阈值"
+                      suffix="%"
+                      value={form.rapidReversalDrawdownPct}
+                      onChange={value =>
+                        setField('rapidReversalDrawdownPct', value)
+                      }
+                    />
+                    <NumericField
+                      id="t-trade-rapid-reversal-confirm"
+                      label="连续确认"
+                      suffix="Tick"
+                      value={form.rapidReversalConfirmTicks}
+                      onChange={value =>
+                        setField('rapidReversalConfirmTicks', value)
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <Label
+                      htmlFor="t-trade-limit-up-touch-enabled"
+                      className="text-xs font-bold text-slate-300"
+                    >
+                      涨停触达退出
+                    </Label>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      活跃 T 批次的可执行买一达到涨停价时，用昨日老仓完成等量退出
+                    </p>
+                  </div>
+                  <input
+                    id="t-trade-limit-up-touch-enabled"
+                    type="checkbox"
+                    checked={form.limitUpTouchExitEnabled}
+                    onChange={event =>
+                      setField(
+                        'limitUpTouchExitEnabled',
+                        event.target.checked
+                      )
+                    }
+                    className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
+                  />
+                </div>
+                {form.limitUpTouchExitEnabled && (
+                  <div className="mt-3 max-w-48 border-t border-white/[0.05] pt-3">
+                    <NumericField
+                      id="t-trade-limit-up-touch-tolerance"
+                      label="涨停容差"
+                      suffix="Tick"
+                      value={form.limitUpTouchToleranceTicks}
+                      onChange={value =>
+                        setField('limitUpTouchToleranceTicks', value)
+                      }
+                    />
+                  </div>
+                )}
+              </div>
+
               <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
                 <div className="flex items-center justify-between gap-4">
                   <div>
@@ -3272,7 +3459,7 @@ export function TTradeGlobalPage() {
                 Tick 信号与确认
               </div>
               <div className="mt-1 text-[10px] text-slate-600">
-                定义回撤企稳机会、确认有效期与冷却时间
+                分别定义回撤企稳与早期快速拉升机会，并控制确认有效期
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
@@ -3332,6 +3519,123 @@ export function TTradeGlobalPage() {
                 value={form.cooldownSeconds}
                 onChange={value => setField('cooldownSeconds', value)}
               />
+            </div>
+
+            <div className="mt-5 border border-white/[0.07] bg-[#07111f]/60 p-3">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <Label
+                    htmlFor="t-trade-momentum-enabled"
+                    className="text-xs font-bold text-slate-300"
+                  >
+                    快速拉升动量买入
+                  </Label>
+                  <p className="mt-1 text-[10px] text-slate-600">
+                    捕捉成交加速的早期拉升；VWAP 上限用于阻止末端追涨
+                  </p>
+                </div>
+                <input
+                  id="t-trade-momentum-enabled"
+                  type="checkbox"
+                  checked={form.momentumEnabled}
+                  onChange={event =>
+                    setField('momentumEnabled', event.target.checked)
+                  }
+                  className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
+                />
+              </div>
+              {form.momentumEnabled && (
+                <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
+                  <NumericField
+                    id="t-trade-momentum-window"
+                    label="动量窗口"
+                    suffix="秒"
+                    value={form.momentumWindowSeconds}
+                    onChange={value =>
+                      setField('momentumWindowSeconds', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-rise"
+                    label="最低拉升"
+                    suffix="%"
+                    value={form.momentumMinRisePct}
+                    onChange={value => setField('momentumMinRisePct', value)}
+                  />
+                  <NumericField
+                    id="t-trade-momentum-duration"
+                    label="最短持续"
+                    suffix="秒"
+                    value={form.momentumMinMoveSeconds}
+                    onChange={value =>
+                      setField('momentumMinMoveSeconds', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-baseline"
+                    label="成交基线"
+                    suffix="秒"
+                    value={form.momentumBaselineSeconds}
+                    onChange={value =>
+                      setField('momentumBaselineSeconds', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-velocity"
+                    label="成交加速倍数"
+                    suffix="倍"
+                    value={form.momentumMinAmountVelocityRatio}
+                    onChange={value =>
+                      setField('momentumMinAmountVelocityRatio', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-min-vwap"
+                    label="VWAP 最低溢价"
+                    suffix="%"
+                    value={form.momentumMinVwapPremiumPct}
+                    onChange={value =>
+                      setField('momentumMinVwapPremiumPct', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-max-vwap"
+                    label="VWAP 追涨上限"
+                    suffix="%"
+                    value={form.momentumMaxVwapPremiumPct}
+                    onChange={value =>
+                      setField('momentumMaxVwapPremiumPct', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-high-tolerance"
+                    label="窗口高点容差"
+                    suffix="Tick"
+                    value={form.momentumHighToleranceTicks}
+                    onChange={value =>
+                      setField('momentumHighToleranceTicks', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-spread-ticks"
+                    label="动量最大价差"
+                    suffix="Tick"
+                    value={form.momentumMaxSpreadTicks}
+                    onChange={value =>
+                      setField('momentumMaxSpreadTicks', value)
+                    }
+                  />
+                  <NumericField
+                    id="t-trade-momentum-spread-pct"
+                    label="价差占比上限"
+                    suffix="%"
+                    value={form.momentumMaxSpreadPct}
+                    onChange={value =>
+                      setField('momentumMaxSpreadPct', value)
+                    }
+                  />
+                </div>
+              )}
             </div>
 
             <div className="mt-5 border-t border-white/[0.05] pt-4">

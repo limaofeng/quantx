@@ -435,7 +435,7 @@ export function TradingCard({
                       ).toFixed(2);
                       if (Number(p) > 0) setPrice(p);
                     }}
-                    className="text-[8px] font-black text-rose-500/60 hover:text-rose-500 transition-colors uppercase"
+                    className="text-[8px] font-black text-market-down/60 hover:text-market-down transition-colors uppercase"
                   >
                     跌停{' '}
                     {(
@@ -462,7 +462,7 @@ export function TradingCard({
                       ).toFixed(2);
                       if (Number(p) > 0) setPrice(p);
                     }}
-                    className="text-[8px] font-black text-emerald-500/60 hover:text-emerald-500 transition-colors uppercase"
+                    className="text-[8px] font-black text-market-up/60 hover:text-market-up transition-colors uppercase"
                   >
                     涨停{' '}
                     {(

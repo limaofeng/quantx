@@ -30,6 +30,17 @@ export const TTradeGlobalMonitorQuery = gql(`
       pullbackThresholdPct
       reboundThresholdPct
       maxSpreadTicks
+      momentumEnabled
+      momentumWindowSeconds
+      momentumMinRisePct
+      momentumMinMoveSeconds
+      momentumBaselineSeconds
+      momentumMinAmountVelocityRatio
+      momentumMinVwapPremiumPct
+      momentumMaxVwapPremiumPct
+      momentumHighToleranceTicks
+      momentumMaxSpreadTicks
+      momentumMaxSpreadPct
       approvalTtlSeconds
       maxPriceDeviationPct
       targetProfitPct
@@ -37,6 +48,15 @@ export const TTradeGlobalMonitorQuery = gql(`
       initialGapPct
       trailingGapSlope
       maxGapPct
+      highProfitLockEnabled
+      highProfitArmPct
+      highProfitMaxDrawdownPct
+      rapidReversalEnabled
+      rapidReversalWindowSeconds
+      rapidReversalDrawdownPct
+      rapidReversalConfirmTicks
+      limitUpTouchExitEnabled
+      limitUpTouchToleranceTicks
       hardStopEnabled
       hardStopPct
       timeExitMode
@@ -72,21 +92,49 @@ export const TTradeGlobalMonitorQuery = gql(`
       readiness {
         accountId
         ready
+        status
+        preparationReady
+        automationReady
         stage
         engineStatus
         agentStatus
         agentDeviceId
+        agentMode
+        protocolVersion
         reconcileStatus
         killSwitch
         policyVersion
         canApprove
         canActivateLive
         blockedReasons
+        preparationBlockedReasons
+        manualCoexistence
+        externalOrderCount
+        externalTradeCount
+        controlledWindowActive
+        controlledWindowSnapshotId
+        controlledWindowStartedAt
+        newExternalOrderCount
+        newExternalTradeCount
+        workingExternalOrderCount
+        snapshotId
+        snapshotHash
+        snapshotAt
+        reconciliationAgeSeconds
+        queuedCommandCount
+        queueDelaySeconds
+        deadLetterCount
+        unresolvedCriticalAlertCount
+        journalIntegrity
+        journalSizeBytes
+        journalPendingReports
+        lastBackupAt
         checkedAt
         checks {
           code
           passed
           message
+          scope
         }
       }
       holdings {
@@ -120,6 +168,29 @@ export const TTradeGlobalMonitorQuery = gql(`
           lastExitReason
           canCancel
           errorMessage
+          latestEvaluation {
+            phase
+            lastTickAt
+            processedTickCount
+            windowSampleCount
+            windowCoverageSeconds
+            triggered
+            reason
+            signalType
+            signalPrice
+            windowHigh
+            windowLow
+            pullbackPct
+            reboundPct
+            vwap
+            vwapPremiumPct
+            spreadTicks
+            spreadPct
+            momentumRisePct
+            momentumMoveSeconds
+            momentumAmountVelocityRatio
+            momentumBaselineCoverageSeconds
+          }
         }
       }
       sessions {
@@ -151,6 +222,29 @@ export const TTradeGlobalMonitorQuery = gql(`
         canCancel
         completedCycles
         errorMessage
+        latestEvaluation {
+          phase
+          lastTickAt
+          processedTickCount
+          windowSampleCount
+          windowCoverageSeconds
+          triggered
+          reason
+          signalType
+          signalPrice
+          windowHigh
+          windowLow
+          pullbackPct
+          reboundPct
+          vwap
+          vwapPremiumPct
+          spreadTicks
+          spreadPct
+          momentumRisePct
+          momentumMoveSeconds
+          momentumAmountVelocityRatio
+          momentumBaselineCoverageSeconds
+        }
       }
     }
   }
@@ -161,21 +255,49 @@ export const TTradeReadinessQuery = gql(`
     validateTTradeLiveReadiness(accountId: $accountId) {
       accountId
       ready
+      status
+      preparationReady
+      automationReady
       stage
       engineStatus
       agentStatus
       agentDeviceId
+      agentMode
+      protocolVersion
       reconcileStatus
       killSwitch
       policyVersion
       canApprove
       canActivateLive
       blockedReasons
+      preparationBlockedReasons
+      manualCoexistence
+      externalOrderCount
+      externalTradeCount
+      controlledWindowActive
+      controlledWindowSnapshotId
+      controlledWindowStartedAt
+      newExternalOrderCount
+      newExternalTradeCount
+      workingExternalOrderCount
+      snapshotId
+      snapshotHash
+      snapshotAt
+      reconciliationAgeSeconds
+      queuedCommandCount
+      queueDelaySeconds
+      deadLetterCount
+      unresolvedCriticalAlertCount
+      journalIntegrity
+      journalSizeBytes
+      journalPendingReports
+      lastBackupAt
       checkedAt
       checks {
         code
         passed
         message
+        scope
       }
     }
   }
@@ -312,6 +434,9 @@ export const TTradeOperationsQuery = gql(`
     validateTTradeLiveReadiness(accountId: $accountId) {
       accountId
       ready
+      status
+      preparationReady
+      automationReady
       stage
       engineStatus
       agentStatus
@@ -322,11 +447,22 @@ export const TTradeOperationsQuery = gql(`
       canApprove
       canActivateLive
       blockedReasons
+      preparationBlockedReasons
+      manualCoexistence
+      externalOrderCount
+      externalTradeCount
+      controlledWindowActive
+      controlledWindowSnapshotId
+      controlledWindowStartedAt
+      newExternalOrderCount
+      newExternalTradeCount
+      workingExternalOrderCount
       checkedAt
       checks {
         code
         passed
         message
+        scope
       }
     }
     tTradeBatches(accountId: $accountId, offset: 0, limit: 100) {
@@ -372,23 +508,57 @@ export const TTradeOperationsQuery = gql(`
   }
 `);
 
+export const BeginTTradeControlledWindowMutation = gql(`
+  mutation Portfolio_BeginTTradeControlledWindow(
+    $accountId: String!
+    $snapshotId: String!
+  ) {
+    beginTTradeControlledWindow(
+      accountId: $accountId
+      snapshotId: $snapshotId
+    ) {
+      success
+      code
+      message
+      readiness {
+        status
+        stage
+        controlledWindowActive
+        controlledWindowSnapshotId
+        workingExternalOrderCount
+        blockedReasons
+        preparationBlockedReasons
+      }
+    }
+  }
+`);
+
 export const ActivateTTradeLiveMutation = gql(`
   mutation Portfolio_ActivateTTradeLive(
     $accountId: String!
     $policyVersion: Int!
+    $targetStage: TTradeRolloutTarget!
+    $confirmation: String!
   ) {
     activateTTradeLive(
       accountId: $accountId
       policyVersion: $policyVersion
+      targetStage: $targetStage
+      confirmation: $confirmation
     ) {
       success
       code
       message
       readiness {
         ready
+        status
+        preparationReady
+        automationReady
         stage
         canApprove
+        controlledWindowActive
         blockedReasons
+        preparationBlockedReasons
       }
     }
   }

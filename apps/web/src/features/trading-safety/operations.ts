@@ -5,6 +5,9 @@ export const LiveSafetyStatusQuery = gql(`
     liveSafetyStatus(accountId: $accountId) {
       accountId
       ready
+      status
+      preparationReady
+      automationReady
       stage
       engineStatus
       agentStatus
@@ -17,6 +20,7 @@ export const LiveSafetyStatusQuery = gql(`
       canApprove
       canActivateLive
       blockedReasons
+      preparationBlockedReasons
       snapshotId
       snapshotHash
       snapshotAt
@@ -25,6 +29,15 @@ export const LiveSafetyStatusQuery = gql(`
       queueDelaySeconds
       deadLetterCount
       unresolvedCriticalAlertCount
+      manualCoexistence
+      externalOrderCount
+      externalTradeCount
+      controlledWindowActive
+      controlledWindowSnapshotId
+      controlledWindowStartedAt
+      newExternalOrderCount
+      newExternalTradeCount
+      workingExternalOrderCount
       journalIntegrity
       journalSizeBytes
       journalPendingReports
@@ -34,6 +47,7 @@ export const LiveSafetyStatusQuery = gql(`
         code
         passed
         message
+        scope
       }
     }
   }

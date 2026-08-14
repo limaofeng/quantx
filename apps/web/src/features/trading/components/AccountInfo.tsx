@@ -1,4 +1,6 @@
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { formatCurrency } from '@/shared/utils/format';
+import { cn } from '@/utils/cn';
 
 interface AccountInfoProps {
   summary?: {
@@ -80,7 +82,12 @@ export function AccountInfo({ summary }: AccountInfoProps) {
             <span className="text-[9px] text-muted-foreground uppercase">
               总盈亏
             </span>
-            <span className="text-[11px] font-mono font-bold">
+            <span
+              className={cn(
+                'text-[11px] font-mono font-bold',
+                financialToneClass(summary?.totalProfitLoss, 'holding')
+              )}
+            >
               {typeof summary?.totalProfitLoss === 'number'
                 ? `${displayCurrency(summary.totalProfitLoss)}${
                     typeof summary.profitLossPercent === 'number'

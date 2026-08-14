@@ -106,6 +106,7 @@ describe('TakeProfitPlanPanel', () => {
     ).not.toBeInTheDocument();
     expect(screen.getByLabelText('目标收益率 (%)')).toHaveValue(15);
     expect(screen.getByLabelText('可卖库存')).toHaveValue(1900);
+    expect(screen.getByText('-21.14%')).toHaveClass('text-holding-down');
     expect(
       screen.getByText(
         '收益率达到 15.00% 后提交 SELL 委托，成交以券商回报为准。'
@@ -131,8 +132,9 @@ describe('TakeProfitPlanPanel', () => {
 
   it('updates fields and preview from the standard take-profit preset', async () => {
     const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
 
-    renderPanel();
+    renderPanel({ onSave });
 
     await user.click(screen.getByRole('button', { name: /标准止盈/ }));
 
@@ -143,7 +145,22 @@ describe('TakeProfitPlanPanel', () => {
     expect(screen.getByLabelText('卖出比例 (%)')).toHaveValue(50);
     expect(
       screen.getByTestId('take-profit-execution-preview')
-    ).toHaveTextContent('本次保存首段止盈');
+    ).toHaveTextContent('强势放量继续跟涨');
+
+    await user.click(
+      screen.getByRole('button', { name: '保存并启用止盈计划' })
+    );
+    await waitFor(() => {
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({
+          autoExitAuthorized: false,
+          executionMode: 'paper',
+          sellMode: 'FIXED_VOLUME',
+          sellVolume: 900,
+          strategy: 'ADAPTIVE_VOLUME_PRICE_TRAILING',
+        })
+      );
+    });
   });
 
   it('shows advanced strategies as disabled until the monitor engine exists', async () => {

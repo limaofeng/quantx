@@ -92,8 +92,11 @@ describe('TradingHoldingsSidebar', () => {
     expect(dayReturn).toBeInTheDocument();
     expect(stockCode.parentElement).not.toHaveTextContent('+1.23%');
     expect(dayReturn.closest('.text-right')).not.toBeNull();
+    expect(dayReturn).toHaveClass('text-market-up');
     expect(within(holdingButton).getByText('持有收益')).toBeInTheDocument();
-    expect(within(holdingButton).getByText('-11.30%')).toBeInTheDocument();
+    expect(within(holdingButton).getByText('-11.30%')).toHaveClass(
+      'text-holding-down'
+    );
   });
 
   it('places profit loss underneath holding return in the compact metrics', () => {

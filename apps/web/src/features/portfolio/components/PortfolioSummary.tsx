@@ -138,7 +138,7 @@ export function PortfolioSummary({
         value={signedCurrency(summary.totalProfitLoss)}
         subValue={`回报率: ${signedPercent(summary.totalProfitLossPercent)}`}
         icon={<TrendingUp />}
-        theme={isTotalProfitable ? 'emerald' : 'rose'}
+        theme={isTotalProfitable ? 'rose' : 'sky'}
         status={isTotalProfitable ? '盈利' : '亏损'}
         sparklineData={cumulativePnlTrend}
       />
@@ -155,8 +155,8 @@ export function PortfolioSummary({
         theme={
           hasTodayProfitLoss
             ? isTodayProfitable
-              ? 'emerald'
-              : 'rose'
+              ? 'rose'
+              : 'sky'
             : 'amber'
         }
         status={

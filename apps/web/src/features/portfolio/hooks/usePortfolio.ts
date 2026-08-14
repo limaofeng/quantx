@@ -410,6 +410,252 @@ export const LiquidatePositionMutation = gql(`
   }
 `);
 
+export const LiquidatePositionsMutation = gql(`
+  mutation LiquidatePositions($input: LiquidatePositionsInput!) {
+    liquidatePositions(input: $input) {
+      groupId
+      success
+      message
+      plans {
+        instrumentCode
+        success
+        planId
+        protectedVolume
+        conflictPlanIds
+        error
+      }
+    }
+  }
+`);
+
+export const ExitPlansQuery = gql(`
+  query ExitPlans(
+    $accountId: String
+    $instrumentCode: String
+    $statuses: [String!]
+    $sourceType: String
+    $limit: Int! = 200
+  ) {
+    exitPlans(
+      accountId: $accountId
+      instrumentCode: $instrumentCode
+      statuses: $statuses
+      sourceType: $sourceType
+      limit: $limit
+    ) {
+      planId
+      groupId
+      accountId
+      instrumentCode
+      bucket
+      sourceType
+      sourceId
+      strategyRunId
+      enabled
+      status
+      executionMode
+      autoExitAuthorized
+      configVersion
+      completionStrategy
+      completionNote
+      protectedVolume
+      exitedVolume
+      remainingVolume
+      entryAvgPrice
+      rules
+      metadata
+      canEditRules
+      editRoute
+      phase
+      dataQuality
+      lastDecision
+      peakPrice
+      peakDrawdownPct
+      trailingFloorPct
+      pendingClientOrderId
+      pendingIntentId
+      lastEvaluatedAt
+      lastError
+      createdAt
+      updatedAt
+    }
+  }
+`);
+
+export const ExitPlanCapabilitiesQuery = gql(`
+  query ExitPlanCapabilities {
+    exitPlanCapabilities {
+      ruleTypes {
+        ruleType
+        label
+        category
+        parameters
+      }
+      completionStrategies
+      conflictStrategies
+      executionModes
+      ruleSemantics
+    }
+  }
+`);
+
+export const ExitPlanEventsQuery = gql(`
+  query ExitPlanEvents($planId: String!, $limit: Int! = 200) {
+    exitPlanEvents(planId: $planId, limit: $limit) {
+      eventId
+      planId
+      eventType
+      payload
+      createdAt
+    }
+  }
+`);
+
+export const ExitPlanHoldingCapacityQuery = gql(`
+  query ExitPlanHoldingCapacity($accountId: String, $instrumentCode: String!) {
+    exitPlanHoldingCapacity(
+      accountId: $accountId
+      instrumentCode: $instrumentCode
+    ) {
+      accountId
+      instrumentCode
+      totalVolume
+      availableVolume
+      frozenVolume
+      protectedVolume
+      pendingVolume
+      unallocatedVolume
+      conflicts {
+        planId
+        sourceType
+        status
+        remainingVolume
+        pending
+      }
+    }
+  }
+`);
+
+export const CreateManualExitPlanMutation = gql(`
+  mutation CreateManualExitPlan($input: CreateManualExitPlanInput!) {
+    createManualExitPlan(input: $input) {
+      planId
+      instrumentCode
+      status
+      configVersion
+      protectedVolume
+    }
+  }
+`);
+
+export const UpdateManualExitPlanMutation = gql(`
+  mutation UpdateManualExitPlan($input: UpdateManualExitPlanInput!) {
+    updateManualExitPlan(input: $input) {
+      planId
+      instrumentCode
+      status
+      configVersion
+      protectedVolume
+      executionMode
+      autoExitAuthorized
+      rules
+      metadata
+    }
+  }
+`);
+
+export const SetExitPlanEnabledMutation = gql(`
+  mutation SetExitPlanEnabled(
+    $planId: String!
+    $enabled: Boolean!
+    $configVersion: Int!
+  ) {
+    setExitPlanEnabled(
+      planId: $planId
+      enabled: $enabled
+      configVersion: $configVersion
+    ) {
+      planId
+      enabled
+      status
+      configVersion
+    }
+  }
+`);
+
+export const CancelExitPlanMutation = gql(`
+  mutation CancelExitPlan($planId: String!, $configVersion: Int!) {
+    cancelExitPlan(planId: $planId, configVersion: $configVersion) {
+      planId
+      enabled
+      status
+      configVersion
+    }
+  }
+`);
+
+export const EvaluateExitPlanNowMutation = gql(`
+  mutation EvaluateExitPlanNow($planId: String!) {
+    evaluateExitPlanNow(planId: $planId) {
+      planId
+      status
+      lastEvaluatedAt
+      lastDecision
+      lastError
+    }
+  }
+`);
+
+export const PreviewExitIntentMutation = gql(`
+  mutation PreviewExitIntent($planId: String!, $intentId: String!) {
+    previewExitIntent(planId: $planId, intentId: $intentId) {
+      success
+      code
+      message
+      preview {
+        challengeId
+        confirmationToken
+        instrumentCode
+        side
+        targetVolume
+        referencePrice
+        estimatedAmount
+        challengeExpiresAt
+        warnings
+      }
+    }
+  }
+`);
+
+export const ConfirmExitIntentMutation = gql(`
+  mutation ConfirmExitIntent(
+    $planId: String!
+    $intentId: String!
+    $confirmationToken: String!
+  ) {
+    confirmExitIntent(
+      planId: $planId
+      intentId: $intentId
+      confirmationToken: $confirmationToken
+    ) {
+      success
+      code
+      message
+      challengeId
+    }
+  }
+`);
+
+export const RejectExitIntentMutation = gql(`
+  mutation RejectExitIntent($planId: String!, $intentId: String!) {
+    rejectExitIntent(planId: $planId, intentId: $intentId) {
+      success
+      code
+      message
+    }
+  }
+`);
+
 /**
  * 查询条件清仓单
  */
@@ -432,6 +678,11 @@ export const ConditionalLiquidationOrdersQuery = gql(`
       status
       targetProfitPct
       targetPrice
+      strategy
+      dynamicPolicy
+      exitPlanId
+      executionMode
+      autoExitAuthorized
       sellMode
       sellRatioPct
       sellVolume
@@ -445,6 +696,18 @@ export const ConditionalLiquidationOrdersQuery = gql(`
       remark
       createdAt
       updatedAt
+      phase
+      dataQuality
+      lastDecision
+      protectedVolume
+      exitedVolume
+      remainingVolume
+      peakPrice
+      peakDrawdownPct
+      volumeVelocity
+      weakScore
+      trailingFloorPct
+      pendingClientOrderId
     }
   }
 `);

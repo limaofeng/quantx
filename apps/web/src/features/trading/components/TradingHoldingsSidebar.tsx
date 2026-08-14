@@ -53,6 +53,7 @@ import type {
   PortfolioSummaryData,
   Position,
 } from '@/features/portfolio/types';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatPercent } from '@/utils/transform/data';
 
@@ -512,11 +513,6 @@ export function TradingHoldingsSidebar({
       toFiniteNumber(holding.todayProfitRate);
     const isDayChangePositive =
       dayChangePercent !== null && dayChangePercent >= 0;
-    const isProfitLossPositive = profitLoss >= 0;
-    const isHoldingReturnPositive =
-      holdingReturnRate === null
-        ? isProfitLossPositive
-        : holdingReturnRate >= 0;
     const ToneIcon =
       dayChangePercent === null
         ? null
@@ -538,9 +534,7 @@ export function TradingHoldingsSidebar({
         {
           label: '持有收益',
           value: formatPercentOrDash(holdingReturnRate),
-          valueClassName: isHoldingReturnPositive
-            ? 'text-rose-300'
-            : 'text-emerald-300',
+          valueClassName: financialToneClass(holdingReturnRate, 'holding'),
         },
       ],
       [
@@ -557,9 +551,7 @@ export function TradingHoldingsSidebar({
         {
           label: '盈亏',
           value: formatSignedCurrency(profitLoss),
-          valueClassName: isProfitLossPositive
-            ? 'text-rose-300'
-            : 'text-emerald-300',
+          valueClassName: financialToneClass(profitLoss, 'holding'),
         },
       ],
     ];
@@ -606,9 +598,7 @@ export function TradingHoldingsSidebar({
                   'inline-flex items-center justify-end gap-1 font-mono text-[10px] font-black leading-none',
                   dayChangePercent === null
                     ? 'text-slate-500'
-                    : isDayChangePositive
-                      ? 'text-rose-300'
-                      : 'text-emerald-300'
+                    : financialToneClass(dayChangePercent, 'holding')
                 )}
               >
                 {ToneIcon && <ToneIcon className="h-3 w-3" />}
@@ -641,12 +631,16 @@ export function TradingHoldingsSidebar({
             {metricRows.map((metrics, rowIndex) => (
               <div
                 key={rowIndex}
-                className="grid grid-cols-[max-content_max-content_max-content] items-baseline justify-between gap-x-2"
+                className="grid min-w-0 grid-cols-3 items-baseline gap-x-2"
               >
-                {metrics.map(metric => (
+                {metrics.map((metric, metricIndex) => (
                   <div
                     key={metric.label}
-                    className="flex min-w-0 items-baseline gap-1 leading-none"
+                    className={cn(
+                      'flex min-w-0 items-baseline gap-1 leading-none',
+                      metricIndex === 1 && 'justify-center',
+                      metricIndex === 2 && 'justify-end'
+                    )}
                   >
                     <span className="shrink-0 text-[8px] font-black leading-none tracking-wider text-slate-600">
                       {metric.label}
@@ -671,8 +665,8 @@ export function TradingHoldingsSidebar({
 
   return (
     <>
-      <aside className="flex h-full min-h-0 flex-col">
-        <div className="border-b border-white/5 px-4 py-3">
+      <aside className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
+        <div className="shrink-0 border-b border-white/5 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
@@ -717,7 +711,7 @@ export function TradingHoldingsSidebar({
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/5 px-4">
             <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
               持仓
@@ -818,7 +812,7 @@ export function TradingHoldingsSidebar({
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto py-2 custom-scrollbar">
+          <div className="custom-scrollbar min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain py-2">
             {isLoading ? (
               <HoldingsSkeleton />
             ) : sortedHoldings.length === 0 ? (
@@ -837,7 +831,7 @@ export function TradingHoldingsSidebar({
           </div>
         </div>
 
-        <div className="border-t border-white/5 p-3">
+        <div className="shrink-0 border-t border-white/5 p-3">
           <button
             type="button"
             onClick={onAccountOpen}

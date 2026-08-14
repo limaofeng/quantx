@@ -126,10 +126,15 @@ export function formatDateTime(value?: string | number | null) {
   }).format(date);
 }
 
-export function pnlClass(value?: number | null) {
+export function pnlClass(
+  value?: number | null,
+  context: 'market' | 'holding' = 'market'
+) {
   if (typeof value !== 'number') return 'text-slate-400';
-  if (value > 0) return 'text-red-400';
-  if (value < 0) return 'text-emerald-400';
+  if (value > 0) return 'text-market-up';
+  if (value < 0) {
+    return context === 'holding' ? 'text-holding-down' : 'text-market-down';
+  }
   return 'text-slate-300';
 }
 

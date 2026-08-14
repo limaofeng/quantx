@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  ArrowLeftRight,
   CheckCircle2,
   DatabaseBackup,
   RadioTower,
@@ -14,17 +15,14 @@ import { StatusBar } from '@/components/studio-workbench';
 import { cn } from '@/utils/cn';
 
 import { LiveSafetyStatusQuery } from './operations';
+import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
 
 function ageLabel(value?: string | null) {
   if (!value) return '无记录';
   const milliseconds = Date.now() - new Date(value).getTime();
   if (!Number.isFinite(milliseconds) || milliseconds < 0) return '时间异常';
-  const seconds = Math.floor(milliseconds / 1000);
-  if (seconds < 60) return `${seconds} 秒前`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟前`;
-  return `${Math.floor(minutes / 60)} 小时前`;
+  return ageSecondsLabel(milliseconds / 1000);
 }
 
 function SafetyMetric({
@@ -68,13 +66,15 @@ export function TradingSafetyBar({
   const status = data?.liveSafetyStatus;
   const stateLabel = fetching
     ? '检查中'
-    : canTrade
-      ? 'READY'
-      : status?.killSwitch
-        ? 'HARD KILL'
-        : 'BLOCKED';
-  const summary =
-    blockedReasons[0] || '协议、快照、对账、告警和备份门禁均已通过';
+    : status?.status || (canTrade ? 'READY' : 'BLOCKED');
+  const isPreparing = stateLabel === 'PREPARING';
+  const summary = isPreparing
+    ? `账户观察与对账已就绪；自动交易保持关闭${blockedReasons[0] ? `：${blockedReasons[0]}` : ''}`
+    : stateLabel === 'READY'
+      ? '账户事实与自动交易门禁均已通过'
+      : status?.preparationBlockedReasons?.[0] ||
+        blockedReasons[0] ||
+        '实盘安全状态尚未就绪';
 
   return (
     <section
@@ -98,7 +98,9 @@ export function TradingSafetyBar({
                 'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider',
                 canTrade
                   ? 'bg-emerald-400/15 text-emerald-300'
-                  : 'bg-red-400/15 text-red-300'
+                  : isPreparing
+                    ? 'bg-amber-400/15 text-amber-200'
+                    : 'bg-red-400/15 text-red-300'
               )}
             >
               {stateLabel}
@@ -122,7 +124,7 @@ export function TradingSafetyBar({
               className="hidden md:inline-flex"
               icon={<TimerReset className="h-2.5 w-2.5" />}
               label="快照"
-              value={ageLabel(status?.snapshotAt)}
+              value={ageSecondsLabel(status?.reconciliationAgeSeconds)}
             />
             <SafetyMetric
               className="hidden xl:inline-flex"
@@ -132,6 +134,12 @@ export function TradingSafetyBar({
             />
             <SafetyMetric
               className="hidden lg:inline-flex"
+              icon={<ArrowLeftRight className="h-2.5 w-2.5" />}
+              label="手工委托/成交"
+              value={`${status?.externalOrderCount ?? 0}/${status?.externalTradeCount ?? 0}`}
+            />
+            <SafetyMetric
+              className="hidden 2xl:inline-flex"
               icon={<ShieldAlert className="h-2.5 w-2.5" />}
               label="死信/告警"
               value={`${status?.deadLetterCount ?? 0}/${status?.unresolvedCriticalAlertCount ?? 0}`}

@@ -32,7 +32,6 @@ import {
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
 import type { Position } from '@/features/portfolio/types';
 import { StockDetailWorkbench } from '@/features/stocks/components';
-import { useIsMobile } from '@/hooks/use-mobile';
 import type { Stock } from '@/shared/types';
 import { cn } from '@/utils/cn';
 
@@ -47,13 +46,9 @@ import { TradingHoldingsSidebar } from '../components/TradingHoldingsSidebar';
 import { TradingInstrumentHeader } from '../components/TradingInstrumentHeader';
 import { useTodayOrders } from '../hooks';
 
-import MobileTradingPage from './MobileTradingPage';
-
 type TradingStudioMode = 'ACCOUNT' | 'CHART' | 'ORDER' | 'ORDERS' | 'TRADES';
 type TradingLayoutMode = 'standard' | 'wide';
 type OrderLike = { status?: string | null };
-
-const TRADING_COMPACT_BREAKPOINT = 900;
 
 const studioModes: StudioMode[] = [
   { id: 'CHART', icon: BarChart3, label: '图表盘口' },
@@ -147,30 +142,7 @@ function getNextLayoutMode(mode: TradingLayoutMode): TradingLayoutMode {
   return mode === 'wide' ? 'standard' : 'wide';
 }
 
-function useCompactTradingLayout() {
-  const [isCompact, setIsCompact] = React.useState<boolean | undefined>(
-    undefined
-  );
-
-  React.useEffect(() => {
-    const mql = window.matchMedia(
-      `(max-width: ${TRADING_COMPACT_BREAKPOINT}px)`
-    );
-    const onChange = () => {
-      setIsCompact(window.innerWidth <= TRADING_COMPACT_BREAKPOINT);
-    };
-
-    mql.addEventListener('change', onChange);
-    onChange();
-    return () => mql.removeEventListener('change', onChange);
-  }, []);
-
-  return !!isCompact;
-}
-
 export default function TradingPage() {
-  const isMobile = useIsMobile();
-  const isCompactTrading = useCompactTradingLayout();
   const itemsPerPage = 10;
   const search = useSearch();
   const urlSymbol = React.useMemo(() => getUrlSymbol(search), [search]);
@@ -727,15 +699,6 @@ export default function TradingPage() {
     ),
     [activeOrderCount, layoutMode, selectedStockCode]
   );
-
-  if (isMobile || isCompactTrading) {
-    return (
-      <MobileTradingPage
-        holdings={holdings}
-        portfolioSummary={portfolioSummary}
-      />
-    );
-  }
 
   return (
     <StudioWorkbench

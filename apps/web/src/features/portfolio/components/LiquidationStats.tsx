@@ -1,6 +1,7 @@
 import { Wallet, PieChart, DollarSign } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { formatCurrency } from '@/utils/transform/data';
 
 interface LiquidationStatsProps {
@@ -42,9 +43,7 @@ export function LiquidationStats({
               已清仓盈亏
             </p>
             <h3
-              className={`text-2xl font-bold ${
-                totalLiquidatedPnL >= 0 ? 'text-success' : 'text-destructive'
-              }`}
+              className={`text-2xl font-bold ${financialToneClass(totalLiquidatedPnL)}`}
             >
               {totalLiquidatedPnL > 0 ? '+' : ''}
               {formatCurrency(totalLiquidatedPnL)}

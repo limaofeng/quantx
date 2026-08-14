@@ -31,26 +31,17 @@ export function TradingSafetyProvider({
   }, [accountId, refresh]);
 
   const readiness = data?.liveSafetyStatus;
-  const unresolvedCriticalAlertCount =
-    readiness?.unresolvedCriticalAlertCount ?? 0;
   const blockedReasons = useMemo(() => {
     if (!accountId) return ['当前用户没有可用资金账户'];
     if (error) return [`安全状态查询失败：${error.message}`];
     if (!readiness) return ['实盘安全状态尚未加载'];
-    const reasons = [...readiness.blockedReasons];
-    if (unresolvedCriticalAlertCount > 0) {
-      reasons.push(`存在 ${unresolvedCriticalAlertCount} 条严重运行告警`);
-    }
-    return Array.from(new Set(reasons));
-  }, [accountId, error, readiness, unresolvedCriticalAlertCount]);
+    return Array.from(new Set(readiness.blockedReasons ?? []));
+  }, [accountId, error, readiness]);
 
   const value = useMemo<TradingSafetyContextValue>(
     () => ({
       accountId,
-      canTrade:
-        Boolean(readiness?.ready) &&
-        unresolvedCriticalAlertCount === 0 &&
-        !error,
+      canTrade: Boolean(readiness?.canApprove) && !error,
       blockedReasons,
       fetching,
     }),
@@ -59,8 +50,7 @@ export function TradingSafetyProvider({
       blockedReasons,
       error,
       fetching,
-      readiness?.ready,
-      unresolvedCriticalAlertCount,
+      readiness?.canApprove,
     ]
   );
 

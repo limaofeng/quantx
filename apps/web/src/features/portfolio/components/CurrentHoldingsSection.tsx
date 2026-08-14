@@ -29,9 +29,15 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
+import type {
+  LiquidationCompletionStrategy,
+  LiquidationConflictStrategy,
+  LiquidationExecutionOptions,
+} from '../hooks/useLiquidationActions';
 import type { Position } from '../types';
 
 interface CurrentHoldingsSectionProps {
@@ -41,8 +47,11 @@ interface CurrentHoldingsSectionProps {
   selectedHoldings: string[];
   onConfigureConditionalOrder?: (holding: Position) => void;
   onSelectionChange: (selected: string[]) => void;
-  onLiquidateSelected: () => void;
-  liquidateMultiple: (stockCodes: string[]) => Promise<unknown>;
+  onLiquidateSelected: (options: LiquidationExecutionOptions) => void;
+  liquidateMultiple: (
+    stockCodes: string[],
+    options: LiquidationExecutionOptions
+  ) => Promise<unknown>;
 }
 
 // 获取股票图标文字
@@ -113,6 +122,18 @@ export function CurrentHoldingsSection({
   liquidateMultiple,
 }: CurrentHoldingsSectionProps) {
   const [isProcessing, setIsProcessing] = useState(false);
+  const [completionStrategy, setCompletionStrategy] = useState<
+    LiquidationCompletionStrategy | ''
+  >('');
+  const [conflictStrategy, setConflictStrategy] = useState<
+    LiquidationConflictStrategy | ''
+  >('');
+  const [executionMode, setExecutionMode] = useState<
+    'paper' | 'live' | ''
+  >('');
+  const hasExplicitChoices = Boolean(
+    completionStrategy && conflictStrategy && executionMode
+  );
   const liquidatableHoldings = holdings.filter(isLiquidatable);
   const selectedSet = new Set(selectedHoldings.map(normalizeStockCode));
   const selectedPositions = liquidatableHoldings.filter(holding =>
@@ -159,11 +180,73 @@ export function CurrentHoldingsSection({
   const handleLiquidateIndividual = async (stockCode: string) => {
     setIsProcessing(true);
     try {
-      await liquidateMultiple([normalizeStockCode(stockCode)]);
+      if (!completionStrategy || !conflictStrategy || !executionMode) return;
+      await liquidateMultiple([normalizeStockCode(stockCode)], {
+        autoExitAuthorized: executionMode === 'paper',
+        completionStrategy,
+        conflictStrategy,
+        executionMode,
+      });
     } finally {
       setIsProcessing(false);
     }
   };
+
+  const liquidationChoices = (
+    <div className="mt-3 grid gap-2 rounded-md border border-border bg-muted/40 p-3 text-left text-sm">
+      <label className="grid gap-1 font-medium">
+        完成策略（必选）
+        <select
+          className="h-9 rounded border border-input bg-background px-2"
+          onChange={event =>
+            setCompletionStrategy(
+              event.target.value as LiquidationCompletionStrategy | ''
+            )
+          }
+          value={completionStrategy}
+        >
+          <option value="">请选择</option>
+          <option value="AVAILABLE_NOW">仅卖确认时可用数量</option>
+          <option value="UNTIL_SNAPSHOT_CLEARED">
+            持续至本次持仓快照清完
+          </option>
+        </select>
+      </label>
+      <label className="grid gap-1 font-medium">
+        冲突策略（必选）
+        <select
+          className="h-9 rounded border border-input bg-background px-2"
+          onChange={event =>
+            setConflictStrategy(
+              event.target.value as LiquidationConflictStrategy | ''
+            )
+          }
+          value={conflictStrategy}
+        >
+          <option value="">请选择</option>
+          <option value="UNALLOCATED_ONLY">只卖未分配数量</option>
+          <option value="REPLACE_CANCELLABLE">替换可取消计划</option>
+        </select>
+      </label>
+      <label className="grid gap-1 font-medium">
+        执行模式（必选）
+        <select
+          className="h-9 rounded border border-input bg-background px-2"
+          onChange={event =>
+            setExecutionMode(event.target.value as 'paper' | 'live' | '')
+          }
+          value={executionMode}
+        >
+          <option value="">请选择</option>
+          <option value="paper">模拟</option>
+          <option value="live">实盘（卖出意图需再次确认）</option>
+        </select>
+      </label>
+      <p className="text-xs text-muted-foreground">
+        持续清仓只保护本次确认时的持仓；后续新买不会自动加入。
+      </p>
+    </div>
+  );
 
   if (holdings.length === 0) {
     return (
@@ -235,13 +318,24 @@ export function CurrentHoldingsSection({
                         估算委托市值: {formatCurrency(selectedEstimatedValue)}
                       </p>
                     </div>
+                    {liquidationChoices}
                   </div>
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>取消</AlertDialogCancel>
                 <AlertDialogAction
-                  onClick={onLiquidateSelected}
+                  disabled={!hasExplicitChoices}
+                  onClick={() => {
+                    if (!completionStrategy || !conflictStrategy || !executionMode)
+                      return;
+                    onLiquidateSelected({
+                      autoExitAuthorized: executionMode === 'paper',
+                      completionStrategy,
+                      conflictStrategy,
+                      executionMode,
+                    });
+                  }}
                   className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                 >
                   提交清仓委托
@@ -352,7 +446,10 @@ export function CurrentHoldingsSection({
                     <div
                       className={cn(
                         'font-medium flex items-center justify-end gap-1',
-                        isProfitable ? 'text-success' : 'text-destructive'
+                        financialToneClass(
+                          holding.profitLoss ?? 0,
+                          'holding'
+                        )
                       )}
                     >
                       {isProfitable ? (
@@ -366,7 +463,10 @@ export function CurrentHoldingsSection({
                     <div
                       className={cn(
                         'text-xs',
-                        isProfitable ? 'text-success' : 'text-destructive'
+                        financialToneClass(
+                          holding.profitRate ?? 0,
+                          'holding'
+                        )
                       )}
                     >
                       {formatPercent(holding.profitRate ?? 0)}
@@ -433,12 +533,14 @@ export function CurrentHoldingsSection({
                                     {formatCurrency(holding.marketValue ?? 0)}
                                   </p>
                                 </div>
+                                {liquidationChoices}
                               </div>
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>取消</AlertDialogCancel>
                             <AlertDialogAction
+                              disabled={!hasExplicitChoices}
                               onClick={() =>
                                 handleLiquidateIndividual(stockCode)
                               }

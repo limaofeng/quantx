@@ -10,6 +10,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
@@ -101,9 +102,7 @@ export function LiquidatedStocksSection({
                 'text-xl font-bold',
                 !hasRealizedPnL
                   ? 'text-slate-400'
-                  : totalRealizedPnL >= 0
-                    ? 'text-success'
-                    : 'text-destructive'
+                  : financialToneClass(totalRealizedPnL)
               )}
             >
               {hasRealizedPnL
@@ -183,9 +182,7 @@ export function LiquidatedStocksSection({
                         'font-medium flex items-center justify-end gap-1',
                         realizedPnL === null
                           ? 'text-slate-400'
-                          : isProfitable
-                            ? 'text-success'
-                            : 'text-destructive'
+                          : financialToneClass(realizedPnL)
                       )}
                     >
                       {realizedPnL === null ? null : isProfitable ? (
@@ -200,9 +197,7 @@ export function LiquidatedStocksSection({
                         'text-xs',
                         realizedPnL === null
                           ? 'text-slate-500'
-                          : isProfitable
-                            ? 'text-success'
-                            : 'text-destructive'
+                          : financialToneClass(realizedPnL)
                       )}
                     >
                       {formatPercentOrDash(stock.realizedPnLPercent)}

@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/select';
 import type { ConditionalLiquidationOrdersQuery as ConditionalLiquidationOrdersQueryData } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
@@ -49,13 +50,17 @@ type ConditionalLiquidationOrderView = NonNullable<
 
 export type ConditionalLiquidationFormPayload = {
   accountId?: string;
+  autoExitAuthorized: boolean;
+  dynamicPolicy?: Record<string, unknown> | null;
   enabled: boolean;
+  executionMode: string;
   id?: string;
   instrumentName?: string | null;
   remark?: string | null;
   sellMode: string;
   sellRatioPct?: number | null;
   sellVolume?: number | null;
+  strategy: string;
   stockCode: string;
   targetPrice?: number | null;
   targetProfitPct?: number | null;
@@ -124,7 +129,13 @@ function getConditionalOrderStatus(
 ) {
   if (!order) return { label: '未配置', tone: 'text-slate-400' };
   if (order.status === 'SUBMITTED') {
-    return { label: '已提交', tone: 'text-emerald-300' };
+    return { label: '委托待成交', tone: 'text-emerald-300' };
+  }
+  if (order.status === 'PARTIALLY_EXITED') {
+    return { label: '部分成交后跟踪', tone: 'text-blue-200' };
+  }
+  if (order.status === 'COMPLETED') {
+    return { label: '保护数量已卖出', tone: 'text-emerald-300' };
   }
   if (order.status === 'FAILED') {
     return { label: '提交失败', tone: 'text-rose-300' };
@@ -140,10 +151,12 @@ function getConditionalOrderStatus(
 function PlanMetric({
   label,
   tone,
+  toneClassName,
   value,
 }: {
   label: string;
   tone?: 'danger' | 'muted' | 'success';
+  toneClassName?: string;
   value: string;
 }) {
   return (
@@ -156,7 +169,8 @@ function PlanMetric({
           'mt-1 truncate font-mono text-sm font-black tabular-nums text-slate-100',
           tone === 'danger' && 'text-rose-300',
           tone === 'success' && 'text-emerald-300',
-          tone === 'muted' && 'text-slate-400'
+          tone === 'muted' && 'text-slate-400',
+          toneClassName
         )}
       >
         {value}
@@ -203,16 +217,17 @@ export function TakeProfitPlanPanel({
     React.useState<TakeProfitSellMode>('ALL_AVAILABLE');
   const [sellRatioPct, setSellRatioPct] = React.useState('50');
   const [sellVolume, setSellVolume] = React.useState('');
+  const [executionMode, setExecutionMode] = React.useState('paper');
+  const [autoExitAuthorized, setAutoExitAuthorized] = React.useState(false);
   const [strategyPickerOpen, setStrategyPickerOpen] = React.useState(false);
 
   React.useEffect(() => {
-    const hasPartialSell =
-      order?.sellMode === 'PERCENT_AVAILABLE' &&
-      (toFiniteNumber(order.sellRatioPct) ?? 100) < 100;
+    const hasAdaptiveStrategy =
+      order?.strategy === 'ADAPTIVE_VOLUME_PRICE_TRAILING';
     const hasProfitTarget = toFiniteNumber(order?.targetProfitPct) !== null;
     const hasPriceTarget = toFiniteNumber(order?.targetPrice) !== null;
 
-    setStrategyId(hasPartialSell ? 'PARTIAL_TRAILING' : 'IMMEDIATE');
+    setStrategyId(hasAdaptiveStrategy ? 'PARTIAL_TRAILING' : 'IMMEDIATE');
     setTriggerMode(
       hasProfitTarget && hasPriceTarget
         ? 'EITHER'
@@ -225,6 +240,8 @@ export function TakeProfitPlanPanel({
     setSellMode((order?.sellMode as TakeProfitSellMode) || 'ALL_AVAILABLE');
     setSellRatioPct(numericInput(order?.sellRatioPct) || '50');
     setSellVolume(numericInput(order?.sellVolume));
+    setExecutionMode(order?.executionMode || 'paper');
+    setAutoExitAuthorized(Boolean(order?.autoExitAuthorized));
   }, [
     order?.id,
     order?.sellMode,
@@ -232,6 +249,9 @@ export function TakeProfitPlanPanel({
     order?.sellVolume,
     order?.targetPrice,
     order?.targetProfitPct,
+    order?.strategy,
+    order?.executionMode,
+    order?.autoExitAuthorized,
     order?.updatedAt,
   ]);
 
@@ -241,9 +261,13 @@ export function TakeProfitPlanPanel({
   const isSaveSupported = supportedStrategyIds.has(strategyId);
   const status = getConditionalOrderStatus(order);
   const isTerminal =
-    order?.status === 'SUBMITTED' || order?.status === 'CANCELLED';
+    order?.status === 'SUBMITTED' ||
+    order?.status === 'COMPLETED' ||
+    order?.status === 'CANCELLED';
   const canOperate = Boolean(selectedStockCode) && !actionLoading;
-  const canUpdateExisting = Boolean(order?.id && !isTerminal);
+  const canUpdateExisting = Boolean(
+    order?.id && !isTerminal && order.status !== 'PARTIALLY_EXITED'
+  );
   const existingId = canUpdateExisting ? order?.id : undefined;
   const sellableVolume = getSellableVolume(holding);
   const parsedProfitPct = parseOptionalNumber(targetProfitPct);
@@ -347,22 +371,60 @@ export function TakeProfitPlanPanel({
       });
       return;
     }
+    const adaptiveVolume = Math.trunc(preview.estimatedSellVolume);
+    if (
+      strategyId === 'PARTIAL_TRAILING' &&
+      (adaptiveVolume <= 0 || adaptiveVolume >= sellableVolume)
+    ) {
+      toast({
+        title: '动态止盈必须保护部分持仓',
+        description: '计划股数需大于 0 且小于当前可卖数量。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      strategyId === 'PARTIAL_TRAILING' &&
+      executionMode === 'live' &&
+      !autoExitAuthorized
+    ) {
+      toast({
+        title: '需要自动卖出授权',
+        description: '实盘动态止盈会自动提交卖单，请先勾选明确授权。',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     await onSave({
       accountId,
+      autoExitAuthorized,
+      dynamicPolicy: {},
       enabled: nextEnabled,
+      executionMode,
       id: existingId,
       instrumentName: holding?.instrumentName || null,
       remark:
         strategyId === 'PARTIAL_TRAILING'
-          ? 'v1 保存首段止盈，追踪剩余待监控引擎接入'
+          ? '平衡型量价动态止盈；固定保护数量，逐笔成交回填'
           : null,
-      sellMode,
-      sellRatioPct: sellMode === 'PERCENT_AVAILABLE' ? ratioPct : null,
+      sellMode:
+        strategyId === 'PARTIAL_TRAILING' ? 'FIXED_VOLUME' : sellMode,
+      sellRatioPct:
+        strategyId !== 'PARTIAL_TRAILING' &&
+        sellMode === 'PERCENT_AVAILABLE'
+          ? ratioPct
+          : null,
       sellVolume:
-        sellMode === 'FIXED_VOLUME' && fixedVolume !== null
-          ? Math.trunc(fixedVolume)
-          : null,
+        strategyId === 'PARTIAL_TRAILING'
+          ? adaptiveVolume
+          : sellMode === 'FIXED_VOLUME' && fixedVolume !== null
+            ? Math.trunc(fixedVolume)
+            : null,
+      strategy:
+        strategyId === 'PARTIAL_TRAILING'
+          ? 'ADAPTIVE_VOLUME_PRICE_TRAILING'
+          : 'IMMEDIATE',
       stockCode: selectedStockCode,
       targetPrice: price,
       targetProfitPct: profitPct,
@@ -399,7 +461,7 @@ export function TakeProfitPlanPanel({
             )}
           </div>
           <p className="mt-1 text-[10px] font-bold text-slate-600">
-            触发后提交 SELL 委托，成交状态以券商回报为准。
+            动态模式进入止盈区后继续观察量价，成交状态以券商回报为准。
           </p>
           <p className="mt-1 text-[10px] font-bold text-slate-600">
             最近检查 {formatDateTime(order?.lastCheckedAt)}
@@ -443,7 +505,10 @@ export function TakeProfitPlanPanel({
           <PlanMetric label="成本价" value={formatPrice(holding?.avgPrice)} />
           <PlanMetric
             label="当前收益率"
-            tone={(preview.currentProfitPct ?? 0) < 0 ? 'danger' : 'success'}
+            toneClassName={financialToneClass(
+              preview.currentProfitPct,
+              'holding'
+            )}
             value={formatPercentOrDash(preview.currentProfitPct, true)}
           />
           <PlanMetric label="目标价" value={formatPrice(preview.targetPrice)} />
@@ -734,6 +799,40 @@ export function TakeProfitPlanPanel({
           </div>
         </div>
 
+        {strategyId === 'PARTIAL_TRAILING' && (
+          <div className="grid gap-3 rounded-md border border-emerald-400/15 bg-emerald-500/[0.06] p-3 md:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label
+                htmlFor="take-profit-execution-mode"
+                className="text-[10px] font-black text-slate-500"
+              >
+                自动止盈执行模式
+              </Label>
+              <Select value={executionMode} onValueChange={setExecutionMode}>
+                <SelectTrigger
+                  id="take-profit-execution-mode"
+                  className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="paper">模拟执行（paper）</SelectItem>
+                  <SelectItem value="live">实盘执行（live）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <label className="flex cursor-pointer items-center gap-2 rounded-md border border-white/10 bg-[#050b14] px-3 text-[10px] font-bold text-slate-300">
+              <input
+                type="checkbox"
+                checked={autoExitAuthorized}
+                onChange={event => setAutoExitAuthorized(event.target.checked)}
+                className="h-3.5 w-3.5 accent-emerald-500"
+              />
+              明确授权达到动态退出条件后自动提交卖单
+            </label>
+          </div>
+        )}
+
         <div
           className="grid gap-3 rounded-md border border-blue-400/15 bg-blue-500/10 p-3 xl:grid-cols-4"
           data-testid="take-profit-execution-preview"
@@ -745,7 +844,7 @@ export function TakeProfitPlanPanel({
             </div>
             {strategyId === 'PARTIAL_TRAILING' && (
               <div className="mt-1 text-[10px] font-bold text-blue-200/70">
-                本次保存首段止盈；剩余仓位追踪能力等待监控引擎接入。
+                达标后不立即卖出：强势放量继续跟涨，量价转弱连续确认或快速回撤时卖出固定保护股数。
               </div>
             )}
           </div>
@@ -761,6 +860,23 @@ export function TakeProfitPlanPanel({
             T+1、可卖量、冻结、停牌、涨跌停、100
             股整数倍与零股清仓仍由交易域和券商回报校验。
           </div>
+          {order?.strategy === 'ADAPTIVE_VOLUME_PRICE_TRAILING' && (
+            <div className="grid gap-2 xl:col-span-4 md:grid-cols-4">
+              <PlanMetric label="动态阶段" value={order.phase || '--'} />
+              <PlanMetric
+                label="剩余保护"
+                value={`${order.remainingVolume ?? order.sellVolume ?? 0} 股`}
+              />
+              <PlanMetric
+                label="峰值回撤"
+                value={formatPercentOrDash(order.peakDrawdownPct)}
+              />
+              <PlanMetric
+                label="量价评分 / 数据"
+                value={`${order.weakScore ?? 0} / ${order.dataQuality || '--'}`}
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/5 bg-[#08101d]/75 px-3 py-2">

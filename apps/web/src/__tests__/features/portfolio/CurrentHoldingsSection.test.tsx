@@ -42,8 +42,8 @@ const holdings = [
     marketValue: 850,
     onRoadVolume: 0,
     openPrice: 8,
-    profitLoss: 50,
-    profitRate: 6.25,
+    profitLoss: -50,
+    profitRate: -6.25,
     stockCode: '000001.SZ',
     updatedAt: '2026-06-04T09:30:00+08:00',
     volume: 100,
@@ -78,6 +78,15 @@ describe('CurrentHoldingsSection', () => {
 
     await user.click(screen.getByTestId('checkbox-600519.SH'));
     await user.click(screen.getByTestId('liquidate-selected-button'));
+    await user.selectOptions(
+      screen.getByLabelText('完成策略（必选）'),
+      'AVAILABLE_NOW'
+    );
+    await user.selectOptions(
+      screen.getByLabelText('冲突策略（必选）'),
+      'UNALLOCATED_ONLY'
+    );
+    await user.selectOptions(screen.getByLabelText('执行模式（必选）'), 'paper');
     await user.click(
       await screen.findByRole('button', { name: '提交清仓委托' })
     );
@@ -93,5 +102,13 @@ describe('CurrentHoldingsSection', () => {
 
     expect(screen.getByTestId('checkbox-000001.SZ')).toBeDisabled();
     expect(screen.getByTestId('liquidate-000001.SZ')).toBeDisabled();
+  });
+
+  it('shows holding losses in light blue', () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(<Harness onSubmit={onSubmit} />);
+
+    expect(screen.getByText('-6.25%')).toHaveClass('text-holding-down');
   });
 });

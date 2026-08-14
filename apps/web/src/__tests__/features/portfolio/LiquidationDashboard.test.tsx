@@ -128,6 +128,14 @@ describe('LiquidationDashboard', () => {
     await user.click(screen.getByTestId('conditional-monitor-row-600519.SH'));
     await user.click(screen.getByTestId('holding-risk-alert-000001.SZ'));
 
+    const conditionRow = screen.getByTestId(
+      'conditional-monitor-row-600519.SH'
+    );
+    expect(conditionRow.querySelector('.text-market-up')).not.toBeNull();
+
+    const riskRow = screen.getByTestId('holding-risk-alert-000001.SZ');
+    const declineValues = riskRow.querySelectorAll('.text-holding-down');
+    expect(declineValues.length).toBeGreaterThanOrEqual(2);
     expect(onOpenStock).toHaveBeenCalledWith('600519.SH', '贵州茅台');
     expect(onOpenStock).toHaveBeenCalledWith('000001.SZ', '平安银行');
   });

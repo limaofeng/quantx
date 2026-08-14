@@ -16,6 +16,11 @@ import { useStudioNavigate } from '@/components/studio-workspace';
 import { Button } from '@/components/ui/button';
 import { logger } from '@/core/errors/logger';
 import { SparklineChart } from '@/shared/components/charts/SparklineChart';
+import {
+  financialChartColor,
+  financialToneBadgeClass,
+  financialToneClass,
+} from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
@@ -61,7 +66,10 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
   const { data: sparklineData, visibleRange } =
     useHoldingIntradayTrend(holding);
 
-  const sparklineColor = isDayUp ? '#ef4444' : '#22c55e';
+  const sparklineColor = financialChartColor(
+    holding.changePercent ?? 0,
+    'holding'
+  );
 
   const handleLiquidate = async () => {
     try {
@@ -138,15 +146,15 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
 
         <div className="grid grid-rows-2 border-r border-white/5">
           <PnLCell
+            amount={holding.todayProfitLoss ?? 0}
             label="今日盈亏"
-            positive={isTodayProfitable}
             value={`${isTodayProfitable ? '+' : ''}${formatCurrency(
               holding.todayProfitLoss ?? 0
             )}`}
           />
           <PnLCell
+            amount={holding.profitLoss ?? 0}
             label="累计收益"
-            positive={isProfitable}
             value={`${isProfitable ? '+' : ''}${formatCurrency(
               holding.profitLoss ?? 0
             )}`}
@@ -162,9 +170,10 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             <span
               className={cn(
                 'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-black',
-                isDayUp
-                  ? 'border-rose-400/20 bg-rose-500/10 text-rose-300'
-                  : 'border-emerald-400/20 bg-emerald-500/10 text-emerald-300'
+                financialToneBadgeClass(
+                  holding.changePercent ?? 0,
+                  'holding'
+                )
               )}
             >
               {isDayUp ? <TrendingUp size={11} /> : <TrendingDown size={11} />}
@@ -278,13 +287,13 @@ function MetricCell({ label, value }: { label: string; value: string }) {
 }
 
 function PnLCell({
+  amount,
   label,
-  positive,
   suffix,
   value,
 }: {
+  amount: number;
   label: string;
-  positive: boolean;
   suffix?: string;
   value: string;
 }) {
@@ -297,7 +306,7 @@ function PnLCell({
         <span
           className={cn(
             'truncate font-mono text-xs font-black',
-            positive ? 'text-rose-300' : 'text-emerald-300'
+            financialToneClass(amount, 'holding')
           )}
         >
           {value}
@@ -306,7 +315,8 @@ function PnLCell({
           <span
             className={cn(
               'shrink-0 font-mono text-[10px] font-bold',
-              positive ? 'text-rose-300/70' : 'text-emerald-300/70'
+              financialToneClass(amount, 'holding'),
+              'opacity-70'
             )}
           >
             {suffix}

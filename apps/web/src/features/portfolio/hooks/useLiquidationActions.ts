@@ -4,9 +4,22 @@ import { useMutation } from 'urql';
 import { useCurrentAccount } from '@/features/dashboard/hooks';
 
 import {
-  LiquidateAllPositionsMutation,
-  LiquidatePositionMutation,
+  LiquidatePositionsMutation,
 } from './usePortfolio';
+
+export type LiquidationCompletionStrategy =
+  | 'AVAILABLE_NOW'
+  | 'UNTIL_SNAPSHOT_CLEARED';
+export type LiquidationConflictStrategy =
+  | 'UNALLOCATED_ONLY'
+  | 'REPLACE_CANCELLABLE';
+
+export interface LiquidationExecutionOptions {
+  completionStrategy: LiquidationCompletionStrategy;
+  conflictStrategy: LiquidationConflictStrategy;
+  executionMode: 'paper' | 'live';
+  autoExitAuthorized?: boolean;
+}
 
 export interface LiquidationActionFailure {
   error: string;
@@ -23,8 +36,13 @@ export interface LiquidationActionResult {
 interface UseLiquidationActionsResult {
   error: Error | null;
   isLoading: boolean;
-  liquidateAll: () => Promise<LiquidationActionResult>;
-  liquidateMultiple: (stockCodes: string[]) => Promise<LiquidationActionResult>;
+  liquidateAll: (
+    options: LiquidationExecutionOptions
+  ) => Promise<LiquidationActionResult>;
+  liquidateMultiple: (
+    stockCodes: string[],
+    options: LiquidationExecutionOptions
+  ) => Promise<LiquidationActionResult>;
   redeemCash: (amount: number) => Promise<void>;
 }
 
@@ -53,15 +71,15 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
   const { data: accountData } = useCurrentAccount();
   const accountId = accountData?.currentAccount?.id;
 
-  const [positionResult, executeLiquidatePosition] = useMutation(
-    LiquidatePositionMutation
-  );
-  const [batchResult, executeLiquidateAll] = useMutation(
-    LiquidateAllPositionsMutation
+  const [liquidationResult, executeLiquidatePositions] = useMutation(
+    LiquidatePositionsMutation
   );
 
   const liquidateMultiple = useCallback(
-    async (stockCodes: string[]): Promise<LiquidationActionResult> => {
+    async (
+      stockCodes: string[],
+      options: LiquidationExecutionOptions
+    ): Promise<LiquidationActionResult> => {
       const codes = uniqueStockCodes(stockCodes);
       if (codes.length === 0) {
         return {
@@ -79,35 +97,28 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
       const submittedOrderIds: string[] = [];
 
       try {
-        for (const stockCode of codes) {
-          const operation = await executeLiquidatePosition({
-            input: {
-              accountId,
-              confirm: true,
-              maxRetry: 1,
-              stockCode,
-            },
-          });
-
-          if (operation.error) {
+        const operation = await executeLiquidatePositions({
+          input: {
+            accountId,
+            autoExitAuthorized: Boolean(options.autoExitAuthorized),
+            completionStrategy: options.completionStrategy,
+            conflictStrategy: options.conflictStrategy,
+            confirm: true,
+            executionMode: options.executionMode,
+            instrumentCodes: codes,
+            scope: 'SELECTED',
+          },
+        });
+        if (operation.error) throw asActionError(operation.error.message);
+        const group = operation.data?.liquidatePositions;
+        for (const item of group?.plans ?? []) {
+          if (!item.success) {
             failures.push({
-              error: operation.error.message,
-              stockCode,
+              error: item.error || '计划创建失败',
+              stockCode: item.instrumentCode,
             });
-            continue;
-          }
-
-          const result = operation.data?.liquidatePosition;
-          if (!result?.success) {
-            failures.push({
-              error: result?.error || result?.message || '委托提交失败',
-              stockCode,
-            });
-            continue;
-          }
-
-          if (result.orderId !== null && result.orderId !== undefined) {
-            submittedOrderIds.push(String(result.orderId));
+          } else if (item.planId) {
+            submittedOrderIds.push(item.planId);
           }
         }
 
@@ -117,7 +128,7 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
           message:
             failures.length > 0
               ? `部分清仓委托提交失败：${failureSummary}`
-              : `清仓委托已提交：${codes.length} 只标的`,
+              : `已创建清仓计划：${codes.length} 只标的`,
           submittedOrderIds,
           success: failures.length === 0,
         };
@@ -136,20 +147,25 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
         setLocalLoading(false);
       }
     },
-    [accountId, executeLiquidatePosition]
+    [accountId, executeLiquidatePositions]
   );
 
   const liquidateAll =
-    useCallback(async (): Promise<LiquidationActionResult> => {
+    useCallback(async (options: LiquidationExecutionOptions): Promise<LiquidationActionResult> => {
       setLocalLoading(true);
       setError(null);
 
       try {
-        const operation = await executeLiquidateAll({
+        const operation = await executeLiquidatePositions({
           input: {
             accountId,
+            autoExitAuthorized: Boolean(options.autoExitAuthorized),
+            completionStrategy: options.completionStrategy,
+            conflictStrategy: options.conflictStrategy,
             confirm: true,
-            maxRetry: 1,
+            executionMode: options.executionMode,
+            instrumentCodes: [],
+            scope: 'ALL',
           },
         });
 
@@ -159,7 +175,7 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
           throw nextError;
         }
 
-        const result = operation.data?.liquidateAllPositions;
+        const result = operation.data?.liquidatePositions;
         if (!result) {
           const nextError = asActionError('清仓结果为空');
           setError(nextError);
@@ -167,14 +183,16 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
         }
 
         const failures =
-          result.errors?.map(item => ({
-            error: item.error,
-            stockCode: item.stockCode,
+          result.plans?.filter(item => !item.success).map(item => ({
+            error: item.error || '计划创建失败',
+            stockCode: item.instrumentCode,
           })) || [];
         const actionResult = {
           failures,
           message: result.message,
-          submittedOrderIds: (result.orders || []).map(String),
+          submittedOrderIds: (result.plans || [])
+            .map(item => item.planId)
+            .filter((value): value is string => Boolean(value)),
           success: Boolean(result.success),
         };
 
@@ -191,7 +209,7 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
       } finally {
         setLocalLoading(false);
       }
-    }, [accountId, executeLiquidateAll]);
+    }, [accountId, executeLiquidatePositions]);
 
   const redeemCash = useCallback(async () => {
     const nextError = new Error(
@@ -205,18 +223,17 @@ export function useLiquidationActions(): UseLiquidationActionsResult {
     () => ({
       error,
       isLoading:
-        localLoading || positionResult.fetching || batchResult.fetching,
+        localLoading || liquidationResult.fetching,
       liquidateAll,
       liquidateMultiple,
       redeemCash,
     }),
     [
-      batchResult.fetching,
       error,
       liquidateAll,
       liquidateMultiple,
       localLoading,
-      positionResult.fetching,
+      liquidationResult.fetching,
       redeemCash,
     ]
   );

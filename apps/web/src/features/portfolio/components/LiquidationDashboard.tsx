@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import type * as React from 'react';
 
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
@@ -204,7 +205,12 @@ function ConditionalMonitorTable({
                 </td>
                 <td className="px-2 py-2 text-right font-mono text-slate-300">
                   <div>{formatNullableCurrency(row.currentPrice)}</div>
-                  <div className="text-[10px] text-slate-500">
+                  <div
+                    className={cn(
+                      'text-[10px]',
+                      financialToneClass(row.currentProfitPct, 'holding')
+                    )}
+                  >
                     {formatNullablePercent(row.currentProfitPct, true)}
                   </div>
                 </td>
@@ -286,16 +292,34 @@ function RiskAlertList({
           <div className="grid shrink-0 grid-cols-3 gap-3 text-right font-mono text-[11px] font-black">
             <div>
               <div className="text-slate-600">涨跌</div>
-              <div>{formatNullablePercent(alert.changePercent, true)}</div>
+              <div
+                className={financialToneClass(
+                  alert.changePercent,
+                  'holding'
+                )}
+              >
+                {formatNullablePercent(alert.changePercent, true)}
+              </div>
             </div>
             <div>
               <div className="text-slate-600">滚动</div>
-              <div>{formatNullablePercent(alert.tickDropPct, true)}</div>
+              <div
+                className={financialToneClass(alert.tickDropPct, 'holding')}
+              >
+                {formatNullablePercent(alert.tickDropPct, true)}
+              </div>
             </div>
             <div className="flex items-center justify-end gap-1">
               <div>
                 <div className="text-slate-600">今日盈亏</div>
-                <div>{formatNullableCurrency(alert.todayProfitLoss)}</div>
+                <div
+                  className={financialToneClass(
+                    alert.todayProfitLoss,
+                    'holding'
+                  )}
+                >
+                  {formatNullableCurrency(alert.todayProfitLoss)}
+                </div>
               </div>
               <ChevronRight className="h-3.5 w-3.5 text-slate-600" />
             </div>

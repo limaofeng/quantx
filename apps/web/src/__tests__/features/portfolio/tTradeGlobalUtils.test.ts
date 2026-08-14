@@ -4,6 +4,7 @@ import {
   formatSignedPercent,
   integerValue,
   numberValue,
+  quoteTone,
   replayDatePreset,
   resolveInstrumentName,
   signalHistoryCategory,
@@ -31,6 +32,11 @@ describe('TTradeGlobal utilities', () => {
     expect(integerValue('3.9', 1)).toBe(3);
     expect(formatSignedPercent(Number.NaN)).toBe('--');
     expect(formatSignedPercent(1.25)).toBe('+1.25%');
+  });
+
+  it('uses the holding palette for live T-trade quote declines', () => {
+    expect(quoteTone(1.25)).toBe('text-market-up');
+    expect(quoteTone(-1.25)).toBe('text-holding-down');
   });
 
   it('does not present a stock code as an instrument name', () => {

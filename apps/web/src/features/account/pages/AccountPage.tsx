@@ -639,7 +639,7 @@ export function AccountPage() {
                 {[
                   ['买入', ShoppingCart, '/holdings?mode=ORDER&side=BUY'],
                   ['卖出', ArrowDownToLine, '/holdings?mode=ORDER&side=SELL'],
-                  ['清仓管理', HandCoins, '/liquidation'],
+                  ['卖出管理', HandCoins, '/liquidation'],
                   ['做T助手', Repeat2, '/t-trade'],
                 ].map(([label, Icon, href]) => (
                   <button
@@ -801,7 +801,7 @@ export function AccountPage() {
                           <td
                             className={cn(
                               'text-right font-mono',
-                              pnlClass(position.profitLoss)
+                              pnlClass(position.profitLoss, 'holding')
                             )}
                           >
                             {formatMoney(position.profitLoss, true)}

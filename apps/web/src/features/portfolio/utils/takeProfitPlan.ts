@@ -56,11 +56,11 @@ export const takeProfitStrategyTemplates: TakeProfitStrategyTemplate[] = [
     summary: '适合明确目标价、希望快速兑现的持仓。',
   },
   {
-    description: '达到目标后先卖一段，剩余追踪能力待监控引擎接入。',
+    description: '达到目标后观察实时量价，强势跟涨，转弱时卖出固定部分。',
     id: 'PARTIAL_TRAILING',
     label: '分段止盈 + 追踪剩余',
     status: 'supported',
-    summary: 'v1 可保存首段止盈，追踪剩余为后续能力。',
+    summary: '平衡型评分：回撤、短线斜率、量速和五档盘口共同确认。',
   },
   {
     description: '进入止盈区后记录 tick/1m 最高点，回撤后卖出。',
