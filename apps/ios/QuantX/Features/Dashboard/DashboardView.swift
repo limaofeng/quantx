@@ -66,6 +66,18 @@ struct DashboardView: View {
         await refreshDashboard()
       }
     }
+    .onAppear {
+      openPendingSystemRouteIfNeeded()
+    }
+    .onChange(of: model.pendingNotificationSystemRoute?.id) { _, _ in
+      openPendingSystemRouteIfNeeded()
+    }
+  }
+
+  private func openPendingSystemRouteIfNeeded() {
+    guard let request = model.consumePendingNotificationSystemRoute() else { return }
+    guard request.destination == .systemStatus else { return }
+    path = [.serviceStatus]
   }
 
   private var actionInbox: some View {
@@ -81,16 +93,21 @@ struct DashboardView: View {
       if actions.isEmpty {
         QuantXCard {
           HStack(spacing: 12) {
-            Image(systemName: actionInboxIsAuthoritative ? "checkmark.shield.fill" : "clock.arrow.circlepath")
-              .font(.title3)
-              .foregroundStyle(actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText)
-              .frame(width: 38, height: 38)
-              .background(
-                (actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText)
-                  .opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 11)
-              )
-              .accessibilityHidden(true)
+            Image(
+              systemName: actionInboxIsAuthoritative
+                ? "checkmark.shield.fill" : "clock.arrow.circlepath"
+            )
+            .font(.title3)
+            .foregroundStyle(
+              actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText
+            )
+            .frame(width: 38, height: 38)
+            .background(
+              (actionInboxIsAuthoritative ? QuantXTheme.online : QuantXTheme.secondaryText)
+                .opacity(0.12),
+              in: RoundedRectangle(cornerRadius: 11)
+            )
+            .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
               Text(actionInboxIsAuthoritative ? "当前无需处理" : "行动状态待同步")
                 .font(.subheadline.weight(.semibold))
@@ -99,8 +116,8 @@ struct DashboardView: View {
                   ? "新的待确认信号、活动委托或风险异常会显示在这里。"
                   : "尚未拿到全部已授权快照，不会把未知状态显示为正常。"
               )
-                .font(.caption)
-                .foregroundStyle(QuantXTheme.secondaryText)
+              .font(.caption)
+              .foregroundStyle(QuantXTheme.secondaryText)
             }
           }
           .accessibilityElement(children: .combine)
@@ -792,7 +809,9 @@ private struct AccountHeroCard: View {
     .padding(18)
     .background(
       LinearGradient(
-        colors: [Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22)],
+        colors: [
+          Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22),
+        ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
       ),
@@ -842,7 +861,9 @@ private struct LockedAccountOverviewCard: View {
     .padding(18)
     .background(
       LinearGradient(
-        colors: [Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22)],
+        colors: [
+          Color(red: 0.08, green: 0.18, blue: 0.36), Color(red: 0.05, green: 0.10, blue: 0.22),
+        ],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
       ),

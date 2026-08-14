@@ -8,12 +8,15 @@ final class AppModel: ObservableObject {
   typealias StrategyLoaderFactory = (ApolloSession) -> any StrategyMonitoringLoading
   typealias TradingLoaderFactory = (ApolloSession) -> any TradingActivityLoading
   typealias TTradeAssistantLoaderFactory = (ApolloSession) -> any TTradeAssistantLoading
+  typealias TTradeControlLoaderFactory = (ApolloSession) -> any TTradeControlLoading
   typealias LimitUpBoardLoaderFactory = (ApolloSession) -> any LimitUpBoardLoading
   typealias TradeApprovalLoaderFactory = (ApolloSession) -> any TradeApprovalLoading
   typealias ManualOrderLoaderFactory = (ApolloSession) -> any ManualOrderLoading
   typealias OrderCancellationLoaderFactory = (ApolloSession) -> any OrderCancellationLoading
   typealias MarketLoaderFactory = (ApolloSession) -> any MarketDataLoading
   typealias LiquidationLoaderFactory = (ApolloSession) -> any LiquidationLoading
+  typealias ExitPlanLoaderFactory = (ApolloSession) -> any ExitPlanLoading
+  typealias PushNotificationLoaderFactory = (ApolloSession) -> any PushNotificationLoading
 
   enum ServiceState: Equatable {
     case idle
@@ -49,6 +52,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var limitUpBoardRefreshInProgress = false
   @Published private(set) var tradeApprovalInProgress = false
   @Published private(set) var pendingManualOrderDraft: ManualOrderDraftLink?
+  @Published private(set) var pendingNotificationTradeRoute: NotificationNavigationRequest?
+  @Published private(set) var pendingNotificationSystemRoute: NotificationNavigationRequest?
   @Published private(set) var marketState: MarketWorkspaceState = .idle
   @Published private(set) var marketRefreshInProgress = false
   @Published private(set) var watchlistMutationInProgress = false
@@ -57,7 +62,11 @@ final class AppModel: ObservableObject {
   let configuration: APIConfiguration?
   let configurationErrorMessage: String?
   let liquidationStore: LiquidationStore
+  let exitPlanWorkspace: ExitPlanWorkspace
+  let tTradeControlStore: TTradeControlStore
   let manualTradingStore: ManualTradingStore
+  let strategyWorkspace: StrategyWorkspace
+  let notificationStore: PushNotificationStore
   private let healthClient: (any HealthChecking)?
   private let sessionClient: (any SessionServing)?
   private let tokenStore: any SessionTokenStore
@@ -67,12 +76,15 @@ final class AppModel: ObservableObject {
   private let strategyLoaderFactory: StrategyLoaderFactory
   private let tradingLoaderFactory: TradingLoaderFactory
   private let tTradeAssistantLoaderFactory: TTradeAssistantLoaderFactory
+  private let tTradeControlLoaderFactory: TTradeControlLoaderFactory
   private let limitUpBoardLoaderFactory: LimitUpBoardLoaderFactory
   private let tradeApprovalLoaderFactory: TradeApprovalLoaderFactory
   private let manualOrderLoaderFactory: ManualOrderLoaderFactory
   private let orderCancellationLoaderFactory: OrderCancellationLoaderFactory
   private let marketLoaderFactory: MarketLoaderFactory
   private let liquidationLoaderFactory: LiquidationLoaderFactory
+  private let exitPlanLoaderFactory: ExitPlanLoaderFactory
+  private let pushNotificationLoaderFactory: PushNotificationLoaderFactory
   private var apolloSession: ApolloSession?
   private var portfolioRepository: (any PortfolioLoading)?
   private var strategyRepository: (any StrategyMonitoringLoading)?
@@ -81,12 +93,12 @@ final class AppModel: ObservableObject {
   private var limitUpBoardRepository: (any LimitUpBoardLoading)?
   private var tradeApprovalRepository: (any TradeApprovalLoading)?
   private var marketRepository: (any MarketDataLoading)?
-#if DEBUG
-  private let usesTransientRealBackendUITestSession =
-    ProcessInfo.processInfo.arguments.contains(
-      DebugRealBackendUITestSession.launchArgument
-    )
-#endif
+  #if DEBUG
+    private let usesTransientRealBackendUITestSession =
+      ProcessInfo.processInfo.arguments.contains(
+        DebugRealBackendUITestSession.launchArgument
+      )
+  #endif
 
   init(
     bundle: Bundle = .main,
@@ -94,7 +106,11 @@ final class AppModel: ObservableObject {
   ) {
     self.localAuthentication = localAuthentication
     liquidationStore = LiquidationStore(localAuthentication: localAuthentication)
+    exitPlanWorkspace = ExitPlanWorkspace(localAuthentication: localAuthentication)
+    tTradeControlStore = TTradeControlStore(localAuthentication: localAuthentication)
     manualTradingStore = ManualTradingStore(localAuthentication: localAuthentication)
+    strategyWorkspace = StrategyWorkspace(localAuthentication: localAuthentication)
+    notificationStore = PushNotificationStore(bundle: bundle)
     apolloSessionFactory = { configuration, accessToken in
       try ApolloClientFactory.make(
         configuration: configuration,
@@ -113,6 +129,9 @@ final class AppModel: ObservableObject {
     tTradeAssistantLoaderFactory = { session in
       TTradeAssistantRepository(client: session.client)
     }
+    tTradeControlLoaderFactory = { session in
+      TTradeControlRepository(client: session.client)
+    }
     limitUpBoardLoaderFactory = { session in
       LimitUpBoardRepository(client: session.client)
     }
@@ -130,6 +149,12 @@ final class AppModel: ObservableObject {
     }
     liquidationLoaderFactory = { session in
       LiquidationRepository(client: session.client)
+    }
+    exitPlanLoaderFactory = { session in
+      ExitPlanRepository(client: session.client)
+    }
+    pushNotificationLoaderFactory = { session in
+      PushNotificationRepository(client: session.client)
     }
     tokenStore = KeychainSessionTokenStore(
       service: bundle.bundleIdentifier ?? "com.limaofeng.quantx"
@@ -180,7 +205,11 @@ final class AppModel: ObservableObject {
       marketState = .unavailable("环境配置无效，行情连接保持关闭")
     }
     configureLiquidationStore()
+    configureExitPlanWorkspace()
+    configureTTradeControlStore()
     configureManualTradingStore()
+    configureStrategyWorkspace()
+    configureNotificationStore()
   }
 
   init(
@@ -207,6 +236,9 @@ final class AppModel: ObservableObject {
     tTradeAssistantLoaderFactory: @escaping TTradeAssistantLoaderFactory = { session in
       TTradeAssistantRepository(client: session.client)
     },
+    tTradeControlLoaderFactory: @escaping TTradeControlLoaderFactory = { session in
+      TTradeControlRepository(client: session.client)
+    },
     limitUpBoardLoaderFactory: @escaping LimitUpBoardLoaderFactory = { session in
       LimitUpBoardRepository(client: session.client)
     },
@@ -224,6 +256,13 @@ final class AppModel: ObservableObject {
     },
     liquidationLoaderFactory: @escaping LiquidationLoaderFactory = { session in
       LiquidationRepository(client: session.client)
+    },
+    exitPlanLoaderFactory: @escaping ExitPlanLoaderFactory = { session in
+      ExitPlanRepository(client: session.client)
+    },
+    notificationStore: PushNotificationStore = .disabled(),
+    pushNotificationLoaderFactory: @escaping PushNotificationLoaderFactory = { session in
+      PushNotificationRepository(client: session.client)
     }
   ) {
     self.configuration = configuration
@@ -233,18 +272,25 @@ final class AppModel: ObservableObject {
     self.tokenStore = tokenStore
     self.localAuthentication = localAuthentication
     liquidationStore = LiquidationStore(localAuthentication: localAuthentication)
+    exitPlanWorkspace = ExitPlanWorkspace(localAuthentication: localAuthentication)
+    tTradeControlStore = TTradeControlStore(localAuthentication: localAuthentication)
     manualTradingStore = ManualTradingStore(localAuthentication: localAuthentication)
+    strategyWorkspace = StrategyWorkspace(localAuthentication: localAuthentication)
+    self.notificationStore = notificationStore
     self.apolloSessionFactory = apolloSessionFactory
     self.portfolioLoaderFactory = portfolioLoaderFactory
     self.strategyLoaderFactory = strategyLoaderFactory
     self.tradingLoaderFactory = tradingLoaderFactory
     self.tTradeAssistantLoaderFactory = tTradeAssistantLoaderFactory
+    self.tTradeControlLoaderFactory = tTradeControlLoaderFactory
     self.limitUpBoardLoaderFactory = limitUpBoardLoaderFactory
     self.tradeApprovalLoaderFactory = tradeApprovalLoaderFactory
     self.manualOrderLoaderFactory = manualOrderLoaderFactory
     self.orderCancellationLoaderFactory = orderCancellationLoaderFactory
     self.marketLoaderFactory = marketLoaderFactory
     self.liquidationLoaderFactory = liquidationLoaderFactory
+    self.exitPlanLoaderFactory = exitPlanLoaderFactory
+    self.pushNotificationLoaderFactory = pushNotificationLoaderFactory
 
     if configuration.accountDataEnabled, sessionClient != nil {
       authenticationState = .signedOut
@@ -267,7 +313,11 @@ final class AppModel: ObservableObject {
       marketState = .unavailable("等待 TLS、认证与行情授权部署验收")
     }
     configureLiquidationStore()
+    configureExitPlanWorkspace()
+    configureTTradeControlStore()
     configureManualTradingStore()
+    configureStrategyWorkspace()
+    configureNotificationStore()
   }
 
   var accountDataEnabled: Bool {
@@ -275,11 +325,11 @@ final class AppModel: ObservableObject {
   }
 
   var requiresAuthentication: Bool {
-#if DEBUG
-    if ProcessInfo.processInfo.arguments.contains("-QuantXUITesting") {
-      return false
-    }
-#endif
+    #if DEBUG
+      if ProcessInfo.processInfo.arguments.contains("-QuantXUITesting") {
+        return false
+      }
+    #endif
     guard accountDataEnabled else { return false }
     return switch authenticationState {
     case .authenticated, .disabled:
@@ -345,7 +395,8 @@ final class AppModel: ObservableObject {
   }
 
   func isInWatchlist(stockCode: String) -> Bool {
-    let normalized = stockCode
+    let normalized =
+      stockCode
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .uppercased()
     return marketState.snapshot?.watchlist.contains {
@@ -354,30 +405,31 @@ final class AppModel: ObservableObject {
   }
 
   func start() async {
-#if DEBUG
-    if ProcessInfo.processInfo.arguments.contains("-QuantXLoginUITesting") {
-      authenticationState = .signedOut
-      return
-    }
-    if usesTransientRealBackendUITestSession {
-      await startTransientRealBackendUITestSession()
-      return
-    }
-    if ProcessInfo.processInfo.arguments.contains("-QuantXWatchlistReadOnlyUITesting") {
-      startWatchlistReadOnlyUITestFixture()
-      return
-    }
-    if ProcessInfo.processInfo.arguments.contains("-QuantXUITesting") {
-      serviceState = .failed("UI 测试未连接服务")
-      portfolioState = .failed("UI 测试未连接账户服务")
-      strategyState = .failed("UI 测试未连接策略服务")
-      tradingState = .failed("UI 测试未连接委托成交服务")
-      tTradeAssistantState = .failed("UI 测试未连接做T服务")
-      limitUpBoardState = .failed("UI 测试未连接打板服务")
-      marketState = .failed("UI 测试未连接行情服务")
-      return
-    }
-#endif
+    #if DEBUG
+      if ProcessInfo.processInfo.arguments.contains("-QuantXLoginUITesting") {
+        authenticationState = .signedOut
+        return
+      }
+      if usesTransientRealBackendUITestSession {
+        await startTransientRealBackendUITestSession()
+        return
+      }
+      if ProcessInfo.processInfo.arguments.contains("-QuantXWatchlistReadOnlyUITesting") {
+        startWatchlistReadOnlyUITestFixture()
+        return
+      }
+      if ProcessInfo.processInfo.arguments.contains("-QuantXUITesting") {
+        serviceState = .failed("UI 测试未连接服务")
+        portfolioState = .failed("UI 测试未连接账户服务")
+        strategyState = .failed("UI 测试未连接策略服务")
+        tradingState = .failed("UI 测试未连接委托成交服务")
+        tTradeAssistantState = .failed("UI 测试未连接做T服务")
+        limitUpBoardState = .failed("UI 测试未连接打板服务")
+        marketState = .failed("UI 测试未连接行情服务")
+        return
+      }
+    #endif
+    await notificationStore.prepareSystemState()
     await refreshHealth()
     await restoreSession()
   }
@@ -476,6 +528,7 @@ final class AppModel: ObservableObject {
       try await localAuthentication.unlock(reason: "解锁 QuantX 个人量化会话")
       localSessionLocked = false
       localUnlockErrorMessage = nil
+      await notificationStore.setLocalSessionUnlocked(true)
       if case .restoring = authenticationState {
         await restoreSession(requireLocalUnlock: false)
       } else {
@@ -487,6 +540,7 @@ final class AppModel: ObservableObject {
   }
 
   func logout(allDevices: Bool = false) async {
+    await notificationStore.unregisterBeforeLogout()
     if let sessionClient,
       let tokens = try? await tokenStore.load()
     {
@@ -654,9 +708,10 @@ final class AppModel: ObservableObject {
       }
     } catch {
       let message = readOnlyErrorMessage(error, fallback: "行情与自选暂时无法读取")
-      marketState = previousSnapshot.map {
-        .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
-      } ?? .failed(message)
+      marketState =
+        previousSnapshot.map {
+          .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
+        } ?? .failed(message)
     }
   }
 
@@ -1074,9 +1129,10 @@ final class AppModel: ObservableObject {
         refreshWarning: nil
       )
     } catch is CancellationError {
-      tTradeAssistantState = previousSnapshot.map {
-        .loaded($0, refreshWarning: nil)
-      } ?? .idle
+      tTradeAssistantState =
+        previousSnapshot.map {
+          .loaded($0, refreshWarning: nil)
+        } ?? .idle
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
@@ -1101,9 +1157,10 @@ final class AppModel: ObservableObject {
       }
     } catch {
       let message = readOnlyErrorMessage(error, fallback: "做T监控暂时无法读取")
-      tTradeAssistantState = previousSnapshot.map {
-        .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
-      } ?? .failed(message)
+      tTradeAssistantState =
+        previousSnapshot.map {
+          .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
+        } ?? .failed(message)
     }
   }
 
@@ -1140,9 +1197,10 @@ final class AppModel: ObservableObject {
         refreshWarning: nil
       )
     } catch is CancellationError {
-      limitUpBoardState = previousSnapshot.map {
-        .loaded($0, refreshWarning: nil)
-      } ?? .idle
+      limitUpBoardState =
+        previousSnapshot.map {
+          .loaded($0, refreshWarning: nil)
+        } ?? .idle
     } catch ReadOnlyRepositoryError.unauthenticated {
       do {
         try await refreshAccessSession()
@@ -1163,9 +1221,10 @@ final class AppModel: ObservableObject {
       }
     } catch {
       let message = readOnlyErrorMessage(error, fallback: "打板工作台暂时无法读取")
-      limitUpBoardState = previousSnapshot.map {
-        .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
-      } ?? .failed(message)
+      limitUpBoardState =
+        previousSnapshot.map {
+          .loaded($0, refreshWarning: "刷新失败，正在显示上次成功获取的数据。\(message)")
+        } ?? .failed(message)
     }
   }
 
@@ -1340,6 +1399,46 @@ final class AppModel: ObservableObject {
     return pendingManualOrderDraft
   }
 
+  func handleNotificationNavigation(_ request: NotificationNavigationRequest) async {
+    guard !localSessionLocked, authenticatedUser != nil else {
+      await notificationStore.receive(notificationEventID: request.eventID)
+      return
+    }
+    switch request.destination {
+    case .today:
+      selectedTab = .today
+      await refreshAllReadOnlySnapshots()
+    case .tradingOrders:
+      pendingNotificationTradeRoute = request
+      selectedTab = .trade
+      await refreshTradingActivity()
+    case .tradingSafety:
+      pendingNotificationTradeRoute = request
+      selectedTab = .trade
+      await refreshPortfolio()
+      await refreshTradingActivity()
+    case .quant:
+      selectedTab = .quant
+      await refreshStrategies()
+      await refreshTTradeAssistant()
+      await refreshLimitUpBoard()
+    case .systemStatus:
+      pendingNotificationSystemRoute = request
+      selectedTab = .today
+      await refreshHealth()
+    }
+  }
+
+  func consumePendingNotificationTradeRoute() -> NotificationNavigationRequest? {
+    defer { pendingNotificationTradeRoute = nil }
+    return pendingNotificationTradeRoute
+  }
+
+  func consumePendingNotificationSystemRoute() -> NotificationNavigationRequest? {
+    defer { pendingNotificationSystemRoute = nil }
+    return pendingNotificationSystemRoute
+  }
+
   func previewManualOrder(
     instrumentCode: String,
     direction: ManualOrderDirection,
@@ -1450,8 +1549,7 @@ final class AppModel: ObservableObject {
     _ error: Error,
     to previousSnapshot: MarketWorkspaceSnapshot
   ) {
-    if
-      hasPermission("market:read"),
+    if hasPermission("market:read"),
       hasPermission("portfolio:read"),
       authenticatedUser?.activeAccountID == previousSnapshot.accountID
     {
@@ -1464,7 +1562,8 @@ final class AppModel: ObservableObject {
         )
       }
     }
-    watchlistMutationErrorMessage = error is CancellationError
+    watchlistMutationErrorMessage =
+      error is CancellationError
       ? nil
       : watchlistMutationMessage(error)
   }
@@ -1488,6 +1587,17 @@ final class AppModel: ObservableObject {
       configuration,
       session.tokens.accessToken
     )
+    let notificationIdentity = PushNotificationSessionIdentity(
+      userID: session.user.id,
+      deviceSessionID: session.tokens.deviceSessionID,
+      activeAccountID: session.user.activeAccountID ?? "",
+      authorizedAccountIDs: Set(session.user.authorizedAccountIDs),
+      grantedScopes: grantedScopes
+    )
+    let pushRepository =
+      grantedScopes.contains(NativeSessionScope.notificationManage.rawValue)
+      ? pushNotificationLoaderFactory(newApolloSession)
+      : nil
     if persistTokens {
       try await tokenStore.save(session.tokens)
     }
@@ -1496,32 +1606,41 @@ final class AppModel: ObservableObject {
       await oldApolloSession.pauseSubscriptions()
     }
     apolloSession = newApolloSession
-    portfolioRepository = grantedScopes.contains("portfolio:read")
+    portfolioRepository =
+      grantedScopes.contains("portfolio:read")
       ? portfolioLoaderFactory(newApolloSession)
       : nil
-    strategyRepository = grantedScopes.contains("strategy:read")
+    strategyRepository =
+      grantedScopes.contains("strategy:read")
       ? strategyLoaderFactory(newApolloSession)
       : nil
-    tradingRepository = grantedScopes.contains("orders:read")
+    tradingRepository =
+      grantedScopes.contains("orders:read")
       ? tradingLoaderFactory(newApolloSession)
       : nil
-    tTradeAssistantRepository = grantedScopes.contains("strategy:read")
+    tTradeAssistantRepository =
+      grantedScopes.contains("strategy:read")
       ? tTradeAssistantLoaderFactory(newApolloSession)
       : nil
-    limitUpBoardRepository = grantedScopes.contains("strategy:read")
+    limitUpBoardRepository =
+      grantedScopes.contains("strategy:read")
       ? limitUpBoardLoaderFactory(newApolloSession)
       : nil
-    tradeApprovalRepository = grantedScopes.contains("trade:approve")
+    tradeApprovalRepository =
+      grantedScopes.contains("trade:approve")
       ? tradeApprovalLoaderFactory(newApolloSession)
       : nil
-    let manualOrderRepository = grantedScopes.contains("trade:manual")
-      && grantedScopes.contains("market:read")
+    let manualOrderRepository =
+      grantedScopes.contains("trade:manual")
+        && grantedScopes.contains("market:read")
       ? manualOrderLoaderFactory(newApolloSession)
       : nil
-    let cancellationRepository = grantedScopes.contains("trade:manual")
+    let cancellationRepository =
+      grantedScopes.contains("trade:manual")
       ? orderCancellationLoaderFactory(newApolloSession)
       : nil
-    marketRepository = grantedScopes.contains("market:read")
+    marketRepository =
+      grantedScopes.contains("market:read")
       ? marketLoaderFactory(newApolloSession)
       : nil
     liquidationStore.activate(
@@ -1536,6 +1655,31 @@ final class AppModel: ObservableObject {
         ? liquidationLoaderFactory(newApolloSession)
         : nil
     )
+    exitPlanWorkspace.activate(
+      identity: ExitPlanWorkspace.SessionIdentity(
+        userID: session.user.id,
+        deviceSessionID: session.tokens.deviceSessionID,
+        activeAccountID: session.user.activeAccountID,
+        authorizedAccountIDs: Set(session.user.authorizedAccountIDs),
+        grantedScopes: grantedScopes
+      ),
+      repository: grantedScopes.contains("orders:read")
+        ? exitPlanLoaderFactory(newApolloSession)
+        : nil
+    )
+    tTradeControlStore.activate(
+      identity: TTradeControlStore.SessionIdentity(
+        userID: session.user.id,
+        deviceSessionID: session.tokens.deviceSessionID,
+        activeAccountID: session.user.activeAccountID,
+        authorizedAccountIDs: Set(session.user.authorizedAccountIDs),
+        grantedScopes: grantedScopes
+      ),
+      repository: grantedScopes.contains("strategy:read")
+        || grantedScopes.contains("t-trade:control")
+        ? tTradeControlLoaderFactory(newApolloSession)
+        : nil
+    )
     manualTradingStore.activate(
       identity: ManualTradingStore.SessionIdentity(
         userID: session.user.id,
@@ -1547,19 +1691,34 @@ final class AppModel: ObservableObject {
       manualOrderRepository: manualOrderRepository,
       cancellationRepository: cancellationRepository
     )
-    portfolioState = grantedScopes.contains("portfolio:read")
+    strategyWorkspace.activate(
+      identity: StrategyWorkspace.SessionIdentity(
+        userID: session.user.id,
+        deviceSessionID: session.tokens.deviceSessionID,
+        activeAccountID: session.user.activeAccountID,
+        authorizedAccountIDs: Set(session.user.authorizedAccountIDs),
+        grantedScopes: grantedScopes
+      ),
+      repository: strategyRepository as? any StrategyWorkspaceLoading
+    )
+    portfolioState =
+      grantedScopes.contains("portfolio:read")
       ? .idle
       : .unavailable("当前会话没有 portfolio:read 权限")
-    strategyState = grantedScopes.contains("strategy:read")
+    strategyState =
+      grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
-    tradingState = grantedScopes.contains("orders:read")
+    tradingState =
+      grantedScopes.contains("orders:read")
       ? .idle
       : .unavailable("当前会话没有 orders:read 权限")
-    tTradeAssistantState = grantedScopes.contains("strategy:read")
+    tTradeAssistantState =
+      grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
-    limitUpBoardState = grantedScopes.contains("strategy:read")
+    limitUpBoardState =
+      grantedScopes.contains("strategy:read")
       ? .idle
       : .unavailable("当前会话没有 strategy:read 权限")
     if !grantedScopes.contains("market:read") {
@@ -1575,6 +1734,11 @@ final class AppModel: ObservableObject {
     localSessionLocked = false
     localUnlockErrorMessage = nil
     authenticationState = .authenticated(session.user)
+    await notificationStore.activate(
+      identity: notificationIdentity,
+      repository: pushRepository,
+      localSessionUnlocked: true
+    )
   }
 
   private func refreshAccessSession() async throws {
@@ -1672,11 +1836,17 @@ final class AppModel: ObservableObject {
     tradeApprovalRepository = nil
     marketRepository = nil
     liquidationStore.clearSession()
+    exitPlanWorkspace.clearSession()
+    tTradeControlStore.clearSession()
     manualTradingStore.clearSession()
+    strategyWorkspace.clearSession()
+    notificationStore.clearSession()
     tradeApprovalInProgress = false
     watchlistMutationInProgress = false
     watchlistMutationErrorMessage = nil
     pendingManualOrderDraft = nil
+    pendingNotificationTradeRoute = nil
+    pendingNotificationSystemRoute = nil
     portfolioState =
       accountDataEnabled
       ? .idle
@@ -1725,31 +1895,35 @@ final class AppModel: ObservableObject {
   }
 
   func handleScenePhase(_ phase: ScenePhase) {
-#if DEBUG
-    if usesTransientRealBackendUITestSession {
-      switch phase {
-      case .active:
-        privacyShieldVisible = false
-        Task {
-          await refreshHealth()
-          await apolloSession?.resumeSubscriptions()
+    #if DEBUG
+      if usesTransientRealBackendUITestSession {
+        switch phase {
+        case .active:
+          privacyShieldVisible = false
+          Task {
+            await refreshHealth()
+            await apolloSession?.resumeSubscriptions()
+          }
+        case .inactive, .background:
+          privacyShieldVisible = true
+          if phase == .background {
+            liquidationStore.invalidateChallengeContext()
+            exitPlanWorkspace.invalidateAuthorizationContext()
+            tTradeControlStore.invalidateChallengeContext()
+            strategyWorkspace.invalidateControlContext()
+          }
+          Task { await apolloSession?.pauseSubscriptions() }
+        @unknown default:
+          privacyShieldVisible = true
         }
-      case .inactive, .background:
-        privacyShieldVisible = true
-        if phase == .background {
-          liquidationStore.invalidateChallengeContext()
-        }
-        Task { await apolloSession?.pauseSubscriptions() }
-      @unknown default:
-        privacyShieldVisible = true
+        return
       }
-      return
-    }
-#endif
+    #endif
     switch phase {
     case .active:
       privacyShieldVisible = false
       Task {
+        await notificationStore.refreshSystemAuthorization()
         await refreshHealth()
         if localSessionLocked {
           await unlockLocalSession()
@@ -1761,9 +1935,13 @@ final class AppModel: ObservableObject {
       privacyShieldVisible = true
       if phase == .background {
         liquidationStore.invalidateChallengeContext()
+        exitPlanWorkspace.invalidateAuthorizationContext()
+        tTradeControlStore.invalidateChallengeContext()
+        strategyWorkspace.invalidateControlContext()
       }
       if case .authenticated = authenticationState {
         localSessionLocked = true
+        notificationStore.lockLocalSession()
       }
       Task { await apolloSession?.pauseSubscriptions() }
     @unknown default:
@@ -1809,6 +1987,67 @@ final class AppModel: ObservableObject {
     )
   }
 
+  private func configureExitPlanWorkspace() {
+    exitPlanWorkspace.configure(
+      contextProvider: { [weak self] in
+        guard let self else {
+          return ExitPlanRuntimeContext(
+            accountID: nil,
+            localSessionLocked: true,
+            accountDataEnabled: false
+          )
+        }
+        return ExitPlanRuntimeContext(
+          accountID: self.portfolioState.snapshot?.account.id,
+          localSessionLocked: self.localSessionLocked,
+          accountDataEnabled: self.accountDataEnabled
+        )
+      },
+      refreshSession: { [weak self] in
+        guard let self else {
+          throw ExitPlanWorkspaceError.unavailable("个人账户会话已释放")
+        }
+        try await self.refreshAccessSession()
+        await self.refreshPortfolio()
+      },
+      refreshTradingTruth: { [weak self] in
+        guard let self else { return }
+        await self.refreshPortfolio()
+        await self.refreshTradingActivity()
+      }
+    )
+  }
+
+  private func configureTTradeControlStore() {
+    tTradeControlStore.configure(
+      contextProvider: { [weak self] in
+        guard let self else {
+          return TTradeControlRuntimeContext(
+            accountID: nil,
+            localSessionLocked: true,
+            accountDataEnabled: false
+          )
+        }
+        return TTradeControlRuntimeContext(
+          accountID: self.portfolioState.snapshot?.account.id,
+          localSessionLocked: self.localSessionLocked,
+          accountDataEnabled: self.accountDataEnabled
+        )
+      },
+      refreshSession: { [weak self] in
+        guard let self else {
+          throw TTradeControlError.unavailable("个人账户会话已释放")
+        }
+        try await self.refreshAccessSession()
+        await self.refreshPortfolio()
+      },
+      refreshAssistantProjection: { [weak self] in
+        guard let self else { return }
+        await self.refreshTTradeAssistant()
+      }
+    )
+  }
+
   private func configureManualTradingStore() {
     manualTradingStore.configure(
       contextProvider: { [weak self] in
@@ -1846,6 +2085,45 @@ final class AppModel: ObservableObject {
     )
   }
 
+  private func configureStrategyWorkspace() {
+    strategyWorkspace.configure(
+      contextProvider: { [weak self] in
+        guard let self else {
+          return StrategyWorkspaceRuntimeContext(
+            accountID: nil,
+            localSessionLocked: true,
+            accountDataEnabled: false
+          )
+        }
+        return StrategyWorkspaceRuntimeContext(
+          accountID: self.portfolioState.snapshot?.account.id,
+          localSessionLocked: self.localSessionLocked,
+          accountDataEnabled: self.accountDataEnabled
+        )
+      },
+      refreshSession: { [weak self] in
+        guard let self else {
+          throw StrategyWorkspaceError.unavailable("个人账户会话已释放")
+        }
+        try await self.refreshAccessSession()
+        await self.refreshPortfolio()
+      },
+      refreshStrategies: { [weak self] in
+        guard let self else { return }
+        await self.refreshStrategies()
+      }
+    )
+  }
+
+  private func configureNotificationStore() {
+    notificationStore.configure(sessionRefresh: { [weak self] in
+      guard let self else {
+        throw PushNotificationRepositoryError.unauthenticated
+      }
+      try await self.refreshAccessSession()
+    })
+  }
+
   private enum ReadOnlyFeature {
     case market
     case strategy
@@ -1863,95 +2141,97 @@ final class AppModel: ObservableObject {
     await refreshLimitUpBoard()
   }
 
-#if DEBUG
-  private func startWatchlistReadOnlyUITestFixture() {
-    let accountID = "UI-WATCHLIST-ACCOUNT"
-    let updatedAt = Date(timeIntervalSince1970: 1_786_752_000)
-    authenticationState = .authenticated(
-      SessionUser(
-        id: "watchlist-ui-user",
-        username: "watchlist-ui-user",
-        displayName: "自选只读测试用户",
-        permissions: ["portfolio:read", "market:read", "watchlist:write"],
-        authorizedAccountIDs: [accountID],
-        activeAccountID: accountID,
-        grantedScopes: ["portfolio:read", "market:read"]
+  #if DEBUG
+    private func startWatchlistReadOnlyUITestFixture() {
+      let accountID = "UI-WATCHLIST-ACCOUNT"
+      let updatedAt = Date(timeIntervalSince1970: 1_786_752_000)
+      authenticationState = .authenticated(
+        SessionUser(
+          id: "watchlist-ui-user",
+          username: "watchlist-ui-user",
+          displayName: "自选只读测试用户",
+          permissions: ["portfolio:read", "market:read", "watchlist:write"],
+          authorizedAccountIDs: [accountID],
+          activeAccountID: accountID,
+          grantedScopes: ["portfolio:read", "market:read"]
+        )
       )
-    )
-    serviceState = .failed("UI 测试未连接服务")
-    portfolioState = .failed("UI 测试未连接账户服务")
-    marketState = .loaded(
-      MarketWorkspaceSnapshot(
-        accountID: accountID,
-        watchlist: [
-          MarketWatchItem(
-            id: "watchlist-ui-1",
-            accountID: accountID,
-            stockCode: "600519.SH",
-            instrumentName: "贵州茅台",
-            displayOrder: 1,
-            groupName: nil,
-            note: nil,
-            updatedAt: updatedAt,
-            quote: MarketQuote(
+      serviceState = .failed("UI 测试未连接服务")
+      portfolioState = .failed("UI 测试未连接账户服务")
+      marketState = .loaded(
+        MarketWorkspaceSnapshot(
+          accountID: accountID,
+          watchlist: [
+            MarketWatchItem(
+              id: "watchlist-ui-1",
+              accountID: accountID,
               stockCode: "600519.SH",
-              time: updatedAt,
-              lastPrice: 1_598.50,
-              open: 1_590,
-              high: 1_605,
-              low: 1_582,
-              preClose: 1_588,
-              change: 10.50,
-              changePercent: 0.0066,
-              volume: 12_300,
-              amount: 1_965_000_000,
-              turnoverRate: 0.004
-            )
-          ),
-          MarketWatchItem(
-            id: "watchlist-ui-2",
-            accountID: accountID,
-            stockCode: "000001.SZ",
-            instrumentName: "平安银行",
-            displayOrder: 2,
-            groupName: nil,
-            note: nil,
-            updatedAt: updatedAt,
-            quote: nil
-          ),
-        ],
-        fetchedAt: updatedAt
-      ),
-      refreshWarning: nil
-    )
-    selectedTab = .market
-  }
-
-  private func startTransientRealBackendUITestSession() async {
-    await refreshHealth()
-    guard let configuration else {
-      authenticationState = .failed("真实后端 UI 测试配置无效")
-      return
+              instrumentName: "贵州茅台",
+              displayOrder: 1,
+              groupName: nil,
+              note: nil,
+              updatedAt: updatedAt,
+              quote: MarketQuote(
+                stockCode: "600519.SH",
+                time: updatedAt,
+                lastPrice: 1_598.50,
+                open: 1_590,
+                high: 1_605,
+                low: 1_582,
+                preClose: 1_588,
+                change: 10.50,
+                changePercent: 0.0066,
+                volume: 12_300,
+                amount: 1_965_000_000,
+                turnoverRate: 0.004
+              )
+            ),
+            MarketWatchItem(
+              id: "watchlist-ui-2",
+              accountID: accountID,
+              stockCode: "000001.SZ",
+              instrumentName: "平安银行",
+              displayOrder: 2,
+              groupName: nil,
+              note: nil,
+              updatedAt: updatedAt,
+              quote: nil
+            ),
+          ],
+          fetchedAt: updatedAt
+        ),
+        refreshWarning: nil
+      )
+      selectedTab = .market
     }
-    do {
-      guard let session = try DebugRealBackendUITestSession.make(
-        arguments: ProcessInfo.processInfo.arguments,
-        environment: ProcessInfo.processInfo.environment
-      ) else {
-        authenticationState = .failed("真实后端 UI 测试会话未提供")
+
+    private func startTransientRealBackendUITestSession() async {
+      await refreshHealth()
+      guard let configuration else {
+        authenticationState = .failed("真实后端 UI 测试配置无效")
         return
       }
-      try await activate(
-        session,
-        configuration: configuration,
-        persistTokens: false
-      )
-      await refreshAllReadOnlySnapshots()
-    } catch {
-      authenticationState = .failed("真实后端 UI 测试会话无效")
+      do {
+        guard
+          let session = try DebugRealBackendUITestSession.make(
+            arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment
+          )
+        else {
+          authenticationState = .failed("真实后端 UI 测试会话未提供")
+          return
+        }
+        try await activate(
+          session,
+          configuration: configuration,
+          persistTokens: false
+        )
+        await refreshAllReadOnlySnapshots()
+      } catch {
+        authenticationState = .failed("真实后端 UI 测试会话无效")
+      }
     }
-  }
-#endif
+  #endif
 
   private func hasPermission(_ permission: String) -> Bool {
     authenticatedUser?.grantedScopes.contains(permission) == true

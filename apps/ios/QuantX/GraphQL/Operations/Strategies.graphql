@@ -16,6 +16,95 @@ query IOSStrategyInstances {
   }
 }
 
+query IOSStrategyInstanceMobileParameters($instanceId: String!) {
+  strategyInstanceMobileParameters(instanceId: $instanceId) {
+    instanceId
+    configVersion
+    editable
+    parameters {
+      key
+      title
+      description
+      valueType
+      currentValue
+      unit
+      minimum
+      maximum
+      step
+      enumValues
+      applyImmediately
+      riskLevel
+    }
+  }
+}
+
+mutation IOSUpdateStrategyInstanceParameters(
+  $instanceId: String!
+  $input: StrategyInstanceParameterUpdateInput!
+) {
+  updateStrategyInstanceParameters(instanceId: $instanceId, input: $input) {
+    id
+    mode
+    status
+    parameterVersion
+    updatedAt
+  }
+}
+
+mutation IOSPauseStrategyInstance($instanceId: String!) {
+  pauseStrategyInstance(instanceId: $instanceId) {
+    success
+    message
+  }
+}
+
+mutation IOSResumeStrategyInstance($instanceId: String!) {
+  resumeStrategyInstance(instanceId: $instanceId) {
+    success
+    message
+  }
+}
+
+mutation IOSPreviewStrategyControl($input: StrategyControlPreviewInput!) {
+  previewStrategyControl(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      accountId
+      instanceId
+      targetInstanceId
+      action
+      currentMode
+      currentStatus
+      configVersion
+      readinessStatus
+      snapshotId
+      snapshotAt
+      challengeExpiresAt
+      checks {
+        code
+        passed
+        message
+      }
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmStrategyControl($input: StrategyControlConfirmationInput!) {
+  confirmStrategyControl(input: $input) {
+    success
+    code
+    message
+    challengeId
+    instanceId
+    status
+  }
+}
+
 query IOSLimitUpBoardAssistant($runId: String!) {
   strategyPendingTradeIntents(runId: $runId) {
     id

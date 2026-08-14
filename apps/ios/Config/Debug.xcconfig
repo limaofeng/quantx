@@ -10,6 +10,8 @@ QUANTX_AUTH_BASE_URL = http:$(URL_SEPARATOR)$(URL_SEPARATOR)192.168.5.6:8080
 DEBUG_HTTP_ALLOWED = 1
 QUANTX_ACCOUNT_DATA_ENABLED = YES
 QUANTX_LOG_LEVEL = debug
+QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = development
+QUANTX_APNS_API_ENVIRONMENT = SANDBOX
 
 // Optional machine-local signing overrides. This file is ignored by Git.
 #include? "Debug.local.xcconfig"

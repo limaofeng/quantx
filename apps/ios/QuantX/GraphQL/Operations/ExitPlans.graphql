@@ -1,0 +1,158 @@
+fragment IOSExitPlanFields on ExitPlanView {
+  planId
+  groupId
+  accountId
+  instrumentCode
+  bucket
+  sourceType
+  sourceId
+  strategyRunId
+  enabled
+  status
+  executionMode
+  autoExitAuthorized
+  autoExitAuthorizationConfigVersion
+  autoExitAuthorizationExpiresAt
+  configVersion
+  completionStrategy
+  completionNote
+  protectedVolume
+  exitedVolume
+  remainingVolume
+  entryAvgPrice
+  rules
+  metadata
+  canEditRules
+  editRoute
+  phase
+  dataQuality
+  lastDecision
+  peakPrice
+  peakDrawdownPct
+  trailingFloorPct
+  pendingClientOrderId
+  pendingIntentId
+  lastEvaluatedAt
+  lastError
+  createdAt
+  updatedAt
+}
+
+query IOSExitPlans($accountId: String!) {
+  exitPlans(accountId: $accountId, limit: 200) {
+    ...IOSExitPlanFields
+  }
+  exitPlanCapabilities {
+    ruleTypes {
+      ruleType
+      label
+      category
+      parameters
+    }
+    completionStrategies
+    conflictStrategies
+    executionModes
+    ruleSemantics
+  }
+}
+
+query IOSExitPlanDetail(
+  $planId: String!
+  $accountId: String!
+  $instrumentCode: String!
+) {
+  exitPlan(planId: $planId) {
+    ...IOSExitPlanFields
+  }
+  exitPlanHoldingCapacity(
+    instrumentCode: $instrumentCode
+    accountId: $accountId
+  ) {
+    accountId
+    instrumentCode
+    totalVolume
+    availableVolume
+    frozenVolume
+    protectedVolume
+    pendingVolume
+    unallocatedVolume
+    conflicts {
+      planId
+      sourceType
+      status
+      remainingVolume
+      pending
+    }
+  }
+  exitPlanEvents(planId: $planId, limit: 100) {
+    eventId
+    planId
+    eventType
+    payload
+    createdAt
+  }
+}
+
+mutation IOSPreviewExitPlanAuthorization(
+  $input: ExitPlanAuthorizationPreviewInput!
+) {
+  previewExitPlanAuthorization(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      accountId
+      planId
+      instrumentCode
+      bucket
+      sourceType
+      executionMode
+      configVersion
+      protectedVolume
+      exitedVolume
+      remainingVolume
+      rules
+      t1Policy
+      executionPolicy
+      position {
+        totalVolume
+        availableVolume
+        frozenVolume
+        yesterdayVolume
+        t1UnavailableVolume
+        positionUpdatedAt
+      }
+      otherProtections {
+        planId
+        sourceType
+        status
+        remainingVolume
+        configVersion
+        pending
+      }
+      readiness
+      authorizationFingerprint
+      authorizationExpiresAt
+      challengeExpiresAt
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmExitPlanAuthorization(
+  $input: ExitPlanAuthorizationConfirmationInput!
+) {
+  confirmExitPlanAuthorization(input: $input) {
+    success
+    code
+    message
+    challengeId
+    planId
+    configVersion
+    authorized
+    authorizationExpiresAt
+    auditEventId
+  }
+}

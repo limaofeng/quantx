@@ -1,0 +1,139 @@
+query IOSTTradeControlState($accountId: String!) {
+  tTradeGlobalMonitor(accountId: $accountId) {
+    accountId
+    enabled
+    mode
+    rolloutStage
+    killSwitch
+    pendingSignalCount
+    activeBatchCount
+    drainingCount
+    positionSnapshotSource
+    positionSnapshotReportedAt
+    positionSnapshotReceivedAt
+    positionSnapshotComplete
+    positionSnapshotError
+    projectionGeneratedAt
+  }
+  validateTTradeLiveReadiness(accountId: $accountId) {
+    accountId
+    ready
+    status
+    preparationReady
+    automationReady
+    stage
+    engineStatus
+    agentStatus
+    agentDeviceId
+    agentMode
+    protocolVersion
+    reconcileStatus
+    killSwitch
+    policyVersion
+    canApprove
+    canActivateLive
+    blockedReasons
+    preparationBlockedReasons
+    checks {
+      code
+      passed
+      message
+      scope
+    }
+    snapshotId
+    snapshotHash
+    snapshotAt
+    reconciliationAgeSeconds
+    queuedCommandCount
+    queueDelaySeconds
+    deadLetterCount
+    unresolvedCriticalAlertCount
+    manualCoexistence
+    externalOrderCount
+    externalTradeCount
+    controlledWindowActive
+    controlledWindowSnapshotId
+    controlledWindowStartedAt
+    newExternalOrderCount
+    newExternalTradeCount
+    workingExternalOrderCount
+    journalIntegrity
+    journalSizeBytes
+    journalPendingReports
+    lastBackupAt
+    checkedAt
+  }
+}
+
+mutation IOSPreviewTTradeControl($input: TTradeControlPreviewInput!) {
+  previewTTradeControl(input: $input) {
+    success
+    code
+    message
+    preview {
+      challengeId
+      confirmationToken
+      tokenIssued
+      accountId
+      action
+      policyVersion
+      snapshotId
+      targetStage
+      reason
+      currentStage
+      readinessStatus
+      readinessFingerprint
+      challengeExpiresAt
+      challengeStatus
+      operationStatus
+      checks {
+        code
+        passed
+        message
+        scope
+      }
+      warnings
+    }
+  }
+}
+
+mutation IOSConfirmTTradeControl($input: TTradeControlConfirmationInput!) {
+  confirmTTradeControl(input: $input) {
+    success
+    code
+    message
+    challengeId
+    accountId
+    action
+    challengeConsumed
+    operationStatus
+    readiness {
+      accountId
+      stage
+      policyVersion
+      snapshotId
+      killSwitch
+      controlledWindowActive
+      controlledWindowSnapshotId
+      checkedAt
+    }
+  }
+}
+
+mutation IOSPauseTTradeEntries($accountId: String!, $reason: String!) {
+  pauseTTradeEntries(accountId: $accountId, reason: $reason) {
+    success
+    code
+    message
+    readiness {
+      accountId
+      stage
+      policyVersion
+      snapshotId
+      killSwitch
+      controlledWindowActive
+      controlledWindowSnapshotId
+      checkedAt
+    }
+  }
+}

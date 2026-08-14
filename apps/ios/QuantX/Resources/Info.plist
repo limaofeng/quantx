@@ -43,6 +43,8 @@
 	</dict>
 	<key>QuantXEnvironment</key>
 	<string>$(QUANTX_ENVIRONMENT)</string>
+	<key>QuantXAPNsEnvironment</key>
+	<string>$(QUANTX_APNS_API_ENVIRONMENT)</string>
 	<key>QuantXGraphQLHTTPURL</key>
 	<string>$(QUANTX_GRAPHQL_HTTP_URL)</string>
 	<key>QuantXGraphQLWebSocketURL</key>

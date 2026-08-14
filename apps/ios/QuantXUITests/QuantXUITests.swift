@@ -129,7 +129,7 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
-  func testManualOrderTicketUsesSafePreviewFirstFlow() throws {
+  func testManualOrderTicketFailsClosedUntilServerCapabilityLoads() throws {
     let app = makeApp()
     app.launch()
 
@@ -140,7 +140,7 @@ final class QuantXUITests: XCTestCase {
 
     XCTAssertTrue(app.staticTexts["委托票据"].waitForExistence(timeout: 3))
     XCTAssertTrue(app.staticTexts["当前主账户"].exists)
-    XCTAssertTrue(app.buttons["对手方最优价"].exists)
+    XCTAssertFalse(app.buttons["对手方最优价"].exists)
     let previewButton = app.buttons["获取服务器预览"]
     XCTAssertTrue(previewButton.exists)
     XCTAssertFalse(previewButton.isEnabled)
@@ -242,7 +242,8 @@ final class QuantXUITests: XCTestCase {
       if element.waitForExistence(timeout: 0.25) {
         let elementFrame = element.frame
         let visibleBottom = tabBar.exists ? tabBar.frame.minY : scrollView.frame.maxY
-        let isFullyVisible = elementFrame.width > 0
+        let isFullyVisible =
+          elementFrame.width > 0
           && elementFrame.height > 0
           && elementFrame.minY >= scrollView.frame.minY
           && elementFrame.maxY <= visibleBottom

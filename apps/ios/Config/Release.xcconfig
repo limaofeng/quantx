@@ -9,6 +9,8 @@ QUANTX_AUTH_BASE_URL = https:$(URL_SEPARATOR)$(URL_SEPARATOR)quantx.invalid
 DEBUG_HTTP_ALLOWED = 0
 QUANTX_ACCOUNT_DATA_ENABLED = NO
 QUANTX_LOG_LEVEL = error
+QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = production
+QUANTX_APNS_API_ENVIRONMENT = PRODUCTION
 
 // Optional machine-local endpoint and signing overrides. This file is ignored by Git.
 #include? "Release.local.xcconfig"

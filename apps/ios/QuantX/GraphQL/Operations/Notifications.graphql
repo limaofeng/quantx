@@ -1,0 +1,48 @@
+mutation IOSRegisterPushDevice($input: RegisterPushDeviceInput!) {
+  registerPushDevice(input: $input) {
+    id
+    deviceInstallId
+    appBundleId
+    appVersion
+    environment
+    registeredAt
+    updatedAt
+    preferences {
+      category
+      enabled
+    }
+  }
+}
+
+mutation IOSUpdatePushPreferences($input: UpdatePushPreferencesInput!) {
+  updatePushPreferences(input: $input) {
+    id
+    deviceInstallId
+    appBundleId
+    appVersion
+    environment
+    registeredAt
+    updatedAt
+    preferences {
+      category
+      enabled
+    }
+  }
+}
+
+mutation IOSUnregisterPushDevice($input: UnregisterPushDeviceInput!) {
+  unregisterPushDevice(input: $input) {
+    success
+  }
+}
+
+query IOSNotificationEventRoute($eventId: ID!) {
+  notificationEventRoute(eventId: $eventId) {
+    eventId
+    category
+    routeType
+    occurredAt
+    expiresAt
+    expired
+  }
+}

@@ -61,9 +61,13 @@ struct TradeWorkspaceView: View {
     }
     .onAppear {
       openPendingDraftIfNeeded()
+      openPendingNotificationRouteIfNeeded()
     }
     .onChange(of: model.pendingManualOrderDraft?.id) { _, _ in
       openPendingDraftIfNeeded()
+    }
+    .onChange(of: model.pendingNotificationTradeRoute?.id) { _, _ in
+      openPendingNotificationRouteIfNeeded()
     }
   }
 
@@ -147,7 +151,7 @@ struct TradeWorkspaceView: View {
             Text("卖出管理")
               .font(.headline)
               .foregroundStyle(.primary)
-            Text("单只、选中或全部持仓的两阶段清仓")
+            Text("退出计划精确授权与两阶段持仓清仓")
               .font(.subheadline)
               .foregroundStyle(QuantXTheme.secondaryText)
           }
@@ -161,7 +165,7 @@ struct TradeWorkspaceView: View {
       }
     }
     .buttonStyle(.plain)
-    .accessibilityHint("进入先预览、后生物识别确认的卖出管理")
+    .accessibilityHint("查看退出保护，或进入先预览、后生物识别确认的持仓清仓")
   }
 
   private var activityDetail: String {
@@ -186,6 +190,18 @@ struct TradeWorkspaceView: View {
         instrumentCode: draft.instrumentCode
       )
     ]
+  }
+
+  private func openPendingNotificationRouteIfNeeded() {
+    guard let request = model.consumePendingNotificationTradeRoute() else { return }
+    switch request.destination {
+    case .tradingOrders:
+      path = [.activity]
+    case .tradingSafety:
+      path = [.liquidation]
+    case .today, .quant, .systemStatus:
+      break
+    }
   }
 }
 
@@ -298,7 +314,9 @@ private struct ManualOrderTicketView: View {
       HStack(alignment: .top, spacing: QuantXTheme.Spacing.medium) {
         Image(systemName: "person.crop.circle.badge.checkmark")
           .font(.title2)
-          .foregroundStyle(model.primaryTradingAccountID == nil ? QuantXTheme.warning : QuantXTheme.accent)
+          .foregroundStyle(
+            model.primaryTradingAccountID == nil ? QuantXTheme.warning : QuantXTheme.accent
+          )
           .accessibilityHidden(true)
         VStack(alignment: .leading, spacing: 4) {
           Text("当前主账户")
@@ -660,7 +678,8 @@ private struct ManualOrderConfirmationSheet: View {
           if preview.wasCapped {
             QuantXStatusBanner(
               title: "风控已缩减委托数量",
-              message: "请求 \(preview.requestedVolume.formatted()) 股，合法数量为 \(preview.finalVolume.formatted()) 股。确认只会提交合法数量。",
+              message:
+                "请求 \(preview.requestedVolume.formatted()) 股，合法数量为 \(preview.finalVolume.formatted()) 股。确认只会提交合法数量。",
               status: .attention
             )
           }
@@ -695,7 +714,8 @@ private struct ManualOrderConfirmationSheet: View {
           Spacer()
           Text(preview.direction.title)
             .font(.headline)
-            .foregroundStyle(preview.direction == .buy ? QuantXTheme.positive : QuantXTheme.negative)
+            .foregroundStyle(
+              preview.direction == .buy ? QuantXTheme.positive : QuantXTheme.negative)
         }
         Divider()
         detailRow("主账户", masked(preview.accountID))
@@ -793,7 +813,7 @@ private struct ManualOrderConfirmationSheet: View {
                   : "确认模拟委托 \(preview.finalVolume.formatted()) 股",
                 systemImage: preview.executionMode == .live ? "faceid" : "checkmark.shield"
               )
-                .frame(maxWidth: .infinity)
+              .frame(maxWidth: .infinity)
             }
           }
           .buttonStyle(.borderedProminent)

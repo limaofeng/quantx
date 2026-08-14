@@ -1,15 +1,50 @@
 import SwiftUI
 
 struct LiquidationWorkspaceView: View {
+  private enum Section: String, CaseIterable, Identifiable {
+    case plans
+    case holdings
+
+    var id: Self { self }
+
+    var title: String {
+      switch self {
+      case .plans: "退出计划"
+      case .holdings: "持仓清仓"
+      }
+    }
+  }
+
   @EnvironmentObject private var model: AppModel
+  @State private var section = Section.plans
 
   var body: some View {
-    LiquidationSelectionWorkspace(
-      store: model.liquidationStore,
-      accountID: model.primaryTradingAccountID,
-      positions: model.portfolioState.snapshot?.positions.filter { $0.volume > 0 } ?? [],
-      refreshPortfolio: { await model.refreshPortfolio() }
-    )
+    VStack(spacing: 0) {
+      Picker("卖出管理分区", selection: $section) {
+        ForEach(Section.allCases) { section in
+          Text(section.title).tag(section)
+        }
+      }
+      .pickerStyle(.segmented)
+      .padding(.horizontal, QuantXTheme.Spacing.large)
+      .padding(.top, QuantXTheme.Spacing.small)
+      .padding(.bottom, QuantXTheme.Spacing.xSmall)
+      .background(QuantXTheme.canvasBackground)
+
+      switch section {
+      case .plans:
+        ExitPlanWorkspaceView(store: model.exitPlanWorkspace)
+      case .holdings:
+        LiquidationSelectionWorkspace(
+          store: model.liquidationStore,
+          accountID: model.primaryTradingAccountID,
+          positions: model.portfolioState.snapshot?.positions.filter { $0.volume > 0 } ?? [],
+          refreshPortfolio: { await model.refreshPortfolio() }
+        )
+      }
+    }
+    .navigationTitle("卖出管理")
+    .navigationBarTitleDisplayMode(.inline)
   }
 }
 
@@ -370,19 +405,19 @@ private struct LiquidationHoldingSelectionRow: View {
 
   private var identity: some View {
     HStack(spacing: QuantXTheme.Spacing.medium) {
-        Image(systemName: selectionIcon)
-          .font(.title3)
-          .foregroundStyle(selected ? QuantXTheme.accent : QuantXTheme.secondaryText)
-          .accessibilityHidden(true)
-        VStack(alignment: .leading, spacing: 3) {
-          Text(position.displayName)
-            .font(.headline)
-            .foregroundStyle(.primary)
-          Text(position.stockCode)
-            .font(.caption.monospaced())
-            .foregroundStyle(QuantXTheme.secondaryText)
-        }
-        Spacer(minLength: 0)
+      Image(systemName: selectionIcon)
+        .font(.title3)
+        .foregroundStyle(selected ? QuantXTheme.accent : QuantXTheme.secondaryText)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(position.displayName)
+          .font(.headline)
+          .foregroundStyle(.primary)
+        Text(position.stockCode)
+          .font(.caption.monospaced())
+          .foregroundStyle(QuantXTheme.secondaryText)
+      }
+      Spacer(minLength: 0)
     }
   }
 

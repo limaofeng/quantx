@@ -6,6 +6,7 @@ struct TTradeAssistantView: View {
     case batches
     case signals
     case readiness
+    case control
 
     var id: Self { self }
 
@@ -15,6 +16,7 @@ struct TTradeAssistantView: View {
       case .batches: "批次"
       case .signals: "信号"
       case .readiness: "门禁"
+      case .control: "控制"
       }
     }
   }
@@ -33,7 +35,10 @@ struct TTradeAssistantView: View {
       .toolbar {
         ToolbarItem(placement: .topBarTrailing) {
           Button {
-            Task { await model.refreshTTradeAssistant() }
+            Task {
+              await model.refreshTTradeAssistant()
+              if scope == .control { await model.tTradeControlStore.refresh() }
+            }
           } label: {
             if model.tTradeAssistantRefreshInProgress {
               ProgressView()
@@ -124,6 +129,11 @@ struct TTradeAssistantView: View {
           signalsSection(snapshot)
         case .readiness:
           readinessSection(snapshot)
+        case .control:
+          TTradeControlView(
+            store: model.tTradeControlStore,
+            assistantSnapshot: snapshot
+          )
         }
 
         HStack {
@@ -138,6 +148,7 @@ struct TTradeAssistantView: View {
     }
     .refreshable {
       await model.refreshTTradeAssistant()
+      if scope == .control { await model.tTradeControlStore.refresh() }
     }
   }
 
@@ -393,7 +404,8 @@ struct TTradeAssistantView: View {
             Spacer()
             StatusBadge(
               title: readiness.ready ? "已就绪" : "未就绪",
-              systemImage: readiness.ready ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
+              systemImage: readiness.ready
+                ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
               color: readiness.ready ? QuantXTheme.online : QuantXTheme.warning
             )
           }
