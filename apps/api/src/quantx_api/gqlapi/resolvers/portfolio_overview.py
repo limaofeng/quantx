@@ -7,6 +7,7 @@ from quantx_infrastructure.models.broker_position_snapshot import (
   BrokerPositionSnapshot,
 )
 from quantx_infrastructure.models.daily_asset_snapshot import DailyAssetSnapshot
+from quantx_infrastructure.models.instrument import Instrument as InstrumentModel
 from quantx_infrastructure.models.position import Position as PositionModel
 from sqlalchemy import and_, select
 
@@ -18,6 +19,23 @@ from ..types.portfolio_types import (
 )
 from .account import AccountResolver
 from .portfolio_summary import PortfolioSummaryResolver
+
+
+def resolve_position_instrument_name(
+  stock_code: str,
+  position_name: str | None,
+  catalog_name: str | None,
+) -> str:
+  normalized_code = str(stock_code or "").strip().upper()
+  code_without_exchange = normalized_code.split(".", 1)[0]
+  code_aliases = {normalized_code, code_without_exchange}
+
+  for candidate in (position_name, catalog_name):
+    value = str(candidate or "").strip()
+    if value and value.upper() not in code_aliases:
+      return value
+
+  return normalized_code
 
 
 class PortfolioOverviewResolver:
@@ -43,6 +61,7 @@ class PortfolioOverviewResolver:
           select(
             AccountModel,
             PositionModel,
+            InstrumentModel,
             BrokerPositionSnapshot,
             DailyAssetSnapshot,
           )
@@ -53,6 +72,10 @@ class PortfolioOverviewResolver:
               PositionModel.account_id == AccountModel.account_id,
               PositionModel.volume > 0,
             ),
+          )
+          .outerjoin(
+            InstrumentModel,
+            InstrumentModel.id == PositionModel.stock_code,
           )
           .outerjoin(
             BrokerPositionSnapshot,
@@ -69,11 +92,21 @@ class PortfolioOverviewResolver:
       if not rows:
         raise ValueError(f"无法获取账户 {account_id} 的信息")
 
-      account, _, snapshot, latest_daily_snapshot = rows[0]
-      position_models = [row[1] for row in rows if row[1] is not None]
+      account, _, _, snapshot, latest_daily_snapshot = rows[0]
+      position_rows = [
+        (row[1], row[2]) for row in rows if row[1] is not None
+      ]
 
       account_type = AccountResolver._to_graphql(account)
-      positions = [Position.from_model(item) for item in position_models]
+      positions = []
+      for position_model, instrument_model in position_rows:
+        position = Position.from_model(position_model)
+        position.instrument_name = resolve_position_instrument_name(
+          stock_code=position_model.stock_code,
+          position_name=position_model.instrument_name,
+          catalog_name=instrument_model.name if instrument_model else None,
+        )
+        positions.append(position)
       summary_data = PortfolioSummaryResolver._calculate_summary(
         account_id, account_type, positions
       )

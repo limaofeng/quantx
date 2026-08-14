@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Position } from '@/features/portfolio/types';
+import { resolveHoldingInstrumentName } from '@/features/trading/components/instrumentNameUtils';
 import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
 
 vi.mock('@/features/portfolio/hooks/useRealTimeHoldings', () => ({
@@ -70,6 +71,15 @@ describe('TradingHoldingsSidebar', () => {
     vi.mocked(window.localStorage.clear).mockImplementation(() => {
       storage.clear();
     });
+  });
+
+  it('uses the catalog name when a position snapshot repeats the stock code', () => {
+    expect(
+      resolveHoldingInstrumentName('688552.SH', '688552.SH', '航天南湖')
+    ).toBe('航天南湖');
+    expect(
+      resolveHoldingInstrumentName('302132.SZ', '302132', '中航成飞')
+    ).toBe('中航成飞');
   });
 
   it('shows daily quote change percent separately from holding return', () => {

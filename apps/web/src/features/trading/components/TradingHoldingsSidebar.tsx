@@ -29,6 +29,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import * as React from 'react';
+import { useQuery } from 'urql';
 
 import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Button } from '@/components/ui/button';
@@ -53,9 +54,12 @@ import type {
   PortfolioSummaryData,
   Position,
 } from '@/features/portfolio/types';
+import { gql } from '@/generated/gql';
 import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatPercent } from '@/utils/transform/data';
+
+import { resolveHoldingInstrumentName } from './instrumentNameUtils';
 
 interface TradingHoldingsSidebarProps {
   accountName: string;
@@ -94,6 +98,15 @@ interface HoldingSortPreference {
 const HOLDING_SORT_PREFERENCE_STORAGE_KEY =
   'quantx.tradingHoldingsSidebar.sortPreference.v1';
 
+const TradingHoldingInstrumentNameQuery = gql(`
+  query Trading_HoldingInstrumentName($stockCode: String!) {
+    instrument(stockCode: $stockCode) {
+      id
+      name
+    }
+  }
+`);
+
 const holdingSortOptions: Array<{
   id: HoldingSortKey;
   label: string;
@@ -113,6 +126,49 @@ const holdingSortOptions: Array<{
 
 function normalizeStockCode(value: unknown) {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+interface HoldingInstrumentNameProps {
+  className?: string;
+  positionName?: string | null;
+  stockCode: string;
+}
+
+function CatalogInstrumentName({
+  className,
+  positionName,
+  stockCode,
+}: HoldingInstrumentNameProps) {
+  const [{ data }] = useQuery({
+    query: TradingHoldingInstrumentNameQuery,
+    variables: { stockCode },
+  });
+  const instrumentName = resolveHoldingInstrumentName(
+    stockCode,
+    positionName,
+    data?.instrument?.name
+  );
+
+  return <span className={className}>{instrumentName}</span>;
+}
+
+function HoldingInstrumentName({
+  className,
+  positionName,
+  stockCode,
+}: HoldingInstrumentNameProps) {
+  const instrumentName = resolveHoldingInstrumentName(stockCode, positionName);
+  if (instrumentName !== stockCode) {
+    return <span className={className}>{instrumentName}</span>;
+  }
+
+  return (
+    <CatalogInstrumentName
+      className={className}
+      positionName={positionName}
+      stockCode={stockCode}
+    />
+  );
 }
 
 function getHoldingSortId(holding: Position) {
@@ -496,7 +552,10 @@ export function TradingHoldingsSidebar({
 
   const renderHoldingCard = (holding: Position) => {
     const stockCode = normalizeStockCode(holding.stockCode);
-    const stockName = holding.instrumentName || stockCode;
+    const stockName = resolveHoldingInstrumentName(
+      stockCode,
+      holding.instrumentName
+    );
     const isSelected = stockCode === normalizedSelectedStockCode;
     const profitLoss = holding.profitLoss ?? 0;
     const averageCost = toFiniteNumber(holding.avgPrice);
@@ -583,9 +642,11 @@ export function TradingHoldingsSidebar({
           </div>
           <div className="flex min-w-0 flex-1 items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
-              <span className="block min-w-0 truncate text-xs font-black">
-                {stockName}
-              </span>
+              <HoldingInstrumentName
+                className="block min-w-0 truncate text-xs font-black"
+                positionName={holding.instrumentName}
+                stockCode={stockCode}
+              />
               <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
                 <span className="truncate font-mono text-[10px] font-bold text-slate-600">
                   {stockCode}
@@ -923,7 +984,10 @@ export function TradingHoldingsSidebar({
                     {sortedHoldings.map((holding, index) => {
                       const sortId = getHoldingSortId(holding);
                       const stockCode = normalizeStockCode(holding.stockCode);
-                      const stockName = holding.instrumentName || stockCode;
+                      const stockName = resolveHoldingInstrumentName(
+                        stockCode,
+                        holding.instrumentName
+                      );
                       return (
                         <SortableHoldingItem
                           key={sortId}
@@ -938,9 +1002,11 @@ export function TradingHoldingsSidebar({
                               {getStockIconText(stockName)}
                             </div>
                             <div className="min-w-0 flex-1">
-                              <div className="truncate text-xs font-black text-slate-200">
-                                {stockName}
-                              </div>
+                              <HoldingInstrumentName
+                                className="block truncate text-xs font-black text-slate-200"
+                                positionName={holding.instrumentName}
+                                stockCode={stockCode}
+                              />
                               <div className="truncate font-mono text-[10px] font-bold text-slate-600">
                                 {stockCode}
                               </div>
