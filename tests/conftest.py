@@ -207,6 +207,8 @@ def authorized_graphql_context():
                     "system-status:read",
                     "trade:approve",
                     "mutation:write",
+                    "assistant:read",
+                    "assistant:write",
                 }
             ),
             authorized_account_ids=(

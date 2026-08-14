@@ -239,6 +239,26 @@ function Resolve-Python {
   return $python.Source
 }
 
+function Resolve-AiRuntimePython {
+  $configured = [Environment]::GetEnvironmentVariable(
+    "QUANTX_AI_RUNTIME_PYTHON_EXE"
+  )
+  if ($configured) {
+    $resolved = [System.IO.Path]::GetFullPath($configured)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+      throw "Configured AI Runtime Python executable does not exist: $resolved"
+    }
+    return $resolved
+  }
+  if ($Environment -ne "production") {
+    $workspacePython = Join-Path $Root ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $workspacePython -PathType Leaf) {
+      return [System.IO.Path]::GetFullPath($workspacePython)
+    }
+  }
+  return Resolve-Python
+}
+
 function Resolve-Node {
   $node = Get-Command node -ErrorAction SilentlyContinue
   if (-not $node) {
@@ -253,6 +273,7 @@ function Get-WorkspacePythonPath {
   }
   $entries = @(
     (Join-Path $Root "apps\api\src"),
+    (Join-Path $Root "apps\ai-runtime\src"),
     (Join-Path $Root "apps\engine\src"),
     (Join-Path $Root "apps\worker\src"),
     (Join-Path $Root "packages\contracts\src"),
@@ -1023,6 +1044,7 @@ function Invoke-CaddyRecovery {
   $existing = @(Read-State)
   $requiredNames = @(
     "api",
+    "ai-runtime",
     "engine",
     "web",
     "docs",
@@ -1346,6 +1368,7 @@ function Invoke-Up {
   Write-State -Processes @()
   Assert-PortsAvailable -Ports @(8080, $ApiPort, 5250, 5251)
   $python = Resolve-Python
+  $aiRuntimePython = Resolve-AiRuntimePython
   Show-ExternalDependencies -Python $python
   $node = Resolve-Node
   $qmtPython = $null
@@ -1410,6 +1433,12 @@ function Invoke-Up {
       -Name "engine" `
       -Executable $python `
       -Arguments @("-m", "quantx_engine.main") `
+      -WorkingDirectory $Root
+
+    Start-ManagedProcess `
+      -Name "ai-runtime" `
+      -Executable $aiRuntimePython `
+      -Arguments @("-m", "quantx_ai_runtime.main") `
       -WorkingDirectory $Root
 
     Start-ManagedProcess `
@@ -1695,6 +1724,7 @@ function Invoke-Bootstrap {
     "packages\application",
     "packages\infrastructure",
     "apps\api",
+    "apps\ai-runtime",
     "apps\engine",
     "apps\worker"
   )
@@ -1852,6 +1882,7 @@ function Get-ServiceConfigurationNames {
   return @(
     "quantx-api.xml",
     "quantx-engine.xml",
+    "quantx-ai-runtime.xml",
     "quantx-worker.xml",
     "quantx-caddy.xml",
     "quantx-qmt-agent.xml"
@@ -2097,6 +2128,7 @@ function Install-ReleasePythonEnvironments {
     -WheelDirectory (Join-Path $ReleaseRoot "wheels") `
     -PackageNames @(
       "quantx-api",
+      "quantx-ai-runtime",
       "quantx-engine",
       "quantx-worker",
       "quantx-application",
@@ -2393,6 +2425,7 @@ function Invoke-Uninstall {
     "quantx-caddy.xml",
     "quantx-worker.xml",
     "quantx-prefect-server.xml",
+    "quantx-ai-runtime.xml",
     "quantx-engine.xml",
     "quantx-api.xml"
   )

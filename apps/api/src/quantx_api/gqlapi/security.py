@@ -128,6 +128,22 @@ _MARKET_FIELDS = {
   "ticks",
   "tradingcalendar",
 }
+_ASSISTANT_QUERY_FIELDS = {
+  "aiassistantcapabilities",
+  "aiassistantmessages",
+  "aiassistantthread",
+  "aiassistantthreads",
+}
+_ASSISTANT_MUTATION_FIELDS = {
+  "cancelaiassistantrun",
+  "createaiassistantthread",
+  "deleteaiassistantthread",
+  "resolveaiassistantapproval",
+  "retryaiassistantrun",
+  "sendaiassistantmessage",
+  "updateaiassistantthread",
+}
+_ASSISTANT_SUBSCRIPTION_FIELDS = {"aiassistantevents"}
 _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
 _TRADE_APPROVAL_MUTATION_FIELDS = {
   "activatettradelive",
@@ -159,6 +175,8 @@ def normalize_field_name(value: str) -> str:
 def required_permission(operation_name: str, field_name: str) -> str:
   normalized = normalize_field_name(field_name)
   if operation_name == "Mutation":
+    if normalized in _ASSISTANT_MUTATION_FIELDS:
+      return "assistant:write"
     if normalized in _TRADE_APPROVAL_MUTATION_FIELDS:
       return "trade:approve"
     return "mutation:write"
@@ -172,7 +190,11 @@ def required_permission(operation_name: str, field_name: str) -> str:
     return "system-status:read"
   if normalized in _MARKET_FIELDS:
     return "market:read"
+  if normalized in _ASSISTANT_QUERY_FIELDS:
+    return "assistant:read"
   if operation_name == "Subscription":
+    if normalized in _ASSISTANT_SUBSCRIPTION_FIELDS:
+      return "assistant:read"
     if normalized in {"tradingevents"}:
       return "orders:read"
     if normalized.startswith("strategy") or normalized == "ttradeupdates":

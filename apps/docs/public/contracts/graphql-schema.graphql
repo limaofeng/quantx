@@ -80,6 +80,180 @@ type AgentEnrollment {
   expiresAt: DateTime!
 }
 
+enum AiAssistantApprovalDecision {
+  APPROVE
+  REJECT
+}
+
+type AiAssistantCapabilities {
+  enabled: Boolean!
+  runtimeStatus: String!
+  model: String!
+  externalSearchAvailable: Boolean!
+  agents: [String!]!
+  tools: [AiAssistantToolCapability!]!
+  maxMessageLength: Int!
+  maxContextRefs: Int!
+  maxConcurrentRuns: Int!
+}
+
+type AiAssistantCitationBlock {
+  kind: String!
+  title: String!
+  url: String!
+  publishedAt: DateTime
+  visitedAt: DateTime
+}
+
+union AiAssistantContentBlock = AiAssistantTextBlock | AiAssistantCitationBlock | AiAssistantContextBlock | AiAssistantToolResultBlock | AiAssistantTaskReferenceBlock | AiAssistantErrorBlock
+
+type AiAssistantContextBlock {
+  kind: String!
+  contextKind: String!
+  objectId: String!
+  label: String
+}
+
+input AiAssistantContextRefInput {
+  kind: String!
+  objectId: String!
+  label: String = null
+}
+
+type AiAssistantErrorBlock {
+  kind: String!
+  code: String!
+  message: String!
+  retryable: Boolean!
+}
+
+type AiAssistantEvent {
+  id: ID!
+  threadId: ID!
+  runId: ID!
+  sequence: Int!
+  eventType: AiAssistantEventType!
+  text: String
+  message: AiAssistantMessage
+  run: AiAssistantRun
+  toolCallId: ID
+  toolName: String
+  toolStatus: String
+  toolSummary: String
+  errorCode: String
+  errorMessage: String
+  retryable: Boolean!
+  createdAt: DateTime!
+}
+
+enum AiAssistantEventType {
+  RUN_STATUS_CHANGED
+  MESSAGE_DELTA
+  MESSAGE_COMPLETED
+  TOOL_CALL_STARTED
+  TOOL_CALL_COMPLETED
+  APPROVAL_REQUIRED
+  USAGE_RECORDED
+  RUN_FAILED
+}
+
+type AiAssistantMessage {
+  id: ID!
+  threadId: ID!
+  runId: ID
+  sequence: Int!
+  role: String!
+  content: [AiAssistantContentBlock!]!
+  createdAt: DateTime!
+}
+
+type AiAssistantMessagePage {
+  items: [AiAssistantMessage!]!
+  nextSequence: Int
+  hasMore: Boolean!
+}
+
+input AiAssistantRouteContextInput {
+  path: String!
+  objectType: String = null
+  objectId: String = null
+}
+
+type AiAssistantRun {
+  id: ID!
+  threadId: ID!
+  status: AiAssistantRunStatus!
+  model: String!
+  errorCode: String
+  errorMessage: String
+  inputTokens: Int!
+  outputTokens: Int!
+  requestCount: Int!
+  toolCallCount: Int!
+  createdAt: DateTime!
+  startedAt: DateTime
+  finishedAt: DateTime
+}
+
+enum AiAssistantRunStatus {
+  QUEUED
+  RUNNING
+  WAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+type AiAssistantTaskReferenceBlock {
+  kind: String!
+  taskKind: String!
+  referenceId: String!
+  label: String!
+}
+
+type AiAssistantTextBlock {
+  kind: String!
+  text: String!
+}
+
+type AiAssistantThread {
+  id: ID!
+  accountId: String
+  agentId: String!
+  title: String!
+  externalSearchEnabled: Boolean!
+  status: String!
+  lastActivityAt: DateTime!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type AiAssistantThreadConnection {
+  edges: [AiAssistantThreadEdge!]!
+  endCursor: String
+  hasNextPage: Boolean!
+}
+
+type AiAssistantThreadEdge {
+  cursor: String!
+  node: AiAssistantThread!
+}
+
+type AiAssistantToolCapability {
+  name: String!
+  description: String!
+  riskLevel: String!
+  approvalRequired: Boolean!
+}
+
+type AiAssistantToolResultBlock {
+  kind: String!
+  toolCallId: String!
+  toolName: String!
+  status: String!
+  summary: String
+}
+
 """公告同步状态"""
 type AnnouncementSyncStatus {
   """是否成功"""
@@ -396,6 +570,12 @@ input ConditionalLiquidationOrderInput {
 
   """备注"""
   remark: String = null
+}
+
+input CreateAiAssistantThreadInput {
+  accountId: String = null
+  agentId: String! = "research_assistant"
+  title: String = null
 }
 
 """创建人工计划"""
@@ -1857,6 +2037,14 @@ type MessageResponse {
 
 "QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
 type Mutation {
+  createAiAssistantThread(input: CreateAiAssistantThreadInput!): AiAssistantThread!
+  sendAiAssistantMessage(input: SendAiAssistantMessageInput!): AiAssistantRun!
+  cancelAiAssistantRun(runId: ID!): AiAssistantRun!
+  retryAiAssistantRun(runId: ID!): AiAssistantRun!
+  resolveAiAssistantApproval(input: ResolveAiAssistantApprovalInput!): AiAssistantRun!
+  updateAiAssistantThread(input: UpdateAiAssistantThreadInput!): AiAssistantThread!
+  deleteAiAssistantThread(threadId: ID!): Boolean!
+
   """创建十分钟内有效的一次性设备登记码"""
   createAgentEnrollment(name: String! = "QuantX QMT Agent", authorizedAccountIds: [String!]! = []): AgentEnrollment!
 
@@ -2595,6 +2783,11 @@ type PositionLiquidationResult {
 
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
+  aiAssistantCapabilities: AiAssistantCapabilities!
+  aiAssistantThreads(first: Int! = 30, after: String = null): AiAssistantThreadConnection!
+  aiAssistantThread(id: ID!): AiAssistantThread
+  aiAssistantMessages(threadId: ID!, afterSequence: Int! = 0, limit: Int! = 100): AiAssistantMessagePage!
+
   """当前用户登记的 Agent 设备"""
   agentDevices(includeRevoked: Boolean! = false): [AgentDevice!]!
 
@@ -3092,6 +3285,12 @@ type ResearchRunSummary {
   artifactErrors: [String!]!
 }
 
+input ResolveAiAssistantApprovalInput {
+  runId: ID!
+  toolCallId: ID!
+  decision: AiAssistantApprovalDecision!
+}
+
 """
 策略风险等级
 
@@ -3165,6 +3364,14 @@ type SectorStats {
 
   """数量"""
   count: Int!
+}
+
+input SendAiAssistantMessageInput {
+  threadId: ID!
+  text: String!
+  clientMessageId: String!
+  routeContext: AiAssistantRouteContextInput = null
+  contextRefs: [AiAssistantContextRefInput!]! = []
 }
 
 """日级信号元信息"""
@@ -4294,6 +4501,8 @@ type StrategyTickData {
 
 "QuantX 系统实时数据订阅接口\n\n## 主要功能\n\n### 实时行情订阅\n- 金融工具实时价格更新\n- K线数据实时推送\n- 市场深度数据订阅\n\n### 交易数据订阅\n- 订单状态变更通知\n- 成交记录实时推送\n\n### 多金融工具监控\n- 同时订阅多个金融工具的价格\n"
 type Subscription {
+  aiAssistantEvents(threadId: ID!, afterSequence: Int! = 0): AiAssistantEvent!
+
   """订阅账户级打板助手投影更新"""
   limitUpBoardAssistantUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
 
@@ -5191,6 +5400,12 @@ enum TradingEventType {
   ORDER_FILLED
   ORDER_CANCELLED
   ORDER_REJECTED
+}
+
+input UpdateAiAssistantThreadInput {
+  threadId: ID!
+  title: String = null
+  externalSearchEnabled: Boolean = null
 }
 
 """更新人工计划"""

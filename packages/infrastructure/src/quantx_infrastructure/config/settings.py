@@ -197,8 +197,10 @@ class Settings(BaseSettings):
       "orders:read",
       "system-status:read",
       "mutation:write",
+      "assistant:read",
+      "assistant:write",
     ],
-    description="首次启动用户权限；首版默认仅授予只读权限",
+    description="首次启动用户权限；生产环境不会覆盖既有用户权限",
   )
   auth_login_rate_limit_attempts: int = Field(
     default=5, description="登录失败窗口内最大尝试次数"
@@ -260,15 +262,33 @@ class Settings(BaseSettings):
   # LLM/AI 服务配置
   llm_api_key: str = Field(default="", description="LLM API Key (兼容 Gemini 等)")
   llm_api_url: str = Field(
-    default="https://generativelanguage.googleapis.com",
-    description="LLM API URL"
+    default="https://generativelanguage.googleapis.com", description="LLM API URL"
   )
-  llm_model: str = Field(
-    default="gemini-2.0-flash-exp",
-    description="LLM 模型名称"
-  )
+  llm_model: str = Field(default="gemini-2.0-flash-exp", description="LLM 模型名称")
   # 向后兼容
-  gemini_api_key: str = Field(default="", description="Gemini API Key (已废弃，请使用 LLM_API_KEY)")
+  gemini_api_key: str = Field(
+    default="", description="Gemini API Key (已废弃，请使用 LLM_API_KEY)"
+  )
+
+  # 产品内 AI Assistant 独立运行时
+  ai_assistant_enabled: bool = Field(
+    default=True,
+    description="是否启动产品内 AI Assistant 运行时",
+  )
+  openai_api_key: str = Field(
+    default="",
+    description="AI Assistant 使用的 OpenAI API Key，仅允许服务端注入",
+  )
+  quantx_ai_model: str = Field(
+    default="gpt-5.6",
+    description="AI Assistant 使用的 OpenAI 模型",
+  )
+  ai_assistant_max_concurrent_runs: int = Field(default=2, ge=1, le=16)
+  ai_assistant_max_turns: int = Field(default=12, ge=1, le=64)
+  ai_assistant_max_tool_calls: int = Field(default=8, ge=1, le=64)
+  ai_assistant_run_timeout_seconds: int = Field(default=300, ge=30, le=3600)
+  ai_assistant_lease_seconds: int = Field(default=60, ge=15, le=600)
+  ai_assistant_tracing_enabled: bool = Field(default=False)
 
   # Prefect 任务调度配置 - 外部服务模式
   prefect_enabled: bool = Field(default=True, description="是否启用Prefect任务调度")
@@ -335,7 +355,7 @@ class Settings(BaseSettings):
     os.environ["http_proxy"] = ""
     os.environ["https_proxy"] = ""
     os.environ["all_proxy"] = ""
-    
+
     # 强制让 httpx 认为所有请求都无需代理
     os.environ["NO_PROXY"] = "*"
     os.environ["no_proxy"] = "*"
@@ -346,7 +366,6 @@ class Settings(BaseSettings):
     os.environ["PREFECT_SILENCE_API_URL_MISCONFIGURATION"] = "true"
     os.environ["PREFECT_API_CSRF_ENABLED"] = "false"
     os.environ["PREFECT_HOME"] = os.path.expanduser(self.prefect_home)
-
 
   @property
   def is_development(self) -> bool:
@@ -379,9 +398,7 @@ class Settings(BaseSettings):
       or parsed_public_url.hostname not in allowed_loopback_hosts
       or parsed_public_url.port != 8080
     ):
-      errors.append(
-        "PUBLIC_URL must be the loopback HTTPS gateway on port 8080"
-      )
+      errors.append("PUBLIC_URL must be the loopback HTTPS gateway on port 8080")
     if self.host not in {"127.0.0.1", "localhost"} or self.port != 18081:
       errors.append("production API must listen on 127.0.0.1:18081")
     if not self.database_url.lower().startswith("postgresql+asyncpg://"):
@@ -406,9 +423,7 @@ class Settings(BaseSettings):
       else ""
     )
     cors_origins = {str(value).rstrip("/") for value in self.cors_origins}
-    auth_origins = {
-      str(value).rstrip("/") for value in self.auth_web_allowed_origins
-    }
+    auth_origins = {str(value).rstrip("/") for value in self.auth_web_allowed_origins}
     if cors_origins != {public_origin.rstrip("/")}:
       errors.append("CORS_ORIGINS must contain only PUBLIC_URL in production")
     if auth_origins != {public_origin.rstrip("/")}:
@@ -429,15 +444,14 @@ class Settings(BaseSettings):
     """Refuse unsafe production startup with a secret-free error message."""
     errors = self.production_validation_errors()
     if errors:
-      raise RuntimeError(
-        "Unsafe production configuration: " + "; ".join(errors)
-      )
+      raise RuntimeError("Unsafe production configuration: " + "; ".join(errors))
 
   def get_log_config(self) -> dict:
     """获取日志配置"""
     # 检查是否支持彩色日志
     try:
       import colorlog  # noqa: F401
+
       use_color = self.is_development
     except ImportError:
       use_color = False

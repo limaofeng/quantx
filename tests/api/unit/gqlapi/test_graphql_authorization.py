@@ -94,6 +94,10 @@ def test_unrelated_mutation_keeps_general_write_permission():
     ("Query", "tTradeBatchEventsPage", "strategy:read"),
     ("Query", "tTradeSignalHistoryPage", "strategy:read"),
     ("Subscription", "tTradeUpdates", "strategy:read"),
+    ("Query", "aiAssistantThreads", "assistant:read"),
+    ("Subscription", "aiAssistantEvents", "assistant:read"),
+    ("Mutation", "sendAiAssistantMessage", "assistant:write"),
+    ("Mutation", "resolveAiAssistantApproval", "assistant:write"),
   ],
 )
 def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(

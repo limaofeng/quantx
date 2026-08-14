@@ -5,6 +5,9 @@ from strawberry.extensions import DisableIntrospection
 from .schemas import (
   AgentMutation,
   AgentQuery,
+  AiAssistantMutation,
+  AiAssistantQuery,
+  AiAssistantSubscription,
   AnnouncementMutation,
   AnnouncementQuery,
   DividFactorQuery,
@@ -12,10 +15,10 @@ from .schemas import (
   HolidayMutation,
   HolidayQuery,
   InstrumentQuery,
-  LiquidationMutation,
-  LiquidationQuery,
   LimitUpBoardAssistantMutation,
   LimitUpBoardAssistantQuery,
+  LiquidationMutation,
+  LiquidationQuery,
   MarketDataQuery,
   PortfolioQuery,
   RealtimeSubscription,
@@ -72,6 +75,7 @@ from .security import AuthorizationExtension
 """
 )
 class Query(
+  AiAssistantQuery,
   AgentQuery,
   AnnouncementQuery,
   DividFactorQuery,
@@ -117,6 +121,7 @@ class Query(
 """
 )
 class Mutation(
+  AiAssistantMutation,
   AgentMutation,
   AnnouncementMutation,
   TradingMutation,
@@ -149,7 +154,7 @@ class Mutation(
 - 同时订阅多个金融工具的价格
 """
 )
-class Subscription(RealtimeSubscription):
+class Subscription(AiAssistantSubscription, RealtimeSubscription):
   pass
 
 

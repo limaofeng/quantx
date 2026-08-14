@@ -33,6 +33,13 @@ EXPECTED_METADATA_SHA256 = (
 # fingerprint or be created early when bootstrapping an empty database.
 POST_BASELINE_TABLES = {
   "account_trading_rollout_events",
+  "ai_assistant_deletion_audits",
+  "ai_assistant_events",
+  "ai_assistant_messages",
+  "ai_assistant_runs",
+  "ai_assistant_session_items",
+  "ai_assistant_threads",
+  "ai_assistant_tool_calls",
   "auto_exit_plan_events",
   "auto_exit_plans",
   "financial_metric_roe_qualities",

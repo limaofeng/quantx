@@ -2,14 +2,13 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-INFRASTRUCTURE = (
-  ROOT / "packages" / "infrastructure" / "src" / "quantx_infrastructure"
-)
+INFRASTRUCTURE = ROOT / "packages" / "infrastructure" / "src" / "quantx_infrastructure"
 RUNTIME_APPS = {
   "engine": ROOT / "apps" / "engine" / "src" / "quantx_engine",
   "worker": ROOT / "apps" / "worker" / "src" / "quantx_worker",
 }
 API = ROOT / "apps" / "api" / "src" / "quantx_api"
+AI_RUNTIME = ROOT / "apps" / "ai-runtime" / "src" / "quantx_ai_runtime"
 
 
 def _import_roots(path: Path) -> set[str]:
@@ -70,5 +69,24 @@ def test_api_does_not_import_engine_owned_runtime_singletons() -> None:
     str(path.relative_to(ROOT)): sorted(_imported_modules(path) & forbidden)
     for path in API.rglob("*.py")
     if _imported_modules(path) & forbidden
+  }
+  assert violations == {}
+
+
+def test_ai_runtime_is_an_adapter_and_does_not_import_api_engine_or_qmt() -> None:
+  forbidden = {"quantx_api", "quantx_engine", "quantx_qmt_agent"}
+  violations = {
+    str(path.relative_to(ROOT)): sorted(_import_roots(path) & forbidden)
+    for path in AI_RUNTIME.rglob("*.py")
+    if _import_roots(path) & forbidden
+  }
+  assert violations == {}
+
+
+def test_api_does_not_depend_on_agents_sdk() -> None:
+  violations = {
+    str(path.relative_to(ROOT)): ["agents"]
+    for path in API.rglob("*.py")
+    if "agents" in _import_roots(path)
   }
   assert violations == {}

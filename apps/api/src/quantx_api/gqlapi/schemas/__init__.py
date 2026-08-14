@@ -1,14 +1,19 @@
 from .agent_schema import AgentMutation, AgentQuery
+from .ai_assistant_schema import (
+  AiAssistantMutation,
+  AiAssistantQuery,
+  AiAssistantSubscription,
+)
 from .announcement_schema import AnnouncementMutation, AnnouncementQuery
 from .divid_factor_schema import DividFactorQuery
 from .financial_schema import FinancialQuery
 from .holiday_schema import HolidayMutation, HolidayQuery
 from .instrument_schema import InstrumentQuery
-from .liquidation_schema import LiquidationMutation, LiquidationQuery
 from .limit_up_board_assistant_schema import (
   LimitUpBoardAssistantMutation,
   LimitUpBoardAssistantQuery,
 )
+from .liquidation_schema import LiquidationMutation, LiquidationQuery
 from .market_data_schema import MarketDataQuery
 from .portfolio_schema import PortfolioQuery
 from .realtime_schema import RealtimeSubscription
@@ -22,8 +27,11 @@ from .watchlist_schema import WatchlistMutation, WatchlistQuery
 from .workflow_schema import WorkflowMutation, WorkflowQuery
 
 __all__ = [
-    "AnnouncementQuery",
+  "AnnouncementQuery",
   "AgentQuery",
+  "AiAssistantQuery",
+  "AiAssistantMutation",
+  "AiAssistantSubscription",
   "AgentMutation",
   "AnnouncementMutation",
   "TTradeQuery",

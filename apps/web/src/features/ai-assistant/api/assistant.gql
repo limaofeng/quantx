@@ -1,0 +1,190 @@
+fragment AiAssistantThreadFields on AiAssistantThread {
+  id
+  accountId
+  agentId
+  title
+  externalSearchEnabled
+  status
+  lastActivityAt
+  createdAt
+  updatedAt
+}
+
+fragment AiAssistantRunFields on AiAssistantRun {
+  id
+  threadId
+  status
+  model
+  errorCode
+  errorMessage
+  inputTokens
+  outputTokens
+  requestCount
+  toolCallCount
+  createdAt
+  startedAt
+  finishedAt
+}
+
+fragment AiAssistantMessageFields on AiAssistantMessage {
+  id
+  threadId
+  runId
+  sequence
+  role
+  createdAt
+  content {
+    __typename
+    ... on AiAssistantTextBlock {
+      kind
+      text
+    }
+    ... on AiAssistantCitationBlock {
+      kind
+      title
+      url
+      publishedAt
+      visitedAt
+    }
+    ... on AiAssistantContextBlock {
+      kind
+      contextKind
+      objectId
+      contextLabel: label
+    }
+    ... on AiAssistantToolResultBlock {
+      kind
+      toolCallId
+      toolName
+      status
+      summary
+    }
+    ... on AiAssistantTaskReferenceBlock {
+      kind
+      taskKind
+      referenceId
+      taskLabel: label
+    }
+    ... on AiAssistantErrorBlock {
+      kind
+      code
+      message
+      retryable
+    }
+  }
+}
+
+query AiAssistantCapabilities {
+  aiAssistantCapabilities {
+    enabled
+    runtimeStatus
+    model
+    externalSearchAvailable
+    agents
+    maxMessageLength
+    maxContextRefs
+    maxConcurrentRuns
+    tools {
+      name
+      description
+      riskLevel
+      approvalRequired
+    }
+  }
+}
+
+query AiAssistantThreads($first: Int!, $after: String) {
+  aiAssistantThreads(first: $first, after: $after) {
+    edges {
+      cursor
+      node {
+        ...AiAssistantThreadFields
+      }
+    }
+    endCursor
+    hasNextPage
+  }
+}
+
+query AiAssistantMessages(
+  $threadId: ID!
+  $afterSequence: Int! = 0
+  $limit: Int! = 100
+) {
+  aiAssistantMessages(
+    threadId: $threadId
+    afterSequence: $afterSequence
+    limit: $limit
+  ) {
+    items {
+      ...AiAssistantMessageFields
+    }
+    nextSequence
+    hasMore
+  }
+}
+
+mutation CreateAiAssistantThread($input: CreateAiAssistantThreadInput!) {
+  createAiAssistantThread(input: $input) {
+    ...AiAssistantThreadFields
+  }
+}
+
+mutation SendAiAssistantMessage($input: SendAiAssistantMessageInput!) {
+  sendAiAssistantMessage(input: $input) {
+    ...AiAssistantRunFields
+  }
+}
+
+mutation CancelAiAssistantRun($runId: ID!) {
+  cancelAiAssistantRun(runId: $runId) {
+    ...AiAssistantRunFields
+  }
+}
+
+mutation RetryAiAssistantRun($runId: ID!) {
+  retryAiAssistantRun(runId: $runId) {
+    ...AiAssistantRunFields
+  }
+}
+
+mutation ResolveAiAssistantApproval($input: ResolveAiAssistantApprovalInput!) {
+  resolveAiAssistantApproval(input: $input) {
+    ...AiAssistantRunFields
+  }
+}
+
+mutation UpdateAiAssistantThread($input: UpdateAiAssistantThreadInput!) {
+  updateAiAssistantThread(input: $input) {
+    ...AiAssistantThreadFields
+  }
+}
+
+mutation DeleteAiAssistantThread($threadId: ID!) {
+  deleteAiAssistantThread(threadId: $threadId)
+}
+
+subscription AiAssistantEvents($threadId: ID!, $afterSequence: Int! = 0) {
+  aiAssistantEvents(threadId: $threadId, afterSequence: $afterSequence) {
+    id
+    threadId
+    runId
+    sequence
+    eventType
+    text
+    toolCallId
+    toolName
+    toolStatus
+    toolSummary
+    errorCode
+    errorMessage
+    retryable
+    createdAt
+    run {
+      ...AiAssistantRunFields
+    }
+    message {
+      ...AiAssistantMessageFields
+    }
+  }
+}

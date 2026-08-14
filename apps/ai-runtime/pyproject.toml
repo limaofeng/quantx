@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantx-ai-runtime"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "openai-agents>=0.20.0,<0.21.0",
+  "pydantic>=2.0.0",
+  "quantx-application",
+  "quantx-domain",
+  "quantx-infrastructure",
+]
+
+[project.scripts]
+quantx-ai-runtime = "quantx_ai_runtime.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.package-data]
+quantx_ai_runtime = ["prompts/*.md"]

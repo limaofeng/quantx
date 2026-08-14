@@ -179,6 +179,7 @@ def test_locked_tool_versions_and_hashes_are_complete() -> None:
 
 def test_windows_services_are_independently_supervised() -> None:
   expected = {
+    "quantx-ai-runtime.xml",
     "quantx-api.xml",
     "quantx-caddy.xml",
     "quantx-engine.xml",
@@ -250,6 +251,10 @@ def test_dev_runtime_defaults_to_full_profile() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
 
   assert '[string]$Profile = "full",' in script
+  assert "function Resolve-AiRuntimePython" in script
+  assert '"QUANTX_AI_RUNTIME_PYTHON_EXE"' in script
+  assert 'Join-Path $Root ".venv\\Scripts\\python.exe"' in script
+  assert '-Executable $aiRuntimePython' in script
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell dev launch matrix")
@@ -448,6 +453,7 @@ def test_server_runtime_path_excludes_qmt_agent_source() -> None:
   )[1].split("function Import-QuantXEnvironment", 1)[0]
 
   assert 'apps\\qmt-agent\\src' not in workspace_path
+  assert 'apps\\ai-runtime\\src' in workspace_path
   assert 'apps\\qmt-agent\\src' in qmt_path
   assert 'packages\\contracts\\src' in qmt_path
   assert 'packages\\infrastructure\\src' not in qmt_path
@@ -649,6 +655,7 @@ def test_all_python_processes_force_utf8_logs() -> None:
   assert "Initialize-PythonEnvironment" in invoke_up
 
   for filename in (
+    "quantx-ai-runtime.xml",
     "quantx-api.xml",
     "quantx-engine.xml",
     "quantx-worker.xml",

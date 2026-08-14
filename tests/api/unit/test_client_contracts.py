@@ -46,6 +46,8 @@ def test_graphql_contract_uses_only_public_permission_categories():
     for permission in operation.values()
   }
   assert actual <= {
+    "assistant:read",
+    "assistant:write",
     "market:read",
     "mutation:write",
     "orders:read",

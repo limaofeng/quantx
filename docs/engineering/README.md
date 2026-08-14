@@ -3,6 +3,7 @@
 工程文档按独立运行单元组织：
 
 - [API](api/README.md)
+- [AI Runtime](ai-runtime/README.md)
 - [Engine](engine/README.md)
 - [Prefect Worker](worker/README.md)
 - [QMT Agent](qmt-agent/README.md)

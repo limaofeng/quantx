@@ -23,6 +23,15 @@ from .agent_runtime import (
   TradeCommandOutbox,
   TTradeBatch,
 )
+from .ai_assistant import (
+  AiAssistantDeletionAudit,
+  AiAssistantEvent,
+  AiAssistantMessage,
+  AiAssistantRun,
+  AiAssistantSessionItem,
+  AiAssistantThread,
+  AiAssistantToolCall,
+)
 from .auth import (
   AuthAuditEvent,
   AuthConsumedRefreshToken,
@@ -65,12 +74,12 @@ from .indicator_snapshot import IndicatorSnapshot
 # 数据库模型 (统一的数据实体)
 from .instrument import Instrument
 from .kline import KLine
-from .limit_up_radar_event import LimitUpRadarEvent
 from .limit_up_board_assistant import (
   LimitUpBoardAssistantConfig,
   LimitUpBoardAssistantProjection,
   LimitUpBoardCandidateArm,
 )
+from .limit_up_radar_event import LimitUpRadarEvent
 from .liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
@@ -146,6 +155,13 @@ __all__ = [
   "AuthDeviceSession",
   "AuthConsumedRefreshToken",
   "AuthAuditEvent",
+  "AiAssistantDeletionAudit",
+  "AiAssistantEvent",
+  "AiAssistantMessage",
+  "AiAssistantRun",
+  "AiAssistantSessionItem",
+  "AiAssistantThread",
+  "AiAssistantToolCall",
   "AgentDevice",
   "AccountTradingRollout",
   "AccountTradingRolloutEvent",
@@ -180,8 +196,8 @@ __all__ = [
   "FinancialCapital",
   "FinancialHolderNum",
   "FinancialShareholder",
-    "FinancialMetricSnapshot",
-    "FinancialMetricRoeQuality",
+  "FinancialMetricSnapshot",
+  "FinancialMetricRoeQuality",
   "FinancialSyncCodeAudit",
   "FinancialSyncRun",
   "DailySignalDefinition",

@@ -1,5 +1,7 @@
-import { BarChart3, TrendingUp, UserRound } from 'lucide-react';
+import { BarChart3, Bot, TrendingUp, UserRound } from 'lucide-react';
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -38,6 +40,11 @@ import {
   setStudioWorkspaceTabPinned,
   type StudioWorkspaceTab,
 } from './workspaceTabs';
+
+const AssistantDrawer = lazy(async () => {
+  const module = await import('@/features/ai-assistant');
+  return { default: module.AssistantDrawer };
+});
 
 const STORAGE_KEY = 'quantx-studio-workspace-tabs';
 const DEFAULT_WORKSPACE_PATH = '/';
@@ -296,6 +303,7 @@ export function StudioWorkspace({
   );
   const [workspaceSidebar, setWorkspaceSidebarState] =
     useState<StudioWorkspaceSidebarConfig | null>(null);
+  const [isAssistantOpen, setIsAssistantOpen] = useState(false);
 
   useEffect(() => {
     const currentTab = buildStudioWorkspaceTab(currentPath);
@@ -451,6 +459,20 @@ export function StudioWorkspace({
     );
   }, [activeTabId, handleTabChange, handleTabClose, handleTabPin, tabs]);
 
+  const workspaceUtilityActions = useMemo(
+    () => [
+      {
+        active: isAssistantOpen,
+        icon: Bot,
+        id: 'utility:ai-assistant',
+        label: 'AI Assistant',
+        onSelect: () => setIsAssistantOpen(value => !value),
+      },
+      ...utilityActions,
+    ],
+    [isAssistantOpen, utilityActions]
+  );
+
   const contextValue = useMemo(
     () => ({
       activeTabId,
@@ -484,7 +506,7 @@ export function StudioWorkspace({
             modes={studioWorkspaceModes}
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
-            utilityActions={utilityActions}
+            utilityActions={workspaceUtilityActions}
           />
 
           <div
@@ -503,6 +525,18 @@ export function StudioWorkspace({
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {children}
               </div>
+              {isAssistantOpen && (
+                <Suspense
+                  fallback={
+                    <aside className="h-full w-[420px] min-w-[360px] max-w-[46vw] shrink-0 border-l border-white/10 bg-[#080e1b]" />
+                  }
+                >
+                  <AssistantDrawer
+                    currentPath={currentPath}
+                    onClose={() => setIsAssistantOpen(false)}
+                  />
+                </Suspense>
+              )}
             </div>
           </div>
         </div>

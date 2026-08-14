@@ -24,9 +24,7 @@ def _load_revision(filename: str, module_name: str) -> ModuleType:
 
 
 def test_baseline_metadata_is_fingerprint_locked() -> None:
-  revision_path = (
-    VERSIONS / "20260729_0001_production_baseline.py"
-  ).as_posix()
+  revision_path = (VERSIONS / "20260729_0001_production_baseline.py").as_posix()
   script = (
     "import importlib.util;"
     f"spec=importlib.util.spec_from_file_location('baseline',{revision_path!r});"
@@ -61,10 +59,7 @@ def test_baseline_clone_excludes_schema_owned_by_later_revisions() -> None:
     assert not (set(table.c.keys()) & column_names)
     assert all(
       not (
-        {
-          str(getattr(expression, "name", ""))
-          for expression in index.expressions
-        }
+        {str(getattr(expression, "name", "")) for expression in index.expressions}
         & column_names
       )
       for index in table.indexes
@@ -83,9 +78,7 @@ def test_live_safety_revision_is_additive_and_downgrade_is_refused() -> None:
 
 
 def test_asyncpg_trigger_ddl_is_split_into_single_commands() -> None:
-  source = (
-    VERSIONS / "20260729_0002_live_safety.py"
-  ).read_text(encoding="utf-8")
+  source = (VERSIONS / "20260729_0002_live_safety.py").read_text(encoding="utf-8")
 
   assert "ON pending_trade_orders;\n      CREATE TRIGGER" not in source
   assert source.count("op.execute(") >= 3
@@ -187,11 +180,25 @@ def test_limit_up_board_assistant_revision_is_reversible() -> None:
     "20260813_0009_limit_up_board_assistant.py",
     "quantx_test_limit_up_board_assistant_revision",
   )
-  source = (
-    VERSIONS / "20260813_0009_limit_up_board_assistant.py"
-  ).read_text(encoding="utf-8")
+  source = (VERSIONS / "20260813_0009_limit_up_board_assistant.py").read_text(
+    encoding="utf-8"
+  )
 
   assert revision.down_revision == "20260813_0008"
   assert "RADAR_CANDIDATES" in source
   assert "RENAME TO strategy_instrument_universe_mode_with_radar" in source
   assert "DROP TYPE strategy_instrument_universe_mode_with_radar" in source
+
+
+def test_ai_assistant_revision_follows_sell_management_and_refuses_downgrade() -> None:
+  revision = _load_revision(
+    "20260814_0011_ai_assistant.py",
+    "quantx_test_ai_assistant_revision",
+  )
+  source = (VERSIONS / "20260814_0011_ai_assistant.py").read_text(encoding="utf-8")
+
+  assert revision.down_revision == "20260813_0010"
+  assert "existing_assistant_tables == ASSISTANT_TABLES" in source
+  assert "Partial AI assistant schema detected" in source
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()

@@ -228,6 +228,7 @@ try {
       --no-emit-workspace `
       --no-hashes `
       --package quantx-api `
+      --package quantx-ai-runtime `
       --package quantx-engine `
       --package quantx-worker `
       --output-file $serverRequirements
