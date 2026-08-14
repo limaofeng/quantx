@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from quantx_engine.realtime_manager import RealTimeDataManager
@@ -72,6 +73,23 @@ def _tick(
     ask_vol=[0.0] * 5,
     bid_vol=[0.0] * 5,
   )
+
+
+def _xt_kline(moment: datetime, close: float) -> dict:
+  shanghai = moment.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+  return {
+    "time": int(shanghai.timestamp() * 1000),
+    "open": close,
+    "high": close + 0.1,
+    "low": close - 0.1,
+    "close": close,
+    "preClose": close - 0.2,
+    "volume": 100,
+    "amount": close * 100,
+    "settlementPrice": 0,
+    "openInt": 0,
+    "suspendFlag": 0,
+  }
 
 
 class FakeTradingTimeService:
@@ -378,6 +396,47 @@ async def test_warm_cache_query_sources_do_not_start_initial_download(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_warm_cache_proactively_subscribes_core_market_indices(monkeypatch):
+  from quantx_engine import warm_cache as warm_cache_module
+
+  service = warm_cache_module.IntradayWarmCacheService()
+  replaced_sources = []
+
+  async def fake_replace_source_symbols(source, symbols):
+    replaced_sources.append((source, set(symbols)))
+
+  async def empty_positions(with_latest_price=False):
+    return []
+
+  async def empty_watchlist(_self, _account_id):
+    return []
+
+  from quantx_infrastructure.core.data.market_data_service import market_data_service
+  from quantx_infrastructure.services import watchlist_service as watchlist_module
+
+  monkeypatch.setattr(
+    market_data_service,
+    "get_positions",
+    empty_positions,
+  )
+  monkeypatch.setattr(
+    watchlist_module.WatchlistService,
+    "get_watchlist",
+    empty_watchlist,
+  )
+  monkeypatch.setattr(
+    service, "replace_source_symbols", fake_replace_source_symbols
+  )
+
+  await service.refresh_source_symbols()
+
+  market_index_source = next(
+    symbols for source, symbols in replaced_sources if source == "market_index"
+  )
+  assert market_index_source == set(warm_cache_module.CORE_MARKET_INDEX_SYMBOLS)
+
+
+@pytest.mark.asyncio
 async def test_warm_cache_start_does_not_block_engine_readiness(monkeypatch):
   from quantx_engine import warm_cache as warm_cache_module
 
@@ -430,6 +489,82 @@ async def test_publish_kline_backfill_pushes_missing_bars_in_order():
   assert delivered == 2
   assert first.time == datetime(2026, 6, 1, 10, 37)
   assert second.time == datetime(2026, 6, 1, 10, 38)
+
+
+@pytest.mark.asyncio
+async def test_qmt_kline_first_frame_keeps_all_current_day_bars(
+  monkeypatch,
+):
+  from quantx_engine import realtime_manager as realtime_manager_module
+  from quantx_engine import warm_cache as warm_cache_module
+
+  manager = RealTimeDataManager()
+  queue = manager._create_optimized_queue()
+  manager.kline_subscribers["000001.SH_1m"] = {queue}
+  stored = []
+
+  monkeypatch.setattr(
+    realtime_manager_module.time_utils,
+    "today",
+    lambda: date(2026, 8, 13),
+  )
+  monkeypatch.setattr(
+    warm_cache_module.intraday_warm_cache,
+    "store_kline",
+    stored.append,
+  )
+
+  await manager._handle_xt_kline_data(
+    "000001.SH",
+    "1m",
+    {
+      "000001.SH": [
+        _xt_kline(datetime(2026, 8, 13, 9, 32), 3932.0),
+        _xt_kline(datetime(2026, 8, 12, 15, 0), 3920.0),
+        _xt_kline(datetime(2026, 8, 13, 9, 31), 3931.0),
+        _xt_kline(datetime(2026, 8, 13, 9, 32), 3932.5),
+        {"close": 0},
+      ]
+    },
+  )
+
+  delivered = [queue.get_nowait(), queue.get_nowait()]
+  assert [item.time.hour * 60 + item.time.minute for item in stored] == [571, 572]
+  assert [item.close for item in stored] == [3931.0, 3932.5]
+  assert [item.close for item in delivered] == [3931.0, 3932.5]
+  assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_qmt_kline_incremental_frame_still_pushes_one_bar(monkeypatch):
+  from quantx_engine import realtime_manager as realtime_manager_module
+  from quantx_engine import warm_cache as warm_cache_module
+
+  manager = RealTimeDataManager()
+  queue = manager._create_optimized_queue()
+  manager.kline_subscribers["000001.SH_1m"] = {queue}
+  stored = []
+
+  monkeypatch.setattr(
+    realtime_manager_module.time_utils,
+    "today",
+    lambda: date(2026, 8, 13),
+  )
+  monkeypatch.setattr(
+    warm_cache_module.intraday_warm_cache,
+    "store_kline",
+    stored.append,
+  )
+
+  await manager._handle_xt_kline_data(
+    "000001.SH",
+    "1m",
+    {"000001.SH": _xt_kline(datetime(2026, 8, 13, 10, 5), 3940.0)},
+  )
+
+  assert [item.close for item in stored] == [3940.0]
+  assert queue.get_nowait().close == 3940.0
+  assert queue.empty()
 
 
 @pytest.mark.asyncio

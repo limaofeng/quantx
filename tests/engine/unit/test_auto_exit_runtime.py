@@ -254,6 +254,57 @@ async def test_limit_up_break_uses_configured_instrument_limits_and_routes_urgen
   assert routed.priority == TradeIntentPriority.URGENT
 
 
+@pytest.mark.asyncio
+async def test_t_trade_rapid_reversal_routes_urgent_protective_market_exit():
+  executor = StrategyExecutor()
+  runtime = make_runtime()
+  runtime.context.parameters.update(
+    {
+      "account_id": "account-1",
+      "auto_exit_acknowledged": True,
+    }
+  )
+  template = runtime.strategy.build_exit_plan_template(
+    instrument_code="600000.SH",
+    batch_id="t-batch-1",
+    plan_id="t-exit-1",
+  )
+  runtime.exit_plan_book.register_entry_fill(
+    template,
+    volume=300,
+    price=27.80,
+    trade_time=datetime(2026, 8, 12, 13, 49, 57),
+  )
+  executor._process_trade_intent = AsyncMock()
+
+  for timestamp, last, bid in [
+    (datetime(2026, 8, 12, 14, 2, 39), 29.67, 29.67),
+    (datetime(2026, 8, 12, 14, 2, 45), 29.60, 29.34),
+    (datetime(2026, 8, 12, 14, 2, 48), 29.63, 29.28),
+  ]:
+    await executor._process_auto_exit_plans(
+      runtime,
+      instrument_code="600000.SH",
+      timestamp=timestamp,
+      market_data=MarketDataSnapshot(
+        instrument_code="600000.SH",
+        price=last,
+        bid_price=[bid],
+        ask_price=[last],
+      ),
+    )
+
+  routed = executor._process_trade_intent.await_args.args[1]
+  assert routed.metadata["exit_rule_type"] == (
+    ExitRuleType.RAPID_PROFIT_REVERSAL.value
+  )
+  assert routed.metadata["price_type"] == "MARKET"
+  assert routed.metadata["price_reference"] == "BID"
+  assert routed.metadata["protected_limit"] is False
+  assert routed.priority == TradeIntentPriority.URGENT
+  assert routed.limit_price_hint == pytest.approx(29.28)
+
+
 def test_limit_price_derivation_is_backtest_only_and_explicit():
   runtime = make_runtime()
   runtime.context.parameters["backtest_limit_rate"] = 0.10

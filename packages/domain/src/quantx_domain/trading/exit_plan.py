@@ -39,11 +39,15 @@ class ExitRuleType(str, Enum):
   GROSS_TAKE_PROFIT = "GROSS_TAKE_PROFIT"
   NET_TAKE_PROFIT = "NET_TAKE_PROFIT"
   TRAILING_NET_PROFIT = "TRAILING_NET_PROFIT"
+  ADAPTIVE_VOLUME_PRICE_TRAILING = "ADAPTIVE_VOLUME_PRICE_TRAILING"
+  RAPID_PROFIT_REVERSAL = "RAPID_PROFIT_REVERSAL"
   TRAILING_PRICE_DRAWDOWN = "TRAILING_PRICE_DRAWDOWN"
   HARD_STOP = "HARD_STOP"
   TIME_OF_DAY = "TIME_OF_DAY"
   MAX_HOLDING_DAYS = "MAX_HOLDING_DAYS"
+  LIMIT_UP_TOUCH = "LIMIT_UP_TOUCH"
   LIMIT_UP_BREAK = "LIMIT_UP_BREAK"
+  MANUAL_TRIGGER = "MANUAL_TRIGGER"
 
 
 class ExitSizingMode(str, Enum):
@@ -108,6 +112,8 @@ class TrailingProfitPolicy:
   initial_gap_pct: float = 1.5
   gap_slope: float = 0.25
   max_gap_pct: float = 3.0
+  high_profit_arm_pct: Optional[float] = None
+  high_profit_max_drawdown_pct: Optional[float] = None
 
 
 def estimate_net_profit_pct(
@@ -150,6 +156,15 @@ def calculate_trailing_floor_pct(
   )
   gap = max(config.initial_gap_pct, min(config.max_gap_pct, gap))
   candidate = max(config.base_floor_pct, peak_profit_pct - gap)
+  if (
+    config.high_profit_arm_pct is not None
+    and config.high_profit_max_drawdown_pct is not None
+    and peak_profit_pct >= config.high_profit_arm_pct
+  ):
+    candidate = max(
+      candidate,
+      peak_profit_pct - config.high_profit_max_drawdown_pct,
+    )
   if previous_floor_pct is None:
     return candidate
   return max(previous_floor_pct, candidate)
@@ -543,6 +558,12 @@ class ExitEvaluationContext:
   limit_up: float = 0.0
   limit_down: float = 0.0
   price_tick: float = 0.01
+  cumulative_volume: Optional[float] = None
+  cumulative_amount: Optional[float] = None
+  depth_imbalance_5: Optional[float] = None
+  market_data_age_seconds: float = 0.0
+  volume_data_age_seconds: float = 0.0
+  source: str = ""
 
   @property
   def trade_date(self) -> str:
@@ -606,11 +627,18 @@ class ExitStrategyRegistry:
     registry.register(ExitRuleType.GROSS_TAKE_PROFIT, _gross_take_profit)
     registry.register(ExitRuleType.NET_TAKE_PROFIT, _net_take_profit)
     registry.register(ExitRuleType.TRAILING_NET_PROFIT, _trailing_net_profit)
+    registry.register(
+      ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING,
+      _adaptive_volume_price_trailing,
+    )
+    registry.register(ExitRuleType.RAPID_PROFIT_REVERSAL, _rapid_profit_reversal)
     registry.register(ExitRuleType.TRAILING_PRICE_DRAWDOWN, _trailing_price_drawdown)
     registry.register(ExitRuleType.HARD_STOP, _hard_stop)
     registry.register(ExitRuleType.TIME_OF_DAY, _time_of_day)
     registry.register(ExitRuleType.MAX_HOLDING_DAYS, _max_holding_days)
+    registry.register(ExitRuleType.LIMIT_UP_TOUCH, _limit_up_touch)
     registry.register(ExitRuleType.LIMIT_UP_BREAK, _limit_up_break)
+    registry.register(ExitRuleType.MANUAL_TRIGGER, _manual_trigger)
     return registry
 
 
@@ -628,7 +656,11 @@ class ExitPlanEvaluator:
       return None
     if plan.pending_intent_id or plan.remaining_volume <= 0:
       return None
-    if context.current_price <= 0:
+    has_manual_trigger = any(
+      rule.enabled and rule.strategy == ExitRuleType.MANUAL_TRIGGER.value
+      for rule in plan.template.rules
+    )
+    if context.current_price <= 0 and context.bid_price <= 0 and not has_manual_trigger:
       return None
     if context.timestamp_ms < int(plan.retry_after_ms or 0):
       return None
@@ -666,6 +698,8 @@ class ExitPlanEvaluator:
       priority=int(rule.priority),
       metrics={
         "current_price": context.current_price,
+        "profit_reference": plan.template.execution.price_reference.value,
+        "profit_reference_price": plan.last_price,
         "last_net_profit_pct": plan.last_net_profit_pct,
         "peak_net_profit_pct": plan.peak_net_profit_pct,
         "trailing_floor_pct": plan.trailing_floor_pct,
@@ -676,8 +710,17 @@ class ExitPlanEvaluator:
 
   @staticmethod
   def _observe(plan: ExitPlan, context: ExitEvaluationContext) -> None:
-    plan.last_price = float(context.current_price)
-    plan.peak_price = max(float(plan.peak_price or 0.0), context.current_price)
+    reference = plan.template.execution.price_reference
+    if reference == ExitPriceReference.BID:
+      reference_price = float(context.bid_price or context.current_price or 0.0)
+    elif reference == ExitPriceReference.ASK:
+      reference_price = float(context.ask_price or context.current_price or 0.0)
+    else:
+      reference_price = float(context.current_price or 0.0)
+    if reference_price <= 0:
+      return
+    plan.last_price = reference_price
+    plan.peak_price = max(float(plan.peak_price or 0.0), reference_price)
     plan.last_evaluated_at = context.timestamp.isoformat()
     if not plan.entry_trade_date:
       plan.entry_trade_date = context.trade_date
@@ -688,7 +731,7 @@ class ExitPlanEvaluator:
       plan.holding_trading_days = int(plan.holding_trading_days or 0) + 1
     plan.last_net_profit_pct = estimate_net_profit_pct(
       entry_price=plan.entry_avg_price,
-      exit_price=context.current_price,
+      exit_price=reference_price,
       volume=plan.remaining_volume,
       costs=plan.template.costs,
     )
@@ -1043,12 +1086,25 @@ def _net_take_profit(
 def _trailing_net_profit(
   rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
 ) -> ExitRuleMatch:
+  high_profit_lock_enabled = bool(
+    rule.parameters.get("high_profit_lock_enabled", False)
+  )
   policy = TrailingProfitPolicy(
     target_profit_pct=_threshold(rule, "target_profit_pct", 2.0),
     base_floor_pct=_threshold(rule, "base_floor_pct", 0.5),
     initial_gap_pct=_threshold(rule, "initial_gap_pct", 1.5),
     gap_slope=_threshold(rule, "gap_slope", 0.25),
     max_gap_pct=_threshold(rule, "max_gap_pct", 3.0),
+    high_profit_arm_pct=(
+      _threshold(rule, "high_profit_arm_pct", 4.0)
+      if high_profit_lock_enabled
+      else None
+    ),
+    high_profit_max_drawdown_pct=(
+      _threshold(rule, "high_profit_max_drawdown_pct", 1.2)
+      if high_profit_lock_enabled
+      else None
+    ),
   )
   state = plan.rule_state.setdefault(rule.rule_id, {})
   floor = calculate_trailing_floor_pct(
@@ -1073,6 +1129,379 @@ def _trailing_net_profit(
     {
       "target_profit_pct": policy.target_profit_pct,
       "trailing_floor_pct": floor,
+      "high_profit_lock_enabled": high_profit_lock_enabled,
+      "high_profit_arm_pct": policy.high_profit_arm_pct,
+      "high_profit_max_drawdown_pct": policy.high_profit_max_drawdown_pct,
+    },
+  )
+
+
+def _adaptive_volume_price_trailing(
+  rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
+) -> ExitRuleMatch:
+  """Follow strength after arming and exit a fixed protected lot on weakness.
+
+  The rule consumes only causal observations.  Its compact rolling window is
+  persisted in ``ExitPlan.rule_state`` so live recovery and tick backtests use
+  the same state machine.
+  """
+
+  state = plan.rule_state.setdefault(rule.rule_id, {})
+  executable_price = float(context.bid_price or context.current_price or 0.0)
+  timestamp_ms = context.timestamp_ms
+  trade_date = context.trade_date
+  if state.get("sample_trade_date") != trade_date:
+    state["samples"] = []
+    state["sample_trade_date"] = trade_date
+    state["consecutive_weak"] = 0
+
+  samples = [
+    dict(item)
+    for item in list(state.get("samples") or [])
+    if isinstance(item, Mapping)
+  ]
+  last_sample = samples[-1] if samples else None
+  is_new_observation = not last_sample or int(last_sample.get("timestamp_ms", 0)) < (
+    timestamp_ms
+  )
+  volume = _optional_float(context.cumulative_volume)
+  if (
+    is_new_observation
+    and last_sample
+    and volume is not None
+    and _optional_float(last_sample.get("volume")) is not None
+    and volume < float(last_sample["volume"])
+  ):
+    # A cumulative counter reset must not be interpreted as negative flow.
+    samples = []
+    last_sample = None
+  if is_new_observation:
+    samples.append(
+      {
+        "timestamp_ms": timestamp_ms,
+        "price": executable_price,
+        "volume": volume,
+      }
+    )
+    cutoff_ms = timestamp_ms - 420_000
+    samples = [
+      item for item in samples if int(item.get("timestamp_ms", 0)) >= cutoff_ms
+    ]
+    state["samples"] = samples
+    state["last_observation_timestamp_ms"] = timestamp_ms
+
+  previous_peak = float(state.get("observed_peak_price", 0.0) or 0.0)
+  if executable_price > previous_peak + 1e-9:
+    state["observed_peak_price"] = executable_price
+    state["peak_timestamp_ms"] = timestamp_ms
+    previous_peak = executable_price
+  observed_peak = max(previous_peak, executable_price)
+  peak_timestamp_ms = int(state.get("peak_timestamp_ms", timestamp_ms) or timestamp_ms)
+  peak_age_seconds = max(0.0, (timestamp_ms - peak_timestamp_ms) / 1000.0)
+  peak_drawdown_pct = (
+    (observed_peak - executable_price) / observed_peak * 100.0
+    if observed_peak > 0 and executable_price > 0
+    else 0.0
+  )
+  return_15s_pct = _window_return_pct(samples, timestamp_ms, 15)
+  return_60s_pct = _window_return_pct(samples, timestamp_ms, 60)
+  volume_velocity = _volume_velocity(samples, timestamp_ms)
+
+  target_profit_pct = _optional_float(
+    rule.parameters.get("arm_target_profit_pct")
+  )
+  target_price = _optional_float(rule.parameters.get("arm_target_price"))
+  if target_profit_pct is None and target_price is None:
+    target_profit_pct = 2.0
+  gross_profit_pct = (
+    (executable_price / plan.entry_avg_price - 1.0) * 100.0
+    if executable_price > 0 and plan.entry_avg_price > 0
+    else 0.0
+  )
+  armed = bool(state.get("armed", False))
+  if not armed:
+    armed = bool(
+      (target_profit_pct is not None and gross_profit_pct >= target_profit_pct)
+      or (target_price is not None and executable_price >= target_price > 0)
+    )
+    if armed:
+      state["armed"] = True
+      state["armed_at_ms"] = timestamp_ms
+      state["armed_price"] = executable_price
+
+  market_stale = float(context.market_data_age_seconds or 0.0) > 5.0
+  volume_stale = float(context.volume_data_age_seconds or 0.0) > 5.0
+  price_available = executable_price > 0 and not market_stale
+  volume_available = volume is not None and not volume_stale
+  data_quality = (
+    "PRICE_UNAVAILABLE"
+    if not price_available
+    else "FULL"
+    if volume_available and volume_velocity is not None
+    else "PRICE_ONLY_DEGRADED"
+  )
+  state["data_quality"] = data_quality
+  state["peak_drawdown_pct"] = peak_drawdown_pct
+  state["return_15s_pct"] = return_15s_pct
+  state["return_60s_pct"] = return_60s_pct
+  state["volume_velocity"] = volume_velocity
+  state["peak_age_seconds"] = peak_age_seconds
+
+  if not armed:
+    state["phase"] = "WAITING_ARM"
+    state["last_decision"] = "WAITING_ARM"
+    state["weak_score"] = 0
+    return ExitRuleMatch(
+      False,
+      "ADAPTIVE_TRAILING_WAITING_ARM",
+      _adaptive_metrics(state, gross_profit_pct),
+    )
+  if not price_available:
+    state["phase"] = "PAUSED_STALE_PRICE"
+    state["last_decision"] = "PAUSE"
+    state["weak_score"] = 0
+    return ExitRuleMatch(
+      False,
+      "ADAPTIVE_TRAILING_PRICE_UNAVAILABLE",
+      _adaptive_metrics(state, gross_profit_pct),
+    )
+
+  trailing_policy = TrailingProfitPolicy(
+    target_profit_pct=float(target_profit_pct or 0.0),
+    base_floor_pct=_threshold(rule, "base_floor_pct", 0.5),
+    initial_gap_pct=_threshold(rule, "initial_gap_pct", 1.5),
+    gap_slope=_threshold(rule, "gap_slope", 0.25),
+    max_gap_pct=_threshold(rule, "max_gap_pct", 3.0),
+  )
+  trailing_floor = calculate_trailing_floor_pct(
+    peak_profit_pct=plan.peak_net_profit_pct,
+    previous_floor_pct=_optional_float(state.get("trailing_floor_pct")),
+    policy=trailing_policy,
+  )
+  state["trailing_floor_pct"] = trailing_floor
+  observed_floors = [
+    candidate
+    for candidate in (
+      _optional_float(item.get("trailing_floor_pct"))
+      for item in plan.rule_state.values()
+    )
+    if candidate is not None
+  ]
+  plan.trailing_floor_pct = max(observed_floors) if observed_floors else None
+
+  weak_score = 0
+  if peak_drawdown_pct >= _threshold(rule, "weak_drawdown_pct", 0.6):
+    weak_score += 2
+  if return_15s_pct is not None and return_15s_pct <= -_threshold(
+    rule, "weak_return_15s_pct", 0.25
+  ):
+    weak_score += 1
+  if (
+    data_quality == "FULL"
+    and volume_velocity is not None
+    and volume_velocity >= _threshold(rule, "stagnation_volume_velocity", 1.5)
+    and return_60s_pct is not None
+    and return_60s_pct <= _threshold(rule, "stagnation_return_60s_pct", 0.1)
+  ):
+    weak_score += 1
+  depth_imbalance = _optional_float(context.depth_imbalance_5)
+  state["depth_imbalance_5"] = depth_imbalance
+  if (
+    data_quality == "FULL"
+    and depth_imbalance is not None
+    and depth_imbalance <= _threshold(rule, "weak_depth_imbalance", -0.2)
+  ):
+    weak_score += 1
+  if peak_age_seconds <= _threshold(rule, "new_high_bonus_seconds", 10.0):
+    weak_score -= 1
+  if (
+    data_quality == "FULL"
+    and return_15s_pct is not None
+    and return_15s_pct >= _threshold(rule, "strong_return_15s_pct", 0.25)
+    and volume_velocity is not None
+    and volume_velocity >= _threshold(rule, "strong_volume_velocity", 1.2)
+  ):
+    weak_score -= 1
+  state["weak_score"] = weak_score
+
+  floor_breached = bool(
+    trailing_floor is not None and plan.last_net_profit_pct <= trailing_floor
+  )
+  rapid_price_reversal = bool(
+    return_15s_pct is not None
+    and return_15s_pct <= -_threshold(rule, "immediate_return_15s_pct", 0.8)
+    and volume_velocity is not None
+    and volume_velocity >= _threshold(rule, "immediate_volume_velocity", 2.0)
+  )
+  immediate = bool(
+    peak_drawdown_pct >= _threshold(rule, "immediate_drawdown_pct", 1.2)
+    or rapid_price_reversal
+    or floor_breached
+  )
+  if immediate:
+    state["phase"] = "TRIGGERED"
+    state["last_decision"] = "IMMEDIATE_EXIT"
+    state["consecutive_weak"] = 0
+    reason = (
+      "ADAPTIVE_TRAILING_FLOOR_BREACHED"
+      if floor_breached
+      else "ADAPTIVE_TRAILING_IMMEDIATE_REVERSAL"
+    )
+    return ExitRuleMatch(
+      True,
+      _reason(rule, reason),
+      _adaptive_metrics(state, gross_profit_pct),
+    )
+
+  confirm_score = int(rule.parameters.get("confirm_score", 3) or 3)
+  confirm_observations = max(
+    1, int(rule.parameters.get("confirm_observations", 2) or 2)
+  )
+  consecutive = int(state.get("consecutive_weak", 0) or 0)
+  if is_new_observation:
+    consecutive = consecutive + 1 if weak_score >= confirm_score else 0
+    state["consecutive_weak"] = consecutive
+  if consecutive >= confirm_observations:
+    state["phase"] = "TRIGGERED"
+    state["last_decision"] = "CONFIRMED_EXIT"
+    return ExitRuleMatch(
+      True,
+      _reason(rule, "ADAPTIVE_TRAILING_WEAKNESS_CONFIRMED"),
+      _adaptive_metrics(state, gross_profit_pct),
+    )
+
+  state["phase"] = (
+    "FOLLOWING" if data_quality == "FULL" else "PRICE_ONLY_DEGRADED"
+  )
+  state["last_decision"] = "FOLLOW"
+  return ExitRuleMatch(
+    False,
+    "ADAPTIVE_TRAILING_FOLLOW",
+    _adaptive_metrics(state, gross_profit_pct),
+  )
+
+
+def _adaptive_metrics(state: Mapping[str, Any], gross_profit_pct: float) -> Dict[str, Any]:
+  return {
+    "phase": str(state.get("phase", "WAITING_ARM") or "WAITING_ARM"),
+    "data_quality": str(state.get("data_quality", "PRICE_UNAVAILABLE") or ""),
+    "last_decision": str(state.get("last_decision", "") or ""),
+    "gross_profit_pct": float(gross_profit_pct),
+    "peak_drawdown_pct": float(state.get("peak_drawdown_pct", 0.0) or 0.0),
+    "return_15s_pct": _optional_float(state.get("return_15s_pct")),
+    "return_60s_pct": _optional_float(state.get("return_60s_pct")),
+    "volume_velocity": _optional_float(state.get("volume_velocity")),
+    "depth_imbalance_5": _optional_float(state.get("depth_imbalance_5")),
+    "weak_score": int(state.get("weak_score", 0) or 0),
+    "consecutive_weak": int(state.get("consecutive_weak", 0) or 0),
+    "trailing_floor_pct": _optional_float(state.get("trailing_floor_pct")),
+  }
+
+
+def _sample_at_or_before(
+  samples: Iterable[Mapping[str, Any]], target_ms: int
+) -> Optional[Mapping[str, Any]]:
+  selected: Optional[Mapping[str, Any]] = None
+  for sample in samples:
+    if int(sample.get("timestamp_ms", 0) or 0) <= target_ms:
+      selected = sample
+    else:
+      break
+  return selected
+
+
+def _window_return_pct(
+  samples: list[Mapping[str, Any]], timestamp_ms: int, seconds: int
+) -> Optional[float]:
+  if not samples:
+    return None
+  target_ms = timestamp_ms - max(1, seconds) * 1000
+  baseline = _sample_at_or_before(samples, target_ms)
+  latest_price = _optional_float(samples[-1].get("price"))
+  baseline_price = _optional_float(baseline.get("price")) if baseline else None
+  if latest_price is None or baseline_price is None or baseline_price <= 0:
+    return None
+  coverage_ms = timestamp_ms - int(baseline.get("timestamp_ms", 0) or 0)
+  if coverage_ms < seconds * 800:
+    return None
+  return (latest_price / baseline_price - 1.0) * 100.0
+
+
+def _volume_velocity(
+  samples: list[Mapping[str, Any]], timestamp_ms: int
+) -> Optional[float]:
+  if not samples:
+    return None
+  current = samples[-1]
+  recent_start = _sample_at_or_before(samples, timestamp_ms - 60_000)
+  baseline_start = _sample_at_or_before(samples, timestamp_ms - 360_000)
+  if recent_start is None or baseline_start is None:
+    return None
+  current_volume = _optional_float(current.get("volume"))
+  recent_volume = _optional_float(recent_start.get("volume"))
+  baseline_volume = _optional_float(baseline_start.get("volume"))
+  if current_volume is None or recent_volume is None or baseline_volume is None:
+    return None
+  baseline_seconds = (
+    int(recent_start.get("timestamp_ms", 0) or 0)
+    - int(baseline_start.get("timestamp_ms", 0) or 0)
+  ) / 1000.0
+  if baseline_seconds < 240.0:
+    return None
+  recent_delta = max(0.0, current_volume - recent_volume)
+  baseline_delta = max(0.0, recent_volume - baseline_volume)
+  baseline_per_60 = baseline_delta / baseline_seconds * 60.0
+  if baseline_per_60 <= 0:
+    return None
+  return recent_delta / baseline_per_60
+
+
+def _rapid_profit_reversal(
+  rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
+) -> ExitRuleMatch:
+  """Confirm a sharp executable-profit collapse shortly after a new peak."""
+
+  arm_profit_pct = _threshold(rule, "arm_profit_pct", 4.0)
+  window_seconds = max(1, int(rule.parameters.get("window_seconds", 15) or 15))
+  drawdown_pct = _threshold(rule, "drawdown_pct", 0.8)
+  confirm_ticks = max(1, int(rule.parameters.get("confirm_ticks", 2) or 2))
+  state = plan.rule_state.setdefault(rule.rule_id, {})
+  observed_peak = float(state.get("observed_peak_net_profit_pct", -1e9) or -1e9)
+  if plan.peak_net_profit_pct > observed_peak + 1e-9:
+    state["observed_peak_net_profit_pct"] = plan.peak_net_profit_pct
+    state["peak_timestamp_ms"] = context.timestamp_ms
+    state["consecutive_matches"] = 0
+
+  peak_timestamp_ms = int(state.get("peak_timestamp_ms", 0) or 0)
+  peak_age_ms = max(0, context.timestamp_ms - peak_timestamp_ms)
+  profit_drawdown_pct = max(
+    0.0,
+    plan.peak_net_profit_pct - plan.last_net_profit_pct,
+  )
+  qualified = bool(
+    context.bid_price > 0
+    and plan.peak_net_profit_pct >= arm_profit_pct
+    and peak_timestamp_ms > 0
+    and peak_age_ms <= window_seconds * 1000
+    and profit_drawdown_pct >= drawdown_pct
+  )
+  consecutive_matches = (
+    int(state.get("consecutive_matches", 0) or 0) + 1 if qualified else 0
+  )
+  state["consecutive_matches"] = consecutive_matches
+  triggered = qualified and consecutive_matches >= confirm_ticks
+  return ExitRuleMatch(
+    triggered,
+    _reason(rule, "RAPID_PROFIT_REVERSAL"),
+    {
+      "arm_profit_pct": arm_profit_pct,
+      "window_seconds": window_seconds,
+      "drawdown_pct": drawdown_pct,
+      "confirm_ticks": confirm_ticks,
+      "consecutive_matches": consecutive_matches,
+      "peak_age_ms": peak_age_ms,
+      "profit_drawdown_pct": profit_drawdown_pct,
+      "executable_bid": context.bid_price,
     },
   )
 
@@ -1154,6 +1583,32 @@ def _max_holding_days(
   )
 
 
+def _limit_up_touch(
+  rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
+) -> ExitRuleMatch:
+  """Exit when the best executable bid reaches the configured upper limit."""
+
+  limit_up = float(context.limit_up or 0.0)
+  price_tick = max(float(context.price_tick or 0.01), 1e-8)
+  tolerance_ticks = max(0, int(rule.parameters.get("tolerance_ticks", 0) or 0))
+  trigger_price = limit_up - tolerance_ticks * price_tick
+  executable_bid = float(context.bid_price or 0.0)
+  triggered = bool(
+    limit_up > 0 and executable_bid > 0 and executable_bid >= trigger_price - 1e-8
+  )
+  return ExitRuleMatch(
+    triggered,
+    _reason(rule, "LIMIT_UP_TOUCH"),
+    {
+      "limit_up": limit_up,
+      "price_tick": price_tick,
+      "tolerance_ticks": tolerance_ticks,
+      "trigger_price": trigger_price,
+      "executable_bid": executable_bid,
+    },
+  )
+
+
 def _limit_up_break(
   rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
 ) -> ExitRuleMatch:
@@ -1213,6 +1668,19 @@ def _limit_up_break(
       "min_seal_seconds": min_seal_seconds,
       "min_holding_trading_days": min_holding_days,
     },
+  )
+
+
+def _manual_trigger(
+  rule: ExitRuleSpec, plan: ExitPlan, context: ExitEvaluationContext
+) -> ExitRuleMatch:
+  """Trigger an operator-confirmed exit without inventing a market condition."""
+
+  del plan, context
+  return ExitRuleMatch(
+    True,
+    _reason(rule, "manual_liquidation_confirmed"),
+    {"trigger": ExitRuleType.MANUAL_TRIGGER.value},
   )
 
 

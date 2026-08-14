@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import math
 from datetime import datetime, time, timedelta
 from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
@@ -853,20 +854,80 @@ class RealTimeDataManager:
       if not kline_list:
         return
 
-      # 取最新的K线数据
-      latest_kline = kline_list[-1] if isinstance(kline_list, list) else kline_list
+      raw_klines = kline_list if isinstance(kline_list, list) else [kline_list]
+      trading_date = time_utils.today()
+      deduped: Dict[datetime, KLine] = {}
+      invalid_count = 0
+      for raw_kline in raw_klines:
+        if not isinstance(raw_kline, dict):
+          invalid_count += 1
+          continue
+        try:
+          timestamp = float(raw_kline.get("time"))
+        except (TypeError, ValueError):
+          invalid_count += 1
+          continue
+        if not math.isfinite(timestamp) or timestamp <= 0:
+          invalid_count += 1
+          continue
 
-      # 构建KLine领域模型对象
-      kline_data = KLine.from_xtquant(stock_code, period, latest_kline)
+        try:
+          kline_data = KLine.from_xtquant(
+            stock_code,
+            period,
+            {**raw_kline, "time": timestamp},
+          )
+          prices = [
+            float(kline_data.open),
+            float(kline_data.high),
+            float(kline_data.low),
+            float(kline_data.close),
+          ]
+          volume = float(kline_data.volume)
+          amount = float(kline_data.amount)
+        except (TypeError, ValueError, OverflowError):
+          invalid_count += 1
+          continue
+        if (
+          any(not math.isfinite(value) or value <= 0 for value in prices)
+          or not math.isfinite(volume)
+          or volume < 0
+          or not math.isfinite(amount)
+          or amount < 0
+          or kline_data.high < max(kline_data.open, kline_data.close)
+          or kline_data.low > min(kline_data.open, kline_data.close)
+        ):
+          invalid_count += 1
+          continue
+
+        kline_time = time_utils.to_shanghai(kline_data.time)
+        if period == "1m" and kline_time.date() != trading_date:
+          continue
+        deduped[kline_time] = kline_data
+
+      if invalid_count:
+        logger.warning(
+          "忽略无效XTQuant K线: %s %s invalid=%s total=%s",
+          stock_code,
+          period,
+          invalid_count,
+          len(raw_klines),
+        )
+      if not deduped:
+        return
+
+      klines = [deduped[item] for item in sorted(deduped)]
       if period == "1m":
         from .warm_cache import (
           intraday_warm_cache,
         )
 
-        intraday_warm_cache.store_kline(kline_data)
+        for kline_data in klines:
+          intraday_warm_cache.store_kline(kline_data)
 
-      # 推送给所有订阅者（使用优化的队列放入方法）
-      await self._publish_kline_to_subscribers(key, kline_data)
+      # 首帧可能包含当日完整分钟序列，必须逐根推送；后续单根增量沿用同一路径。
+      for kline_data in klines:
+        await self._publish_kline_to_subscribers(key, kline_data)
 
     except Exception as e:
       logger.error(f"处理XTQuant K线数据回调失败: {stock_code} {period}, {e}")

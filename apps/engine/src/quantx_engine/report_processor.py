@@ -33,7 +33,9 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
   AccountTradingRollout,
+  AccountTradingRolloutEvent,
   AgentReportInbox,
+  OperationalAlert,
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   StrategyOrderCorrelation,
@@ -42,6 +44,7 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.models.enums import AccountType
 from quantx_infrastructure.repositories.account_repository import AccountRepository
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
 )
@@ -70,6 +73,12 @@ _ORDER_STATUS_NAMES = {
 }
 
 _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES = {"RECONCILING"}
+_AUTOMATIC_RECONCILIATION_KINDS = {
+  "MISSING_WORKING_ORDER",
+  "PROTOCOL_1_1_REQUIRED",
+  "UNKNOWN_BROKER_ORDER",
+  "UNKNOWN_BROKER_TRADE",
+}
 
 
 class RetryableReportError(RuntimeError):
@@ -91,6 +100,58 @@ def _snapshot_can_promote_heartbeat(status: Any) -> bool:
 def _body(payload: dict[str, Any], key: str) -> dict[str, Any]:
   nested = payload.get(key)
   return dict(nested) if isinstance(nested, dict) else dict(payload)
+
+
+def _report_account_ids(payload: dict[str, Any]) -> set[str]:
+  """Return every funding account covered by one Agent report payload."""
+  account_ids: set[str] = set()
+
+  def add(value: Any) -> None:
+    normalized = str(value or "").strip()
+    if normalized:
+      account_ids.add(normalized)
+
+  add(payload.get("account_id"))
+  for nested_name in ("order", "execution"):
+    nested = payload.get(nested_name)
+    if isinstance(nested, dict):
+      add(nested.get("account_id"))
+  for collection_name in (
+    "accounts",
+    "orders",
+    "trades",
+    "order_errors",
+    "cancel_errors",
+    "position_deltas",
+    "positions",
+  ):
+    for item in payload.get(collection_name) or []:
+      if isinstance(item, dict):
+        add(item.get("account_id"))
+  positions_by_account = payload.get("positions_by_account")
+  if isinstance(positions_by_account, dict):
+    for account_id in positions_by_account:
+      add(account_id)
+  return account_ids
+
+
+def _was_automatic_reconciliation_pause(reason: Any) -> bool:
+  """Distinguish an Engine reconciliation pause from an operator pause."""
+  if not isinstance(reason, str) or not reason.strip():
+    return False
+  try:
+    items = json.loads(reason)
+  except (TypeError, ValueError):
+    return False
+  return bool(
+    isinstance(items, list)
+    and items
+    and all(
+      isinstance(item, dict)
+      and str(item.get("kind") or "") in _AUTOMATIC_RECONCILIATION_KINDS
+      for item in items
+    )
+  )
 
 
 async def _update_pending(
@@ -200,15 +261,26 @@ async def _process_order_report(payload: dict[str, Any]) -> None:
   order.setdefault("price_type", 50)
   await OrderService(str(order.get("account_id", ""))).upsert_report(order)
   status = _normalized_order_status(
-    order.get("status") or order.get("order_status") or "SUBMITTED"
+    order.get("effective_order_status")
+    or order.get("status")
+    or order.get("order_status")
+    or "SUBMITTED"
   )
   await _update_pending(
     str(payload.get("client_order_id") or "") or None,
     status=status,
     broker_order_id=str(broker_order_id),
-    reason=str(order.get("status_msg") or ""),
+    reason=str(
+      order.get("effective_status_reason") or order.get("status_msg") or ""
+    ),
     source_sequence=int(payload.get("source_sequence") or 0),
     source_event_at=_parse_report_time(payload.get("source_event_at")),
+  )
+  await AutoExitPlanService().apply_order_event_for_report(
+    client_order_id=str(payload.get("client_order_id") or ""),
+    broker_order_id=str(broker_order_id),
+    status=status,
+    source_sequence=int(payload.get("source_sequence") or 0),
   )
 
 
@@ -241,6 +313,19 @@ async def _process_execution_report(payload: dict[str, Any]) -> None:
     broker_order_id=str(broker_order_id),
     source_sequence=int(payload.get("source_sequence") or 0),
     source_event_at=_parse_report_time(payload.get("source_event_at")),
+  )
+  await AutoExitPlanService().apply_order_event_for_report(
+    client_order_id=str(payload.get("client_order_id") or ""),
+    broker_order_id=str(broker_order_id),
+    status=str(payload.get("order_status") or "PARTIAL_FILLED"),
+    source_sequence=int(payload.get("source_sequence") or 0),
+  )
+  await AutoExitPlanService().apply_execution_for_report(
+    execution_id=str(trade.get("execution_id") or trade.get("traded_id") or ""),
+    client_order_id=str(payload.get("client_order_id") or ""),
+    broker_order_id=str(broker_order_id),
+    volume=int(trade.get("traded_volume") or 0),
+    price=float(trade.get("traded_price") or 0.0),
   )
 
 
@@ -326,6 +411,9 @@ async def _process_delta_report(
   for error in payload.get("order_errors") or []:
     reason = str(error.get("error_msg") or error.get("reason") or "")
     client_order_id = str(error.get("client_order_id") or "")
+    broker_order_id = str(
+      error.get("order_id") or error.get("broker_order_id") or ""
+    )
     if client_order_id:
       await _update_pending(
         client_order_id,
@@ -334,10 +422,21 @@ async def _process_delta_report(
       )
     else:
       await _update_pending_by_broker(
-        error.get("order_id") or error.get("broker_order_id"),
+        broker_order_id,
         status="REJECTED",
         reason=reason,
       )
+    await AutoExitPlanService().apply_order_event_for_report(
+      client_order_id=client_order_id,
+      broker_order_id=broker_order_id,
+      status="REJECTED",
+      source_sequence=int(
+        error.get("source_sequence")
+        or payload.get("source_sequence")
+        or payload.get("sequence")
+        or 0
+      ),
+    )
   for error in payload.get("cancel_errors") or []:
     reason = str(error.get("error_msg") or error.get("reason") or "")
     client_order_id = str(error.get("client_order_id") or "")
@@ -395,6 +494,7 @@ async def _process_delta_report(
   if is_complete and protocol_version == "1.1":
     ready_accounts: list[str] = []
     blocked_accounts: list[str] = []
+    reconciliation_accounts: dict[str, dict[str, Any]] = {}
     account_ids = {
       str(item.get("account_id") or "")
       for item in payload.get("accounts") or []
@@ -406,9 +506,46 @@ async def _process_delta_report(
       if str(value)
     )
     for account_id in sorted(account_ids):
-      discrepancies = await _snapshot_discrepancies(account_id, payload)
       async with AsyncSessionLocal() as db:
-        rollout = await db.get(AccountTradingRollout, account_id)
+        existing_rollout = await db.get(AccountTradingRollout, account_id)
+        controlled_window_active = bool(
+          existing_rollout and existing_rollout.controlled_window_active
+        )
+        acknowledged_external_order_ids = {
+          str(value)
+          for value in list(
+            existing_rollout.controlled_window_external_order_ids or []
+          )
+        } if existing_rollout else set()
+        acknowledged_external_trade_ids = {
+          str(value)
+          for value in list(
+            existing_rollout.controlled_window_external_trade_ids or []
+          )
+        } if existing_rollout else set()
+        allow_external_activity = bool(
+          existing_rollout is None
+          or (
+            not existing_rollout.enabled
+            and not existing_rollout.kill_switch
+            and str(existing_rollout.stage).upper() in {"SHADOW", "PAUSED"}
+            and not controlled_window_active
+          )
+        )
+      reconciliation = await _snapshot_discrepancies(
+        account_id,
+        payload,
+        allow_external_activity=allow_external_activity,
+        acknowledged_external_order_ids=acknowledged_external_order_ids,
+        acknowledged_external_trade_ids=acknowledged_external_trade_ids,
+      )
+      discrepancies = list(reconciliation["blocking_discrepancies"])
+      async with AsyncSessionLocal() as db:
+        rollout = await db.get(
+          AccountTradingRollout,
+          account_id,
+          with_for_update=True,
+        )
         if rollout is None:
           rollout = AccountTradingRollout(account_id=account_id)
           db.add(rollout)
@@ -429,6 +566,8 @@ async def _process_delta_report(
             },
           )
         if discrepancies:
+          window_was_active = bool(rollout.controlled_window_active)
+          previous_stage = str(rollout.stage)
           rollout.enabled = False
           if not rollout.kill_switch:
             rollout.stage = "PAUSED"
@@ -437,9 +576,61 @@ async def _process_delta_report(
             ensure_ascii=False,
             default=str,
           )[:2000]
+          if window_was_active:
+            rollout.controlled_window_active = False
+            rollout.controlled_window_snapshot_id = None
+            rollout.controlled_window_snapshot_hash = None
+            rollout.controlled_window_started_at = None
+            rollout.controlled_window_started_by_user_id = None
+            rollout.controlled_window_external_order_ids = []
+            rollout.controlled_window_external_trade_ids = []
+            db.add(
+              AccountTradingRolloutEvent(
+                event_id=str(uuid.uuid4()),
+                account_id=account_id,
+                event_type="CONTROLLED_WINDOW_INVALIDATED",
+                previous_stage=previous_stage,
+                next_stage=str(rollout.stage),
+                snapshot_id=snapshot_id or None,
+                details={"discrepancies": discrepancies[:20]},
+                created_at=utcnow(),
+              )
+            )
           blocked_accounts.append(account_id)
         else:
+          if (
+            str(rollout.stage).upper() == "PAUSED"
+            and _was_automatic_reconciliation_pause(rollout.paused_reason)
+          ):
+            # A recovered automatic pause returns to the read-only preparation
+            # stage. It never silently resumes CANARY/LIVE order authority.
+            rollout.stage = "SHADOW"
+            rollout.enabled = False
+            rollout.paused_reason = None
           ready_accounts.append(account_id)
+        reconciliation_accounts[account_id] = {
+          "snapshotId": snapshot_id,
+          "snapshotAt": reported_at.isoformat(),
+          "status": rollout.reconcile_status,
+          "manualCoexistence": allow_external_activity,
+          "externalOrderCount": len(reconciliation["external_orders"]),
+          "externalTradeCount": len(reconciliation["external_trades"]),
+          "newExternalOrderCount": sum(
+            not bool(item.get("acknowledged"))
+            for item in reconciliation["external_orders"]
+          ),
+          "newExternalTradeCount": sum(
+            not bool(item.get("acknowledged"))
+            for item in reconciliation["external_trades"]
+          ),
+          "workingExternalOrderCount": sum(
+            str(item.get("status") or "")
+            in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+            for item in reconciliation["external_orders"]
+          ),
+          "controlledWindowActive": bool(rollout.controlled_window_active),
+          "blockingDiscrepancyCount": len(discrepancies),
+        }
         await db.commit()
 
     async with AsyncSessionLocal() as db:
@@ -447,13 +638,10 @@ async def _process_delta_report(
         RuntimeComponentHeartbeat,
         f"qmt-agent:{device_id}",
       )
-      if heartbeat is not None and _snapshot_can_promote_heartbeat(
-        heartbeat.status
-      ):
-        heartbeat.status = (
-          "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
-        )
+      if heartbeat is not None:
         details = dict(heartbeat.details or {})
+        account_details = dict(details.get("accountReconciliation") or {})
+        account_details.update(reconciliation_accounts)
         details.update(
           {
             "snapshotId": snapshot_id,
@@ -461,9 +649,14 @@ async def _process_delta_report(
             "snapshotAt": reported_at.isoformat(),
             "readyAccounts": ready_accounts,
             "blockedAccounts": blocked_accounts,
+            "accountReconciliation": account_details,
           }
         )
         heartbeat.details = details
+        if _snapshot_can_promote_heartbeat(heartbeat.status):
+          heartbeat.status = (
+            "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
+          )
         heartbeat.updated_at = utcnow()
         await db.commit()
 
@@ -471,7 +664,13 @@ async def _process_delta_report(
 async def _snapshot_discrepancies(
   account_id: str,
   payload: dict[str, Any],
-) -> list[dict[str, str]]:
+  *,
+  allow_external_activity: bool,
+  acknowledged_external_order_ids: set[str] | None = None,
+  acknowledged_external_trade_ids: set[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+  acknowledged_external_order_ids = acknowledged_external_order_ids or set()
+  acknowledged_external_trade_ids = acknowledged_external_trade_ids or set()
   snapshot_orders = [
     dict(item)
     for item in payload.get("orders") or []
@@ -497,6 +696,8 @@ async def _snapshot_discrepancies(
     if item.broker_order_id
   }
   discrepancies: list[dict[str, str]] = []
+  external_orders: list[dict[str, Any]] = []
+  external_trades: list[dict[str, Any]] = []
   seen_broker_ids: set[str] = set()
   for order in snapshot_orders:
     client_id = str(order.get("client_order_id") or "")
@@ -504,27 +705,55 @@ async def _snapshot_discrepancies(
     if broker_id:
       seen_broker_ids.add(broker_id)
     if not by_client.get(client_id) and not by_broker.get(broker_id):
-      discrepancies.append(
-        {
-          "kind": "UNKNOWN_BROKER_ORDER",
-          "business_id": broker_id or client_id or "unknown",
-        }
+      observation = {
+        "kind": "EXTERNAL_BROKER_ORDER",
+        "business_id": broker_id or client_id or "unknown",
+        "status": _normalized_order_status(
+          order.get("effective_order_status")
+          or order.get("order_status", order.get("status"))
+        ),
+        "raw_status": _normalized_order_status(
+          order.get("order_status", order.get("status"))
+        ),
+        "status_reason": str(order.get("effective_status_reason") or ""),
+      }
+      observation["acknowledged"] = (
+        observation["business_id"] in acknowledged_external_order_ids
       )
+      external_orders.append(observation)
+      if not allow_external_activity and not observation["acknowledged"]:
+        discrepancies.append(
+          {
+            "kind": "UNKNOWN_BROKER_ORDER",
+            "business_id": observation["business_id"],
+          }
+        )
   for trade in snapshot_trades:
     client_id = str(trade.get("client_order_id") or "")
     broker_id = str(trade.get("order_id") or trade.get("broker_order_id") or "")
     if not by_client.get(client_id) and not by_broker.get(broker_id):
-      discrepancies.append(
-        {
-          "kind": "UNKNOWN_BROKER_TRADE",
-          "business_id": str(
-            trade.get("execution_id")
-            or trade.get("traded_id")
-            or broker_id
-            or "unknown"
-          ),
-        }
+      observation = {
+        "kind": "EXTERNAL_BROKER_TRADE",
+        "business_id": str(
+          trade.get("execution_id")
+          or trade.get("traded_id")
+          or trade.get("trade_id")
+          or broker_id
+          or "unknown"
+        ),
+        "status": "FILLED",
+      }
+      observation["acknowledged"] = (
+        observation["business_id"] in acknowledged_external_trade_ids
       )
+      external_trades.append(observation)
+      if not allow_external_activity and not observation["acknowledged"]:
+        discrepancies.append(
+          {
+            "kind": "UNKNOWN_BROKER_TRADE",
+            "business_id": observation["business_id"],
+          }
+        )
   for item in pending:
     if (
       item.broker_order_id
@@ -538,7 +767,11 @@ async def _snapshot_discrepancies(
           "business_id": str(item.client_order_id),
         }
       )
-  return discrepancies
+  return {
+    "blocking_discrepancies": discrepancies,
+    "external_orders": external_orders,
+    "external_trades": external_trades,
+  }
 
 
 async def _process(report: AgentReportInbox) -> None:
@@ -643,7 +876,7 @@ def _runtime_business_key(
     return f"trade:{correlation.account_id}:{execution_id}"[:192]
   return (
     f"order:{correlation.client_order_id}:{broker_order_id}:"
-    f"{_normalized_order_status(item.get('status') or item.get('order_status'))}:"
+    f"{_normalized_order_status(item.get('effective_order_status') or item.get('status') or item.get('order_status'))}:"
     f"{int(item.get('traded_volume') or 0)}"
   )[:192]
 
@@ -680,7 +913,9 @@ async def _project_t_trade_event(
   )
   if event_type == "ORDER":
     status = _normalized_order_status(
-      item.get("status") or item.get("order_status")
+      item.get("effective_order_status")
+      or item.get("status")
+      or item.get("order_status")
     )
     if role == "ENTRY":
       batch.entry_broker_order_id = broker_order_id or batch.entry_broker_order_id
@@ -705,7 +940,11 @@ async def _project_t_trade_event(
         "EXPIRED": "EXIT_REJECTED",
       }.get(status, batch.status)
       if status in {"REJECTED", "CANCELLED", "EXPIRED"}:
-        batch.exception_reason = str(item.get("status_msg") or status)
+        batch.exception_reason = str(
+          item.get("effective_status_reason")
+          or item.get("status_msg")
+          or status
+        )
   else:
     volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
     price = float(item.get("traded_price") or item.get("price") or 0.0)
@@ -1003,6 +1242,75 @@ async def _recover_stuck_runtime_events() -> None:
     await db.commit()
 
 
+async def _supersede_prior_complete_snapshot_failures(
+  db,
+  report: AgentReportInbox,
+  *,
+  resolved_at: datetime,
+) -> int:
+  """Close obsolete full-snapshot dead letters after newer state converges.
+
+  Complete protocol 1.1 snapshots are authoritative account-state checkpoints.
+  Once a newer checkpoint for the same device and accounts succeeds, an older
+  failed complete snapshot no longer represents an unresolved state gap. The
+  raw report and its error remain stored with a SUPERSEDED audit status.
+  """
+  payload = dict(report.payload or {})
+  current_accounts = _report_account_ids(payload)
+  if (
+    report.message_type != "delta_report"
+    or str(report.protocol_version or "") != "1.1"
+    or not bool(payload.get("is_complete"))
+    or not current_accounts
+  ):
+    return 0
+  failures = list(
+    (
+      await db.execute(
+        select(AgentReportInbox).where(
+          AgentReportInbox.device_id == report.device_id,
+          AgentReportInbox.message_id != report.message_id,
+          AgentReportInbox.message_type == "delta_report",
+          AgentReportInbox.protocol_version == "1.1",
+          AgentReportInbox.processing_status == "FAILED",
+          AgentReportInbox.received_at <= report.received_at,
+        )
+      )
+    ).scalars().all()
+  )
+  superseded = [
+    item
+    for item in failures
+    if (covered_accounts := _report_account_ids(dict(item.payload or {})))
+    and covered_accounts.issubset(current_accounts)
+    and bool(dict(item.payload or {}).get("is_complete"))
+  ]
+  if not superseded:
+    return 0
+  message_ids = [item.message_id for item in superseded]
+  for item in superseded:
+    item.processing_status = "SUPERSEDED"
+    item.processed_at = resolved_at
+    item.next_attempt_at = None
+  await db.execute(
+    update(OperationalAlert)
+    .where(
+      OperationalAlert.code == "AGENT_REPORT_DEAD_LETTER",
+      OperationalAlert.business_id.in_(message_ids),
+      OperationalAlert.status != "RESOLVED",
+    )
+    .values(
+      status="RESOLVED",
+      resolved_by="SYSTEM_RECONCILIATION",
+      resolved_at=resolved_at,
+      resolution=(
+        "后续协议 1.1 完整账户快照已成功收敛；旧失败快照已由权威状态取代"
+      ),
+    )
+  )
+  return len(superseded)
+
+
 async def _finish(
   message_id: str,
   *,
@@ -1013,47 +1321,49 @@ async def _finish(
     if report is None:
       return
     if error is None:
+      finished_at = utcnow()
       report.processing_status = "PROCESSED"
-      report.processed_at = utcnow()
+      report.processed_at = finished_at
       report.processing_error = None
       report.next_attempt_at = None
+      superseded_count = await _supersede_prior_complete_snapshot_failures(
+        db,
+        report,
+        resolved_at=finished_at,
+      )
+      if superseded_count:
+        logger.info(
+          "Authoritative Agent snapshot superseded %s prior dead letters",
+          superseded_count,
+        )
     else:
       attempts = int(report.processing_attempts or 1)
       report.processing_error = str(error)[:2000]
       if attempts >= 10 or not isinstance(error, RetryableReportError):
         report.processing_status = "FAILED"
-        payload = dict(report.payload or {})
-        body = (
-          payload.get("execution")
-          or payload.get("order")
-          or payload
-        )
-        account_id = (
-          str(body.get("account_id") or "")
-          if isinstance(body, dict)
-          else ""
-        )
-        await OperationalAlertService(db).raise_alert(
-          severity="SEV2",
-          source="ENGINE",
-          code="AGENT_REPORT_DEAD_LETTER",
-          account_id=account_id or None,
-          business_id=report.message_id,
-          message=(
-            f"Agent report 永久失败：{report.message_type} / "
-            f"{error.__class__.__name__}"
-          ),
-          details={
-            "message_id": report.message_id,
-            "message_type": report.message_type,
-            "protocol_version": report.protocol_version,
-            "payload_hash": report.raw_payload_hash,
-            "attempts": attempts,
-            "error_class": error.__class__.__name__,
-            "error": str(error)[:2000],
-          },
-          commit=False,
-        )
+        account_ids = sorted(_report_account_ids(dict(report.payload or {})))
+        for account_id in account_ids or [None]:
+          await OperationalAlertService(db).raise_alert(
+            severity="SEV2",
+            source="ENGINE",
+            code="AGENT_REPORT_DEAD_LETTER",
+            account_id=account_id,
+            business_id=report.message_id,
+            message=(
+              f"Agent report 永久失败：{report.message_type} / "
+              f"{error.__class__.__name__}"
+            ),
+            details={
+              "message_id": report.message_id,
+              "message_type": report.message_type,
+              "protocol_version": report.protocol_version,
+              "payload_hash": report.raw_payload_hash,
+              "attempts": attempts,
+              "error_class": error.__class__.__name__,
+              "error": str(error)[:2000],
+            },
+            commit=False,
+          )
       else:
         report.processing_status = "PENDING"
         report.next_attempt_at = utcnow() + timedelta(

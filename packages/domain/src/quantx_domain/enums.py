@@ -17,6 +17,7 @@ class StrategyInstrumentScope(str, Enum):
 class StrategyInstrumentUniverseMode(str, Enum):
   STATIC = "static"
   ACCOUNT_HOLDINGS = "account_holdings"
+  RADAR_CANDIDATES = "radar_candidates"
 
 
 class StrategyCategory(str, Enum):

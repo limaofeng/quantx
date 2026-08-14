@@ -1,3 +1,4 @@
+import pytest
 from quantx_domain.trading.t_trade import (
   SignalPolicy,
   TickSample,
@@ -10,14 +11,20 @@ from quantx_domain.trading.t_trade import (
 
 
 def test_target_amount_sizing_uses_lots_and_available_inventory():
-  assert calculate_target_trade_volume(
-    entry_price=10.0,
-    available_volume=2000,
-  ).volume == 1000
-  assert calculate_target_trade_volume(
-    entry_price=32.0,
-    available_volume=2000,
-  ).volume == 300
+  assert (
+    calculate_target_trade_volume(
+      entry_price=10.0,
+      available_volume=2000,
+    ).volume
+    == 1000
+  )
+  assert (
+    calculate_target_trade_volume(
+      entry_price=32.0,
+      available_volume=2000,
+    ).volume
+    == 300
+  )
   limited = calculate_target_trade_volume(
     entry_price=20.0,
     available_volume=400,
@@ -118,3 +125,74 @@ def test_signal_requires_the_high_to_precede_the_low():
 
   assert signal.triggered is False
   assert signal.reason == "PULLBACK_TOO_SMALL"
+
+
+def test_momentum_signal_detects_early_acceleration_without_future_ticks():
+  # Recorded from 300917.SZ (特发服务) on 2026-08-12.  The last sample is
+  # 13:49:57; no observation from the later 14:02 vertical move is present.
+  samples = [
+    TickSample(0, 27.35, cumulative_amount=139_550_205.23, cumulative_volume=5_151_984),
+    TickSample(
+      60_000, 27.41, cumulative_amount=140_158_282.23, cumulative_volume=5_174_184
+    ),
+    TickSample(
+      120_000, 27.50, cumulative_amount=146_892_465.23, cumulative_volume=5_418_784
+    ),
+    TickSample(
+      180_000, 27.58, cumulative_amount=150_553_455.23, cumulative_volume=5_551_684
+    ),
+    TickSample(
+      240_000, 27.53, cumulative_amount=152_226_340.73, cumulative_volume=5_612_473
+    ),
+    TickSample(
+      300_000, 27.53, cumulative_amount=154_724_134.73, cumulative_volume=5_703_073
+    ),
+    TickSample(
+      360_000,
+      27.78,
+      bid_price=27.75,
+      ask_price=27.80,
+      cumulative_amount=161_167_439.73,
+      cumulative_volume=5_936_073,
+    ),
+  ]
+
+  signal = evaluate_intraday_t_signal(samples)
+
+  assert signal.triggered is True
+  assert signal.signal_type == "MOMENTUM_ACCELERATION"
+  assert signal.reason == "MOMENTUM_ACCELERATION_CONFIRMED"
+  assert signal.momentum_rise_pct == pytest.approx(0.9081002543)
+  assert signal.momentum_move_seconds == 60
+  assert signal.momentum_amount_velocity_ratio == pytest.approx(2.1231497748)
+  assert signal.vwap == pytest.approx(27.1505151183)
+  assert signal.vwap_premium_pct == pytest.approx(2.3185006948)
+  assert signal.spread_ticks == pytest.approx(5)
+
+
+def test_momentum_signal_rejects_late_vertical_chase_above_vwap_band():
+  # Recorded causal snapshots leading into 14:02:33.  The move is fast, but at
+  # 29.20 the price is already 6.04% above VWAP and is no longer an early entry.
+  samples = [
+    TickSample(0, 28.00, cumulative_amount=220_000_000, cumulative_volume=8_000_000),
+    TickSample(
+      300_000, 28.27, cumulative_amount=246_846_410.37, cumulative_volume=8_928_632
+    ),
+    TickSample(
+      330_000, 28.50, cumulative_amount=255_000_000, cumulative_volume=9_220_000
+    ),
+    TickSample(
+      360_000,
+      29.20,
+      bid_price=29.20,
+      ask_price=29.25,
+      cumulative_amount=265_077_630.37,
+      cumulative_volume=9_626_734,
+    ),
+  ]
+
+  signal = evaluate_intraday_t_signal(samples)
+
+  assert signal.triggered is False
+  assert signal.reason == "MOMENTUM_VWAP_PREMIUM_TOO_HIGH"
+  assert signal.vwap_premium_pct == pytest.approx(6.0446, abs=0.0001)

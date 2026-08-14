@@ -123,6 +123,28 @@ def test_runtime_state_t1_and_reservations():
   assert state.get_position("000001.SZ")["available_volume"] == 100
 
 
+def test_runtime_state_restores_order_reservation_indexes():
+  state = RuntimeStateManager(run_id="run", persist_enabled=False, enable_reserve=True)
+  state.update_account(cash=100_000, frozen_cash=0, total_asset=100_000)
+  assert state.reserve_cash("intent-buy", 10_005)
+  state.transfer_reservation("intent-buy", "broker-buy")
+
+  restored = RuntimeStateManager(
+    run_id="run",
+    persist_enabled=False,
+    enable_reserve=True,
+  )
+  restored._state = {
+    **state._state,
+    "custom": dict(state._state["custom"]),
+  }
+  restored._restore_reservation_state()
+
+  assert restored.get_reserved_amount("broker-buy") == 10_005
+  assert restored.release_cash("broker-buy") is True
+  assert restored.get_account_quota()["available_cash"] == 100_000
+
+
 def test_trade_intent_status_accumulates_partial_fill_volume():
   state = RuntimeStateManager(run_id="run", persist_enabled=False, enable_reserve=True)
   intent_id = "intent-partial-fill"

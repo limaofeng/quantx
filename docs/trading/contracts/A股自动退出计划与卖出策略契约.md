@@ -33,6 +33,7 @@
 | `GROSS_TAKE_PROFIT` | 达到毛收益率 |
 | `NET_TAKE_PROFIT` | 扣除双边费用后达到净收益率 |
 | `TRAILING_NET_PROFIT` | 净收益达到门槛后按动态底线回撤退出 |
+| `ADAPTIVE_VOLUME_PRICE_TRAILING` | 达标后按量价强弱跟涨或退出固定保护数量 |
 | `TRAILING_PRICE_DRAWDOWN` | 从持仓后峰值价格回撤退出 |
 | `HARD_STOP` | 按成本收益率强制止损 |
 | `TIME_OF_DAY` | 到达日内指定时点退出 |
@@ -163,6 +164,20 @@ T+1 置换不得是系统隐式默认行为。卖出意图会携带
 
 其触发和数量语义与退出计划一致；旧 API 与订单模型继续作为兼容入口。
 
+持仓级动态部分止盈使用 `ADAPTIVE_VOLUME_PRICE_TRAILING`：创建计划时把待保护
+数量固化为小于当前可卖量的 100 股整数倍，之后不因总持仓或可卖量变化扩大。
+目标收益率或目标价只负责激活，激活后不会立即卖出。Engine 每秒消费 QMT
+whole-quote，综合峰值回撤、15/60 秒价格变化、累计成交量速度和五档盘口
+失衡：量价强势时继续跟涨，转弱评分连续两次达到阈值时退出；峰值回撤、
+放量急跌或动态保盈线失守时立即退出。实时量能陈旧时降级为价格追踪，价格
+也陈旧时暂停判断，禁止用旧行情触发卖出。
+
+手工持仓动态计划持久化在 `auto_exit_plans`，不依附 StrategyRun；策略入场
+计划仍沿用 `StrategyRunState.custom_state`。两条入口共享同一个规则、计划
+状态机和成交回报语义。已有未完成卖出委托时拒绝创建或修改；触发后使用
+买一价减保护滑点的限价委托。只有 QMT Agent 的真实委托/成交回报才能推进
+`EXIT_PENDING -> PARTIALLY_EXITED / COMPLETED`，`command_ack` 不得推进成交。
+
 ### 5.3 打板
 
 `AshareLimitUpBoardStrategy` 在临近涨停、尚未封死时生成一次 `swing` BUY
@@ -191,3 +206,29 @@ execution=BID_PROTECTED_LIMIT
 - T+1 策略、风险动作、执行价格参考和授权模式。
 
 被延迟、拒绝、取消、部分成交和重试都必须保留原计划，不得伪造为已退出。
+
+## 7. 卖出管理与人工计划
+
+`/liquidation` 的产品名称统一为“卖出管理”，固定承载“退出计划、持仓清仓、
+卖出历史”，不另建任务中心。模拟盘和实盘的非回测计划统一持久化到
+`auto_exit_plans`；回测仍使用内存 `ExitPlanBook`。策略来源计划会在 Engine
+运行时交接给持久化 `ExitPlanMonitor`，因此入场策略停止后，已有保护计划仍
+继续监控。
+
+人工清仓使用来源 `MANUAL_LIQUIDATION` 和规则 `MANUAL_TRIGGER`。批量操作为
+每只股票建立独立计划，以 `group_id` 关联。确认时必须明确选择：
+
+- `AVAILABLE_NOW`：只保护确认时的可卖数量，不等待 T+1。
+- `UNTIL_SNAPSHOT_CLEARED`：保护确认时的总持仓，跨日继续处理不可卖部分。
+- `UNALLOCATED_ONLY`：保留冲突计划，只认领未分配数量。
+- `REPLACE_CANCELLABLE`：取消无待成交委托的冲突计划后重新认领。
+
+暂停和错误计划仍占用保护数量，完成或取消才释放。存在 `EXIT_PENDING` 或待
+成交 SELL 时，禁止重复清仓或替换。持续清仓只保护确认时快照，之后新增持仓
+不自动加入，计划完成投影必须显示“新增持仓未纳入本次清仓”。
+
+通用 `TradeIntentProcessor` 先写入 `strategy_trade_intents`，使用
+`owner_type=EXIT_PLAN`、`owner_id=plan_id` 和账户范围标识，再执行 OrderSizer、
+T+1/可卖量、涨跌停、后置风控和数据库消息箱投递。实盘未预授权 SELL 进入
+`AWAITING_APPROVAL`，必须通过设备绑定的预览—确认挑战后重新经过实时风控；
+拒绝则释放 pending 意图并恢复计划监控。

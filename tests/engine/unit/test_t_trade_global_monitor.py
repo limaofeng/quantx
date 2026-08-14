@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import quantx_engine.t_trade_global_monitor as monitor_module
 from quantx_engine.t_trade_global_monitor import (
   TTradeGlobalMonitorService,
 )
@@ -121,6 +122,46 @@ async def test_monitor_projects_multiple_holdings_from_one_run():
 
 
 @pytest.mark.asyncio
+async def test_monitor_embeds_full_readiness_for_live_controls(
+  monkeypatch: pytest.MonkeyPatch,
+):
+  readiness = {
+    "stage": "SHADOW",
+    "engine_status": "READY",
+    "agent_status": "READY",
+    "reconcile_status": "READY",
+    "kill_switch": False,
+    "can_approve": False,
+    "can_activate_live": False,
+    "blocked_reasons": ["尚未基于最新完整快照建立受控交易窗口"],
+    "controlled_window_active": False,
+  }
+  operations = SimpleNamespace(readiness=AsyncMock(return_value=readiness))
+  monkeypatch.setattr(
+    monitor_module,
+    "TTradeOperationsService",
+    lambda: operations,
+  )
+  save_projection = AsyncMock(side_effect=lambda _account_id, data: data)
+  monkeypatch.setattr(
+    monitor_module.t_trade_monitor_projection_service,
+    "save",
+    save_projection,
+  )
+  service = TTradeGlobalMonitorService()
+  service._load_config = AsyncMock(return_value=config())
+  service.position_service.get_snapshot_status = AsyncMock(return_value=None)
+  service.position_service.get_positions = AsyncMock(return_value=[])
+  service.session_service.get_run_sessions = AsyncMock(return_value=[])
+
+  result = await service.get_monitor("account-1")
+
+  assert result["readiness"] is readiness
+  assert result["agent_status"] == "READY"
+  assert result["blocked_reasons"] == readiness["blocked_reasons"]
+
+
+@pytest.mark.asyncio
 async def test_four_lot_holding_is_eligible_without_a_percentage_gate():
   service = TTradeGlobalMonitorService()
   service._load_config = AsyncMock(return_value=config(run_id=None))
@@ -175,6 +216,7 @@ async def test_monitor_uses_instrument_master_when_snapshot_name_is_code():
 @pytest.mark.asyncio
 async def test_reconcile_creates_one_run_for_dynamic_holdings_universe():
   service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(return_value=[])
   current = config(ignored=["000001.SZ"], run_id=None)
   service._load_config = AsyncMock(return_value=current)
   service.position_service.read_agent_snapshot = AsyncMock(return_value={})
@@ -206,6 +248,9 @@ async def test_reconcile_creates_one_run_for_dynamic_holdings_universe():
 @pytest.mark.asyncio
 async def test_reconcile_updates_existing_run_once_for_all_codes():
   service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-global"]
+  )
   service._load_config = AsyncMock(return_value=config())
   service.position_service.read_agent_snapshot = AsyncMock(return_value={})
   service.position_service.get_positions = AsyncMock(
@@ -230,8 +275,43 @@ async def test_reconcile_updates_existing_run_once_for_all_codes():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_restores_paused_run_before_updating_universe():
+  service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-global"]
+  )
+  service._load_config = AsyncMock(return_value=config())
+  service.position_service.read_agent_snapshot = AsyncMock(return_value={})
+  service.position_service.get_positions = AsyncMock(
+    return_value=[position("600000.SH")]
+  )
+  service.session_service.get_run_sessions = AsyncMock(
+    return_value=[session("600000.SH", run_status="paused")]
+  )
+  service.session_service.ensure_account_strategy_running = AsyncMock(
+    return_value=True
+  )
+  service.session_service.update_account_strategy = AsyncMock(
+    return_value={"added": [], "removed": [], "instruments": []}
+  )
+  service._save_reconcile_config = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={"account_id": "account-1"})
+
+  await service.reconcile_account("account-1")
+
+  service.session_service.ensure_account_strategy_running.assert_awaited_once_with(
+    "run-global"
+  )
+  service.session_service.update_account_strategy.assert_awaited_once()
+  assert service._save_reconcile_config.await_args.args[1] == []
+
+
+@pytest.mark.asyncio
 async def test_disabled_monitor_keeps_only_active_code_in_draining_state():
   service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-global"]
+  )
   service._load_config = AsyncMock(return_value=config(enabled=False))
   service.position_service.read_agent_snapshot = AsyncMock(return_value={})
   service.position_service.get_positions = AsyncMock(
@@ -275,6 +355,7 @@ async def test_failed_agent_snapshot_does_not_reconcile_or_clear_universe():
 @pytest.mark.asyncio
 async def test_terminal_run_without_active_batch_is_replaced():
   service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(return_value=[])
   current = config()
   service._load_config = AsyncMock(return_value=current)
   service.position_service.read_agent_snapshot = AsyncMock(return_value={})
@@ -303,6 +384,7 @@ async def test_terminal_run_without_active_batch_is_replaced():
 @pytest.mark.asyncio
 async def test_terminal_run_with_active_batch_blocks_replacement():
   service = TTradeGlobalMonitorService()
+  service.session_service.list_active_account_run_ids = AsyncMock(return_value=[])
   current = config()
   service._load_config = AsyncMock(return_value=current)
   service.position_service.read_agent_snapshot = AsyncMock(return_value={})
@@ -326,3 +408,99 @@ async def test_terminal_run_with_active_batch_blocks_replacement():
   errors = service._save_reconcile_config.await_args.args[1]
   assert "策略运行状态异常" in errors[0]
   assert current.strategy_run_id == "run-global"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_adopts_the_only_active_run_when_pointer_is_lost():
+  service = TTradeGlobalMonitorService()
+  current = config(run_id=None)
+  service._load_config = AsyncMock(return_value=current)
+  service.position_service.read_agent_snapshot = AsyncMock(return_value={})
+  service.position_service.get_positions = AsyncMock(
+    return_value=[position("600000.SH")]
+  )
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-existing"]
+  )
+  service.session_service.get_run_sessions = AsyncMock(
+    return_value=[session("600000.SH")]
+  )
+  service.session_service.update_account_strategy = AsyncMock(
+    return_value={"added": [], "removed": [], "instruments": []}
+  )
+  service.session_service.start_account_strategy = AsyncMock()
+  service.session_service.stop_account_strategy = AsyncMock()
+  service._save_reconcile_config = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={"account_id": "account-1"})
+
+  await service.reconcile_account("account-1")
+
+  assert current.strategy_run_id == "run-existing"
+  service.session_service.update_account_strategy.assert_awaited_once()
+  service.session_service.start_account_strategy.assert_not_awaited()
+  service.session_service.stop_account_strategy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stops_idle_duplicate_run():
+  service = TTradeGlobalMonitorService()
+  current = config()
+  service._load_config = AsyncMock(return_value=current)
+  service.position_service.read_agent_snapshot = AsyncMock(return_value={})
+  service.position_service.get_positions = AsyncMock(
+    return_value=[position("600000.SH")]
+  )
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-duplicate", "run-global"]
+  )
+  service.session_service.get_run_sessions = AsyncMock(
+    side_effect=lambda run_id: [session("600000.SH")]
+  )
+  service.session_service.stop_account_strategy = AsyncMock(
+    return_value={"success": True, "message": "stopped"}
+  )
+  service.session_service.update_account_strategy = AsyncMock(
+    return_value={"added": [], "removed": [], "instruments": []}
+  )
+  service._save_reconcile_config = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={"account_id": "account-1"})
+
+  await service.reconcile_account("account-1")
+
+  service.session_service.stop_account_strategy.assert_awaited_once_with(
+    "run-duplicate"
+  )
+  service.session_service.update_account_strategy.assert_awaited_once()
+  assert service._save_reconcile_config.await_args.args[1] == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_blocks_when_duplicate_run_has_open_work():
+  service = TTradeGlobalMonitorService()
+  current = config()
+  service._load_config = AsyncMock(return_value=current)
+  service.position_service.read_agent_snapshot = AsyncMock(return_value={})
+  service.position_service.get_positions = AsyncMock(
+    return_value=[position("600000.SH")]
+  )
+  service.session_service.list_active_account_run_ids = AsyncMock(
+    return_value=["run-duplicate", "run-global"]
+  )
+  service.session_service.get_run_sessions = AsyncMock(
+    side_effect=lambda run_id: [
+      session("600000.SH", active=100 if run_id == "run-duplicate" else 0)
+    ]
+  )
+  service.session_service.stop_account_strategy = AsyncMock()
+  service.session_service.update_account_strategy = AsyncMock()
+  service.session_service.start_account_strategy = AsyncMock()
+  service._save_reconcile_config = AsyncMock()
+  service.get_monitor = AsyncMock(return_value={"account_id": "account-1"})
+
+  await service.reconcile_account("account-1")
+
+  service.session_service.stop_account_strategy.assert_not_awaited()
+  service.session_service.update_account_strategy.assert_not_awaited()
+  service.session_service.start_account_strategy.assert_not_awaited()
+  errors = service._save_reconcile_config.await_args.args[1]
+  assert "多个做 T 活跃实例" in errors[0]

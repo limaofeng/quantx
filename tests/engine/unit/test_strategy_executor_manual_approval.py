@@ -1,3 +1,4 @@
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,6 +20,7 @@ from quantx_engine.strategy_executor import (
   StrategyExecutor,
   StrategyRuntime,
 )
+from quantx_infrastructure.core.utils import time_utils
 
 
 class FakeStateManager:
@@ -37,6 +39,43 @@ class FakeStateManager:
 
   def get_account_quota(self):
     return {"total_asset": 100_000.0}
+
+
+def test_manual_approval_fails_closed_for_missing_or_stale_execution_quote():
+  executor = StrategyExecutor()
+  context = StrategyContext(
+    run_id="run-fresh-quote",
+    mode=StrategyRunMode.PAPER,
+    instruments=["600000.SH"],
+    parameters={"execution_quote_max_age_seconds": 3.0},
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="fresh-quote",
+    strategy_id=1,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+  )
+  intent = TradeIntent(
+    strategy_id="1",
+    run_id=runtime.run_id,
+    instrument_code="600000.SH",
+    direction=TradeIntentDirection.BUY,
+    bucket="swing",
+    reason="fresh_quote",
+    target_volume=100,
+    execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
+  )
+
+  assert executor._approval_failure(runtime, intent)[0] == "APPROVAL_QUOTE_MISSING"
+
+  runtime.latest_market_data["600000.SH"] = MarketDataSnapshot(
+    instrument_code="600000.SH",
+    timestamp=time_utils.now() - timedelta(seconds=4),
+    price=10.0,
+    ask_price=[10.0],
+  )
+  assert executor._approval_failure(runtime, intent)[0] == "APPROVAL_QUOTE_STALE"
 
 
 def test_t_trade_approval_rechecks_single_amount_hard_cap():

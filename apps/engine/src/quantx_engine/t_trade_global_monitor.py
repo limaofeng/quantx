@@ -38,6 +38,17 @@ GLOBAL_SETTING_DEFAULTS: Dict[str, Any] = {
   "pullback_threshold_pct": 0.8,
   "rebound_threshold_pct": 0.2,
   "max_spread_ticks": 3,
+  "momentum_enabled": True,
+  "momentum_window_seconds": 60,
+  "momentum_min_rise_pct": 0.8,
+  "momentum_min_move_seconds": 15,
+  "momentum_baseline_seconds": 300,
+  "momentum_min_amount_velocity_ratio": 2.0,
+  "momentum_min_vwap_premium_pct": 2.0,
+  "momentum_max_vwap_premium_pct": 3.5,
+  "momentum_high_tolerance_ticks": 1,
+  "momentum_max_spread_ticks": 10,
+  "momentum_max_spread_pct": 0.3,
   "approval_ttl_seconds": 30,
   "max_price_deviation_pct": 0.3,
   "max_exit_slippage_bps": 30.0,
@@ -46,6 +57,15 @@ GLOBAL_SETTING_DEFAULTS: Dict[str, Any] = {
   "initial_gap_pct": 1.5,
   "trailing_gap_slope": 0.25,
   "max_gap_pct": 3.0,
+  "high_profit_lock_enabled": True,
+  "high_profit_arm_pct": 4.0,
+  "high_profit_max_drawdown_pct": 1.2,
+  "rapid_reversal_enabled": True,
+  "rapid_reversal_window_seconds": 15,
+  "rapid_reversal_drawdown_pct": 0.8,
+  "rapid_reversal_confirm_ticks": 2,
+  "limit_up_touch_exit_enabled": True,
+  "limit_up_touch_tolerance_ticks": 0,
   "hard_stop_enabled": False,
   "hard_stop_pct": -0.8,
   "time_exit_mode": "UNLIMITED",
@@ -143,9 +163,7 @@ class TTradeGlobalMonitorService:
       except Exception as exc:
         config_data["last_error"] = config_data.get("last_error") or str(exc)
 
-    position_by_code = {
-      str(item.stock_code or "").upper(): item for item in positions
-    }
+    position_by_code = {str(item.stock_code or "").upper(): item for item in positions}
     session_by_code = {item["stock_code"]: item for item in sessions}
     stock_codes = sorted(set(position_by_code) | set(session_by_code))
     codes_missing_names = [
@@ -212,7 +230,9 @@ class TTradeGlobalMonitorService:
     holdings.sort(
       key=lambda item: (
         0 if item["session"] and item["session"].get("pending_entry_intent_id") else 1,
-        0 if item["session"] and int(item["session"].get("active_volume", 0) or 0) else 1,
+        0
+        if item["session"] and int(item["session"].get("active_volume", 0) or 0)
+        else 1,
         item["stock_code"],
       )
     )
@@ -244,6 +264,7 @@ class TTradeGlobalMonitorService:
           "can_approve": readiness["can_approve"],
           "can_activate_live": readiness["can_activate_live"],
           "blocked_reasons": readiness["blocked_reasons"],
+          "readiness": readiness,
         }
       )
     except Exception as exc:
@@ -291,10 +312,57 @@ class TTradeGlobalMonitorService:
       return await self.get_monitor(account_id)
 
     sessions: List[Dict[str, Any]] = []
+    coordination_blocked = False
+    try:
+      active_run_ids = await self.session_service.list_active_account_run_ids(
+        account_id
+      )
+    except Exception as exc:
+      active_run_ids = []
+      coordination_blocked = True
+      errors.append(f"做 T 活跃实例扫描失败: {exc}")
+
+    sessions_by_run: Dict[str, List[Dict[str, Any]]] = {}
+    candidate_run_ids = list(active_run_ids)
+    if config.strategy_run_id and config.strategy_run_id not in candidate_run_ids:
+      candidate_run_ids.append(config.strategy_run_id)
+    for run_id in candidate_run_ids:
+      try:
+        sessions_by_run[run_id] = await self.session_service.get_run_sessions(run_id)
+      except Exception as exc:
+        coordination_blocked = True
+        errors.append(f"做 T 实例 {run_id} 状态读取失败: {exc}")
+
     if config.strategy_run_id:
-      sessions = await self.session_service.get_run_sessions(config.strategy_run_id)
+      sessions = sessions_by_run.get(config.strategy_run_id, [])
       if not sessions:
         config.strategy_run_id = None
+
+    if not config.strategy_run_id:
+      adoptable = [run_id for run_id in active_run_ids if sessions_by_run.get(run_id)]
+      if adoptable:
+        config.strategy_run_id = adoptable[0]
+        sessions = sessions_by_run[config.strategy_run_id]
+
+    duplicate_run_ids = [
+      run_id for run_id in active_run_ids if run_id != config.strategy_run_id
+    ]
+    for duplicate_run_id in duplicate_run_ids:
+      duplicate_sessions = sessions_by_run.get(duplicate_run_id, [])
+      if self._sessions_have_open_work(duplicate_sessions):
+        coordination_blocked = True
+        errors.append(
+          "检测到多个做 T 活跃实例，重复实例仍有持仓批次或待处理意图："
+          f"{duplicate_run_id}；已停止新建和标的协调"
+        )
+        continue
+      try:
+        result = await self.session_service.stop_account_strategy(duplicate_run_id)
+        if not bool(result.get("success")):
+          raise RuntimeError(str(result.get("message") or "停止重复实例失败"))
+      except Exception as exc:
+        coordination_blocked = True
+        errors.append(f"停止重复做 T 实例 {duplicate_run_id} 失败: {exc}")
 
     run_mode = str(sessions[0].get("mode", "") or "").lower() if sessions else ""
     mode_mismatch = bool(run_mode and run_mode != str(config.mode or "paper").lower())
@@ -321,12 +389,31 @@ class TTradeGlobalMonitorService:
     run_status_unavailable = bool(
       run_status and run_status not in ACTIVE_T_STRATEGY_RUN_STATUSES
     )
-    coordination_blocked = run_status_unavailable and active_count > 0
-    if coordination_blocked:
+    unsafe_run_status = run_status_unavailable and active_count > 0
+    coordination_blocked = coordination_blocked or unsafe_run_status
+    if unsafe_run_status:
       errors.append(
         f"策略运行状态异常（{run_status}），仍有 {active_count} 个活动批次，"
         "已停止标的协调以保护交易状态"
       )
+
+    should_restore_run = bool(
+      config.strategy_run_id
+      and run_status in {"paused", "pending"}
+      and (
+        (bool(config.enabled) and bool(desired) and not mode_mismatch)
+        or active_count > 0
+      )
+    )
+    if should_restore_run and not coordination_blocked:
+      try:
+        await self.session_service.ensure_account_strategy_running(
+          config.strategy_run_id
+        )
+        run_status = "running"
+      except Exception as exc:
+        coordination_blocked = True
+        errors.append(f"做 T 策略运行恢复失败: {exc}")
 
     should_stop = bool(
       config.strategy_run_id
@@ -393,6 +480,15 @@ class TTradeGlobalMonitorService:
     await self._save_reconcile_config(config, errors)
     return await self.get_monitor(account_id)
 
+  @staticmethod
+  def _sessions_have_open_work(sessions: List[Dict[str, Any]]) -> bool:
+    return any(
+      int(item.get("active_volume", 0) or 0) > 0
+      or bool(item.get("pending_entry_intent_id"))
+      or bool(item.get("pending_exit_intent_id"))
+      for item in sessions
+    )
+
   def _build_universe(
     self,
     config: TTradeGlobalConfig,
@@ -453,9 +549,7 @@ class TTradeGlobalMonitorService:
           or getattr(position, "open_price", 0.0)
           or 0.0
         ),
-        "position_market_value": float(
-          getattr(position, "market_value", 0.0) or 0.0
-        ),
+        "position_market_value": float(getattr(position, "market_value", 0.0) or 0.0),
       }
     return metadata, sorted(desired)
 
@@ -646,9 +740,7 @@ class TTradeGlobalMonitorService:
     return {key: normalized[key] for key in GLOBAL_SETTING_DEFAULTS}
 
   def _normalized_settings(self, settings: Any) -> Dict[str, Any]:
-    normalized = self.session_service._normalize_exit_settings(
-      dict(settings or {})
-    )
+    normalized = self.session_service._normalize_exit_settings(dict(settings or {}))
     return {
       **GLOBAL_SETTING_DEFAULTS,
       **{
@@ -669,8 +761,10 @@ class TTradeGlobalMonitorService:
     session: Optional[Dict[str, Any]],
   ) -> Tuple[str, str]:
     active = int((session or {}).get("active_volume", 0) or 0)
-    if session and active > 0 and (
-      not config_data["enabled"] or is_ignored or not is_eligible
+    if (
+      session
+      and active > 0
+      and (not config_data["enabled"] or is_ignored or not is_eligible)
     ):
       return "DRAINING", "已有 T 批次，仅保留自动退出监控"
     if is_ignored:
@@ -691,7 +785,11 @@ class TTradeGlobalMonitorService:
     return "PENDING_START", "等待动态标的池协调"
 
   def _normalize_ignored_codes(self, values: Any) -> List[str]:
-    raw_values = re.split(r"[\s,，;；]+", values) if isinstance(values, str) else list(values or [])
+    raw_values = (
+      re.split(r"[\s,，;；]+", values)
+      if isinstance(values, str)
+      else list(values or [])
+    )
     normalized: List[str] = []
     for raw in raw_values:
       code = self._normalize_stock_code(raw)

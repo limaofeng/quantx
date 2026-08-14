@@ -19,10 +19,13 @@ from quantx_infrastructure.database.relational_connection import (
   engine,
 )
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
+from quantx_infrastructure.services.limit_up_radar import limit_up_radar_monitor
 from sqlalchemy import text
 
 from .command_processor import run_command_consumer
 from .conditional_liquidation import conditional_liquidation_monitor
+from .exit_plan_monitor import exit_plan_monitor
+from .limit_up_board_runtime import limit_up_board_assistant
 from .realtime_manager import realtime_manager
 from .report_processor import run_report_consumer
 from .strategy_manager import strategy_manager
@@ -268,10 +271,13 @@ async def run_engine() -> None:
     set_intraday_warm_cache(intraday_warm_cache)
     await market_data_service.initialize()
     await realtime_manager.start()
+    await limit_up_radar_monitor.start()
     await intraday_warm_cache.start()
     await strategy_manager.start()
+    await exit_plan_monitor.start()
     await conditional_liquidation_monitor.start()
     await t_trade_global_monitor.start()
+    await limit_up_board_assistant.start()
     tasks = [
       asyncio.create_task(
         _heartbeat(stopped, instance_id),
@@ -305,11 +311,16 @@ async def run_engine() -> None:
     await _stop_engine_tasks(tasks)
     await _stop_component("t-trade monitor", t_trade_global_monitor.stop)
     await _stop_component(
+      "limit-up board assistant", limit_up_board_assistant.stop
+    )
+    await _stop_component(
       "conditional liquidation monitor",
       conditional_liquidation_monitor.stop,
     )
+    await _stop_component("exit plan monitor", exit_plan_monitor.stop)
     await _stop_component("strategy manager", strategy_manager.stop)
     await _stop_component("intraday warm cache", intraday_warm_cache.shutdown)
+    await _stop_component("limit-up radar", limit_up_radar_monitor.stop)
     await _stop_component("realtime manager", realtime_manager.stop)
     await _stop_component("market data", market_data_service.shutdown)
     set_intraday_warm_cache(None)

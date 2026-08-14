@@ -1,9 +1,10 @@
 """
 Engine-owned intraday warm cache for actively watched symbols.
 
-The service owns proactive tick/1m subscriptions for holdings, watchlist items,
-and symbols opened by charts. Initial data is converged asynchronously through
-durable Agent/Worker transfers; query paths never invoke a local trading terminal.
+The service owns proactive tick/1m subscriptions for core market indices,
+holdings, watchlist items, and symbols opened by charts. Initial data is
+converged asynchronously through durable Agent/Worker transfers; query paths
+never invoke a local trading terminal.
 """
 
 import asyncio
@@ -26,6 +27,16 @@ from quantx_infrastructure.services.watchlist_service import (
 
 logger = logging.getLogger(__name__)
 INITIAL_DOWNLOAD_SOURCES = {"holding", "watchlist"}
+CORE_MARKET_INDEX_SYMBOLS = frozenset(
+  {
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "000300.SH",
+    "000905.SH",
+    "000852.SH",
+  }
+)
 
 
 @dataclass
@@ -176,6 +187,7 @@ class IntradayWarmCacheService:
     except Exception as exc:
       logger.debug("Warm cache watchlist source unavailable: %s", exc)
 
+    await self.replace_source_symbols("market_index", CORE_MARKET_INDEX_SYMBOLS)
     await self.replace_source_symbols("holding", holding_symbols)
     await self.replace_source_symbols("watchlist", watchlist_symbols)
 

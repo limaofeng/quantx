@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Optional
 
 from quantx_domain.clock import utcnow
 from quantx_domain.grid_book import GRID_BOOK_CUSTOM_STATE_KEY
+from quantx_infrastructure.core.assistant_strategy_policy import (
+  LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
+)
 from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
@@ -19,6 +23,7 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
 )
 from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
 from quantx_infrastructure.services.t_trade_service import TTradeService
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from sqlalchemy import select, update
 
 from quantx_engine.strategy_manager import strategy_manager
@@ -27,6 +32,8 @@ from quantx_engine.warm_cache import (
 )
 
 from .conditional_liquidation import conditional_liquidation_monitor
+from .exit_plan_monitor import exit_plan_monitor
+from .limit_up_board_runtime import limit_up_board_assistant
 from .t_trade_runtime import t_trade_global_monitor
 
 
@@ -50,6 +57,18 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
   return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+  if isinstance(value, dict):
+    return dict(value)
+  if isinstance(value, str):
+    try:
+      parsed = json.loads(value)
+    except (TypeError, ValueError):
+      return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+  return {}
+
+
 async def _strategy_create(payload: dict[str, Any]) -> dict[str, Any]:
   run_id = str(payload["run_id"])
   existing_runtime = strategy_manager.get_run(run_id)
@@ -58,6 +77,38 @@ async def _strategy_create(payload: dict[str, Any]) -> dict[str, Any]:
 
   async with AsyncSessionLocal() as db:
     strategy = await StrategyRepository(db).find_by_id(int(payload["strategy_id"]))
+    if strategy and strategy.class_name == LIMIT_UP_BOARD_STRATEGY_CLASS_NAME:
+      mode = StrategyRunMode(str(payload["mode"]).lower())
+      if mode != StrategyRunMode.BACKTEST:
+        instruments = {
+          str(code or "").strip().upper()
+          for code in list(payload.get("instruments") or [])
+          if str(code or "").strip()
+        }
+        parameters = _mapping(payload.get("parameters"))
+        account_id = str(parameters.get("account_id") or "").strip()
+        active_runs = await StrategyRunRepository(
+          db
+        ).find_active_runs_by_strategy_class(LIMIT_UP_BOARD_STRATEGY_CLASS_NAME)
+        for active_run in active_runs:
+          if str(active_run.id) == run_id:
+            continue
+          active_instruments = {
+            str(code or "").strip().upper()
+            for code in list(active_run.instruments or [])
+            if str(code or "").strip()
+          }
+          if not instruments.intersection(active_instruments):
+            continue
+          active_parameters = _mapping(active_run.parameters)
+          active_account_id = str(
+            active_parameters.get("account_id") or ""
+          ).strip()
+          if account_id and active_account_id and account_id != active_account_id:
+            continue
+          raise ValueError(
+            f"ACTIVE_LIMIT_UP_INSTANCE_EXISTS:{active_run.id}"
+          )
   if strategy is None:
     raise ValueError(f"策略模板不存在: {payload['strategy_id']}")
   strategy_class = strategy_registry.get_strategy_class(
@@ -159,6 +210,62 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
         )
       )
     }
+  if command_type == "EXIT_PLAN_CREATE_MANUAL":
+    record = await AutoExitPlanService().create_manual_exit_plan(payload)
+    return {"plan_id": record.plan_id, "config_version": record.config_version}
+  if command_type == "EXIT_PLAN_UPDATE_MANUAL":
+    record = await AutoExitPlanService().update_manual_exit_plan(payload)
+    return {"plan_id": record.plan_id, "config_version": record.config_version}
+  if command_type == "EXIT_PLAN_SET_ENABLED":
+    record = await AutoExitPlanService().set_enabled(
+      str(payload["plan_id"]),
+      bool(payload["enabled"]),
+      account_id=payload.get("account_id"),
+      config_version=payload.get("config_version"),
+    )
+    return {
+      "plan_id": record.plan_id if record else str(payload["plan_id"]),
+      "config_version": record.config_version if record else None,
+    }
+  if command_type == "EXIT_PLAN_CANCEL":
+    record = await AutoExitPlanService().cancel(
+      str(payload["plan_id"]),
+      str(payload.get("reason") or "USER_CANCELLED"),
+      account_id=payload.get("account_id"),
+      config_version=payload.get("config_version"),
+    )
+    return {
+      "plan_id": record.plan_id if record else str(payload["plan_id"]),
+      "config_version": record.config_version if record else None,
+    }
+  if command_type == "EXIT_PLAN_EVALUATE_NOW":
+    return {
+      "items": _json_value(
+        await exit_plan_monitor.evaluate_all_active_plans(
+          account_id=payload.get("account_id"),
+          instrument_code=payload.get("instrument_code"),
+          plan_id=payload.get("plan_id"),
+        )
+      )
+    }
+  if command_type == "EXIT_PLAN_LIQUIDATE_POSITIONS":
+    return _json_value(
+      await AutoExitPlanService().create_liquidation_group(payload)
+    )
+  if command_type == "EXIT_PLAN_CONFIRM_INTENT":
+    return _json_value(
+      await exit_plan_monitor.confirm_exit_intent(
+        plan_id=str(payload["plan_id"]),
+        intent_id=str(payload["intent_id"]),
+      )
+    )
+  if command_type == "EXIT_PLAN_REJECT_INTENT":
+    await AutoExitPlanService().reject_exit_intent(
+      plan_id=str(payload["plan_id"]),
+      intent_id=str(payload["intent_id"]),
+      reason=str(payload.get("reason") or "USER_REJECTED"),
+    )
+    return {"success": True}
   if command_type == "WARM_CACHE_REFRESH_SOURCES":
     await intraday_warm_cache.refresh_source_symbols()
     return {"success": True}
@@ -168,6 +275,23 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
         intraday_warm_cache.get_status(payload.get("symbols"))
       )
     }
+
+  if command_type == "LIMIT_UP_BOARD_ASSISTANT_SAVE":
+    return _json_value(
+      await limit_up_board_assistant.save_config(payload["input"])
+    )
+  if command_type == "LIMIT_UP_BOARD_ASSISTANT_GET":
+    return _json_value(
+      await limit_up_board_assistant.get_monitor(payload["account_id"])
+    )
+  if command_type == "LIMIT_UP_BOARD_ASSISTANT_RECONCILE":
+    return _json_value(
+      await limit_up_board_assistant.reconcile_account(payload["account_id"])
+    )
+  if command_type == "LIMIT_UP_BOARD_CANDIDATE_ARM":
+    return _json_value(await limit_up_board_assistant.arm_candidate(payload))
+  if command_type == "LIMIT_UP_BOARD_CANDIDATE_DISARM":
+    return _json_value(await limit_up_board_assistant.disarm_candidate(payload))
 
   t_trade_service = TTradeService(strategy_manager)
   if command_type == "T_TRADE_START_SESSION":

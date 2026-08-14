@@ -45,6 +45,49 @@ def context(price, timestamp=None):
   )
 
 
+def adaptive_context(
+  price,
+  timestamp,
+  *,
+  volume=None,
+  depth=0.0,
+  market_age=0.0,
+  volume_age=0.0,
+):
+  return ExitEvaluationContext(
+    timestamp=timestamp,
+    current_price=price,
+    bid_price=price,
+    ask_price=price + 0.01,
+    cumulative_volume=volume,
+    depth_imbalance_5=depth,
+    market_data_age_seconds=market_age,
+    volume_data_age_seconds=volume_age,
+    source="test_tick",
+  )
+
+
+def adaptive_rule(**parameters):
+  return ExitRuleSpec(
+    rule_id="adaptive",
+    strategy=ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING,
+    parameters={"arm_target_profit_pct": 2.0, **parameters},
+  )
+
+
+def warm_adaptive_plan(book, start, *, peak=10.5):
+  prices = [10.0, 10.05, 10.1, 10.15, 10.2, 10.3, peak]
+  for index, price in enumerate(prices):
+    assert book.evaluate(
+      "600000.SH",
+      adaptive_context(
+        price,
+        start.replace(minute=start.minute + index),
+        volume=10_000 + index * 1_000,
+      ),
+    ) == []
+
+
 def test_plan_chooses_highest_priority_triggered_sell_strategy():
   book = ExitPlanBook()
   book.register_entry_fill(
@@ -128,7 +171,245 @@ def test_price_trailing_rule_stays_armed_after_current_profit_drops_below_arm_le
   [decision] = book.evaluate("600000.SH", context(10.4))
 
   assert decision.rule_id == "price-trailing"
-  assert decision.metrics["peak_gross_profit_pct"] == pytest.approx(10.0)
+  # ExitPlanTemplate defaults to executable BID as its profit reference.
+  assert decision.metrics["peak_gross_profit_pct"] == pytest.approx(9.9)
+
+
+def test_high_profit_lock_caps_peak_profit_drawdown():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="trailing",
+        strategy=ExitRuleType.TRAILING_NET_PROFIT,
+        parameters={
+          "target_profit_pct": 2.0,
+          "base_floor_pct": 0.5,
+          "initial_gap_pct": 1.5,
+          "gap_slope": 0.25,
+          "max_gap_pct": 3.0,
+          "high_profit_lock_enabled": True,
+          "high_profit_arm_pct": 4.0,
+          "high_profit_max_drawdown_pct": 1.2,
+        },
+      )
+    ),
+    volume=300,
+    price=27.80,
+  )
+
+  assert book.evaluate("600000.SH", context(29.68)) == []
+  assert plan.trailing_floor_pct == pytest.approx(
+    plan.peak_net_profit_pct - 1.2
+  )
+
+
+def test_rapid_profit_reversal_requires_two_ticks_inside_peak_window():
+  book = ExitPlanBook()
+  book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="rapid-reversal",
+        strategy=ExitRuleType.RAPID_PROFIT_REVERSAL,
+        priority=850,
+        parameters={
+          "arm_profit_pct": 4.0,
+          "window_seconds": 15,
+          "drawdown_pct": 0.8,
+          "confirm_ticks": 2,
+        },
+      )
+    ),
+    volume=300,
+    price=27.80,
+  )
+
+  assert book.evaluate(
+    "600000.SH", context(29.68, datetime(2026, 8, 12, 14, 2, 39))
+  ) == []
+  assert book.evaluate(
+    "600000.SH", context(29.35, datetime(2026, 8, 12, 14, 2, 45))
+  ) == []
+  [decision] = book.evaluate(
+    "600000.SH", context(29.29, datetime(2026, 8, 12, 14, 2, 48))
+  )
+
+  assert decision.rule_type == ExitRuleType.RAPID_PROFIT_REVERSAL.value
+  assert decision.reason == "RAPID_PROFIT_REVERSAL"
+  assert decision.metrics["consecutive_matches"] == 2
+  assert decision.metrics["profit_reference"] == "BID"
+
+
+def test_limit_up_touch_requires_an_executable_bid_at_the_upper_limit():
+  book = ExitPlanBook()
+  book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="limit-up-touch",
+        strategy=ExitRuleType.LIMIT_UP_TOUCH,
+        priority=900,
+        parameters={"tolerance_ticks": 0},
+      )
+    ),
+    volume=300,
+    price=27.80,
+  )
+
+  assert (
+    book.evaluate(
+      "600000.SH",
+      ExitEvaluationContext(
+        timestamp=datetime(2026, 8, 12, 14, 0),
+        current_price=31.69,
+        bid_price=31.68,
+        ask_price=31.69,
+        limit_up=31.69,
+        price_tick=0.01,
+      ),
+    )
+    == []
+  )
+
+  [decision] = book.evaluate(
+    "600000.SH",
+    ExitEvaluationContext(
+      timestamp=datetime(2026, 8, 12, 14, 0, 3),
+      current_price=31.69,
+      bid_price=31.69,
+      ask_price=0.0,
+      limit_up=31.69,
+      price_tick=0.01,
+    ),
+  )
+
+  assert decision.rule_type == ExitRuleType.LIMIT_UP_TOUCH.value
+  assert decision.reason == "LIMIT_UP_TOUCH"
+  assert decision.volume == 300
+  assert decision.metrics["executable_bid"] == 31.69
+
+
+def test_adaptive_trailing_arms_but_keeps_following_price_volume_strength():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(adaptive_rule()),
+    volume=500,
+    price=10.0,
+  )
+  start = datetime(2026, 8, 13, 9, 50)
+
+  warm_adaptive_plan(book, start)
+
+  state = plan.rule_state["adaptive"]
+  assert state["armed"] is True
+  assert state["phase"] == "FOLLOWING"
+  assert state["last_decision"] == "FOLLOW"
+  assert state["data_quality"] == "FULL"
+  assert plan.remaining_volume == 500
+
+
+def test_adaptive_trailing_requires_two_distinct_weak_observations():
+  book = ExitPlanBook()
+  book.register_entry_fill(
+    template(adaptive_rule()),
+    volume=500,
+    price=10.0,
+  )
+  start = datetime(2026, 8, 13, 9, 50)
+  warm_adaptive_plan(book, start)
+
+  assert book.evaluate(
+    "600000.SH",
+    adaptive_context(
+      10.43,
+      datetime(2026, 8, 13, 9, 56, 15),
+      volume=17_500,
+      depth=-0.25,
+    ),
+  ) == []
+  [decision] = book.evaluate(
+    "600000.SH",
+    adaptive_context(
+      10.42,
+      datetime(2026, 8, 13, 9, 56, 18),
+      volume=18_000,
+      depth=-0.25,
+    ),
+  )
+
+  assert decision.rule_type == ExitRuleType.ADAPTIVE_VOLUME_PRICE_TRAILING.value
+  assert decision.reason == "ADAPTIVE_TRAILING_WEAKNESS_CONFIRMED"
+  assert decision.volume == 500
+  assert decision.metrics["consecutive_weak"] == 2
+
+
+def test_adaptive_trailing_immediately_exits_on_large_peak_drawdown():
+  book = ExitPlanBook()
+  book.register_entry_fill(
+    template(adaptive_rule()),
+    volume=300,
+    price=10.0,
+  )
+  start = datetime(2026, 8, 13, 9, 50)
+  warm_adaptive_plan(book, start)
+
+  [decision] = book.evaluate(
+    "600000.SH",
+    adaptive_context(
+      10.36,
+      datetime(2026, 8, 13, 9, 56, 15),
+      volume=18_500,
+    ),
+  )
+
+  assert decision.reason == "ADAPTIVE_TRAILING_IMMEDIATE_REVERSAL"
+  assert decision.metrics["peak_drawdown_pct"] >= 1.2
+
+
+def test_adaptive_trailing_degrades_to_price_only_when_volume_is_stale():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(adaptive_rule()),
+    volume=300,
+    price=10.0,
+  )
+  start = datetime(2026, 8, 13, 9, 50)
+  warm_adaptive_plan(book, start)
+
+  assert book.evaluate(
+    "600000.SH",
+    adaptive_context(
+      10.46,
+      datetime(2026, 8, 13, 9, 56, 15),
+      volume=17_000,
+      volume_age=6.0,
+    ),
+  ) == []
+
+  state = plan.rule_state["adaptive"]
+  assert state["phase"] == "PRICE_ONLY_DEGRADED"
+  assert state["data_quality"] == "PRICE_ONLY_DEGRADED"
+
+
+def test_adaptive_trailing_pauses_when_executable_price_is_stale():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(adaptive_rule()),
+    volume=300,
+    price=10.0,
+  )
+  start = datetime(2026, 8, 13, 9, 50)
+  warm_adaptive_plan(book, start)
+
+  assert book.evaluate(
+    "600000.SH",
+    adaptive_context(
+      10.30,
+      datetime(2026, 8, 13, 9, 56, 15),
+      volume=20_000,
+      market_age=6.0,
+    ),
+  ) == []
+  assert plan.rule_state["adaptive"]["phase"] == "PAUSED_STALE_PRICE"
 
 
 def test_staged_once_rule_uses_its_own_sell_sizing():
@@ -479,3 +760,32 @@ def test_pruning_terminal_history_never_removes_active_plans():
   assert removed == ["plan-0"]
   assert "plan-1" in book.plans
   assert "plan-2" in book.plans
+
+
+def test_manual_trigger_creates_immediate_decision_without_quote_price():
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(
+    template(
+      ExitRuleSpec(
+        rule_id="manual-liquidation",
+        strategy=ExitRuleType.MANUAL_TRIGGER,
+        priority=1000,
+      )
+    ),
+    volume=300,
+    price=10.0,
+  )
+
+  decisions = book.evaluate(
+    "600000.SH",
+    ExitEvaluationContext(
+      timestamp=datetime(2026, 8, 14, 9, 31),
+      current_price=0.0,
+      source="MANUAL_CONFIRMATION",
+    ),
+  )
+
+  assert len(decisions) == 1
+  assert decisions[0].plan_id == plan.plan_id
+  assert decisions[0].rule_type == ExitRuleType.MANUAL_TRIGGER.value
+  assert decisions[0].volume == 300

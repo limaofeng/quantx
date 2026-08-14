@@ -605,6 +605,12 @@ class StrategyBase(ABC):
     """Return persisted manual-confirm intents that should survive a restart."""
     return []
 
+  def validate_manual_approval(
+    self, intent: TradeIntent, market_data: Any
+  ) -> Optional[tuple[str, str]]:
+    """Optionally reject a manual intent against the latest in-memory quote."""
+    return None
+
   @abstractmethod
   async def on_init(self) -> None:
     """
