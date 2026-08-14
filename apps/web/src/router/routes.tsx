@@ -7,7 +7,6 @@ import {
   Filter,
   FlaskConical,
   Hand,
-  LayoutDashboard,
   Radar,
   Target,
   type LucideIcon,
@@ -82,22 +81,6 @@ function route(definition: RouteDefinition): AppRouteConfig {
 export const appRoutes: AppRouteConfig[] = [
   route({
     path: '/',
-    title: '仪表板',
-    importer: toDefaultExport(
-      () => import('@/features/dashboard'),
-      'DashboardPage'
-    ),
-    skeleton: 'dashboard',
-    preload: true,
-    nav: {
-      label: '仪表板',
-      icon: LayoutDashboard,
-      group: MAIN_GROUP,
-      order: 10,
-    },
-  }),
-  route({
-    path: '/market-shortcuts',
     title: '行情工作台',
     importer: toDefaultExport(
       () => import('@/features/dashboard'),
@@ -109,8 +92,17 @@ export const appRoutes: AppRouteConfig[] = [
       label: '行情',
       icon: BarChart3,
       group: MAIN_GROUP,
-      order: 15,
+      order: 10,
     },
+  }),
+  route({
+    path: '/market-shortcuts',
+    title: '行情工作台',
+    importer: toDefaultExport(
+      () => import('./redirects'),
+      'MarketWorkbenchRedirect'
+    ),
+    skeleton: 'default',
   }),
   route({
     path: '/holdings',
@@ -130,7 +122,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/account',
-    title: '账户中心',
+    title: '账户概览',
     importer: toDefaultExport(
       () => import('@/features/account'),
       'AccountPage'
@@ -468,7 +460,7 @@ export function findRoute(pathname: string): AppRouteConfig | undefined {
 
 export function getPageTitle(pathname: string): string {
   const routeConfig = findRoute(pathname);
-  if (!routeConfig) return '仪表板';
+  if (!routeConfig) return '页面';
   return typeof routeConfig.title === 'function'
     ? routeConfig.title(pathname)
     : routeConfig.title;

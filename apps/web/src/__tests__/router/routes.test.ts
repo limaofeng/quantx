@@ -43,9 +43,9 @@ describe('router configuration', () => {
   });
 
   it('resolves titles from the unified route source', () => {
-    expect(getPageTitle('/')).toBe('仪表板');
+    expect(getPageTitle('/')).toBe('行情工作台');
     expect(getPageTitle('/holdings')).toBe('持仓');
-    expect(getPageTitle('/account')).toBe('账户中心');
+    expect(getPageTitle('/account')).toBe('账户概览');
     expect(getPageTitle('/t-trade')).toBe('做T助手');
     expect(getPageTitle('/limit-up-board')).toBe('打板助手');
     expect(getPageTitle('/stock/000001')).toBe('个股详情');
@@ -91,7 +91,6 @@ describe('router configuration', () => {
 
     expect(main?.items.map(item => item.href)).toEqual([
       '/',
-      '/market-shortcuts',
       '/holdings',
       '/t-trade',
       '/limit-up-board',
@@ -105,6 +104,8 @@ describe('router configuration', () => {
       '/settings/agents',
     ]);
     expect(main?.items.map(item => item.href)).not.toContain('/account');
+    expect(main?.items.map(item => item.label)).toContain('行情');
+    expect(main?.items.map(item => item.label)).not.toContain('仪表板');
   });
 
   it('marks parent navigation active for child routes', () => {

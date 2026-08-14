@@ -30,9 +30,9 @@ import {
 } from '@/features/strategies/hooks/useLimitUpRadar';
 import { financialToneClass } from '@/shared/utils/financialColors';
 
-import { DashboardStudioShell } from '../components/DashboardStudioShell';
 import { MarketIntradayChart } from '../components/MarketIntradayChart';
 import { MarketStockSearch } from '../components/MarketStockSearch';
+import { MarketStudioShell } from '../components/MarketStudioShell';
 import { useAMarketSession } from '../hooks/useAMarketSession';
 import { useMarketPulse } from '../hooks/useMarketPulse';
 import { useMarketWorkbench } from '../hooks/useMarketWorkbench';
@@ -616,7 +616,7 @@ export default function MarketShortcutsPage() {
   };
 
   return (
-    <DashboardStudioShell
+    <MarketStudioShell
       content={
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#080d18]">
           <header className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-[#0b1120]/95 px-4 py-2 xl:min-h-11 xl:py-1">

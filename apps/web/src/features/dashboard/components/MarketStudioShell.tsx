@@ -1,4 +1,4 @@
-import { LayoutDashboard } from 'lucide-react';
+import { BarChart3 } from 'lucide-react';
 import { useMemo, type ReactNode } from 'react';
 
 import {
@@ -8,37 +8,37 @@ import {
   type StudioTab,
 } from '@/components/studio-workbench';
 
-export type DashboardStudioMode = 'DASHBOARD';
+export type MarketStudioMode = 'MARKET';
 
-const dashboardDescription = '账户、市场、快捷任务';
+const marketDescription = '大盘全景、热点机会、个股排行';
 
-const dashboardModes: StudioMode[] = [
+const marketModes: StudioMode[] = [
   {
-    icon: LayoutDashboard,
-    id: 'DASHBOARD',
-    label: '仪表板',
+    icon: BarChart3,
+    id: 'MARKET',
+    label: '行情工作台',
   },
 ];
 
-interface DashboardStudioShellProps {
+interface MarketStudioShellProps {
   content: ReactNode;
   statusBarLeft?: ReactNode;
   statusBarRight?: ReactNode;
 }
 
-export function DashboardStudioShell({
+export function MarketStudioShell({
   content,
   statusBarLeft,
   statusBarRight,
-}: DashboardStudioShellProps) {
-  const activeMode: DashboardStudioMode = 'DASHBOARD';
+}: MarketStudioShellProps) {
+  const activeMode: MarketStudioMode = 'MARKET';
   const tabs = useMemo<StudioTab[]>(
     () =>
-      dashboardModes.map(mode => ({
+      marketModes.map(mode => ({
         icon: mode.icon,
         id: mode.id,
         name: mode.label,
-        type: 'dashboard-resource',
+        type: 'market-resource',
       })),
     []
   );
@@ -48,7 +48,7 @@ export function DashboardStudioShell({
       activeMode={activeMode}
       content={content}
       isPage
-      modes={dashboardModes}
+      modes={marketModes}
       onModeChange={() => undefined}
       showSidebar={false}
       statusBarLeft={
@@ -56,17 +56,17 @@ export function DashboardStudioShell({
           <>
             <span className="inline-flex items-center gap-2">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              仪表板在线
+              行情工作台在线
             </span>
             <span className="text-slate-700">|</span>
-            <span>{dashboardDescription}</span>
+            <span>{marketDescription}</span>
           </>
         )
       }
       statusBarRight={statusBarRight}
       tabBar={
         <TabBar
-          activeTabId="DASHBOARD"
+          activeTabId="MARKET"
           closable={false}
           onTabChange={() => undefined}
           onTabClose={() => undefined}
@@ -75,9 +75,9 @@ export function DashboardStudioShell({
         />
       }
       theme={{
-        icon: LayoutDashboard,
+        icon: BarChart3,
         name: 'red',
-        title: 'QuantX Overview Studio',
+        title: 'QuantX Market Studio',
       }}
     />
   );

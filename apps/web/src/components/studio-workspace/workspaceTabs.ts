@@ -70,7 +70,10 @@ function isPreviewablePath(pathname: string) {
 
 export function getStudioWorkspacePath(rawPath: string) {
   const { pathname, search } = splitPath(rawPath);
-  const normalizedPath = normalizePath(pathname);
+  const normalizedPath =
+    normalizePath(pathname) === '/market-shortcuts'
+      ? '/'
+      : normalizePath(pathname);
 
   if (search) return `${normalizedPath}?${search}`;
 
@@ -112,7 +115,6 @@ export function getStudioWorkspaceTabId(rawPath: string) {
 function getTabIcon(pathname: string): LucideIcon {
   const route = findRoute(pathname);
   if (route?.nav?.icon) return route.nav.icon;
-  if (pathname === '/') return LayoutDashboard;
   if (pathname === '/holdings') return Briefcase;
   if (pathname === '/account') return Wallet;
   if (pathname === '/liquidation') return Hand;
@@ -131,7 +133,7 @@ function getTabIcon(pathname: string): LucideIcon {
 
 function getTabTitle(pathname: string, search = '') {
   if (pathname === '/holdings') return '持仓';
-  if (pathname === '/account') return '账户中心';
+  if (pathname === '/account') return '账户概览';
 
   if (pathname === '/liquidation' && getSearchParam(search, 'workspaceTab')) {
     const stockName = (getSearchParam(search, 'name') || '').trim();

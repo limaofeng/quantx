@@ -10,8 +10,8 @@ const mocks = vi.hoisted(() => ({
   pulse: {} as Record<string, unknown>,
 }));
 
-vi.mock('@/features/dashboard/components/DashboardStudioShell', () => ({
-  DashboardStudioShell: ({ content }: { content: ReactNode }) => content,
+vi.mock('@/features/dashboard/components/MarketStudioShell', () => ({
+  MarketStudioShell: ({ content }: { content: ReactNode }) => content,
 }));
 
 vi.mock('@/features/dashboard/components/MarketIntradayChart', () => ({

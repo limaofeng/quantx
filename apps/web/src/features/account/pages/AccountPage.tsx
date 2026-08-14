@@ -93,10 +93,10 @@ function KpiCard({
   icon: typeof WalletCards;
 }) {
   return (
-    <section className="min-w-0 rounded-xl border border-white/10 bg-[#10131a] p-4 shadow-sm">
+    <section className="min-w-0 rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
       <div className="mb-4 flex items-start justify-between gap-3">
         <span className="text-xs font-medium text-slate-400">{label}</span>
-        <span className="rounded-lg border border-white/10 bg-white/[0.04] p-2 text-slate-300">
+        <span className="rounded-md border border-white/[0.08] bg-white/[0.035] p-2 text-slate-300">
           <Icon className="h-4 w-4" />
         </span>
       </div>
@@ -110,7 +110,7 @@ function KpiCard({
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center rounded-xl border border-dashed border-white/10 bg-white/[0.015] px-6 text-center">
+    <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-white/[0.015] px-6 text-center">
       <Clock3 className="mb-3 h-6 w-6 text-slate-600" />
       <p className="text-sm font-medium text-slate-300">{title}</p>
       <p className="mt-1 max-w-md text-xs leading-5 text-slate-500">{detail}</p>
@@ -126,14 +126,14 @@ function ScopeSwitch({
   onChange: (value: RecordScope) => void;
 }) {
   return (
-    <div className="flex rounded-lg border border-white/10 bg-black/20 p-0.5">
+    <div className="flex rounded-md border border-white/[0.08] bg-[#080d18]/80 p-0.5">
       {(['today', 'history'] as const).map(scope => (
         <button
           key={scope}
           type="button"
           onClick={() => onChange(scope)}
           className={cn(
-            'min-h-8 rounded-md px-3 text-xs transition-colors',
+            'min-h-8 cursor-pointer rounded-md px-3 text-xs transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50',
             value === scope
               ? 'bg-red-500/15 text-red-300'
               : 'text-slate-500 hover:text-slate-300'
@@ -157,7 +157,7 @@ function Pagination({
 }) {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
-    <div className="flex items-center justify-between border-t border-white/10 px-3 py-2 text-xs text-slate-500">
+    <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2 text-xs text-slate-500">
       <span>共 {total} 条</span>
       <div className="flex items-center gap-2">
         <Button
@@ -479,12 +479,12 @@ export function AccountPage() {
   const error = accountError || overview.error;
   if (!loading && !account) {
     return (
-      <div className="h-full overflow-y-auto bg-[#080a0f] p-4 text-slate-200 md:p-8">
+      <div className="h-full overflow-y-auto bg-[#080d18] p-4 text-slate-200 md:p-8">
         <EmptyState
           title="当前未连接资金账户"
           detail={
             error?.message ||
-            '账户中心不会使用默认账号或模拟资产。请先连接 miniQMT 并完成一次账户同步。'
+            '账户概览不会使用默认账号或模拟资产。请先连接 miniQMT 并完成一次账户同步。'
           }
         />
       </div>
@@ -500,20 +500,22 @@ export function AccountPage() {
   const recentTrades = todayTrades.trades.slice(0, 5);
 
   return (
-    <div className="h-full overflow-y-auto bg-[#080a0f] text-slate-100">
-      <div className="mx-auto max-w-[1600px] space-y-4 p-3 sm:p-4 lg:p-6">
-        <header className="flex flex-col gap-4 rounded-xl border border-white/10 bg-[#10131a] p-4 sm:flex-row sm:items-center sm:justify-between">
+    <div className="h-full overflow-y-auto bg-[#080d18] text-slate-100 custom-scrollbar">
+      <div className="mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-3 sm:px-4 lg:px-5 xl:px-3 xl:pt-2">
+        <header className="flex min-h-14 flex-col justify-center gap-3 rounded-lg border border-white/[0.06] bg-[#0b1120]/95 px-4 py-2 sm:flex-row sm:items-center sm:justify-between xl:min-h-11 xl:py-1">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Landmark className="h-5 w-5 text-red-400" />
-              <h1 className="text-lg font-semibold">默认账户中心</h1>
+              <h1 className="truncate text-xs font-black uppercase tracking-[0.18em] text-slate-100">
+                账户概览
+              </h1>
               <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
-                单账户
+                miniQMT · 单账户
               </span>
             </div>
-            <p className="mt-1 truncate text-xs text-slate-500">
+            <p className="mt-1 truncate text-[10px] font-medium text-slate-500">
               {account
-                ? `${account.accountName} · ${account.id}`
+                ? `资金、持仓、委托与盈亏 · ${account.accountName} · ${account.id}`
                 : '正在读取 miniQMT 账户'}
             </p>
           </div>
@@ -521,7 +523,7 @@ export function AccountPage() {
             <Button
               variant="outline"
               size="sm"
-              className="border-white/10 bg-transparent"
+              className="h-8 border-white/[0.08] bg-white/[0.025] text-xs hover:border-white/20 hover:bg-white/[0.05]"
               onClick={refreshAll}
               disabled={loading}
             >
@@ -533,7 +535,7 @@ export function AccountPage() {
             <Button
               variant="outline"
               size="sm"
-              className="border-white/10 bg-transparent"
+              className="h-8 border-white/[0.08] bg-white/[0.025] text-xs hover:border-white/20 hover:bg-white/[0.05]"
               onClick={exportCurrentView}
             >
               <Download className="mr-2 h-4 w-4" />
@@ -541,7 +543,6 @@ export function AccountPage() {
             </Button>
           </div>
         </header>
-
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="总资产"
@@ -581,7 +582,7 @@ export function AccountPage() {
           <span>账户更新时间：{formatDateTime(account?.updateTime)}</span>
         </div>
 
-        <nav className="overflow-x-auto rounded-xl border border-white/10 bg-[#10131a] px-2">
+        <nav className="sticky top-0 z-20 overflow-x-auto rounded-lg border border-white/[0.06] bg-[#0b1120]/95 px-2 backdrop-blur">
           <div className="flex min-w-max">
             {VIEWS.map(item => (
               <button
@@ -589,7 +590,7 @@ export function AccountPage() {
                 type="button"
                 onClick={() => setLocation(`/account?view=${item.id}`)}
                 className={cn(
-                  'min-h-12 border-b-2 px-5 text-sm transition-colors',
+                  'min-h-12 cursor-pointer border-b-2 px-5 text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/50',
                   view === item.id
                     ? 'border-red-400 text-red-300'
                     : 'border-transparent text-slate-500 hover:text-slate-200'
@@ -609,7 +610,7 @@ export function AccountPage() {
 
         {view === 'overview' && (
           <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
               <h2 className="text-sm font-medium">资产构成</h2>
               <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/5">
                 <div
@@ -633,7 +634,7 @@ export function AccountPage() {
                 ))}
               </div>
             </section>
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
               <h2 className="text-sm font-medium">快捷操作</h2>
               <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
@@ -646,7 +647,7 @@ export function AccountPage() {
                     key={String(label)}
                     type="button"
                     onClick={() => setLocation(String(href))}
-                    className="flex min-h-20 flex-col items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.025] text-xs text-slate-300 transition-colors hover:border-red-400/30 hover:bg-red-400/5"
+                    className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-xs text-slate-300 transition-colors duration-200 hover:border-red-400/30 hover:bg-red-400/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   >
                     <Icon className="h-5 w-5 text-red-300" />
                     {String(label)}
@@ -654,14 +655,14 @@ export function AccountPage() {
                 ))}
               </div>
               <p className="mt-3 text-[11px] text-slate-600">
-                账户页只提供入口，不在本页直接下单或清仓。
+                账户概览只提供入口，不在本页直接下单或清仓。
               </p>
             </section>
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">待处理委托</h2>
                 <button
-                  className="text-xs text-red-300"
+                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   onClick={() => setLocation('/account?view=orders')}
                 >
                   查看全部
@@ -705,11 +706,11 @@ export function AccountPage() {
                 />
               )}
             </section>
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">最近成交</h2>
                 <button
-                  className="text-xs text-red-300"
+                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   onClick={() => setLocation('/account?view=trades')}
                 >
                   查看全部
@@ -753,11 +754,11 @@ export function AccountPage() {
                 />
               )}
             </section>
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4 xl:col-span-2">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4 xl:col-span-2">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">主要持仓</h2>
                 <button
-                  className="text-xs text-red-300"
+                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
                   onClick={() => setLocation('/holdings')}
                 >
                   打开持仓工作台
@@ -825,8 +826,8 @@ export function AccountPage() {
         )}
 
         {(view === 'orders' || view === 'trades') && (
-          <section className="overflow-hidden rounded-xl border border-white/10 bg-[#10131a]">
-            <div className="flex flex-col gap-3 border-b border-white/10 p-3 lg:flex-row lg:items-center lg:justify-between">
+          <section className="overflow-hidden rounded-lg border border-white/[0.06] bg-[#0b1120]/80">
+            <div className="flex flex-col gap-3 border-b border-white/[0.06] p-3 lg:flex-row lg:items-center lg:justify-between">
               <ScopeSwitch
                 value={view === 'orders' ? orderScope : tradeScope}
                 onChange={value =>
@@ -840,13 +841,13 @@ export function AccountPage() {
                   value={stockFilter}
                   onChange={event => setStockFilter(event.target.value)}
                   placeholder="代码 / 名称"
-                  className="h-9 w-36 border-white/10 bg-black/20 text-xs"
+                  className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
                 />
                 <Select
                   value={directionFilter}
                   onValueChange={setDirectionFilter}
                 >
-                  <SelectTrigger className="h-9 w-28 border-white/10 bg-black/20 text-xs">
+                  <SelectTrigger className="h-9 w-28 border-white/[0.08] bg-[#080d18]/80 text-xs">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -857,7 +858,7 @@ export function AccountPage() {
                 </Select>
                 {view === 'orders' && (
                   <Select value={statusFilter} onValueChange={setStatusFilter}>
-                    <SelectTrigger className="h-9 w-32 border-white/10 bg-black/20 text-xs">
+                    <SelectTrigger className="h-9 w-32 border-white/[0.08] bg-[#080d18]/80 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -879,7 +880,7 @@ export function AccountPage() {
                       min={daysAgoKey(365)}
                       max={endDate}
                       onChange={event => setStartDate(event.target.value)}
-                      className="h-9 w-36 border-white/10 bg-black/20 text-xs"
+                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
                     />
                     <Input
                       type="date"
@@ -887,7 +888,7 @@ export function AccountPage() {
                       min={startDate}
                       max={today}
                       onChange={event => setEndDate(event.target.value)}
-                      className="h-9 w-36 border-white/10 bg-black/20 text-xs"
+                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
                     />
                   </>
                 )}
@@ -1045,7 +1046,7 @@ export function AccountPage() {
                 value={String(pnlDays)}
                 onValueChange={value => setPnlDays(Number(value))}
               >
-                <SelectTrigger className="h-9 w-32 border-white/10 bg-[#10131a] text-xs">
+                <SelectTrigger className="h-9 w-32 border-white/[0.08] bg-[#080d18]/80 text-xs">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1088,7 +1089,7 @@ export function AccountPage() {
               ].map(([label, value, tone]) => (
                 <div
                   key={label}
-                  className="rounded-xl border border-white/10 bg-[#10131a] p-4"
+                  className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4"
                 >
                   <p className="text-xs text-slate-500">{label}</p>
                   <p
@@ -1099,7 +1100,7 @@ export function AccountPage() {
                 </div>
               ))}
             </div>
-            <section className="rounded-xl border border-white/10 bg-[#10131a] p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-medium">日终盈亏序列</h2>
                 <span className="text-[11px] text-slate-500">
@@ -1154,8 +1155,8 @@ export function AccountPage() {
         )}
 
         {view === 'closed' && (
-          <section className="overflow-hidden rounded-xl border border-white/10 bg-[#10131a]">
-            <div className="flex flex-wrap justify-end gap-2 border-b border-white/10 p-3">
+          <section className="overflow-hidden rounded-lg border border-white/[0.06] bg-[#0b1120]/80">
+            <div className="flex flex-wrap justify-end gap-2 border-b border-white/[0.06] p-3">
               <Input
                 type="date"
                 value={startDate}
@@ -1164,7 +1165,7 @@ export function AccountPage() {
                   setStartDate(event.target.value);
                   setClosedPage(1);
                 }}
-                className="h-9 w-36 border-white/10 bg-black/20 text-xs"
+                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
               />
               <Input
                 type="date"
@@ -1175,7 +1176,7 @@ export function AccountPage() {
                   setEndDate(event.target.value);
                   setClosedPage(1);
                 }}
-                className="h-9 w-36 border-white/10 bg-black/20 text-xs"
+                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
               />
             </div>
             {closed.loading ? (

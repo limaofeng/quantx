@@ -52,7 +52,7 @@ const PAGE_SPECIFIC_BUDGETS: Record<
   string,
   Partial<PerformanceBudgetConfig>
 > = {
-  // 仪表板页面 - 数据密集型，允许稍慢的 LCP
+  // 行情工作台 - 数据密集型，允许稍慢的 LCP
   '/': {
     LCP: 3000,
     FCP: 2000,

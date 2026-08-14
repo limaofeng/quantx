@@ -34,12 +34,14 @@ describe('studio workspace tabs', () => {
     expect(unknownTab.name).toBe('页面未找到');
   });
 
-  it('hosts the market workbench in the studio workspace', () => {
-    const tab = buildStudioWorkspaceTab('/market-shortcuts');
+  it('hosts the market workbench as the default studio workspace', () => {
+    const tab = buildStudioWorkspaceTab('/');
+    const legacyTab = buildStudioWorkspaceTab('/market-shortcuts');
 
-    expect(tab?.id).toBe('page:/market-shortcuts');
+    expect(tab?.id).toBe('page:/');
     expect(tab?.name).toBe('行情工作台');
-    expect(tab?.path).toBe('/market-shortcuts');
+    expect(tab?.path).toBe('/');
+    expect(legacyTab).toEqual(tab);
   });
 
   it('hosts the global T trade assistant in the studio workspace', () => {
@@ -84,7 +86,7 @@ describe('studio workspace tabs', () => {
     expect(overview?.id).toBe('account');
     expect(trades?.id).toBe('account');
     expect(closed?.id).toBe('account');
-    expect(trades?.name).toBe('账户中心');
+    expect(trades?.name).toBe('账户概览');
     expect(mergeStudioWorkspaceTab([overview!], trades!)).toEqual([trades]);
   });
 
@@ -146,15 +148,15 @@ describe('studio workspace tabs', () => {
     ]);
   });
 
-  it('keeps dashboard and liquidation as separate workspace tabs', () => {
-    const dashboardTab = buildStudioWorkspaceTab('/')!;
+  it('keeps the market workbench and liquidation as separate workspace tabs', () => {
+    const marketTab = buildStudioWorkspaceTab('/')!;
     const liquidationTab = buildStudioWorkspaceTab(
       '/liquidation?symbol=562500.SH'
     )!;
 
     expect(liquidationTab.id).toBe('liquidation');
-    expect(mergeStudioWorkspaceTab([dashboardTab], liquidationTab)).toEqual([
-      dashboardTab,
+    expect(mergeStudioWorkspaceTab([marketTab], liquidationTab)).toEqual([
+      marketTab,
       liquidationTab,
     ]);
   });

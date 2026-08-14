@@ -1,4 +1,4 @@
-// Dashboard 功能模块导出
+// 行情工作台与账户共享数据模块导出
 export * from './pages';
 export * from './components';
 export * from './hooks';
