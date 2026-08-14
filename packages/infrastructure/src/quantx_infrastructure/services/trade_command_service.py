@@ -38,6 +38,8 @@ class QueuedTradeCommand:
 
 
 class TradeCommandService:
+  MANUAL_RECONCILIATION_MAX_AGE_SECONDS = 90
+
   def __init__(self, db: AsyncSession) -> None:
     self.db = db
 
@@ -89,20 +91,83 @@ class TradeCommandService:
     account_id: str,
     *,
     risk_reducing: bool,
-  ) -> None:
-    """Authorize an explicitly confirmed manual order without automation rollout."""
+  ) -> AccountTradingRollout:
+    """Lock and validate the account gate for a confirmed manual live order.
+
+    The rollout row is the first mutable trading row locked by both this path
+    and ``TTradeOperationsService.kill``.  If enqueue wins, kill subsequently
+    scans and cancels the new pending command; if kill wins, a BUY observes the
+    kill state here and is rejected before any outbox row is created.
+
+    Risk-reducing SELL orders deliberately do not require an active controlled
+    window, CANARY/LIVE enablement, or policy acknowledgement.  This preserves
+    an escape path while paused or killed, but still requires a current,
+    authoritative reconciliation snapshot and a ready live device.
+    """
 
     if not settings.enable_real_trading:
       raise AgentUnavailableError("服务端真实交易总开关未启用")
     if account_id not in set(settings.real_trading_account_allowlist or []):
       raise AgentUnavailableError("账户不在服务端真实交易白名单")
-    rollout = await self.db.get(AccountTradingRollout, account_id)
-    if (
-      rollout is not None
-      and (rollout.kill_switch or rollout.stage == "KILL_SWITCHED")
-      and not risk_reducing
+    rollout = await self.db.get(
+      AccountTradingRollout,
+      account_id,
+      with_for_update=True,
+    )
+    if rollout is None:
+      raise AgentUnavailableError("账户尚未配置实盘灰度与对账状态")
+
+    if not risk_reducing and (
+      bool(rollout.kill_switch)
+      or str(rollout.stage or "").upper() == "KILL_SWITCHED"
     ):
       raise AgentUnavailableError("账户交易 kill switch 已触发，禁止新增风险")
+    if str(rollout.reconcile_status or "").upper() != "READY":
+      raise AgentUnavailableError("账户资金、持仓、委托和成交快照尚未完成对账")
+
+    snapshot_id = str(rollout.last_snapshot_id or "")
+    snapshot_hash = str(rollout.last_snapshot_hash or "")
+    snapshot_at = (
+      to_naive_utc(rollout.last_snapshot_at)
+      if rollout.last_snapshot_at is not None
+      else None
+    )
+    snapshot_age = (
+      (utcnow() - snapshot_at).total_seconds()
+      if snapshot_at is not None
+      else None
+    )
+    if (
+      not snapshot_id
+      or not snapshot_hash
+      or snapshot_age is None
+      or snapshot_age < 0
+      or snapshot_age > self.MANUAL_RECONCILIATION_MAX_AGE_SECONDS
+    ):
+      raise AgentUnavailableError("账户完整对账快照缺失或已超过 90 秒")
+
+    if risk_reducing:
+      return rollout
+
+    if not bool(rollout.controlled_window_active):
+      raise AgentUnavailableError("手动买入需要基于最新快照建立受控交易窗口")
+    controlled_snapshot_id = str(rollout.controlled_window_snapshot_id or "")
+    controlled_snapshot_hash = str(rollout.controlled_window_snapshot_hash or "")
+    if (
+      controlled_snapshot_id != snapshot_id
+      or controlled_snapshot_hash != snapshot_hash
+    ):
+      raise AgentUnavailableError("受控窗口快照与最新完整快照不一致")
+    if not bool(rollout.enabled) or str(rollout.stage or "").upper() not in {
+      "CANARY",
+      "LIVE",
+    }:
+      raise AgentUnavailableError("手动买入要求账户处于已启用的 CANARY/LIVE 阶段")
+    if int(rollout.acknowledged_policy_version or 0) < int(
+      rollout.policy_version or 0
+    ):
+      raise AgentUnavailableError("当前交易策略版本尚未确认")
+    return rollout
 
   async def _device_for(
     self,
@@ -119,6 +184,7 @@ class TradeCommandService:
       )
     )
     devices = result.scalars().all()
+    eligible: list[AgentDevice] = []
     for device in devices:
       allowed = list(device.authorized_account_ids or [])
       capabilities = {
@@ -144,7 +210,13 @@ class TradeCommandService:
           continue
         if not self._heartbeat_fresh(heartbeat):
           continue
-      return device
+      eligible.append(device)
+    if execution_mode == "live" and len(eligible) > 1:
+      raise AgentUnavailableError(
+        "同一账户检测到多个就绪 live QMT Agent，已拒绝路由交易命令"
+      )
+    if eligible:
+      return eligible[0]
     raise AgentUnavailableError(
       f"没有已登记、就绪且具备交易能力（{execution_mode}）的 QMT Agent"
     )
@@ -208,9 +280,29 @@ class TradeCommandService:
     policy_version: int = 0,
     request_metadata: dict[str, Any] | None = None,
     manual_live: bool = False,
+    reason_tags: list[str] | None = None,
+    commit_transaction: bool = True,
   ) -> QueuedTradeCommand:
     if volume <= 0:
       raise ValueError("委托数量必须大于 0")
+    normalized_mode = execution_mode.strip().lower()
+    if normalized_mode not in {"paper", "live"}:
+      raise ValueError("交易命令 execution_mode 必须是 paper 或 live")
+    normalized_role = t_trade_role.strip().upper()
+    if normalized_role not in {"", "ENTRY", "EXIT"}:
+      raise ValueError("做 T 订单角色必须是 ENTRY 或 EXIT")
+    immutable_metadata = dict(request_metadata or {})
+    if manual_live and normalized_mode != "live":
+      raise ValueError("手动实盘授权只能用于 live 交易命令")
+    risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
+    if manual_live:
+      # This lock must precede the outbox lookup/insert to match kill()'s
+      # rollout -> pending/outbox lock order.
+      await self._require_manual_live_authorization(
+        account_id,
+        risk_reducing=risk_reducing,
+      )
+
     raw_idempotency_key = idempotency_key.strip() or trace_id.strip()
     if raw_idempotency_key:
       business_idempotency_key = self.order_idempotency_digest(
@@ -234,27 +326,11 @@ class TradeCommandService:
     else:
       business_idempotency_key = f"generated:{uuid.uuid4()}"
 
-    normalized_mode = execution_mode.strip().lower()
-    if normalized_mode not in {"paper", "live"}:
-      raise ValueError("交易命令 execution_mode 必须是 paper 或 live")
-    normalized_role = t_trade_role.strip().upper()
-    if normalized_role not in {"", "ENTRY", "EXIT"}:
-      raise ValueError("做 T 订单角色必须是 ENTRY 或 EXIT")
-    immutable_metadata = dict(request_metadata or {})
-    if manual_live and normalized_mode != "live":
-      raise ValueError("手动实盘授权只能用于 live 交易命令")
-    if normalized_mode == "live":
-      risk_reducing = normalized_role == "EXIT" or side.upper() == "SELL"
-      if manual_live:
-        await self._require_manual_live_authorization(
-          account_id,
-          risk_reducing=risk_reducing,
-        )
-      else:
-        await self._require_live_authorization(
-          account_id,
-          risk_reducing=risk_reducing,
-        )
+    if normalized_mode == "live" and not manual_live:
+      await self._require_live_authorization(
+        account_id,
+        risk_reducing=risk_reducing,
+      )
     device = await self._device_for(
       user_id=user_id,
       account_id=account_id,
@@ -280,7 +356,17 @@ class TradeCommandService:
       "order_remark": order_remark,
       "trace_id": trace_id or message_id,
       "risk_decision_id": risk_decision_id or trace_id or message_id,
-      "reason_tags": ["queued-command"],
+      "reason_tags": sorted(
+        {
+          str(value).strip()
+          for value in (
+            list(reason_tags)
+            if reason_tags is not None
+            else ["queued-command"]
+          )
+          if str(value).strip()
+        }
+      ),
       "substitution_plan": substitution_plan,
       "strategy_run_id": strategy_run_id,
       "strategy_order_id": strategy_order_id,
@@ -367,6 +453,12 @@ class TradeCommandService:
         attempts=0,
       )
     )
+    if not commit_transaction:
+      # The caller owns one atomic transaction spanning its authorization
+      # record and the pending/outbox rows.  Integrity failures propagate so
+      # the caller can roll back the entire unit rather than half-commit it.
+      await self.db.flush()
+      return QueuedTradeCommand(client_order_id, message_id, "QUEUED")
     try:
       await self.db.commit()
     except IntegrityError:

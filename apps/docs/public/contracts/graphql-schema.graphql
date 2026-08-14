@@ -2154,7 +2154,15 @@ type ManualOrderPreview {
   instrumentCode: String!
   side: ManualOrderSide!
   priceType: ManualOrderPriceType!
+
+  """兼容字段，等于 requestedVolume"""
   volume: Int!
+
+  """用户请求的原始委托数量"""
+  requestedVolume: Int!
+
+  """用户确认后允许排队的最终合法数量"""
+  finalVolume: Int!
   limitPrice: Float
   referencePrice: Float!
   estimatedAmount: Float!
@@ -2165,11 +2173,26 @@ type ManualOrderPreview {
   executionMode: String!
   quoteTimestamp: DateTime!
   challengeExpiresAt: DateTime!
+
+  """稳定风控决策 ID"""
+  riskDecisionId: String!
+
+  """ALLOW 或 CAP"""
+  riskAction: String!
+
+  """结构化风控原因码"""
+  riskReasonCode: String!
+
+  """风控决策说明"""
+  riskReasonDetail: String!
   warnings: [String!]!
 }
 
 """移动端手动委托预览输入"""
 input ManualOrderPreviewInput {
+  """必填资金账号"""
+  accountId: String!
+
   """带市场后缀的证券代码"""
   instrumentCode: String!
 
@@ -2184,9 +2207,6 @@ input ManualOrderPreviewInput {
 
   """调用方生成的业务幂等键"""
   idempotencyKey: String!
-
-  """资金账号"""
-  accountId: String = null
 
   """LIMIT 必填；BEST 必须为空"""
   limitPrice: Float = null
@@ -3163,6 +3183,9 @@ type Query {
 
   """获取单个策略实例"""
   strategyInstance(id: String!): StrategyInstance
+
+  """获取策略实例允许原生移动端修改的安全参数"""
+  strategyInstanceMobileParameters(instanceId: String!): StrategyInstanceMobileParameters!
 
   """获取策略运行中等待人工确认的交易意图"""
   strategyPendingTradeIntents(runId: String!): [StrategyApprovalIntent!]!
@@ -4371,10 +4394,21 @@ type StrategyInstanceEvent {
   payload: JSON!
 }
 
+"""策略实例的移动安全参数与乐观锁版本"""
+type StrategyInstanceMobileParameters {
+  instanceId: String!
+  configVersion: String!
+  editable: Boolean!
+  parameters: [StrategyMobileParameter!]!
+}
+
 """更新策略实例参数输入"""
 input StrategyInstanceParameterUpdateInput {
   parameters: JSON!
   applyImmediately: Boolean! = false
+
+  """原生移动端必填；必须等于当前 configVersion"""
+  expectedVersion: String = null
 }
 
 """
@@ -4486,6 +4520,22 @@ type StrategyLogPage {
 
   """日志条目"""
   entries: [StrategyLogEntry!]!
+}
+
+"""允许原生移动端修改的单个策略参数"""
+type StrategyMobileParameter {
+  key: String!
+  title: String!
+  description: String!
+  valueType: String!
+  currentValue: JSON!
+  unit: String
+  minimum: Float
+  maximum: Float
+  step: Float
+  enumValues: [String!]
+  applyImmediately: Boolean!
+  riskLevel: String!
 }
 
 """策略月度收益"""

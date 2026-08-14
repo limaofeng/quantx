@@ -33,6 +33,16 @@ def test_client_contract_snapshots_are_current():
     )
   schema_sdl = generated["graphql-schema.graphql"].decode("utf-8")
   assert "authorizedAccountIds: [String!]! = []" in schema_sdl
+  manual_input = schema_sdl.split("input ManualOrderPreviewInput {", 1)[1].split(
+    "}", 1
+  )[0]
+  manual_preview = schema_sdl.split("type ManualOrderPreview {", 1)[1].split(
+    "}", 1
+  )[0]
+  assert "accountId: String!" in manual_input
+  assert "requestedVolume: Int!" in manual_preview
+  assert "finalVolume: Int!" in manual_preview
+  assert "riskDecisionId: String!" in manual_preview
   assert "strawberry.types.field.UNRESOLVED" not in schema_sdl
 
 
@@ -48,16 +58,20 @@ def test_graphql_contract_uses_only_public_permission_categories():
   assert actual <= {
     "assistant:read",
     "assistant:write",
+    "limit-up:control",
     "market:read",
     "mutation:write",
     "orders:read",
     "portfolio:read",
     "strategy:read",
+    "strategy:control",
     "system-status:read",
     "system-config:write",
     "trade:approve",
     "trade:direct",
     "trade:manual",
+    "t-trade:control",
+    "watchlist:write",
   }
 
 

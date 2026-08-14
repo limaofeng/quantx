@@ -244,3 +244,58 @@ def test_trade_confirmation_revision_follows_ai_runtime_and_refuses_downgrade() 
   assert revision.down_revision == "20260814_0014"
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()
+
+
+def test_trade_confirmation_revision_validates_preexisting_schema() -> None:
+  revision = _load_revision(
+    "20260815_0015_trade_confirmation_challenges.py",
+    "quantx_test_trade_confirmation_existing_schema",
+  )
+
+  class Inspector:
+    def __init__(self, *, columns=None, uniques=None):
+      self.columns = columns or [
+        {
+          "name": name,
+          "nullable": name in {"consumed_at", "result_reference"},
+        }
+        for name in revision._REQUIRED_COLUMNS
+      ]
+      self.uniques = uniques or [
+        {
+          "name": "uq_trade_confirmation_challenge_idempotency",
+          "column_names": [
+            "user_id",
+            "account_id",
+            "action",
+            "idempotency_key",
+          ],
+        }
+      ]
+
+    def get_columns(self, _table_name):
+      return self.columns
+
+    def get_unique_constraints(self, _table_name):
+      return self.uniques
+
+  revision._validate_existing_schema(Inspector())
+
+  missing = Inspector()
+  missing.columns = [
+    column for column in missing.columns if column["name"] != "token_digest"
+  ]
+  with pytest.raises(RuntimeError, match="Partial.*missing columns=token_digest"):
+    revision._validate_existing_schema(missing)
+
+  nullable = Inspector()
+  next(column for column in nullable.columns if column["name"] == "payload")[
+    "nullable"
+  ] = True
+  with pytest.raises(RuntimeError, match="nullable required columns=payload"):
+    revision._validate_existing_schema(nullable)
+
+  no_unique = Inspector(uniques=[])
+  no_unique.uniques = []
+  with pytest.raises(RuntimeError, match="missing user/account/action/idempotency"):
+    revision._validate_existing_schema(no_unique)

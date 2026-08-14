@@ -138,12 +138,12 @@ class OrderInput:
 
 @strawberry.input(description="移动端手动委托预览输入")
 class ManualOrderPreviewInput:
+  account_id: str = strawberry.field(description="必填资金账号")
   instrument_code: str = strawberry.field(description="带市场后缀的证券代码")
   side: ManualOrderSide = strawberry.field(description="BUY 或 SELL")
   price_type: ManualOrderPriceType = strawberry.field(description="LIMIT 或 BEST")
   volume: int = strawberry.field(description="请求委托数量")
   idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
-  account_id: Optional[str] = strawberry.field(description="资金账号", default=None)
   limit_price: Optional[float] = strawberry.field(
     description="LIMIT 必填；BEST 必须为空",
     default=None,
@@ -164,7 +164,9 @@ class ManualOrderPreview:
   instrument_code: str
   side: ManualOrderSide
   price_type: ManualOrderPriceType
-  volume: int
+  volume: int = strawberry.field(description="兼容字段，等于 requestedVolume")
+  requested_volume: int = strawberry.field(description="用户请求的原始委托数量")
+  final_volume: int = strawberry.field(description="用户确认后允许排队的最终合法数量")
   limit_price: Optional[float]
   reference_price: float
   estimated_amount: float
@@ -175,6 +177,10 @@ class ManualOrderPreview:
   execution_mode: str
   quote_timestamp: datetime
   challenge_expires_at: datetime
+  risk_decision_id: str = strawberry.field(description="稳定风控决策 ID")
+  risk_action: str = strawberry.field(description="ALLOW 或 CAP")
+  risk_reason_code: str = strawberry.field(description="结构化风控原因码")
+  risk_reason_detail: str = strawberry.field(description="风控决策说明")
   warnings: List[str]
 
 

@@ -559,3 +559,65 @@ async def test_kill_switch_invalidates_controlled_window_and_audits(
   assert event.next_stage == "KILL_SWITCHED"
   alert_service.raise_alert.assert_awaited_once()
   db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_kill_scans_and_cancels_manual_order_committed_before_it(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout(
+    stage="LIVE",
+    enabled=True,
+    controlled_window_active=True,
+    controlled_window_snapshot_id="snapshot-1",
+  )
+  pending = SimpleNamespace(
+    client_order_id="manual-client-1",
+    broker_order_id=None,
+    status="QUEUED",
+    status_reason=None,
+  )
+  source = SimpleNamespace(
+    client_order_id="manual-client-1",
+    device_id="device-1",
+    delivery_status="QUEUED",
+    last_error=None,
+    payload={"command_kind": "PLACE_ORDER"},
+  )
+
+  def result(rows):
+    value = MagicMock()
+    value.scalars.return_value.all.return_value = rows
+    return value
+
+  db = SimpleNamespace(
+    get=AsyncMock(return_value=rollout),
+    execute=AsyncMock(
+      side_effect=[result([]), result([pending]), result([source])]
+    ),
+    add=MagicMock(),
+    commit=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  alert_service = SimpleNamespace(raise_alert=AsyncMock())
+  monkeypatch.setattr(
+    operations_module,
+    "OperationalAlertService",
+    lambda _db: alert_service,
+  )
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(return_value={"status": "HARD_KILL"})
+
+  await service.kill("account-1", "manual kill", user_id="user-1")
+
+  assert source.delivery_status == "CANCELLED_KILL"
+  assert source.last_error == "hard_kill_before_broker_confirmation"
+  assert pending.status == "KILL_SWITCHED"
+  assert pending.status_reason == "hard kill before broker order id"
+  assert db.get.await_args.kwargs == {"with_for_update": True}
+  db.commit.assert_awaited_once()
