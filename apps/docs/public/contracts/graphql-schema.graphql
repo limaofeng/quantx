@@ -259,6 +259,21 @@ type ConditionalLiquidationOrder {
   """目标触发价"""
   targetPrice: Float
 
+  """触发后的退出策略"""
+  strategy: String!
+
+  """动态止盈参数"""
+  dynamicPolicy: JSON!
+
+  """统一退出计划ID"""
+  exitPlanId: String
+
+  """执行模式"""
+  executionMode: String!
+
+  """是否授权自动卖出"""
+  autoExitAuthorized: Boolean!
+
   """卖出数量模式"""
   sellMode: String!
 
@@ -297,6 +312,42 @@ type ConditionalLiquidationOrder {
 
   """更新时间"""
   updatedAt: DateTime
+
+  """动态止盈阶段"""
+  phase: String
+
+  """实时数据质量"""
+  dataQuality: String
+
+  """最近动态决策"""
+  lastDecision: String
+
+  """固定保护数量"""
+  protectedVolume: Int
+
+  """已成交数量"""
+  exitedVolume: Int
+
+  """剩余保护数量"""
+  remainingVolume: Int
+
+  """激活后峰值价"""
+  peakPrice: Float
+
+  """峰值回撤百分比"""
+  peakDrawdownPct: Float
+
+  """实时量速比"""
+  volumeVelocity: Float
+
+  """量价转弱评分"""
+  weakScore: Int
+
+  """动态保盈线"""
+  trailingFloorPct: Float
+
+  """待成交委托ID"""
+  pendingClientOrderId: String
 }
 
 """条件清仓单输入"""
@@ -322,6 +373,18 @@ input ConditionalLiquidationOrderInput {
   """目标触发价"""
   targetPrice: Float = null
 
+  """IMMEDIATE 或 ADAPTIVE_VOLUME_PRICE_TRAILING"""
+  strategy: String! = "IMMEDIATE"
+
+  """动态止盈参数；为空使用平衡型默认值"""
+  dynamicPolicy: JSON = null
+
+  """paper 或 live"""
+  executionMode: String! = "paper"
+
+  """明确授权自动卖出"""
+  autoExitAuthorized: Boolean! = false
+
   """卖出数量模式"""
   sellMode: String! = "ALL_AVAILABLE"
 
@@ -332,6 +395,19 @@ input ConditionalLiquidationOrderInput {
   sellVolume: Int = null
 
   """备注"""
+  remark: String = null
+}
+
+"""创建人工计划"""
+input CreateManualExitPlanInput {
+  instrumentCode: String!
+  protectedVolume: Int!
+  rules: JSON!
+  accountId: String = null
+  bucket: String! = "manual"
+  enabled: Boolean! = true
+  executionMode: String! = "paper"
+  autoExitAuthorized: Boolean! = false
   remark: String = null
 }
 
@@ -532,6 +608,93 @@ type ExecutionTraceView {
   updatedAt: DateTime
 }
 
+"""退出计划能力"""
+type ExitPlanCapabilities {
+  ruleTypes: [ExitPlanRuleCapability!]!
+  completionStrategies: [String!]!
+  conflictStrategies: [String!]!
+  executionModes: [String!]!
+  ruleSemantics: String!
+}
+
+"""占用持仓数量的冲突计划"""
+type ExitPlanCapacityConflict {
+  planId: String!
+  sourceType: String!
+  status: String!
+  remainingVolume: Int!
+  pending: Boolean!
+}
+
+"""退出计划审计事件"""
+type ExitPlanEventView {
+  eventId: String!
+  planId: String!
+  eventType: String!
+  payload: JSON!
+  createdAt: DateTime!
+}
+
+"""股票退出计划持仓容量"""
+type ExitPlanHoldingCapacity {
+  accountId: String!
+  instrumentCode: String!
+  totalVolume: Int!
+  availableVolume: Int!
+  frozenVolume: Int!
+  protectedVolume: Int!
+  pendingVolume: Int!
+  unallocatedVolume: Int!
+  conflicts: [ExitPlanCapacityConflict!]!
+}
+
+"""退出规则能力"""
+type ExitPlanRuleCapability {
+  ruleType: String!
+  label: String!
+  category: String!
+  parameters: JSON!
+}
+
+"""统一退出计划"""
+type ExitPlanView {
+  planId: String!
+  groupId: String
+  accountId: String!
+  instrumentCode: String!
+  bucket: String!
+  sourceType: String!
+  sourceId: String!
+  strategyRunId: String
+  enabled: Boolean!
+  status: String!
+  executionMode: String!
+  autoExitAuthorized: Boolean!
+  configVersion: Int!
+  completionStrategy: String
+  completionNote: String
+  protectedVolume: Int!
+  exitedVolume: Int!
+  remainingVolume: Int!
+  entryAvgPrice: Float!
+  rules: JSON!
+  metadata: JSON!
+  canEditRules: Boolean!
+  editRoute: String
+  phase: String!
+  dataQuality: String!
+  lastDecision: String
+  peakPrice: Float!
+  peakDrawdownPct: Float!
+  trailingFloorPct: Float
+  pendingClientOrderId: String
+  pendingIntentId: String
+  lastEvaluatedAt: DateTime
+  lastError: String
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
 """资产负债表核心字段"""
 type FinancialBalanceSheetData {
   """标的代码"""
@@ -674,6 +837,9 @@ type FinancialOverview {
 
   """最新公告日"""
   latestAnnounceDate: Date
+
+  """财务同步健康状态"""
+  syncHealth: FinancialSyncHealth!
 }
 
 """财务数据页报表分页"""
@@ -779,6 +945,30 @@ type FinancialSummary {
 
   """股本结构记录数"""
   capitalCount: Int!
+}
+
+"""财务同步下载、入库和指标重算健康状态"""
+type FinancialSyncHealth {
+  status: FinancialSyncHealthStatus!
+  lastCompletedAt: DateTime
+  lastSuccessAt: DateTime
+  requestedCodes: Int!
+  syncedCodes: Int!
+  emptyCodes: Int!
+  statementRows: Int!
+  metricRows: Int!
+  isStale: Boolean!
+  warnings: [String!]!
+}
+
+"""财务同步健康状态"""
+enum FinancialSyncHealthStatus {
+  NEVER_RUN
+  RUNNING
+  SUCCESS
+  PARTIAL_FAILURE
+  FAILED
+  STALE
 }
 
 """Prefect流程运行状态"""
@@ -1054,6 +1244,11 @@ type IntradayVolumeScreenItem {
 """盘中全市场量能筛选分页结果"""
 type IntradayVolumeScreenPage {
   items: [IntradayVolumeScreenItem!]!
+  topGainers: [IntradayVolumeScreenItem!]!
+  topLosers: [IntradayVolumeScreenItem!]!
+  advancers: Int!
+  decliners: Int!
+  flats: Int!
   total: Int!
   limit: Int!
   offset: Int!
@@ -1185,6 +1380,250 @@ enum KLinePeriod {
   YEAR_1
 }
 
+"""账户当日人工布防候选"""
+type LimitUpBoardArmedCandidate {
+  instrumentCode: String!
+  source: String!
+  armVersion: Int!
+  armedAt: DateTime
+}
+
+"""账户级打板助手"""
+type LimitUpBoardAssistant {
+  configId: String
+  strategyRunId: String
+  accountId: String!
+  enabled: Boolean!
+  mode: String!
+  autoExitAcknowledged: Boolean!
+  configVersion: Int!
+  universeRevision: Int!
+  targetEntryAmount: Float!
+  maxSinglePositionPct: Float!
+  autoSignalMinScore: Float!
+  entryDistanceTicks: Int!
+  entryStartTime: String!
+  entryEndTime: String!
+  approvalTtlMs: Int!
+  entryOrderTtlMs: Int!
+  maxPriceDeviationBps: Float!
+  executionQuoteMaxAgeSeconds: Float!
+  maxEntryAttemptsPerDay: Int!
+  exitLimitBreakTicks: Int!
+  exitMinSealSeconds: Float!
+  exitTrailingArmProfitPct: Float!
+  exitTrailingDrawdownPct: Float!
+  exitTrailingPercent: Float!
+  maxHoldingTradingDays: Int!
+  maxHoldingExitTime: String!
+  exitMaxSlippageBps: Float!
+  armedCandidates: [LimitUpBoardArmedCandidate!]!
+  manualArmedCount: Int!
+  pendingSignalCount: Int!
+  activeExitPlanCount: Int!
+  monitoredCount: Int!
+  runStatus: String!
+  engineStatus: String!
+  agentStatus: String!
+  reconcileStatus: String!
+  killSwitch: Boolean!
+  canApprove: Boolean!
+  canActivateLive: Boolean!
+  blockedReasons: [String!]!
+  lastReconciledAt: DateTime
+  lastError: String
+  projectionVersion: String!
+  projectionGeneratedAt: DateTime
+}
+
+"""账户级打板助手操作结果"""
+type LimitUpBoardAssistantMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  assistant: LimitUpBoardAssistant
+}
+
+"""账户级打板助手设置"""
+input LimitUpBoardAssistantSettingsInput {
+  accountId: String!
+  enabled: Boolean! = false
+  mode: String! = "paper"
+  autoExitAcknowledged: Boolean! = false
+  targetEntryAmount: Float! = 10000
+  maxSinglePositionPct: Float! = 0.05
+  autoSignalMinScore: Float! = 70
+  entryDistanceTicks: Int! = 1
+  entryStartTime: String! = "09:30"
+  entryEndTime: String! = "14:50"
+  approvalTtlMs: Int! = 15000
+  entryOrderTtlMs: Int! = 15000
+  maxPriceDeviationBps: Float! = 20
+  executionQuoteMaxAgeSeconds: Float! = 3
+  maxEntryAttemptsPerDay: Int! = 1
+  exitLimitBreakTicks: Int! = 1
+  exitMinSealSeconds: Float! = 3
+  exitTrailingArmProfitPct: Float! = 2
+  exitTrailingDrawdownPct: Float! = 3
+  exitTrailingPercent: Float! = 50
+  maxHoldingTradingDays: Int! = 2
+  maxHoldingExitTime: String! = "14:50"
+  exitMaxSlippageBps: Float! = 50
+}
+
+"""账户级打板助手投影更新通知"""
+type LimitUpBoardAssistantUpdateNotice {
+  accountId: String!
+  version: String!
+  occurredAt: DateTime!
+}
+
+"""打板候选布防操作"""
+input LimitUpBoardCandidateActionInput {
+  accountId: String!
+  instrumentCode: String!
+  idempotencyKey: String! = ""
+}
+
+"""打板雷达阶段事件"""
+type LimitUpRadarEvent {
+  eventId: String!
+  stage: LimitUpRadarStage!
+  stageLabel: String!
+  occurredAt: DateTime!
+  score: Float!
+}
+
+"""打板雷达行业热度"""
+type LimitUpRadarIndustryHeat {
+  industry: String!
+  candidateCount: Int!
+  nearLimitCount: Int!
+  sealedCount: Int!
+  averageScore: Float!
+}
+
+"""沪深全市场打板雷达查询输入"""
+input LimitUpRadarInput {
+  """候选阶段过滤"""
+  stages: [LimitUpRadarStage!] = null
+
+  """包含行业"""
+  includeIndustries: [String!] = null
+
+  """最低雷达评分"""
+  minScore: Float = null
+
+  """代码或名称搜索"""
+  search: String = null
+
+  """排序字段"""
+  sortField: LimitUpRadarSortField! = SCORE
+
+  """排序方向"""
+  sortDirection: StockScreenSortDirection! = DESC
+
+  """每页数量，最大200"""
+  limit: Int! = 200
+
+  """偏移量"""
+  offset: Int! = 0
+}
+
+"""打板雷达候选股"""
+type LimitUpRadarItem {
+  code: String!
+  name: String!
+  industry: String
+  currentPrice: Float!
+  changePct: Float!
+  limitUpPrice: Float!
+  priceTick: Float!
+  distanceToLimitPct: Float!
+  distanceToLimitTicks: Float!
+  priceChange5mPct: Float!
+  amount: Float!
+  amountPaceRatio: Float!
+  volumePaceRatio: Float!
+  last5mVolumeRatio: Float!
+  intradayTurnoverRatePct: Float
+  depthImbalance5: Float!
+  bid1Price: Float
+  ask1Price: Float
+  bid1Volume: Float!
+  ask1Volume: Float!
+  stage: LimitUpRadarStage!
+  stageLabel: String!
+  radarScore: Float!
+  scoreVersion: String!
+  scoreBreakdown: [LimitUpRadarScoreFactor!]!
+  breakCount: Int!
+  firstTouchAt: DateTime
+  firstSealedAt: DateTime
+  lastStageAt: DateTime
+  events: [LimitUpRadarEvent!]!
+  oneWordLimitUp: Boolean!
+  isStale: Boolean!
+  qualityTags: [String!]!
+  blockedReasons: [String!]!
+  canCreateInstance: Boolean!
+  existingInstanceId: String
+  updatedAt: DateTime!
+}
+
+"""沪深全市场打板雷达结果"""
+type LimitUpRadarPage {
+  items: [LimitUpRadarItem!]!
+  industries: [LimitUpRadarIndustryHeat!]!
+  summary: LimitUpRadarSummary!
+  total: Int!
+  limit: Int!
+  offset: Int!
+  scoreVersion: String!
+  updatedAt: DateTime
+  isScannerRunning: Boolean!
+  warnings: [String!]!
+}
+
+"""打板雷达评分因子"""
+type LimitUpRadarScoreFactor {
+  code: String!
+  label: String!
+  score: Float!
+  maxScore: Float!
+  explanation: String!
+}
+
+"""打板雷达排序字段"""
+enum LimitUpRadarSortField {
+  SCORE
+  DISTANCE_TO_LIMIT
+  AMOUNT
+  UPDATED_AT
+}
+
+"""打板雷达候选阶段"""
+enum LimitUpRadarStage {
+  MOMENTUM
+  SURGING
+  NEAR_LIMIT
+  TOUCHING
+  SEALED
+  BROKEN
+  RESEALED
+}
+
+"""打板雷达全市场摘要"""
+type LimitUpRadarSummary {
+  scannedCount: Int!
+  candidateCount: Int!
+  nearLimitCount: Int!
+  sealedCount: Int!
+  brokenCount: Int!
+  staleCount: Int!
+  excludedCount: Int!
+}
+
 """可清仓持仓"""
 type LiquidatablePosition {
   """股票代码"""
@@ -1233,6 +1672,18 @@ input LiquidatePositionInput {
   accountId: String = null
 }
 
+"""批量或一键清仓"""
+input LiquidatePositionsInput {
+  completionStrategy: String!
+  conflictStrategy: String!
+  confirm: Boolean!
+  accountId: String = null
+  scope: String! = "SELECTED"
+  instrumentCodes: [String!] = null
+  executionMode: String! = "paper"
+  autoExitAuthorized: Boolean! = false
+}
+
 """清仓错误"""
 type LiquidationError {
   """股票代码"""
@@ -1240,6 +1691,14 @@ type LiquidationError {
 
   """错误信息"""
   error: String!
+}
+
+"""一组持仓清仓计划"""
+type LiquidationGroupResult {
+  groupId: String!
+  success: Boolean!
+  message: String!
+  plans: [LiquidationPlanResult!]!
 }
 
 """清仓订单"""
@@ -1291,6 +1750,16 @@ type LiquidationOrder {
 
   """创建时间"""
   createdAt: String
+}
+
+"""单只股票清仓计划创建结果"""
+type LiquidationPlanResult {
+  instrumentCode: String!
+  success: Boolean!
+  planId: String
+  protectedVolume: Int
+  conflictPlanIds: [String!]!
+  error: String
 }
 
 """清仓结果"""
@@ -1386,7 +1855,7 @@ type MessageResponse {
   message: String!
 }
 
-"QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 清仓管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
+"QuantX 系统数据变更接口\n\n## 主要功能\n\n### 订单操作\n- 创建买入/卖出订单\n- 取消未成交订单\n\n### 持仓管理\n- 执行清仓操作\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 策略管理\n- 创建、更新、删除策略模板\n- 管理策略实例的生命周期\n"
 type Mutation {
   """创建十分钟内有效的一次性设备登记码"""
   createAgentEnrollment(name: String! = "QuantX QMT Agent", authorizedAccountIds: [String!]! = []): AgentEnrollment!
@@ -1402,6 +1871,33 @@ type Mutation {
 
   """撤单"""
   cancelOrder(input: CancelOrderInput!): CancelOrderResult!
+
+  """预览并签发退出 SELL 意图确认挑战"""
+  previewExitIntent(planId: String!, intentId: String!): TradeApprovalPreviewResult!
+
+  """确认退出 SELL 意图并重新进入统一风控"""
+  confirmExitIntent(planId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
+
+  """拒绝退出 SELL 意图"""
+  rejectExitIntent(planId: String!, intentId: String!, reason: String! = "USER_REJECTED"): TradeApprovalConfirmationResult!
+
+  """创建人工计划"""
+  createManualExitPlan(input: CreateManualExitPlanInput!): ExitPlanView!
+
+  """更新人工计划规则"""
+  updateManualExitPlan(input: UpdateManualExitPlanInput!): ExitPlanView!
+
+  """启用或暂停退出计划"""
+  setExitPlanEnabled(planId: String!, enabled: Boolean!, configVersion: Int!): ExitPlanView!
+
+  """取消并释放退出计划保护数量"""
+  cancelExitPlan(planId: String!, configVersion: Int!, reason: String! = "USER_CANCELLED"): ExitPlanView!
+
+  """立即评估一个退出计划"""
+  evaluateExitPlanNow(planId: String!): ExitPlanView!
+
+  """按股票创建一组统一清仓计划"""
+  liquidatePositions(input: LiquidatePositionsInput!): LiquidationGroupResult!
 
   """一键清仓"""
   liquidateAllPositions(input: LiquidateAllPositionsInput!): LiquidationResult!
@@ -1426,6 +1922,18 @@ type Mutation {
 
   """取消清仓订单"""
   cancelLiquidationOrder(orderId: String!, accountId: String!): MessageResponse!
+
+  """保存并协调账户级打板助手"""
+  saveLimitUpBoardAssistant(input: LimitUpBoardAssistantSettingsInput!): LimitUpBoardAssistantMutationResult!
+
+  """立即重新协调账户级打板助手"""
+  reconcileLimitUpBoardAssistant(accountId: String!): LimitUpBoardAssistantMutationResult!
+
+  """将雷达候选加入当日人工布防"""
+  armLimitUpBoardCandidate(input: LimitUpBoardCandidateActionInput!): LimitUpBoardAssistantMutationResult!
+
+  """取消雷达候选的当日人工布防"""
+  disarmLimitUpBoardCandidate(input: LimitUpBoardCandidateActionInput!): LimitUpBoardAssistantMutationResult!
 
   """运行策略（创建并启动）"""
   runStrategy(input: StrategyRunInput!, autoStart: Boolean! = true): StrategyRun!
@@ -1480,6 +1988,12 @@ type Mutation {
 
   """拒绝一个等待人工授权的策略交易意图"""
   rejectStrategyTradeIntent(runId: String!, intentId: String!, reason: String! = "USER_REJECTED"): OperationResult!
+
+  """生成一次策略买入意图的短时设备绑定确认预览"""
+  previewStrategyTradeIntentApproval(runId: String!, intentId: String!): TradeApprovalPreviewResult!
+
+  """消费短时凭据并确认一个策略买入意图"""
+  confirmStrategyTradeIntentApproval(runId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
 
   """归档策略实例"""
   archiveStrategyInstance(instanceId: String!): StrategyInstance
@@ -1553,8 +2067,17 @@ type Mutation {
   """确认做 T 买入信号"""
   approveTTradeEntry(runId: String!, intentId: String!, expectedSignalVersion: Int! = 0, idempotencyKey: String! = ""): TTradeMutationResult!
 
-  """完成门禁检查并启用严格 Canary 实盘"""
-  activateTTradeLive(accountId: String!, policyVersion: Int!): TTradeOperationsMutationResult!
+  """生成一次做 T 买入确认的短时设备绑定预览"""
+  previewTTradeEntryApproval(runId: String!, intentId: String!): TradeApprovalPreviewResult!
+
+  """消费短时凭据并确认一个做 T 买入信号"""
+  confirmTTradeEntryApproval(runId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
+
+  """基于最新完整快照建立受控交易窗口"""
+  beginTTradeControlledWindow(accountId: String!, snapshotId: String!): TTradeOperationsMutationResult!
+
+  """完成门禁检查并启用 Canary 或开发环境正式 LIVE"""
+  activateTTradeLive(accountId: String!, policyVersion: Int!, targetStage: TTradeRolloutTarget! = CANARY, confirmation: String! = ""): TTradeOperationsMutationResult!
 
   """停止做 T 新买入，继续保护已有批次"""
   pauseTTradeEntries(accountId: String!, reason: String! = "manual pause"): TTradeOperationsMutationResult!
@@ -2070,7 +2593,7 @@ type PositionLiquidationResult {
   error: String
 }
 
-"QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 清仓管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
+"QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
   """当前用户登记的 Agent 设备"""
   agentDevices(includeRevoked: Boolean! = false): [AgentDevice!]!
@@ -2165,6 +2688,21 @@ type Query {
   """分页获取已清仓持仓周期"""
   closedPositionCycles(accountId: String!, startDate: String = null, endDate: String = null, limit: Int! = 50, offset: Int! = 0): ClosedPositionCyclePage!
 
+  """统一退出计划列表"""
+  exitPlans(accountId: String = null, instrumentCode: String = null, statuses: [String!] = null, sourceType: String = null, limit: Int! = 200): [ExitPlanView!]!
+
+  """单个统一退出计划"""
+  exitPlan(planId: String!): ExitPlanView
+
+  """退出计划规则、模式和冲突处理能力"""
+  exitPlanCapabilities: ExitPlanCapabilities!
+
+  """股票可供退出计划认领的持仓容量"""
+  exitPlanHoldingCapacity(instrumentCode: String!, accountId: String = null): ExitPlanHoldingCapacity!
+
+  """退出计划、规则、委托和成交时间线"""
+  exitPlanEvents(planId: String!, limit: Int! = 200): [ExitPlanEventView!]!
+
   """获取清仓概况"""
   liquidationSummary(accountId: String = null): LiquidationSummary!
 
@@ -2180,14 +2718,17 @@ type Query {
   """获取赎回记录列表"""
   redemptionRecords(accountId: String!, stockCode: String!, limit: Int! = 20, offset: Int! = 0): [RedemptionRecord!]!
 
+  """查询账户级打板助手"""
+  limitUpBoardAssistant(accountId: String!): LimitUpBoardAssistant!
+
   """获取策略模板列表"""
-  strategies: [Strategy!]!
+  strategies(includeAssistantManaged: Boolean! = false): [Strategy!]!
 
   """获取单个策略模板"""
   strategy(strategyId: Int!): Strategy
 
   """获取策略运行列表"""
-  strategyRuns: [StrategyRun!]!
+  strategyRuns(includeAssistantManaged: Boolean! = false): [StrategyRun!]!
 
   """获取单个策略运行"""
   strategyRun(runId: String!): StrategyRun
@@ -2196,10 +2737,10 @@ type Query {
   backtestHistory(runId: String!): [StrategyBacktest!]!
 
   """获取策略库定义列表"""
-  strategyDefinitions: [StrategyDefinition!]!
+  strategyDefinitions(includeAssistantManaged: Boolean! = false): [StrategyDefinition!]!
 
   """获取策略实例列表"""
-  strategyInstances(status: String = null, strategyKey: String = null, instrumentCode: String = null): [StrategyInstance!]!
+  strategyInstances(status: String = null, strategyKey: String = null, instrumentCode: String = null, includeAssistantManaged: Boolean! = false): [StrategyInstance!]!
 
   """获取单个策略实例"""
   strategyInstance(id: String!): StrategyInstance
@@ -2269,6 +2810,9 @@ type Query {
 
   """基于 QMT Agent 全市场实时行情执行盘中量能筛选"""
   intradayVolumeScreen(input: IntradayVolumeScreenInput!): IntradayVolumeScreenPage!
+
+  """沪深全市场打板机会雷达"""
+  limitUpRadar(input: LimitUpRadarInput!): LimitUpRadarPage!
 
   """获取可用日级信号及快照元信息"""
   stockSignalSnapshotMeta: [SignalMeta!]!
@@ -2563,6 +3107,15 @@ enum RiskLevel {
   VERY_HIGH
 }
 
+"""ROE（TTM）独立质量状态"""
+enum RoeQualityStatus {
+  VALID
+  STALE
+  SUSPICIOUS
+  INVALID
+  UNVERIFIED
+}
+
 """行业/概念板块"""
 type Sector {
   """板块ID"""
@@ -2807,6 +3360,18 @@ type StockRepurchaseEvent {
   rawPayload: JSON!
 }
 
+"""条件选股财务同步与 ROE 可筛选健康状态"""
+type StockScreenFinancialHealth {
+  status: FinancialSyncHealthStatus!
+  lastSuccessAt: DateTime
+  verifiedCount: Int!
+  selectableCount: Int!
+  excludedStaleCount: Int!
+  excludedSuspiciousCount: Int!
+  excludedInvalidCount: Int!
+  excludedUnverifiedCount: Int!
+}
+
 """条件选股输入"""
 input StockScreenInput {
   """包含行业"""
@@ -2842,7 +3407,7 @@ input StockScreenInput {
   """偏移量"""
   offset: Int! = 0
 
-  """最小TTM归母ROE"""
+  """最小 ROE（TTM），仅使用截至快照已披露且验证通过的数据"""
   minRoe: Float = null
 
   """最小归母净利润单季同比增速"""
@@ -2895,12 +3460,15 @@ type StockScreenItem {
   ma5Prev: Float
   ma10Prev: Float
   roe: Float
+  roeQualityStatus: RoeQualityStatus!
   netProfitGrowth: Float
   yoyGrowth: Float
   netProfitAccumGrowth: Float
   revenueAccumGrowth: Float
   financialReportDate: Date
   financialAnnounceDate: Date
+  financialAsOfDate: Date
+  financialVerifiedAt: DateTime
   financialQualityFlags: [String!]!
   matchedStrategies: [String!]!
   score: Float!
@@ -2925,6 +3493,7 @@ type StockScreenPage {
   hasStaleData: Boolean!
   isComplete: Boolean!
   warnings: [String!]!
+  financialHealth: StockScreenFinancialHealth
 }
 
 """选股日级快照完整性状态"""
@@ -3197,6 +3766,7 @@ type StrategyExitPlanView {
   lastNetProfitPct: Float!
   peakNetProfitPct: Float!
   holdingTradingDays: Int!
+  entryTradeDate: String
   pendingIntentId: String
   pendingOrderId: String
   lastExitReason: String
@@ -3384,10 +3954,12 @@ enum StrategyInstrumentScope {
 
 - STATIC: 创建运行实例时固定指定标的
 - ACCOUNT_HOLDINGS: 由账户持仓快照动态维护标的池
+- RADAR_CANDIDATES: 由 Engine 打板雷达协调候选标的池
 """
 enum StrategyInstrumentUniverseMode {
   STATIC
   ACCOUNT_HOLDINGS
+  RADAR_CANDIDATES
 }
 
 """策略 K线数据"""
@@ -3722,6 +4294,9 @@ type StrategyTickData {
 
 "QuantX 系统实时数据订阅接口\n\n## 主要功能\n\n### 实时行情订阅\n- 金融工具实时价格更新\n- K线数据实时推送\n- 市场深度数据订阅\n\n### 交易数据订阅\n- 订单状态变更通知\n- 成交记录实时推送\n\n### 多金融工具监控\n- 同时订阅多个金融工具的价格\n"
 type Subscription {
+  """订阅账户级打板助手投影更新"""
+  limitUpBoardAssistantUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
+
   """订阅账户做 T 监控投影更新"""
   tTradeUpdates(accountId: String!): TTradeUpdateNotice!
 
@@ -3846,6 +4421,31 @@ type TTradeBatchPage {
   pageInfo: PageInfo!
 }
 
+"""做 T 单标的最新策略评估遥测"""
+type TTradeEvaluationTelemetry {
+  phase: String!
+  lastTickAt: DateTime!
+  processedTickCount: Int!
+  windowSampleCount: Int!
+  windowCoverageSeconds: Float!
+  triggered: Boolean!
+  reason: String!
+  signalType: String!
+  signalPrice: Float!
+  windowHigh: Float
+  windowLow: Float
+  pullbackPct: Float
+  reboundPct: Float
+  vwap: Float
+  vwapPremiumPct: Float
+  spreadTicks: Float
+  spreadPct: Float
+  momentumRisePct: Float
+  momentumMoveSeconds: Float
+  momentumAmountVelocityRatio: Float
+  momentumBaselineCoverageSeconds: Float
+}
+
 """导入外部已成交的做 T 买入批次"""
 input TTradeExternalEntryInput {
   runId: String!
@@ -3886,13 +4486,34 @@ type TTradeGlobalMonitor {
   pullbackThresholdPct: Float!
   reboundThresholdPct: Float!
   maxSpreadTicks: Int!
+  momentumEnabled: Boolean!
+  momentumWindowSeconds: Int!
+  momentumMinRisePct: Float!
+  momentumMinMoveSeconds: Int!
+  momentumBaselineSeconds: Int!
+  momentumMinAmountVelocityRatio: Float!
+  momentumMinVwapPremiumPct: Float!
+  momentumMaxVwapPremiumPct: Float!
+  momentumHighToleranceTicks: Int!
+  momentumMaxSpreadTicks: Int!
+  momentumMaxSpreadPct: Float!
   approvalTtlSeconds: Int!
   maxPriceDeviationPct: Float!
+  maxExitSlippageBps: Float!
   targetProfitPct: Float!
   baseFloorPct: Float!
   initialGapPct: Float!
   trailingGapSlope: Float!
   maxGapPct: Float!
+  highProfitLockEnabled: Boolean!
+  highProfitArmPct: Float!
+  highProfitMaxDrawdownPct: Float!
+  rapidReversalEnabled: Boolean!
+  rapidReversalWindowSeconds: Int!
+  rapidReversalDrawdownPct: Float!
+  rapidReversalConfirmTicks: Int!
+  limitUpTouchExitEnabled: Boolean!
+  limitUpTouchToleranceTicks: Int!
   hardStopEnabled: Boolean!
   hardStopPct: Float!
   timeExitMode: TTradeTimeExitMode!
@@ -3955,6 +4576,17 @@ input TTradeGlobalSettingsInput {
   pullbackThresholdPct: Float! = 0.8
   reboundThresholdPct: Float! = 0.2
   maxSpreadTicks: Int! = 3
+  momentumEnabled: Boolean! = true
+  momentumWindowSeconds: Int! = 60
+  momentumMinRisePct: Float! = 0.8
+  momentumMinMoveSeconds: Int! = 15
+  momentumBaselineSeconds: Int! = 300
+  momentumMinAmountVelocityRatio: Float! = 2
+  momentumMinVwapPremiumPct: Float! = 2
+  momentumMaxVwapPremiumPct: Float! = 3.5
+  momentumHighToleranceTicks: Int! = 1
+  momentumMaxSpreadTicks: Int! = 10
+  momentumMaxSpreadPct: Float! = 0.3
   approvalTtlSeconds: Int! = 30
   maxPriceDeviationPct: Float! = 0.3
   targetProfitPct: Float! = 2
@@ -3962,6 +4594,15 @@ input TTradeGlobalSettingsInput {
   initialGapPct: Float! = 1.5
   trailingGapSlope: Float! = 0.25
   maxGapPct: Float! = 3
+  highProfitLockEnabled: Boolean! = true
+  highProfitArmPct: Float! = 4
+  highProfitMaxDrawdownPct: Float! = 1.2
+  rapidReversalEnabled: Boolean! = true
+  rapidReversalWindowSeconds: Int! = 15
+  rapidReversalDrawdownPct: Float! = 0.8
+  rapidReversalConfirmTicks: Int! = 2
+  limitUpTouchExitEnabled: Boolean! = true
+  limitUpTouchToleranceTicks: Int! = 0
   hardStopEnabled: Boolean! = false
   hardStopPct: Float! = -0.8
   timeExitMode: TTradeTimeExitMode! = UNLIMITED
@@ -3987,6 +4628,9 @@ type TTradeImportedEntry {
 type TTradeLiveReadiness {
   accountId: String!
   ready: Boolean!
+  status: String!
+  preparationReady: Boolean!
+  automationReady: Boolean!
   stage: String!
   engineStatus: String!
   agentStatus: String!
@@ -3999,6 +4643,7 @@ type TTradeLiveReadiness {
   canApprove: Boolean!
   canActivateLive: Boolean!
   blockedReasons: [String!]!
+  preparationBlockedReasons: [String!]!
   checks: [TTradeReadinessCheck!]!
   snapshotId: String
   snapshotHash: String
@@ -4008,6 +4653,15 @@ type TTradeLiveReadiness {
   queueDelaySeconds: Float!
   deadLetterCount: Int!
   unresolvedCriticalAlertCount: Int!
+  manualCoexistence: Boolean!
+  externalOrderCount: Int!
+  externalTradeCount: Int!
+  controlledWindowActive: Boolean!
+  controlledWindowSnapshotId: String
+  controlledWindowStartedAt: DateTime
+  newExternalOrderCount: Int!
+  newExternalTradeCount: Int!
+  workingExternalOrderCount: Int!
   journalIntegrity: String!
   journalSizeBytes: Int!
   journalPendingReports: Int!
@@ -4036,6 +4690,7 @@ type TTradeReadinessCheck {
   code: String!
   passed: Boolean!
   message: String!
+  scope: String!
 }
 
 """做 T 历史回放运行"""
@@ -4174,6 +4829,17 @@ input TTradeReplayStartInput {
   pullbackThresholdPct: Float! = 0.8
   reboundThresholdPct: Float! = 0.2
   maxSpreadTicks: Int! = 3
+  momentumEnabled: Boolean! = true
+  momentumWindowSeconds: Int! = 60
+  momentumMinRisePct: Float! = 0.8
+  momentumMinMoveSeconds: Int! = 15
+  momentumBaselineSeconds: Int! = 300
+  momentumMinAmountVelocityRatio: Float! = 2
+  momentumMinVwapPremiumPct: Float! = 2
+  momentumMaxVwapPremiumPct: Float! = 3.5
+  momentumHighToleranceTicks: Int! = 1
+  momentumMaxSpreadTicks: Int! = 10
+  momentumMaxSpreadPct: Float! = 0.3
   approvalTtlSeconds: Int! = 30
   maxPriceDeviationPct: Float! = 0.3
   targetProfitPct: Float! = 2
@@ -4181,6 +4847,15 @@ input TTradeReplayStartInput {
   initialGapPct: Float! = 1.5
   trailingGapSlope: Float! = 0.25
   maxGapPct: Float! = 3
+  highProfitLockEnabled: Boolean! = true
+  highProfitArmPct: Float! = 4
+  highProfitMaxDrawdownPct: Float! = 1.2
+  rapidReversalEnabled: Boolean! = true
+  rapidReversalWindowSeconds: Int! = 15
+  rapidReversalDrawdownPct: Float! = 0.8
+  rapidReversalConfirmTicks: Int! = 2
+  limitUpTouchExitEnabled: Boolean! = true
+  limitUpTouchToleranceTicks: Int! = 0
   hardStopEnabled: Boolean! = false
   hardStopPct: Float! = -0.8
   timeExitMode: TTradeTimeExitMode! = UNLIMITED
@@ -4210,6 +4885,12 @@ type TTradeReplaySummary {
   openCycles: Int!
   winningCycles: Int!
   winRatePct: Float!
+}
+
+"""账户自动交易目标灰度阶段"""
+enum TTradeRolloutTarget {
+  CANARY
+  LIVE
 }
 
 """持仓做 T 会话"""
@@ -4256,6 +4937,7 @@ type TTradeSession {
   updatedAt: DateTime
   globalMonitorId: String
   globalConfigVersion: Int!
+  latestEvaluation: TTradeEvaluationTelemetry
 }
 
 """做 T 买入确认信号历史"""
@@ -4295,6 +4977,17 @@ input TTradeStartInput {
   pullbackThresholdPct: Float! = 0.8
   reboundThresholdPct: Float! = 0.2
   maxSpreadTicks: Int! = 3
+  momentumEnabled: Boolean! = true
+  momentumWindowSeconds: Int! = 60
+  momentumMinRisePct: Float! = 0.8
+  momentumMinMoveSeconds: Int! = 15
+  momentumBaselineSeconds: Int! = 300
+  momentumMinAmountVelocityRatio: Float! = 2
+  momentumMinVwapPremiumPct: Float! = 2
+  momentumMaxVwapPremiumPct: Float! = 3.5
+  momentumHighToleranceTicks: Int! = 1
+  momentumMaxSpreadTicks: Int! = 10
+  momentumMaxSpreadPct: Float! = 0.3
   approvalTtlSeconds: Int! = 30
   maxPriceDeviationPct: Float! = 0.3
   targetProfitPct: Float! = 2
@@ -4302,6 +4995,15 @@ input TTradeStartInput {
   initialGapPct: Float! = 1.5
   trailingGapSlope: Float! = 0.25
   maxGapPct: Float! = 3
+  highProfitLockEnabled: Boolean! = true
+  highProfitArmPct: Float! = 4
+  highProfitMaxDrawdownPct: Float! = 1.2
+  rapidReversalEnabled: Boolean! = true
+  rapidReversalWindowSeconds: Int! = 15
+  rapidReversalDrawdownPct: Float! = 0.8
+  rapidReversalConfirmTicks: Int! = 2
+  limitUpTouchExitEnabled: Boolean! = true
+  limitUpTouchToleranceTicks: Int! = 0
   hardStopEnabled: Boolean! = false
   hardStopPct: Float! = -0.8
   timeExitMode: TTradeTimeExitMode! = UNLIMITED
@@ -4432,6 +5134,42 @@ type Trade {
   tradedAmount: Float!
 }
 
+"""交易确认提交结果；成功仅表示已进入统一执行链路"""
+type TradeApprovalConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: String
+}
+
+"""服务器生成的单笔交易确认预览"""
+type TradeApprovalPreview {
+  challengeId: String!
+  confirmationToken: String!
+  action: String!
+  accountId: String!
+  runId: String!
+  intentId: String!
+  instrumentCode: String!
+  side: String!
+  bucket: String!
+  reason: String!
+  targetVolume: Int
+  referencePrice: Float
+  estimatedAmount: Float
+  signalExpiresAt: DateTime
+  challengeExpiresAt: DateTime!
+  warnings: [String!]!
+}
+
+"""交易确认预览结果"""
+type TradeApprovalPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: TradeApprovalPreview
+}
+
 """策略 TradeIntent 前端视图"""
 type TradeIntentView {
   id: String!
@@ -4453,6 +5191,18 @@ enum TradingEventType {
   ORDER_FILLED
   ORDER_CANCELLED
   ORDER_REJECTED
+}
+
+"""更新人工计划"""
+input UpdateManualExitPlanInput {
+  planId: String!
+  configVersion: Int!
+  rules: JSON!
+  accountId: String = null
+  protectedVolume: Int = null
+  executionMode: String = null
+  autoExitAuthorized: Boolean = null
+  remark: String = null
 }
 
 """自选股"""
