@@ -126,7 +126,7 @@ GraphQL 根字段默认拒绝。目标 iOS scope 如下：
 | 委托成交 | `todayOrders`、`historyOrders`、`todayTrades`、`historyTrades`、`order`、`trade`、`tradingEvents` | 规范化 `canCancel`、状态时间线与事件序列 |
 | 卖出管理 | `exitPlans`、`exitPlan`、`exitPlanEvents`、`exitPlanCapabilities`、`exitPlanHoldingCapacity`、`liquidationSummary` | 清仓组预览/确认挑战 |
 | 策略 | `strategyInstances`、`strategyInstance`、`strategyPerformance`、`strategyDecisionHistory`、`strategyExecutionTrace`、`strategyInstanceEvents` | 移动参数描述与控制预览 |
-| 做 T | `tTradeGlobalMonitor`、批次/信号/事件 Query、`tTradeUpdates`、`validateTTradeLiveReadiness` | 无；写权限需拆分 |
+| 做 T | `tTradeGlobalMonitor`、批次/信号/事件 Query、`tTradeUpdates`、`validateTTradeLiveReadiness` | 账户级控制已使用专用 scope 与两阶段挑战 |
 | 打板 | `limitUpBoardAssistant`、`firstBoardPromotionDesk`、`limitUpRadar` 及更新订阅 | 无；写权限需拆分 |
 
 查询字段以发布 SDL 为准。iOS operation 命名使用 `IOS` 前缀并经过 Apollo
@@ -149,6 +149,9 @@ codegen；Generated GraphQL Model 必须先映射为校验过的 App Domain Mode
 | `strategyInstanceMobileParameters` | Query | `strategy:read` | 返回 allowlist 参数描述和配置版本 |
 | `previewStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 进入实盘/实盘启动前返回 readiness 挑战 |
 | `confirmStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 消费实盘控制挑战 |
+| `previewTTradeControl` | Mutation | `trade:approve` + `t-trade:control` | 预览受控窗口、Canary、LIVE 或 Kill Switch 的精确安全上下文 |
+| `confirmTTradeControl` | Mutation | `trade:approve` + `t-trade:control` | 消费设备绑定挑战、重校验门禁并幂等应用账户级控制 |
+| `pauseTTradeEntries` | Mutation（收紧） | `t-trade:control` | 风险降低操作，只停止新入场并保留现有退出保护 |
 | `registerPushDevice` / `updatePushPreferences` / `unregisterPushDevice` | Mutation | `notification:manage` | 管理当前设备 APNs Token 与类别偏好 |
 
 现有 `placeOrder`、`liquidatePosition`、`liquidateAllPositions` 和只带布尔
@@ -273,10 +276,20 @@ QMT 最新 `canCancel` 和状态；响应 `QUEUED` 只表示撤单命令已排�
 ### 7.2 做 T
 
 - 读取沿用当前投影和 readiness。
-- 设置、忽略列表、启停与协调使用 `t-trade:control`；入场批准、建立受控窗口、
-  激活实盘和 Kill Switch 继续要求 `trade:approve` 和设备绑定挑战。
+- 设置、忽略列表、暂停新入场与协调使用 `t-trade:control`；入场批准、建立受控
+  窗口、激活 Canary/LIVE 和 Kill Switch 同时要求 `trade:approve`，Resolver
+  再校验两个 scope、唯一主账户和当前设备会话。
 - 已有 `previewTTradeEntryApproval/confirmTTradeEntryApproval` 作为预览确认基线；
   挑战继续绑定 run/intent/account/device，确认后只重新进入统一风控。
+- 账户级控制使用 `previewTTradeControl/confirmTTradeControl`。60 秒挑战绑定动作、
+  policyVersion、完整快照、目标阶段、原因、rollout/readiness 指纹与设备会话；
+  BEGIN/ACTIVATE 确认时重新校验唯一 live Agent、协议 1.1、对账、快照和全部实盘
+  门禁。Kill Switch 是风险降低动作，不因 Agent、快照或普通实盘门禁失效而禁用，
+  但仍要求非空原因、逐次生物确认及精确用户/设备/账户/token 绑定。
+- 确认结果区分 `DISPATCHING`、`APPLIED` 与 `REJECTED`。服务端以 challenge ID
+  作为 rollout 事件 operation marker，并以短租约恢复崩溃；重放不得重复创建
+  熔断事件、SEV1 告警、撤单或 emergency-stop 命令。`APPLIED` 也不表示券商已报
+  或成交。
 - 有活动批次/退出计划时停止请求由服务端拒绝或转 DRAINING，客户端不得清除投影。
 
 ### 7.3 打板
@@ -301,9 +314,9 @@ QMT 最新 `canCancel` 和状态；响应 `QUEUED` 只表示撤单命令已排�
 
 ## 9. APNs 契约
 
-### 9.0 当前服务端基础（2026-08-15）
+### 9.0 当前服务端实现（2026-08-15）
 
-M5 服务端基础已落地，公共 GraphQL 契约为：
+M5 服务端注册、业务事件投影和 APNs outbox 发送器均已落地。公共 GraphQL 契约为：
 
 - `registerPushDevice(input)`：绑定当前 `deviceSessionId` 和唯一主账户，按安装实例
   幂等注册或轮换 Token；
@@ -314,13 +327,23 @@ M5 服务端基础已落地，公共 GraphQL 契约为：
   发生/过期时间；事件必须同时匹配当前用户、设备会话和主账户。
 
 四个根字段均要求 `notification:manage`；兼容 Web Mutation 只沿用现有
-`mutation:write` 迁移规则，原生会话不接受该宽权限回退。服务端通过 0017 迁移
-持久化加密 Token、类别偏好、随机事件和无业务 payload 的 outbox；旧库若只存在
-部分表、约束或索引会 fail-closed。
+`mutation:write` 迁移规则，原生会话不接受该宽权限回退。服务端通过 0017/0019
+前向迁移持久化加密 Token、类别偏好、随机事件、无业务 payload 的 outbox，以及
+业务事件全局幂等回执；旧库若只存在部分表、约束或索引会 fail-closed。
 
-当前切片不连接真实 APNs，也不把 outbox 的 `PENDING` 表示为送达。后续发送器必须
-以可注入客户端接入，并在 ES256 Key ID、Team ID、Bundle ID、环境、HTTP/2 与 TLS
-配置全部有效时才启用；只发送普通 alert，不申请或模拟 Critical Alerts。
+独立 Worker 从数据库真源投影通知，不依赖 Redis，也不因后来开启偏好而补发旧
+事件。`ORDER_UPDATE` 只接受已 `APPLIED` 的委托/成交运行时事件；请求成功、
+`command_ack` 和回测事件均不产生订单通知。投影回执与随机 event/outbox 在同一
+事务写入，并在创建 outbox 前重新校验用户、主账户、设备会话、专用权限、注册和
+类别偏好。
+
+APNs 发送器使用 ES256 provider token、HTTP/2/TLS、严格的 sandbox/production
+主机和最小 payload；Token 缓存 50 分钟，410 会安全失效对应注册，429/5xx 按受限
+策略重试。发送 Worker 默认关闭，只有 Team ID、Key ID、Bundle ID、`.p8` 文件及
+投递参数全部通过配置校验后才允许运行。当前自动化仅使用可注入客户端验证协议，
+**尚无真实 Apple 凭据、真机送达或 TestFlight 证据**；outbox 的 `PENDING`、
+`SENT` 也不表示业务操作已处理或交易已成交。系统只发送普通 alert，不申请或模拟
+Critical Alerts。
 
 ### 9.1 设备注册
 
@@ -346,7 +369,7 @@ App 版本和通知偏好。Token 轮换时 upsert；登出和会话吊销时注
 {
   "aps": {
     "alert": {
-      "title": "QuantX 有一项待处理事项",
+      "title": "QuantX 有一项状态更新",
       "body": "打开应用查看当前状态"
     },
     "sound": "default"
@@ -400,15 +423,15 @@ REST `detail` 和 GraphQL `errors[].extensions` 至少包含稳定 `code`、
 
 ## 11. 兼容与发布阻断
 
-| 当前能力 | 目标差距 | 发布决策 |
+| 当前能力 | 剩余证据或差距 | 发布决策 |
 | --- | --- | --- |
-| 会话继承用户全部权限 | 缺设备 scope 与唯一主账户绑定 | 交易 TestFlight 候选阻断 |
-| 大多数 Mutation 只要求 `mutation:write` | 缺最小权限拆分 | iOS 不调用这些写入 |
-| `placeOrder` 直接提交 | 缺手工下单两阶段确认 | 不提供手工交易入口 |
-| 清仓兼容接口使用布尔 `confirm` | 缺组级绑定预览 | iOS 只读卖出管理，直至新契约落地 |
-| 策略参数是通用 JSON | 缺移动 allowlist 和版本冲突 | iOS 只展示，不编辑 |
-| 已有助手买入预览/确认 | 权限仍需设备 scope 化 | 可复用实现，但不得宣告最终安全门完成 |
-| 无 APNs 设备契约 | 无通知闭环 | 通知阶段阻断 |
+| 原生会话绑定设备 scope 与唯一主账户 | 尚缺 TestFlight 五日会话/网络切换观察 | 自动化可验收，G4 保持阻断 |
+| iOS Mutation 已拆分专用 scope，兼容 Web 保留宽权限 | 仍需逐字段发布契约与攻击矩阵全量复核 | 原生不得回退 `mutation:write` |
+| 手工订单已使用 capability 与两阶段挑战 | 尚缺 paper 全场景和受控实盘证据 | 默认 PAPER；G3/G5 未通过前不放行实盘 |
+| 清仓组和退出计划精确授权契约已落地 | 条件计划完整编辑体验与真机证据仍需收口 | 不调用兼容 `liquidate*` 直写接口 |
+| 策略移动参数 allowlist、版本、冲突恢复和实盘挑战已通过 iOS 自动化 | 尚缺 stop/DRAINING、真机、paper 与受控实盘证据 | 未完成端到端证据前保持 capability 关闭 |
+| 做 T 入场及账户级窗口/激活/熔断均有设备绑定挑战，iOS 控制已通过目标自动化 | 尚缺完整设置、真机、paper 闭环与受控实盘证据 | 原生只调用两阶段接口；旧单步 Mutation 继续兼容 Web |
+| APNs 注册、投影、发送器和最小 payload 已落地 | 无真实 APNs 凭据/真机送达/TestFlight 证据 | 发送器默认关闭，G4 保持阻断 |
 
 接口落地后，必须刷新 SDL、权限 JSON、Client OpenAPI、在线文档和 Apollo Swift
 类型，并通过 Web/iOS 双端 codegen。禁止为赶进度在 iOS 中调用兼容直写接口、
