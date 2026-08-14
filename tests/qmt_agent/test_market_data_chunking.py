@@ -79,10 +79,7 @@ async def _read_http_content(content) -> bytes:
 
 
 def test_chunk_encoder_streams_and_respects_limits() -> None:
-  records = [
-    {"code": f"{index:06d}.SZ", "payload": "行情" * 8}
-    for index in range(7)
-  ]
+  records = [{"code": f"{index:06d}.SZ", "payload": "行情" * 8} for index in range(7)]
   chunks = list(
     _iter_encoded_market_data_chunks(
       iter(records),
@@ -93,11 +90,7 @@ def test_chunk_encoder_streams_and_respects_limits() -> None:
 
   assert all(record_count <= 3 for _, record_count in chunks)
   assert all(len(raw) <= 170 for raw, _ in chunks)
-  restored = [
-    record
-    for raw, _ in chunks
-    for record in json.loads(raw.decode("utf-8"))
-  ]
+  restored = [record for raw, _ in chunks for record in json.loads(raw.decode("utf-8"))]
   assert restored == records
 
 
@@ -150,8 +143,7 @@ def test_chunk_encoder_fails_at_record_and_byte_boundaries() -> None:
 
 def test_chunk_encoder_emits_one_empty_json_array() -> None:
   assert [
-    (bytes(raw), count)
-    for raw, count in _iter_encoded_market_data_chunks([])
+    (bytes(raw), count) for raw, count in _iter_encoded_market_data_chunks([])
   ] == [(b"[]", 0)]
 
 
@@ -166,9 +158,7 @@ def test_spool_is_incremental_deterministic_and_bounded(tmp_path) -> None:
     def iter_market_data(self, _payload):
       for index, record in enumerate(_records(5002)):
         if index == 5001:
-          self.observed_first_chunk = (
-            self.directory / "chunk-000000.json.gz"
-          ).exists()
+          self.observed_first_chunk = (self.directory / "chunk-000000.json.gz").exists()
         yield record
 
   first_broker = StreamingBroker(first_directory)
@@ -185,13 +175,10 @@ def test_spool_is_incremental_deterministic_and_bounded(tmp_path) -> None:
   assert _spool_bytes(first) == _spool_bytes(second)
   assert all(content[4:8] == b"\x00\x00\x00\x00" for content in _spool_bytes(first))
   restored_count = sum(
-    len(json.loads(gzip.decompress(content)))
-    for content in _spool_bytes(first)
+    len(json.loads(gzip.decompress(content))) for content in _spool_bytes(first)
   )
   assert restored_count == 5002
-  assert first.compressed_bytes == sum(
-    chunk.compressed_bytes for chunk in first.chunks
-  )
+  assert first.compressed_bytes == sum(chunk.compressed_bytes for chunk in first.chunks)
 
 
 def test_spool_enforces_compressed_limit_and_removes_partial_files(
@@ -353,17 +340,13 @@ async def test_cancelled_session_reuses_inflight_native_preparation(
     payload={"request_id": "request-reconnect", "operation": "bars"}
   )
 
-  disconnected = asyncio.create_task(
-    runtime._handle_market_data_request(envelope)
-  )
+  disconnected = asyncio.create_task(runtime._handle_market_data_request(envelope))
   assert await asyncio.to_thread(started.wait, 1)
   disconnected.cancel()
   with pytest.raises(asyncio.CancelledError):
     await disconnected
 
-  reconnected = asyncio.create_task(
-    runtime._handle_market_data_request(envelope)
-  )
+  reconnected = asyncio.create_task(runtime._handle_market_data_request(envelope))
   await asyncio.sleep(0)
   assert runtime.broker.calls == 1
   release.set()
@@ -537,9 +520,7 @@ async def test_partial_upload_survives_session_cancel_and_joins_redelivery(
   await first_queue.put(envelope)
   first_worker = asyncio.create_task(runtime._market_request_loop(Socket()))
   await asyncio.wait_for(sixth_started.wait(), timeout=2)
-  shared_upload = runtime._market_upload_tasks[
-    "request-session-partial"
-  ].task
+  shared_upload = runtime._market_upload_tasks["request-session-partial"].task
 
   first_worker.cancel()
   with pytest.raises(asyncio.CancelledError):
@@ -552,21 +533,15 @@ async def test_partial_upload_survives_session_cancel_and_joins_redelivery(
   runtime._market_requests = second_queue
   await second_queue.put(envelope)
   second_socket = Socket()
-  second_worker = asyncio.create_task(
-    runtime._market_request_loop(second_socket)
-  )
+  second_worker = asyncio.create_task(runtime._market_request_loop(second_socket))
   await asyncio.sleep(0)
-  assert (
-    runtime._market_upload_tasks["request-session-partial"].task
-    is shared_upload
-  )
+  assert runtime._market_upload_tasks["request-session-partial"].task is shared_upload
 
   release_sixth.set()
   await asyncio.wait_for(second_queue.join(), timeout=2)
   assert [index for index, *_ in attempts] == list(range(10))
   assert all(
-    hashlib.sha256(body).hexdigest() == digest
-    for _, body, digest, _ in attempts
+    hashlib.sha256(body).hexdigest() == digest for _, body, digest, _ in attempts
   )
   assert [authorization for *_, authorization in attempts[:6]] == [
     "Bearer session-token-1"
@@ -580,8 +555,7 @@ async def test_partial_upload_survives_session_cancel_and_joins_redelivery(
   assert "request-session-partial" in runtime._market_upload_tombstones
   assert second_socket.closed == []
   sent_envelopes = [
-    AgentEnvelope.model_validate_json(serialized)
-    for serialized in second_socket.sent
+    AgentEnvelope.model_validate_json(serialized) for serialized in second_socket.sent
   ]
   assert any(
     envelope.message_type is AgentMessageType.HEARTBEAT
@@ -1230,9 +1204,7 @@ async def test_full_market_request_queue_closes_without_blocking() -> None:
   )
 
   assert runtime._market_requests.qsize() == 1
-  assert socket.closed == [
-    {"code": 1013, "reason": "market-data request queue full"}
-  ]
+  assert socket.closed == [{"code": 1013, "reason": "market-data request queue full"}]
   runtime.stop()
 
 
@@ -1241,8 +1213,8 @@ async def test_run_forever_propagates_fatal_for_supervisor_restart() -> None:
   runtime = object.__new__(AgentRuntime)
   runtime._stopped = asyncio.Event()
   runtime._stopped.set()
-  runtime._fatal_market_data_error = (
-    runtime_module._FatalMarketDataPreparationError("restart required")
+  runtime._fatal_market_data_error = runtime_module._FatalMarketDataPreparationError(
+    "restart required"
   )
 
   with pytest.raises(
@@ -1340,8 +1312,7 @@ def test_bars_request_preflight_accepts_campaign_and_rejects_oom_shapes() -> Non
     _validate_bars_request(
       {
         "stock_list": [
-          f"{index:06d}.SZ"
-          for index in range(broker_module.MAX_MARKET_DATA_CODES + 1)
+          f"{index:06d}.SZ" for index in range(broker_module.MAX_MARKET_DATA_CODES + 1)
         ],
         "periods": ["1d"],
         "start_time": "20250101",
@@ -1385,9 +1356,7 @@ def test_bars_request_preflight_accepts_campaign_and_rejects_oom_shapes() -> Non
 def test_bars_response_rejects_unrequested_code_and_out_of_range_time() -> None:
   class ExtraCodeManager:
     def get_market_data(self, **_kwargs):
-      return {
-        "600000.SH": pd.DataFrame([{"time": 20250102, "close": 10.0}])
-      }
+      return {"600000.SH": pd.DataFrame([{"time": 20250102, "close": 10.0}])}
 
   payload = {
     "operation": "bars",
@@ -1401,9 +1370,7 @@ def test_bars_response_rejects_unrequested_code_and_out_of_range_time() -> None:
 
   class OutOfRangeManager:
     def get_market_data(self, **_kwargs):
-      return {
-        "000001.SZ": pd.DataFrame([{"time": 20250103, "close": 10.0}])
-      }
+      return {"000001.SZ": pd.DataFrame([{"time": 20250103, "close": 10.0}])}
 
   with pytest.raises(ValueError, match="outside requested range"):
     _market_data_records(OutOfRangeManager(), payload)
@@ -1423,16 +1390,12 @@ def test_daily_keys_and_canonical_json_are_cold_restart_stable(
   class FirstManager:
     def get_market_data(self, **_kwargs):
       return {
-        "000001.SZ": pd.DataFrame(
-          [{"close": 10.0, "time": "2025-01-02T00:00:00Z"}]
-        )
+        "000001.SZ": pd.DataFrame([{"close": 10.0, "time": "2025-01-02T00:00:00Z"}])
       }
 
   class SecondManager:
     def get_market_data(self, **_kwargs):
-      frame = pd.DataFrame(
-        [{"time": datetime(2025, 1, 2, 9, 30), "close": 10.0}]
-      )
+      frame = pd.DataFrame([{"time": datetime(2025, 1, 2, 9, 30), "close": 10.0}])
       return {"000001.SZ": frame[["time", "close"]]}
 
   first_records = _market_data_records(FirstManager(), payload)
@@ -1511,9 +1474,7 @@ def test_broker_record_limit_fails_during_iteration() -> None:
   class Manager:
     def get_market_data(self, **_kwargs):
       return {
-        "600000.SH": pd.DataFrame(
-          [{"time": 20250101 + index} for index in range(3)]
-        )
+        "600000.SH": pd.DataFrame([{"time": 20250101 + index} for index in range(3)])
       }
 
   with pytest.raises(ValueError, match="record count limit"):
@@ -1538,11 +1499,7 @@ def test_broker_rejects_an_unbounded_single_frame(monkeypatch) -> None:
 
   class Manager:
     def get_market_data(self, **_kwargs):
-      return {
-        "600000.SH": pd.DataFrame(
-          [{"time": base + index} for index in range(3)]
-        )
-      }
+      return {"600000.SH": pd.DataFrame([{"time": base + index} for index in range(3)])}
 
   monkeypatch.setattr(
     broker_module,
@@ -1575,9 +1532,7 @@ def test_market_data_records_are_sorted_by_code_and_time() -> None:
             {"time": 20250101, "close": 10.1},
           ]
         ),
-        "000001.SZ": pd.DataFrame(
-          [{"time": 20250102, "close": 9.9}]
-        ),
+        "000001.SZ": pd.DataFrame([{"time": 20250102, "close": 9.9}]),
       }
 
   records = _market_data_records(
@@ -1605,6 +1560,192 @@ def test_market_data_records_are_sorted_by_code_and_time() -> None:
       _normalize_market_timestamp(datetime(2025, 1, 3)),
     ),
   ]
+
+
+def test_financial_data_downloads_before_streaming_normalized_rows() -> None:
+  calls = []
+
+  class Manager:
+    def download_financial_data_list(self, codes, **kwargs):
+      calls.append(("download", codes, kwargs))
+
+    def get_financial_data_list(self, codes, **kwargs):
+      calls.append(("get", codes, kwargs))
+      return {
+        "688552.SH": {
+          "Income": pd.DataFrame(
+            [
+              {
+                "m_timetag": pd.Timestamp("2026-03-31"),
+                "m_anntime": pd.Timestamp("2026-04-22"),
+                "revenue": float("nan"),
+              }
+            ]
+          )
+        }
+      }
+
+  records = list(
+    _iter_market_data_records(
+      Manager(),
+      {
+        "operation": "financial_data",
+        "record_format": "financial-row-v1",
+        "download": True,
+        "stock_list": ["688552.SH"],
+        "table_list": ["Balance", "Income", "CashFlow", "Capital"],
+        "start_time": "20230101",
+        "end_time": "20260810",
+      },
+    )
+  )
+
+  assert [call[0] for call in calls] == ["download", "get"]
+  assert calls[0][2] == {
+    "table_list": ["Balance", "Income", "CashFlow", "Capital"],
+    "start_time": "20230101",
+    "end_time": "20260810",
+  }
+  assert calls[1][2]["table_list"] == [
+    "Balance",
+    "Income",
+    "CashFlow",
+    "Capital",
+  ]
+  assert calls[1][2]["start_time"] == "20230101"
+  assert calls[1][2]["end_time"] == "20260810"
+  assert calls[1][2]["report_type"] == "announce_time"
+  assert records[0]["record_type"] == "financial_row"
+  assert records[0]["row"]["m_timetag"] == "20260331"
+  assert records[0]["row"]["m_anntime"] == "20260422"
+  assert records[0]["row"]["revenue"] is None
+  assert records[-1] == {
+    "record_type": "financial_summary",
+    "schema_version": 1,
+    "code": "688552.SH",
+    "table_counts": {
+      "Balance": 0,
+      "Income": 1,
+      "CashFlow": 0,
+      "Capital": 0,
+    },
+  }
+
+
+def test_financial_data_emits_summary_for_code_with_no_rows() -> None:
+  class Manager:
+    def download_financial_data_list(self, _codes, **_kwargs):
+      return None
+
+    def get_financial_data_list(self, _codes, **_kwargs):
+      return {"688552.SH": {}}
+
+  records = list(
+    _iter_market_data_records(
+      Manager(),
+      {
+        "operation": "financial_data",
+        "stock_list": ["688552.SH"],
+        "start_time": "20230101",
+        "end_time": "20260810",
+      },
+    )
+  )
+
+  assert records == [
+    {
+      "record_type": "financial_summary",
+      "schema_version": 1,
+      "code": "688552.SH",
+      "table_counts": {
+        "Balance": 0,
+        "Income": 0,
+        "CashFlow": 0,
+        "Capital": 0,
+      },
+    }
+  ]
+
+
+def test_financial_data_download_failure_stops_before_read() -> None:
+  class Manager:
+    def download_financial_data_list(self, _codes, **_kwargs):
+      raise RuntimeError("download failed")
+
+    def get_financial_data_list(self, _codes, **_kwargs):
+      raise AssertionError("read must not run after a download failure")
+
+  with pytest.raises(RuntimeError, match="download failed"):
+    list(
+      _iter_market_data_records(
+        Manager(),
+        {
+          "operation": "financial_data",
+          "stock_list": ["688552.SH"],
+          "start_time": "20230101",
+          "end_time": "20260810",
+        },
+      )
+    )
+
+
+def test_financial_data_keeps_latest_announcement_for_duplicate_report() -> None:
+  class Manager:
+    def download_financial_data_list(self, _codes, **_kwargs):
+      return None
+
+    def get_financial_data_list(self, _codes, **_kwargs):
+      return {
+        "000001.SZ": {
+          "Balance": pd.DataFrame(
+            [
+              {
+                "m_timetag": "20221230",
+                "m_anntime": "20230309",
+                "tot_assets": 1,
+              },
+              {
+                "m_timetag": "20221231",
+                "m_anntime": "20230824",
+                "tot_assets": 2,
+              },
+            ]
+          )
+        }
+      }
+
+  records = list(
+    _iter_market_data_records(
+      Manager(),
+      {
+        "operation": "financial_data",
+        "stock_list": ["000001.SZ"],
+        "start_time": "20220101",
+        "end_time": "20260810",
+      },
+    )
+  )
+
+  assert len(records) == 2
+  assert records[0]["row"]["m_timetag"] == "20221231"
+  assert records[0]["row"]["m_anntime"] == "20230824"
+  assert records[0]["row"]["tot_assets"] == 2
+  assert records[1]["table_counts"]["Balance"] == 1
+
+
+def test_financial_data_rejects_oversized_code_batch() -> None:
+  with pytest.raises(ValueError, match="at most 100"):
+    list(
+      _iter_market_data_records(
+        object(),
+        {
+          "operation": "financial_data",
+          "stock_list": [f"{index:06d}.SZ" for index in range(101)],
+          "start_time": "20230101",
+          "end_time": "20260810",
+        },
+      )
+    )
 
 
 @pytest.mark.parametrize(
@@ -1656,11 +1797,7 @@ def test_market_timestamp_normalization_fails_closed(value) -> None:
 def test_market_data_records_fail_closed_on_unparseable_time() -> None:
   class Manager:
     def get_market_data(self, **_kwargs):
-      return {
-        "600000.SH": pd.DataFrame(
-          [{"time": "not-a-time", "close": 10.3}]
-        )
-      }
+      return {"600000.SH": pd.DataFrame([{"time": "not-a-time", "close": 10.3}])}
 
   with pytest.raises(ValueError, match="market data time"):
     _market_data_records(

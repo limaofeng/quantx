@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 MAX_MARKET_DATA_RECORDS = 500_000
 MAX_MARKET_DATA_FRAME_RECORDS = 100_000
 MAX_MARKET_DATA_CODES = 300
+MAX_FINANCIAL_DATA_CODES = 100
+WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
+FINANCIAL_DATA_RECORD_FORMAT = "financial-row-v1"
+SUPPORTED_FINANCIAL_TABLES = (
+  "Balance",
+  "Income",
+  "CashFlow",
+  "Capital",
+)
 SUPPORTED_HISTORICAL_BAR_PERIODS = frozenset({"tick", "1m", "1d"})
 MAX_BAR_DATE_SPAN_DAYS = {
   "tick": 7,
@@ -48,13 +57,16 @@ class _ValidatedBarsRequest:
   start_local: datetime
   end_local: datetime
 
+
 def enrich_report_payload(
   message_type: AgentMessageType,
   payload: dict[str, Any],
 ) -> dict[str, Any]:
   """Add protocol 1.1 report ordering and snapshot identity metadata."""
   value = dict(payload)
-  sequence = int(value.get("source_sequence") or value.get("sequence") or time.time_ns())
+  sequence = int(
+    value.get("source_sequence") or value.get("sequence") or time.time_ns()
+  )
   value["source_sequence"] = sequence
   value.setdefault("source_event_at", datetime.now(timezone.utc).isoformat())
   if message_type is AgentMessageType.DELTA_REPORT:
@@ -121,16 +133,8 @@ def _object_payload(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
   if isinstance(value, dict):
     source = value
   else:
-    source = {
-      field: getattr(value, field)
-      for field in fields
-      if hasattr(value, field)
-    }
-  return {
-    field: _json_safe(source[field])
-    for field in fields
-    if field in source
-  }
+    source = {field: getattr(value, field) for field in fields if hasattr(value, field)}
+  return {field: _json_safe(source[field]) for field in fields if field in source}
 
 
 ORDER_FIELDS = (
@@ -317,9 +321,7 @@ class SimulatorBroker:
   def full_snapshot(self) -> dict[str, Any]:
     return {
       "accounts": [],
-      "positions_by_account": {
-        account_id: [] for account_id in self.allowed_accounts
-      },
+      "positions_by_account": {account_id: [] for account_id in self.allowed_accounts},
       "sequence": int(time.time() * 1_000_000),
       "is_complete": True,
       "mode": "data-only" if self.data_only else "paper",
@@ -424,13 +426,147 @@ class _LocalMarketStreamer:
     self._access_lock = access_lock or threading.RLock()
     self._subscriptions: dict[str, int | list[int]] = {}
     self._lock = threading.RLock()
+    self._whole_quote_metadata: dict[str, dict[str, float]] = {}
+    self._whole_quote_metadata_date = None
+    self._whole_quote_metadata_refreshing = False
+
+  @staticmethod
+  def _positive_number(value: Any) -> float:
+    try:
+      number = float(value)
+    except (TypeError, ValueError):
+      return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
+
+  def _load_whole_quote_metadata(
+    self,
+    markets: list[str],
+  ) -> dict[str, dict[str, float]]:
+    normalized_markets: set[str] = set()
+    for market in markets:
+      candidate = str(market).strip().upper()
+      if not candidate:
+        continue
+      exchange = candidate.rpartition(".")[2]
+      normalized_markets.add(exchange if exchange in {"SH", "SZ"} else candidate)
+    sectors = (
+      ["沪深A股"]
+      if {"SH", "SZ"}.issubset(normalized_markets)
+      else [
+        {"SH": "上证A股", "SZ": "深证A股"}.get(market, market)
+        for market in sorted(normalized_markets)
+      ]
+    )
+    codes = sorted(
+      {
+        str(code).strip().upper()
+        for sector in sectors
+        for code in (self.data_manager.get_stock_list_in_sector(sector) or [])
+        if str(code).strip()
+      }
+    )
+    metadata: dict[str, dict[str, float]] = {}
+    for start in range(0, len(codes), WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE):
+      batch = codes[start : start + WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE]
+      details = self.data_manager.get_instrument_detail_list(
+        batch,
+        iscomplete=True,
+      )
+      if not isinstance(details, dict):
+        continue
+      for code, raw_detail in details.items():
+        detail = _as_dict(raw_detail)
+        upper_limit = self._positive_number(
+          detail.get("UpStopPrice")
+          or detail.get("up_stop_price")
+          or detail.get("upperLimit")
+        )
+        price_tick = self._positive_number(
+          detail.get("PriceTick")
+          or detail.get("price_tick")
+          or detail.get("priceTick")
+        )
+        values: dict[str, float] = {}
+        if upper_limit > 0:
+          values["upperLimit"] = upper_limit
+        if price_tick > 0:
+          values["priceTick"] = price_tick
+        if values:
+          metadata[str(code).strip().upper()] = values
+    return metadata
+
+  def _refresh_whole_quote_metadata(self, markets: list[str]) -> None:
+    try:
+      with self._access_lock:
+        metadata = self._load_whole_quote_metadata(markets)
+      if not metadata:
+        raise RuntimeError("QMT returned no instrument limit metadata")
+      with self._lock:
+        self._whole_quote_metadata = metadata
+        self._whole_quote_metadata_date = datetime.now(SHANGHAI_TIMEZONE).date()
+      logger.info(
+        "Whole-quote instrument metadata refreshed: markets=%s instruments=%s",
+        markets,
+        len(metadata),
+      )
+    except Exception as exc:
+      logger.warning(
+        "Whole-quote instrument metadata refresh failed: markets=%s error=%s",
+        markets,
+        exc.__class__.__name__,
+      )
+    finally:
+      with self._lock:
+        self._whole_quote_metadata_refreshing = False
+
+  def _ensure_whole_quote_metadata_current(self, markets: list[str]) -> None:
+    today = datetime.now(SHANGHAI_TIMEZONE).date()
+    with self._lock:
+      if (
+        self._whole_quote_metadata_date == today
+        or self._whole_quote_metadata_refreshing
+      ):
+        return
+      self._whole_quote_metadata_refreshing = True
+    threading.Thread(
+      target=self._refresh_whole_quote_metadata,
+      args=(list(markets),),
+      name="qmt-whole-quote-metadata-refresh",
+      daemon=True,
+    ).start()
+
+  def _enrich_whole_quote_data(self, data: Any) -> Any:
+    if not isinstance(data, dict):
+      return data
+    today = datetime.now(SHANGHAI_TIMEZONE).date()
+    with self._lock:
+      if self._whole_quote_metadata_date != today:
+        return data
+      metadata = dict(self._whole_quote_metadata)
+    for code, raw_tick in data.items():
+      if not isinstance(raw_tick, dict):
+        continue
+      values = metadata.get(str(code).strip().upper())
+      if not values:
+        continue
+      if self._positive_number(
+        raw_tick.get("upperLimit")
+        or raw_tick.get("UpStopPrice")
+        or raw_tick.get("up_stop_price")
+      ) <= 0 and values.get("upperLimit", 0) > 0:
+        raw_tick["upperLimit"] = values["upperLimit"]
+      if self._positive_number(
+        raw_tick.get("priceTick")
+        or raw_tick.get("PriceTick")
+        or raw_tick.get("price_tick")
+      ) <= 0 and values.get("priceTick", 0) > 0:
+        raw_tick["priceTick"] = values["priceTick"]
+    return data
 
   @staticmethod
   def _valid_subscription(value: Any) -> bool:
     values = value if isinstance(value, list) else [value]
-    return bool(values) and all(
-      isinstance(item, int) and item > 0 for item in values
-    )
+    return bool(values) and all(isinstance(item, int) and item > 0 for item in values)
 
   def subscribe(self, payload: dict[str, Any], callback) -> bool:
     subscription_id = str(payload.get("subscription_id") or "")
@@ -443,28 +579,40 @@ class _LocalMarketStreamer:
     kind = str(payload.get("kind") or "quote")
     stock_code = str(payload.get("stock_code") or "")
     period = str(payload.get("period") or "tick")
+    markets = list(payload.get("stock_codes") or [])
 
     def on_data(data: Any) -> None:
+      safe_data = _json_safe(data)
+      if kind == "whole":
+        self._ensure_whole_quote_metadata_current(markets)
+        safe_data = self._enrich_whole_quote_data(safe_data)
       callback(
         {
           "subscription_id": subscription_id,
           "kind": kind,
           "stock_code": stock_code,
           "period": period,
-          "data": _json_safe(data),
+          "data": safe_data,
         }
       )
 
     with self._access_lock:
       if kind == "whole":
+        today = datetime.now(SHANGHAI_TIMEZONE).date()
+        with self._lock:
+          metadata_is_current = self._whole_quote_metadata_date == today
+        if not metadata_is_current:
+          self._refresh_whole_quote_metadata(markets)
         local_id = self.data_manager.subscribe_whole_quote(
-          list(payload.get("stock_codes") or []),
+          markets,
           callback=on_data,
         )
       elif kind == "quote" and stock_code:
         local_id = self.data_manager.subscribe_quote(
           stock_code,
           period=period,
+          start_time=str(payload.get("start_time") or ""),
+          end_time=str(payload.get("end_time") or ""),
           count=int(payload.get("count") or 0),
           callback=on_data,
         )
@@ -622,9 +770,7 @@ class LiveBroker:
     unavailable_accounts = []
     with self._trading_access_lock:
       for account_id, agent in self.agents.items():
-        if not bool(
-          getattr(agent.trading_manager, "is_connected", False)
-        ):
+        if not bool(getattr(agent.trading_manager, "is_connected", False)):
           unavailable_accounts.append(account_id)
           accounts.append(
             {
@@ -700,9 +846,7 @@ class LiveBroker:
     command["order_type"] = payload.get("side")
     command["price_type"] = payload.get("order_type")
     command["price"] = float(payload.get("limit_price") or 0)
-    command["order_remark"] = (
-      f"qx:{str(payload['client_order_id'])[:20]}"
-    )
+    command["order_remark"] = f"qx:{str(payload['client_order_id'])[:20]}"
     result = agent.place_order(command)
     return {
       "accepted": bool(result.get("success")),
@@ -801,15 +945,7 @@ def _iter_market_data_records_unbounded(
         yield {"code": code, **_as_dict(values[code])}
     return
   if operation == "financial_data":
-    values = manager.get_financial_data_list(
-      list(payload.get("stock_list") or [])
-    )
-    if isinstance(values, dict):
-      for code in sorted(values):
-        yield {
-          "code": code,
-          "financial_data": _json_safe(values[code]),
-        }
+    yield from _financial_data_records(manager, payload)
     return
   if operation == "divid_factors":
     yield from _divid_factor_records(manager, payload)
@@ -838,16 +974,12 @@ def _iter_market_data_records_unbounded(
     for code in sorted(values):
       normalized_code = str(code).strip().upper()
       if normalized_code not in requested_codes:
-        raise ValueError(
-          f"XTData returned unrequested instrument: {normalized_code}"
-        )
+        raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
       frame = values[code]
       if len(frame) > MAX_MARKET_DATA_FRAME_RECORDS:
         raise ValueError("single market data frame exceeds record limit")
       normalized = (
-        frame
-        if "time" in getattr(frame, "columns", ())
-        else frame.reset_index()
+        frame if "time" in getattr(frame, "columns", ()) else frame.reset_index()
       )
       if "time" not in normalized.columns and len(normalized.columns) > 0:
         normalized = normalized.rename(columns={normalized.columns[0]: "time"})
@@ -855,17 +987,13 @@ def _iter_market_data_records_unbounded(
         raise ValueError(f"market data frame for {code} has no time column")
       normalized_time_column = "__quantx_normalized_time_ms"
       if normalized_time_column in normalized.columns:
-        raise ValueError(
-          f"market data frame for {code} contains a reserved column"
-        )
+        raise ValueError(f"market data frame for {code} contains a reserved column")
       normalize_time = (
         _normalize_daily_market_timestamp
         if period == "1d"
         else _normalize_market_timestamp
       )
-      normalized_times = [
-        normalize_time(value) for value in normalized["time"].array
-      ]
+      normalized_times = [normalize_time(value) for value in normalized["time"].array]
       normalized = normalized.assign(
         **{normalized_time_column: normalized_times}
       ).sort_values(
@@ -895,10 +1023,7 @@ def _iter_market_data_records_unbounded(
 
 
 def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
-  codes = tuple(
-    str(code).strip().upper()
-    for code in payload.get("stock_list") or []
-  )
+  codes = tuple(str(code).strip().upper() for code in payload.get("stock_list") or [])
   if not codes:
     raise ValueError("bars request requires a non-empty stock_list")
   if len(codes) > MAX_MARKET_DATA_CODES:
@@ -911,15 +1036,12 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
     raise ValueError(f"bars request contains invalid instruments: {invalid_codes}")
 
   periods = tuple(
-    str(period).strip().lower()
-    for period in payload.get("periods") or ["1d"]
+    str(period).strip().lower() for period in payload.get("periods") or ["1d"]
   )
   if not periods or len(set(periods)) != len(periods):
     raise ValueError("bars request periods must be non-empty and unique")
   unsupported = [
-    period
-    for period in periods
-    if period not in SUPPORTED_HISTORICAL_BAR_PERIODS
+    period for period in periods if period not in SUPPORTED_HISTORICAL_BAR_PERIODS
   ]
   if unsupported:
     raise ValueError(f"bars request contains unsupported periods: {unsupported}")
@@ -930,9 +1052,7 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
     start_local = datetime.strptime(start_text, "%Y%m%d").replace(
       tzinfo=SHANGHAI_TIMEZONE
     )
-    end_local = datetime.strptime(end_text, "%Y%m%d").replace(
-      tzinfo=SHANGHAI_TIMEZONE
-    )
+    end_local = datetime.strptime(end_text, "%Y%m%d").replace(tzinfo=SHANGHAI_TIMEZONE)
   except ValueError as exc:
     raise ValueError("bars request dates must be YYYYMMDD") from exc
   if end_local < start_local:
@@ -942,18 +1062,14 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
   span_days = (end_local.date() - start_local.date()).days + 1
   for period in periods:
     if span_days > MAX_BAR_DATE_SPAN_DAYS[period]:
-      raise ValueError(
-        f"bars request date span exceeds {period} limit"
-      )
+      raise ValueError(f"bars request date span exceeds {period} limit")
   estimated_records = (
     len(codes)
     * span_days
     * sum(ESTIMATED_BAR_RECORDS_PER_DAY[period] for period in periods)
   )
   if estimated_records > MAX_MARKET_DATA_RECORDS:
-    raise ValueError(
-      "bars request estimated record count exceeds safe limit"
-    )
+    raise ValueError("bars request estimated record count exceeds safe limit")
   return _ValidatedBarsRequest(
     codes=codes,
     periods=periods,
@@ -977,6 +1093,184 @@ def _normalize_daily_market_timestamp(value: Any) -> int:
     tzinfo=SHANGHAI_TIMEZONE,
   )
   return _normalize_market_timestamp(local_midnight)
+
+
+def _normalize_financial_date(value: Any) -> str | None:
+  """Normalize XTData financial dates to the wire-format YYYYMMDD."""
+  if value is None or isinstance(value, bool):
+    return None
+  try:
+    if bool(value != value):
+      return None
+  except Exception:
+    pass
+
+  to_pydatetime = getattr(value, "to_pydatetime", None)
+  if callable(to_pydatetime):
+    try:
+      value = to_pydatetime()
+    except Exception as exc:
+      raise ValueError("financial date is not supported") from exc
+  if isinstance(value, datetime):
+    return value.strftime("%Y%m%d")
+
+  candidate = str(value).strip()
+  if not candidate:
+    return None
+  if candidate.endswith(".0") and candidate[:-2].isdigit():
+    candidate = candidate[:-2]
+  if len(candidate) == 8 and candidate.isdigit():
+    try:
+      return datetime.strptime(candidate, "%Y%m%d").strftime("%Y%m%d")
+    except ValueError as exc:
+      raise ValueError("financial date is not supported") from exc
+  if candidate.isdigit():
+    timestamp = _normalize_market_timestamp(int(candidate))
+    return (
+      datetime.fromtimestamp(
+        timestamp / 1000,
+        timezone.utc,
+      )
+      .astimezone(SHANGHAI_TIMEZONE)
+      .strftime("%Y%m%d")
+    )
+  try:
+    return datetime.fromisoformat(candidate.replace("Z", "+00:00")).strftime("%Y%m%d")
+  except ValueError as exc:
+    raise ValueError("financial date is not supported") from exc
+
+
+def _normalize_financial_report_date(value: Any) -> str | None:
+  """Canonicalize XTData's occasional quarter-end-minus-one report date."""
+  normalized = _normalize_financial_date(value)
+  if normalized is None:
+    return None
+  parsed = datetime.strptime(normalized, "%Y%m%d")
+  quarter_end_days = {3: 31, 6: 30, 9: 30, 12: 31}
+  quarter_end_day = quarter_end_days.get(parsed.month)
+  if quarter_end_day is not None and parsed.day == quarter_end_day - 1:
+    return parsed.replace(day=quarter_end_day).strftime("%Y%m%d")
+  return normalized
+
+
+def _financial_json_safe(value: Any) -> Any:
+  if value is None:
+    return None
+  if isinstance(value, Real) and not isinstance(value, bool):
+    numeric = float(value)
+    if not math.isfinite(numeric):
+      return None
+  return _json_safe(value)
+
+
+def _financial_data_records(
+  manager: Any,
+  payload: dict[str, Any],
+) -> Iterator[dict[str, Any]]:
+  codes = tuple(
+    sorted(
+      {
+        str(code).strip().upper()
+        for code in payload.get("stock_list") or []
+        if str(code).strip()
+      }
+    )
+  )
+  if not codes:
+    raise ValueError("financial_data requires a non-empty stock_list")
+  if len(codes) > MAX_FINANCIAL_DATA_CODES:
+    raise ValueError(
+      f"financial_data accepts at most {MAX_FINANCIAL_DATA_CODES} instruments"
+    )
+
+  record_format = str(payload.get("record_format") or FINANCIAL_DATA_RECORD_FORMAT)
+  if record_format != FINANCIAL_DATA_RECORD_FORMAT:
+    raise ValueError(f"unsupported financial_data record_format: {record_format}")
+  requested_tables = list(
+    dict.fromkeys(payload.get("table_list") or SUPPORTED_FINANCIAL_TABLES)
+  )
+  invalid_tables = [
+    table for table in requested_tables if table not in SUPPORTED_FINANCIAL_TABLES
+  ]
+  if invalid_tables:
+    raise ValueError(f"unsupported financial_data tables: {invalid_tables}")
+
+  start_time = str(payload.get("start_time") or "")
+  end_time = str(payload.get("end_time") or "")
+  for label, value in (("start_time", start_time), ("end_time", end_time)):
+    if len(value) != 8 or not value.isdigit():
+      raise ValueError(f"financial_data {label} must be YYYYMMDD")
+  if end_time < start_time:
+    raise ValueError("financial_data end_time precedes start_time")
+
+  if bool(payload.get("download", True)):
+    manager.download_financial_data_list(
+      list(codes),
+      table_list=requested_tables,
+      start_time=start_time,
+      end_time=end_time,
+    )
+  values = manager.get_financial_data_list(
+    list(codes),
+    table_list=requested_tables,
+    start_time=start_time,
+    end_time=end_time,
+    report_type="announce_time",
+  )
+  if not isinstance(values, dict):
+    raise ValueError("unexpected financial_data result")
+  unexpected_codes = sorted(
+    str(code).strip().upper()
+    for code in values
+    if str(code).strip().upper() not in codes
+  )
+  if unexpected_codes:
+    raise ValueError(
+      f"XTData returned unrequested financial instruments: {unexpected_codes}"
+    )
+
+  for code in codes:
+    tables = values.get(code) or {}
+    if not isinstance(tables, dict):
+      raise ValueError(f"unexpected financial_data result for {code}")
+    table_counts: dict[str, int] = {}
+    for table in requested_tables:
+      frame = tables.get(table)
+      if frame is None or bool(getattr(frame, "empty", False)):
+        table_counts[table] = 0
+        continue
+      if not hasattr(frame, "reset_index") or not hasattr(frame, "to_dict"):
+        raise ValueError(f"unexpected financial_data {table} for {code}")
+      normalized = frame.reset_index()
+      rows = normalized.to_dict(orient="records")
+      rows_by_report_date: dict[str, tuple[str, int, dict[str, Any]]] = {}
+      for row_index, raw_row in enumerate(rows):
+        row = {str(key): _financial_json_safe(value) for key, value in raw_row.items()}
+        row["m_timetag"] = _normalize_financial_report_date(row.get("m_timetag"))
+        row["m_anntime"] = _normalize_financial_date(row.get("m_anntime"))
+        if row["m_timetag"] is None:
+          raise ValueError(f"financial_data row has no report date: {code}/{table}")
+        report_date = str(row["m_timetag"])
+        priority = (str(row.get("m_anntime") or ""), row_index)
+        current = rows_by_report_date.get(report_date)
+        if current is None or priority >= current[:2]:
+          rows_by_report_date[report_date] = (*priority, row)
+      table_counts[table] = len(rows_by_report_date)
+      for report_date in sorted(rows_by_report_date):
+        row = rows_by_report_date[report_date][2]
+        yield {
+          "record_type": "financial_row",
+          "schema_version": 1,
+          "code": code,
+          "table": table,
+          "row": row,
+        }
+    yield {
+      "record_type": "financial_summary",
+      "schema_version": 1,
+      "code": code,
+      "table_counts": table_counts,
+    }
 
 
 def _bar_time_bounds(
@@ -1012,9 +1306,8 @@ def _normalize_market_timestamp(value: Any) -> int:
       epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
       delta = normalized - epoch
       timestamp = (
-        (delta.days * 86_400 + delta.seconds) * 1000
-        + delta.microseconds // 1000
-      )
+        delta.days * 86_400 + delta.seconds
+      ) * 1000 + delta.microseconds // 1000
     except (OverflowError, TypeError, ValueError) as exc:
       raise ValueError("market data time is not a supported timestamp") from exc
     if not isinstance(timestamp, Integral):
@@ -1082,12 +1375,8 @@ def _validate_market_timestamp(value: int) -> int:
   try:
     parsed = datetime.fromtimestamp(value / 1000, timezone.utc)
   except (OSError, OverflowError, ValueError) as exc:
-    raise ValueError(
-      "market data time is outside the supported range"
-    ) from exc
-  latest = datetime.now(timezone.utc) + timedelta(
-    days=MARKET_TIMESTAMP_MAX_FUTURE_DAYS
-  )
+    raise ValueError("market data time is outside the supported range") from exc
+  latest = datetime.now(timezone.utc) + timedelta(days=MARKET_TIMESTAMP_MAX_FUTURE_DAYS)
   if parsed < MIN_MARKET_TIMESTAMP or parsed > latest:
     raise ValueError("market data time is outside the supported range")
   return value
@@ -1141,16 +1430,12 @@ def _divid_factor_records(
     if "ex_date" not in normalized.columns:
       if len(normalized.columns) == 0:
         continue
-      normalized = normalized.rename(
-        columns={normalized.columns[0]: "ex_date"}
-      )
+      normalized = normalized.rename(columns={normalized.columns[0]: "ex_date"})
     missing = [
       field for field in _DIVID_FACTOR_FIELDS if field not in normalized.columns
     ]
     if missing:
-      raise ValueError(
-        f"divid_factors result for {code} is missing fields: {missing}"
-      )
+      raise ValueError(f"divid_factors result for {code} is missing fields: {missing}")
 
     for row in normalized.to_dict(orient="records"):
       ex_date = str(row.get("ex_date") or "").strip()
@@ -1170,13 +1455,9 @@ def _divid_factor_records(
             f"invalid divid_factors {field} for {code}/{ex_date}"
           ) from exc
         if not math.isfinite(numeric):
-          raise ValueError(
-            f"non-finite divid_factors {field} for {code}/{ex_date}"
-          )
+          raise ValueError(f"non-finite divid_factors {field} for {code}/{ex_date}")
         record[field] = numeric
       if record["time"] <= 0 or record["dr"] <= 0:
-        raise ValueError(
-          f"non-positive divid_factors time/dr for {code}/{ex_date}"
-        )
+        raise ValueError(f"non-positive divid_factors time/dr for {code}/{ex_date}")
       records.append(record)
   return records

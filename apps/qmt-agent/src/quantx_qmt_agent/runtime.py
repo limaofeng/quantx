@@ -901,7 +901,12 @@ class AgentRuntime:
     payload = HeartbeatPayload(
       device_id=self.configuration.device_id,
       agent_version="0.1.0",
-      capabilities=["market-data", "divid-factors", self.mode],
+      capabilities=[
+        "market-data",
+        "divid-factors",
+        "financial-data-v1",
+        self.mode,
+      ],
       status=status,
       journal_integrity=str(journal_stats["integrity"]),
       journal_size_bytes=int(journal_stats["size_bytes"]),

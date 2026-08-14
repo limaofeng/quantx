@@ -294,11 +294,13 @@ async def test_live_callback_sink_persists_reports_before_websocket_send(
 
 def test_local_market_streamer_is_idempotent_and_resets() -> None:
   callbacks = []
+  subscriptions = []
   unsubscribed = []
 
   class FakeDataManager:
     def subscribe_quote(self, stock_code, **kwargs):
       assert stock_code == "600000.SH"
+      subscriptions.append(kwargs)
       callbacks.append(kwargs["callback"])
       return 101
 
@@ -312,12 +314,18 @@ def test_local_market_streamer_is_idempotent_and_resets() -> None:
     "kind": "quote",
     "stock_code": "600000.SH",
     "period": "1m",
+    "start_time": "20260813000000",
+    "end_time": "20260813235959",
     "count": -1,
   }
 
   assert streamer.subscribe(payload, events.append)
   assert streamer.subscribe(payload, events.append)
   assert len(callbacks) == 1
+  assert subscriptions[0]["period"] == "1m"
+  assert subscriptions[0]["start_time"] == "20260813000000"
+  assert subscriptions[0]["end_time"] == "20260813235959"
+  assert subscriptions[0]["count"] == -1
   callbacks[0]({"600000.SH": [{"time": 1, "close": 10.5}]})
   assert events == [
     {
@@ -331,6 +339,66 @@ def test_local_market_streamer_is_idempotent_and_resets() -> None:
 
   streamer.reset()
   assert unsubscribed == [101]
+
+
+def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
+  callbacks = []
+  detail_batches = []
+
+  class FakeDataManager:
+    def get_stock_list_in_sector(self, sector):
+      assert sector == "沪深A股"
+      return ["600000.SH", "300001.SZ"]
+
+    def get_instrument_detail_list(self, codes, iscomplete=False):
+      detail_batches.append(list(codes))
+      assert iscomplete is True
+      return {
+        "600000.SH": {"UpStopPrice": 11.0, "PriceTick": 0.01},
+        "300001.SZ": {"UpStopPrice": 24.0, "PriceTick": 0.01},
+      }
+
+    def subscribe_whole_quote(self, markets, callback):
+      assert markets == ["600000.SH", "300001.SZ"]
+      callbacks.append(callback)
+      return 202
+
+    def unsubscribe_quote(self, subscription_id):
+      del subscription_id
+
+  events = []
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  payload = {
+    "subscription_id": "whole-market-1",
+    "kind": "whole",
+    "stock_codes": ["600000.SH", "300001.SZ"],
+    "period": "tick",
+  }
+
+  assert streamer.subscribe(payload, events.append)
+  assert detail_batches == [["300001.SZ", "600000.SH"]]
+  callbacks[0](
+    {
+      "600000.SH": {"lastPrice": 10.8},
+      "300001.SZ": {
+        "lastPrice": 23.5,
+        "upperLimit": 24.0,
+        "priceTick": 0.02,
+      },
+    }
+  )
+
+  ticks = events[0]["data"]
+  assert ticks["600000.SH"]["upperLimit"] == 11.0
+  assert ticks["600000.SH"]["priceTick"] == 0.01
+  assert ticks["300001.SZ"]["upperLimit"] == 24.0
+  assert ticks["300001.SZ"]["priceTick"] == 0.02
+
+  assert streamer.subscribe(
+    {**payload, "subscription_id": "whole-market-2"},
+    events.append,
+  )
+  assert detail_batches == [["300001.SZ", "600000.SH"]]
 
 
 def test_data_only_simulator_rejects_trade_commands() -> None:

@@ -11,6 +11,126 @@ from typing import Any, Dict, List, Optional
 from quantx_qmt_agent import clock
 from quantx_qmt_agent.qmt_types import OrderType, PriceType
 
+_QMT_ORDER_STATUS_NAMES = {
+  48: "PENDING",
+  49: "SUBMITTED",
+  50: "SUBMITTED",
+  51: "SUBMITTED",
+  52: "PARTIAL_FILLED",
+  53: "CANCELLED",
+  54: "CANCELLED",
+  55: "PARTIAL_FILLED",
+  56: "FILLED",
+  57: "REJECTED",
+  255: "PENDING",
+}
+_ACTIVE_QMT_ORDER_STATUSES = {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+_ASHARE_SESSION_CLOSE = time(15, 0)
+
+
+def _normalized_qmt_order_status(value: Any) -> str:
+  try:
+    return _QMT_ORDER_STATUS_NAMES[int(value)]
+  except (TypeError, ValueError, KeyError):
+    text = str(value or "").strip().upper()
+    aliases = {
+      "UNREPORTED": "PENDING",
+      "WAIT_REPORTING": "SUBMITTED",
+      "REPORTED": "SUBMITTED",
+      "REPORTED_CANCEL": "SUBMITTED",
+      "PARTSUCC_CANCEL": "PARTIAL_FILLED",
+      "PART_SUCC": "PARTIAL_FILLED",
+      "PART_CANCEL": "CANCELLED",
+      "CANCELED": "CANCELLED",
+      "SUCCEEDED": "FILLED",
+      "JUNK": "REJECTED",
+    }
+    return aliases.get(text, text or "PENDING")
+
+
+def _order_time_in_shanghai(value: Any) -> Optional[datetime]:
+  if isinstance(value, datetime):
+    return clock.to_shanghai(value)
+  text = str(value or "").strip()
+  if not text:
+    return None
+  if text.isdigit() and len(text) == 14 and text.startswith(("19", "20")):
+    try:
+      return datetime.strptime(text, "%Y%m%d%H%M%S").replace(
+        tzinfo=clock.SHANGHAI_TZ
+      )
+    except ValueError:
+      return None
+  try:
+    numeric = float(text)
+  except (TypeError, ValueError):
+    try:
+      return clock.to_shanghai(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+      return None
+  if numeric > 10_000_000_000:
+    numeric /= 1000.0
+  try:
+    return datetime.fromtimestamp(numeric, tz=clock.SHANGHAI_TZ)
+  except (OSError, OverflowError, ValueError):
+    return None
+
+
+def _order_identity(value: Dict[str, Any]) -> str:
+  return str(value.get("order_id") or value.get("broker_order_id") or "")
+
+
+def _with_effective_order_status(
+  value: Dict[str, Any],
+  *,
+  observed_at: datetime,
+  cancelable_order_ids: Optional[set[str]],
+) -> Dict[str, Any]:
+  """Preserve QMT's raw status and derive A-share day-order expiry."""
+  order = dict(value)
+  raw_status = order.get("order_status", order.get("status"))
+  effective_status = _normalized_qmt_order_status(raw_status)
+  identity = _order_identity(order)
+  can_cancel = (
+    identity in cancelable_order_ids
+    if identity and cancelable_order_ids is not None
+    else None
+  )
+  order_time = _order_time_in_shanghai(order.get("order_time"))
+  observed = clock.to_shanghai(observed_at)
+  stock_code = str(
+    order.get("stock_code") or order.get("instrument_code") or ""
+  ).upper()
+  is_ashare = bool(re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", stock_code))
+  session_closed = bool(
+    order_time
+    and (
+      order_time.date() < observed.date()
+      or (
+        order_time.date() == observed.date()
+        and observed.timetz().replace(tzinfo=None) >= _ASHARE_SESSION_CLOSE
+      )
+    )
+  )
+  session_expired = bool(
+    is_ashare
+    and effective_status in _ACTIVE_QMT_ORDER_STATUSES
+    and int(order.get("traded_volume") or 0) == 0
+    and session_closed
+  )
+  if session_expired:
+    effective_status = "EXPIRED"
+
+  order["effective_order_status"] = effective_status
+  order["session_expired"] = session_expired
+  order["can_cancel"] = can_cancel
+  order["effective_status_reason"] = (
+    "MARKET_SESSION_CLOSED" if session_expired else ""
+  )
+  if order_time is not None:
+    order["order_session_date"] = order_time.date().isoformat()
+  return order
+
 
 class LocalAgentStatus(str, Enum):
   READY = "READY"
@@ -319,6 +439,16 @@ class MiniQmtLocalAgent:
       orders = []
     return [_to_dict(item) for item in orders]
 
+  def query_cancelable_orders(self) -> Optional[List[Dict[str, Any]]]:
+    """Return MiniQMT's authoritative cancelable set, or unknown on failure."""
+    try:
+      orders = self.trading_manager.get_orders(True)
+    except (AttributeError, TypeError):
+      return None
+    except Exception:
+      return None
+    return [_to_dict(item) for item in orders]
+
   def query_trades(self) -> List[Dict[str, Any]]:
     return [
       _to_dict(item)
@@ -382,10 +512,25 @@ class MiniQmtLocalAgent:
     return self.reconcile_snapshots(expected_snapshot, self.full_snapshot())
 
   def full_snapshot(self) -> Dict[str, Any]:
+    observed_at = clock.now_aware()
+    orders = self.query_orders()
+    cancelable_orders = self.query_cancelable_orders()
+    cancelable_order_ids = (
+      {_order_identity(item) for item in cancelable_orders if _order_identity(item)}
+      if cancelable_orders is not None
+      else None
+    )
     return {
       "account": self.query_account(),
       "positions": self.query_positions(),
-      "orders": self.query_orders(),
+      "orders": [
+        _with_effective_order_status(
+          order,
+          observed_at=observed_at,
+          cancelable_order_ids=cancelable_order_ids,
+        )
+        for order in orders
+      ],
       "trades": self.query_trades(),
       "connected": bool(getattr(self.trading_manager, "is_connected", False)),
     }
@@ -472,6 +617,15 @@ def _to_miniqmt_price_type(value: Any, price: Any = 0.0) -> Any:
     text = "FIX_PRICE" if float(price or 0.0) > 0 else "LATEST_PRICE"
   if text in {"LIMIT", "FIX", "FIX_PRICE"}:
     name = "FIX_PRICE"
+  elif text in {"MARKET_CONVERT_5_LIMIT", "MARKET_CONVERT_5_CANCEL"}:
+    # The shared execution path uses MARKET_CONVERT_5_LIMIT as its portable
+    # protective-market name. TradingManager resolves it to the exchange-
+    # specific SH/SZ five-level immediate-or-cancel order type.
+    name = "MARKET_CONVERT_5_LIMIT"
+  elif text in {"MARKET_PEER_PRICE_FIRST", "PEER_PRICE_FIRST"}:
+    name = "MARKET_PEER_PRICE_FIRST"
+  elif text in {"MARKET_MINE_PRICE_FIRST", "MINE_PRICE_FIRST"}:
+    name = "MARKET_MINE_PRICE_FIRST"
   else:
     name = "LATEST_PRICE"
   return getattr(PriceType, name)
