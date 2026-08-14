@@ -1,8 +1,8 @@
 # Strategies 模块查询操作
 
 # 获取所有策略
-query strategies {
-  strategies {
+query strategies($includeAssistantManaged: Boolean! = false) {
+  strategies(includeAssistantManaged: $includeAssistantManaged) {
     id
     name
     description
@@ -172,6 +172,7 @@ query LimitUpBoardWorkbench(
     lastNetProfitPct
     peakNetProfitPct
     holdingTradingDays
+    entryTradeDate
     pendingIntentId
     pendingOrderId
     lastExitReason
@@ -193,6 +194,139 @@ query LimitUpBoardWorkbench(
       warning
       sampleCount
     }
+  }
+}
+
+query LimitUpBoardAssistantDesk($accountId: String!) {
+  limitUpBoardAssistant(accountId: $accountId) {
+    configId
+    strategyRunId
+    accountId
+    enabled
+    mode
+    autoExitAcknowledged
+    configVersion
+    universeRevision
+    targetEntryAmount
+    maxSinglePositionPct
+    autoSignalMinScore
+    entryDistanceTicks
+    entryStartTime
+    entryEndTime
+    approvalTtlMs
+    entryOrderTtlMs
+    maxPriceDeviationBps
+    executionQuoteMaxAgeSeconds
+    maxEntryAttemptsPerDay
+    exitLimitBreakTicks
+    exitMinSealSeconds
+    exitTrailingArmProfitPct
+    exitTrailingDrawdownPct
+    exitTrailingPercent
+    maxHoldingTradingDays
+    maxHoldingExitTime
+    exitMaxSlippageBps
+    armedCandidates {
+      instrumentCode
+      source
+      armVersion
+      armedAt
+    }
+    manualArmedCount
+    pendingSignalCount
+    activeExitPlanCount
+    monitoredCount
+    runStatus
+    engineStatus
+    agentStatus
+    reconcileStatus
+    killSwitch
+    canApprove
+    canActivateLive
+    blockedReasons
+    lastReconciledAt
+    lastError
+    projectionVersion
+    projectionGeneratedAt
+  }
+}
+
+query LimitUpBoardAssistantRuntime($runId: String!) {
+  strategyPendingTradeIntents(runId: $runId) {
+    id
+    instrumentCode
+    reason
+    confidence
+    limitPriceHint
+    targetAmount
+    signalPrice
+    limitUpPrice
+    distanceToLimitTicks
+    approvalExpiresAt
+    createdAt
+    metadata
+  }
+  strategyExitPlans(runId: $runId) {
+    id
+    instrumentCode
+    status
+    entryFilledVolume
+    entryAvgPrice
+    exitedVolume
+    remainingVolume
+    lastPrice
+    lastNetProfitPct
+    peakNetProfitPct
+    holdingTradingDays
+    entryTradeDate
+    pendingIntentId
+    pendingOrderId
+    lastExitReason
+    t1Policy
+    executionMode
+    autoExitAuthorized
+    ruleTypes
+    raw
+  }
+}
+
+mutation SaveLimitUpBoardAssistant($input: LimitUpBoardAssistantSettingsInput!) {
+  saveLimitUpBoardAssistant(input: $input) {
+    success
+    code
+    message
+  }
+}
+
+mutation ReconcileLimitUpBoardAssistant($accountId: String!) {
+  reconcileLimitUpBoardAssistant(accountId: $accountId) {
+    success
+    code
+    message
+  }
+}
+
+mutation ArmLimitUpBoardCandidate($input: LimitUpBoardCandidateActionInput!) {
+  armLimitUpBoardCandidate(input: $input) {
+    success
+    code
+    message
+  }
+}
+
+mutation DisarmLimitUpBoardCandidate($input: LimitUpBoardCandidateActionInput!) {
+  disarmLimitUpBoardCandidate(input: $input) {
+    success
+    code
+    message
+  }
+}
+
+subscription LimitUpBoardAssistantUpdates($accountId: String!) {
+  limitUpBoardAssistantUpdates(accountId: $accountId) {
+    accountId
+    version
+    occurredAt
   }
 }
 

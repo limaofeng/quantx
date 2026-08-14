@@ -17,6 +17,7 @@ import {
   type StrategyRunMode,
   type StrategyRunStatus,
 } from '@/generated/gql/graphql';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import {
@@ -205,12 +206,18 @@ export default function RunningStrategies({
               </div>
               <div className="space-y-0.5">
                 <span
-                  className={`text-[9px] font-bold uppercase tracking-widest block ${totalProfit >= 0 ? 'text-emerald-500/70' : 'text-rose-500/70'}`}
+                  className={cn(
+                    'block text-[9px] font-bold uppercase tracking-widest opacity-70',
+                    financialToneClass(totalProfit)
+                  )}
                 >
                   累计盈亏
                 </span>
                 <p
-                  className={`text-xl font-mono font-medium tabular-nums tracking-tight ${totalProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                  className={cn(
+                    'font-mono text-xl font-medium tabular-nums tracking-tight',
+                    financialToneClass(totalProfit)
+                  )}
                 >
                   {totalProfit >= 0 ? '+' : ''}
                   {totalProfit.toFixed(1)}
@@ -342,7 +349,6 @@ export default function RunningStrategies({
             )}
           >
             {runsWithInstances.map(({ run, instance }, idx) => {
-              const isProfit = run.profitLoss >= 0;
               const state = getStrategyRunState(run.mode, run.status);
               const isActive = state.status === 'RUNNING';
               const statusToneClass = {
@@ -411,7 +417,10 @@ export default function RunningStrategies({
                         盈亏
                       </span>
                       <span
-                        className={`flex items-center gap-1 ${isProfit ? 'text-emerald-500' : 'text-rose-500'}`}
+                        className={cn(
+                          'flex items-center gap-1',
+                          financialToneClass(run.profitLoss)
+                        )}
                       >
                         {run.profitLoss.toFixed(2)}
                       </span>

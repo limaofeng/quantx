@@ -10,6 +10,7 @@ import {
   type StrategyRunStatus,
   type StrategyRunMode,
 } from '@/generated/gql/graphql';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { getStrategyRunState, type StrategyInstance } from '../domain';
@@ -40,7 +41,6 @@ export default function StrategyInstanceCard({
 }: StrategyInstanceCardProps) {
   const [, setLocation] = useLocation();
   const { closeMenu, menu, openAtPointer } = useStudioMenu<string>();
-  const isProfit = run.profitLoss >= 0;
   const state = getStrategyRunState(run.mode, run.status);
   const detailUrl = `/strategies/${run.strategy?.id}/runs/${encodeURIComponent(run.id)}`;
   const ModeIcon = {
@@ -156,9 +156,10 @@ export default function StrategyInstanceCard({
                 盈亏
               </span>
               <span
-                className={`font-mono text-xs font-bold tracking-tight ${
-                  isProfit ? 'text-emerald-400' : 'text-rose-400'
-                }`}
+                className={cn(
+                  'font-mono text-xs font-bold tracking-tight',
+                  financialToneClass(run.profitLoss)
+                )}
               >
                 {run.profitLoss > 0 ? '+' : ''}
                 {run.profitLoss.toFixed(1)}

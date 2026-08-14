@@ -47,6 +47,7 @@ describe('router configuration', () => {
     expect(getPageTitle('/holdings')).toBe('持仓');
     expect(getPageTitle('/account')).toBe('账户中心');
     expect(getPageTitle('/t-trade')).toBe('做T助手');
+    expect(getPageTitle('/limit-up-board')).toBe('打板助手');
     expect(getPageTitle('/stock/000001')).toBe('个股详情');
     expect(getPageTitle('/settings/data/market')).toBe('全市场数据');
     expect(getPageTitle('/settings/data/stocks')).toBe('个股数据');
@@ -93,6 +94,7 @@ describe('router configuration', () => {
       '/market-shortcuts',
       '/holdings',
       '/t-trade',
+      '/limit-up-board',
       '/liquidation',
       '/strategies',
       '/research',

@@ -26,6 +26,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import {
@@ -475,10 +476,9 @@ export default function BacktestHistoryTab({
                             <span
                               className={cn(
                                 'font-medium',
-                                !Number.isNaN(totalPnlNumber) &&
-                                  totalPnlNumber >= 0
-                                  ? 'text-green-400'
-                                  : 'text-red-400'
+                                Number.isNaN(totalPnlNumber)
+                                  ? 'text-market-flat'
+                                  : financialToneClass(totalPnlNumber)
                               )}
                             >
                               收益: {formatMetric(totalPnl)}

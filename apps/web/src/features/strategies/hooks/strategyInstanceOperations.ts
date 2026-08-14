@@ -1,8 +1,8 @@
 import { gql } from '@/generated/gql';
 
 export const StrategyDefinitionsQuery = `
-  query StrategyDefinitions {
-    strategyDefinitions {
+  query StrategyDefinitions($includeAssistantManaged: Boolean! = false) {
+    strategyDefinitions(includeAssistantManaged: $includeAssistantManaged) {
       key
       strategyId
       displayName
@@ -40,8 +40,8 @@ export const StrategyDefinitionsQuery = `
 `;
 
 export const StrategyInstancesQuery = `
-  query StrategyInstances($status: String, $strategyKey: String, $instrumentCode: String) {
-    strategyInstances(status: $status, strategyKey: $strategyKey, instrumentCode: $instrumentCode) {
+  query StrategyInstances($status: String, $strategyKey: String, $instrumentCode: String, $includeAssistantManaged: Boolean! = false) {
+    strategyInstances(status: $status, strategyKey: $strategyKey, instrumentCode: $instrumentCode, includeAssistantManaged: $includeAssistantManaged) {
       id
       strategyKey
       strategyId

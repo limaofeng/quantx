@@ -9,6 +9,7 @@ import {
   Hand,
   LayoutDashboard,
   Radar,
+  Target,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -97,7 +98,7 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/market-shortcuts',
-    title: '行情快捷方式',
+    title: '行情工作台',
     importer: toDefaultExport(
       () => import('@/features/dashboard'),
       'MarketShortcutsPage'
@@ -152,15 +153,31 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/limit-up-board',
+    title: '打板助手',
+    importer: toDefaultExport(
+      () => import('@/features/strategies'),
+      'LimitUpBoardPage'
+    ),
+    skeleton: 'dashboard',
+    preload: true,
+    nav: {
+      label: '打板助手',
+      icon: Target,
+      group: MAIN_GROUP,
+      order: 35,
+    },
+  }),
+  route({
     path: '/liquidation',
-    title: '清仓管理',
+    title: '卖出管理',
     importer: toDefaultExport(
       () => import('@/features/portfolio'),
       'LiquidationPage'
     ),
     skeleton: 'table',
     nav: {
-      label: '清仓管理',
+      label: '卖出管理',
       icon: Hand,
       group: MAIN_GROUP,
       order: 40,

@@ -30,6 +30,10 @@ import { useQuery } from 'urql';
 
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
+import {
+  FINANCIAL_CHART_COLORS,
+  financialToneClass,
+} from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { StrategyPerformanceQuery } from '../hooks/strategyInstanceOperations';
@@ -248,8 +252,8 @@ function MetricCard({
   icon: typeof TrendingUp;
 }) {
   const toneClass = {
-    positive: 'text-emerald-500',
-    negative: 'text-rose-500',
+    positive: financialToneClass(1),
+    negative: financialToneClass(-1),
     neutral: 'text-slate-900 dark:text-white',
     warning: 'text-amber-500',
   }[tone];
@@ -721,7 +725,11 @@ export default function PerformanceTab({
                     {monthlyReturns.map(item => (
                       <Cell
                         key={item.month}
-                        fill={item.returnPct >= 0 ? '#10b981' : '#ef4444'}
+                        fill={
+                          item.returnPct >= 0
+                            ? FINANCIAL_CHART_COLORS.up
+                            : FINANCIAL_CHART_COLORS.down
+                        }
                       />
                     ))}
                   </Bar>

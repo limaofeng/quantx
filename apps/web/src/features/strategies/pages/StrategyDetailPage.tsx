@@ -66,6 +66,7 @@ import {
   StrategyRunStatus,
   StrategyRunMode,
 } from '@/generated/gql/graphql';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import BacktestHistoryTab from '../components/BacktestHistoryTab';
@@ -1152,7 +1153,7 @@ export default function StrategyDetailPage() {
       // 注意：metrics 结构可能根据 generated 类型不同，这里做保护性访问
       // 如果 displayRun.metrics 是 JSON/any，则直接访问
       icon: TrendingUp,
-      color: totalPnl >= 0 ? 'text-emerald-500' : 'text-rose-500',
+      color: financialToneClass(totalPnl),
     },
     {
       label:

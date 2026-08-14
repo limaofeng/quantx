@@ -1,6 +1,7 @@
 import { AlertTriangle } from 'lucide-react';
 import React from 'react';
 
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { type GridResult } from '../types';
@@ -146,15 +147,13 @@ const GridTable: React.FC<Props> = ({ result }) => {
                 <td
                   className={cn(
                     'px-3 py-1.5 text-right font-mono text-xs',
-                    level.pctFromBase > 0 ? 'text-green-500' : 'text-red-500' // Sell/Profit Zone (positive pct) usually Green, Buy/Loss Zone (negative pct) usually Red in this inverted logic? Wait.
-                    // level.pctFromBase > 0 is UP (Sell Zone). Chart Sell Grid is Green. So Text should be Green.
-                    // level.pctFromBase < 0 is DOWN (Buy Zone). Chart Buy Grid is Red. So Text should be Red.
+                    financialToneClass(level.pctFromBase)
                   )}
                 >
                   {level.pctFromBase > 0 ? '+' : ''}
                   {level.pctFromBase.toFixed(2)}%
                 </td>
-                <td className="px-3 py-1.5 text-right font-mono text-xs text-emerald-600 dark:text-emerald-400 font-bold opacity-60 group-hover:opacity-100">
+                <td className="px-3 py-1.5 text-right font-mono text-xs text-market-up font-bold opacity-60 group-hover:opacity-100">
                   +{level.expectedProfit.toFixed(1)}
                 </td>
               </tr>

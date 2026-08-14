@@ -520,7 +520,7 @@ export default function LimitUpBoardWorkbench({
             id="board-exit-title"
             className="text-sm font-black text-slate-900 dark:text-white"
           >
-            活跃退出计划
+            打板退出计划
           </h3>
           <p className="mt-1 text-[10px] text-slate-500">
             只有真实成交后才创建；可卖量不足时按 T+1 规则等待。

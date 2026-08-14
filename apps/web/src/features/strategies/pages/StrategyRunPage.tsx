@@ -81,12 +81,21 @@ function readStrategyRunDraft(strategyId: number): StrategyRunDraft | null {
   }
 }
 
+function existingLimitUpInstanceId(message: string) {
+  return message.match(/ACTIVE_LIMIT_UP_INSTANCE_EXISTS:([a-zA-Z0-9-]+)/)?.[1];
+}
+
 export default function StrategyRunPage() {
   const [location, setLocation] = useLocation();
   const params = useParams();
   const searchParams = new URLSearchParams(window.location.search);
   const strategyIdParam =
     searchParams.get('strategyId') || params.strategyId || null;
+  const instrumentCodeParam =
+    searchParams.get('instrumentCode') || searchParams.get('symbol') || '';
+  const isAssistantManagedEntry = ['limit-up-board', 'limit-up-radar'].includes(
+    searchParams.get('source') || ''
+  );
 
   const [selectedId, setSelectedId] = useState<number | null>(
     strategyIdParam ? parseInt(strategyIdParam, 10) : null
@@ -120,6 +129,7 @@ export default function StrategyRunPage() {
   // 获取所有可用策略列表
   const [{ data: listData }] = useQuery({
     query: StrategiesDocument,
+    variables: { includeAssistantManaged: isAssistantManagedEntry },
   });
 
   const availableStrategies = useMemo(
@@ -209,6 +219,7 @@ export default function StrategyRunPage() {
       );
 
       const defaultInstrument =
+        instrumentCodeParam ||
         draft?.instrumentCode ||
         mergedParams?.instrument_code ||
         mergedParams?.instrumentCode ||
@@ -238,7 +249,7 @@ export default function StrategyRunPage() {
       setStockCodes('');
       setStrategyConfig({});
     }
-  }, [strategy, selectedId]);
+  }, [instrumentCodeParam, strategy, selectedId]);
 
   const handleStrategyChange = (value: string | number) => {
     const newId = typeof value === 'string' ? parseInt(value, 10) : value;
@@ -309,6 +320,14 @@ export default function StrategyRunPage() {
       });
 
       if (result.error) {
+        const existingId = existingLimitUpInstanceId(result.error.message);
+        if (existingId) {
+          setFormError(null);
+          setLocation(
+            `/strategies/${strategy.id}/runs/${encodeURIComponent(existingId)}`
+          );
+          return;
+        }
         throw new Error(result.error.message);
       }
 
