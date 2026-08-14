@@ -20,6 +20,8 @@ from .schemas import (
   LiquidationMutation,
   LiquidationQuery,
   MarketDataQuery,
+  NotificationMutation,
+  NotificationQuery,
   PortfolioQuery,
   RealtimeSubscription,
   ResearchQuery,
@@ -94,6 +96,7 @@ class Query(
   WatchlistQuery,
   TTradeQuery,
   ResearchQuery,
+  NotificationQuery,
 ):
   pass
 
@@ -132,6 +135,7 @@ class Mutation(
   HolidayMutation,
   WatchlistMutation,
   TTradeMutation,
+  NotificationMutation,
 ):
   pass
 

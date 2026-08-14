@@ -119,6 +119,7 @@ _MARKET_FIELDS = {
   "limituplifecycle",
   "marketindexintradaytrend",
   "limitupradar",
+  "orderentrycapabilities",
   "rootsectors",
   "researchrun",
   "researchruns",
@@ -153,9 +154,11 @@ _ASSISTANT_SUBSCRIPTION_FIELDS = {"aiassistantevents"}
 _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
 _TRADE_APPROVAL_MUTATION_FIELDS = {
   "confirmstrategytradeintentapproval",
+  "confirmstrategycontrol",
   "confirmexitintent",
   "confirmttradeentryapproval",
   "previewstrategytradeintentapproval",
+  "previewstrategycontrol",
   "previewexitintent",
   "previewttradeentryapproval",
 }
@@ -198,6 +201,16 @@ _LIMIT_UP_CONTROL_MUTATION_FIELDS = {
   "savelimitupboardassistant",
   "setfirstboardcandidatepreference",
 }
+_LIQUIDATION_CONTROL_MUTATION_FIELDS = {
+  "confirmliquidation",
+  "previewliquidation",
+}
+_NOTIFICATION_MUTATION_FIELDS = {
+  "registerpushdevice",
+  "updatepushpreferences",
+  "unregisterpushdevice",
+}
+_NOTIFICATION_QUERY_FIELDS = {"notificationeventroute"}
 _LEGACY_WEB_MUTATION_COMPAT_PERMISSIONS = frozenset(
   {
     "limit-up:control",
@@ -239,6 +252,10 @@ def required_permission(operation_name: str, field_name: str) -> str:
       return "t-trade:control"
     if normalized in _LIMIT_UP_CONTROL_MUTATION_FIELDS:
       return "limit-up:control"
+    if normalized in _LIQUIDATION_CONTROL_MUTATION_FIELDS:
+      return "liquidation:control"
+    if normalized in _NOTIFICATION_MUTATION_FIELDS:
+      return "notification:manage"
     return "mutation:write"
   if normalized in _NORMALIZED_PORTFOLIO_FIELDS:
     return "portfolio:read"
@@ -252,6 +269,8 @@ def required_permission(operation_name: str, field_name: str) -> str:
     return "market:read"
   if normalized in _ASSISTANT_QUERY_FIELDS:
     return "assistant:read"
+  if normalized in _NOTIFICATION_QUERY_FIELDS:
+    return "notification:manage"
   if operation_name == "Subscription":
     if normalized in _ASSISTANT_SUBSCRIPTION_FIELDS:
       return "assistant:read"

@@ -147,8 +147,8 @@ codegen；Generated GraphQL Model 必须先映射为校验过的 App Domain Mode
 | `previewExitPlanAuthorization` | Mutation | `liquidation:control` | 预览精确规则、保护量、版本与授权期限 |
 | `confirmExitPlanAuthorization` | Mutation | `liquidation:control` + `trade:approve` | 生物确认后授权精确自动退出计划 |
 | `strategyInstanceMobileParameters` | Query | `strategy:read` | 返回 allowlist 参数描述和配置版本 |
-| `previewStrategyControl` | Mutation | `strategy:control` | 进入实盘/实盘启动前返回 readiness 挑战 |
-| `confirmStrategyControl` | Mutation | `strategy:control` + `trade:approve` | 消费实盘控制挑战 |
+| `previewStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 进入实盘/实盘启动前返回 readiness 挑战 |
+| `confirmStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 消费实盘控制挑战 |
 | `registerPushDevice` / `updatePushPreferences` / `unregisterPushDevice` | Mutation | `notification:manage` | 管理当前设备 APNs Token 与类别偏好 |
 
 现有 `placeOrder`、`liquidatePosition`、`liquidateAllPositions` 和只带布尔
@@ -301,11 +301,44 @@ QMT 最新 `canCancel` 和状态；响应 `QUEUED` 只表示撤单命令已排�
 
 ## 9. APNs 契约
 
+### 9.0 当前服务端基础（2026-08-15）
+
+M5 服务端基础已落地，公共 GraphQL 契约为：
+
+- `registerPushDevice(input)`：绑定当前 `deviceSessionId` 和唯一主账户，按安装实例
+  幂等注册或轮换 Token；
+- `updatePushPreferences(input)`：只修改当前会话、当前安装的类别偏好；
+- `unregisterPushDevice(input)`：失效当前安装、清除可解密 Token，并把待发送项标为
+  `DISCARDED`；
+- `notificationEventRoute(eventId)`：解锁后按随机事件 ID 解析类别、非敏感路由、
+  发生/过期时间；事件必须同时匹配当前用户、设备会话和主账户。
+
+四个根字段均要求 `notification:manage`；兼容 Web Mutation 只沿用现有
+`mutation:write` 迁移规则，原生会话不接受该宽权限回退。服务端通过 0017 迁移
+持久化加密 Token、类别偏好、随机事件和无业务 payload 的 outbox；旧库若只存在
+部分表、约束或索引会 fail-closed。
+
+当前切片不连接真实 APNs，也不把 outbox 的 `PENDING` 表示为送达。后续发送器必须
+以可注入客户端接入，并在 ES256 Key ID、Team ID、Bundle ID、环境、HTTP/2 与 TLS
+配置全部有效时才启用；只发送普通 alert，不申请或模拟 Critical Alerts。
+
 ### 9.1 设备注册
 
 APNs Token 绑定当前 `deviceSessionId`、安装实例 ID、环境（sandbox/production）、
 App 版本和通知偏好。Token 轮换时 upsert；登出和会话吊销时注销或失效。服务端
-以加密或受控敏感字段保存 Token，不写普通日志。
+以加密敏感字段保存 Token，并只以带服务端密钥的摘要进行轮换识别；GraphQL 响应、
+普通日志、异常和 outbox 均不包含 Token。客户端不假设 Token 固定长度，并在系统
+回调获得新 Token 后重新注册。
+
+类别与默认值固定为：
+
+| GraphQL 类别 | 默认 APNs |
+| --- | --- |
+| `ACTION_REQUIRED` | 开 |
+| `ORDER_UPDATE` | 开 |
+| `RISK_SAFETY` | 开 |
+| `AUTOMATION_ERROR` | 开 |
+| `CONNECTION_DATA` | 关 |
 
 ### 9.2 Payload
 
@@ -327,6 +360,17 @@ App 版本和通知偏好。Token 轮换时 upsert；登出和会话吊销时注
 payload 和锁屏文案禁止包含账号、金额、证券代码/名称、价格、数量、策略参数、
 订单 ID、确认 Token 或买卖方向。App 解锁后使用 `eventId` 重新读取，并校验事件
 属于当前主账户。APNs 送达不是业务确认，不改变服务端事件状态。
+
+允许的 `route` 仅为 `today.action`、`trading.orders`、`trading.safety`、
+`quant.workspace` 和 `system.status`。payload 的自定义业务键严格只有
+`eventId/category/route`；标题和正文使用统一非敏感文案。事件过期后 Resolver
+仍可返回 `expired=true` 供客户端显示真实过期状态，但不得重放旧操作。
+
+实现依据：Apple 的
+[App 注册 APNs](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns)、
+[Token 连接](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns)、
+[发送请求](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns)
+和[通知交互处理](https://developer.apple.com/documentation/usernotifications/handling-notifications-and-notification-related-actions)。
 
 ## 10. 错误、审计与敏感数据
 

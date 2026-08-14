@@ -86,6 +86,8 @@ def test_ai_runtime_settings_use_dedicated_system_permissions():
     "confirmTTradeEntryApproval",
     "previewStrategyTradeIntentApproval",
     "confirmStrategyTradeIntentApproval",
+    "previewStrategyControl",
+    "confirmStrategyControl",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(
@@ -149,6 +151,12 @@ def test_manual_trade_mutations_require_manual_permission(field_name: str):
 
 def test_legacy_direct_order_requires_distinct_permission():
   assert required_permission("Mutation", "placeOrder") == "trade:direct"
+
+
+def test_order_entry_capabilities_require_market_read_permission():
+  assert (
+    required_permission("Query", "orderEntryCapabilities") == "market:read"
+  )
 
 
 @pytest.mark.asyncio

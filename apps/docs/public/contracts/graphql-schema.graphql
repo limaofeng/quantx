@@ -1989,6 +1989,51 @@ input LiquidatePositionsInput {
   autoExitAuthorized: Boolean! = false
 }
 
+"""清仓完成策略"""
+enum LiquidationCompletionStrategy {
+  AVAILABLE_NOW
+  UNTIL_SNAPSHOT_CLEARED
+}
+
+"""移动端组级清仓确认输入"""
+input LiquidationConfirmationInput {
+  """预览返回的确认挑战 ID"""
+  challengeId: String!
+
+  """预览返回的一次性确认凭据"""
+  confirmationToken: String!
+}
+
+"""移动端清仓确认结果；PENDING 仅表示 Engine 命令已排队"""
+type LiquidationConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: String
+  groupId: String
+  commandId: String
+  status: String
+  createdCount: Int!
+  failedCount: Int!
+  plans: [LiquidationPlanResult!]!
+}
+
+"""清仓预览中的冲突退出计划"""
+type LiquidationConflictPreview {
+  planId: String!
+  sourceType: String!
+  status: String!
+  remainingVolume: Int!
+  configVersion: Int!
+  pending: Boolean!
+}
+
+"""清仓计划冲突策略"""
+enum LiquidationConflictStrategy {
+  UNALLOCATED_ONLY
+  REPLACE_CANCELLABLE
+}
+
 """清仓错误"""
 type LiquidationError {
   """股票代码"""
@@ -1998,12 +2043,36 @@ type LiquidationError {
   error: String!
 }
 
+"""清仓执行模式；默认 PAPER，LIVE 需要额外实盘门禁"""
+enum LiquidationExecutionMode {
+  PAPER
+  LIVE
+}
+
 """一组持仓清仓计划"""
 type LiquidationGroupResult {
   groupId: String!
   success: Boolean!
   message: String!
   plans: [LiquidationPlanResult!]!
+}
+
+"""清仓预览中的单只证券固定快照"""
+type LiquidationItemPreview {
+  instrumentCode: String!
+  instrumentName: String
+  totalVolume: Int!
+  availableVolume: Int!
+  frozenVolume: Int!
+  t1UnavailableVolume: Int!
+  protectedVolume: Int!
+  pendingSellVolume: Int!
+  maxProtectedVolume: Int!
+  included: Boolean!
+  reasonCode: String!
+  reasonDetail: String!
+  positionUpdatedAt: DateTime
+  conflicts: [LiquidationConflictPreview!]!
 }
 
 """清仓订单"""
@@ -2067,6 +2136,61 @@ type LiquidationPlanResult {
   error: String
 }
 
+"""移动端组级清仓服务器预览"""
+type LiquidationPreview {
+  challengeId: String!
+  confirmationToken: String!
+  groupId: String!
+  accountId: String!
+  scope: LiquidationScope!
+  instrumentCodes: [String!]!
+  completionStrategy: LiquidationCompletionStrategy!
+  conflictStrategy: LiquidationConflictStrategy!
+  executionMode: LiquidationExecutionMode!
+  idempotencyKey: String!
+  snapshotVersion: String!
+  accountUpdatedAt: DateTime!
+  rolloutSnapshotId: String
+  rolloutSnapshotHash: String
+  challengeExpiresAt: DateTime!
+  includedCount: Int!
+  skippedCount: Int!
+  items: [LiquidationItemPreview!]!
+  warnings: [String!]!
+}
+
+"""移动端组级清仓预览输入"""
+input LiquidationPreviewInput {
+  """必填资金账号"""
+  accountId: String!
+
+  """单只、选中或全部"""
+  scope: LiquidationScope!
+
+  """处理当前可卖量或持续处理预览持仓快照"""
+  completionStrategy: LiquidationCompletionStrategy!
+
+  """只使用未分配数量或替换可取消计划"""
+  conflictStrategy: LiquidationConflictStrategy!
+
+  """调用方生成的业务幂等键"""
+  idempotencyKey: String!
+
+  """SINGLE/SELECTED 必填；ALL 必须为空"""
+  instrumentCodes: [String!] = null
+
+  """默认 PAPER；LIVE 需要实盘门禁和最新完整对账"""
+  executionMode: LiquidationExecutionMode! = PAPER
+}
+
+"""移动端清仓预览结果"""
+type LiquidationPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: LiquidationPreview
+}
+
 """清仓结果"""
 type LiquidationResult {
   """是否成功"""
@@ -2089,6 +2213,13 @@ type LiquidationResult {
 
   """错误列表"""
   errors: [LiquidationError!]!
+}
+
+"""移动端清仓范围"""
+enum LiquidationScope {
+  SINGLE
+  SELECTED
+  ALL
 }
 
 """清仓概况"""
@@ -2144,6 +2275,12 @@ type ManualOrderConfirmationResult {
   challengeId: String
   clientOrderId: String
   status: String
+}
+
+"""移动端手动委托执行模式"""
+enum ManualOrderExecutionMode {
+  PAPER
+  LIVE
 }
 
 """移动端手动委托服务器预览"""
@@ -2207,6 +2344,9 @@ input ManualOrderPreviewInput {
 
   """调用方生成的业务幂等键"""
   idempotencyKey: String!
+
+  """默认 PAPER；LIVE 额外要求实盘灰度、对账和唯一 Agent 就绪"""
+  executionMode: ManualOrderExecutionMode! = PAPER
 
   """LIMIT 必填；BEST 必须为空"""
   limitPrice: Float = null
@@ -2297,6 +2437,12 @@ type Mutation {
 
   """撤单"""
   cancelOrder(input: CancelOrderInput!): CancelOrderResult!
+
+  """预览固定持仓快照并签发组级清仓确认挑战"""
+  previewLiquidation(input: LiquidationPreviewInput!): LiquidationPreviewResult!
+
+  """消费组级挑战并原子排队清仓 Engine 命令"""
+  confirmLiquidation(input: LiquidationConfirmationInput!): LiquidationConfirmationResult!
 
   """预览并签发退出 SELL 意图确认挑战"""
   previewExitIntent(planId: String!, intentId: String!): TradeApprovalPreviewResult!
@@ -2414,6 +2560,12 @@ type Mutation {
 
   """恢复策略实例"""
   resumeStrategyInstance(instanceId: String!): OperationResult!
+
+  """预览实盘策略控制并签发设备绑定挑战"""
+  previewStrategyControl(input: StrategyControlPreviewInput!): StrategyControlPreviewResult!
+
+  """消费设备绑定挑战并应用实盘策略控制"""
+  confirmStrategyControl(input: StrategyControlConfirmationInput!): StrategyControlConfirmationResult!
 
   """确认一个等待人工授权的策略交易意图"""
   approveStrategyTradeIntent(runId: String!, intentId: String!): OperationResult!
@@ -2537,6 +2689,34 @@ type Mutation {
 
   """取消正在执行的做 T 历史回放"""
   cancelTTradeReplay(runId: String!): TTradeReplayMutationResult!
+
+  """注册或幂等轮换当前安装的 APNs Token"""
+  registerPushDevice(input: RegisterPushDeviceInput!): PushDeviceRegistration!
+
+  """更新当前安装的普通通知类别偏好"""
+  updatePushPreferences(input: UpdatePushPreferencesInput!): PushDeviceRegistration!
+
+  """注销当前安装并丢弃尚未发送的推送意图"""
+  unregisterPushDevice(input: UnregisterPushDeviceInput!): UnregisterPushDeviceResult!
+}
+
+"""解锁后解析的非敏感路由；业务终态仍由目标 Query 重新读取"""
+type NotificationEventRoute {
+  eventId: ID!
+  category: PushCategory!
+  routeType: NotificationRouteType!
+  occurredAt: DateTime!
+  expiresAt: DateTime!
+  expired: Boolean!
+}
+
+"""解锁后允许导航的非敏感路由类型"""
+enum NotificationRouteType {
+  TODAY_ACTION
+  TRADING_ORDERS
+  TRADING_SAFETY
+  QUANT_WORKSPACE
+  SYSTEM_STATUS
 }
 
 """操作结果"""
@@ -2626,6 +2806,20 @@ type Order {
 enum OrderDirection {
   ASC
   DESC
+}
+
+"""服务端计算的移动端手动委托能力"""
+type OrderEntryCapabilities {
+  accountId: String!
+  instrumentCode: String!
+  canManualTrade: Boolean!
+  defaultExecutionMode: ManualOrderExecutionMode!
+  executionModes: [ManualOrderExecutionMode!]!
+  supportedSides: [ManualOrderSide!]!
+  supportedPriceTypes: [ManualOrderPriceType!]!
+  liveReady: Boolean!
+  liveBlockedReasons: [String!]!
+  warnings: [String!]!
 }
 
 """订单事件 (个人量化软件专用)"""
@@ -3025,6 +3219,45 @@ type PositionLiquidationResult {
   error: String
 }
 
+"""可配置的普通通知类别"""
+enum PushCategory {
+  ACTION_REQUIRED
+  ORDER_UPDATE
+  RISK_SAFETY
+  AUTOMATION_ERROR
+  CONNECTION_DATA
+}
+
+"""普通通知类别偏好"""
+type PushCategoryPreference {
+  category: PushCategory!
+  enabled: Boolean!
+}
+
+"""单个普通通知类别偏好"""
+input PushCategoryPreferenceInput {
+  category: PushCategory!
+  enabled: Boolean!
+}
+
+"""当前会话绑定的 APNs 注册；不返回设备 Token"""
+type PushDeviceRegistration {
+  id: ID!
+  deviceInstallId: String!
+  appBundleId: String!
+  appVersion: String!
+  environment: PushEnvironment!
+  registeredAt: DateTime!
+  updatedAt: DateTime!
+  preferences: [PushCategoryPreference!]!
+}
+
+"""APNs 服务环境"""
+enum PushEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
   """AI Runtime 全局非敏感配置与应用状态"""
@@ -3081,6 +3314,9 @@ type Query {
 
   """获取交易日历（指定区间内的交易日列表）"""
   tradingCalendar(market: String! = "SH", startDate: Date = null, endDate: Date = null): [Date!]!
+
+  """查询当前账户与标的的移动端下单能力"""
+  orderEntryCapabilities(instrumentCode: String!, accountId: String = null): OrderEntryCapabilities!
 
   """获取当日委托列表"""
   todayOrders(accountId: String = null): [Order!]!
@@ -3324,6 +3560,9 @@ type Query {
 
   """按不透明稳定 key 获取一次研究运行详情"""
   researchRun(key: String!): ResearchRunDetail
+
+  """按随机事件标识解析当前会话可访问的非敏感路由"""
+  notificationEventRoute(eventId: ID!): NotificationEventRoute
 }
 
 """实时价格数据"""
@@ -3447,6 +3686,15 @@ type RedemptionResult {
 
   """错误信息"""
   error: String
+}
+
+"""注册或轮换当前安装的 APNs Token"""
+input RegisterPushDeviceInput {
+  deviceToken: String!
+  environment: PushEnvironment!
+  appBundleId: String!
+  appVersion: String!
+  deviceInstallId: String!
 }
 
 """自选股排序输入"""
@@ -4171,6 +4419,79 @@ enum StrategyCategory {
   ARBITRAGE
   MARKET_MAKING
   OTHER
+}
+
+"""需要设备逐次确认的实盘策略控制动作"""
+enum StrategyControlAction {
+  START_LIVE
+  RESUME_LIVE
+  CLONE_TO_LIVE
+}
+
+"""实盘策略控制确认输入"""
+input StrategyControlConfirmationInput {
+  challengeId: String!
+  confirmationToken: String!
+}
+
+"""实盘策略控制确认结果"""
+type StrategyControlConfirmationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  challengeId: String
+  instanceId: String
+  status: String
+}
+
+"""实盘策略控制的服务端预览"""
+type StrategyControlPreview {
+  challengeId: String!
+  confirmationToken: String!
+  accountId: String!
+  instanceId: String!
+  targetInstanceId: String!
+  action: StrategyControlAction!
+  currentMode: String!
+  currentStatus: String!
+  configVersion: String!
+  readinessStatus: String!
+  snapshotId: String
+  snapshotAt: DateTime
+  challengeExpiresAt: DateTime!
+  checks: [StrategyControlReadinessCheck!]!
+  warnings: [String!]!
+}
+
+"""实盘策略控制预览输入"""
+input StrategyControlPreviewInput {
+  """当前设备会话绑定的资金账号"""
+  accountId: String!
+
+  """目标或来源策略实例 ID"""
+  instanceId: String!
+  action: StrategyControlAction!
+
+  """必须等于当前移动参数 configVersion"""
+  expectedConfigVersion: String!
+
+  """调用方生成、当前动作内唯一的幂等键"""
+  idempotencyKey: String!
+}
+
+"""实盘策略控制预览结果"""
+type StrategyControlPreviewResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  preview: StrategyControlPreview
+}
+
+"""策略实盘就绪检查项"""
+type StrategyControlReadinessCheck {
+  code: String!
+  passed: Boolean!
+  message: String!
 }
 
 """策略决策审计记录"""
@@ -5687,6 +6008,18 @@ enum TradingEventType {
   ORDER_REJECTED
 }
 
+"""注销当前安装的 APNs Token"""
+input UnregisterPushDeviceInput {
+  environment: PushEnvironment!
+  appBundleId: String!
+  deviceInstallId: String!
+}
+
+"""APNs 安装注销结果"""
+type UnregisterPushDeviceResult {
+  success: Boolean!
+}
+
 input UpdateAiAssistantThreadInput {
   threadId: ID!
   title: String = null
@@ -5713,6 +6046,14 @@ input UpdateManualExitPlanInput {
   executionMode: String = null
   autoExitAuthorized: Boolean = null
   remark: String = null
+}
+
+"""更新当前安装的普通通知类别偏好"""
+input UpdatePushPreferencesInput {
+  environment: PushEnvironment!
+  appBundleId: String!
+  deviceInstallId: String!
+  preferences: [PushCategoryPreferenceInput!]!
 }
 
 """自选股"""

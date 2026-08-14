@@ -4,6 +4,7 @@ import pytest
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.resolvers.liquidation import LiquidationResolver
 from quantx_api.gqlapi.schema import schema
+from quantx_api.gqlapi.security import required_permission
 from quantx_api.gqlapi.types.liquidation_types import PositionLiquidationResult
 
 
@@ -19,6 +20,61 @@ def _context(*accounts: str) -> dict:
     authorized_account_ids=accounts,
   )
   return {"principal": principal, "request_id": "liquidation-request"}
+
+
+def _native_context(*permissions: str) -> dict:
+  principal = Principal(
+    user_id="liquidation-user",
+    username="liquidation-user",
+    display_name="Liquidation User",
+    device_session_id="liquidation-session",
+    access_token_expires_at=datetime.now(timezone.utc).replace(tzinfo=None)
+    + timedelta(minutes=5),
+    permissions=frozenset(permissions),
+    authorized_account_ids=("AUTHORIZED-ACCOUNT",),
+    active_account_id="AUTHORIZED-ACCOUNT",
+  )
+  return {"principal": principal, "request_id": "liquidation-native-request"}
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  ["previewLiquidation", "confirmLiquidation"],
+)
+def test_native_liquidation_mutations_use_dedicated_permission(field_name):
+  assert required_permission("Mutation", field_name) == "liquidation:control"
+
+
+@pytest.mark.asyncio
+async def test_confirm_liquidation_explicitly_requires_trade_approve():
+  result = await schema.execute(
+    """
+    mutation Confirm($input: LiquidationConfirmationInput!) {
+      confirmLiquidation(input: $input) { success code }
+    }
+    """,
+    variable_values={
+      "input": {
+        "challengeId": "challenge-1",
+        "confirmationToken": "token-1",
+      }
+    },
+    context_value=_native_context("liquidation:control"),
+  )
+
+  assert result.errors is None
+  assert result.data == {
+    "confirmLiquidation": {"success": False, "code": "FORBIDDEN"}
+  }
+
+
+def test_liquidation_contract_requires_account_and_defaults_to_paper():
+  schema_sdl = schema.as_str()
+  input_sdl = schema_sdl.split("input LiquidationPreviewInput {", 1)[1].split(
+    "}", 1
+  )[0]
+  assert "accountId: String!" in input_sdl
+  assert "executionMode: LiquidationExecutionMode! = PAPER" in input_sdl
 
 
 @pytest.mark.asyncio

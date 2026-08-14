@@ -35,6 +35,8 @@ _AUTHORIZATION_SCHEMA = strawberry.Schema(
     "confirmTTradeEntryApproval",
     "previewStrategyTradeIntentApproval",
     "confirmStrategyTradeIntentApproval",
+    "previewStrategyControl",
+    "confirmStrategyControl",
   ],
 )
 def test_trade_approval_mutations_require_independent_permission(

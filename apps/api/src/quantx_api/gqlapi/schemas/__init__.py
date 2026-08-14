@@ -15,6 +15,7 @@ from .limit_up_board_assistant_schema import (
 )
 from .liquidation_schema import LiquidationMutation, LiquidationQuery
 from .market_data_schema import MarketDataQuery
+from .notification_schema import NotificationMutation, NotificationQuery
 from .portfolio_schema import PortfolioQuery
 from .realtime_schema import RealtimeSubscription
 from .research_schema import ResearchQuery
@@ -39,6 +40,8 @@ __all__ = [
   "InstrumentQuery",
   "PortfolioQuery",
   "MarketDataQuery",
+  "NotificationQuery",
+  "NotificationMutation",
   "DividFactorQuery",
   "FinancialQuery",
   "StockScreeningQuery",

@@ -59,8 +59,10 @@ def test_graphql_contract_uses_only_public_permission_categories():
     "assistant:read",
     "assistant:write",
     "limit-up:control",
+    "liquidation:control",
     "market:read",
     "mutation:write",
+    "notification:manage",
     "orders:read",
     "portfolio:read",
     "strategy:read",
@@ -73,6 +75,41 @@ def test_graphql_contract_uses_only_public_permission_categories():
     "t-trade:control",
     "watchlist:write",
   }
+
+
+def test_client_contract_contains_session_bound_push_fields():
+  schema_sdl = (CONTRACT_DIRECTORY / "graphql-schema.graphql").read_text("utf-8")
+  permissions = json.loads(
+    (CONTRACT_DIRECTORY / "graphql-permissions.json").read_text("utf-8")
+  )
+
+  for field_name in (
+    "registerPushDevice",
+    "updatePushPreferences",
+    "unregisterPushDevice",
+  ):
+    assert permissions["Mutation"][field_name] == "notification:manage"
+  assert (
+    permissions["Query"]["notificationEventRoute"] == "notification:manage"
+  )
+  assert "deviceToken: String!" in schema_sdl
+  registration = schema_sdl.split("type PushDeviceRegistration {", 1)[1].split(
+    "}", 1
+  )[0]
+  assert "deviceToken" not in registration
+  assert "notificationEventRoute(eventId: ID!)" in schema_sdl
+
+
+def test_client_contract_contains_narrow_mobile_control_permissions():
+  permissions = json.loads(
+    (CONTRACT_DIRECTORY / "graphql-permissions.json").read_text("utf-8")
+  )
+
+  assert permissions["Query"]["orderEntryCapabilities"] == "market:read"
+  assert permissions["Mutation"]["previewLiquidation"] == "liquidation:control"
+  assert permissions["Mutation"]["confirmLiquidation"] == "liquidation:control"
+  assert permissions["Mutation"]["previewStrategyControl"] == "trade:approve"
+  assert permissions["Mutation"]["confirmStrategyControl"] == "trade:approve"
 
 
 def test_client_openapi_contains_only_allowlisted_paths_and_models():
