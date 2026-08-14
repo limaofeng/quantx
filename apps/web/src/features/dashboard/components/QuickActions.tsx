@@ -1,5 +1,5 @@
 // 快速操作组件
-import { BarChart3, Hand, Plus } from 'lucide-react';
+import { BarChart3, Hand, Plus, Target } from 'lucide-react';
 import { Link } from 'wouter';
 
 import { Button } from '@/components/ui/button';
@@ -14,7 +14,7 @@ export function QuickActions() {
           常用交易入口，危险操作进入管理页后再次确认
         </p>
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 xl:grid-cols-4">
         <Button
           asChild
           className="h-9 w-full rounded-md text-xs"
@@ -28,12 +28,23 @@ export function QuickActions() {
         <Button
           asChild
           variant="outline"
+          className="h-9 w-full rounded-md border-red-500/40 text-xs text-red-300 hover:border-red-400/70 hover:bg-red-500/10 hover:text-red-200"
+          data-testid="quick-action-limit-up-board"
+        >
+          <Link href="/limit-up-board">
+            <Target className="mr-2 h-3.5 w-3.5" />
+            打板助手
+          </Link>
+        </Button>
+        <Button
+          asChild
+          variant="outline"
           className="h-9 w-full rounded-md border-rose-500/40 text-xs text-rose-300 hover:border-rose-400/70 hover:bg-rose-500/10 hover:text-rose-200"
           data-testid="quick-action-liquidate"
         >
           <Link href="/liquidation">
             <Hand className="mr-2 h-3.5 w-3.5" />
-            清仓管理
+            卖出管理
           </Link>
         </Button>
         <Button

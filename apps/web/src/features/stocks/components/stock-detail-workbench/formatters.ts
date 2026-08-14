@@ -1,3 +1,5 @@
+import { financialToneClass } from '@/shared/utils/financialColors';
+
 export function toFiniteNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -66,7 +68,7 @@ export function formatDateTime(value?: string | null) {
 export function getToneClass(value: unknown) {
   const amount = toFiniteNumber(value);
   if (amount === null || amount === 0) return 'text-slate-200';
-  return amount > 0 ? 'text-rose-300' : 'text-emerald-300';
+  return financialToneClass(amount);
 }
 
 export function getProgressPercent(part: unknown, total: unknown) {

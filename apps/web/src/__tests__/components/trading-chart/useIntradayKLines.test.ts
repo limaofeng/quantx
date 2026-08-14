@@ -6,6 +6,7 @@ import { __intradayKLineTestUtils } from '@/hooks/useIntradayKLines';
 const {
   buildCallAuctionTickBars,
   buildTickMinuteBar,
+  getFallbackTradingDateRange,
   getMinuteMs,
   isKLineBaseReadyForTick,
   mergeKLines,
@@ -207,6 +208,24 @@ describe('intraday query date range', () => {
     ).toEqual({
       startTime: '2026-05-29 00:00:00',
       endTime: '2026-05-29 23:59:59',
+    });
+  });
+
+  it('falls back to the previous trading day when the current session has no stored bars', () => {
+    expect(
+      getFallbackTradingDateRange(tradingDays, '2026-06-02 00:00:00')
+    ).toEqual({
+      startTime: '2026-06-01 00:00:00',
+      endTime: '2026-06-01 23:59:59',
+    });
+  });
+
+  it('does not invent a fallback date before the calendar provides one', () => {
+    expect(
+      getFallbackTradingDateRange(['2026-06-02'], '2026-06-02 00:00:00')
+    ).toEqual({
+      startTime: undefined,
+      endTime: undefined,
     });
   });
 });

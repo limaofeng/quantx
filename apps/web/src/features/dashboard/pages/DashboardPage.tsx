@@ -5,6 +5,7 @@ import { useAccountOverview } from '@/features/account/hooks/useAccountCenter';
 import { daysAgoKey, shanghaiDateKey } from '@/features/account/utils';
 import { useTodayTrades } from '@/features/trading/hooks/useTrading';
 import type { EnrichedHolding } from '@/shared/types';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { formatCurrency } from '@/shared/utils/format';
 
 import { DashboardStudioShell } from '../components/DashboardStudioShell';
@@ -107,9 +108,16 @@ export default function DashboardPage() {
                     : undefined
                 }
                 changeLabel="券商账户口径"
+                changeClassName={financialToneClass(
+                  account?.profitLossPercent,
+                  'holding'
+                )}
                 icon={TrendingUp}
-                variant="success"
                 testId="metric-today-pnl"
+                valueClassName={financialToneClass(
+                  account?.totalProfitLoss,
+                  'holding'
+                )}
               />
 
               <MetricCard

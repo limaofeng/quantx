@@ -5,6 +5,7 @@ import { Link } from 'wouter';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import type { EnrichedHolding } from '@/shared/types';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import {
   getStockIconText,
   formatCurrency,
@@ -90,7 +91,7 @@ export function TopHoldings({ holdings, isLoading }: TopHoldingsProps) {
                   {formatCurrency(currentValue)}
                 </p>
                 <p
-                  className={`text-sm ${pnl >= 0 ? 'text-success' : 'text-destructive'}`}
+                  className={`text-sm ${financialToneClass(pnl, 'holding')}`}
                 >
                   {formatPercent(pnlPercent)} ({pnl >= 0 ? '+' : ''}
                   {formatCurrency(pnl)})

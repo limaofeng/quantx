@@ -1,5 +1,6 @@
 // 市场状态组件
 import { Card } from '@/components/ui/card';
+import { financialToneClass } from '@/shared/utils/financialColors';
 
 export function MarketStatus() {
   // Temporary placeholder data until real API is connected
@@ -37,7 +38,7 @@ export function MarketStatus() {
                 {index.value}
               </span>
               <span
-                className={`shrink-0 text-xs font-bold tabular-nums ${index.isPositive ? 'text-success' : 'text-destructive'}`}
+                className={`shrink-0 text-xs font-bold tabular-nums ${financialToneClass(index.isPositive ? 1 : -1)}`}
                 data-testid={`market-${index.name}-change`}
               >
                 {index.change}

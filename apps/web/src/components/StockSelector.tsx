@@ -8,6 +8,7 @@ import {
   PopoverAnchor,
 } from '@/components/ui/popover';
 import type { Stock } from '@/shared/types';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { formatCurrency } from '@/shared/utils/format';
 import { cn } from '@/utils/cn';
 
@@ -137,9 +138,7 @@ export function StockSelector({
                     <span
                       className={cn(
                         'text-[10px] font-mono font-medium',
-                        (stock.quote?.changePercent ?? 0) >= 0
-                          ? 'text-success'
-                          : 'text-destructive'
+                        financialToneClass(stock.quote?.changePercent)
                       )}
                     >
                       {(stock.quote?.changePercent ?? 0) >= 0 ? '+' : ''}

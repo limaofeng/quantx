@@ -2,6 +2,7 @@ import { ArrowDownRight, ArrowUpRight } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
 import { formatPercent } from '@/shared/utils';
+import { financialToneClass } from '@/shared/utils/financialColors';
 
 import { type StockDetail } from '../types';
 
@@ -28,7 +29,7 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
               ¥{quote.lastPrice.toFixed(2)}
             </span>
             <div
-              className={`ml-3 flex items-center text-xs font-bold ${isPositive ? 'text-success' : 'text-destructive'}`}
+              className={`ml-3 flex items-center text-xs font-bold ${financialToneClass(quote.change)}`}
             >
               {isPositive ? (
                 <ArrowUpRight className="h-4 w-4 mr-1" />
@@ -50,7 +51,7 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
             <div className="flex justify-between">
               <span className="text-slate-500">最高:</span>
               <span
-                className="font-mono font-medium text-destructive"
+                className="font-mono font-medium text-market-up"
                 data-testid="52w-high"
               >
                 ¥{quote.high.toFixed(2)}
@@ -59,7 +60,7 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
             <div className="flex justify-between">
               <span className="text-slate-500">最低:</span>
               <span
-                className="font-mono font-medium text-success"
+                className="font-mono font-medium text-market-down"
                 data-testid="52w-low"
               >
                 ¥{quote.low.toFixed(2)}

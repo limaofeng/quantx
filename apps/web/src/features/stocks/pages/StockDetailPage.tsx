@@ -5,6 +5,7 @@ import {
   FileText,
   LineChart,
   ReceiptText,
+  Target,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useParams } from 'wouter';
@@ -220,6 +221,19 @@ export default function StockDetailPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <Button
+                className="h-8 border-white/10 bg-white/[0.03] text-xs text-slate-300 hover:bg-white/[0.06]"
+                onClick={() =>
+                  openStudioTab(
+                    `/liquidation?symbol=${encodeURIComponent(stock.id || stockCode)}`
+                  )
+                }
+                size="sm"
+                variant="outline"
+              >
+                <Target className="mr-2 h-3.5 w-3.5" />
+                止盈/止损计划
+              </Button>
               <Button
                 size="sm"
                 variant="outline"

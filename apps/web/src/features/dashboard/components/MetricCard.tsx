@@ -3,6 +3,7 @@ import { type LucideIcon } from 'lucide-react';
 import type React from 'react';
 
 import { Card } from '@/components/ui/card';
+import { cn } from '@/utils/cn';
 
 interface MetricCardProps {
   title: string;
@@ -11,6 +12,8 @@ interface MetricCardProps {
   changeLabel?: string;
   icon: LucideIcon;
   variant?: 'default' | 'success' | 'warning' | 'destructive';
+  valueClassName?: string;
+  changeClassName?: string;
   testId?: string;
   children?: React.ReactNode;
 }
@@ -55,6 +58,8 @@ export function MetricCard({
   variant = 'default',
   testId,
   children,
+  valueClassName,
+  changeClassName,
 }: MetricCardProps) {
   const styles = variantStyles[variant];
 
@@ -77,7 +82,11 @@ export function MetricCard({
             {title}
           </p>
           <p
-            className={`text-2xl font-black ${styles.valueColor} transition-colors duration-200`}
+            className={cn(
+              'text-2xl font-black transition-colors duration-200',
+              styles.valueColor,
+              valueClassName
+            )}
             data-testid={testId}
           >
             {value}
@@ -102,7 +111,10 @@ export function MetricCard({
           {change && (
             <>
               <span
-                className="inline-flex items-center px-2 py-1 rounded-md bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 text-xs font-bold"
+                className={cn(
+                  'inline-flex items-center rounded-md bg-white/[0.04] px-2 py-1 text-xs font-bold',
+                  changeClassName || 'text-slate-400'
+                )}
                 data-testid={`${testId}-change`}
               >
                 {change}

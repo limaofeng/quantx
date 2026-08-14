@@ -359,6 +359,29 @@ const isKLineBaseReadyForTick = (
   return latestKLineMinuteMs >= tickMinuteMs - 60_000;
 };
 
+const getFallbackTradingDateRange = (
+  tradingDays: string[],
+  currentStartTime: string | undefined
+) => {
+  const anchorDate = currentStartTime?.slice(0, 10);
+  if (!anchorDate) {
+    return { startTime: undefined, endTime: undefined };
+  }
+
+  const previousTradingDay = tradingDays
+    .filter(day => day < anchorDate)
+    .sort()
+    .at(-1);
+  if (!previousTradingDay) {
+    return { startTime: undefined, endTime: undefined };
+  }
+
+  return {
+    startTime: `${previousTradingDay} 00:00:00`,
+    endTime: `${previousTradingDay} 23:59:59`,
+  };
+};
+
 export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   const { tradingDays, loading: tradingDaysLoading } = useTradingDays();
   const [rangeNow, setRangeNow] = useState(() => new Date());
@@ -391,6 +414,31 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     pause: !startTime || !endTime,
     requestPolicy: 'network-only',
   });
+
+  const fallbackRange = useMemo(
+    () => getFallbackTradingDateRange(tradingDays, startTime),
+    [startTime, tradingDays]
+  );
+  const shouldLoadFallback =
+    mode === '1d' &&
+    !initialLoading &&
+    initialKLines.length === 0 &&
+    Boolean(fallbackRange.startTime && fallbackRange.endTime);
+  const {
+    data: fallbackKLines,
+    loading: fallbackLoading,
+    error: fallbackError,
+  } = useKLines(
+    stockCode,
+    'MIN_1',
+    fallbackRange.startTime,
+    fallbackRange.endTime,
+    {
+      order: 'asc',
+      pause: !shouldLoadFallback,
+      requestPolicy: 'network-only',
+    }
+  );
 
   const { startTime: auctionStartTime, endTime: auctionEndTime } =
     useMemo(() => {
@@ -445,6 +493,17 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
 
   useEffect(() => {
     if (
+      initialKLines.length > 0 ||
+      !Array.isArray(fallbackKLines) ||
+      fallbackKLines.length === 0
+    ) {
+      return;
+    }
+    setKlineMap(prev => mergeKLines(prev, fallbackKLines));
+  }, [fallbackKLines, initialKLines.length]);
+
+  useEffect(() => {
+    if (
       !Array.isArray(initialAuctionTicks) ||
       initialAuctionTicks.length === 0
     ) {
@@ -483,6 +542,17 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     [baseBars, latestTick]
   );
 
+  const currentRangeDate = endTime?.slice(0, 10);
+  const baseHasCurrentRangeBars = useMemo(
+    () =>
+      Boolean(currentRangeDate) &&
+      baseBars.some(bar => {
+        const date = parseMarketDate(bar?.time);
+        return date && getShanghaiDateKey(date) === currentRangeDate;
+      }),
+    [baseBars, currentRangeDate]
+  );
+
   const latestTickIsCallAuction = useMemo(
     () => isCallAuctionTimestamp(latestTick?.sourceTime ?? latestTick?.time),
     [latestTick]
@@ -496,19 +566,23 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   useEffect(() => {
     if (!stockCode || !startTime || !endTime) return;
     if (
-      baseBars.length > 0 &&
+      baseHasCurrentRangeBars &&
       (!latestTick || latestTickIsCallAuction || baseReadyForLatestTick)
     ) {
       return;
     }
 
-    const timer = window.setInterval(() => {
-      refresh();
-    }, 5_000);
+    const timer = window.setInterval(
+      () => {
+        refresh();
+      },
+      baseBars.length > 0 ? 30_000 : 5_000
+    );
 
     return () => window.clearInterval(timer);
   }, [
     baseBars.length,
+    baseHasCurrentRangeBars,
     baseReadyForLatestTick,
     endTime,
     latestTick,
@@ -581,10 +655,14 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   return {
     data,
     loading:
-      (tradingDaysLoading || initialLoading || auctionTicksLoading) &&
+      (tradingDaysLoading ||
+        initialLoading ||
+        auctionTicksLoading ||
+        (shouldLoadFallback && fallbackLoading)) &&
       data.length === 0,
     error:
       initialError ||
+      fallbackError ||
       auctionTicksError ||
       klineSubResult.error ||
       tickSubResult.error,
@@ -595,6 +673,7 @@ export const __intradayKLineTestUtils = {
   buildCallAuctionTickBars,
   buildTickMinuteBar,
   getMinuteMs,
+  getFallbackTradingDateRange,
   isKLineBaseReadyForTick,
   mergeKLines,
   mergeTicks,

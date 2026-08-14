@@ -14,11 +14,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover';
-import {
   generateIntradayData,
   generateHistoricalData,
   calculateMA,
@@ -304,8 +299,8 @@ export default function StockChart({
             </Button>
           ))}
 
-          {/* 更多按钮 - 大屏幕直接展开，小屏幕使用悬浮面板 */}
-          <div className="hidden md:block">
+          {/* 扩展时间周期 */}
+          <div>
             <Button
               variant="outline"
               size="sm"
@@ -320,48 +315,11 @@ export default function StockChart({
             </Button>
           </div>
 
-          {/* 移动端悬浮面板 */}
-          <div className="block md:hidden">
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  data-testid="mobile-more-trigger"
-                  className="flex items-center gap-1"
-                >
-                  更多
-                  <ChevronDown className="h-3 w-3" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-64 p-3">
-                <div className="grid grid-cols-2 gap-2">
-                  {extendedPeriods.map(period => (
-                    <Button
-                      key={period.key}
-                      variant={
-                        timePeriod === period.key ? 'default' : 'outline'
-                      }
-                      size="sm"
-                      onClick={() => {
-                        setTimePeriod(period.key);
-                        setChartKey(prev => prev + 1);
-                      }}
-                      data-testid={`mobile-period-${period.key}`}
-                      className="text-xs"
-                    >
-                      {period.label}
-                    </Button>
-                  ))}
-                </div>
-              </PopoverContent>
-            </Popover>
-          </div>
         </div>
 
-        {/* 大屏幕扩展选项 */}
+        {/* 桌面扩展选项 */}
         {showExtended && (
-          <div className="hidden md:flex flex-wrap gap-2 mt-3 pt-3 border-t">
+          <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
             {extendedPeriods.map(period => (
               <Button
                 key={period.key}
