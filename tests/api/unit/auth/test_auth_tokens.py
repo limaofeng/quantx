@@ -36,8 +36,41 @@ def test_hs256_access_token_round_trip_has_minimal_claims():
   assert claims.user_id == "user-1"
   assert claims.device_session_id == "session-1"
   assert claims.expires_at == expires_at
+  assert claims.active_account_id is None
+  assert claims.scopes is None
   assert expires_at > datetime.now(timezone.utc).replace(tzinfo=None)
   assert "account" not in token.lower()
+
+
+def test_native_access_token_binds_account_and_scopes():
+  settings = _settings()
+  token, expires_at = issue_access_token(
+    "user-1",
+    "session-1",
+    settings,
+    active_account_id="account-1",
+    scopes=["portfolio:read", "orders:read"],
+  )
+
+  claims = decode_access_token(token, settings)
+
+  assert claims.expires_at == expires_at
+  assert claims.active_account_id == "account-1"
+  assert claims.scopes == frozenset({"portfolio:read", "orders:read"})
+
+
+def test_native_access_token_rejects_incomplete_scope_binding():
+  settings = _settings()
+
+  with pytest.raises(AuthError) as raised:
+    issue_access_token(
+      "user-1",
+      "session-1",
+      settings,
+      active_account_id="account-1",
+    )
+
+  assert raised.value.code == "INVALID_TOKEN_SCOPE"
 
 
 def test_tampered_access_token_is_rejected():

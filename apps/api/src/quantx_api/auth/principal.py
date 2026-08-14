@@ -16,6 +16,7 @@ class Principal:
   access_token_expires_at: datetime
   permissions: FrozenSet[str]
   authorized_account_ids: Tuple[str, ...]
+  active_account_id: Optional[str] = None
 
   def require_permission(self, permission: str) -> None:
     if permission not in self.permissions:
@@ -27,6 +28,10 @@ class Principal:
       if normalized not in self.authorized_account_ids:
         raise forbidden("无权访问该资金账户")
       return normalized
+    if self.active_account_id is not None:
+      if self.active_account_id not in self.authorized_account_ids:
+        raise forbidden("当前设备会话的主账户授权已失效")
+      return self.active_account_id
     if not self.authorized_account_ids:
       raise forbidden("当前用户未授权任何资金账户")
     return self.authorized_account_ids[0]

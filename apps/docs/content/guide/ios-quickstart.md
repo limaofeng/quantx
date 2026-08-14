@@ -67,9 +67,9 @@ Schema 由 QuantX 服务生成。客户端不得手工修改生成类型、手�
 5. Token 即将过期时只允许一个刷新任务执行，其他请求等待同一结果。
 6. 校验授权账户能唯一解析为主账户；出现跨账户响应时整页拒绝展示。
 
-目标交易版本还必须请求设备 `requestedScopes/requestedAccountId`，并确认响应包含
-匹配的 `grantedScopes/activeAccountId`。当前部署未发布这些字段时，客户端保持
-受影响写能力关闭。
+原生登录必须请求明确的 `requestedScopes`，并在多账户时传入
+`requestedAccountId`。登录、刷新与会话恢复都必须校验响应中匹配的
+`grantedScopes/activeAccountId`；未授权能力按服务端返回的 grant 降级。
 
 完整流程见[原生客户端会话](./native-session)。
 

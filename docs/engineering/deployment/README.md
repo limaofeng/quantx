@@ -50,6 +50,8 @@ Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker �
 与影子/CANARY 步骤见
 [PRODUCTION_RUNBOOK.md](./PRODUCTION_RUNBOOK.md)。`bootstrap` 仅供开发环境；
 生产 `install` 必须提供带校验和的 release zip。
+升级到 `20260815_0016` 会 fail-closed 撤销无法区分的旧 native/Web 会话，
+不删除会话或审计记录；发布前必须按运行手册预告用户重新登录。
 
 WinSW 2.12 使用 bundled mode：每个服务目录内都放置同名的 XML 与 wrapper，
 例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Engine、Worker 和

@@ -14,7 +14,7 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-      "LoginRequest": {
+      "NativeLoginRequest": {
         "properties": {
           "deviceName": {
             "anyOf": [
@@ -36,6 +36,26 @@
             "type": "string",
             "writeOnly": true
           },
+          "requestedAccountId": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedaccountid"
+          },
+          "requestedScopes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Requestedscopes",
+            "type": "array"
+          },
           "username": {
             "maxLength": 80,
             "minLength": 1,
@@ -45,9 +65,10 @@
         },
         "required": [
           "username",
-          "password"
+          "password",
+          "requestedScopes"
         ],
-        "title": "LoginRequest",
+        "title": "NativeLoginRequest",
         "type": "object"
       },
       "RefreshRequest": {
@@ -77,9 +98,20 @@
             "title": "Accesstokenexpiresat",
             "type": "string"
           },
+          "activeAccountId": {
+            "title": "Activeaccountid",
+            "type": "string"
+          },
           "deviceSessionId": {
             "title": "Devicesessionid",
             "type": "string"
+          },
+          "grantedScopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Grantedscopes",
+            "type": "array"
           },
           "refreshToken": {
             "title": "Refreshtoken",
@@ -104,6 +136,8 @@
           "accessTokenExpiresAt",
           "refreshTokenExpiresAt",
           "deviceSessionId",
+          "activeAccountId",
+          "grantedScopes",
           "user"
         ],
         "title": "SessionGrantResponse",
@@ -115,9 +149,20 @@
             "title": "Accesstokenexpiresat",
             "type": "string"
           },
+          "activeAccountId": {
+            "title": "Activeaccountid",
+            "type": "string"
+          },
           "deviceSessionId": {
             "title": "Devicesessionid",
             "type": "string"
+          },
+          "grantedScopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Grantedscopes",
+            "type": "array"
           },
           "user": {
             "$ref": "#/components/schemas/SessionUserResponse"
@@ -126,6 +171,8 @@
         "required": [
           "deviceSessionId",
           "accessTokenExpiresAt",
+          "activeAccountId",
+          "grantedScopes",
           "user"
         ],
         "title": "SessionStateResponse",
@@ -279,7 +326,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LoginRequest"
+                "$ref": "#/components/schemas/NativeLoginRequest"
               }
             }
           },

@@ -61,6 +61,10 @@ POST_BASELINE_TABLES = {
   "trade_confirmation_challenges",
 }
 POST_BASELINE_COLUMNS = {
+  "auth_device_sessions": {
+    "active_account_id",
+    "granted_permissions",
+  },
   "account_trading_rollouts": {
     "controlled_window_active",
     "controlled_window_external_order_ids",
@@ -102,13 +106,15 @@ def _baseline_metadata() -> MetaData:
     table = metadata.tables[table_key]
     for index in list(table.indexes):
       indexed_columns = {
-        str(getattr(expression, "name", ""))
-        for expression in index.expressions
+        str(getattr(expression, "name", "")) for expression in index.expressions
       }
       if indexed_columns & column_names:
         table.indexes.remove(index)
     for constraint in list(table.constraints):
-      if {column.name for column in constraint.columns} & column_names:
+      if {column.name for column in constraint.columns} & column_names or (
+        table_key == "auth_device_sessions"
+        and constraint.name == "ck_auth_device_sessions_scope_pair"
+      ):
         table.constraints.remove(constraint)
     for column_name in column_names:
       table._columns.remove(table.c[column_name])
@@ -140,9 +146,7 @@ def _metadata_payload() -> list[dict[str, object]]:
       if isinstance(constraint, CheckConstraint):
         entry["sqltext"] = str(constraint.sqltext)
       if isinstance(constraint, ForeignKeyConstraint):
-        entry["targets"] = [
-          element.target_fullname for element in constraint.elements
-        ]
+        entry["targets"] = [element.target_fullname for element in constraint.elements]
         entry["ondelete"] = constraint.ondelete
         entry["onupdate"] = constraint.onupdate
       if isinstance(constraint, UniqueConstraint):

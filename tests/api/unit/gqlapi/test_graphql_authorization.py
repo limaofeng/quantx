@@ -28,6 +28,10 @@ class AuthorizationMutation:
   def place_order(self) -> bool:
     raise AssertionError("read-only principal must never reach this resolver")
 
+  @strawberry.mutation
+  def pause_strategy_instance(self) -> bool:
+    return True
+
 
 SCHEMA = strawberry.Schema(
   query=AuthorizationQuery,
@@ -46,6 +50,20 @@ def _principal(*, permissions, accounts=("TEST-ACCOUNT-1",)) -> Principal:
     + timedelta(minutes=5),
     permissions=frozenset(permissions),
     authorized_account_ids=accounts,
+  )
+
+
+def _native_principal(*, permissions) -> Principal:
+  principal = _principal(permissions=permissions)
+  return Principal(
+    user_id=principal.user_id,
+    username=principal.username,
+    display_name=principal.display_name,
+    device_session_id=principal.device_session_id,
+    access_token_expires_at=principal.access_token_expires_at,
+    permissions=principal.permissions,
+    authorized_account_ids=("TEST-ACCOUNT-1",),
+    active_account_id="TEST-ACCOUNT-1",
   )
 
 
@@ -145,6 +163,48 @@ async def test_mobile_manual_principal_cannot_call_legacy_direct_order():
 
   assert result.data is None
   assert result.errors[0].extensions["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_legacy_web_general_write_remains_compatible_with_narrow_control():
+  result = await SCHEMA.execute(
+    "mutation { pauseStrategyInstance }",
+    context_value={
+      "principal": _principal(permissions={"mutation:write"}),
+      "request_id": "request-web-compat",
+    },
+  )
+
+  assert result.errors is None
+  assert result.data == {"pauseStrategyInstance": True}
+
+
+@pytest.mark.asyncio
+async def test_native_session_cannot_use_general_write_as_control_scope():
+  result = await SCHEMA.execute(
+    "mutation { pauseStrategyInstance }",
+    context_value={
+      "principal": _native_principal(permissions={"mutation:write"}),
+      "request_id": "request-native-no-fallback",
+    },
+  )
+
+  assert result.data is None
+  assert result.errors[0].extensions["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_native_session_can_use_dedicated_control_scope():
+  result = await SCHEMA.execute(
+    "mutation { pauseStrategyInstance }",
+    context_value={
+      "principal": _native_principal(permissions={"strategy:control"}),
+      "request_id": "request-native-control",
+    },
+  )
+
+  assert result.errors is None
+  assert result.data == {"pauseStrategyInstance": True}
 
 
 @pytest.mark.parametrize(

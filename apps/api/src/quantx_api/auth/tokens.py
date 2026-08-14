@@ -8,7 +8,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Optional, Tuple
 
 from quantx_infrastructure.config.settings import Settings
 
@@ -30,6 +30,8 @@ class AccessClaims:
   user_id: str
   device_session_id: str
   expires_at: datetime
+  active_account_id: Optional[str] = None
+  scopes: Optional[FrozenSet[str]] = None
 
 
 def require_signing_key(settings: Settings) -> bytes:
@@ -70,9 +72,20 @@ def _decode_part(value: str) -> Dict[str, Any]:
 
 
 def issue_access_token(
-  user_id: str, device_session_id: str, settings: Settings
+  user_id: str,
+  device_session_id: str,
+  settings: Settings,
+  *,
+  active_account_id: Optional[str] = None,
+  scopes: Optional[Iterable[str]] = None,
 ) -> Tuple[str, datetime]:
   key = require_signing_key(settings)
+  if (active_account_id is None) != (scopes is None):
+    raise AuthError(
+      "INVALID_TOKEN_SCOPE",
+      "访问令牌的主账户和权限必须同时绑定",
+      status_code=500,
+    )
   now = int(time.time())
   expires = now + max(1, settings.access_token_expire_minutes) * 60
   header = {"alg": "HS256", "typ": "JWT"}
@@ -86,6 +99,19 @@ def issue_access_token(
     "sid": device_session_id,
     "sub": user_id,
   }
+  if active_account_id is not None and scopes is not None:
+    raw_scopes = list(scopes)
+    normalized_scope_set = {
+      value.strip() for value in raw_scopes if isinstance(value, str) and value.strip()
+    }
+    if not active_account_id.strip() or len(normalized_scope_set) != len(raw_scopes):
+      raise AuthError(
+        "INVALID_TOKEN_SCOPE",
+        "访问令牌的主账户或权限绑定无效",
+        status_code=500,
+      )
+    payload["acct"] = active_account_id
+    payload["scope"] = sorted(normalized_scope_set)
   signing_input = f"{_encode_part(header)}.{_encode_part(payload)}"
   signature = hmac.new(key, signing_input.encode("ascii"), hashlib.sha256).digest()
   encoded_signature = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
@@ -129,10 +155,32 @@ def decode_access_token(token: str, settings: Settings) -> AccessClaims:
     session_id = str(payload["sid"])
     if not user_id or not session_id:
       raise ValueError("Missing subject")
+    raw_account_id = payload.get("acct")
+    raw_scopes = payload.get("scope")
+    if (raw_account_id is None) != (raw_scopes is None):
+      raise ValueError("Incomplete native session binding")
+    active_account_id: Optional[str] = None
+    scopes: Optional[FrozenSet[str]] = None
+    if raw_account_id is not None:
+      if not isinstance(raw_account_id, str) or not raw_account_id.strip():
+        raise ValueError("Invalid active account")
+      if not isinstance(raw_scopes, list):
+        raise ValueError("Invalid scopes")
+      normalized_scopes = {
+        value.strip()
+        for value in raw_scopes
+        if isinstance(value, str) and value.strip()
+      }
+      if len(normalized_scopes) != len(raw_scopes):
+        raise ValueError("Invalid scopes")
+      active_account_id = raw_account_id
+      scopes = frozenset(normalized_scopes)
     return AccessClaims(
       user_id=user_id,
       device_session_id=session_id,
       expires_at=_naive_utc_from_timestamp(expires),
+      active_account_id=active_account_id,
+      scopes=scopes,
     )
   except AuthError:
     raise

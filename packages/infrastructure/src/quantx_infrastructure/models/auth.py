@@ -1,6 +1,15 @@
 """Authentication and account-authorization persistence models."""
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Index, String
+from sqlalchemy import (
+  JSON,
+  Boolean,
+  CheckConstraint,
+  Column,
+  DateTime,
+  ForeignKey,
+  Index,
+  String,
+)
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 
@@ -38,6 +47,10 @@ class AuthDeviceSession(Base, TimestampMixin):
   __tablename__ = "auth_device_sessions"
   __table_args__ = (
     Index("ix_auth_device_sessions_user_active", "user_id", "revoked_at"),
+    CheckConstraint(
+      "(active_account_id IS NULL) = (granted_permissions IS NULL)",
+      name="ck_auth_device_sessions_scope_pair",
+    ),
   )
 
   id = Column(String(36), primary_key=True, index=True)
@@ -52,15 +65,15 @@ class AuthDeviceSession(Base, TimestampMixin):
   revoked_at = Column(DateTime, nullable=True)
   last_used_at = Column(DateTime, nullable=False)
   device_name = Column(String(120), nullable=True)
+  active_account_id = Column(String(50), nullable=True)
+  granted_permissions = Column(JSON(none_as_null=True), nullable=True)
 
 
 class AuthConsumedRefreshToken(Base):
   """Consumed refresh-token digests retained for replay detection."""
 
   __tablename__ = "auth_consumed_refresh_tokens"
-  __table_args__ = (
-    Index("ix_auth_consumed_refresh_tokens_expires_at", "expires_at"),
-  )
+  __table_args__ = (Index("ix_auth_consumed_refresh_tokens_expires_at", "expires_at"),)
 
   token_hash = Column(String(64), primary_key=True)
   device_session_id = Column(

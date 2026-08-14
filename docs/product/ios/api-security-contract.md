@@ -39,8 +39,7 @@ Release 和 TestFlight 仅允许同源 `HTTPS/WSS`，公共路径固定为 `/aut
 
 ### 2.1 设备作用域会话
 
-现有原生会话返回用户权限和授权账户列表。目标契约在保持旧客户端兼容的前提下，
-为 `POST /auth/session` 增加可选字段：
+原生会话已按设备保存最小权限和唯一主账户。`POST /auth/session` 请求为：
 
 ```json
 {
@@ -64,6 +63,8 @@ Release 和 TestFlight 仅允许同源 `HTTPS/WSS`，公共路径固定为 `/aut
 规则：
 
 1. iOS 必须请求明确 scope；服务端只签发“用户权限 ∩ 设备允许权限 ∩ 请求范围”。
+   已知但用户未授权的 scope 会从 grant 中省略；未知或禁止签发给 iOS 的
+   宽泛权限使登录失败。
 2. v1 只允许绑定一个 `activeAccountId`。用户没有或拥有多个可选账户而未能唯一
    解析时，登录失败，不默认选择第一个。
 3. Refresh Token 轮换保持同一设备会话、主账户和 scope，不得借刷新扩权。
@@ -71,8 +72,9 @@ Release 和 TestFlight 仅允许同源 `HTTPS/WSS`，公共路径固定为 `/aut
 5. 单设备或全部设备吊销立即让后续 HTTP/WS 和确认挑战失败。
 6. 密码只用于会话创建，不写 Keychain；Access/Refresh Token 只写 Keychain。
 
-在设备 scope 落地前，现有会话继承用户全部权限，属于 `CONTRACT_GAP`。TestFlight
-交易候选包不得通过“隐藏按钮”缓解这个缺口。
+原生登录、刷新和 `GET /auth/session` 都返回同一
+`activeAccountId/grantedScopes`。兼容 Web 会话仍使用完整用户权限，不得作为
+iOS 原生会话或交易权限的回退路径。
 
 ### 2.2 Token 与 WebSocket
 

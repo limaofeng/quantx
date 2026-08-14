@@ -81,6 +81,7 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
           "username": "ios-router-user",
           "password": "router-test-password",
           "deviceName": "Test iPhone",
+          "requestedScopes": ["portfolio:read", "orders:read"],
         },
       )
       assert login.status_code == 200
@@ -88,6 +89,9 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert login.headers["pragma"] == "no-cache"
       login_payload = login.json()
       assert login_payload["tokenType"] == "Bearer"
+      assert login_payload["activeAccountId"] == "TEST-ACCOUNT-1"
+      assert login_payload["grantedScopes"] == ["portfolio:read"]
+      assert login_payload["user"]["permissions"] == ["portfolio:read"]
       assert login_payload["user"]["authorizedAccountIds"] == ["TEST-ACCOUNT-1"]
 
       current = await client.get(
@@ -97,6 +101,8 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert current.status_code == 200
       assert current.headers["cache-control"] == "no-store"
       assert current.json()["deviceSessionId"] == login_payload["deviceSessionId"]
+      assert current.json()["activeAccountId"] == "TEST-ACCOUNT-1"
+      assert current.json()["grantedScopes"] == ["portfolio:read"]
 
       refresh = await client.post(
         "/auth/session/refresh",
@@ -106,6 +112,8 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert refresh.headers["cache-control"] == "no-store"
       refresh_payload = refresh.json()
       assert refresh_payload["refreshToken"] != login_payload["refreshToken"]
+      assert refresh_payload["activeAccountId"] == "TEST-ACCOUNT-1"
+      assert refresh_payload["grantedScopes"] == ["portfolio:read"]
 
       replay = await client.post(
         "/auth/session/refresh",
@@ -151,7 +159,9 @@ async def test_web_session_uses_httponly_cookie_and_never_returns_refresh_token(
 
     app.dependency_overrides[_database] = override_database
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="https://quantx.test") as client:
+    async with AsyncClient(
+      transport=transport, base_url="https://quantx.test"
+    ) as client:
       development_login = await client.post(
         "/auth/web/session/development",
         headers={"Origin": "http://127.0.0.1:8080"},
@@ -176,10 +186,14 @@ async def test_web_session_uses_httponly_cookie_and_never_returns_refresh_token(
           "username": "ios-router-user",
           "password": "router-test-password",
           "deviceName": "Browser Test",
+          "requestedAccountId": "IGNORED-CROSS-ACCOUNT",
+          "requestedScopes": ["mutation:write"],
         },
       )
       assert login.status_code == 200
       assert "refreshToken" not in login.json()
+      assert login.json()["user"]["permissions"] == ["portfolio:read"]
+      assert login.json()["user"]["authorizedAccountIds"] == ["TEST-ACCOUNT-1"]
       cookie = login.headers["set-cookie"]
       assert "quantx_refresh=" in cookie
       assert "HttpOnly" in cookie

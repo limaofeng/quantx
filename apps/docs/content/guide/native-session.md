@@ -14,7 +14,9 @@ Content-Type: application/json
 {
   "username": "developer",
   "password": "password",
-  "deviceName": "Limao iPhone"
+  "deviceName": "Limao iPhone",
+  "requestedAccountId": "account-id",
+  "requestedScopes": ["portfolio:read", "market:read", "orders:read"]
 }
 ```
 
@@ -28,6 +30,8 @@ Content-Type: application/json
   "refreshTokenExpiresAt": "2026-08-06T11:55:00Z",
   "tokenType": "Bearer",
   "deviceSessionId": "session-id",
+  "activeAccountId": "account-id",
+  "grantedScopes": ["portfolio:read", "market:read", "orders:read"],
   "user": {
     "id": "user-id",
     "username": "developer",
@@ -42,14 +46,16 @@ Content-Type: application/json
 
 ## 设备 scope 与单一主账户
 
-iOS v1 交易版本的目标会话会增加可选请求字段
-`requestedScopes/requestedAccountId`，并返回实际
-`grantedScopes/activeAccountId`。服务端只签发用户权限、设备允许范围和请求
-scope 的交集；Refresh Token 轮换保持同一 scope 和主账户，不得扩权。
+`requestedScopes` 是原生登录的必填字段。服务端返回“用户当前权限 ∩
+iOS 允许权限 ∩ 请求范围”作为 `grantedScopes`：已知但用户未授权的
+scope 会被安全省略，未知 scope 以及 `mutation:write`、`trade:direct`、
+`system-config:write`、`admin:*` 等宽泛权限会使登录失败。
+显式的空数组 `[]` 允许建立仅身份验证、零产品能力的会话；它不等于省略字段。
 
-这些字段尚未出现在当前 Client OpenAPI 时，客户端继续按现有响应安全登录，但
-必须关闭依赖设备 scope 的手动下单、清仓、策略控制和通知写入。不能依靠客户端
-隐藏入口弥补会话继承用户全部权限的问题。
+`requestedAccountId` 必须属于当前用户。它仅在用户恰好授权一个账户时可
+省略；零账户或多账户不会默认选择第一个。会话、Access Token 和后续响应
+都绑定这一 `activeAccountId`。Refresh Token 轮换保持同一账户与 scope，
+用户权限被收回时只会继续收缩，新增用户权限不会扩大既有设备会话。
 
 v1 不提供账户切换。授权账户无法唯一解析、响应对象属于其他账户或刷新后的主
 账户发生变化时，清除业务状态并要求重新建立会话。
@@ -86,6 +92,8 @@ Authorization: Bearer <access-token>
 ```
 
 用于验证 Access Token、读取用户权限和授权账户，不返回 Refresh Token。
+响应同样包含 `activeAccountId/grantedScopes`，客户端恢复会话时必须重新
+校验这两个字段。
 
 ## 登出与吊销
 
@@ -116,3 +124,9 @@ Authorization: Bearer <access-token>
 
 App 进入后台时暂停订阅并遮蔽任务切换快照中的金额与账号；回到前台后先刷新
 关键查询，再恢复订阅。
+
+## 0016 升级提示
+
+0016 之前的原生和 Web 会话在数据库中无法可靠区分。迁移因此会一次性将
+所有尚未撤销的旧会话标记 `revoked_at`，升级后原生和 Web 用户都需要重新登录。
+迁移不删除会话或审计记录，也不会改写已撤销会话原有的撤销时间。

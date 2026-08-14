@@ -196,6 +196,16 @@ _LIMIT_UP_CONTROL_MUTATION_FIELDS = {
   "savelimitupboardassistant",
   "setfirstboardcandidatepreference",
 }
+_LEGACY_WEB_MUTATION_COMPAT_PERMISSIONS = frozenset(
+  {
+    "limit-up:control",
+    "liquidation:control",
+    "notification:manage",
+    "strategy:control",
+    "t-trade:control",
+    "watchlist:write",
+  }
+)
 
 _NORMALIZED_PORTFOLIO_FIELDS = {
   re.sub(r"[^a-z0-9]", "", value.lower()) for value in _PORTFOLIO_FIELDS
@@ -334,7 +344,14 @@ class AuthorizationExtension(SchemaExtension):
       ):
         principal = principal_from_context(context)
         permission = required_permission(operation_name, info.field_name)
-        principal.require_permission(permission)
+        legacy_web_write_compatible = (
+          operation_name == "Mutation"
+          and principal.active_account_id is None
+          and permission in _LEGACY_WEB_MUTATION_COMPAT_PERMISSIONS
+          and "mutation:write" in principal.permissions
+        )
+        if not legacy_web_write_compatible:
+          principal.require_permission(permission)
         requested_account_id = _account_id_from_kwargs(kwargs)
         if requested_account_id is not None:
           principal.require_account(requested_account_id)

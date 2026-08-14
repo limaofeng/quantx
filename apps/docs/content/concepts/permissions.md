@@ -35,10 +35,10 @@ QuantX 对 GraphQL 根字段默认拒绝。客户端必须同时满足根字段�
 客户端拿到账号字符串、曾缓存该账号或在 UI 中显示该账号，都不能绕过第二层。
 系统配置权限也不被通用 Mutation 权限自动替代。
 
-## iOS v1 最小权限目标
+## iOS v1 最小权限
 
 iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制中心。正式开放写入前，
-服务端必须支持按设备、单一主账户收缩 scope。目标专用 scope 为：
+原生会话按设备、单一主账户收缩 scope。iOS v1 专用 scope 为：
 
 | Scope | 目标能力 |
 | --- | --- |
@@ -51,14 +51,14 @@ iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制�
 | `limit-up:control` | 打板配置、候选偏好与布防 |
 | `notification:manage` | 当前设备 APNs Token 与通知偏好 |
 
-通用 `mutation:write` **不满足上述任何 iOS 写能力**。目标原生会话请求明确的
+通用 `mutation:write` **不满足上述任何 iOS 写能力**。原生会话请求明确的
 `requestedScopes` 和唯一 `requestedAccountId`，响应返回实际
 `grantedScopes/activeAccountId`；刷新不得扩权。
 
-::: warning 当前迁移限制
-当前原生会话仍返回用户现有权限，没有按设备请求更小 scope 的完整契约。目标
-设备 scope 和专用 Mutation 权限落地前，手动下单、清仓、策略控制和配置入口必须
-保持关闭；不能靠隐藏按钮、直调 `placeOrder` 或兼容清仓接口临时开放。
+::: warning 专用 Mutation 迁移限制
+设备 scope 已落地，但不代表所有目标 Mutation 都已实现专用权限和交易门禁。
+未出现在当前 GraphQL 权限契约的写能力仍必须关闭；不能靠隐藏按钮、
+直调 `placeOrder` 或兼容清仓接口临时开放。
 :::
 
 ## 高风险确认

@@ -64,6 +64,35 @@ def test_graphql_contract_uses_only_public_permission_categories():
 def test_client_openapi_contains_only_allowlisted_paths_and_models():
   document = build_client_openapi(app)
   assert set(document["paths"]) == CLIENT_OPENAPI_PATHS
+  schemas = document["components"]["schemas"]
+  assert set(schemas["NativeLoginRequest"]["required"]) >= {
+    "username",
+    "password",
+    "requestedScopes",
+  }
+  for response_model in ("SessionGrantResponse", "SessionStateResponse"):
+    assert set(schemas[response_model]["required"]) >= {
+      "activeAccountId",
+      "grantedScopes",
+    }
+  assert (
+    document["paths"]["/auth/session"]["post"]["responses"]["200"]["content"][
+      "application/json"
+    ]["schema"]["$ref"]
+    == "#/components/schemas/SessionGrantResponse"
+  )
+  assert (
+    document["paths"]["/auth/session/refresh"]["post"]["responses"]["200"]["content"][
+      "application/json"
+    ]["schema"]["$ref"]
+    == "#/components/schemas/SessionGrantResponse"
+  )
+  assert (
+    document["paths"]["/auth/session"]["get"]["responses"]["200"]["content"][
+      "application/json"
+    ]["schema"]["$ref"]
+    == "#/components/schemas/SessionStateResponse"
+  )
   serialized = json.dumps(document, ensure_ascii=False).lower()
   for forbidden in (
     "/auth/web/",

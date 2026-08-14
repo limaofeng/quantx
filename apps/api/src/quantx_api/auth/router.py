@@ -28,10 +28,15 @@ class APIModel(BaseModel):
   model_config = ConfigDict(alias_generator=_to_camel, populate_by_name=True)
 
 
-class LoginRequest(APIModel):
+class WebLoginRequest(APIModel):
   username: str = Field(min_length=1, max_length=80)
   password: SecretStr = Field(min_length=1, max_length=1024)
   device_name: Optional[str] = Field(default=None, max_length=120)
+
+
+class NativeLoginRequest(WebLoginRequest):
+  requested_account_id: Optional[str] = Field(default=None, max_length=50)
+  requested_scopes: list[str] = Field(max_length=32)
 
 
 class RefreshRequest(APIModel):
@@ -53,6 +58,8 @@ class SessionGrantResponse(APIModel):
   refresh_token_expires_at: str
   token_type: str = "Bearer"
   device_session_id: str
+  active_account_id: str
+  granted_scopes: list[str]
   user: SessionUserResponse
 
 
@@ -67,6 +74,8 @@ class WebSessionGrantResponse(APIModel):
 class SessionStateResponse(APIModel):
   device_session_id: str
   access_token_expires_at: str
+  active_account_id: str
+  granted_scopes: list[str]
   user: SessionUserResponse
 
 
@@ -161,14 +170,27 @@ def _user_response(principal: Principal) -> SessionUserResponse:
 
 
 def _grant_response(grant: SessionGrant) -> SessionGrantResponse:
+  active_account_id, granted_scopes = _native_session_context(grant.principal)
   return SessionGrantResponse(
     access_token=grant.access_token,
     refresh_token=grant.refresh_token,
     access_token_expires_at=grant.access_token_expires_at.isoformat() + "Z",
     refresh_token_expires_at=grant.refresh_token_expires_at.isoformat() + "Z",
     device_session_id=grant.principal.device_session_id,
+    active_account_id=active_account_id,
+    granted_scopes=granted_scopes,
     user=_user_response(grant.principal),
   )
+
+
+def _native_session_context(principal: Principal) -> tuple[str, list[str]]:
+  if principal.active_account_id is None:
+    raise AuthError(
+      "SESSION_SCOPE_REQUIRED",
+      "该令牌不属于原生设备会话",
+      status_code=401,
+    )
+  return principal.active_account_id, sorted(principal.permissions)
 
 
 def _web_grant_response(grant: SessionGrant) -> WebSessionGrantResponse:
@@ -216,8 +238,7 @@ def _require_web_origin(request: Request) -> None:
     str(value).strip().rstrip("/") for value in configured_origins if str(value).strip()
   }
   if origin and (
-    origin in allowed_origins
-    or _is_same_origin_development_request(request, origin)
+    origin in allowed_origins or _is_same_origin_development_request(request, origin)
   ):
     return
   raise _http_error(
@@ -282,7 +303,7 @@ def _web_error_response(error: AuthError, request_id: str) -> JSONResponse:
 
 @auth_router.post("/session", response_model=SessionGrantResponse)
 async def create_session(
-  payload: LoginRequest,
+  payload: NativeLoginRequest,
   request: Request,
   response: Response,
   db: AsyncSession = Depends(_database),
@@ -295,6 +316,8 @@ async def create_session(
       device_name=payload.device_name,
       client_fingerprint=_client_fingerprint(request),
       request_id=_request_id(request),
+      requested_account_id=payload.requested_account_id,
+      requested_scopes=payload.requested_scopes,
     )
     return _grant_response(grant)
   except AuthError as exc:
@@ -303,7 +326,7 @@ async def create_session(
 
 @auth_router.post("/web/session", response_model=WebSessionGrantResponse)
 async def create_web_session(
-  payload: LoginRequest,
+  payload: WebLoginRequest,
   request: Request,
   response: Response,
   db: AsyncSession = Depends(_database),
@@ -319,6 +342,7 @@ async def create_web_session(
       device_name=payload.device_name or "QuantX Web",
       client_fingerprint=_client_fingerprint(request),
       request_id=_request_id(request),
+      legacy_full_user=True,
     )
     _set_web_refresh_cookie(response, grant)
     return _web_grant_response(grant)
@@ -421,7 +445,9 @@ async def refresh_session(
   _disable_session_caching(response)
   try:
     grant = await AuthService(db).refresh(
-      payload.refresh_token.get_secret_value(), _request_id(request)
+      payload.refresh_token.get_secret_value(),
+      _request_id(request),
+      require_scoped_session=True,
     )
     return _grant_response(grant)
   except AuthError as exc:
@@ -430,15 +456,22 @@ async def refresh_session(
 
 @auth_router.get("/session", response_model=SessionStateResponse)
 async def get_session(
+  request: Request,
   response: Response,
   principal: Principal = Depends(_principal),
 ) -> SessionStateResponse:
   _disable_session_caching(response)
-  return SessionStateResponse(
-    device_session_id=principal.device_session_id,
-    access_token_expires_at=principal.access_token_expires_at.isoformat() + "Z",
-    user=_user_response(principal),
-  )
+  try:
+    active_account_id, granted_scopes = _native_session_context(principal)
+    return SessionStateResponse(
+      device_session_id=principal.device_session_id,
+      access_token_expires_at=principal.access_token_expires_at.isoformat() + "Z",
+      active_account_id=active_account_id,
+      granted_scopes=granted_scopes,
+      user=_user_response(principal),
+    )
+  except AuthError as exc:
+    raise _http_error(exc, _request_id(request)) from None
 
 
 @auth_router.delete("/session", status_code=204)
