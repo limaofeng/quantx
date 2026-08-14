@@ -27,6 +27,7 @@ from ..types import (
   StrategyGridBookUpdateInput,
   StrategyInstance,
   StrategyInstanceCreateInput,
+  StrategyInstanceMobileParameters,
   StrategyInstanceParameterUpdateInput,
   StrategyLogPage,
   StrategyPerformance,
@@ -148,6 +149,17 @@ class StrategyQuery:
   ) -> Optional[StrategyInstance]:
     await _authorize_native_strategy_run(info, id)
     return await StrategyResolver.get_strategy_instance(id)
+
+  @strawberry.field(description="获取策略实例允许原生移动端修改的安全参数")
+  async def strategy_instance_mobile_parameters(
+    self,
+    info: strawberry.types.Info,
+    instance_id: str,
+  ) -> StrategyInstanceMobileParameters:
+    await _authorize_native_strategy_run(info, instance_id)
+    return await StrategyResolver.get_strategy_instance_mobile_parameters(
+      instance_id
+    )
 
   @strawberry.field(description="获取策略运行中等待人工确认的交易意图")
   async def strategy_pending_trade_intents(
@@ -364,10 +376,17 @@ class StrategyMutation:
   @strawberry.field(description="更新策略实例参数")
   async def update_strategy_instance_parameters(
     self,
+    info: strawberry.types.Info,
     instance_id: str,
     input: StrategyInstanceParameterUpdateInput,
   ) -> Optional[StrategyInstance]:
-    return await StrategyResolver.update_strategy_instance_parameters(instance_id, input)
+    principal = principal_from_context(info.context)
+    await _authorize_native_strategy_run(info, instance_id)
+    return await StrategyResolver.update_strategy_instance_parameters(
+      instance_id,
+      input,
+      mobile_only=principal.active_account_id is not None,
+    )
 
   @strawberry.field(description="更新 Pullback Grid 网格簿")
   async def update_strategy_grid_book(

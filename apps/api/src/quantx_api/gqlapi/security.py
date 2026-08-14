@@ -63,6 +63,7 @@ _STRATEGY_FIELDS = {
   "strategyexitplans",
   "strategygridbook",
   "strategyinstance",
+  "strategyinstancemobileparameters",
   "strategyinstances",
   "strategypendingtradeintents",
   "strategyperformance",
@@ -177,6 +178,7 @@ _STRATEGY_CONTROL_MUTATION_FIELDS = {
   "pausestrategyinstance",
   "resumestrategyinstance",
   "rejectstrategytradeintent",
+  "updatestrategyinstanceparameters",
 }
 _T_TRADE_CONTROL_MUTATION_FIELDS = {
   "acknowledgeoperationalalert",

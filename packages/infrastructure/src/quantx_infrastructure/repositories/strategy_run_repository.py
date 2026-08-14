@@ -46,6 +46,16 @@ class StrategyRunRepository(BaseRepository[StrategyRun]):
     )
     return result.scalar_one_or_none()
 
+  async def find_run_by_id_for_update(self, run_id: str) -> Optional[StrategyRun]:
+    """Lock one run while checking and changing its configuration version."""
+    result = await self.db.execute(
+      select(StrategyRun)
+      .options(selectinload(StrategyRun.strategy))
+      .filter(StrategyRun.id == run_id)
+      .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
   async def find_all_runs_by_strategy(self, strategy_id: int) -> List[StrategyRun]:
     """获取策略的所有运行"""
     result = await self.db.execute(

@@ -909,10 +909,38 @@ class StrategyInstanceCreateInput:
   end_time: Optional[datetime] = None
 
 
+@strawberry.type(description="允许原生移动端修改的单个策略参数")
+class StrategyMobileParameter:
+  key: str
+  title: str
+  description: str
+  value_type: str
+  current_value: JSON
+  unit: Optional[str] = None
+  minimum: Optional[float] = None
+  maximum: Optional[float] = None
+  step: Optional[float] = None
+  enum_values: Optional[List[str]] = None
+  apply_immediately: bool = False
+  risk_level: str = "LOW"
+
+
+@strawberry.type(description="策略实例的移动安全参数与乐观锁版本")
+class StrategyInstanceMobileParameters:
+  instance_id: str
+  config_version: str
+  editable: bool
+  parameters: List[StrategyMobileParameter]
+
+
 @strawberry.input(description="更新策略实例参数输入")
 class StrategyInstanceParameterUpdateInput:
   parameters: JSON
   apply_immediately: bool = False
+  expected_version: Optional[str] = strawberry.field(
+    default=None,
+    description="原生移动端必填；必须等于当前 configVersion",
+  )
 
 
 def _json_object(value) -> dict:

@@ -104,6 +104,7 @@ def test_trade_approval_mutations_require_independent_permission(
     ("pauseStrategyInstance", "strategy:control"),
     ("resumeStrategyInstance", "strategy:control"),
     ("rejectStrategyTradeIntent", "strategy:control"),
+    ("updateStrategyInstanceParameters", "strategy:control"),
     ("saveTTradeGlobalMonitor", "t-trade:control"),
     ("reconcileTTradeGlobalMonitor", "t-trade:control"),
     ("startTTradeSession", "t-trade:control"),
@@ -130,7 +131,6 @@ def test_mobile_non_order_mutations_use_narrow_permissions(
     "beginTTradeControlledWindow",
     "activateTTradeLive",
     "triggerTTradeKillSwitch",
-    "updateStrategyInstanceParameters",
   ],
 )
 def test_legacy_or_not_yet_challenged_risk_writes_stay_out_of_native_scopes(

@@ -8,6 +8,7 @@ import os
 import uuid
 from collections import deque
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Set
 
 from quantx_infrastructure.core.assistant_strategy_policy import (
@@ -38,9 +39,11 @@ from ..types import (
   StrategyExitPlanView,
   StrategyInstance,
   StrategyInstanceCreateInput,
+  StrategyInstanceMobileParameters,
   StrategyInstanceParameterUpdateInput,
   StrategyLogEntry,
   StrategyLogPage,
+  StrategyMobileParameter,
   StrategyRun,
   StrategyRunInput,
   StrategyRunMode,
@@ -66,6 +69,119 @@ class StrategyResolver:
       except Exception:
         return {}
     return {}
+
+  @staticmethod
+  def _mobile_parameter_properties(strategy_class: Any) -> Dict[str, Any]:
+    schema = strategy_class.get_parameter_schema()
+    properties = dict(getattr(schema, "properties", None) or {})
+    mobile: Dict[str, Any] = {}
+    for key, prop in properties.items():
+      if not bool(getattr(prop, "mobileEditable", False)):
+        continue
+      value_type = str(getattr(prop, "type", "") or "").lower()
+      risk_level = str(getattr(prop, "mobileRiskLevel", "") or "").upper()
+      if value_type not in {"boolean", "integer", "number", "string"}:
+        raise ValueError(f"移动参数 {key} 使用了不支持的类型")
+      if risk_level not in {"LOW", "MEDIUM", "HIGH"}:
+        raise ValueError(f"移动参数 {key} 缺少有效风险等级")
+      mobile[str(key)] = prop
+    return mobile
+
+  @staticmethod
+  def _mobile_config_version(parameters: Dict[str, Any]) -> str:
+    value = parameters.get("_mobile_config_version")
+    if value is None:
+      value = parameters.get("_parameter_version", "1")
+    normalized = str(value or "").strip()
+    if not normalized.isdigit() or int(normalized) <= 0:
+      raise ValueError("策略实例配置版本无效")
+    return str(int(normalized))
+
+  @staticmethod
+  def _validate_mobile_parameter_value(key: str, value: Any, prop: Any) -> None:
+    value_type = str(prop.type).lower()
+    if value_type == "boolean":
+      if type(value) is not bool:
+        raise ValueError(f"移动参数 {key} 必须是布尔值")
+      return
+    if value_type == "string":
+      if not isinstance(value, str):
+        raise ValueError(f"移动参数 {key} 必须是字符串")
+      allowed = list(getattr(prop, "enum", None) or [])
+      if allowed and value not in allowed:
+        raise ValueError(f"移动参数 {key} 不在允许枚举中")
+      return
+    if value_type == "integer":
+      if type(value) is not int:
+        raise ValueError(f"移动参数 {key} 必须是整数")
+      number = Decimal(value)
+    else:
+      if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"移动参数 {key} 必须是数值")
+      try:
+        number = Decimal(str(value))
+      except InvalidOperation as exc:
+        raise ValueError(f"移动参数 {key} 必须是有限数值") from exc
+    if not number.is_finite():
+      raise ValueError(f"移动参数 {key} 必须是有限数值")
+    minimum = getattr(prop, "minimum", None)
+    maximum = getattr(prop, "maximum", None)
+    if minimum is not None and number < Decimal(str(minimum)):
+      raise ValueError(f"移动参数 {key} 小于服务端最小值")
+    if maximum is not None and number > Decimal(str(maximum)):
+      raise ValueError(f"移动参数 {key} 大于服务端最大值")
+    step = getattr(prop, "step", None)
+    if step is not None:
+      step_value = Decimal(str(step))
+      base = Decimal(str(minimum or 0))
+      if step_value <= 0 or (number - base) % step_value != 0:
+        raise ValueError(f"移动参数 {key} 不符合服务端步长")
+
+  @staticmethod
+  def _mobile_parameter_projection(
+    *,
+    instance_id: str,
+    strategy_class: Any,
+    parameters: Dict[str, Any],
+  ) -> StrategyInstanceMobileParameters:
+    properties = StrategyResolver._mobile_parameter_properties(strategy_class)
+    pending = StrategyResolver._json_object(parameters.get("_parameter_draft"))
+    projected = {**parameters, **pending}
+    descriptors: List[StrategyMobileParameter] = []
+    for key in sorted(properties):
+      prop = properties[key]
+      value = projected.get(key, getattr(prop, "default", None))
+      if value is None:
+        raise ValueError(f"移动参数 {key} 缺少当前值和默认值")
+      StrategyResolver._validate_mobile_parameter_value(key, value, prop)
+      descriptors.append(
+        StrategyMobileParameter(
+          key=key,
+          title=str(getattr(prop, "title", None) or key),
+          description=str(getattr(prop, "description", None) or ""),
+          value_type=str(prop.type).lower(),
+          current_value=value,
+          unit=getattr(prop, "unit", None),
+          minimum=(
+            float(prop.minimum) if getattr(prop, "minimum", None) is not None else None
+          ),
+          maximum=(
+            float(prop.maximum) if getattr(prop, "maximum", None) is not None else None
+          ),
+          step=(float(prop.step) if getattr(prop, "step", None) is not None else None),
+          enum_values=list(getattr(prop, "enum", None) or []) or None,
+          apply_immediately=bool(
+            getattr(prop, "mobileApplyImmediately", False)
+          ),
+          risk_level=str(prop.mobileRiskLevel).upper(),
+        )
+      )
+    return StrategyInstanceMobileParameters(
+      instance_id=instance_id,
+      config_version=StrategyResolver._mobile_config_version(parameters),
+      editable=bool(descriptors),
+      parameters=descriptors,
+    )
 
   @staticmethod
   async def _engine_request(
@@ -992,6 +1108,33 @@ class StrategyResolver:
         return await StrategyResolver._instance_from_run_model(db, run)
       break
     return None
+
+  @staticmethod
+  async def get_strategy_instance_mobile_parameters(
+    instance_id: str,
+  ) -> StrategyInstanceMobileParameters:
+    async for db in get_async_db():
+      run = await StrategyRunRepository(db).find_run_by_id(instance_id)
+      if run is None:
+        raise ValueError("策略实例不存在")
+      if run.strategy is None:
+        raise ValueError("策略实例缺少策略定义")
+      strategy_class = strategy_registry.get_strategy_class(
+        run.strategy.class_name,
+        run.strategy.file_path,
+      )
+      projection = StrategyResolver._mobile_parameter_projection(
+        instance_id=instance_id,
+        strategy_class=strategy_class,
+        parameters=StrategyResolver._json_object(run.parameters),
+      )
+      mode_value = str(getattr(run.mode, "value", run.mode)).lower()
+      if mode_value == StrategyRunMode.LIVE.value:
+        # Live risk changes stay closed until the separate strategy-control
+        # readiness challenge is consumed.
+        projection.editable = False
+      return projection
+    raise ValueError("策略实例参数暂不可读取")
 
   @staticmethod
   async def strategy_run_account_id(run_id: str) -> str:
@@ -1921,20 +2064,58 @@ class StrategyResolver:
   async def update_strategy_instance_parameters(
     instance_id: str,
     input: StrategyInstanceParameterUpdateInput,
+    *,
+    mobile_only: bool = False,
   ) -> Optional[StrategyInstance]:
     async for db in get_async_db():
       repo = StrategyRunRepository(db)
-      run = await repo.find_run_by_id(instance_id)
+      run = (
+        await repo.find_run_by_id_for_update(instance_id)
+        if mobile_only
+        else await repo.find_run_by_id(instance_id)
+      )
       if not run:
         return None
       current = StrategyResolver._json_object(run.parameters)
-      new_parameters = StrategyResolver._json_object(input.parameters)
+      requested_parameters = StrategyResolver._json_object(input.parameters)
       if not run.strategy:
         raise ValueError("策略实例缺少策略定义")
       strategy_class = strategy_registry.get_strategy_class(
         run.strategy.class_name,
         run.strategy.file_path,
       )
+      if mobile_only:
+        mode_value = str(getattr(run.mode, "value", run.mode)).lower()
+        if mode_value == StrategyRunMode.LIVE.value:
+          raise ValueError(
+            "LIVE_STRATEGY_PARAMETER_CHANGE_REQUIRES_CONTROL_PREVIEW"
+          )
+        expected_version = str(input.expected_version or "").strip()
+        current_version = StrategyResolver._mobile_config_version(current)
+        if not expected_version:
+          raise ValueError("原生移动端更新必须提供 expectedVersion")
+        if expected_version != current_version:
+          raise ValueError(
+            f"STRATEGY_CONFIG_VERSION_CONFLICT: 当前版本为 {current_version}"
+          )
+        allowed = StrategyResolver._mobile_parameter_properties(strategy_class)
+        if not requested_parameters:
+          raise ValueError("移动参数更新不能为空")
+        unknown = sorted(set(requested_parameters) - set(allowed))
+        if unknown:
+          raise ValueError("包含未列入移动 allowlist 的策略参数")
+        if input.apply_immediately and any(
+          not bool(getattr(allowed[key], "mobileApplyImmediately", False))
+          for key in requested_parameters
+        ):
+          raise ValueError("所选移动参数不允许立即应用")
+        for key, value in requested_parameters.items():
+          StrategyResolver._validate_mobile_parameter_value(key, value, allowed[key])
+        pending = StrategyResolver._json_object(current.get("_parameter_draft"))
+        update_base = pending or current
+        new_parameters = {**update_base, **requested_parameters}
+      else:
+        new_parameters = requested_parameters
       new_parameters = validate_strategy_configuration(
         strategy_class,
         new_parameters,
@@ -1951,13 +2132,19 @@ class StrategyResolver:
       status_value = str(getattr(run.status, "value", run.status)).lower()
       mode_value = str(getattr(run.mode, "value", run.mode)).lower()
       is_running = status_value == StrategyRunStatus.RUNNING.value
+      mobile_config_version = (
+        int(StrategyResolver._mobile_config_version(current)) + 1
+      )
       if is_running and not input.apply_immediately:
         current["_parameter_draft"] = new_parameters
+        current["_mobile_config_version"] = str(mobile_config_version)
       else:
         version = int(current.get("_parameter_version") or 1) + 1
         new_parameters["instrument_code"] = original_instrument
         new_parameters["stockCodes"] = [original_instrument]
         new_parameters["_parameter_version"] = str(version)
+        new_parameters["_mobile_config_version"] = str(mobile_config_version)
+        new_parameters.pop("_parameter_draft", None)
         if mode_value == StrategyRunMode.BACKTEST.value:
           new_parameters["_grid_book_needs_backtest"] = True
         current = new_parameters
@@ -2001,7 +2188,7 @@ class StrategyResolver:
         aggregate_id=instance_id,
         idempotency_key=(
           f"strategy-reload-parameters:{instance_id}:"
-          f"{current.get('_parameter_version', 'draft')}"
+          f"{current.get('_mobile_config_version') or current.get('_parameter_version', 'draft')}"
         ),
       )
       return await StrategyResolver._instance_from_run_model(

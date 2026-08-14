@@ -40,6 +40,15 @@ class ParameterProperty(BaseModel):
   enumDescriptions: Optional[Dict[str, str]] = Field(None, description="枚举值说明")
   widget: Optional[str] = Field(None, description="表单控件类型")
   placeholder: Optional[str] = Field(None, description="占位符文本")
+  mobileEditable: bool = Field(False, description="是否允许原生移动端修改")
+  mobileApplyImmediately: bool = Field(
+    False,
+    description="移动端修改是否允许立即应用到运行实例",
+  )
+  mobileRiskLevel: Optional[str] = Field(
+    None,
+    description="移动端修改的风险等级",
+  )
 
   class Config:
     extra = "allow"  # 允许额外字段

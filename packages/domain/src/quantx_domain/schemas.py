@@ -22,6 +22,9 @@ class ParameterProperty(BaseModel):
   enumDescriptions: Optional[Dict[str, str]] = None
   widget: Optional[str] = None
   placeholder: Optional[str] = None
+  mobileEditable: bool = False
+  mobileApplyImmediately: bool = False
+  mobileRiskLevel: Optional[str] = None
 
   model_config = {"extra": "allow"}
 
