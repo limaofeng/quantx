@@ -417,6 +417,30 @@ async def test_projection_requires_current_account_authorization(
 
 
 @pytest.mark.asyncio
+async def test_projection_requires_current_user_notification_permission(
+  projection_database,
+) -> None:
+  now = utcnow()
+  async with projection_database() as db:
+    await _seed_registration(db, now=now)
+    user = await db.get(AuthUser, "user-1")
+    assert user is not None
+    user.permissions = []
+    db.add(_connection_alert("alert-1", now))
+    await db.commit()
+
+  async with projection_database() as db:
+    result = await IosBusinessNotificationProjector(
+      db,
+      signing_key=SIGNING_KEY,
+    ).project_once(now=now + timedelta(seconds=1))
+    await db.commit()
+    assert result.projected == 1
+    assert result.queued == 0
+    assert await db.scalar(select(func.count(IosNotificationEvent.id))) == 0
+
+
+@pytest.mark.asyncio
 async def test_order_update_waits_for_applied_runtime_event(
   projection_database,
 ) -> None:

@@ -90,7 +90,11 @@ class IosNotificationEnqueueService:
       raise ValueError("iOS notification expiry must follow occurrence")
 
     query = (
-      select(IosPushRegistration, AuthDeviceSession.granted_permissions)
+      select(
+        IosPushRegistration,
+        AuthDeviceSession.granted_permissions,
+        AuthUser.permissions,
+      )
       .join(
         IosPushCategoryPreference,
         IosPushCategoryPreference.registration_id == IosPushRegistration.id,
@@ -129,8 +133,9 @@ class IosNotificationEnqueueService:
     rows = (await self.db.execute(query)).all()
     registrations = [
       registration
-      for registration, granted_permissions in rows
+      for registration, granted_permissions, user_permissions in rows
       if _has_notification_permission(granted_permissions)
+      and _has_notification_permission(user_permissions)
     ]
 
     queued: list[EnqueuedIosNotification] = []
