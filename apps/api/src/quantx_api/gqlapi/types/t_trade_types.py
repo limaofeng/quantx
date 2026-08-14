@@ -18,6 +18,12 @@ class TTradeTimeExitMode(Enum):
   MAX_HOLDING_DAYS = "MAX_HOLDING_DAYS"
 
 
+@strawberry.enum(description="账户自动交易目标灰度阶段")
+class TTradeRolloutTarget(Enum):
+  CANARY = "CANARY"
+  LIVE = "LIVE"
+
+
 @strawberry.input(description="启动持仓做 T 会话")
 class TTradeStartInput:
   account_id: str
@@ -33,6 +39,17 @@ class TTradeStartInput:
   pullback_threshold_pct: float = 0.8
   rebound_threshold_pct: float = 0.2
   max_spread_ticks: int = 3
+  momentum_enabled: bool = True
+  momentum_window_seconds: int = 60
+  momentum_min_rise_pct: float = 0.8
+  momentum_min_move_seconds: int = 15
+  momentum_baseline_seconds: int = 300
+  momentum_min_amount_velocity_ratio: float = 2.0
+  momentum_min_vwap_premium_pct: float = 2.0
+  momentum_max_vwap_premium_pct: float = 3.5
+  momentum_high_tolerance_ticks: int = 1
+  momentum_max_spread_ticks: int = 10
+  momentum_max_spread_pct: float = 0.3
   approval_ttl_seconds: int = 30
   max_price_deviation_pct: float = 0.3
   target_profit_pct: float = 2.0
@@ -40,6 +57,15 @@ class TTradeStartInput:
   initial_gap_pct: float = 1.5
   trailing_gap_slope: float = 0.25
   max_gap_pct: float = 3.0
+  high_profit_lock_enabled: bool = True
+  high_profit_arm_pct: float = 4.0
+  high_profit_max_drawdown_pct: float = 1.2
+  rapid_reversal_enabled: bool = True
+  rapid_reversal_window_seconds: int = 15
+  rapid_reversal_drawdown_pct: float = 0.8
+  rapid_reversal_confirm_ticks: int = 2
+  limit_up_touch_exit_enabled: bool = True
+  limit_up_touch_tolerance_ticks: int = 0
   hard_stop_enabled: bool = False
   hard_stop_pct: float = -0.8
   time_exit_mode: TTradeTimeExitMode = TTradeTimeExitMode.UNLIMITED
@@ -82,6 +108,31 @@ class TTradeSignalHistoryEntry:
   created_at: Optional[datetime]
   expires_at: Optional[datetime]
   updated_at: Optional[datetime]
+
+
+@strawberry.type(description="做 T 单标的最新策略评估遥测")
+class TTradeEvaluationTelemetry:
+  phase: str
+  last_tick_at: datetime
+  processed_tick_count: int
+  window_sample_count: int
+  window_coverage_seconds: float
+  triggered: bool
+  reason: str
+  signal_type: str
+  signal_price: float
+  window_high: Optional[float]
+  window_low: Optional[float]
+  pullback_pct: Optional[float]
+  rebound_pct: Optional[float]
+  vwap: Optional[float]
+  vwap_premium_pct: Optional[float]
+  spread_ticks: Optional[float]
+  spread_pct: Optional[float]
+  momentum_rise_pct: Optional[float]
+  momentum_move_seconds: Optional[float]
+  momentum_amount_velocity_ratio: Optional[float]
+  momentum_baseline_coverage_seconds: Optional[float]
 
 
 @strawberry.type(description="持仓做 T 会话")
@@ -128,6 +179,7 @@ class TTradeSession:
   updated_at: Optional[datetime]
   global_monitor_id: Optional[str] = None
   global_config_version: int = 0
+  latest_evaluation: Optional[TTradeEvaluationTelemetry] = None
 
 
 @strawberry.type(description="持仓做 T 操作结果")
@@ -154,6 +206,17 @@ class TTradeGlobalSettingsInput:
   pullback_threshold_pct: float = 0.8
   rebound_threshold_pct: float = 0.2
   max_spread_ticks: int = 3
+  momentum_enabled: bool = True
+  momentum_window_seconds: int = 60
+  momentum_min_rise_pct: float = 0.8
+  momentum_min_move_seconds: int = 15
+  momentum_baseline_seconds: int = 300
+  momentum_min_amount_velocity_ratio: float = 2.0
+  momentum_min_vwap_premium_pct: float = 2.0
+  momentum_max_vwap_premium_pct: float = 3.5
+  momentum_high_tolerance_ticks: int = 1
+  momentum_max_spread_ticks: int = 10
+  momentum_max_spread_pct: float = 0.3
   approval_ttl_seconds: int = 30
   max_price_deviation_pct: float = 0.3
   target_profit_pct: float = 2.0
@@ -161,6 +224,15 @@ class TTradeGlobalSettingsInput:
   initial_gap_pct: float = 1.5
   trailing_gap_slope: float = 0.25
   max_gap_pct: float = 3.0
+  high_profit_lock_enabled: bool = True
+  high_profit_arm_pct: float = 4.0
+  high_profit_max_drawdown_pct: float = 1.2
+  rapid_reversal_enabled: bool = True
+  rapid_reversal_window_seconds: int = 15
+  rapid_reversal_drawdown_pct: float = 0.8
+  rapid_reversal_confirm_ticks: int = 2
+  limit_up_touch_exit_enabled: bool = True
+  limit_up_touch_tolerance_ticks: int = 0
   hard_stop_enabled: bool = False
   hard_stop_pct: float = -0.8
   time_exit_mode: TTradeTimeExitMode = TTradeTimeExitMode.UNLIMITED
@@ -187,12 +259,16 @@ class TTradeReadinessCheck:
   code: str
   passed: bool
   message: str
+  scope: str
 
 
 @strawberry.type(description="做 T 生产就绪与灰度状态")
 class TTradeLiveReadiness:
   account_id: str
   ready: bool
+  status: str
+  preparation_ready: bool
+  automation_ready: bool
   stage: str
   engine_status: str
   agent_status: str
@@ -205,6 +281,7 @@ class TTradeLiveReadiness:
   can_approve: bool
   can_activate_live: bool
   blocked_reasons: List[str]
+  preparation_blocked_reasons: List[str]
   checks: List[TTradeReadinessCheck]
   snapshot_id: Optional[str]
   snapshot_hash: Optional[str]
@@ -214,6 +291,15 @@ class TTradeLiveReadiness:
   queue_delay_seconds: float
   dead_letter_count: int
   unresolved_critical_alert_count: int
+  manual_coexistence: bool
+  external_order_count: int
+  external_trade_count: int
+  controlled_window_active: bool
+  controlled_window_snapshot_id: Optional[str]
+  controlled_window_started_at: Optional[datetime]
+  new_external_order_count: int
+  new_external_trade_count: int
+  working_external_order_count: int
   journal_integrity: str
   journal_size_bytes: int
   journal_pending_reports: int
@@ -333,13 +419,34 @@ class TTradeGlobalMonitor:
   pullback_threshold_pct: float
   rebound_threshold_pct: float
   max_spread_ticks: int
+  momentum_enabled: bool
+  momentum_window_seconds: int
+  momentum_min_rise_pct: float
+  momentum_min_move_seconds: int
+  momentum_baseline_seconds: int
+  momentum_min_amount_velocity_ratio: float
+  momentum_min_vwap_premium_pct: float
+  momentum_max_vwap_premium_pct: float
+  momentum_high_tolerance_ticks: int
+  momentum_max_spread_ticks: int
+  momentum_max_spread_pct: float
   approval_ttl_seconds: int
   max_price_deviation_pct: float
+  max_exit_slippage_bps: float
   target_profit_pct: float
   base_floor_pct: float
   initial_gap_pct: float
   trailing_gap_slope: float
   max_gap_pct: float
+  high_profit_lock_enabled: bool
+  high_profit_arm_pct: float
+  high_profit_max_drawdown_pct: float
+  rapid_reversal_enabled: bool
+  rapid_reversal_window_seconds: int
+  rapid_reversal_drawdown_pct: float
+  rapid_reversal_confirm_ticks: int
+  limit_up_touch_exit_enabled: bool
+  limit_up_touch_tolerance_ticks: int
   hard_stop_enabled: bool
   hard_stop_pct: float
   time_exit_mode: TTradeTimeExitMode
@@ -421,6 +528,17 @@ class TTradeReplayStartInput:
   pullback_threshold_pct: float = 0.8
   rebound_threshold_pct: float = 0.2
   max_spread_ticks: int = 3
+  momentum_enabled: bool = True
+  momentum_window_seconds: int = 60
+  momentum_min_rise_pct: float = 0.8
+  momentum_min_move_seconds: int = 15
+  momentum_baseline_seconds: int = 300
+  momentum_min_amount_velocity_ratio: float = 2.0
+  momentum_min_vwap_premium_pct: float = 2.0
+  momentum_max_vwap_premium_pct: float = 3.5
+  momentum_high_tolerance_ticks: int = 1
+  momentum_max_spread_ticks: int = 10
+  momentum_max_spread_pct: float = 0.3
   approval_ttl_seconds: int = 30
   max_price_deviation_pct: float = 0.3
   target_profit_pct: float = 2.0
@@ -428,6 +546,15 @@ class TTradeReplayStartInput:
   initial_gap_pct: float = 1.5
   trailing_gap_slope: float = 0.25
   max_gap_pct: float = 3.0
+  high_profit_lock_enabled: bool = True
+  high_profit_arm_pct: float = 4.0
+  high_profit_max_drawdown_pct: float = 1.2
+  rapid_reversal_enabled: bool = True
+  rapid_reversal_window_seconds: int = 15
+  rapid_reversal_drawdown_pct: float = 0.8
+  rapid_reversal_confirm_ticks: int = 2
+  limit_up_touch_exit_enabled: bool = True
+  limit_up_touch_tolerance_ticks: int = 0
   hard_stop_enabled: bool = False
   hard_stop_pct: float = -0.8
   time_exit_mode: TTradeTimeExitMode = TTradeTimeExitMode.UNLIMITED

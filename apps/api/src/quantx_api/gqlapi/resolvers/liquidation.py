@@ -1,5 +1,5 @@
 """
-清仓管理相关的GraphQL解析器
+卖出管理与统一退出计划 GraphQL 解析器
 """
 
 import uuid
@@ -8,8 +8,16 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 from quantx_infrastructure.database.connection import get_async_db
+from quantx_infrastructure.models.auto_exit_plan import (
+  AutoExitPlanEvent,
+  AutoExitPlanRecord,
+)
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder as ConditionalLiquidationOrderModel,
+)
+from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+  AutoExitPlanRepository,
 )
 from quantx_infrastructure.models.liquidation import (
   LiquidationOrder as LiquidationOrderModel,
@@ -29,22 +37,33 @@ from ..types.liquidation_types import (
   ConditionalLiquidationEvaluationResult,
   ConditionalLiquidationOrder,
   ConditionalLiquidationOrderInput,
+  CreateManualExitPlanInput,
+  ExitPlanCapabilities,
+  ExitPlanCapacityConflict,
+  ExitPlanEventView,
+  ExitPlanHoldingCapacity,
+  ExitPlanRuleCapability,
+  ExitPlanView,
   LiquidatablePosition,
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
+  LiquidatePositionsInput,
   LiquidationError,
+  LiquidationGroupResult,
   LiquidationOrder,
+  LiquidationPlanResult,
   LiquidationResult,
   LiquidationSummary,
   PositionLiquidationResult,
   RedeemPositionInput,
   RedemptionRecord,
   RedemptionResult,
+  UpdateManualExitPlanInput,
 )
 
 
 class LiquidationResolver:
-  """清仓管理解析器"""
+  """卖出管理与统一退出计划解析器。"""
 
   @staticmethod
   def _liquidation_order(model: LiquidationOrderModel) -> LiquidationOrder:
@@ -99,6 +118,7 @@ class LiquidationResolver:
   @staticmethod
   def _conditional_evaluation_result(
     result,
+    exit_plan: Optional[AutoExitPlanRecord] = None,
   ) -> ConditionalLiquidationEvaluationResult:
     if isinstance(result, dict):
       order_data = dict(result.get("order") or {})
@@ -118,7 +138,7 @@ class LiquidationResolver:
         }
       )
     return ConditionalLiquidationEvaluationResult(
-      order=ConditionalLiquidationOrder.from_model(result.order),
+      order=ConditionalLiquidationOrder.from_model(result.order, exit_plan),
       triggered=result.triggered,
       submitted=result.submitted,
       message=result.message,
@@ -127,6 +147,225 @@ class LiquidationResolver:
       latest_price=result.latest_price,
       profit_pct=result.profit_pct,
       error=result.error,
+    )
+
+  @staticmethod
+  async def _exit_plan_map(orders) -> dict[str, AutoExitPlanRecord]:
+    plan_ids = {
+      str(getattr(order, "exit_plan_id", None) or "")
+      for order in orders
+      if getattr(order, "exit_plan_id", None)
+    }
+    if not plan_ids:
+      return {}
+    async for db in get_async_db():
+      result = await db.execute(
+        select(AutoExitPlanRecord).where(
+          AutoExitPlanRecord.plan_id.in_(plan_ids)
+        )
+      )
+      return {item.plan_id: item for item in result.scalars().all()}
+    return {}
+
+  @staticmethod
+  async def _request_engine(
+    command_type: str,
+    payload: dict,
+    *,
+    aggregate_id: str,
+  ) -> dict:
+    receipt = await engine_command_service.request(
+      command_type,
+      payload,
+      aggregate_id=aggregate_id,
+      idempotency_key=(
+        f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
+      ),
+    )
+    if receipt.status == "FAILED":
+      raise ValueError(receipt.error or f"{command_type} 执行失败")
+    if receipt.status != "SUCCEEDED":
+      raise RuntimeError(f"Engine 尚未确认操作: {receipt.message_id}")
+    return dict(receipt.result or {})
+
+  @staticmethod
+  async def _load_exit_plan(
+    plan_id: str,
+    *,
+    account_id: Optional[str] = None,
+  ) -> Optional[AutoExitPlanRecord]:
+    async for db in get_async_db():
+      record = await AutoExitPlanRepository(db).find_by_id(plan_id)
+      if record is not None and account_id and record.account_id != account_id:
+        return None
+      return record
+    return None
+
+  @staticmethod
+  async def exit_plan_account_id(plan_id: str) -> Optional[str]:
+    record = await LiquidationResolver._load_exit_plan(plan_id)
+    return record.account_id if record is not None else None
+
+  @staticmethod
+  async def get_exit_plans(
+    account_id: str,
+    *,
+    instrument_code: Optional[str] = None,
+    statuses: Optional[list[str]] = None,
+    source_type: Optional[str] = None,
+    limit: int = 200,
+  ) -> List[ExitPlanView]:
+    async for db in get_async_db():
+      records = await AutoExitPlanRepository(db).find_all(
+        account_id=account_id,
+        instrument_code=(
+          str(instrument_code or "").strip().upper() or None
+        ),
+        statuses=[str(item).upper() for item in statuses or []] or None,
+        source_type=str(source_type or "").upper() or None,
+        limit=limit,
+      )
+      return [ExitPlanView.from_model(record) for record in records]
+    return []
+
+  @staticmethod
+  async def get_exit_plan(plan_id: str, account_id: str) -> Optional[ExitPlanView]:
+    record = await LiquidationResolver._load_exit_plan(
+      plan_id, account_id=account_id
+    )
+    return ExitPlanView.from_model(record) if record is not None else None
+
+  @staticmethod
+  async def get_exit_plan_events(
+    plan_id: str,
+    account_id: str,
+    *,
+    limit: int = 200,
+  ) -> List[ExitPlanEventView]:
+    record = await LiquidationResolver._load_exit_plan(
+      plan_id, account_id=account_id
+    )
+    if record is None:
+      return []
+    async for db in get_async_db():
+      events = await AutoExitPlanRepository(db).find_events(
+        plan_id=plan_id, limit=limit
+      )
+      return [
+        ExitPlanEventView(
+          event_id=item.event_id,
+          plan_id=item.plan_id,
+          event_type=item.event_type,
+          payload=dict(item.payload or {}),
+          created_at=item.created_at,
+        )
+        for item in events
+      ]
+    return []
+
+  @staticmethod
+  def get_exit_plan_capabilities() -> ExitPlanCapabilities:
+    labels = {
+      "TARGET_PRICE": ("目标价", "price", {"target_price": "number"}),
+      "STOP_PRICE": ("止损价", "price", {"stop_price": "number"}),
+      "GROSS_TAKE_PROFIT": (
+        "收益止盈",
+        "profit",
+        {"target_profit_pct": "number"},
+      ),
+      "NET_TAKE_PROFIT": (
+        "净收益止盈",
+        "profit",
+        {"target_net_profit_pct": "number"},
+      ),
+      "TRAILING_NET_PROFIT": ("动态保盈", "trailing", {}),
+      "ADAPTIVE_VOLUME_PRICE_TRAILING": ("量价动态止盈", "trailing", {}),
+      "RAPID_PROFIT_REVERSAL": ("快速收益反转", "drawdown", {}),
+      "TRAILING_PRICE_DRAWDOWN": ("价格回撤", "drawdown", {}),
+      "HARD_STOP": ("硬止损", "risk", {"stop_loss_pct": "number"}),
+      "TIME_OF_DAY": ("指定时间", "time", {"exit_time": "HH:mm"}),
+      "MAX_HOLDING_DAYS": (
+        "最大持有日",
+        "time",
+        {"max_holding_trading_days": "integer"},
+      ),
+      "LIMIT_UP_TOUCH": ("触及涨停", "limit_up", {}),
+      "LIMIT_UP_BREAK": ("涨停开板", "limit_up", {}),
+      "MANUAL_TRIGGER": ("人工计划触发", "manual", {}),
+    }
+    return ExitPlanCapabilities(
+      rule_types=[
+        ExitPlanRuleCapability(
+          rule_type=rule_type,
+          label=value[0],
+          category=value[1],
+          parameters=value[2],
+        )
+        for rule_type, value in labels.items()
+      ],
+      completion_strategies=["AVAILABLE_NOW", "UNTIL_SNAPSHOT_CLEARED"],
+      conflict_strategies=["UNALLOCATED_ONLY", "REPLACE_CANCELLABLE"],
+      execution_modes=["paper", "live"],
+      rule_semantics="OR；按 priority 从高到低决定首个执行规则",
+    )
+
+  @staticmethod
+  async def get_exit_plan_holding_capacity(
+    account_id: str,
+    instrument_code: str,
+  ) -> ExitPlanHoldingCapacity:
+    code = str(instrument_code or "").strip().upper()
+    async for db in get_async_db():
+      position = await db.scalar(
+        select(Position)
+        .where(Position.account_id == account_id)
+        .where(Position.stock_code == code)
+      )
+      plans = await AutoExitPlanRepository(db).find_reserving(
+        account_id=account_id,
+        instrument_code=code,
+      )
+      total = int(getattr(position, "volume", 0) or 0)
+      available = int(getattr(position, "can_use_volume", 0) or 0)
+      frozen = int(getattr(position, "frozen_volume", 0) or 0)
+      protected = sum(max(0, int(item.remaining_volume or 0)) for item in plans)
+      pending = sum(
+        max(0, int(item.remaining_volume or 0))
+        for item in plans
+        if item.status == "EXIT_PENDING" or item.pending_client_order_id
+      )
+      return ExitPlanHoldingCapacity(
+        account_id=account_id,
+        instrument_code=code,
+        total_volume=total,
+        available_volume=available,
+        frozen_volume=frozen,
+        protected_volume=protected,
+        pending_volume=pending,
+        unallocated_volume=max(0, total - protected),
+        conflicts=[
+          ExitPlanCapacityConflict(
+            plan_id=item.plan_id,
+            source_type=item.source_type,
+            status=item.status,
+            remaining_volume=int(item.remaining_volume or 0),
+            pending=bool(
+              item.status == "EXIT_PENDING" or item.pending_client_order_id
+            ),
+          )
+          for item in plans
+        ],
+      )
+    return ExitPlanHoldingCapacity(
+      account_id=account_id,
+      instrument_code=code,
+      total_volume=0,
+      available_volume=0,
+      frozen_volume=0,
+      protected_volume=0,
+      pending_volume=0,
+      unallocated_volume=0,
+      conflicts=[],
     )
 
   @staticmethod
@@ -170,42 +409,255 @@ class LiquidationResolver:
       stock_code=stock_code,
       include_cancelled=include_cancelled,
     )
-    return [ConditionalLiquidationOrder.from_model(order) for order in orders]
+    plans = await LiquidationResolver._exit_plan_map(orders)
+    return [
+      ConditionalLiquidationOrder.from_model(
+        order,
+        plans.get(str(order.exit_plan_id or "")),
+      )
+      for order in orders
+    ]
+
+  @staticmethod
+  async def create_manual_exit_plan(
+    input: CreateManualExitPlanInput,
+    account_id: str,
+  ) -> ExitPlanView:
+    result = await LiquidationResolver._request_engine(
+      "EXIT_PLAN_CREATE_MANUAL",
+      {
+        "account_id": account_id,
+        "instrument_code": input.instrument_code,
+        "protected_volume": input.protected_volume,
+        "rules": list(input.rules or []),
+        "bucket": input.bucket,
+        "enabled": input.enabled,
+        "execution_mode": input.execution_mode,
+        "auto_exit_authorized": input.auto_exit_authorized,
+        "remark": input.remark,
+      },
+      aggregate_id=f"{account_id}:{input.instrument_code.upper()}",
+    )
+    record = await LiquidationResolver._load_exit_plan(
+      str(result.get("plan_id") or ""), account_id=account_id
+    )
+    if record is None:
+      raise RuntimeError("Engine 已创建计划，但读取持久化结果失败")
+    return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def update_manual_exit_plan(
+    input: UpdateManualExitPlanInput,
+    account_id: str,
+  ) -> ExitPlanView:
+    payload = {
+      "account_id": account_id,
+      "plan_id": input.plan_id,
+      "config_version": input.config_version,
+      "rules": list(input.rules or []),
+      "remark": input.remark,
+    }
+    if input.protected_volume is not None:
+      payload["protected_volume"] = input.protected_volume
+    if input.execution_mode is not None:
+      payload["execution_mode"] = input.execution_mode
+    if input.auto_exit_authorized is not None:
+      payload["auto_exit_authorized"] = input.auto_exit_authorized
+    await LiquidationResolver._request_engine(
+      "EXIT_PLAN_UPDATE_MANUAL",
+      payload,
+      aggregate_id=f"{account_id}:{input.plan_id}",
+    )
+    record = await LiquidationResolver._load_exit_plan(
+      input.plan_id, account_id=account_id
+    )
+    if record is None:
+      raise RuntimeError("退出计划不存在")
+    return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def set_exit_plan_enabled(
+    *,
+    plan_id: str,
+    enabled: bool,
+    config_version: int,
+    account_id: str,
+  ) -> ExitPlanView:
+    await LiquidationResolver._request_engine(
+      "EXIT_PLAN_SET_ENABLED",
+      {
+        "plan_id": plan_id,
+        "enabled": enabled,
+        "config_version": config_version,
+        "account_id": account_id,
+      },
+      aggregate_id=f"{account_id}:{plan_id}",
+    )
+    record = await LiquidationResolver._load_exit_plan(
+      plan_id, account_id=account_id
+    )
+    if record is None:
+      raise RuntimeError("退出计划不存在")
+    return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def cancel_exit_plan(
+    *,
+    plan_id: str,
+    config_version: int,
+    reason: str,
+    account_id: str,
+  ) -> ExitPlanView:
+    await LiquidationResolver._request_engine(
+      "EXIT_PLAN_CANCEL",
+      {
+        "plan_id": plan_id,
+        "config_version": config_version,
+        "reason": reason,
+        "account_id": account_id,
+      },
+      aggregate_id=f"{account_id}:{plan_id}",
+    )
+    record = await LiquidationResolver._load_exit_plan(
+      plan_id, account_id=account_id
+    )
+    if record is None:
+      raise RuntimeError("退出计划不存在")
+    return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def evaluate_exit_plan_now(
+    *,
+    plan_id: str,
+    account_id: str,
+  ) -> ExitPlanView:
+    await LiquidationResolver._request_engine(
+      "EXIT_PLAN_EVALUATE_NOW",
+      {"plan_id": plan_id, "account_id": account_id},
+      aggregate_id=f"{account_id}:{plan_id}",
+    )
+    record = await LiquidationResolver._load_exit_plan(
+      plan_id, account_id=account_id
+    )
+    if record is None:
+      raise RuntimeError("退出计划不存在")
+    return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def liquidate_positions(
+    input: LiquidatePositionsInput,
+    account_id: str,
+  ) -> LiquidationGroupResult:
+    result = await LiquidationResolver._request_engine(
+      "EXIT_PLAN_LIQUIDATE_POSITIONS",
+      {
+        "account_id": account_id,
+        "scope": input.scope,
+        "instrument_codes": list(input.instrument_codes or []),
+        "completion_strategy": input.completion_strategy,
+        "conflict_strategy": input.conflict_strategy,
+        "execution_mode": input.execution_mode,
+        "auto_exit_authorized": input.auto_exit_authorized,
+        "confirm": input.confirm,
+      },
+      aggregate_id=account_id,
+    )
+    plans = [
+      LiquidationPlanResult(
+        instrument_code=str(item.get("instrument_code") or ""),
+        success=bool(item.get("success")),
+        plan_id=str(item.get("plan_id") or "") or None,
+        protected_volume=(
+          int(item["protected_volume"])
+          if item.get("protected_volume") is not None
+          else None
+        ),
+        conflict_plan_ids=[
+          str(value) for value in list(item.get("conflict_plan_ids") or [])
+        ],
+        error=str(item.get("error") or "") or None,
+      )
+      for item in list(result.get("items") or [])
+    ]
+    succeeded = sum(1 for item in plans if item.success)
+    return LiquidationGroupResult(
+      group_id=str(result.get("group_id") or ""),
+      success=bool(result.get("success")),
+      message=f"已创建 {succeeded}/{len(plans)} 个清仓计划",
+      plans=plans,
+    )
+
+  @staticmethod
+  async def confirm_exit_intent(
+    *,
+    plan_id: str,
+    intent_id: str,
+    account_id: str,
+  ) -> dict:
+    return await LiquidationResolver._request_engine(
+      "EXIT_PLAN_CONFIRM_INTENT",
+      {
+        "plan_id": plan_id,
+        "intent_id": intent_id,
+        "account_id": account_id,
+      },
+      aggregate_id=f"{account_id}:{plan_id}",
+    )
+
+  @staticmethod
+  async def reject_exit_intent(
+    *,
+    plan_id: str,
+    intent_id: str,
+    reason: str,
+    account_id: str,
+  ) -> dict:
+    return await LiquidationResolver._request_engine(
+      "EXIT_PLAN_REJECT_INTENT",
+      {
+        "plan_id": plan_id,
+        "intent_id": intent_id,
+        "reason": reason,
+        "account_id": account_id,
+      },
+      aggregate_id=f"{account_id}:{plan_id}",
+    )
 
   @staticmethod
   async def liquidate_all_positions(
     input: LiquidateAllPositionsInput,
     account_id: str,
   ) -> LiquidationResult:
-    """一键清仓"""
-    liquidation_service = LiquidationService(account_id=account_id)
-
-    # 执行一键清仓
-    result_data = await liquidation_service.liquidate_all_positions(
-      confirm=input.confirm, max_retry=input.max_retry
+    """Compatibility adapter: old callers only protect currently sellable shares."""
+    result_data = await LiquidationResolver.liquidate_positions(
+      LiquidatePositionsInput(
+        completion_strategy="AVAILABLE_NOW",
+        conflict_strategy="UNALLOCATED_ONLY",
+        confirm=input.confirm,
+        account_id=account_id,
+        scope="ALL",
+        instrument_codes=[],
+        execution_mode="paper",
+        auto_exit_authorized=False,
+      ),
+      account_id,
     )
-
-    # 转换错误信息
     errors = [
-      LiquidationError(stock_code=error["stock_code"], error=error["error"])
-      for error in result_data.errors
+      LiquidationError(stock_code=item.instrument_code, error=item.error or "未知错误")
+      for item in result_data.plans
+      if not item.success
     ]
-
     result = LiquidationResult(
       success=result_data.success,
-      total_positions=result_data.total_positions,
-      liquidated_positions=result_data.liquidated_positions,
-      failed_positions=result_data.failed_positions,
+      total_positions=len(result_data.plans),
+      liquidated_positions=sum(1 for item in result_data.plans if item.success),
+      failed_positions=sum(1 for item in result_data.plans if not item.success),
       message=result_data.message,
     )
     result.errors = lambda: errors
-    order_ids = [
-      str(order.get("order_id"))
-      for order in result_data.orders
-      if order.get("order_id") is not None
+    result.orders = lambda: [
+      str(item.plan_id) for item in result_data.plans if item.plan_id
     ]
-    result.orders = lambda: order_ids
-
     return result
 
   @staticmethod
@@ -213,21 +665,28 @@ class LiquidationResolver:
     input: LiquidatePositionInput,
     account_id: str,
   ) -> PositionLiquidationResult:
-    """个股清仓"""
-    liquidation_service = LiquidationService(account_id=account_id)
-
-    # 执行个股清仓
-    result_data = await liquidation_service.liquidate_position(
-      stock_code=input.stock_code, confirm=input.confirm, max_retry=input.max_retry
+    """Compatibility adapter fixed to AVAILABLE_NOW semantics."""
+    group = await LiquidationResolver.liquidate_positions(
+      LiquidatePositionsInput(
+        completion_strategy="AVAILABLE_NOW",
+        conflict_strategy="UNALLOCATED_ONLY",
+        confirm=input.confirm,
+        account_id=account_id,
+        scope="SELECTED",
+        instrument_codes=[input.stock_code],
+        execution_mode="paper",
+        auto_exit_authorized=False,
+      ),
+      account_id,
     )
-
+    item = group.plans[0] if group.plans else None
     return PositionLiquidationResult(
-      success=result_data["success"],
-      stock_code=result_data["stock_code"],
-      volume=result_data.get("volume"),
-      order_id=result_data.get("order_id"),
-      message=result_data["message"],
-      error=result_data.get("error"),
+      success=bool(item and item.success),
+      stock_code=input.stock_code,
+      volume=item.protected_volume if item else None,
+      order_id=item.plan_id if item else None,
+      message=group.message,
+      error=item.error if item else "未创建清仓计划",
     )
 
   @staticmethod
@@ -247,8 +706,16 @@ class LiquidationResolver:
       sell_ratio_pct=input.sell_ratio_pct,
       sell_volume=input.sell_volume,
       remark=input.remark,
+      strategy=input.strategy,
+      dynamic_policy=input.dynamic_policy,
+      execution_mode=input.execution_mode,
+      auto_exit_authorized=input.auto_exit_authorized,
     )
-    return ConditionalLiquidationOrder.from_model(order)
+    plans = await LiquidationResolver._exit_plan_map([order])
+    return ConditionalLiquidationOrder.from_model(
+      order,
+      plans.get(str(order.exit_plan_id or "")),
+    )
 
   @staticmethod
   async def set_conditional_liquidation_order_enabled(
@@ -261,7 +728,13 @@ class LiquidationResolver:
       order_id,
       enabled,
     )
-    return ConditionalLiquidationOrder.from_model(order) if order else None
+    if not order:
+      return None
+    plans = await LiquidationResolver._exit_plan_map([order])
+    return ConditionalLiquidationOrder.from_model(
+      order,
+      plans.get(str(order.exit_plan_id or "")),
+    )
 
   @staticmethod
   async def cancel_conditional_liquidation_order(
@@ -270,7 +743,13 @@ class LiquidationResolver:
   ) -> Optional[ConditionalLiquidationOrder]:
     service = LiquidationService(account_id=account_id)
     order = await service.cancel_conditional_liquidation_order(order_id)
-    return ConditionalLiquidationOrder.from_model(order) if order else None
+    if not order:
+      return None
+    plans = await LiquidationResolver._exit_plan_map([order])
+    return ConditionalLiquidationOrder.from_model(
+      order,
+      plans.get(str(order.exit_plan_id or "")),
+    )
 
   @staticmethod
   async def evaluate_conditional_liquidation_orders(
@@ -294,7 +773,15 @@ class LiquidationResolver:
         f"条件清仓评估已排队但 Engine 尚未确认: {receipt.message_id}"
       )
     results = list((receipt.result or {}).get("items") or [])
-    return [LiquidationResolver._conditional_evaluation_result(item) for item in results]
+    raw_orders = [SimpleNamespace(**dict(item.get("order") or {})) for item in results]
+    plans = await LiquidationResolver._exit_plan_map(raw_orders)
+    return [
+      LiquidationResolver._conditional_evaluation_result(
+        item,
+        plans.get(str((item.get("order") or {}).get("exit_plan_id") or "")),
+      )
+      for item in results
+    ]
 
   @staticmethod
   async def redeem_cleared_position(

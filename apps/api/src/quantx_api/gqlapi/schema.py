@@ -14,6 +14,8 @@ from .schemas import (
   InstrumentQuery,
   LiquidationMutation,
   LiquidationQuery,
+  LimitUpBoardAssistantMutation,
+  LimitUpBoardAssistantQuery,
   MarketDataQuery,
   PortfolioQuery,
   RealtimeSubscription,
@@ -47,7 +49,7 @@ from .security import AuthorizationExtension
 - 查看当前持仓情况
 - 获取持仓盈亏信息
 
-### 清仓管理
+### 卖出管理
 - 一键清仓所有持仓
 - 个股清仓操作
 - 已清仓股票资金赎回
@@ -79,6 +81,7 @@ class Query(
   TradingQuery,
   PortfolioQuery,
   LiquidationQuery,
+  LimitUpBoardAssistantQuery,
   StrategyQuery,
   WorkflowQuery,
   SectorQuery,
@@ -103,7 +106,7 @@ class Query(
 ### 持仓管理
 - 执行清仓操作
 
-### 清仓管理
+### 卖出管理
 - 一键清仓所有持仓
 - 个股清仓操作
 - 已清仓股票资金赎回
@@ -118,6 +121,7 @@ class Mutation(
   AnnouncementMutation,
   TradingMutation,
   LiquidationMutation,
+  LimitUpBoardAssistantMutation,
   StrategyMutation,
   WorkflowMutation,
   HolidayMutation,

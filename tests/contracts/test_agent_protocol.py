@@ -78,7 +78,12 @@ def test_protocol_11_order_report_is_strongly_typed() -> None:
         "account_id": "account-1",
         "broker_order_id": "broker-1",
         "stock_code": "600000.SH",
-        "status": "SUBMITTED",
+        "order_status": 50,
+        "effective_order_status": "EXPIRED",
+        "can_cancel": False,
+        "session_expired": True,
+        "effective_status_reason": "MARKET_SESSION_CLOSED",
+        "order_session_date": "2026-08-13",
       },
     },
   )
@@ -88,6 +93,11 @@ def test_protocol_11_order_report_is_strongly_typed() -> None:
   assert isinstance(typed, OrderReportPayload)
   assert typed.source_sequence == 42
   assert typed.order.broker_order_id == "broker-1"
+  assert typed.order.order_status == 50
+  assert typed.order.effective_order_status == "EXPIRED"
+  assert typed.order.can_cancel is False
+  assert typed.order.session_expired is True
+  assert typed.order.effective_status_reason == "MARKET_SESSION_CLOSED"
 
 
 def test_complete_snapshot_requires_durable_identity() -> None:

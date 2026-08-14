@@ -8,6 +8,9 @@ from quantx_infrastructure.repositories.financial_repository import (
   FinancialCashFlowRepository,
   FinancialIncomeStatementRepository,
 )
+from quantx_infrastructure.services.financial_sync_health_service import (
+  financial_sync_health,
+)
 
 from ..types import (
   FinancialBalanceSheetData,
@@ -19,6 +22,8 @@ from ..types import (
   FinancialReportSummary,
   FinancialStatements,
   FinancialSummary,
+  FinancialSyncHealth,
+  FinancialSyncHealthStatus,
 )
 
 
@@ -30,13 +35,33 @@ class FinancialResolver:
     async for db in get_async_db():
       income_repo = FinancialIncomeStatementRepository(db)
       overview = await income_repo.get_overview()
-      return FinancialOverview(**overview)
+      health = await financial_sync_health(db)
+      health_status = FinancialSyncHealthStatus(health.pop("status"))
+      return FinancialOverview(
+        **overview,
+        sync_health=FinancialSyncHealth(
+          **health,
+          status=health_status,
+        ),
+      )
 
     return FinancialOverview(
       report_count=0,
       instrument_count=0,
       latest_report_date=None,
       latest_announce_date=None,
+      sync_health=FinancialSyncHealth(
+        status=FinancialSyncHealthStatus.NEVER_RUN,
+        last_completed_at=None,
+        last_success_at=None,
+        requested_codes=0,
+        synced_codes=0,
+        empty_codes=0,
+        statement_rows=0,
+        metric_rows=0,
+        is_stale=True,
+        warnings=["数据库连接不可用"],
+      ),
     )
 
   @staticmethod

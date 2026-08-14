@@ -54,11 +54,39 @@ def test_agent_device_query_requires_system_status_permission():
 
 
 @pytest.mark.parametrize(
+  "field_name",
+  [
+    "approveTTradeEntry",
+    "rejectTTradeEntry",
+    "previewTTradeEntryApproval",
+    "confirmTTradeEntryApproval",
+    "approveStrategyTradeIntent",
+    "rejectStrategyTradeIntent",
+    "previewStrategyTradeIntentApproval",
+    "confirmStrategyTradeIntentApproval",
+    "beginTTradeControlledWindow",
+    "activateTTradeLive",
+    "pauseTTradeEntries",
+    "triggerTTradeKillSwitch",
+  ],
+)
+def test_trade_approval_mutations_require_independent_permission(
+  field_name: str,
+):
+  assert required_permission("Mutation", field_name) == "trade:approve"
+
+
+def test_unrelated_mutation_keeps_general_write_permission():
+  assert required_permission("Mutation", "pauseStrategyInstance") == "mutation:write"
+
+
+@pytest.mark.parametrize(
   ("operation", "field_name", "permission"),
   [
     ("Query", "portfolioOverview", "portfolio:read"),
     ("Query", "dailyAssetSnapshotsPage", "portfolio:read"),
     ("Query", "latestMarketQuotes", "market:read"),
+    ("Query", "limitUpRadar", "market:read"),
     ("Query", "stockScreenSnapshotStatus", "market:read"),
     ("Query", "researchRuns", "market:read"),
     ("Query", "researchRun", "market:read"),

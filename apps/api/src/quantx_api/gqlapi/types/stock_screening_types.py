@@ -4,6 +4,8 @@ from typing import List, Optional
 
 import strawberry
 
+from .financial_types import FinancialSyncHealthStatus
+
 
 @strawberry.input(description="选股字段条件")
 class StockFieldConditionInput:
@@ -60,6 +62,15 @@ class StockScreenUniverse(Enum):
   STOCK_AND_ETF = "stock_and_etf"
 
 
+@strawberry.enum(description="ROE（TTM）独立质量状态")
+class RoeQualityStatus(Enum):
+  VALID = "VALID"
+  STALE = "STALE"
+  SUSPICIOUS = "SUSPICIOUS"
+  INVALID = "INVALID"
+  UNVERIFIED = "UNVERIFIED"
+
+
 @strawberry.input(description="条件选股排序输入")
 class StockScreenSortInput:
   field: StockScreenSortField = strawberry.field(description="排序字段")
@@ -94,7 +105,10 @@ class StockScreenInput:
   sort: Optional[StockScreenSortInput] = strawberry.field(default=None, description="排序配置")
   limit: int = strawberry.field(default=200, description="每页数量，最大200")
   offset: int = strawberry.field(default=0, description="偏移量")
-  min_roe: Optional[float] = strawberry.field(default=None, description="最小TTM归母ROE")
+  min_roe: Optional[float] = strawberry.field(
+    default=None,
+    description="最小 ROE（TTM），仅使用截至快照已披露且验证通过的数据",
+  )
   min_net_profit_growth: Optional[float] = strawberry.field(default=None, description="最小归母净利润单季同比增速")
   min_yoy_growth: Optional[float] = strawberry.field(default=None, description="最小营收单季同比增速")
 
@@ -142,12 +156,15 @@ class StockScreenItem:
   ma5_prev: Optional[float]
   ma10_prev: Optional[float]
   roe: Optional[float]
+  roe_quality_status: RoeQualityStatus
   net_profit_growth: Optional[float]
   yoy_growth: Optional[float]
   net_profit_accum_growth: Optional[float]
   revenue_accum_growth: Optional[float]
   financial_report_date: Optional[date]
   financial_announce_date: Optional[date]
+  financial_as_of_date: Optional[date]
+  financial_verified_at: Optional[datetime]
   financial_quality_flags: List[str]
   matched_strategies: List[str]
   score: float
@@ -172,6 +189,19 @@ class StockScreenPage:
   has_stale_data: bool
   is_complete: bool
   warnings: List[str]
+  financial_health: Optional["StockScreenFinancialHealth"] = None
+
+
+@strawberry.type(description="条件选股财务同步与 ROE 可筛选健康状态")
+class StockScreenFinancialHealth:
+  status: FinancialSyncHealthStatus
+  last_success_at: Optional[datetime]
+  verified_count: int
+  selectable_count: int
+  excluded_stale_count: int
+  excluded_suspicious_count: int
+  excluded_invalid_count: int
+  excluded_unverified_count: int
 
 
 @strawberry.type(description="选股日级快照完整性状态")
@@ -230,9 +260,150 @@ class IntradayVolumeScreenItem:
 @strawberry.type(description="盘中全市场量能筛选分页结果")
 class IntradayVolumeScreenPage:
   items: List[IntradayVolumeScreenItem]
+  top_gainers: List[IntradayVolumeScreenItem]
+  top_losers: List[IntradayVolumeScreenItem]
+  advancers: int
+  decliners: int
+  flats: int
   total: int
   limit: int
   offset: int
+  updated_at: Optional[datetime]
+  is_scanner_running: bool
+  warnings: List[str]
+
+
+@strawberry.enum(description="打板雷达候选阶段")
+class LimitUpRadarStage(Enum):
+  MOMENTUM = "MOMENTUM"
+  SURGING = "SURGING"
+  NEAR_LIMIT = "NEAR_LIMIT"
+  TOUCHING = "TOUCHING"
+  SEALED = "SEALED"
+  BROKEN = "BROKEN"
+  RESEALED = "RESEALED"
+
+
+@strawberry.enum(description="打板雷达排序字段")
+class LimitUpRadarSortField(Enum):
+  SCORE = "score"
+  DISTANCE_TO_LIMIT = "distance_to_limit"
+  AMOUNT = "amount"
+  UPDATED_AT = "updated_at"
+
+
+@strawberry.input(description="沪深全市场打板雷达查询输入")
+class LimitUpRadarInput:
+  stages: Optional[List[LimitUpRadarStage]] = strawberry.field(
+    default=None,
+    description="候选阶段过滤",
+  )
+  include_industries: Optional[List[str]] = strawberry.field(
+    default=None,
+    description="包含行业",
+  )
+  min_score: Optional[float] = strawberry.field(default=None, description="最低雷达评分")
+  search: Optional[str] = strawberry.field(default=None, description="代码或名称搜索")
+  sort_field: LimitUpRadarSortField = strawberry.field(
+    default=LimitUpRadarSortField.SCORE,
+    description="排序字段",
+  )
+  sort_direction: StockScreenSortDirection = strawberry.field(
+    default=StockScreenSortDirection.DESC,
+    description="排序方向",
+  )
+  limit: int = strawberry.field(default=200, description="每页数量，最大200")
+  offset: int = strawberry.field(default=0, description="偏移量")
+
+
+@strawberry.type(description="打板雷达评分因子")
+class LimitUpRadarScoreFactor:
+  code: str
+  label: str
+  score: float
+  max_score: float
+  explanation: str
+
+
+@strawberry.type(description="打板雷达阶段事件")
+class LimitUpRadarEvent:
+  event_id: str
+  stage: LimitUpRadarStage
+  stage_label: str
+  occurred_at: datetime
+  score: float
+
+
+@strawberry.type(description="打板雷达行业热度")
+class LimitUpRadarIndustryHeat:
+  industry: str
+  candidate_count: int
+  near_limit_count: int
+  sealed_count: int
+  average_score: float
+
+
+@strawberry.type(description="打板雷达全市场摘要")
+class LimitUpRadarSummary:
+  scanned_count: int
+  candidate_count: int
+  near_limit_count: int
+  sealed_count: int
+  broken_count: int
+  stale_count: int
+  excluded_count: int
+
+
+@strawberry.type(description="打板雷达候选股")
+class LimitUpRadarItem:
+  code: str
+  name: str
+  industry: Optional[str]
+  current_price: float
+  change_pct: float
+  limit_up_price: float
+  price_tick: float
+  distance_to_limit_pct: float
+  distance_to_limit_ticks: float
+  price_change_5m_pct: float
+  amount: float
+  amount_pace_ratio: float
+  volume_pace_ratio: float
+  last_5m_volume_ratio: float
+  intraday_turnover_rate_pct: Optional[float]
+  depth_imbalance_5: float
+  bid1_price: Optional[float]
+  ask1_price: Optional[float]
+  bid1_volume: float
+  ask1_volume: float
+  stage: LimitUpRadarStage
+  stage_label: str
+  radar_score: float
+  score_version: str
+  score_breakdown: List[LimitUpRadarScoreFactor]
+  break_count: int
+  first_touch_at: Optional[datetime]
+  first_sealed_at: Optional[datetime]
+  last_stage_at: Optional[datetime]
+  events: List[LimitUpRadarEvent]
+  one_word_limit_up: bool
+  is_stale: bool
+  quality_tags: List[str]
+  blocked_reasons: List[str]
+  can_create_instance: bool
+  existing_instance_id: Optional[str]
+  updated_at: datetime
+
+
+@strawberry.type(description="沪深全市场打板雷达结果")
+class LimitUpRadarPage:
+  items: List[LimitUpRadarItem]
+  industries: List[LimitUpRadarIndustryHeat]
+  summary: LimitUpRadarSummary
+  total: int
+  limit: int
+  offset: int
+  score_version: str
   updated_at: Optional[datetime]
   is_scanner_running: bool
   warnings: List[str]

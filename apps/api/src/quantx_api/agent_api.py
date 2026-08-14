@@ -137,12 +137,13 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
     status = requested_status
     if (
       heartbeat is not None
-      and heartbeat.status == "RECONCILING"
+      and str(heartbeat.status or "").upper()
+      in {"RECONCILING", "RECONCILE_REQUIRED"}
       and requested_status == "READY"
     ):
       # Only Engine may promote a reconnecting Agent after the durable full
       # snapshot has been applied. A heartbeat is not reconciliation proof.
-      status = "RECONCILING"
+      status = str(heartbeat.status).upper()
     details = dict(heartbeat.details or {}) if heartbeat is not None else {}
     details.update(
       {

@@ -3,6 +3,7 @@ pytest 配置文件 - 测试固件和共享配置
 """
 import asyncio
 import importlib.util
+import os
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,32 @@ from typing import AsyncGenerator
 import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--quantx-run-e2e",
+        action="store_true",
+        default=False,
+        help="run QuantX tests marked e2e against explicitly approved services",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    enabled = config.getoption("--quantx-run-e2e") or os.getenv(
+        "QUANTX_RUN_E2E", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        return
+    skip = pytest.mark.skip(
+        reason=(
+            "QuantX e2e tests are opt-in; pass --quantx-run-e2e only after "
+            "approving their external-state effects"
+        )
+    )
+    for item in items:
+        if item.get_closest_marker("e2e") is not None:
+            item.add_marker(skip)
 
 
 def _module_missing(module_name: str) -> bool:
@@ -178,6 +205,7 @@ def authorized_graphql_context():
                     "portfolio:read",
                     "strategy:read",
                     "system-status:read",
+                    "trade:approve",
                     "mutation:write",
                 }
             ),

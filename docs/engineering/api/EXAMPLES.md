@@ -8,8 +8,9 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 .\ops\quantx.ps1 down
 ```
 
-需要 Prefect 与 data-only QMT Agent 时使用 `-Profile full`。数据库、
-InfluxDB 和 Redis 由外部管理。
+普通开发命令会统一提升为 `full/live`，同时启动 Prefect Worker 和 QMT Agent；
+Prefect Server、数据库、InfluxDB 和 Redis 由外部管理。只有操作者明确要求纯行情
+运行时才传 `-Mode data-only`，不得把 live 启动失败自动降级为 data-only。
 
 ## 策略域导入
 

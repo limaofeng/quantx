@@ -5,6 +5,10 @@ from .financial_schema import FinancialQuery
 from .holiday_schema import HolidayMutation, HolidayQuery
 from .instrument_schema import InstrumentQuery
 from .liquidation_schema import LiquidationMutation, LiquidationQuery
+from .limit_up_board_assistant_schema import (
+  LimitUpBoardAssistantMutation,
+  LimitUpBoardAssistantQuery,
+)
 from .market_data_schema import MarketDataQuery
 from .portfolio_schema import PortfolioQuery
 from .realtime_schema import RealtimeSubscription
@@ -36,6 +40,8 @@ __all__ = [
   "TradingMutation",
   "LiquidationQuery",
   "LiquidationMutation",
+  "LimitUpBoardAssistantQuery",
+  "LimitUpBoardAssistantMutation",
   "StrategyQuery",
   "StrategyMutation",
   "WorkflowQuery",

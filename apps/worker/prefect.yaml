@@ -19,9 +19,11 @@ deployments:
         timezone: Asia/Shanghai
         parameters:
           sync_market_data: false
-      - cron: "30 15 * * 1-5"
+      - cron: "35 15 * * 1-5"
         timezone: Asia/Shanghai
-    version: "0.0.2"
+        parameters:
+          sync_market_data: true
+    version: "0.0.4"
   - name: instrument-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:instrument_request_flow
     work_pool: *quantx_process_pool
@@ -34,7 +36,9 @@ deployments:
     schedules:
       - cron: "0 9 * * 1-5"
         timezone: Asia/Shanghai
-    version: "0.1.2"
+        parameters:
+          batch_size: 100
+    version: "0.2.0"
   - name: bond-repo-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:market_universe_request_flow
     work_pool: *quantx_process_pool
@@ -98,8 +102,8 @@ deployments:
           periods: ["1m", "1d"]
           sectors: ["沪深A股", "沪深ETF", "沪深指数"]
           skip_download: false
-          compute_daily_signals: false
-    version: "0.1.0"
+          compute_daily_signals: true
+    version: "0.2.0"
   - name: daily-indicator-snapshot
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/daily_indicator_snapshot_flow.py:daily_indicator_snapshot_flow
     work_pool: *quantx_process_pool
@@ -108,13 +112,6 @@ deployments:
       limit: 1
       collision_strategy: CANCEL_NEW
       grace_period_seconds: 120
-    schedules:
-      - cron: "35 15 * * 1-5"
-        timezone: Asia/Shanghai
-        parameters:
-          sectors: ["沪深A股", "沪深ETF"]
-          batch_size: 300
-          retain_days: 30
     version: "0.2.0"
   - name: announcement-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/announcement_sync_flow.py:announcement_sync_flow

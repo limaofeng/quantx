@@ -7,6 +7,11 @@ import strawberry
 
 from ..resolvers.t_trade import TTradeResolver
 from ..security import authorized_account_id, principal_from_context
+from ..trade_approval import (
+  T_TRADE_ENTRY_APPROVAL,
+  TradeApprovalChallengeError,
+  TradeApprovalChallengeService,
+)
 from ..types.t_trade_types import (
   OperationalAlert,
   TTradeBatch,
@@ -26,10 +31,16 @@ from ..types.t_trade_types import (
   TTradeReplayMutationResult,
   TTradeReplayPreparation,
   TTradeReplayStartInput,
+  TTradeRolloutTarget,
   TTradeSession,
   TTradeSignalHistoryEntry,
   TTradeSignalHistoryPage,
   TTradeStartInput,
+)
+from ..types.trade_approval_types import (
+  TradeApprovalConfirmationResult,
+  TradeApprovalPreview,
+  TradeApprovalPreviewResult,
 )
 
 
@@ -315,26 +326,121 @@ class TTradeMutation:
   ) -> TTradeMutationResult:
     owner_account_id = await TTradeResolver.session_account_id(run_id)
     authorized_account_id(info, owner_account_id)
+    principal = principal_from_context(info.context)
     return await TTradeResolver.approve_entry(
       run_id,
       intent_id,
       expected_signal_version=expected_signal_version,
       idempotency_key=idempotency_key,
+      actor_id=principal.user_id,
+      device_session_id=principal.device_session_id,
+      approval_channel="GRAPHQL_LEGACY",
     )
 
-  @strawberry.mutation(description="完成门禁检查并启用严格 Canary 实盘")
+  @strawberry.mutation(description="生成一次做 T 买入确认的短时设备绑定预览")
+  async def preview_t_trade_entry_approval(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+  ) -> TradeApprovalPreviewResult:
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
+    try:
+      owner_account_id = await TTradeResolver.session_account_id(run_id)
+      resolved_account_id = authorized_account_id(info, owner_account_id)
+      preview = await TradeApprovalChallengeService.issue(
+        principal=principal,
+        action=T_TRADE_ENTRY_APPROVAL,
+        account_id=resolved_account_id,
+        run_id=run_id,
+        intent_id=intent_id,
+      )
+      return TradeApprovalPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对交易信息并在凭据过期前完成本机认证",
+        preview=TradeApprovalPreview.from_data(preview),
+      )
+    except TradeApprovalChallengeError as exc:
+      return TradeApprovalPreviewResult(False, exc.code, exc.message)
+    except ValueError as exc:
+      return TradeApprovalPreviewResult(False, "VALIDATION_FAILED", str(exc))
+
+  @strawberry.mutation(description="消费短时凭据并确认一个做 T 买入信号")
+  async def confirm_t_trade_entry_approval(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+    confirmation_token: str,
+  ) -> TradeApprovalConfirmationResult:
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
+    try:
+      owner_account_id = await TTradeResolver.session_account_id(run_id)
+      resolved_account_id = authorized_account_id(info, owner_account_id)
+      challenge_id = await TradeApprovalChallengeService.consume(
+        principal=principal,
+        action=T_TRADE_ENTRY_APPROVAL,
+        account_id=resolved_account_id,
+        run_id=run_id,
+        intent_id=intent_id,
+        confirmation_token=confirmation_token,
+      )
+      result = await TTradeResolver.approve_entry(
+        run_id,
+        intent_id,
+        idempotency_key=challenge_id,
+        actor_id=principal.user_id,
+        device_session_id=principal.device_session_id,
+        approval_channel="IOS_BIOMETRIC",
+      )
+      return TradeApprovalConfirmationResult(
+        success=result.success,
+        code=result.code,
+        message=result.message,
+        challenge_id=challenge_id,
+      )
+    except TradeApprovalChallengeError as exc:
+      return TradeApprovalConfirmationResult(False, exc.code, exc.message)
+    except ValueError as exc:
+      return TradeApprovalConfirmationResult(False, "VALIDATION_FAILED", str(exc))
+
+  @strawberry.mutation(description="基于最新完整快照建立受控交易窗口")
+  async def begin_t_trade_controlled_window(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    snapshot_id: str,
+  ) -> TTradeOperationsMutationResult:
+    resolved = authorized_account_id(info, account_id)
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
+    return await TTradeResolver.begin_controlled_window(
+      resolved,
+      user_id=principal.user_id,
+      snapshot_id=snapshot_id,
+    )
+
+  @strawberry.mutation(description="完成门禁检查并启用 Canary 或开发环境正式 LIVE")
   async def activate_t_trade_live(
     self,
     info: strawberry.types.Info,
     account_id: str,
     policy_version: int,
+    target_stage: TTradeRolloutTarget = TTradeRolloutTarget.CANARY,
+    confirmation: str = "",
   ) -> TTradeOperationsMutationResult:
     resolved = authorized_account_id(info, account_id)
     principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
     return await TTradeResolver.activate_live(
       resolved,
       user_id=principal.user_id,
       policy_version=policy_version,
+      target_stage=target_stage,
+      confirmation=confirmation,
     )
 
   @strawberry.mutation(description="停止做 T 新买入，继续保护已有批次")
@@ -344,9 +450,13 @@ class TTradeMutation:
     account_id: str,
     reason: str = "manual pause",
   ) -> TTradeOperationsMutationResult:
+    resolved = authorized_account_id(info, account_id)
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
     return await TTradeResolver.pause_entries(
-      authorized_account_id(info, account_id),
+      resolved,
       reason,
+      user_id=principal.user_id,
     )
 
   @strawberry.mutation(description="触发做 T 紧急停止并转人工处置")
@@ -356,9 +466,13 @@ class TTradeMutation:
     account_id: str,
     reason: str,
   ) -> TTradeOperationsMutationResult:
+    resolved = authorized_account_id(info, account_id)
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
     return await TTradeResolver.trigger_kill_switch(
-      authorized_account_id(info, account_id),
+      resolved,
       reason,
+      user_id=principal.user_id,
     )
 
   @strawberry.mutation(description="撤销当前仍可撤的做 T 委托")

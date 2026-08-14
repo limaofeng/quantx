@@ -28,7 +28,14 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 | `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情分项状态 |
 | `/health` | `/health/ready` 的兼容别名 |
 
-`full` profile 中，Prefect Worker、QMT Agent 和行情 capability 也必须 ready。
+`full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
+ready。QMT Agent 的组件健康表示进程与会话在线；账户对账、kill switch 和
+交易能力由交易就绪检查独立判定，不会把在线 Agent 误报为离线。
+
+GraphQL `liveSafetyStatus` 进一步分成 `preparationReady`（账户观察、外部活动
+分类和完整快照对账链路）与 `automationReady`（可申请自动执行）两个结论。
+`PREPARING` 是健康的 `SHADOW` 准备阶段，`BLOCKED` 才表示准备链路本身
+未通过；`ready` 保留为 `automationReady` 的兼容别名。
 
 ## 用户认证
 
@@ -111,3 +118,15 @@ npm run docs:contracts
 
 发布文件位于 `/docs/contracts/`。生产环境关闭运行时 OpenAPI、Swagger、
 ReDoc、GraphiQL 和 GraphQL 内省。
+
+## 卖出管理 GraphQL
+
+统一读取入口为 `exitPlans`、`exitPlan`、`exitPlanEvents`、
+`exitPlanCapabilities` 和 `exitPlanHoldingCapacity`。写入入口为
+`createManualExitPlan`、`updateManualExitPlan`、`setExitPlanEnabled`、
+`cancelExitPlan`、`evaluateExitPlanNow` 和 `liquidatePositions`。
+
+实盘人工计划或清仓计划产生待确认 SELL 后，客户端使用 `previewExitIntent`、
+`confirmExitIntent` 或 `rejectExitIntent`。确认挑战只授权该意图再次进入统一
+风控，不代表委托提交或成交。旧 `liquidatePosition` 与
+`liquidateAllPositions` 保留为 `AVAILABLE_NOW + UNALLOCATED_ONLY` 兼容适配器。

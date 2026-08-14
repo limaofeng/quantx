@@ -131,8 +131,6 @@ class KLineData:
     )
 
 
-
-
 @strawberry.type(description="K线分页结果")
 class KLinePage:
   items: List[KLineData] = strawberry.field(description="K线列表(按 order 排序)")

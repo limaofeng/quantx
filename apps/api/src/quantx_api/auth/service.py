@@ -421,6 +421,61 @@ class AuthService:
     await self.db.commit()
     return True
 
+  @staticmethod
+  async def reconcile_development_auto_login_permissions(
+    db: AsyncSession,
+    auth_settings: Optional[Settings] = None,
+  ) -> bool:
+    """Add explicitly configured permissions to the dev auto-login user.
+
+    This is deliberately development-only and additive: production users are
+    never modified, and permissions granted manually are never removed.
+    """
+    auth_settings = auth_settings or settings
+    if (
+      not auth_settings.is_development
+      or not auth_settings.auth_development_auto_login
+    ):
+      return False
+    username = auth_settings.auth_development_username.strip().lower()
+    if not username:
+      return False
+    result = await db.execute(
+      select(AuthUser).where(AuthUser.username == username)
+    )
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+      return False
+    configured = {
+      str(value).strip()
+      for value in auth_settings.auth_bootstrap_permissions
+      if str(value).strip()
+    }
+    current = {str(value) for value in list(user.permissions or [])}
+    additions = configured - current
+    if not additions:
+      return False
+    user.permissions = sorted(current | additions)
+    db.add(
+      AuthAuditEvent(
+        id=str(uuid.uuid4()),
+        event_type="DEVELOPMENT_PERMISSION_SYNC",
+        outcome="SUCCESS",
+        reason_code="CONFIGURED_ADDITIVE_GRANT",
+        user_id=user.id,
+        device_session_id=None,
+        subject_fingerprint=None,
+        request_id="startup-development-permission-sync",
+        occurred_at=utcnow(),
+      )
+    )
+    await db.commit()
+    logger.info(
+      "开发自动登录用户权限已按配置增量同步（新增权限数量=%d）",
+      len(additions),
+    )
+    return True
+
   async def authenticate(self, access_token: str) -> Principal:
     claims = decode_access_token(access_token, self.settings)
     rows = (

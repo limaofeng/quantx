@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from typing import List, Optional
 
 import strawberry
@@ -196,6 +197,31 @@ class FinancialOverview:
   instrument_count: int = strawberry.field(description="覆盖标的数")
   latest_report_date: Optional[date] = strawberry.field(description="最新报告期")
   latest_announce_date: Optional[date] = strawberry.field(description="最新公告日")
+  sync_health: "FinancialSyncHealth" = strawberry.field(description="财务同步健康状态")
+
+
+@strawberry.enum(description="财务同步健康状态")
+class FinancialSyncHealthStatus(Enum):
+  NEVER_RUN = "NEVER_RUN"
+  RUNNING = "RUNNING"
+  SUCCESS = "SUCCESS"
+  PARTIAL_FAILURE = "PARTIAL_FAILURE"
+  FAILED = "FAILED"
+  STALE = "STALE"
+
+
+@strawberry.type(description="财务同步下载、入库和指标重算健康状态")
+class FinancialSyncHealth:
+  status: FinancialSyncHealthStatus
+  last_completed_at: Optional[datetime]
+  last_success_at: Optional[datetime]
+  requested_codes: int
+  synced_codes: int
+  empty_codes: int
+  statement_rows: int
+  metric_rows: int
+  is_stale: bool
+  warnings: List[str]
 
 
 @strawberry.type(description="单票财务摘要")

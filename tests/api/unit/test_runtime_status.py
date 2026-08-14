@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 import pytest
-from quantx_api import runtime_status
+from quantx_api import agent_api, runtime_status
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
@@ -131,7 +131,7 @@ async def test_component_status_exposes_worker_registration_counts(
 
 
 @pytest.mark.asyncio
-async def test_qmt_agent_is_ready_only_after_complete_reconciliation(
+async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -165,8 +165,8 @@ async def test_qmt_agent_is_ready_only_after_complete_reconciliation(
       RuntimeComponentHeartbeat(
         component="qmt-agent:device-1",
         instance_id="instance-1",
-        status="RECONCILING",
-        details={},
+        status="RECONCILE_REQUIRED",
+        details={"protocolVersion": "1.1"},
         updated_at=now,
       )
     )
@@ -174,13 +174,19 @@ async def test_qmt_agent_is_ready_only_after_complete_reconciliation(
 
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"] == {
-    "status": "offline",
-    "connectedDevices": 0,
+    "status": "ready",
+    "connectedDevices": 1,
+    "readyDevices": 0,
     "onlineDevices": 1,
     "reconcilingDevices": 1,
+    "degradedDevices": 0,
     "registeredDevices": 1,
+    "modes": ["paper"],
+    "protocolVersions": ["1.1"],
+    "accountIds": ["account-1"],
+    "latestSnapshotAgeSeconds": None,
   }
-  assert components["market-data"]["status"] == "offline"
+  assert components["market-data"]["status"] == "ready"
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -190,7 +196,78 @@ async def test_qmt_agent_is_ready_only_after_complete_reconciliation(
   components = await runtime_status._component_heartbeats()
   assert components["qmt-agent"]["status"] == "ready"
   assert components["qmt-agent"]["connectedDevices"] == 1
+  assert components["qmt-agent"]["readyDevices"] == 1
+  assert components["qmt-agent"]["reconcilingDevices"] == 0
   assert components["market-data"]["status"] == "ready"
+
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    heartbeat.status = "XTDATA_UNAVAILABLE"
+    await db.commit()
+
+  components = await runtime_status._component_heartbeats()
+  assert components["qmt-agent"]["status"] == "ready"
+  assert components["qmt-agent"]["degradedDevices"] == 1
+  assert components["market-data"]["status"] == "offline"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ready_heartbeat_cannot_clear_engine_reconciliation_requirement(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=[
+          AgentDevice.__table__,
+          RuntimeComponentHeartbeat.__table__,
+        ],
+      )
+    )
+  session_factory = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(agent_api, "AsyncSessionLocal", session_factory)
+  now = runtime_status.utcnow()
+
+  async with session_factory() as db:
+    db.add(
+      AgentDevice(
+        id="device-1",
+        user_id="user-1",
+        name="live",
+        secret_hash="x" * 64,
+        authorized_account_ids=["account-1"],
+        capabilities=["live", "market-data"],
+        last_seen_at=now,
+      )
+    )
+    db.add(
+      RuntimeComponentHeartbeat(
+        component="qmt-agent:device-1",
+        instance_id="instance-1",
+        status="RECONCILE_REQUIRED",
+        details={},
+        updated_at=now,
+      )
+    )
+    await db.commit()
+
+  await agent_api._record_heartbeat(
+    "device-1",
+    {
+      "status": "READY",
+      "capabilities": ["live", "market-data"],
+      "agent_version": "test",
+      "protocol_version": "1.1",
+    },
+  )
+
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    assert heartbeat.status == "RECONCILE_REQUIRED"
+    assert heartbeat.details["protocolVersion"] == "1.1"
   await engine.dispose()
 
 

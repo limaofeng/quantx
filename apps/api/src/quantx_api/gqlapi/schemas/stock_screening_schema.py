@@ -3,9 +3,12 @@ from typing import List
 import strawberry
 
 from ..resolvers.stock_screening import StockScreeningResolver
+from ..security import principal_from_context
 from ..types import (
   IntradayVolumeScreenInput,
   IntradayVolumeScreenPage,
+  LimitUpRadarInput,
+  LimitUpRadarPage,
   SignalMeta,
   StockScreenInput,
   StockScreenPage,
@@ -35,6 +38,18 @@ class StockScreeningQuery:
     self, input: IntradayVolumeScreenInput
   ) -> IntradayVolumeScreenPage:
     return await StockScreeningResolver.intraday_volume_screen(input)
+
+  @strawberry.field(description="沪深全市场打板机会雷达")
+  async def limit_up_radar(
+    self,
+    info: strawberry.types.Info,
+    input: LimitUpRadarInput,
+  ) -> LimitUpRadarPage:
+    principal = principal_from_context(info.context)
+    return await StockScreeningResolver.limit_up_radar(
+      input,
+      user_id=principal.user_id,
+    )
 
   @strawberry.field(description="获取可用日级信号及快照元信息")
   async def stock_signal_snapshot_meta(self) -> List[SignalMeta]:

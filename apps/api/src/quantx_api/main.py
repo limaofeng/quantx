@@ -329,6 +329,7 @@ async def lifespan(app: FastAPI):
     logger.info("数据库初始化完成")
     async for auth_db in get_async_db():
       await AuthService.bootstrap_from_settings(auth_db)
+      await AuthService.reconcile_development_auto_login_permissions(auth_db)
       break
   except Exception as e:
     logger.error(f"数据库初始化失败: {e}")

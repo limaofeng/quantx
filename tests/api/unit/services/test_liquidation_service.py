@@ -10,6 +10,7 @@ from quantx_infrastructure.models.enums import AccountType, OrderType, PriceType
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
+  ConditionalLiquidationStrategy,
 )
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.services.liquidation_service import (
@@ -625,3 +626,41 @@ class TestLiquidationService:
     assert not result.submitted
     assert result.error == "no_legal_sell_volume"
     mock_submit.assert_not_called()
+
+  @pytest.mark.asyncio
+  async def test_adaptive_conditional_order_never_uses_immediate_submit_path(
+    self, liquidation_service, mock_position
+  ):
+    order = make_conditional_order(
+      strategy=ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING,
+      sell_mode=ConditionalLiquidationSellMode.FIXED_VOLUME,
+      sell_volume=300,
+    )
+    mock_position.avg_price = 10.0
+    mock_position.last_price = 12.0
+
+    with (
+      patch.object(
+        liquidation_service,
+        "_get_position_for_condition",
+        return_value=mock_position,
+      ),
+      patch.object(liquidation_service, "_liquidate_single_position") as submit,
+    ):
+      result = await liquidation_service.evaluate_conditional_liquidation_order(
+        order
+      )
+
+    assert not result.submitted
+    assert result.message == "adaptive_exit_requires_engine_market_context"
+    submit.assert_not_called()
+
+  def test_dynamic_strategy_validation_is_explicit(self, liquidation_service):
+    assert (
+      liquidation_service._normalize_conditional_strategy(
+        "adaptive_volume_price_trailing"
+      )
+      == ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING
+    )
+    with pytest.raises(LiquidationError, match="不支持的条件清仓策略"):
+      liquidation_service._normalize_conditional_strategy("unknown")

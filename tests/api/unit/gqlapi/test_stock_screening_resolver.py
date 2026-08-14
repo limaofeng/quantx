@@ -1,10 +1,15 @@
 import math
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.gqlapi.resolvers.stock_screening import StockScreeningResolver
 from quantx_api.gqlapi.types import (
+  IntradayVolumeScreenInput,
+  LimitUpRadarInput,
+  LimitUpRadarSortField,
+  LimitUpRadarStage,
   StockScreenInput,
   StockScreenSortDirection,
   StockScreenSortField,
@@ -13,12 +18,79 @@ from quantx_api.gqlapi.types import (
 )
 
 
+@pytest.mark.asyncio
+async def test_intraday_volume_screen_returns_live_breadth_and_rankings(monkeypatch):
+  import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  updated_at = "2026-08-13T14:40:03+08:00"
+
+  def item(code, change_pct):
+    return {
+      "code": code,
+      "name": code,
+      "instrument_type": "stock",
+      "current_price": 10 + change_pct,
+      "change_pct": change_pct,
+      "volume_ratio": 1.2,
+      "volume_pace_ratio": 1 + abs(change_pct),
+      "updated_at": updated_at,
+    }
+
+  monkeypatch.setattr(
+    stock_screening_module.limit_up_radar_store,
+    "read_intraday",
+    AsyncMock(
+      return_value={
+        "items": [
+          item("000001.SZ", 1.2),
+          item("000002.SZ", -2.5),
+          item("000003.SZ", 5.0),
+          item("000004.SZ", 0.0),
+        ],
+        "updated_at": updated_at,
+        "is_scanner_running": True,
+        "warnings": [],
+      }
+    ),
+  )
+
+  result = await StockScreeningResolver.intraday_volume_screen(
+    IntradayVolumeScreenInput(limit=2)
+  )
+
+  assert result.total == 4
+  assert result.advancers == 2
+  assert result.decliners == 1
+  assert result.flats == 1
+  assert [row.code for row in result.top_gainers] == ["000003.SZ", "000001.SZ"]
+  assert [row.code for row in result.top_losers] == ["000002.SZ"]
+
+
 async def fake_db_factory():
   yield object()
 
 
 async def natural_expected_snapshot_date(today):
   return today
+
+
+def financial_health(status="SUCCESS"):
+  return {
+    "status": status,
+    "last_completed_at": None,
+    "last_success_at": None,
+    "requested_codes": 5000,
+    "synced_codes": 4998 if status != "SUCCESS" else 5000,
+    "empty_codes": 2 if status != "SUCCESS" else 0,
+    "statement_rows": 100,
+    "metric_rows": 100,
+    "is_stale": status == "STALE",
+    "warnings": (
+      ["2 只股票未返回受支持的财务四表"]
+      if status != "SUCCESS"
+      else []
+    ),
+  }
 
 
 class EmptySnapshotRepo:
@@ -167,6 +239,16 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
   async def find_instrument_types_by_codes(self, codes):
     return {code: "etf" if code == "000001.SZ" else "stock" for code in codes}
 
+  async def financial_quality_counts(self, *_args, **_kwargs):
+    return {
+      "verified": 1,
+      "selectable": 1,
+      "stale": 0,
+      "suspicious": 0,
+      "invalid": 0,
+      "unverified": 1,
+    }
+
   async def screen_snapshots(
     self,
     snapshot_date,
@@ -262,11 +344,26 @@ class SnapshotRepoWithSortableRows(SnapshotRepoWithNonFiniteValues):
           revenue_growth_pct=16.2,
           report_date=date(2025, 12, 31),
           announce_date=date(2026, 4, 20),
+          as_of_date=date(2026, 4, 20),
           quality_flags=["valid"],
         ),
+        financial_audit=SimpleNamespace(
+          verified_at=datetime(2026, 5, 20, 8, 30),
+        ),
+        roe_quality_status="VALID",
+        roe_quality_flags=["valid"],
         matched_signals=["强势股", "放量突破"],
       ),
     ], 2
+
+
+class SnapshotRepoWithSuspiciousRoe(SnapshotRepoWithSortableRows):
+  async def screen_snapshots(self, *args, **kwargs):
+    records, total = await super().screen_snapshots(*args, **kwargs)
+    record = records[1]
+    record.roe_quality_status = "SUSPICIOUS"
+    record.roe_quality_flags = ["extreme_roe_ttm"]
+    return records, total
 
 
 @pytest.mark.asyncio
@@ -368,6 +465,11 @@ async def test_stock_screen_uses_previous_trading_day_on_non_trading_day(monkeyp
     "_expected_snapshot_date",
     staticmethod(expected_previous_trading_day),
   )
+  monkeypatch.setattr(
+    stock_screening_module,
+    "financial_sync_health",
+    AsyncMock(return_value=financial_health()),
+  )
 
   result = await StockScreeningResolver.stock_screen(
     StockScreenInput(min_roe=5.0)
@@ -407,6 +509,11 @@ async def test_stock_screen_passes_financial_filters_and_maps_financial_metrics(
     "_expected_snapshot_date",
     staticmethod(natural_expected_snapshot_date),
   )
+  monkeypatch.setattr(
+    stock_screening_module,
+    "financial_sync_health",
+    AsyncMock(return_value=financial_health("PARTIAL_FAILURE")),
+  )
 
   result = await StockScreeningResolver.stock_screen(
     StockScreenInput(
@@ -427,7 +534,52 @@ async def test_stock_screen_passes_financial_filters_and_maps_financial_metrics(
   assert item.revenue_accum_growth == 16.2
   assert item.financial_report_date == date(2025, 12, 31)
   assert item.financial_announce_date == date(2026, 4, 20)
+  assert item.financial_as_of_date == date(2026, 4, 20)
+  assert item.financial_verified_at == datetime(2026, 5, 20, 8, 30)
   assert item.financial_quality_flags == ["valid"]
+  assert item.roe_quality_status.value == "VALID"
+  assert result.financial_health.selectable_count == 1
+  assert any("财务同步状态异常" in warning for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_stock_screen_hides_suspicious_roe_but_keeps_quality_audit(monkeypatch):
+  import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  monkeypatch.setattr(stock_screening_module, "get_async_db", fake_db_factory)
+  monkeypatch.setattr(
+    stock_screening_module,
+    "IndicatorSnapshotRepository",
+    SnapshotRepoWithSuspiciousRoe,
+  )
+  monkeypatch.setattr(
+    stock_screening_module,
+    "DailySignalRunRepository",
+    CompletedRunRepo,
+  )
+  monkeypatch.setattr(
+    StockScreeningResolver,
+    "_today",
+    staticmethod(lambda: date(2026, 5, 20)),
+  )
+  monkeypatch.setattr(
+    StockScreeningResolver,
+    "_expected_snapshot_date",
+    staticmethod(natural_expected_snapshot_date),
+  )
+  monkeypatch.setattr(
+    stock_screening_module,
+    "financial_sync_health",
+    AsyncMock(return_value=financial_health()),
+  )
+
+  result = await StockScreeningResolver.stock_screen(StockScreenInput())
+  item = next(item for item in result.items if item.code == "000001.SZ")
+
+  assert item.roe is None
+  assert item.roe_quality_status.value == "SUSPICIOUS"
+  assert item.financial_quality_flags == ["extreme_roe_ttm"]
+  assert item.financial_report_date == date(2025, 12, 31)
 
 
 @pytest.mark.asyncio
@@ -733,3 +885,233 @@ async def test_stale_successful_run_is_not_complete(monkeypatch):
   assert result.snapshot_date == date(2026, 5, 20)
   assert result.has_stale_data is True
   assert result.is_complete is False
+
+
+def radar_projection():
+  return {
+    "score_version": "limit-up-radar-v1",
+    "updated_at": "2026-08-10T10:20:03+08:00",
+    "is_scanner_running": True,
+    "warnings": [],
+    "summary": {
+      "scanned_count": 5200,
+      "candidate_count": 2,
+      "near_limit_count": 1,
+      "sealed_count": 1,
+      "broken_count": 0,
+      "stale_count": 0,
+      "excluded_count": 80,
+    },
+    "industries": [
+      {
+        "industry": "软件服务",
+        "candidate_count": 2,
+        "near_limit_count": 1,
+        "sealed_count": 1,
+        "average_score": 82.5,
+      }
+    ],
+    "items": [
+      {
+        "code": "300001.SZ",
+        "name": "特锐德",
+        "industry": "软件服务",
+        "current_price": 19.7,
+        "change_pct": 8.8,
+        "limit_up_price": 20.0,
+        "price_tick": 0.01,
+        "distance_to_limit_pct": 1.5,
+        "distance_to_limit_ticks": 30,
+        "price_change_5m_pct": 2.1,
+        "amount": 500000000,
+        "amount_pace_ratio": 2.3,
+        "volume_pace_ratio": 2.1,
+        "last_5m_volume_ratio": 3.2,
+        "intraday_turnover_rate_pct": 7.1,
+        "depth_imbalance_5": 0.45,
+        "bid1_price": 19.69,
+        "ask1_price": 19.7,
+        "bid1_volume": 120000,
+        "ask1_volume": 30000,
+        "stage": "NEAR_LIMIT",
+        "stage_label": "临板",
+        "radar_score": 88.0,
+        "score_version": "limit-up-radar-v1",
+        "score_breakdown": [
+          {
+            "code": "PROXIMITY",
+            "label": "涨停距离",
+            "score": 21,
+            "max_score": 30,
+            "explanation": "距涨停 1.50%",
+          }
+        ],
+        "break_count": 0,
+        "events": [],
+        "one_word_limit_up": False,
+        "is_stale": False,
+        "quality_tags": [],
+        "blocked_reasons": [],
+        "can_create_instance": True,
+        "updated_at": "2026-08-10T10:20:03+08:00",
+      },
+      {
+        "code": "600001.SH",
+        "name": "示例封板",
+        "industry": "软件服务",
+        "current_price": 11.0,
+        "change_pct": 10.0,
+        "limit_up_price": 11.0,
+        "distance_to_limit_pct": 0,
+        "stage": "SEALED",
+        "stage_label": "封板",
+        "radar_score": 77.0,
+        "score_breakdown": [],
+        "break_count": 0,
+        "events": [],
+        "one_word_limit_up": False,
+        "is_stale": False,
+        "quality_tags": [],
+        "blocked_reasons": ["LIMIT_UP_ALREADY_REACHED"],
+        "can_create_instance": False,
+        "updated_at": "2026-08-10T10:20:01+08:00",
+      },
+    ],
+  }
+
+
+@pytest.mark.asyncio
+async def test_limit_up_radar_filters_sorts_and_maps_user_instance(monkeypatch):
+  import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  class RadarRunRepo:
+    received_user_id = None
+
+    def __init__(self, db):
+      self.db = db
+
+    async def find_all_strategy_runs(self, user_id=None):
+      RadarRunRepo.received_user_id = user_id
+      return [
+        SimpleNamespace(
+          id="run-300001",
+          instruments=["300001.SZ"],
+          mode="paper",
+          status="running",
+          updated_at=datetime(2026, 8, 10, 10, 0),
+          strategy=SimpleNamespace(
+            class_name="AshareLimitUpBoardStrategy",
+            name="A股单标的打板策略",
+          ),
+        )
+      ]
+
+  monkeypatch.setattr(
+    stock_screening_module.limit_up_radar_store,
+    "read_radar",
+    AsyncMock(return_value=radar_projection()),
+  )
+  monkeypatch.setattr(stock_screening_module, "get_async_db", fake_db_factory)
+  monkeypatch.setattr(
+    stock_screening_module,
+    "StrategyRunRepository",
+    RadarRunRepo,
+  )
+
+  result = await StockScreeningResolver.limit_up_radar(
+    LimitUpRadarInput(
+      stages=[LimitUpRadarStage.NEAR_LIMIT],
+      include_industries=["软件服务"],
+      min_score=80,
+      search="特锐",
+      sort_field=LimitUpRadarSortField.DISTANCE_TO_LIMIT,
+    ),
+    user_id="user-1",
+  )
+
+  assert RadarRunRepo.received_user_id == "user-1"
+  assert result.total == 1
+  assert result.items[0].code == "300001.SZ"
+  assert result.items[0].existing_instance_id == "run-300001"
+  assert result.items[0].score_breakdown[0].score == 21
+  assert result.summary.scanned_count == 5200
+  assert result.industries[0].average_score == 82.5
+
+
+@pytest.mark.asyncio
+async def test_limit_up_radar_uses_latest_active_instance_not_terminal_history(
+  monkeypatch,
+):
+  import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  class RadarRunRepo:
+    def __init__(self, db):
+      self.db = db
+
+    async def find_all_strategy_runs(self, user_id=None):
+      strategy = SimpleNamespace(
+        class_name="AshareLimitUpBoardStrategy",
+        name="A股单标的打板策略",
+      )
+      return [
+        SimpleNamespace(
+          id="terminal-newest",
+          instruments=["300001.SZ"],
+          mode="paper",
+          status="stopped",
+          updated_at=datetime(2026, 8, 10, 11, 0),
+          strategy=strategy,
+        ),
+        SimpleNamespace(
+          id="active-older",
+          instruments=["300001.SZ"],
+          mode="paper",
+          status="running",
+          updated_at=datetime(2026, 8, 10, 9, 0),
+          strategy=strategy,
+        ),
+        SimpleNamespace(
+          id="active-latest",
+          instruments=["300001.SZ"],
+          mode="live",
+          status="paused",
+          updated_at=datetime(2026, 8, 10, 10, 0),
+          strategy=strategy,
+        ),
+      ]
+
+  monkeypatch.setattr(
+    stock_screening_module.limit_up_radar_store,
+    "read_radar",
+    AsyncMock(return_value=radar_projection()),
+  )
+  monkeypatch.setattr(stock_screening_module, "get_async_db", fake_db_factory)
+  monkeypatch.setattr(
+    stock_screening_module,
+    "StrategyRunRepository",
+    RadarRunRepo,
+  )
+
+  result = await StockScreeningResolver.limit_up_radar(
+    LimitUpRadarInput(search="特锐"),
+    user_id="user-1",
+  )
+
+  assert result.items[0].existing_instance_id == "active-latest"
+
+
+@pytest.mark.asyncio
+async def test_limit_up_radar_offline_projection_is_fail_closed(monkeypatch):
+  import quantx_api.gqlapi.resolvers.stock_screening as stock_screening_module
+
+  monkeypatch.setattr(
+    stock_screening_module.limit_up_radar_store,
+    "read_radar",
+    AsyncMock(return_value=None),
+  )
+
+  result = await StockScreeningResolver.limit_up_radar(LimitUpRadarInput())
+
+  assert result.items == []
+  assert result.is_scanner_running is False
+  assert "Engine" in result.warnings[0]

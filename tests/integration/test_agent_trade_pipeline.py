@@ -22,7 +22,11 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.trade import Trade
-from quantx_infrastructure.services import order_service, trade_service
+from quantx_infrastructure.services import (
+  auto_exit_plan_service,
+  order_service,
+  trade_service,
+)
 from quantx_infrastructure.services.trade_command_service import (
   TradeCommandService,
 )
@@ -77,6 +81,11 @@ async def _database(
 
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", session_factory)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", session_factory)
+  monkeypatch.setattr(
+    auto_exit_plan_service,
+    "AsyncSessionLocal",
+    session_factory,
+  )
   monkeypatch.setattr(order_service, "get_async_db", get_test_db)
   monkeypatch.setattr(trade_service, "get_async_db", get_test_db)
   async with session_factory() as db:

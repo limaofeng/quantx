@@ -173,6 +173,11 @@ class BrokerOrderPayload(BaseModel):
   stock_code: str = ""
   order_status: Optional[Any] = None
   status: Optional[Any] = None
+  effective_order_status: Optional[str] = None
+  can_cancel: Optional[bool] = None
+  session_expired: bool = False
+  effective_status_reason: str = ""
+  order_session_date: Optional[str] = None
   traded_volume: int = Field(default=0, ge=0)
   traded_price: float = Field(default=0.0, ge=0)
 

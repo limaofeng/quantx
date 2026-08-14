@@ -26,6 +26,9 @@ def balance(report_date, announce_date, equity):
     stock_code="000001.SZ",
     report_date=report_date,
     announce_date=announce_date,
+    total_assets=equity + 100.0,
+    total_liabilities=100.0,
+    total_equity=equity,
     tot_shrhldr_eqy_excl_min_int=equity,
   )
 
@@ -125,6 +128,8 @@ def test_calculates_annual_ttm_roe_and_growth():
   assert result["net_profit_quarter_growth_pct"] == 50.0
   assert result["revenue_quarter_growth_pct"] == 25.0
   assert result["quality_status"] == "valid"
+  assert result["roe_quality_status"] == "VALID"
+  assert result["roe_quality_flags"] == []
 
 
 def test_calculates_non_annual_ttm_from_current_prior_year_and_prior_same():
@@ -253,6 +258,8 @@ def test_non_positive_average_equity_nulls_roe():
   assert result["roe_ttm"] is None
   assert "non_positive_average_shareholder_equity" in result["quality_flags"]
   assert result["quality_status"] == "partial"
+  assert result["roe_quality_status"] == "INVALID"
+  assert "non_positive_start_shareholder_equity" in result["roe_quality_flags"]
 
 
 def test_missing_current_announce_date_is_not_visible_to_history():
@@ -273,3 +280,62 @@ def test_missing_current_announce_date_is_not_visible_to_history():
   assert result["as_of_date"] == UNKNOWN_AS_OF_DATE
   assert "missing_current_income_announce_date" in result["quality_flags"]
   assert "not_visible_without_current_announce_date" in result["quality_flags"]
+  assert result["roe_quality_status"] == "INVALID"
+
+
+def test_extreme_roe_is_suspicious_but_keeps_audit_value():
+  current = income(date(2025, 12, 31), date(2026, 4, 20), 3_000.0, 4_000.0)
+
+  result = calculate(
+    current,
+    [current],
+    [
+      balance(date(2024, 12, 31), date(2025, 4, 20), 10.0),
+      balance(date(2025, 12, 31), date(2026, 4, 20), 10.0),
+    ],
+  )
+
+  assert result["roe_ttm"] == 30_000.0
+  assert result["roe_quality_status"] == "SUSPICIOUS"
+  assert "extreme_roe_ttm" in result["roe_quality_flags"]
+
+
+def test_balance_equation_mismatch_marks_roe_suspicious():
+  current = income(date(2025, 12, 31), date(2026, 4, 20), 120.0, 1_000.0)
+  current_balance = balance(
+    date(2025, 12, 31),
+    date(2026, 4, 20),
+    1_000.0,
+  )
+  current_balance.total_assets = 5_000.0
+
+  result = calculate(
+    current,
+    [current],
+    [
+      balance(date(2024, 12, 31), date(2025, 4, 20), 800.0),
+      current_balance,
+    ],
+  )
+
+  assert result["roe_ttm"] == 13.3333
+  assert result["roe_quality_status"] == "SUSPICIOUS"
+  assert "current_balance_equation_mismatch" in result["roe_quality_flags"]
+
+
+def test_future_announcement_marks_roe_suspicious():
+  current = income(date(2025, 12, 31), date(2026, 6, 10), 120.0, 1_000.0)
+
+  result = calculate(
+    current,
+    [current],
+    [
+      balance(date(2024, 12, 31), date(2025, 4, 20), 800.0),
+      balance(date(2025, 12, 31), date(2026, 6, 10), 1_000.0),
+    ],
+  )
+
+  assert result["roe_quality_status"] == "SUSPICIOUS"
+  assert "current_income_announce_after_verification_date" in result[
+    "roe_quality_flags"
+  ]

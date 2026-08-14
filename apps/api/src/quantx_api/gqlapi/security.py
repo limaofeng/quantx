@@ -33,6 +33,11 @@ _PORTFOLIO_FIELDS = {
 }
 _ORDER_FIELDS = {
   "conditionalliquidationorders",
+  "exitplan",
+  "exitplancapabilities",
+  "exitplanevents",
+  "exitplanholdingcapacity",
+  "exitplans",
   "historyorders",
   "historytrades",
   "liquidationorder",
@@ -59,6 +64,8 @@ _STRATEGY_FIELDS = {
   "strategyinstances",
   "strategypendingtradeintents",
   "strategyperformance",
+  "limitupboardassistant",
+  "limitupboardassistantupdates",
   "strategyrun",
   "strategyruns",
   "ttradeglobalmonitor",
@@ -104,6 +111,8 @@ _MARKET_FIELDS = {
   "klines",
   "klinespage",
   "latestmarketquotes",
+  "marketindexintradaytrend",
+  "limitupradar",
   "rootsectors",
   "researchrun",
   "researchruns",
@@ -120,6 +129,23 @@ _MARKET_FIELDS = {
   "tradingcalendar",
 }
 _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
+_TRADE_APPROVAL_MUTATION_FIELDS = {
+  "activatettradelive",
+  "approvestrategytradeintent",
+  "approvettradeentry",
+  "beginttradecontrolledwindow",
+  "confirmstrategytradeintentapproval",
+  "confirmexitintent",
+  "confirmttradeentryapproval",
+  "previewstrategytradeintentapproval",
+  "previewexitintent",
+  "previewttradeentryapproval",
+  "pausettradeentries",
+  "rejectstrategytradeintent",
+  "rejectexitintent",
+  "rejectttradeentry",
+  "triggerttradekillswitch",
+}
 
 _NORMALIZED_PORTFOLIO_FIELDS = {
   re.sub(r"[^a-z0-9]", "", value.lower()) for value in _PORTFOLIO_FIELDS
@@ -131,9 +157,11 @@ def normalize_field_name(value: str) -> str:
 
 
 def required_permission(operation_name: str, field_name: str) -> str:
-  if operation_name == "Mutation":
-    return "mutation:write"
   normalized = normalize_field_name(field_name)
+  if operation_name == "Mutation":
+    if normalized in _TRADE_APPROVAL_MUTATION_FIELDS:
+      return "trade:approve"
+    return "mutation:write"
   if normalized in _NORMALIZED_PORTFOLIO_FIELDS:
     return "portfolio:read"
   if normalized in _ORDER_FIELDS:

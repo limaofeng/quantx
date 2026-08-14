@@ -3,6 +3,10 @@ import math
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
+from quantx_infrastructure.core.assistant_strategy_policy import (
+  LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
+  is_active_execution_run,
+)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import get_async_db
 from quantx_infrastructure.repositories.daily_signal_run_repository import (
@@ -11,19 +15,38 @@ from quantx_infrastructure.repositories.daily_signal_run_repository import (
 from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   IndicatorSnapshotRepository,
 )
-from quantx_infrastructure.services.intraday_volume_scanner import (
-  intraday_volume_scanner,
+from quantx_infrastructure.repositories.strategy_run_repository import (
+  StrategyRunRepository,
+)
+from quantx_infrastructure.services.financial_sync_health_service import (
+  financial_sync_health,
+)
+from quantx_infrastructure.services.limit_up_radar import (
+  RADAR_SCORE_VERSION,
+  limit_up_radar_store,
 )
 from quantx_infrastructure.services.trading_time_service import (
   TradingDateHelper,
   TradingTimeService,
 )
 
+from ..types.financial_types import FinancialSyncHealthStatus
 from ..types.stock_screening_types import (
   IntradayVolumeScreenInput,
   IntradayVolumeScreenItem,
   IntradayVolumeScreenPage,
+  LimitUpRadarEvent,
+  LimitUpRadarIndustryHeat,
+  LimitUpRadarInput,
+  LimitUpRadarItem,
+  LimitUpRadarPage,
+  LimitUpRadarScoreFactor,
+  LimitUpRadarSortField,
+  LimitUpRadarStage,
+  LimitUpRadarSummary,
+  RoeQualityStatus,
   SignalMeta,
+  StockScreenFinancialHealth,
   StockScreenInput,
   StockScreenItem,
   StockScreenPage,
@@ -86,6 +109,24 @@ def _instrument_type_value(value: Any) -> str:
     text = text.rsplit(".", 1)[-1]
   text = text.lower()
   return text if text in {"stock", "etf"} else "stock"
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+  if isinstance(value, datetime):
+    return value
+  if value in (None, ""):
+    return None
+  try:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+  except ValueError:
+    return None
+
+
+def _radar_stage(value: Any) -> LimitUpRadarStage:
+  try:
+    return LimitUpRadarStage(str(value or "MOMENTUM"))
+  except ValueError:
+    return LimitUpRadarStage.MOMENTUM
 
 
 class StockScreeningResolver:
@@ -352,6 +393,48 @@ class StockScreeningResolver:
         universe=input.universe.value,
         exclude_st=input.exclude_st,
       )
+      try:
+        financial_health_data = await financial_sync_health(db)
+      except Exception:
+        logger.exception("读取财务同步健康状态失败")
+        financial_health_data = {
+          "status": "FAILED",
+          "last_success_at": None,
+          "requested_codes": 0,
+          "synced_codes": 0,
+          "warnings": ["财务同步健康状态读取失败"],
+        }
+      try:
+        financial_quality_counts = await snapshot_repo.financial_quality_counts(
+          snapshot_date,
+          include_industries=input.include_industries,
+          exclude_industries=input.exclude_industries,
+          universe=input.universe.value,
+          exclude_st=input.exclude_st,
+        )
+      except (AttributeError, NotImplementedError):
+        financial_quality_counts = {
+          "verified": int(financial_health_data.get("synced_codes") or 0),
+          "selectable": 0,
+          "stale": 0,
+          "suspicious": 0,
+          "invalid": 0,
+          "unverified": 0,
+        }
+      financial_health = StockScreenFinancialHealth(
+        status=FinancialSyncHealthStatus(financial_health_data["status"]),
+        last_success_at=financial_health_data.get("last_success_at"),
+        verified_count=int(financial_quality_counts.get("verified") or 0),
+        selectable_count=int(financial_quality_counts.get("selectable") or 0),
+        excluded_stale_count=int(financial_quality_counts.get("stale") or 0),
+        excluded_suspicious_count=int(
+          financial_quality_counts.get("suspicious") or 0
+        ),
+        excluded_invalid_count=int(financial_quality_counts.get("invalid") or 0),
+        excluded_unverified_count=int(
+          financial_quality_counts.get("unverified") or 0
+        ),
+      )
       financial_filter_active = any(
         value is not None
         for value in [
@@ -360,6 +443,18 @@ class StockScreeningResolver:
           input.min_yoy_growth,
         ]
       )
+      if financial_filter_active:
+        if financial_health_data["status"] != "SUCCESS":
+          coverage = (
+            f"{financial_health_data.get('synced_codes', 0)}/"
+            f"{financial_health_data.get('requested_codes', 0)}"
+          )
+          detail = "；".join(financial_health_data.get("warnings") or [])
+          warnings.append(
+            "财务同步状态异常，未验证或质量异常的数据已排除："
+            f"状态={financial_health_data['status']}，覆盖={coverage}"
+            + (f"；{detail}" if detail else "")
+          )
       if financial_filter_active and total == 0:
         warnings.append("未找到满足财务指标条件的标的，未公告或质量异常的财报不会通过财务筛选")
       industry_map = await snapshot_repo.find_industry_names_by_codes([record.code for record in records])
@@ -383,6 +478,16 @@ class StockScreeningResolver:
         current_price = _finite_float(record.current_price)
         open_price = _finite_float(record.open_price)
         financial_metric = getattr(record, "financial_metric", None)
+        financial_audit = getattr(record, "financial_audit", None)
+        raw_roe_quality_status = getattr(
+          record,
+          "roe_quality_status",
+          "UNVERIFIED",
+        )
+        try:
+          roe_quality_status = RoeQualityStatus(raw_roe_quality_status)
+        except ValueError:
+          roe_quality_status = RoeQualityStatus.UNVERIFIED
         items.append(
           StockScreenItem(
             code=record.code,
@@ -434,9 +539,12 @@ class StockScreeningResolver:
             ma20=_finite_float(record.ma20),
             ma5_prev=_finite_optional_float(record.ma5_prev),
             ma10_prev=_finite_optional_float(record.ma10_prev),
-            roe=_finite_optional_float(
-              getattr(financial_metric, "roe_ttm", None)
+            roe=(
+              _finite_optional_float(getattr(financial_metric, "roe_ttm", None))
+              if roe_quality_status is RoeQualityStatus.VALID
+              else None
             ),
+            roe_quality_status=roe_quality_status,
             net_profit_growth=_finite_optional_float(
               getattr(financial_metric, "net_profit_quarter_growth_pct", None)
             ),
@@ -451,8 +559,10 @@ class StockScreeningResolver:
             ),
             financial_report_date=getattr(financial_metric, "report_date", None),
             financial_announce_date=getattr(financial_metric, "announce_date", None),
+            financial_as_of_date=getattr(financial_metric, "as_of_date", None),
+            financial_verified_at=getattr(financial_audit, "verified_at", None),
             financial_quality_flags=list(
-              getattr(financial_metric, "quality_flags", None) or []
+              getattr(record, "roe_quality_flags", None) or []
             ),
             matched_strategies=matched,
             score=score,
@@ -483,6 +593,7 @@ class StockScreeningResolver:
           and metadata_run.status == "success"
         ),
         warnings=warnings,
+        financial_health=financial_health,
       )
 
     raise RuntimeError("数据库连接不可用")
@@ -493,104 +604,323 @@ class StockScreeningResolver:
   ) -> IntradayVolumeScreenPage:
     limit = min(max(input.limit or 200, 1), 200)
     offset = min(max(input.offset or 0, 0), 200 * 1000)
-    warnings: List[str] = []
-    scanner_started = await intraday_volume_scanner.start()
-    if not scanner_started:
-      warnings.append(
-        "盘中全市场量能扫描未启动，可能是 QMT Agent 行情能力不可用"
-      )
-
-    async for db in get_async_db():
-      snapshot_repo = IndicatorSnapshotRepository(db)
-      snapshot_date = await snapshot_repo.get_latest_snapshot_date()
-      if snapshot_date is None:
-        return IntradayVolumeScreenPage(
-          items=[],
-          total=0,
-          limit=limit,
-          offset=offset,
-          updated_at=None,
-          is_scanner_running=intraday_volume_scanner.is_running,
-          warnings=warnings + ["尚无可用日级基线快照，无法计算盘中量能进度"],
-        )
-
-      records, _ = await snapshot_repo.screen_snapshots(
-        snapshot_date=snapshot_date,
-        include_industries=input.include_industries,
-        exclude_industries=input.exclude_industries,
-        limit=20000,
-        offset=0,
-        universe=input.universe.value,
-        exclude_st=input.exclude_st,
-      )
-      codes = [record.code for record in records]
-      industry_map = await snapshot_repo.find_industry_names_by_codes(codes)
-      instrument_type_map = await snapshot_repo.find_instrument_types_by_codes(codes)
-      float_volume_map = await snapshot_repo.find_float_volume_by_codes(codes)
-      baselines = [
-        {
-          "code": record.code,
-          "name": record.name or record.code,
-          "industry": industry_map.get(record.code),
-          "instrument_type": _instrument_type_value(
-            instrument_type_map.get(record.code)
-            or getattr(record, "instrument_type", None)
-          ),
-          "avg_volume_20": _finite_float(record.avg_volume_20),
-          "avg_amount_20": _finite_float(
-            getattr(record, "avg_amount_20", None)
-          ),
-          "float_volume": float_volume_map.get(record.code),
-        }
-        for record in records
-      ]
-      page = intraday_volume_scanner.screen(
-        baselines,
-        min_volume_pace_ratio=input.min_volume_pace_ratio,
-        min_amount_pace_ratio=input.min_amount_pace_ratio,
-        min_last_5m_volume_ratio=input.min_last_5m_volume_ratio,
-        min_intraday_turnover_rate=input.min_intraday_turnover_rate,
-        min_depth_imbalance_5=input.min_depth_imbalance_5,
-        stale_after_seconds=input.stale_after_seconds,
-        limit=limit,
-        offset=offset,
-      )
-      if not page["items"]:
-        warnings.append("尚未收到匹配条件的全市场实时 tick，盘中扫描会在行情推送后更新")
+    page = await limit_up_radar_store.read_intraday()
+    if page is None:
       return IntradayVolumeScreenPage(
-        items=[
-          IntradayVolumeScreenItem(
-            code=item["code"],
-            name=item["name"],
-            industry=item["industry"],
-            instrument_type=item["instrument_type"],
-            current_price=item["current_price"],
-            change_pct=item["change_pct"],
-            volume=item["volume"],
-            amount=item["amount"],
-            volume_ratio=item["volume_ratio"],
-            amount_ratio=item["amount_ratio"],
-            volume_pace_ratio=item["volume_pace_ratio"],
-            amount_pace_ratio=item["amount_pace_ratio"],
-            last_5m_volume_ratio=item["last_5m_volume_ratio"],
-            intraday_turnover_rate_pct=item["intraday_turnover_rate_pct"],
-            depth_imbalance_5=item["depth_imbalance_5"],
-            avg_trade_amount_proxy=item["avg_trade_amount_proxy"],
-            matched_signals=item["matched_signals"],
-            updated_at=item["updated_at"],
-            is_stale=item["is_stale"],
-          )
-          for item in page["items"]
-        ],
-        total=page["total"],
+        items=[],
+        top_gainers=[],
+        top_losers=[],
+        advancers=0,
+        decliners=0,
+        flats=0,
+        total=0,
         limit=limit,
         offset=offset,
-        updated_at=page["updated_at"],
-        is_scanner_running=page["is_scanner_running"],
-        warnings=warnings,
+        updated_at=None,
+        is_scanner_running=False,
+        warnings=["Engine 全市场扫描尚未就绪，请检查 Engine 与 QMT Agent"],
       )
 
-    raise RuntimeError("数据库连接不可用")
+    include_industries = set(input.include_industries or [])
+    exclude_industries = set(input.exclude_industries or [])
+    universe = input.universe.value
+
+    def matches(item: Dict[str, Any]) -> bool:
+      instrument_type = str(item.get("instrument_type") or "stock")
+      if universe != "stock_and_etf" and instrument_type != universe:
+        return False
+      industry = item.get("industry")
+      if include_industries and industry not in include_industries:
+        return False
+      if exclude_industries and industry in exclude_industries:
+        return False
+      thresholds = (
+        (input.min_volume_pace_ratio, "volume_pace_ratio"),
+        (input.min_amount_pace_ratio, "amount_pace_ratio"),
+        (input.min_last_5m_volume_ratio, "last_5m_volume_ratio"),
+        (input.min_intraday_turnover_rate, "intraday_turnover_rate_pct"),
+        (input.min_depth_imbalance_5, "depth_imbalance_5"),
+      )
+      return all(
+        threshold is None
+        or item.get(key) is not None
+        and _finite_float(item.get(key)) >= threshold
+        for threshold, key in thresholds
+      )
+
+    matched = [item for item in list(page.get("items") or []) if matches(item)]
+    advancers = sum(
+      1 for item in matched if _finite_float(item.get("change_pct")) > 0.000001
+    )
+    decliners = sum(
+      1 for item in matched if _finite_float(item.get("change_pct")) < -0.000001
+    )
+    flats = len(matched) - advancers - decliners
+    top_gainers = sorted(
+      (
+        item
+        for item in matched
+        if _finite_float(item.get("change_pct")) > 0.000001
+      ),
+      key=lambda item: _finite_float(item.get("change_pct")),
+      reverse=True,
+    )[:10]
+    top_losers = sorted(
+      (
+        item
+        for item in matched
+        if _finite_float(item.get("change_pct")) < -0.000001
+      ),
+      key=lambda item: _finite_float(item.get("change_pct")),
+    )[:10]
+    matched.sort(
+      key=lambda item: (
+        _finite_float(item.get("volume_pace_ratio")),
+        _finite_float(item.get("amount_pace_ratio")),
+        _finite_float(item.get("last_5m_volume_ratio")),
+      ),
+      reverse=True,
+    )
+    page_items = matched[offset : offset + limit]
+    warnings = list(page.get("warnings") or [])
+    if not page_items:
+      warnings.append("尚未收到匹配条件的全市场实时 tick")
+
+    def to_graphql_item(item: Dict[str, Any]) -> IntradayVolumeScreenItem:
+      return IntradayVolumeScreenItem(
+        code=str(item.get("code") or ""),
+        name=str(item.get("name") or item.get("code") or ""),
+        industry=item.get("industry"),
+        instrument_type=str(item.get("instrument_type") or "stock"),
+        current_price=_finite_float(item.get("current_price")),
+        change_pct=_finite_float(item.get("change_pct")),
+        volume=_finite_float(item.get("volume")),
+        amount=_finite_float(item.get("amount")),
+        volume_ratio=_finite_float(item.get("volume_ratio")),
+        amount_ratio=_finite_float(item.get("amount_ratio")),
+        volume_pace_ratio=_finite_float(item.get("volume_pace_ratio")),
+        amount_pace_ratio=_finite_float(item.get("amount_pace_ratio")),
+        last_5m_volume_ratio=_finite_float(item.get("last_5m_volume_ratio")),
+        intraday_turnover_rate_pct=_finite_optional_float(
+          item.get("intraday_turnover_rate_pct")
+        ),
+        depth_imbalance_5=_finite_float(item.get("depth_imbalance_5")),
+        avg_trade_amount_proxy=_finite_optional_float(
+          item.get("avg_trade_amount_proxy")
+        ),
+        matched_signals=list(item.get("matched_signals") or []),
+        updated_at=_parse_datetime(item.get("updated_at"))
+        or StockScreeningResolver._now(),
+        is_stale=bool(item.get("is_stale")),
+      )
+
+    return IntradayVolumeScreenPage(
+      items=[to_graphql_item(item) for item in page_items],
+      top_gainers=[to_graphql_item(item) for item in top_gainers],
+      top_losers=[to_graphql_item(item) for item in top_losers],
+      advancers=advancers,
+      decliners=decliners,
+      flats=flats,
+      total=len(matched),
+      limit=limit,
+      offset=offset,
+      updated_at=_parse_datetime(page.get("updated_at")),
+      is_scanner_running=bool(page.get("is_scanner_running")),
+      warnings=warnings,
+    )
+
+  @staticmethod
+  async def limit_up_radar(
+    input: LimitUpRadarInput,
+    *,
+    user_id: Optional[str] = None,
+  ) -> LimitUpRadarPage:
+    limit = min(max(input.limit or 200, 1), 200)
+    offset = min(max(input.offset or 0, 0), 200 * 1000)
+    projection = await limit_up_radar_store.read_radar()
+    if projection is None:
+      return LimitUpRadarPage(
+        items=[],
+        industries=[],
+        summary=LimitUpRadarSummary(
+          scanned_count=0,
+          candidate_count=0,
+          near_limit_count=0,
+          sealed_count=0,
+          broken_count=0,
+          stale_count=0,
+          excluded_count=0,
+        ),
+        total=0,
+        limit=limit,
+        offset=offset,
+        score_version=RADAR_SCORE_VERSION,
+        updated_at=None,
+        is_scanner_running=False,
+        warnings=["Engine 全市场打板雷达尚未就绪，请检查 Engine 与 QMT Agent"],
+      )
+
+    existing_instances: Dict[str, str] = {}
+    if user_id:
+      async for db in get_async_db():
+        runs = await StrategyRunRepository(db).find_all_strategy_runs(user_id)
+        active_runs = sorted(
+          (run for run in runs if is_active_execution_run(run)),
+          key=lambda run: (
+            getattr(run, "updated_at", None)
+            or getattr(run, "created_at", None)
+            or datetime.min,
+            str(getattr(run, "id", "")),
+          ),
+          reverse=True,
+        )
+        for run in active_runs:
+          strategy = getattr(run, "strategy", None)
+          if not strategy or (
+            getattr(strategy, "class_name", "")
+            != LIMIT_UP_BOARD_STRATEGY_CLASS_NAME
+            and "打板" not in str(getattr(strategy, "name", ""))
+          ):
+            continue
+          for instrument_code in list(getattr(run, "instruments", None) or []):
+            existing_instances.setdefault(
+              str(instrument_code).upper(),
+              str(run.id),
+            )
+        break
+
+    stages = {stage.value for stage in input.stages or []}
+    industries = set(input.include_industries or [])
+    search = str(input.search or "").strip().lower()
+    values = []
+    for raw in list(projection.get("items") or []):
+      stage = str(raw.get("stage") or "")
+      if stages and stage not in stages:
+        continue
+      if industries and raw.get("industry") not in industries:
+        continue
+      if input.min_score is not None and _finite_float(
+        raw.get("radar_score")
+      ) < input.min_score:
+        continue
+      if search and search not in (
+        f"{raw.get('code') or ''} {raw.get('name') or ''}".lower()
+      ):
+        continue
+      values.append(dict(raw))
+
+    sort_field = input.sort_field
+    sort_key = {
+      LimitUpRadarSortField.SCORE: "radar_score",
+      LimitUpRadarSortField.DISTANCE_TO_LIMIT: "distance_to_limit_pct",
+      LimitUpRadarSortField.AMOUNT: "amount",
+      LimitUpRadarSortField.UPDATED_AT: "updated_at",
+    }[sort_field]
+    reverse = input.sort_direction.value == "desc"
+    if sort_field is LimitUpRadarSortField.UPDATED_AT:
+      values.sort(key=lambda item: str(item.get(sort_key) or ""), reverse=reverse)
+    else:
+      values.sort(
+        key=lambda item: _finite_float(item.get(sort_key)),
+        reverse=reverse,
+      )
+    total = len(values)
+    values = values[offset : offset + limit]
+
+    def item_type(raw: Dict[str, Any]) -> LimitUpRadarItem:
+      code = str(raw.get("code") or "").upper()
+      return LimitUpRadarItem(
+        code=code,
+        name=str(raw.get("name") or code),
+        industry=raw.get("industry"),
+        current_price=_finite_float(raw.get("current_price")),
+        change_pct=_finite_float(raw.get("change_pct")),
+        limit_up_price=_finite_float(raw.get("limit_up_price")),
+        price_tick=_finite_float(raw.get("price_tick"), 0.01),
+        distance_to_limit_pct=_finite_float(raw.get("distance_to_limit_pct")),
+        distance_to_limit_ticks=_finite_float(raw.get("distance_to_limit_ticks")),
+        price_change_5m_pct=_finite_float(raw.get("price_change_5m_pct")),
+        amount=_finite_float(raw.get("amount")),
+        amount_pace_ratio=_finite_float(raw.get("amount_pace_ratio")),
+        volume_pace_ratio=_finite_float(raw.get("volume_pace_ratio")),
+        last_5m_volume_ratio=_finite_float(raw.get("last_5m_volume_ratio")),
+        intraday_turnover_rate_pct=_finite_optional_float(
+          raw.get("intraday_turnover_rate_pct")
+        ),
+        depth_imbalance_5=_finite_float(raw.get("depth_imbalance_5")),
+        bid1_price=_finite_optional_float(raw.get("bid1_price")),
+        ask1_price=_finite_optional_float(raw.get("ask1_price")),
+        bid1_volume=_finite_float(raw.get("bid1_volume")),
+        ask1_volume=_finite_float(raw.get("ask1_volume")),
+        stage=_radar_stage(raw.get("stage")),
+        stage_label=str(raw.get("stage_label") or ""),
+        radar_score=_finite_float(raw.get("radar_score")),
+        score_version=str(raw.get("score_version") or RADAR_SCORE_VERSION),
+        score_breakdown=[
+          LimitUpRadarScoreFactor(
+            code=str(factor.get("code") or ""),
+            label=str(factor.get("label") or ""),
+            score=_finite_float(factor.get("score")),
+            max_score=_finite_float(factor.get("max_score")),
+            explanation=str(factor.get("explanation") or ""),
+          )
+          for factor in list(raw.get("score_breakdown") or [])
+        ],
+        break_count=_finite_int(raw.get("break_count")),
+        first_touch_at=_parse_datetime(raw.get("first_touch_at")),
+        first_sealed_at=_parse_datetime(raw.get("first_sealed_at")),
+        last_stage_at=_parse_datetime(raw.get("last_stage_at")),
+        events=[
+          LimitUpRadarEvent(
+            event_id=str(event.get("eventId") or ""),
+            stage=_radar_stage(event.get("stage")),
+            stage_label=str(event.get("stageLabel") or ""),
+            occurred_at=_parse_datetime(event.get("occurredAt"))
+            or StockScreeningResolver._now(),
+            score=_finite_float(event.get("score")),
+          )
+          for event in list(raw.get("events") or [])
+        ],
+        one_word_limit_up=bool(raw.get("one_word_limit_up")),
+        is_stale=bool(raw.get("is_stale")),
+        quality_tags=list(raw.get("quality_tags") or []),
+        blocked_reasons=list(raw.get("blocked_reasons") or []),
+        can_create_instance=bool(raw.get("can_create_instance")),
+        existing_instance_id=existing_instances.get(code),
+        updated_at=_parse_datetime(raw.get("updated_at"))
+        or StockScreeningResolver._now(),
+      )
+
+    summary = dict(projection.get("summary") or {})
+    return LimitUpRadarPage(
+      items=[item_type(raw) for raw in values],
+      industries=[
+        LimitUpRadarIndustryHeat(
+          industry=str(item.get("industry") or "未分类"),
+          candidate_count=_finite_int(item.get("candidate_count")),
+          near_limit_count=_finite_int(item.get("near_limit_count")),
+          sealed_count=_finite_int(item.get("sealed_count")),
+          average_score=_finite_float(item.get("average_score")),
+        )
+        for item in list(projection.get("industries") or [])
+      ],
+      summary=LimitUpRadarSummary(
+        scanned_count=_finite_int(summary.get("scanned_count")),
+        candidate_count=_finite_int(summary.get("candidate_count")),
+        near_limit_count=_finite_int(summary.get("near_limit_count")),
+        sealed_count=_finite_int(summary.get("sealed_count")),
+        broken_count=_finite_int(summary.get("broken_count")),
+        stale_count=_finite_int(summary.get("stale_count")),
+        excluded_count=_finite_int(summary.get("excluded_count")),
+      ),
+      total=total,
+      limit=limit,
+      offset=offset,
+      score_version=str(projection.get("score_version") or RADAR_SCORE_VERSION),
+      updated_at=_parse_datetime(projection.get("updated_at")),
+      is_scanner_running=bool(projection.get("is_scanner_running")),
+      warnings=list(projection.get("warnings") or []),
+    )
 
   @staticmethod
   async def stock_signal_snapshot_meta() -> List[SignalMeta]:

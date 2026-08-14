@@ -1,4 +1,5 @@
 import json
+from difflib import unified_diff
 from pathlib import Path
 
 from quantx_api.client_contracts import (
@@ -21,7 +22,15 @@ def test_client_contract_snapshots_are_current():
     "openapi-client.json",
   }
   for name, content in generated.items():
-    assert (CONTRACT_DIRECTORY / name).read_bytes() == content
+    actual = (CONTRACT_DIRECTORY / name).read_bytes()
+    assert actual == content, "".join(
+      unified_diff(
+        actual.decode("utf-8").splitlines(keepends=True),
+        content.decode("utf-8").splitlines(keepends=True),
+        fromfile=f"checked-in/{name}",
+        tofile=f"generated/{name}",
+      )
+    )
   schema_sdl = generated["graphql-schema.graphql"].decode("utf-8")
   assert "authorizedAccountIds: [String!]! = []" in schema_sdl
   assert "strawberry.types.field.UNRESOLVED" not in schema_sdl
@@ -43,6 +52,7 @@ def test_graphql_contract_uses_only_public_permission_categories():
     "portfolio:read",
     "strategy:read",
     "system-status:read",
+    "trade:approve",
   }
 
 

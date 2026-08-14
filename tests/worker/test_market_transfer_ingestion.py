@@ -98,3 +98,105 @@ async def test_uploaded_chunk_checksum_mismatch_fails(tmp_path):
 
   with pytest.raises(RuntimeError, match="checksum mismatch"):
     await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.asyncio
+async def test_uploaded_financial_rows_are_validated_saved_and_rebuilt(
+  tmp_path,
+  monkeypatch,
+):
+  records = [
+    {
+      "record_type": "financial_row",
+      "schema_version": 1,
+      "code": "688552.SH",
+      "table": "Income",
+      "row": {
+        "m_timetag": "20260331",
+        "m_anntime": "20260422",
+        "revenue": 100,
+      },
+    },
+    {
+      "record_type": "financial_summary",
+      "schema_version": 1,
+      "code": "688552.SH",
+      "table_counts": {
+        "Balance": 0,
+        "Income": 1,
+        "CashFlow": 0,
+        "Capital": 0,
+      },
+    },
+  ]
+  store = FakeStore(
+    request={
+      "expected_chunks": 1,
+      "request_payload": {
+        "operation": "financial_data",
+        "record_format": "financial-row-v1",
+        "stock_list": ["688552.SH"],
+        "table_list": ["Balance", "Income", "CashFlow", "Capital"],
+        "start_time": "20220101",
+        "end_time": "20260810",
+      },
+    },
+    manifest=[_transfer(tmp_path, records)],
+  )
+  captured = {}
+  parse_report_date = durable_agent_flows.FinancialService._parse_report_date
+
+  class FakeFinancialService:
+    _parse_report_date = staticmethod(parse_report_date)
+
+    async def save_batch_financial_data_with_audit(self, frames):
+      captured.update(frames)
+      return {
+        "rows_received": 1,
+        "rows_upserted": 1,
+        "rows_rejected": 0,
+        "metric_codes_rebuilt": 1,
+        "metric_rows_rebuilt": 6,
+      }
+
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "FinancialService",
+    FakeFinancialService,
+  )
+
+  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  assert captured["688552.SH"]["Income"].iloc[0]["m_timetag"] == "20260331"
+  assert result["records_saved"] == 1
+  assert result["replacement_audit"]["synced_codes"] == 1
+  assert result["replacement_audit"]["metric_rows_rebuilt"] == 6
+
+
+@pytest.mark.asyncio
+async def test_uploaded_financial_rows_require_per_code_summary(tmp_path):
+  records = [
+    {
+      "record_type": "financial_row",
+      "schema_version": 1,
+      "code": "688552.SH",
+      "table": "Income",
+      "row": {"m_timetag": "20260331", "m_anntime": "20260422"},
+    }
+  ]
+  store = FakeStore(
+    request={
+      "expected_chunks": 1,
+      "request_payload": {
+        "operation": "financial_data",
+        "stock_list": ["688552.SH"],
+        "table_list": ["Balance", "Income", "CashFlow", "Capital"],
+        "start_time": "20220101",
+        "end_time": "20260810",
+      },
+    },
+    manifest=[_transfer(tmp_path, records)],
+  )
+
+  with pytest.raises(RuntimeError, match="summaries missing"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")

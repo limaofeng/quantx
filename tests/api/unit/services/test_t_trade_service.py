@@ -28,6 +28,50 @@ def test_t_trade_amount_hard_cap_must_cover_target():
     )
 
 
+def test_t_trade_momentum_window_must_cover_minimum_move():
+  with pytest.raises(ValueError, match="动量最短持续时间不能超过动量观察窗口"):
+    TTradeService._validate_parameters(
+      {
+        "momentum_window_seconds": 30,
+        "momentum_min_move_seconds": 31,
+      },
+      StrategyRunMode.PAPER,
+    )
+
+
+def test_t_trade_momentum_vwap_band_must_be_ordered():
+  with pytest.raises(ValueError, match="动量 VWAP 最小溢价必须低于最大溢价"):
+    TTradeService._validate_parameters(
+      {
+        "momentum_min_vwap_premium_pct": 3.5,
+        "momentum_max_vwap_premium_pct": 3.5,
+      },
+      StrategyRunMode.PAPER,
+    )
+
+
+def test_t_trade_high_profit_arm_must_exceed_base_arm():
+  with pytest.raises(ValueError, match="高利润保护武装线必须高于"):
+    TTradeService._validate_parameters(
+      {
+        "target_profit_pct": 4.0,
+        "high_profit_arm_pct": 4.0,
+      },
+      StrategyRunMode.PAPER,
+    )
+
+
+def test_t_trade_high_profit_drawdown_must_stay_below_arm():
+  with pytest.raises(ValueError, match="高利润最大回吐必须低于"):
+    TTradeService._validate_parameters(
+      {
+        "high_profit_arm_pct": 4.0,
+        "high_profit_max_drawdown_pct": 4.0,
+      },
+      StrategyRunMode.PAPER,
+    )
+
+
 def test_live_t_trade_accepts_unlimited_protection():
   TTradeService._validate_parameters(
     {"time_exit_mode": "UNLIMITED", "hard_stop_enabled": False},
@@ -79,6 +123,98 @@ def test_t_trade_mapping_decodes_persisted_json_parameters():
 
 def test_t_trade_mapping_rejects_non_object_json():
   assert TTradeService._mapping('["not", "an", "object"]') == {}
+
+
+def test_session_projection_maps_monitoring_telemetry_and_keeps_legacy_null():
+  now = datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc)
+  run = SimpleNamespace(
+    id="run-telemetry",
+    mode=StrategyRunMode.PAPER,
+    created_at=now,
+    updated_at=now,
+  )
+  service = TTradeService()
+  params = {"account_id": "account-1"}
+  state = {
+    "monitoring_telemetry": {
+      "phase": "ENTRY_SCAN",
+      "last_tick_at_ms": int(now.timestamp() * 1000),
+      "processed_tick_count": 123,
+      "window_sample_count": 45,
+      "window_coverage_seconds": 119.0,
+      "triggered": False,
+      "reason": "WAITING_PULLBACK",
+      "signal_type": "NONE",
+      "signal_price": 10.12,
+      "window_high": 10.2,
+      "pullback_pct": 0.4,
+      "vwap": None,
+    }
+  }
+
+  projected = service._project_session(
+    run=run,
+    run_status="RUNNING",
+    error_message=None,
+    params=params,
+    stock_code="600000.SH",
+    state=state,
+  )
+  legacy = service._project_session(
+    run=run,
+    run_status="RUNNING",
+    error_message=None,
+    params=params,
+    stock_code="000001.SZ",
+    state={},
+  )
+
+  assert projected["latest_evaluation"]["processed_tick_count"] == 123
+  assert projected["latest_evaluation"]["vwap"] is None
+  assert projected["latest_evaluation"]["last_tick_at"].timestamp() == pytest.approx(
+    now.timestamp()
+  )
+  assert legacy["latest_evaluation"] is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_account_strategy_running_starts_restored_idle_runtime():
+  runtime = SimpleNamespace(
+    status=SimpleNamespace(value="PENDING"),
+    task=None,
+  )
+  manager = SimpleNamespace(
+    get_run=lambda _run_id: runtime,
+    start_strategy=AsyncMock(return_value=True),
+    resume_strategy=AsyncMock(),
+  )
+  service = TTradeService(manager)
+
+  changed = await service.ensure_account_strategy_running("run-restored")
+
+  assert changed is True
+  manager.start_strategy.assert_awaited_once_with("run-restored")
+  manager.resume_strategy.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_account_strategy_running_resumes_live_paused_runtime():
+  runtime = SimpleNamespace(
+    status=SimpleNamespace(value="PAUSED"),
+    task=SimpleNamespace(done=lambda: False),
+  )
+  manager = SimpleNamespace(
+    get_run=lambda _run_id: runtime,
+    start_strategy=AsyncMock(),
+    resume_strategy=AsyncMock(return_value=True),
+  )
+  service = TTradeService(manager)
+
+  changed = await service.ensure_account_strategy_running("run-paused")
+
+  assert changed is True
+  manager.resume_strategy.assert_awaited_once_with("run-paused")
+  manager.start_strategy.assert_not_awaited()
 
 
 def test_signal_history_projection_keeps_expiry_and_audit_reason():

@@ -117,6 +117,65 @@ async def test_login_refresh_rotation_and_logout_lifecycle(db):
 
 
 @pytest.mark.asyncio
+async def test_development_auto_login_permission_sync_is_additive_and_audited(db):
+  initial = _settings(auth_bootstrap_permissions=["portfolio:read"])
+  assert await AuthService.bootstrap_from_settings(db, initial)
+  configured = _settings(
+    auth_bootstrap_permissions=["portfolio:read", "trade:approve"]
+  )
+
+  assert await AuthService.reconcile_development_auto_login_permissions(
+    db,
+    configured,
+  )
+  assert not await AuthService.reconcile_development_auto_login_permissions(
+    db,
+    configured,
+  )
+
+  user = (
+    await db.execute(
+      select(AuthUser).where(
+        AuthUser.username == configured.auth_development_username
+      )
+    )
+  ).scalar_one()
+  assert user.permissions == ["portfolio:read", "trade:approve"]
+  audits = (
+    await db.execute(
+      select(AuthAuditEvent).where(
+        AuthAuditEvent.event_type == "DEVELOPMENT_PERMISSION_SYNC"
+      )
+    )
+  ).scalars().all()
+  assert len(audits) == 1
+  assert audits[0].reason_code == "CONFIGURED_ADDITIVE_GRANT"
+
+
+@pytest.mark.asyncio
+async def test_production_never_syncs_auto_login_permissions(db):
+  initial = _settings(auth_bootstrap_permissions=["portfolio:read"])
+  assert await AuthService.bootstrap_from_settings(db, initial)
+  production = _settings(
+    ENV="production",
+    auth_bootstrap_permissions=["portfolio:read", "trade:approve"],
+  )
+
+  assert not await AuthService.reconcile_development_auto_login_permissions(
+    db,
+    production,
+  )
+  user = (
+    await db.execute(
+      select(AuthUser).where(
+        AuthUser.username == production.auth_development_username
+      )
+    )
+  ).scalar_one()
+  assert user.permissions == ["portfolio:read"]
+
+
+@pytest.mark.asyncio
 async def test_logout_all_devices_revokes_every_access_token(db):
   settings = _settings(auth_bootstrap_username=f"user-{uuid.uuid4().hex[:8]}")
   await AuthService.bootstrap_from_settings(db, settings)

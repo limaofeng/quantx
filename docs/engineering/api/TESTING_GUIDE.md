@@ -29,6 +29,10 @@ python -m ruff check apps packages tests
 python -m pytest tests/ -m "not dangerous and not real_trading and not e2e"
 ```
 
+`e2e` 标记默认由根测试配置跳过。只有在已确认外部服务、数据写入范围和风险后，
+才显式传入 `--quantx-run-e2e`（或设置 `QUANTX_RUN_E2E=true`）；该开关本身不
+替代真实交易所需的环境、账户白名单与 QMT 实盘开关。
+
 可按组件缩小范围：
 
 ```powershell
@@ -68,8 +72,9 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 ```
 
 完成设备登记后再验收 `full`。启动顺序必须是 Prefect health、process pool、
-全部 deployment、Worker、data-only/paper QMT Agent；最终
-`/health/ready` 返回 200。
+全部 deployment、Worker、QMT Agent；最终 `/health/ready` 返回 200。开发
+`full` 默认使用 `live` Agent 读取真实账户，但账户仍保持 `SHADOW` 准备阶段，
+不会因此取得自动下单权限；纯行情验收显式使用 `-Mode data-only`。
 
 ## 真实交易硬门禁
 
@@ -82,11 +87,21 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 5. Agent 与服务端账户白名单均包含目标账户
 6. 账户通过灰度、快照、对账、Agent READY 和策略授权门禁
 
-production 默认仍拒绝，只有完整门禁通过才允许 Canary/Live。
-`up -Environment dev -Profile full` 只允许 `data-only` 或 `paper`。
-CI 始终设置所有真实交易开关为 false。
+production 默认仍拒绝，只有完整门禁通过才允许 Canary/Live。开发 `full`
+启动 live Agent 仅用于账户观察和手工交易共存，账户级自动命令仍由
+`SHADOW -> CANARY -> LIVE` 门禁独立控制。CI 始终设置所有真实交易开关为
+false。
 
 ## 验收原则
+
+- 验收分成“服务健康”“准备阶段”“自动交易授权”三层，不以自动交易
+  `READY` 代替前两层。
+- `SHADOW` 准备验收允许 QMT 手工交易，但必须证明外部委托/成交已分类、完整
+  快照新鲜、当前死信已闭环且账户事实可持续收敛。
+- `CANARY / LIVE` 自动交易验收必须使用无外部活动的受控窗口；准备阶段显示
+  `PREPARING` 是预期结果，不是服务故障。
+- `BLOCKED` 只表示准备链路本身不安全；备份缺失、实盘开关未开或当前存在
+  手工活动只阻止自动授权，不应把健康的观察链路显示成故障。
 
 - 不能以 skipped 的可选 MCP 测试证明 MCP 已部署。
 - 不能以 `command_ack` 证明订单成交。

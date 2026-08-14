@@ -1,7 +1,16 @@
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
 from quantx_api.gqlapi.resolvers.t_trade import TTradeResolver
-from quantx_api.gqlapi.types.t_trade_types import TTradeTimeExitMode
+from quantx_api.gqlapi.types.t_trade_types import (
+  TTradeGlobalMonitor,
+  TTradeRolloutTarget,
+  TTradeTimeExitMode,
+)
+from quantx_infrastructure.models.enums import StrategyRunMode
+from quantx_infrastructure.services.t_trade_service import TTradeService
 
 
 def test_global_monitor_projects_graphql_scalar_types():
@@ -58,6 +67,7 @@ def test_global_monitor_projects_graphql_scalar_types():
       "created_at": None,
       "updated_at": "2026-07-28T04:32:00Z",
       "projection_generated_at": "2026-07-28T04:32:01Z",
+      "future_internal_projection_field": "ignored by GraphQL boundary",
       "readiness": {
         "account_id": "account-1",
         "ready": True,
@@ -71,12 +81,14 @@ def test_global_monitor_projects_graphql_scalar_types():
         "can_approve": True,
         "can_activate_live": False,
         "blocked_reasons": [],
+        "future_internal_readiness_field": "ignored by GraphQL boundary",
         "checked_at": "2026-07-28T04:32:00Z",
         "checks": [
           {
             "code": "ENGINE_ONLINE",
             "passed": True,
             "message": "Engine online",
+            "future_internal_check_field": "ignored by GraphQL boundary",
           }
         ],
       },
@@ -92,3 +104,132 @@ def test_global_monitor_projects_graphql_scalar_types():
   assert monitor.readiness is not None
   assert isinstance(monitor.readiness.checked_at, datetime)
   assert monitor.readiness.checks[0].passed is True
+  assert monitor.max_exit_slippage_bps == 30.0
+  assert monitor.momentum_enabled is True
+  assert monitor.momentum_window_seconds == 60
+  assert monitor.momentum_min_amount_velocity_ratio == 2.0
+  assert monitor.momentum_min_vwap_premium_pct == 2.0
+  assert monitor.momentum_max_vwap_premium_pct == 3.5
+  assert monitor.limit_up_touch_exit_enabled is True
+  assert monitor.limit_up_touch_tolerance_ticks == 0
+  assert monitor.high_profit_lock_enabled is True
+  assert monitor.high_profit_arm_pct == 4.0
+  assert monitor.high_profit_max_drawdown_pct == 1.2
+  assert monitor.rapid_reversal_enabled is True
+  assert monitor.rapid_reversal_window_seconds == 15
+  assert monitor.rapid_reversal_drawdown_pct == 0.8
+  assert monitor.rapid_reversal_confirm_ticks == 2
+
+
+def test_graphql_projection_keeps_known_fields_and_drops_internal_fields():
+  payload = TTradeResolver._graphql_kwargs(
+    TTradeGlobalMonitor,
+    {
+      "max_exit_slippage_bps": 42.0,
+      "future_internal_projection_field": "not public",
+    },
+  )
+
+  assert payload == {"max_exit_slippage_bps": 42.0}
+
+
+def test_session_graphql_projection_maps_latest_evaluation_and_legacy_null():
+  now = datetime(2026, 8, 13, 10, 5)
+  run = SimpleNamespace(
+    id="run-telemetry",
+    mode=StrategyRunMode.PAPER,
+    created_at=now,
+    updated_at=now,
+  )
+  service = TTradeService()
+  base = dict(
+    run=run,
+    run_status="RUNNING",
+    error_message=None,
+    params={"account_id": "account-1"},
+    stock_code="600000.SH",
+  )
+  projected = service._project_session(
+    **base,
+    state={
+      "monitoring_telemetry": {
+        "phase": "ENTRY_SCAN",
+        "last_tick_at_ms": int(now.timestamp() * 1000),
+        "processed_tick_count": 7,
+        "reason": "INSUFFICIENT_TICKS",
+      }
+    },
+  )
+  legacy = service._project_session(**base, state={})
+
+  session = TTradeResolver._session_type(projected)
+  legacy_session = TTradeResolver._session_type(legacy)
+
+  assert session.latest_evaluation is not None
+  assert session.latest_evaluation.processed_tick_count == 7
+  assert isinstance(session.latest_evaluation.last_tick_at, datetime)
+  assert legacy_session.latest_evaluation is None
+
+
+@pytest.mark.asyncio
+async def test_live_activation_failure_is_audited(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service = SimpleNamespace(
+    activate_rollout=AsyncMock(
+      side_effect=ValueError("正式 LIVE 需要精确确认 LIVE:account-1")
+    ),
+    record_event=AsyncMock(),
+  )
+  monkeypatch.setattr(TTradeResolver, "operations_service", service)
+
+  result = await TTradeResolver.activate_live(
+    "account-1",
+    user_id="user-1",
+    policy_version=3,
+    target_stage=TTradeRolloutTarget.LIVE,
+    confirmation="wrong",
+  )
+
+  assert result.success is False
+  assert result.code == "LIVE_NOT_READY"
+  service.record_event.assert_awaited_once_with(
+    "account-1",
+    "LIVE_ACTIVATION_REJECTED",
+    actor_user_id="user-1",
+    details={
+      "targetStage": "LIVE",
+      "reason": "正式 LIVE 需要精确确认 LIVE:account-1",
+    },
+  )
+
+
+@pytest.mark.asyncio
+async def test_controlled_window_failure_is_audited(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service = SimpleNamespace(
+    begin_controlled_window=AsyncMock(
+      side_effect=ValueError("当前仍有 3 笔 QMT 手工委托可能成交")
+    ),
+    record_event=AsyncMock(),
+  )
+  monkeypatch.setattr(TTradeResolver, "operations_service", service)
+
+  result = await TTradeResolver.begin_controlled_window(
+    "account-1",
+    user_id="user-1",
+    snapshot_id="snapshot-1",
+  )
+
+  assert result.success is False
+  assert result.code == "CONTROLLED_WINDOW_NOT_READY"
+  service.record_event.assert_awaited_once_with(
+    "account-1",
+    "CONTROLLED_WINDOW_REJECTED",
+    actor_user_id="user-1",
+    details={
+      "snapshotId": "snapshot-1",
+      "reason": "当前仍有 3 笔 QMT 手工委托可能成交",
+    },
+  )

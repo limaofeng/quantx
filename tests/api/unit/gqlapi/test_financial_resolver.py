@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.gqlapi.resolvers.financial import FinancialResolver
@@ -164,7 +165,6 @@ async def test_financial_reports_return_latest_income_rows(monkeypatch):
     "FinancialIncomeStatementRepository",
     FakeIncomeRepo,
   )
-
   result = await FinancialResolver.get_financial_reports(
     search=" 茅台 ",
     limit=10,
@@ -198,12 +198,30 @@ async def test_financial_overview_returns_real_counts(monkeypatch):
     "FinancialIncomeStatementRepository",
     FakeIncomeRepo,
   )
+  monkeypatch.setattr(
+    financial_module,
+    "financial_sync_health",
+    AsyncMock(return_value={
+      "status": "SUCCESS",
+      "last_completed_at": None,
+      "last_success_at": None,
+      "requested_codes": 3,
+      "synced_codes": 3,
+      "empty_codes": 0,
+      "statement_rows": 12,
+      "metric_rows": 9,
+      "is_stale": False,
+      "warnings": [],
+    }),
+  )
 
   result = await FinancialResolver.get_financial_overview()
 
   assert result.report_count == 12
   assert result.instrument_count == 3
   assert result.latest_report_date == date(2025, 12, 31)
+  assert result.sync_health.status.value == "SUCCESS"
+  assert result.sync_health.synced_codes == 3
 
 
 async def _empty_statements(stock_code):

@@ -36,21 +36,220 @@ async def test_instrument_flow_rejects_empty_code_without_request(monkeypatch) -
 async def test_financial_flow_uses_persisted_universe(monkeypatch) -> None:
   monkeypatch.setattr(
     durable_agent_flows,
-    "_persisted_instrument_codes",
+    "_persisted_stock_codes",
     AsyncMock(return_value=["600000.SH", "000001.SZ"]),
   )
-  request = AsyncMock(return_value={"status": "completed", "request_id": "request-2"})
+  request = AsyncMock(
+    return_value={
+      "status": "completed",
+      "request_id": "request-2",
+      "replacement_audit": {
+        "requested_codes": 2,
+        "synced_codes": 2,
+        "empty_codes": [],
+        "rows_upserted": 8,
+        "metric_rows_rebuilt": 4,
+      },
+    }
+  )
   monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
 
-  result = await durable_agent_flows.financial_request_flow.fn()
+  updates = []
 
-  assert result["request_id"] == "request-2"
+  class FakeSession:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, *_args):
+      return None
+
+  class FakeRunRepo:
+    def __init__(self, _db):
+      pass
+
+    async def create_run(self, data):
+      updates.append(("create", data))
+      return SimpleNamespace(id=42)
+
+    async def update_run(self, run_id, data):
+      updates.append((run_id, data))
+      return SimpleNamespace(id=run_id)
+
+    async def upsert_code_audits(self, records):
+      updates.append(("audits", records))
+      return len(records)
+
+  monkeypatch.setattr(durable_agent_flows, "AsyncSessionLocal", FakeSession)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "FinancialSyncRunRepository",
+    FakeRunRepo,
+  )
+
+  result = await durable_agent_flows.financial_request_flow.fn(
+    start_time="20250101",
+    end_time="20260101",
+  )
+
+  assert result["request_ids"] == ["request-2"]
+  assert result["status"] == "success"
   request.assert_awaited_once_with(
     {
       "operation": "financial_data",
-      "stock_list": ["600000.SH", "000001.SZ"],
-    }
+      "record_format": "financial-row-v1",
+      "download": True,
+      "stock_list": ["000001.SZ", "600000.SH"],
+      "table_list": ["Balance", "Income", "CashFlow", "Capital"],
+      "start_time": "20250101",
+      "end_time": "20260101",
+      "sync_run_id": 42,
+      "batch_index": 1,
+    },
+    agent_device_id="",
+    required_capabilities=["financial-data-v1"],
   )
+  assert any(
+    key == 42 and data.get("status") == "running" and data.get("synced_codes") == 2
+    for key, data in updates
+    if key != "create"
+  )
+  assert updates[-1][1]["status"] == "success"
+  audit_records = next(data for key, data in updates if key == "audits")
+  assert {record["stock_code"] for record in audit_records} == {
+    "000001.SZ",
+    "600000.SH",
+  }
+  assert {record["status"] for record in audit_records} == {"SUCCESS"}
+
+
+@pytest.mark.asyncio
+async def test_financial_flow_splits_205_codes_into_three_batches(monkeypatch) -> None:
+  class FakeSession:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, *_args):
+      return None
+
+  class FakeRunRepo:
+    def __init__(self, _db):
+      pass
+
+    async def create_run(self, _data):
+      return SimpleNamespace(id=7)
+
+    async def update_run(self, run_id, _data):
+      return SimpleNamespace(id=run_id)
+
+    async def upsert_code_audits(self, records):
+      return len(records)
+
+  async def request(payload, **_kwargs):
+    code_count = len(payload["stock_list"])
+    return {
+      "status": "completed",
+      "request_id": f"request-{payload['batch_index']}",
+      "replacement_audit": {
+        "requested_codes": code_count,
+        "synced_codes": code_count,
+        "empty_codes": [],
+        "rows_upserted": code_count,
+        "metric_rows_rebuilt": code_count,
+      },
+    }
+
+  request_mock = AsyncMock(side_effect=request)
+  monkeypatch.setattr(durable_agent_flows, "AsyncSessionLocal", FakeSession)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "FinancialSyncRunRepository",
+    FakeRunRepo,
+  )
+  monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request_mock)
+  codes = [f"{index:06d}.SZ" for index in range(205)]
+
+  result = await durable_agent_flows.financial_request_flow.fn(
+    stock_codes=codes,
+    start_time="20250101",
+    end_time="20260101",
+  )
+
+  assert result["batch_count"] == 3
+  assert result["synced_codes"] == 205
+  assert [len(call.args[0]["stock_list"]) for call in request_mock.await_args_list] == [
+    100,
+    100,
+    5,
+  ]
+
+
+@pytest.mark.asyncio
+async def test_financial_flow_keeps_successful_code_audits_when_later_batch_fails(
+  monkeypatch,
+) -> None:
+  audits = []
+
+  class FakeSession:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, *_args):
+      return None
+
+  class FakeRunRepo:
+    def __init__(self, _db):
+      pass
+
+    async def create_run(self, _data):
+      return SimpleNamespace(id=9)
+
+    async def update_run(self, run_id, _data):
+      return SimpleNamespace(id=run_id)
+
+    async def upsert_code_audits(self, records):
+      audits.extend(records)
+      return len(records)
+
+  async def request(payload, **_kwargs):
+    if payload["batch_index"] == 2:
+      raise RuntimeError("second batch failed")
+    codes = payload["stock_list"]
+    return {
+      "status": "completed",
+      "request_id": "request-1",
+      "replacement_audit": {
+        "requested_codes": len(codes),
+        "synced_codes": len(codes),
+        "empty_codes": [],
+        "rows_upserted": len(codes),
+        "metric_rows_rebuilt": len(codes),
+        "statement_rows_by_code": {code: 1 for code in codes},
+        "metric_rows_by_code": {code: 1 for code in codes},
+      },
+    }
+
+  monkeypatch.setattr(durable_agent_flows, "AsyncSessionLocal", FakeSession)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "FinancialSyncRunRepository",
+    FakeRunRepo,
+  )
+  monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
+
+  with pytest.raises(RuntimeError, match="second batch failed"):
+    await durable_agent_flows.financial_request_flow.fn(
+      stock_codes=["000001.SZ", "000002.SZ", "000003.SZ"],
+      start_time="20250101",
+      end_time="20260101",
+      batch_size=2,
+    )
+
+  assert [record["status"] for record in audits] == [
+    "SUCCESS",
+    "SUCCESS",
+    "FAILED",
+  ]
+  assert audits[-1]["stock_code"] == "000003.SZ"
 
 
 @pytest.mark.asyncio
@@ -156,11 +355,7 @@ async def test_explicit_reprocess_claims_uploaded_request(monkeypatch) -> None:
     ingestion,
   )
 
-  result = (
-    await durable_agent_flows.reprocess_uploaded_market_data_request(
-      "request-1"
-    )
-  )
+  result = await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
   store.claim_market_data_request.assert_awaited_once_with("request-1")
   ingestion.assert_awaited_once_with(store, "request-1")
@@ -195,9 +390,7 @@ async def test_explicit_reprocess_rejects_request_not_reopened(
   )
 
   with pytest.raises(RuntimeError, match="not explicitly reopened"):
-    await durable_agent_flows.reprocess_uploaded_market_data_request(
-      "request-1"
-    )
+    await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
   store.claim_market_data_request.assert_not_awaited()
   store.finish_market_data_request.assert_not_awaited()
@@ -227,9 +420,7 @@ async def test_explicit_reprocess_returns_ingestion_failure_to_failed(
   )
 
   with pytest.raises(RuntimeError, match="Influx unavailable"):
-    await durable_agent_flows.reprocess_uploaded_market_data_request(
-      "request-1"
-    )
+    await durable_agent_flows.reprocess_uploaded_market_data_request("request-1")
 
   store.finish_market_data_request.assert_awaited_once_with(
     "request-1",
@@ -292,3 +483,152 @@ async def test_bond_repo_flow_enqueues_explicit_trade_command(monkeypatch) -> No
   enqueue.assert_awaited_once()
   assert enqueue.await_args.kwargs["side"] == "SELL"
   assert enqueue.await_args.kwargs["instrument_code"] == "204001.SH"
+
+
+def _convergence_store(*, ready: bool = True):
+  return SimpleNamespace(
+    component_status=AsyncMock(
+      return_value=[
+        {
+          "component": "qmt-agent:device-1",
+          "status": "READY" if ready else "TRADING_UNAVAILABLE",
+        }
+      ]
+    ),
+    close=AsyncMock(),
+  )
+
+
+@pytest.mark.asyncio
+async def test_agent_convergence_does_not_sync_when_disabled(monkeypatch) -> None:
+  store = _convergence_store()
+  position_codes = AsyncMock()
+  request = AsyncMock()
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "_persisted_position_codes",
+    position_codes,
+  )
+  monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
+
+  result = await durable_agent_flows.agent_convergence_flow.fn()
+
+  assert result["status"] == "ready"
+  assert "market_data_sync" not in result
+  position_codes.assert_not_awaited()
+  request.assert_not_awaited()
+  store.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_convergence_syncs_positive_position_ticks(monkeypatch) -> None:
+  store = _convergence_store()
+  position_codes = AsyncMock(return_value=["000001.SZ", "600000.SH"])
+  request = AsyncMock(
+    return_value={
+      "status": "completed",
+      "request_id": "request-tick-1",
+      "records_received": 123,
+      "records_saved": 123,
+    }
+  )
+  trading_dates = SimpleNamespace(is_trading_date=AsyncMock(return_value=True))
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "_persisted_position_codes",
+    position_codes,
+  )
+  monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "TradingDateHelper",
+    lambda: trading_dates,
+  )
+
+  result = await durable_agent_flows.agent_convergence_flow.fn(
+    sync_market_data=True,
+    target_date="20260812",
+  )
+
+  request.assert_awaited_once_with(
+    {
+      "operation": "bars",
+      "download": True,
+      "stock_list": ["000001.SZ", "600000.SH"],
+      "periods": ["tick"],
+      "start_time": "20260812",
+      "end_time": "20260812",
+    }
+  )
+  assert result["market_data_sync"] == {
+    "status": "completed",
+    "request_id": "request-tick-1",
+    "records_received": 123,
+    "records_saved": 123,
+    "target_date": "20260812",
+    "stock_count": 2,
+    "stock_codes": ["000001.SZ", "600000.SH"],
+  }
+
+
+@pytest.mark.asyncio
+async def test_agent_convergence_rejects_tick_sync_without_ready_agent(
+  monkeypatch,
+) -> None:
+  store = _convergence_store(ready=False)
+  position_codes = AsyncMock()
+  request = AsyncMock()
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "_persisted_position_codes",
+    position_codes,
+  )
+  monkeypatch.setattr(durable_agent_flows, "_request_and_wait", request)
+
+  with pytest.raises(RuntimeError, match="no READY QMT Agent"):
+    await durable_agent_flows.agent_convergence_flow.fn(
+      sync_market_data=True,
+      target_date="20260812",
+    )
+
+  position_codes.assert_not_awaited()
+  request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_convergence_rejects_incomplete_tick_persistence(
+  monkeypatch,
+) -> None:
+  store = _convergence_store()
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "_persisted_position_codes",
+    AsyncMock(return_value=["600000.SH"]),
+  )
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "_request_and_wait",
+    AsyncMock(
+      return_value={
+        "status": "completed",
+        "request_id": "request-tick-2",
+        "records_received": 100,
+        "records_saved": 99,
+      }
+    ),
+  )
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "TradingDateHelper",
+    lambda: SimpleNamespace(is_trading_date=AsyncMock(return_value=True)),
+  )
+
+  with pytest.raises(RuntimeError, match="未完整入库"):
+    await durable_agent_flows.agent_convergence_flow.fn(
+      sync_market_data=True,
+      target_date="20260812",
+    )

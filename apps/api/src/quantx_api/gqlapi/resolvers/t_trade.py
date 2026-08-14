@@ -1,6 +1,7 @@
 """GraphQL resolver facade for T-trade sessions."""
 
 import uuid
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from typing import List, Optional
 
@@ -28,6 +29,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeBatchEvent,
   TTradeBatchEventPage,
   TTradeBatchPage,
+  TTradeEvaluationTelemetry,
   TTradeExternalEntryInput,
   TTradeGlobalHolding,
   TTradeGlobalMonitor,
@@ -48,6 +50,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeReplayPreparation,
   TTradeReplayStartInput,
   TTradeReplaySummary,
+  TTradeRolloutTarget,
   TTradeSession,
   TTradeSignalHistoryEntry,
   TTradeSignalHistoryPage,
@@ -74,8 +77,7 @@ class TTradeResolver:
       payload,
       aggregate_id=aggregate_id,
       idempotency_key=(
-        idempotency_key
-        or f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
+        idempotency_key or f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
       ),
     )
     if receipt.status == "FAILED":
@@ -99,6 +101,12 @@ class TTradeResolver:
     return payload
 
   @staticmethod
+  def _graphql_kwargs(graphql_type, data: dict) -> dict:
+    """Keep internal projection fields from leaking into GraphQL constructors."""
+    known_fields = {item.name for item in dataclass_fields(graphql_type)}
+    return {key: value for key, value in dict(data).items() if key in known_fields}
+
+  @staticmethod
   def _time_exit_mode(value) -> TTradeTimeExitMode:
     if isinstance(value, TTradeTimeExitMode):
       return value
@@ -110,12 +118,18 @@ class TTradeResolver:
   @classmethod
   def _session_type(cls, data: dict) -> TTradeSession:
     payload = cls._with_datetimes(data, "created_at", "updated_at")
-    payload["time_exit_mode"] = cls._time_exit_mode(
-      payload.get("time_exit_mode")
-    )
+    payload["time_exit_mode"] = cls._time_exit_mode(payload.get("time_exit_mode"))
     payload["created_at"] = cls._datetime(payload.get("created_at"))
     payload["updated_at"] = cls._datetime(payload.get("updated_at"))
-    return TTradeSession(**payload)
+    if payload.get("latest_evaluation"):
+      evaluation = dict(payload["latest_evaluation"])
+      evaluation["last_tick_at"] = cls._datetime(evaluation.get("last_tick_at"))
+      payload["latest_evaluation"] = TTradeEvaluationTelemetry(
+        **cls._graphql_kwargs(TTradeEvaluationTelemetry, evaluation)
+      )
+    else:
+      payload["latest_evaluation"] = None
+    return TTradeSession(**cls._graphql_kwargs(TTradeSession, payload))
 
   @classmethod
   def _replay_type(cls, data: dict) -> TTradeReplay:
@@ -127,18 +141,24 @@ class TTradeResolver:
       "updated_at",
     )
     if payload.get("summary"):
-      payload["summary"] = TTradeReplaySummary(**payload["summary"])
+      payload["summary"] = TTradeReplaySummary(
+        **cls._graphql_kwargs(TTradeReplaySummary, payload["summary"])
+      )
     payload["instruments"] = [
-      TTradeReplayInstrumentResult(**item)
+      TTradeReplayInstrumentResult(
+        **cls._graphql_kwargs(TTradeReplayInstrumentResult, item)
+      )
       for item in payload.get("instruments", [])
     ]
     curve = []
     for item in payload.get("curve", []):
       point = dict(item)
       point["timestamp"] = cls._datetime(point.get("timestamp"))
-      curve.append(TTradeReplayCurvePoint(**point))
+      curve.append(
+        TTradeReplayCurvePoint(**cls._graphql_kwargs(TTradeReplayCurvePoint, point))
+      )
     payload["curve"] = curve
-    return TTradeReplay(**payload)
+    return TTradeReplay(**cls._graphql_kwargs(TTradeReplay, payload))
 
   @classmethod
   def _global_monitor_type(cls, data: dict) -> TTradeGlobalMonitor:
@@ -150,19 +170,21 @@ class TTradeResolver:
       "created_at",
       "updated_at",
     )
-    payload["sessions"] = [cls._session_type(session) for session in payload.get("sessions", [])]
+    payload["sessions"] = [
+      cls._session_type(session) for session in payload.get("sessions", [])
+    ]
     holdings = []
     for holding in payload.get("holdings", []):
       holding_payload = dict(holding)
       if holding_payload.get("session"):
         holding_payload["session"] = cls._session_type(holding_payload["session"])
-      holdings.append(TTradeGlobalHolding(**holding_payload))
+      holdings.append(
+        TTradeGlobalHolding(**cls._graphql_kwargs(TTradeGlobalHolding, holding_payload))
+      )
     payload["holdings"] = holdings
     if payload.get("readiness"):
       payload["readiness"] = cls._readiness_type(payload["readiness"])
-    payload["time_exit_mode"] = cls._time_exit_mode(
-      payload.get("time_exit_mode")
-    )
+    payload["time_exit_mode"] = cls._time_exit_mode(payload.get("time_exit_mode"))
     for field_name in (
       "position_snapshot_reported_at",
       "position_snapshot_received_at",
@@ -172,17 +194,47 @@ class TTradeResolver:
       "projection_generated_at",
     ):
       payload[field_name] = cls._datetime(payload.get(field_name))
-    return TTradeGlobalMonitor(**payload)
+    # Projections written before these settings were introduced remain valid.
+    defaults = {
+      "max_exit_slippage_bps": 30.0,
+      "high_profit_lock_enabled": True,
+      "high_profit_arm_pct": 4.0,
+      "high_profit_max_drawdown_pct": 1.2,
+      "rapid_reversal_enabled": True,
+      "rapid_reversal_window_seconds": 15,
+      "rapid_reversal_drawdown_pct": 0.8,
+      "rapid_reversal_confirm_ticks": 2,
+      "momentum_enabled": True,
+      "momentum_window_seconds": 60,
+      "momentum_min_rise_pct": 0.8,
+      "momentum_min_move_seconds": 15,
+      "momentum_baseline_seconds": 300,
+      "momentum_min_amount_velocity_ratio": 2.0,
+      "momentum_min_vwap_premium_pct": 2.0,
+      "momentum_max_vwap_premium_pct": 3.5,
+      "momentum_high_tolerance_ticks": 1,
+      "momentum_max_spread_ticks": 10,
+      "momentum_max_spread_pct": 0.3,
+      "limit_up_touch_exit_enabled": True,
+      "limit_up_touch_tolerance_ticks": 0,
+    }
+    for key, value in defaults.items():
+      payload.setdefault(key, value)
+    return TTradeGlobalMonitor(**cls._graphql_kwargs(TTradeGlobalMonitor, payload))
 
   @classmethod
   def _readiness_type(cls, data: dict) -> TTradeLiveReadiness:
     payload = cls._with_datetimes(
       data,
       "snapshot_at",
+      "controlled_window_started_at",
       "last_backup_at",
       "checked_at",
     )
     defaults = {
+      "status": "READY" if payload.get("ready") else "BLOCKED",
+      "preparation_ready": bool(payload.get("ready")),
+      "automation_ready": bool(payload.get("ready")),
       "agent_mode": "unknown",
       "protocol_version": "",
       "snapshot_id": None,
@@ -193,6 +245,16 @@ class TTradeResolver:
       "queue_delay_seconds": 0.0,
       "dead_letter_count": 0,
       "unresolved_critical_alert_count": 0,
+      "manual_coexistence": False,
+      "external_order_count": 0,
+      "external_trade_count": 0,
+      "controlled_window_active": False,
+      "controlled_window_snapshot_id": None,
+      "controlled_window_started_at": None,
+      "new_external_order_count": 0,
+      "new_external_trade_count": 0,
+      "working_external_order_count": 0,
+      "preparation_blocked_reasons": list(payload.get("blocked_reasons") or []),
       "journal_integrity": "unknown",
       "journal_size_bytes": 0,
       "journal_pending_reports": 0,
@@ -201,9 +263,15 @@ class TTradeResolver:
     for key, value in defaults.items():
       payload.setdefault(key, value)
     payload["checks"] = [
-      TTradeReadinessCheck(**item) for item in payload.get("checks", [])
+      TTradeReadinessCheck(
+        **cls._graphql_kwargs(
+          TTradeReadinessCheck,
+          {"scope": "AUTOMATION", **dict(item)},
+        )
+      )
+      for item in payload.get("checks", [])
     ]
-    return TTradeLiveReadiness(**payload)
+    return TTradeLiveReadiness(**cls._graphql_kwargs(TTradeLiveReadiness, payload))
 
   @classmethod
   def _operational_alert_type(
@@ -336,7 +404,10 @@ class TTradeResolver:
     rows = await cls.service.list_imported_entries(account_id)
     return [
       TTradeImportedEntry(
-        **cls._with_datetimes(row, "source_trade_time")
+        **cls._graphql_kwargs(
+          TTradeImportedEntry,
+          cls._with_datetimes(row, "source_trade_time"),
+        )
       )
       for row in rows
     ]
@@ -348,11 +419,14 @@ class TTradeResolver:
     rows = await cls.service.list_signal_history(account_id, limit)
     return [
       TTradeSignalHistoryEntry(
-        **cls._with_datetimes(
-          row,
-          "created_at",
-          "expires_at",
-          "updated_at",
+        **cls._graphql_kwargs(
+          TTradeSignalHistoryEntry,
+          cls._with_datetimes(
+            row,
+            "created_at",
+            "expires_at",
+            "updated_at",
+          ),
         )
       )
       for row in rows
@@ -384,11 +458,14 @@ class TTradeResolver:
       cursors.append(encode_cursor(cursor_created_at, cursor_row_id))
       items.append(
         TTradeSignalHistoryEntry(
-          **cls._with_datetimes(
-            payload,
-            "created_at",
-            "expires_at",
-            "updated_at",
+          **cls._graphql_kwargs(
+            TTradeSignalHistoryEntry,
+            cls._with_datetimes(
+              payload,
+              "created_at",
+              "expires_at",
+              "updated_at",
+            ),
           )
         )
       )
@@ -431,6 +508,9 @@ class TTradeResolver:
     *,
     expected_signal_version: int = 0,
     idempotency_key: str = "",
+    actor_id: str = "",
+    device_session_id: str = "",
+    approval_channel: str = "WEB",
   ) -> TTradeMutationResult:
     try:
       session = await cls.service.get_session(run_id)
@@ -450,6 +530,11 @@ class TTradeResolver:
           "run_id": run_id,
           "intent_id": intent_id,
           "expected_signal_version": expected_signal_version,
+          "approval_audit": {
+            "actor_id": str(actor_id or "")[:64],
+            "device_session_id": str(device_session_id or "")[:64],
+            "channel": str(approval_channel or "WEB")[:32],
+          },
         },
         run_id,
         idempotency_key=(
@@ -461,17 +546,13 @@ class TTradeResolver:
         success=bool(result.get("success")),
         code=str(result.get("code", "")),
         message=str(result.get("message", "")),
-        session=cls._session_type(result["session"])
-        if result.get("session")
-        else None,
+        session=cls._session_type(result["session"]) if result.get("session") else None,
       )
     except ValueError as exc:
       return TTradeMutationResult(False, "VALIDATION_FAILED", str(exc))
 
   @classmethod
-  async def reject_entry(
-    cls, run_id: str, intent_id: str
-  ) -> TTradeMutationResult:
+  async def reject_entry(cls, run_id: str, intent_id: str) -> TTradeMutationResult:
     try:
       result = await cls._engine_request(
         "T_TRADE_REJECT_ENTRY",
@@ -482,9 +563,7 @@ class TTradeResolver:
         success=bool(result.get("success")),
         code=str(result.get("code", "")),
         message=str(result.get("message", "")),
-        session=cls._session_type(result["session"])
-        if result.get("session")
-        else None,
+        session=cls._session_type(result["session"]) if result.get("session") else None,
       )
     except ValueError as exc:
       return TTradeMutationResult(False, "VALIDATION_FAILED", str(exc))
@@ -536,18 +615,14 @@ class TTradeResolver:
         success=bool(result.get("success")),
         code=str(result.get("code", "")),
         message=str(result.get("message", "")),
-        session=cls._session_type(result["session"])
-        if result.get("session")
-        else None,
+        session=cls._session_type(result["session"]) if result.get("session") else None,
       )
     except ValueError as exc:
       return TTradeMutationResult(False, "VALIDATION_FAILED", str(exc))
 
   @classmethod
   async def readiness(cls, account_id: str) -> TTradeLiveReadiness:
-    return cls._readiness_type(
-      await cls.operations_service.readiness(account_id)
-    )
+    return cls._readiness_type(await cls.operations_service.readiness(account_id))
 
   @classmethod
   async def operational_alerts(
@@ -624,7 +699,10 @@ class TTradeResolver:
     )
     return [
       TTradeBatch(
-        **cls._with_datetimes(row, "created_at", "updated_at")
+        **cls._graphql_kwargs(
+          TTradeBatch,
+          cls._with_datetimes(row, "created_at", "updated_at"),
+        )
       )
       for row in rows
     ]
@@ -648,12 +726,15 @@ class TTradeResolver:
       cursor_id=cursor_id,
       first=first,
     )
-    cursors = [
-      encode_cursor(row["updated_at"], row["batch_id"]) for row in rows
-    ]
+    cursors = [encode_cursor(row["updated_at"], row["batch_id"]) for row in rows]
     return TTradeBatchPage(
       items=[
-        TTradeBatch(**cls._with_datetimes(row, "created_at", "updated_at"))
+        TTradeBatch(
+          **cls._graphql_kwargs(
+            TTradeBatch,
+            cls._with_datetimes(row, "created_at", "updated_at"),
+          )
+        )
         for row in rows
       ],
       page_info=PageInfo(
@@ -678,7 +759,10 @@ class TTradeResolver:
     )
     return [
       TTradeBatchEvent(
-        **cls._with_datetimes(row, "created_at", "applied_at")
+        **cls._graphql_kwargs(
+          TTradeBatchEvent,
+          cls._with_datetimes(row, "created_at", "applied_at"),
+        )
       )
       for row in rows
     ]
@@ -702,12 +786,15 @@ class TTradeResolver:
       cursor_id=cursor_id,
       first=first,
     )
-    cursors = [
-      encode_cursor(row["created_at"], row["event_id"]) for row in rows
-    ]
+    cursors = [encode_cursor(row["created_at"], row["event_id"]) for row in rows]
     return TTradeBatchEventPage(
       items=[
-        TTradeBatchEvent(**cls._with_datetimes(row, "created_at", "applied_at"))
+        TTradeBatchEvent(
+          **cls._graphql_kwargs(
+            TTradeBatchEvent,
+            cls._with_datetimes(row, "created_at", "applied_at"),
+          )
+        )
         for row in rows
       ],
       page_info=PageInfo(
@@ -725,24 +812,73 @@ class TTradeResolver:
     *,
     user_id: str,
     policy_version: int,
+    target_stage: TTradeRolloutTarget = TTradeRolloutTarget.CANARY,
+    confirmation: str = "",
   ) -> TTradeOperationsMutationResult:
     try:
-      readiness = await cls.operations_service.activate_canary(
+      target = str(target_stage.value)
+      readiness = await cls.operations_service.activate_rollout(
         account_id,
         user_id=user_id,
         acknowledged_policy_version=policy_version,
+        target_stage=target,
+        confirmation=confirmation,
       )
       return TTradeOperationsMutationResult(
-        True,
-        "CANARY_ACTIVATED",
-        "账户已进入严格 Canary 阶段",
-        cls._readiness_type(readiness),
+        success=True,
+        code=f"{target}_ACTIVATED",
+        message="账户已进入正式 LIVE 阶段"
+        if target == "LIVE"
+        else "账户已进入严格 Canary 阶段",
+        readiness=cls._readiness_type(readiness),
       )
     except ValueError as exc:
+      await cls.operations_service.record_event(
+        account_id,
+        "LIVE_ACTIVATION_REJECTED",
+        actor_user_id=user_id,
+        details={
+          "targetStage": str(target_stage.value),
+          "reason": str(exc),
+        },
+      )
       return TTradeOperationsMutationResult(
-        False,
-        "LIVE_NOT_READY",
-        str(exc),
+        success=False,
+        code="LIVE_NOT_READY",
+        message=str(exc),
+      )
+
+  @classmethod
+  async def begin_controlled_window(
+    cls,
+    account_id: str,
+    *,
+    user_id: str,
+    snapshot_id: str,
+  ) -> TTradeOperationsMutationResult:
+    try:
+      readiness = await cls.operations_service.begin_controlled_window(
+        account_id,
+        user_id=user_id,
+        snapshot_id=snapshot_id,
+      )
+      return TTradeOperationsMutationResult(
+        success=True,
+        code="CONTROLLED_WINDOW_STARTED",
+        message="已基于当前完整快照建立受控交易窗口",
+        readiness=cls._readiness_type(readiness),
+      )
+    except ValueError as exc:
+      await cls.operations_service.record_event(
+        account_id,
+        "CONTROLLED_WINDOW_REJECTED",
+        actor_user_id=user_id,
+        details={"snapshotId": snapshot_id, "reason": str(exc)},
+      )
+      return TTradeOperationsMutationResult(
+        success=False,
+        code="CONTROLLED_WINDOW_NOT_READY",
+        message=str(exc),
       )
 
   @classmethod
@@ -750,13 +886,19 @@ class TTradeResolver:
     cls,
     account_id: str,
     reason: str,
+    *,
+    user_id: str | None = None,
   ) -> TTradeOperationsMutationResult:
-    readiness = await cls.operations_service.pause(account_id, reason)
+    readiness = await cls.operations_service.pause(
+      account_id,
+      reason,
+      user_id=user_id,
+    )
     return TTradeOperationsMutationResult(
-      True,
-      "ENTRIES_PAUSED",
-      "已停止新买入，现有批次继续受保护",
-      cls._readiness_type(readiness),
+      success=True,
+      code="ENTRIES_PAUSED",
+      message="已停止新买入，现有批次继续受保护",
+      readiness=cls._readiness_type(readiness),
     )
 
   @classmethod
@@ -764,13 +906,19 @@ class TTradeResolver:
     cls,
     account_id: str,
     reason: str,
+    *,
+    user_id: str | None = None,
   ) -> TTradeOperationsMutationResult:
-    readiness = await cls.operations_service.kill(account_id, reason)
+    readiness = await cls.operations_service.kill(
+      account_id,
+      reason,
+      user_id=user_id,
+    )
     return TTradeOperationsMutationResult(
-      True,
-      "KILL_SWITCHED",
-      "kill switch 已触发，现有批次转人工处置",
-      cls._readiness_type(readiness),
+      success=True,
+      code="KILL_SWITCHED",
+      message="kill switch 已触发，现有批次转人工处置",
+      readiness=cls._readiness_type(readiness),
     )
 
   @classmethod
@@ -785,15 +933,15 @@ class TTradeResolver:
         client_order_id,
       )
       return TTradeOperationsMutationResult(
-        bool(result.get("success")),
-        str(result.get("status") or "CANCEL_REQUESTED"),
-        str(result.get("message") or ""),
+        success=bool(result.get("success")),
+        code=str(result.get("status") or "CANCEL_REQUESTED"),
+        message=str(result.get("message") or ""),
       )
     except ValueError as exc:
       return TTradeOperationsMutationResult(
-        False,
-        "CANCEL_NOT_ALLOWED",
-        str(exc),
+        success=False,
+        code="CANCEL_NOT_ALLOWED",
+        message=str(exc),
       )
 
   @classmethod
@@ -816,7 +964,7 @@ class TTradeResolver:
       )
       for item in data.get("positions", [])
     ]
-    return TTradeReplayPreparation(**data)
+    return TTradeReplayPreparation(**cls._graphql_kwargs(TTradeReplayPreparation, data))
 
   @classmethod
   async def get_replay(cls, run_id: str) -> Optional[TTradeReplay]:
@@ -830,9 +978,7 @@ class TTradeResolver:
     return str(account_id) if account_id else None
 
   @classmethod
-  async def replay_history(
-    cls, account_id: str, limit: int
-  ) -> List[TTradeReplay]:
+  async def replay_history(cls, account_id: str, limit: int) -> List[TTradeReplay]:
     rows = await cls.replay_service.history(account_id, limit)
     return [cls._replay_type(row) for row in rows]
 
@@ -844,9 +990,9 @@ class TTradeResolver:
     items = []
     for raw in data.get("items", []):
       item = cls._with_datetimes(raw, "entry_time", "exit_time")
-      items.append(TTradeReplayCycle(**item))
+      items.append(TTradeReplayCycle(**cls._graphql_kwargs(TTradeReplayCycle, item)))
     data["items"] = items
-    return TTradeReplayCyclePage(**data)
+    return TTradeReplayCyclePage(**cls._graphql_kwargs(TTradeReplayCyclePage, data))
 
   @classmethod
   async def start_replay(

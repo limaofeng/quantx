@@ -18,6 +18,9 @@ from quantx_infrastructure.services.runtime_subscription_bridge import (
 from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   t_trade_monitor_projection_service,
 )
+from quantx_infrastructure.services.limit_up_board_assistant_projection_service import (
+  limit_up_board_assistant_projection_service,
+)
 from sqlalchemy import select
 
 from quantx_api.gqlapi.security import authorized_account_id
@@ -30,6 +33,9 @@ from quantx_api.gqlapi.types.strategy_subscription_types import (
 )
 from quantx_api.gqlapi.types.strategy_types import StrategyInstanceEvent
 from quantx_api.gqlapi.types.t_trade_types import TTradeUpdateNotice
+from quantx_api.gqlapi.types.limit_up_board_assistant_types import (
+  LimitUpBoardAssistantUpdateNotice,
+)
 from quantx_api.runtime_status import component_status, required_components
 
 from ..security import principal_from_context
@@ -157,6 +163,24 @@ def with_retry(max_retries: int = 3, retry_delay: float = 1.0):
 
 @strawberry.type(description="实时数据订阅")
 class RealtimeSubscription:
+  @strawberry.subscription(description="订阅账户级打板助手投影更新")
+  async def limit_up_board_assistant_updates(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> AsyncIterator[LimitUpBoardAssistantUpdateNotice]:
+    authorized = authorized_account_id(info, account_id)
+    async for message in limit_up_board_assistant_projection_service.subscribe(
+      authorized
+    ):
+      yield LimitUpBoardAssistantUpdateNotice(
+        account_id=authorized,
+        version=str(message.get("version") or "0"),
+        occurred_at=datetime.fromisoformat(
+          str(message.get("occurred_at")).replace("Z", "+00:00")
+        ),
+      )
+
   @strawberry.subscription(description="订阅账户做 T 监控投影更新")
   async def t_trade_updates(
     self,

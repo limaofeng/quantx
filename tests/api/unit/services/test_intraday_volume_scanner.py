@@ -9,9 +9,11 @@ class FakeManager:
   def __init__(self):
     self.callback = None
     self.market_codes = None
+    self.subscribe_count = 0
     self.unsubscribed = None
 
   def subscribe_whole_quote(self, market_codes, callback):
+    self.subscribe_count += 1
     self.market_codes = market_codes
     self.callback = callback
     return 1001
@@ -79,7 +81,9 @@ async def test_intraday_volume_scanner_subscribes_whole_market_and_scores_ticks(
 
   try:
     assert await scanner.start() is True
+    assert await scanner.start() is True
     assert manager.market_codes == ["SH", "SZ"]
+    assert manager.subscribe_count == 1
     assert callable(manager.callback)
 
     feed_two_ticks(scanner)

@@ -10,6 +10,9 @@ from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+from quantx_infrastructure.core.assistant_strategy_policy import (
+  is_assistant_managed_strategy,
+)
 from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.enums import StrategyRunStatus
@@ -898,7 +901,9 @@ class StrategyResolver:
     return None
 
   @staticmethod
-  async def get_strategies() -> List[Strategy]:
+  async def get_strategies(
+    include_assistant_managed: bool = False,
+  ) -> List[Strategy]:
     """获取策略模板列表"""
     strategies = []
 
@@ -907,6 +912,8 @@ class StrategyResolver:
       strategy_models = await repo.get_all_strategies()
 
       for model in strategy_models:
+        if not include_assistant_managed and is_assistant_managed_strategy(model):
+          continue
         strategy = Strategy.from_model(model)
         strategies.append(strategy)
 
@@ -925,12 +932,18 @@ class StrategyResolver:
     return None
 
   @staticmethod
-  async def get_strategy_definitions() -> List[StrategyDefinition]:
+  async def get_strategy_definitions(
+    include_assistant_managed: bool = False,
+  ) -> List[StrategyDefinition]:
     definitions = []
     async for db in get_async_db():
       repo = StrategyRepository(db)
       strategy_models = await repo.get_all_strategies()
-      definitions = [StrategyDefinition.from_strategy(model) for model in strategy_models]
+      definitions = [
+        StrategyDefinition.from_strategy(model)
+        for model in strategy_models
+        if include_assistant_managed or not is_assistant_managed_strategy(model)
+      ]
       break
     return definitions
 
@@ -939,12 +952,15 @@ class StrategyResolver:
     status: Optional[str] = None,
     strategy_key: Optional[str] = None,
     instrument_code: Optional[str] = None,
+    include_assistant_managed: bool = False,
   ) -> List[StrategyInstance]:
     instances: List[StrategyInstance] = []
     async for db in get_async_db():
       run_repo = StrategyRunRepository(db)
       runs = await run_repo.find_all_strategy_runs()
       for run in runs:
+        if not include_assistant_managed and is_assistant_managed_strategy(run):
+          continue
         if status and str(getattr(run.status, "value", run.status)).lower() != status.lower():
           continue
         if strategy_key:
@@ -968,6 +984,22 @@ class StrategyResolver:
         return await StrategyResolver._instance_from_run_model(db, run)
       break
     return None
+
+  @staticmethod
+  async def strategy_run_account_id(run_id: str) -> str:
+    """Resolve the broker account bound to a strategy run for authorization."""
+    async for db in get_async_db():
+      run = await StrategyRunRepository(db).find_run_by_id(run_id)
+      if not run:
+        raise ValueError("策略运行不存在")
+      parameters = StrategyResolver._json_object(run.parameters)
+      account_id = str(
+        parameters.get("account_id") or parameters.get("accountId") or ""
+      ).strip()
+      if not account_id:
+        raise ValueError("策略运行未绑定资金账户，禁止远程确认交易")
+      return account_id
+    raise ValueError("策略运行账户暂不可读取")
 
   @staticmethod
   async def get_strategy_pending_trade_intents(
@@ -994,11 +1026,26 @@ class StrategyResolver:
     from quantx_infrastructure.repositories.strategy_run_state_repository import (
       StrategyRunStateRepository,
     )
+    from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+      AutoExitPlanRepository,
+    )
+    from quantx_domain.trading.exit_plan import ExitPlan
 
     async for db in get_async_db():
       run = await StrategyRunRepository(db).find_run_by_id(run_id)
       if not run:
         raise ValueError("策略运行不存在")
+      persistent = await AutoExitPlanRepository(db).find_all(
+        strategy_run_id=run_id,
+        limit=500,
+      )
+      if persistent:
+        return [
+          StrategyExitPlanView.from_projection(
+            ExitPlan.from_dict(dict(item.plan_state or {})).projection()
+          )
+          for item in persistent
+        ]
       state = await StrategyRunStateRepository(db).get_state(run_id)
       custom_state = dict(state.custom_state or {}) if state else {}
       book = ExitPlanBook.from_dict(custom_state.get(EXIT_PLAN_BOOK_STATE_KEY))
@@ -1673,7 +1720,9 @@ class StrategyResolver:
     return None
 
   @staticmethod
-  async def get_strategy_runs() -> List[StrategyRun]:
+  async def get_strategy_runs(
+    include_assistant_managed: bool = False,
+  ) -> List[StrategyRun]:
     """获取所有策略运行"""
     runs = []
     strategy_cache = {}
@@ -1683,6 +1732,8 @@ class StrategyResolver:
       db_runs = await run_repo.find_all_strategy_runs()
 
       for model in db_runs:
+        if not include_assistant_managed and is_assistant_managed_strategy(model):
+          continue
         if model.strategy_id not in strategy_cache:
           strategy_cache[model.strategy_id] = await StrategyResolver._get_strategy_by_id(
             model.strategy_id
@@ -2073,11 +2124,18 @@ class StrategyResolver:
   async def approve_strategy_trade_intent(
     run_id: str,
     intent_id: str,
+    *,
+    actor_id: str = "",
+    device_session_id: str = "",
+    approval_channel: str = "WEB",
   ) -> OperationResult:
     return await StrategyResolver._resolve_strategy_trade_intent(
       run_id=run_id,
       intent_id=intent_id,
       command_type="STRATEGY_APPROVE_TRADE_INTENT",
+      actor_id=actor_id,
+      device_session_id=device_session_id,
+      approval_channel=approval_channel,
     )
 
   @staticmethod
@@ -2085,12 +2143,19 @@ class StrategyResolver:
     run_id: str,
     intent_id: str,
     reason: str = "USER_REJECTED",
+    *,
+    actor_id: str = "",
+    device_session_id: str = "",
+    approval_channel: str = "WEB",
   ) -> OperationResult:
     return await StrategyResolver._resolve_strategy_trade_intent(
       run_id=run_id,
       intent_id=intent_id,
       command_type="STRATEGY_REJECT_TRADE_INTENT",
       reason=reason,
+      actor_id=actor_id,
+      device_session_id=device_session_id,
+      approval_channel=approval_channel,
     )
 
   @staticmethod
@@ -2100,6 +2165,9 @@ class StrategyResolver:
     intent_id: str,
     command_type: str,
     reason: str = "USER_REJECTED",
+    actor_id: str = "",
+    device_session_id: str = "",
+    approval_channel: str = "WEB",
   ) -> OperationResult:
     from quantx_infrastructure.repositories.trade_intent_repository import (
       TradeIntentRepository,
@@ -2120,6 +2188,11 @@ class StrategyResolver:
       "run_id": run_id,
       "intent_id": intent_id,
       "reason": str(reason or "USER_REJECTED")[:120],
+      "approval_audit": {
+        "actor_id": str(actor_id or "")[:64],
+        "device_session_id": str(device_session_id or "")[:64],
+        "channel": str(approval_channel or "WEB")[:32],
+      },
     }
     try:
       result = await StrategyResolver._engine_request(

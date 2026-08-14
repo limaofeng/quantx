@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import List, Optional
 
@@ -5,6 +6,12 @@ import strawberry
 from strawberry.scalars import JSON
 
 from ..resolvers.strategies import StrategyResolver
+from ..security import authorized_account_id, principal_from_context
+from ..trade_approval import (
+  STRATEGY_TRADE_INTENT_APPROVAL,
+  TradeApprovalChallengeError,
+  TradeApprovalChallengeService,
+)
 from ..types import (
   BucketLedgerView,
   ExecutionTraceView,
@@ -28,21 +35,36 @@ from ..types import (
   StrategyRunMode,
   StrategyRunUpdateInput,
 )
+from ..types.trade_approval_types import (
+  TradeApprovalConfirmationResult,
+  TradeApprovalPreview,
+  TradeApprovalPreviewResult,
+)
 
 
 @strawberry.type(description="策略相关查询")
 class StrategyQuery:
   @strawberry.field(description="获取策略模板列表")
-  async def strategies(self) -> List[Strategy]:
-    return await StrategyResolver.get_strategies()
+  async def strategies(
+    self,
+    include_assistant_managed: bool = False,
+  ) -> List[Strategy]:
+    return await StrategyResolver.get_strategies(
+      include_assistant_managed=include_assistant_managed
+    )
 
   @strawberry.field(description="获取单个策略模板")
   async def strategy(self, strategy_id: int) -> Optional[Strategy]:
     return await StrategyResolver.get_strategy(strategy_id)
 
   @strawberry.field(description="获取策略运行列表")
-  async def strategy_runs(self) -> List[StrategyRun]:
-    return await StrategyResolver.get_strategy_runs()
+  async def strategy_runs(
+    self,
+    include_assistant_managed: bool = False,
+  ) -> List[StrategyRun]:
+    return await StrategyResolver.get_strategy_runs(
+      include_assistant_managed=include_assistant_managed
+    )
 
   @strawberry.field(description="获取单个策略运行")
   async def strategy_run(self, run_id: str) -> Optional[StrategyRun]:
@@ -53,8 +75,13 @@ class StrategyQuery:
     return await StrategyResolver.get_backtest_history(run_id)
 
   @strawberry.field(description="获取策略库定义列表")
-  async def strategy_definitions(self) -> List[StrategyDefinition]:
-    return await StrategyResolver.get_strategy_definitions()
+  async def strategy_definitions(
+    self,
+    include_assistant_managed: bool = False,
+  ) -> List[StrategyDefinition]:
+    return await StrategyResolver.get_strategy_definitions(
+      include_assistant_managed=include_assistant_managed
+    )
 
   @strawberry.field(description="获取策略实例列表")
   async def strategy_instances(
@@ -62,11 +89,13 @@ class StrategyQuery:
     status: Optional[str] = None,
     strategy_key: Optional[str] = None,
     instrument_code: Optional[str] = None,
+    include_assistant_managed: bool = False,
   ) -> List[StrategyInstance]:
     return await StrategyResolver.get_strategy_instances(
       status=status,
       strategy_key=strategy_key,
       instrument_code=instrument_code,
+      include_assistant_managed=include_assistant_managed,
     )
 
   @strawberry.field(description="获取单个策略实例")
@@ -293,23 +322,110 @@ class StrategyMutation:
   @strawberry.field(description="确认一个等待人工授权的策略交易意图")
   async def approve_strategy_trade_intent(
     self,
+    info: strawberry.types.Info,
     run_id: str,
     intent_id: str,
   ) -> OperationResult:
-    return await StrategyResolver.approve_strategy_trade_intent(run_id, intent_id)
+    principal = principal_from_context(info.context)
+    account_id = await StrategyResolver.strategy_run_account_id(run_id)
+    authorized_account_id(info, account_id)
+    return await StrategyResolver.approve_strategy_trade_intent(
+      run_id,
+      intent_id,
+      actor_id=principal.user_id,
+      device_session_id=principal.device_session_id,
+      approval_channel="GRAPHQL_LEGACY",
+    )
 
   @strawberry.field(description="拒绝一个等待人工授权的策略交易意图")
   async def reject_strategy_trade_intent(
     self,
+    info: strawberry.types.Info,
     run_id: str,
     intent_id: str,
     reason: str = "USER_REJECTED",
   ) -> OperationResult:
+    principal = principal_from_context(info.context)
+    account_id = await StrategyResolver.strategy_run_account_id(run_id)
+    authorized_account_id(info, account_id)
     return await StrategyResolver.reject_strategy_trade_intent(
       run_id,
       intent_id,
       reason,
+      actor_id=principal.user_id,
+      device_session_id=principal.device_session_id,
+      approval_channel="GRAPHQL_LEGACY",
     )
+
+  @strawberry.mutation(description="生成一次策略买入意图的短时设备绑定确认预览")
+  async def preview_strategy_trade_intent_approval(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+  ) -> TradeApprovalPreviewResult:
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
+    try:
+      account_id = await StrategyResolver.strategy_run_account_id(run_id)
+      resolved_account_id = authorized_account_id(info, account_id)
+      preview = await TradeApprovalChallengeService.issue(
+        principal=principal,
+        action=STRATEGY_TRADE_INTENT_APPROVAL,
+        account_id=resolved_account_id,
+        run_id=run_id,
+        intent_id=intent_id,
+      )
+      return TradeApprovalPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对交易信息并在凭据过期前完成本机认证",
+        preview=TradeApprovalPreview.from_data(preview),
+      )
+    except TradeApprovalChallengeError as exc:
+      return TradeApprovalPreviewResult(False, exc.code, exc.message)
+    except ValueError as exc:
+      return TradeApprovalPreviewResult(False, "VALIDATION_FAILED", str(exc))
+
+  @strawberry.mutation(description="消费短时凭据并确认一个策略买入意图")
+  async def confirm_strategy_trade_intent_approval(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    intent_id: str,
+    confirmation_token: str,
+  ) -> TradeApprovalConfirmationResult:
+    principal = principal_from_context(info.context)
+    principal.require_permission("trade:approve")
+    try:
+      account_id = await StrategyResolver.strategy_run_account_id(run_id)
+      resolved_account_id = authorized_account_id(info, account_id)
+      challenge_id = await TradeApprovalChallengeService.consume(
+        principal=principal,
+        action=STRATEGY_TRADE_INTENT_APPROVAL,
+        account_id=resolved_account_id,
+        run_id=run_id,
+        intent_id=intent_id,
+        confirmation_token=confirmation_token,
+      )
+      result = await StrategyResolver.approve_strategy_trade_intent(
+        run_id,
+        intent_id,
+        actor_id=principal.user_id,
+        device_session_id=principal.device_session_id,
+        approval_channel="IOS_BIOMETRIC",
+      )
+      data = json.loads(result.data) if result.data else {}
+      return TradeApprovalConfirmationResult(
+        success=result.success,
+        code=str(data.get("code") or ("APPROVED" if result.success else "FAILED")),
+        message=result.message,
+        challenge_id=challenge_id,
+      )
+    except TradeApprovalChallengeError as exc:
+      return TradeApprovalConfirmationResult(False, exc.code, exc.message)
+    except (ValueError, json.JSONDecodeError) as exc:
+      return TradeApprovalConfirmationResult(False, "VALIDATION_FAILED", str(exc))
 
   @strawberry.field(description="归档策略实例")
   async def archive_strategy_instance(self, instance_id: str) -> Optional[StrategyInstance]:

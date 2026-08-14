@@ -262,9 +262,13 @@ class StrategyInstance:
         parameters.get("_parameter_version")
         or (run.updated_at.isoformat() if run.updated_at else "1")
       ),
-      created_at=run.created_at,
-      updated_at=run.updated_at,
-      last_decision_at=last_decision_at,
+      created_at=time_utils.to_shanghai(run.created_at, keep_tz=True),
+      updated_at=time_utils.to_shanghai(run.updated_at, keep_tz=True),
+      last_decision_at=(
+        time_utils.to_shanghai(last_decision_at, keep_tz=True)
+        if last_decision_at
+        else None
+      ),
       latest_execution_status=latest_execution_status,
     )
 
@@ -429,6 +433,7 @@ class StrategyExitPlanView:
   last_net_profit_pct: float
   peak_net_profit_pct: float
   holding_trading_days: int
+  entry_trade_date: Optional[str] = None
   pending_intent_id: Optional[str] = None
   pending_order_id: Optional[str] = None
   last_exit_reason: Optional[str] = None
@@ -460,6 +465,7 @@ class StrategyExitPlanView:
       last_net_profit_pct=float(raw.get("last_net_profit_pct", 0.0) or 0.0),
       peak_net_profit_pct=float(raw.get("peak_net_profit_pct", 0.0) or 0.0),
       holding_trading_days=int(raw.get("holding_trading_days", 0) or 0),
+      entry_trade_date=str(raw.get("entry_trade_date") or "") or None,
       pending_intent_id=str(raw.get("pending_intent_id") or "") or None,
       pending_order_id=str(raw.get("pending_order_id") or "") or None,
       last_exit_reason=str(raw.get("last_exit_reason") or "") or None,
