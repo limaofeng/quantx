@@ -236,6 +236,8 @@ prompt。能力差异先用工具和结构化上下文表达；当某一研究�
 | `ai_assistant_events` | 每个 thread 单调递增事件流，供断线重放 |
 | `ai_assistant_tool_calls` | 参数、风险、审批、结果、错误和幂等键 |
 | `ai_assistant_deletion_audits` | 永久删除对话后的最小审计，不保留正文 |
+| `ai_runtime_settings` | 全局非敏感期望配置、递增版本和修改人 |
+| `ai_runtime_settings_audits` | 配置修改前后安全值、版本、用户和 request ID |
 
 同一 thread 在 `QUEUED`、`RUNNING`、`WAITING_APPROVAL` 中最多存在一个
 active run，由 PostgreSQL partial unique index 保证，不能只靠前端按钮。
@@ -445,6 +447,16 @@ AI_ASSISTANT_RUN_TIMEOUT_SECONDS=300
 AI_ASSISTANT_LEASE_SECONDS=60
 AI_ASSISTANT_TRACING_ENABLED=False
 ```
+
+无 `ai_runtime_settings` 记录时，上述环境变量是有效配置。首次从“系统设置 / AI
+Runtime”保存后，PostgreSQL 中的版本化记录覆盖启用状态、模型、并发、轮次、工具
+调用上限和超时；Runtime 通过 Redis 唤醒并至少每 5 秒轮询数据库，Redis 故障只会
+增加生效延迟。降低并发不会取消已运行任务，只会限制后续领取。
+
+每个 AI Assistant run 创建时持久化配置版本和安全快照。排队、运行中和等待批准
+的旧任务继续使用该快照；显式重试使用重试时的最新配置。首板研究任务在领取时
+取得当时的有效配置。停用 Runtime 后不再创建或领取新任务，但允许当前任务完成、
+取消任务和处理既有批准；重新启用后继续领取等待中的任务。
 
 `OPENAI_API_KEY` 仅通过服务端运行环境注入，不进入前端、数据库、GraphQL
 capabilities、日志或异常。无 key 时 Runtime 仍上报 `unconfigured` 心跳，但不

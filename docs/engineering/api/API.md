@@ -25,7 +25,7 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 | --- | --- |
 | `/health/live` | 只证明 API 事件循环可响应 |
 | `/health/ready` | 按 `web/full` profile 检查必要组件 |
-| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情分项状态 |
+| `/health/components` | API、数据库、Engine、Prefect、Worker、Agent、行情和 AI Runtime 分项状态 |
 | `/health` | `/health/ready` 的兼容别名 |
 
 `full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
@@ -36,6 +36,10 @@ GraphQL `liveSafetyStatus` 进一步分成 `preparationReady`（账户观察、�
 分类和完整快照对账链路）与 `automationReady`（可申请自动执行）两个结论。
 `PREPARING` 是健康的 `SHADOW` 准备阶段，`BLOCKED` 才表示准备链路本身
 未通过；`ready` 保留为 `automationReady` 的兼容别名。
+
+AI Runtime 在组件健康中仅返回脱敏状态、心跳年龄和已应用配置版本。它是可选
+组件，即使处于 `disabled`、`unconfigured`、`offline` 或 `unavailable`，也不会
+改变 QuantX 必需组件的 readiness。
 
 ## 用户认证
 
@@ -77,6 +81,17 @@ WebSocket。
 
 GraphQL 同时提供 `agentDevices`、`createAgentEnrollment` 和
 `revokeAgentDevice`，供 Web 管理设备状态。
+
+## 系统设置 GraphQL
+
+`aiRuntimeSettings` 使用 `system-status:read`，返回全局非敏感期望配置、
+Runtime 已应用版本和应用状态。`updateAiRuntimeSettings` 使用独立权限
+`system-config:write`，并要求客户端提交 `expectedVersion`；版本冲突时拒绝覆盖，
+客户端必须刷新后重试。
+
+可动态修改的字段仅包括启用状态、模型、最大并发、最大轮次、最大工具调用数和
+运行超时。API Key 只返回“是否已配置”，Tracing 和租约只读；三者都继续由服务端
+环境管理，不进入 GraphQL、数据库或审计正文。
 
 ## 交易 mutation 语义
 
