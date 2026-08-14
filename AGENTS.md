@@ -97,6 +97,13 @@ python -m pytest tests/api/integration/
 Codex 生成的截图、trace 和 video 放在根目录 `.codex_screenshots/`，默认不
 提交。
 
+## 任务完成与提交
+
+- Codex 确认任务完整达成并完成必要验证后，必须立即 `git commit` 本次改动，
+  不得让已确认完成的代码继续处于未提交状态。
+- 提交必须按实际功能合理拆分，并使用专业、清晰的 commit message；只有用户
+  明确要求暂不提交时才允许例外。
+
 ## 交易系统硬约束
 
 - 回测与实盘调用同一个 `StrategyBase.step(StrategyInput)`。
