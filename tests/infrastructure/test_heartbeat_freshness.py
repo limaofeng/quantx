@@ -266,12 +266,90 @@ async def test_readiness_prefers_fresh_ready_agent_for_the_account(
   result = await TTradeOperationsService().readiness("TEST-ACCOUNT")
 
   assert result["agent_device_id"] == "device-fresh"
+  assert result["ready_live_agent_count"] == 1
   assert result["agent_status"] == "READY"
   assert result["agent_mode"] == "live"
   assert result["protocol_version"] == "1.1"
   assert next(
     item for item in result["checks"] if item["code"] == "LIVE_AGENT_READY"
   )["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_closed_for_multiple_ready_live_agents(
+  monkeypatch: pytest.MonkeyPatch,
+  fixed_utcnow: datetime,
+) -> None:
+  rollout = SimpleNamespace(
+    account_id="TEST-ACCOUNT",
+    stage="CANARY",
+    enabled=True,
+    kill_switch=False,
+    reconcile_status="READY",
+    policy_version=1,
+    last_snapshot_id="snapshot-1",
+    last_snapshot_hash="a" * 64,
+    last_snapshot_at=fixed_utcnow - timedelta(seconds=10),
+    last_backup_at=fixed_utcnow - timedelta(hours=1),
+  )
+  engine = SimpleNamespace(status="READY", updated_at=fixed_utcnow)
+
+  def device(value: str):
+    return SimpleNamespace(
+      id=value,
+      authorized_account_ids=["TEST-ACCOUNT"],
+      capabilities=["live"],
+    )
+
+  def agent():
+    return SimpleNamespace(
+      status="READY",
+      updated_at=fixed_utcnow,
+      details={
+        "capabilities": ["live"],
+        "protocolVersion": "1.1",
+        "accountReconciliation": {
+          "TEST-ACCOUNT": {
+            "snapshotId": "snapshot-1",
+            "manualCoexistence": True,
+            "externalOrderCount": 0,
+            "externalTradeCount": 0,
+          }
+        },
+      },
+    )
+
+  snapshot_result = MagicMock()
+  snapshot_result.all.return_value = [
+    (rollout, engine, device("device-1"), agent(), 0, None, 0, 0),
+    (rollout, engine, device("device-2"), agent(), 0, None, 0, 0),
+  ]
+  db = SimpleNamespace(execute=AsyncMock(return_value=snapshot_result))
+
+  class SessionContext:
+    async def __aenter__(self):
+      return db
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  monkeypatch.setattr(operations_module, "AsyncSessionLocal", SessionContext)
+  monkeypatch.setattr(
+    operations_module.settings,
+    "real_trading_account_allowlist",
+    ["TEST-ACCOUNT"],
+  )
+  monkeypatch.setattr(operations_module.settings, "enable_real_trading", True)
+  monkeypatch.setattr(operations_module.settings, "t_trade_live_enabled", True)
+
+  result = await TTradeOperationsService().readiness("TEST-ACCOUNT")
+
+  assert result["ready_live_agent_count"] == 2
+  live_agent_check = next(
+    item for item in result["checks"] if item["code"] == "LIVE_AGENT_READY"
+  )
+  assert live_agent_check["passed"] is False
+  assert "多个就绪 live QMT Agent" in live_agent_check["message"]
 
 
 @pytest.mark.asyncio

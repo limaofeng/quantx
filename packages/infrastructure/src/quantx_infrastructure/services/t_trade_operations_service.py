@@ -334,6 +334,7 @@ class TTradeOperationsService:
       ) = rows[0]
       device = None
       agent = None
+      live_agent_candidates = []
       for row in rows:
         candidate_device = row[2]
         if candidate_device is None:
@@ -347,6 +348,7 @@ class TTradeOperationsService:
           }
         ):
           candidate_agent = row[3]
+          live_agent_candidates.append((candidate_device, candidate_agent))
           if device is None or self._agent_candidate_rank(
             candidate_agent
           ) > self._agent_candidate_rank(agent):
@@ -452,16 +454,46 @@ class TTradeOperationsService:
         else None
       )
       now = utcnow()
+      ready_live_agents = [
+        (candidate_device, candidate_agent)
+        for candidate_device, candidate_agent in live_agent_candidates
+        if self._fresh(candidate_agent)
+      ]
+      multiple_ready_live_agents = len(ready_live_agents) > 1
+      if len(ready_live_agents) == 1:
+        device, agent = ready_live_agents[0]
+        agent_details = dict(agent.details or {})
+        capabilities = {
+          str(value).lower()
+          for value in list(agent_details.get("capabilities") or [])
+        }
+        reported_agent_mode = next(
+          (
+            value
+            for value in ("live", "paper", "data-only")
+            if value in capabilities
+          ),
+          "offline",
+        )
+        reported_protocol_version = str(
+          agent_details.get("protocolVersion") or ""
+        )
       agent_heartbeat_fresh = bool(
         agent
         and to_naive_utc(agent.updated_at)
         >= now - timedelta(seconds=90)
       )
       live_agent_ready = bool(
-        agent_heartbeat_fresh
+        not multiple_ready_live_agents
+        and len(ready_live_agents) == 1
+        and agent_heartbeat_fresh
         and str(agent.status).upper() == "READY"
       )
-      if device is None:
+      if multiple_ready_live_agents:
+        live_agent_blocked_reason = (
+          "同一账户检测到多个就绪 live QMT Agent，必须先恢复唯一会话"
+        )
+      elif device is None:
         live_agent_blocked_reason = (
           "没有绑定该账户且具备 live 能力的已登记 QMT Agent"
         )
@@ -651,6 +683,7 @@ class TTradeOperationsService:
         "engine_status": str(engine.status if engine else "OFFLINE"),
         "agent_status": agent_status,
         "agent_device_id": str(device.id) if device else None,
+        "ready_live_agent_count": len(ready_live_agents),
         "agent_mode": agent_mode,
         "protocol_version": protocol_version,
         "reconcile_status": str(

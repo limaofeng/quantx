@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any, List, Optional
 
 import strawberry
@@ -941,6 +942,76 @@ class StrategyInstanceParameterUpdateInput:
     default=None,
     description="原生移动端必填；必须等于当前 configVersion",
   )
+
+
+@strawberry.enum(description="需要设备逐次确认的实盘策略控制动作")
+class StrategyControlAction(str, Enum):
+  START_LIVE = "START_LIVE"
+  RESUME_LIVE = "RESUME_LIVE"
+  CLONE_TO_LIVE = "CLONE_TO_LIVE"
+
+
+@strawberry.input(description="实盘策略控制预览输入")
+class StrategyControlPreviewInput:
+  account_id: str = strawberry.field(description="当前设备会话绑定的资金账号")
+  instance_id: str = strawberry.field(description="目标或来源策略实例 ID")
+  action: StrategyControlAction
+  expected_config_version: str = strawberry.field(
+    description="必须等于当前移动参数 configVersion",
+  )
+  idempotency_key: str = strawberry.field(
+    description="调用方生成、当前动作内唯一的幂等键",
+  )
+
+
+@strawberry.input(description="实盘策略控制确认输入")
+class StrategyControlConfirmationInput:
+  challenge_id: str
+  confirmation_token: str
+
+
+@strawberry.type(description="策略实盘就绪检查项")
+class StrategyControlReadinessCheck:
+  code: str
+  passed: bool
+  message: str
+
+
+@strawberry.type(description="实盘策略控制的服务端预览")
+class StrategyControlPreview:
+  challenge_id: str
+  confirmation_token: str
+  account_id: str
+  instance_id: str
+  target_instance_id: str
+  action: StrategyControlAction
+  current_mode: str
+  current_status: str
+  config_version: str
+  readiness_status: str
+  snapshot_id: Optional[str]
+  snapshot_at: Optional[datetime]
+  challenge_expires_at: datetime
+  checks: List[StrategyControlReadinessCheck]
+  warnings: List[str]
+
+
+@strawberry.type(description="实盘策略控制预览结果")
+class StrategyControlPreviewResult:
+  success: bool
+  code: str
+  message: str
+  preview: Optional[StrategyControlPreview] = None
+
+
+@strawberry.type(description="实盘策略控制确认结果")
+class StrategyControlConfirmationResult:
+  success: bool
+  code: str
+  message: str
+  challenge_id: Optional[str] = None
+  instance_id: Optional[str] = None
+  status: Optional[str] = None
 
 
 def _json_object(value) -> dict:

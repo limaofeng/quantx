@@ -7,6 +7,10 @@ from strawberry.scalars import JSON
 
 from ..resolvers.strategies import StrategyResolver
 from ..security import authorized_account_id, principal_from_context
+from ..strategy_control import (
+  StrategyControlChallengeService,
+  normalize_strategy_control_request,
+)
 from ..trade_approval import (
   STRATEGY_TRADE_INTENT_APPROVAL,
   TradeApprovalChallengeError,
@@ -35,6 +39,14 @@ from ..types import (
   StrategyRunInput,
   StrategyRunMode,
   StrategyRunUpdateInput,
+)
+from ..types.strategy_types import (
+  StrategyControlConfirmationInput,
+  StrategyControlConfirmationResult,
+  StrategyControlPreview,
+  StrategyControlPreviewInput,
+  StrategyControlPreviewResult,
+  StrategyControlReadinessCheck,
 )
 from ..types.trade_approval_types import (
   TradeApprovalConfirmationResult,
@@ -412,7 +424,113 @@ class StrategyMutation:
     instance_id: str,
   ) -> OperationResult:
     await _authorize_native_strategy_run(info, instance_id)
+    principal = principal_from_context(info.context)
+    if (
+      principal.active_account_id is not None
+      and await StrategyControlChallengeService.instance_requires_confirmation(
+        instance_id
+      )
+    ):
+      return OperationResult(
+        success=False,
+        message=(
+          "实盘策略恢复必须使用 previewStrategyControl / "
+          "confirmStrategyControl 并逐次进行本机生物确认"
+        ),
+      )
     return await StrategyResolver.resume_strategy_instance(instance_id)
+
+  @strawberry.field(description="预览实盘策略控制并签发设备绑定挑战")
+  async def preview_strategy_control(
+    self,
+    info: strawberry.types.Info,
+    input: StrategyControlPreviewInput,
+  ) -> StrategyControlPreviewResult:
+    try:
+      principal = principal_from_context(info.context)
+      account_id = authorized_account_id(info, input.account_id)
+      request = normalize_strategy_control_request(
+        account_id=account_id,
+        instance_id=input.instance_id,
+        action=input.action,
+        expected_config_version=input.expected_config_version,
+        idempotency_key=input.idempotency_key,
+      )
+      issued = await StrategyControlChallengeService.issue(
+        principal=principal,
+        request=request,
+      )
+      checks = [
+        StrategyControlReadinessCheck(
+          code=str(item.get("code") or ""),
+          passed=bool(item.get("passed")),
+          message=str(item.get("message") or ""),
+        )
+        for item in list(issued.readiness.get("checks") or [])
+      ]
+      return StrategyControlPreviewResult(
+        success=True,
+        code="STRATEGY_CONTROL_PREVIEW_READY",
+        message="请核对策略、账户和实盘就绪快照后进行本机生物确认",
+        preview=StrategyControlPreview(
+          challenge_id=issued.challenge_id,
+          confirmation_token=issued.confirmation_token,
+          account_id=request.account_id,
+          instance_id=request.instance_id,
+          target_instance_id=issued.target_instance_id,
+          action=request.action,
+          current_mode=issued.current_mode,
+          current_status=issued.current_status,
+          config_version=issued.config_version,
+          readiness_status=str(issued.readiness.get("status") or "UNKNOWN"),
+          snapshot_id=(
+            str(issued.readiness.get("snapshot_id"))
+            if issued.readiness.get("snapshot_id")
+            else None
+          ),
+          snapshot_at=issued.readiness.get("snapshot_at"),
+          challenge_expires_at=issued.challenge_expires_at,
+          checks=checks,
+          warnings=[
+            "确认只控制策略生命周期，不代表任何交易已报送或成交",
+            "策略后续每个 TradeIntent 仍须经过统一 A 股合法性和实时风控",
+            "实盘安全快照、配置版本或策略状态变化都会使本次确认失效",
+          ],
+        ),
+      )
+    except TradeApprovalChallengeError as exc:
+      return StrategyControlPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+
+  @strawberry.field(description="消费设备绑定挑战并应用实盘策略控制")
+  async def confirm_strategy_control(
+    self,
+    info: strawberry.types.Info,
+    input: StrategyControlConfirmationInput,
+  ) -> StrategyControlConfirmationResult:
+    try:
+      confirmed = await StrategyControlChallengeService.confirm(
+        principal=principal_from_context(info.context),
+        challenge_id=input.challenge_id,
+        confirmation_token=input.confirmation_token,
+      )
+      return StrategyControlConfirmationResult(
+        success=True,
+        code="STRATEGY_CONTROL_APPLIED",
+        message="Engine 已应用策略控制；请刷新策略投影确认当前状态",
+        challenge_id=confirmed.challenge_id,
+        instance_id=confirmed.instance_id,
+        status=confirmed.status,
+      )
+    except TradeApprovalChallengeError as exc:
+      return StrategyControlConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
 
   @strawberry.field(description="确认一个等待人工授权的策略交易意图")
   async def approve_strategy_trade_intent(
