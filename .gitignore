@@ -51,6 +51,15 @@ coverage/
 apps/docs/content/reference/graphql-api/
 apps/docs/.vitepress/cache/
 
+# Apple platform build artifacts and local tooling
+DerivedData/
+*.xcresult
+*.ipa
+apps/ios/apollo-ios-cli
+apps/ios/.build/
+apps/ios/.swiftpm/
+apps/ios/Config/*.local.xcconfig
+
 # QuantX local services and caches
 .runtime/
 .prefect/
