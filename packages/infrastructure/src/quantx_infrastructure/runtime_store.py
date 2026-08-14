@@ -81,6 +81,7 @@ class DurableRuntimeStore:
     payload: dict[str, Any],
     *,
     device_id: Optional[str] = None,
+    required_capabilities: Optional[list[str]] = None,
   ) -> str:
     encoded = json.dumps(
       payload,
@@ -132,20 +133,32 @@ class DurableRuntimeStore:
             )
           )
         ).mappings()
+      required = {"market-data"}
+      required.update(
+        str(item).strip()
+        for item in required_capabilities or []
+        if str(item).strip()
+      )
       selected_device_id = ""
       for row in rows:
         capabilities = row["capabilities"]
         if isinstance(capabilities, str):
           capabilities = json.loads(capabilities)
-        if "market-data" in list(capabilities or []):
+        available = set(capabilities or [])
+        if required.issubset(available):
           selected_device_id = str(row["id"])
           break
       if not selected_device_id:
+        requirement = ", ".join(sorted(required))
         if device_id:
           raise RuntimeError(
-            "Requested QMT Agent is unavailable or lacks market-data capability"
+            "Requested QMT Agent is unavailable or lacks required "
+            f"capabilities: {requirement}"
           )
-        raise RuntimeError("No registered market-data QMT Agent is available")
+        raise RuntimeError(
+          "No registered QMT Agent is available with capabilities: "
+          f"{requirement}"
+        )
       request_id = str(uuid.uuid4())
       await connection.execute(
         text(
@@ -423,7 +436,15 @@ class DurableRuntimeStore:
       ).mappings()
       return [dict(value) for value in values]
 
-  async def instrument_codes(self, limit: int = 10000) -> list[str]:
+  async def instrument_codes(
+    self,
+    limit: int = 10000,
+    *,
+    instrument_type: Optional[str] = None,
+  ) -> list[str]:
+    normalized_type = (
+      str(instrument_type).strip().upper() if instrument_type else None
+    )
     async with self.engine.connect() as connection:
       values = (
         await connection.execute(
@@ -432,11 +453,18 @@ class DurableRuntimeStore:
             SELECT code
             FROM instruments
             WHERE code IS NOT NULL
+              AND (
+                CAST(:instrument_type AS TEXT) IS NULL
+                OR UPPER(instrument_type::text) = CAST(:instrument_type AS TEXT)
+              )
             ORDER BY code
             LIMIT :limit
             """
           ),
-          {"limit": max(1, min(int(limit), 100000))},
+          {
+            "limit": max(1, min(int(limit), 100000)),
+            "instrument_type": normalized_type,
+          },
         )
       ).scalars()
       return [str(value) for value in values if value]

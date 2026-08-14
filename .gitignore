@@ -12,6 +12,9 @@ data/
 # `data/` above is for runtime payloads; the research data-source package is code.
 !apps/research/src/quantx_research/data/
 !apps/research/src/quantx_research/data/**
+# Infrastructure market-data adapters are source code, not runtime payloads.
+!packages/infrastructure/src/quantx_infrastructure/core/data/
+!packages/infrastructure/src/quantx_infrastructure/core/data/**
 logs/
 *.log
 *.pid

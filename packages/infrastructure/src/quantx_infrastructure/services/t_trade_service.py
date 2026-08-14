@@ -11,6 +11,9 @@ from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
 
+from quantx_infrastructure.core.assistant_strategy_policy import (
+  T_TRADE_STRATEGY_CLASS_NAME,
+)
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.enums import OrderStatus, OrderType, StrategyRunMode
 from quantx_infrastructure.models.order import Order
@@ -30,7 +33,7 @@ from quantx_infrastructure.repositories.trade_intent_repository import (
 )
 from quantx_infrastructure.services.order_service import OrderService
 
-T_TRADE_CLASS_NAME = "AshareIntradayTAssistantStrategy"
+T_TRADE_CLASS_NAME = T_TRADE_STRATEGY_CLASS_NAME
 ACTIVE_RUN_STATUSES = {"pending", "running", "paused"}
 
 
@@ -185,10 +188,29 @@ class TTradeService:
     for run_id in run_ids:
       rows = await self.get_run_sessions(run_id)
       sessions.extend(
-        row for row in rows if not normalized_code or row["stock_code"] == normalized_code
+        row
+        for row in rows
+        if not normalized_code or row["stock_code"] == normalized_code
       )
     sessions.sort(key=lambda item: item["stock_code"])
     return sessions
+
+  async def list_active_account_run_ids(self, account_id: str) -> List[str]:
+    """Return all active account-level T runs, newest first."""
+    normalized_account_id = str(account_id or "").strip()
+    if not normalized_account_id:
+      raise ValueError("账户不能为空")
+    async for db in get_async_db():
+      runs = await StrategyRunRepository(db).find_active_runs_by_strategy_class(
+        T_TRADE_CLASS_NAME
+      )
+      return [
+        str(run.id)
+        for run in runs
+        if str(self._mapping(run.parameters).get("account_id", ""))
+        == normalized_account_id
+      ]
+    return []
 
   async def list_signal_history(
     self, account_id: str, limit: int = 50
@@ -236,13 +258,13 @@ class TTradeService:
         and str(self._mapping(run.parameters).get("account_id", ""))
         == normalized_account_id
       ]
-      records, has_next_page = (
-        await TradeIntentRepository(db).find_recent_t_trade_entries_page(
-          run_ids,
-          cursor_created_at=cursor_created_at,
-          cursor_id=cursor_id,
-          first=first,
-        )
+      records, has_next_page = await TradeIntentRepository(
+        db
+      ).find_recent_t_trade_entries_page(
+        run_ids,
+        cursor_created_at=cursor_created_at,
+        cursor_id=cursor_id,
+        first=first,
       )
       rows = []
       for record in records:
@@ -362,18 +384,20 @@ class TTradeService:
       repo = TTradeImportedEntryRepository(db)
       if await repo.find_source(account_id, source_id):
         raise ValueError("该笔委托已经加入做 T 助手")
-      await repo.save(TTradeImportedEntry(
-        account_id=account_id,
-        source_trade_id=source_id,
-        source_order_id=normalized_order_id,
-        source_trade_time=getattr(order, "time", None),
-        stock_code=order.stock_code,
-        volume=int(order.traded_volume or 0),
-        price=float(order.traded_price or 0.0),
-        strategy_run_id=run_id,
-        batch_id=batch_id,
-        status="IMPORTED",
-      ))
+      await repo.save(
+        TTradeImportedEntry(
+          account_id=account_id,
+          source_trade_id=source_id,
+          source_order_id=normalized_order_id,
+          source_trade_time=getattr(order, "time", None),
+          stock_code=order.stock_code,
+          volume=int(order.traded_volume or 0),
+          price=float(order.traded_price or 0.0),
+          strategy_run_id=run_id,
+          batch_id=batch_id,
+          status="IMPORTED",
+        )
+      )
       break
     strategy_manager.executor.apply_external_state_patch(run_id, patch)
     imported_state = dict(patch.set["instrument_states"][order.stock_code] or {})
@@ -418,18 +442,50 @@ class TTradeService:
   async def list_imported_entries(self, account_id: str) -> List[Dict[str, Any]]:
     async for db in get_async_db():
       rows = await TTradeImportedEntryRepository(db).find_by_account(account_id)
-      return [{
-        "source_trade_id": row.source_trade_id,
-        "source_order_id": row.source_order_id,
-        "stock_code": row.stock_code,
-        "volume": row.volume,
-        "price": row.price,
-        "status": row.status,
-        "source_trade_time": row.source_trade_time,
-        "strategy_run_id": row.strategy_run_id,
-        "batch_id": row.batch_id,
-      } for row in rows]
+      return [
+        {
+          "source_trade_id": row.source_trade_id,
+          "source_order_id": row.source_order_id,
+          "stock_code": row.stock_code,
+          "volume": row.volume,
+          "price": row.price,
+          "status": row.status,
+          "source_trade_time": row.source_trade_time,
+          "strategy_run_id": row.strategy_run_id,
+          "batch_id": row.batch_id,
+        }
+        for row in rows
+      ]
     return []
+
+  async def ensure_account_strategy_running(self, run_id: str) -> bool:
+    """Start a restored idle runtime or resume an in-process paused runtime."""
+
+    strategy_manager = self._require_runtime_manager()
+    runtime = strategy_manager.get_run(run_id)
+    if runtime is None:
+      raise RuntimeError(f"做 T 策略运行未恢复到 Engine: {run_id}")
+
+    runtime_status = str(
+      getattr(getattr(runtime, "status", None), "value", getattr(runtime, "status", ""))
+      or ""
+    ).lower()
+    task = getattr(runtime, "task", None)
+    task_is_active = task is not None and not task.done()
+
+    if task_is_active and runtime_status in {"running", "starting"}:
+      return False
+    if task_is_active and runtime_status == "paused":
+      success = await strategy_manager.resume_strategy(run_id)
+    else:
+      # Restored PAUSED/PENDING runs are recreated with no task and a PENDING
+      # in-memory status. They need the full start path to restore state,
+      # connect the data adapter, and subscribe to realtime Tick data.
+      success = await strategy_manager.start_strategy(run_id)
+
+    if not success:
+      raise RuntimeError(f"做 T 策略运行恢复失败: {run_id}")
+    return True
 
   async def stop_account_strategy(self, run_id: str) -> Dict[str, Any]:
     strategy_manager = self._require_runtime_manager()
@@ -468,6 +524,17 @@ class TTradeService:
       "pullback_threshold_pct",
       "rebound_threshold_pct",
       "max_spread_ticks",
+      "momentum_enabled",
+      "momentum_window_seconds",
+      "momentum_min_rise_pct",
+      "momentum_min_move_seconds",
+      "momentum_baseline_seconds",
+      "momentum_min_amount_velocity_ratio",
+      "momentum_min_vwap_premium_pct",
+      "momentum_max_vwap_premium_pct",
+      "momentum_high_tolerance_ticks",
+      "momentum_max_spread_ticks",
+      "momentum_max_spread_pct",
       "approval_ttl_seconds",
       "max_price_deviation_pct",
       "target_profit_pct",
@@ -475,6 +542,15 @@ class TTradeService:
       "initial_gap_pct",
       "trailing_gap_slope",
       "max_gap_pct",
+      "high_profit_lock_enabled",
+      "high_profit_arm_pct",
+      "high_profit_max_drawdown_pct",
+      "rapid_reversal_enabled",
+      "rapid_reversal_window_seconds",
+      "rapid_reversal_drawdown_pct",
+      "rapid_reversal_confirm_ticks",
+      "limit_up_touch_exit_enabled",
+      "limit_up_touch_tolerance_ticks",
       "hard_stop_enabled",
       "hard_stop_pct",
       "time_exit_mode",
@@ -526,6 +602,47 @@ class TTradeService:
     active_volume = max(0, entry_volume - exit_volume)
     pending_entry = str(state.get("pending_entry_intent_id", "") or "")
     pending_exit = str(state.get("pending_exit_intent_id", "") or "")
+    telemetry = dict(state.get("monitoring_telemetry", {}) or {})
+    last_tick_at_ms = int(telemetry.get("last_tick_at_ms", 0) or 0)
+    latest_evaluation = None
+    if last_tick_at_ms > 0:
+      latest_evaluation = {
+        "phase": str(telemetry.get("phase", "ENTRY_SCAN") or "ENTRY_SCAN"),
+        "last_tick_at": datetime.fromtimestamp(last_tick_at_ms / 1000),
+        "processed_tick_count": int(
+          telemetry.get("processed_tick_count", 0) or 0
+        ),
+        "window_sample_count": int(telemetry.get("window_sample_count", 0) or 0),
+        "window_coverage_seconds": float(
+          telemetry.get("window_coverage_seconds", 0.0) or 0.0
+        ),
+        "triggered": bool(telemetry.get("triggered", False)),
+        "reason": str(telemetry.get("reason", "") or ""),
+        "signal_type": str(telemetry.get("signal_type", "NONE") or "NONE"),
+        "signal_price": float(telemetry.get("signal_price", 0.0) or 0.0),
+        "window_high": self._optional_float(telemetry.get("window_high")),
+        "window_low": self._optional_float(telemetry.get("window_low")),
+        "pullback_pct": self._optional_float(telemetry.get("pullback_pct")),
+        "rebound_pct": self._optional_float(telemetry.get("rebound_pct")),
+        "vwap": self._optional_float(telemetry.get("vwap")),
+        "vwap_premium_pct": self._optional_float(
+          telemetry.get("vwap_premium_pct")
+        ),
+        "spread_ticks": self._optional_float(telemetry.get("spread_ticks")),
+        "spread_pct": self._optional_float(telemetry.get("spread_pct")),
+        "momentum_rise_pct": self._optional_float(
+          telemetry.get("momentum_rise_pct")
+        ),
+        "momentum_move_seconds": self._optional_float(
+          telemetry.get("momentum_move_seconds")
+        ),
+        "momentum_amount_velocity_ratio": self._optional_float(
+          telemetry.get("momentum_amount_velocity_ratio")
+        ),
+        "momentum_baseline_coverage_seconds": self._optional_float(
+          telemetry.get("momentum_baseline_coverage_seconds")
+        ),
+      }
     return {
       "run_id": run.id,
       "account_id": str(params.get("account_id", "") or ""),
@@ -534,18 +651,12 @@ class TTradeService:
       "run_status": run_status,
       "status": str(state.get("status", "STARTING") or "STARTING"),
       "position_shares": int(state.get("position_shares", 0) or 0),
-      "position_available_shares": int(
-        state.get("position_available_shares", 0) or 0
-      ),
+      "position_available_shares": int(state.get("position_available_shares", 0) or 0),
       "target_trade_amount": float(
         params.get("target_trade_amount", 10_000.0) or 10_000.0
       ),
-      "max_trade_amount": float(
-        params.get("max_trade_amount", 12_000.0) or 12_000.0
-      ),
-      "planned_entry_volume": int(
-        state.get("requested_entry_volume", 0) or 0
-      ),
+      "max_trade_amount": float(params.get("max_trade_amount", 12_000.0) or 12_000.0),
+      "planned_entry_volume": int(state.get("requested_entry_volume", 0) or 0),
       "target_profit_pct": float(params.get("target_profit_pct", 2.0) or 2.0),
       "base_floor_pct": float(params.get("base_floor_pct", 0.5) or 0.5),
       "hard_stop_enabled": bool(
@@ -584,6 +695,7 @@ class TTradeService:
       "updated_at": run.updated_at,
       "global_monitor_id": str(params.get("global_monitor_id", "") or "") or None,
       "global_config_version": int(params.get("global_config_version", 0) or 0),
+      "latest_evaluation": latest_evaluation,
     }
 
   @staticmethod
@@ -613,10 +725,14 @@ class TTradeService:
     floor = float(value or -999.0)
     return None if floor <= -900 else floor
 
+  @staticmethod
+  def _optional_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+      return None
+    return float(value)
+
   @classmethod
-  def _validate_parameters(
-    cls, payload: Dict[str, Any], mode: StrategyRunMode
-  ) -> None:
+  def _validate_parameters(cls, payload: Dict[str, Any], mode: StrategyRunMode) -> None:
     payload = cls._normalize_exit_settings(payload)
     numeric_ranges = {
       "target_trade_amount": (100.0, 1_000_000.0, 10_000.0),
@@ -628,6 +744,16 @@ class TTradeService:
       "pullback_threshold_pct": (0.1, 5.0, 0.8),
       "rebound_threshold_pct": (0.05, 2.0, 0.2),
       "max_spread_ticks": (1.0, 10.0, 3.0),
+      "momentum_window_seconds": (15.0, 300.0, 60.0),
+      "momentum_min_rise_pct": (0.1, 10.0, 0.8),
+      "momentum_min_move_seconds": (3.0, 120.0, 15.0),
+      "momentum_baseline_seconds": (60.0, 900.0, 300.0),
+      "momentum_min_amount_velocity_ratio": (1.0, 20.0, 2.0),
+      "momentum_min_vwap_premium_pct": (0.0, 10.0, 2.0),
+      "momentum_max_vwap_premium_pct": (0.1, 20.0, 3.5),
+      "momentum_high_tolerance_ticks": (0.0, 20.0, 1.0),
+      "momentum_max_spread_ticks": (1.0, 30.0, 10.0),
+      "momentum_max_spread_pct": (0.01, 2.0, 0.3),
       "approval_ttl_seconds": (5.0, 300.0, 30.0),
       "max_price_deviation_pct": (0.05, 2.0, 0.3),
       "target_profit_pct": (0.1, 20.0, 2.0),
@@ -635,6 +761,12 @@ class TTradeService:
       "initial_gap_pct": (0.1, 10.0, 1.5),
       "trailing_gap_slope": (0.0, 2.0, 0.25),
       "max_gap_pct": (0.1, 15.0, 3.0),
+      "high_profit_arm_pct": (0.5, 30.0, 4.0),
+      "high_profit_max_drawdown_pct": (0.1, 10.0, 1.2),
+      "rapid_reversal_window_seconds": (3.0, 120.0, 15.0),
+      "rapid_reversal_drawdown_pct": (0.1, 5.0, 0.8),
+      "rapid_reversal_confirm_ticks": (1.0, 10.0, 2.0),
+      "limit_up_touch_tolerance_ticks": (0.0, 20.0, 0.0),
       "cooldown_seconds": (0.0, 3600.0, 300.0),
       "max_exit_slippage_bps": (0.0, 200.0, 30.0),
       "commission_rate": (0.0, 0.01, 0.0003),
@@ -653,20 +785,28 @@ class TTradeService:
       values[key] = value
     if values["stabilization_seconds"] >= values["signal_lookback_seconds"]:
       raise ValueError("低点稳定时间必须小于信号观察窗口")
+    if values["momentum_min_move_seconds"] > values["momentum_window_seconds"]:
+      raise ValueError("动量最短持续时间不能超过动量观察窗口")
+    if (
+      values["momentum_min_vwap_premium_pct"] >= values["momentum_max_vwap_premium_pct"]
+    ):
+      raise ValueError("动量 VWAP 最小溢价必须低于最大溢价")
     if values["max_trade_amount"] < values["target_trade_amount"]:
       raise ValueError("单次金额硬上限不能低于目标单次金额")
     if values["base_floor_pct"] >= values["target_profit_pct"]:
       raise ValueError("初始保护线必须低于止盈武装线")
     if values["max_gap_pct"] < values["initial_gap_pct"]:
       raise ValueError("最大回撤间距不能小于初始回撤间距")
+    if values["high_profit_arm_pct"] <= values["target_profit_pct"]:
+      raise ValueError("高利润保护武装线必须高于基础止盈武装线")
+    if values["high_profit_max_drawdown_pct"] >= values["high_profit_arm_pct"]:
+      raise ValueError("高利润最大回吐必须低于高利润保护武装线")
     try:
       hard_stop_pct = float(payload.get("hard_stop_pct", -0.8))
     except (TypeError, ValueError) as exc:
       raise ValueError("参数 hard_stop_pct 必须是数字") from exc
     if bool(payload.get("hard_stop_enabled", False)) and (
-      not math.isfinite(hard_stop_pct)
-      or hard_stop_pct <= -10.0
-      or hard_stop_pct >= 0.0
+      not math.isfinite(hard_stop_pct) or hard_stop_pct <= -10.0 or hard_stop_pct >= 0.0
     ):
       raise ValueError("启用硬止损时，止损比例必须大于 -10 且小于 0")
 

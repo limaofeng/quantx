@@ -68,27 +68,38 @@ class ListAttributeConverter(AttributeConverter):
     self.max_levels = max_levels
     self.backup_json = backup_json
 
-  def convert_to_database_column(self, dataset: pd.DataFrame, name: str) -> dict:
+  @staticmethod
+  def _parse_list(value: Any) -> Optional[list]:
+    """Normalize legacy JSON strings and in-memory array-like values."""
+
+    if value is None:
+      return None
+    if isinstance(value, str):
+      try:
+        value = json.loads(value)
+      except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    elif hasattr(value, "tolist"):
+      value = value.tolist()
+    if isinstance(value, (list, tuple)):
+      return list(value)
+    try:
+      if pd.isna(value):
+        return None
+    except (TypeError, ValueError):
+      return None
+    return [value]
+
+  def convert_to_database_column(
+    self, dataset: pd.DataFrame, name: str
+  ) -> pd.DataFrame:
     # dataset 保证为 pd.DataFrame（按要求），对列 name 进行向量化展开为 prefix1..prefixN
     col = name
     # 如果列不存在直接返回原 DataFrame（调用方应保证列存在，但这里容错）
     if col not in dataset.columns:
       return dataset
 
-    # 把值规范为 list：支持 list/tuple、JSON 字符串、单个标量
-    def to_list(x):
-      if x is None:
-        return []
-      if isinstance(x, (list, tuple)):
-        return list(x)
-      if isinstance(x, str):
-        try:
-          return json.loads(x)
-        except Exception:
-          return []
-      return [x]
-
-    series = dataset[col].apply(to_list)
+    series = dataset[col].apply(lambda value: self._parse_list(value) or [])
     used_prefix = self.prefix or name
 
     # 用向量化的方式填充新列（str.get 对 list-like Series 表现良好）
@@ -102,7 +113,9 @@ class ListAttributeConverter(AttributeConverter):
     dataset.drop(columns=[col], inplace=True)
     return dataset
 
-  def convert_to_entity_attribute(self, dataset: pd.DataFrame, name: str) -> list:
+  def convert_to_entity_attribute(
+    self, dataset: pd.DataFrame, name: str
+  ) -> pd.DataFrame:
     """
     从展开的列（prefix1..prefixN）以及可选的 {name}_json 还原回原始的 list 列（列级批量恢复）。
     预期 dataset 一定为 pd.DataFrame，返回修改后的 DataFrame（在默认行为下删除展开列）。
@@ -117,26 +130,33 @@ class ListAttributeConverter(AttributeConverter):
       if f"{used_prefix}{i + 1}" in dataset.columns
     ]
 
-    # 如果既没有展开列也没有 json 备份，直接返回原 DataFrame
-    if not cols and json_key not in dataset.columns:
+    direct_column = name in dataset.columns
+    # 兼容三种已落库格式：旧版 JSON 字符串、JSON 备份列、展开列。
+    if not direct_column and not cols and json_key not in dataset.columns:
       return dataset
 
     def row_to_list(row):
-      # 优先使用 json 备份
-      if json_key in dataset.columns:
-        try:
-          v = row.get(json_key)
-          if v is not None:
-            return json.loads(v)
-        except Exception:
-          pass
-      # 否则按顺序从展开列收集非 None 值
+      # 新版展开列优先；旧 JSON 字段可能在同一个 point 上继续存在。
       res = []
       for c in cols:
         v = row.get(c)
-        if v is not None:
+        try:
+          missing = v is None or bool(pd.isna(v))
+        except (TypeError, ValueError):
+          missing = v is None
+        if not missing:
           res.append(v)
-      return res
+      if res:
+        return res
+      if direct_column:
+        direct = self._parse_list(row.get(name))
+        if direct is not None:
+          return direct
+      if json_key in dataset.columns:
+        backup = self._parse_list(row.get(json_key))
+        if backup is not None:
+          return backup
+      return []
 
     # 批量应用，得到每行的 list
     dataset[name] = dataset.apply(lambda r: row_to_list(r), axis=1)
@@ -365,6 +385,16 @@ class BaseRepository(Generic[M]):
       logger.debug("bulk_save: 无记录需要保存")
       return 0
 
+    # Keep bulk writes consistent with single-entity writes. In particular,
+    # Tick order-book arrays must be expanded into scalar InfluxDB fields.
+    for col, converter in self._get_field_converters().items():
+      if col not in records.columns:
+        continue
+      try:
+        records = converter.convert_to_database_column(records, col)
+      except Exception as e:
+        logger.warning(f"字段转换失败 {col}: {e}")
+
     if timestamp_column in records.columns:
       records[timestamp_column] = self._normalize_timestamp_series(
         records[timestamp_column]
@@ -540,13 +570,11 @@ class BaseRepository(Generic[M]):
       ).dt.tz_convert("Asia/Shanghai")
 
     # 处理字段转换器
-    _field_converters = self._get_field_converters()
-    for col, converter in _field_converters.items():
-      if col in records.columns:
-        try:
-          records = converter.convert_to_entity_attribute(records, col)
-        except Exception as e:
-          logger.warning(f"字段转换失败 {col}: {e}")
+    for col, converter in self._get_field_converters().items():
+      try:
+        records = converter.convert_to_entity_attribute(records, col)
+      except Exception as e:
+        logger.warning(f"字段转换失败 {col}: {e}")
 
     return records
 

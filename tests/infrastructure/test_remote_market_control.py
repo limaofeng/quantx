@@ -1,4 +1,5 @@
 import json
+from datetime import date
 
 import pytest
 from quantx_infrastructure.core.data import remote_market_data
@@ -58,3 +59,49 @@ async def test_market_control_is_cached_before_pubsub_wakeup(
     unsubscribe
   )
   assert fake_redis.values == {}
+
+
+def test_one_minute_subscription_is_bounded_to_current_shanghai_day(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  manager = remote_market_data.RemoteMarketDataManager()
+  captured = {}
+
+  def capture(channel, callback, control):
+    captured.update(
+      {
+        "channel": channel,
+        "callback": callback,
+        "control": control,
+      }
+    )
+    return 7
+
+  monkeypatch.setattr(manager, "_subscribe", capture)
+  monkeypatch.setattr(
+    remote_market_data.time_utils,
+    "today",
+    lambda: date(2026, 8, 13),
+  )
+
+  callback = lambda _data: None
+  subscription_id = manager.subscribe_quote(
+    "000001.SH",
+    period="1m",
+    count=-1,
+    callback=callback,
+  )
+
+  assert subscription_id == 7
+  assert captured == {
+    "channel": "market-data:000001.SH:1m",
+    "callback": callback,
+    "control": {
+      "kind": "quote",
+      "stock_code": "000001.SH",
+      "period": "1m",
+      "count": -1,
+      "start_time": "20260813000000",
+      "end_time": "20260813235959",
+    },
+  }

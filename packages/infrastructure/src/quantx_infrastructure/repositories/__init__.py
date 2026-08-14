@@ -13,6 +13,7 @@ from quantx_infrastructure.database.types import (
 )
 
 from .account_repository import AccountRepository
+from .auto_exit_plan_repository import AutoExitPlanRepository
 from .closed_position_cycle_repository import ClosedPositionCycleRepository
 from .conditional_liquidation_order_repository import (
   ConditionalLiquidationOrderRepository,
@@ -23,6 +24,10 @@ from .daily_asset_snapshot_repository import (
 )
 from .holiday_repository import HolidayRepository
 from .instrument_repository import InstrumentRepository
+from .limit_up_board_assistant_repository import (
+  LimitUpBoardAssistantConfigRepository,
+  LimitUpBoardCandidateArmRepository,
+)
 from .order_repository import OrderRepository
 from .position_repository import PositionRepository
 from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
@@ -41,6 +46,8 @@ __all__ = [
   "Pageable",
   "Pagination",
   "InstrumentRepository",
+  "LimitUpBoardAssistantConfigRepository",
+  "LimitUpBoardCandidateArmRepository",
   "ConditionalLiquidationOrderRepository",
   "ClosedPositionCycleRepository",
   "OrderRepository",
@@ -55,6 +62,7 @@ __all__ = [
   "MarketDataRepository",
   "HolidayRepository",
   "AccountRepository",
+  "AutoExitPlanRepository",
   "DailyAssetSnapshotRepository",
   "DailyAssetPositionSnapshotRepository",
 ]

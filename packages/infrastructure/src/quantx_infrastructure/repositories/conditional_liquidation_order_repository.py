@@ -47,6 +47,7 @@ class ConditionalLiquidationOrderRepository(
           [
             ConditionalLiquidationStatus.CANCELLED,
             ConditionalLiquidationStatus.SUBMITTED,
+            ConditionalLiquidationStatus.COMPLETED,
           ]
         )
       )
@@ -89,7 +90,12 @@ class ConditionalLiquidationOrderRepository(
       select(ConditionalLiquidationOrder)
       .filter(ConditionalLiquidationOrder.enabled == True)  # noqa: E712
       .filter(
-        ConditionalLiquidationOrder.status == ConditionalLiquidationStatus.ACTIVE
+        ConditionalLiquidationOrder.status.in_(
+          [
+            ConditionalLiquidationStatus.ACTIVE,
+            ConditionalLiquidationStatus.PARTIALLY_EXITED,
+          ]
+        )
       )
     )
     if account_id:

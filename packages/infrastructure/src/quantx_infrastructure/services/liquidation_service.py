@@ -20,26 +20,31 @@ from quantx_domain.trading.exit_plan import (
   ExitT1Policy,
 )
 from quantx_domain.trading.market_rules import AShareMarketRules
+from sqlalchemy import select
 
 from quantx_infrastructure.core.data import market_data_service
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
+from quantx_infrastructure.models.agent_runtime import PendingTradeOrder
 from quantx_infrastructure.models.enums import AccountType, OrderType, PriceType
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
   ConditionalLiquidationStatus,
+  ConditionalLiquidationStrategy,
 )
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories.conditional_liquidation_order_repository import (
   ConditionalLiquidationOrderRepository,
 )
 from quantx_infrastructure.repositories.position_repository import PositionRepository
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.position_service import PositionService
 from quantx_infrastructure.services.trading_service import TradingService
 
 logger = logging.getLogger(__name__)
 DEFAULT_ACCOUNT_ID = "300000013250"
+ACTIVE_SELL_ORDER_STATUSES = {"QUEUED", "PENDING", "SUBMITTED", "PARTIAL_FILLED"}
 
 
 class LiquidationError(Exception):
@@ -153,10 +158,18 @@ class LiquidationService:
     order_id: Optional[str] = None,
     instrument_name: Optional[str] = None,
     remark: Optional[str] = None,
+    strategy: str = ConditionalLiquidationStrategy.IMMEDIATE,
+    dynamic_policy: Optional[Dict[str, Any]] = None,
+    execution_mode: str = "paper",
+    auto_exit_authorized: bool = False,
   ) -> ConditionalLiquidationOrder:
     """创建或更新某只持仓的条件清仓单。"""
     normalized_stock_code = self._normalize_stock_code(stock_code)
     normalized_sell_mode = self._normalize_sell_mode(sell_mode)
+    normalized_strategy = self._normalize_conditional_strategy(strategy)
+    normalized_execution_mode = str(execution_mode or "paper").strip().lower()
+    if normalized_execution_mode not in {"paper", "live"}:
+      raise LiquidationError("动态止盈执行模式只能是 paper 或 live")
     self._validate_conditional_order_payload(
       stock_code=normalized_stock_code,
       target_profit_pct=target_profit_pct,
@@ -165,6 +178,37 @@ class LiquidationService:
       sell_ratio_pct=sell_ratio_pct,
       sell_volume=sell_volume,
     )
+
+    position = None
+    protected_volume = 0
+    if (
+      normalized_strategy
+      == ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING
+    ):
+      if normalized_sell_mode != ConditionalLiquidationSellMode.FIXED_VOLUME:
+        raise LiquidationError("动态止盈必须使用固定股数，计划创建后数量保持不变")
+      position = await self._get_position_for_condition(normalized_stock_code)
+      if position is None:
+        raise LiquidationError("未找到可创建动态止盈计划的持仓")
+      available = max(0, int(getattr(position, "can_use_volume", 0) or 0))
+      protected_volume = int(sell_volume or 0)
+      if protected_volume <= 0:
+        raise LiquidationError("动态止盈固定股数必须大于0")
+      legal_volume = ExitSizingPolicy(
+        mode=ExitSizingMode.FIXED_VOLUME,
+        value=protected_volume,
+        allow_odd_lot_full_exit=False,
+      ).calculate(available)
+      if legal_volume != protected_volume:
+        raise LiquidationError("动态止盈固定股数必须是可卖范围内的100股整数倍")
+      if protected_volume >= available:
+        raise LiquidationError("动态止盈只保护部分持仓，固定股数必须小于当前可卖数量")
+      if float(getattr(position, "avg_price", 0.0) or 0.0) <= 0:
+        raise LiquidationError("动态止盈需要有效的持仓成本")
+    else:
+      position = await self._get_position_for_condition(normalized_stock_code)
+      if position is None:
+        raise LiquidationError("未找到可创建退出计划的持仓")
 
     now = time_utils.now()
     payload = {
@@ -176,6 +220,10 @@ class LiquidationService:
       "status": ConditionalLiquidationStatus.ACTIVE,
       "target_profit_pct": target_profit_pct,
       "target_price": target_price,
+      "strategy": normalized_strategy,
+      "dynamic_policy": dict(dynamic_policy or {}),
+      "execution_mode": normalized_execution_mode,
+      "auto_exit_authorized": bool(auto_exit_authorized),
       "sell_mode": normalized_sell_mode,
       "sell_ratio_pct": sell_ratio_pct,
       "sell_volume": int(sell_volume) if sell_volume is not None else None,
@@ -188,6 +236,8 @@ class LiquidationService:
       "remark": remark,
     }
 
+    saved_order = None
+    previous_exit_plan_id = None
     async for db in get_async_db():
       repo = ConditionalLiquidationOrderRepository(db)
       order = await repo.find_by_id(order_id) if order_id else None
@@ -199,13 +249,34 @@ class LiquidationService:
           stock_code=normalized_stock_code,
         )
 
+      if (
+        normalized_strategy
+        == ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING
+      ):
+        active_sell_order = (
+          await db.execute(
+            select(PendingTradeOrder)
+            .where(PendingTradeOrder.account_id == self.account_id)
+            .where(PendingTradeOrder.instrument_code == normalized_stock_code)
+            .where(PendingTradeOrder.side == "SELL")
+            .where(PendingTradeOrder.status.in_(ACTIVE_SELL_ORDER_STATUSES))
+            .limit(1)
+          )
+        ).scalar_one_or_none()
+        if active_sell_order is not None:
+          raise LiquidationError("该持仓已有未完成卖出委托，不能创建或修改动态止盈")
+
       if order is not None:
         if order.status == ConditionalLiquidationStatus.SUBMITTED:
           raise LiquidationError("已提交的条件清仓单不可修改，请重新创建")
+        if order.status == ConditionalLiquidationStatus.PARTIALLY_EXITED:
+          raise LiquidationError("动态止盈已部分成交，不能修改保护数量或规则")
+        previous_exit_plan_id = order.exit_plan_id
         payload["last_checked_at"] = order.last_checked_at
-        return await repo.update_order(order.id, payload)
+        saved_order = await repo.update_order(order.id, payload)
+        break
 
-      return await repo.create_order(
+      saved_order = await repo.create_order(
         ConditionalLiquidationOrder(
           id=str(uuid.uuid4()),
           created_at=now,
@@ -213,12 +284,41 @@ class LiquidationService:
           **payload,
         )
       )
-    raise LiquidationError("条件清仓单保存失败")
+      break
+
+    if saved_order is None:
+      raise LiquidationError("条件清仓单保存失败")
+
+    auto_exit_service = AutoExitPlanService()
+    if protected_volume <= 0:
+      protected_volume = self.calculate_conditional_sell_volume(
+        saved_order, position
+      )
+    try:
+      plan = await auto_exit_service.create_or_update_manual_plan(
+        order=saved_order,
+        position=position,
+        protected_volume=protected_volume,
+      )
+      if previous_exit_plan_id and previous_exit_plan_id != plan.plan_id:
+        await auto_exit_service.cancel(previous_exit_plan_id, "STRATEGY_REPLACED")
+      updated = await self._update_conditional_order(
+        saved_order.id,
+        {"exit_plan_id": plan.plan_id, "last_error": None},
+      )
+      return updated or saved_order
+    except Exception as exc:
+      await self._update_conditional_order(
+        saved_order.id,
+        {"enabled": False, "last_error": str(exc)[:2000]},
+      )
+      raise
 
   async def set_conditional_liquidation_order_enabled(
     self, order_id: str, enabled: bool
   ) -> Optional[ConditionalLiquidationOrder]:
     """启用或停用条件清仓单。"""
+    saved_order = None
     async for db in get_async_db():
       repo = ConditionalLiquidationOrderRepository(db)
       order = await repo.find_by_id(order_id)
@@ -229,22 +329,32 @@ class LiquidationService:
       if order.status in {
         ConditionalLiquidationStatus.SUBMITTED,
         ConditionalLiquidationStatus.CANCELLED,
+        ConditionalLiquidationStatus.COMPLETED,
       }:
-        raise LiquidationError("已提交或已取消的条件清仓单不可启停")
-      return await repo.update_order(
+        raise LiquidationError("已提交、已完成或已取消的条件清仓单不可启停")
+      saved_order = await repo.update_order(
         order_id,
         {
           "enabled": bool(enabled),
-          "status": ConditionalLiquidationStatus.ACTIVE,
+          "status": (
+            ConditionalLiquidationStatus.PARTIALLY_EXITED
+            if order.status == ConditionalLiquidationStatus.PARTIALLY_EXITED
+            else ConditionalLiquidationStatus.ACTIVE
+          ),
           "last_error": None if enabled else order.last_error,
         },
       )
-    return None
+      break
+    if saved_order and saved_order.exit_plan_id:
+      await AutoExitPlanService().set_enabled(saved_order.exit_plan_id, enabled)
+    return saved_order
 
   async def cancel_conditional_liquidation_order(
     self, order_id: str
   ) -> Optional[ConditionalLiquidationOrder]:
     """取消条件清仓单。"""
+    saved_order = None
+    exit_plan_id = None
     async for db in get_async_db():
       repo = ConditionalLiquidationOrderRepository(db)
       order = await repo.find_by_id(order_id)
@@ -252,7 +362,10 @@ class LiquidationService:
         return None
       if order.account_id != self.account_id:
         raise LiquidationError("条件清仓单不属于当前资金账户")
-      return await repo.update_order(
+      if order.status == ConditionalLiquidationStatus.SUBMITTED:
+        raise LiquidationError("已有动态止盈委托待成交，请先撤销该卖出委托")
+      exit_plan_id = order.exit_plan_id
+      saved_order = await repo.update_order(
         order_id,
         {
           "enabled": False,
@@ -260,7 +373,10 @@ class LiquidationService:
           "last_error": None,
         },
       )
-    return None
+      break
+    if exit_plan_id:
+      await AutoExitPlanService().cancel(exit_plan_id)
+    return saved_order
 
   async def evaluate_conditional_liquidation_orders(
     self,
@@ -289,6 +405,28 @@ class LiquidationService:
     order: ConditionalLiquidationOrder,
   ) -> ConditionalLiquidationEvaluation:
     """评估单个条件清仓单，触发时提交一次卖出委托。"""
+    if (
+      str(order.strategy or "").upper()
+      == ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING
+    ):
+      position = await self._get_position_for_condition(order.stock_code)
+      latest_price = self._resolve_latest_price(position)
+      avg_price = self._optional_float(getattr(position, "avg_price", None))
+      profit_pct = (
+        (latest_price - avg_price) / avg_price * 100
+        if latest_price is not None and avg_price and avg_price > 0
+        else None
+      )
+      return ConditionalLiquidationEvaluation(
+        order=order,
+        triggered=order.status == ConditionalLiquidationStatus.SUBMITTED,
+        submitted=order.status == ConditionalLiquidationStatus.SUBMITTED,
+        sell_volume=int(order.submitted_volume or 0),
+        order_id=order.submitted_order_id,
+        latest_price=latest_price,
+        profit_pct=profit_pct,
+        message="adaptive_exit_requires_engine_market_context",
+      )
     now = time_utils.now()
     position = await self._get_position_for_condition(order.stock_code)
     latest_price = self._resolve_latest_price(position)
@@ -901,6 +1039,15 @@ class LiquidationService:
       ConditionalLiquidationSellMode.FIXED_VOLUME,
     }:
       raise LiquidationError(f"不支持的条件清仓卖出模式: {value}")
+    return text
+
+  def _normalize_conditional_strategy(self, value: str) -> str:
+    text = str(value or ConditionalLiquidationStrategy.IMMEDIATE).upper()
+    if text not in {
+      ConditionalLiquidationStrategy.IMMEDIATE,
+      ConditionalLiquidationStrategy.ADAPTIVE_VOLUME_PRICE_TRAILING,
+    }:
+      raise LiquidationError(f"不支持的条件清仓策略: {value}")
     return text
 
   def _normalize_stock_code(self, value: Optional[str]) -> str:

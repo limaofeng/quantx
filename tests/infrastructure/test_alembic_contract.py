@@ -48,6 +48,29 @@ def test_baseline_metadata_is_fingerprint_locked() -> None:
   assert len(expected) == 64
 
 
+def test_baseline_clone_excludes_schema_owned_by_later_revisions() -> None:
+  revision = _load_revision(
+    "20260729_0001_production_baseline.py",
+    "quantx_test_baseline_clone",
+  )
+
+  metadata = revision._baseline_metadata()
+  assert not (set(metadata.tables) & revision.POST_BASELINE_TABLES)
+  for table_name, column_names in revision.POST_BASELINE_COLUMNS.items():
+    table = metadata.tables[table_name]
+    assert not (set(table.c.keys()) & column_names)
+    assert all(
+      not (
+        {
+          str(getattr(expression, "name", ""))
+          for expression in index.expressions
+        }
+        & column_names
+      )
+      for index in table.indexes
+    )
+
+
 def test_live_safety_revision_is_additive_and_downgrade_is_refused() -> None:
   revision = _load_revision(
     "20260729_0002_live_safety.py",
@@ -103,7 +126,7 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
 
   assert revision.down_revision == "20260729_0002"
   assert DividFactorTable.__table__.name == "divid_factors"
-  assert set(revision.TABLE_COMMENTS) == set(Base.metadata.tables)
+  assert set(revision.TABLE_COMMENTS) <= set(Base.metadata.tables)
   revision.upgrade()
   assert calls == list(revision.REQUIRED_TABLE_COMMENTS.items())
   assert len(statements) == len(revision.OPTIONAL_TABLE_COMMENTS)
@@ -114,3 +137,61 @@ def test_table_comment_revision_covers_metadata_and_refuses_downgrade(
     assert re.search(r"[\u4e00-\u9fff]", comment)
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()
+
+
+def test_roe_quality_revision_follows_financial_sync_and_refuses_downgrade() -> None:
+  revision = _load_revision(
+    "20260812_0006_roe_quality_audits.py",
+    "quantx_test_roe_quality_revision",
+  )
+
+  assert revision.down_revision == "20260810_0005"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
+
+
+def test_controlled_live_window_revision_follows_roe_quality() -> None:
+  revision = _load_revision(
+    "20260813_0007_controlled_live_window.py",
+    "quantx_test_controlled_live_window_revision",
+  )
+
+  assert revision.down_revision == "20260812_0006"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
+
+
+def test_sell_management_revision_follows_exit_and_board_revisions() -> None:
+  auto_exit = _load_revision(
+    "20260813_0008_auto_exit_plans.py",
+    "quantx_test_auto_exit_plans",
+  )
+  board = _load_revision(
+    "20260813_0009_limit_up_board_assistant.py",
+    "quantx_test_limit_up_board_assistant",
+  )
+  sell_management = _load_revision(
+    "20260813_0010_sell_management.py",
+    "quantx_test_sell_management",
+  )
+
+  assert auto_exit.down_revision == "20260813_0007"
+  assert board.down_revision == "20260813_0008"
+  assert sell_management.down_revision == "20260813_0009"
+  with pytest.raises(RuntimeError, match="downgrades"):
+    sell_management.downgrade()
+
+
+def test_limit_up_board_assistant_revision_is_reversible() -> None:
+  revision = _load_revision(
+    "20260813_0009_limit_up_board_assistant.py",
+    "quantx_test_limit_up_board_assistant_revision",
+  )
+  source = (
+    VERSIONS / "20260813_0009_limit_up_board_assistant.py"
+  ).read_text(encoding="utf-8")
+
+  assert revision.down_revision == "20260813_0008"
+  assert "RADAR_CANDIDATES" in source
+  assert "RENAME TO strategy_instrument_universe_mode_with_radar" in source
+  assert "DROP TYPE strategy_instrument_universe_mode_with_radar" in source

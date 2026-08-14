@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from quantx_infrastructure.database.relational_base import BaseRepository
-from quantx_infrastructure.models.enums import StrategyRunStatus
+from quantx_infrastructure.models.enums import StrategyRunMode, StrategyRunStatus
+from quantx_infrastructure.models.strategy import Strategy
 from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
 from quantx_infrastructure.models.strategy_decision_trace_record import (
   StrategyDecisionTraceRecord,
@@ -88,6 +89,34 @@ class StrategyRunRepository(BaseRepository[StrategyRun]):
     if user_id:
       stmt = stmt.filter(StrategyRun.user_id == user_id)
 
+    result = await self.db.execute(stmt)
+    return list(result.scalars().all())
+
+  async def find_active_runs_by_strategy_class(
+    self,
+    class_name: str,
+  ) -> List[StrategyRun]:
+    """Return non-backtest active runs for one strategy class, newest first."""
+    active_statuses = [
+      StrategyRunStatus.RUNNING,
+      StrategyRunStatus.PAUSED,
+      StrategyRunStatus.PENDING,
+    ]
+    stmt = (
+      select(StrategyRun)
+      .join(StrategyRun.strategy)
+      .options(selectinload(StrategyRun.strategy))
+      .filter(
+        Strategy.class_name == class_name,
+        StrategyRun.status.in_(active_statuses),
+        StrategyRun.mode != StrategyRunMode.BACKTEST,
+      )
+      .order_by(
+        StrategyRun.updated_at.desc(),
+        StrategyRun.created_at.desc(),
+        StrategyRun.id.desc(),
+      )
+    )
     result = await self.db.execute(stmt)
     return list(result.scalars().all())
 

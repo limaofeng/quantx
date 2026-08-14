@@ -4,7 +4,17 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Enum, Integer, Numeric, String, Text
+from sqlalchemy import (
+  JSON,
+  Boolean,
+  Column,
+  DateTime,
+  Enum,
+  Integer,
+  Numeric,
+  String,
+  Text,
+)
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 from quantx_infrastructure.models.enums import AccountType
@@ -34,6 +44,8 @@ class ConditionalLiquidationStatus:
 
   ACTIVE = "ACTIVE"
   SUBMITTED = "SUBMITTED"
+  PARTIALLY_EXITED = "PARTIALLY_EXITED"
+  COMPLETED = "COMPLETED"
   FAILED = "FAILED"
   CANCELLED = "CANCELLED"
 
@@ -44,6 +56,13 @@ class ConditionalLiquidationSellMode:
   ALL_AVAILABLE = "ALL_AVAILABLE"
   PERCENT_AVAILABLE = "PERCENT_AVAILABLE"
   FIXED_VOLUME = "FIXED_VOLUME"
+
+
+class ConditionalLiquidationStrategy:
+  """条件清仓触发后的执行策略。"""
+
+  IMMEDIATE = "IMMEDIATE"
+  ADAPTIVE_VOLUME_PRICE_TRAILING = "ADAPTIVE_VOLUME_PRICE_TRAILING"
 
 
 class LiquidationOrder(Base, TimestampMixin):
@@ -232,6 +251,16 @@ class ConditionalLiquidationOrder(Base, TimestampMixin):
 
   target_profit_pct = Column(Numeric(10, 4), nullable=True, comment="目标收益率百分比")
   target_price = Column(Numeric(10, 4), nullable=True, comment="目标触发价")
+  strategy = Column(
+    String(48),
+    nullable=False,
+    default=ConditionalLiquidationStrategy.IMMEDIATE,
+    comment="退出策略",
+  )
+  dynamic_policy = Column(JSON, nullable=True, comment="动态止盈版本化参数")
+  exit_plan_id = Column(String(128), nullable=True, index=True, comment="统一退出计划ID")
+  execution_mode = Column(String(16), nullable=False, default="paper", comment="执行模式")
+  auto_exit_authorized = Column(Boolean, nullable=False, default=False, comment="自动卖出授权")
 
   sell_mode = Column(
     String(30),
@@ -266,6 +295,11 @@ class ConditionalLiquidationOrder(Base, TimestampMixin):
       "target_price": float(self.target_price)
       if self.target_price is not None
       else None,
+      "strategy": self.strategy,
+      "dynamic_policy": dict(self.dynamic_policy or {}),
+      "exit_plan_id": self.exit_plan_id,
+      "execution_mode": self.execution_mode,
+      "auto_exit_authorized": bool(self.auto_exit_authorized),
       "sell_mode": self.sell_mode,
       "sell_ratio_pct": float(self.sell_ratio_pct)
       if self.sell_ratio_pct is not None

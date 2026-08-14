@@ -8,6 +8,7 @@ from quantx_infrastructure.database.relational_base import Base
 from .account import Account
 from .agent_runtime import (
   AccountTradingRollout,
+  AccountTradingRolloutEvent,
   AgentDevice,
   AgentEnrollmentCode,
   AgentReportInbox,
@@ -29,6 +30,7 @@ from .auth import (
   AuthUser,
   AuthUserAccountAccess,
 )
+from .auto_exit_plan import AutoExitPlanEvent, AutoExitPlanRecord
 from .broker_position_snapshot import BrokerPositionSnapshot
 from .closed_position_cycle import ClosedPositionCycle
 from .daily_asset_snapshot import DailyAssetPositionSnapshot, DailyAssetSnapshot
@@ -53,17 +55,27 @@ from .financial import (
   FinancialIncomeStatement,
   FinancialShareholder,
 )
+from .financial_metric_roe_quality import FinancialMetricRoeQuality
 from .financial_metric_snapshot import FinancialMetricSnapshot
+from .financial_sync_code_audit import FinancialSyncCodeAudit
+from .financial_sync_run import FinancialSyncRun
 from .holidays import Holiday
 from .indicator_snapshot import IndicatorSnapshot
 
 # 数据库模型 (统一的数据实体)
 from .instrument import Instrument
 from .kline import KLine
+from .limit_up_radar_event import LimitUpRadarEvent
+from .limit_up_board_assistant import (
+  LimitUpBoardAssistantConfig,
+  LimitUpBoardAssistantProjection,
+  LimitUpBoardCandidateArm,
+)
 from .liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
   ConditionalLiquidationStatus,
+  ConditionalLiquidationStrategy,
   LiquidationLog,
   LiquidationOrder,
   LiquidationStatus,
@@ -127,6 +139,8 @@ __all__ = [
   "TTradeImportedEntry",
   "WatchlistItem",
   "Account",
+  "AutoExitPlanRecord",
+  "AutoExitPlanEvent",
   "AuthUser",
   "AuthUserAccountAccess",
   "AuthDeviceSession",
@@ -134,6 +148,7 @@ __all__ = [
   "AuthAuditEvent",
   "AgentDevice",
   "AccountTradingRollout",
+  "AccountTradingRolloutEvent",
   "AgentEnrollmentCode",
   "AgentReportInbox",
   "EngineCommandOutbox",
@@ -157,6 +172,7 @@ __all__ = [
   "ConditionalLiquidationOrder",
   "ConditionalLiquidationStatus",
   "ConditionalLiquidationSellMode",
+  "ConditionalLiquidationStrategy",
   # 财务数据模型
   "FinancialBalanceSheet",
   "FinancialIncomeStatement",
@@ -164,7 +180,10 @@ __all__ = [
   "FinancialCapital",
   "FinancialHolderNum",
   "FinancialShareholder",
-  "FinancialMetricSnapshot",
+    "FinancialMetricSnapshot",
+    "FinancialMetricRoeQuality",
+  "FinancialSyncCodeAudit",
+  "FinancialSyncRun",
   "DailySignalDefinition",
   "DailySignalRun",
   "DailyAssetSnapshot",
@@ -176,6 +195,10 @@ __all__ = [
   # 市场数据模型
   "KLine",
   "Tick",
+  "LimitUpRadarEvent",
+  "LimitUpBoardAssistantConfig",
+  "LimitUpBoardAssistantProjection",
+  "LimitUpBoardCandidateArm",
   # 策略运行时状态
   "StrategyRunPosition",
   "StrategyRunState",

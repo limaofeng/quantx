@@ -21,12 +21,22 @@ class IntradayVolumeState:
   code: str
   current_price: float = 0.0
   pre_close: float = 0.0
+  open_price: float = 0.0
+  high_price: float = 0.0
+  low_price: float = 0.0
+  price_tick: float = 0.0
+  up_stop_price: float = 0.0
+  down_stop_price: float = 0.0
+  stock_status: int = 0
   volume: float = 0.0
   amount: float = 0.0
   transaction_num: int = 0
+  bid_price: List[float] = field(default_factory=list)
+  ask_price: List[float] = field(default_factory=list)
   bid_vol: List[float] = field(default_factory=list)
   ask_vol: List[float] = field(default_factory=list)
   minute_volume: Dict[datetime, float] = field(default_factory=lambda: defaultdict(float))
+  minute_close: Dict[datetime, float] = field(default_factory=dict)
   previous_volume: Optional[float] = None
   previous_amount: Optional[float] = None
   previous_transaction_num: Optional[int] = None
@@ -157,9 +167,37 @@ class IntradayVolumeScanner:
         tick.get("preClose"),
         tick.get("pre_close"),
       )
+      state.open_price = self._number(tick.get("open"), tick.get("open_price"))
+      state.high_price = self._number(tick.get("high"), tick.get("high_price"))
+      state.low_price = self._number(tick.get("low"), tick.get("low_price"))
+      state.price_tick = max(
+        0.0,
+        self._number(
+          tick.get("priceTick"),
+          tick.get("PriceTick"),
+          tick.get("price_tick"),
+        ),
+      )
+      state.up_stop_price = self._number(
+        tick.get("upperLimit"),
+        tick.get("upStopPrice"),
+        tick.get("UpStopPrice"),
+        tick.get("up_stop_price"),
+      )
+      state.down_stop_price = self._number(
+        tick.get("lowerLimit"),
+        tick.get("downStopPrice"),
+        tick.get("DownStopPrice"),
+        tick.get("down_stop_price"),
+      )
+      state.stock_status = int(
+        self._number(tick.get("stockStatus"), tick.get("stock_status"))
+      )
       state.volume = volume
       state.amount = amount
       state.transaction_num = transaction_num
+      state.bid_price = self._number_list(tick.get("bidPrice"), tick.get("bid_price"))
+      state.ask_price = self._number_list(tick.get("askPrice"), tick.get("ask_price"))
       state.bid_vol = self._number_list(tick.get("bidVol"), tick.get("bid_vol"))
       state.ask_vol = self._number_list(tick.get("askVol"), tick.get("ask_vol"))
       state.updated_at = updated_at
@@ -174,7 +212,10 @@ class IntradayVolumeScanner:
       if volume_delta > 0:
         minute = updated_at.replace(second=0, microsecond=0)
         state.minute_volume[minute] += volume_delta
-        self._prune_minutes(state, updated_at)
+      if price > 0:
+        minute = updated_at.replace(second=0, microsecond=0)
+        state.minute_close[minute] = price
+      self._prune_minutes(state, updated_at)
 
   def screen(
     self,
@@ -303,6 +344,12 @@ class IntradayVolumeScanner:
       "is_stale": is_stale,
     }
 
+  def snapshot_states(self) -> Dict[str, IntradayVolumeState]:
+    """Return a shallow snapshot for a single Engine-owned derived monitor."""
+    self.touch()
+    with self._lock:
+      return dict(self._states)
+
   def _passes(self, item: Dict[str, Any], **thresholds) -> bool:
     metric_aliases = {
       "intraday_turnover_rate": "intraday_turnover_rate_pct",
@@ -373,6 +420,7 @@ class IntradayVolumeScanner:
     ]
     for minute in stale:
       state.minute_volume.pop(minute, None)
+      state.minute_close.pop(minute, None)
 
   def _trading_progress(self, value: datetime) -> float:
     local = time_utils.to_shanghai(value)

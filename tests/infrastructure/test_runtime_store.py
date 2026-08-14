@@ -85,8 +85,9 @@ class _BoundDeviceResult:
 
 
 class _BoundDeviceConnection:
-  def __init__(self) -> None:
+  def __init__(self, capabilities=None) -> None:
     self.calls: list[tuple[str, dict[str, object] | None]] = []
+    self.capabilities = capabilities or ["market-data", "data-only"]
 
   async def execute(self, statement, parameters=None):
     sql = str(statement)
@@ -97,7 +98,7 @@ class _BoundDeviceConnection:
       return _BoundDeviceResult(
         mapping={
           "id": "device-data-only",
-          "capabilities": ["market-data", "data-only"],
+          "capabilities": self.capabilities,
         }
       )
     return _BoundDeviceResult()
@@ -125,6 +126,22 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
     call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
   )
   assert insert[1]["device_id"] == "device-data-only"
+
+
+@pytest.mark.asyncio
+async def test_market_data_request_requires_financial_protocol_capability() -> None:
+  connection = _BoundDeviceConnection(["market-data", "data-only"])
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = _Engine(connection)
+
+  with pytest.raises(RuntimeError, match="financial-data-v1"):
+    await store.create_market_data_request(
+      {"operation": "financial_data"},
+      device_id="device-data-only",
+      required_capabilities=["financial-data-v1"],
+    )
 
 
 @pytest.mark.asyncio

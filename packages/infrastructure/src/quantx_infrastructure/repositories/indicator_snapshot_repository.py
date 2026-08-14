@@ -5,16 +5,31 @@
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, delete, exists, func, not_, or_, select
+from sqlalchemy import and_, case, delete, exists, func, not_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from quantx_infrastructure.core.financial_quality import (
+  ROE_QUALITY_INVALID,
+  ROE_QUALITY_STALE,
+  ROE_QUALITY_SUSPICIOUS,
+  ROE_QUALITY_UNVERIFIED,
+  ROE_QUALITY_VALID,
+  minimum_required_financial_report_date,
+)
 from quantx_infrastructure.database.relational_base import BaseRepository
 from quantx_infrastructure.models.enums import InstrumentType
+from quantx_infrastructure.models.financial_metric_roe_quality import (
+  FinancialMetricRoeQuality,
+)
 from quantx_infrastructure.models.financial_metric_snapshot import (
   FinancialMetricSnapshot,
 )
+from quantx_infrastructure.models.financial_sync_code_audit import (
+  FinancialSyncCodeAudit,
+)
+from quantx_infrastructure.models.financial_sync_run import FinancialSyncRun
 from quantx_infrastructure.models.indicator_snapshot import IndicatorSnapshot
 from quantx_infrastructure.models.instrument import Instrument
 from quantx_infrastructure.models.sector import Sector
@@ -43,6 +58,33 @@ def _normalize_instrument_type(value: Any) -> Optional[str]:
 def _is_st_stock_name(name: Optional[str]) -> bool:
   normalized = (name or "").strip().upper()
   return normalized.startswith(ST_NAME_PREFIXES)
+
+
+def _effective_roe_quality(
+  metric: Optional[FinancialMetricSnapshot],
+  quality: Optional[FinancialMetricRoeQuality],
+  audit: Optional[FinancialSyncCodeAudit],
+  snapshot_date: date,
+) -> tuple[str, List[str]]:
+  flags = list(getattr(quality, "flags", None) or [])
+  if audit is None or audit.status == "FAILED":
+    return ROE_QUALITY_UNVERIFIED, [*flags, "financial_sync_unverified"]
+  if audit.status == "EMPTY":
+    return ROE_QUALITY_INVALID, [*flags, "financial_sync_empty"]
+  if audit.status != "SUCCESS":
+    return ROE_QUALITY_UNVERIFIED, [*flags, "financial_sync_unverified"]
+  if metric is None:
+    return ROE_QUALITY_INVALID, [*flags, "missing_roe_metric"]
+  if quality is None:
+    return ROE_QUALITY_UNVERIFIED, [*flags, "roe_quality_unverified"]
+
+  static_status = quality.status or ROE_QUALITY_UNVERIFIED
+  if static_status != ROE_QUALITY_VALID:
+    return static_status, flags
+  minimum_report_date = minimum_required_financial_report_date(snapshot_date)
+  if metric.report_date < minimum_report_date:
+    return ROE_QUALITY_STALE, [*flags, "financial_report_stale"]
+  return ROE_QUALITY_VALID, flags
 
 
 class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
@@ -342,9 +384,35 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       FinancialMetricSnapshot.as_of_date == latest_metric_as_of,
       FinancialMetricSnapshot.report_date == latest_metric_report,
     )
+    roe_quality_join = and_(
+      FinancialMetricRoeQuality.code == FinancialMetricSnapshot.code,
+      FinancialMetricRoeQuality.as_of_date == FinancialMetricSnapshot.as_of_date,
+      FinancialMetricRoeQuality.report_date == FinancialMetricSnapshot.report_date,
+    )
+    latest_sync_run_id = (
+      select(FinancialSyncRun.id)
+      .order_by(FinancialSyncRun.started_at.desc(), FinancialSyncRun.id.desc())
+      .limit(1)
+      .scalar_subquery()
+    )
+    financial_audit_join = and_(
+      FinancialSyncCodeAudit.run_id == latest_sync_run_id,
+      FinancialSyncCodeAudit.stock_code == IndicatorSnapshot.code,
+    )
+    minimum_report_date = minimum_required_financial_report_date(snapshot_date)
+    valid_roe_condition = and_(
+      FinancialSyncCodeAudit.status == "SUCCESS",
+      FinancialMetricRoeQuality.status == ROE_QUALITY_VALID,
+      FinancialMetricSnapshot.report_date >= minimum_report_date,
+      FinancialMetricSnapshot.roe_ttm.isnot(None),
+    )
+    effective_roe = case(
+      (valid_roe_condition, FinancialMetricSnapshot.roe_ttm),
+      else_=None,
+    )
     if min_roe is not None:
       conditions.extend([
-        FinancialMetricSnapshot.roe_ttm.isnot(None),
+        valid_roe_condition,
         FinancialMetricSnapshot.roe_ttm >= min_roe,
       ])
     if min_net_profit_growth is not None:
@@ -359,9 +427,16 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       ])
 
     base = (
-      select(IndicatorSnapshot, FinancialMetricSnapshot)
+      select(
+        IndicatorSnapshot,
+        FinancialMetricSnapshot,
+        FinancialMetricRoeQuality,
+        FinancialSyncCodeAudit,
+      )
       .outerjoin(Instrument, Instrument.id == IndicatorSnapshot.code)
       .outerjoin(FinancialMetricSnapshot, financial_metric_join)
+      .outerjoin(FinancialMetricRoeQuality, roe_quality_join)
+      .outerjoin(FinancialSyncCodeAudit, financial_audit_join)
       .where(*conditions)
     )
     count_stmt = select(func.count()).select_from(base.subquery())
@@ -387,7 +462,7 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
       "amount_percentile_60": IndicatorSnapshot.amount_percentile_60,
       "price_drop_pct": IndicatorSnapshot.price_drop_pct,
       "days_since_peak": IndicatorSnapshot.days_since_peak,
-      "roe_ttm": FinancialMetricSnapshot.roe_ttm,
+      "roe_ttm": effective_roe,
       "net_profit_growth_pct": FinancialMetricSnapshot.net_profit_quarter_growth_pct,
       "revenue_growth_pct": FinancialMetricSnapshot.revenue_quarter_growth_pct,
     }
@@ -413,10 +488,155 @@ class IndicatorSnapshotRepository(BaseRepository[IndicatorSnapshot]):
     )
     result = await self.db.execute(stmt)
     records = []
-    for snapshot, financial_metric in result.all():
+    for snapshot, financial_metric, roe_quality, financial_audit in result.all():
+      roe_quality_status, roe_quality_flags = _effective_roe_quality(
+        financial_metric,
+        roe_quality,
+        financial_audit,
+        snapshot_date,
+      )
       setattr(snapshot, "financial_metric", financial_metric)
+      setattr(snapshot, "financial_audit", financial_audit)
+      setattr(snapshot, "roe_quality_status", roe_quality_status)
+      setattr(snapshot, "roe_quality_flags", roe_quality_flags)
       records.append(snapshot)
     return records, total
+
+  async def financial_quality_counts(
+    self,
+    snapshot_date: date,
+    *,
+    include_industries: Optional[List[str]] = None,
+    exclude_industries: Optional[List[str]] = None,
+    universe: str = "stock",
+    exclude_st: bool = True,
+  ) -> Dict[str, int]:
+    """Count effective ROE states for the requested screening universe."""
+    conditions = [
+      IndicatorSnapshot.snapshot_date == snapshot_date,
+      self._universe_condition(universe),
+    ]
+    include_condition = self._industry_condition(include_industries or [], True)
+    if include_condition is not None:
+      conditions.append(include_condition)
+    exclude_condition = self._industry_condition(exclude_industries or [], False)
+    if exclude_condition is not None:
+      conditions.append(exclude_condition)
+    if exclude_st:
+      conditions.append(self._exclude_st_condition())
+
+    latest_metric = aliased(FinancialMetricSnapshot)
+    latest_metric_as_of = (
+      select(latest_metric.as_of_date)
+      .where(
+        latest_metric.code == IndicatorSnapshot.code,
+        latest_metric.as_of_date <= snapshot_date,
+      )
+      .order_by(latest_metric.as_of_date.desc(), latest_metric.report_date.desc())
+      .limit(1)
+      .correlate(IndicatorSnapshot)
+      .scalar_subquery()
+    )
+    latest_metric_report = (
+      select(latest_metric.report_date)
+      .where(
+        latest_metric.code == IndicatorSnapshot.code,
+        latest_metric.as_of_date <= snapshot_date,
+      )
+      .order_by(latest_metric.as_of_date.desc(), latest_metric.report_date.desc())
+      .limit(1)
+      .correlate(IndicatorSnapshot)
+      .scalar_subquery()
+    )
+    financial_metric_join = and_(
+      FinancialMetricSnapshot.code == IndicatorSnapshot.code,
+      FinancialMetricSnapshot.as_of_date == latest_metric_as_of,
+      FinancialMetricSnapshot.report_date == latest_metric_report,
+    )
+    roe_quality_join = and_(
+      FinancialMetricRoeQuality.code == FinancialMetricSnapshot.code,
+      FinancialMetricRoeQuality.as_of_date == FinancialMetricSnapshot.as_of_date,
+      FinancialMetricRoeQuality.report_date == FinancialMetricSnapshot.report_date,
+    )
+    latest_sync_run_id = (
+      select(FinancialSyncRun.id)
+      .order_by(FinancialSyncRun.started_at.desc(), FinancialSyncRun.id.desc())
+      .limit(1)
+      .scalar_subquery()
+    )
+    financial_audit_join = and_(
+      FinancialSyncCodeAudit.run_id == latest_sync_run_id,
+      FinancialSyncCodeAudit.stock_code == IndicatorSnapshot.code,
+    )
+    effective_status = case(
+      (
+        or_(
+          FinancialSyncCodeAudit.id.is_(None),
+          FinancialSyncCodeAudit.status == "FAILED",
+          FinancialSyncCodeAudit.status.notin_(["SUCCESS", "EMPTY"]),
+        ),
+        ROE_QUALITY_UNVERIFIED,
+      ),
+      (FinancialSyncCodeAudit.status == "EMPTY", ROE_QUALITY_INVALID),
+      (FinancialMetricSnapshot.code.is_(None), ROE_QUALITY_INVALID),
+      (
+        FinancialMetricRoeQuality.status == ROE_QUALITY_SUSPICIOUS,
+        ROE_QUALITY_SUSPICIOUS,
+      ),
+      (
+        FinancialMetricRoeQuality.status == ROE_QUALITY_INVALID,
+        ROE_QUALITY_INVALID,
+      ),
+      (
+        or_(
+          FinancialMetricRoeQuality.code.is_(None),
+          FinancialMetricRoeQuality.status != ROE_QUALITY_VALID,
+        ),
+        ROE_QUALITY_UNVERIFIED,
+      ),
+      (
+        FinancialMetricSnapshot.report_date
+        < minimum_required_financial_report_date(snapshot_date),
+        ROE_QUALITY_STALE,
+      ),
+      else_=ROE_QUALITY_VALID,
+    )
+    base = (
+      select(effective_status.label("roe_quality_status"))
+      .select_from(IndicatorSnapshot)
+      .outerjoin(Instrument, Instrument.id == IndicatorSnapshot.code)
+      .outerjoin(FinancialMetricSnapshot, financial_metric_join)
+      .outerjoin(FinancialMetricRoeQuality, roe_quality_join)
+      .outerjoin(FinancialSyncCodeAudit, financial_audit_join)
+      .where(*conditions)
+    ).subquery()
+    result = await self.db.execute(
+      select(
+        func.count().label("total"),
+        func.count().filter(base.c.roe_quality_status == ROE_QUALITY_VALID),
+        func.count().filter(base.c.roe_quality_status == ROE_QUALITY_STALE),
+        func.count().filter(base.c.roe_quality_status == ROE_QUALITY_SUSPICIOUS),
+        func.count().filter(base.c.roe_quality_status == ROE_QUALITY_INVALID),
+        func.count().filter(base.c.roe_quality_status == ROE_QUALITY_UNVERIFIED),
+      ).select_from(base)
+    )
+    row = result.one()
+    verified_result = await self.db.execute(
+      select(func.count())
+      .select_from(IndicatorSnapshot)
+      .outerjoin(Instrument, Instrument.id == IndicatorSnapshot.code)
+      .outerjoin(FinancialSyncCodeAudit, financial_audit_join)
+      .where(*conditions, FinancialSyncCodeAudit.status == "SUCCESS")
+    )
+    return {
+      "total": int(row[0] or 0),
+      "selectable": int(row[1] or 0),
+      "stale": int(row[2] or 0),
+      "suspicious": int(row[3] or 0),
+      "invalid": int(row[4] or 0),
+      "unverified": int(row[5] or 0),
+      "verified": int(verified_result.scalar_one() or 0),
+    }
 
   async def find_latest_by_code(
     self, code: str

@@ -283,6 +283,36 @@ class AccountTradingRollout(Base, TimestampMixin):
   last_snapshot_hash = Column(String(64), nullable=True)
   last_snapshot_at = Column(DateTime, nullable=True)
   last_backup_at = Column(DateTime, nullable=True)
+  controlled_window_active = Column(Boolean, nullable=False, default=False)
+  controlled_window_snapshot_id = Column(String(128), nullable=True)
+  controlled_window_snapshot_hash = Column(String(64), nullable=True)
+  controlled_window_started_at = Column(DateTime, nullable=True)
+  controlled_window_started_by_user_id = Column(String(36), nullable=True)
+  controlled_window_external_order_ids = Column(JSON, nullable=False, default=list)
+  controlled_window_external_trade_ids = Column(JSON, nullable=False, default=list)
+
+
+class AccountTradingRolloutEvent(Base):
+  """Append-only audit event for account rollout state changes."""
+
+  __tablename__ = "account_trading_rollout_events"
+  __table_args__ = (
+    Index(
+      "ix_account_trading_rollout_event_account_created",
+      "account_id",
+      "created_at",
+    ),
+  )
+
+  event_id = Column(String(36), primary_key=True)
+  account_id = Column(String(50), nullable=False, index=True)
+  event_type = Column(String(64), nullable=False)
+  actor_user_id = Column(String(36), nullable=True)
+  previous_stage = Column(String(24), nullable=True)
+  next_stage = Column(String(24), nullable=True)
+  snapshot_id = Column(String(128), nullable=True)
+  details = Column(JSON, nullable=False, default=dict)
+  created_at = Column(DateTime, nullable=False)
 
 
 class AgentReportInbox(Base):

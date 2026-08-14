@@ -1,7 +1,11 @@
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from xml.etree import ElementTree
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,6 +71,65 @@ def test_active_engineering_guidance_uses_monorepo_imports() -> None:
     if token in path.read_text(encoding="utf-8")
   }
   assert violations == {}
+
+
+def test_runtime_resolves_repository_junction_before_deriving_paths() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  startup = script.split("function Ensure-RuntimeDirectories", 1)[0]
+
+  assert "function Resolve-PhysicalDirectoryPath" in startup
+  assert "[IO.FileAttributes]::ReparsePoint" in startup
+  assert '$item.PSObject.Properties["Target"]' in startup
+  assert "$Root = Resolve-PhysicalDirectoryPath -Path" in startup
+  assert '$ScriptRoot = Join-Path $Root "ops"' in startup
+  assert startup.index("$Root = Resolve-PhysicalDirectoryPath -Path") < startup.index(
+    '$Runtime = Join-Path $Root ".runtime"'
+  )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Junction regression")
+def test_physical_directory_resolver_follows_windows_junction(
+  tmp_path: Path,
+) -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  resolver = "function Resolve-PhysicalDirectoryPath" + script.split(
+    "function Resolve-PhysicalDirectoryPath",
+    1,
+  )[1].split("$InvokedScriptRoot", 1)[0]
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+
+  target = tmp_path / "physical-root"
+  junction = tmp_path / "workspace-link"
+  target.mkdir()
+
+  def quote(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+  command = f"""
+$ErrorActionPreference = "Stop"
+{resolver}
+New-Item -ItemType Junction -Path '{quote(junction)}' `
+  -Target '{quote(target)}' | Out-Null
+try {{
+  Resolve-PhysicalDirectoryPath -Path '{quote(junction)}'
+}} finally {{
+  if (Test-Path -LiteralPath '{quote(junction)}') {{
+    Remove-Item -LiteralPath '{quote(junction)}' -Force
+  }}
+}}
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert Path(result.stdout.strip()).resolve() == target.resolve()
 
 
 def test_caddy_is_the_only_public_http_entrypoint() -> None:
@@ -187,6 +250,175 @@ def test_dev_runtime_defaults_to_full_profile() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
 
   assert '[string]$Profile = "full",' in script
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell dev launch matrix")
+def test_dev_launch_profile_mode_and_allowlist_matrix() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+
+  list_setting = "function ConvertFrom-ListSetting" + script.split(
+    "function ConvertFrom-ListSetting",
+    1,
+  )[1].split("function Assert-QmtAgentEnrollment", 1)[0]
+  launch_functions = "function Resolve-DevLaunchProfile" + script.split(
+    "function Resolve-DevLaunchProfile",
+    1,
+  )[1].split("function Invoke-Up", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+{list_setting}
+{launch_functions}
+
+$profiles = [ordered]@{{
+  webDefault = Resolve-DevLaunchProfile -RequestedProfile "web" `
+    -ModeExplicitlySpecified $false -RequestedMode "data-only"
+  webDataOnly = Resolve-DevLaunchProfile -RequestedProfile "web" `
+    -ModeExplicitlySpecified $true -RequestedMode "data-only"
+  webLive = Resolve-DevLaunchProfile -RequestedProfile "web" `
+    -ModeExplicitlySpecified $true -RequestedMode "live"
+  fullDefault = Resolve-DevLaunchProfile -RequestedProfile "full" `
+    -ModeExplicitlySpecified $false -RequestedMode "data-only"
+}}
+
+function Reset-TestAccountEnvironment {{
+  $env:QMT_ACCOUNT_WHITELIST = ""
+  $env:REAL_TRADING_ACCOUNT_ALLOWLIST = ""
+  $env:AUTH_BOOTSTRAP_ACCOUNT_IDS = ""
+}}
+
+Reset-TestAccountEnvironment
+$Profile = "full"
+$script:ModeWasExplicitlySpecified = $false
+$Mode = "data-only"
+$AccountId = "ACCOUNT-1"
+$defaultMode = Set-DevTradingModeEnvironment
+$defaultLive = [ordered]@{{
+  mode = $defaultMode
+  qmtMode = $env:QMT_AGENT_MODE
+  qmtAccount = $env:QMT_ACCOUNT_WHITELIST
+  allowlist = $env:REAL_TRADING_ACCOUNT_ALLOWLIST
+  server = $env:ENABLE_REAL_TRADING
+  qmt = $env:QMT_REAL_TRADING_ENABLED
+  tTrade = $env:T_TRADE_LIVE_ENABLED
+}}
+
+Reset-TestAccountEnvironment
+$Profile = "full"
+$script:ModeWasExplicitlySpecified = $true
+$Mode = "data-only"
+$AccountId = "IGNORED"
+$explicitDataOnlyMode = Set-DevTradingModeEnvironment
+$explicitDataOnly = [ordered]@{{
+  mode = $explicitDataOnlyMode
+  qmtAccount = $env:QMT_ACCOUNT_WHITELIST
+  allowlist = $env:REAL_TRADING_ACCOUNT_ALLOWLIST
+  server = $env:ENABLE_REAL_TRADING
+  qmt = $env:QMT_REAL_TRADING_ENABLED
+  tTrade = $env:T_TRADE_LIVE_ENABLED
+}}
+
+Reset-TestAccountEnvironment
+$Profile = "web"
+$script:ModeWasExplicitlySpecified = $true
+$Mode = "data-only"
+$AccountId = ""
+$webDataOnlyMode = Set-DevTradingModeEnvironment
+
+Reset-TestAccountEnvironment
+$env:QMT_ACCOUNT_WHITELIST = "ACCOUNT-2"
+$Profile = "full"
+$script:ModeWasExplicitlySpecified = $true
+$Mode = "live"
+$AccountId = ""
+$uniqueMode = Set-DevTradingModeEnvironment
+$uniqueAccount = [ordered]@{{
+  mode = $uniqueMode
+  account = $env:QMT_ACCOUNT_WHITELIST
+  allowlist = $env:REAL_TRADING_ACCOUNT_ALLOWLIST
+}}
+
+Reset-TestAccountEnvironment
+$Profile = "full"
+$script:ModeWasExplicitlySpecified = $true
+$Mode = "paper"
+$AccountId = "ACCOUNT-2"
+$paperModeError = ""
+try {{
+  $null = Set-DevTradingModeEnvironment
+}} catch {{
+  $paperModeError = $_.Exception.Message
+}}
+
+Reset-TestAccountEnvironment
+$env:QMT_ACCOUNT_WHITELIST = "ACCOUNT-A"
+$env:AUTH_BOOTSTRAP_ACCOUNT_IDS = "ACCOUNT-B"
+$Profile = "full"
+$script:ModeWasExplicitlySpecified = $true
+$Mode = "live"
+$AccountId = ""
+$multipleAccountError = ""
+try {{
+  $null = Set-DevTradingModeEnvironment
+}} catch {{
+  $multipleAccountError = $_.Exception.Message
+}}
+
+[ordered]@{{
+  profiles = $profiles
+  defaultLive = $defaultLive
+  explicitDataOnly = $explicitDataOnly
+  webDataOnlyMode = $webDataOnlyMode
+  uniqueAccount = $uniqueAccount
+  paperModeError = $paperModeError
+  multipleAccountError = $multipleAccountError
+}} | ConvertTo-Json -Depth 6 -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  payload = json.loads(result.stdout.strip())
+  assert payload["profiles"] == {
+    "webDefault": "full",
+    "webDataOnly": "web",
+    "webLive": "full",
+    "fullDefault": "full",
+  }
+  assert payload["defaultLive"] == {
+    "mode": "live",
+    "qmtMode": "live",
+    "qmtAccount": "ACCOUNT-1",
+    "allowlist": '["ACCOUNT-1"]',
+    "server": "true",
+    "qmt": "true",
+    "tTrade": "true",
+  }
+  assert payload["explicitDataOnly"] == {
+    "mode": "data-only",
+    "qmtAccount": "",
+    "allowlist": "[]",
+    "server": "false",
+    "qmt": "false",
+    "tTrade": "false",
+  }
+  assert payload["webDataOnlyMode"] == "data-only"
+  assert payload["uniqueAccount"] == {
+    "mode": "live",
+    "account": "ACCOUNT-2",
+    "allowlist": '["ACCOUNT-2"]',
+  }
+  assert "only non-live entry" in payload["paperModeError"]
+  assert "Multiple development trading accounts" in payload[
+    "multipleAccountError"
+  ]
 
 
 def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
@@ -328,11 +560,22 @@ def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
 
 def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  dev_mode = script.split(
+    "function Set-DevTradingModeEnvironment", 1
+  )[1].split("function Invoke-Up", 1)[0]
 
   assert "function Assert-QmtAgentEnrollment" in script
   assert "Assert-QmtAgentEnrollment -Python $qmtPython" in script
   assert "function Set-DevTradingModeEnvironment" in script
   assert '$agentMode = Set-DevTradingModeEnvironment' in script
+  assert (
+    '$script:ModeWasExplicitlySpecified = $PSBoundParameters.ContainsKey("Mode")'
+    in script
+  )
+  assert 'if ($script:ModeWasExplicitlySpecified) { $Mode } else { "live" }' in script
+  assert "function Resolve-DevTradingAccountId" in dev_mode
+  assert '"QMT_ACCOUNT_WHITELIST"' in dev_mode
+  assert "ConfirmLive" not in dev_mode
   assert "Live mode requires -ConfirmLive '$expected'." in script
   assert '$env:QMT_ACCOUNT_WHITELIST = if' in script
   assert '$env:REAL_TRADING_ACCOUNT_ALLOWLIST = ConvertTo-Json' in script
@@ -350,6 +593,20 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "-TimeoutSeconds 180" in script
   assert "timed out after $TimeoutSeconds seconds" in script
 
+  invoke_up = script.split("function Invoke-Up", 1)[1].split(
+    "function Invoke-Down", 1
+  )[0]
+  assert "function Enable-DevServerTrading" not in script
+  assert "$env:ENABLE_REAL_TRADING = \"true\"" in script
+  assert "$env:T_TRADE_LIVE_ENABLED = \"true\"" in script
+  assert "Resolve-DevLaunchProfile" in invoke_up
+  assert "-ModeExplicitlySpecified $script:ModeWasExplicitlySpecified" in invoke_up
+  assert "-RequestedMode $Mode" in invoke_up
+  assert "$Profile = $resolvedProfile" in invoke_up
+  assert "Wait-QmtAgentRuntimeReady" in invoke_up
+  assert '$protocols -contains "1.1"' in script
+  assert "[int]$qmt.readyDevices -ge 1" in script
+
   prefect = ElementTree.parse(OPS / "windows" / "quantx-worker.xml").getroot()
   environment = {
     node.attrib["name"]: node.attrib["value"]
@@ -361,6 +618,24 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert environment["PYTHONUTF8"] == "1"
   assert environment["PYTHONIOENCODING"] == "utf-8"
   assert prefect.find("depend") is None
+
+
+def test_dev_guidance_forbids_silent_data_only_fallback() -> None:
+  agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+  readme = (ROOT / "README.md").read_text(encoding="utf-8")
+  examples = (ROOT / "docs" / "engineering" / "api" / "EXAMPLES.md").read_text(
+    encoding="utf-8"
+  )
+  deployment = (
+    ROOT / "docs" / "engineering" / "deployment" / "README.md"
+  ).read_text(encoding="utf-8")
+
+  for document in (agents, readme, examples, deployment):
+    assert "full/live" in document
+    assert "不得" in document
+    assert "data-only" in document
+  assert "默认 `data-only`" not in readme
+  assert "默认 data-only" not in examples
 
 
 def test_all_python_processes_force_utf8_logs() -> None:
@@ -431,6 +706,30 @@ def test_environment_precedence_keeps_process_values_and_later_files_win() -> No
   )
   assert "$processOverrides.Contains($name)" in importer
   assert "$files += $ProductionConfigFile" in importer
+
+
+def test_process_state_reader_flattens_json_arrays_before_pid_checks() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  reader = script.split("function Read-State", 1)[1].split(
+    "function Write-State",
+    1,
+  )[0]
+
+  assert "$parsed = ConvertFrom-Json -InputObject $raw" in reader
+  assert "if ($parsed -is [System.Array])" in reader
+  assert "foreach ($entry in $parsed)" in reader
+
+
+def test_port_owner_lookup_is_safe_on_windows_powershell_51() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  lookup = script.split("function Get-PortOwner", 1)[1].split(
+    "function Assert-PortsAvailable",
+    1,
+  )[0]
+
+  assert '$processInfo.PSObject.Properties["CommandLine"]' in lookup
+  assert '$processInfo.PSObject.Properties["Path"]' in lookup
+  assert "$processInfo.CommandLine" not in lookup
 
 
 def test_winsw_install_starts_services_and_rolls_back_partial_failure() -> None:

@@ -5,6 +5,11 @@ from collections import defaultdict
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
 
+from quantx_infrastructure.core.financial_quality import (
+  ROE_QUALITY_INVALID,
+  ROE_QUALITY_SUSPICIOUS,
+  ROE_QUALITY_VALID,
+)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import get_async_db
 from quantx_infrastructure.models.financial import (
@@ -19,6 +24,8 @@ from quantx_infrastructure.services.financial_report_date import (
 )
 
 UNKNOWN_AS_OF_DATE = date(9999, 12, 31)
+ROE_SUSPICIOUS_ABS_LIMIT = 200.0
+BALANCE_EQUATION_REL_TOLERANCE = 0.005
 
 
 def _finite_float(value: Any) -> Optional[float]:
@@ -75,6 +82,57 @@ def _record_announce_date(
     return False
   announce_dates.append(announce_date)
   return True
+
+
+def _validate_roe_dependency(
+  row: Any,
+  label: str,
+  expected_report_date: date,
+  calculated_date: date,
+  invalid_flags: List[str],
+  suspicious_flags: List[str],
+  announce_dates: List[date],
+) -> None:
+  if row is None:
+    _add_flag(invalid_flags, f"missing_{label}")
+    return
+
+  actual_report_date = normalize_financial_report_date(
+    getattr(row, "report_date", None)
+  )
+  if actual_report_date != expected_report_date:
+    _add_flag(invalid_flags, f"mismatched_{label}_report_date")
+
+  announce_date = getattr(row, "announce_date", None)
+  if announce_date is None:
+    _add_flag(invalid_flags, f"missing_{label}_announce_date")
+    return
+  announce_dates.append(announce_date)
+  if announce_date < expected_report_date:
+    _add_flag(suspicious_flags, f"{label}_announce_before_report_date")
+  if announce_date > calculated_date:
+    _add_flag(suspicious_flags, f"{label}_announce_after_verification_date")
+
+
+def _validate_balance_equation(
+  row: Any,
+  label: str,
+  invalid_flags: List[str],
+  suspicious_flags: List[str],
+) -> None:
+  if row is None:
+    return
+  total_assets = _finite_float(getattr(row, "total_assets", None))
+  total_liabilities = _finite_float(getattr(row, "total_liabilities", None))
+  total_equity = _finite_float(getattr(row, "total_equity", None))
+  if None in {total_assets, total_liabilities, total_equity}:
+    _add_flag(invalid_flags, f"missing_{label}_balance_equation")
+    return
+
+  difference = abs(total_assets - total_liabilities - total_equity)
+  tolerance = max(1.0, abs(total_assets) * BALANCE_EQUATION_REL_TOLERANCE)
+  if difference > tolerance:
+    _add_flag(suspicious_flags, f"{label}_balance_equation_mismatch")
 
 
 def _growth_pct(
@@ -186,6 +244,47 @@ def calculate_metric_snapshot(
     else None
   )
 
+  roe_invalid_flags: List[str] = []
+  roe_suspicious_flags: List[str] = []
+  roe_announce_dates: List[date] = []
+  calculated_date = (
+    calculated_at.date() if hasattr(calculated_at, "date") else calculated_at
+  )
+  roe_dependencies = [
+    (current_income, "current_income", report_date),
+    (current_balance, "current_balance", report_date),
+    (start_balance, "start_balance", prior_same_date),
+  ]
+  if not _is_annual_report(report_date):
+    roe_dependencies.extend(
+      [
+        (prior_year_income, "prior_year_income", prior_year_end_date),
+        (prior_same_income, "prior_same_income", prior_same_date),
+      ]
+    )
+  for row, label, expected_report_date in roe_dependencies:
+    _validate_roe_dependency(
+      row,
+      label,
+      expected_report_date,
+      calculated_date,
+      roe_invalid_flags,
+      roe_suspicious_flags,
+      roe_announce_dates,
+    )
+  _validate_balance_equation(
+    current_balance,
+    "current",
+    roe_invalid_flags,
+    roe_suspicious_flags,
+  )
+  _validate_balance_equation(
+    start_balance,
+    "start",
+    roe_invalid_flags,
+    roe_suspicious_flags,
+  )
+
   _record_announce_date(current_income, "current_income", flags, announce_dates)
   _record_announce_date(current_balance, "current_balance", flags, announce_dates)
   _record_announce_date(start_balance, "start_balance", flags, announce_dates)
@@ -257,10 +356,35 @@ def calculate_metric_snapshot(
     _add_flag(flags, "missing_start_shareholder_equity")
   else:
     average_equity = (current_equity + start_equity) / 2
+    if current_equity <= 0:
+      _add_flag(flags, "non_positive_current_shareholder_equity")
+      _add_flag(roe_invalid_flags, "non_positive_current_shareholder_equity")
+    if start_equity <= 0:
+      _add_flag(flags, "non_positive_start_shareholder_equity")
+      _add_flag(roe_invalid_flags, "non_positive_start_shareholder_equity")
     if average_equity <= 0:
       _add_flag(flags, "non_positive_average_shareholder_equity")
     else:
       roe_ttm = round(net_profit_ttm / average_equity * 100, 4)
+
+  if net_profit_ttm is None:
+    _add_flag(roe_invalid_flags, "missing_ttm_net_profit")
+  if current_equity is None:
+    _add_flag(roe_invalid_flags, "missing_current_shareholder_equity")
+  if start_equity is None:
+    _add_flag(roe_invalid_flags, "missing_start_shareholder_equity")
+  if roe_ttm is None or not math.isfinite(roe_ttm):
+    _add_flag(roe_invalid_flags, "missing_or_non_finite_roe_ttm")
+  elif abs(roe_ttm) > ROE_SUSPICIOUS_ABS_LIMIT:
+    _add_flag(roe_suspicious_flags, "extreme_roe_ttm")
+
+  roe_quality_flags = [*roe_invalid_flags, *roe_suspicious_flags]
+  if roe_invalid_flags:
+    roe_quality_status = ROE_QUALITY_INVALID
+  elif roe_suspicious_flags:
+    roe_quality_status = ROE_QUALITY_SUSPICIOUS
+  else:
+    roe_quality_status = ROE_QUALITY_VALID
 
   net_profit_growth_pct = _growth_pct(
     current_profit,
@@ -335,6 +459,8 @@ def calculate_metric_snapshot(
     "report_date": report_date,
     "announce_date": current_announce_date,
     "roe_ttm": roe_ttm,
+    "roe_quality_status": roe_quality_status,
+    "roe_quality_flags": roe_quality_flags,
     "net_profit_ttm": net_profit_ttm,
     "net_profit_growth_pct": net_profit_growth_pct,
     "revenue_growth_pct": revenue_growth_pct,
@@ -369,12 +495,18 @@ class FinancialMetricSnapshotService:
   async def rebuild_for_codes(
     self,
     stock_codes: Optional[List[str]] = None,
+    *,
+    commit: bool = True,
   ) -> Dict[str, Any]:
     if self.db_session is not None:
-      return await self._rebuild_with_db(self.db_session, stock_codes, commit=True)
+      return await self._rebuild_with_db(
+        self.db_session,
+        stock_codes,
+        commit=commit,
+      )
 
     async for db in self.db_factory():
-      return await self._rebuild_with_db(db, stock_codes, commit=True)
+      return await self._rebuild_with_db(db, stock_codes, commit=commit)
 
     raise RuntimeError("数据库连接不可用")
 
@@ -399,6 +531,7 @@ class FinancialMetricSnapshotService:
     balance_by_stock = _group_by_stock(balance_rows)
     calculated_at = time_utils.now()
     records: List[Dict[str, Any]] = []
+    metric_rows_by_code: Dict[str, int] = defaultdict(int)
 
     for code in normalized_codes:
       income_by_date = {
@@ -423,6 +556,7 @@ class FinancialMetricSnapshotService:
             calculated_at=calculated_at,
           )
         )
+        metric_rows_by_code[code] += 1
 
     deleted = await repo.delete_by_codes(normalized_codes)
     saved = await repo.bulk_upsert(records)
@@ -432,4 +566,5 @@ class FinancialMetricSnapshotService:
       "codes": len(normalized_codes),
       "records": saved,
       "deleted": deleted,
+      "metric_rows_by_code": dict(metric_rows_by_code),
     }

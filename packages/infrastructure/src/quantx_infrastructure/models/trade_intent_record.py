@@ -29,10 +29,25 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
       "created_at",
       "id",
     ),
+    Index(
+      "ix_trade_intent_owner_created",
+      "owner_type",
+      "owner_id",
+      "created_at",
+    ),
+    Index(
+      "ix_trade_intent_account_status_created",
+      "account_id",
+      "status",
+      "created_at",
+    ),
   )
 
   id = Column(String(36), primary_key=True)  # UUID，重写基类的id
-  strategy_run_id = Column(String(36), ForeignKey("strategy_runs.id"), nullable=False)
+  strategy_run_id = Column(String(36), ForeignKey("strategy_runs.id"), nullable=True)
+  owner_type = Column(String(32), nullable=False, default="STRATEGY_RUN")
+  owner_id = Column(String(128), nullable=False, default="")
+  account_id = Column(String(50), nullable=True)
   strategy_id = Column(String(64), nullable=True)
   instrument_code = Column(String(20), nullable=False)  # 标的代码
   direction = Column(String(20), nullable=False)  # BUY, SELL, HOLD
@@ -65,6 +80,9 @@ class TradeIntentRecord(BaseModel, TimestampMixin):
     return {
       "id": self.id,
       "strategy_run_id": self.strategy_run_id,
+      "owner_type": self.owner_type,
+      "owner_id": self.owner_id,
+      "account_id": self.account_id,
       "strategy_id": self.strategy_id,
       "instrument_code": self.instrument_code,
       "direction": self.direction,

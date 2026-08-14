@@ -126,7 +126,11 @@ class RedisPubSub:
                 if message["type"] == "message":
                     try:
                         data = json.loads(message["data"])
-                        logger.info(f"Received message on {channel}: {data.get('status', 'unknown')}")
+                        logger.debug(
+                            "Received message on %s: %s",
+                            channel,
+                            data.get("status", "unknown"),
+                        )
                         yield data
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to decode message: {e}")

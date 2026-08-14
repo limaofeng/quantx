@@ -12,6 +12,9 @@ from quantx_infrastructure.models.financial import (
   FinancialBalanceSheet,
   FinancialIncomeStatement,
 )
+from quantx_infrastructure.models.financial_metric_roe_quality import (
+  FinancialMetricRoeQuality,
+)
 from quantx_infrastructure.models.financial_metric_snapshot import (
   FinancialMetricSnapshot,
 )
@@ -41,7 +44,28 @@ class FinancialMetricSnapshotRepository(BaseRepository[FinancialMetricSnapshot])
     if not records:
       return 0
     for record in records:
-      await self.upsert(record)
+      metric_record = {
+        key: value
+        for key, value in record.items()
+        if key not in {"roe_quality_status", "roe_quality_flags"}
+      }
+      await self.upsert(metric_record)
+      quality_statement = insert(FinancialMetricRoeQuality).values(
+        code=record["code"],
+        as_of_date=record["as_of_date"],
+        report_date=record["report_date"],
+        status=record.get("roe_quality_status", "UNVERIFIED"),
+        flags=record.get("roe_quality_flags") or [],
+      )
+      quality_statement = quality_statement.on_conflict_do_update(
+        index_elements=["code", "as_of_date", "report_date"],
+        set_={
+          "status": quality_statement.excluded.status,
+          "flags": quality_statement.excluded.flags,
+          "updated_at": func.now(),
+        },
+      )
+      await self.db.execute(quality_statement)
     return len(records)
 
   async def delete_by_codes(self, codes: List[str]) -> int:

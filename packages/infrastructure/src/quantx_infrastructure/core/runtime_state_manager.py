@@ -33,6 +33,8 @@ except ModuleNotFoundError:  # pragma: no cover - lightweight test environments
 BUCKET_LEDGER_CUSTOM_STATE_KEY = "bucket_ledger_snapshot"
 APPLIED_CORPORATE_ACTIONS_KEY = "applied_corporate_actions"
 GRID_BOOK_CUSTOM_STATE_KEY = "grid_book_snapshot"
+ORDER_CASH_RESERVATIONS_KEY = "order_cash_reservations"
+ORDER_POSITION_RESERVATIONS_KEY = "order_position_reservations"
 
 
 @dataclass
@@ -71,7 +73,7 @@ class RuntimeStateManager:
     # 标记是否有未保存的更改
     _dirty: bool = field(default=False, repr=False)
 
-    # 资金冻结（不持久化）
+    # 资金/持仓冻结索引；镜像到 custom state，供 Engine 重启恢复。
     _reservations: Dict[str, float] = field(default_factory=dict, repr=False)
     _position_reservations: Dict[str, Dict[str, int]] = field(
         default_factory=dict, repr=False
@@ -225,6 +227,7 @@ class RuntimeStateManager:
                         "frozen_cash": state_record.frozen_cash,
                         "total_asset": state_record.total_asset,
                     }
+                    self._restore_reservation_state()
                     ledger_snapshot = self._state["custom"].get(BUCKET_LEDGER_CUSTOM_STATE_KEY)
                     if ledger_snapshot:
                         from quantx_domain.trading.bucket_ledger import BucketLedger
@@ -343,14 +346,24 @@ class RuntimeStateManager:
             async for db in get_async_db():
                 # 1. 保存资金与自定义状态
                 state_repo = StrategyRunStateRepository(db)
-                await state_repo.upsert_state(
+                expected_version = int(self._state.get("version", 0) or 0)
+                saved = await state_repo.upsert_state(
                     run_id=self.run_id,
                     cash=self._state["account"].get("cash", 0.0),
                     frozen_cash=self._state["account"].get("frozen_cash", 0.0),
                     total_asset=self._state["account"].get("total_asset", 0.0),
                     custom_state=custom_state,
-                    expected_version=self._state.get("version"),
+                    expected_version=expected_version,
                 )
+                if not saved:
+                    raise RuntimeError(
+                        "runtime state snapshot version conflict: "
+                        f"run_id={self.run_id}, expected_version={expected_version}"
+                    )
+                # Keep the in-memory optimistic-lock token aligned with the row
+                # written above.  Otherwise only the first snapshot succeeds and
+                # every later save conflicts with its own previous write.
+                self._state["version"] = expected_version + 1
                 
                 # 2. 保存所有持仓（简单起见，逐个保存，可优化为批量）
                 pos_repo = StrategyRunPositionRepository(db)
@@ -662,6 +675,44 @@ class RuntimeStateManager:
     def get_reserved_amount(self, order_id: str) -> float:
         return float(self._reservations.get(order_id, 0.0))
 
+    def _sync_reservation_state(self) -> None:
+        custom = self._state.setdefault("custom", {})
+        custom[ORDER_CASH_RESERVATIONS_KEY] = {
+            str(order_id): float(amount)
+            for order_id, amount in self._reservations.items()
+            if float(amount or 0.0) > 0
+        }
+        custom[ORDER_POSITION_RESERVATIONS_KEY] = {
+            str(order_id): {
+                str(code): int(volume)
+                for code, volume in reservations.items()
+                if int(volume or 0) > 0
+            }
+            for order_id, reservations in self._position_reservations.items()
+            if reservations
+        }
+
+    def _restore_reservation_state(self) -> None:
+        custom = dict(self._state.get("custom") or {})
+        cash_value = custom.get(ORDER_CASH_RESERVATIONS_KEY)
+        position_value = custom.get(ORDER_POSITION_RESERVATIONS_KEY)
+        cash = cash_value if isinstance(cash_value, dict) else {}
+        positions = position_value if isinstance(position_value, dict) else {}
+        self._reservations = {
+            str(order_id): float(amount)
+            for order_id, amount in cash.items()
+            if float(amount or 0.0) > 0
+        }
+        self._position_reservations = {
+            str(order_id): {
+                str(code): int(volume)
+                for code, volume in dict(reservations or {}).items()
+                if int(volume or 0) > 0
+            }
+            for order_id, reservations in positions.items()
+            if isinstance(reservations, dict)
+        }
+
     def reserve_cash(self, order_id: str, amount: float) -> bool:
         if not self.enable_reserve:
             return False
@@ -679,6 +730,7 @@ class RuntimeStateManager:
         self._state["account"] = account
 
         self._reservations[order_id] = self._reservations.get(order_id, 0.0) + amount
+        self._sync_reservation_state()
         self._recalculate_total_asset()
         self._mark_dirty()
         return True
@@ -701,6 +753,8 @@ class RuntimeStateManager:
         if self._bucket_ledger:
             self._bucket_ledger.transfer_order(old_order_id, new_order_id)
             self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
+        self._sync_reservation_state()
+        self._mark_dirty()
 
     def consume_cash_reservation(self, order_id: str, amount: float) -> float:
         """Consume frozen cash for a fill and return any unfunded shortfall."""
@@ -724,6 +778,7 @@ class RuntimeStateManager:
         else:
             self._reservations[order_id] = remaining
 
+        self._sync_reservation_state()
         self._recalculate_total_asset()
         self._mark_dirty()
         return max(0.0, amount - consumed)
@@ -752,6 +807,7 @@ class RuntimeStateManager:
         else:
             self._reservations[order_id] = remaining
 
+        self._sync_reservation_state()
         self._recalculate_total_asset()
         self._mark_dirty()
         return True
@@ -778,6 +834,7 @@ class RuntimeStateManager:
 
         reserved = self._position_reservations.setdefault(order_id, {})
         reserved[instrument_code] = reserved.get(instrument_code, 0) + volume
+        self._sync_reservation_state()
         self._mark_dirty()
         return True
 
@@ -822,6 +879,7 @@ class RuntimeStateManager:
             self._position_reservations.pop(order_id, None)
         if changed:
             self._state["positions"] = positions
+            self._sync_reservation_state()
             self._mark_dirty()
         return changed
 
@@ -853,6 +911,7 @@ class RuntimeStateManager:
                 reserved[instrument_code] = remaining
             if not reserved and order_id in self._position_reservations:
                 self._position_reservations.pop(order_id, None)
+            self._sync_reservation_state()
             self._mark_dirty()
         return max(0, volume - consumed)
 

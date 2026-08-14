@@ -216,7 +216,8 @@ class StrategyInstrumentScope(str, Enum):
   description="""策略标的池来源
 
 - STATIC: 创建运行实例时固定指定标的
-- ACCOUNT_HOLDINGS: 由账户持仓快照动态维护标的池"""
+- ACCOUNT_HOLDINGS: 由账户持仓快照动态维护标的池
+- RADAR_CANDIDATES: 由 Engine 打板雷达协调候选标的池"""
 )
 class StrategyInstrumentUniverseMode(str, Enum):
   """策略运行实例的标的池维护方式。"""
@@ -226,6 +227,9 @@ class StrategyInstrumentUniverseMode(str, Enum):
 
   ACCOUNT_HOLDINGS = "account_holdings"
   """由账户持仓快照动态维护标的。"""
+
+  RADAR_CANDIDATES = "radar_candidates"
+  """由 Engine 打板雷达协调候选标的。"""
 
 
 @strawberry.enum(
