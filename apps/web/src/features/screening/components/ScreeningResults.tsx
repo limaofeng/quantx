@@ -181,10 +181,10 @@ const SORTABLE_COLUMNS: ScreeningColumn[] = [
   {
     align: 'right',
     id: 'roe',
-    label: 'ROE',
+    label: 'ROE（TTM）',
     sortField: 'ROE',
-    width: 90,
-    widthClass: 'min-w-[90px] w-[90px]',
+    width: 120,
+    widthClass: 'min-w-[120px] w-[120px]',
   },
   {
     align: 'right',
@@ -221,6 +221,37 @@ const OPPOSITE_DIRECTION: Record<
   ASC: 'DESC',
   DESC: 'ASC',
 };
+
+function describeFinancialQualityFlag(flag: string) {
+  const exactLabels: Record<string, string> = {
+    extreme_roe_ttm: 'ROE 数值超出常规范围',
+    financial_report_stale: '报告期未达到当前披露期限要求',
+    financial_sync_empty: '最近同步未返回该股票财务数据',
+    financial_sync_unverified: '最近同步未验证该股票',
+    missing_roe_metric: '缺少 ROE 指标快照',
+    roe_quality_unverified: '历史指标尚未重新验证',
+  };
+  if (exactLabels[flag]) return exactLabels[flag];
+  if (flag.includes('announce_after_verification_date')) {
+    return `公告日晚于验证时间（${flag}）`;
+  }
+  if (flag.includes('announce_before_report_date')) {
+    return `公告日早于报告期（${flag}）`;
+  }
+  if (flag.includes('balance_equation_mismatch')) {
+    return `资产负债勾稽不一致（${flag}）`;
+  }
+  if (flag.startsWith('non_positive_')) {
+    return `归母权益非正（${flag}）`;
+  }
+  if (flag.startsWith('mismatched_')) {
+    return `报告期不匹配（${flag}）`;
+  }
+  if (flag.startsWith('missing_')) {
+    return `ROE 计算依赖缺失（${flag}）`;
+  }
+  return `质量校验未通过（${flag}）`;
+}
 
 export function ScreeningResults({
   screeningLoading,
@@ -374,6 +405,9 @@ export function ScreeningResults({
     const hasAnyFinancialData =
       stock.financialReportDate ||
       stock.financialAnnounceDate ||
+      stock.financialAsOfDate ||
+      stock.financialVerifiedAt ||
+      stock.roeQualityStatus ||
       stock.financialQualityFlags?.length ||
       stock.roe !== undefined ||
       stock.netProfitGrowth !== undefined ||
@@ -389,6 +423,25 @@ export function ScreeningResults({
     if (stock.financialAnnounceDate) {
       parts.push(`公告日: ${stock.financialAnnounceDate}`);
     }
+    if (stock.financialAsOfDate) {
+      parts.push(`财务可用日: ${stock.financialAsOfDate}`);
+    }
+    if (stock.financialVerifiedAt) {
+      parts.push(
+        `验证时间: ${new Date(stock.financialVerifiedAt).toLocaleString('zh-CN')}`
+      );
+    }
+    const qualityStatus =
+      stock.roeQualityStatus ??
+      (stock.roe !== undefined ? 'VALID' : 'UNVERIFIED');
+    const qualityLabels = {
+      INVALID: '无效：依赖报表缺失或不满足计算约束',
+      STALE: '过期：未达到当前日期要求的最低报告期',
+      SUSPICIOUS: '可疑：数值、公告日期或报表勾稽异常',
+      UNVERIFIED: '未验证：最近同步未确认该股票数据',
+      VALID: '有效：截至筛选快照已披露且验证通过',
+    } as const;
+    parts.push(`ROE 质量: ${qualityLabels[qualityStatus]}`);
     parts.push(`净利单季同比: ${formatOptionalPercent(stock.netProfitGrowth)}`);
     parts.push(
       `净利累计同比: ${formatOptionalPercent(stock.netProfitAccumGrowth)}`
@@ -398,7 +451,11 @@ export function ScreeningResults({
       `营收累计同比: ${formatOptionalPercent(stock.revenueAccumGrowth)}`
     );
     if (stock.financialQualityFlags?.length) {
-      parts.push(`质量标记: ${stock.financialQualityFlags.join(', ')}`);
+      parts.push(
+        `质量原因: ${stock.financialQualityFlags
+          .map(describeFinancialQualityFlag)
+          .join('；')}`
+      );
     }
     return parts.join('\n');
   };
@@ -846,6 +903,17 @@ export function ScreeningResults({
           </td>
         );
       case 'roe':
+        {
+          const roeQualityStatus =
+            stock.roeQualityStatus ??
+            (stock.roe !== undefined ? 'VALID' : 'UNVERIFIED');
+          const qualityBadge = {
+            INVALID: ['无效', 'border-rose-500/30 text-rose-300'],
+            STALE: ['过期', 'border-amber-500/30 text-amber-300'],
+            SUSPICIOUS: ['可疑', 'border-orange-500/30 text-orange-300'],
+            UNVERIFIED: ['未验证', 'border-slate-500/30 text-slate-400'],
+            VALID: null,
+          } as const;
         return (
           <td
             key={column.id}
@@ -857,13 +925,28 @@ export function ScreeningResults({
             )}
           >
             <span
-              className={cn('font-mono', getFinancialValueClass(stock.roe))}
+              className={cn(
+                'flex items-center justify-end gap-1 font-mono',
+                getFinancialValueClass(stock.roe)
+              )}
               title={getFinancialTitle(stock)}
             >
               {formatOptionalPercent(stock.roe)}
+              {qualityBadge[roeQualityStatus] && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    'h-4 px-1 text-[9px] font-normal',
+                    qualityBadge[roeQualityStatus]?.[1]
+                  )}
+                >
+                  {qualityBadge[roeQualityStatus]?.[0]}
+                </Badge>
+              )}
             </span>
           </td>
         );
+        }
       case 'netProfitGrowth':
         return (
           <td
@@ -1186,6 +1269,21 @@ export function ScreeningResults({
             >
               <AlertTriangle className="mr-1 h-3 w-3" />
               非今日快照
+            </Badge>
+          )}
+          {meta?.financialHealth && (
+            <Badge
+              variant="outline"
+              className={cn(
+                'font-mono text-[10px] font-normal',
+                meta.financialHealth.status === 'SUCCESS'
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                  : 'border-orange-500/30 bg-orange-500/10 text-orange-300'
+              )}
+              title={`已验证 ${meta.financialHealth.verifiedCount}；可筛选 ${meta.financialHealth.selectableCount}；过期 ${meta.financialHealth.excludedStaleCount}；可疑 ${meta.financialHealth.excludedSuspiciousCount}；无效 ${meta.financialHealth.excludedInvalidCount}；未验证 ${meta.financialHealth.excludedUnverifiedCount}`}
+            >
+              财务 {meta.financialHealth.status} · 可筛选{' '}
+              {meta.financialHealth.selectableCount}
             </Badge>
           )}
         </>

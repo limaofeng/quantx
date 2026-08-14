@@ -51,6 +51,7 @@ import {
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { gql } from '@/generated/gql';
 import { useWatchlist } from '@/hooks/useWatchlist';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
@@ -63,6 +64,18 @@ const FINANCIAL_DATA_PAGE_QUERY = gql(`
       instrumentCount
       latestReportDate
       latestAnnounceDate
+      syncHealth {
+        status
+        lastCompletedAt
+        lastSuccessAt
+        requestedCodes
+        syncedCodes
+        emptyCodes
+        statementRows
+        metricRows
+        isStale
+        warnings
+      }
     }
     financialReports(search: $search, limit: $limit, offset: $offset) {
       total
@@ -400,6 +413,8 @@ export function FinancialDataPage() {
   });
 
   const overview = data?.financialOverview;
+  const syncHealth = overview?.syncHealth;
+  const syncHealthy = syncHealth?.status === 'SUCCESS' && !syncHealth.isStale;
   const reports = useMemo(() => {
     const baseReports =
       quickFilter === 'all'
@@ -725,6 +740,34 @@ export function FinancialDataPage() {
             successMessage="财务数据同步任务已提交"
           />
         </div>
+
+        {syncHealth && (
+          <div
+            className={cn(
+              'flex flex-col gap-2 rounded-lg border px-4 py-3 text-xs md:flex-row md:items-center md:justify-between',
+              syncHealthy
+                ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300'
+                : 'border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200'
+            )}
+          >
+            <div className="font-semibold">
+              财务同步：{syncHealth.status}
+              <span className="ml-3 font-normal">
+                覆盖 {syncHealth.syncedCodes.toLocaleString()}/
+                {syncHealth.requestedCodes.toLocaleString()}，空数据{' '}
+                {syncHealth.emptyCodes.toLocaleString()}，本次写入{' '}
+                {syncHealth.statementRows.toLocaleString()} 行
+              </span>
+            </div>
+            <div className="text-[11px] opacity-80">
+              {syncHealth.warnings.length > 0
+                ? syncHealth.warnings.join('；')
+                : syncHealth.lastCompletedAt
+                  ? `完成于 ${new Date(syncHealth.lastCompletedAt).toLocaleString('zh-CN')}`
+                  : '等待首次同步'}
+            </div>
+          </div>
+        )}
 
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -1908,11 +1951,7 @@ function MoneyValue({
     <span
       className={cn(
         'font-mono text-[11px] font-bold',
-        trend
-          ? Number(value ?? 0) < 0
-            ? 'text-rose-600 dark:text-rose-400'
-            : 'text-emerald-600 dark:text-emerald-400'
-          : 'text-slate-300'
+        trend ? financialToneClass(value) : 'text-slate-300'
       )}
     >
       {formatCompactMoney(value)}

@@ -104,12 +104,15 @@ describe('ScreeningResults', () => {
     expect(identityHeader).toHaveStyle({
       left: '0px',
       position: 'sticky',
+      zIndex: '30',
     });
     expect(identityHeader.draggable).toBe(false);
     expect(identityCell).toHaveStyle({
       left: '0px',
       position: 'sticky',
+      zIndex: '5',
     });
+    expect(identityHeader.closest('thead')).toHaveClass('z-10');
   });
 
   it('opens column context menu and pins columns to the left', () => {
@@ -242,6 +245,51 @@ describe('ScreeningResults', () => {
     );
 
     expect(screen.getByText('14.7%')).toBeInTheDocument();
+    expect(screen.getByText('ROE（TTM）')).toBeInTheDocument();
+  });
+
+  it('shows invalid ROE as a placeholder with quality and health status', () => {
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[
+          {
+            ...baseStock,
+            financialAnnounceDate: '2026-04-20',
+            financialAsOfDate: '2026-04-20',
+            financialQualityFlags: ['financial_sync_unverified'],
+            financialReportDate: '2025-12-31',
+            financialVerifiedAt: '2026-08-12T08:00:00',
+            roeQualityStatus: 'UNVERIFIED',
+          },
+        ]}
+        meta={{
+          financialHealth: {
+            excludedInvalidCount: 1,
+            excludedStaleCount: 2,
+            excludedSuspiciousCount: 3,
+            excludedUnverifiedCount: 4,
+            lastSuccessAt: '2026-08-11T08:00:00',
+            selectableCount: 1,
+            status: 'PARTIAL_FAILURE',
+            verifiedCount: 5,
+          },
+          hasStaleData: false,
+          isComplete: true,
+          missingSnapshotDates: [],
+          total: 1,
+          warnings: [],
+        }}
+      />
+    );
+
+    const status = screen.getByText('未验证');
+    expect(status).toBeInTheDocument();
+    expect(status.parentElement).toHaveAttribute(
+      'title',
+      expect.stringContaining('ROE 质量: 未验证')
+    );
+    expect(screen.getByText(/财务 PARTIAL_FAILURE/)).toBeInTheDocument();
   });
 
   it('labels quarter growth columns and shows accumulated growth in tooltip', () => {

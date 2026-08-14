@@ -247,7 +247,7 @@ export function ScreeningTopBar({
         variant="secondary"
         className="bg-purple-500/10 text-purple-400 border border-purple-500/20"
       >
-        ROE &gt; {screeningCriteria.minROE}%
+        ROE（TTM） &gt; {screeningCriteria.minROE}%
         <X
           className="ml-1 w-3 h-3 cursor-pointer hover:text-white"
           onClick={() => removeTag('minROE')}
@@ -733,7 +733,7 @@ export function ScreeningTopBar({
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1.5 flex flex-col justify-end">
                     <Label className="text-[10px] text-slate-400">
-                      最小 ROE (%)
+                      最小 ROE（TTM）
                     </Label>
                     <div className="relative">
                       <Input
@@ -750,6 +750,9 @@ export function ScreeningTopBar({
                         %
                       </span>
                     </div>
+                    <p className="text-[9px] leading-4 text-slate-500">
+                      仅使用截至筛选快照已披露且验证通过的数据
+                    </p>
                   </div>
                   <div className="space-y-1.5 flex flex-col justify-end">
                     <Label className="text-[10px] text-slate-400 leading-tight">

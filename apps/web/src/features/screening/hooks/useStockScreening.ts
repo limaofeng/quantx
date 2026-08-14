@@ -37,6 +37,16 @@ const STOCK_SCREEN_QUERY = gql(`
       hasStaleData
       isComplete
       warnings
+      financialHealth {
+        status
+        lastSuccessAt
+        verifiedCount
+        selectableCount
+        excludedStaleCount
+        excludedSuspiciousCount
+        excludedInvalidCount
+        excludedUnverifiedCount
+      }
       items {
         code
         name
@@ -79,12 +89,15 @@ const STOCK_SCREEN_QUERY = gql(`
         ma5Prev
         ma10Prev
         roe
+        roeQualityStatus
         netProfitGrowth
         yoyGrowth
         netProfitAccumGrowth
         revenueAccumGrowth
         financialReportDate
         financialAnnounceDate
+        financialAsOfDate
+        financialVerifiedAt
         financialQualityFlags
         matchedStrategies
         score
@@ -622,12 +635,15 @@ export function useStockScreening() {
       ma5Prev: item.ma5Prev ?? undefined,
       ma10Prev: item.ma10Prev ?? undefined,
       roe: item.roe ?? undefined,
+      roeQualityStatus: item.roeQualityStatus,
       netProfitGrowth: item.netProfitGrowth ?? undefined,
       yoyGrowth: item.yoyGrowth ?? undefined,
       netProfitAccumGrowth: item.netProfitAccumGrowth ?? undefined,
       revenueAccumGrowth: item.revenueAccumGrowth ?? undefined,
       financialReportDate: item.financialReportDate ?? undefined,
       financialAnnounceDate: item.financialAnnounceDate ?? undefined,
+      financialAsOfDate: item.financialAsOfDate ?? undefined,
+      financialVerifiedAt: item.financialVerifiedAt ?? undefined,
       financialQualityFlags: item.financialQualityFlags ?? [],
       turnoverRatePct: item.turnoverRatePct ?? null,
     }));
@@ -653,6 +669,7 @@ export function useStockScreening() {
         hasStaleData: false,
         isComplete: Boolean(page?.isScannerRunning),
         warnings: page?.warnings ?? [],
+        financialHealth: null,
       };
     }
 
@@ -678,6 +695,7 @@ export function useStockScreening() {
           ...(page?.warnings ?? []),
         ])
       ),
+      financialHealth: page?.financialHealth ?? null,
     };
   }, [
     intradayVolumeResult.data?.intradayVolumeScreen,

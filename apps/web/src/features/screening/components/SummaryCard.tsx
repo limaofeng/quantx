@@ -2,6 +2,7 @@ import { TrendingUp, TrendingDown } from 'lucide-react';
 import type React from 'react';
 
 import { Card, CardContent } from '@/components/ui/card';
+import { financialToneClass } from '@/shared/utils/financialColors';
 
 interface SummaryCardProps {
   title: string;
@@ -42,12 +43,12 @@ export function SummaryCard({
         {trend !== undefined && (
           <div className="mt-4 flex items-center">
             {trend > 0 ? (
-              <TrendingUp className="h-4 w-4 text-green-500 mr-1" />
+              <TrendingUp className="mr-1 h-4 w-4 text-market-up" />
             ) : (
-              <TrendingDown className="h-4 w-4 text-red-500 mr-1" />
+              <TrendingDown className="mr-1 h-4 w-4 text-market-down" />
             )}
             <span
-              className={`text-sm font-medium ${trend > 0 ? 'text-green-500' : 'text-red-500'}`}
+              className={`text-sm font-medium ${financialToneClass(trend)}`}
             >
               {Math.abs(trend)}%
             </span>

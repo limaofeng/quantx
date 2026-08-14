@@ -1,5 +1,11 @@
 export type StockScreenUniverse = 'STOCK' | 'ETF' | 'STOCK_AND_ETF';
 export type ScreeningMode = 'DAILY' | 'INTRADAY';
+export type RoeQualityStatus =
+  | 'VALID'
+  | 'STALE'
+  | 'SUSPICIOUS'
+  | 'INVALID'
+  | 'UNVERIFIED';
 
 export interface ScreeningCriteria {
   // --- Universe ---
@@ -82,12 +88,15 @@ export interface StockScreeningResult {
 
   // Fundamentals
   roe?: number;
+  roeQualityStatus?: RoeQualityStatus;
   netProfitGrowth?: number;
   yoyGrowth?: number;
   netProfitAccumGrowth?: number;
   revenueAccumGrowth?: number;
   financialReportDate?: string | null;
   financialAnnounceDate?: string | null;
+  financialAsOfDate?: string | null;
+  financialVerifiedAt?: string | null;
   financialQualityFlags?: string[];
 
   // Peak/Trough Stats
@@ -144,6 +153,24 @@ export interface StockScreeningMeta {
   hasStaleData: boolean;
   isComplete: boolean;
   warnings: string[];
+  financialHealth?: StockScreenFinancialHealth | null;
+}
+
+export interface StockScreenFinancialHealth {
+  status:
+    | 'NEVER_RUN'
+    | 'RUNNING'
+    | 'SUCCESS'
+    | 'PARTIAL_FAILURE'
+    | 'FAILED'
+    | 'STALE';
+  lastSuccessAt?: string | null;
+  verifiedCount: number;
+  selectableCount: number;
+  excludedStaleCount: number;
+  excludedSuspiciousCount: number;
+  excludedInvalidCount: number;
+  excludedUnverifiedCount: number;
 }
 
 export interface StockScreenSnapshotStatus {

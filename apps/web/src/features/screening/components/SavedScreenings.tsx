@@ -7,6 +7,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { financialToneClass } from '@/shared/utils/financialColors';
 
 interface SavedScreeningResult {
   id: string;
@@ -72,7 +73,7 @@ export function SavedScreenings({ screenings }: SavedScreeningsProps) {
                     >
                       {result.stock.name}
                       <span
-                        className={`ml-1 ${result.returnPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}
+                        className={`ml-1 ${financialToneClass(result.returnPercentage)}`}
                       >
                         {result.returnPercentage >= 0 ? '+' : ''}
                         {result.returnPercentage}%

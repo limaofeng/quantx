@@ -23,6 +23,18 @@ const FINANCIAL_SYNC_CARD_QUERY = gql(`
     financialOverview {
       reportCount
       instrumentCount
+      syncHealth {
+        status
+        lastCompletedAt
+        lastSuccessAt
+        requestedCodes
+        syncedCodes
+        emptyCodes
+        statementRows
+        metricRows
+        isStale
+        warnings
+      }
     }
   }
 `);
@@ -31,22 +43,23 @@ export function FinancialDataSyncCard() {
   const [, setLocation] = useLocation();
 
   // Use the hook for deployment status
-  const { deployment, isSyncing } = useDeploymentSync('financial-sync');
+  const { deployment, isSyncing: isDeploymentSyncing } =
+    useDeploymentSync('financial-sync');
   const [{ data }] = useQuery({ query: FINANCIAL_SYNC_CARD_QUERY });
 
   const stats = {
     reportsCount: data?.financialOverview.reportCount ?? 0,
     instrumentsCount: data?.financialOverview.instrumentCount ?? 0,
   };
+  const syncHealth = data?.financialOverview.syncHealth;
 
-  const isHealthy =
-    deployment?.status === 'Ready' ||
-    deployment?.status === 'Scheduled' ||
-    !deployment;
-  const isStale = deployment?.isStale || deployment?.status === 'Stale';
+  const isHealthy = syncHealth?.status === 'SUCCESS' && !syncHealth.isStale;
+  const isSyncing = syncHealth?.status === 'RUNNING' || isDeploymentSyncing;
+  const isStale = syncHealth?.status === 'STALE';
   const isError =
-    deployment?.status === 'Failed' ||
-    deployment?.status === 'Crashed' ||
+    syncHealth?.status === 'FAILED' ||
+    syncHealth?.status === 'PARTIAL_FAILURE' ||
+    syncHealth?.status === 'NEVER_RUN' ||
     isStale;
   const isInternalOffline = false; // Assume online for now
 
@@ -141,7 +154,7 @@ export function FinancialDataSyncCard() {
           </div>
         </div>
 
-        {deployment ? (
+        {syncHealth || deployment ? (
           <Badge
             variant="outline"
             className={cn(
@@ -170,22 +183,30 @@ export function FinancialDataSyncCard() {
             )}
             <span className="text-[10px]">
               {isStale
-                ? '运行卡住'
+                ? '数据过期'
                 : isSyncing
                   ? '同步中'
                   : isHealthy
                     ? '系统就绪'
-                    : isError
-                      ? '任务异常'
-                      : deployment.status}
+                    : syncHealth?.status === 'PARTIAL_FAILURE'
+                      ? '部分完成'
+                      : syncHealth?.status === 'FAILED'
+                        ? '同步失败'
+                        : syncHealth?.status === 'NEVER_RUN'
+                          ? '从未同步'
+                          : isError
+                            ? '任务异常'
+                            : syncHealth?.status ||
+                              deployment?.status ||
+                              '状态未知'}
             </span>
           </Badge>
         ) : (
           <Badge
             variant="outline"
-            className="bg-emerald-500/5 text-emerald-600 border-emerald-500/20"
+            className="bg-slate-500/5 text-slate-500 border-slate-500/20"
           >
-            <span className="text-[10px]">就绪</span>
+            <span className="text-[10px]">状态未知</span>
           </Badge>
         )}
       </div>
@@ -207,10 +228,12 @@ export function FinancialDataSyncCard() {
         <div className="flex flex-col gap-1 p-3 rounded-lg bg-white/60 dark:bg-black/20 border border-slate-200/50 dark:border-white/5">
           <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
             <PieChart className="w-3 h-3" />
-            覆盖标的
+            同步覆盖
           </div>
           <div className={cn('text-2xl font-black', theme.text)}>
-            {stats.instrumentsCount.toLocaleString()}
+            {syncHealth
+              ? `${syncHealth.syncedCodes.toLocaleString()}/${syncHealth.requestedCodes.toLocaleString()}`
+              : stats.instrumentsCount.toLocaleString()}
           </div>
         </div>
       </div>
@@ -226,13 +249,13 @@ export function FinancialDataSyncCard() {
           <Clock size={12} />
           <span className="text-[10px] font-mono">
             {isStale
-              ? deployment?.staleReason || '运行中但长时间无活动'
+              ? syncHealth?.warnings?.[0] || '财务同步数据已过期'
               : isSyncing
                 ? '正在同步数据...'
                 : isError
-                  ? '上次同步失败'
-                  : deployment?.lastRunTime
-                    ? `上次同步: ${formatDistanceToNow(new Date(deployment.lastRunTime), { locale: zhCN, addSuffix: true })}`
+                  ? syncHealth?.warnings?.[0] || '上次同步未完整成功'
+                  : syncHealth?.lastCompletedAt
+                    ? `上次同步: ${formatDistanceToNow(new Date(syncHealth.lastCompletedAt), { locale: zhCN, addSuffix: true })}`
                     : '自动同步'}
           </span>
         </div>

@@ -26,6 +26,7 @@ interface ComponentStatus {
   status?: string;
   version?: string;
   connectedDevices?: number;
+  readyDevices?: number;
   onlineDevices?: number;
   reconcilingDevices?: number;
   registeredDevices?: number;
@@ -220,7 +221,7 @@ export function SystemInsightCard() {
         status: toSystemStatus(qmtAgent, true),
         metric:
           qmtAgent?.status === 'ready'
-            ? `${qmtAgent.connectedDevices ?? 0} Ready`
+            ? `${qmtAgent.connectedDevices ?? 0} Connected · ${qmtAgent.readyDevices ?? 0} Ready`
             : (qmtAgent?.status ?? 'Offline'),
         icon: ShieldCheck,
       },
