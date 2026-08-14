@@ -2,10 +2,17 @@
 卖出管理与统一退出计划的 GraphQL 查询和变更定义
 """
 
+import logging
 from typing import List, Optional
 
 import strawberry
 
+from quantx_api.auth.errors import AuthError
+
+from ..liquidation_approval import (
+  LiquidationChallengeService,
+  normalize_liquidation_request,
+)
 from ..resolvers.liquidation import LiquidationResolver
 from ..security import authorized_account_id, principal_from_context
 from ..trade_approval import (
@@ -14,11 +21,6 @@ from ..trade_approval import (
   TradeApprovalChallengeService,
 )
 from ..types import MessageResponse
-from ..types.trade_approval_types import (
-  TradeApprovalConfirmationResult,
-  TradeApprovalPreview,
-  TradeApprovalPreviewResult,
-)
 from ..types.liquidation_types import (
   ConditionalLiquidationEvaluationResult,
   ConditionalLiquidationOrder,
@@ -31,9 +33,21 @@ from ..types.liquidation_types import (
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
   LiquidatePositionsInput,
+  LiquidationCompletionStrategy,
+  LiquidationConfirmationInput,
+  LiquidationConfirmationResult,
+  LiquidationConflictPreview,
+  LiquidationConflictStrategy,
+  LiquidationExecutionMode,
   LiquidationGroupResult,
+  LiquidationItemPreview,
   LiquidationOrder,
+  LiquidationPlanResult,
+  LiquidationPreview,
+  LiquidationPreviewInput,
+  LiquidationPreviewResult,
   LiquidationResult,
+  LiquidationScope,
   LiquidationSummary,
   PositionLiquidationResult,
   RedeemPositionInput,
@@ -41,6 +55,68 @@ from ..types.liquidation_types import (
   RedemptionResult,
   UpdateManualExitPlanInput,
 )
+from ..types.trade_approval_types import (
+  TradeApprovalConfirmationResult,
+  TradeApprovalPreview,
+  TradeApprovalPreviewResult,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _native_liquidation_preview(data) -> LiquidationPreview:
+  items = [
+    LiquidationItemPreview(
+      instrument_code=item.instrument_code,
+      instrument_name=item.instrument_name,
+      total_volume=item.total_volume,
+      available_volume=item.available_volume,
+      frozen_volume=item.frozen_volume,
+      t1_unavailable_volume=item.t1_unavailable_volume,
+      protected_volume=item.protected_volume,
+      pending_sell_volume=item.pending_sell_volume,
+      max_protected_volume=item.max_protected_volume,
+      included=item.included,
+      reason_code=item.reason_code,
+      reason_detail=item.reason_detail,
+      position_updated_at=item.position_updated_at,
+      conflicts=[
+        LiquidationConflictPreview(
+          plan_id=conflict.plan_id,
+          source_type=conflict.source_type,
+          status=conflict.status,
+          remaining_volume=conflict.remaining_volume,
+          config_version=conflict.config_version,
+          pending=conflict.pending,
+        )
+        for conflict in item.conflicts
+      ],
+    )
+    for item in data.snapshot.items
+  ]
+  return LiquidationPreview(
+    challenge_id=data.challenge_id,
+    confirmation_token=data.confirmation_token,
+    group_id=data.group_id,
+    account_id=data.request.account_id,
+    scope=LiquidationScope(data.request.scope),
+    instrument_codes=list(data.request.instrument_codes),
+    completion_strategy=LiquidationCompletionStrategy(
+      data.request.completion_strategy
+    ),
+    conflict_strategy=LiquidationConflictStrategy(data.request.conflict_strategy),
+    execution_mode=LiquidationExecutionMode(data.request.execution_mode),
+    idempotency_key=data.request.idempotency_key,
+    snapshot_version=data.snapshot.snapshot_version,
+    account_updated_at=data.snapshot.account_updated_at,
+    rollout_snapshot_id=data.snapshot.rollout_snapshot_id,
+    rollout_snapshot_hash=data.snapshot.rollout_snapshot_hash,
+    challenge_expires_at=data.challenge_expires_at,
+    included_count=sum(1 for item in items if item.included),
+    skipped_count=sum(1 for item in items if not item.included),
+    items=items,
+    warnings=list(data.snapshot.warnings),
+  )
 
 
 @strawberry.type(description="卖出管理与统一退出计划查询")
@@ -163,6 +239,139 @@ class LiquidationQuery:
 
 @strawberry.type(description="卖出管理与统一退出计划变更")
 class LiquidationMutation:
+  @strawberry.mutation(description="预览固定持仓快照并签发组级清仓确认挑战")
+  async def preview_liquidation(
+    self,
+    info: strawberry.types.Info,
+    input: LiquidationPreviewInput,
+  ) -> LiquidationPreviewResult:
+    try:
+      principal = principal_from_context(info.context)
+      request = normalize_liquidation_request(
+        account_id=authorized_account_id(info, input.account_id),
+        scope=input.scope,
+        instrument_codes=list(input.instrument_codes or []),
+        completion_strategy=input.completion_strategy,
+        conflict_strategy=input.conflict_strategy,
+        execution_mode=input.execution_mode,
+        idempotency_key=input.idempotency_key,
+      )
+      preview = await LiquidationChallengeService.issue(
+        principal=principal,
+        request=request,
+      )
+      return LiquidationPreviewResult(
+        success=True,
+        code="PREVIEW_READY",
+        message="请核对证券集合、最大保护量、冲突和执行模式后进行本机确认",
+        preview=_native_liquidation_preview(preview),
+      )
+    except TradeApprovalChallengeError as exc:
+      return LiquidationPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+    except AuthError as exc:
+      return LiquidationPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+    except Exception:
+      logger.exception("移动端清仓预览失败")
+      return LiquidationPreviewResult(
+        success=False,
+        code="LIQUIDATION_PREVIEW_UNAVAILABLE",
+        message="清仓预览暂不可用，请刷新账户快照后重试",
+      )
+
+  @strawberry.mutation(description="消费组级挑战并原子排队清仓 Engine 命令")
+  async def confirm_liquidation(
+    self,
+    info: strawberry.types.Info,
+    input: LiquidationConfirmationInput,
+  ) -> LiquidationConfirmationResult:
+    try:
+      principal = principal_from_context(info.context)
+      # Top-level authorization requires liquidation:control; confirmation
+      # additionally requires the independent high-risk approval capability.
+      principal.require_permission("trade:approve")
+      result = await LiquidationChallengeService.confirm(
+        principal=principal,
+        challenge_id=input.challenge_id,
+        confirmation_token=input.confirmation_token,
+      )
+      failed = result.status == "FAILED"
+      result_items = list((result.result or {}).get("items") or [])
+      plans = [
+        LiquidationPlanResult(
+          instrument_code=str(item.get("instrument_code") or ""),
+          success=bool(item.get("success")),
+          plan_id=str(item.get("plan_id") or "") or None,
+          protected_volume=(
+            int(item["protected_volume"])
+            if item.get("protected_volume") is not None
+            else None
+          ),
+          conflict_plan_ids=[
+            str(value) for value in list(item.get("conflict_plan_ids") or [])
+          ],
+          error=str(item.get("error") or "") or None,
+        )
+        for item in result_items
+      ]
+      created_count = sum(1 for item in plans if item.success)
+      failed_count = sum(1 for item in plans if not item.success)
+      completed = result.status == "SUCCEEDED"
+      group_success = bool((result.result or {}).get("success")) if completed else True
+      code = "LIQUIDATION_FAILED" if failed else "LIQUIDATION_QUEUED"
+      message = (
+        result.error or "清仓计划创建失败"
+        if failed
+        else "清仓 Engine 命令已排队；计划、委托与成交状态将独立推进"
+      )
+      if completed:
+        code = (
+          "LIQUIDATION_CREATED"
+          if group_success
+          else "LIQUIDATION_PARTIAL"
+          if created_count
+          else "LIQUIDATION_REJECTED"
+        )
+        message = f"已创建 {created_count}/{len(plans)} 个固定快照清仓计划"
+      return LiquidationConfirmationResult(
+        success=not failed and group_success,
+        code=code,
+        message=message,
+        challenge_id=result.challenge_id,
+        group_id=result.group_id,
+        command_id=result.command_id,
+        status=result.status,
+        created_count=created_count,
+        failed_count=failed_count,
+        plans=plans,
+      )
+    except TradeApprovalChallengeError as exc:
+      return LiquidationConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+    except AuthError as exc:
+      return LiquidationConfirmationResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
+    except Exception:
+      logger.exception("移动端清仓确认排队失败")
+      return LiquidationConfirmationResult(
+        success=False,
+        code="LIQUIDATION_REJECTED",
+        message="清仓确认未能安全进入 Engine 队列，请刷新状态后重试",
+      )
+
   @strawberry.mutation(description="预览并签发退出 SELL 意图确认挑战")
   async def preview_exit_intent(
     self,

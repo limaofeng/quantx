@@ -44,11 +44,16 @@ from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
-from quantx_infrastructure.repositories.position_repository import PositionRepository
 from quantx_infrastructure.services.trade_intent_processor import TradeIntentProcessor
 
 ADAPTIVE_RULE_ID_SUFFIX = "adaptive-volume-price"
-ACTIVE_ORDER_STATUSES = {"QUEUED", "PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+ACTIVE_ORDER_STATUSES = {
+  "QUEUED",
+  "PENDING",
+  "SUBMITTED",
+  "REPORTED",
+  "PARTIAL_FILLED",
+}
 MANUAL_PLAN_SOURCE = "MANUAL_POSITION"
 MANUAL_LIQUIDATION_SOURCE = "MANUAL_LIQUIDATION"
 AVAILABLE_NOW = "AVAILABLE_NOW"
@@ -494,9 +499,83 @@ class AutoExitPlanService:
     scope = str(payload.get("scope") or "SELECTED").upper()
     if scope == "SELECTED" and not selected:
       raise ValueError("请选择至少一只持仓")
-    group_id = str(uuid.uuid4())
+    requested_group_id = str(payload.get("group_id") or "").strip()
+    if requested_group_id:
+      try:
+        group_id = str(uuid.UUID(requested_group_id))
+      except ValueError as exc:
+        raise ValueError("清仓组 ID 无效") from exc
+    else:
+      group_id = str(uuid.uuid4())
+    expected_items = {
+      str(item.get("instrument_code") or "").strip().upper(): dict(item)
+      for item in list(payload.get("expected_items") or [])
+      if isinstance(item, Mapping)
+      and str(item.get("instrument_code") or "").strip()
+    }
+    snapshot_version = str(
+      payload.get("authorization_snapshot_version") or ""
+    ).strip()
+    authorization_challenge_id = str(
+      payload.get("authorization_challenge_id") or ""
+    ).strip()
+    native_confirmation = bool(expected_items or authorization_challenge_id)
+    if native_confirmation and (
+      not expected_items or not snapshot_version or not authorization_challenge_id
+    ):
+      raise ValueError("移动端清仓命令缺少完整快照授权")
     results: list[dict[str, Any]] = []
     async with AsyncSessionLocal() as db:
+      if native_confirmation:
+        existing_group = list(
+          (
+            await db.execute(
+              select(AutoExitPlanRecord)
+              .where(AutoExitPlanRecord.group_id == group_id)
+              .order_by(AutoExitPlanRecord.instrument_code)
+            )
+          )
+          .scalars()
+          .all()
+        )
+        if existing_group:
+          existing_by_code = {
+            str(record.instrument_code): record for record in existing_group
+          }
+          replay_items: list[dict[str, Any]] = []
+          for code, expected in expected_items.items():
+            record = existing_by_code.get(code)
+            if record is not None:
+              replay_items.append(
+                {
+                  "instrument_code": record.instrument_code,
+                  "success": True,
+                  "plan_id": record.plan_id,
+                  "protected_volume": int(record.protected_volume or 0),
+                  "conflict_plan_ids": [],
+                }
+              )
+            else:
+              replay_items.append(
+                {
+                  "instrument_code": code,
+                  "success": False,
+                  "error": str(
+                    expected.get("reason_detail")
+                    or "首次处理未创建该证券的清仓计划"
+                  ),
+                  "conflict_plan_ids": [
+                    str(item.get("plan_id") or "")
+                    for item in list(expected.get("conflicts") or [])
+                    if str(item.get("plan_id") or "")
+                  ],
+                }
+              )
+          return {
+            "group_id": group_id,
+            "success": all(item.get("success") for item in replay_items),
+            "items": replay_items,
+          }
       position_stmt = (
         select(Position)
         .where(Position.account_id == account_id)
@@ -513,8 +592,52 @@ class AutoExitPlanService:
           {"instrument_code": missing, "success": False, "error": "未找到持仓"}
         )
       repo = AutoExitPlanRepository(db)
+      pending_sell_by_code: dict[str, list[PendingTradeOrder]] = {}
+      if native_confirmation:
+        pending_sell_rows = list(
+          (
+            await db.execute(
+              select(PendingTradeOrder)
+              .where(PendingTradeOrder.account_id == account_id)
+              .where(PendingTradeOrder.instrument_code.in_(selected))
+              .where(PendingTradeOrder.side == "SELL")
+              .where(PendingTradeOrder.status.in_(ACTIVE_ORDER_STATUSES))
+              .with_for_update()
+            )
+          )
+          .scalars()
+          .all()
+        )
+        for order in pending_sell_rows:
+          pending_sell_by_code.setdefault(
+            str(order.instrument_code).upper(), []
+          ).append(order)
       for position in positions:
         code = str(position.stock_code)
+        expected = expected_items.get(code) if native_confirmation else None
+        if native_confirmation and expected is None:
+          results.append(
+            {
+              "instrument_code": code,
+              "success": False,
+              "error": "证券不在已确认的固定清仓快照中",
+            }
+          )
+          continue
+        if expected is not None and not bool(expected.get("included")):
+          results.append(
+            {
+              "instrument_code": code,
+              "success": False,
+              "error": str(expected.get("reason_detail") or "预览已跳过该持仓"),
+              "conflict_plan_ids": [
+                str(item.get("plan_id") or "")
+                for item in list(expected.get("conflicts") or [])
+                if str(item.get("plan_id") or "")
+              ],
+            }
+          )
+          continue
         reserving = await repo.find_reserving(
           account_id=account_id,
           instrument_code=code,
@@ -526,7 +649,8 @@ class AutoExitPlanService:
           if item.status == ExitPlanStatus.EXIT_PENDING.value
           or item.pending_client_order_id
         ]
-        if pending:
+        direct_pending = pending_sell_by_code.get(code, [])
+        if pending or direct_pending:
           results.append(
             {
               "instrument_code": code,
@@ -536,6 +660,70 @@ class AutoExitPlanService:
             }
           )
           continue
+        if expected is not None:
+          current_conflicts = [
+            {
+              "plan_id": str(item.plan_id),
+              "source_type": str(item.source_type),
+              "status": str(item.status),
+              "remaining_volume": max(0, int(item.remaining_volume or 0)),
+              "config_version": max(0, int(item.config_version or 0)),
+              "pending": bool(
+                str(item.status or "").upper() == "EXIT_PENDING"
+                or item.pending_client_order_id
+              ),
+            }
+            for item in reserving
+          ]
+          expected_conflicts = [
+            {
+              "plan_id": str(item.get("plan_id") or ""),
+              "source_type": str(item.get("source_type") or ""),
+              "status": str(item.get("status") or ""),
+              "remaining_volume": max(
+                0, int(item.get("remaining_volume") or 0)
+              ),
+              "config_version": max(0, int(item.get("config_version") or 0)),
+              "pending": bool(item.get("pending")),
+            }
+            for item in list(expected.get("conflicts") or [])
+          ]
+          if current_conflicts != expected_conflicts:
+            results.append(
+              {
+                "instrument_code": code,
+                "success": False,
+                "error": "退出计划冲突在确认排队后发生变化",
+                "conflict_plan_ids": [item.plan_id for item in reserving],
+              }
+            )
+            continue
+        conflict_plan_ids = [item.plan_id for item in reserving]
+        reserved = (
+          0
+          if conflict_strategy == REPLACE_CANCELLABLE
+          else sum(max(0, int(item.remaining_volume or 0)) for item in reserving)
+        )
+        snapshot_target = (
+          int(position.can_use_volume or 0)
+          if completion == AVAILABLE_NOW
+          else int(position.volume or 0)
+        )
+        target = max(0, min(snapshot_target, int(position.volume or 0) - reserved))
+        if expected is not None:
+          target = min(target, max(0, int(expected.get("max_protected_volume") or 0)))
+        if target <= 0:
+          results.append(
+            {
+              "instrument_code": code,
+              "success": False,
+              "error": "持仓数量已被其他退出计划保护",
+              "conflict_plan_ids": conflict_plan_ids,
+            }
+          )
+          continue
+        # Never remove existing protection until a positive, bounded
+        # replacement can be created in this same transaction.
         if conflict_strategy == REPLACE_CANCELLABLE:
           for existing in reserving:
             old_plan = ExitPlan.from_dict(dict(existing.plan_state or {}))
@@ -550,24 +738,6 @@ class AutoExitPlanService:
               event_type="PLAN_CANCELLED",
               payload={"replacement_group_id": group_id},
             )
-          reserving = []
-        reserved = sum(max(0, int(item.remaining_volume or 0)) for item in reserving)
-        snapshot_target = (
-          int(position.can_use_volume or 0)
-          if completion == AVAILABLE_NOW
-          else int(position.volume or 0)
-        )
-        target = max(0, min(snapshot_target, int(position.volume or 0) - reserved))
-        if target <= 0:
-          results.append(
-            {
-              "instrument_code": code,
-              "success": False,
-              "error": "持仓数量已被其他退出计划保护",
-              "conflict_plan_ids": [item.plan_id for item in reserving],
-            }
-          )
-          continue
         plan_id = f"manual-liquidation:{group_id}:{code}"
         rule = ExitRuleSpec(
           rule_id=f"{plan_id}:manual-trigger",
@@ -591,6 +761,13 @@ class AutoExitPlanService:
             "conflict_strategy": conflict_strategy,
             "position_volume_snapshot": int(position.volume or 0),
             "available_volume_snapshot": int(position.can_use_volume or 0),
+            "authorization_challenge_id": authorization_challenge_id or None,
+            "authorization_snapshot_version": snapshot_version or None,
+            "authorized_max_protected_volume": (
+              int(expected.get("max_protected_volume") or 0)
+              if expected is not None
+              else None
+            ),
           },
           auto_exit_authorized=bool(payload.get("auto_exit_authorized", False)),
         )
@@ -630,7 +807,7 @@ class AutoExitPlanService:
             "group_id": group_id,
             "completion_strategy": completion,
             "protected_volume": target,
-            "conflict_plan_ids": [item.plan_id for item in reserving],
+            "conflict_plan_ids": conflict_plan_ids,
           },
         )
         results.append(
@@ -639,7 +816,7 @@ class AutoExitPlanService:
             "success": True,
             "plan_id": plan_id,
             "protected_volume": target,
-            "conflict_plan_ids": [item.plan_id for item in reserving],
+            "conflict_plan_ids": conflict_plan_ids,
           }
         )
       await db.commit()

@@ -3,6 +3,7 @@
 """
 
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional
 
 import strawberry
@@ -11,6 +12,31 @@ from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder as ConditionalOrderModel,
 )
 from strawberry.scalars import JSON
+
+
+@strawberry.enum(description="移动端清仓范围")
+class LiquidationScope(str, Enum):
+  SINGLE = "SINGLE"
+  SELECTED = "SELECTED"
+  ALL = "ALL"
+
+
+@strawberry.enum(description="清仓完成策略")
+class LiquidationCompletionStrategy(str, Enum):
+  AVAILABLE_NOW = "AVAILABLE_NOW"
+  UNTIL_SNAPSHOT_CLEARED = "UNTIL_SNAPSHOT_CLEARED"
+
+
+@strawberry.enum(description="清仓计划冲突策略")
+class LiquidationConflictStrategy(str, Enum):
+  UNALLOCATED_ONLY = "UNALLOCATED_ONLY"
+  REPLACE_CANCELLABLE = "REPLACE_CANCELLABLE"
+
+
+@strawberry.enum(description="清仓执行模式；默认 PAPER，LIVE 需要额外实盘门禁")
+class LiquidationExecutionMode(str, Enum):
+  PAPER = "PAPER"
+  LIVE = "LIVE"
 
 
 @strawberry.type(description="清仓结果")
@@ -389,6 +415,106 @@ class LiquidationGroupResult:
   success: bool
   message: str
   plans: List[LiquidationPlanResult]
+
+
+@strawberry.type(description="清仓预览中的冲突退出计划")
+class LiquidationConflictPreview:
+  plan_id: str
+  source_type: str
+  status: str
+  remaining_volume: int
+  config_version: int
+  pending: bool
+
+
+@strawberry.type(description="清仓预览中的单只证券固定快照")
+class LiquidationItemPreview:
+  instrument_code: str
+  instrument_name: Optional[str]
+  total_volume: int
+  available_volume: int
+  frozen_volume: int
+  t1_unavailable_volume: int
+  protected_volume: int
+  pending_sell_volume: int
+  max_protected_volume: int
+  included: bool
+  reason_code: str
+  reason_detail: str
+  position_updated_at: Optional[datetime]
+  conflicts: List[LiquidationConflictPreview]
+
+
+@strawberry.type(description="移动端组级清仓服务器预览")
+class LiquidationPreview:
+  challenge_id: str
+  confirmation_token: str
+  group_id: str
+  account_id: str
+  scope: LiquidationScope
+  instrument_codes: List[str]
+  completion_strategy: LiquidationCompletionStrategy
+  conflict_strategy: LiquidationConflictStrategy
+  execution_mode: LiquidationExecutionMode
+  idempotency_key: str
+  snapshot_version: str
+  account_updated_at: datetime
+  rollout_snapshot_id: Optional[str]
+  rollout_snapshot_hash: Optional[str]
+  challenge_expires_at: datetime
+  included_count: int
+  skipped_count: int
+  items: List[LiquidationItemPreview]
+  warnings: List[str]
+
+
+@strawberry.type(description="移动端清仓预览结果")
+class LiquidationPreviewResult:
+  success: bool
+  code: str
+  message: str
+  preview: Optional[LiquidationPreview] = None
+
+
+@strawberry.type(description="移动端清仓确认结果；PENDING 仅表示 Engine 命令已排队")
+class LiquidationConfirmationResult:
+  success: bool
+  code: str
+  message: str
+  challenge_id: Optional[str] = None
+  group_id: Optional[str] = None
+  command_id: Optional[str] = None
+  status: Optional[str] = None
+  created_count: int = 0
+  failed_count: int = 0
+  plans: List[LiquidationPlanResult] = strawberry.field(default_factory=list)
+
+
+@strawberry.input(description="移动端组级清仓预览输入")
+class LiquidationPreviewInput:
+  account_id: str = strawberry.field(description="必填资金账号")
+  scope: LiquidationScope = strawberry.field(description="单只、选中或全部")
+  completion_strategy: LiquidationCompletionStrategy = strawberry.field(
+    description="处理当前可卖量或持续处理预览持仓快照"
+  )
+  conflict_strategy: LiquidationConflictStrategy = strawberry.field(
+    description="只使用未分配数量或替换可取消计划"
+  )
+  idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")
+  instrument_codes: Optional[List[str]] = strawberry.field(
+    description="SINGLE/SELECTED 必填；ALL 必须为空",
+    default=None,
+  )
+  execution_mode: LiquidationExecutionMode = strawberry.field(
+    description="默认 PAPER；LIVE 需要实盘门禁和最新完整对账",
+    default=LiquidationExecutionMode.PAPER,
+  )
+
+
+@strawberry.input(description="移动端组级清仓确认输入")
+class LiquidationConfirmationInput:
+  challenge_id: str = strawberry.field(description="预览返回的确认挑战 ID")
+  confirmation_token: str = strawberry.field(description="预览返回的一次性确认凭据")
 
 
 # 输入类型
