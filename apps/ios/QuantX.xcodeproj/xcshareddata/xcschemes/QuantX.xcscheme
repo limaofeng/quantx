@@ -21,6 +21,34 @@
                ReferencedContainer = "container:QuantX.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AEB987C1358EB9EA2FDBFC61"
+               BuildableName = "QuantXTests.xctest"
+               BlueprintName = "QuantXTests"
+               ReferencedContainer = "container:QuantX.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "441DBC23DC8A6D227A25666C"
+               BuildableName = "QuantXUITests.xctest"
+               BlueprintName = "QuantXUITests"
+               ReferencedContainer = "container:QuantX.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -88,6 +116,18 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
       </CommandLineArguments>
+      <EnvironmentVariables>
+         <EnvironmentVariable
+            key = "QUANTX_IOS_DEVELOPMENT_PASSWORD"
+            value = "$(QUANTX_IOS_DEVELOPMENT_PASSWORD)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
+            key = "QUANTX_IOS_DEVELOPMENT_USERNAME"
+            value = "$(QUANTX_IOS_DEVELOPMENT_USERNAME)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

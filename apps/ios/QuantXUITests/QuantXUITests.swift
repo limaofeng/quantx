@@ -180,25 +180,24 @@ final class QuantXUITests: XCTestCase {
   }
 
   @MainActor
-  func testLoginExplainsSingleAccountBindingWithoutPersistingSecrets() throws {
+  func testLoginUsesServerSelectedSingleAccountWithoutAccountInput() throws {
     let app = XCUIApplication()
     app.launchArguments.append("-QuantXLoginUITesting")
+    app.launchEnvironment["QUANTX_IOS_DEVELOPMENT_USERNAME"] = "quantx-ui-test"
+    app.launchEnvironment["QUANTX_IOS_DEVELOPMENT_PASSWORD"] = "local-ui-test-password"
     app.launch()
 
     XCTAssertTrue(app.staticTexts["登录 QuantX"].waitForExistence(timeout: 5))
-    XCTAssertTrue(app.textFields["用户名"].exists)
+    XCTAssertEqual(app.textFields["用户名"].value as? String, "quantx-ui-test")
     XCTAssertTrue(app.secureTextFields["密码"].exists)
-    XCTAssertTrue(app.textFields["login-requested-account-id"].exists)
-    XCTAssertTrue(
-      app.staticTexts[
-        "每个移动会话只绑定一个主账户；留空时仅在服务端确认唯一账户后自动选择。"
-      ].exists
-    )
-    let keychainNotice = app.staticTexts.matching(
-      NSPredicate(format: "label CONTAINS %@", "Keychain")
+    XCTAssertFalse(app.textFields["login-requested-account-id"].exists)
+    XCTAssertTrue(app.staticTexts["服务端会按当前用户授权自动绑定唯一主账户。"].exists)
+    XCTAssertTrue(app.buttons["登录并加载数据"].isEnabled)
+    let developmentPrefillNotice = app.staticTexts.matching(
+      NSPredicate(format: "label CONTAINS %@", "本机 Xcode 配置预填")
     ).firstMatch
-    scrollToElement(keychainNotice, in: app)
-    XCTAssertTrue(keychainNotice.exists)
+    scrollToElement(developmentPrefillNotice, in: app)
+    XCTAssertTrue(developmentPrefillNotice.exists)
     XCTAssertFalse(app.tabBars.firstMatch.exists)
   }
 

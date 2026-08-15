@@ -2,9 +2,15 @@ import SwiftUI
 
 struct LoginView: View {
   @EnvironmentObject private var model: AppModel
-  @State private var username = ""
-  @State private var password = ""
-  @State private var requestedAccountID = ""
+  @State private var username: String
+  @State private var password: String
+  private let developmentPrefillConfigured: Bool
+
+  init(prefill: DevelopmentLoginPrefill = .load()) {
+    _username = State(initialValue: prefill.username)
+    _password = State(initialValue: prefill.password)
+    developmentPrefillConfigured = prefill.isConfigured
+  }
 
   var body: some View {
     NavigationStack {
@@ -33,18 +39,11 @@ struct LoginView: View {
 
             SecureField("密码", text: $password)
               .textContentType(.password)
-              .submitLabel(.next)
-              .textFieldStyle(.roundedBorder)
-
-            TextField("主账户 ID（单账户可留空）", text: $requestedAccountID)
-              .textInputAutocapitalization(.characters)
-              .autocorrectionDisabled()
               .submitLabel(.go)
               .textFieldStyle(.roundedBorder)
-              .accessibilityIdentifier("login-requested-account-id")
               .onSubmit(login)
 
-            Text("每个移动会话只绑定一个主账户；留空时仅在服务端确认唯一账户后自动选择。")
+            Text("服务端会按当前用户授权自动绑定唯一主账户。")
               .font(.caption)
               .foregroundStyle(QuantXTheme.secondaryText)
               .frame(maxWidth: .infinity, alignment: .leading)
@@ -102,6 +101,9 @@ struct LoginView: View {
   }
 
   private var sessionNotice: String {
+    if developmentPrefillConfigured {
+      return "开发凭据由本机 Xcode 配置预填，不会进入仓库；登录后密码立即从页面清空。"
+    }
     if usesInsecureDevelopmentTransport {
       return "当前使用开发环境 HTTP 明文传输；密码不落盘，会话令牌仍仅存本机 Keychain。"
     }
@@ -117,13 +119,10 @@ struct LoginView: View {
     let submittedPassword = password
     password = ""
     Task {
-      let accountID = requestedAccountID.trimmingCharacters(
-        in: .whitespacesAndNewlines
-      )
       await model.login(
         username: submittedUsername,
         password: submittedPassword,
-        requestedAccountID: accountID.isEmpty ? nil : accountID
+        requestedAccountID: nil
       )
     }
   }
