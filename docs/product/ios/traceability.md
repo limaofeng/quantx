@@ -135,7 +135,7 @@
 | `IOS-REL-001` | 会话/Token/行情/推送已实现快照优先及部分重建；VPN/蜂窝切换、进程重启、乱序故障注入和五日观察未执行。 | GraphQL HTTP/WS、Feature Stores；各读权限 | `T-RECOVERY` / 局部 `E-AUTO`；缺 `E-TF5` | `PARTIAL` |
 | `IOS-REL-002` | 尚无覆盖客户端、API、Engine、Agent、QMT 的端到端性能时间线和签署报告。 | telemetry/关联 ID；脱敏诊断 | `T-RECOVERY,T-RELEASE` / 无完整证据 | `PENDING` |
 | `IOS-REL-003` | Keychain、隐私遮罩、内存挑战和最小通知内容已实现；完整日志/崩溃/后台截图/诊断包扫描未完成。 | Keychain、OSLog、privacy shield；本地/会话 | `T-SECURITY,T-A11Y` / 局部 `E-AUTO,E-SEC` | `PARTIAL` |
-| `IOS-RLS-001` | 公共 SDL/权限和 iOS 生成物已多轮更新，针对性构建通过；本轮 Web 公共 endpoint codegen 尚无成功证据，完整 pytest/Ruff 也未全绿。 | SDL、permission JSON、Apollo/Web；构建权限 | `T-RELEASE` / 局部 `E-AUTO`；见 RC 报告阻断 | `BLOCKED` |
+| `IOS-RLS-001` | 公共 SDL/权限、iOS 生成物和远端 Caddy Web codegen 已验证且无生成 diff；完整 pytest/Ruff 仍未全绿。 | SDL、permission JSON、Apollo/Web；构建权限 | `T-RELEASE` / 双端 codegen `E-AUTO`；其余见 RC 报告阻断 | `BLOCKED` |
 | `IOS-RLS-002` | 尚未生成可签署的 TestFlight 候选，也未开始连续五个 A 股交易日观察。 | Release candidate + production-like services；设备 scope | `T-RELEASE,T-RECOVERY` / 缺 `E-TF5` | `PENDING` |
 | `IOS-RLS-003` | 全功能 paper、做 T/打板各 20 闭环均未提供；受控 100 股实盘因前置门禁未满足而禁止执行。 | 全交易链路与安全门禁；显式实盘权限 | `T-RELEASE,T-SECURITY` / 缺 `E-PAPER,E-LIVE` | `BLOCKED` |
 
@@ -144,7 +144,7 @@
 | 门禁 | RC1 状态 | 结论 |
 | --- | --- | --- |
 | G0 规格冻结 | `PARTIAL` | 文档体系和稳定 ID 已建立，`npm run build:docs` 已通过；仍待最终评审与签署。 |
-| G1 契约就绪 | `PARTIAL` | 核心专用 scope、两阶段交易/清仓、策略、ExitPlan、做 T 和通知契约已落地；Web endpoint codegen 与最终双端同源验证待补。 |
+| G1 契约就绪 | `PARTIAL` | 核心专用 scope、两阶段交易/清仓、策略、ExitPlan、做 T 和通知契约已落地；iOS 静态公开 SDL codegen 与远端 Caddy Web codegen 均通过且无 diff，最终契约评审/签署待补。 |
 | G2 功能与自动化 | `BLOCKED` | 存在明确产品缺口，完整 pytest collection、可运行测试集和全量 Ruff 未全绿，真实设备 UI/无障碍矩阵未完成。 |
 | G3 模拟盘 | `PENDING` | 没有全功能 paper 证据；做 T/打板各 20 个审计闭环未执行。 |
 | G4 TestFlight | `PENDING` | 五个连续 A 股交易日观察未开始。 |

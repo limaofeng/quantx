@@ -217,8 +217,12 @@ python -m pytest tests/ -m "not dangerous and not real_trading and not e2e"
 
 GraphQL 或前端 operation 变化时，按仓库契约通过 Caddy 执行：
 
+当前 macOS/iOS 开发工作区连接远端开发后端 `192.168.5.6:8080`；只有命令运行在
+后端主机本机时才使用 `127.0.0.1:8080`。两者都必须经过 Caddy，不得改用 API
+私有端口 `18081`。
+
 ```powershell
-$env:CODEGEN_GRAPHQL_ENDPOINT="http://127.0.0.1:8080/graphql"
+$env:CODEGEN_GRAPHQL_ENDPOINT="http://192.168.5.6:8080/graphql"
 npm run codegen
 npm run docs:contracts
 npm run check

@@ -302,9 +302,13 @@ apps/docs/public/contracts/graphql-schema.graphql
 
 任何后端 Strawberry 类型、Resolver、Query、Mutation 或 Subscription 变化，必须在同一轮完成：
 
-1. 使用项目 Python 重启后端并固定运行在 8080。
-2. 确认 `http://127.0.0.1:8080/health` 健康。
-3. 前端以 `CODEGEN_GRAPHQL_ENDPOINT=http://127.0.0.1:8080/graphql` 运行 `npm run codegen`。
+1. 后端主机只通过统一 `ops/quantx.ps1` 管理；API 私有端口为 `18081`，Caddy
+   公共端口为 `8080`。macOS/iOS 工作区不在本地另启后端。
+2. 从当前 macOS/iOS 工作区确认远端 Caddy
+   `http://192.168.5.6:8080/health/live` 健康；只有在后端主机本机运行命令时才使用
+   `127.0.0.1:8080`。
+3. 前端以 `CODEGEN_GRAPHQL_ENDPOINT=http://192.168.5.6:8080/graphql` 运行
+   `npm run codegen`；不得绕过 Caddy 使用 API 私有端口 `18081`。
 4. 运行 `npm run docs:contracts`，刷新 SDL、权限和 Client OpenAPI。
 5. 运行 Apollo iOS codegen，生成 Swift 类型。
 6. 运行前端 `npm run check` 和 iOS 单元测试。

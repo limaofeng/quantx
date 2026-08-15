@@ -15,8 +15,9 @@ codegen、集成与自动化验证。
 `0.1.0-rc1` 仍不是可发布版本。ExitPlan 创建/编辑、策略 stop/DRAINING、资产
 区间曲线与策略贡献、打板完整移动闭环、端到端可观测性尚未完成；真实 APNs、
 全功能 paper、做 T/打板各 20 个闭环、真实设备无障碍矩阵、五日 TestFlight 和
-受控实盘均没有证据。完整 pytest/Ruff 与 Web 公共 endpoint codegen 也尚未形成
-全绿发布记录。权威状态见[追踪矩阵](traceability.md)和
+受控实盘均没有证据。Web 已从远端 Caddy 公共端点完成权威 codegen 且生成物无
+差异，但完整 pytest/Ruff 仍未形成全绿发布记录。权威状态见
+[追踪矩阵](traceability.md)和
 [RC1 发布报告](releases/0.1.0-rc1.md)。
 
 ## 2. 里程碑与依赖
@@ -38,7 +39,7 @@ APNs 可以在 M3/M4 后半并行开发，但 M5 必须基于已经稳定的事�
 
 | 里程碑 | 状态 | 当前结论 |
 | --- | --- | --- |
-| M0 规格与契约基线 | `IMPLEMENTED_AUTO` | 文档、公共 SDL/权限和核心挑战契约已建立；最终评审与双端同源验证待补。 |
+| M0 规格与契约基线 | `IMPLEMENTED_AUTO` | 文档、公共 SDL/权限和核心挑战契约已建立；远端 Caddy Web codegen 与 iOS codegen 均通过，最终评审待补。 |
 | M1 壳层、会话与权限 | `IMPLEMENTED_AUTO` | 五 Tab、设计基础、唯一主账户和专用 scope 有针对性测试；完整真机矩阵待补。 |
 | M2 今日、行情与资产 | `PARTIAL` | 今日/行情/持仓读取面可用；服务端 action inbox、资产曲线、bucket 与复盘不完整。 |
 | M3 手动交易与卖出 | `PARTIAL` | 手工订单、撤单和清仓主要代码完成；ExitPlan 创建/编辑及 paper/实盘闭环缺失。 |
@@ -213,8 +214,9 @@ APNs 可以在 M3/M4 后半并行开发，但 M5 必须基于已经稳定的事�
    target 和 Debug/Release 无签名构建；真实设备、签名与 Archive 仍属于后续门禁。
 2. 完成 ExitPlan 创建/编辑、策略 stop/DRAINING、资产曲线/bucket/贡献复盘；若
    决定延期，必须经产品评审修改 v1 PRD，不能只在发布说明中静默降级。
-3. 通过 Caddy 公共 `http://127.0.0.1:8080/graphql` 完成 Web codegen，并清理或
-   明确隔离完整 pytest collection、可运行测试集和 Ruff 阻断，形成可复现日志。
+3. **Web codegen 已完成**：通过远端 Caddy 公共
+   `http://192.168.5.6:8080/graphql` 生成且无 diff；继续清理或明确隔离完整
+   pytest collection、可运行测试集和 Ruff 阻断，形成可复现日志。
 4. 在真实 iPhone 完成 UI/无障碍/隐私/弱网矩阵和真实 APNs 沙箱、生产环境验证。
 5. 全部真实交易开关保持关闭，完成全功能 paper 以及做 T、打板各 20 个审计闭环。
 6. 只有 G0–G3 签署后才开始 G4 五交易日 TestFlight；观察期重置规则按门禁执行。
