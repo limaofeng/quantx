@@ -66,7 +66,7 @@ final class AppModelTradeApprovalTests: XCTestCase {
     )
     await model.restoreSession(requireLocalUnlock: false)
 
-    await XCTAssertThrowsErrorAsync {
+    await xctAssertThrowsErrorAsync {
       _ = try await model.confirmTradeApproval(preview)
     }
     XCTAssertEqual(authentication.tradeAuthorizationCount, 0)
@@ -94,13 +94,14 @@ final class AppModelTradeApprovalTests: XCTestCase {
         accountDataEnabled: true
       ),
       sessionClient: TradeSessionService(user: user),
-      tokenStore: TradeTokenStore(tokens: SessionTokens(
-        accessToken: "access-token",
-        refreshToken: "refresh-token",
-        accessTokenExpiresAt: Date().addingTimeInterval(600),
-        refreshTokenExpiresAt: Date().addingTimeInterval(3_600),
-        deviceSessionID: "device-session-1"
-      )),
+      tokenStore: TradeTokenStore(
+        tokens: SessionTokens(
+          accessToken: "access-token",
+          refreshToken: "refresh-token",
+          accessTokenExpiresAt: Date().addingTimeInterval(600),
+          refreshTokenExpiresAt: Date().addingTimeInterval(3_600),
+          deviceSessionID: "device-session-1"
+        )),
       localAuthentication: authentication,
       tradeApprovalLoaderFactory: { _ in approval }
     )
@@ -215,8 +216,7 @@ private actor TradeSessionService: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String,
-    requestedAccountID _: String?
+    deviceName _: String
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }
@@ -230,7 +230,7 @@ private actor TradeSessionService: SessionServing {
 }
 
 @MainActor
-private func XCTAssertThrowsErrorAsync(
+private func xctAssertThrowsErrorAsync(
   _ expression: () async throws -> Void,
   file: StaticString = #filePath,
   line: UInt = #line

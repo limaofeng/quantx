@@ -148,9 +148,7 @@ class AuthService:
     device_name: Optional[str],
     client_fingerprint: str,
     request_id: str,
-    requested_account_id: Optional[str] = None,
-    requested_scopes: Optional[Iterable[str]] = None,
-    legacy_full_user: bool = False,
+    bind_personal_account: bool = True,
   ) -> SessionGrant:
     require_signing_key(self.settings)
     normalized_username = username.strip().lower()
@@ -206,16 +204,10 @@ class AuthService:
     await login_rate_limiter.clear(subject_fingerprint)
     active_account_id: Optional[str] = None
     granted_permissions: Optional[Tuple[str, ...]] = None
-    if not legacy_full_user:
+    if bind_personal_account:
       try:
-        active_account_id = await self._resolve_native_active_account(
-          user.id,
-          requested_account_id,
-        )
-        granted_permissions = self._resolve_native_permissions(
-          user.permissions,
-          requested_scopes,
-        )
+        active_account_id = await self._resolve_native_active_account(user.id)
+        granted_permissions = self._resolve_native_permissions(user.permissions)
       except AuthError as exc:
         await self._audit(
           "LOGIN",
@@ -742,28 +734,12 @@ class AuthService:
   async def _resolve_native_active_account(
     self,
     user_id: str,
-    requested_account_id: Optional[str],
   ) -> str:
     account_ids = await self._authorized_account_ids(user_id)
-    if requested_account_id is not None:
-      normalized = requested_account_id.strip()
-      if not normalized:
-        raise AuthError(
-          "INVALID_ACTIVE_ACCOUNT",
-          "requestedAccountId 不能为空",
-          status_code=400,
-        )
-      if normalized not in account_ids:
-        raise AuthError(
-          "ACCOUNT_NOT_AUTHORIZED",
-          "当前用户无权使用该资金账户",
-          status_code=403,
-        )
-      return normalized
     if len(account_ids) != 1:
       raise AuthError(
-        "ACTIVE_ACCOUNT_REQUIRED",
-        "原生设备会话必须明确且唯一地选择主账户",
+        "SINGLE_ACCOUNT_REQUIRED",
+        "个人原生会话必须且只能授权一个资金账户",
         status_code=400,
       )
     return account_ids[0]
@@ -771,36 +747,11 @@ class AuthService:
   @staticmethod
   def _resolve_native_permissions(
     user_permissions: Optional[Iterable[str]],
-    requested_scopes: Optional[Iterable[str]],
   ) -> Tuple[str, ...]:
-    if requested_scopes is None:
-      raise AuthError(
-        "SESSION_SCOPES_REQUIRED",
-        "原生设备会话必须显式请求 requestedScopes",
-        status_code=400,
-      )
-    # An explicit empty list is a valid authentication-only session. It is
-    # distinct from an omitted field and grants no product capability.
-    requested: set[str] = set()
-    for raw_scope in requested_scopes:
-      if not isinstance(raw_scope, str) or not raw_scope.strip():
-        raise AuthError(
-          "INVALID_SESSION_SCOPE",
-          "requestedScopes 包含无效权限",
-          status_code=400,
-        )
-      requested.add(raw_scope.strip())
-    invalid = requested - NATIVE_SESSION_SCOPES
-    if invalid:
-      raise AuthError(
-        "INVALID_SESSION_SCOPE",
-        "requestedScopes 包含原生会话不允许的权限",
-        status_code=400,
-      )
     current_user_permissions = {
       str(value).strip() for value in (user_permissions or []) if str(value).strip()
     }
-    return tuple(sorted(requested & current_user_permissions))
+    return tuple(sorted(NATIVE_SESSION_SCOPES & current_user_permissions))
 
   async def _authorized_account_ids(self, user_id: str) -> Tuple[str, ...]:
     result = await self.db.execute(

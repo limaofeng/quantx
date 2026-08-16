@@ -504,8 +504,7 @@ final class AppModel: ObservableObject {
 
   func login(
     username: String,
-    password: String,
-    requestedAccountID: String? = nil
+    password: String
   ) async {
     guard let sessionClient, let configuration else { return }
     authenticationState = .authenticating
@@ -513,8 +512,7 @@ final class AppModel: ObservableObject {
       let session = try await sessionClient.login(
         username: username,
         password: password,
-        deviceName: UIDevice.current.model,
-        requestedAccountID: requestedAccountID
+        deviceName: UIDevice.current.model
       )
       try await activate(session, configuration: configuration)
       await refreshAllReadOnlySnapshots()
@@ -1582,7 +1580,7 @@ final class AppModel: ObservableObject {
       session.user,
       previousAuthorization: previousAuthorization
     )
-    let grantedScopes = Set(session.user.grantedScopes)
+    let grantedScopes = Set(session.user.permissions)
     let newApolloSession = try apolloSessionFactory(
       configuration,
       session.tokens.accessToken
@@ -1782,15 +1780,15 @@ final class AppModel: ObservableObject {
       !activeAccountID.isEmpty,
       activeAccountID == activeAccountID.trimmingCharacters(in: .whitespacesAndNewlines),
       user.authorizedAccountIDs == [activeAccountID],
-      Set(user.grantedScopes).count == user.grantedScopes.count,
-      user.grantedScopes.allSatisfy({ NativeSessionScope.v1AllowedValues.contains($0) })
+      Set(user.permissions).count == user.permissions.count,
+      user.permissions.allSatisfy({ NativeSessionScope.v1AllowedValues.contains($0) })
     else {
       throw SessionClient.ClientError.invalidResponse
     }
     if let previousAuthorization {
       guard
         previousAuthorization.activeAccountID == activeAccountID,
-        Set(user.grantedScopes).isSubset(of: Set(previousAuthorization.grantedScopes))
+        Set(user.permissions).isSubset(of: Set(previousAuthorization.permissions))
       else {
         throw SessionClient.ClientError.invalidResponse
       }
@@ -2150,10 +2148,8 @@ final class AppModel: ObservableObject {
           id: "watchlist-ui-user",
           username: "watchlist-ui-user",
           displayName: "自选只读测试用户",
-          permissions: ["portfolio:read", "market:read", "watchlist:write"],
-          authorizedAccountIDs: [accountID],
-          activeAccountID: accountID,
-          grantedScopes: ["portfolio:read", "market:read"]
+          permissions: ["portfolio:read", "market:read"],
+          authorizedAccountIDs: [accountID]
         )
       )
       serviceState = .failed("UI 测试未连接服务")
@@ -2234,7 +2230,7 @@ final class AppModel: ObservableObject {
   #endif
 
   private func hasPermission(_ permission: String) -> Bool {
-    authenticatedUser?.grantedScopes.contains(permission) == true
+    authenticatedUser?.permissions.contains(permission) == true
   }
 
   private func activeAccountIDs(for user: SessionUser) -> Set<String> {

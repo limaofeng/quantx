@@ -8,7 +8,7 @@ QuantX iOS v1 只使用普通 APNs。推送是提醒和刷新触发器，不是�
 
 四个根字段均使用 `notification:manage`。原生请求不传资金账号；服务端在敏感写入
 事务内重新锁定并校验当前认证会话，然后强制绑定该会话的唯一
-`activeAccountId`。事件路由还必须匹配同一用户、同一 `deviceSessionId` 和同一主
+授权账户。事件路由还必须匹配同一用户、同一 `deviceSessionId` 和同一主
 账户，另一台设备即使属于同一用户也不能解析该事件 ID。
 
 ## 注册与 Token 轮换

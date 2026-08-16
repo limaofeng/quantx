@@ -72,9 +72,9 @@ APNs 可以在 M3/M4 后半并行开发，但 M5 必须基于已经稳定的事�
 
 ### 服务端
 
-- 原生会话增加 `requestedAccountId/requestedScopes` 与
-  `activeAccountId/grantedScopes`，刷新保持同一范围。
-- GraphQL iOS 写字段映射到专用 scope；保留旧 Web 权限的兼容迁移期。
+- 原生登录只接受用户名、密码和设备名；服务端绑定唯一授权账户，并在
+  `user.permissions` 返回 iOS 能力白名单交集，刷新只允许缩权。
+- GraphQL iOS 写字段映射到专用 scope；Web 与 iOS 各自使用唯一明确的权限契约。
 - 提供客户端 capability 投影，后端未部署时高风险功能自然不可用。
 
 ### iOS
@@ -232,12 +232,12 @@ APNs 可以在 M3/M4 后半并行开发，但 M5 必须基于已经稳定的事�
 - 同一 Schema 变更轮次完成 Web/iOS 双端生成和验证，不长期提交无法消费的半套契约。
 - 内部功能开关只反映服务端 capability，不创建能绕过权限或风险门禁的本地开关。
 
-### 11.2 兼容迁移
+### 11.2 契约迁移
 
-- 新会话字段保持可选请求、向后兼容响应；iOS v1 交易版本强制要求返回 scope 和
-  `activeAccountId`，否则只读降级并说明原因。
-- 专用权限先与旧权限并行供 Web 迁移，iOS 从第一天只使用专用权限；完成迁移后
-  再评估弃用宽泛 Mutation 权限。
+- 会话契约在服务端、公共 OpenAPI、iOS、文档和测试中原子切换；退休字段直接
+  拒绝，不增加双协议、可选兼容字段或只读兜底。
+- iOS 从第一天只使用专用权限；Web 使用其独立权限契约，不把宽泛 Mutation
+  权限映射为 iOS 能力。
 - 新两阶段接口不改变已有 pending/outbox/Engine/QMT 状态流，不做第二套移动交易
   订单表或客户端专用成交状态机。
 - 数据库迁移仅追加、可回滚代码读取，保留现有订单、成交、策略、ExitPlan、bucket

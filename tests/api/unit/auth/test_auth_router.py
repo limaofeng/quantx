@@ -81,7 +81,6 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
           "username": "ios-router-user",
           "password": "router-test-password",
           "deviceName": "Test iPhone",
-          "requestedScopes": ["portfolio:read", "orders:read"],
         },
       )
       assert login.status_code == 200
@@ -89,8 +88,8 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert login.headers["pragma"] == "no-cache"
       login_payload = login.json()
       assert login_payload["tokenType"] == "Bearer"
-      assert login_payload["activeAccountId"] == "TEST-ACCOUNT-1"
-      assert login_payload["grantedScopes"] == ["portfolio:read"]
+      assert "activeAccountId" not in login_payload
+      assert "grantedScopes" not in login_payload
       assert login_payload["user"]["permissions"] == ["portfolio:read"]
       assert login_payload["user"]["authorizedAccountIds"] == ["TEST-ACCOUNT-1"]
 
@@ -101,8 +100,8 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert current.status_code == 200
       assert current.headers["cache-control"] == "no-store"
       assert current.json()["deviceSessionId"] == login_payload["deviceSessionId"]
-      assert current.json()["activeAccountId"] == "TEST-ACCOUNT-1"
-      assert current.json()["grantedScopes"] == ["portfolio:read"]
+      assert "activeAccountId" not in current.json()
+      assert "grantedScopes" not in current.json()
 
       refresh = await client.post(
         "/auth/session/refresh",
@@ -112,8 +111,8 @@ async def test_session_rest_contract_and_refresh_replay_rejection(monkeypatch):
       assert refresh.headers["cache-control"] == "no-store"
       refresh_payload = refresh.json()
       assert refresh_payload["refreshToken"] != login_payload["refreshToken"]
-      assert refresh_payload["activeAccountId"] == "TEST-ACCOUNT-1"
-      assert refresh_payload["grantedScopes"] == ["portfolio:read"]
+      assert "activeAccountId" not in refresh_payload
+      assert "grantedScopes" not in refresh_payload
 
       replay = await client.post(
         "/auth/session/refresh",
@@ -186,8 +185,6 @@ async def test_web_session_uses_httponly_cookie_and_never_returns_refresh_token(
           "username": "ios-router-user",
           "password": "router-test-password",
           "deviceName": "Browser Test",
-          "requestedAccountId": "IGNORED-CROSS-ACCOUNT",
-          "requestedScopes": ["mutation:write"],
         },
       )
       assert login.status_code == 200
@@ -233,6 +230,49 @@ async def test_web_session_uses_httponly_cookie_and_never_returns_refresh_token(
       )
       assert lan_login.status_code == 200
       assert lan_login.json()["user"]["username"] == "ios-router-user"
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_rejects_retired_account_and_scope_fields(monkeypatch):
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection, tables=AUTH_TABLES
+      )
+    )
+  session_factory = async_sessionmaker(engine, expire_on_commit=False)
+  settings = _settings()
+
+  async with session_factory() as db:
+    await AuthService.bootstrap_from_settings(db, settings)
+    monkeypatch.setattr(auth_service_module, "settings", settings)
+
+    app = FastAPI()
+    app.include_router(auth_router)
+
+    async def override_database():
+      yield db
+
+    app.dependency_overrides[_database] = override_database
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="https://test") as client:
+      response = await client.post(
+        "/auth/session",
+        json={
+          "username": "ios-router-user",
+          "password": "router-test-password",
+          "deviceName": "Test iPhone",
+          "requestedAccountId": "TEST-ACCOUNT-1",
+          "requestedScopes": ["portfolio:read"],
+        },
+      )
+
+      assert response.status_code == 422
+      rejected_fields = {error["loc"][-1] for error in response.json()["detail"]}
+      assert rejected_fields == {"requestedAccountId", "requestedScopes"}
 
   await engine.dispose()
 

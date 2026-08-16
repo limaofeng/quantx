@@ -4,12 +4,11 @@ import XCTest
 
 @MainActor
 final class AppModelWatchlistTests: XCTestCase {
-  func testBroadPermissionWithoutGrantedWriteScopeKeepsWatchlistReadOnly() async {
+  func testMissingWritePermissionKeepsWatchlistReadOnly() async {
     let initial = makeSnapshot(["600519.SH"])
     let loader = WatchlistLoaderSpy(loadSnapshots: [initial])
     let model = makeModel(
       grantedScopes: ["portfolio:read", "market:read"],
-      permissions: ["portfolio:read", "market:read", "watchlist:write", "mutation:write"],
       loader: loader
     )
     await model.restoreSession(requireLocalUnlock: false)
@@ -21,7 +20,7 @@ final class AppModelWatchlistTests: XCTestCase {
     )
     do {
       try await model.addToWatchlist(makeInstrument("000001.SZ"))
-      XCTFail("缺少已授予的 watchlist:write scope 时不应写入")
+      XCTFail("缺少 watchlist:write 权限时不应写入")
     } catch let error as WatchlistMutationError {
       XCTAssertEqual(
         error,
@@ -138,17 +137,14 @@ final class AppModelWatchlistTests: XCTestCase {
 
   private func makeModel(
     grantedScopes: [String] = ["portfolio:read", "market:read", "watchlist:write"],
-    permissions: [String]? = nil,
     loader: WatchlistLoaderSpy
   ) -> AppModel {
     let user = SessionUser(
       id: "watchlist-user",
       username: "watchlist-user",
       displayName: "自选用户",
-      permissions: permissions ?? grantedScopes,
-      authorizedAccountIDs: ["ACCOUNT-1"],
-      activeAccountID: "ACCOUNT-1",
-      grantedScopes: grantedScopes
+      permissions: grantedScopes,
+      authorizedAccountIDs: ["ACCOUNT-1"]
     )
     return AppModel(
       configuration: APIConfiguration(
@@ -406,8 +402,7 @@ private actor WatchlistSessionService: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String,
-    requestedAccountID _: String?
+    deviceName _: String
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }

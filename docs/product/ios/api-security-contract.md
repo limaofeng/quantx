@@ -45,36 +45,37 @@ Release 和 TestFlight 仅允许同源 `HTTPS/WSS`，公共路径固定为 `/aut
 {
   "username": "…",
   "password": "…",
-  "deviceName": "Personal iPhone",
-  "requestedAccountId": "main-account-id",
-  "requestedScopes": ["portfolio:read", "market:read", "orders:read"]
+  "deviceName": "Personal iPhone"
 }
 ```
 
-目标响应除现有 Token、用户和 `deviceSessionId` 外，增加：
+响应中的用户对象同时给出唯一授权账户和本次设备会话权限：
 
 ```json
 {
-  "activeAccountId": "main-account-id",
-  "grantedScopes": ["portfolio:read", "market:read", "orders:read"]
+  "user": {
+    "permissions": ["portfolio:read", "market:read", "orders:read"],
+    "authorizedAccountIds": ["main-account-id"]
+  }
 }
 ```
 
 规则：
 
-1. iOS 必须请求明确 scope；服务端只签发“用户权限 ∩ 设备允许权限 ∩ 请求范围”。
-   已知但用户未授权的 scope 会从 grant 中省略；未知或禁止签发给 iOS 的
-   宽泛权限使登录失败。
-2. v1 只允许绑定一个 `activeAccountId`。用户没有或拥有多个可选账户而未能唯一
-   解析时，登录失败，不默认选择第一个。
-3. Refresh Token 轮换保持同一设备会话、主账户和 scope，不得借刷新扩权。
-4. Access Token 至少绑定 `sub`、`sid`、主账户、scope、签发和过期时间。
-5. 单设备或全部设备吊销立即让后续 HTTP/WS 和确认挑战失败。
-6. 密码只用于会话创建，不写 Keychain；Access/Refresh Token 只写 Keychain。
+1. 登录请求只接受用户名、密码和可选设备名；账户与权限由服务端决定，退休字段
+   直接拒绝，不做忽略或兼容解析。
+2. 服务端只签发“用户权限 ∩ iOS v1 能力白名单”，结果直接放在
+   `user.permissions`；宽泛权限不得进入原生会话。
+3. 服务端要求用户恰好授权一个资金账户，并把会话绑定到该账户；没有账户或账户
+   数量大于一时登录失败，不默认选择第一个。
+4. Refresh Token 轮换保持同一设备会话、账户和权限上限，不得借刷新扩权。
+5. Access Token 至少绑定 `sub`、`sid`、账户、权限、签发和过期时间。
+6. 单设备或全部设备吊销立即让后续 HTTP/WS 和确认挑战失败。
+7. 密码只用于会话创建，不写 Keychain；Access/Refresh Token 只写 Keychain。
 
-原生登录、刷新和 `GET /auth/session` 都返回同一
-`activeAccountId/grantedScopes`。兼容 Web 会话仍使用完整用户权限，不得作为
-iOS 原生会话或交易权限的回退路径。
+原生登录、刷新和 `GET /auth/session` 都使用同一 `user.permissions` 与
+`user.authorizedAccountIds` 契约。Web 会话有独立的浏览器安全边界，不得作为
+iOS 原生会话或交易权限的替代路径。
 
 ### 2.2 Token 与 WebSocket
 
@@ -105,11 +106,11 @@ GraphQL 根字段默认拒绝。目标 iOS scope 如下：
 | `limit-up:control` | 打板配置、布防和取消布防 | 做 T 控制 |
 | `notification:manage` | APNs 设备与通知偏好 | 读取或修改交易事实 |
 
-迁移规则：
+权限规则：
 
 - 当前 `trade:approve` 的短时买入批准继续复用并收紧到设备 scope。
-- 兼容 `placeOrder` 使用隔离的 `trade:direct`，不得签发给 iOS 产品会话。
-- `mutation:write` 是 Web/兼容管理权限，**不满足任何 iOS 写操作**。每个 iOS
+- `placeOrder` 使用隔离的 `trade:direct`，不得签发给 iOS 产品会话。
+- `mutation:write` 是 Web 管理权限，**不满足任何 iOS 写操作**。每个 iOS
   Mutation 必须映射到上表的专用 scope。
 - `system-config:write`、`admin:*`、Agent 登记和部署权限永不签发给 iOS 产品会话。
 - 字段既校验 scope，也校验主账户、资源归属、当前状态和风险门禁。

@@ -52,9 +52,10 @@ iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制�
 | `limit-up:control` | 打板配置、候选偏好与布防 |
 | `notification:manage` | 当前设备 APNs Token 与通知偏好 |
 
-通用 `mutation:write` **不满足上述任何 iOS 写能力**。原生会话请求明确的
-`requestedScopes` 和唯一 `requestedAccountId`，响应返回实际
-`grantedScopes/activeAccountId`；刷新不得扩权。
+通用 `mutation:write` **不满足上述任何 iOS 写能力**。原生登录不接受账户或
+scope 选择；服务端绑定用户唯一授权账户，并在 `user.permissions` 返回“用户
+权限 ∩ iOS 能力白名单”。`user.authorizedAccountIds` 必须恰好包含该账户，刷新
+不得扩权。
 
 ::: warning 专用 Mutation 迁移限制
 设备 scope 已落地，但不代表所有目标 Mutation 都已实现专用权限和交易门禁。
@@ -83,7 +84,7 @@ iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制�
 
 ## 客户端实现规则
 
-- 登录后按 `grantedScopes` 和服务端 capability 生成可用功能；缺权限时展示明确
+- 登录后按 `user.permissions` 和服务端 capability 生成可用功能；缺权限时展示明确
   只读/不可用状态，不显示必然失败的危险按钮。
 - 每次 Mutation 仍处理 `FORBIDDEN`、账户不匹配、挑战过期和状态竞态，不能因为
   登录时有权限就假定请求会成功。

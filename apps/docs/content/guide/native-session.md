@@ -14,9 +14,7 @@ Content-Type: application/json
 {
   "username": "developer",
   "password": "password",
-  "deviceName": "Limao iPhone",
-  "requestedAccountId": "account-id",
-  "requestedScopes": ["portfolio:read", "market:read", "orders:read"]
+  "deviceName": "Limao iPhone"
 }
 ```
 
@@ -30,13 +28,11 @@ Content-Type: application/json
   "refreshTokenExpiresAt": "2026-08-06T11:55:00Z",
   "tokenType": "Bearer",
   "deviceSessionId": "session-id",
-  "activeAccountId": "account-id",
-  "grantedScopes": ["portfolio:read", "market:read", "orders:read"],
   "user": {
     "id": "user-id",
     "username": "developer",
     "displayName": "Developer",
-    "permissions": ["portfolio:read"],
+    "permissions": ["portfolio:read", "market:read", "orders:read"],
     "authorizedAccountIds": ["account-id"]
   }
 }
@@ -44,18 +40,19 @@ Content-Type: application/json
 
 响应包含 `Cache-Control: no-store`。Token、密码和完整响应不得进入应用日志。
 
-## 设备 scope 与单一主账户
+## 会话权限与个人单账户
 
-`requestedScopes` 是原生登录的必填字段。服务端返回“用户当前权限 ∩
-iOS 允许权限 ∩ 请求范围”作为 `grantedScopes`：已知但用户未授权的
-scope 会被安全省略，未知 scope 以及 `mutation:write`、`trade:direct`、
-`system-config:write`、`admin:*` 等宽泛权限会使登录失败。
-显式的空数组 `[]` 允许建立仅身份验证、零产品能力的会话；它不等于省略字段。
+登录请求只接受用户名、密码和可选设备名。账户与权限不是客户端可选项；提交
+已废弃的账户或 scope 字段会直接返回 `422`。
 
-`requestedAccountId` 必须属于当前用户。它仅在用户恰好授权一个账户时可
-省略；零账户或多账户不会默认选择第一个。会话、Access Token 和后续响应
-都绑定这一 `activeAccountId`。Refresh Token 轮换保持同一账户与 scope，
-用户权限被收回时只会继续收缩，新增用户权限不会扩大既有设备会话。
+服务端要求当前用户恰好授权一个资金账户，并把设备会话和 Access Token 绑定到
+该账户；零账户或多账户都会使登录失败。响应只通过
+`user.authorizedAccountIds` 返回这一唯一账户，不重复返回“当前账户”字段。
+
+`user.permissions` 是该设备会话唯一的能力真源，取“用户当前权限 ∩ iOS v1
+能力白名单”。`mutation:write`、`trade:direct`、`system-config:write`、
+`admin:*` 等宽泛权限不会进入原生会话。Refresh Token 轮换保持同一账户和权限
+上限：用户权限被收回时会收缩，新增用户权限不会扩大既有设备会话。
 
 v1 不提供账户切换。授权账户无法唯一解析、响应对象属于其他账户或刷新后的主
 账户发生变化时，清除业务状态并要求重新建立会话。
@@ -92,8 +89,8 @@ Authorization: Bearer <access-token>
 ```
 
 用于验证 Access Token、读取用户权限和授权账户，不返回 Refresh Token。
-响应同样包含 `activeAccountId/grantedScopes`，客户端恢复会话时必须重新
-校验这两个字段。
+客户端恢复会话时必须重新校验 `user.authorizedAccountIds` 恰好包含一个账户，
+且 `user.permissions` 只包含原生能力白名单内的权限。
 
 ## 登出与吊销
 

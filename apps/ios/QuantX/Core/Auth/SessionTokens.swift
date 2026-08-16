@@ -15,7 +15,7 @@ enum NativeSessionScope: String, CaseIterable, Sendable {
   case limitUpControl = "limit-up:control"
   case notificationManage = "notification:manage"
 
-  static let v1Requested: [Self] = [
+  static let v1Capabilities: [Self] = [
     .portfolioRead,
     .marketRead,
     .ordersRead,
@@ -31,8 +31,8 @@ enum NativeSessionScope: String, CaseIterable, Sendable {
     .notificationManage,
   ]
 
-  static let v1RequestedValues = v1Requested.map(\.rawValue)
-  static let v1AllowedValues = Set(v1RequestedValues)
+  static let v1CapabilityValues = v1Capabilities.map(\.rawValue)
+  static let v1AllowedValues = Set(v1CapabilityValues)
 }
 
 struct SessionTokens: Codable, Equatable, Sendable {

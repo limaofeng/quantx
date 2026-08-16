@@ -58,7 +58,7 @@
 | --- | --- | --- | --- | --- |
 | `IOS-PLT-001` | 已从监控壳层转向个人量化五入口，并实现主要查看、手工交易、清仓和部分量化控制；复盘、部分助手控制及发布闭环仍缺。 | 本表全部接口；按能力拆分 | `T-RELEASE` / `E-AUTO`；缺 `E-PAPER,E-TF5,E-LIVE` | `PARTIAL` |
 | `IOS-PLT-002` | SwiftUI/iOS 17+、Apollo 和环境配置已落地；个人 VPN、真实设备和 TestFlight 分发未验证。 | `/health`、HTTPS/WSS 环境配置；会话外 | `T-SESSION,T-RELEASE` / 部分 `E-AUTO`；缺 `E-TF5` | `PARTIAL` |
-| `IOS-PLT-003` | 原生会话绑定唯一 `activeAccountId`，客户端对账户集合歧义和跨账户响应 fail-closed。 | `/auth/session`；会话 scope | `T-SESSION,T-AUTHZ` / `E-AUTO` | `IMPLEMENTED_AUTO` |
+| `IOS-PLT-003` | 原生会话绑定唯一授权账户，客户端要求 `authorizedAccountIds` 恰好只有一个，并对账户集合歧义和跨账户响应 fail-closed。 | `/auth/session`；会话权限 | `T-SESSION,T-AUTHZ` / `E-AUTO` | `IMPLEMENTED_AUTO` |
 | `IOS-PLT-004` | 订单、清仓、策略与助手写入继续复用服务端交易域、outbox/inbox 和 QMT 回报真源；尚无全功能 paper/实盘链路证据。 | Engine/QMT 投影；按操作 scope | `T-ORDER,T-LIQ,T-SECURITY` / `E-AUTO`；缺 `E-PAPER,E-LIVE` | `PARTIAL` |
 | `IOS-NAV-001` | 固定“今日/行情/交易/量化/资产”五 Tab 已实现，图标改为单色语义。 | `AppTab`；本地 + 读权限 | `T-NAV,T-A11Y` / `E-AUTO`；真实设备矩阵待补 | `IMPLEMENTED_AUTO` |
 | `IOS-NAV-002` | 设置、会话、通知偏好和版本从资产页账户入口进入。 | App Route、`GET/DELETE /auth/session`；会话 | `T-NAV,T-SESSION` / `E-AUTO` | `IMPLEMENTED_AUTO` |
@@ -123,7 +123,7 @@
 | 需求 ID | 页面/行为与实现 | 接口/权限 | 验证/证据 | RC1 状态 |
 | --- | --- | --- | --- | --- |
 | `IOS-SEC-001` | 原生会话按设备、唯一账户和专用 scope 签发；iOS 不使用 `mutation:write` 解锁写 UI。 | native session、GraphQL permission map；专用 scopes | `T-SESSION,T-AUTHZ` / `E-AUTO,E-SEC` | `IMPLEMENTED_AUTO` |
-| `IOS-SEC-002` | Repository/Store 对唯一账户、资源归属及会话缩权 fail-closed。 | session active account + account resolvers；全部账户 scope | `T-SESSION,T-AUTHZ` / `E-AUTO,E-SEC` | `IMPLEMENTED_AUTO` |
+| `IOS-SEC-002` | Repository/Store 对唯一账户、资源归属及会话缩权 fail-closed。 | session unique account + account resolvers；全部账户权限 | `T-SESSION,T-AUTHZ` / `E-AUTO,E-SEC` | `IMPLEMENTED_AUTO` |
 | `IOS-SEC-003` | 手工订单、清仓、ExitPlan、策略与做 T 控制使用短时 HMAC、精确绑定、一次性消费与操作幂等。 | approval challenge、outbox/idempotency；交易写 scope | `T-ORDER,T-LIQ,T-SECURITY` / `E-AUTO,E-SEC` | `IMPLEMENTED_AUTO` |
 | `IOS-SEC-004` | 已实现的 LIVE 下单、清仓、自动退出授权、策略/助手与做 T 高风险控制均逐次生物确认；真实设备生物矩阵未验收。 | LocalAuthentication + confirm APIs；专用控制 scope | `T-SECURITY,T-ORDER,T-STRATEGY` / `E-AUTO`；`E-UI,E-LIVE` 缺 | `IMPLEMENTED_AUTO` |
 | `IOS-SEC-005` | 架构保持 iOS/服务端与 miniQMT、券商凭证隔离；改动文件有敏感扫描证据，但完整二进制/崩溃链路扫描未签署。 | 依赖边界；无 iOS QMT 权限 | `T-SECURITY,T-RELEASE` / 局部 `E-AUTO,E-SEC` | `PARTIAL` |

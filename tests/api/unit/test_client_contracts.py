@@ -36,9 +36,7 @@ def test_client_contract_snapshots_are_current():
   manual_input = schema_sdl.split("input ManualOrderPreviewInput {", 1)[1].split(
     "}", 1
   )[0]
-  manual_preview = schema_sdl.split("type ManualOrderPreview {", 1)[1].split(
-    "}", 1
-  )[0]
+  manual_preview = schema_sdl.split("type ManualOrderPreview {", 1)[1].split("}", 1)[0]
   assert "accountId: String!" in manual_input
   assert "requestedVolume: Int!" in manual_preview
   assert "finalVolume: Int!" in manual_preview
@@ -89,13 +87,11 @@ def test_client_contract_contains_session_bound_push_fields():
     "unregisterPushDevice",
   ):
     assert permissions["Mutation"][field_name] == "notification:manage"
-  assert (
-    permissions["Query"]["notificationEventRoute"] == "notification:manage"
-  )
+  assert permissions["Query"]["notificationEventRoute"] == "notification:manage"
   assert "deviceToken: String!" in schema_sdl
-  registration = schema_sdl.split("type PushDeviceRegistration {", 1)[1].split(
-    "}", 1
-  )[0]
+  registration = schema_sdl.split("type PushDeviceRegistration {", 1)[1].split("}", 1)[
+    0
+  ]
   assert "deviceToken" not in registration
   assert "notificationEventRoute(eventId: ID!)" in schema_sdl
 
@@ -110,12 +106,10 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
   assert permissions["Mutation"]["previewLiquidation"] == "liquidation:control"
   assert permissions["Mutation"]["confirmLiquidation"] == "liquidation:control"
   assert (
-    permissions["Mutation"]["previewExitPlanAuthorization"]
-    == "liquidation:control"
+    permissions["Mutation"]["previewExitPlanAuthorization"] == "liquidation:control"
   )
   assert (
-    permissions["Mutation"]["confirmExitPlanAuthorization"]
-    == "liquidation:control"
+    permissions["Mutation"]["confirmExitPlanAuthorization"] == "liquidation:control"
   )
   assert permissions["Mutation"]["previewStrategyControl"] == "trade:approve"
   assert permissions["Mutation"]["confirmStrategyControl"] == "trade:approve"
@@ -132,25 +126,22 @@ def test_client_contract_contains_narrow_mobile_control_permissions():
   ):
     assert action in schema_sdl
   assert "previewTTradeControl(input: TTradeControlPreviewInput!)" in schema_sdl
-  assert (
-    "confirmTTradeControl(input: TTradeControlConfirmationInput!)" in schema_sdl
-  )
+  assert "confirmTTradeControl(input: TTradeControlConfirmationInput!)" in schema_sdl
 
 
 def test_client_openapi_contains_only_allowlisted_paths_and_models():
   document = build_client_openapi(app)
   assert set(document["paths"]) == CLIENT_OPENAPI_PATHS
   schemas = document["components"]["schemas"]
-  assert set(schemas["NativeLoginRequest"]["required"]) >= {
+  assert set(schemas["LoginRequest"]["required"]) == {"username", "password"}
+  assert set(schemas["LoginRequest"]["properties"]) == {
     "username",
     "password",
-    "requestedScopes",
+    "deviceName",
   }
   for response_model in ("SessionGrantResponse", "SessionStateResponse"):
-    assert set(schemas[response_model]["required"]) >= {
-      "activeAccountId",
-      "grantedScopes",
-    }
+    assert "activeAccountId" not in schemas[response_model]["properties"]
+    assert "grantedScopes" not in schemas[response_model]["properties"]
   assert (
     document["paths"]["/auth/session"]["post"]["responses"]["200"]["content"][
       "application/json"

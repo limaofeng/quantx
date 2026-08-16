@@ -102,7 +102,7 @@ final class AppModelManualOrderTests: XCTestCase {
     )
     await model.restoreSession(requireLocalUnlock: false)
 
-    await XCTAssertThrowsManualOrderError {
+    await xctAssertThrowsManualOrderError {
       _ = try await model.confirmManualOrder(manualOrder.previewResult)
     }
     XCTAssertEqual(authentication.tradeAuthorizationCount, 0)
@@ -143,7 +143,7 @@ final class AppModelManualOrderTests: XCTestCase {
     )
     await model.restoreSession(requireLocalUnlock: false)
 
-    await XCTAssertThrowsManualOrderError {
+    await xctAssertThrowsManualOrderError {
       _ = try await model.previewManualOrder(
         instrumentCode: "600519.SH",
         direction: .sell,
@@ -181,13 +181,14 @@ final class AppModelManualOrderTests: XCTestCase {
         accountDataEnabled: true
       ),
       sessionClient: ManualOrderSessionService(user: user),
-      tokenStore: ManualOrderTokenStore(tokens: SessionTokens(
-        accessToken: "access-token",
-        refreshToken: "refresh-token",
-        accessTokenExpiresAt: Date().addingTimeInterval(600),
-        refreshTokenExpiresAt: Date().addingTimeInterval(3_600),
-        deviceSessionID: "device-session-1"
-      )),
+      tokenStore: ManualOrderTokenStore(
+        tokens: SessionTokens(
+          accessToken: "access-token",
+          refreshToken: "refresh-token",
+          accessTokenExpiresAt: Date().addingTimeInterval(600),
+          refreshTokenExpiresAt: Date().addingTimeInterval(3_600),
+          deviceSessionID: "device-session-1"
+        )),
       localAuthentication: authentication,
       portfolioLoaderFactory: { _ in
         ManualOrderPortfolioLoader(snapshot: Self.makePortfolio(accountID: portfolioAccountID))
@@ -366,8 +367,7 @@ private actor ManualOrderSessionService: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String,
-    requestedAccountID _: String?
+    deviceName _: String
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }
@@ -381,7 +381,7 @@ private actor ManualOrderSessionService: SessionServing {
 }
 
 @MainActor
-private func XCTAssertThrowsManualOrderError(
+private func xctAssertThrowsManualOrderError(
   _ expression: () async throws -> Void,
   file: StaticString = #filePath,
   line: UInt = #line

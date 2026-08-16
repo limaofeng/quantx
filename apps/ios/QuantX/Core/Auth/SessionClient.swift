@@ -6,8 +6,10 @@ struct SessionUser: Codable, Equatable, Identifiable, Sendable {
   let displayName: String
   let permissions: [String]
   let authorizedAccountIDs: [String]
-  let activeAccountID: String?
-  let grantedScopes: [String]
+
+  var activeAccountID: String? {
+    authorizedAccountIDs.count == 1 ? authorizedAccountIDs[0] : nil
+  }
 
   private enum CodingKeys: String, CodingKey {
     case id
@@ -15,66 +17,6 @@ struct SessionUser: Codable, Equatable, Identifiable, Sendable {
     case displayName
     case permissions
     case authorizedAccountIDs = "authorizedAccountIds"
-  }
-
-  init(
-    id: String,
-    username: String,
-    displayName: String,
-    permissions: [String],
-    authorizedAccountIDs: [String],
-    activeAccountID: String? = nil,
-    grantedScopes: [String]? = nil
-  ) {
-    self.id = id
-    self.username = username
-    self.displayName = displayName
-    self.permissions = permissions
-    self.authorizedAccountIDs = authorizedAccountIDs
-    self.activeAccountID =
-      activeAccountID
-      ?? (authorizedAccountIDs.count == 1 ? authorizedAccountIDs[0] : nil)
-    self.grantedScopes =
-      grantedScopes
-      ?? permissions.filter { NativeSessionScope.v1AllowedValues.contains($0) }
-  }
-
-  init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    self.init(
-      id: try container.decode(String.self, forKey: .id),
-      username: try container.decode(String.self, forKey: .username),
-      displayName: try container.decode(String.self, forKey: .displayName),
-      permissions: try container.decode([String].self, forKey: .permissions),
-      authorizedAccountIDs: try container.decode(
-        [String].self,
-        forKey: .authorizedAccountIDs
-      )
-    )
-  }
-
-  func encode(to encoder: any Encoder) throws {
-    var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(id, forKey: .id)
-    try container.encode(username, forKey: .username)
-    try container.encode(displayName, forKey: .displayName)
-    try container.encode(permissions, forKey: .permissions)
-    try container.encode(authorizedAccountIDs, forKey: .authorizedAccountIDs)
-  }
-
-  fileprivate func bound(
-    to activeAccountID: String,
-    grantedScopes: [String]
-  ) -> Self {
-    Self(
-      id: id,
-      username: username,
-      displayName: displayName,
-      permissions: permissions,
-      authorizedAccountIDs: authorizedAccountIDs,
-      activeAccountID: activeAccountID,
-      grantedScopes: grantedScopes
-    )
   }
 }
 
@@ -87,27 +29,11 @@ protocol SessionServing: Sendable {
   func login(
     username: String,
     password: String,
-    deviceName: String,
-    requestedAccountID: String?
+    deviceName: String
   ) async throws -> AuthenticatedSession
   func refresh(refreshToken: String) async throws -> AuthenticatedSession
   func current(accessToken: String) async throws -> SessionUser
   func logout(accessToken: String, allDevices: Bool) async throws
-}
-
-extension SessionServing {
-  func login(
-    username: String,
-    password: String,
-    deviceName: String
-  ) async throws -> AuthenticatedSession {
-    try await login(
-      username: username,
-      password: password,
-      deviceName: deviceName,
-      requestedAccountID: nil
-    )
-  }
 }
 
 actor SessionClient: SessionServing {
@@ -132,16 +58,6 @@ actor SessionClient: SessionServing {
     let username: String
     let password: String
     let deviceName: String
-    let requestedAccountID: String?
-    let requestedScopes: [String]
-
-    private enum CodingKeys: String, CodingKey {
-      case username
-      case password
-      case deviceName
-      case requestedAccountID = "requestedAccountId"
-      case requestedScopes
-    }
   }
 
   private struct RefreshBody: Encodable {
@@ -154,8 +70,6 @@ actor SessionClient: SessionServing {
     let accessTokenExpiresAt: Date
     let refreshTokenExpiresAt: Date
     let deviceSessionID: String
-    let activeAccountID: String
-    let grantedScopes: [String]
     let user: SessionUser
 
     private enum CodingKeys: String, CodingKey {
@@ -164,8 +78,6 @@ actor SessionClient: SessionServing {
       case accessTokenExpiresAt
       case refreshTokenExpiresAt
       case deviceSessionID = "deviceSessionId"
-      case activeAccountID = "activeAccountId"
-      case grantedScopes
       case user
     }
   }
@@ -173,15 +85,11 @@ actor SessionClient: SessionServing {
   private struct StateResponse: Decodable {
     let deviceSessionID: String
     let accessTokenExpiresAt: Date
-    let activeAccountID: String
-    let grantedScopes: [String]
     let user: SessionUser
 
     private enum CodingKeys: String, CodingKey {
       case deviceSessionID = "deviceSessionId"
       case accessTokenExpiresAt
-      case activeAccountID = "activeAccountId"
-      case grantedScopes
       case user
     }
   }
@@ -238,21 +146,13 @@ actor SessionClient: SessionServing {
   func login(
     username: String,
     password: String,
-    deviceName: String,
-    requestedAccountID: String?
+    deviceName: String
   ) async throws -> AuthenticatedSession {
-    let normalizedAccountID = requestedAccountID?
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard normalizedAccountID.map({ !$0.isEmpty && $0.count <= 50 }) ?? true else {
-      throw ClientError.invalidResponse
-    }
     let body = try encoder.encode(
       LoginBody(
         username: username,
         password: password,
-        deviceName: deviceName,
-        requestedAccountID: normalizedAccountID,
-        requestedScopes: NativeSessionScope.v1RequestedValues
+        deviceName: deviceName
       )
     )
     let response: GrantResponse = try await request(
@@ -303,8 +203,6 @@ actor SessionClient: SessionServing {
     )
     let user = try validatedUser(
       response.user,
-      activeAccountID: response.activeAccountID,
-      grantedScopes: response.grantedScopes,
       previousAuthorization: currentAuthorization
     )
     currentAuthorization = user
@@ -334,8 +232,6 @@ actor SessionClient: SessionServing {
   ) throws -> AuthenticatedSession {
     let user = try validatedUser(
       response.user,
-      activeAccountID: response.activeAccountID,
-      grantedScopes: response.grantedScopes,
       previousAuthorization: previousAuthorization
     )
     return AuthenticatedSession(
@@ -352,13 +248,15 @@ actor SessionClient: SessionServing {
 
   private func validatedUser(
     _ user: SessionUser,
-    activeAccountID: String,
-    grantedScopes: [String],
     previousAuthorization: SessionUser?
   ) throws -> SessionUser {
+    guard let activeAccountID = user.activeAccountID else {
+      throw ClientError.invalidResponse
+    }
     let normalizedAccountID = activeAccountID.trimmingCharacters(
       in: .whitespacesAndNewlines
     )
+    let grantedScopes = user.permissions
     let grantedSet = Set(grantedScopes)
     guard
       !normalizedAccountID.isEmpty,
@@ -377,15 +275,12 @@ actor SessionClient: SessionServing {
     if let previousAuthorization {
       guard
         previousAuthorization.activeAccountID == normalizedAccountID,
-        grantedSet.isSubset(of: Set(previousAuthorization.grantedScopes))
+        grantedSet.isSubset(of: Set(previousAuthorization.permissions))
       else {
         throw ClientError.invalidResponse
       }
     }
-    return user.bound(
-      to: normalizedAccountID,
-      grantedScopes: grantedScopes.sorted()
-    )
+    return user
   }
 
   private func request<Response: Decodable>(

@@ -4,7 +4,7 @@ QuantX 原生 iOS 客户端最低支持 iOS 17，定位为个人 A 股量化移�
 
 移动端不会直接访问 QMT。助手买入确认继续使用独立 `trade:approve` 权限、短时服务端预览及 Face ID/Touch ID；确认只表示意图重新进入统一交易域与风控链路。手动交易只允许接入独立 `trade:manual` 两阶段契约，绝不调用遗留 `placeOrder` 绕过预览。委托投递、券商受理与成交严格区分，最终事实只认 QMT Agent 回报经 Engine 持久化和收敛后的结果。Debug 可连接配置的私网 HTTP/WS 开发服务；Staging 与 Release 仍只允许 HTTPS/WSS。
 
-原生登录固定请求最小化的 v1 scope 集合：`portfolio:read`、`market:read`、`orders:read`、`strategy:read`、`system-status:read`、`watchlist:write`、`trade:manual`、`trade:approve`、`liquidation:control`、`strategy:control`、`t-trade:control`、`limit-up:control`、`notification:manage`。请求绝不包含 `mutation:write`、`trade:direct` 或 `assistant:*`。每个设备会话只接受一个非空 `activeAccountId`，且 `authorizedAccountIds` 必须恰好只包含该账户；账户未显式填写时仅允许服务端从唯一授权账户推断。
+原生登录只提交用户名、密码和设备名。服务端自动把设备会话绑定到用户唯一授权账户，并把用户权限收缩到 iOS v1 能力白名单：`portfolio:read`、`market:read`、`orders:read`、`strategy:read`、`system-status:read`、`watchlist:write`、`trade:manual`、`trade:approve`、`liquidation:control`、`strategy:control`、`t-trade:control`、`limit-up:control`、`notification:manage`。响应中的 `authorizedAccountIds` 必须恰好包含一个账户，`permissions` 不得包含 `mutation:write`、`trade:direct` 或 `assistant:*`。
 
 ## 环境
 
@@ -98,11 +98,11 @@ Apollo codegen 直接读取同一 monorepo 中发布的 `apps/docs/public/contra
 - `.xcconfig` 只能放非敏感设置。Token 只允许进入 Keychain，不能写入仓库、日志或 UserDefaults。
 - Debug 默认将 `QUANTX_ACCOUNT_DATA_ENABLED` 设为 `YES`；Staging/Release 是否启用仍由各自部署验收决定。
 - `SessionClient` 仅在 Debug 环境允许通过配置的 HTTP 地址登录；Staging 与 Release 仍拒绝非 HTTPS 认证地址。
-- 登录、刷新和当前会话响应都必须返回一致的 `activeAccountId/grantedScopes`。App 只用 `grantedScopes` 控制 Repository 与 UI 能力，不使用用户对象中的宽泛 `permissions` 代替设备授权；刷新只允许 scope 缩减，缩减后对应数据仓库与操作入口立即关闭，其他已授权只读模块继续可用。
-- Keychain 只保存 Access/Refresh Token、到期时间与设备会话 ID。主账户和获准 scope 不持久化，冷启动通过 `GET /auth/session` 重新恢复；登出即清除令牌、内存账户/scope、Apollo 缓存与订阅。
+- 登录、刷新和当前会话响应都以 `user.authorizedAccountIds` 和 `user.permissions` 为唯一账户与能力契约。App 要求账户列表恰好只有一个，并只按 `permissions` 控制 Repository 与 UI；刷新只允许权限缩减，缩减后对应数据仓库与操作入口立即关闭。
+- Keychain 只保存 Access/Refresh Token、到期时间与设备会话 ID。唯一账户和会话权限不持久化，冷启动通过 `GET /auth/session` 重新恢复；登出即清除令牌、内存账户/权限、Apollo 缓存与订阅。
 - 账户摘要、组合汇总和每条持仓会再次进行客户端 `accountId` 范围一致性校验；发现跨账户数据时整页拒绝展示。
 - 行情搜索使用 `Instrument.id` 作为带市场后缀的统一 `stockCode`；六位 `instrumentId` 仅用于展示，不能作为交易请求标的。自选、批量报价、K 线与 WebSocket 行情均校验证券代码和有限数值。
-- 自选添加、移除和排序只接受设备会话实际获授的 `watchlist:write`，宽泛 `permissions` 或 `mutation:write` 不能代替。每次 Mutation 都显式携带并再次校验唯一 `activeAccountId`；UI 先乐观更新，失败恢复上次服务端快照，成功后立即刷新并以服务端返回顺序为最终事实。没有该 scope 时行情和自选读取保持可用，维护入口明确显示不可用。
+- 自选添加、移除和排序只接受设备会话 `permissions` 中的 `watchlist:write`，`mutation:write` 不能代替。每次 Mutation 都显式携带并再次校验唯一账户；UI 先乐观更新，失败恢复上次服务端快照，成功后立即刷新并以服务端返回顺序为最终事实。没有该权限时行情和自选读取保持可用，维护入口明确显示不可用。
 - 委托与成交查询按当前账户发起；成交结果会再次校验 `accountId`，未知券商方向或状态保持“未知”，不会推断为卖出或成交完成。
 - 兼容后端遗留的 Asia/Shanghai 无时区数据库时间；新 API 输出会携带明确时区，客户端不会按设备时区猜测。
 - 做T助手校验账户作用域、可用量关系、生产就绪门禁、Kill Switch、信号与批次数值；打板助手仅处理明确识别的打板策略实例、待确认意图和退出计划。

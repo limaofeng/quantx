@@ -47,7 +47,7 @@ final class AppModelLiquidationTests: XCTestCase {
     )
     await model.restoreSession(requireLocalUnlock: false)
 
-    await XCTAssertThrowsLiquidationError {
+    await xctAssertThrowsLiquidationError {
       _ = try await model.liquidationStore.preview(
         scope: .single,
         instrumentCodes: ["600519.SH"],
@@ -122,7 +122,7 @@ final class AppModelLiquidationTests: XCTestCase {
       executionMode: .paper
     )
 
-    await XCTAssertThrowsLiquidationError {
+    await xctAssertThrowsLiquidationError {
       _ = try await model.liquidationStore.confirm(
         preview,
         recoveryAuthorization: nil,
@@ -203,7 +203,7 @@ final class AppModelLiquidationTests: XCTestCase {
 
     XCTAssertNotEqual(preview.contextID, model.liquidationStore.challengeContextID)
     XCTAssertNotNil(model.liquidationStore.confirmationUnavailableReason(for: preview))
-    await XCTAssertThrowsLiquidationError {
+    await xctAssertThrowsLiquidationError {
       _ = try await model.liquidationStore.confirm(
         preview,
         recoveryAuthorization: nil,
@@ -241,7 +241,7 @@ final class AppModelLiquidationTests: XCTestCase {
     )
 
     XCTAssertNotEqual(preview.contextID, model.liquidationStore.challengeContextID)
-    await XCTAssertThrowsLiquidationError {
+    await xctAssertThrowsLiquidationError {
       _ = try await model.liquidationStore.confirm(
         preview,
         recoveryAuthorization: nil,
@@ -282,9 +282,7 @@ final class AppModelLiquidationTests: XCTestCase {
       username: "operator",
       displayName: "Operator",
       permissions: scopes,
-      authorizedAccountIDs: ["ACCOUNT-1"],
-      activeAccountID: "ACCOUNT-1",
-      grantedScopes: scopes
+      authorizedAccountIDs: ["ACCOUNT-1"]
     )
     return AppModel(
       configuration: APIConfiguration(
@@ -533,8 +531,7 @@ private actor LiquidationSessionService: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String,
-    requestedAccountID _: String?
+    deviceName _: String
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }
@@ -548,7 +545,7 @@ private actor LiquidationSessionService: SessionServing {
 }
 
 @MainActor
-private func XCTAssertThrowsLiquidationError(
+private func xctAssertThrowsLiquidationError(
   _ expression: () async throws -> Void,
   file: StaticString = #filePath,
   line: UInt = #line

@@ -137,8 +137,7 @@ struct LoginView: View {
     Task {
       await model.login(
         username: submittedUsername,
-        password: submittedPassword,
-        requestedAccountID: nil
+        password: submittedPassword
       )
     }
   }

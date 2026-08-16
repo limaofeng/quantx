@@ -24,9 +24,9 @@ final class SessionTokensTests: XCTestCase {
     XCTAssertNil(json["grantedScopes"])
   }
 
-  func testNativeV1ScopeSetIsMinimalAndContainsNoLegacyBroadPermission() {
+  func testNativeV1CapabilitiesAreMinimalAndExcludeBroadPermissions() {
     XCTAssertEqual(
-      NativeSessionScope.v1RequestedValues,
+      NativeSessionScope.v1CapabilityValues,
       [
         "portfolio:read",
         "market:read",
@@ -43,10 +43,10 @@ final class SessionTokensTests: XCTestCase {
         "notification:manage",
       ]
     )
-    XCTAssertFalse(NativeSessionScope.v1RequestedValues.contains("mutation:write"))
-    XCTAssertFalse(NativeSessionScope.v1RequestedValues.contains("trade:direct"))
+    XCTAssertFalse(NativeSessionScope.v1CapabilityValues.contains("mutation:write"))
+    XCTAssertFalse(NativeSessionScope.v1CapabilityValues.contains("trade:direct"))
     XCTAssertFalse(
-      NativeSessionScope.v1RequestedValues.contains { $0.hasPrefix("assistant:") }
+      NativeSessionScope.v1CapabilityValues.contains { $0.hasPrefix("assistant:") }
     )
   }
 }

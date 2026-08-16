@@ -84,7 +84,6 @@ async def test_login_refresh_rotation_and_logout_lifecycle(db):
     device_name="Test iPhone",
     client_fingerprint="127.0.0.1\npytest",
     request_id="request-login",
-    requested_scopes=["portfolio:read", "orders:read"],
   )
   assert grant.principal.authorized_account_ids == ("TEST-ACCOUNT-1",)
   assert grant.principal.active_account_id == "TEST-ACCOUNT-1"
@@ -192,7 +191,6 @@ async def test_logout_all_devices_revokes_every_access_token(db):
     device_name="iPhone",
     client_fingerprint="device-one",
     request_id="login-one",
-    requested_scopes=["portfolio:read"],
   )
   second = await service.login(
     settings.auth_bootstrap_username,
@@ -200,7 +198,6 @@ async def test_logout_all_devices_revokes_every_access_token(db):
     device_name="iPad",
     client_fingerprint="device-two",
     request_id="login-two",
-    requested_scopes=["portfolio:read"],
   )
   await service.logout(first.principal, all_devices=True, request_id="logout-all")
 
@@ -252,7 +249,6 @@ async def test_authenticate_loads_session_user_and_accounts_in_one_query(db):
     device_name="Test Browser",
     client_fingerprint="single-query-client",
     request_id="single-query-login",
-    requested_scopes=["portfolio:read"],
   )
   statements = []
 
@@ -294,10 +290,11 @@ async def test_native_scope_is_intersection_and_refresh_never_expands(db):
     device_name="Scoped iPhone",
     client_fingerprint="native-scope-client",
     request_id="native-scope-login",
-    requested_scopes=["portfolio:read", "orders:read", "market:read"],
   )
 
-  assert grant.principal.permissions == frozenset({"portfolio:read", "orders:read"})
+  assert grant.principal.permissions == frozenset(
+    {"portfolio:read", "orders:read", "trade:manual"}
+  )
   assert grant.principal.authorized_account_ids == ("TEST-ACCOUNT-1",)
   assert grant.principal.active_account_id == "TEST-ACCOUNT-1"
   session = (
@@ -308,7 +305,11 @@ async def test_native_scope_is_intersection_and_refresh_never_expands(db):
     )
   ).scalar_one()
   assert session.active_account_id == "TEST-ACCOUNT-1"
-  assert session.granted_permissions == ["orders:read", "portfolio:read"]
+  assert session.granted_permissions == [
+    "orders:read",
+    "portfolio:read",
+    "trade:manual",
+  ]
 
   user = (
     await db.execute(select(AuthUser).where(AuthUser.id == grant.principal.user_id))
@@ -325,20 +326,22 @@ async def test_native_scope_is_intersection_and_refresh_never_expands(db):
     "native-scope-refresh-no-expansion",
     require_scoped_session=True,
   )
-  assert refreshed.principal.permissions == frozenset({"portfolio:read", "orders:read"})
+  assert refreshed.principal.permissions == frozenset(
+    {"portfolio:read", "orders:read", "trade:manual"}
+  )
 
   user.permissions = ["portfolio:read", "trade:manual"]
   await db.commit()
   authenticated = await service.authenticate(refreshed.access_token)
-  assert authenticated.permissions == frozenset({"portfolio:read"})
+  assert authenticated.permissions == frozenset({"portfolio:read", "trade:manual"})
   reduced = await service.refresh(
     refreshed.refresh_token,
     "native-scope-refresh-after-revocation",
     require_scoped_session=True,
   )
-  assert reduced.principal.permissions == frozenset({"portfolio:read"})
+  assert reduced.principal.permissions == frozenset({"portfolio:read", "trade:manual"})
   await db.refresh(session)
-  assert session.granted_permissions == ["portfolio:read"]
+  assert session.granted_permissions == ["portfolio:read", "trade:manual"]
   with pytest.raises(AuthError) as stale_claims:
     await service.authenticate(refreshed.access_token)
   assert stale_claims.value.code == "UNAUTHENTICATED"
@@ -355,7 +358,6 @@ async def test_authenticate_rejects_valid_token_with_mismatched_session_claims(d
     device_name="Scoped iPhone",
     client_fingerprint="claim-binding-client",
     request_id="claim-binding-login",
-    requested_scopes=["portfolio:read"],
   )
 
   wrong_account_token, _ = issue_access_token(
@@ -370,7 +372,7 @@ async def test_authenticate_rejects_valid_token_with_mismatched_session_claims(d
     grant.principal.device_session_id,
     settings,
     active_account_id="TEST-ACCOUNT-1",
-    scopes=["orders:read", "portfolio:read"],
+    scopes=["portfolio:read"],
   )
 
   for token in (wrong_account_token, wrong_scope_token):
@@ -384,47 +386,49 @@ async def test_authenticate_rejects_valid_token_with_mismatched_session_claims(d
   "invalid_scope",
   ["unknown:scope", "mutation:write", "trade:direct", "system-config:write"],
 )
-async def test_native_login_rejects_unknown_or_forbidden_scope(db, invalid_scope):
+async def test_native_login_filters_permissions_outside_allowlist(db, invalid_scope):
   settings = _settings(
     auth_bootstrap_username=f"invalid-scope-{uuid.uuid4().hex[:8]}",
     auth_bootstrap_permissions=["portfolio:read", invalid_scope],
   )
   await AuthService.bootstrap_from_settings(db, settings)
 
-  with pytest.raises(AuthError) as rejected:
-    await AuthService(db, settings).login(
-      settings.auth_bootstrap_username,
-      settings.auth_bootstrap_password,
-      device_name="Scoped iPhone",
-      client_fingerprint=f"invalid-scope-{invalid_scope}",
-      request_id="invalid-native-scope",
-      requested_scopes=["portfolio:read", invalid_scope],
-    )
+  grant = await AuthService(db, settings).login(
+    settings.auth_bootstrap_username,
+    settings.auth_bootstrap_password,
+    device_name="Scoped iPhone",
+    client_fingerprint=f"invalid-scope-{invalid_scope}",
+    request_id="filtered-native-scope",
+  )
 
-  assert rejected.value.code == "INVALID_SESSION_SCOPE"
-  assert rejected.value.status_code == 400
+  assert grant.principal.permissions == frozenset({"portfolio:read"})
 
 
 @pytest.mark.asyncio
-async def test_native_login_requires_explicit_scopes(db):
-  settings = _settings(auth_bootstrap_username="missing-scope-user")
+async def test_native_login_grants_allowed_user_permissions_automatically(db):
+  settings = _settings(
+    auth_bootstrap_username="automatic-scope-user",
+    auth_bootstrap_permissions=["portfolio:read", "market:read"],
+  )
   await AuthService.bootstrap_from_settings(db, settings)
 
-  with pytest.raises(AuthError) as rejected:
-    await AuthService(db, settings).login(
-      settings.auth_bootstrap_username,
-      settings.auth_bootstrap_password,
-      device_name="Scoped iPhone",
-      client_fingerprint="missing-scope-client",
-      request_id="missing-native-scopes",
-    )
+  grant = await AuthService(db, settings).login(
+    settings.auth_bootstrap_username,
+    settings.auth_bootstrap_password,
+    device_name="Scoped iPhone",
+    client_fingerprint="automatic-scope-client",
+    request_id="automatic-native-scopes",
+  )
 
-  assert rejected.value.code == "SESSION_SCOPES_REQUIRED"
+  assert grant.principal.permissions == frozenset({"portfolio:read", "market:read"})
 
 
 @pytest.mark.asyncio
-async def test_native_login_allows_explicit_zero_capability_scope(db):
-  settings = _settings(auth_bootstrap_username="zero-scope-user")
+async def test_native_login_allows_zero_capability_session(db):
+  settings = _settings(
+    auth_bootstrap_username="zero-scope-user",
+    auth_bootstrap_permissions=["mutation:write"],
+  )
   await AuthService.bootstrap_from_settings(db, settings)
 
   grant = await AuthService(db, settings).login(
@@ -433,7 +437,6 @@ async def test_native_login_allows_explicit_zero_capability_scope(db):
     device_name="Scoped iPhone",
     client_fingerprint="zero-scope-client",
     request_id="zero-scope-login",
-    requested_scopes=[],
   )
 
   assert grant.principal.permissions == frozenset()
@@ -449,7 +452,7 @@ async def test_native_login_allows_explicit_zero_capability_scope(db):
 
 
 @pytest.mark.asyncio
-async def test_native_login_requires_unique_or_explicit_authorized_account(db):
+async def test_native_login_requires_exactly_one_authorized_account(db):
   settings = _settings(auth_bootstrap_username="multi-account-user")
   await AuthService.bootstrap_from_settings(db, settings)
   user = (
@@ -474,34 +477,8 @@ async def test_native_login_requires_unique_or_explicit_authorized_account(db):
       device_name="Scoped iPhone",
       client_fingerprint="ambiguous-account-client",
       request_id="ambiguous-account",
-      requested_scopes=["portfolio:read"],
     )
-  assert ambiguous.value.code == "ACTIVE_ACCOUNT_REQUIRED"
-
-  with pytest.raises(AuthError) as cross_account:
-    await service.login(
-      settings.auth_bootstrap_username,
-      settings.auth_bootstrap_password,
-      device_name="Scoped iPhone",
-      client_fingerprint="cross-account-client",
-      request_id="cross-account",
-      requested_account_id="OTHER-ACCOUNT",
-      requested_scopes=["portfolio:read"],
-    )
-  assert cross_account.value.code == "ACCOUNT_NOT_AUTHORIZED"
-
-  selected = await service.login(
-    settings.auth_bootstrap_username,
-    settings.auth_bootstrap_password,
-    device_name="Scoped iPhone",
-    client_fingerprint="selected-account-client",
-    request_id="selected-account",
-    requested_account_id="TEST-ACCOUNT-2",
-    requested_scopes=["portfolio:read"],
-  )
-  assert selected.principal.active_account_id == "TEST-ACCOUNT-2"
-  assert selected.principal.authorized_account_ids == ("TEST-ACCOUNT-2",)
-  assert selected.principal.require_account() == "TEST-ACCOUNT-2"
+  assert ambiguous.value.code == "SINGLE_ACCOUNT_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -519,10 +496,9 @@ async def test_native_login_rejects_user_without_authorized_account(db):
       device_name="Scoped iPhone",
       client_fingerprint="no-account-client",
       request_id="no-account-login",
-      requested_scopes=["portfolio:read"],
     )
 
-  assert rejected.value.code == "ACTIVE_ACCOUNT_REQUIRED"
+  assert rejected.value.code == "SINGLE_ACCOUNT_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -536,7 +512,6 @@ async def test_locked_session_validation_fails_after_revocation(db):
     device_name="Scoped iPhone",
     client_fingerprint="session-lock-client",
     request_id="session-lock-login",
-    requested_scopes=["portfolio:read"],
   )
 
   current = await service.lock_and_validate_session(

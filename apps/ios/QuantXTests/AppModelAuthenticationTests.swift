@@ -80,9 +80,7 @@ final class AppModelAuthenticationTests: XCTestCase {
       username: "ios-user",
       displayName: "iOS 用户",
       permissions: ["portfolio:read"],
-      authorizedAccountIDs: ["account-id"],
-      activeAccountID: "other-account",
-      grantedScopes: ["portfolio:read"]
+      authorizedAccountIDs: ["account-id", "other-account"]
     )
     let store = MemorySessionTokenStore(tokens: makeTokens())
     let model = makeModel(
@@ -186,18 +184,14 @@ final class AppModelAuthenticationTests: XCTestCase {
       username: "ios-user",
       displayName: "iOS 用户",
       permissions: ["portfolio:read", "trade:manual"],
-      authorizedAccountIDs: ["account-id"],
-      activeAccountID: "account-id",
-      grantedScopes: ["portfolio:read", "trade:manual"]
+      authorizedAccountIDs: ["account-id"]
     )
     let reducedUser = SessionUser(
       id: "user-id",
       username: "ios-user",
       displayName: "iOS 用户",
-      permissions: ["portfolio:read", "trade:manual"],
-      authorizedAccountIDs: ["account-id"],
-      activeAccountID: "account-id",
-      grantedScopes: []
+      permissions: [],
+      authorizedAccountIDs: ["account-id"]
     )
     let refreshedTokens = makeTokens(accessExpiresIn: 1_200, refreshExpiresIn: 7_200)
     let store = MemorySessionTokenStore(tokens: makeTokens())
@@ -407,8 +401,7 @@ private actor SessionServiceStub: SessionServing {
   func login(
     username _: String,
     password _: String,
-    deviceName _: String,
-    requestedAccountID _: String?
+    deviceName _: String
   ) throws -> AuthenticatedSession {
     throw SessionClient.ClientError.invalidResponse
   }

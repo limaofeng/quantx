@@ -14,7 +14,8 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-      "NativeLoginRequest": {
+      "LoginRequest": {
+        "additionalProperties": false,
         "properties": {
           "deviceName": {
             "anyOf": [
@@ -36,26 +37,6 @@
             "type": "string",
             "writeOnly": true
           },
-          "requestedAccountId": {
-            "anyOf": [
-              {
-                "maxLength": 50,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Requestedaccountid"
-          },
-          "requestedScopes": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 32,
-            "title": "Requestedscopes",
-            "type": "array"
-          },
           "username": {
             "maxLength": 80,
             "minLength": 1,
@@ -65,13 +46,13 @@
         },
         "required": [
           "username",
-          "password",
-          "requestedScopes"
+          "password"
         ],
-        "title": "NativeLoginRequest",
+        "title": "LoginRequest",
         "type": "object"
       },
       "RefreshRequest": {
+        "additionalProperties": false,
         "properties": {
           "refreshToken": {
             "format": "password",
@@ -89,6 +70,7 @@
         "type": "object"
       },
       "SessionGrantResponse": {
+        "additionalProperties": false,
         "properties": {
           "accessToken": {
             "title": "Accesstoken",
@@ -98,20 +80,9 @@
             "title": "Accesstokenexpiresat",
             "type": "string"
           },
-          "activeAccountId": {
-            "title": "Activeaccountid",
-            "type": "string"
-          },
           "deviceSessionId": {
             "title": "Devicesessionid",
             "type": "string"
-          },
-          "grantedScopes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Grantedscopes",
-            "type": "array"
           },
           "refreshToken": {
             "title": "Refreshtoken",
@@ -136,33 +107,21 @@
           "accessTokenExpiresAt",
           "refreshTokenExpiresAt",
           "deviceSessionId",
-          "activeAccountId",
-          "grantedScopes",
           "user"
         ],
         "title": "SessionGrantResponse",
         "type": "object"
       },
       "SessionStateResponse": {
+        "additionalProperties": false,
         "properties": {
           "accessTokenExpiresAt": {
             "title": "Accesstokenexpiresat",
             "type": "string"
           },
-          "activeAccountId": {
-            "title": "Activeaccountid",
-            "type": "string"
-          },
           "deviceSessionId": {
             "title": "Devicesessionid",
             "type": "string"
-          },
-          "grantedScopes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Grantedscopes",
-            "type": "array"
           },
           "user": {
             "$ref": "#/components/schemas/SessionUserResponse"
@@ -171,14 +130,13 @@
         "required": [
           "deviceSessionId",
           "accessTokenExpiresAt",
-          "activeAccountId",
-          "grantedScopes",
           "user"
         ],
         "title": "SessionStateResponse",
         "type": "object"
       },
       "SessionUserResponse": {
+        "additionalProperties": false,
         "properties": {
           "authorizedAccountIds": {
             "items": {
@@ -326,7 +284,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/NativeLoginRequest"
+                "$ref": "#/components/schemas/LoginRequest"
               }
             }
           },
