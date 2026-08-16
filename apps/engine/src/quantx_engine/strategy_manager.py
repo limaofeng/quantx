@@ -49,6 +49,12 @@ from quantx_infrastructure.services.trading_time_service import TradingDateHelpe
 
 from .strategy_executor import ExecutionStatus, StrategyExecutor, StrategyRuntime
 
+_MARKET_DATA_SYNC_MAX_DATE_SPAN_DAYS = {
+  "tick": 7,
+  "1m": 31,
+  "1d": 3_700,
+}
+
 
 class StrategyManager:
   """
@@ -891,29 +897,57 @@ class StrategyManager:
         end_day=end_day,
       )
 
-      self.logger.info(
-        f"补齐回测历史数据: {runtime.run_id}, 标的={instrument}, "
-        f"日期={start_day}~{end_day}, periods={sorted(periods)}"
-      )
-      result = await request_market_data_sync(
-        stock_list=[instrument],
-        start_time=start_day,
-        end_time=end_day,
-        periods=sorted(periods),
-      )
-
-      status = result.get("status")
-      if status == "skipped":
+      for chunk_start, chunk_end in self._market_data_sync_date_windows(
+        dates,
+        periods,
+      ):
+        chunk_start_day = chunk_start.strftime("%Y%m%d")
+        chunk_end_day = chunk_end.strftime("%Y%m%d")
         self.logger.info(
-          f"daily-market-data-sync 已跳过: {runtime.run_id}, "
-          f"instrument={instrument}, reason={result.get('reason')}"
+          f"补齐回测历史数据: {runtime.run_id}, 标的={instrument}, "
+          f"日期={chunk_start_day}~{chunk_end_day}, periods={sorted(periods)}"
         )
-        status = "success"
-      if status not in {"success", "partial_success"}:
-        raise RuntimeError(
-          f"daily-market-data-sync 执行失败: instrument={instrument}, "
-          f"status={status}, reason={result.get('reason')}"
+        result = await request_market_data_sync(
+          stock_list=[instrument],
+          start_time=chunk_start_day,
+          end_time=chunk_end_day,
+          periods=sorted(periods),
         )
+
+        status = result.get("status")
+        if status == "skipped":
+          self.logger.info(
+            f"daily-market-data-sync 已跳过: {runtime.run_id}, "
+            f"instrument={instrument}, reason={result.get('reason')}"
+          )
+          status = "success"
+        if status not in {"success", "partial_success"}:
+          raise RuntimeError(
+            f"daily-market-data-sync 执行失败: instrument={instrument}, "
+            f"status={status}, reason={result.get('reason')}"
+          )
+
+  @staticmethod
+  def _market_data_sync_date_windows(
+    dates: List[date],
+    periods: Set[str],
+  ) -> List[tuple[date, date]]:
+    """Split requests to stay within the QMT Agent's per-period date limits."""
+    if not dates:
+      return []
+    max_span_days = min(
+      _MARKET_DATA_SYNC_MAX_DATE_SPAN_DAYS[period] for period in periods
+    )
+    windows: List[tuple[date, date]] = []
+    window_start = dates[0]
+    window_end = dates[0]
+    for current_date in dates[1:]:
+      if (current_date - window_start).days + 1 > max_span_days:
+        windows.append((window_start, window_end))
+        window_start = current_date
+      window_end = current_date
+    windows.append((window_start, window_end))
+    return windows
 
   def _sync_periods_for_missing_info(
     self,

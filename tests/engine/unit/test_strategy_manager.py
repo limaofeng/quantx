@@ -560,3 +560,80 @@ class TestStrategyManager:
 
     assert periods == {"tick", "1m", "1d"}
     StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_sync_missing_tick_data_splits_requests_into_seven_day_windows(
+    self,
+    monkeypatch,
+  ):
+    """Tick 补齐请求必须满足 QMT Agent 的七个自然日跨度上限。"""
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    sync_request = AsyncMock(return_value={"status": "success"})
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.request_market_data_sync",
+      sync_request,
+    )
+    monkeypatch.setattr(manager, "_clear_market_data_sync_cache", lambda **_: None)
+    trading_dates = [
+      date(2026, 7, 20),
+      date(2026, 7, 21),
+      date(2026, 7, 22),
+      date(2026, 7, 23),
+      date(2026, 7, 24),
+      date(2026, 7, 27),
+      date(2026, 7, 28),
+      date(2026, 7, 29),
+      date(2026, 7, 30),
+      date(2026, 7, 31),
+      date(2026, 8, 3),
+      date(2026, 8, 4),
+      date(2026, 8, 5),
+      date(2026, 8, 6),
+      date(2026, 8, 7),
+      date(2026, 8, 10),
+      date(2026, 8, 11),
+      date(2026, 8, 12),
+      date(2026, 8, 13),
+      date(2026, 8, 14),
+    ]
+
+    await manager._sync_missing_backtest_data(
+      runtime=SimpleNamespace(run_id="replay-run"),
+      missing={
+        "600887.SH": {
+          "dates": set(trading_dates),
+          "klines": set(),
+          "tick": True,
+        }
+      },
+      sync_periods={"tick"},
+    )
+
+    assert [call.kwargs for call in sync_request.await_args_list] == [
+      {
+        "stock_list": ["600887.SH"],
+        "start_time": "20260720",
+        "end_time": "20260724",
+        "periods": ["tick"],
+      },
+      {
+        "stock_list": ["600887.SH"],
+        "start_time": "20260727",
+        "end_time": "20260731",
+        "periods": ["tick"],
+      },
+      {
+        "stock_list": ["600887.SH"],
+        "start_time": "20260803",
+        "end_time": "20260807",
+        "periods": ["tick"],
+      },
+      {
+        "stock_list": ["600887.SH"],
+        "start_time": "20260810",
+        "end_time": "20260814",
+        "periods": ["tick"],
+      },
+    ]
+    StrategyManager._instance = None
