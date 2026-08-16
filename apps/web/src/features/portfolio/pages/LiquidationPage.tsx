@@ -74,9 +74,9 @@ type ConditionalLiquidationOrderView = NonNullable<
 >[number];
 
 const liquidationModes: StudioMode[] = [
-  { id: 'EXIT_PLANS', icon: ClipboardList, label: '退出计划' },
+  { id: 'EXIT_PLANS', icon: ClipboardList, label: '卖出计划' },
   { id: 'LIQUIDATION', icon: ShieldAlert, label: '持仓清仓' },
-  { id: 'SELL_HISTORY', icon: History, label: '卖出历史' },
+  { id: 'SELL_HISTORY', icon: History, label: '卖出记录' },
 ];
 
 function normalizeStockCode(value: unknown) {
@@ -954,7 +954,7 @@ export function LiquidationPage() {
           卖出管理
         </div>
         <div className="truncate text-[10px] font-medium text-slate-600">
-          退出计划、明确清仓动作与真实卖出历史
+          卖出计划、持仓清仓与真实卖出记录
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
@@ -1103,7 +1103,7 @@ export function LiquidationPage() {
           <span className="text-slate-700">|</span>
           <span>{accountName}</span>
           <span className="text-slate-700">|</span>
-          <span>退出计划与清仓统一监控</span>
+          <span>卖出计划与清仓统一监控</span>
         </>
       }
       statusBarRight={

@@ -73,8 +73,8 @@ const activeStatuses = new Set([
 ]);
 
 const sourceLabels: Record<string, string> = {
-  LIMIT_UP_BOARD: '打板退出计划',
-  LIMIT_UP_ENTRY: '打板退出计划',
+  LIMIT_UP_BOARD: '打板卖出计划',
+  LIMIT_UP_ENTRY: '打板卖出计划',
   MANUAL_LIQUIDATION: '人工清仓',
   MANUAL_POSITION: '人工计划',
   TAKE_PROFIT: '止盈/止损计划',
@@ -657,7 +657,7 @@ export function ManualPlanEditor({
           {(createResult.fetching || updateResult.fetching) && (
             <Loader2 className="animate-spin" />
           )}
-          {editingPlan ? '保存计划修改' : '创建退出计划'}
+          {editingPlan ? '保存计划修改' : '创建卖出计划'}
         </Button>
       </div>
     </section>
@@ -755,7 +755,7 @@ export function ExitPlansPanel({
     <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-base font-black text-slate-100">退出计划</h2>
+          <h2 className="text-base font-black text-slate-100">卖出计划</h2>
           <p className="mt-1 text-xs font-bold text-slate-500">
             统一监控打板、T 批次、止盈/止损、人工计划和人工清仓。
           </p>
@@ -777,11 +777,11 @@ export function ExitPlansPanel({
         {plans.fetching && visiblePlans.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-16 text-sm font-bold text-slate-500">
             <Loader2 className="h-4 w-4 animate-spin" />
-            加载退出计划
+            加载卖出计划
           </div>
         ) : visiblePlans.length === 0 ? (
           <div className="rounded-md border border-dashed border-white/10 py-16 text-center text-sm font-bold text-slate-500">
-            暂无进行中的退出计划
+            暂无进行中的卖出计划
           </div>
         ) : (
           visiblePlans.map(plan => (
@@ -795,7 +795,7 @@ export function ExitPlansPanel({
                       configVersion: item.configVersion,
                       planId: item.planId,
                     }),
-                  '退出计划已取消'
+                  '卖出计划已取消'
                 )
               }
               onConfirmIntent={item => void approvePendingIntent(item)}
@@ -825,7 +825,7 @@ export function ExitPlansPanel({
                       enabled: !item.enabled,
                       planId: item.planId,
                     }),
-                  item.enabled ? '退出计划已暂停' : '退出计划已恢复'
+                  item.enabled ? '卖出计划已暂停' : '卖出计划已恢复'
                 )
               }
               plan={plan}
@@ -941,7 +941,7 @@ export function PositionLiquidationPanel({
       <div>
         <h2 className="text-base font-black text-slate-100">持仓清仓</h2>
         <p className="mt-1 text-xs font-bold text-slate-500">
-          清仓是明确动作；确认后按股票创建独立退出计划并由统一状态机执行。
+          清仓是明确动作；确认后按股票创建独立卖出计划并由统一状态机执行。
         </p>
       </div>
       <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -1099,7 +1099,7 @@ export function PositionLiquidationPanel({
                 <AlertDialogTitle>确认本次持仓清仓</AlertDialogTitle>
                 <AlertDialogDescription asChild>
                   <div className="grid gap-2 text-sm">
-                    <p>本次将为 {selected.length} 只股票分别创建退出计划。</p>
+                    <p>本次将为 {selected.length} 只股票分别创建卖出计划。</p>
                     <p>完成策略：{completion}</p>
                     <p>冲突策略：{conflict}</p>
                     <p>执行模式：{executionMode}</p>

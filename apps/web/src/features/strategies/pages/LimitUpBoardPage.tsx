@@ -576,7 +576,7 @@ export default function LimitUpBoardPage() {
                   <EmptyRail
                     icon={WalletCards}
                     title="暂无托管仓位"
-                    description="受托买入的真实成交回报到达后，退出计划会自动出现在这里。"
+                    description="受托买入的真实成交回报到达后，卖出计划会自动出现在这里。"
                   />
                 )}
               </div>

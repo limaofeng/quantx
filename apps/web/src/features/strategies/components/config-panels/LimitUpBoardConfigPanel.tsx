@@ -80,7 +80,7 @@ const GROUPS = [
   },
   {
     id: 'exit',
-    title: '退出计划',
+    title: '卖出计划',
     description: '真实成交后由 Engine 统一管理破板、回撤和持有期退出。',
     icon: Activity,
   },
@@ -329,7 +329,7 @@ export function LimitUpBoardConfigPanel({
               placeholder="搜索 A 股代码 / 名称 / 拼音"
             />
             <p className="text-[10px] leading-relaxed text-slate-500">
-              一个实例只绑定一个标的；已有持仓、未完成买单或活跃退出计划时不会重复入场。
+              一个实例只绑定一个标的；已有持仓、未完成买单或活跃卖出计划时不会重复入场。
             </p>
           </div>
 

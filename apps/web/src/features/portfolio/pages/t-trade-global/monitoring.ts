@@ -106,8 +106,8 @@ const evaluationReasonLabels: Record<string, string> = {
   INTENT_PENDING: '已有指令等待确认',
   COOLDOWN_ACTIVE: '批次冷却中',
   END_OF_DAY_ENTRY_BLOCKED: '临近收盘，停止新开批次',
-  WAITING_FOR_EXIT_PLAN_REGISTRATION: '等待退出计划注册',
-  MONITOR_ENGINE_EXIT_PLAN: '持续评估退出计划',
+  WAITING_FOR_EXIT_PLAN_REGISTRATION: '等待卖出计划注册',
+  MONITOR_ENGINE_EXIT_PLAN: '持续评估卖出计划',
   PULLBACK_REBOUND_TRIGGERED: '回撤反弹机会已触发',
   MOMENTUM_ACCELERATION_TRIGGERED: '动量加速机会已触发',
 };

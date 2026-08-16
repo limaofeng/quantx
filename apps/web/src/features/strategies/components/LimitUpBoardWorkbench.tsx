@@ -372,7 +372,7 @@ export default function LimitUpBoardWorkbench({
     return (
       <EmptyState
         title="尚未选择策略实例"
-        description="创建并选择一个单标的打板实例后，这里会展示信号确认、退出计划与回测约束。"
+        description="创建并选择一个单标的打板实例后，这里会展示信号确认、卖出计划与回测约束。"
       />
     );
   }
@@ -520,7 +520,7 @@ export default function LimitUpBoardWorkbench({
             id="board-exit-title"
             className="text-sm font-black text-slate-900 dark:text-white"
           >
-            打板退出计划
+            打板卖出计划
           </h3>
           <p className="mt-1 text-[10px] text-slate-500">
             只有真实成交后才创建；可卖量不足时按 T+1 规则等待。
@@ -588,7 +588,7 @@ export default function LimitUpBoardWorkbench({
           </div>
         ) : (
           <EmptyState
-            title="当前没有活跃退出计划"
+            title="当前没有活跃卖出计划"
             description="尚未发生有效入场成交，或对应仓位已经完成退出。回测结果仍可在下方查看成交约束。"
           />
         )}
