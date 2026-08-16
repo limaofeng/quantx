@@ -28,6 +28,7 @@ async def request_market_data_sync(
 ) -> dict[str, Any]:
   payload = {
     "operation": "bars",
+    "download": True,
     "stock_list": stock_list,
     "start_time": start_time,
     "end_time": end_time,
@@ -101,6 +102,10 @@ async def request_agent_market_data(
       if request.status == "COMPLETED":
         return {"status": "success", "request_id": request_id}
       if request.status == "FAILED":
-        return {"status": "failed", "request_id": request_id}
+        return {
+          "status": "failed",
+          "request_id": request_id,
+          "reason": request.processing_error,
+        }
     await asyncio.sleep(1)
   return {"status": "failed", "request_id": request_id, "reason": "timeout"}
