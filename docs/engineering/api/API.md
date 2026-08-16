@@ -64,6 +64,10 @@ GraphQL HTTP 使用 Bearer token；GraphQL WebSocket 在
 `connection_init.Authorization` 中发送同一短期 token。服务端按用户权限和
 账户授权再次校验，前端状态不是安全边界。
 
+GraphQL 写权限按领域拆分为 `portfolio:write`、`market:write`、
+`orders:write`、`strategy:write`、`operations:write` 和 `agent:manage`。
+高风险交易确认额外要求 `trade:approve`；旧 `mutation:write` 已停用。
+
 ## QMT Agent 设备接口
 
 ```text
@@ -131,7 +135,8 @@ npm run build
 npm run docs:contracts
 ```
 
-发布文件位于 `/docs/contracts/`。生产环境关闭运行时 OpenAPI、Swagger、
+发布文件位于 `/docs/contracts/`，包括 GraphQL SDL、v2 operation policy、
+Client OpenAPI 与 Web OpenAPI。生产环境关闭运行时 OpenAPI、Swagger、
 ReDoc、GraphiQL 和 GraphQL 内省。
 
 ## 卖出管理 GraphQL

@@ -3,7 +3,7 @@
 ## 物理边界
 
 ```text
-iOS / 第三方客户端
+Web / 原生 / 第三方客户端
   -> VPN 或零信任 HTTPS/WSS
   -> Windows Caddy
   -> FastAPI / Strawberry
@@ -28,10 +28,10 @@ Windows QMT Agent
 - 服务端数据库；
 - GraphQL、REST 或 WebSocket 业务消息；
 - 日志和异常堆栈；
-- iOS App、UserDefaults 或客户端诊断包。
+- Web 存储、原生偏好存储或客户端诊断包。
 
-设备密钥只保存在 Windows Credential Manager，iOS 客户端不参与 Agent
-登记或券商连接。
+设备密钥只保存在 Windows Credential Manager。Web 只能创建一次性登记码和撤销
+设备；原生与第三方客户端不参与 Agent 凭据交换或券商连接。
 
 ## 状态真源
 
@@ -40,7 +40,7 @@ Windows QMT Agent
 | 用户、权限、实例与审计 | PostgreSQL |
 | Redis | 唤醒、广播和缓存，不是可靠状态真源 |
 | 实盘委托、成交、资金和持仓 | miniQMT 回报，经服务端持久化与收敛 |
-| iOS 本地 | Keychain Token、非敏感偏好和当前会话内存快照 |
+| 客户端本地 | 只保存会话所需 Token、非敏感偏好和当前会话内存快照；iOS Token 存入 Keychain |
 
 客户端不得根据价格变化推断成交，也不得以本地缓存覆盖服务端返回的保守状态。
 失败刷新可以保留最后有效内存快照并明确标记 stale；不完整、旧序列或跨账户

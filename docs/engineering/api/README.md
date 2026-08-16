@@ -17,7 +17,8 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 `127.0.0.1:18081`。常用端点包括 `/graphql`、`/health/live`、
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
-`/_dev/api-docs` 提供，生产环境关闭。
+`/_dev/api-docs` 提供，生产环境关闭。统一开发者中心覆盖 Web、原生客户端与
+第三方 API。
 
 ## 代码边界
 

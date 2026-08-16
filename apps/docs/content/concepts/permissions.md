@@ -1,45 +1,61 @@
 # 权限模型
 
-QuantX 对 GraphQL 根字段默认拒绝。客户端必须同时满足根字段权限、账户/资源归属
-和业务状态门禁；页面中是否显示按钮永远不是服务端授权边界。
+QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 operation policy
+显式登记；客户端还必须满足账户/资源归属和业务状态门禁。页面中是否显示按钮
+永远不是服务端授权边界。
 
 ## 当前部署权限
 
 | 权限 | 当前能力 |
 | --- | --- |
-| `portfolio:read` | 账户、资产、持仓、自选与组合摘要读取 |
-| `market:read` | 标的、行情、K 线、交易日历与研究数据读取 |
-| `strategy:read` | 策略实例、运行状态、审计、做 T 与打板投影读取 |
-| `orders:read` | 委托、成交、清仓记录和交易事件读取 |
-| `system-status:read` | 服务、Agent、任务和必要运行状态读取 |
-| `trade:approve` | 已支持的策略/做 T 短时交易意图预览与确认，以及受控实盘动作 |
-| `trade:manual` | 两阶段移动手动委托预览/确认与撤单 |
-| `trade:direct` | 兼容直写 `placeOrder`；禁止 iOS 使用 |
-| `notification:manage` | 当前会话 APNs 注册、类别偏好和随机事件路由解析 |
-| `system-config:write` | Web 管理端修改全局非敏感系统配置 |
-| `mutation:write` | 现有大多数通用 GraphQL Mutation 的兼容权限 |
+| `portfolio:read` | 账户、资产、持仓、自选与组合摘要 |
+| `portfolio:write` | 修改组合偏好等 Web 领域能力 |
+| `watchlist:write` | 原生会话维护当前主账户自选 |
+| `market:read` | 标的、行情、K 线、交易日历与研究数据 |
+| `market:write` | 维护交易日历与市场研究数据 |
+| `strategy:read` | 策略实例、运行状态、审计与做 T 监控 |
+| `strategy:write` | 修改策略、回测、做 T 与助手状态 |
+| `strategy:control` | 原生会话控制策略生命周期与安全参数 |
+| `t-trade:control` | 原生会话控制做 T 配置、启停与熔断 |
+| `limit-up:control` | 原生会话控制打板配置、候选偏好与布防 |
+| `orders:read` | 委托、成交、清仓记录和交易事件订阅 |
+| `orders:write` | 创建交易命令、退出计划、清仓与撤单 |
+| `trade:manual` | 两阶段移动手动委托预览、确认与撤单 |
+| `liquidation:control` | 清仓和退出计划的设备绑定预览与控制 |
+| `notification:manage` | 当前设备 APNs 注册、偏好与通知路由 |
+| `system-status:read` | 服务、Agent、任务和运维状态 |
+| `operations:write` | 操作部署、流程与运营告警 |
+| `agent:manage` | 创建设备登记码与撤销 Agent |
+| `system-config:write` | 修改 AI Runtime 等全局非敏感系统配置 |
+| `assistant:read` / `assistant:write` | AI 对话、运行和非交易工具审批 |
+| `trade:approve` | 高风险交易确认和实盘灰度操作的附加授权 |
 
-每个字段的实际映射以随当前服务发布的
-[GraphQL 权限契约](/contracts/graphql-permissions.json)为准。文档中的目标 scope
-没有出现在该 JSON 前，客户端不能假定服务端已经支持。
-
-`trade:approve` 独立于 `mutation:write`。只有 `mutation:write` 的会话不能批准
-策略或做 T 买入意图；预览/确认仍会检查设备会话、账户、信号和实盘门禁。
+每个字段的当前映射见
+[v2 operation policy](/contracts/graphql-operation-policies.v2.json)。旧的
+`graphql-permissions.json` 已弃用，不再包含字段映射。
 
 ## 两层授权
 
 请求同时满足：
 
-1. Principal 拥有根字段要求的权限。
+1. Principal 拥有根字段 `requiredPermissions` 中的全部权限。
 2. 请求中的 `accountId` 及目标资源属于 Principal 的授权账户集合。
 
 客户端拿到账号字符串、曾缓存该账号或在 UI 中显示该账号，都不能绕过第二层。
-系统配置权限也不被通用 Mutation 权限自动替代。
+系统配置权限也不被其他写权限自动替代。
+
+`trade:approve` 不替代领域或控制权限。例如退出意图确认同时要求
+`orders:write` 和 `trade:approve`，做 T 实盘激活同时要求 `strategy:write` 和
+`trade:approve`。
+
+旧 `mutation:write` 已停用。升级迁移会为原先拥有它的用户补齐领域写权限和
+已发布的控制权限并移除旧值；`trade:manual` 与 `trade:approve` 仍需显式授予。
+之后管理员可以按最小权限重新收缩。
 
 ## iOS v1 最小权限
 
-iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制中心。正式开放写入前，
-原生会话按设备、单一主账户收缩 scope。iOS v1 专用 scope 为：
+iOS 的产品目标是个人 A 股量化控制中心。原生会话按设备、单一主账户收缩
+scope。iOS v1 专用 scope 为：
 
 | Scope | 目标能力 |
 | --- | --- |
@@ -52,15 +68,20 @@ iOS 的产品目标已从“只读监控端”调整为个人 A 股量化控制�
 | `limit-up:control` | 打板配置、候选偏好与布防 |
 | `notification:manage` | 当前设备 APNs Token 与通知偏好 |
 
-通用 `mutation:write` **不满足上述任何 iOS 写能力**。原生登录不接受账户或
+已停用的 `mutation:write` **不满足上述任何 iOS 写能力**。原生登录不接受账户或
 scope 选择；服务端绑定用户唯一授权账户，并在 `user.permissions` 返回“用户
 权限 ∩ iOS 能力白名单”。`user.authorizedAccountIds` 必须恰好包含该账户，刷新
 不得扩权。
 
-::: warning 专用 Mutation 迁移限制
-设备 scope 已落地，但不代表所有目标 Mutation 都已实现专用权限和交易门禁。
-未出现在当前 GraphQL 权限契约的写能力仍必须关闭；不能靠隐藏按钮、
-直调 `placeOrder` 或兼容清仓接口临时开放。
+## 客户端范围
+
+operation policy 使用 `audiences` 和 `stability` 区分 `web`、`native`、
+`third-party`。第三方只依赖同时标记 `third-party` 与 `supported` 的字段；
+`web-internal` 虽然公开记录，但不构成第三方兼容承诺。
+
+::: warning 当前限制
+未出现在当前 v2 operation policy 的写能力必须保持关闭；不能靠隐藏按钮、直调
+`placeOrder` 或兼容清仓接口临时开放。第三方集成应使用独立限权用户。
 :::
 
 ## 高风险确认

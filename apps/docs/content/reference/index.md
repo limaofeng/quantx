@@ -5,13 +5,14 @@
 
 | 契约 | 用途 | 下载 |
 | --- | --- | --- |
-| GraphQL SDL | Apollo iOS codegen 和 Schema diff | [graphql-schema.graphql](/contracts/graphql-schema.graphql) |
-| GraphQL 权限 | 根字段权限审查 | [graphql-permissions.json](/contracts/graphql-permissions.json) |
-| Client OpenAPI | 原生会话和健康检查代码生成 | [openapi-client.json](/contracts/openapi-client.json) |
+| GraphQL SDL | 各平台 codegen 和 Schema diff | [graphql-schema.graphql](/contracts/graphql-schema.graphql) |
+| GraphQL operation policy v2 | 权限组合、受众、稳定性与风险 | [graphql-operation-policies.v2.json](/contracts/graphql-operation-policies.v2.json) |
+| Client OpenAPI | 原生/第三方会话与健康检查 | [openapi-client.json](/contracts/openapi-client.json) |
+| Web OpenAPI | Web Cookie 会话与健康检查 | [openapi-web.json](/contracts/openapi-web.json) |
 
-## Client OpenAPI 范围
+## REST 契约范围
 
-只包含：
+Client OpenAPI 包含：
 
 - `POST /auth/session`
 - `POST /auth/session/refresh`
@@ -19,12 +20,13 @@
 - `DELETE /auth/session`
 - `/health`、`/health/live`、`/health/ready`、`/health/components`
 
-明确排除浏览器 Cookie 会话、QMT Agent 登记与设备密钥、metrics、开发端点
-和内部管理接口。
+Web OpenAPI 另包含 `/auth/web/session`、刷新、登出和开发自动登录；后者明确标为
+development-only。两份契约都排除 QMT Agent 密钥交换、metrics 和内部管理接口。
 
 ## GraphQL 参考
 
 在线可搜索的字段和类型页面见[GraphQL Schema 参考](./graphql-api/)。
 完整 Schema 包含 Query、Mutation 和 Subscription，以便标准工具正确生成类型。
-iOS 按[权限模型](../concepts/permissions)和服务端 capability 只启用已发布的专用
-能力；通用 `mutation:write` 不得替代移动端交易安全契约。
+客户端必须结合[权限模型](../concepts/permissions)、服务端 capability 和 v2
+operation policy 选择可用字段；已停用的 `mutation:write` 不得替代移动端交易
+安全契约。

@@ -3,7 +3,7 @@
 本目录是 QuantX 的统一文档入口。
 
 - 在线客户端文档：运行 `web` profile 后访问 `/docs/`，源码位于
-  `apps/docs/`，只发布 iOS/第三方客户端需要的内容。
+  `apps/docs/`，覆盖 QuantX Web、原生客户端和第三方 API，并标注公开稳定性。
 - [个人 A 股量化 iOS 产品文档](product/ios/README.md)：PRD、交互、设计系统、
   API/安全、验收、路线图与需求追踪矩阵。
 - [工程文档](engineering/README.md)：API、Engine、Worker、QMT Agent 与部署。

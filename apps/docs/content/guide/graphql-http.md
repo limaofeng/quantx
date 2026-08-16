@@ -9,7 +9,7 @@ GraphiQL 与内省，客户端应使用发布包中的 SDL 进行 codegen。
 POST /graphql
 Authorization: Bearer <access-token>
 Content-Type: application/json
-X-Request-ID: ios-optional-correlation-id
+X-Request-ID: optional-correlation-id
 ```
 
 ```json
@@ -31,11 +31,10 @@ X-Request-ID: ios-optional-correlation-id
 - 每个根字段按权限映射进行默认拒绝授权。
 - `accountId` 只是筛选参数，服务端仍会验证它属于当前 Principal。
 - 客户端隐藏入口不能替代服务端权限。
-- 当前大多数通用 Mutation 要求 `mutation:write`，受控交易批准使用独立
+- Mutation 使用领域写权限或按设备的专用控制 scope；高风险操作可能同时要求
   `trade:approve`。每个字段的事实映射以
-  [权限 JSON](/contracts/graphql-permissions.json)为准。
-- iOS 目标写能力使用按设备的专用 scope；通用 `mutation:write` 不得作为移动端
-  手动交易、清仓或策略控制权限。目标接口尚未发布时保持功能关闭。
+  [v2 operation policy](/contracts/graphql-operation-policies.v2.json)为准。
+- 已停用的 `mutation:write` 不得作为移动手动交易、清仓或策略控制权限。
 
 ## 错误结构
 
@@ -63,9 +62,9 @@ GraphQL 业务和授权错误通常仍使用 HTTP 200，并出现在 `errors`：
 ## Codegen 约束
 
 - 使用[发布 SDL](/contracts/graphql-schema.graphql)，不依赖生产内省。
-- `.graphql` operation 与生成 Swift 类型一起接受代码审查。
+- `.graphql` operation 与各平台生成类型一起接受代码审查。
 - Schema 更新后重新生成，不使用字典、强制转换或手写模型掩盖差异。
-- Generated GraphQL Model 先映射为 App Domain Model，再进入 SwiftUI。
+- Generated GraphQL Model 先映射为客户端 Domain Model，再进入界面或自动化逻辑。
 
 ## Mutation 安全模式
 

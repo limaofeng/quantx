@@ -6,7 +6,7 @@ const docsVersion = process.env.QUANTX_DOCS_VERSION?.trim() || 'development';
 export default defineConfig({
   base: '/docs/',
   cleanUrls: true,
-  description: 'QuantX 原生客户端、GraphQL 与交易边界开发文档',
+  description: 'QuantX Web、原生客户端与第三方 API 开发文档',
   head: [
     ['meta', { name: 'color-scheme', content: 'dark light' }],
     ['meta', { name: 'theme-color', content: '#0b1120' }],
@@ -43,8 +43,9 @@ export default defineConfig({
     },
     lightModeSwitchTitle: '切换到浅色主题',
     nav: [
+      { text: '开始接入', link: '/guide/' },
       { text: 'iOS 产品契约', link: '/guide/ios-product-contract' },
-      { text: 'iOS 快速开始', link: '/guide/ios-quickstart' },
+      { text: '能力地图', link: '/guide/capabilities' },
       { text: 'API 参考', link: '/reference/' },
       {
         text: `版本 ${docsVersion}`,
@@ -87,6 +88,13 @@ export default defineConfig({
         text: '开始',
         items: [
           { text: '文档首页', link: '/' },
+          { text: '选择接入方式', link: '/guide/' },
+          { text: 'Web 快速开始', link: '/guide/web-quickstart' },
+          { text: '原生客户端', link: '/guide/native-quickstart' },
+          { text: '第三方 API', link: '/guide/third-party-quickstart' },
+          { text: '认证与会话', link: '/guide/authentication' },
+          { text: '能力地图', link: '/guide/capabilities' },
+          { text: 'Mutation 工作流', link: '/guide/mutations' },
           { text: 'iOS 产品契约', link: '/guide/ios-product-contract' },
           { text: 'iOS 快速开始', link: '/guide/ios-quickstart' },
           { text: '原生客户端会话', link: '/guide/native-session' },
