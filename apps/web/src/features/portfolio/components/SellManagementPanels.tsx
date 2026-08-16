@@ -324,7 +324,7 @@ function PlanCard({
   );
 }
 
-function ManualPlanEditor({
+export function ManualPlanEditor({
   accountId,
   editingPlan,
   initialInstrumentCode,
@@ -408,6 +408,11 @@ function ManualPlanEditor({
     setOpen(true);
   }, [editingPlan]);
 
+  React.useEffect(() => {
+    if (editingPlan) return;
+    setInstrumentCode(initialInstrumentCode || '');
+  }, [editingPlan, initialInstrumentCode]);
+
   const close = () => {
     setOpen(false);
     if (editingPlan) onFinishedEditing();
@@ -476,7 +481,7 @@ function ManualPlanEditor({
   }
 
   return (
-    <section className="rounded-md border border-blue-400/20 bg-blue-500/[0.06] p-3">
+    <section className="w-full basis-full rounded-md border border-blue-400/20 bg-blue-500/[0.06] p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-black text-slate-100">
