@@ -133,6 +133,64 @@ def test_graphql_projection_keeps_known_fields_and_drops_internal_fields():
   assert payload == {"max_exit_slippage_bps": 42.0}
 
 
+def test_replay_projection_exposes_generated_report_and_capital_metrics():
+  replay = TTradeResolver._replay_type(
+    {
+      "run_id": "replay-1",
+      "backtest_id": "backtest-1",
+      "account_id": "account-1",
+      "status": "COMPLETED",
+      "progress_pct": 100.0,
+      "start_time": "2026-08-01T09:30:00",
+      "end_time": "2026-08-02T15:00:00",
+      "snapshot_id": None,
+      "snapshot_date": None,
+      "created_at": None,
+      "updated_at": None,
+      "error_message": None,
+      "data_quality": "OK",
+      "data_quality_message": "历史回放与期末清算完整",
+      "skipped_stock_codes": [],
+      "summary": {
+        "initial_equity": 100_000.0,
+        "final_equity": 100_100.0,
+        "t_net_profit": 100.0,
+        "total_return_pct": 0.1,
+        "passive_final_equity": 100_000.0,
+        "passive_return_pct": 0.0,
+        "excess_return_pct": 0.1,
+        "max_drawdown_pct": 0.0,
+        "total_fees": 10.0,
+        "turnover": 2_000.0,
+        "completed_cycles": 1,
+        "open_cycles": 0,
+        "winning_cycles": 1,
+        "win_rate_pct": 100.0,
+        "capital_utilization_pct": 50.0,
+        "forced_exit_cycles": 1,
+      },
+      "instruments": [],
+      "curve": [],
+      "report": {
+        "status": "GENERATED",
+        "schema_version": 1,
+        "generated_at": "2026-08-02T15:01:00",
+        "conclusion_code": "INSUFFICIENT_SAMPLE",
+        "conclusion": "需要扩大回放区间",
+        "html_artifact": "t-trade-report.html",
+        "json_artifact": "t-trade-report.json",
+      },
+    }
+  )
+
+  assert replay.summary is not None
+  assert replay.summary.capital_utilization_pct == 50.0
+  assert replay.summary.forced_exit_cycles == 1
+  assert replay.report is not None
+  assert replay.report.generated_at == datetime(2026, 8, 2, 15, 1)
+  assert replay.report.html_artifact == "t-trade-report.html"
+
+
 def test_session_graphql_projection_maps_latest_evaluation_and_legacy_null():
   now = datetime(2026, 8, 13, 10, 5)
   run = SimpleNamespace(

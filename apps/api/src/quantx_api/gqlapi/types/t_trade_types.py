@@ -676,6 +676,20 @@ class TTradeReplaySummary:
   open_cycles: int
   winning_cycles: int
   win_rate_pct: float
+  natural_exit_cycles: int = 0
+  forced_exit_cycles: int = 0
+  liquidation_failed_cycles: int = 0
+  capital_capacity: float = 0.0
+  average_occupied_capital: float = 0.0
+  peak_occupied_capital: float = 0.0
+  capital_occupancy_pct: float = 0.0
+  capital_availability_pct: float = 0.0
+  capital_turnover_times: float = 0.0
+  capital_turnover_per_trading_day: float = 0.0
+  capital_utilization_pct: float = 0.0
+  average_holding_hours: float = 0.0
+  max_holding_hours: float = 0.0
+  capital_profit_per_occupied_day_pct: float = 0.0
 
 
 @strawberry.type(description="做 T 回放单标的结果")
@@ -690,6 +704,9 @@ class TTradeReplayInstrumentResult:
   open_cycles: int
   winning_cycles: int
   win_rate_pct: float
+  forced_exit_cycles: int = 0
+  capital_utilization_pct: float = 0.0
+  average_holding_hours: float = 0.0
 
 
 @strawberry.type(description="做 T 回放权益曲线点")
@@ -719,6 +736,22 @@ class TTradeReplayCycle:
   net_profit: float
   net_return_pct: float
   exit_reason: str
+  liquidation_status: str = ""
+  forced_exit: bool = False
+  entry_capital: float = 0.0
+  holding_hours: float = 0.0
+  capital_utilization_pct: float = 0.0
+
+
+@strawberry.type(description="做 T 回放报告产物与样本内结论")
+class TTradeReplayReport:
+  status: str
+  schema_version: int
+  generated_at: Optional[datetime]
+  conclusion_code: str
+  conclusion: str
+  html_artifact: str
+  json_artifact: str
 
 
 @strawberry.type(description="做 T 历史回放运行")
@@ -741,6 +774,7 @@ class TTradeReplay:
   summary: Optional[TTradeReplaySummary]
   instruments: List[TTradeReplayInstrumentResult]
   curve: List[TTradeReplayCurvePoint]
+  report: Optional[TTradeReplayReport] = None
 
 
 @strawberry.type(description="做 T 历史回放批次分页")

@@ -775,8 +775,22 @@ export const TTradeReplayQuery = gql(`
         turnover
         completedCycles
         openCycles
+        naturalExitCycles
+        forcedExitCycles
+        liquidationFailedCycles
         winningCycles
         winRatePct
+        capitalCapacity
+        averageOccupiedCapital
+        peakOccupiedCapital
+        capitalOccupancyPct
+        capitalAvailabilityPct
+        capitalTurnoverTimes
+        capitalTurnoverPerTradingDay
+        capitalUtilizationPct
+        averageHoldingHours
+        maxHoldingHours
+        capitalProfitPerOccupiedDayPct
       }
       instruments {
         stockCode
@@ -787,8 +801,11 @@ export const TTradeReplayQuery = gql(`
         totalFees
         completedCycles
         openCycles
+        forcedExitCycles
         winningCycles
         winRatePct
+        capitalUtilizationPct
+        averageHoldingHours
       }
       curve {
         timestamp
@@ -798,6 +815,15 @@ export const TTradeReplayQuery = gql(`
         returnPct
         passiveReturnPct
         excessReturnPct
+      }
+      report {
+        status
+        schemaVersion
+        generatedAt
+        conclusionCode
+        conclusion
+        htmlArtifact
+        jsonArtifact
       }
     }
   }
@@ -829,6 +855,11 @@ export const TTradeReplayCyclesQuery = gql(`
         netProfit
         netReturnPct
         exitReason
+        liquidationStatus
+        forcedExit
+        entryCapital
+        holdingHours
+        capitalUtilizationPct
       }
     }
   }

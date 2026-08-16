@@ -6,8 +6,11 @@ import {
   Check,
   CircleDollarSign,
   Clock3,
+  FileCheck2,
   FlaskConical,
+  Gauge,
   History,
+  Hourglass,
   ListChecks,
   Loader2,
   Plus,
@@ -801,6 +804,89 @@ function TTradeReplayPanel({
               />
             </section>
 
+            {replay.summary && (
+              <section className="border-b border-white/[0.06] p-4">
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-xs font-black text-slate-200">
+                      <Gauge className="h-4 w-4 text-cyan-300" />
+                      资金效率与期末清算
+                    </h3>
+                    <p className="mt-1 text-[10px] text-slate-600">
+                      资金利用率按 4 小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
+                    </p>
+                  </div>
+                  <span
+                    className={cn(
+                      'border px-2 py-1 text-[10px] font-black',
+                      replay.summary.liquidationFailedCycles > 0
+                        ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
+                        : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+                    )}
+                  >
+                    期末清算 {replay.summary.forcedExitCycles} 批 · 失败{' '}
+                    {replay.summary.liquidationFailedCycles} 批
+                  </span>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  <MetricCard
+                    icon={Gauge}
+                    label="等待折损后利用率"
+                    tone="sky"
+                    value={`${formatNumber(replay.summary.capitalUtilizationPct, 1)}%`}
+                  />
+                  <MetricCard
+                    icon={WalletCards}
+                    label="平均占用 / 可用率"
+                    tone="slate"
+                    value={`¥${formatNumber(replay.summary.averageOccupiedCapital)} / ${formatNumber(replay.summary.capitalAvailabilityPct, 1)}%`}
+                  />
+                  <MetricCard
+                    icon={RefreshCw}
+                    label="累计 / 日均周转"
+                    tone="emerald"
+                    value={`${formatNumber(replay.summary.capitalTurnoverTimes)}× / ${formatNumber(replay.summary.capitalTurnoverPerTradingDay)}×`}
+                  />
+                  <MetricCard
+                    icon={Hourglass}
+                    label="平均 / 最长等待"
+                    tone="amber"
+                    value={`${formatNumber(replay.summary.averageHoldingHours, 1)}h / ${formatNumber(replay.summary.maxHoldingHours, 1)}h`}
+                  />
+                </div>
+              </section>
+            )}
+
+            {replay.report && (
+              <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-4">
+                <div className="flex items-start gap-3">
+                  <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-xs font-black text-slate-100">
+                        回放报告 · {replay.report.conclusionCode}
+                      </h3>
+                      <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-[9px] font-black text-cyan-200">
+                        {replay.report.status === 'GENERATED'
+                          ? 'HTML / JSON 已生成'
+                          : '报告生成失败'}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[11px] leading-5 text-slate-400">
+                      {replay.report.conclusion}
+                    </p>
+                    <p className="mt-1 font-mono text-[9px] text-slate-700">
+                      {replay.report.generatedAt
+                        ? formatTime(replay.report.generatedAt)
+                        : '--'}{' '}
+                      · {replay.report.htmlArtifact || '--'} ·{' '}
+                      {replay.report.jsonArtifact || '--'}
+                    </p>
+                  </div>
+                </div>
+              </section>
+            )}
+
             <section className="border-b border-white/[0.06] p-4">
               <div className="mb-3 flex items-center justify-between">
                 <div>
@@ -889,7 +975,7 @@ function TTradeReplayPanel({
                 </span>
               </div>
               <div className="overflow-x-auto border border-white/[0.06]">
-                <table className="w-full min-w-[880px] text-left text-[10px]">
+                <table className="w-full min-w-[1080px] text-left text-[10px]">
                   <thead className="bg-white/[0.025] text-slate-500">
                     <tr>
                       <th className="px-3 py-2">标的 / 批次</th>
@@ -897,6 +983,7 @@ function TTradeReplayPanel({
                       <th className="px-3 py-2 text-right">买入</th>
                       <th className="px-3 py-2 text-right">卖出</th>
                       <th className="px-3 py-2 text-right">税费</th>
+                      <th className="px-3 py-2 text-right">等待 / 资金利用率</th>
                       <th className="px-3 py-2 text-right">净增量</th>
                       <th className="px-3 py-2">退出原因</th>
                     </tr>
@@ -931,6 +1018,10 @@ function TTradeReplayPanel({
                         <td className="px-3 py-2 text-right font-mono">
                           ¥{formatNumber(cycle.totalFees)}
                         </td>
+                        <td className="px-3 py-2 text-right font-mono">
+                          {formatNumber(cycle.holdingHours, 1)}h /{' '}
+                          {formatNumber(cycle.capitalUtilizationPct, 1)}%
+                        </td>
                         <td
                           className={cn(
                             'px-3 py-2 text-right font-mono font-bold',
@@ -943,6 +1034,11 @@ function TTradeReplayPanel({
                         </td>
                         <td className="px-3 py-2">
                           {cycle.exitReason || '--'}
+                          {cycle.forcedExit && (
+                            <span className="ml-1.5 border border-amber-400/20 bg-amber-400/[0.06] px-1 py-0.5 text-[8px] text-amber-200">
+                              期末清算
+                            </span>
+                          )}
                         </td>
                       </tr>
                     ))}

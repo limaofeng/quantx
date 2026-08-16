@@ -48,6 +48,7 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeReplayMutationResult,
   TTradeReplayPosition,
   TTradeReplayPreparation,
+  TTradeReplayReport,
   TTradeReplayStartInput,
   TTradeReplaySummary,
   TTradeRolloutTarget,
@@ -143,6 +144,12 @@ class TTradeResolver:
     if payload.get("summary"):
       payload["summary"] = TTradeReplaySummary(
         **cls._graphql_kwargs(TTradeReplaySummary, payload["summary"])
+      )
+    if payload.get("report"):
+      report = dict(payload["report"])
+      report["generated_at"] = cls._datetime(report.get("generated_at"))
+      payload["report"] = TTradeReplayReport(
+        **cls._graphql_kwargs(TTradeReplayReport, report)
       )
     payload["instruments"] = [
       TTradeReplayInstrumentResult(

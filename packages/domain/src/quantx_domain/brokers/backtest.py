@@ -290,6 +290,17 @@ class BacktestBroker(BrokerBase):
     await self._update_equity_curve()
     self._record_replay_curve()
 
+  async def refresh_performance_snapshot(self) -> None:
+    """Record account performance after an order placed on the final quote.
+
+    End-of-window liquidation happens after the last market-data callback.  It
+    must therefore refresh the account curve explicitly, without replaying the
+    same quote (which would also re-run pending-order and ghost-DCA logic).
+    """
+
+    await self._update_equity_curve()
+    self._record_replay_curve()
+
   async def _validate_order(self, request: OrderRequest) -> bool:
     """验证订单"""
     if request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]:
@@ -304,9 +315,7 @@ class BacktestBroker(BrokerBase):
     else:
       # 卖出验证
       position = self.positions.get(request.instrument_code)
-      available_volume = (
-        position.available_volume if position else 0
-      )
+      available_volume = position.available_volume if position else 0
       if not position or available_volume < request.volume:
         self.logger.warning(
           f"持仓不足: {request.instrument_code} 需要 {request.volume}, "
@@ -441,9 +450,7 @@ class BacktestBroker(BrokerBase):
     position.last_price = price
     position.market_value = position.long_volume * price
 
-  def _calculate_costs(
-    self, amount: float, order_type: OrderType
-  ) -> Dict[str, float]:
+  def _calculate_costs(self, amount: float, order_type: OrderType) -> Dict[str, float]:
     amount = float(amount or 0.0)
     if amount <= 0:
       return {
@@ -543,8 +550,14 @@ class BacktestBroker(BrokerBase):
     fallback_price: float,
     market_data: Optional[MarketDataSnapshot],
   ) -> bool:
-    high = market_data.high if market_data and market_data.high is not None else fallback_price
-    low = market_data.low if market_data and market_data.low is not None else fallback_price
+    high = (
+      market_data.high
+      if market_data and market_data.high is not None
+      else fallback_price
+    )
+    low = (
+      market_data.low if market_data and market_data.low is not None else fallback_price
+    )
     if request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]:
       return low <= request.price
     return high >= request.price
@@ -554,7 +567,10 @@ class BacktestBroker(BrokerBase):
   ) -> bool:
     if not market_data:
       return False
-    if getattr(market_data, "suspended", False) or getattr(market_data, "is_trading", True) is False:
+    if (
+      getattr(market_data, "suspended", False)
+      or getattr(market_data, "is_trading", True) is False
+    ):
       return True
     if (
       request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]
@@ -577,7 +593,10 @@ class BacktestBroker(BrokerBase):
   ) -> None:
     if not market_data:
       return
-    if getattr(market_data, "suspended", False) or getattr(market_data, "is_trading", True) is False:
+    if (
+      getattr(market_data, "suspended", False)
+      or getattr(market_data, "is_trading", True) is False
+    ):
       self.constraint_statistics["suspended_blocked"] += 1
       return
     if request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]:
@@ -676,7 +695,9 @@ class BacktestBroker(BrokerBase):
     for code in self.passive_volumes:
       if code in self.current_prices:
         self.passive_prices[code] = self.current_prices[code]
-    equity = self.cash + sum(position.market_value for position in self.positions.values())
+    equity = self.cash + sum(
+      position.market_value for position in self.positions.values()
+    )
     passive_equity = self.passive_cash + sum(
       volume * self.passive_prices.get(code, 0.0)
       for code, volume in self.passive_volumes.items()

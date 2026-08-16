@@ -44,16 +44,12 @@ class TTradeReplayService:
       raise RuntimeError("该操作只能由 QuantX Engine 执行")
     return self._runtime_manager
 
-  async def prepare(
-    self, account_id: str, start_time: datetime
-  ) -> Dict[str, Any]:
+  async def prepare(self, account_id: str, start_time: datetime) -> Dict[str, Any]:
     account_id = str(account_id or "").strip()
     if not account_id:
       raise ValueError("账户不能为空")
     start_time = self._naive(start_time)
-    snapshot, positions = await self._load_snapshot_portfolio(
-      account_id, start_time
-    )
+    snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
     requires_manual = snapshot is None or not positions
     return {
       "account_id": account_id,
@@ -62,7 +58,9 @@ class TTradeReplayService:
       "snapshot_date": snapshot.trade_date.isoformat() if snapshot else None,
       "snapshot_source": snapshot.source if snapshot else None,
       "initial_cash": float(snapshot.cash_available_cny or 0.0) if snapshot else 0.0,
-      "initial_total_asset": float(snapshot.total_asset_cny or 0.0) if snapshot else 0.0,
+      "initial_total_asset": float(snapshot.total_asset_cny or 0.0)
+      if snapshot
+      else 0.0,
       "requires_manual_portfolio": requires_manual,
       "message": (
         "已采用回放开始日前最近一个账户日结快照"
@@ -98,9 +96,7 @@ class TTradeReplayService:
     snapshot = None
     positions = manual_positions
     if not positions:
-      snapshot, positions = await self._load_snapshot_portfolio(
-        account_id, start_time
-      )
+      snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
       if snapshot is None or not positions:
         raise ValueError("开始日前没有完整账户快照，请提供手工初始资产与持仓")
 
@@ -158,14 +154,10 @@ class TTradeReplayService:
       "initial_total_asset": initial_total_asset,
       "initial_positions": positions,
       "initial_portfolio_metadata": metadata,
-      "initial_instrument_metadata": {
-        code: metadata[code] for code in instruments
-      },
+      "initial_instrument_metadata": {code: metadata[code] for code in instruments},
       "replay_skipped_instruments": skipped,
       "replay_snapshot_id": snapshot.id if snapshot else None,
-      "replay_snapshot_date": (
-        snapshot.trade_date.isoformat() if snapshot else None
-      ),
+      "replay_snapshot_date": (snapshot.trade_date.isoformat() if snapshot else None),
       "replay_start_time": start_time.isoformat(),
       "replay_end_time": end_time.isoformat(),
       "commission_rate": float(payload.get("commission_rate", 0.0003) or 0.0),
@@ -382,7 +374,12 @@ class TTradeReplayService:
     elif current_time and end_time > start_time:
       progress = max(
         0.0,
-        min(99.9, (current_time - start_time).total_seconds() / (end_time - start_time).total_seconds() * 100.0),
+        min(
+          99.9,
+          (current_time - start_time).total_seconds()
+          / (end_time - start_time).total_seconds()
+          * 100.0,
+        ),
       )
     else:
       progress = 0.0
@@ -403,13 +400,10 @@ class TTradeReplayService:
       "updated_at": run.updated_at,
       "error_message": error_message,
       "data_quality": str(
-        replay_metrics.get("data_quality")
-        or ("ERROR" if error_message else "RUNNING")
+        replay_metrics.get("data_quality") or ("ERROR" if error_message else "RUNNING")
       ),
       "data_quality_message": str(
-        replay_metrics.get("data_quality_message")
-        or error_message
-        or "回放正在执行"
+        replay_metrics.get("data_quality_message") or error_message or "回放正在执行"
       ),
       "skipped_stock_codes": list(
         replay_metrics.get("skipped_stock_codes")
@@ -418,6 +412,7 @@ class TTradeReplayService:
       "summary": replay_metrics.get("summary"),
       "instruments": list(replay_metrics.get("instruments") or []),
       "curve": list(replay_metrics.get("curve") or []),
+      "report": replay_metrics.get("report"),
     }
 
   @staticmethod

@@ -47,6 +47,7 @@ from quantx_domain.trading import (
   AShareMarketRules,
   ContextRiskLayer,
   DecisionTrace,
+  ExitDecision,
   ExitEvaluationContext,
   ExitPlanBook,
   ExitPlanEvaluator,
@@ -1221,6 +1222,7 @@ class StrategyExecutor:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         self._runtime_log(runtime, "INFO", "回测执行开始")
         await self._run_backtest_loop(runtime)
+        await self._finalize_t_trade_replay(runtime)
       else:
         # 实时模式下，_run_realtime_loop 主要负责状态更新和心跳
         # 事件处理在 _process_event_queue 中进行
@@ -1267,8 +1269,32 @@ class StrategyExecutor:
               from quantx_infrastructure.core.t_trade_replay_metrics import (
                 build_t_trade_replay_metrics,
               )
+              from quantx_infrastructure.core.t_trade_replay_report import (
+                write_t_trade_replay_report,
+              )
 
-              metrics["t_trade_replay"] = build_t_trade_replay_metrics(runtime)
+              replay_metrics = build_t_trade_replay_metrics(runtime)
+              try:
+                replay_metrics["report"] = write_t_trade_replay_report(
+                  result_path,
+                  replay_metrics,
+                  run_id=runtime.run_id,
+                  backtest_id=runtime.context.backtest_id,
+                  start_time=runtime.context.backtest_start_time,
+                  end_time=runtime.context.backtest_end_time,
+                )
+              except Exception:
+                self.logger.exception("做 T 回放报告生成失败")
+                replay_metrics["report"] = {
+                  "status": "FAILED",
+                  "schema_version": 1,
+                  "generated_at": None,
+                  "conclusion_code": "REPORT_GENERATION_FAILED",
+                  "conclusion": "回放已完成，但报告文件生成失败，请检查 Engine 日志。",
+                  "html_artifact": "",
+                  "json_artifact": "",
+                }
+              metrics["t_trade_replay"] = replay_metrics
             if runtime.performance_recorder:
               try:
                 await runtime.performance_recorder.flush()
@@ -1419,6 +1445,180 @@ class StrategyExecutor:
             period,
             lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
           )
+
+  async def _wait_for_backtest_reports(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    timeout_seconds: float = 30.0,
+  ) -> None:
+    """Wait until simulated broker reports have reached runtime state."""
+
+    try:
+      await asyncio.wait_for(
+        runtime.event_queue.join(),
+        timeout=max(1.0, float(timeout_seconds)),
+      )
+    except asyncio.TimeoutError as exc:
+      raise RuntimeError("回测 Broker 回报未在结束前完成收敛") from exc
+
+  async def _cancel_backtest_pending_orders(self, runtime: StrategyRuntime) -> None:
+    broker = runtime.broker
+    if not isinstance(broker, BacktestBroker):
+      return
+    active_statuses = {
+      OrderStatus.PENDING,
+      OrderStatus.SUBMITTED,
+      OrderStatus.PARTIAL_FILLED,
+    }
+    for order in list((broker.orders or {}).values()):
+      if getattr(order, "status", None) not in active_statuses:
+        continue
+      await broker.cancel_order(str(order.order_id))
+
+  def _build_backtest_end_exit_intent(
+    self,
+    runtime: StrategyRuntime,
+    plan: Any,
+    market_data: MarketDataSnapshot,
+  ) -> tuple[ExitDecision, TradeIntent]:
+    bids = list(getattr(market_data, "bid_price", []) or [])
+    current_price = float(
+      getattr(market_data, "price", 0.0) or getattr(market_data, "close", 0.0) or 0.0
+    )
+    price_hint = float(bids[0] if bids and bids[0] else current_price)
+    batch_id = str(plan.template.metadata.get("t_batch_id", "") or "")
+    rule_id = f"backtest-end-force-close:{plan.plan_id}"
+    decision = ExitDecision(
+      plan_id=plan.plan_id,
+      rule_id=rule_id,
+      rule_type="BACKTEST_END_FORCE_CLOSE",
+      reason="BACKTEST_END_FORCE_CLOSE",
+      volume=int(plan.remaining_volume),
+      priority=10_000,
+      metrics={
+        "backtest_end": True,
+        "current_price": current_price,
+        "remaining_volume": int(plan.remaining_volume),
+      },
+    )
+    intent = TradeIntent(
+      strategy_id=plan.template.strategy_id or str(runtime.strategy_id),
+      run_id=plan.template.run_id or runtime.run_id,
+      instrument_code=plan.template.instrument_code,
+      direction=TradeIntentDirection.SELL,
+      bucket=plan.template.bucket,
+      reason="BACKTEST_END_FORCE_CLOSE",
+      priority=TradeIntentPriority.URGENT,
+      target_volume=int(plan.remaining_volume),
+      limit_price_hint=price_hint,
+      execution_mode=TradeIntentExecutionMode.AUTO,
+      max_price_deviation_bps=plan.template.execution.max_slippage_bps,
+      metadata={
+        **dict(plan.template.metadata or {}),
+        "t_batch_id": batch_id,
+        "exit_plan_id": plan.plan_id,
+        "exit_rule_id": rule_id,
+        "exit_rule_type": "BACKTEST_END_FORCE_CLOSE",
+        "exit_reason": "BACKTEST_END_FORCE_CLOSE",
+        "exit_plan_source_type": plan.template.source_type,
+        "exit_plan_source_id": plan.template.source_id,
+        "exit_plan_config_version": plan.template.config_version,
+        "price_type": "MARKET",
+        "price_reference": ExitPriceReference.BID.value,
+        "protected_limit": False,
+        "max_exit_slippage_bps": plan.template.execution.max_slippage_bps,
+        "execution_urgency": "URGENT",
+        "t1_policy": plan.template.t1_policy.value,
+        "allow_t1_substitution": True,
+        "t1_insufficient_action": "REJECT",
+        "backtest_forced_close": True,
+        "exit_metrics": dict(decision.metrics),
+      },
+    )
+    return decision, intent
+
+  async def _finalize_t_trade_replay(self, runtime: StrategyRuntime) -> None:
+    """Close replay-created T batches on the final tradable quote."""
+
+    if (
+      runtime.context.mode != StrategyRunMode.BACKTEST
+      or not runtime.context.parameters.get("t_trade_replay")
+      or not isinstance(runtime.broker, BacktestBroker)
+    ):
+      return
+
+    await self._wait_for_backtest_reports(runtime)
+    await self._cancel_backtest_pending_orders(runtime)
+    await self._wait_for_backtest_reports(runtime)
+
+    attempts: List[Dict[str, Any]] = []
+    plans = sorted(
+      list(runtime.exit_plan_book.plans.values()),
+      key=lambda item: (item.template.instrument_code, item.plan_id),
+    )
+    for plan in plans:
+      if plan.remaining_volume <= 0:
+        continue
+      attempt = {
+        "plan_id": plan.plan_id,
+        "batch_id": str(plan.template.metadata.get("t_batch_id", "") or ""),
+        "stock_code": plan.template.instrument_code,
+        "requested_volume": int(plan.remaining_volume),
+        "status": "PENDING",
+        "remaining_volume": int(plan.remaining_volume),
+      }
+      attempts.append(attempt)
+      market_data = runtime.latest_market_data.get(plan.template.instrument_code)
+      if market_data is None:
+        attempt.update(status="FAILED_NO_FINAL_QUOTE")
+        continue
+      if plan.pending_intent_id:
+        attempt.update(status="FAILED_PENDING_EXIT_NOT_RELEASED")
+        continue
+
+      decision, intent = self._build_backtest_end_exit_intent(
+        runtime,
+        plan,
+        market_data,
+      )
+      runtime.exit_plan_book.mark_intent(decision, intent.intent_id)
+      self._persist_exit_plan_book(runtime)
+      await self._process_strategy_output(
+        runtime,
+        StrategyOutput(
+          trade_intents=[intent],
+          decision_tags=["backtest_end_force_close"],
+          trace_payload={
+            "exit_plan_id": plan.plan_id,
+            "t_batch_id": attempt["batch_id"],
+            "requested_volume": attempt["requested_volume"],
+          },
+        ),
+      )
+      await self._wait_for_backtest_reports(runtime)
+      attempt["remaining_volume"] = int(plan.remaining_volume)
+      attempt["status"] = (
+        "FILLED" if plan.remaining_volume <= 0 else "FAILED_NOT_FULLY_LIQUIDATED"
+      )
+
+    await runtime.broker.refresh_performance_snapshot()
+    liquidation = {
+      "attempted_cycles": len(attempts),
+      "closed_cycles": sum(item["status"] == "FILLED" for item in attempts),
+      "failed_cycles": sum(item["status"] != "FILLED" for item in attempts),
+      "attempts": attempts,
+    }
+    runtime.context.parameters["replay_forced_liquidation"] = liquidation
+    level = "SUCCESS" if liquidation["failed_cycles"] == 0 else "WARNING"
+    self._runtime_log(
+      runtime,
+      level,
+      "做 T 回放期末清算完成: "
+      f"attempted={liquidation['attempted_cycles']}, "
+      f"closed={liquidation['closed_cycles']}, "
+      f"failed={liquidation['failed_cycles']}",
+    )
 
   async def _run_backtest_multi_instrument_timeline(
     self,
@@ -1761,8 +1961,7 @@ class StrategyExecutor:
     from quantx_engine.exit_plan_monitor import exit_plan_monitor
 
     if (
-      runtime.context.mode != StrategyRunMode.BACKTEST
-      and exit_plan_monitor.is_running
+      runtime.context.mode != StrategyRunMode.BACKTEST and exit_plan_monitor.is_running
     ):
       await AutoExitPlanService().sync_strategy_plan_book(
         strategy_run_id=runtime.run_id,
@@ -3355,7 +3554,9 @@ class StrategyExecutor:
           continue
         if runtime.state_manager:
           runtime.state_manager.release_order_resources(str(order_id))
-          intent_id = str(dict(getattr(request, "metadata", {}) or {}).get("intent_id") or "")
+          intent_id = str(
+            dict(getattr(request, "metadata", {}) or {}).get("intent_id") or ""
+          )
           if intent_id:
             await runtime.state_manager.update_trade_intent_status(
               intent_id,

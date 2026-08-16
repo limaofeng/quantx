@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional
+
+CAPITAL_UTILIZATION_REFERENCE_HOURS = 4.0
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -29,6 +31,18 @@ def _timestamp(value: Any) -> Any:
   return value.isoformat() if isinstance(value, datetime) else value
 
 
+def _datetime(value: Any) -> Optional[datetime]:
+  if isinstance(value, datetime):
+    return value.replace(tzinfo=None) if value.tzinfo else value
+  if isinstance(value, str) and value:
+    try:
+      parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+      return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+      return None
+  return None
+
+
 def _trade_payload(trade: Any) -> Dict[str, Any]:
   metadata = dict(getattr(trade, "metadata", {}) or {})
   costs = dict(metadata.get("costs") or {})
@@ -47,7 +61,40 @@ def _trade_payload(trade: Any) -> Dict[str, Any]:
   }
 
 
-def _cycle_from_trades(batch_id: str, trades: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def _capital_events(trades: Iterable[Dict[str, Any]]) -> List[tuple[datetime, float]]:
+  """Return capital deltas using average-cost release for partial exits."""
+
+  events: List[tuple[datetime, float]] = []
+  open_volume = 0
+  open_cost = 0.0
+  for row in sorted(
+    list(trades), key=lambda item: item.get("trade_time") or datetime.min
+  ):
+    timestamp = _datetime(row.get("trade_time"))
+    if timestamp is None:
+      continue
+    if row["side"] in {"BUY", "BUY_TO_COVER"}:
+      delta = max(0.0, row["amount"] + row["fees"])
+      open_volume += max(0, row["volume"])
+      open_cost += delta
+      events.append((timestamp, delta))
+      continue
+    if open_volume <= 0 or open_cost <= 0:
+      continue
+    sold = min(open_volume, max(0, row["volume"]))
+    released = open_cost * sold / open_volume
+    open_volume -= sold
+    open_cost = max(0.0, open_cost - released)
+    events.append((timestamp, -released))
+  return events
+
+
+def _cycle_from_trades(
+  batch_id: str,
+  trades: Iterable[Dict[str, Any]],
+  *,
+  evaluation_end: Optional[datetime],
+) -> Dict[str, Any]:
   rows = sorted(
     list(trades),
     key=lambda row: row.get("trade_time") or datetime.min,
@@ -78,25 +125,98 @@ def _cycle_from_trades(batch_id: str, trades: Iterable[Dict[str, Any]]) -> Dict[
   open_volume = max(0, entry_volume - exit_volume)
   complete = entry_volume > 0 and open_volume == 0 and exit_volume >= entry_volume
   first = rows[0] if rows else {}
-  last_exit = exits[-1] if exits else {}
-  metadata = dict(last_exit.get("metadata") or {})
+  metadata = dict(exits[-1].get("metadata") or {}) if exits else {}
+  forced_exit = any(
+    bool(dict(row.get("metadata") or {}).get("backtest_forced_close")) for row in exits
+  )
+  entry_time = _datetime(entries[0].get("trade_time")) if entries else None
+  holding_end = (
+    _datetime(exits[-1].get("trade_time")) if complete and exits else evaluation_end
+  )
+  if holding_end is None and rows:
+    holding_end = _datetime(rows[-1].get("trade_time"))
+  holding_seconds = max(
+    0.0,
+    (holding_end - entry_time).total_seconds()
+    if entry_time is not None and holding_end is not None
+    else 0.0,
+  )
+  holding_hours = holding_seconds / 3600.0
+  utilization_pct = (
+    min(
+      100.0,
+      CAPITAL_UTILIZATION_REFERENCE_HOURS / max(holding_hours, 1e-9) * 100.0,
+    )
+    if entry_volume > 0
+    else 0.0
+  )
   return {
     "batch_id": batch_id,
     "stock_code": str(first.get("instrument_code") or ""),
     "status": "COMPLETED" if complete else "OPEN",
-    "entry_time": _timestamp(entries[0].get("trade_time")) if entries else None,
-    "exit_time": (
-      _timestamp(exits[-1].get("trade_time")) if complete and exits else None
+    "liquidation_status": (
+      "FORCED_CLOSED"
+      if complete and forced_exit
+      else "NATURAL_CLOSED"
+      if complete
+      else "OPEN"
     ),
+    "forced_exit": forced_exit,
+    "entry_time": _timestamp(entry_time),
+    "exit_time": _timestamp(holding_end) if complete else None,
     "entry_volume": entry_volume,
     "exit_volume": exit_volume,
     "open_volume": open_volume,
     "entry_avg_price": entry_amount / entry_volume if entry_volume > 0 else 0.0,
     "exit_avg_price": exit_amount / exit_volume if exit_volume > 0 else 0.0,
+    "entry_capital": entry_amount + entry_fees,
     "total_fees": entry_fees + exit_fees,
     "net_profit": net_profit,
     "net_return_pct": net_return_pct,
+    "holding_hours": holding_hours,
+    "capital_utilization_pct": utilization_pct,
     "exit_reason": str(metadata.get("exit_reason", "") or ""),
+  }
+
+
+def _capital_usage(
+  grouped: Dict[str, List[Dict[str, Any]]],
+  *,
+  start_time: Optional[datetime],
+  end_time: Optional[datetime],
+) -> Dict[str, float]:
+  events = sorted(
+    [event for rows in grouped.values() for event in _capital_events(rows)],
+    key=lambda item: item[0],
+  )
+  if not events:
+    return {
+      "average_occupied_capital": 0.0,
+      "peak_occupied_capital": 0.0,
+      "occupied_capital_hours": 0.0,
+    }
+  period_start = start_time or events[0][0]
+  period_end = end_time or events[-1][0]
+  if period_end < period_start:
+    period_start, period_end = period_end, period_start
+  occupied = 0.0
+  peak = 0.0
+  occupied_seconds = 0.0
+  cursor = period_start
+  for timestamp, delta in events:
+    clipped = min(max(timestamp, period_start), period_end)
+    if clipped > cursor:
+      occupied_seconds += occupied * (clipped - cursor).total_seconds()
+      cursor = clipped
+    occupied = max(0.0, occupied + delta)
+    peak = max(peak, occupied)
+  if period_end > cursor:
+    occupied_seconds += occupied * (period_end - cursor).total_seconds()
+  elapsed = max(0.0, (period_end - period_start).total_seconds())
+  return {
+    "average_occupied_capital": occupied_seconds / elapsed if elapsed > 0 else occupied,
+    "peak_occupied_capital": peak,
+    "occupied_capital_hours": occupied_seconds / 3600.0,
   }
 
 
@@ -104,7 +224,8 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
   """Build a compact, JSON-safe replay result from the completed runtime."""
 
   broker = getattr(runtime, "broker", None)
-  params = dict(getattr(getattr(runtime, "context", None), "parameters", {}) or {})
+  context = getattr(runtime, "context", None)
+  params = dict(getattr(context, "parameters", {}) or {})
   trades = [_trade_payload(item) for item in list(getattr(broker, "trades", []) or [])]
   grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
   for index, trade in enumerate(trades):
@@ -112,11 +233,23 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
     batch_id = str(metadata.get("t_batch_id", "") or f"unbatched-{index + 1}")
     grouped[batch_id].append(trade)
 
-  cycles = [_cycle_from_trades(batch_id, rows) for batch_id, rows in grouped.items()]
+  configured_start = _datetime(params.get("replay_start_time")) or _datetime(
+    getattr(context, "backtest_start_time", None)
+  )
+  configured_end = _datetime(params.get("replay_end_time")) or _datetime(
+    getattr(context, "backtest_end_time", None)
+  )
+  broker_end = _datetime(getattr(broker, "current_time", None))
+  evaluation_end = configured_end or broker_end
+  cycles = [
+    _cycle_from_trades(batch_id, rows, evaluation_end=evaluation_end)
+    for batch_id, rows in grouped.items()
+  ]
   cycles.sort(key=lambda row: str(row.get("entry_time") or ""))
   completed = [row for row in cycles if row["status"] == "COMPLETED"]
   open_cycles = [row for row in cycles if row["status"] != "COMPLETED"]
   winning = [row for row in completed if row["net_profit"] > 0]
+  forced = [row for row in completed if row["forced_exit"]]
 
   names = {
     str(item.get("stock_code", "") or ""): str(item.get("instrument_name", "") or "")
@@ -140,8 +273,14 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
       "total_fees": 0.0,
       "completed_cycles": 0,
       "open_cycles": 0,
+      "forced_exit_cycles": 0,
       "winning_cycles": 0,
       "win_rate_pct": 0.0,
+      "capital_utilization_pct": 0.0,
+      "average_holding_hours": 0.0,
+      "_entry_capital": 0.0,
+      "_weighted_utilization": 0.0,
+      "_weighted_holding": 0.0,
     }
   for cycle in cycles:
     code = cycle["stock_code"]
@@ -156,16 +295,28 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
         "total_fees": 0.0,
         "completed_cycles": 0,
         "open_cycles": 0,
+        "forced_exit_cycles": 0,
         "winning_cycles": 0,
         "win_rate_pct": 0.0,
+        "capital_utilization_pct": 0.0,
+        "average_holding_hours": 0.0,
+        "_entry_capital": 0.0,
+        "_weighted_utilization": 0.0,
+        "_weighted_holding": 0.0,
       },
     )
-    result["status"] = "OK"
-    result["reason"] = ""
+    result["status"] = "OK" if cycle["status"] == "COMPLETED" else "LIQUIDATION_FAILED"
+    result["reason"] = "" if cycle["status"] == "COMPLETED" else "期末仍有未清算 T 仓位"
     result["t_net_profit"] += cycle["net_profit"]
     result["total_fees"] += cycle["total_fees"]
+    capital = cycle["entry_capital"]
+    result["_entry_capital"] += capital
+    result["_weighted_utilization"] += capital * cycle["capital_utilization_pct"]
+    result["_weighted_holding"] += capital * cycle["holding_hours"]
     if cycle["status"] == "COMPLETED":
       result["completed_cycles"] += 1
+      if cycle["forced_exit"]:
+        result["forced_exit_cycles"] += 1
       if cycle["net_profit"] > 0:
         result["winning_cycles"] += 1
     else:
@@ -187,24 +338,51 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
         "total_fees": 0.0,
         "completed_cycles": 0,
         "open_cycles": 0,
+        "forced_exit_cycles": 0,
         "winning_cycles": 0,
         "win_rate_pct": 0.0,
+        "capital_utilization_pct": 0.0,
+        "average_holding_hours": 0.0,
+        "_entry_capital": 0.0,
+        "_weighted_utilization": 0.0,
+        "_weighted_holding": 0.0,
       },
     )
 
   for result in per_instrument.values():
     count = result["completed_cycles"]
-    result["win_rate_pct"] = (
-      result["winning_cycles"] / count * 100.0 if count else 0.0
+    capital = result.pop("_entry_capital", 0.0)
+    weighted_utilization = result.pop("_weighted_utilization", 0.0)
+    weighted_holding = result.pop("_weighted_holding", 0.0)
+    result["win_rate_pct"] = result["winning_cycles"] / count * 100.0 if count else 0.0
+    result["capital_utilization_pct"] = (
+      weighted_utilization / capital if capital else 0.0
     )
+    result["average_holding_hours"] = weighted_holding / capital if capital else 0.0
+    if result["open_cycles"] > 0:
+      result["status"] = "LIQUIDATION_FAILED"
+      result["reason"] = "期末仍有未清算 T 仓位"
+    elif result["completed_cycles"] > 0:
+      result["status"] = "OK"
+      result["reason"] = ""
 
-  initial_equity = _number(params.get("initial_total_asset"), getattr(broker, "initial_capital", 0.0))
+  initial_equity = _number(
+    params.get("initial_total_asset"), getattr(broker, "initial_capital", 0.0)
+  )
   curve = []
+  trading_dates = set()
   for point in list(getattr(broker, "replay_curve", []) or []):
     equity = _number(point.get("equity"), initial_equity)
     passive = _number(point.get("passive_equity"), initial_equity)
-    return_pct = (equity - initial_equity) / initial_equity * 100.0 if initial_equity else 0.0
-    passive_return = (passive - initial_equity) / initial_equity * 100.0 if initial_equity else 0.0
+    point_time = _datetime(point.get("timestamp"))
+    if point_time:
+      trading_dates.add(point_time.date())
+    return_pct = (
+      (equity - initial_equity) / initial_equity * 100.0 if initial_equity else 0.0
+    )
+    passive_return = (
+      (passive - initial_equity) / initial_equity * 100.0 if initial_equity else 0.0
+    )
     curve.append(
       {
         "timestamp": _timestamp(point.get("timestamp")),
@@ -227,17 +405,71 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
   )
   total_fees = sum(row["fees"] for row in trades)
   turnover = sum(row["amount"] for row in trades)
+  entry_capital = sum(row["entry_capital"] for row in cycles)
+  weighted_utilization = sum(
+    row["entry_capital"] * row["capital_utilization_pct"] for row in cycles
+  )
+  weighted_holding = sum(row["entry_capital"] * row["holding_hours"] for row in cycles)
+  capital_utilization_pct = (
+    weighted_utilization / entry_capital if entry_capital else 0.0
+  )
+  average_holding_hours = weighted_holding / entry_capital if entry_capital else 0.0
+  max_holding_hours = max((row["holding_hours"] for row in cycles), default=0.0)
+  configured_capacity = initial_equity * max(
+    0.0, _number(params.get("max_total_t_exposure_pct"), 0.1)
+  )
+  initial_cash = (
+    configured_capacity
+    if params.get("initial_cash") is None
+    else max(0.0, _number(params.get("initial_cash")))
+  )
+  capital_capacity = min(configured_capacity, initial_cash)
+  usage = _capital_usage(
+    grouped,
+    start_time=configured_start,
+    end_time=configured_end or broker_end,
+  )
+  capital_occupancy_pct = (
+    usage["average_occupied_capital"] / capital_capacity * 100.0
+    if capital_capacity > 0
+    else 0.0
+  )
+  capital_turnover_times = (
+    entry_capital / capital_capacity if capital_capacity > 0 else 0.0
+  )
+  trading_day_count = max(1, len(trading_dates))
+  occupied_capital_days = usage["occupied_capital_hours"] / 24.0
+  t_net_profit = final_equity - passive_final
+  liquidation = dict(params.get("replay_forced_liquidation") or {})
+  liquidation_failed_cycles = max(
+    len(open_cycles),
+    _integer(liquidation.get("failed_cycles")),
+  )
   broker_metrics = broker.get_performance_metrics() if broker else {}
+  quality_messages = []
+  if skipped:
+    quality_messages.append(f"{len(skipped)} 只持仓因历史数据不足未参与回放")
+  if liquidation_failed_cycles:
+    quality_messages.append(f"{liquidation_failed_cycles} 个批次期末未完成合法清算")
+  data_quality = "PARTIAL" if quality_messages else "OK"
   return {
-    "data_quality": "PARTIAL" if skipped else "OK",
-    "data_quality_message": (
-      f"{len(skipped)} 只持仓因历史数据不足未参与回放" if skipped else "历史回放数据完整"
-    ),
+    "data_quality": data_quality,
+    "data_quality_message": "；".join(quality_messages)
+    if quality_messages
+    else "历史回放与期末清算完整",
     "skipped_stock_codes": [str(item.get("stock_code", "") or "") for item in skipped],
+    "methodology": {
+      "forced_liquidation": "回放结束时仅清算回放新增的 T 批次；合法性校验失败时不伪造成交",
+      "capital_utilization": (
+        "逐批按实际买入资金加权：min(100%, 4小时/持有小时)；"
+        "卖出等待越长，资金利用率越低"
+      ),
+      "capital_utilization_reference_hours": CAPITAL_UTILIZATION_REFERENCE_HOURS,
+    },
     "summary": {
       "initial_equity": initial_equity,
       "final_equity": final_equity,
-      "t_net_profit": final_equity - passive_final,
+      "t_net_profit": t_net_profit,
       "total_return_pct": total_return_pct,
       "passive_final_equity": passive_final,
       "passive_return_pct": passive_return_pct,
@@ -247,10 +479,29 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
       "turnover": turnover,
       "completed_cycles": len(completed),
       "open_cycles": len(open_cycles),
+      "natural_exit_cycles": len(completed) - len(forced),
+      "forced_exit_cycles": len(forced),
+      "liquidation_failed_cycles": liquidation_failed_cycles,
       "winning_cycles": len(winning),
       "win_rate_pct": len(winning) / len(completed) * 100.0 if completed else 0.0,
+      "capital_capacity": capital_capacity,
+      "average_occupied_capital": usage["average_occupied_capital"],
+      "peak_occupied_capital": usage["peak_occupied_capital"],
+      "capital_occupancy_pct": capital_occupancy_pct,
+      "capital_availability_pct": max(0.0, 100.0 - capital_occupancy_pct),
+      "capital_turnover_times": capital_turnover_times,
+      "capital_turnover_per_trading_day": capital_turnover_times / trading_day_count,
+      "capital_utilization_pct": capital_utilization_pct,
+      "average_holding_hours": average_holding_hours,
+      "max_holding_hours": max_holding_hours,
+      "capital_profit_per_occupied_day_pct": (
+        t_net_profit / occupied_capital_days * 100.0
+        if occupied_capital_days > 0
+        else 0.0
+      ),
     },
     "instruments": sorted(per_instrument.values(), key=lambda row: row["stock_code"]),
     "curve": curve,
     "cycles": cycles,
+    "liquidation": liquidation,
   }
