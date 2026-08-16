@@ -84,7 +84,7 @@ def _require_legacy_web_liquidation_session(
     raise forbidden(
       "原生设备会话必须使用 previewLiquidation/confirmLiquidation 清仓"
     )
-  principal.require_permission("mutation:write")
+  principal.require_permission("orders:write")
 
 
 def _native_liquidation_preview(data) -> LiquidationPreview:
@@ -193,8 +193,6 @@ def _exit_plan_authorization_preview(data) -> ExitPlanAuthorizationPreview:
       "每次触发仍重新经过实时风控、实盘开关、对账和唯一 QMT Agent 门禁",
     ],
   )
-
-
 @strawberry.type(description="卖出管理与统一退出计划查询")
 class LiquidationQuery:
   @strawberry.field(description="统一退出计划列表")
@@ -700,7 +698,9 @@ class LiquidationMutation:
       input, authorized_account_id(info, input.account_id)
     )
 
-  @strawberry.mutation(description="一键清仓")
+  @strawberry.mutation(
+    description="为当前可退出的未归因持仓创建清仓计划；返回计划结果而非成交确认"
+  )
   async def liquidate_all_positions(
     self,
     info: strawberry.types.Info,
@@ -712,7 +712,9 @@ class LiquidationMutation:
       authorized_account_id(info, input.account_id),
     )
 
-  @strawberry.mutation(description="个股清仓")
+  @strawberry.mutation(
+    description="为指定股票当前可退出的未归因持仓创建清仓计划；不直接宣称成交"
+  )
   async def liquidate_position(
     self,
     info: strawberry.types.Info,

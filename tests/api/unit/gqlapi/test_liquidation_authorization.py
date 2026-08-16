@@ -31,7 +31,7 @@ def _context(*accounts: str) -> dict:
     device_session_id="liquidation-session",
     access_token_expires_at=datetime.now(timezone.utc).replace(tzinfo=None)
     + timedelta(minutes=5),
-    permissions=frozenset({"mutation:write"}),
+    permissions=frozenset({"orders:write"}),
     authorized_account_ids=accounts,
   )
   return {"principal": principal, "request_id": "liquidation-request"}

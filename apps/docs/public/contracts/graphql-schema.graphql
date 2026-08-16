@@ -2504,12 +2504,26 @@ type MessageResponse {
 type Mutation {
   """更新 AI Runtime 全局非敏感配置"""
   updateAiRuntimeSettings(input: UpdateAiRuntimeSettingsInput!): AiRuntimeSettings!
+
+  """创建归属当前用户、可选绑定账户的 AI 对话"""
   createAiAssistantThread(input: CreateAiAssistantThreadInput!): AiAssistantThread!
+
+  """幂等写入用户消息并创建异步 AI 运行；返回运行状态而非最终回答"""
   sendAiAssistantMessage(input: SendAiAssistantMessageInput!): AiAssistantRun!
+
+  """请求取消当前用户拥有的 AI 运行"""
   cancelAiAssistantRun(runId: ID!): AiAssistantRun!
+
+  """为失败或取消且未完成写操作的 AI 运行创建一次新重试"""
   retryAiAssistantRun(runId: ID!): AiAssistantRun!
+
+  """批准或拒绝 AI 运行中等待处理的非交易工具调用"""
   resolveAiAssistantApproval(input: ResolveAiAssistantApprovalInput!): AiAssistantRun!
+
+  """更新当前用户 AI 对话的标题或外部搜索偏好"""
   updateAiAssistantThread(input: UpdateAiAssistantThreadInput!): AiAssistantThread!
+
+  """删除当前用户拥有且没有活动运行的 AI 对话及其消息"""
   deleteAiAssistantThread(threadId: ID!): Boolean!
 
   """创建十分钟内有效的一次性设备登记码"""
@@ -2527,10 +2541,10 @@ type Mutation {
   """消费一次性挑战并排队移动端手动委托"""
   confirmManualOrder(input: ManualOrderConfirmationInput!): ManualOrderConfirmationResult!
 
-  """下单"""
+  """创建手工交易命令并返回排队状态；成功不表示已报、成交或持仓已变化"""
   placeOrder(input: OrderInput!): OrderMutationResult!
 
-  """撤单"""
+  """创建撤单命令并返回受理结果；最终撤单状态以 QMT 委托回报收敛结果为准"""
   cancelOrder(input: CancelOrderInput!): CancelOrderResult!
 
   """预览既有 LIVE 退出计划的精确自动实盘授权"""
@@ -2572,10 +2586,10 @@ type Mutation {
   """按股票创建一组统一清仓计划"""
   liquidatePositions(input: LiquidatePositionsInput!): LiquidationGroupResult!
 
-  """一键清仓"""
+  """为当前可退出的未归因持仓创建清仓计划；返回计划结果而非成交确认"""
   liquidateAllPositions(input: LiquidateAllPositionsInput!): LiquidationResult!
 
-  """个股清仓"""
+  """为指定股票当前可退出的未归因持仓创建清仓计划；不直接宣称成交"""
   liquidatePosition(input: LiquidatePositionInput!): PositionLiquidationResult!
 
   """创建或更新条件清仓单"""
@@ -3369,9 +3383,17 @@ enum PushEnvironment {
 type Query {
   """AI Runtime 全局非敏感配置与应用状态"""
   aiRuntimeSettings: AiRuntimeSettings!
+
+  """读取当前 AI Assistant 能力、模型与工具风险声明"""
   aiAssistantCapabilities: AiAssistantCapabilities!
+
+  """按最近活动时间分页读取当前用户的 AI 对话"""
   aiAssistantThreads(first: Int! = 30, after: String = null): AiAssistantThreadConnection!
+
+  """读取当前用户拥有的单个 AI 对话"""
   aiAssistantThread(id: ID!): AiAssistantThread
+
+  """按序号增量读取单个 AI 对话的消息"""
   aiAssistantMessages(threadId: ID!, afterSequence: Int! = 0, limit: Int! = 100): AiAssistantMessagePage!
 
   """当前用户登记的 Agent 设备"""
@@ -5211,6 +5233,7 @@ type StrategyTickData {
 
 "QuantX 系统实时数据订阅接口\n\n## 主要功能\n\n### 实时行情订阅\n- 金融工具实时价格更新\n- K线数据实时推送\n- 市场深度数据订阅\n\n### 交易数据订阅\n- 订单状态变更通知\n- 成交记录实时推送\n\n### 多金融工具监控\n- 同时订阅多个金融工具的价格\n"
 type Subscription {
+  """按持久化序号订阅单个 AI 对话的可恢复事件流"""
   aiAssistantEvents(threadId: ID!, afterSequence: Int! = 0): AiAssistantEvent!
 
   """订阅首板晋级工作台版本通知"""

@@ -251,7 +251,7 @@ class AiAssistantQuery:
       config = await AiRuntimeSettingsRepository(db).get_effective()
       return await _runtime_settings_view(db, config)
 
-  @strawberry.field
+  @strawberry.field(description="读取当前 AI Assistant 能力、模型与工具风险声明")
   async def ai_assistant_capabilities(
     self,
     info: strawberry.types.Info,
@@ -298,7 +298,7 @@ class AiAssistantQuery:
       max_concurrent_runs=config.values.max_concurrent_runs,
     )
 
-  @strawberry.field
+  @strawberry.field(description="按最近活动时间分页读取当前用户的 AI 对话")
   async def ai_assistant_threads(
     self,
     info: strawberry.types.Info,
@@ -331,7 +331,7 @@ class AiAssistantQuery:
       has_next_page=has_next,
     )
 
-  @strawberry.field
+  @strawberry.field(description="读取当前用户拥有的单个 AI 对话")
   async def ai_assistant_thread(
     self,
     info: strawberry.types.Info,
@@ -347,7 +347,7 @@ class AiAssistantQuery:
       _validate_thread_account(principal, thread)
       return AiAssistantThread.from_model(thread)
 
-  @strawberry.field
+  @strawberry.field(description="按序号增量读取单个 AI 对话的消息")
   async def ai_assistant_messages(
     self,
     info: strawberry.types.Info,
@@ -426,7 +426,7 @@ class AiAssistantMutation:
     await _safe_notify_runtime_settings(config.version)
     return view
 
-  @strawberry.mutation
+  @strawberry.mutation(description="创建归属当前用户、可选绑定账户的 AI 对话")
   async def create_ai_assistant_thread(
     self,
     info: strawberry.types.Info,
@@ -447,7 +447,9 @@ class AiAssistantMutation:
       )
       return AiAssistantThread.from_model(thread)
 
-  @strawberry.mutation
+  @strawberry.mutation(
+    description="幂等写入用户消息并创建异步 AI 运行；返回运行状态而非最终回答"
+  )
   async def send_ai_assistant_message(
     self,
     info: strawberry.types.Info,
@@ -525,7 +527,7 @@ class AiAssistantMutation:
       await _safe_notify_run(run.id)
     return AiAssistantRun.from_model(run)
 
-  @strawberry.mutation
+  @strawberry.mutation(description="请求取消当前用户拥有的 AI 运行")
   async def cancel_ai_assistant_run(
     self,
     info: strawberry.types.Info,
@@ -551,7 +553,9 @@ class AiAssistantMutation:
       await _safe_notify_event(run.thread_id, int(event.sequence))
     return AiAssistantRun.from_model(run)
 
-  @strawberry.mutation
+  @strawberry.mutation(
+    description="为失败或取消且未完成写操作的 AI 运行创建一次新重试"
+  )
   async def retry_ai_assistant_run(
     self,
     info: strawberry.types.Info,
@@ -592,7 +596,9 @@ class AiAssistantMutation:
     await _safe_notify_run(run.id)
     return AiAssistantRun.from_model(run)
 
-  @strawberry.mutation
+  @strawberry.mutation(
+    description="批准或拒绝 AI 运行中等待处理的非交易工具调用"
+  )
   async def resolve_ai_assistant_approval(
     self,
     info: strawberry.types.Info,
@@ -640,7 +646,7 @@ class AiAssistantMutation:
       await _safe_notify_run(run.id)
     return AiAssistantRun.from_model(run)
 
-  @strawberry.mutation
+  @strawberry.mutation(description="更新当前用户 AI 对话的标题或外部搜索偏好")
   async def update_ai_assistant_thread(
     self,
     info: strawberry.types.Info,
@@ -664,7 +670,9 @@ class AiAssistantMutation:
       )
       return AiAssistantThread.from_model(thread)
 
-  @strawberry.mutation
+  @strawberry.mutation(
+    description="删除当前用户拥有且没有活动运行的 AI 对话及其消息"
+  )
   async def delete_ai_assistant_thread(
     self,
     info: strawberry.types.Info,
@@ -689,7 +697,9 @@ class AiAssistantMutation:
 
 @strawberry.type(description="产品内 AI Assistant 实时事件")
 class AiAssistantSubscription:
-  @strawberry.subscription
+  @strawberry.subscription(
+    description="按持久化序号订阅单个 AI 对话的可恢复事件流"
+  )
   async def ai_assistant_events(
     self,
     info: strawberry.types.Info,

@@ -1,0 +1,2664 @@
+{
+  "operations": {
+    "Mutation": {
+      "acknowledgeOperationalAlert": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "activateTTradeLive": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "addHoliday": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "addWatchlistItem": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "approveStrategyTradeIntent": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "approveTTradeEntry": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "archiveStrategyInstance": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "armLimitUpBoardCandidate": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "beginTTradeControlledWindow": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "bulkSaveHolidays": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelAiAssistantRun": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "cancelConditionalLiquidationOrder": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelExitPlan": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelFlowRun": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "cancelLiquidationOrder": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelOrder": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "trade:manual"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelTTradeOrder": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cancelTTradeReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cloneStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "cloneStrategyInstance": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmExitIntent": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmExitPlanAuthorization": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "liquidation:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmLiquidation": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "liquidation:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmManualOrder": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "trade:manual"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmStrategyControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmStrategyTradeIntentApproval": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmTTradeControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmTTradeEntryApproval": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "createAgentEnrollment": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "agent:manage"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "createAiAssistantThread": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "createManualExitPlan": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "createStrategyInstance": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "createStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "deleteAiAssistantThread": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "deleteBacktestVersion": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "deleteHoliday": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "deleteStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "disarmLimitUpBoardCandidate": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "evaluateConditionalLiquidationOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "evaluateExitPlanNow": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "importTTradeExternalEntry": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "liquidateAllPositions": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "liquidatePosition": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "liquidatePositions": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "pauseStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "pauseStrategyInstance": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "pauseStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "pauseTTradeEntries": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "placeOrder": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewExitIntent": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewExitPlanAuthorization": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "liquidation:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewLiquidation": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "liquidation:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewManualOrder": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "trade:manual"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewStrategyControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewStrategyTradeIntentApproval": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewTTradeControl": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewTTradeEntryApproval": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "reconcileLimitUpBoardAssistant": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "reconcileTTradeGlobalMonitor": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "redeemClearedPosition": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "refreshStockDisclosures": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "registerPushDevice": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "notification:manage"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "rejectExitIntent": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "rejectStrategyTradeIntent": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "rejectTTradeEntry": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "removeWatchlistItem": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "reorderWatchlist": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "replaceWatchlist": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "rerunBacktestVersion": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "resolveAiAssistantApproval": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "resolveOperationalAlert": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "restartStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "resumeStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "resumeStrategyInstance": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "resumeStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "retryAiAssistantRun": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "retryFlowRun": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "revokeAgentDevice": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "agent:manage"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "runDeployment": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "runStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "saveFirstBoardAssistant": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "saveLimitUpBoardAssistant": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "saveTTradeGlobalMonitor": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "sendAiAssistantMessage": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "setConditionalLiquidationOrderEnabled": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "setDeploymentScheduleActive": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "operations:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "setExitPlanEnabled": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "setFirstBoardCandidatePreference": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "limit-up:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "startStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "startStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "startTTradeReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "startTTradeSession": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "stopStrategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "stopStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "stopTTradeSession": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "syncTTradeSourceOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "triggerTTradeKillSwitch": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "unregisterPushDevice": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "notification:manage"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "updateAiAssistantThread": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "experimental"
+      },
+      "updateAiRuntimeSettings": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-config:write"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
+      "updateManualExitPlan": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "updatePushPreferences": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "notification:manage"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "updateStrategyGridBook": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "updateStrategyInstanceParameters": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "updateStrategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "upsertConditionalLiquidationOrder": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      }
+    },
+    "Query": {
+      "account": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "agentDevices": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "aiAssistantCapabilities": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:read"
+        ],
+        "risk": "READ",
+        "stability": "experimental"
+      },
+      "aiAssistantMessages": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:read"
+        ],
+        "risk": "READ",
+        "stability": "experimental"
+      },
+      "aiAssistantThread": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:read"
+        ],
+        "risk": "READ",
+        "stability": "experimental"
+      },
+      "aiAssistantThreads": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:read"
+        ],
+        "risk": "READ",
+        "stability": "experimental"
+      },
+      "aiRuntimeSettings": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "backtestHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "closedPositionCycles": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "conditionalLiquidationOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "currentAccount": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "dailyAssetSnapshots": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "dailyAssetSnapshotsPage": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "dividFactors": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlan": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanCapabilities": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanHoldingCapacity": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlans": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "financialOverview": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "financialReports": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "financialStatements": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "financialSummary": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "firstBoardPromotionDesk": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "flowRun": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "flowRuns": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "getDeploymentById": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "getDeploymentByName": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "historyOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "historyTrades": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "holidays": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "instrument": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "instruments": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "instrumentsConnection": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "intradayVolumeScreen": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "intradayWarmCacheStatus": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "klines": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "klinesPage": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "latestMarketQuotes": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardAssistant": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpLifecycle": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpRadar": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "liquidationOrder": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "liquidationOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "liquidationSummary": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "listDeployments": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "liveSafetyStatus": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "notificationEventRoute": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "notification:manage"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "operationalAlerts": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "order": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "orderEntryCapabilities": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "portfolioOverview": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "portfolioSummary": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "position": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "positions": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "redemptionRecords": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "researchRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "researchRuns": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "rootSectors": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "sector": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "sectorStats": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "sectors": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockDisclosureSummary": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockScreen": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockScreenSnapshotStatus": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockSectors": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "stockSignalSnapshotMeta": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategies": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategy": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyBucketLedger": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyDecisionHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyDefinitions": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyExecutionLogs": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyExecutionTrace": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyExitPlans": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyGridBook": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyInstance": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyInstanceMobileParameters": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyInstances": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyPendingTradeIntents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyPerformance": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyRun": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyRuns": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeBatchEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeBatchEventsPage": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeBatches": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeBatchesPage": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeGlobalMonitor": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeImportedEntries": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeReplayCycles": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeReplayHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeReplayPreparation": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeSession": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeSessions": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeSignalHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tTradeSignalHistoryPage": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "ticks": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "todayOrders": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "todayTrades": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "trade": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tradingCalendar": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "validateTTradeLiveReadiness": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "watchlist": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      }
+    },
+    "Subscription": {
+      "aiAssistantEvents": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "assistant:read"
+        ],
+        "risk": "READ",
+        "stability": "experimental"
+      },
+      "deploymentStatus": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "firstBoardPromotionUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "flowRunLogs": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "limitUpBoardAssistantUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "marketDepth": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "marketKlines": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "marketQuotes": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "marketTicks": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyInstanceEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyKlines": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyLogs": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "strategyTicks": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "systemAlerts": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "systemStrategies": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
+      },
+      "tTradeUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "tradingEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      }
+    }
+  },
+  "schemaVersion": 2
+}

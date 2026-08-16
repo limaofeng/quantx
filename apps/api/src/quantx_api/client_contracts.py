@@ -1,4 +1,4 @@
-"""Generate the public, read-only client-development contract bundle."""
+"""Generate versioned Web, native, and third-party development contracts."""
 
 from __future__ import annotations
 
@@ -12,12 +12,23 @@ from fastapi import FastAPI
 from graphql import build_schema
 from strawberry import Schema
 
-from quantx_api.gqlapi.security import required_permission
+from quantx_api.gqlapi.operation_policy import operation_policy
 
 CLIENT_OPENAPI_PATHS = frozenset(
   {
     "/auth/session",
     "/auth/session/refresh",
+    "/health",
+    "/health/live",
+    "/health/ready",
+    "/health/components",
+  }
+)
+WEB_OPENAPI_PATHS = frozenset(
+  {
+    "/auth/web/session",
+    "/auth/web/session/development",
+    "/auth/web/session/refresh",
     "/health",
     "/health/live",
     "/health/ready",
@@ -91,28 +102,30 @@ def _pruned_components(
   return pruned.get("components", {})
 
 
-def build_client_openapi(app: FastAPI) -> dict[str, Any]:
-  """Return a native-client OpenAPI document without internal API surfaces."""
+def _build_scoped_openapi(
+  app: FastAPI,
+  paths_to_include: frozenset[str],
+  *,
+  title: str,
+  description: str,
+) -> dict[str, Any]:
   source = deepcopy(app.openapi())
   paths = {
     path: source["paths"][path]
-    for path in sorted(CLIENT_OPENAPI_PATHS)
+    for path in sorted(paths_to_include)
     if path in source.get("paths", {})
   }
-  missing = CLIENT_OPENAPI_PATHS - paths.keys()
+  missing = paths_to_include - paths.keys()
   if missing:
     missing_list = ", ".join(sorted(missing))
-    raise RuntimeError(f"Client OpenAPI paths are missing: {missing_list}")
+    raise RuntimeError(f"Scoped OpenAPI paths are missing: {missing_list}")
 
   document: dict[str, Any] = {
     "openapi": source["openapi"],
     "info": {
       **source["info"],
-      "title": "QuantX Client API",
-      "description": (
-        "QuantX 原生客户端会话与服务状态接口。业务查询、变更和订阅"
-        "使用同源 /graphql。"
-      ),
+      "title": title,
+      "description": description,
     },
     "paths": paths,
   }
@@ -122,20 +135,62 @@ def build_client_openapi(app: FastAPI) -> dict[str, Any]:
   return document
 
 
-def build_graphql_permissions(schema_sdl: str) -> dict[str, dict[str, str]]:
-  """Map every GraphQL root field to the server authorization permission."""
+def build_client_openapi(app: FastAPI) -> dict[str, Any]:
+  """Return the native and third-party client REST contract."""
+  return _build_scoped_openapi(
+    app,
+    CLIENT_OPENAPI_PATHS,
+    title="QuantX Client API",
+    description=(
+      "QuantX 原生与第三方客户端会话和服务状态接口。业务查询、变更与订阅"
+      "使用同源 /graphql。"
+    ),
+  )
+
+
+def build_web_openapi(app: FastAPI) -> dict[str, Any]:
+  """Return the browser-session and health contract used by QuantX Web."""
+  document = _build_scoped_openapi(
+    app,
+    WEB_OPENAPI_PATHS,
+    title="QuantX Web API",
+    description=(
+      "QuantX Web 会话与服务状态接口。Web 业务能力使用同源 /graphql；"
+      "development 会话端点仅在开发环境可用。"
+    ),
+  )
+  for path, path_item in document["paths"].items():
+    stability = (
+      "development-only"
+      if path == "/auth/web/session/development"
+      else "web-internal"
+    )
+    for operation in path_item.values():
+      if isinstance(operation, dict):
+        operation["x-quantx-stability"] = stability
+  return document
+
+
+def build_graphql_operation_policies(schema_sdl: str) -> dict[str, Any]:
+  """Export every GraphQL root field's authorization and support policy."""
   graphql_schema = build_schema(schema_sdl)
-  result: dict[str, dict[str, str]] = {}
+  operations: dict[str, dict[str, Any]] = {}
   for operation_name in ROOT_OPERATION_TYPES:
     root_type = graphql_schema.get_type(operation_name)
     fields = getattr(root_type, "fields", None)
     if not isinstance(fields, dict):
       continue
-    result[operation_name] = {
-      field_name: required_permission(operation_name, field_name)
-      for field_name in sorted(fields)
-    }
-  return result
+    operation_fields: dict[str, Any] = {}
+    for field_name in sorted(fields):
+      policy = operation_policy(operation_name, field_name)
+      operation_fields[field_name] = {
+        "audiences": list(policy.audiences),
+        "requiredPermissions": list(policy.required_permissions),
+        "risk": policy.risk,
+        "stability": policy.stability,
+      }
+    operations[operation_name] = operation_fields
+  return {"schemaVersion": 2, "operations": operations}
 
 
 def build_contract_files(
@@ -143,11 +198,18 @@ def build_contract_files(
 ) -> dict[str, bytes]:
   schema_sdl = schema.as_str().rstrip() + "\n"
   return {
+    "graphql-operation-policies.v2.json": _json_bytes(
+      build_graphql_operation_policies(schema_sdl)
+    ),
     "graphql-permissions.json": _json_bytes(
-      build_graphql_permissions(schema_sdl)
+      {
+        "deprecated": True,
+        "replacement": "graphql-operation-policies.v2.json",
+      }
     ),
     "graphql-schema.graphql": schema_sdl.encode("utf-8"),
     "openapi-client.json": _json_bytes(build_client_openapi(app)),
+    "openapi-web.json": _json_bytes(build_web_openapi(app)),
   }
 
 

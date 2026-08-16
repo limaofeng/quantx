@@ -22,12 +22,16 @@ const schemaSource = await fs.readFile(
   path.join(contractRoot, 'graphql-schema.graphql'),
   'utf8'
 );
-const permissions = JSON.parse(
+const policyContract = JSON.parse(
   await fs.readFile(
-    path.join(contractRoot, 'graphql-permissions.json'),
+    path.join(contractRoot, 'graphql-operation-policies.v2.json'),
     'utf8'
   )
 );
+if (policyContract.schemaVersion !== 2) {
+  throw new Error('Unsupported GraphQL operation policy schema version');
+}
+const operationPolicies = policyContract.operations;
 const schema = buildSchema(schemaSource);
 
 await fs.rm(outputRoot, { recursive: true, force: true });
@@ -62,16 +66,26 @@ function renderOperation(operationName, type) {
     frontmatter(operationName),
     `# ${operationName}`,
     '',
-    '> 此页面由当前部署版本的 GraphQL Schema 自动生成。字段权限来自服务端授权映射。',
+    '> 此页面由当前部署版本的 GraphQL Schema 与显式 operation policy 自动生成。',
     '',
   ];
-  const permissionMap = permissions[operationName] ?? {};
+  const policyMap = operationPolicies[operationName] ?? {};
   for (const field of Object.values(type.getFields()).sort((a, b) =>
     a.name.localeCompare(b.name)
   )) {
+    const policy = policyMap[field.name];
+    if (!policy) {
+      throw new Error(`Missing operation policy: ${operationName}.${field.name}`);
+    }
     lines.push(`## ${field.name}`, '');
     lines.push(
-      `**所需权限：** \`${permissionMap[field.name] ?? 'query:unclassified'}\``,
+      `**所需权限：** ${policy.requiredPermissions
+        .map(permission => `\`${permission}\``)
+        .join(' + ')}`,
+      '',
+      `**适用端：** ${policy.audiences.map(value => `\`${value}\``).join('、')}`,
+      '',
+      `**稳定性 / 风险：** \`${policy.stability}\` / \`${policy.risk}\``,
       ''
     );
     if (field.description) lines.push(field.description, '');
@@ -167,7 +181,7 @@ const index = [
   frontmatter('GraphQL Schema 参考'),
   '# GraphQL Schema 参考',
   '',
-  '该参考由发布包中的 SDL 和服务端权限映射自动生成，不依赖生产环境内省。',
+  '该参考由发布包中的 SDL 和 operation policy 自动生成，不依赖生产环境内省。',
   '',
   '| 操作 | 字段数 | 参考 |',
   '| --- | ---: | --- |',
@@ -176,7 +190,7 @@ const index = [
   `| Subscription | ${counts.Subscription} | [查看 Subscription](./subscription) |`,
   `| Types | ${types.length} | [查看类型索引](./types) |`,
   '',
-  '完整 SDL 可在[契约下载](../)页面获取，用于 Apollo iOS codegen。',
+  '完整 SDL 与 v2 operation policy 可在[契约下载](../)页面获取。',
   '',
 ].join('\n');
 await fs.writeFile(path.join(outputRoot, 'index.md'), index, 'utf8');

@@ -487,7 +487,7 @@ async def create_agent_enrollment(
   principal: Principal = Depends(_principal),
   db: AsyncSession = Depends(_database),
 ) -> AgentEnrollmentResponse:
-  principal.require_permission("mutation:write")
+  principal.require_permission("agent:manage")
   account_ids = [
     principal.require_account(account_id)
     for account_id in payload.authorized_account_ids
@@ -550,7 +550,7 @@ async def revoke_agent_device(
   principal: Principal = Depends(_principal),
   db: AsyncSession = Depends(_database),
 ) -> None:
-  principal.require_permission("mutation:write")
+  principal.require_permission("agent:manage")
   revoked = await AgentAuthService(db).revoke(
     device_id=device_id,
     user_id=principal.user_id,

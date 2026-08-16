@@ -15,7 +15,7 @@ def _context(account_id: str) -> dict:
       device_session_id="t-trade-session",
       access_token_expires_at=datetime.now(timezone.utc).replace(tzinfo=None)
       + timedelta(minutes=5),
-      permissions=frozenset({"mutation:write"}),
+      permissions=frozenset({"strategy:write"}),
       authorized_account_ids=(account_id,),
     ),
     "request_id": "t-trade-request",

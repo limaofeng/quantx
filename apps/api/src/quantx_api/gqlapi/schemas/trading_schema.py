@@ -364,7 +364,11 @@ class TradingMutation:
         message="手动委托未能进入交易命令队列，请检查交易就绪状态",
       )
 
-  @strawberry.mutation(description="下单")
+  @strawberry.mutation(
+    description=(
+      "创建手工交易命令并返回排队状态；成功不表示已报、成交或持仓已变化"
+    )
+  )
   async def place_order(
     self, info: strawberry.types.Info, input: OrderInput
   ) -> OrderMutationResult:
@@ -404,7 +408,11 @@ class TradingMutation:
         order=None,
       )
 
-  @strawberry.mutation(description="撤单")
+  @strawberry.mutation(
+    description=(
+      "创建撤单命令并返回受理结果；最终撤单状态以 QMT 委托回报收敛结果为准"
+    )
+  )
   async def cancel_order(
     self, info: strawberry.types.Info, input: CancelOrderInput
   ) -> CancelOrderResult:

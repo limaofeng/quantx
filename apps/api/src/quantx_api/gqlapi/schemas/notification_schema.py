@@ -31,16 +31,9 @@ async def _lock_push_write(db, info):
   request_account_id = authorized_account_id(info)
   current = await AuthService(db).lock_and_validate_session(
     principal,
+    required_permission=_PERMISSION,
     account_id=request_account_id,
   )
-  # The top-level security extension preserves existing Web administration via
-  # mutation:write. Native sessions never receive that broad permission and
-  # must hold the dedicated notification scope.
-  legacy_web_compatible = (
-    current.active_account_id is None and "mutation:write" in current.permissions
-  )
-  if not legacy_web_compatible:
-    current.require_permission(_PERMISSION)
   return current, _current_account_id(current, request_account_id)
 
 

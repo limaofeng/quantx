@@ -4,7 +4,11 @@ import pytest
 import strawberry
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.tokens import utcnow
-from quantx_api.gqlapi.security import AuthorizationExtension, required_permission
+from quantx_api.gqlapi.security import (
+  AuthorizationExtension,
+  required_permission,
+  required_permissions,
+)
 
 
 @strawberry.type
@@ -44,7 +48,7 @@ _AUTHORIZATION_SCHEMA = strawberry.Schema(
 def test_trade_approval_mutations_require_independent_permission(
   field_name: str,
 ):
-  assert required_permission("Mutation", field_name) == "trade:approve"
+  assert required_permissions("Mutation", field_name)[-1] == "trade:approve"
 
 
 def test_strategy_lifecycle_uses_narrow_control_permission():
@@ -65,10 +69,10 @@ def test_t_trade_risk_reduction_uses_narrow_control_permission():
     "triggerTTradeKillSwitch",
   ],
 )
-def test_legacy_or_unchallenged_risk_writes_are_not_native_capabilities(
+def test_legacy_or_unchallenged_risk_writes_use_domain_permission(
   field_name: str,
 ):
-  assert required_permission("Mutation", field_name) == "mutation:write"
+  assert required_permission("Mutation", field_name) == "strategy:write"
 
 
 @pytest.mark.parametrize(
@@ -95,7 +99,7 @@ def test_liquidation_mutations_require_independent_control_permission(
 
 
 def test_legacy_direct_order_does_not_share_mobile_manual_permission():
-  assert required_permission("Mutation", "placeOrder") == "trade:direct"
+  assert required_permission("Mutation", "placeOrder") == "orders:write"
 
 
 @pytest.mark.asyncio

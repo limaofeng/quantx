@@ -14,279 +14,22 @@ from quantx_api.auth.errors import AuthError, unauthenticated
 from quantx_api.auth.principal import Principal
 from quantx_api.auth.tokens import utcnow
 
+from .operation_policy import operation_policy
+
 logger = logging.getLogger(__name__)
 
 _SLOW_RESOLVER_SECONDS = 1.0
 
-_PORTFOLIO_FIELDS = {
-  "account",
-  "closedpositioncycles",
-  "currentaccount",
-  "dailyassetsnapshots",
-  "dailyassetsnapshotspage",
-  "portfoliooverview",
-  "portfolio_summary",
-  "portfoliosummary",
-  "position",
-  "positions",
-  "watchlist",
-}
-_ORDER_FIELDS = {
-  "conditionalliquidationorders",
-  "exitplan",
-  "exitplancapabilities",
-  "exitplanevents",
-  "exitplanholdingcapacity",
-  "exitplans",
-  "historyorders",
-  "historytrades",
-  "liquidationorder",
-  "liquidationorders",
-  "liquidationsummary",
-  "order",
-  "redemptionrecords",
-  "todayorders",
-  "todaytrades",
-  "trade",
-}
-_STRATEGY_FIELDS = {
-  "backtesthistory",
-  "firstboardpromotiondesk",
-  "firstboardpromotionupdates",
-  "strategies",
-  "strategy",
-  "strategybucketledger",
-  "strategydecisionhistory",
-  "strategydefinitions",
-  "strategyexecutionlogs",
-  "strategyexecutiontrace",
-  "strategyexitplans",
-  "strategygridbook",
-  "strategyinstance",
-  "strategyinstancemobileparameters",
-  "strategyinstances",
-  "strategypendingtradeintents",
-  "strategyperformance",
-  "limitupboardassistant",
-  "limitupboardassistantupdates",
-  "strategyrun",
-  "strategyruns",
-  "ttradeglobalmonitor",
-  "ttradebatches",
-  "ttradebatchevents",
-  "ttradebatcheventspage",
-  "ttradebatchespage",
-  "ttradeimportedentries",
-  "ttradereplay",
-  "ttradereplaycycles",
-  "ttradereplayhistory",
-  "ttradereplaypreparation",
-  "ttradesession",
-  "ttradesessions",
-  "ttradesignalhistory",
-  "ttradesignalhistorypage",
-  "validatettradelivereadiness",
-  "livesafetystatus",
-  "operationalalerts",
-}
-_SYSTEM_FIELDS = {
-  "schema",
-  "type",
-  "agentdevices",
-  "airuntimesettings",
-  "flowrun",
-  "flowruns",
-  "getdeploymentbyid",
-  "getdeploymentbyname",
-  "intradaywarmcachestatus",
-  "listdeployments",
-}
-_SYSTEM_CONFIG_MUTATION_FIELDS = {"updateairuntimesettings"}
-_MARKET_FIELDS = {
-  "dividfactors",
-  "financialoverview",
-  "financialreports",
-  "financialstatements",
-  "financialsummary",
-  "holidays",
-  "instrument",
-  "instruments",
-  "instrumentsconnection",
-  "intradayvolumescreen",
-  "klines",
-  "klinespage",
-  "latestmarketquotes",
-  "limituplifecycle",
-  "marketindexintradaytrend",
-  "limitupradar",
-  "orderentrycapabilities",
-  "rootsectors",
-  "researchrun",
-  "researchruns",
-  "sector",
-  "sectors",
-  "sectorstats",
-  "stockdisclosuresummary",
-  "stockscreen",
-  "stockscreensnapshotstatus",
-  "stocksignalssnapshotmeta",
-  "stocksignalsnapshotmeta",
-  "stocksectors",
-  "ticks",
-  "tradingcalendar",
-}
-_ASSISTANT_QUERY_FIELDS = {
-  "aiassistantcapabilities",
-  "aiassistantmessages",
-  "aiassistantthread",
-  "aiassistantthreads",
-}
-_ASSISTANT_MUTATION_FIELDS = {
-  "cancelaiassistantrun",
-  "createaiassistantthread",
-  "deleteaiassistantthread",
-  "resolveaiassistantapproval",
-  "retryaiassistantrun",
-  "sendaiassistantmessage",
-  "updateaiassistantthread",
-}
-_ASSISTANT_SUBSCRIPTION_FIELDS = {"aiassistantevents"}
 _ACCOUNT_KEY = re.compile(r"^account_?id$", re.IGNORECASE)
-_TRADE_APPROVAL_MUTATION_FIELDS = {
-  "confirmstrategytradeintentapproval",
-  "confirmstrategycontrol",
-  "confirmttradecontrol",
-  "confirmexitintent",
-  "confirmttradeentryapproval",
-  "previewstrategytradeintentapproval",
-  "previewstrategycontrol",
-  "previewttradecontrol",
-  "previewexitintent",
-  "previewttradeentryapproval",
-}
-_MANUAL_TRADE_MUTATION_FIELDS = {
-  "cancelorder",
-  "confirmmanualorder",
-  "previewmanualorder",
-}
-_DIRECT_TRADE_MUTATION_FIELDS = {"placeorder"}
-_WATCHLIST_MUTATION_FIELDS = {
-  "addwatchlistitem",
-  "removewatchlistitem",
-  "replacewatchlist",
-  "reorderwatchlist",
-}
-_STRATEGY_CONTROL_MUTATION_FIELDS = {
-  # These lifecycle operations do not create a broker order.  Mobile parameter
-  # editing remains on the legacy permission until its allowlist/version
-  # contract is enforced by the resolver.
-  "pausestrategyinstance",
-  "resumestrategyinstance",
-  "rejectstrategytradeintent",
-  "updatestrategyinstanceparameters",
-}
-_T_TRADE_CONTROL_MUTATION_FIELDS = {
-  "acknowledgeoperationalalert",
-  "cancelttradeorder",
-  "pausettradeentries",
-  "reconcilettradeglobalmonitor",
-  "rejectttradeentry",
-  "resolveoperationalalert",
-  "savettradeglobalmonitor",
-  "startttradesession",
-  "stopttradesession",
-}
-_LIMIT_UP_CONTROL_MUTATION_FIELDS = {
-  "armlimitupboardcandidate",
-  "disarmlimitupboardcandidate",
-  "reconcilelimitupboardassistant",
-  "savefirstboardassistant",
-  "savelimitupboardassistant",
-  "setfirstboardcandidatepreference",
-}
-_LIQUIDATION_CONTROL_MUTATION_FIELDS = {
-  "confirmexitplanauthorization",
-  "confirmliquidation",
-  "previewexitplanauthorization",
-  "previewliquidation",
-}
-_NOTIFICATION_MUTATION_FIELDS = {
-  "registerpushdevice",
-  "updatepushpreferences",
-  "unregisterpushdevice",
-}
-_NOTIFICATION_QUERY_FIELDS = {"notificationeventroute"}
-_LEGACY_WEB_MUTATION_COMPAT_PERMISSIONS = frozenset(
-  {
-    "limit-up:control",
-    "liquidation:control",
-    "notification:manage",
-    "strategy:control",
-    "t-trade:control",
-    "watchlist:write",
-  }
-)
-
-_NORMALIZED_PORTFOLIO_FIELDS = {
-  re.sub(r"[^a-z0-9]", "", value.lower()) for value in _PORTFOLIO_FIELDS
-}
 
 
-def normalize_field_name(value: str) -> str:
-  return re.sub(r"[^a-z0-9]", "", value.lower())
+def required_permissions(operation_name: str, field_name: str) -> tuple[str, ...]:
+  return operation_policy(operation_name, field_name).required_permissions
 
 
 def required_permission(operation_name: str, field_name: str) -> str:
-  normalized = normalize_field_name(field_name)
-  if operation_name == "Mutation":
-    if normalized in _SYSTEM_CONFIG_MUTATION_FIELDS:
-      return "system-config:write"
-    if normalized in _ASSISTANT_MUTATION_FIELDS:
-      return "assistant:write"
-    if normalized in _TRADE_APPROVAL_MUTATION_FIELDS:
-      return "trade:approve"
-    if normalized in _MANUAL_TRADE_MUTATION_FIELDS:
-      return "trade:manual"
-    if normalized in _DIRECT_TRADE_MUTATION_FIELDS:
-      return "trade:direct"
-    if normalized in _WATCHLIST_MUTATION_FIELDS:
-      return "watchlist:write"
-    if normalized in _STRATEGY_CONTROL_MUTATION_FIELDS:
-      return "strategy:control"
-    if normalized in _T_TRADE_CONTROL_MUTATION_FIELDS:
-      return "t-trade:control"
-    if normalized in _LIMIT_UP_CONTROL_MUTATION_FIELDS:
-      return "limit-up:control"
-    if normalized in _LIQUIDATION_CONTROL_MUTATION_FIELDS:
-      return "liquidation:control"
-    if normalized in _NOTIFICATION_MUTATION_FIELDS:
-      return "notification:manage"
-    return "mutation:write"
-  if normalized in _NORMALIZED_PORTFOLIO_FIELDS:
-    return "portfolio:read"
-  if normalized in _ORDER_FIELDS:
-    return "orders:read"
-  if normalized in _STRATEGY_FIELDS:
-    return "strategy:read"
-  if normalized in _SYSTEM_FIELDS:
-    return "system-status:read"
-  if normalized in _MARKET_FIELDS:
-    return "market:read"
-  if normalized in _ASSISTANT_QUERY_FIELDS:
-    return "assistant:read"
-  if normalized in _NOTIFICATION_QUERY_FIELDS:
-    return "notification:manage"
-  if operation_name == "Subscription":
-    if normalized in _ASSISTANT_SUBSCRIPTION_FIELDS:
-      return "assistant:read"
-    if normalized in {"tradingevents"}:
-      return "orders:read"
-    if normalized.startswith("strategy") or normalized == "ttradeupdates":
-      return "strategy:read"
-    if normalized.startswith("market"):
-      return "market:read"
-    return "system-status:read"
-  return "query:unclassified"
+  """Return the primary permission for legacy internal callers."""
+  return required_permissions(operation_name, field_name)[0]
 
 
 def extract_bearer(value: Optional[str]) -> str:
@@ -369,14 +112,7 @@ class AuthorizationExtension(SchemaExtension):
         and not info.field_name.startswith("__")
       ):
         principal = principal_from_context(context)
-        permission = required_permission(operation_name, info.field_name)
-        legacy_web_write_compatible = (
-          operation_name == "Mutation"
-          and principal.active_account_id is None
-          and permission in _LEGACY_WEB_MUTATION_COMPAT_PERMISSIONS
-          and "mutation:write" in principal.permissions
-        )
-        if not legacy_web_write_compatible:
+        for permission in required_permissions(operation_name, info.field_name):
           principal.require_permission(permission)
         requested_account_id = _account_id_from_kwargs(kwargs)
         if requested_account_id is not None:

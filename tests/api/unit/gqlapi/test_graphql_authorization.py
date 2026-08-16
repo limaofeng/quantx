@@ -7,7 +7,11 @@ import strawberry
 from quantx_api.auth.errors import unauthenticated
 from quantx_api.auth.principal import Principal
 from quantx_api.gqlapi.app import AuthenticatedGraphQLRouter
-from quantx_api.gqlapi.security import AuthorizationExtension, required_permission
+from quantx_api.gqlapi.security import (
+  AuthorizationExtension,
+  required_permission,
+  required_permissions,
+)
 from starlette.websockets import WebSocketState
 
 
@@ -30,6 +34,10 @@ class AuthorizationMutation:
 
   @strawberry.mutation
   def pause_strategy_instance(self) -> bool:
+    return True
+
+  @strawberry.mutation
+  def activate_t_trade_live(self) -> bool:
     return True
 
 
@@ -95,7 +103,7 @@ def test_ai_runtime_settings_use_dedicated_system_permissions():
 def test_trade_approval_mutations_require_independent_permission(
   field_name: str,
 ):
-  assert required_permission("Mutation", field_name) == "trade:approve"
+  assert required_permissions("Mutation", field_name)[-1] == "trade:approve"
 
 
 @pytest.mark.parametrize(
@@ -142,10 +150,10 @@ def test_mobile_non_order_mutations_use_narrow_permissions(
     "triggerTTradeKillSwitch",
   ],
 )
-def test_legacy_or_not_yet_challenged_risk_writes_stay_out_of_native_scopes(
+def test_legacy_or_not_yet_challenged_risk_writes_use_domain_permissions(
   field_name: str,
 ):
-  assert required_permission("Mutation", field_name) == "mutation:write"
+  assert required_permission("Mutation", field_name) == "strategy:write"
 
 
 @pytest.mark.parametrize(
@@ -157,7 +165,7 @@ def test_manual_trade_mutations_require_manual_permission(field_name: str):
 
 
 def test_legacy_direct_order_requires_distinct_permission():
-  assert required_permission("Mutation", "placeOrder") == "trade:direct"
+  assert required_permission("Mutation", "placeOrder") == "orders:write"
 
 
 def test_order_entry_capabilities_require_market_read_permission():
@@ -181,7 +189,7 @@ async def test_mobile_manual_principal_cannot_call_legacy_direct_order():
 
 
 @pytest.mark.asyncio
-async def test_legacy_web_general_write_remains_compatible_with_narrow_control():
+async def test_removed_general_write_does_not_authorize_narrow_control():
   result = await SCHEMA.execute(
     "mutation { pauseStrategyInstance }",
     context_value={
@@ -190,8 +198,8 @@ async def test_legacy_web_general_write_remains_compatible_with_narrow_control()
     },
   )
 
-  assert result.errors is None
-  assert result.data == {"pauseStrategyInstance": True}
+  assert result.data is None
+  assert result.errors[0].extensions["code"] == "FORBIDDEN"
 
 
 @pytest.mark.asyncio
@@ -255,6 +263,17 @@ def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(
   assert required_permission(operation, field_name) == permission
 
 
+def test_high_risk_mutations_require_domain_write_and_trade_approval():
+  assert required_permissions("Mutation", "confirmExitIntent") == (
+    "orders:write",
+    "trade:approve",
+  )
+  assert required_permissions("Mutation", "activateTTradeLive") == (
+    "strategy:write",
+    "trade:approve",
+  )
+
+
 @pytest.mark.asyncio
 async def test_anonymous_graphql_query_is_rejected_with_safe_extensions():
   result = await SCHEMA.execute(
@@ -286,6 +305,36 @@ async def test_read_only_principal_cannot_execute_mutation():
 
   assert result.data is None
   assert result.errors[0].extensions["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_all_of_permission_rejects_missing_trade_approval():
+  result = await SCHEMA.execute(
+    "mutation { activateTTradeLive }",
+    context_value={
+      "principal": _principal(permissions={"strategy:write"}),
+      "request_id": "request-approval",
+    },
+  )
+
+  assert result.data is None
+  assert result.errors[0].extensions["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_all_of_permission_accepts_complete_permission_set():
+  result = await SCHEMA.execute(
+    "mutation { activateTTradeLive }",
+    context_value={
+      "principal": _principal(
+        permissions={"strategy:write", "trade:approve"}
+      ),
+      "request_id": "request-approval-complete",
+    },
+  )
+
+  assert result.errors is None
+  assert result.data == {"activateTTradeLive": True}
 
 
 @pytest.mark.asyncio

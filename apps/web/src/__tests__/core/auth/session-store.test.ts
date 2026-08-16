@@ -21,7 +21,7 @@ function grant(token: string): WebSessionGrant {
       id: 'user-1',
       username: 'owner',
       displayName: 'QuantX Owner',
-      permissions: ['portfolio:read', 'mutation:write'],
+      permissions: ['portfolio:read', 'portfolio:write'],
       authorizedAccountIds: ['ACCOUNT-1'],
     },
   };

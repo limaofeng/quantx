@@ -299,3 +299,19 @@ def test_trade_confirmation_revision_validates_preexisting_schema() -> None:
   no_unique.uniques = []
   with pytest.raises(RuntimeError, match="missing user/account/action/idempotency"):
     revision._validate_existing_schema(no_unique)
+
+
+def test_graphql_write_permission_migration_is_complete_and_irreversible() -> None:
+  revision = _load_revision(
+    "20260816_0020_graphql_write_permissions.py",
+    "quantx_test_graphql_write_permissions_revision",
+  )
+
+  assert revision.down_revision == "20260815_0019"
+  assert revision.migrate_permissions(["market:read"]) == ["market:read"]
+  migrated = revision.migrate_permissions(["mutation:write", "market:read"])
+  assert "mutation:write" not in migrated
+  assert set(revision.REPLACEMENT_WRITE_PERMISSIONS) <= set(migrated)
+  assert revision.migrate_permissions(migrated) == migrated
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
