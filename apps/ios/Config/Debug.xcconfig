@@ -13,5 +13,7 @@ QUANTX_LOG_LEVEL = debug
 QUANTX_APNS_ENTITLEMENT_ENVIRONMENT = development
 QUANTX_APNS_API_ENVIRONMENT = SANDBOX
 
-// Optional machine-local signing overrides. This file is ignored by Git.
+// Optional machine-local signing and login-prefill overrides. This file is ignored by Git.
+QUANTX_IOS_DEVELOPMENT_USERNAME =
+QUANTX_IOS_DEVELOPMENT_PASSWORD =
 #include? "Debug.local.xcconfig"

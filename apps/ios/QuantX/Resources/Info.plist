@@ -55,6 +55,12 @@
 	<string>$(QUANTX_AUTH_BASE_URL)</string>
 	<key>QuantXAccountDataEnabled</key>
 	<string>$(QUANTX_ACCOUNT_DATA_ENABLED)</string>
+#if DEBUG_HTTP_ALLOWED
+	<key>QuantXDevelopmentUsername</key>
+	<string>$(QUANTX_IOS_DEVELOPMENT_USERNAME)</string>
+	<key>QuantXDevelopmentPassword</key>
+	<string>$(QUANTX_IOS_DEVELOPMENT_PASSWORD)</string>
+#endif
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

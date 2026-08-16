@@ -116,18 +116,6 @@
       </BuildableProductRunnable>
       <CommandLineArguments>
       </CommandLineArguments>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "QUANTX_IOS_DEVELOPMENT_PASSWORD"
-            value = "$(QUANTX_IOS_DEVELOPMENT_PASSWORD)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "QUANTX_IOS_DEVELOPMENT_USERNAME"
-            value = "$(QUANTX_IOS_DEVELOPMENT_USERNAME)"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

@@ -36,12 +36,28 @@ struct LoginView: View {
               .autocorrectionDisabled()
               .submitLabel(.next)
               .textFieldStyle(.roundedBorder)
+              .contextMenu {
+                PasteButton(payloadType: String.self) { values in
+                  if let value = values.first {
+                    username = value
+                  }
+                }
+                .accessibilityLabel("粘贴用户名")
+              }
 
             SecureField("密码", text: $password)
               .textContentType(.password)
               .submitLabel(.go)
               .textFieldStyle(.roundedBorder)
               .onSubmit(login)
+              .contextMenu {
+                PasteButton(payloadType: String.self) { values in
+                  if let value = values.first {
+                    password = value
+                  }
+                }
+                .accessibilityLabel("粘贴密码")
+              }
 
             Text("服务端会按当前用户授权自动绑定唯一主账户。")
               .font(.caption)

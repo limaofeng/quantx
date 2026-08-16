@@ -91,9 +91,6 @@ schemes:
         QuantXUITests: [test]
     run:
       config: Debug
-      environmentVariables:
-        QUANTX_IOS_DEVELOPMENT_USERNAME: "$(QUANTX_IOS_DEVELOPMENT_USERNAME)"
-        QUANTX_IOS_DEVELOPMENT_PASSWORD: "$(QUANTX_IOS_DEVELOPMENT_PASSWORD)"
     test:
       config: Debug
       gatherCoverageData: true

@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 final class QuantXUITests: XCTestCase {
@@ -190,6 +191,8 @@ final class QuantXUITests: XCTestCase {
     XCTAssertTrue(app.staticTexts["登录 QuantX"].waitForExistence(timeout: 5))
     XCTAssertEqual(app.textFields["用户名"].value as? String, "quantx-ui-test")
     XCTAssertTrue(app.secureTextFields["密码"].exists)
+    XCTAssertFalse(app.buttons["粘贴用户名"].exists)
+    XCTAssertFalse(app.buttons["粘贴密码"].exists)
     XCTAssertFalse(app.textFields["login-requested-account-id"].exists)
     XCTAssertTrue(app.staticTexts["服务端会按当前用户授权自动绑定唯一主账户。"].exists)
     XCTAssertTrue(app.buttons["登录并加载数据"].isEnabled)
@@ -199,6 +202,17 @@ final class QuantXUITests: XCTestCase {
     scrollToElement(developmentPrefillNotice, in: app)
     XCTAssertTrue(developmentPrefillNotice.exists)
     XCTAssertFalse(app.tabBars.firstMatch.exists)
+
+    let usernameField = app.textFields["用户名"]
+    UIPasteboard.general.string = "pasted-username"
+    scrollToElement(usernameField, in: app)
+    usernameField.press(forDuration: 1)
+
+    let pasteUsernameButton = app.buttons["粘贴用户名"]
+    XCTAssertTrue(pasteUsernameButton.waitForExistence(timeout: 3))
+    pasteUsernameButton.tap()
+    XCTAssertEqual(usernameField.value as? String, "pasted-username")
+    XCTAssertFalse(pasteUsernameButton.exists)
   }
 
   @MainActor

@@ -8,11 +8,26 @@ final class DevelopmentLoginPrefillTests: XCTestCase {
       environment: [
         DevelopmentLoginPrefill.usernameEnvironmentKey: "  quantx-developer  ",
         DevelopmentLoginPrefill.passwordEnvironmentKey: "development-password",
-      ]
+      ],
+      bundleInfo: [:]
     )
 
     XCTAssertEqual(prefill.username, "quantx-developer")
     XCTAssertEqual(prefill.password, "development-password")
+    XCTAssertTrue(prefill.isConfigured)
+  }
+
+  func testDebugPrefillFallsBackToMachineLocalBundleSettings() {
+    let prefill = DevelopmentLoginPrefill.load(
+      environment: [:],
+      bundleInfo: [
+        DevelopmentLoginPrefill.usernameBundleKey: "bundle-developer",
+        DevelopmentLoginPrefill.passwordBundleKey: "bundle-password",
+      ]
+    )
+
+    XCTAssertEqual(prefill.username, "bundle-developer")
+    XCTAssertEqual(prefill.password, "bundle-password")
     XCTAssertTrue(prefill.isConfigured)
   }
 
@@ -22,6 +37,12 @@ final class DevelopmentLoginPrefillTests: XCTestCase {
         DevelopmentLoginPrefill.usernameEnvironmentKey:
           "$(QUANTX_IOS_DEVELOPMENT_USERNAME)",
         DevelopmentLoginPrefill.passwordEnvironmentKey:
+          "$(QUANTX_IOS_DEVELOPMENT_PASSWORD)",
+      ],
+      bundleInfo: [
+        DevelopmentLoginPrefill.usernameBundleKey:
+          "$(QUANTX_IOS_DEVELOPMENT_USERNAME)",
+        DevelopmentLoginPrefill.passwordBundleKey:
           "$(QUANTX_IOS_DEVELOPMENT_PASSWORD)",
       ]
     )
