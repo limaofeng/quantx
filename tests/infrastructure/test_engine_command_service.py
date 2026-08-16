@@ -1,3 +1,7 @@
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+
 import pytest
 from quantx_engine import command_processor
 from quantx_infrastructure.database.relational_base import Base
@@ -6,6 +10,23 @@ from quantx_infrastructure.services import engine_command_service as service_mod
 from quantx_infrastructure.services.engine_command_service import EngineCommandService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+class ReplayMode(Enum):
+  BACKTEST = "BACKTEST"
+
+
+@dataclass
+class ReplayPositionInput:
+  stock_code: str
+  volume: int
+
+
+@dataclass
+class ReplayStartInput:
+  start_time: datetime
+  mode: ReplayMode
+  positions: list[ReplayPositionInput]
 
 
 @pytest.fixture
@@ -49,6 +70,34 @@ async def test_engine_command_idempotency_is_database_enforced(
       await db.scalar(select(func.count()).select_from(EngineCommandOutbox))
       == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_engine_command_serializes_nested_dataclass_payloads(
+  command_database,
+) -> None:
+  service = EngineCommandService()
+  replay_input = ReplayStartInput(
+    start_time=datetime(2026, 7, 20, 9, 30),
+    mode=ReplayMode.BACKTEST,
+    positions=[ReplayPositionInput(stock_code="600887.SH", volume=800)],
+  )
+
+  receipt = await service.enqueue(
+    "T_TRADE_REPLAY_START",
+    {"input": replay_input},
+    aggregate_id="account-1",
+  )
+
+  async with command_database() as db:
+    row = await db.get(EngineCommandOutbox, receipt.message_id)
+    assert row.payload == {
+      "input": {
+        "start_time": "2026-07-20T09:30:00",
+        "mode": "BACKTEST",
+        "positions": [{"stock_code": "600887.SH", "volume": 800}],
+      }
+    }
 
 
 @pytest.mark.asyncio

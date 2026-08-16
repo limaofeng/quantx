@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -120,6 +120,8 @@ class EngineCommandService:
 
   @classmethod
   def _json_value(cls, value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+      return cls._json_value(asdict(value))
     if isinstance(value, Enum):
       return value.value
     if isinstance(value, datetime):
