@@ -104,6 +104,20 @@ deployments:
           skip_download: false
           compute_daily_signals: true
     version: "0.2.0"
+  - name: core-index-intraday-repair
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/core_index_intraday_repair_flow.py:core_index_intraday_repair_flow
+    work_pool: *quantx_process_pool
+    description: 自动检查并回补行情工作台核心指数 1 分钟 K 线
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "50 8 * * *"
+        timezone: Asia/Shanghai
+      - cron: "20 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.1.0"
   - name: daily-indicator-snapshot
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/daily_indicator_snapshot_flow.py:daily_indicator_snapshot_flow
     work_pool: *quantx_process_pool

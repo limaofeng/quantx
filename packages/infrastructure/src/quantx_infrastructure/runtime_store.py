@@ -82,6 +82,7 @@ class DurableRuntimeStore:
     *,
     device_id: Optional[str] = None,
     required_capabilities: Optional[list[str]] = None,
+    idempotency_scope: str = "",
   ) -> str:
     encoded = json.dumps(
       payload,
@@ -89,7 +90,15 @@ class DurableRuntimeStore:
       separators=(",", ":"),
       default=str,
     )
-    idempotency_key = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    normalized_scope = str(idempotency_scope or "").strip()
+    if len(normalized_scope) > 200:
+      raise ValueError("market-data idempotency_scope is too long")
+    idempotency_material = (
+      encoded if not normalized_scope else f"{normalized_scope}\0{encoded}"
+    )
+    idempotency_key = hashlib.sha256(
+      idempotency_material.encode("utf-8")
+    ).hexdigest()
     async with self.engine.begin() as connection:
       existing = (
         await connection.execute(

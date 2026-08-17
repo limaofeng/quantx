@@ -1,3 +1,5 @@
+import hashlib
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -126,6 +128,39 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
     call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
   )
   assert insert[1]["device_id"] == "device-data-only"
+
+
+@pytest.mark.asyncio
+async def test_market_data_request_scopes_repair_attempt_without_changing_payload() -> None:
+  connection = _BoundDeviceConnection()
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = _Engine(connection)
+  payload = {"operation": "bars", "stock_list": ["000001.SH"]}
+  scope = "core-index-intraday-repair:v1:2026-08-17:attempt-1"
+
+  await store.create_market_data_request(
+    payload,
+    device_id="device-data-only",
+    idempotency_scope=scope,
+  )
+
+  encoded = json.dumps(
+    payload,
+    sort_keys=True,
+    separators=(",", ":"),
+    default=str,
+  )
+  expected_key = hashlib.sha256(f"{scope}\0{encoded}".encode()).hexdigest()
+  lookup = next(
+    call for call in connection.calls if "WHERE idempotency_key" in call[0]
+  )
+  insert = next(
+    call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
+  )
+  assert lookup[1] == {"idempotency_key": expected_key}
+  assert insert[1]["request_payload"] == encoded
 
 
 @pytest.mark.asyncio

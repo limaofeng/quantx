@@ -92,6 +92,7 @@ async def _request_and_wait(
   timeout_seconds: int = 900,
   agent_device_id: str = "",
   required_capabilities: Optional[list[str]] = None,
+  idempotency_scope: str = "",
 ) -> dict[str, Any]:
   store = DurableRuntimeStore()
   try:
@@ -100,6 +101,8 @@ async def _request_and_wait(
       request_kwargs["device_id"] = agent_device_id
     if required_capabilities:
       request_kwargs["required_capabilities"] = required_capabilities
+    if idempotency_scope:
+      request_kwargs["idempotency_scope"] = idempotency_scope
     request_id = await store.create_market_data_request(payload, **request_kwargs)
     logger.info(
       "Created market-data request request_id=%s operation=%s codes=%s "
