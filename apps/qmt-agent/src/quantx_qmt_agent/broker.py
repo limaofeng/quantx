@@ -412,6 +412,20 @@ class SimulatorBroker:
   def reset_market_subscriptions(self) -> None:
     return None
 
+  def subscribe_whole_market(self, callback) -> bool:
+    del callback
+    return False
+
+  def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
+    return {}
+
+  def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
+    del data
+    return {}
+
+  def unsubscribe_whole_market(self) -> None:
+    return None
+
 
 class _LocalMarketStreamer:
   """Map server subscription identities to local XTData subscriptions."""
@@ -427,8 +441,10 @@ class _LocalMarketStreamer:
     self._subscriptions: dict[str, int | list[int]] = {}
     self._lock = threading.RLock()
     self._whole_quote_metadata: dict[str, dict[str, float]] = {}
+    self._whole_quote_codes: tuple[str, ...] = ()
     self._whole_quote_metadata_date = None
     self._whole_quote_metadata_refreshing = False
+    self._whole_quote_subscription: int | list[int] | None = None
 
   @staticmethod
   def _positive_number(value: Any) -> float:
@@ -441,7 +457,7 @@ class _LocalMarketStreamer:
   def _load_whole_quote_metadata(
     self,
     markets: list[str],
-  ) -> dict[str, dict[str, float]]:
+  ) -> tuple[tuple[str, ...], dict[str, dict[str, float]]]:
     normalized_markets: set[str] = set()
     for market in markets:
       candidate = str(market).strip().upper()
@@ -493,21 +509,22 @@ class _LocalMarketStreamer:
           values["priceTick"] = price_tick
         if values:
           metadata[str(code).strip().upper()] = values
-    return metadata
+    return tuple(codes), metadata
 
   def _refresh_whole_quote_metadata(self, markets: list[str]) -> None:
     try:
       with self._access_lock:
-        metadata = self._load_whole_quote_metadata(markets)
-      if not metadata:
-        raise RuntimeError("QMT returned no instrument limit metadata")
+        codes, metadata = self._load_whole_quote_metadata(markets)
+      if not codes:
+        raise RuntimeError("QMT returned no SH/SZ instruments")
       with self._lock:
+        self._whole_quote_codes = codes
         self._whole_quote_metadata = metadata
         self._whole_quote_metadata_date = datetime.now(SHANGHAI_TIMEZONE).date()
       logger.info(
         "Whole-quote instrument metadata refreshed: markets=%s instruments=%s",
         markets,
-        len(metadata),
+        len(codes),
       )
     except Exception as exc:
       logger.warning(
@@ -542,7 +559,7 @@ class _LocalMarketStreamer:
     with self._lock:
       if self._whole_quote_metadata_date != today:
         return data
-      metadata = dict(self._whole_quote_metadata)
+      metadata = self._whole_quote_metadata
     for code, raw_tick in data.items():
       if not isinstance(raw_tick, dict):
         continue
@@ -579,13 +596,9 @@ class _LocalMarketStreamer:
     kind = str(payload.get("kind") or "quote")
     stock_code = str(payload.get("stock_code") or "")
     period = str(payload.get("period") or "tick")
-    markets = list(payload.get("stock_codes") or [])
 
     def on_data(data: Any) -> None:
       safe_data = _json_safe(data)
-      if kind == "whole":
-        self._ensure_whole_quote_metadata_current(markets)
-        safe_data = self._enrich_whole_quote_data(safe_data)
       callback(
         {
           "subscription_id": subscription_id,
@@ -597,17 +610,7 @@ class _LocalMarketStreamer:
       )
 
     with self._access_lock:
-      if kind == "whole":
-        today = datetime.now(SHANGHAI_TIMEZONE).date()
-        with self._lock:
-          metadata_is_current = self._whole_quote_metadata_date == today
-        if not metadata_is_current:
-          self._refresh_whole_quote_metadata(markets)
-        local_id = self.data_manager.subscribe_whole_quote(
-          markets,
-          callback=on_data,
-        )
-      elif kind == "quote" and stock_code:
+      if kind == "quote" and stock_code:
         local_id = self.data_manager.subscribe_quote(
           stock_code,
           period=period,
@@ -627,6 +630,72 @@ class _LocalMarketStreamer:
         return True
     self._unsubscribe_local(local_id)
     return True
+
+  def subscribe_whole_market(self, callback) -> bool:
+    """Establish the process-wide fixed SH/SZ whole-quote subscription."""
+    markets = ["SH", "SZ"]
+    with self._lock:
+      if self._whole_quote_subscription is not None:
+        return True
+      metadata_is_current = (
+        self._whole_quote_metadata_date
+        == datetime.now(SHANGHAI_TIMEZONE).date()
+        and bool(self._whole_quote_codes)
+      )
+    if not metadata_is_current:
+      self._refresh_whole_quote_metadata(markets)
+
+    def on_data(data: Any) -> None:
+      self._ensure_whole_quote_metadata_current(markets)
+      callback(data)
+
+    with self._access_lock:
+      local_id = self.data_manager.subscribe_whole_quote(
+        markets,
+        callback=on_data,
+      )
+    if not self._valid_subscription(local_id):
+      return False
+    with self._lock:
+      if self._whole_quote_subscription is None:
+        self._whole_quote_subscription = local_id
+        return True
+    self._unsubscribe_local(local_id)
+    return True
+
+  def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
+    """Read the latest complete SH/SZ state after subscription establishment."""
+    markets = ["SH", "SZ"]
+    today = datetime.now(SHANGHAI_TIMEZONE).date()
+    with self._lock:
+      metadata_is_current = (
+        self._whole_quote_metadata_date == today
+        and bool(self._whole_quote_codes)
+      )
+    if not metadata_is_current:
+      self._refresh_whole_quote_metadata(markets)
+    with self._lock:
+      codes = self._whole_quote_codes
+    if not codes:
+      raise RuntimeError("SH/SZ instrument universe is empty")
+    with self._access_lock:
+      snapshot = self.data_manager.get_full_tick(codes)
+    safe_snapshot = _json_safe(snapshot)
+    enriched = self._enrich_whole_quote_data(safe_snapshot)
+    return enriched if isinstance(enriched, dict) else {}
+
+  def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
+    """Normalize one XT callback outside the callback thread."""
+    safe_data = _json_safe(data)
+    enriched = self._enrich_whole_quote_data(safe_data)
+    return enriched if isinstance(enriched, dict) else {}
+
+  def unsubscribe_whole_market(self) -> None:
+    with self._lock:
+      local_id = self._whole_quote_subscription
+      self._whole_quote_subscription = None
+    if local_id is not None:
+      self._unsubscribe_local(local_id)
 
   def _unsubscribe_local(self, local_id: int | list[int]) -> None:
     values = local_id if isinstance(local_id, list) else [local_id]
@@ -694,6 +763,18 @@ class QmtDataBroker(SimulatorBroker):
 
   def reset_market_subscriptions(self) -> None:
     self.market_streamer.reset()
+
+  def subscribe_whole_market(self, callback) -> bool:
+    return self.market_streamer.subscribe_whole_market(callback)
+
+  def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.whole_market_snapshot()
+
+  def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.prepare_whole_market_data(data)
+
+  def unsubscribe_whole_market(self) -> None:
+    self.market_streamer.unsubscribe_whole_market()
 
 
 class LiveBroker:
@@ -876,6 +957,18 @@ class LiveBroker:
 
   def reset_market_subscriptions(self) -> None:
     self.market_streamer.reset()
+
+  def subscribe_whole_market(self, callback) -> bool:
+    return self.market_streamer.subscribe_whole_market(callback)
+
+  def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.whole_market_snapshot()
+
+  def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.prepare_whole_market_data(data)
+
+  def unsubscribe_whole_market(self) -> None:
+    self.market_streamer.unsubscribe_whole_market()
 
 
 def _iter_locked_market_data_records(

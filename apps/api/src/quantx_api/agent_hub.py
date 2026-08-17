@@ -41,7 +41,7 @@ class AgentConnectionHub:
         control = json.loads(value)
       except (TypeError, json.JSONDecodeError):
         continue
-      if isinstance(control, dict):
+      if isinstance(control, dict) and control.get("kind") == "quote":
         controls[str(subscription_id)] = control
     self._active_controls = controls
 
@@ -123,6 +123,8 @@ class AgentConnectionHub:
       return self._market_device_id == device_id
 
   async def _dispatch(self, control: dict[str, Any]) -> None:
+    if control.get("kind") != "quote":
+      return
     subscription_id = str(control.get("subscription_id") or "")
     if not subscription_id:
       return

@@ -1,7 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from quantx_api import agent_api, runtime_status
+from quantx_infrastructure.core.data.market_stream_transport import (
+  MarketStreamState,
+)
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
@@ -163,6 +166,35 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
     )
   session_factory = async_sessionmaker(engine, expire_on_commit=False)
   monkeypatch.setattr(runtime_status, "AsyncSessionLocal", session_factory)
+  stream_state = MarketStreamState(
+    status="READY",
+    stream_id="stream-1",
+    sequence=5,
+    captured_at=datetime.now(timezone.utc),
+    updated_at=datetime.now(timezone.utc),
+    instrument_count=5_000,
+  )
+
+  async def state():
+    return stream_state
+
+  async def engine_state():
+    return stream_state
+
+  async def outside_session(*_args):
+    return False
+
+  monkeypatch.setattr(runtime_status.market_stream_store, "state", state)
+  monkeypatch.setattr(
+    runtime_status.market_stream_store,
+    "engine_state",
+    engine_state,
+  )
+  monkeypatch.setattr(
+    runtime_status.TradingTimeService,
+    "is_trading_hours",
+    outside_session,
+  )
   now = runtime_status.utcnow()
 
   async with session_factory() as db:
@@ -182,7 +214,10 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
         component="qmt-agent:device-1",
         instance_id="instance-1",
         status="RECONCILE_REQUIRED",
-        details={"protocolVersion": "1.1"},
+        details={
+          "protocolVersion": "1.1",
+          "marketStreamStatus": "READY",
+        },
         updated_at=now,
       )
     )

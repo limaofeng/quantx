@@ -129,27 +129,7 @@ class RemoteMarketDataManager:
       control,
     )
 
-  def subscribe_whole_quote(
-    self,
-    markets: list[str],
-    *,
-    callback: Callable,
-  ) -> int:
-    return self._subscribe(
-      "market-data:whole",
-      callback,
-      {
-        "kind": "whole",
-        "stock_codes": list(markets),
-        "period": "tick",
-        "count": 0,
-      },
-    )
-
   def unsubscribe_quote(self, subscription_id: int) -> None:
-    self._cancel(subscription_id)
-
-  def unsubscribe_whole_quote(self, subscription_id: int) -> None:
     self._cancel(subscription_id)
 
   def _cancel(self, subscription_id: int) -> None:

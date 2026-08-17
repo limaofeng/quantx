@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -23,10 +24,18 @@ from fastapi import (
   WebSocketDisconnect,
 )
 from quantx_contracts import (
+  MARKET_STREAM_MARKETS,
+  MARKET_STREAM_SUBPROTOCOL,
   PROTOCOL_VERSION,
   AgentEnvelope,
   AgentMessageType,
+  MarketControlType,
+  MarketStreamBatch,
+  MarketStreamControl,
   ReportAckPayload,
+)
+from quantx_infrastructure.core.data.market_stream_transport import (
+  market_stream_store,
 )
 from quantx_infrastructure.database.redis_pubsub import (
   AGENT_REPORT_WAKE_CHANNEL,
@@ -48,6 +57,15 @@ from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.tokens import utcnow
+from quantx_api.monitoring.metrics import (
+  MARKET_STREAM_CONNECTIONS,
+  MARKET_STREAM_FRAME_BYTES,
+  MARKET_STREAM_FRAMES,
+  MARKET_STREAM_INSTRUMENTS,
+  MARKET_STREAM_PROCESSING,
+  MARKET_STREAM_RESYNCS,
+  MARKET_STREAM_SEQUENCE,
+)
 
 logger = logging.getLogger(__name__)
 agent_router = APIRouter(tags=["qmt-agent"])
@@ -76,6 +94,29 @@ MAX_MARKET_DATA_CHUNK_RECORDS = 5000
 MAX_MARKET_DATA_CHUNKS = 100_000
 
 
+class _MarketConnectionRegistry:
+  """Process-local single connection gate for the personal market Agent."""
+
+  def __init__(self) -> None:
+    self._lock = asyncio.Lock()
+    self._connection_id = ""
+
+  async def register(self) -> str | None:
+    async with self._lock:
+      if self._connection_id:
+        return None
+      self._connection_id = str(uuid.uuid4())
+      return self._connection_id
+
+  async def unregister(self, connection_id: str) -> None:
+    async with self._lock:
+      if self._connection_id == connection_id:
+        self._connection_id = ""
+
+
+_market_connections = _MarketConnectionRegistry()
+
+
 async def _publish_market_event(
   device_id: str,
   payload: dict[str, Any],
@@ -85,12 +126,10 @@ async def _publish_market_event(
   kind = str(payload.get("kind") or "")
   stock_code = str(payload.get("stock_code") or "")
   period = str(payload.get("period") or "tick")
-  if kind == "whole":
-    channel = "market-data:whole"
-  elif kind == "quote" and stock_code:
+  if kind == "quote" and stock_code:
     channel = f"market-data:{stock_code}:{period}"
   else:
-    raise ValueError("market_event 缺少有效行情路由")
+    raise ValueError("market_event 只允许单标的 K 线行情")
   data = payload.get("data")
   if not isinstance(data, dict):
     data = {stock_code or "data": data}
@@ -159,6 +198,21 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
         ),
         "journalProcessingCommands": int(
           payload.get("journal_processing_commands") or 0
+        ),
+        "marketStreamStatus": str(
+          payload.get("market_stream_status") or "OFFLINE"
+        )[:32],
+        "marketStreamSequence": int(
+          payload.get("market_stream_sequence") or 0
+        ),
+        "marketStreamQueueDepth": int(
+          payload.get("market_stream_queue_depth") or 0
+        ),
+        "marketStreamResyncs": int(
+          payload.get("market_stream_resyncs") or 0
+        ),
+        "marketStreamAckLatencyMs": float(
+          payload.get("market_stream_ack_latency_ms") or 0.0
         ),
       }
     )
@@ -497,6 +551,159 @@ async def _process_message(
     await _publish_market_event(device_id, envelope.payload)
     return
   raise ValueError(f"不支持的 Agent 消息类型: {envelope.message_type.value}")
+
+
+async def _request_market_resync(
+  websocket: WebSocket,
+  *,
+  stream_id: str,
+  sequence: int,
+  reason: str,
+) -> None:
+  try:
+    await websocket.send_text(
+      MarketStreamControl(
+        type=MarketControlType.RESYNC,
+        stream_id=stream_id,
+        sequence=sequence,
+        reason=reason[:256],
+      ).model_dump_json()
+    )
+  except Exception:
+    pass
+
+
+@agent_router.websocket("/ws/agent/market")
+async def agent_market_websocket(websocket: WebSocket) -> None:
+  """Receive the only SH/SZ whole-quote stream and converge it in Redis."""
+  offered = set(websocket.scope.get("subprotocols") or [])
+  if MARKET_STREAM_SUBPROTOCOL not in offered:
+    await websocket.close(code=4406, reason="market subprotocol required")
+    return
+  await websocket.accept(subprotocol=MARKET_STREAM_SUBPROTOCOL)
+  connection_id = ""
+  stream_id = ""
+  last_sequence = 0
+  disconnect_reason = "market websocket disconnected"
+  try:
+    first = AgentEnvelope.model_validate_json(await websocket.receive_text())
+    session = await _authenticate(first)
+    device = session.device
+    capabilities = {
+      str(value).lower() for value in first.payload.get("capabilities", [])
+    }
+    if "market-data" not in capabilities:
+      raise AuthError("FORBIDDEN", "Agent 未声明 market-data 能力")
+    if not await agent_connection_hub.is_market_device(device.id):
+      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+    connection_id = await _market_connections.register() or ""
+    if not connection_id:
+      raise AuthError("CONFLICT", "已存在活动行情连接")
+    MARKET_STREAM_CONNECTIONS.set(1)
+
+    await websocket.send_text(
+      _auth_result(accepted=True).model_dump_json()
+    )
+    await market_stream_store.cleanup_legacy_whole_controls()
+    stream_id = str(uuid.uuid4())
+    await market_stream_store.mark_syncing(
+      stream_id,
+      reason="market websocket connected",
+    )
+    await websocket.send_text(
+      MarketStreamControl(
+        type=MarketControlType.START,
+        stream_id=stream_id,
+        markets=MARKET_STREAM_MARKETS,
+      ).model_dump_json()
+    )
+
+    while True:
+      if utcnow() >= session.expires_at:
+        raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
+      await _ensure_device_active(device.id)
+      message = await websocket.receive()
+      if message["type"] == "websocket.disconnect":
+        raise WebSocketDisconnect(message.get("code", 1000))
+      payload = message.get("bytes")
+      if not isinstance(payload, bytes):
+        raise ValueError("market stream only accepts binary data frames")
+      processing_started = time.monotonic()
+      batch = MarketStreamBatch.from_bytes(payload)
+      if batch.stream_id != stream_id:
+        raise ValueError("market stream id mismatch")
+      state = await market_stream_store.write_batch(batch, payload)
+      MARKET_STREAM_PROCESSING.observe(time.monotonic() - processing_started)
+      MARKET_STREAM_FRAMES.labels(kind=batch.kind.value).inc()
+      MARKET_STREAM_FRAME_BYTES.set(len(payload))
+      MARKET_STREAM_INSTRUMENTS.set(batch.instrument_count)
+      MARKET_STREAM_SEQUENCE.set(batch.sequence)
+      last_sequence = state.sequence
+      await websocket.send_text(
+        MarketStreamControl(
+          type=MarketControlType.ACK,
+          stream_id=stream_id,
+          sequence=last_sequence,
+        ).model_dump_json()
+      )
+  except WebSocketDisconnect:
+    disconnect_reason = "market websocket disconnected"
+  except AuthError as exc:
+    disconnect_reason = exc.message
+    if not stream_id:
+      try:
+        await websocket.send_text(
+          _auth_result(accepted=False, reason=exc.message).model_dump_json()
+        )
+      except Exception:
+        pass
+    else:
+      await _request_market_resync(
+        websocket,
+        stream_id=stream_id,
+        sequence=last_sequence,
+        reason=exc.message,
+      )
+    try:
+      await websocket.close(code=4401, reason=exc.message[:120])
+    except Exception:
+      pass
+  except Exception as exc:
+    disconnect_reason = f"{exc.__class__.__name__}: {exc}"
+    logger.warning(
+      "Agent market WebSocket resync: stream_id=%s sequence=%s error=%s",
+      stream_id,
+      last_sequence,
+      disconnect_reason,
+    )
+    MARKET_STREAM_RESYNCS.labels(reason=exc.__class__.__name__).inc()
+    if stream_id:
+      await _request_market_resync(
+        websocket,
+        stream_id=stream_id,
+        sequence=last_sequence,
+        reason=disconnect_reason,
+      )
+    try:
+      await websocket.close(code=1011, reason="market stream resync required")
+    except Exception:
+      pass
+  finally:
+    if stream_id:
+      try:
+        await market_stream_store.mark_offline(
+          stream_id,
+          reason=disconnect_reason,
+        )
+      except Exception as exc:
+        logger.warning(
+          "Could not mark market stream offline: stream_id=%s error=%s",
+          stream_id,
+          exc.__class__.__name__,
+        )
+    if connection_id:
+      await _market_connections.unregister(connection_id)
+      MARKET_STREAM_CONNECTIONS.set(0)
 
 
 @agent_router.websocket("/ws/agent")

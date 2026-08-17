@@ -8,13 +8,13 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import pandas as pd
 
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 
 from .adapter import DataAdapter, DataMode, DataSubscription
 from .unified_subscription_manager import unified_subscription_manager
-from quantx_infrastructure.core.utils import time_utils
 
 
 class IntradayWarmCache(Protocol):
@@ -120,20 +120,21 @@ class RealtimeDataAdapter(DataAdapter):
     self.subscriptions[subscription_id] = subscription
 
     # 通过统一管理器订阅K线数据
-    def data_callback(data):
+    async def data_callback(data):
       """处理来自统一管理器的K线数据回调"""
-      asyncio.create_task(self._handle_xt_kline_data(instrument_code, period, data))
+      await self._handle_xt_kline_data(instrument_code, period, data)
 
     try:
-      subscribed = await self.subscription_manager.subscribe(
+      manager_handle = await self.subscription_manager.subscribe(
         stock_code=instrument_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period=period,
       )
-      if not subscribed:
+      if not manager_handle:
         self.subscriptions.pop(subscription_id, None)
         raise RuntimeError(f"底层K线订阅失败: {instrument_code} {period}")
+      subscription.manager_handle = manager_handle
       self.logger.info(f"通过统一管理器订阅K线数据: {instrument_code} {period}")
     except Exception as e:
       self.subscriptions.pop(subscription_id, None)
@@ -157,20 +158,21 @@ class RealtimeDataAdapter(DataAdapter):
     self.subscriptions[subscription_id] = subscription
 
     # 通过统一管理器订阅
-    def data_callback(data):
+    async def data_callback(data):
       """处理来自统一管理器的数据回调"""
-      asyncio.create_task(self._handle_xt_tick_data(instrument_code, data))
+      await self._handle_xt_tick_data(instrument_code, data)
 
     try:
-      subscribed = await self.subscription_manager.subscribe(
+      manager_handle = await self.subscription_manager.subscribe(
         stock_code=instrument_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period="tick",
       )
-      if not subscribed:
+      if not manager_handle:
         self.subscriptions.pop(subscription_id, None)
         raise RuntimeError(f"底层tick订阅失败: {instrument_code}")
+      subscription.manager_handle = manager_handle
       self.logger.info(f"通过统一管理器订阅实时Tick数据: {instrument_code}")
     except Exception as e:
       self.subscriptions.pop(subscription_id, None)
@@ -186,24 +188,13 @@ class RealtimeDataAdapter(DataAdapter):
 
     subscription = self.subscriptions[subscription_id]
     instrument_code = subscription.instrument_code
-    data_type = subscription.data_type
 
     # 移除订阅记录
     del self.subscriptions[subscription_id]
 
-    # 检查是否还有其他订阅使用同一个股票代码和数据类型
-    still_subscribed = any(
-      sub.instrument_code == instrument_code and sub.data_type == data_type
-      for sub in self.subscriptions.values()
-    )
-
-    # 如果没有其他订阅使用该股票代码，通过统一管理器取消订阅
-    if not still_subscribed:
+    if subscription.manager_handle:
       try:
-        period = "tick" if data_type == "tick" else subscription.period or "tick"
-        await self.subscription_manager.unsubscribe(
-          self.subscriber_id, instrument_code, period
-        )
+        await self.subscription_manager.unsubscribe(subscription.manager_handle)
         self.logger.info(f"通过统一管理器取消订阅: {instrument_code}")
       except Exception as e:
         self.logger.error(f"取消订阅失败: {instrument_code}, {e}")
@@ -244,7 +235,9 @@ class RealtimeDataAdapter(DataAdapter):
         dividend_type=dividend_type,
       )
 
-    from quantx_infrastructure.services.historical_market_data_service import HistoricalMarketDataService
+    from quantx_infrastructure.services.historical_market_data_service import (
+      HistoricalMarketDataService,
+    )
 
     market_data_service = HistoricalMarketDataService()
     klines = await market_data_service.get_kline_data(
@@ -432,7 +425,9 @@ class RealtimeDataAdapter(DataAdapter):
       if not self.is_connected:
         await self.connect()
 
-      from quantx_infrastructure.services.historical_market_data_service import HistoricalMarketDataService
+      from quantx_infrastructure.services.historical_market_data_service import (
+        HistoricalMarketDataService,
+      )
 
       try:
         historical = await HistoricalMarketDataService().get_kline_data(
@@ -596,7 +591,9 @@ class RealtimeDataAdapter(DataAdapter):
     order: str,
     limit: Optional[int],
   ) -> List[Tick]:
-    from quantx_infrastructure.services.historical_market_data_service import HistoricalMarketDataService
+    from quantx_infrastructure.services.historical_market_data_service import (
+      HistoricalMarketDataService,
+    )
 
     market_data_service = HistoricalMarketDataService()
     ticks = await market_data_service.get_tick_data(
@@ -869,20 +866,21 @@ class RealtimeDataAdapter(DataAdapter):
     self.subscriptions[subscription_id] = subscription
 
     # 市场深度数据从 tick 数据中提取，通过统一管理器订阅 tick
-    def data_callback(data):
+    async def data_callback(data):
       """处理来自统一管理器的深度数据回调"""
-      asyncio.create_task(self._handle_xt_depth_data(instrument_code, data))
+      await self._handle_xt_depth_data(instrument_code, data)
 
     try:
-      subscribed = await self.subscription_manager.subscribe(
+      manager_handle = await self.subscription_manager.subscribe(
         stock_code=instrument_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period="tick",  # 深度数据从 tick 中提取
       )
-      if not subscribed:
+      if not manager_handle:
         self.subscriptions.pop(subscription_id, None)
         raise RuntimeError(f"底层市场深度订阅失败: {instrument_code}")
+      subscription.manager_handle = manager_handle
       self.logger.info(f"通过统一管理器订阅市场深度: {instrument_code}")
     except Exception as e:
       self.subscriptions.pop(subscription_id, None)

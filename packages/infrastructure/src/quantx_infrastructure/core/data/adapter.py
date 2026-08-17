@@ -32,6 +32,7 @@ class DataSubscription:
   callback: Optional[Callable] = None
   is_active: bool = True
   replay_speed: float = 1.0
+  manager_handle: str = ""
 
 
 class DataAdapter(ABC):

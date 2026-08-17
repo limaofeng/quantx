@@ -27,7 +27,14 @@ async def test_hub_replays_active_subscriptions_to_one_market_agent(
       "kind": "quote",
       "stock_code": "600000.SH",
       "period": "tick",
-    }
+    },
+    "obsolete-whole": {
+      "action": "SUBSCRIBE",
+      "subscription_id": "obsolete-whole",
+      "kind": "whole",
+      "stock_codes": ["SH", "SZ"],
+      "period": "tick",
+    },
   }
   fake_redis = FakeRedis(active)
 
@@ -100,4 +107,10 @@ async def test_market_event_only_publishes_from_assigned_agent(
         "kind": "whole",
         "data": {},
       },
+    )
+
+  with pytest.raises(ValueError, match="只允许单标的 K 线"):
+    await agent_api._publish_market_event(
+      "device-1",
+      {"kind": "whole", "data": {}},
     )

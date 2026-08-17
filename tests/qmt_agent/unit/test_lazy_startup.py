@@ -1,5 +1,4 @@
 import asyncio
-import threading
 
 import pytest
 
@@ -72,29 +71,48 @@ def test_unified_subscription_manager_defers_data_manager():
   assert registry.called is True
 
 
-def test_unified_subscription_manager_dispatches_sync_callback_to_main_loop():
+def test_unified_subscription_manager_uses_unique_handles_for_same_owner():
   from quantx_infrastructure.core.data.unified_subscription_manager import (
     UnifiedDataSubscriptionManager,
   )
 
   async def run_case():
-    manager = UnifiedDataSubscriptionManager()
-    manager.set_main_loop(asyncio.get_running_loop())
-    called = asyncio.Event()
+    class FakeHub:
+      def __init__(self):
+        self.callbacks = {}
+        self.cancelled = []
 
-    async def mark_called():
-      called.set()
+      async def subscribe_tick(self, stock_code, callback, *, delivery):
+        del stock_code, delivery
+        handle = f"hub-{len(self.callbacks) + 1}"
+        self.callbacks[handle] = callback
+        return handle
 
-    def callback(_data):
-      asyncio.create_task(mark_called())
+      async def unsubscribe(self, handle):
+        self.cancelled.append(handle)
+        return True
 
-    thread = threading.Thread(
-      target=lambda: manager._invoke_callback(callback, {"600900.SH": {}}, "600900.SH")
-    )
-    thread.start()
-    thread.join(timeout=1)
+      def snapshot(self):
+        return {}
 
-    await asyncio.wait_for(called.wait(), timeout=1)
+    original = UnifiedDataSubscriptionManager._instance
+    try:
+      UnifiedDataSubscriptionManager._instance = None
+      manager = UnifiedDataSubscriptionManager()
+      manager.hub = FakeHub()
+      first = await manager.subscribe(
+        "600900.SH", lambda _data: None, "same-owner", "tick"
+      )
+      second = await manager.subscribe(
+        "600900.SH", lambda _data: None, "same-owner", "tick"
+      )
+      assert first != second
+      assert await manager.unsubscribe(first)
+      assert manager.hub.cancelled == ["hub-1"]
+      assert await manager.unsubscribe(second)
+      assert manager.hub.cancelled == ["hub-1", "hub-2"]
+    finally:
+      UnifiedDataSubscriptionManager._instance = original
 
   asyncio.run(run_case())
 

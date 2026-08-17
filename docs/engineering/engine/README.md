@@ -4,8 +4,11 @@
 Agent 回报收敛。它使用 PostgreSQL advisory lock 保证同数据库只运行一个
 实例，并定期写入组件心跳。
 
-Engine 同时独占沪深全市场打板雷达：通过唯一的 `["SH", "SZ"]` whole-quote
-订阅维护盘中状态机，每 3 秒把最新候选榜和通用盘中量能快照批量写入 Redis
+Engine 的 `WholeQuoteHub` 是沪深 tick 的唯一进程内入口。它先订阅 Redis 二进制
+批次频道，再加载最新全量快照与水位，按 `stream_id + sequence` 检查重复、
+乱序和缺口，并按标的源时间阻止旧 tick 回退。全市场雷达、退出监控、策略、
+暖缓存和单标的展示均在 Hub 内本地过滤；新增标的不再向 Agent 创建或重建
+whole-quote 订阅。每 3 秒把最新候选榜和通用盘中量能快照批量写入 Redis
 派生读模型。API 只读取该投影，不因页面访问创建行情订阅。首次触板、封板、
 炸板和回封等阶段变化追加到 PostgreSQL `limit_up_radar_events`，用于 Engine
 重启后恢复当日轨迹；Redis 仍不是事件真源。
@@ -45,7 +48,7 @@ Redis 只用于唤醒消费者，以及向 API 发布行情、策略与交易事
 [A 股自动退出计划与卖出策略契约](../../trading/contracts/A股自动退出计划与卖出策略契约.md)。
 
 手工持仓的部分动态止盈也由 Engine 承载。计划创建时固定保护股数，条件清仓
-监控每秒从唯一 whole-quote 订阅读取价格、累计成交量和五档盘口，执行
+监控每秒从 `WholeQuoteHub` 中央快照读取价格、累计成交量和五档盘口，执行
 `ADAPTIVE_VOLUME_PRICE_TRAILING`。量能陈旧会降级到价格模式，价格陈旧则
 暂停；触发后持久化 pending 委托，逐笔成交通过 `agent_report_inbox` 幂等
 回填，部分成交只继续管理未成交的保护数量。实盘计划要求显式自动卖出授权。
@@ -54,7 +57,13 @@ Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例�
 权，并持续写入 `runtime_component_heartbeats`，供 API 就绪检查使用。
 
 持久化 `ExitPlanMonitor` 与策略运行解耦，每秒扫描 `auto_exit_plans` 的活动
-计划并消费全市场 whole-quote。API 对计划的创建、修改、启停、取消、立即
+计划并消费 `WholeQuoteHub` 全市场批次。API 对计划的创建、修改、启停、取消、立即
 评估和批量清仓全部写入 `engine_command_outbox`；Engine 在账户＋股票锁内
 校验 `config_version`、保护量冲突和待成交 SELL。策略非回测计划在运行时幂等
 同步到同一张表，策略停止不再终止已有退出保护。
+
+行情状态为 `STARTING → SYNCING → READY → STALE/OFFLINE`。只有 `READY`
+继续分发关键实时动作；交易时段 10 秒无新批次进入 `STALE`，午休、收盘和
+非交易日不误判。关键消费者使用容量 8 的有序队列，溢出后显式进入
+`LAGGING` 并停止相关回调；UI 使用容量 1 的 latest-only 队列并记录合并数。
+Pub/Sub 缺批时 Hub 从 Redis 最新全量快照收敛，不重放可能过时的中间 tick。

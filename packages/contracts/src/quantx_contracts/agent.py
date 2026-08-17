@@ -151,6 +151,11 @@ class HeartbeatPayload(BaseModel):
   journal_size_bytes: int = Field(default=0, ge=0)
   journal_pending_reports: int = Field(default=0, ge=0)
   journal_processing_commands: int = Field(default=0, ge=0)
+  market_stream_status: str = "OFFLINE"
+  market_stream_sequence: int = Field(default=0, ge=0)
+  market_stream_queue_depth: int = Field(default=0, ge=0)
+  market_stream_resyncs: int = Field(default=0, ge=0)
+  market_stream_ack_latency_ms: float = Field(default=0.0, ge=0)
 
 
 class ReportAckPayload(BaseModel):

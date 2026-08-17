@@ -359,45 +359,44 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
       }
 
     def subscribe_whole_quote(self, markets, callback):
-      assert markets == ["600000.SH", "300001.SZ"]
+      assert markets == ["SH", "SZ"]
       callbacks.append(callback)
       return 202
+
+    def get_full_tick(self, codes):
+      assert tuple(codes) == ("300001.SZ", "600000.SH")
+      return {
+        "600000.SH": {"lastPrice": 10.8},
+        "300001.SZ": {"lastPrice": 23.5},
+      }
 
     def unsubscribe_quote(self, subscription_id):
       del subscription_id
 
   events = []
   streamer = _LocalMarketStreamer(FakeDataManager())
-  payload = {
-    "subscription_id": "whole-market-1",
-    "kind": "whole",
-    "stock_codes": ["600000.SH", "300001.SZ"],
-    "period": "tick",
-  }
-
-  assert streamer.subscribe(payload, events.append)
+  assert streamer.subscribe_whole_market(events.append)
+  assert streamer.subscribe_whole_market(events.append)
   assert detail_batches == [["300001.SZ", "600000.SH"]]
-  callbacks[0](
-    {
-      "600000.SH": {"lastPrice": 10.8},
-      "300001.SZ": {
-        "lastPrice": 23.5,
-        "upperLimit": 24.0,
-        "priceTick": 0.02,
-      },
-    }
-  )
+  raw_ticks = {
+    "600000.SH": {"lastPrice": 10.8},
+    "300001.SZ": {
+      "lastPrice": 23.5,
+      "upperLimit": 24.0,
+      "priceTick": 0.02,
+    },
+  }
+  callbacks[0](raw_ticks)
 
-  ticks = events[0]["data"]
+  assert events[0] is raw_ticks
+  ticks = streamer.prepare_whole_market_data(events[0])
   assert ticks["600000.SH"]["upperLimit"] == 11.0
   assert ticks["600000.SH"]["priceTick"] == 0.01
   assert ticks["300001.SZ"]["upperLimit"] == 24.0
   assert ticks["300001.SZ"]["priceTick"] == 0.02
 
-  assert streamer.subscribe(
-    {**payload, "subscription_id": "whole-market-2"},
-    events.append,
-  )
+  snapshot = streamer.whole_market_snapshot()
+  assert snapshot["600000.SH"]["upperLimit"] == 11.0
   assert detail_batches == [["300001.SZ", "600000.SH"]]
 
 

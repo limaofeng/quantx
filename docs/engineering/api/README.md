@@ -17,7 +17,8 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 `127.0.0.1:18081`。常用端点包括 `/graphql`、`/health/live`、
 `/health/ready`、`/health/components` 和 `/ws/agent`。原生客户端在线
 文档位于 `/docs/`；FastAPI 开发 Swagger 只在内部 API 端口的
-`/_dev/api-docs` 提供，生产环境关闭。统一开发者中心覆盖 Web、原生客户端与
+`/_dev/api-docs` 提供，生产环境关闭。QMT Agent 的交易连接使用 `/ws/agent`，
+唯一沪深行情连接使用 `/ws/agent/market` 和 `quantx.market.v1`。统一开发者中心覆盖 Web、原生客户端与
 第三方 API。
 
 ## 代码边界
@@ -26,6 +27,11 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 - Agent 回报先进入 `agent_report_inbox`；Engine 消费后才推进订单和持仓。
 - API 源码禁止导入 `miniqmt`、`xtquant`、`quantx_engine` 或 `quantx_worker`。
 - GraphQL 契约变化后，通过 Caddy 公共入口运行前端 codegen。
+- API 行情中继在 Redis 最新 tick Hash、stream 状态和二进制 Pub/Sub 原子提交
+  后才 ACK Agent。首帧非快照、序号缺口、非法帧或 Redis 失败一律不 ACK，
+  将 stream 置为失效并要求全量重建；不提供旧 whole JSON 双读或直通降级。
+- `marketData=ready` 同时要求活动 Agent 行情连接、API 完整快照和 Engine
+  水位一致；交易时段还要求两端最近 10 秒内收到并应用行情。
 
 ## 开发认证与交易审批
 

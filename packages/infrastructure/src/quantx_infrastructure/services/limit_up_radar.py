@@ -936,7 +936,7 @@ class LimitUpRadarMonitor:
     if task is not None:
       task.cancel()
       await asyncio.gather(task, return_exceptions=True)
-    self.scanner.stop()
+    await self.scanner.stop()
 
   async def _run(self) -> None:
     while True:

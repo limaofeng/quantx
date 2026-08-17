@@ -84,7 +84,9 @@ def test_one_minute_subscription_is_bounded_to_current_shanghai_day(
     lambda: date(2026, 8, 13),
   )
 
-  callback = lambda _data: None
+  def callback(_data):
+    return None
+
   subscription_id = manager.subscribe_quote(
     "000001.SH",
     period="1m",
@@ -105,3 +107,10 @@ def test_one_minute_subscription_is_bounded_to_current_shanghai_day(
       "end_time": "20260813235959",
     },
   }
+
+
+def test_remote_manager_has_no_whole_quote_control_api() -> None:
+  manager = remote_market_data.RemoteMarketDataManager()
+
+  assert not hasattr(manager, "subscribe_whole_quote")
+  assert not hasattr(manager, "unsubscribe_whole_quote")

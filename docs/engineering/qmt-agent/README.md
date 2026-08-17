@@ -20,8 +20,23 @@ QMT Agent 子进程注入 `ENV=testing`、账户白名单和实盘开关。账�
 需要纯行情通道时显式传入 `-Mode data-only`。生产环境的模式切换仍要求精确
 确认和独立配置的实盘开关。
 
-控制与订单回报走 WebSocket；批量行情按请求 ID、批次序号、压缩和 SHA256
-通过 HTTP 上传。断线重连后 Agent 先上报完整账户快照。
+交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
+`/ws/agent/market`，子协议固定为 `quantx.market.v1`。Agent 只建立一个
+`subscribe_whole_quote(["SH", "SZ"])`，先发送完整快照，再发送递增序号的
+二进制增量批次。单标的 `1m/5m/1d` 等 QMT K 线仍由主连接控制
+`subscribe_quote`，不得从 tick 合成。
+
+whole-quote 回调只进入容量 8、估算上限 64 MiB 的捕获队列，序列化和网络 ACK
+在专用任务完成；
+队列溢出、10 秒 ACK 超时、连接故障或 RESYNC 都会关闭行情连接、取消本地
+whole-quote 并用新 `stream_id` 和全量快照恢复，不静默丢弃旧事件。交易连接
+不会被大行情帧阻塞。批量历史行情仍按请求 ID、批次序号、压缩和 SHA256
+通过 HTTP 上传。交易连接断线重连后 Agent 先上报完整账户快照。
+
+性能回归使用固定 5,000 标的、30 个批次运行
+`python ops/benchmark-market-stream.py`，记录 orjson 编解码 p50/p95/p99、帧大小、
+CPU 时间和峰值内存；实机验收再结合各阶段日志比较 WebSocket ACK、Redis 应用
+和 Engine 水位延迟，不设置脱离设备负载的固定 SLA。
 
 首次运行必须由 Web 创建一次性登记码，再执行：
 

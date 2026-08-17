@@ -1421,6 +1421,7 @@ function Invoke-Up {
         "-m", "uvicorn", "quantx_api.main:app",
         "--host", "127.0.0.1",
         "--port", [string]$ApiPort,
+        "--ws-max-size", "67108864",
         "--ws-ping-interval", "20",
         "--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds
       ) `

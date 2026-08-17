@@ -51,6 +51,8 @@ class WarmSymbolState:
   initialization_error: Optional[str] = None
   tick_subscribed: bool = False
   kline_subscribed: bool = False
+  tick_handle: str = ""
+  kline_handle: str = ""
 
 
 class IntradayWarmCacheService:
@@ -113,14 +115,19 @@ class IntradayWarmCacheService:
       for state in self._states.values():
         state.tick_subscribed = False
         state.kline_subscribed = False
+        state.tick_handle = ""
+        state.kline_handle = ""
 
   async def _remove_symbol(self, stock_code: str) -> None:
-    await self.subscription_manager.unsubscribe(
-      self.subscriber_id, stock_code, period="tick"
-    )
-    await self.subscription_manager.unsubscribe(
-      self.subscriber_id, stock_code, period="1m"
-    )
+    with self._lock:
+      state = self._states.get(stock_code)
+      handles = (
+        state.tick_handle if state is not None else "",
+        state.kline_handle if state is not None else "",
+      )
+    for handle in handles:
+      if handle:
+        await self.subscription_manager.unsubscribe(handle)
     with self._lock:
       self._states.pop(stock_code, None)
       self._ticks.pop(stock_code, None)
@@ -251,24 +258,26 @@ class IntradayWarmCacheService:
       needs_kline = not state.kline_subscribed
 
     if needs_tick:
-      subscribed = await self.subscription_manager.subscribe(
+      handle = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=tick_callback,
         subscriber_id=self.subscriber_id,
         period="tick",
       )
       with self._lock:
-        self._states[stock_code].tick_subscribed = bool(subscribed)
+        self._states[stock_code].tick_subscribed = bool(handle)
+        self._states[stock_code].tick_handle = handle
 
     if needs_kline:
-      subscribed = await self.subscription_manager.subscribe(
+      handle = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=kline_callback,
         subscriber_id=self.subscriber_id,
         period="1m",
       )
       with self._lock:
-        self._states[stock_code].kline_subscribed = bool(subscribed)
+        self._states[stock_code].kline_subscribed = bool(handle)
+        self._states[stock_code].kline_handle = handle
 
   async def _ensure_initial_download(self, stock_code: str) -> None:
     trading_date = self._current_date or time_utils.today()

@@ -1,33 +1,23 @@
-import asyncio
-import contextlib
-
 import pytest
 from quantx_infrastructure.services.intraday_volume_scanner import IntradayVolumeScanner
 
 
-class FakeManager:
+class FakeHub:
   def __init__(self):
     self.callback = None
-    self.market_codes = None
     self.subscribe_count = 0
-    self.unsubscribed = None
+    self.unsubscribed = ""
+    self.is_ready = True
 
-  def subscribe_whole_quote(self, market_codes, callback):
+  async def subscribe_batches(self, callback, *, delivery):
+    del delivery
     self.subscribe_count += 1
-    self.market_codes = market_codes
     self.callback = callback
-    return 1001
+    return "whole-handle"
 
-  def unsubscribe_whole_quote(self, sub_id):
-    self.unsubscribed = sub_id
-
-
-class FakeRegistry:
-  def __init__(self, manager):
-    self.manager = manager
-
-  def get_manager(self):
-    return self.manager
+  async def unsubscribe(self, handle):
+    self.unsubscribed = handle
+    return True
 
 
 def baseline():
@@ -73,18 +63,14 @@ def feed_two_ticks(scanner: IntradayVolumeScanner):
 
 @pytest.mark.asyncio
 async def test_intraday_volume_scanner_subscribes_whole_market_and_scores_ticks():
-  manager = FakeManager()
-  scanner = IntradayVolumeScanner(
-    data_registry_factory=lambda: FakeRegistry(manager),
-    idle_stop_seconds=10,
-  )
+  hub = FakeHub()
+  scanner = IntradayVolumeScanner(hub=hub)
 
   try:
     assert await scanner.start() is True
     assert await scanner.start() is True
-    assert manager.market_codes == ["SH", "SZ"]
-    assert manager.subscribe_count == 1
-    assert callable(manager.callback)
+    assert hub.subscribe_count == 1
+    assert callable(hub.callback)
 
     feed_two_ticks(scanner)
     result = scanner.screen(
@@ -111,17 +97,12 @@ async def test_intraday_volume_scanner_subscribes_whole_market_and_scores_ticks(
     assert "买盘占优" in item["matched_signals"]
     assert "成交活跃" in item["matched_signals"]
   finally:
-    scanner.stop()
-    if scanner._idle_task is not None:
-      scanner._idle_task.cancel()
-      with contextlib.suppress(asyncio.CancelledError):
-        await scanner._idle_task
+    await scanner.stop()
+    assert hub.unsubscribed == "whole-handle"
 
 
 def test_intraday_volume_scanner_filters_by_thresholds():
-  scanner = IntradayVolumeScanner(
-    data_registry_factory=lambda: FakeRegistry(FakeManager())
-  )
+  scanner = IntradayVolumeScanner(hub=FakeHub())
   feed_two_ticks(scanner)
 
   result = scanner.screen([baseline()], min_volume_pace_ratio=100.0)

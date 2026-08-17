@@ -105,6 +105,36 @@ METRICS_COLLECTION_FAILURES = Counter(
   "Best-effort metric collection failures",
   ["collector"],
 )
+MARKET_STREAM_CONNECTIONS = Gauge(
+  "quantx_market_stream_connections",
+  "Active dedicated QMT Agent market connections",
+)
+MARKET_STREAM_FRAMES = Counter(
+  "quantx_market_stream_frames_total",
+  "Whole-market frames accepted by API",
+  ["kind"],
+)
+MARKET_STREAM_RESYNCS = Counter(
+  "quantx_market_stream_resyncs_total",
+  "Whole-market streams invalidated for convergence",
+  ["reason"],
+)
+MARKET_STREAM_PROCESSING = Histogram(
+  "quantx_market_stream_processing_seconds",
+  "API validation plus Redis cache/publish time",
+)
+MARKET_STREAM_FRAME_BYTES = Gauge(
+  "quantx_market_stream_frame_bytes",
+  "Last whole-market binary frame size",
+)
+MARKET_STREAM_SEQUENCE = Gauge(
+  "quantx_market_stream_sequence",
+  "Last whole-market sequence committed by API",
+)
+MARKET_STREAM_INSTRUMENTS = Gauge(
+  "quantx_market_stream_instruments",
+  "Instrument count in the last whole-market frame",
+)
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):

@@ -53,6 +53,8 @@ class RealTimeDataManager:
     # GraphQL订阅者管理
     self.tick_subscribers: Dict[str, Set[asyncio.Queue]] = {}
     self.kline_subscribers: Dict[str, Set[asyncio.Queue]] = {}
+    self._tick_handles: Dict[str, str] = {}
+    self._kline_handles: Dict[str, str] = {}
 
     # 统一订阅管理器
     self.subscription_manager = unified_subscription_manager
@@ -112,6 +114,8 @@ class RealTimeDataManager:
       # 清理本地订阅者队列
       self.tick_subscribers.clear()
       self.kline_subscribers.clear()
+      self._tick_handles.clear()
+      self._kline_handles.clear()
       self._started_loop = None
 
       logger.info("实时数据管理器已停止")
@@ -131,6 +135,7 @@ class RealTimeDataManager:
       self.connection_stats[connection_id] = {
         "messages_sent": 0,
         "messages_failed": 0,
+        "messages_coalesced": 0,
         "last_activity": time_utils.now(),
         "start_time": time_utils.now(),
       }
@@ -153,7 +158,19 @@ class RealTimeDataManager:
       if queue.full():
         try:
           queue.get_nowait()  # 移除最旧的数据
+          queue.task_done()
           logger.warning(f"队列满，丢弃旧数据: {connection_id}")
+          if connection_id:
+            self.connection_stats.setdefault(
+              connection_id,
+              {
+                "messages_sent": 0,
+                "messages_failed": 0,
+                "messages_coalesced": 0,
+                "last_activity": time_utils.now(),
+                "start_time": time_utils.now(),
+              },
+            )["messages_coalesced"] += 1
         except asyncio.QueueEmpty:
           pass
 
@@ -196,7 +213,7 @@ class RealTimeDataManager:
     返回 RealTimePrice 格式的异步迭代器，用于 GraphQL WebSocket 推送
     """
     # 创建队列来接收数据
-    queue = asyncio.Queue()
+    queue = asyncio.Queue(maxsize=1)
 
     # 添加到订阅列表
     if stock_code not in self.tick_subscribers:
@@ -210,17 +227,19 @@ class RealTimeDataManager:
         """数据回调处理"""
         await self._handle_xt_tick_data(stock_code, data)
 
-      subscribed = await self.subscription_manager.subscribe(
+      handle = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period="tick",
+        latest_only=True,
       )
-      if not subscribed:
+      if not handle:
         self.tick_subscribers[stock_code].discard(queue)
         if not self.tick_subscribers[stock_code]:
           del self.tick_subscribers[stock_code]
         raise RuntimeError(f"底层tick订阅失败: {stock_code}")
+      self._tick_handles[stock_code] = handle
 
     # 统一管理器缓存首帧推送，确保后加入订阅者立即收到最新数据
     try:
@@ -259,9 +278,9 @@ class RealTimeDataManager:
         self.tick_subscribers[stock_code].discard(queue)
         if not self.tick_subscribers[stock_code]:
           # 如果没有更多订阅者，取消统一管理器订阅
-          await self.subscription_manager.unsubscribe(
-            self.subscriber_id, stock_code, "tick"
-          )
+          handle = self._tick_handles.pop(stock_code, "")
+          if handle:
+            await self.subscription_manager.unsubscribe(handle)
           del self.tick_subscribers[stock_code]
 
   async def publish_tick_backfill(
@@ -695,17 +714,18 @@ class RealTimeDataManager:
         """数据回调处理"""
         await self._handle_xt_kline_data(stock_code, period, data)
 
-      subscribed = await self.subscription_manager.subscribe(
+      handle = await self.subscription_manager.subscribe(
         stock_code=stock_code,
         callback=data_callback,
         subscriber_id=self.subscriber_id,
         period=period,
       )
-      if not subscribed:
+      if not handle:
         self.kline_subscribers[key].discard(queue)
         if not self.kline_subscribers[key]:
           del self.kline_subscribers[key]
         raise RuntimeError(f"底层K线订阅失败: {stock_code} {period}")
+      self._kline_handles[key] = handle
 
     try:
       logger.info(f"新增GraphQL K线订阅: {stock_code} {period}")
@@ -726,9 +746,9 @@ class RealTimeDataManager:
         self.kline_subscribers[key].discard(queue)
         if not self.kline_subscribers[key]:
           # 如果没有更多订阅者，取消统一管理器订阅
-          await self.subscription_manager.unsubscribe(
-            self.subscriber_id, stock_code, period
-          )
+          handle = self._kline_handles.pop(key, "")
+          if handle:
+            await self.subscription_manager.unsubscribe(handle)
           del self.kline_subscribers[key]
 
   async def subscribe_depth(self, stock_code: str) -> AsyncIterator[MarketDepth]:

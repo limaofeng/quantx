@@ -8,11 +8,16 @@ from typing import Any
 
 import httpx
 from quantx_infrastructure.config.settings import settings
+from quantx_infrastructure.core.data.market_stream_transport import (
+  market_stream_store,
+)
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   RuntimeComponentHeartbeat,
 )
+from quantx_infrastructure.services.trading_time_service import TradingTimeService
 from sqlalchemy import select, text
 
 from quantx_api.auth.tokens import utcnow
@@ -42,6 +47,13 @@ def _snapshot_age_seconds(value: Any, now: datetime) -> float | None:
     return max(0.0, (now - parsed).total_seconds())
   except (TypeError, ValueError):
     return None
+
+
+def _aware_state_age(value: datetime | None, now: datetime) -> float | None:
+  if value is None:
+    return None
+  normalized = value.astimezone(timezone.utc).replace(tzinfo=None)
+  return max(0.0, (now - normalized).total_seconds())
 
 
 async def _database_status() -> dict[str, Any]:
@@ -170,10 +182,98 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     if "market-data" in list(agent.capabilities or [])
     and status != "XTDATA_UNAVAILABLE"
   ]
-  components["market-data"] = {
-    "status": "ready" if market_data_agents else "offline",
-    "connectedDevices": len(market_data_agents),
-  }
+  market_stream_agents = []
+  ready_market_stream_agents = []
+  for agent in market_data_agents:
+    heartbeat = heartbeat_by_component.get(f"qmt-agent:{agent.id}")
+    details = dict(heartbeat.details or {}) if heartbeat else {}
+    market_stream_status = str(
+      details.get("marketStreamStatus") or "OFFLINE"
+    ).upper()
+    if market_stream_status != "OFFLINE":
+      market_stream_agents.append(agent)
+    if market_stream_status == "READY":
+      ready_market_stream_agents.append(agent)
+  try:
+    stream_state, engine_state = await asyncio.gather(
+      market_stream_store.state(),
+      market_stream_store.engine_state(),
+    )
+    trading_session = await TradingTimeService().is_trading_hours(
+      "SH",
+      time_utils.now(),
+    )
+    stream_age = _aware_state_age(
+      stream_state.updated_at if stream_state is not None else None,
+      now,
+    )
+    engine_age = _aware_state_age(
+      engine_state.updated_at if engine_state is not None else None,
+      now,
+    )
+    watermarks_match = bool(
+      stream_state is not None
+      and engine_state is not None
+      and stream_state.stream_id == engine_state.stream_id
+      and stream_state.sequence == engine_state.sequence
+    )
+    fresh = bool(
+      not trading_session
+      or (
+        stream_age is not None
+        and engine_age is not None
+        and stream_age <= 10
+        and engine_age <= 10
+      )
+    )
+    ready = bool(
+      ready_market_stream_agents
+      and stream_state is not None
+      and stream_state.status == "READY"
+      and engine_state is not None
+      and engine_state.status == "READY"
+      and watermarks_match
+      and fresh
+    )
+    if ready:
+      effective_status = "ready"
+    elif not market_stream_agents:
+      effective_status = "offline"
+    elif stream_state is None or engine_state is None:
+      effective_status = "syncing"
+    elif stream_state.status != "READY":
+      effective_status = str(stream_state.status).lower()
+    elif engine_state.status != "READY" or not fresh:
+      effective_status = "stale"
+    elif not watermarks_match:
+      effective_status = "syncing"
+    else:
+      effective_status = "syncing"
+    components["market-data"] = {
+      "status": effective_status,
+      "connectedDevices": (
+        len(market_stream_agents)
+        if stream_state is not None and stream_state.status != "OFFLINE"
+        else 0
+      ),
+      "protocol": "quantx.market.v1",
+      "streamId": stream_state.stream_id if stream_state is not None else "",
+      "sequence": stream_state.sequence if stream_state is not None else 0,
+      "engineSequence": engine_state.sequence if engine_state is not None else 0,
+      "instrumentCount": (
+        engine_state.instrument_count if engine_state is not None else 0
+      ),
+      "streamAgeSeconds": round(stream_age, 3) if stream_age is not None else None,
+      "engineAgeSeconds": round(engine_age, 3) if engine_age is not None else None,
+      "tradingSession": trading_session,
+    }
+  except Exception as exc:
+    components["market-data"] = {
+      "status": "unavailable",
+      "connectedDevices": 0,
+      "protocol": "quantx.market.v1",
+      "error": exc.__class__.__name__,
+    }
   return components
 
 

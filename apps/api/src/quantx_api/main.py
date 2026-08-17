@@ -17,6 +17,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from quantx_infrastructure.config.settings import create_log_directory, settings
+from quantx_infrastructure.core.data.market_stream_transport import (
+  market_stream_store,
+)
 from quantx_infrastructure.database.manager import db_manager
 from quantx_infrastructure.database.relational_connection import get_async_db
 
@@ -335,6 +338,22 @@ async def lifespan(app: FastAPI):
     logger.error(f"数据库初始化失败: {e}")
     raise
 
+  try:
+    previous_stream = await market_stream_store.state()
+    if previous_stream is not None:
+      await market_stream_store.mark_offline(
+        previous_stream.stream_id,
+        reason="API process restarted",
+      )
+    removed_controls = await market_stream_store.cleanup_legacy_whole_controls()
+    if removed_controls:
+      logger.info("已清理旧 whole-quote 控制项: count=%s", removed_controls)
+  except Exception as exc:
+    logger.warning(
+      "初始化 market stream Redis 状态失败，行情保持不可用: error=%s",
+      exc.__class__.__name__,
+    )
+
   agent_hub_stopped = asyncio.Event()
   agent_hub_task = asyncio.create_task(
     agent_connection_hub.run_control_relay(agent_hub_stopped)
@@ -540,6 +559,7 @@ def run_api_server() -> None:
     reload_dirs=[str(Path(__file__).resolve().parent)] if settings.debug else None,
     reload_includes=["*.py"] if settings.debug else None,
     timeout_keep_alive=5,
+    ws_max_size=64 * 1024 * 1024,
     timeout_graceful_shutdown=25,  # 给 lifespan 清理留足够时间
   )
   server = QuantXUvicornServer(config=config)

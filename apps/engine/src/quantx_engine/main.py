@@ -13,6 +13,7 @@ from typing import Awaitable, Callable
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.core.data.market_data_service import market_data_service
 from quantx_infrastructure.core.data.realtime import set_intraday_warm_cache
+from quantx_infrastructure.core.data.whole_quote_hub import whole_quote_hub
 from quantx_infrastructure.database.manager import db_manager
 from quantx_infrastructure.database.relational_connection import (
   AsyncSessionLocal,
@@ -270,6 +271,7 @@ async def run_engine() -> None:
   try:
     set_intraday_warm_cache(intraday_warm_cache)
     await market_data_service.initialize()
+    await whole_quote_hub.start()
     await realtime_manager.start()
     await limit_up_radar_monitor.start()
     await intraday_warm_cache.start()
@@ -322,6 +324,7 @@ async def run_engine() -> None:
     await _stop_component("intraday warm cache", intraday_warm_cache.shutdown)
     await _stop_component("limit-up radar", limit_up_radar_monitor.stop)
     await _stop_component("realtime manager", realtime_manager.stop)
+    await _stop_component("whole quote hub", whole_quote_hub.stop)
     await _stop_component("market data", market_data_service.shutdown)
     set_intraday_warm_cache(None)
     await _mark_engine_offline(instance_id)

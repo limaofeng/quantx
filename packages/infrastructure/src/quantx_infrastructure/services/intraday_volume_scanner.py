@@ -1,6 +1,5 @@
 """Full-market intraday volume scanner for the screening page."""
 
-import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -8,7 +7,11 @@ from datetime import datetime, time, timezone
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional
 
-from quantx_infrastructure.core.data.remote_market_data import RemoteMarketDataRegistry
+from quantx_infrastructure.core.data.whole_quote_hub import (
+  QuoteDeliveryMode,
+  WholeQuoteHub,
+  whole_quote_hub,
+)
 from quantx_infrastructure.core.utils import time_utils
 
 logger = logging.getLogger(__name__)
@@ -49,92 +52,59 @@ class IntradayVolumeScanner:
 
   def __init__(
     self,
-    data_registry_factory=RemoteMarketDataRegistry,
-    idle_stop_seconds: int = 60,
+    hub: WholeQuoteHub = whole_quote_hub,
   ):
-    self.data_registry_factory = data_registry_factory
-    self.idle_stop_seconds = max(10, int(idle_stop_seconds))
-    self._data_manager = None
-    self._sub_id = None
+    self.hub = hub
+    self._handle = ""
     self._states: Dict[str, IntradayVolumeState] = {}
     self._lock = RLock()
     self._last_access_at: Optional[datetime] = None
-    self._idle_task: Optional[asyncio.Task] = None
 
   @property
   def is_running(self) -> bool:
-    return self._sub_id is not None
-
-  @property
-  def data_manager(self):
-    if self._data_manager is None:
-      self._data_manager = self.data_registry_factory().get_manager()
-    return self._data_manager
+    return bool(self._handle) and self.hub.is_ready
 
   async def start(self) -> bool:
     with self._lock:
       self._last_access_at = time_utils.now()
-      if self._sub_id is not None:
+      if self._handle:
         return True
 
     try:
-      sub_id = self.data_manager.subscribe_whole_quote(
-        ["SH", "SZ"],
-        callback=self._handle_whole_quote,
+      handle = await self.hub.subscribe_batches(
+        self._handle_whole_quote,
+        delivery=QuoteDeliveryMode.CRITICAL,
       )
     except Exception as exc:
       logger.warning("启动全市场量能扫描失败: %s", exc)
       return False
 
-    if sub_id is None:
-      logger.warning("启动全市场量能扫描失败: QMT Agent 未返回订阅ID")
+    if not handle:
+      logger.warning("启动全市场量能扫描失败: WholeQuoteHub 未返回 handle")
       return False
 
     with self._lock:
-      self._sub_id = sub_id
+      self._handle = handle
       self._last_access_at = time_utils.now()
 
-    self._ensure_idle_task()
-    logger.info("全市场量能扫描已启动: sub_id=%s", sub_id)
+    logger.info("全市场量能扫描已接入 WholeQuoteHub: handle=%s", handle)
     return True
 
   def touch(self) -> None:
     with self._lock:
       self._last_access_at = time_utils.now()
 
-  def stop(self) -> None:
+  async def stop(self) -> None:
     with self._lock:
-      sub_id = self._sub_id
-      self._sub_id = None
-    if sub_id is None:
+      handle = self._handle
+      self._handle = ""
+    if not handle:
       return
     try:
-      self.data_manager.unsubscribe_whole_quote(sub_id)
-      logger.info("全市场量能扫描已停止: sub_id=%s", sub_id)
+      await self.hub.unsubscribe(handle)
+      logger.info("全市场量能扫描已停止: handle=%s", handle)
     except Exception as exc:
       logger.warning("停止全市场量能扫描失败: %s", exc)
-
-  def _ensure_idle_task(self) -> None:
-    try:
-      loop = asyncio.get_running_loop()
-    except RuntimeError:
-      return
-    if self._idle_task is None or self._idle_task.done():
-      self._idle_task = loop.create_task(self._idle_stop_loop())
-
-  async def _idle_stop_loop(self) -> None:
-    while True:
-      await asyncio.sleep(15)
-      with self._lock:
-        if self._sub_id is None:
-          return
-        last_access_at = self._last_access_at
-      if last_access_at is None:
-        continue
-      idle_seconds = (time_utils.now() - last_access_at).total_seconds()
-      if idle_seconds >= self.idle_stop_seconds:
-        self.stop()
-        return
 
   def _handle_whole_quote(self, data: Dict[str, Dict[str, Any]]) -> None:
     if not isinstance(data, dict):
