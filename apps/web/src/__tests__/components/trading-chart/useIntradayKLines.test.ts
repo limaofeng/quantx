@@ -184,18 +184,27 @@ describe('intraday query date range', () => {
     });
   });
 
-  it('uses the previous trading day before 9:00 on a trading day', () => {
+  it('uses the previous trading day at 09:14:59 on a trading day', () => {
     expect(
-      getTickDateRange(tradingDays, '1d', new Date('2026-06-02T00:30:00.000Z'))
+      getTickDateRange(tradingDays, '1d', new Date('2026-06-02T01:14:59.000Z'))
     ).toEqual({
       startTime: '2026-06-01 00:00:00',
       endTime: '2026-06-01 23:59:59',
     });
   });
 
-  it('uses the current trading day from 9:00 onward', () => {
+  it('uses the current trading day from 09:15 onward', () => {
     expect(
-      getTickDateRange(tradingDays, '1d', new Date('2026-06-02T01:00:00.000Z'))
+      getTickDateRange(tradingDays, '1d', new Date('2026-06-02T01:15:00.000Z'))
+    ).toEqual({
+      startTime: '2026-06-02 00:00:00',
+      endTime: '2026-06-02 23:59:59',
+    });
+  });
+
+  it('keeps the current trading day after close', () => {
+    expect(
+      getTickDateRange(tradingDays, '1d', new Date('2026-06-02T08:30:00.000Z'))
     ).toEqual({
       startTime: '2026-06-02 00:00:00',
       endTime: '2026-06-02 23:59:59',

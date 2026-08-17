@@ -276,14 +276,14 @@ export const getTickDateRange = (
   }
 
   const nowParts = getShanghaiDateParts(now);
-  const hours = Math.floor(nowParts.minutes / 60);
   const todayStr = nowParts.dateKey;
+  const isBeforeCallAuction = nowParts.minutes < 9 * 60 + 15;
 
   // Determine "current" trading day anchor
   let anchorDateStr = todayStr;
 
-  // If before 9:00 AM, market not open, use last available trading day
-  if (hours < 9) {
+  // Before call auction starts, keep showing the previous completed session.
+  if (isBeforeCallAuction) {
     // If today is in list, we want previous one; if not, we want last one in list < today
     // Since list is sorted (ascending from API usually), we find the last one < today or <= yesterday
     // But simplified: just take last known tradingDay effectively?
@@ -294,7 +294,7 @@ export const getTickDateRange = (
     anchorDateStr =
       pastDays.length > 0 ? pastDays[pastDays.length - 1] : tradingDays[0];
   } else {
-    // After 9:00 AM.
+    // From 09:15 onward.
     // If today is a trading day, use today.
     // If today is NOT a trading day (weekend/holiday), use last available trading day.
     if (tradingDays.includes(todayStr)) {
@@ -326,7 +326,7 @@ export const getTickDateRange = (
     // If anchor is yesterday (today is weekend), end is today (ticks won't exist but ok) or anchor 23:59
     // Safest is to set end to Now or End of Anchor Day.
     // Let's us End of Anchor Day to be precise about "5 Trading Days" but if market is live, we need up to now.
-    // Since anchorDate logic handles "before 9:00", if it's live trading session, anchor IS today.
+    // Since anchorDate logic handles "before 09:15", if it's live trading session, anchor IS today.
     // If it's weekend, anchor IS Friday.
     // Setting endTime to anchorDate is safe.
     endTimeStr = anchorDateStr;

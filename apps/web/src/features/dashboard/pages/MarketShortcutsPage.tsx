@@ -831,17 +831,19 @@ export default function MarketShortcutsPage() {
                           label="涨跌家数对比"
                           tone="text-market-flat"
                           value={
-                            breadthTotal
-                              ? <>
-                                  <span className="text-market-up">
-                                    {pulse.breadth.advancers}
-                                  </span>
-                                  <span className="text-market-flat"> : </span>
-                                  <span className="text-market-down">
-                                    {pulse.breadth.decliners}
-                                  </span>
-                                </>
-                              : '-- : --'
+                            breadthTotal ? (
+                              <>
+                                <span className="text-market-up">
+                                  {pulse.breadth.advancers}
+                                </span>
+                                <span className="text-market-flat"> : </span>
+                                <span className="text-market-down">
+                                  {pulse.breadth.decliners}
+                                </span>
+                              </>
+                            ) : (
+                              '-- : --'
+                            )
                           }
                         />
                         <ComparisonCard
@@ -935,6 +937,7 @@ export default function MarketShortcutsPage() {
                         changePercent={selectedQuote?.changePercent}
                         preClose={selectedQuote?.preClose}
                         stockCode={selected?.definition.code || selectedCode}
+                        targetTradingDate={session.targetTradingDate}
                       />
                     </div>
                   </section>
@@ -1097,7 +1100,7 @@ export default function MarketShortcutsPage() {
                 <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0e1628]">
                   <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
-                    <ListOrdered className="h-3.5 w-3.5 shrink-0 text-red-300" />
+                      <ListOrdered className="h-3.5 w-3.5 shrink-0 text-red-300" />
                       <h2 className="text-xs font-black text-slate-100">
                         股票排行
                       </h2>

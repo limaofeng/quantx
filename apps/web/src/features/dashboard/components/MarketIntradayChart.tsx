@@ -22,13 +22,14 @@ import {
   MARKET_SESSION_TICKS,
   toMarketSessionMinute,
 } from '../marketIntradayAxis';
-import { selectCurrentShanghaiMarketBars } from '../marketIntradayData';
+import { selectShanghaiMarketBarsForTradingDate } from '../marketIntradayData';
 import { formatMarketPrice } from '../marketWorkbench';
 
 interface MarketIntradayChartProps {
   changePercent?: number | null;
   preClose?: number | null;
   stockCode: string;
+  targetTradingDate: string | null;
 }
 
 const readPrice = (...values: unknown[]) => {
@@ -51,14 +52,15 @@ export function MarketIntradayChart({
   changePercent,
   preClose,
   stockCode,
+  targetTradingDate,
 }: MarketIntradayChartProps) {
   const { anchorDate, bars, loading, error } = useIntradayTrendData(
     stockCode,
     '1d'
   );
   const resolvedBars = useMemo(
-    () => selectCurrentShanghaiMarketBars(bars),
-    [bars]
+    () => selectShanghaiMarketBarsForTradingDate(bars, targetTradingDate),
+    [bars, targetTradingDate]
   );
   const data = useMemo(
     () =>
@@ -102,8 +104,10 @@ export function MarketIntradayChart({
       .map(bar => parseMarketDate(bar.time))
       .filter((value): value is Date => value !== null)
       .sort((left, right) => right.getTime() - left.getTime())[0];
-    return latest ? getShanghaiDateKey(latest) : anchorDate;
-  }, [anchorDate, resolvedBars]);
+    return (
+      targetTradingDate || (latest ? getShanghaiDateKey(latest) : anchorDate)
+    );
+  }, [anchorDate, resolvedBars, targetTradingDate]);
   const dateLabel = resolvedAnchorDate?.slice(5).replace('-', '/');
 
   if (loading && data.length === 0) {
@@ -122,12 +126,14 @@ export function MarketIntradayChart({
       <div className="flex h-[210px] items-center justify-center px-6 text-center xl:h-[150px]">
         <div>
           <div className="text-sm font-bold text-slate-300">
-            QMT 当日分钟行情暂不可用
+            QMT {dateLabel ? `${dateLabel} ` : ''}分钟行情暂不可用
           </div>
           <div className="mt-1 text-xs leading-5 text-slate-600">
             {error
               ? 'QMT 行情连接或查询异常，顶部实时快照不受影响。'
-              : '等待 QMT 推送当日 1 分钟 K 线。'}
+              : dateLabel
+                ? `等待 QMT 推送 ${dateLabel} 的 1 分钟 K 线。`
+                : '等待 QMT 推送目标交易日的 1 分钟 K 线。'}
           </div>
         </div>
       </div>
@@ -140,10 +146,8 @@ export function MarketIntradayChart({
       data-testid="market-intraday-chart"
     >
       {dateLabel ? (
-        <span
-          className="pointer-events-none absolute left-2 top-1 z-10 rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[8px] font-bold text-cyan-300"
-        >
-          {dateLabel} · 当日分时
+        <span className="pointer-events-none absolute left-2 top-1 z-10 rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[8px] font-bold text-cyan-300">
+          {dateLabel} · 分时
         </span>
       ) : null}
       <ResponsiveContainer width="100%" height="100%">

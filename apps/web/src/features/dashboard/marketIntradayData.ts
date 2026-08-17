@@ -4,13 +4,14 @@ import {
 } from '@/components/trading-chart/utils/time-utils';
 import type { IntradayTrendBar } from '@/hooks/useIntradayTrendData';
 
-export const selectCurrentShanghaiMarketBars = (
+export const selectShanghaiMarketBarsForTradingDate = (
   bars: IntradayTrendBar[],
-  now: Date = new Date()
+  targetTradingDate: string | null | undefined
 ) => {
-  const todayKey = getShanghaiDateKey(now);
+  if (!targetTradingDate) return [];
+
   return bars.filter(bar => {
     const date = parseMarketDate(bar.time);
-    return date && getShanghaiDateKey(date) === todayKey;
+    return date && getShanghaiDateKey(date) === targetTradingDate;
   });
 };
