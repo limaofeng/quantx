@@ -12,6 +12,35 @@ const mocks = vi.hoisted(() => ({
   useQuery: vi.fn(),
 }));
 
+const capabilitiesData = {
+  exitPlanCapabilities: {
+    completionStrategies: ['AVAILABLE_NOW'],
+    conflictStrategies: ['UNALLOCATED_ONLY'],
+    executionModes: ['paper', 'live'],
+    ruleSemantics: 'OR；按 priority 从高到低决定首个执行规则',
+    ruleTypes: [
+      {
+        category: 'price',
+        label: '目标价',
+        parameters: { target_price: 'number' },
+        ruleType: 'TARGET_PRICE',
+      },
+      {
+        category: 'trailing',
+        label: '量价动态止盈',
+        parameters: {},
+        ruleType: 'ADAPTIVE_VOLUME_PRICE_TRAILING',
+      },
+      {
+        category: 'risk',
+        label: '硬止损',
+        parameters: { stop_loss_pct: 'number' },
+        ruleType: 'HARD_STOP',
+      },
+    ],
+  },
+};
+
 vi.mock('urql', () => ({
   useMutation: mocks.useMutation,
   useQuery: mocks.useQuery,
@@ -61,22 +90,84 @@ describe('ManualPlanEditor', () => {
       onSaved: vi.fn(),
     };
     const { rerender } = render(
-      <ManualPlanEditor
-        {...props}
-        initialInstrumentCode="300917.SZ"
-      />
+      <ManualPlanEditor {...props} initialInstrumentCode="300917.SZ" />
     );
 
     await user.click(screen.getByRole('button', { name: '手动添加计划' }));
     expect(screen.getByLabelText('股票')).toHaveValue('300917.SZ');
 
-    rerender(
+    rerender(<ManualPlanEditor {...props} initialInstrumentCode="302132.SZ" />);
+
+    expect(screen.getByLabelText('股票')).toHaveValue('302132.SZ');
+  });
+
+  it('explains strategies and configures parameters without exposing a native select', async () => {
+    const user = userEvent.setup();
+    mocks.useQuery.mockReturnValue([
+      { data: capabilitiesData, error: undefined, fetching: false },
+      mocks.refetch,
+    ]);
+    mocks.mutate.mockResolvedValue({ data: {}, error: undefined });
+    render(
       <ManualPlanEditor
-        {...props}
-        initialInstrumentCode="302132.SZ"
+        accountId="300000013250"
+        initialInstrumentCode="605499.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
       />
     );
 
-    expect(screen.getByLabelText('股票')).toHaveValue('302132.SZ');
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+
+    const strategyPicker = screen.getByRole('button', {
+      name: '规则 1 类型',
+    });
+    expect(strategyPicker).toHaveTextContent('目标价');
+    expect(
+      screen.queryByRole('combobox', { name: '规则 1 类型' })
+    ).not.toBeInTheDocument();
+
+    await user.click(strategyPicker);
+
+    expect(screen.getByText('选择卖出策略')).toBeVisible();
+    expect(
+      screen.getByText(/系统自动判断强弱，不需要你预判快速上涨/)
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('radio', { name: /量价动态止盈/ }));
+
+    expect(strategyPicker).toHaveTextContent('量价动态止盈');
+    expect(screen.getByLabelText('开始跟踪收益率')).toHaveValue(2);
+    expect(screen.getByLabelText('立即退出回撤')).toHaveValue(1.2);
+    expect(screen.getByLabelText('转弱确认次数')).toHaveValue(2);
+    expect(screen.getByText(/强势跟涨/)).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '高级设置' }));
+    const advancedJson = screen.getByLabelText(
+      '规则 1 参数 JSON'
+    ) as HTMLTextAreaElement;
+    expect(advancedJson.value).toContain('"arm_target_profit_pct":2');
+    expect(advancedJson.value).not.toContain('target_price');
+
+    await user.type(screen.getByLabelText('保护数量'), '100');
+    await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
+
+    expect(mocks.mutate).toHaveBeenCalledWith({
+      input: expect.objectContaining({
+        executionMode: 'paper',
+        instrumentCode: '605499.SH',
+        protectedVolume: 100,
+        rules: [
+          expect.objectContaining({
+            parameters: expect.objectContaining({
+              arm_target_profit_pct: 2,
+              confirm_observations: 2,
+              immediate_drawdown_pct: 1.2,
+            }),
+            strategy: 'ADAPTIVE_VOLUME_PRICE_TRAILING',
+          }),
+        ],
+      }),
+    });
   });
 });

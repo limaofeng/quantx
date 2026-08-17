@@ -9,7 +9,6 @@ import {
   Plus,
   RefreshCw,
   ShieldAlert,
-  Trash2,
   XCircle,
 } from 'lucide-react';
 import * as React from 'react';
@@ -52,16 +51,14 @@ import {
 } from '../hooks/usePortfolio';
 import type { Position } from '../types';
 
+import {
+  ManualExitRuleEditor,
+  type ManualExitRuleDraft,
+} from './ManualExitRuleEditor';
+
 type ExitPlan = NonNullable<
   NonNullable<ReturnType<typeof useExitPlans>['data']>['exitPlans']
 >[number];
-
-interface ExitPlanRuleDraft {
-  id: string;
-  parametersText: string;
-  priority: number;
-  ruleType: string;
-}
 
 const activeStatuses = new Set([
   'ACTIVE',
@@ -348,10 +345,10 @@ export function ManualPlanEditor({
   );
   const [authorized, setAuthorized] = React.useState(false);
   const [remark, setRemark] = React.useState('');
-  const [rules, setRules] = React.useState<ExitPlanRuleDraft[]>(() => [
+  const [rules, setRules] = React.useState<ManualExitRuleDraft[]>(() => [
     {
       id: createClientId('exit-rule'),
-      parametersText: '{"target_price": 0}',
+      parametersText: '{"target_price":0}',
       priority: 500,
       ruleType: 'TARGET_PRICE',
     },
@@ -399,7 +396,7 @@ export function ManualPlanEditor({
         : [
             {
               id: createClientId('exit-rule'),
-              parametersText: '{"target_price": 0}',
+              parametersText: '{"target_price":0}',
               priority: 500,
               ruleType: 'TARGET_PRICE',
             },
@@ -488,7 +485,7 @@ export function ManualPlanEditor({
             {editingPlan ? '编辑人工计划' : '人工计划编辑器'}
           </h3>
           <p className="mt-1 text-[11px] font-bold text-slate-500">
-            多条规则为 OR；priority 越大越先执行。
+            先选择“什么情况下卖”，再填写触发参数；添加多个条件时，任一条件满足即可执行。
           </p>
         </div>
         <Button onClick={close} size="sm" variant="ghost">
@@ -554,74 +551,23 @@ export function ManualPlanEditor({
           {capacity.data.exitPlanHoldingCapacity.unallocatedVolume} 股
         </div>
       )}
-      <div className="mt-3 grid gap-2">
+      <div className="mt-3 grid gap-3">
         {rules.map((rule, index) => (
-          <div
-            className="grid gap-2 rounded border border-white/8 bg-black/10 p-2 lg:grid-cols-[220px_100px_minmax(260px,1fr)_36px]"
+          <ManualExitRuleEditor
+            capabilities={ruleTypes}
+            canDelete={rules.length > 1}
+            index={index}
             key={rule.id}
-          >
-            <select
-              aria-label={`规则 ${index + 1} 类型`}
-              className="h-9 rounded border border-white/10 bg-[#080d18] px-2 text-xs text-slate-200"
-              onChange={event =>
-                setRules(current =>
-                  current.map(item =>
-                    item.id === rule.id
-                      ? { ...item, ruleType: event.target.value }
-                      : item
-                  )
-                )
-              }
-              value={rule.ruleType}
-            >
-              {ruleTypes.map(item => (
-                <option key={item.ruleType} value={item.ruleType}>
-                  {item.label} · {item.ruleType}
-                </option>
-              ))}
-            </select>
-            <input
-              aria-label={`规则 ${index + 1} 优先级`}
-              className="h-9 rounded border border-white/10 bg-[#080d18] px-2 font-mono text-xs text-slate-200"
-              onChange={event =>
-                setRules(current =>
-                  current.map(item =>
-                    item.id === rule.id
-                      ? { ...item, priority: Number(event.target.value) }
-                      : item
-                  )
-                )
-              }
-              type="number"
-              value={rule.priority}
-            />
-            <input
-              aria-label={`规则 ${index + 1} 参数 JSON`}
-              className="h-9 rounded border border-white/10 bg-[#080d18] px-2 font-mono text-xs text-slate-200"
-              onChange={event =>
-                setRules(current =>
-                  current.map(item =>
-                    item.id === rule.id
-                      ? { ...item, parametersText: event.target.value }
-                      : item
-                  )
-                )
-              }
-              value={rule.parametersText}
-            />
-            <Button
-              aria-label={`删除规则 ${index + 1}`}
-              disabled={rules.length === 1}
-              onClick={() =>
-                setRules(current => current.filter(item => item.id !== rule.id))
-              }
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <Trash2 />
-            </Button>
-          </div>
+            onChange={nextRule =>
+              setRules(current =>
+                current.map(item => (item.id === rule.id ? nextRule : item))
+              )
+            }
+            onDelete={() =>
+              setRules(current => current.filter(item => item.id !== rule.id))
+            }
+            rule={rule}
+          />
         ))}
       </div>
       <div className="mt-3 flex flex-wrap justify-between gap-2">
@@ -631,9 +577,9 @@ export function ManualPlanEditor({
               ...current,
               {
                 id: createClientId('exit-rule'),
-                parametersText: '{}',
+                parametersText: '{"target_price":0}',
                 priority: 500,
-                ruleType: ruleTypes[0]?.ruleType || 'TARGET_PRICE',
+                ruleType: 'TARGET_PRICE',
               },
             ])
           }
@@ -641,7 +587,7 @@ export function ManualPlanEditor({
           variant="outline"
         >
           <Plus />
-          添加 OR 规则
+          添加另一个条件
         </Button>
         <Button
           disabled={
