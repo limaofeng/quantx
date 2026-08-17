@@ -71,7 +71,7 @@ def _native_principal(*, permissions) -> Principal:
     access_token_expires_at=principal.access_token_expires_at,
     permissions=principal.permissions,
     authorized_account_ids=("TEST-ACCOUNT-1",),
-    active_account_id="TEST-ACCOUNT-1",
+    is_native_session=True,
   )
 
 
@@ -246,6 +246,7 @@ async def test_native_session_can_use_dedicated_control_scope():
     ("Query", "tTradeBatchEventsPage", "strategy:read"),
     ("Query", "tTradeSignalHistoryPage", "strategy:read"),
     ("Subscription", "tTradeUpdates", "strategy:read"),
+    ("Subscription", "tTradeReplayUpdates", "strategy:read"),
     ("Subscription", "firstBoardPromotionUpdates", "strategy:read"),
     ("Query", "aiAssistantThreads", "assistant:read"),
     ("Subscription", "aiAssistantEvents", "assistant:read"),

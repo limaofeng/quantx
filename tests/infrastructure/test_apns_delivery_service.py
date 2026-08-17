@@ -18,7 +18,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 from quantx_infrastructure.config.settings import Settings
 from quantx_infrastructure.database.relational_base import Base
-from quantx_infrastructure.models.auth import AuthDeviceSession, AuthUser
+from quantx_infrastructure.models.auth import (
+  AuthDeviceSession,
+  AuthUser,
+  AuthUserAccountAccess,
+)
 from quantx_infrastructure.models.ios_notifications import (
   IosNotificationEvent,
   IosNotificationOutbox,
@@ -418,6 +422,7 @@ async def apns_database():
   engine = create_async_engine("sqlite+aiosqlite:///:memory:")
   tables = [
     AuthUser.__table__,
+    AuthUserAccountAccess.__table__,
     AuthDeviceSession.__table__,
     IosPushRegistration.__table__,
     IosPushCategoryPreference.__table__,
@@ -444,6 +449,13 @@ async def apns_database():
       )
     )
     db.add(
+      AuthUserAccountAccess(
+        user_id="user-1",
+        account_id="ACCOUNT-1",
+        is_default=True,
+      )
+    )
+    db.add(
       AuthDeviceSession(
         id="session-1",
         user_id="user-1",
@@ -452,7 +464,6 @@ async def apns_database():
         revoked_at=None,
         last_used_at=NOW,
         device_name="iPhone",
-        active_account_id="ACCOUNT-1",
         granted_permissions=["notification:manage"],
       )
     )
@@ -879,10 +890,10 @@ async def test_max_attempts_fails_closed(apns_database):
 
 
 @pytest.mark.asyncio
-async def test_account_drift_discards_without_decrypting_token(apns_database):
+async def test_account_revocation_discards_without_decrypting_token(apns_database):
   async with apns_database() as db:
-    session = await db.get(AuthDeviceSession, "session-1")
-    session.active_account_id = "ACCOUNT-2"
+    access = await db.get(AuthUserAccountAccess, ("user-1", "ACCOUNT-1"))
+    await db.delete(access)
     await db.commit()
 
   async with apns_database() as db:

@@ -326,7 +326,6 @@ async def _authorization_session_valid(
     session.revoked_at is not None
     or session.expires_at <= utcnow()
     or not bool(user.is_active)
-    or str(session.active_account_id or "") != str(record.account_id)
   ):
     return False
   session_scopes = {

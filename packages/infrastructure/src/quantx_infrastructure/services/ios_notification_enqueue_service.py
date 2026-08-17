@@ -121,7 +121,6 @@ class IosNotificationEnqueueService:
         IosPushCategoryPreference.category == normalized_category,
         IosPushCategoryPreference.enabled.is_(True),
         AuthUser.is_active.is_(True),
-        AuthDeviceSession.active_account_id == normalized_account_id,
         AuthDeviceSession.revoked_at.is_(None),
         AuthDeviceSession.expires_at > now,
       )

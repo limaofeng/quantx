@@ -86,7 +86,7 @@ async def test_login_refresh_rotation_and_logout_lifecycle(db):
     request_id="request-login",
   )
   assert grant.principal.authorized_account_ids == ("TEST-ACCOUNT-1",)
-  assert grant.principal.active_account_id == "TEST-ACCOUNT-1"
+  assert grant.principal.is_native_session
   assert grant.principal.permissions == frozenset({"portfolio:read", "orders:read"})
   assert grant.principal.require_account() == "TEST-ACCOUNT-1"
 
@@ -296,7 +296,7 @@ async def test_native_scope_is_intersection_and_refresh_never_expands(db):
     {"portfolio:read", "orders:read", "trade:manual"}
   )
   assert grant.principal.authorized_account_ids == ("TEST-ACCOUNT-1",)
-  assert grant.principal.active_account_id == "TEST-ACCOUNT-1"
+  assert grant.principal.is_native_session
   session = (
     await db.execute(
       select(AuthDeviceSession).where(
@@ -304,7 +304,6 @@ async def test_native_scope_is_intersection_and_refresh_never_expands(db):
       )
     )
   ).scalar_one()
-  assert session.active_account_id == "TEST-ACCOUNT-1"
   assert session.granted_permissions == [
     "orders:read",
     "portfolio:read",
@@ -360,22 +359,19 @@ async def test_authenticate_rejects_valid_token_with_mismatched_session_claims(d
     request_id="claim-binding-login",
   )
 
-  wrong_account_token, _ = issue_access_token(
+  unscoped_token, _ = issue_access_token(
     grant.principal.user_id,
     grant.principal.device_session_id,
     settings,
-    active_account_id="OTHER-ACCOUNT",
-    scopes=["portfolio:read"],
   )
   wrong_scope_token, _ = issue_access_token(
     grant.principal.user_id,
     grant.principal.device_session_id,
     settings,
-    active_account_id="TEST-ACCOUNT-1",
     scopes=["portfolio:read"],
   )
 
-  for token in (wrong_account_token, wrong_scope_token):
+  for token in (unscoped_token, wrong_scope_token):
     with pytest.raises(AuthError) as mismatch:
       await service.authenticate(token)
     assert mismatch.value.code == "UNAUTHENTICATED"
@@ -440,7 +436,7 @@ async def test_native_login_allows_zero_capability_session(db):
   )
 
   assert grant.principal.permissions == frozenset()
-  assert grant.principal.active_account_id == "TEST-ACCOUNT-1"
+  assert grant.principal.is_native_session
   session = (
     await db.execute(
       select(AuthDeviceSession).where(
@@ -519,7 +515,7 @@ async def test_locked_session_validation_fails_after_revocation(db):
     required_permission="portfolio:read",
     account_id="TEST-ACCOUNT-1",
   )
-  assert current.active_account_id == "TEST-ACCOUNT-1"
+  assert current.require_account() == "TEST-ACCOUNT-1"
   await service.logout(
     grant.principal,
     all_devices=False,

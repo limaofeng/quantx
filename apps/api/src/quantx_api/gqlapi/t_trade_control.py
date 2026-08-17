@@ -595,7 +595,7 @@ def _payload(
     "session_binding": {
       "user_id": principal.user_id,
       "device_session_id": principal.device_session_id,
-      "active_account_id": principal.active_account_id,
+      "account_id": principal.require_account(),
     },
     "rollout_binding": rollout_binding,
     "readiness_fingerprint": _canonical_hash(readiness_binding),
@@ -613,9 +613,7 @@ def _require_native_control_principal(
     principal.require_account(account_id)
   except AuthError as exc:
     raise TradeApprovalChallengeError(exc.code, exc.message) from exc
-  if principal.active_account_id != account_id or principal.authorized_account_ids != (
-    account_id,
-  ):
+  if not principal.is_native_session or principal.authorized_account_ids != (account_id,):
     raise TradeApprovalChallengeError(
       "NATIVE_SESSION_ACCOUNT_REQUIRED",
       "做 T 原生控制只能作用于当前设备会话的唯一主账户",
@@ -913,7 +911,7 @@ class TTradeControlChallengeService:
         if session_binding != {
           "user_id": current.user_id,
           "device_session_id": current.device_session_id,
-          "active_account_id": current.active_account_id,
+          "account_id": current.require_account(),
         }:
           raise TradeApprovalChallengeError(
             "CONFIRMATION_CONTEXT_MISMATCH",

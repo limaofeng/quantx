@@ -58,7 +58,7 @@
 | --- | --- | --- | --- | --- |
 | `IOS-PLT-001` | 已从监控壳层转向个人量化五入口，并实现主要查看、手工交易、清仓和部分量化控制；复盘、部分助手控制及发布闭环仍缺。 | 本表全部接口；按能力拆分 | `T-RELEASE` / `E-AUTO`；缺 `E-PAPER,E-TF5,E-LIVE` | `PARTIAL` |
 | `IOS-PLT-002` | SwiftUI/iOS 17+、Apollo 和环境配置已落地；个人 VPN、真实设备和 TestFlight 分发未验证。 | `/health`、HTTPS/WSS 环境配置；会话外 | `T-SESSION,T-RELEASE` / 部分 `E-AUTO`；缺 `E-TF5` | `PARTIAL` |
-| `IOS-PLT-003` | 原生会话绑定唯一授权账户，客户端要求 `authorizedAccountIds` 恰好只有一个，并对账户集合歧义和跨账户响应 fail-closed。 | `/auth/session`；会话权限 | `T-SESSION,T-AUTHZ` / `E-AUTO` | `IMPLEMENTED_AUTO` |
+| `IOS-PLT-003` | 服务端从授权关系实时解析唯一账户，客户端要求 `authorizedAccountIds` 恰好只有一个，并对账户集合歧义和跨账户响应 fail-closed。 | `/auth/session`；会话权限 | `T-SESSION,T-AUTHZ` / `E-AUTO` | `IMPLEMENTED_AUTO` |
 | `IOS-PLT-004` | 订单、清仓、策略与助手写入继续复用服务端交易域、outbox/inbox 和 QMT 回报真源；尚无全功能 paper/实盘链路证据。 | Engine/QMT 投影；按操作 scope | `T-ORDER,T-LIQ,T-SECURITY` / `E-AUTO`；缺 `E-PAPER,E-LIVE` | `PARTIAL` |
 | `IOS-NAV-001` | 固定“今日/行情/交易/量化/资产”五 Tab 已实现，图标改为单色语义。 | `AppTab`；本地 + 读权限 | `T-NAV,T-A11Y` / `E-AUTO`；真实设备矩阵待补 | `IMPLEMENTED_AUTO` |
 | `IOS-NAV-002` | 设置、会话、通知偏好和版本从资产页账户入口进入。 | App Route、`GET/DELETE /auth/session`；会话 | `T-NAV,T-SESSION` / `E-AUTO` | `IMPLEMENTED_AUTO` |

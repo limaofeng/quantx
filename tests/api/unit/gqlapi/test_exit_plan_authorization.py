@@ -95,7 +95,7 @@ def _principal(
     access_token_expires_at=utcnow() + timedelta(minutes=5),
     permissions=frozenset(permissions),
     authorized_account_ids=(account_id,),
-    active_account_id=account_id,
+    is_native_session=True,
   )
 
 
@@ -179,7 +179,6 @@ async def authorization_database(monkeypatch):
           revoked_at=None,
           last_used_at=utcnow(),
           device_name="iPhone",
-          active_account_id="ACCOUNT-1",
           granted_permissions=["liquidation:control", "trade:approve"],
         ),
         AuthUserAccountAccess(

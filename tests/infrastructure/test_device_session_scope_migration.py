@@ -33,6 +33,63 @@ def test_device_session_scope_revision_follows_trade_confirmation() -> None:
     revision.downgrade()
 
 
+def test_personal_session_scope_revision_merges_retired_head() -> None:
+  legacy = _load_revision(
+    "20260816_0015_legacy_graphql_write_permissions.py",
+    "quantx_test_legacy_graphql_write_permissions_revision",
+  )
+  revision = _load_revision(
+    "20260818_0022_personal_session_scope.py",
+    "quantx_test_personal_session_scope_revision",
+  )
+
+  assert legacy.down_revision == "20260814_0014"
+  assert revision.down_revision == ("20260816_0021", "20260816_0015")
+  with pytest.raises(RuntimeError, match="downgrades"):
+    revision.downgrade()
+
+
+def test_personal_session_scope_drops_redundant_account_column(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  revision = _load_revision(
+    "20260818_0022_personal_session_scope.py",
+    "quantx_test_personal_session_scope_upgrade",
+  )
+  inspector = _DeviceSessionScopeInspector(
+    columns=_valid_device_session_scope_columns(),
+    constraints=[_valid_device_session_scope_constraint()],
+  )
+  statements = []
+  dropped_constraints = []
+  dropped_columns = []
+  monkeypatch.setattr(revision.op, "get_bind", lambda: object())
+  monkeypatch.setattr(revision, "inspect", lambda _bind: inspector)
+  monkeypatch.setattr(revision.op, "execute", statements.append)
+  monkeypatch.setattr(
+    revision.op,
+    "drop_constraint",
+    lambda *args, **kwargs: dropped_constraints.append((args, kwargs)),
+  )
+  monkeypatch.setattr(
+    revision.op,
+    "drop_column",
+    lambda *args: dropped_columns.append(args),
+  )
+
+  revision.upgrade()
+
+  assert len(statements) == 1
+  assert "revoked_at IS NULL" in str(statements[0])
+  assert dropped_constraints == [
+    (
+      ("ck_auth_device_sessions_scope_pair", "auth_device_sessions"),
+      {"type_": "check"},
+    )
+  ]
+  assert dropped_columns == [("auth_device_sessions", "active_account_id")]
+
+
 class _DeviceSessionScopeInspector:
   def __init__(self, *, columns, constraints=()):
     self.columns = columns

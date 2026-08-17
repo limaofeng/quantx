@@ -55,29 +55,24 @@ from ..types.trade_approval_types import (
 )
 
 
-def _native_active_account_id(info: strawberry.types.Info) -> Optional[str]:
-  """Return the one account selected by a scoped native session.
-
-  Legacy Web sessions intentionally have no active account and retain their
-  existing multi-account management surface.  Native sessions never receive an
-  unfiltered strategy-run list.
-  """
+def _native_account_id(info: strawberry.types.Info) -> Optional[str]:
+  """Return the personal account for a native session."""
 
   principal = principal_from_context(info.context)
-  if principal.active_account_id is None:
+  if not principal.is_native_session:
     return None
-  return principal.require_account(principal.active_account_id)
+  return principal.require_account()
 
 
 async def _authorize_native_strategy_run(
   info: strawberry.types.Info,
   run_id: str,
 ) -> None:
-  active_account_id = _native_active_account_id(info)
-  if active_account_id is None:
+  account_id = _native_account_id(info)
+  if account_id is None:
     return
   bound_account_id = await StrategyResolver.strategy_run_account_id(run_id)
-  if bound_account_id != active_account_id:
+  if bound_account_id != account_id:
     # Use the shared authorization error rather than revealing whether a
     # cross-account run identifier exists.
     principal_from_context(info.context).require_account(bound_account_id)
@@ -106,7 +101,7 @@ class StrategyQuery:
   ) -> List[StrategyRun]:
     return await StrategyResolver.get_strategy_runs(
       include_assistant_managed=include_assistant_managed,
-      account_id=_native_active_account_id(info),
+      account_id=_native_account_id(info),
     )
 
   @strawberry.field(description="获取单个策略运行")
@@ -150,7 +145,7 @@ class StrategyQuery:
       strategy_key=strategy_key,
       instrument_code=instrument_code,
       include_assistant_managed=include_assistant_managed,
-      account_id=_native_active_account_id(info),
+      account_id=_native_account_id(info),
     )
 
   @strawberry.field(description="获取单个策略实例")
@@ -397,7 +392,7 @@ class StrategyMutation:
     return await StrategyResolver.update_strategy_instance_parameters(
       instance_id,
       input,
-      mobile_only=principal.active_account_id is not None,
+      mobile_only=principal.is_native_session,
     )
 
   @strawberry.field(description="更新 Pullback Grid 网格簿")
@@ -426,7 +421,7 @@ class StrategyMutation:
     await _authorize_native_strategy_run(info, instance_id)
     principal = principal_from_context(info.context)
     if (
-      principal.active_account_id is not None
+      principal.is_native_session
       and await StrategyControlChallengeService.instance_requires_confirmation(
         instance_id
       )

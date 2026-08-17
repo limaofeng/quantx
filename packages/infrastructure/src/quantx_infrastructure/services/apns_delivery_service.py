@@ -29,7 +29,11 @@ from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from quantx_infrastructure.models.auth import AuthDeviceSession, AuthUser
+from quantx_infrastructure.models.auth import (
+  AuthDeviceSession,
+  AuthUser,
+  AuthUserAccountAccess,
+)
 from quantx_infrastructure.models.ios_notifications import (
   NOTIFICATION_ROUTE_TYPES,
   PUSH_CATEGORIES,
@@ -511,6 +515,7 @@ class ApnsOutboxService:
             IosPushCategoryPreference,
             AuthDeviceSession,
             AuthUser,
+            AuthUserAccountAccess.account_id,
           )
           .join(
             IosNotificationEvent,
@@ -530,6 +535,11 @@ class ApnsOutboxService:
             AuthDeviceSession.id == IosPushRegistration.device_session_id,
           )
           .join(AuthUser, AuthUser.id == AuthDeviceSession.user_id)
+          .outerjoin(
+            AuthUserAccountAccess,
+            (AuthUserAccountAccess.user_id == IosPushRegistration.user_id)
+            & (AuthUserAccountAccess.account_id == IosPushRegistration.account_id),
+          )
           .where(
             IosNotificationOutbox.status.in_(("PENDING", "RETRY")),
             IosNotificationOutbox.available_at <= current,
@@ -546,13 +556,14 @@ class ApnsOutboxService:
       ).one_or_none()
       if row is None:
         return ApnsClaimResult(failed=failed, discarded=discarded)
-      outbox, event, registration, preference, session, user = row
+      outbox, event, registration, preference, session, user, account_id = row
       discard_reason = self._discard_reason(
         event=event,
         registration=registration,
         preference=preference,
         session=session,
         user=user,
+        account_authorized=account_id is not None,
         now=current,
       )
       if discard_reason:
@@ -698,6 +709,7 @@ class ApnsOutboxService:
     preference: Optional[IosPushCategoryPreference],
     session: AuthDeviceSession,
     user: AuthUser,
+    account_authorized: bool,
     now: datetime,
   ) -> Optional[str]:
     if event.expires_at <= now:
@@ -714,7 +726,7 @@ class ApnsOutboxService:
       or not bool(user.is_active)
       or user.id != session.user_id
       or session.user_id != registration.user_id
-      or session.active_account_id != registration.account_id
+      or not account_authorized
       or "notification:manage" not in set(session.granted_permissions or [])
       or event.device_session_id != registration.device_session_id
       or event.user_id != registration.user_id

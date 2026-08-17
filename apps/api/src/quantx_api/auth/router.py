@@ -177,7 +177,7 @@ def _grant_response(grant: SessionGrant) -> SessionGrantResponse:
 
 
 def _require_native_session(principal: Principal) -> None:
-  if principal.active_account_id is None:
+  if not principal.is_native_session:
     raise AuthError(
       "SESSION_SCOPE_REQUIRED",
       "该令牌不属于原生设备会话",
@@ -332,7 +332,7 @@ async def create_web_session(
       device_name=payload.device_name or "QuantX Web",
       client_fingerprint=_client_fingerprint(request),
       request_id=_request_id(request),
-      bind_personal_account=False,
+      native_session=False,
     )
     _set_web_refresh_cookie(response, grant)
     return _web_grant_response(grant)

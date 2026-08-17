@@ -49,7 +49,7 @@ def _principal(
   *,
   session_id: str = "session-native-1",
   permissions: frozenset[str] = frozenset({"notification:manage"}),
-  active_account_id: str | None = "ACCOUNT-1",
+  native_session: bool = True,
 ) -> Principal:
   return Principal(
     user_id="user-1",
@@ -59,7 +59,7 @@ def _principal(
     access_token_expires_at=utcnow() + timedelta(minutes=5),
     permissions=permissions,
     authorized_account_ids=("ACCOUNT-1",),
-    active_account_id=active_account_id,
+    is_native_session=native_session,
   )
 
 
@@ -115,7 +115,6 @@ async def notification_database(monkeypatch):
           revoked_at=None,
           last_used_at=utcnow(),
           device_name="iPhone",
-          active_account_id="ACCOUNT-1",
           granted_permissions=["notification:manage"],
         ),
         AuthDeviceSession(
@@ -126,7 +125,6 @@ async def notification_database(monkeypatch):
           revoked_at=None,
           last_used_at=utcnow(),
           device_name="iPad",
-          active_account_id="ACCOUNT-1",
           granted_permissions=["notification:manage"],
         ),
         AuthDeviceSession(
@@ -137,7 +135,6 @@ async def notification_database(monkeypatch):
           revoked_at=None,
           last_used_at=utcnow(),
           device_name="Web",
-          active_account_id=None,
           granted_permissions=None,
         ),
       ]
@@ -389,7 +386,7 @@ async def test_legacy_web_mutation_compatibility_uses_current_security_contract(
       _principal(
         session_id="session-web-1",
         permissions=frozenset({"mutation:write"}),
-        active_account_id=None,
+        native_session=False,
       )
     ),
     RegisterPushDeviceInput(

@@ -3,7 +3,6 @@
 from sqlalchemy import (
   JSON,
   Boolean,
-  CheckConstraint,
   Column,
   DateTime,
   ForeignKey,
@@ -47,10 +46,6 @@ class AuthDeviceSession(Base, TimestampMixin):
   __tablename__ = "auth_device_sessions"
   __table_args__ = (
     Index("ix_auth_device_sessions_user_active", "user_id", "revoked_at"),
-    CheckConstraint(
-      "(active_account_id IS NULL) = (granted_permissions IS NULL)",
-      name="ck_auth_device_sessions_scope_pair",
-    ),
   )
 
   id = Column(String(36), primary_key=True, index=True)
@@ -65,7 +60,6 @@ class AuthDeviceSession(Base, TimestampMixin):
   revoked_at = Column(DateTime, nullable=True)
   last_used_at = Column(DateTime, nullable=False)
   device_name = Column(String(120), nullable=True)
-  active_account_id = Column(String(50), nullable=True)
   granted_permissions = Column(JSON(none_as_null=True), nullable=True)
 
 

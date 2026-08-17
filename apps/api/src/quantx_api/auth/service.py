@@ -148,7 +148,7 @@ class AuthService:
     device_name: Optional[str],
     client_fingerprint: str,
     request_id: str,
-    bind_personal_account: bool = True,
+    native_session: bool = True,
   ) -> SessionGrant:
     require_signing_key(self.settings)
     normalized_username = username.strip().lower()
@@ -202,30 +202,28 @@ class AuthService:
       raise unauthenticated("用户名或密码错误")
 
     await login_rate_limiter.clear(subject_fingerprint)
-    active_account_id: Optional[str] = None
     granted_permissions: Optional[Tuple[str, ...]] = None
-    if bind_personal_account:
-      try:
-        active_account_id = await self._resolve_native_active_account(user.id)
+    try:
+      await self._require_personal_account(user.id)
+      if native_session:
         granted_permissions = self._resolve_native_permissions(user.permissions)
-      except AuthError as exc:
-        await self._audit(
-          "LOGIN",
-          "DENIED",
-          request_id=request_id,
-          reason_code=exc.code,
-          user_id=user.id,
-          subject_fingerprint=subject_fingerprint,
-        )
-        await self.db.commit()
-        raise
+    except AuthError as exc:
+      await self._audit(
+        "LOGIN",
+        "DENIED",
+        request_id=request_id,
+        reason_code=exc.code,
+        user_id=user.id,
+        subject_fingerprint=subject_fingerprint,
+      )
+      await self.db.commit()
+      raise
     return await self._issue_session(
       user,
       device_name=device_name,
       request_id=request_id,
       audit_event_type="LOGIN",
       subject_fingerprint=subject_fingerprint,
-      active_account_id=active_account_id,
       granted_permissions=granted_permissions,
     )
 
@@ -283,7 +281,6 @@ class AuthService:
     request_id: str,
     audit_event_type: str,
     subject_fingerprint: Optional[str] = None,
-    active_account_id: Optional[str] = None,
     granted_permissions: Optional[Tuple[str, ...]] = None,
   ) -> SessionGrant:
     now = utcnow()
@@ -296,7 +293,6 @@ class AuthService:
       revoked_at=None,
       last_used_at=now,
       device_name=(device_name or "").strip()[:120] or None,
-      active_account_id=active_account_id,
       granted_permissions=(
         list(granted_permissions) if granted_permissions is not None else None
       ),
@@ -379,7 +375,7 @@ class AuthService:
       await self.db.commit()
       raise unauthenticated("刷新令牌无效或已过期")
 
-    if require_scoped_session and not self._is_scoped_session(session):
+    if require_scoped_session and not self._is_native_session(session):
       await self._audit(
         "REFRESH",
         "DENIED",
@@ -438,7 +434,7 @@ class AuthService:
     )
     session.expires_at = refresh_expiry(self.settings)
     session.last_used_at = now
-    if self._is_scoped_session(session):
+    if self._is_native_session(session):
       # A refresh can only remove permissions after a user-level revocation.
       # Newly granted user permissions never expand an existing device scope.
       session.granted_permissions = sorted(principal.permissions)
@@ -603,14 +599,12 @@ class AuthService:
       raise unauthenticated()
     account_ids = tuple(row[6] for row in rows if row[6])
     self._validate_access_claim_binding(claims, session)
-    (
-      effective_permissions,
-      effective_account_ids,
-      active_account_id,
-    ) = self._session_authorization(
-      session,
-      permissions,
-      account_ids,
+    effective_permissions, effective_account_ids, is_native_session = (
+      self._session_authorization(
+        session,
+        permissions,
+        account_ids,
+      )
     )
     return Principal(
       user_id=user_id,
@@ -620,7 +614,7 @@ class AuthService:
       access_token_expires_at=claims.expires_at,
       permissions=effective_permissions,
       authorized_account_ids=effective_account_ids,
-      active_account_id=active_account_id,
+      is_native_session=is_native_session,
     )
 
   async def lock_and_validate_session(
@@ -715,10 +709,8 @@ class AuthService:
       )
     )
     account_ids: Tuple[str, ...] = tuple(access_result.scalars().all())
-    permissions, effective_account_ids, active_account_id = self._session_authorization(
-      session,
-      user.permissions,
-      account_ids,
+    permissions, effective_account_ids, is_native_session = (
+      self._session_authorization(session, user.permissions, account_ids)
     )
     return Principal(
       user_id=user.id,
@@ -728,10 +720,10 @@ class AuthService:
       access_token_expires_at=access_expiry,
       permissions=permissions,
       authorized_account_ids=effective_account_ids,
-      active_account_id=active_account_id,
+      is_native_session=is_native_session,
     )
 
-  async def _resolve_native_active_account(
+  async def _require_personal_account(
     self,
     user_id: str,
   ) -> str:
@@ -739,7 +731,7 @@ class AuthService:
     if len(account_ids) != 1:
       raise AuthError(
         "SINGLE_ACCOUNT_REQUIRED",
-        "个人原生会话必须且只能授权一个资金账户",
+        "个人会话必须且只能授权一个资金账户",
         status_code=400,
       )
     return account_ids[0]
@@ -766,23 +758,20 @@ class AuthService:
     return tuple(result.scalars().all())
 
   @staticmethod
-  def _is_scoped_session(session: AuthDeviceSession) -> bool:
-    return (
-      session.active_account_id is not None or session.granted_permissions is not None
-    )
+  def _is_native_session(session: AuthDeviceSession) -> bool:
+    return session.granted_permissions is not None
 
   def _issue_access_token(
     self,
     user_id: str,
     session: AuthDeviceSession,
   ) -> tuple[str, datetime]:
-    if not self._is_scoped_session(session):
+    if not self._is_native_session(session):
       return issue_access_token(user_id, session.id, self.settings)
     return issue_access_token(
       user_id,
       session.id,
       self.settings,
-      active_account_id=session.active_account_id,
       scopes=session.granted_permissions,
     )
 
@@ -791,15 +780,13 @@ class AuthService:
     claims: AccessClaims,
     session: AuthDeviceSession,
   ) -> None:
-    if not AuthService._is_scoped_session(session):
-      if claims.active_account_id is not None or claims.scopes is not None:
+    if not AuthService._is_native_session(session):
+      if claims.scopes is not None:
         raise unauthenticated("访问令牌与设备会话不匹配")
       return
     persisted_permissions = session.granted_permissions
     if (
-      session.active_account_id is None
-      or not isinstance(persisted_permissions, list)
-      or claims.active_account_id != session.active_account_id
+      not isinstance(persisted_permissions, list)
       or claims.scopes
       != frozenset(
         value.strip()
@@ -814,19 +801,16 @@ class AuthService:
     session: AuthDeviceSession,
     user_permissions: Optional[Iterable[str]],
     account_ids: Tuple[str, ...],
-  ) -> tuple[frozenset[str], Tuple[str, ...], Optional[str]]:
-    active_account_id = session.active_account_id
+  ) -> tuple[frozenset[str], Tuple[str, ...], bool]:
     granted_permissions = session.granted_permissions
-    if active_account_id is None and granted_permissions is None:
+    if granted_permissions is None:
       return (
         frozenset(str(value) for value in (user_permissions or [])),
         account_ids,
-        None,
+        False,
       )
-    if active_account_id is None or not isinstance(granted_permissions, list):
+    if not isinstance(granted_permissions, list):
       raise unauthenticated("设备会话权限上下文无效")
-    if active_account_id not in account_ids:
-      raise unauthenticated("设备会话主账户授权已失效")
     persisted = {
       value.strip()
       for value in granted_permissions
@@ -842,8 +826,8 @@ class AuthService:
     }
     return (
       frozenset(persisted & current),
-      (active_account_id,),
-      active_account_id,
+      account_ids,
+      True,
     )
 
   def _subject_fingerprint(self, username: str, client_fingerprint: str) -> str:

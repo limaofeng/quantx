@@ -10,8 +10,7 @@ from quantx_api.gqlapi.resolvers.strategies import StrategyResolver
 from quantx_api.gqlapi.schemas.strategy_schema import StrategyMutation, StrategyQuery
 
 
-def _info(*, active_account_id: str | None) -> SimpleNamespace:
-  accounts = ("ACCOUNT-1", "ACCOUNT-2") if active_account_id is None else (active_account_id,)
+def _info(*, native_session: bool) -> SimpleNamespace:
   return SimpleNamespace(
     context={
       "principal": Principal(
@@ -21,8 +20,8 @@ def _info(*, active_account_id: str | None) -> SimpleNamespace:
         device_session_id="session-1",
         access_token_expires_at=utcnow() + timedelta(minutes=5),
         permissions=frozenset({"strategy:read", "strategy:control"}),
-        authorized_account_ids=accounts,
-        active_account_id=active_account_id,
+        authorized_account_ids=("ACCOUNT-1",),
+        is_native_session=native_session,
       )
     }
   )
@@ -42,7 +41,7 @@ async def test_native_strategy_lists_are_forced_to_active_account():
       new=AsyncMock(return_value=[]),
     ) as runs,
   ):
-    info = _info(active_account_id="ACCOUNT-1")
+    info = _info(native_session=True)
     assert await StrategyQuery().strategy_instances(info) == []
     assert await StrategyQuery().strategy_runs(info) == []
 
@@ -58,7 +57,7 @@ async def test_legacy_web_strategy_list_keeps_existing_unscoped_shape():
     new=AsyncMock(return_value=[]),
   ) as resolver:
     assert (
-      await StrategyQuery().strategy_instances(_info(active_account_id=None))
+      await StrategyQuery().strategy_instances(_info(native_session=False))
       == []
     )
 
@@ -81,7 +80,7 @@ async def test_native_strategy_detail_rejects_cross_account_before_read():
   ):
     with pytest.raises(AuthError) as caught:
       await StrategyQuery().strategy_instance(
-        _info(active_account_id="ACCOUNT-1"),
+        _info(native_session=True),
         "run-other-account",
       )
 
@@ -105,7 +104,7 @@ async def test_native_strategy_lifecycle_rejects_cross_account_before_write():
   ):
     with pytest.raises(AuthError) as caught:
       await StrategyMutation().pause_strategy_instance(
-        _info(active_account_id="ACCOUNT-1"),
+        _info(native_session=True),
         "run-other-account",
       )
 
@@ -129,7 +128,7 @@ async def test_native_strategy_detail_allows_matching_account():
     ) as resolver,
   ):
     actual = await StrategyQuery().strategy_instance(
-      _info(active_account_id="ACCOUNT-1"),
+      _info(native_session=True),
       "run-own-account",
     )
 

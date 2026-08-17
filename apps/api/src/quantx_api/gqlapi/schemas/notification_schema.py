@@ -49,15 +49,7 @@ async def _lock_push_read(db, info):
 
 
 def _current_account_id(current, request_account_id: str) -> str:
-  if current.active_account_id is None:
-    return current.require_account(request_account_id)
-  if current.active_account_id != request_account_id:
-    raise AuthError(
-      "ACCOUNT_SCOPE_MISMATCH",
-      "当前设备会话的主账户已变化",
-      status_code=403,
-    )
-  return current.active_account_id
+  return current.require_account(request_account_id)
 
 
 def _service(db) -> PushNotificationService:

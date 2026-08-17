@@ -82,7 +82,6 @@ async def _seed_registration(
   *,
   now,
   authorized: bool = True,
-  active_account_id: str = ACCOUNT_ID,
   enabled_categories: tuple[str, ...] = (
     "ACTION_REQUIRED",
     "ORDER_UPDATE",
@@ -122,7 +121,6 @@ async def _seed_registration(
       revoked_at=None,
       last_used_at=now,
       device_name="iPhone",
-      active_account_id=active_account_id,
       granted_permissions=["notification:manage"],
       created_at=now,
       updated_at=now,

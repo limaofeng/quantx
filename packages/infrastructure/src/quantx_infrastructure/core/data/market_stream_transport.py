@@ -107,6 +107,7 @@ class MarketStreamStore:
     if self._redis is None:
       self._redis = aioredis.Redis.from_url(
         settings.redis_url,
+        password=settings.redis_password or None,
         decode_responses=False,
         socket_timeout=settings.redis_socket_timeout,
         socket_connect_timeout=settings.redis_socket_connect_timeout,
@@ -117,6 +118,7 @@ class MarketStreamStore:
   async def open_subscription(self) -> BinaryMarketSubscription:
     subscriber = aioredis.Redis.from_url(
       settings.redis_url,
+      password=settings.redis_password or None,
       decode_responses=False,
       socket_timeout=settings.redis_socket_timeout,
       socket_connect_timeout=settings.redis_socket_connect_timeout,

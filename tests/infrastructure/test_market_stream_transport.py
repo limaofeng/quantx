@@ -131,3 +131,35 @@ async def test_store_redis_failure_prevents_publish_and_ready_state() -> None:
 
   assert redis.published == []
   assert (await store.state()).status == "SYNCING"
+
+
+@pytest.mark.asyncio
+async def test_store_url_connection_preserves_separate_redis_password(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  captured = {}
+  expected_client = object()
+
+  def from_url(url, **kwargs):
+    captured["url"] = url
+    captured.update(kwargs)
+    return expected_client
+
+  monkeypatch.setattr(
+    "quantx_infrastructure.core.data.market_stream_transport.settings.redis_url",
+    "redis://192.168.101.4:30179/0",
+  )
+  monkeypatch.setattr(
+    "quantx_infrastructure.core.data.market_stream_transport.settings.redis_password",
+    "configured-secret",
+  )
+  monkeypatch.setattr(
+    "quantx_infrastructure.core.data.market_stream_transport.aioredis.Redis.from_url",
+    from_url,
+  )
+
+  client = await MarketStreamStore().redis()
+
+  assert client is expected_client
+  assert captured["url"] == "redis://192.168.101.4:30179/0"
+  assert captured["password"] == "configured-secret"

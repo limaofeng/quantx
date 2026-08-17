@@ -54,8 +54,8 @@ QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 
 
 ## iOS v1 最小权限
 
-iOS 的产品目标是个人 A 股量化控制中心。原生会话按设备、单一主账户收缩
-scope。iOS v1 专用 scope 为：
+iOS 的产品目标是个人 A 股量化控制中心。原生会话按设备收缩 scope，账户则从
+唯一的用户账户授权关系实时解析。iOS v1 专用 scope 为：
 
 | Scope | 目标能力 |
 | --- | --- |
@@ -69,9 +69,9 @@ scope。iOS v1 专用 scope 为：
 | `notification:manage` | 当前设备 APNs Token 与通知偏好 |
 
 已停用的 `mutation:write` **不满足上述任何 iOS 写能力**。原生登录不接受账户或
-scope 选择；服务端绑定用户唯一授权账户，并在 `user.permissions` 返回“用户
-权限 ∩ iOS 能力白名单”。`user.authorizedAccountIds` 必须恰好包含该账户，刷新
-不得扩权。
+scope 选择；服务端实时解析用户唯一授权账户，并在 `user.permissions` 返回“用户
+权限 ∩ iOS 能力白名单”。`user.authorizedAccountIds` 必须恰好包含该账户，设备
+会话不重复保存账户，刷新不得扩权。
 
 ## 客户端范围
 

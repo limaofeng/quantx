@@ -46,7 +46,7 @@ def _principal(
     access_token_expires_at=utcnow() + timedelta(minutes=5),
     permissions=frozenset(permissions),
     authorized_account_ids=("ACCOUNT-1",),
-    active_account_id="ACCOUNT-1",
+    is_native_session=True,
   )
 
 
@@ -112,7 +112,6 @@ async def liquidation_database(monkeypatch):
         last_used_at=utcnow(),
         device_name="iPhone",
         granted_permissions=["liquidation:control", "trade:approve"],
-        active_account_id="ACCOUNT-1",
       )
     )
     db.add(
@@ -375,7 +374,7 @@ async def test_confirmation_rechecks_and_locks_account_membership(
       challenge_id=preview.challenge_id,
       confirmation_token=preview.confirmation_token,
     )
-  assert rejected.value.code == "UNAUTHENTICATED"
+  assert rejected.value.code == "FORBIDDEN"
   async with liquidation_database() as db:
     challenge = await db.get(TradeConfirmationChallenge, preview.challenge_id)
     assert challenge.consumed_at is None

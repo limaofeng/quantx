@@ -47,7 +47,7 @@ def _native_context(*permissions: str) -> dict:
     + timedelta(minutes=5),
     permissions=frozenset(permissions),
     authorized_account_ids=("AUTHORIZED-ACCOUNT",),
-    active_account_id="AUTHORIZED-ACCOUNT",
+    is_native_session=True,
   )
   return {"principal": principal, "request_id": "liquidation-native-request"}
 

@@ -313,5 +313,9 @@ def test_graphql_write_permission_migration_is_complete_and_irreversible() -> No
   assert "mutation:write" not in migrated
   assert set(revision.REPLACEMENT_WRITE_PERMISSIONS) <= set(migrated)
   assert revision.migrate_permissions(migrated) == migrated
+  legacy_migrated = revision.migrate_permissions(
+    [*revision.LEGACY_REPLACEMENT_WRITE_PERMISSIONS, "market:read"]
+  )
+  assert set(revision.REPLACEMENT_WRITE_PERMISSIONS) <= set(legacy_migrated)
   with pytest.raises(RuntimeError, match="downgrades"):
     revision.downgrade()

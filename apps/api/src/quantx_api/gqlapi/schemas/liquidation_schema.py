@@ -80,7 +80,7 @@ def _require_legacy_web_liquidation_session(
   """Keep native clients on the snapshot-bound liquidation contract."""
 
   principal = principal_from_context(info.context)
-  if principal.active_account_id is not None:
+  if principal.is_native_session:
     raise forbidden(
       "原生设备会话必须使用 previewLiquidation/confirmLiquidation 清仓"
     )

@@ -4,7 +4,7 @@ QuantX 原生 iOS 客户端最低支持 iOS 17，定位为个人 A 股量化移�
 
 移动端不会直接访问 QMT。助手买入确认继续使用独立 `trade:approve` 权限、短时服务端预览及 Face ID/Touch ID；确认只表示意图重新进入统一交易域与风控链路。手动交易只允许接入独立 `trade:manual` 两阶段契约，绝不调用遗留 `placeOrder` 绕过预览。委托投递、券商受理与成交严格区分，最终事实只认 QMT Agent 回报经 Engine 持久化和收敛后的结果。Debug 可连接配置的私网 HTTP/WS 开发服务；Staging 与 Release 仍只允许 HTTPS/WSS。
 
-原生登录只提交用户名、密码和设备名。服务端自动把设备会话绑定到用户唯一授权账户，并把用户权限收缩到 iOS v1 能力白名单：`portfolio:read`、`market:read`、`orders:read`、`strategy:read`、`system-status:read`、`watchlist:write`、`trade:manual`、`trade:approve`、`liquidation:control`、`strategy:control`、`t-trade:control`、`limit-up:control`、`notification:manage`。响应中的 `authorizedAccountIds` 必须恰好包含一个账户，`permissions` 不得包含 `mutation:write`、`trade:direct` 或 `assistant:*`。
+原生登录只提交用户名、密码和设备名。服务端从用户账户授权关系实时解析唯一账户，不在设备会话或 Token 中重复保存账户，并把用户权限收缩到 iOS v1 能力白名单：`portfolio:read`、`market:read`、`orders:read`、`strategy:read`、`system-status:read`、`watchlist:write`、`trade:manual`、`trade:approve`、`liquidation:control`、`strategy:control`、`t-trade:control`、`limit-up:control`、`notification:manage`。响应中的 `authorizedAccountIds` 必须恰好包含一个账户，`permissions` 不得包含 `mutation:write`、`trade:direct` 或 `assistant:*`。
 
 ## 环境
 

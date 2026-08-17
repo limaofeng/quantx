@@ -151,7 +151,7 @@ def _require_current_native_account(
   account_id: str,
 ) -> None:
   if (
-    principal.active_account_id != account_id
+    not principal.is_native_session
     or principal.authorized_account_ids != (account_id,)
   ):
     raise TradeApprovalChallengeError(

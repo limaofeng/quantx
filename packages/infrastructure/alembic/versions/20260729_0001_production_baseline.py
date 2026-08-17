@@ -67,7 +67,6 @@ POST_BASELINE_TABLES = {
 }
 POST_BASELINE_COLUMNS = {
   "auth_device_sessions": {
-    "active_account_id",
     "granted_permissions",
   },
   "account_trading_rollouts": {

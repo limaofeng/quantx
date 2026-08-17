@@ -35,7 +35,7 @@ def _principal() -> Principal:
       {"strategy:read", "strategy:control", "trade:approve"}
     ),
     authorized_account_ids=("ACCOUNT-1",),
-    active_account_id="ACCOUNT-1",
+    is_native_session=True,
   )
 
 

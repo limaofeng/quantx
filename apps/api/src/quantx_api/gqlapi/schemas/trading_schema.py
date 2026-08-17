@@ -420,7 +420,7 @@ class TradingMutation:
       account_id = await _resolve_account_id(info, input.account_id)
       principal = principal_from_context(info.context)
       idempotency_key = str(input.idempotency_key or "").strip()
-      if principal.active_account_id is not None and (
+      if principal.is_native_session and (
         not idempotency_key or len(idempotency_key) > 128
       ):
         return CancelOrderResult(
@@ -480,7 +480,7 @@ class TradingMutation:
             .with_for_update()
           )
         ).scalar_one_or_none()
-        if principal.active_account_id is not None and pending is None:
+        if principal.is_native_session and pending is None:
           return CancelOrderResult(
             success=False,
             message="订单缺少 QuantX 命令关联，原生端拒绝撤销未追踪委托",

@@ -150,7 +150,7 @@ def _principal(
   device_session_id: str = "device-session-1",
   permissions: frozenset[str] | None = None,
   account_id: str = "ACCOUNT-1",
-  active_account_id: str | None = "ACCOUNT-1",
+  native_session: bool = True,
 ) -> Principal:
   return Principal(
     user_id="user-1",
@@ -164,7 +164,7 @@ def _principal(
       else frozenset({"t-trade:control", "trade:approve"})
     ),
     authorized_account_ids=(account_id,),
-    active_account_id=active_account_id,
+    is_native_session=native_session,
   )
 
 
@@ -232,11 +232,6 @@ async def control_database(monkeypatch, tmp_path):
           account_id="ACCOUNT-1",
           is_default=True,
         ),
-        AuthUserAccountAccess(
-          user_id="user-1",
-          account_id="ACCOUNT-2",
-          is_default=False,
-        ),
       ]
     )
     for session_id in ("device-session-1", "device-session-2"):
@@ -249,7 +244,6 @@ async def control_database(monkeypatch, tmp_path):
           revoked_at=None,
           last_used_at=utcnow(),
           device_name="iPhone",
-          active_account_id="ACCOUNT-1",
           granted_permissions=["t-trade:control", "trade:approve"],
         )
       )
@@ -262,7 +256,6 @@ async def control_database(monkeypatch, tmp_path):
         revoked_at=None,
         last_used_at=utcnow(),
         device_name="Web",
-        active_account_id=None,
         granted_permissions=None,
       )
     )
@@ -390,7 +383,7 @@ async def test_control_requires_native_unique_primary_account(
     await TTradeControlChallengeService.issue(
       principal=_principal(
         device_session_id="web-session",
-        active_account_id=None,
+        native_session=False,
       ),
       request=_request(),
     )
@@ -398,7 +391,7 @@ async def test_control_requires_native_unique_primary_account(
 
   with pytest.raises(TradeApprovalChallengeError) as account_rejected:
     await TTradeControlChallengeService.issue(
-      principal=_principal(account_id="ACCOUNT-2", active_account_id="ACCOUNT-2"),
+      principal=_principal(account_id="ACCOUNT-2"),
       request=_request(),
     )
   assert account_rejected.value.code == "FORBIDDEN"

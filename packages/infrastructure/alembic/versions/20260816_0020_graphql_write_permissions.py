@@ -25,6 +25,16 @@ REPLACEMENT_WRITE_PERMISSIONS = (
   "t-trade:control",
   "watchlist:write",
 )
+LEGACY_REPLACEMENT_WRITE_PERMISSIONS = frozenset(
+  {
+    "agent:manage",
+    "market:write",
+    "operations:write",
+    "orders:write",
+    "portfolio:write",
+    "strategy:write",
+  }
+)
 
 
 def migrate_permissions(values: object) -> list[str]:
@@ -33,6 +43,10 @@ def migrate_permissions(values: object) -> list[str]:
   permissions = {str(value).strip() for value in values if str(value).strip()}
   if "mutation:write" in permissions:
     permissions.remove("mutation:write")
+    permissions.update(REPLACEMENT_WRITE_PERMISSIONS)
+  elif LEGACY_REPLACEMENT_WRITE_PERMISSIONS <= permissions:
+    # A short-lived retired revision already replaced mutation:write with the
+    # six legacy scopes. Complete that upgrade when repairing its Alembic head.
     permissions.update(REPLACEMENT_WRITE_PERMISSIONS)
   return sorted(permissions)
 
