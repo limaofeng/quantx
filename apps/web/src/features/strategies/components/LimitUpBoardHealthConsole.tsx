@@ -4,17 +4,19 @@ import {
   CheckCircle2,
   Clock3,
   DatabaseZap,
+  Loader2,
+  Play,
   type LucideIcon,
   Radio,
   RefreshCw,
   Settings2,
   ShieldAlert,
+  Square,
   Target,
   WalletCards,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Switch } from '@/components/ui/switch';
 import { cn } from '@/utils/cn';
 
 import type {
@@ -33,26 +35,30 @@ const ITEM_ICONS: Record<string, LucideIcon> = {
 
 const TONE_STYLES: Record<
   LimitUpBoardHealthItemTone,
-  { dot: string; icon: string; text: string }
+  { dot: string; icon: string; surface: string; text: string }
 > = {
   error: {
     dot: 'bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.55)]',
     icon: 'text-rose-300',
+    surface: 'border-rose-400/15 bg-rose-400/[0.055] text-rose-200',
     text: 'text-rose-200',
   },
   healthy: {
     dot: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.45)]',
     icon: 'text-emerald-300',
+    surface: 'border-emerald-400/15 bg-emerald-400/[0.055] text-emerald-200',
     text: 'text-emerald-200',
   },
   neutral: {
     dot: 'bg-slate-600',
     icon: 'text-slate-500',
+    surface: 'border-white/[0.07] bg-white/[0.025] text-slate-300',
     text: 'text-slate-300',
   },
   warning: {
     dot: 'bg-amber-300 shadow-[0_0_8px_rgba(252,211,77,0.4)]',
     icon: 'text-amber-300',
+    surface: 'border-amber-400/15 bg-amber-400/[0.055] text-amber-200',
     text: 'text-amber-200',
   },
 };
@@ -99,27 +105,38 @@ export function LimitUpBoardHealthConsole({
       : health.tone === 'warning'
         ? '需要关注'
         : '业务链健康';
+  const primaryIssue =
+    health.items.find(item => item.tone === 'error') ??
+    health.items.find(item => item.tone === 'warning') ??
+    null;
+  const assistantHealth = health.items.find(item => item.id === 'assistant');
+  const entryGateHealth = health.items.find(item => item.id === 'entry-gate');
 
   return (
     <aside
-      aria-label="首板健康控制台"
+      aria-labelledby="limit-up-health-console-title"
       className="flex h-full min-h-0 w-full flex-col bg-[#081423] text-slate-200"
       data-testid="limit-up-health-console"
     >
-      <div className="shrink-0 border-b border-white/[0.06] py-3.5 pl-4 pr-14">
+      <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[9px] font-black uppercase tracking-[0.24em] text-red-300">
               First board operations
             </div>
-            <h1 className="mt-1 text-base font-black">首板健康控制台</h1>
+            <h1
+              id="limit-up-health-console-title"
+              className="mt-1 text-base font-black"
+            >
+              健康控制台
+            </h1>
             <div className="mt-1 truncate font-mono text-[9px] text-slate-600">
               {accountName || '未选择账户'} · {accountId || '--'}
             </div>
           </div>
           <button
             type="button"
-            aria-label="刷新首板健康控制台"
+            aria-label="刷新健康控制台"
             className="flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-sm border border-white/[0.08] text-slate-500 hover:border-red-400/25 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
@@ -134,18 +151,34 @@ export function LimitUpBoardHealthConsole({
         </div>
       </div>
 
-      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/[0.06] p-3">
+      <div
+        className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/[0.06] p-3"
+        role="group"
+        aria-label="首板运行摘要"
+      >
         <HealthStatusCell
           icon={health.tone === 'healthy' ? CheckCircle2 : ShieldAlert}
-          label="首板业务链"
+          label="业务链"
           tone={health.tone}
           value={overallLabel}
+        />
+        <HealthStatusCell
+          icon={Bot}
+          label="晋级助手"
+          tone={assistantHealth?.tone ?? 'neutral'}
+          value={assistantHealth?.value ?? '等待状态'}
         />
         <HealthStatusCell
           icon={Activity}
           label="执行环境"
           tone={mode === 'live' ? 'warning' : 'neutral'}
           value={mode === 'live' ? 'LIVE 实盘' : 'PAPER 模拟'}
+        />
+        <HealthStatusCell
+          icon={ShieldAlert}
+          label="确认门禁"
+          tone={entryGateHealth?.tone ?? 'neutral'}
+          value={entryGateHealth?.value ?? '等待状态'}
         />
       </div>
 
@@ -155,14 +188,19 @@ export function LimitUpBoardHealthConsole({
             <span>业务链检查</span>
             <span>更新 {formatTime(radarUpdatedAt)}</span>
           </div>
-          <div className="space-y-1.5">
+          <div
+            className="border border-white/[0.055] bg-white/[0.018]"
+            role="list"
+            aria-label="首板业务链检查项"
+          >
             {health.items.map(item => {
               const Icon = ITEM_ICONS[item.id] || Activity;
               const style = TONE_STYLES[item.tone];
               return (
                 <div
                   key={item.id}
-                  className="rounded-sm border border-white/[0.055] bg-white/[0.018] px-2.5 py-2"
+                  className="border-b border-white/[0.055] px-2.5 py-2.5 last:border-b-0"
+                  role="listitem"
                 >
                   <div className="flex items-center gap-2">
                     <Icon className={cn('h-3.5 w-3.5 shrink-0', style.icon)} />
@@ -190,10 +228,25 @@ export function LimitUpBoardHealthConsole({
 
         <section className="p-3">
           <div className="mb-2 flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
-            <Clock3 className="h-3.5 w-3.5 text-cyan-400" />
-            健康边界
+            {primaryIssue ? (
+              <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+            )}
+            首要门禁
           </div>
-          <p className="text-[9px] leading-4 text-slate-600">
+          <p
+            className={cn(
+              'text-[10px] leading-4',
+              primaryIssue ? 'text-amber-100' : 'text-emerald-200'
+            )}
+          >
+            {primaryIssue
+              ? `${primaryIssue.label} · ${primaryIssue.detail}`
+              : '当前没有业务阻断项'}
+          </p>
+          <p className="mt-3 border-t border-white/[0.05] pt-3 text-[9px] leading-4 text-slate-600">
+            <Clock3 className="mr-1 inline h-3 w-3 text-cyan-400" />
             这里只判断首板扫描、候选收敛、入场门禁与 T+1
             退出计划。Engine、Agent、备份与死信等全局状态仍以底部状态栏和统一设置为准。
           </p>
@@ -222,24 +275,26 @@ export function LimitUpBoardHealthConsole({
             风险设置
           </Button>
         </div>
-        <label className="flex h-9 cursor-pointer items-center justify-between rounded-sm border border-white/[0.08] bg-white/[0.025] px-3 text-[10px] text-slate-300">
-          <span className="inline-flex items-center gap-2">
-            <Bot
-              className={cn(
-                'h-3.5 w-3.5',
-                assistantEnabled ? 'text-emerald-300' : 'text-slate-600'
-              )}
-            />
-            首板晋级助手
-          </span>
-          <Switch
-            aria-label="启用首板晋级助手"
-            checked={assistantEnabled}
-            disabled={!accountId || actionLoading}
-            onCheckedChange={onToggleAssistant}
-            className="scale-75 data-[state=checked]:bg-emerald-500"
-          />
-        </label>
+        <Button
+          type="button"
+          className={cn(
+            'h-9 w-full cursor-pointer rounded-sm text-[10px] font-black',
+            assistantEnabled
+              ? 'bg-slate-700 text-white hover:bg-slate-600'
+              : 'bg-red-500 text-white hover:bg-red-400'
+          )}
+          disabled={!accountId || actionLoading}
+          onClick={() => onToggleAssistant(!assistantEnabled)}
+        >
+          {actionLoading ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+          ) : assistantEnabled ? (
+            <Square className="mr-1.5 h-3 w-3" />
+          ) : (
+            <Play className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {assistantEnabled ? '停止助手' : '启动助手'}
+        </Button>
       </div>
     </aside>
   );
@@ -258,17 +313,16 @@ function HealthStatusCell({
 }) {
   const style = TONE_STYLES[tone];
   return (
-    <div className="min-w-0 rounded-sm border border-white/[0.06] bg-white/[0.025] px-2.5 py-2">
-      <div className="flex items-center gap-1.5 text-[9px] text-slate-600">
-        <Icon className={cn('h-3 w-3', style.icon)} />
-        {label}
+    <div
+      className={cn('min-w-0 border px-2.5 py-2', style.surface)}
+      role="group"
+      aria-label={label}
+    >
+      <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] opacity-65">
+        <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 flex items-center gap-1.5">
-        <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />
-        <strong className={cn('truncate text-[10px]', style.text)}>
-          {value}
-        </strong>
-      </div>
+      <div className="mt-1 truncate text-[11px] font-black">{value}</div>
     </div>
   );
 }

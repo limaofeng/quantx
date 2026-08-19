@@ -124,7 +124,7 @@ function CandidateIdentity({ candidate }: { candidate: RadarCandidate }) {
           <Clock3 className="h-3 w-3 shrink-0 text-amber-300" />
         ) : null}
       </span>
-      <span className="mt-1 block truncate font-mono text-[10px] text-slate-500">
+      <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-500">
         {candidate.code} ·{' '}
         {candidate.boardSegment === 'GROWTH' ? '双创' : '主板'} ·{' '}
         {candidate.industry || '未分类'}
@@ -310,20 +310,20 @@ function CandidateRow({
     <div
       style={style}
       className={cn(
-        'absolute left-0 top-0 w-full cursor-pointer rounded-md border text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/70 motion-reduce:transition-none',
-        layout === 'wide' && `grid ${wideGridColumns} items-center gap-2 px-3`,
+        'absolute left-0 top-0 w-full cursor-pointer border-b border-white/[0.045] text-left transition-colors duration-150 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/70 motion-reduce:transition-none',
+        layout === 'wide' && `grid ${wideGridColumns} items-center gap-2 px-4`,
         layout === 'compact' &&
-          `grid ${compactGridColumns} items-center gap-2 px-3`,
-        layout === 'narrow' && 'flex flex-col justify-between px-3 py-2.5',
+          `grid ${compactGridColumns} items-center gap-2 px-4`,
+        layout === 'narrow' && 'flex flex-col justify-between px-4 py-2.5',
         candidate.isStale
-          ? 'border-white/[0.05] bg-slate-950/70'
+          ? 'bg-slate-950/45'
           : pending
-            ? 'border-amber-400/30 bg-amber-400/[0.06]'
+            ? 'bg-amber-400/[0.045]'
             : managed
-              ? 'border-emerald-400/25 bg-emerald-400/[0.05]'
-              : 'border-white/[0.06] bg-[#0a1322] hover:border-white/15 hover:bg-white/[0.035]',
+              ? 'bg-emerald-400/[0.04]'
+              : 'bg-transparent',
         selected &&
-          'border-cyan-300/60 bg-cyan-400/[0.07] ring-1 ring-inset ring-cyan-300/30'
+          'bg-cyan-400/[0.07] shadow-[inset_3px_0_0_rgba(103,232,249,0.8)]'
       )}
       data-testid={`limit-up-candidate-${candidate.code}`}
       aria-label={`查看 ${candidate.name} ${candidate.code}`}
@@ -531,7 +531,7 @@ function CandidateGridHeader({ layout }: { layout: CandidateLayout }) {
   return (
     <div
       className={cn(
-        'grid shrink-0 gap-2 border-b border-white/[0.06] px-3 py-2 text-[9px] font-black tracking-wider text-slate-500',
+        'grid shrink-0 gap-2 bg-[#0b1628] px-4 py-2.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.05)]',
         layout === 'wide' ? wideGridColumns : compactGridColumns
       )}
       role="row"
@@ -686,36 +686,38 @@ export function LimitUpRadarPanel({
   return (
     <section
       ref={panelRef}
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border border-cyan-400/15 bg-[#0d1626]/90"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#0a1424]"
       data-layout={layout}
       data-testid="limit-up-radar-panel"
     >
       <div
         className={cn(
-          'flex shrink-0 gap-2 border-b border-white/[0.07] p-3',
+          'flex shrink-0 gap-3 border-b border-white/[0.05] px-4 py-3',
           layout === 'wide'
             ? 'flex-row items-center justify-between'
-            : 'flex-col'
+            : 'flex-col items-stretch'
         )}
       >
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <div className="flex items-center gap-2 text-sm font-black text-slate-100">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-sm font-black text-slate-100">
             <Radar className="h-4 w-4 text-cyan-300" />
             首板晋级候选
-          </div>
-          <span className="font-mono text-[10px] text-slate-500">
-            {summary.discoveredCount} 发现 · {summary.eligibleCount} 合格 ·{' '}
-            {summary.scannedCount} 已扫描
-          </span>
-          <span className="flex items-center gap-1.5 text-[10px] text-slate-500">
-            <span
-              className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                isScannerRunning ? 'bg-emerald-400' : 'bg-rose-400'
-              )}
-            />
-            {fetching ? '刷新中' : isScannerRunning ? '实时扫描' : '雷达离线'}
-          </span>
+          </h2>
+          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-600">
+            <span className="font-mono">
+              {summary.discoveredCount} 发现 · {summary.eligibleCount} 合格 ·{' '}
+              {summary.scannedCount} 已扫描
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  isScannerRunning ? 'bg-emerald-400' : 'bg-rose-400'
+                )}
+              />
+              {fetching ? '刷新中' : isScannerRunning ? '实时扫描' : '雷达离线'}
+            </span>
+          </p>
         </div>
         <div
           className={cn(
@@ -733,7 +735,7 @@ export function LimitUpRadarPanel({
               value={search}
               onChange={event => onSearchChange(event.target.value)}
               placeholder="代码 / 名称"
-              className="h-8 border-white/10 bg-[#08111f] pl-8 text-[11px]"
+              className="h-8 rounded-sm border border-white/10 bg-[#08111f] pl-8 text-[11px]"
             />
           </label>
           <label>
@@ -743,7 +745,7 @@ export function LimitUpRadarPanel({
               onChange={event =>
                 onStageChange(event.target.value as RadarStage | 'ALL')
               }
-              className="h-8 w-full rounded-md border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
+              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
             >
               {stages.map(item => (
                 <option key={item.value} value={item.value}>
@@ -757,7 +759,7 @@ export function LimitUpRadarPanel({
             <select
               value={industry}
               onChange={event => onIndustryChange(event.target.value)}
-              className="h-8 w-full rounded-md border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
+              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
             >
               <option value="ALL">全部行业</option>
               {industries.map(item => (
@@ -773,7 +775,7 @@ export function LimitUpRadarPanel({
       {errorMessage || systemWarnings.length ? (
         <div
           role="alert"
-          className="m-3 mb-0 flex shrink-0 items-start gap-2 rounded-md border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.07] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="font-black">系统保护</span>
@@ -784,7 +786,7 @@ export function LimitUpRadarPanel({
       ) : null}
 
       <div
-        className="flex min-h-0 flex-1 flex-col px-3 pb-3 pt-3"
+        className="flex min-h-0 flex-1 flex-col"
         role="grid"
         aria-label="首板晋级候选列表"
         aria-rowcount={candidates.length + 1}
@@ -792,7 +794,7 @@ export function LimitUpRadarPanel({
         <CandidateGridHeader layout={layout} />
         <div
           ref={viewportRef}
-          className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar"
           data-testid="limit-up-radar-viewport"
           onScroll={onScroll}
           role="rowgroup"
@@ -807,7 +809,7 @@ export function LimitUpRadarPanel({
                   key={candidate.code}
                   candidate={candidate}
                   style={{
-                    height: rowHeight - 5,
+                    height: rowHeight,
                     transform: `translateY(${(start + index) * rowHeight}px)`,
                   }}
                   armed={armedCodes.has(candidate.code)}
@@ -825,9 +827,9 @@ export function LimitUpRadarPanel({
               ))}
             </div>
           ) : (
-            <div className="flex h-full items-stretch" role="row">
+            <div className="flex h-full items-stretch px-4 py-3" role="row">
               <div
-                className="flex flex-1 flex-col items-center justify-center rounded-md border border-dashed border-white/10 text-center"
+                className="flex flex-1 flex-col items-center justify-center text-center"
                 role="gridcell"
               >
                 <ShieldCheck className="h-8 w-8 text-slate-700" />
@@ -843,8 +845,8 @@ export function LimitUpRadarPanel({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] px-3 py-2 text-[9px] text-slate-500">
-        <span>自适应列布局 · 稳定行高虚拟滚动</span>
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-1 border-t border-white/[0.05] bg-[#07111f] px-4 py-2 text-[9px] text-slate-600">
+        <span>报价过期仅供观察 · 点击候选查看评分、盘口与研究</span>
         <button
           type="button"
           className="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-slate-400 transition-colors duration-200 hover:bg-white/[0.05] hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"

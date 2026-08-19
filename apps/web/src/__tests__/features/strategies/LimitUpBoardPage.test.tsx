@@ -317,6 +317,7 @@ describe('LimitUpBoardPage', () => {
   });
 
   it('registers first-board business checks in the health console', async () => {
+    const user = userEvent.setup();
     render(<HostedLimitUpBoardPage />);
 
     await waitFor(() => expect(mocks.setWorkspaceSidebar).toHaveBeenCalled());
@@ -327,6 +328,19 @@ describe('LimitUpBoardPage', () => {
       'limit-up-health-console'
     );
 
+    expect(
+      within(healthConsole).getByRole('heading', {
+        level: 1,
+        name: '健康控制台',
+      })
+    ).toBeVisible();
+    expect(
+      within(healthConsole).getByRole('group', { name: '首板运行摘要' })
+    ).toBeVisible();
+    const businessChecks = within(healthConsole).getByRole('list', {
+      name: '首板业务链检查项',
+    });
+    expect(businessChecks).toBeVisible();
     expect(within(healthConsole).getByText('业务链检查')).toBeVisible();
     for (const label of [
       '候选雷达',
@@ -336,8 +350,14 @@ describe('LimitUpBoardPage', () => {
       '监控负载',
       '退出托管',
     ]) {
-      expect(within(healthConsole).getByText(label)).toBeVisible();
+      expect(within(businessChecks).getByText(label)).toBeVisible();
     }
+    const stopAssistant = within(healthConsole).getByRole('button', {
+      name: '停止助手',
+    });
+    expect(stopAssistant).toBeVisible();
+    await user.click(stopAssistant);
+    expect(mocks.save).toHaveBeenCalledWith({ enabled: false });
   });
 
   it('opens the selected candidate in the right-side inspector', async () => {

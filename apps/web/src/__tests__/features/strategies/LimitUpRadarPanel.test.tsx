@@ -199,9 +199,16 @@ describe('LimitUpRadarPanel', () => {
     const { rerender } = render(<LimitUpRadarPanel {...props} />);
     const row = screen.getByTestId(`limit-up-candidate-${candidate.code}`);
 
+    expect(
+      screen.getByRole('heading', { level: 2, name: '首板晋级候选' })
+    ).toBeVisible();
+    expect(
+      screen.getByRole('grid', { name: '首板晋级候选列表' })
+    ).toHaveAttribute('aria-rowcount', '2');
     expect(row).toHaveAttribute('role', 'row');
     expect(row).toHaveAttribute('tabindex', '0');
     expect(row).toHaveAttribute('aria-selected', 'false');
+    expect(row).toHaveAttribute('aria-rowindex', '2');
 
     fireEvent.click(row);
     fireEvent.keyDown(row, { key: 'Enter' });
@@ -216,7 +223,6 @@ describe('LimitUpRadarPanel', () => {
 
     rerender(<LimitUpRadarPanel {...props} selectedCode={candidate.code} />);
     expect(row).toHaveAttribute('aria-selected', 'true');
-    expect(row).toHaveClass('border-cyan-300/60');
   });
 
   it('uses measured width and height for compact and narrow virtualization', () => {
