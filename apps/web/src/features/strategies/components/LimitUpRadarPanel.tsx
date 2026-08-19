@@ -1,7 +1,7 @@
 import {
   AlertTriangle,
   Clock3,
-  ExternalLink,
+  PanelRightOpen,
   Radar,
   Search,
   ShieldCheck,
@@ -9,8 +9,10 @@ import {
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent,
   type UIEvent,
 } from 'react';
 
@@ -25,11 +27,23 @@ import type {
   RadarSummary,
 } from '../hooks/useLimitUpRadar';
 
-import { LimitUpRadarMiniChart } from './LimitUpRadarMiniChart';
+type CandidateLayout = 'wide' | 'compact' | 'narrow';
 
-const ROW_HEIGHT = 76;
-const VIEWPORT_HEIGHT = 624;
+const DEFAULT_CONTAINER_WIDTH = 1080;
+const FALLBACK_VIEWPORT_HEIGHT = 624;
+const WIDE_LAYOUT_MIN_WIDTH = 1080;
+const COMPACT_LAYOUT_MIN_WIDTH = 720;
 const OVERSCAN = 5;
+const ROW_HEIGHTS: Record<CandidateLayout, number> = {
+  wide: 76,
+  compact: 96,
+  narrow: 170,
+};
+
+const wideGridColumns =
+  'grid-cols-[minmax(148px,1.35fr)_68px_70px_78px_84px_80px_74px_80px_92px]';
+const compactGridColumns =
+  'grid-cols-[minmax(130px,1.2fr)_64px_70px_76px_minmax(110px,1fr)_82px]';
 
 const stageTone: Record<RadarStage, string> = {
   BROKEN: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
@@ -52,27 +66,202 @@ const stages: Array<{ label: string; value: RadarStage | 'ALL' }> = [
   { label: '回封', value: 'RESEALED' },
 ];
 
+function getCandidateLayout(width: number): CandidateLayout {
+  if (width >= WIDE_LAYOUT_MIN_WIDTH) return 'wide';
+  if (width >= COMPACT_LAYOUT_MIN_WIDTH) return 'compact';
+  return 'narrow';
+}
+
+function getHighPositionLabel(value: string) {
+  return (
+    {
+      BASE_BREAKOUT: '基底突破',
+      HIGH_BREAKOUT: '高位突破',
+      OVERHEATED: '过热加速',
+      DATA_UNKNOWN: '数据未知',
+    }[value] ?? value
+  );
+}
+
+function getResearchLabel(candidate: RadarCandidate) {
+  return candidate.researchArtifact ? '研究已生成' : '等待研究';
+}
+
+function getResearchDetail(candidate: RadarCandidate) {
+  return candidate.researchArtifact?.dataGaps.length
+    ? `${candidate.researchArtifact.dataGaps.length} 项缺口`
+    : candidate.researchArtifact
+      ? '公告证据已附'
+      : 'AI 不影响资格';
+}
+
+function CandidateStage({ candidate }: { candidate: RadarCandidate }) {
+  return (
+    <span className="text-center">
+      <span
+        className={cn(
+          'inline-flex rounded border px-1.5 py-1 text-[10px] font-black',
+          stageTone[candidate.stage]
+        )}
+      >
+        {candidate.stageLabel}
+      </span>
+      <span className="mt-1 block text-[9px] text-slate-500">
+        进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
+      </span>
+    </span>
+  );
+}
+
+function CandidateIdentity({ candidate }: { candidate: RadarCandidate }) {
+  return (
+    <span className="min-w-0 text-left">
+      <span className="flex min-w-0 items-center gap-1.5">
+        <span className="truncate text-xs font-black text-slate-100">
+          {candidate.name}
+        </span>
+        {candidate.isStale ? (
+          <Clock3 className="h-3 w-3 shrink-0 text-amber-300" />
+        ) : null}
+      </span>
+      <span className="mt-1 block truncate font-mono text-[10px] text-slate-500">
+        {candidate.code} ·{' '}
+        {candidate.boardSegment === 'GROWTH' ? '双创' : '主板'} ·{' '}
+        {candidate.industry || '未分类'}
+      </span>
+    </span>
+  );
+}
+
+function CandidateAction({
+  armed,
+  autoTracked,
+  busy,
+  candidate,
+  hardBlocked,
+  managed,
+  onArm,
+  onDisarm,
+  pending,
+  stateLabel,
+}: {
+  armed: boolean;
+  autoTracked: boolean;
+  busy: boolean;
+  candidate: RadarCandidate;
+  hardBlocked: boolean;
+  managed: boolean;
+  onArm: (code: string) => void;
+  onDisarm: (code: string) => void;
+  pending: boolean;
+  stateLabel: string;
+}) {
+  if (candidate.isStale) {
+    return (
+      <span className="rounded-md border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1.5 text-center text-[10px] font-black text-amber-200/80">
+        报价过期
+      </span>
+    );
+  }
+
+  if (managed || pending) {
+    return (
+      <span
+        className={cn(
+          'rounded-md border px-2 py-1.5 text-center text-[10px] font-black',
+          managed
+            ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
+            : 'border-amber-400/25 bg-amber-400/10 text-amber-200'
+        )}
+      >
+        {stateLabel}
+      </span>
+    );
+  }
+
+  if (armed) {
+    return (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        onClick={event => {
+          event.stopPropagation();
+          onDisarm(candidate.code);
+        }}
+        className="h-7 cursor-pointer border-white/10 bg-white/[0.03] px-2 text-[10px] text-slate-300 hover:bg-white/[0.07]"
+      >
+        {busy ? '处理中' : '取消关注'}
+      </Button>
+    );
+  }
+
+  return (
+    <Button
+      type="button"
+      size="sm"
+      disabled={busy || hardBlocked}
+      onClick={event => {
+        event.stopPropagation();
+        onArm(candidate.code);
+      }}
+      title={
+        candidate.isStale ? '报价超过15秒，仅供观察' : '提高账户候选关注优先级'
+      }
+      className="h-7 cursor-pointer bg-red-500 px-2 text-[10px] font-black text-white hover:bg-red-400"
+    >
+      {busy ? '处理中' : autoTracked ? '优先关注' : '关注'}
+    </Button>
+  );
+}
+
+function CandidateMetric({
+  detail,
+  tone,
+  value,
+}: {
+  detail: string;
+  tone: string;
+  value: string;
+}) {
+  return (
+    <span className={cn('text-center font-mono font-black', tone)}>
+      {value}
+      <span className="block text-[9px] font-normal text-slate-500">
+        {detail}
+      </span>
+    </span>
+  );
+}
+
 function CandidateRow({
   armed,
   assistantEnabled,
   busy,
   candidate,
+  layout,
   managed,
   onArm,
   onDisarm,
-  onOpenStock,
+  onSelect,
   pending,
+  rowIndex,
+  selected,
   style,
 }: {
   armed: boolean;
   assistantEnabled: boolean;
   busy: boolean;
   candidate: RadarCandidate;
+  layout: CandidateLayout;
   managed: boolean;
   onArm: (code: string) => void;
   onDisarm: (code: string) => void;
-  onOpenStock: (code: string) => void;
+  onSelect: (code: string) => void;
   pending: boolean;
+  rowIndex: number;
+  selected: boolean;
   style: CSSProperties;
 }) {
   const hardBlocked =
@@ -95,140 +284,294 @@ function CandidateRow({
         : autoTracked
           ? '晋级候选'
           : '仅观察';
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar')
+      return;
+    event.preventDefault();
+    onSelect(candidate.code);
+  };
+  const action = (
+    <CandidateAction
+      armed={armed}
+      autoTracked={autoTracked}
+      busy={busy}
+      candidate={candidate}
+      hardBlocked={hardBlocked}
+      managed={managed}
+      onArm={onArm}
+      onDisarm={onDisarm}
+      pending={pending}
+      stateLabel={stateLabel}
+    />
+  );
 
   return (
     <div
       style={style}
       className={cn(
-        'absolute left-0 top-0 grid w-full grid-cols-[minmax(170px,1.35fr)_76px_76px_84px_90px_88px_82px_88px_98px] items-center gap-2 rounded-md border px-3 text-left focus-within:ring-2 focus-within:ring-cyan-400/60',
+        'absolute left-0 top-0 w-full cursor-pointer rounded-md border text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/70 motion-reduce:transition-none',
+        layout === 'wide' && `grid ${wideGridColumns} items-center gap-2 px-3`,
+        layout === 'compact' &&
+          `grid ${compactGridColumns} items-center gap-2 px-3`,
+        layout === 'narrow' && 'flex flex-col justify-between px-3 py-2.5',
         candidate.isStale
-          ? 'border-white/[0.04] bg-slate-950/70 opacity-55'
+          ? 'border-white/[0.05] bg-slate-950/70'
           : pending
             ? 'border-amber-400/30 bg-amber-400/[0.06]'
             : managed
               ? 'border-emerald-400/25 bg-emerald-400/[0.05]'
-              : 'border-white/[0.06] bg-[#0a1322] hover:border-white/15 hover:bg-white/[0.035]'
+              : 'border-white/[0.06] bg-[#0a1322] hover:border-white/15 hover:bg-white/[0.035]',
+        selected &&
+          'border-cyan-300/60 bg-cyan-400/[0.07] ring-1 ring-inset ring-cyan-300/30'
       )}
       data-testid={`limit-up-candidate-${candidate.code}`}
+      aria-label={`查看 ${candidate.name} ${candidate.code}`}
+      aria-rowindex={rowIndex}
+      aria-selected={selected}
+      onClick={() => onSelect(candidate.code)}
+      onKeyDown={handleKeyDown}
+      role="row"
+      tabIndex={0}
     >
-      <button
-        type="button"
-        onClick={() => onOpenStock(candidate.code)}
-        className="min-w-0 rounded text-left focus-visible:outline-none"
-        aria-label={`查看 ${candidate.name} ${candidate.code}`}
-      >
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-xs font-black text-slate-100">
-            {candidate.name}
+      {layout === 'wide' ? (
+        <>
+          <span className="min-w-0" role="gridcell">
+            <CandidateIdentity candidate={candidate} />
           </span>
-          {candidate.isStale ? (
-            <Clock3 className="h-3 w-3 shrink-0 text-amber-300" />
-          ) : null}
-        </span>
-        <span className="mt-1 block truncate font-mono text-[10px] text-slate-500">
-          {candidate.code} · {candidate.boardSegment === 'GROWTH' ? '双创' : '主板'} ·{' '}
-          {candidate.industry || '未分类'}
-        </span>
-      </button>
-      <span className="text-center">
-        <span
-          className={cn(
-            'inline-flex rounded border px-1.5 py-1 text-[10px] font-black',
-            stageTone[candidate.stage]
-          )}
-        >
-          {candidate.stageLabel}
-        </span>
-        <span className="mt-1 block text-[9px] text-slate-600">
-          进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
-        </span>
-      </span>
-      <span className="text-center font-mono text-sm font-black text-cyan-200">
-        {(candidate.firstBoardCloseProbability * 100).toFixed(0)}%
-        <span className="block text-[9px] font-normal text-slate-600">首板封住</span>
-      </span>
-      <span className="text-center font-mono text-[12px] font-black text-violet-200">
-        {(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%
-        <span className="block text-[9px] font-normal text-slate-600">
-          二板触及 / {(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住
-        </span>
-      </span>
-      <span className="text-center font-mono text-[11px] font-black text-red-300">
-        {candidate.expectedNetReturnPct >= 0 ? '+' : ''}
-        {candidate.expectedNetReturnPct.toFixed(2)}%
-        <span className="block text-[9px] font-normal text-slate-600">
-          净期望 / CVaR {candidate.cvar95LossPct.toFixed(1)}%
-        </span>
-      </span>
-      <span className="text-center text-[10px] font-black text-slate-300">
-        {{
-          BASE_BREAKOUT: '基底突破',
-          HIGH_BREAKOUT: '高位突破',
-          OVERHEATED: '过热加速',
-          DATA_UNKNOWN: '数据未知',
-        }[candidate.highPositionType] ?? candidate.highPositionType}
-        <span className="mt-1 block font-mono text-[9px] font-normal text-slate-600">
-          晋级分 {candidate.promotionScore.toFixed(1)}
-        </span>
-      </span>
-      <span className="text-center text-[10px] font-black text-slate-300">
-        {candidate.researchArtifact ? '研究已生成' : '等待研究'}
-        <span className="mt-1 block text-[9px] font-normal text-slate-600">
-          {candidate.researchArtifact?.dataGaps.length
-            ? `${candidate.researchArtifact.dataGaps.length} 项缺口`
-            : candidate.researchArtifact
-              ? '公告证据已附'
-              : 'AI 不影响资格'}
-        </span>
-      </span>
-      <span className="text-center text-[10px] text-slate-400">
-        {candidate.promotionEligible ? '资格通过' : '硬否决'}
-        <span className="mt-1 block truncate text-[9px] text-slate-600">
-          {candidate.blockedReasons[0] || '确定性规则'}
-        </span>
-      </span>
-      {candidate.isStale ? (
-        <span className="rounded-md border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1.5 text-center text-[10px] font-black text-amber-200/80">
-          报价过期
-        </span>
-      ) : managed || pending ? (
-        <span
-          className={cn(
-            'rounded-md border px-2 py-1.5 text-center text-[10px] font-black',
-            managed
-              ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
-              : 'border-amber-400/25 bg-amber-400/10 text-amber-200'
-          )}
-        >
-          {stateLabel}
-        </span>
-      ) : armed ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          onClick={() => onDisarm(candidate.code)}
-          className="h-7 border-white/10 bg-white/[0.03] px-2 text-[10px] text-slate-300 hover:bg-white/[0.07]"
-        >
-          {busy ? '处理中' : '取消关注'}
-        </Button>
+          <span role="gridcell">
+            <CandidateStage candidate={candidate} />
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail="首板封住"
+              tone="text-sm text-cyan-200"
+              value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
+            />
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail={`二板触及 / ${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住`}
+              tone="text-[12px] text-violet-200"
+              value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
+            />
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail={`净期望 / CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
+              tone="text-[11px] text-red-300"
+              value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
+            />
+          </span>
+          <span
+            className="text-center text-[10px] font-black text-slate-300"
+            role="gridcell"
+          >
+            {getHighPositionLabel(candidate.highPositionType)}
+            <span className="mt-1 block font-mono text-[9px] font-normal text-slate-500">
+              晋级分 {candidate.promotionScore.toFixed(1)}
+            </span>
+          </span>
+          <span
+            className="text-center text-[10px] font-black text-slate-300"
+            role="gridcell"
+          >
+            {getResearchLabel(candidate)}
+            <span className="mt-1 block text-[9px] font-normal text-slate-500">
+              {getResearchDetail(candidate)}
+            </span>
+          </span>
+          <span
+            className="text-center text-[10px] text-slate-300"
+            role="gridcell"
+          >
+            {candidate.promotionEligible ? '资格通过' : '硬否决'}
+            <span className="mt-1 block truncate text-[9px] text-slate-500">
+              {candidate.blockedReasons[0] || '确定性规则'}
+            </span>
+          </span>
+          <span className="flex justify-center" role="gridcell">
+            {action}
+          </span>
+        </>
+      ) : layout === 'compact' ? (
+        <>
+          <span className="min-w-0" role="gridcell">
+            <CandidateIdentity candidate={candidate} />
+            <span className="mt-1.5 flex items-center gap-2">
+              <span
+                className={cn(
+                  'inline-flex rounded border px-1.5 py-0.5 text-[9px] font-black',
+                  stageTone[candidate.stage]
+                )}
+              >
+                {candidate.stageLabel}
+              </span>
+              <span className="text-[9px] text-slate-500">
+                进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
+              </span>
+            </span>
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail="首板封住"
+              tone="text-[12px] text-cyan-200"
+              value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
+            />
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail={`${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住`}
+              tone="text-[12px] text-violet-200"
+              value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
+            />
+          </span>
+          <span role="gridcell">
+            <CandidateMetric
+              detail={`CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
+              tone="text-[11px] text-red-300"
+              value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
+            />
+          </span>
+          <span className="min-w-0 text-[9px] leading-4" role="gridcell">
+            <span className="block truncate font-black text-slate-300">
+              {getHighPositionLabel(candidate.highPositionType)} · 晋级分{' '}
+              {candidate.promotionScore.toFixed(1)}
+            </span>
+            <span className="block truncate text-slate-400">
+              {getResearchLabel(candidate)} · {getResearchDetail(candidate)}
+            </span>
+            <span className="block truncate text-slate-500">
+              {candidate.promotionEligible ? '资格通过' : '硬否决'} ·{' '}
+              {candidate.blockedReasons[0] || '确定性规则'}
+            </span>
+          </span>
+          <span className="flex justify-center" role="gridcell">
+            {action}
+          </span>
+        </>
       ) : (
-        <Button
-          type="button"
-          size="sm"
-          disabled={busy || hardBlocked}
-          onClick={() => onArm(candidate.code)}
-          title={
-            candidate.isStale ? '报价超过15秒，仅供观察' : '提高账户候选关注优先级'
-          }
-          className="h-7 bg-red-500 px-2 text-[10px] font-black text-white hover:bg-red-400"
-        >
-          {busy ? '处理中' : autoTracked ? '优先关注' : '关注'}
-        </Button>
+        <>
+          <span
+            className="flex w-full min-w-0 items-start justify-between gap-3"
+            role="gridcell"
+          >
+            <CandidateIdentity candidate={candidate} />
+            <CandidateStage candidate={candidate} />
+          </span>
+          <span className="grid w-full grid-cols-3 gap-2" role="gridcell">
+            <CandidateMetric
+              detail="首板封住"
+              tone="text-[12px] text-cyan-200"
+              value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
+            />
+            <CandidateMetric
+              detail={`T+1 / ${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封`}
+              tone="text-[12px] text-violet-200"
+              value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
+            />
+            <CandidateMetric
+              detail={`CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
+              tone="text-[11px] text-red-300"
+              value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
+            />
+          </span>
+          <span
+            className="grid w-full grid-cols-3 gap-2 text-[9px] leading-4"
+            role="gridcell"
+          >
+            <span className="min-w-0 truncate text-slate-400">
+              <strong className="text-slate-300">价格</strong> ·{' '}
+              {getHighPositionLabel(candidate.highPositionType)} /{' '}
+              {candidate.promotionScore.toFixed(1)}
+            </span>
+            <span className="min-w-0 truncate text-slate-400">
+              <strong className="text-slate-300">AI</strong> ·{' '}
+              {getResearchLabel(candidate)} / {getResearchDetail(candidate)}
+            </span>
+            <span className="min-w-0 truncate text-slate-400">
+              <strong className="text-slate-300">资格</strong> ·{' '}
+              {candidate.promotionEligible ? '通过' : '否决'} /{' '}
+              {candidate.blockedReasons[0] || '确定性规则'}
+            </span>
+          </span>
+          <span className="flex w-full justify-end" role="gridcell">
+            {action}
+          </span>
+        </>
       )}
     </div>
   );
+}
+
+function CandidateGridHeader({ layout }: { layout: CandidateLayout }) {
+  if (layout === 'narrow') {
+    return (
+      <div className="sr-only" role="row">
+        <span role="columnheader">候选卡片</span>
+      </div>
+    );
+  }
+
+  const labels =
+    layout === 'wide'
+      ? [
+          '候选标的',
+          '生命周期',
+          '首板封住',
+          'T+1 晋级',
+          '收益 / 尾损',
+          '价格位置',
+          'AI 研究',
+          '资格',
+          '操作',
+        ]
+      : ['候选 / 阶段', '首板', 'T+1', '收益 / 尾损', '判断依据', '操作'];
+
+  return (
+    <div
+      className={cn(
+        'grid shrink-0 gap-2 border-b border-white/[0.06] px-3 py-2 text-[9px] font-black tracking-wider text-slate-500',
+        layout === 'wide' ? wideGridColumns : compactGridColumns
+      )}
+      role="row"
+    >
+      {labels.map((label, index) => (
+        <span
+          key={label}
+          className={cn(index > 0 && 'text-center')}
+          role="columnheader"
+        >
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export interface LimitUpRadarPanelProps {
+  armedCodes: Set<string>;
+  assistantEnabled: boolean;
+  busyCode?: string | null;
+  candidates: RadarCandidate[];
+  errorMessage?: string;
+  exitPlanCodes: Set<string>;
+  fetching: boolean;
+  industries: RadarIndustryHeat[];
+  industry: string;
+  isScannerRunning: boolean;
+  onArm: (code: string) => void;
+  onDisarm: (code: string) => void;
+  onIndustryChange: (value: string) => void;
+  onSearchChange: (value: string) => void;
+  onSelectCandidate: (code: string) => void;
+  onStageChange: (value: RadarStage | 'ALL') => void;
+  pendingCodes: Set<string>;
+  search: string;
+  selectedCode: string | null;
+  stage: RadarStage | 'ALL';
+  summary: RadarSummary;
+  systemWarnings: string[];
 }
 
 export function LimitUpRadarPanel({
@@ -245,66 +588,117 @@ export function LimitUpRadarPanel({
   onArm,
   onDisarm,
   onIndustryChange,
-  onOpenStock,
   onSearchChange,
+  onSelectCandidate,
   onStageChange,
   pendingCodes,
   search,
+  selectedCode,
   stage,
   summary,
   systemWarnings,
-}: {
-  armedCodes: Set<string>;
-  assistantEnabled: boolean;
-  busyCode?: string | null;
-  candidates: RadarCandidate[];
-  errorMessage?: string;
-  exitPlanCodes: Set<string>;
-  fetching: boolean;
-  industries: RadarIndustryHeat[];
-  industry: string;
-  isScannerRunning: boolean;
-  onArm: (code: string) => void;
-  onDisarm: (code: string) => void;
-  onIndustryChange: (value: string) => void;
-  onOpenStock: (code: string) => void;
-  onSearchChange: (value: string) => void;
-  onStageChange: (value: RadarStage | 'ALL') => void;
-  pendingCodes: Set<string>;
-  search: string;
-  stage: RadarStage | 'ALL';
-  summary: RadarSummary;
-  systemWarnings: string[];
-}) {
+}: LimitUpRadarPanelProps) {
+  const panelRef = useRef<HTMLElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(DEFAULT_CONTAINER_WIDTH);
+  const [viewportHeight, setViewportHeight] = useState(
+    FALLBACK_VIEWPORT_HEIGHT
+  );
   const [scrollTop, setScrollTop] = useState(0);
-  const [selectedCode, setSelectedCode] = useState<string | null>(null);
-  const selected = useMemo(
-    () =>
-      candidates.find(item => item.code === selectedCode) ?? candidates[0] ?? null,
-    [candidates, selectedCode]
+  const layout = getCandidateLayout(containerWidth);
+  const rowHeight = ROW_HEIGHTS[layout];
+  const previousRowHeightRef = useRef(rowHeight);
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    const viewport = viewportRef.current;
+    if (!panel || !viewport) return;
+
+    const applySize = (target: Element, width: number, height: number) => {
+      if (target === panel && width > 0) {
+        const nextWidth = Math.round(width);
+        setContainerWidth(current =>
+          current === nextWidth ? current : nextWidth
+        );
+      }
+      if (target === viewport && height > 0) {
+        const nextHeight = Math.round(height);
+        setViewportHeight(current =>
+          current === nextHeight ? current : nextHeight
+        );
+      }
+    };
+    const panelRect = panel.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    applySize(panel, panelRect.width, panelRect.height);
+    applySize(viewport, viewportRect.width, viewportRect.height);
+
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(entries => {
+      entries.forEach(entry => {
+        applySize(
+          entry.target,
+          entry.contentRect.width,
+          entry.contentRect.height
+        );
+      });
+    });
+    observer.observe(panel);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const previousRowHeight = previousRowHeightRef.current;
+    if (previousRowHeight === rowHeight) return;
+    const firstVisibleIndex = Math.floor(scrollTop / previousRowHeight);
+    const nextScrollTop = firstVisibleIndex * rowHeight;
+    if (viewportRef.current) viewportRef.current.scrollTop = nextScrollTop;
+    setScrollTop(nextScrollTop);
+    previousRowHeightRef.current = rowHeight;
+  }, [rowHeight, scrollTop]);
+
+  const maxScrollTop = Math.max(
+    0,
+    candidates.length * rowHeight - viewportHeight
   );
   useEffect(() => {
-    if (selectedCode && !candidates.some(item => item.code === selectedCode)) {
-      setSelectedCode(null);
-    }
-  }, [candidates, selectedCode]);
-  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
-  const visibleCount = Math.ceil(VIEWPORT_HEIGHT / ROW_HEIGHT) + OVERSCAN * 2;
+    if (scrollTop <= maxScrollTop) return;
+    if (viewportRef.current) viewportRef.current.scrollTop = maxScrollTop;
+    setScrollTop(maxScrollTop);
+  }, [maxScrollTop, scrollTop]);
+
+  const start = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN);
+  const visibleCount = Math.ceil(viewportHeight / rowHeight) + OVERSCAN * 2;
   const visible = useMemo(
     () => candidates.slice(start, start + visibleCount),
     [candidates, start, visibleCount]
   );
+  const selected = useMemo(
+    () => candidates.find(candidate => candidate.code === selectedCode) ?? null,
+    [candidates, selectedCode]
+  );
+  const inspectionCode = selected?.code ?? candidates[0]?.code ?? null;
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     setScrollTop(event.currentTarget.scrollTop);
   };
 
   return (
     <section
-      className="min-w-0 rounded-lg border border-cyan-400/15 bg-[#0d1626]/90"
+      ref={panelRef}
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-cyan-400/15 bg-[#0d1626]/90"
+      data-layout={layout}
       data-testid="limit-up-radar-panel"
     >
-      <div className="flex flex-col gap-2 border-b border-white/[0.07] p-3 xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex items-center gap-3">
+      <div
+        className={cn(
+          'flex shrink-0 gap-2 border-b border-white/[0.07] p-3',
+          layout === 'wide'
+            ? 'flex-row items-center justify-between'
+            : 'flex-col'
+        )}
+      >
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <div className="flex items-center gap-2 text-sm font-black text-slate-100">
             <Radar className="h-4 w-4 text-cyan-300" />
             首板晋级候选
@@ -323,10 +717,18 @@ export function LimitUpRadarPanel({
             {fetching ? '刷新中' : isScannerRunning ? '实时扫描' : '雷达离线'}
           </span>
         </div>
-        <div className="grid grid-cols-[minmax(150px,1fr)_110px_130px] gap-2">
+        <div
+          className={cn(
+            'grid gap-2',
+            layout === 'narrow'
+              ? 'grid-cols-2'
+              : 'grid-cols-[minmax(150px,1fr)_110px_130px]',
+            layout === 'narrow' && '[&>label:first-child]:col-span-2'
+          )}
+        >
           <label className="relative min-w-0">
             <span className="sr-only">搜索候选</span>
-            <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-600" />
+            <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-500" />
             <Input
               value={search}
               onChange={event => onSearchChange(event.target.value)}
@@ -371,7 +773,7 @@ export function LimitUpRadarPanel({
       {errorMessage || systemWarnings.length ? (
         <div
           role="alert"
-          className="m-3 flex items-start gap-2 rounded-md border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-[10px] leading-4 text-rose-100"
+          className="m-3 mb-0 flex shrink-0 items-start gap-2 rounded-md border border-rose-400/25 bg-rose-500/[0.08] px-3 py-2 text-[10px] leading-4 text-rose-100"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="font-black">系统保护</span>
@@ -381,177 +783,76 @@ export function LimitUpRadarPanel({
         </div>
       ) : null}
 
-      <div className="overflow-x-auto px-3 pb-3 custom-scrollbar">
-        <div className="min-w-[1080px]">
-          <div className="grid grid-cols-[minmax(170px,1.35fr)_76px_76px_84px_90px_88px_82px_88px_98px] gap-2 border-b border-white/[0.06] px-3 py-2 text-[9px] font-black tracking-wider text-slate-600">
-            <span>候选标的</span>
-            <span className="text-center">生命周期</span>
-            <span className="text-center">首板封住</span>
-            <span className="text-center">T+1 晋级</span>
-            <span className="text-center">收益 / 尾损</span>
-            <span className="text-center">价格位置</span>
-            <span className="text-center">AI 研究</span>
-            <span className="text-center">资格</span>
-            <span className="text-center">操作</span>
-          </div>
+      <div
+        className="flex min-h-0 flex-1 flex-col px-3 pb-3 pt-3"
+        role="grid"
+        aria-label="首板晋级候选列表"
+        aria-rowcount={candidates.length + 1}
+      >
+        <CandidateGridHeader layout={layout} />
+        <div
+          ref={viewportRef}
+          className="mt-2 min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar"
+          data-testid="limit-up-radar-viewport"
+          onScroll={onScroll}
+          role="rowgroup"
+        >
           {candidates.length ? (
             <div
-              className="mt-2 overflow-y-auto overscroll-contain custom-scrollbar"
-              style={{ height: VIEWPORT_HEIGHT }}
-              onScroll={onScroll}
+              className="relative"
+              style={{ height: candidates.length * rowHeight }}
             >
-              <div
-                className="relative"
-                style={{ height: candidates.length * ROW_HEIGHT }}
-              >
-                {visible.map((candidate, index) => (
-                  <CandidateRow
-                    key={candidate.code}
-                    candidate={candidate}
-                    style={{
-                      height: ROW_HEIGHT - 5,
-                      transform: `translateY(${(start + index) * ROW_HEIGHT}px)`,
-                    }}
-                    armed={armedCodes.has(candidate.code)}
-                    assistantEnabled={assistantEnabled}
-                    busy={busyCode === candidate.code}
-                    managed={exitPlanCodes.has(candidate.code)}
-                    pending={pendingCodes.has(candidate.code)}
-                    onArm={onArm}
-                    onDisarm={onDisarm}
-                    onOpenStock={setSelectedCode}
-                  />
-                ))}
-              </div>
+              {visible.map((candidate, index) => (
+                <CandidateRow
+                  key={candidate.code}
+                  candidate={candidate}
+                  style={{
+                    height: rowHeight - 5,
+                    transform: `translateY(${(start + index) * rowHeight}px)`,
+                  }}
+                  armed={armedCodes.has(candidate.code)}
+                  assistantEnabled={assistantEnabled}
+                  busy={busyCode === candidate.code}
+                  layout={layout}
+                  managed={exitPlanCodes.has(candidate.code)}
+                  pending={pendingCodes.has(candidate.code)}
+                  rowIndex={start + index + 2}
+                  selected={selectedCode === candidate.code}
+                  onArm={onArm}
+                  onDisarm={onDisarm}
+                  onSelect={onSelectCandidate}
+                />
+              ))}
             </div>
           ) : (
-            <div className="flex h-[610px] flex-col items-center justify-center rounded-md border border-dashed border-white/10 text-center">
-              <ShieldCheck className="h-8 w-8 text-slate-700" />
-              <p className="mt-3 text-xs font-black text-slate-300">
-                暂无匹配候选
-              </p>
-              <p className="mt-1 text-[10px] text-slate-600">
-                雷达会持续扫描；非交易时段保留最近快照供观察。
-              </p>
+            <div className="flex h-full items-stretch" role="row">
+              <div
+                className="flex flex-1 flex-col items-center justify-center rounded-md border border-dashed border-white/10 text-center"
+                role="gridcell"
+              >
+                <ShieldCheck className="h-8 w-8 text-slate-700" />
+                <p className="mt-3 text-xs font-black text-slate-300">
+                  暂无匹配候选
+                </p>
+                <p className="mt-1 text-[10px] text-slate-500">
+                  雷达会持续扫描；非交易时段保留最近快照供观察。
+                </p>
+              </div>
             </div>
           )}
         </div>
       </div>
-      {selected ? (
-        <div className="grid gap-px border-t border-white/[0.06] bg-white/[0.06] lg:grid-cols-[220px_1fr_1fr]">
-          <section className="bg-[#0a1322] p-3" aria-label="候选走势">
-            <div className="mb-2 flex items-center justify-between">
-              <div>
-                <h3 className="text-[11px] font-black text-slate-200">
-                  {selected.name} · 生命周期
-                </h3>
-                <p className="mt-0.5 font-mono text-[9px] text-slate-600">
-                  数据 {new Date(selected.updatedAt).toLocaleTimeString('zh-CN')}
-                </p>
-              </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 px-2 text-[9px]"
-                onClick={() => onOpenStock(selected.code)}
-              >
-                打开 K 线
-              </Button>
-            </div>
-            <LimitUpRadarMiniChart code={selected.code} />
-          </section>
-          <section className="bg-[#0a1322] p-3" aria-label="晋级因子证据">
-            <h3 className="text-[11px] font-black text-slate-200">因子与判断依据</h3>
-            <div className="mt-2 grid gap-1.5 sm:grid-cols-2">
-              {selected.promotionFactors.map(factor => (
-                <div
-                  key={factor.code}
-                  className="rounded border border-white/[0.06] bg-white/[0.025] px-2 py-1.5"
-                >
-                  <div className="flex justify-between text-[9px]">
-                    <span className="font-black text-slate-300">{factor.label}</span>
-                    <span className="font-mono text-cyan-300">
-                      {factor.contribution.toFixed(2)}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[9px] leading-4 text-slate-600">
-                    {factor.explanation}
-                  </p>
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1">
-              {selected.events.slice(0, 6).map(event => (
-                <span
-                  key={event.eventId}
-                  className="rounded border border-white/[0.06] px-1.5 py-1 text-[9px] text-slate-500"
-                >
-                  {event.stageLabel} ·{' '}
-                  {new Date(event.occurredAt).toLocaleTimeString('zh-CN')}
-                </span>
-              ))}
-            </div>
-          </section>
-          <section className="bg-[#0a1322] p-3" aria-label="AI 公告研究">
-            <div className="flex items-center justify-between">
-              <h3 className="text-[11px] font-black text-slate-200">AI 公告研究</h3>
-              <span className="text-[9px] text-slate-600">不参与交易资格</span>
-            </div>
-            {selected.researchArtifact ? (
-              <div className="mt-2 space-y-2 text-[9px] leading-4">
-                <p className="text-slate-400">{selected.researchArtifact.summary}</p>
-                {selected.researchArtifact.announcementRisks.length ? (
-                  <p className="text-amber-200/80">
-                    公告风险：{selected.researchArtifact.announcementRisks.join('；')}
-                  </p>
-                ) : null}
-                {selected.researchArtifact.dataGaps.length ? (
-                  <p className="text-slate-600">
-                    数据缺口：{selected.researchArtifact.dataGaps.join('；')}
-                  </p>
-                ) : null}
-                <div className="flex flex-wrap gap-1">
-                  {selected.researchArtifact.citations.slice(0, 5).map(citation =>
-                    /^https?:\/\//i.test(citation) ? (
-                      <a
-                        key={citation}
-                        href={citation}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="max-w-[180px] truncate rounded border border-cyan-400/15 px-1.5 py-1 text-cyan-300 hover:bg-cyan-400/10"
-                      >
-                        公告引用
-                      </a>
-                    ) : (
-                      <span
-                        key={citation}
-                        className="max-w-[240px] truncate rounded border border-white/10 px-1.5 py-1 text-slate-500"
-                        title={citation}
-                      >
-                        {citation}
-                      </span>
-                    ),
-                  )}
-                </div>
-              </div>
-            ) : (
-              <p className="mt-3 rounded border border-dashed border-white/10 p-3 text-[9px] leading-4 text-slate-600">
-                候选进入动态 Top 5 后会生成一次市场级共享研究。AI Runtime 离线或公告缺失不会改变资格。
-              </p>
-            )}
-          </section>
-        </div>
-      ) : null}
-      <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2 text-[9px] text-slate-600">
-        <span>稳定行高 · 超过 100 条自动虚拟滚动</span>
+
+      <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] px-3 py-2 text-[9px] text-slate-500">
+        <span>自适应列布局 · 稳定行高虚拟滚动</span>
         <button
           type="button"
-          className="flex items-center gap-1 rounded px-1.5 py-1 text-slate-500 hover:bg-white/[0.05] hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-          onClick={() => selected && onOpenStock(selected.code)}
-          disabled={!selected}
+          className="flex cursor-pointer items-center gap-1 rounded px-1.5 py-1 text-slate-400 transition-colors duration-200 hover:bg-white/[0.05] hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+          onClick={() => inspectionCode && onSelectCandidate(inspectionCode)}
+          disabled={!inspectionCode}
         >
-          <ExternalLink className="h-3 w-3" />
-          打开首位候选
+          <PanelRightOpen className="h-3 w-3" />
+          {selected ? '查看已选候选' : '查看首位候选'}
         </button>
       </div>
     </section>

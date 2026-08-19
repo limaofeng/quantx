@@ -1,19 +1,106 @@
-import { render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import LimitUpBoardPage from '@/features/strategies/pages/LimitUpBoardPage';
 
-const mocks = vi.hoisted(() => ({
-  approve: vi.fn(async () => ({ message: '已确认' })),
-  arm: vi.fn(async () => ({ message: '已布防' })),
-  disarm: vi.fn(async () => ({ message: '已取消' })),
-  reconcile: vi.fn(async () => ({ message: '已同步' })),
-  refreshRadar: vi.fn(),
-  reject: vi.fn(async () => ({ message: '已忽略' })),
-  save: vi.fn(async () => ({ message: '已保存' })),
-  setLocation: vi.fn(),
-  toast: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const approve = vi.fn(async () => ({ message: '已确认' }));
+  const arm = vi.fn(async () => ({ message: '已布防' }));
+  const disarm = vi.fn(async () => ({ message: '已取消' }));
+  const reconcile = vi.fn(async () => ({ message: '已同步' }));
+  const refreshRadar = vi.fn();
+  const reject = vi.fn(async () => ({ message: '已忽略' }));
+  const save = vi.fn(async () => ({ message: '已保存' }));
+  const firstIntent = {
+    approvalExpiresAt: '2099-08-19T10:00:15+08:00',
+    distanceToLimitTicks: 1,
+    id: 'intent-1',
+    instrumentCode: '600000.SH',
+    limitUpPrice: 19.71,
+    signalPrice: 19.7,
+    targetAmount: 10_000,
+    targetPositionPct: 0.02,
+  };
+  const assistantState = {
+    approve,
+    arm,
+    assistant: {
+      activeExitPlanCount: 1,
+      armedCandidates: [],
+      autoSignalMinScore: 70,
+      blockedReasons: [],
+      canApprove: true,
+      enabled: true,
+      engineStatus: 'ONLINE',
+      killSwitch: false,
+      lastError: null,
+      monitoredCount: 1,
+      pendingSignalCount: 1,
+      projectionGeneratedAt: '2026-08-19T09:59:55+08:00',
+      projectionVersion: '1',
+      promotionModelMode: 'SHADOW',
+      reconcileStatus: 'READY',
+      runStatus: 'RUNNING',
+    },
+    currentSettings: {
+      accountId: 'account-1',
+      autoExitAcknowledged: false,
+      autoSignalMinScore: 70,
+      enabled: true,
+      maxDailyExposurePct: 0.06,
+      maxOpenPositions: 2,
+      maxRankedCandidates: 5,
+      maxSinglePositionPct: 0.05,
+      mode: 'paper',
+      plannedTailLossPct: 0.0015,
+      promotionModelMode: 'SHADOW',
+    },
+    disarm,
+    error: null,
+    exitPlans: [
+      {
+        autoExitAuthorized: true,
+        entryAvgPrice: 10,
+        entryTradeDate: '2026-08-13',
+        holdingTradingDays: 2,
+        id: 'plan-1',
+        instrumentCode: '000001.SZ',
+        lastNetProfitPct: 1.2,
+        lastPrice: 10.12,
+        pendingOrderId: null,
+        remainingVolume: 1000,
+        ruleTypes: [
+          'LIMIT_UP_TOUCH',
+          'LIMIT_UP_BREAK',
+          'TRAILING_PRICE_DRAWDOWN',
+          'MAX_HOLDING_DAYS',
+        ],
+        status: 'ACTIVE',
+      },
+    ],
+    fetching: false,
+    pendingIntents: [{ ...firstIntent }],
+    reconcile,
+    refresh: vi.fn(),
+    reject,
+    runId: 'run-1',
+    save,
+  };
+
+  return {
+    approve,
+    arm,
+    assistantState,
+    disarm,
+    firstIntent,
+    reconcile,
+    refreshRadar,
+    reject,
+    save,
+    setLocation: vi.fn(),
+    toast: vi.fn(),
+  };
+});
 
 vi.mock('wouter', () => ({
   useLocation: () => ['/limit-up-board', mocks.setLocation],
@@ -23,10 +110,24 @@ vi.mock('@/hooks/use-toast', () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
 
-vi.mock(
-  '@/features/strategies/components/LimitUpRadarMiniChart',
-  () => ({ LimitUpRadarMiniChart: () => <div data-testid="radar-mini-chart" /> })
-);
+vi.mock('@/features/strategies/components/LimitUpRadarMiniChart', () => ({
+  LimitUpRadarMiniChart: () => <div data-testid="radar-mini-chart" />,
+}));
+
+vi.mock('@/features/dashboard/hooks/useAMarketSession', () => ({
+  useAMarketSession: () => ({
+    calendarError: null,
+    calendarLoading: false,
+    detail: '午间前持续交易',
+    isOpen: true,
+    isTradingDay: true,
+    label: '交易中',
+    now: new Date('2026-08-19T10:00:00+08:00'),
+    phase: 'morning',
+    targetTradingDate: '2026-08-19',
+    tradingDays: ['2026-08-19'],
+  }),
+}));
 
 vi.mock('@/features/dashboard/hooks/useDashboard', () => ({
   useCurrentAccount: () => ({
@@ -56,17 +157,20 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
         boardSegment: 'GROWTH',
         breakCount: 0,
         canCreateInstance: true,
+        candidatePreference: 'AUTO',
         changePct: 8.8,
         code: '300001.SZ',
         currentPrice: 19.7,
+        cvar95LossPct: 5.5,
         depthImbalance5: 0.45,
         distanceToLimitPct: 0.15,
         distanceToLimitTicks: 1,
         events: [],
+        existingInstanceId: null,
         exitPolicyVersion: 'first-board-exit-v2-shadow-1',
         expectedNetReturnPct: 1.25,
-        existingInstanceId: null,
         firstBoardCloseProbability: 0.72,
+        highPositionType: 'BASE_BREAKOUT',
         industry: '软件服务',
         intradayTurnoverRatePct: 7.1,
         isStale: false,
@@ -90,10 +194,8 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
         scoreVersion: 'limit-up-radar-v1',
         stage: 'NEAR_LIMIT',
         stageLabel: '临板',
-        highPositionType: 'BASE_BREAKOUT',
-        updatedAt: new Date().toISOString(),
+        updatedAt: '2026-08-19T10:00:00+08:00',
         volumePaceRatio: 2.1,
-        cvar95LossPct: 5.5,
       },
     ],
     error: null,
@@ -119,116 +221,195 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
       staleCount: 0,
     },
     total: 1,
-    updatedAt: new Date().toISOString(),
+    updatedAt: '2026-08-19T10:00:00+08:00',
     warnings: [],
   }),
 }));
 
 vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
-  useLimitUpBoardAssistant: () => ({
-    approve: mocks.approve,
-    arm: mocks.arm,
-    assistant: {
-      activeExitPlanCount: 1,
-      armedCandidates: [],
-      autoSignalMinScore: 70,
-      canApprove: true,
-      enabled: true,
-      engineStatus: 'ONLINE',
-      lastError: null,
-      monitoredCount: 1,
-      pendingSignalCount: 1,
-      promotionModelMode: 'SHADOW',
-    },
-    currentSettings: {
-      accountId: 'account-1',
-      autoExitAcknowledged: false,
-      autoSignalMinScore: 70,
-      enabled: true,
-      maxSinglePositionPct: 0.05,
-      maxDailyExposurePct: 0.06,
-      maxOpenPositions: 2,
-      maxRankedCandidates: 5,
-      mode: 'paper',
-      plannedTailLossPct: 0.0015,
-      promotionModelMode: 'SHADOW',
-    },
-    disarm: mocks.disarm,
-    error: null,
-    exitPlans: [
-      {
-        autoExitAuthorized: true,
-        entryAvgPrice: 10,
-        entryTradeDate: '2026-08-13',
-        holdingTradingDays: 2,
-        id: 'plan-1',
-        instrumentCode: '000001.SZ',
-        lastNetProfitPct: 1.2,
-        lastPrice: 10.12,
-        pendingOrderId: null,
-        remainingVolume: 1000,
-        ruleTypes: [
-          'LIMIT_UP_TOUCH',
-          'LIMIT_UP_BREAK',
-          'TRAILING_PRICE_DRAWDOWN',
-          'MAX_HOLDING_DAYS',
-        ],
-        status: 'ACTIVE',
-      },
-    ],
-    fetching: false,
-    pendingIntents: [
-      {
-        approvalExpiresAt: new Date(Date.now() + 15_000).toISOString(),
-        distanceToLimitTicks: 1,
-        id: 'intent-1',
-        instrumentCode: '600000.SH',
-        limitUpPrice: 19.71,
-        signalPrice: 19.7,
-        targetAmount: 10_000,
-        targetPositionPct: 0.02,
-      },
-    ],
-    reconcile: mocks.reconcile,
-    refresh: vi.fn(),
-    reject: mocks.reject,
-    runId: 'run-1',
-    save: mocks.save,
-  }),
+  useLimitUpBoardAssistant: () => mocks.assistantState,
 }));
 
 describe('LimitUpBoardPage', () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it('puts market candidates first and removes the per-symbol instance flow', () => {
-    render(<LimitUpBoardPage />);
-
-    expect(screen.getByTestId('limit-up-board-page')).toBeVisible();
-    expect(screen.getByText('首板晋级候选')).toBeVisible();
-    expect(screen.getByText('特锐德')).toBeVisible();
-    expect(screen.getByText('待确认信号')).toBeVisible();
-    expect(screen.getByText('T+1 自适应退出')).toBeVisible();
-    expect(screen.queryByText('全市场打板雷达')).not.toBeInTheDocument();
-    expect(screen.queryByText('手动新建实例')).not.toBeInTheDocument();
-    expect(screen.queryByText('实例管理')).not.toBeInTheDocument();
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.assistantState.pendingIntents = [{ ...mocks.firstIntent }];
   });
 
-  it('confirms a signal without exposing editable order fields', async () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the full workbench width and exposes three accessible views', () => {
+    render(<LimitUpBoardPage />);
+
+    const root = screen.getByTestId('limit-up-board-page');
+    expect(root).toHaveClass('w-full');
+    expect(root).not.toHaveClass('max-w-[1540px]');
+
+    const radarTab = screen.getByRole('tab', { name: /候选雷达/ });
+    const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
+    const positionsTab = screen.getByRole('tab', { name: /T\+1 持仓/ });
+
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(radarTab).toHaveAttribute('aria-selected', 'true');
+    expect(signalsTab).toHaveAttribute(
+      'aria-controls',
+      'limit-up-workbench-view'
+    );
+    expect(positionsTab).toHaveAttribute(
+      'aria-controls',
+      'limit-up-workbench-view'
+    );
+    expect(screen.getByRole('tabpanel', { name: '候选雷达' })).toBeVisible();
+  });
+
+  it('docks health only when the measured workspace can keep the radar wide', () => {
+    type ObserverCallback = (
+      entries: ResizeObserverEntry[],
+      observer: ResizeObserver
+    ) => void;
+    const observations = new Map<
+      Element,
+      { callback: ObserverCallback; observer: ResizeObserver }
+    >();
+    class ResizeObserverMock implements ResizeObserver {
+      constructor(private readonly callback: ObserverCallback) {}
+
+      disconnect() {}
+
+      observe = (target: Element) => {
+        observations.set(target, { callback: this.callback, observer: this });
+      };
+
+      unobserve() {}
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverMock);
+    render(<LimitUpBoardPage />);
+
+    const root = screen.getByTestId('limit-up-board-page');
+    const inlineHealth = screen.getByTestId('limit-up-inline-health');
+    const healthButton = screen.getByRole('button', {
+      name: '打开首板健康控制台',
+    });
+    const observation = observations.get(root);
+    expect(observation).toBeDefined();
+    if (!observation) throw new Error('page resize observer was not attached');
+    const resizeEntry = (width: number): ResizeObserverEntry => ({
+      borderBoxSize: [],
+      contentBoxSize: [],
+      contentRect: { width } as DOMRectReadOnly,
+      devicePixelContentBoxSize: [],
+      target: root,
+    });
+
+    act(() => {
+      observation.callback([resizeEntry(1500)], observation.observer);
+    });
+    expect(inlineHealth).toHaveClass('flex');
+    expect(healthButton).toHaveClass('hidden');
+
+    act(() => {
+      observation.callback([resizeEntry(1200)], observation.observer);
+    });
+    expect(inlineHealth).toHaveClass('hidden');
+    expect(healthButton).not.toHaveClass('hidden');
+  });
+
+  it('opens the health console with first-board business checks', async () => {
     const user = userEvent.setup();
     render(<LimitUpBoardPage />);
 
+    await user.click(
+      screen.getByRole('button', { name: '打开首板健康控制台' })
+    );
+
+    const consoleDialog = await screen.findByRole('dialog', {
+      name: '首板健康控制台',
+    });
+    const healthConsole = within(consoleDialog).getByTestId(
+      'limit-up-health-console'
+    );
+
+    expect(within(healthConsole).getByText('业务链检查')).toBeVisible();
+    for (const label of [
+      '候选雷达',
+      '晋级助手',
+      '业务投影',
+      '确认门禁',
+      '监控负载',
+      '退出托管',
+    ]) {
+      expect(within(healthConsole).getByText(label)).toBeVisible();
+    }
+  });
+
+  it('opens the selected candidate in the right-side inspector', async () => {
+    const user = userEvent.setup();
+    render(<LimitUpBoardPage />);
+
+    const candidateRow = screen.getByRole('row', {
+      name: '查看 特锐德 300001.SZ',
+    });
+    await user.click(candidateRow);
+
+    const inspectorDialog = await screen.findByRole('dialog', {
+      name: '特锐德候选详情',
+    });
+    expect(within(inspectorDialog).getByText('生命周期走势')).toBeVisible();
+    expect(
+      within(inspectorDialog).getByText(/300001\.SZ · 首板晋级候选检查器/)
+    ).toBeVisible();
+    expect(
+      within(inspectorDialog).getByTestId('radar-mini-chart')
+    ).toBeVisible();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(candidateRow).toHaveFocus());
+  });
+
+  it('switches to pending signals and confirms without editable order fields', async () => {
+    const user = userEvent.setup();
+    render(<LimitUpBoardPage />);
+
+    const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
+    await user.click(signalsTab);
+
+    expect(signalsTab).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel', { name: '待确认信号' })).toBeVisible();
     expect(screen.queryByLabelText('临时价格')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '确认买入' }));
 
     expect(mocks.approve).toHaveBeenCalledWith('intent-1');
   });
 
-  it('marks an automatic candidate as preferred without bypassing rules', async () => {
+  it('auto-opens pending signals once when a new intent arrives after hydration', async () => {
     const user = userEvent.setup();
-    render(<LimitUpBoardPage />);
+    const { rerender } = render(<LimitUpBoardPage />);
+    const radarTab = screen.getByRole('tab', { name: /候选雷达/ });
 
-    await user.click(screen.getByRole('button', { name: '优先关注' }));
+    expect(radarTab).toHaveAttribute('aria-selected', 'true');
 
-    expect(mocks.arm).toHaveBeenCalledWith('300001.SZ');
+    mocks.assistantState.pendingIntents = [
+      { ...mocks.firstIntent },
+      {
+        ...mocks.firstIntent,
+        id: 'intent-2',
+        instrumentCode: '600001.SH',
+      },
+    ];
+    rerender(<LimitUpBoardPage />);
+
+    const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
+    await waitFor(() =>
+      expect(signalsTab).toHaveAttribute('aria-selected', 'true')
+    );
+    expect(screen.getByText('600001.SH')).toBeVisible();
+
+    await user.click(radarTab);
+    mocks.assistantState.pendingIntents = [
+      ...mocks.assistantState.pendingIntents,
+    ];
+    rerender(<LimitUpBoardPage />);
+
+    expect(radarTab).toHaveAttribute('aria-selected', 'true');
   });
 });
