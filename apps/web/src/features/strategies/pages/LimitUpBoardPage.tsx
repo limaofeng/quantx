@@ -1,10 +1,9 @@
 import {
   AlertTriangle,
-  Bot,
   Check,
   Clock3,
   LayoutList,
-  PanelLeftOpen,
+  Radar,
   RadioTower,
   RefreshCw,
   Settings2,
@@ -14,16 +13,13 @@ import {
   WalletCards,
   X,
 } from 'lucide-react';
-import {
-  type ReactNode,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'wouter';
 
+import {
+  StudioWorkbench,
+  type StudioMode,
+} from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -43,7 +39,6 @@ import {
   SheetDescription,
   SheetTitle,
 } from '@/components/ui/sheet';
-import { Switch } from '@/components/ui/switch';
 import { useAMarketSession } from '@/features/dashboard/hooks/useAMarketSession';
 import { useCurrentAccount } from '@/features/dashboard/hooks/useDashboard';
 import { useToast } from '@/hooks/use-toast';
@@ -297,31 +292,6 @@ function ExitPlanCard({
 
 type LimitUpWorkbenchView = 'RADAR' | 'SIGNALS' | 'POSITIONS';
 
-function useObservedWidth() {
-  const elementRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(0);
-
-  useLayoutEffect(() => {
-    const element = elementRef.current;
-    if (!element) return;
-    const updateWidth = (nextWidth: number) => {
-      if (nextWidth <= 0) return;
-      const rounded = Math.round(nextWidth);
-      setWidth(current => (current === rounded ? current : rounded));
-    };
-    updateWidth(element.getBoundingClientRect().width);
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(entries => {
-      const entry = entries[0];
-      if (entry) updateWidth(entry.contentRect.width);
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-
-  return { elementRef, width };
-}
-
 export default function LimitUpBoardPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -331,10 +301,8 @@ export default function LimitUpBoardPage() {
   const accountId = account?.id;
   const radar = useLimitUpRadar(true, accountId);
   const assistant = useLimitUpBoardAssistant(accountId);
-  const { elementRef: pageRef, width: workspaceWidth } = useObservedWidth();
   const [activeView, setActiveView] = useState<LimitUpWorkbenchView>('RADAR');
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [healthOpen, setHealthOpen] = useState(false);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [positionCap, setPositionCap] = useState(2);
@@ -344,9 +312,7 @@ export default function LimitUpBoardPage() {
   const [mode, setMode] = useState('paper');
   const [autoExitAcknowledged, setAutoExitAcknowledged] = useState(false);
   const candidateTriggerRef = useRef<HTMLElement | null>(null);
-  const healthTriggerRef = useRef<HTMLButtonElement>(null);
   const knownPendingIntentIds = useRef<Set<string> | null>(null);
-  const showInlineHealthConsole = workspaceWidth >= 1460;
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -374,10 +340,6 @@ export default function LimitUpBoardPage() {
     }
     knownPendingIntentIds.current = nextIds;
   }, [assistant.pendingIntents]);
-
-  useEffect(() => {
-    if (showInlineHealthConsole) setHealthOpen(false);
-  }, [showInlineHealthConsole]);
 
   const armedCodes = useMemo(
     () =>
@@ -554,387 +516,357 @@ export default function LimitUpBoardPage() {
     },
   ];
 
-  return (
+  const studioModes: StudioMode[] = views.map(({ icon, id, label }) => ({
+    icon,
+    id,
+    label,
+  }));
+  const updatedAt = radar.updatedAt
+    ? new Date(radar.updatedAt).toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : '--';
+
+  const toolbar = (
+    <header className="flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] bg-[#07111f]/95 px-4">
+      <nav
+        aria-label="首板工作区"
+        className="flex h-full min-w-0 items-stretch overflow-x-auto custom-scrollbar"
+        role="tablist"
+      >
+        <span className="relative flex h-full shrink-0 items-center gap-1.5 px-3 text-[11px] font-black text-red-200 after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-red-400">
+          <Radar className="h-3.5 w-3.5" />
+          实时监控
+        </span>
+        <span className="mx-2 my-3 w-px shrink-0 bg-white/[0.08]" />
+        {views.map(view => {
+          const active = activeView === view.id;
+          return (
+            <button
+              key={view.id}
+              type="button"
+              aria-controls="limit-up-workbench-view"
+              aria-selected={active}
+              className={cn(
+                'relative h-full shrink-0 cursor-pointer px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60',
+                active
+                  ? 'text-red-200 after:bg-red-400'
+                  : 'text-slate-500 hover:text-slate-200'
+              )}
+              onClick={() => setActiveView(view.id)}
+              role="tab"
+            >
+              {view.label}
+              {view.count ? (
+                <span className="ml-1.5 rounded-sm bg-white/[0.07] px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
+                  {view.count}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="flex shrink-0 items-center gap-2">
+        <span
+          className={cn(
+            'hidden items-center gap-1.5 text-[10px] font-bold md:inline-flex',
+            enabled ? 'text-emerald-300' : 'text-slate-600'
+          )}
+        >
+          <span
+            className={cn(
+              'h-1.5 w-1.5 rounded-full',
+              enabled
+                ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.65)]'
+                : 'bg-slate-700'
+            )}
+          />
+          {enabled ? '晋级助手运行中' : '晋级助手已停止'}
+        </span>
+        <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
+        <span className="hidden font-mono text-[9px] text-slate-600 lg:inline">
+          {radar.isScannerRunning ? '雷达在线' : '雷达离线'} · 更新 {updatedAt}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="同步首板业务链"
+          className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
+          onClick={syncWorkbench}
+          disabled={!accountId || busyAction === 'refresh'}
+        >
+          <RefreshCw
+            className={cn(
+              'h-3.5 w-3.5',
+              busyAction === 'refresh' &&
+                'animate-spin motion-reduce:animate-none'
+            )}
+          />
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          aria-label="打开首板风险设置"
+          className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </header>
+  );
+
+  const content = (
     <div
-      ref={pageRef}
-      className="flex h-full min-h-0 w-full overflow-hidden bg-[#07101d] text-slate-100"
+      className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#07101d] text-slate-100"
       data-testid="limit-up-board-page"
     >
-      <div
-        className={cn(
-          'h-full min-h-0 w-[304px] shrink-0 border-r border-white/[0.07]',
-          showInlineHealthConsole ? 'flex' : 'hidden'
-        )}
-        data-testid="limit-up-inline-health"
-      >
-        <LimitUpBoardHealthConsole {...healthConsoleProps} />
-      </div>
+      {toolbar}
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-12 shrink-0 items-stretch border-b border-white/[0.07] bg-[#0b1524]">
-          <button
-            ref={healthTriggerRef}
-            type="button"
-            aria-label="打开首板健康控制台"
-            className={cn(
-              'flex w-11 shrink-0 items-center justify-center border-r border-white/[0.06] text-slate-500 hover:bg-white/[0.04] hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60',
-              showInlineHealthConsole && 'hidden'
-            )}
-            onClick={() => setHealthOpen(true)}
-          >
-            <span className="relative">
-              <PanelLeftOpen className="h-4 w-4" />
-              <span
-                className={cn(
-                  'absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full',
-                  health.tone === 'error'
-                    ? 'bg-rose-400'
-                    : health.tone === 'warning'
-                      ? 'bg-amber-300'
-                      : 'bg-emerald-400'
-                )}
-              />
-            </span>
-          </button>
+      {assistant.assistant?.lastError ? (
+        <div
+          role="alert"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.08] px-3 py-2 text-[10px] text-rose-100"
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <strong>助手受保护</strong>
+          <span className="truncate text-rose-100/75">
+            {assistant.assistant.lastError}
+          </span>
+        </div>
+      ) : null}
 
-          <div className="hidden min-w-0 shrink-0 items-center gap-2 border-r border-white/[0.06] px-3 sm:flex">
-            <Target className="h-4 w-4 shrink-0 text-red-400" />
-            <div className="min-w-0">
-              <div
-                className={cn(
-                  'max-w-28 truncate text-[11px] font-black',
-                  workspaceWidth >= 1100 && 'max-w-52'
-                )}
-              >
-                首板晋级 · {account?.accountName || '未选择账户'}
+      <main className="min-h-0 flex-1 overflow-hidden bg-[#0a1424]">
+        <section
+          id="limit-up-workbench-view"
+          aria-label={views.find(view => view.id === activeView)?.label}
+          className="h-full min-h-0"
+          role="tabpanel"
+        >
+          {activeView === 'RADAR' ? (
+            <LimitUpRadarPanel
+              armedCodes={armedCodes}
+              assistantEnabled={enabled}
+              busyCode={
+                busyAction?.startsWith('candidate:')
+                  ? busyAction.slice(10)
+                  : null
+              }
+              candidates={radar.candidates}
+              errorMessage={radar.error?.message}
+              exitPlanCodes={exitPlanCodes}
+              fetching={radar.fetching}
+              industries={radar.industries}
+              industry={radar.industry}
+              isScannerRunning={radar.isScannerRunning}
+              onArm={code =>
+                act(`candidate:${code}`, () => assistant.arm(code))
+              }
+              onDisarm={code =>
+                act(`candidate:${code}`, () => assistant.disarm(code))
+              }
+              onIndustryChange={radar.setIndustry}
+              onSearchChange={radar.setSearch}
+              onSelectCandidate={selectCandidate}
+              onStageChange={radar.setStage}
+              pendingCodes={pendingCodes}
+              search={radar.search}
+              selectedCode={selectedCode}
+              stage={radar.stage}
+              summary={radar.summary}
+              systemWarnings={systemWarnings}
+            />
+          ) : activeView === 'SIGNALS' ? (
+            <div className="flex h-full min-h-0 flex-col overflow-hidden border border-amber-400/15 bg-[#0d1626]/90">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
+                <div>
+                  <h2 className="flex items-center gap-2 text-xs font-black">
+                    <Clock3 className="h-3.5 w-3.5 text-amber-300" />
+                    待确认信号
+                  </h2>
+                  <p className="mt-1 text-[9px] text-slate-600">
+                    新信号到达时自动切换一次；确认前仍会重新校验行情、资金与风控。
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 text-[9px] text-slate-500">
+                  <span>
+                    入场门禁{' '}
+                    <strong
+                      className={
+                        assistant.assistant?.canApprove
+                          ? 'text-emerald-300'
+                          : 'text-amber-300'
+                      }
+                    >
+                      {assistant.assistant?.canApprove ? '已通过' : '未通过'}
+                    </strong>
+                  </span>
+                  <Badge className="border-amber-400/20 bg-amber-400/10 text-[9px] text-amber-200 hover:bg-amber-400/10">
+                    {assistant.pendingIntents.length}
+                  </Badge>
+                </div>
               </div>
-              <div
-                className={cn(
-                  'hidden truncate font-mono text-[8px] text-slate-600',
-                  workspaceWidth >= 1100 && 'block'
+              <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
+                {assistant.pendingIntents.length ? (
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
+                    {assistant.pendingIntents.map(intent => (
+                      <PendingSignalCard
+                        key={intent.id}
+                        intent={intent}
+                        busy={busyAction === `intent:${intent.id}`}
+                        canApprove={Boolean(assistant.assistant?.canApprove)}
+                        onApprove={() =>
+                          act(`intent:${intent.id}`, () =>
+                            assistant.approve(intent.id)
+                          )
+                        }
+                        onReject={() =>
+                          act(`intent:${intent.id}`, () =>
+                            assistant.reject(intent.id)
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyWorkspace
+                    icon={ShieldCheck}
+                    title="暂无待确认信号"
+                    description="助手只在候选进入临板触发区时生成一次 15 秒确认卡。你可以回到候选雷达继续观察。"
+                    actionLabel="返回候选雷达"
+                    onAction={() => setActiveView('RADAR')}
+                  />
                 )}
-              >
-                {accountId || '--'}
               </div>
             </div>
-          </div>
-
-          <nav
-            aria-label="首板工作视图"
-            className="flex min-w-0 flex-1 overflow-x-auto custom-scrollbar"
-            role="tablist"
-          >
-            {views.map(view => {
-              const Icon = view.icon;
-              const active = activeView === view.id;
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  aria-controls="limit-up-workbench-view"
-                  aria-selected={active}
-                  className={cn(
-                    'relative flex h-full min-w-max items-center gap-1.5 px-3 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60 sm:px-4',
-                    active
-                      ? 'bg-white/[0.025] text-slate-100'
-                      : 'text-slate-500 hover:bg-white/[0.02] hover:text-slate-300'
-                  )}
-                  onClick={() => setActiveView(view.id)}
-                  role="tab"
+          ) : (
+            <div className="flex h-full min-h-0 flex-col overflow-hidden border border-emerald-400/15 bg-[#0d1626]/90">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
+                <div>
+                  <h2 className="flex items-center gap-2 text-xs font-black">
+                    <WalletCards className="h-3.5 w-3.5 text-emerald-300" />
+                    T+1 自适应退出
+                  </h2>
+                  <p className="mt-1 text-[9px] text-slate-600">
+                    真实成交回报到达后由 Engine 建立唯一退出计划并持续托管。
+                  </p>
+                </div>
+                <Button
+                  className="h-7 border-white/10 bg-white/[0.025] px-2 text-[9px] text-slate-300 hover:bg-white/[0.06]"
+                  onClick={() => setLocation('/liquidation')}
+                  size="sm"
+                  variant="outline"
                 >
-                  <Icon
-                    className={cn(
-                      'h-3.5 w-3.5',
-                      active && view.id === 'RADAR' && 'text-red-300',
-                      active && view.id === 'SIGNALS' && 'text-amber-300',
-                      active && view.id === 'POSITIONS' && 'text-emerald-300'
-                    )}
+                  打开卖出管理
+                </Button>
+              </div>
+              <div className="grid shrink-0 grid-flow-col auto-cols-[minmax(150px,1fr)] gap-px overflow-x-auto border-b border-white/[0.06] bg-white/[0.06] custom-scrollbar">
+                <PositionMetric
+                  label="托管持仓"
+                  value={assistant.exitPlans.length}
+                />
+                <PositionMetric
+                  label="退出委托中"
+                  value={
+                    assistant.exitPlans.filter(plan => plan.pendingOrderId)
+                      .length
+                  }
+                />
+                <PositionMetric
+                  label="计划异常"
+                  value={exitPlanErrorCount}
+                  alert={exitPlanErrorCount > 0}
+                />
+                <PositionMetric
+                  label="未授权"
+                  value={
+                    assistant.exitPlans.filter(plan => !plan.autoExitAuthorized)
+                      .length
+                  }
+                  alert={assistant.exitPlans.some(
+                    plan => !plan.autoExitAuthorized
+                  )}
+                />
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
+                {assistant.exitPlans.length ? (
+                  <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
+                    {assistant.exitPlans.map(plan => (
+                      <ExitPlanCard key={plan.id} plan={plan} />
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyWorkspace
+                    icon={WalletCards}
+                    title="暂无托管仓位"
+                    description="受托买入的真实成交回报到达后，T+1 退出计划会自动出现在这里。"
                   />
-                  {view.label}
-                  <span
-                    className={cn(
-                      'min-w-4 rounded-full px-1 font-mono text-[8px] leading-4',
-                      active
-                        ? 'bg-white/[0.08] text-slate-200'
-                        : 'text-slate-600'
-                    )}
-                  >
-                    {view.count}
-                  </span>
-                  {active ? (
-                    <span className="absolute inset-x-2 bottom-0 h-0.5 bg-red-500" />
-                  ) : null}
-                </button>
-              );
-            })}
-          </nav>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
 
-          <div className="flex shrink-0 items-center gap-1 border-l border-white/[0.06] px-1.5">
-            <span
-              className={cn(
-                'hidden items-center gap-1.5 px-1 text-[9px] text-slate-600',
-                workspaceWidth >= 1080 && 'flex'
-              )}
-            >
+  return (
+    <>
+      <StudioWorkbench
+        activeMode={activeView}
+        className="h-full min-h-0"
+        content={content}
+        isPage
+        modes={studioModes}
+        onModeChange={nextMode =>
+          setActiveView(nextMode as LimitUpWorkbenchView)
+        }
+        showSidebar
+        sidebar={<LimitUpBoardHealthConsole {...healthConsoleProps} />}
+        sidebarSizing={{
+          defaultWidth: 312,
+          maxWidth: 420,
+          minWidth: 260,
+          storageScope: 'limit-up-board-studio',
+        }}
+        statusBarLeft={
+          <>
+            <span className="inline-flex items-center gap-2">
               <span
                 className={cn(
                   'h-1.5 w-1.5 rounded-full',
-                  radar.isScannerRunning ? 'bg-emerald-400' : 'bg-rose-400'
+                  enabled ? 'bg-emerald-400' : 'bg-slate-600'
                 )}
               />
-              {radar.isScannerRunning ? '雷达在线' : '雷达离线'}
+              {enabled ? '晋级助手运行中' : '晋级助手已停止'}
             </span>
-            <label
-              className={cn(
-                'hidden cursor-pointer items-center gap-1.5 px-1 text-[9px] text-slate-500',
-                workspaceWidth >= 1220 && 'flex'
-              )}
-            >
-              <Bot
-                className={cn('h-3.5 w-3.5', enabled && 'text-emerald-300')}
-              />
-              助手
-              <Switch
-                checked={enabled}
-                disabled={!accountId || busyAction === 'toggle'}
-                onCheckedChange={toggleAssistant}
-                aria-label="启用首板晋级助手"
-                className="scale-75 data-[state=checked]:bg-emerald-500"
-              />
-            </label>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label="同步首板业务链"
-              className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
-              onClick={syncWorkbench}
-              disabled={!accountId || busyAction === 'refresh'}
-            >
-              <RefreshCw
-                className={cn(
-                  'h-3.5 w-3.5',
-                  busyAction === 'refresh' &&
-                    'animate-spin motion-reduce:animate-none'
-                )}
-              />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label="打开首板风险设置"
-              className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <Settings2 className="h-3.5 w-3.5" />
-            </Button>
-          </div>
-        </header>
-
-        {assistant.assistant?.lastError ? (
-          <div
-            role="alert"
-            className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.08] px-3 py-2 text-[10px] text-rose-100"
-          >
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <strong>助手受保护</strong>
-            <span className="truncate text-rose-100/75">
-              {assistant.assistant.lastError}
+            <span className="text-slate-700">|</span>
+            <span className="font-mono">{accountId || '未配置账户'}</span>
+            <span className="text-slate-700">|</span>
+            <span>最近同步 {updatedAt}</span>
+          </>
+        }
+        statusBarRight={
+          <>
+            <span>
+              {assistant.currentSettings.mode === 'live' ? '实盘' : '模拟盘'}
             </span>
-          </div>
-        ) : null}
-
-        <main className="min-h-0 flex-1 overflow-hidden p-2 sm:p-3">
-          <section
-            id="limit-up-workbench-view"
-            aria-label={views.find(view => view.id === activeView)?.label}
-            className="h-full min-h-0"
-            role="tabpanel"
-          >
-            {activeView === 'RADAR' ? (
-              <LimitUpRadarPanel
-                armedCodes={armedCodes}
-                assistantEnabled={enabled}
-                busyCode={
-                  busyAction?.startsWith('candidate:')
-                    ? busyAction.slice(10)
-                    : null
-                }
-                candidates={radar.candidates}
-                errorMessage={radar.error?.message}
-                exitPlanCodes={exitPlanCodes}
-                fetching={radar.fetching}
-                industries={radar.industries}
-                industry={radar.industry}
-                isScannerRunning={radar.isScannerRunning}
-                onArm={code =>
-                  act(`candidate:${code}`, () => assistant.arm(code))
-                }
-                onDisarm={code =>
-                  act(`candidate:${code}`, () => assistant.disarm(code))
-                }
-                onIndustryChange={radar.setIndustry}
-                onSearchChange={radar.setSearch}
-                onSelectCandidate={selectCandidate}
-                onStageChange={radar.setStage}
-                pendingCodes={pendingCodes}
-                search={radar.search}
-                selectedCode={selectedCode}
-                stage={radar.stage}
-                summary={radar.summary}
-                systemWarnings={systemWarnings}
-              />
-            ) : activeView === 'SIGNALS' ? (
-              <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-sm border border-amber-400/15 bg-[#0d1626]/90">
-                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
-                  <div>
-                    <h2 className="flex items-center gap-2 text-xs font-black">
-                      <Clock3 className="h-3.5 w-3.5 text-amber-300" />
-                      待确认信号
-                    </h2>
-                    <p className="mt-1 text-[9px] text-slate-600">
-                      新信号到达时自动切换一次；确认前仍会重新校验行情、资金与风控。
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 text-[9px] text-slate-500">
-                    <span>
-                      入场门禁{' '}
-                      <strong
-                        className={
-                          assistant.assistant?.canApprove
-                            ? 'text-emerald-300'
-                            : 'text-amber-300'
-                        }
-                      >
-                        {assistant.assistant?.canApprove ? '已通过' : '未通过'}
-                      </strong>
-                    </span>
-                    <Badge className="border-amber-400/20 bg-amber-400/10 text-[9px] text-amber-200 hover:bg-amber-400/10">
-                      {assistant.pendingIntents.length}
-                    </Badge>
-                  </div>
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
-                  {assistant.pendingIntents.length ? (
-                    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
-                      {assistant.pendingIntents.map(intent => (
-                        <PendingSignalCard
-                          key={intent.id}
-                          intent={intent}
-                          busy={busyAction === `intent:${intent.id}`}
-                          canApprove={Boolean(assistant.assistant?.canApprove)}
-                          onApprove={() =>
-                            act(`intent:${intent.id}`, () =>
-                              assistant.approve(intent.id)
-                            )
-                          }
-                          onReject={() =>
-                            act(`intent:${intent.id}`, () =>
-                              assistant.reject(intent.id)
-                            )
-                          }
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <EmptyWorkspace
-                      icon={ShieldCheck}
-                      title="暂无待确认信号"
-                      description="助手只在候选进入临板触发区时生成一次 15 秒确认卡。你可以回到候选雷达继续观察。"
-                      actionLabel="返回候选雷达"
-                      onAction={() => setActiveView('RADAR')}
-                    />
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-sm border border-emerald-400/15 bg-[#0d1626]/90">
-                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
-                  <div>
-                    <h2 className="flex items-center gap-2 text-xs font-black">
-                      <WalletCards className="h-3.5 w-3.5 text-emerald-300" />
-                      T+1 自适应退出
-                    </h2>
-                    <p className="mt-1 text-[9px] text-slate-600">
-                      真实成交回报到达后由 Engine 建立唯一退出计划并持续托管。
-                    </p>
-                  </div>
-                  <Button
-                    className="h-7 border-white/10 bg-white/[0.025] px-2 text-[9px] text-slate-300 hover:bg-white/[0.06]"
-                    onClick={() => setLocation('/liquidation')}
-                    size="sm"
-                    variant="outline"
-                  >
-                    打开卖出管理
-                  </Button>
-                </div>
-                <div className="grid shrink-0 grid-flow-col auto-cols-[minmax(150px,1fr)] gap-px overflow-x-auto border-b border-white/[0.06] bg-white/[0.06] custom-scrollbar">
-                  <PositionMetric
-                    label="托管持仓"
-                    value={assistant.exitPlans.length}
-                  />
-                  <PositionMetric
-                    label="退出委托中"
-                    value={
-                      assistant.exitPlans.filter(plan => plan.pendingOrderId)
-                        .length
-                    }
-                  />
-                  <PositionMetric
-                    label="计划异常"
-                    value={exitPlanErrorCount}
-                    alert={exitPlanErrorCount > 0}
-                  />
-                  <PositionMetric
-                    label="未授权"
-                    value={
-                      assistant.exitPlans.filter(
-                        plan => !plan.autoExitAuthorized
-                      ).length
-                    }
-                    alert={assistant.exitPlans.some(
-                      plan => !plan.autoExitAuthorized
-                    )}
-                  />
-                </div>
-                <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
-                  {assistant.exitPlans.length ? (
-                    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
-                      {assistant.exitPlans.map(plan => (
-                        <ExitPlanCard key={plan.id} plan={plan} />
-                      ))}
-                    </div>
-                  ) : (
-                    <EmptyWorkspace
-                      icon={WalletCards}
-                      title="暂无托管仓位"
-                      description="受托买入的真实成交回报到达后，T+1 退出计划会自动出现在这里。"
-                    />
-                  )}
-                </div>
-              </div>
-            )}
-          </section>
-        </main>
-      </div>
-
-      <Sheet open={healthOpen} onOpenChange={setHealthOpen}>
-        <SheetContent
-          side="left"
-          className="w-[92vw] max-w-[320px] border-white/[0.08] bg-[#081423] p-0 text-slate-100 sm:max-w-[320px]"
-          onCloseAutoFocus={event => {
-            event.preventDefault();
-            healthTriggerRef.current?.focus();
-          }}
-        >
-          <SheetTitle className="sr-only">首板健康控制台</SheetTitle>
-          <SheetDescription className="sr-only">
-            首板扫描、候选收敛、入场门禁与 T+1 退出计划的业务健康状态。
-          </SheetDescription>
-          <LimitUpBoardHealthConsole {...healthConsoleProps} />
-        </SheetContent>
-      </Sheet>
+            <span className="text-slate-700">|</span>
+            <span>
+              候选 {radar.summary.eligibleCount} · 待确认{' '}
+              {assistant.pendingIntents.length}
+            </span>
+            <span className="text-slate-700">|</span>
+            <span>T+1 托管 {assistant.exitPlans.length}</span>
+          </>
+        }
+        theme={{ icon: Target, name: 'red', title: '打板助手' }}
+      />
 
       <Sheet
         open={Boolean(selectedCandidate)}
@@ -944,7 +876,7 @@ export default function LimitUpBoardPage() {
       >
         <SheetContent
           side="right"
-          className="w-[94vw] border-white/[0.08] bg-[#081423] p-0 text-slate-100 sm:max-w-[540px]"
+          className="w-[92vw] border-white/[0.08] bg-[#081423] p-0 text-slate-100 sm:max-w-[540px]"
           onCloseAutoFocus={event => {
             event.preventDefault();
             candidateTriggerRef.current?.focus();
@@ -1088,7 +1020,7 @@ export default function LimitUpBoardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>
   );
 }
 

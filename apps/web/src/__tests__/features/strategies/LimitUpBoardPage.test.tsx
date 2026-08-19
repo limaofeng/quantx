@@ -1,6 +1,10 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+import {
+  StudioWorkspaceContext,
+  type StudioWorkspaceContextValue,
+} from '@/components/studio-workspace';
 import LimitUpBoardPage from '@/features/strategies/pages/LimitUpBoardPage';
 
 const mocks = vi.hoisted(() => {
@@ -11,6 +15,8 @@ const mocks = vi.hoisted(() => {
   const refreshRadar = vi.fn();
   const reject = vi.fn(async () => ({ message: '已忽略' }));
   const save = vi.fn(async () => ({ message: '已保存' }));
+  const clearWorkspaceSidebar = vi.fn();
+  const setWorkspaceSidebar = vi.fn();
   const firstIntent = {
     approvalExpiresAt: '2099-08-19T10:00:15+08:00',
     distanceToLimitTicks: 1,
@@ -91,6 +97,7 @@ const mocks = vi.hoisted(() => {
     approve,
     arm,
     assistantState,
+    clearWorkspaceSidebar,
     disarm,
     firstIntent,
     reconcile,
@@ -98,9 +105,27 @@ const mocks = vi.hoisted(() => {
     reject,
     save,
     setLocation: vi.fn(),
+    setWorkspaceSidebar,
     toast: vi.fn(),
   };
 });
+
+const workspaceContext: StudioWorkspaceContextValue = {
+  activeTabId: 'page:/limit-up-board',
+  clearWorkspaceSidebar: mocks.clearWorkspaceSidebar,
+  isWorkspaceHosted: true,
+  openStudioTab: vi.fn(),
+  setWorkspaceSidebar: mocks.setWorkspaceSidebar,
+  updateActiveTab: vi.fn(),
+};
+
+function HostedLimitUpBoardPage() {
+  return (
+    <StudioWorkspaceContext.Provider value={workspaceContext}>
+      <LimitUpBoardPage />
+    </StudioWorkspaceContext.Provider>
+  );
+}
 
 vi.mock('wouter', () => ({
   useLocation: () => ['/limit-up-board', mocks.setLocation],
@@ -239,17 +264,26 @@ describe('LimitUpBoardPage', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('uses the full workbench width and exposes three accessible views', () => {
-    render(<LimitUpBoardPage />);
+    render(<HostedLimitUpBoardPage />);
 
     const root = screen.getByTestId('limit-up-board-page');
     expect(root).toHaveClass('w-full');
     expect(root).not.toHaveClass('max-w-[1540px]');
 
-    const radarTab = screen.getByRole('tab', { name: /候选雷达/ });
-    const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
-    const positionsTab = screen.getByRole('tab', { name: /T\+1 持仓/ });
+    const navigation = screen.getByRole('tablist', {
+      name: '首板工作区',
+    });
+    const radarTab = within(navigation).getByRole('tab', {
+      name: /候选雷达/,
+    });
+    const signalsTab = within(navigation).getByRole('tab', {
+      name: /待确认信号/,
+    });
+    const positionsTab = within(navigation).getByRole('tab', {
+      name: /T\+1 持仓/,
+    });
 
-    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(within(navigation).getAllByRole('tab')).toHaveLength(3);
     expect(radarTab).toHaveAttribute('aria-selected', 'true');
     expect(signalsTab).toHaveAttribute(
       'aria-controls',
@@ -262,70 +296,34 @@ describe('LimitUpBoardPage', () => {
     expect(screen.getByRole('tabpanel', { name: '候选雷达' })).toBeVisible();
   });
 
-  it('docks health only when the measured workspace can keep the radar wide', () => {
-    type ObserverCallback = (
-      entries: ResizeObserverEntry[],
-      observer: ResizeObserver
-    ) => void;
-    const observations = new Map<
-      Element,
-      { callback: ObserverCallback; observer: ResizeObserver }
-    >();
-    class ResizeObserverMock implements ResizeObserver {
-      constructor(private readonly callback: ObserverCallback) {}
+  it('registers the same resizable workspace sidebar pattern as the T assistant', async () => {
+    render(<HostedLimitUpBoardPage />);
 
-      disconnect() {}
+    await waitFor(() => expect(mocks.setWorkspaceSidebar).toHaveBeenCalled());
+    const sidebar = mocks.setWorkspaceSidebar.mock.lastCall?.[0];
 
-      observe = (target: Element) => {
-        observations.set(target, { callback: this.callback, observer: this });
-      };
-
-      unobserve() {}
-    }
-    vi.stubGlobal('ResizeObserver', ResizeObserverMock);
-    render(<LimitUpBoardPage />);
-
-    const root = screen.getByTestId('limit-up-board-page');
-    const inlineHealth = screen.getByTestId('limit-up-inline-health');
-    const healthButton = screen.getByRole('button', {
-      name: '打开首板健康控制台',
+    expect(sidebar).toMatchObject({
+      showSidebar: true,
+      sizing: {
+        defaultWidth: 312,
+        maxWidth: 420,
+        minWidth: 260,
+        storageScope: 'limit-up-board-studio',
+      },
+      themeName: 'red',
+      title: '打板助手',
     });
-    const observation = observations.get(root);
-    expect(observation).toBeDefined();
-    if (!observation) throw new Error('page resize observer was not attached');
-    const resizeEntry = (width: number): ResizeObserverEntry => ({
-      borderBoxSize: [],
-      contentBoxSize: [],
-      contentRect: { width } as DOMRectReadOnly,
-      devicePixelContentBoxSize: [],
-      target: root,
-    });
-
-    act(() => {
-      observation.callback([resizeEntry(1500)], observation.observer);
-    });
-    expect(inlineHealth).toHaveClass('flex');
-    expect(healthButton).toHaveClass('hidden');
-
-    act(() => {
-      observation.callback([resizeEntry(1200)], observation.observer);
-    });
-    expect(inlineHealth).toHaveClass('hidden');
-    expect(healthButton).not.toHaveClass('hidden');
+    expect(sidebar?.content).toBeTruthy();
   });
 
-  it('opens the health console with first-board business checks', async () => {
-    const user = userEvent.setup();
-    render(<LimitUpBoardPage />);
+  it('registers first-board business checks in the health console', async () => {
+    render(<HostedLimitUpBoardPage />);
 
-    await user.click(
-      screen.getByRole('button', { name: '打开首板健康控制台' })
-    );
-
-    const consoleDialog = await screen.findByRole('dialog', {
-      name: '首板健康控制台',
-    });
-    const healthConsole = within(consoleDialog).getByTestId(
+    await waitFor(() => expect(mocks.setWorkspaceSidebar).toHaveBeenCalled());
+    const sidebar = mocks.setWorkspaceSidebar.mock.lastCall?.[0];
+    if (!sidebar?.content) throw new Error('health sidebar was not registered');
+    const sidebarView = render(sidebar.content);
+    const healthConsole = within(sidebarView.container).getByTestId(
       'limit-up-health-console'
     );
 
@@ -344,7 +342,7 @@ describe('LimitUpBoardPage', () => {
 
   it('opens the selected candidate in the right-side inspector', async () => {
     const user = userEvent.setup();
-    render(<LimitUpBoardPage />);
+    render(<HostedLimitUpBoardPage />);
 
     const candidateRow = screen.getByRole('row', {
       name: '查看 特锐德 300001.SZ',
@@ -368,7 +366,7 @@ describe('LimitUpBoardPage', () => {
 
   it('switches to pending signals and confirms without editable order fields', async () => {
     const user = userEvent.setup();
-    render(<LimitUpBoardPage />);
+    render(<HostedLimitUpBoardPage />);
 
     const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
     await user.click(signalsTab);
@@ -383,7 +381,7 @@ describe('LimitUpBoardPage', () => {
 
   it('auto-opens pending signals once when a new intent arrives after hydration', async () => {
     const user = userEvent.setup();
-    const { rerender } = render(<LimitUpBoardPage />);
+    const { rerender } = render(<HostedLimitUpBoardPage />);
     const radarTab = screen.getByRole('tab', { name: /候选雷达/ });
 
     expect(radarTab).toHaveAttribute('aria-selected', 'true');
@@ -396,7 +394,7 @@ describe('LimitUpBoardPage', () => {
         instrumentCode: '600001.SH',
       },
     ];
-    rerender(<LimitUpBoardPage />);
+    rerender(<HostedLimitUpBoardPage />);
 
     const signalsTab = screen.getByRole('tab', { name: /待确认信号/ });
     await waitFor(() =>
@@ -408,7 +406,7 @@ describe('LimitUpBoardPage', () => {
     mocks.assistantState.pendingIntents = [
       ...mocks.assistantState.pendingIntents,
     ];
-    rerender(<LimitUpBoardPage />);
+    rerender(<HostedLimitUpBoardPage />);
 
     expect(radarTab).toHaveAttribute('aria-selected', 'true');
   });

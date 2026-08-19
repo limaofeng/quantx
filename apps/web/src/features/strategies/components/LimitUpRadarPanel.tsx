@@ -686,7 +686,7 @@ export function LimitUpRadarPanel({
   return (
     <section
       ref={panelRef}
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-cyan-400/15 bg-[#0d1626]/90"
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden border border-cyan-400/15 bg-[#0d1626]/90"
       data-layout={layout}
       data-testid="limit-up-radar-panel"
     >
