@@ -1,7 +1,7 @@
 export interface MarketDataSyncValidationInput {
   startDate: string;
   endDate: string;
-  targetMode: 'sectors' | 'stocks';
+  targetMode: 'holdings' | 'sectors' | 'stocks';
   stockCount: number;
   periods: string[];
   skipDownload: boolean;
@@ -29,6 +29,9 @@ export function validateMarketDataSync({
   if (rangeDays <= 0) return '结束日期不能早于开始日期。';
   if (targetMode === 'stocks' && stockCount === 0) {
     return '标的模式下至少输入一个股票或 ETF 代码。';
+  }
+  if (targetMode === 'holdings' && stockCount === 0) {
+    return '当前账户没有可同步的持仓。';
   }
   if (computeDailySignals && !periods.includes('1d')) {
     return '计算日级指标依赖 1d K 线，请先选择日线周期。';

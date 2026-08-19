@@ -1,21 +1,26 @@
 import {
   ArrowLeft,
   AlertTriangle,
+  BriefcaseBusiness,
   CalendarDays,
   CandlestickChart,
   CheckCircle2,
   Database,
   Info,
   ListFilter,
+  Loader2,
+  RefreshCw,
   SlidersHorizontal,
 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
+import { useQuery } from 'urql';
 import { useLocation } from 'wouter';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { GetHoldingsQuery } from '@/features/portfolio/hooks/usePortfolio';
 import { useStockScreenSnapshotStatus } from '@/features/screening/hooks/useStockScreenSnapshotStatus';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
 import { cn } from '@/utils/cn';
@@ -24,6 +29,7 @@ import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
 import { DeploymentRunMonitor } from '../components/DeploymentRunMonitor';
 import { DeploymentSyncControl } from '../components/DeploymentSyncControl';
 
+import { getActiveHoldingStockCodes } from './marketDataSyncTargets';
 import { validateMarketDataSync } from './marketDataSyncValidation';
 
 const sectorOptions = ['沪深A股', '沪深ETF', '沪深指数'];
@@ -34,7 +40,7 @@ const periodOptions = [
 ] as const;
 
 type PeriodValue = (typeof periodOptions)[number]['value'];
-type TargetMode = 'sectors' | 'stocks';
+type TargetMode = 'holdings' | 'sectors' | 'stocks';
 
 function todayInputValue() {
   const now = new Date();
@@ -100,29 +106,47 @@ export function DailyMarketDataSyncPage() {
   const [periods, setPeriods] = useState<PeriodValue[]>(['1d', '1m']);
   const [skipDownload, setSkipDownload] = useState(false);
   const [computeDailySignals, setComputeDailySignals] = useState(true);
+  const [holdingsResult, refreshHoldings] = useQuery({
+    query: GetHoldingsQuery,
+    variables: {},
+    pause: targetMode !== 'holdings',
+    requestPolicy: 'cache-and-network',
+  });
 
   const stockList = useMemo(() => parseList(stockText), [stockText]);
-  const validationMessage = useMemo(
-    () =>
-      validateMarketDataSync({
-        startDate,
-        endDate,
-        targetMode,
-        stockCount: stockList.length,
-        periods,
-        skipDownload,
-        computeDailySignals,
-      }),
-    [
-      computeDailySignals,
+  const holdingStockCodes = useMemo(
+    () => getActiveHoldingStockCodes(holdingsResult.data?.positions),
+    [holdingsResult.data?.positions]
+  );
+  const targetStockCount =
+    targetMode === 'holdings' ? holdingStockCodes.length : stockList.length;
+  const validationMessage = useMemo(() => {
+    if (targetMode === 'holdings' && holdingsResult.fetching) {
+      return '正在读取当前持仓，请稍候。';
+    }
+    if (targetMode === 'holdings' && holdingsResult.error) {
+      return '当前持仓读取失败，请刷新后重试。';
+    }
+    return validateMarketDataSync({
+      startDate,
       endDate,
+      targetMode,
+      stockCount: targetStockCount,
       periods,
       skipDownload,
-      startDate,
-      stockList.length,
-      targetMode,
-    ]
-  );
+      computeDailySignals,
+    });
+  }, [
+    computeDailySignals,
+    endDate,
+    holdingsResult.error,
+    holdingsResult.fetching,
+    periods,
+    skipDownload,
+    startDate,
+    targetStockCount,
+    targetMode,
+  ]);
   const syncParameters = useMemo(() => {
     const parameters: Record<string, unknown> = {
       compute_daily_signals: computeDailySignals,
@@ -134,6 +158,8 @@ export function DailyMarketDataSyncPage() {
 
     if (targetMode === 'sectors') {
       parameters.sectors = selectedSectors;
+    } else if (targetMode === 'holdings') {
+      parameters.stock_list = holdingStockCodes;
     } else {
       parameters.stock_list = stockList;
     }
@@ -142,6 +168,7 @@ export function DailyMarketDataSyncPage() {
   }, [
     computeDailySignals,
     endDate,
+    holdingStockCodes,
     periods,
     selectedSectors,
     skipDownload,
@@ -263,12 +290,13 @@ export function DailyMarketDataSyncPage() {
                     同步目标
                   </h2>
                   <p className="mt-1 text-xs font-medium text-slate-500">
-                    按板块展开全量标的，或手动输入明确股票代码。
+                    按板块、当前持仓或手工代码确定本次同步范围。
                   </p>
                 </div>
                 <div className="flex rounded-lg border border-slate-200/60 bg-slate-50 p-1 dark:border-white/5 dark:bg-white/[0.03]">
                   {[
                     { label: '板块', value: 'sectors' },
+                    { label: '持仓', value: 'holdings' },
                     { label: '标的', value: 'stocks' },
                   ].map(option => (
                     <button
@@ -314,6 +342,71 @@ export function DailyMarketDataSyncPage() {
                       </button>
                     );
                   })}
+                </div>
+              ) : targetMode === 'holdings' ? (
+                <div
+                  className="mt-4 rounded-xl border border-slate-200/60 bg-slate-50/70 p-4 dark:border-white/5 dark:bg-white/[0.02]"
+                  aria-live="polite"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <div className="rounded-lg bg-blue-500/10 p-2 text-blue-600 dark:text-blue-300">
+                        <BriefcaseBusiness className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-slate-900 dark:text-white">
+                          {holdingsResult.fetching
+                            ? '正在读取当前持仓'
+                            : `当前持仓 ${holdingStockCodes.length} 只`}
+                        </div>
+                        <p className="mt-1 text-[10px] font-medium text-slate-500">
+                          自动过滤零持仓并去重，提交时写入明确的 stock_list。
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="刷新持仓"
+                      className="h-8 w-8 shrink-0 rounded-lg"
+                      disabled={holdingsResult.fetching}
+                      onClick={() =>
+                        refreshHoldings({ requestPolicy: 'network-only' })
+                      }
+                    >
+                      {holdingsResult.fetching ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
+
+                  {holdingsResult.error ? (
+                    <div
+                      role="alert"
+                      className="mt-3 flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300"
+                    >
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      当前持仓读取失败，请刷新后重试。
+                    </div>
+                  ) : holdingStockCodes.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {holdingStockCodes.map(stockCode => (
+                        <span
+                          key={stockCode}
+                          className="rounded-md border border-blue-500/15 bg-blue-500/5 px-2 py-1 font-mono text-[10px] font-bold text-blue-700 dark:text-blue-300"
+                        >
+                          {stockCode}
+                        </span>
+                      ))}
+                    </div>
+                  ) : holdingsResult.fetching ? null : (
+                    <div className="mt-3 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                      当前账户没有可同步的持仓。
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="mt-4">

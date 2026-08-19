@@ -50,4 +50,21 @@ describe('validateMarketDataSync', () => {
       })
     ).toContain('仅补算指标');
   });
+
+  it('requires at least one active holding in holdings mode', () => {
+    expect(
+      validateMarketDataSync({
+        ...validInput,
+        targetMode: 'holdings',
+        stockCount: 0,
+      })
+    ).toContain('没有可同步的持仓');
+    expect(
+      validateMarketDataSync({
+        ...validInput,
+        targetMode: 'holdings',
+        stockCount: 2,
+      })
+    ).toBeNull();
+  });
 });
