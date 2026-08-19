@@ -25,6 +25,7 @@ MAX_MARKET_DATA_FRAME_RECORDS = 100_000
 MAX_MARKET_DATA_CODES = 300
 MAX_FINANCIAL_DATA_CODES = 100
 WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
+WHOLE_QUOTE_SECTORS = ("沪深A股", "沪深指数")
 FINANCIAL_DATA_RECORD_FORMAT = "financial-row-v1"
 SUPPORTED_FINANCIAL_TABLES = (
   "Balance",
@@ -442,6 +443,7 @@ class _LocalMarketStreamer:
     self._lock = threading.RLock()
     self._whole_quote_metadata: dict[str, dict[str, float]] = {}
     self._whole_quote_codes: tuple[str, ...] = ()
+    self._whole_quote_code_set: frozenset[str] = frozenset()
     self._whole_quote_metadata_date = None
     self._whole_quote_metadata_refreshing = False
     self._whole_quote_subscription: int | list[int] | None = None
@@ -465,20 +467,13 @@ class _LocalMarketStreamer:
         continue
       exchange = candidate.rpartition(".")[2]
       normalized_markets.add(exchange if exchange in {"SH", "SZ"} else candidate)
-    sectors = (
-      ["沪深A股"]
-      if {"SH", "SZ"}.issubset(normalized_markets)
-      else [
-        {"SH": "上证A股", "SZ": "深证A股"}.get(market, market)
-        for market in sorted(normalized_markets)
-      ]
-    )
     codes = sorted(
       {
         str(code).strip().upper()
-        for sector in sectors
+        for sector in WHOLE_QUOTE_SECTORS
         for code in (self.data_manager.get_stock_list_in_sector(sector) or [])
         if str(code).strip()
+        and str(code).strip().upper().rpartition(".")[2] in normalized_markets
       }
     )
     metadata: dict[str, dict[str, float]] = {}
@@ -519,6 +514,7 @@ class _LocalMarketStreamer:
         raise RuntimeError("QMT returned no SH/SZ instruments")
       with self._lock:
         self._whole_quote_codes = codes
+        self._whole_quote_code_set = frozenset(codes)
         self._whole_quote_metadata = metadata
         self._whole_quote_metadata_date = datetime.now(SHANGHAI_TIMEZONE).date()
       logger.info(
@@ -535,6 +531,19 @@ class _LocalMarketStreamer:
     finally:
       with self._lock:
         self._whole_quote_metadata_refreshing = False
+
+  def _filter_whole_quote_data(self, data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+      return {}
+    with self._lock:
+      allowed_codes = self._whole_quote_code_set
+    if not allowed_codes:
+      return {}
+    return {
+      normalized_code: raw_tick
+      for code, raw_tick in data.items()
+      if (normalized_code := str(code).strip().upper()) in allowed_codes
+    }
 
   def _ensure_whole_quote_metadata_current(self, markets: list[str]) -> None:
     today = datetime.now(SHANGHAI_TIMEZONE).date()
@@ -632,7 +641,7 @@ class _LocalMarketStreamer:
     return True
 
   def subscribe_whole_market(self, callback) -> bool:
-    """Establish the process-wide fixed SH/SZ whole-quote subscription."""
+    """Subscribe once to the fixed SH/SZ A-share and index universe."""
     markets = ["SH", "SZ"]
     with self._lock:
       if self._whole_quote_subscription is not None:
@@ -644,14 +653,20 @@ class _LocalMarketStreamer:
       )
     if not metadata_is_current:
       self._refresh_whole_quote_metadata(markets)
+    with self._lock:
+      codes = self._whole_quote_codes
+    if not codes:
+      return False
 
     def on_data(data: Any) -> None:
       self._ensure_whole_quote_metadata_current(markets)
-      callback(data)
+      filtered = self._filter_whole_quote_data(data)
+      if filtered:
+        callback(filtered)
 
     with self._access_lock:
       local_id = self.data_manager.subscribe_whole_quote(
-        markets,
+        codes,
         callback=on_data,
       )
     if not self._valid_subscription(local_id):
@@ -686,7 +701,7 @@ class _LocalMarketStreamer:
 
   def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
     """Normalize one XT callback outside the callback thread."""
-    safe_data = _json_safe(data)
+    safe_data = _json_safe(self._filter_whole_quote_data(data))
     enriched = self._enrich_whole_quote_data(safe_data)
     return enriched if isinstance(enriched, dict) else {}
 

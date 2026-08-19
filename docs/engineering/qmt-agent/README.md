@@ -22,8 +22,9 @@ QMT Agent 子进程注入 `ENV=testing`、账户白名单和实盘开关。账�
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
 `/ws/agent/market`，子协议固定为 `quantx.market.v1`。Agent 只建立一个
-`subscribe_whole_quote(["SH", "SZ"])`，先发送完整快照，再发送递增序号的
-二进制增量批次。单标的 `1m/5m/1d` 等 QMT K 线仍由主连接控制
+`subscribe_whole_quote(codes)`，其中 `codes` 是 QMT “沪深A股”与“沪深指数”
+板块的去重代码集合；回调入口再按同一集合防御性过滤，然后先发送完整快照，
+再发送递增序号的二进制增量批次。单标的 `1m/5m/1d` 等 QMT K 线仍由主连接控制
 `subscribe_quote`，不得从 tick 合成。
 
 whole-quote 回调只进入容量 8、估算上限 64 MiB 的捕获队列，序列化和网络 ACK

@@ -347,8 +347,10 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
 
   class FakeDataManager:
     def get_stock_list_in_sector(self, sector):
-      assert sector == "沪深A股"
-      return ["600000.SH", "300001.SZ"]
+      return {
+        "沪深A股": ["600000.SH", "300001.SZ"],
+        "沪深指数": ["000001.SH", "399001.SZ"],
+      }[sector]
 
     def get_instrument_detail_list(self, codes, iscomplete=False):
       detail_batches.append(list(codes))
@@ -358,16 +360,28 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
         "300001.SZ": {"UpStopPrice": 24.0, "PriceTick": 0.01},
       }
 
-    def subscribe_whole_quote(self, markets, callback):
-      assert markets == ["SH", "SZ"]
+    def subscribe_whole_quote(self, codes, callback):
+      assert codes == (
+        "000001.SH",
+        "300001.SZ",
+        "399001.SZ",
+        "600000.SH",
+      )
       callbacks.append(callback)
       return 202
 
     def get_full_tick(self, codes):
-      assert tuple(codes) == ("300001.SZ", "600000.SH")
+      assert tuple(codes) == (
+        "000001.SH",
+        "300001.SZ",
+        "399001.SZ",
+        "600000.SH",
+      )
       return {
+        "000001.SH": {"lastPrice": 3500.0},
         "600000.SH": {"lastPrice": 10.8},
         "300001.SZ": {"lastPrice": 23.5},
+        "399001.SZ": {"lastPrice": 11000.0},
       }
 
     def unsubscribe_quote(self, subscription_id):
@@ -377,27 +391,37 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
   streamer = _LocalMarketStreamer(FakeDataManager())
   assert streamer.subscribe_whole_market(events.append)
   assert streamer.subscribe_whole_market(events.append)
-  assert detail_batches == [["300001.SZ", "600000.SH"]]
+  assert detail_batches == [["000001.SH", "300001.SZ", "399001.SZ", "600000.SH"]]
   raw_ticks = {
+    "000001.SH": {"lastPrice": 3501.0},
     "600000.SH": {"lastPrice": 10.8},
     "300001.SZ": {
       "lastPrice": 23.5,
       "upperLimit": 24.0,
       "priceTick": 0.02,
     },
+    "399001.SZ": {"lastPrice": 11001.0},
+    "510300.SH": {"lastPrice": 4.5},
   }
   callbacks[0](raw_ticks)
 
-  assert events[0] is raw_ticks
+  assert set(events[0]) == {
+    "000001.SH",
+    "300001.SZ",
+    "399001.SZ",
+    "600000.SH",
+  }
+  assert "510300.SH" not in events[0]
   ticks = streamer.prepare_whole_market_data(events[0])
   assert ticks["600000.SH"]["upperLimit"] == 11.0
   assert ticks["600000.SH"]["priceTick"] == 0.01
   assert ticks["300001.SZ"]["upperLimit"] == 24.0
   assert ticks["300001.SZ"]["priceTick"] == 0.02
+  assert "510300.SH" not in streamer.prepare_whole_market_data(raw_ticks)
 
   snapshot = streamer.whole_market_snapshot()
   assert snapshot["600000.SH"]["upperLimit"] == 11.0
-  assert detail_batches == [["300001.SZ", "600000.SH"]]
+  assert detail_batches == [["000001.SH", "300001.SZ", "399001.SZ", "600000.SH"]]
 
 
 def test_data_only_simulator_rejects_trade_commands() -> None:

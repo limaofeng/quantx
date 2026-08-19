@@ -160,20 +160,26 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
   callbacks = []
 
   class FakeXTData:
-    def get_stock_list_in_sector(self, _sector):
-      return ["600000.SH"]
+    def get_stock_list_in_sector(self, sector):
+      return {
+        "沪深A股": ["600000.SH"],
+        "沪深指数": ["000001.SH"],
+      }[sector]
 
     def get_instrument_detail_list(self, _codes, iscomplete=False):
       assert iscomplete is True
       return {"600000.SH": {"UpStopPrice": 11.0, "PriceTick": 0.01}}
 
-    def subscribe_whole_quote(self, markets, callback):
-      assert markets == ["SH", "SZ"]
+    def subscribe_whole_quote(self, codes, callback):
+      assert codes == ("000001.SH", "600000.SH")
       callbacks.append(callback)
       return 1
 
     def get_full_tick(self, _codes):
-      return {"600000.SH": {"lastPrice": 10.0, "time": 1_000}}
+      return {
+        "000001.SH": {"lastPrice": 3500.0, "time": 1_000},
+        "600000.SH": {"lastPrice": 10.0, "time": 1_000},
+      }
 
     def unsubscribe_quote(self, _subscription_id):
       return None
@@ -181,8 +187,15 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
   streamer = _LocalMarketStreamer(FakeXTData())
   raw_events = []
   assert streamer.subscribe_whole_market(raw_events.append)
-  callbacks[0]({"600000.SH": {"lastPrice": 10.2, "time": 2_000}})
+  callbacks[0](
+    {
+      "000001.SH": {"lastPrice": 3501.0, "time": 2_000},
+      "510300.SH": {"lastPrice": 4.5, "time": 2_000},
+      "600000.SH": {"lastPrice": 10.2, "time": 2_000},
+    }
+  )
   assert raw_events
+  assert set(raw_events[0]) == {"000001.SH", "600000.SH"}
 
   snapshot = streamer.whole_market_snapshot()
   delta = streamer.prepare_whole_market_data(raw_events[0])
