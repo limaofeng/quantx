@@ -34,7 +34,7 @@ describe('TabBar', () => {
     expect(onTabChange).toHaveBeenCalledWith('tab-2');
   });
 
-  it('keeps the active tab visible and moves excess tabs into overflow', () => {
+  it('keeps every tab in a horizontally scrollable strip', () => {
     const tabs = buildTabs(10);
 
     render(
@@ -47,13 +47,18 @@ describe('TabBar', () => {
       />
     );
 
+    const tablist = screen.getByRole('tablist', { name: '工作区标签' });
+    expect(screen.getAllByRole('tab')).toHaveLength(10);
+    expect(screen.getByRole('tab', { name: '标签 8' })).toBeVisible();
     expect(screen.getByRole('tab', { name: '标签 10' })).toBeVisible();
+    expect(tablist).toHaveClass(
+      'overflow-x-auto',
+      'overscroll-x-contain',
+      'no-scrollbar'
+    );
     expect(
-      screen.queryByRole('tab', { name: '标签 8' })
+      screen.queryByTestId('studio-tab-overflow-trigger')
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: '更多标签，2 个' })
-    ).toBeVisible();
   });
 
   it('pins a preview tab on double click', () => {

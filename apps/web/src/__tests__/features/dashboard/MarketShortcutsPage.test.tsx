@@ -139,6 +139,29 @@ describe('MarketShortcutsPage realtime date guard', () => {
     expect(screen.queryByText('数据滞后')).not.toBeInTheDocument();
   });
 
+  it('keeps the index strip horizontally scrollable without a visible scrollbar', () => {
+    mocks.market = createMarketState({
+      dataMode: 'live',
+      freshCoverage: CORE_MARKET_INDICES.length,
+      latestQuoteAt: '2026-08-13T10:30:10+08:00',
+      targetDateCoverage: CORE_MARKET_INDICES.length,
+    });
+
+    render(<MarketShortcutsPage />);
+
+    const indexStrip = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[0].code}`
+    ).parentElement;
+    expect(indexStrip).not.toBeNull();
+    expect(indexStrip).toHaveClass(
+      'grid-flow-col',
+      'overflow-x-auto',
+      'overscroll-x-contain',
+      'no-scrollbar'
+    );
+    expect(indexStrip).not.toHaveClass('lg:grid-cols-6', 'lg:overflow-visible');
+  });
+
   it('renders breadth advancers red and decliners green', () => {
     mocks.market = createMarketState({
       dataMode: 'live',
@@ -195,10 +218,15 @@ describe('MarketShortcutsPage realtime date guard', () => {
     render(<MarketShortcutsPage />);
 
     expect(screen.getByTestId('stock-ranking-grid')).toHaveClass(
-      'grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))]'
+      'grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))]',
+      'gap-px'
     );
-    expect(screen.getByTestId('stock-ranking-gainers').querySelector('ol')).toBeVisible();
-    expect(screen.getByTestId('stock-ranking-losers').querySelector('ol')).toBeVisible();
+    const gainers = screen.getByTestId('stock-ranking-gainers');
+    const losers = screen.getByTestId('stock-ranking-losers');
+    expect(gainers.querySelector('ol')).toBeVisible();
+    expect(losers.querySelector('ol')).toBeVisible();
+    expect(gainers).not.toHaveClass('rounded-lg', 'border');
+    expect(losers).not.toHaveClass('rounded-lg', 'border');
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

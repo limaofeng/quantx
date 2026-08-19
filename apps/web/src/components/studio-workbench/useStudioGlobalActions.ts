@@ -16,6 +16,12 @@ import type { StudioAction } from './types';
 const studioNavigationItems = getStudioNavigation().flatMap(
   group => group.items
 );
+const primaryNavigationItems = studioNavigationItems.filter(
+  item => item.href !== '/settings'
+);
+const settingsNavigationItems = studioNavigationItems.filter(
+  item => item.href === '/settings'
+);
 
 function formatAssetLabel(totalAsset?: number | null) {
   if (typeof totalAsset !== 'number') return '总资产';
@@ -50,7 +56,7 @@ export function useStudioGlobalActions() {
 
   const globalActions = useMemo<StudioAction[]>(
     () =>
-      studioNavigationItems.map(item => ({
+      primaryNavigationItems.map(item => ({
         active: isNavigationItemActive(item.href, location),
         icon: item.icon,
         id: `nav:${item.href}`,
@@ -89,8 +95,16 @@ export function useStudioGlobalActions() {
         label: '退出登录',
         onSelect: () => void handleLogout(),
       },
+      ...settingsNavigationItems.map(item => ({
+        active: isNavigationItemActive(item.href, location),
+        icon: item.icon,
+        id: `nav:${item.href}`,
+        label: item.label,
+        onHover: () => void preloadRoute(item.href),
+        onSelect: () => setLocation(item.href),
+      })),
     ],
-    [handleLogout, openDeveloperDocs, setLocation, totalAsset]
+    [handleLogout, location, openDeveloperDocs, setLocation, totalAsset]
   );
 
   return {

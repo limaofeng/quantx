@@ -1,15 +1,7 @@
-import { ChevronDown, Pin, Plus, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pin, Plus, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type React from 'react';
 
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { cn } from '@/utils/cn';
 
 import {
@@ -19,10 +11,6 @@ import {
 } from './StudioTabContextMenu';
 import { getStudioThemeStyles } from './themeStyles';
 import type { StudioTab, StudioThemeName } from './types';
-
-const MAX_VISIBLE_TABS = 8;
-const TAB_SLOT_WIDTH = 148;
-const TAB_BAR_RESERVED_WIDTH = 52;
 
 export interface TabBarProps<T extends StudioTab> {
   activeTabId: string | null;
@@ -35,32 +23,6 @@ export interface TabBarProps<T extends StudioTab> {
   renderTabContent?: (tab: T, isActive: boolean) => React.ReactNode;
   tabs: T[];
   themeColor: StudioThemeName;
-}
-
-function partitionTabs<T extends StudioTab>(
-  tabs: T[],
-  visibleCapacity: number,
-  activeTabId: string | null
-) {
-  if (tabs.length <= visibleCapacity) {
-    return { hiddenTabs: [] as T[], visibleTabs: tabs };
-  }
-
-  const initialVisibleTabs = tabs.slice(0, visibleCapacity);
-  const activeTab = tabs.find(tab => tab.id === activeTabId);
-  const activeIsVisible = initialVisibleTabs.some(
-    tab => tab.id === activeTabId
-  );
-  const visibleTabs =
-    activeTab && !activeIsVisible
-      ? [...initialVisibleTabs.slice(0, -1), activeTab]
-      : initialVisibleTabs;
-  const visibleIds = new Set(visibleTabs.map(tab => tab.id));
-
-  return {
-    hiddenTabs: tabs.filter(tab => !visibleIds.has(tab.id)),
-    visibleTabs,
-  };
 }
 
 export function TabBar<T extends StudioTab>({
@@ -77,42 +39,14 @@ export function TabBar<T extends StudioTab>({
 }: TabBarProps<T>) {
   const [contextMenu, setContextMenu] =
     useState<StudioTabContextMenuState | null>(null);
-  const [visibleCapacity, setVisibleCapacity] = useState(MAX_VISIBLE_TABS);
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const tabButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const themeStyles = getStudioThemeStyles(themeColor);
 
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const updateVisibleCapacity = () => {
-      const containerWidth = container.getBoundingClientRect().width;
-      if (containerWidth <= 0) return;
-      const availableWidth = containerWidth - TAB_BAR_RESERVED_WIDTH;
-      const nextCapacity = Math.max(
-        1,
-        Math.min(MAX_VISIBLE_TABS, Math.floor(availableWidth / TAB_SLOT_WIDTH))
-      );
-      setVisibleCapacity(nextCapacity);
-    };
-
-    updateVisibleCapacity();
-
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateVisibleCapacity);
-      return () => window.removeEventListener('resize', updateVisibleCapacity);
-    }
-
-    const observer = new ResizeObserver(updateVisibleCapacity);
-    observer.observe(container);
-    return () => observer.disconnect();
-  }, []);
-
-  const { hiddenTabs, visibleTabs } = useMemo(
-    () => partitionTabs(tabs, visibleCapacity, activeTabId),
-    [activeTabId, tabs, visibleCapacity]
-  );
+    if (!activeTabId) return;
+    const activeTab = tabButtonRefs.current.get(activeTabId);
+    activeTab?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [activeTabId, tabs.length]);
 
   const handleContextMenuAction = useCallback(
     (action: StudioTabContextMenuAction, tabId: string) => {
@@ -148,7 +82,7 @@ export function TabBar<T extends StudioTab>({
 
   const handleTabKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>, tabId: string) => {
-      const currentIndex = visibleTabs.findIndex(tab => tab.id === tabId);
+      const currentIndex = tabs.findIndex(tab => tab.id === tabId);
       if (currentIndex === -1) return;
 
       if (event.key === 'Delete' && closable) {
@@ -159,40 +93,38 @@ export function TabBar<T extends StudioTab>({
 
       let nextIndex: number | null = null;
       if (event.key === 'ArrowLeft') {
-        nextIndex =
-          (currentIndex - 1 + visibleTabs.length) % visibleTabs.length;
+        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
       } else if (event.key === 'ArrowRight') {
-        nextIndex = (currentIndex + 1) % visibleTabs.length;
+        nextIndex = (currentIndex + 1) % tabs.length;
       } else if (event.key === 'Home') {
         nextIndex = 0;
       } else if (event.key === 'End') {
-        nextIndex = visibleTabs.length - 1;
+        nextIndex = tabs.length - 1;
       }
 
       if (nextIndex === null) return;
 
       event.preventDefault();
-      const nextTab = visibleTabs[nextIndex];
+      const nextTab = tabs[nextIndex];
       onTabChange(nextTab.id);
       window.requestAnimationFrame(() => {
         tabButtonRefs.current.get(nextTab.id)?.focus();
       });
     },
-    [closable, onTabChange, onTabClose, visibleTabs]
+    [closable, onTabChange, onTabClose, tabs]
   );
 
   return (
     <div
-      ref={containerRef}
       className="relative h-10 shrink-0 overflow-hidden border-b border-white/5 bg-[#0b1120]/70"
       data-testid="studio-tab-bar"
     >
       <div
         aria-label="工作区标签"
-        className="flex h-full min-w-0 items-center gap-1 px-2"
+        className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain scroll-smooth px-2"
         role="tablist"
       >
-        {visibleTabs.map(tab => {
+        {tabs.map(tab => {
           const isActive = activeTabId === tab.id;
 
           return (
@@ -292,58 +224,6 @@ export function TabBar<T extends StudioTab>({
             </div>
           );
         })}
-
-        {hiddenTabs.length > 0 && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="ml-auto flex h-8 shrink-0 cursor-pointer items-center gap-1 rounded-md border border-white/10 bg-white/[0.03] px-2 text-xs font-bold text-slate-300 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/80"
-                aria-label={`更多标签，${hiddenTabs.length} 个`}
-                data-testid="studio-tab-overflow-trigger"
-              >
-                <span>更多</span>
-                <span className="font-mono text-[10px] text-slate-400">
-                  {hiddenTabs.length}
-                </span>
-                <ChevronDown className="h-3.5 w-3.5" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              className="w-64 border-white/10 bg-[#0b1120] text-slate-200 shadow-xl shadow-black/30"
-              sideOffset={0}
-            >
-              <DropdownMenuLabel className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
-                已收纳的标签
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator className="bg-white/10" />
-              {hiddenTabs.map(tab => {
-                const Icon = tab.icon;
-                return (
-                  <DropdownMenuItem
-                    key={tab.id}
-                    onSelect={() => onTabChange(tab.id)}
-                    className="cursor-pointer py-2 text-xs focus:bg-white/[0.07] focus:text-white"
-                  >
-                    {Icon && <Icon className="h-3.5 w-3.5 text-slate-400" />}
-                    <span
-                      className={cn(
-                        'min-w-0 flex-1 truncate',
-                        tab.isPreview && 'italic'
-                      )}
-                    >
-                      {tab.name}
-                    </span>
-                    {tab.isPreviewable && !tab.isPreview && (
-                      <Pin className="h-3 w-3 text-slate-500" />
-                    )}
-                  </DropdownMenuItem>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
 
         {onTabCreate && (
           <button

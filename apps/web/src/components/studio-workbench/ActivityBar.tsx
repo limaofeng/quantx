@@ -130,6 +130,19 @@ export function ActivityBar({
         </button>
       )}
 
+      <div
+        className={cn(
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border',
+          themeStyles.iconBox
+        )}
+        title={theme.title}
+        data-testid="studio-service-logo"
+      >
+        <ServiceIcon size={18} />
+      </div>
+
+      <div aria-hidden="true" className="h-px w-6 shrink-0 bg-white/[0.06]" />
+
       <div className="no-scrollbar flex min-h-0 flex-1 flex-col items-center gap-2.5 overflow-y-auto">
         {globalActions.length > 0 ? (
           <div className="flex flex-col items-center gap-2.5">
@@ -147,16 +160,6 @@ export function ActivityBar({
         data-testid="studio-utility-bar"
       >
         {utilityActions.map(action => renderActionButton(action, 'utility'))}
-        <div
-          className={cn(
-            'flex h-8 w-8 items-center justify-center rounded-lg border',
-            themeStyles.iconBox
-          )}
-          title={theme.title}
-          data-testid="studio-service-logo"
-        >
-          <ServiceIcon size={18} />
-        </div>
       </div>
     </div>
   );

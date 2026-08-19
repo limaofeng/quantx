@@ -446,7 +446,7 @@ function StockRankingList({
   return (
     <section
       aria-labelledby={headingId}
-      className="min-w-0 overflow-hidden rounded-lg border border-white/[0.065] bg-black/[0.08]"
+      className="min-w-0 overflow-hidden bg-[#0e1628]"
       data-testid={`stock-ranking-${direction}`}
     >
       <div className="grid grid-cols-[1.25rem_minmax(0,1fr)_3.5rem_3.5rem] items-center gap-1.5 border-b border-white/[0.06] bg-black/10 px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-slate-600 sm:grid-cols-[1.5rem_minmax(0,1fr)_4rem_4rem_3.5rem] sm:gap-2 sm:px-3">
@@ -770,7 +770,7 @@ export default function MarketShortcutsPage() {
                     </div>
                   </div>
 
-                  <div className="grid grid-flow-col auto-cols-[minmax(150px,1fr)] gap-2 overflow-x-auto p-3 lg:grid-flow-row lg:grid-cols-6 lg:overflow-visible xl:p-2">
+                  <div className="no-scrollbar grid grid-flow-col auto-cols-[minmax(150px,1fr)] gap-2 overflow-x-auto overscroll-x-contain p-3 xl:p-2">
                     {market.indices.map(item => (
                       <MarketIndexCard
                         key={item.definition.code}
@@ -1113,7 +1113,7 @@ export default function MarketShortcutsPage() {
                     </span>
                   </div>
                   <div
-                    className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-2 p-2"
+                    className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-px bg-white/[0.06]"
                     data-testid="stock-ranking-grid"
                   >
                     <StockRankingList
