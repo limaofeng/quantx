@@ -14,9 +14,9 @@ from quantx_domain.state_schema import StateProperty, StateSchema
 from quantx_domain.strategies.ashare_limit_up_board import (
   SWING_BUCKET,
   AshareLimitUpBoardStrategy,
+  _account_id,
   _has_active_exit_plan,
   _has_open_buy,
-  _parse_time,
   _position_volume,
 )
 from quantx_domain.strategies.base import (
@@ -32,6 +32,13 @@ from quantx_domain.strategies.base import (
   TradeIntentPriority,
 )
 from quantx_domain.trading.exit_plan import ExitPlanTemplate
+from quantx_domain.trading.first_board_policy import (
+  FirstBoardEntryPolicy,
+  FirstBoardExitPolicy,
+  FirstBoardMarketSnapshot,
+  build_first_board_exit_plan,
+  evaluate_first_board_market_signal,
+)
 
 
 class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
@@ -606,98 +613,47 @@ class AshareLimitUpBoardAssistantStrategy(AshareLimitUpBoardStrategy):
     if dict(input.execution_profile or {}).get("allow_swing_buy") is False:
       return "execution_disallow_swing_buy"
 
-    if snapshot["suspended"]:
-      return "instrument_suspended"
-    if snapshot["is_st"]:
-      return "st_stock_blocked"
-    if snapshot["delist_risk"]:
-      return "delist_risk_blocked"
-    if snapshot["limit_up"] <= 0 or snapshot["price"] <= 0:
-      return "invalid_limit_quote"
-    if bool(self.get_parameter("require_data_quality_ok", True)) and str(
-      snapshot["data_quality"]
-    ).upper() not in {"", "OK"}:
-      return "data_quality_not_ok"
-    timestamp = input.timestamp.time()
-    if timestamp < _parse_time(self.get_parameter("entry_start_time", "09:30")):
-      return "before_entry_window"
-    if timestamp > _parse_time(self.get_parameter("entry_end_time", "14:50")):
-      return "after_entry_window"
-    if bool(self.get_parameter("exclude_one_word_limit_up", True)) and snapshot[
-      "one_word_limit_up"
-    ]:
-      return "one_word_limit_up_blocked"
-    if not self._is_entry_band(snapshot):
-      return "not_in_entry_band"
-    if snapshot["bid1_volume"] < int(self.get_parameter("min_bid1_volume", 0) or 0):
-      return "insufficient_bid1_volume"
-    if snapshot["amount"] < float(self.get_parameter("min_daily_amount", 0) or 0.0):
-      return "insufficient_daily_amount"
-    return ""
+    market_snapshot = FirstBoardMarketSnapshot.from_mapping(
+      snapshot,
+      instrument_code=input.instrument_code,
+      timestamp=input.timestamp,
+    )
+    decision = evaluate_first_board_market_signal(
+      market_snapshot,
+      FirstBoardEntryPolicy.from_parameters(self.context.parameters or {}),
+      promotion_eligible=bool(state.get("promotion_eligible", False)),
+      promotion_reason=str(
+        state.get("eligibility_reason") or "candidate_not_eligible"
+      ),
+    )
+    return "" if decision.eligible else decision.reason
 
   def _build_exit_plan(
     self, input: StrategyInput, snapshot: Dict[str, Any], attempt: int
   ) -> ExitPlanTemplate:
-    template = super()._build_exit_plan(input, snapshot, attempt)
-    payload = template.to_dict()
-    payload["source_type"] = "FIRST_BOARD_PROMOTION_V2"
-    payload["config_version"] = 2
-    payload["metadata"].update(
-      {
-        "promotion_model_version": self._instrument_states()
-        .get(str(input.instrument_code or "").upper(), {})
-        .get("promotion_model_version", ""),
-        "exit_policy_version": self._instrument_states()
-        .get(str(input.instrument_code or "").upper(), {})
-        .get("exit_policy_version", ""),
-        "t_plus_one_locked": True,
-      }
+    code = str(input.instrument_code or "").upper()
+    state = self._instrument_states().get(code, {})
+    plan_id = (
+      f"limit-up-board:{input.run_id}:{input.instrument_code}:"
+      f"{input.trade_date}:{attempt}"
     )
-    rules = list(payload["rules"])
-    rules.insert(
-      0,
-      {
-        "strategy": "LIMIT_UP_TOUCH",
-        "priority": 1100,
-        "sizing": {"mode": "ALL_REMAINING"},
-        "parameters": {
-          "min_holding_trading_days": 2,
-          "reason": "SECOND_BOARD_LIMIT_TOUCH",
-        },
-      },
+    return build_first_board_exit_plan(
+      plan_id=plan_id,
+      account_id=_account_id(input.portfolio_state),
+      instrument_code=input.instrument_code,
+      strategy_id=input.strategy_id,
+      run_id=input.run_id,
+      entry_trade_date=input.trade_date,
+      signal_price=float(snapshot["price"]),
+      entry_limit_up=float(snapshot["limit_up"]),
+      promotion_model_version=str(state.get("promotion_model_version") or ""),
+      exit_policy_version=str(state.get("exit_policy_version") or ""),
+      cvar95_loss_pct=float(state.get("cvar95_loss_pct", 0.0) or 0.0),
+      policy=FirstBoardExitPolicy.from_parameters(self.context.parameters or {}),
+      auto_exit_authorized=bool(
+        self.get_parameter("auto_exit_authorized", False)
+      ),
     )
-    cvar95_loss_pct = float(
-      self._instrument_states()
-      .get(str(input.instrument_code or "").upper(), {})
-      .get("cvar95_loss_pct", 0.0)
-      or 0.0
-    )
-    if cvar95_loss_pct > 0:
-      rules.insert(
-        1,
-        {
-          "strategy": "HARD_STOP",
-          "priority": 1050,
-          "sizing": {"mode": "ALL_REMAINING"},
-          "parameters": {
-            "min_holding_trading_days": 2,
-            "stop_loss_pct": -cvar95_loss_pct,
-            "reason": "FIRST_BOARD_T1_TAIL_LOSS",
-          },
-        },
-      )
-    for rule in rules:
-      if rule["strategy"] in {
-        "LIMIT_UP_BREAK",
-        "TRAILING_PRICE_DRAWDOWN",
-        "MAX_HOLDING_DAYS",
-      }:
-        rule["sizing"] = {"mode": "ALL_REMAINING"}
-      if rule["strategy"] == "TRAILING_PRICE_DRAWDOWN":
-        rule["parameters"]["reason"] = "FIRST_BOARD_T1_WEAKNESS_EXIT"
-        rule["parameters"]["min_holding_trading_days"] = 2
-    payload["rules"] = rules
-    return ExitPlanTemplate.from_dict(payload)
 
   @staticmethod
   def _managed_open_position_count(states: Dict[str, Dict[str, Any]]) -> int:

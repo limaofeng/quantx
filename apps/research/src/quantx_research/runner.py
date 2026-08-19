@@ -102,6 +102,14 @@ async def validate_study(
   source: ResearchDataSource | None = None,
   market_data_archive: str | Path | None = None,
 ) -> dict[str, Any]:
+  if _configured_study(config_path) == "first-board-promotion":
+    if source is not None or market_data_archive is not None:
+      raise ValueError(
+        "first-board research reads its feature/tick archives from the YAML config"
+      )
+    from quantx_research.first_board_runner import validate_first_board_study
+
+    return await validate_first_board_study(config_path)
   config = load_study_config(config_path)
   staging_parent = REPO_ROOT / ".runtime" / "research-staging"
   staging_parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +184,18 @@ async def run_study(
   output_root: str | Path | None = None,
   now: datetime | None = None,
 ) -> Path:
+  if _configured_study(config_path) == "first-board-promotion":
+    if source is not None or market_data_archive is not None:
+      raise ValueError(
+        "first-board research reads its feature/tick archives from the YAML config"
+      )
+    from quantx_research.first_board_runner import run_first_board_study
+
+    return await run_first_board_study(
+      config_path,
+      output_root=output_root,
+      now=now,
+    )
   if source is not None and market_data_archive is not None:
     raise ValueError("source 与 market_data_archive 不能同时指定")
   config = load_study_config(config_path)
@@ -401,15 +421,27 @@ def _remove_partial_output_artifacts(run_dir: Path) -> list[str]:
 
 def render_existing(run_dir: str | Path) -> Path:
   directory = Path(run_dir)
+  manifest = _read_json(directory / "manifest.json")
+  if manifest.get("study_id") == "first-board-promotion":
+    from quantx_research.first_board_runner import render_first_board_existing
+
+    report = render_first_board_existing(directory)
+    manifest["artifacts"] = artifact_index(directory)
+    write_json(directory / "manifest.json", manifest)
+    return report
   metrics = _read_json(directory / "metrics.json")
   quality = _read_json(directory / "data-quality.json")
-  manifest = _read_json(directory / "manifest.json")
   config_path = directory / "resolved-config.yaml"
   config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
   report = render_report(directory, metrics, quality, manifest, config)
   manifest["artifacts"] = artifact_index(directory)
   write_json(directory / "manifest.json", manifest)
   return report
+
+
+def _configured_study(config_path: str | Path) -> str:
+  payload = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+  return str(payload.get("study", "")) if isinstance(payload, dict) else ""
 
 
 async def _build_dataset(

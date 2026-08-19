@@ -43,6 +43,14 @@ from .exit_plan import (
   calculate_trailing_floor_pct,
   estimate_net_profit_pct,
 )
+from .first_board_policy import (
+  FirstBoardEntryPolicy,
+  FirstBoardExitPolicy,
+  FirstBoardMarketSignalDecision,
+  FirstBoardMarketSnapshot,
+  build_first_board_exit_plan,
+  evaluate_first_board_market_signal,
+)
 from .first_board_promotion import (
   FIRST_BOARD_EXIT_POLICY_VERSION,
   FIRST_BOARD_MODEL_VERSION,
@@ -113,6 +121,10 @@ __all__ = [
   "FirstBoardPromotionFactor",
   "FirstBoardPromotionFeatures",
   "FirstBoardSegment",
+  "FirstBoardEntryPolicy",
+  "FirstBoardExitPolicy",
+  "FirstBoardMarketSignalDecision",
+  "FirstBoardMarketSnapshot",
   "InstrumentMaster",
   "InstrumentMasterSnapshot",
   "MarketContextSnapshot",
@@ -134,5 +146,7 @@ __all__ = [
   "TrailingProfitPolicy",
   "calculate_trailing_floor_pct",
   "estimate_net_profit_pct",
+  "build_first_board_exit_plan",
+  "evaluate_first_board_market_signal",
   "first_board_segment",
 ]

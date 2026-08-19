@@ -9,7 +9,7 @@ module; its only promotion output is an evidence document for operator review.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,9 @@ class FirstBoardResearchResult:
   historical_rules_complete: bool
   release_ready_for_paper: bool
   warnings: tuple[str, ...]
+  replay_quality: dict[str, Any] | None = None
+  replay_trades: pd.DataFrame | None = None
+  replay_decisions: pd.DataFrame | None = None
 
   def release_evidence(self) -> dict[str, object]:
     """Return the non-authoritative evidence payload used by an approver."""
@@ -93,6 +96,7 @@ class FirstBoardResearchResult:
       "release_ready_for_paper": self.release_ready_for_paper,
       "comparisons": [asdict(item) for item in self.comparisons],
       "warnings": list(self.warnings),
+      "replay_quality": self.replay_quality,
     }
 
 
@@ -111,8 +115,6 @@ class FirstBoardPromotionStudy:
     "next_day_limit_touch",
     "next_day_limit_seal",
     "net_return_pct",
-    "v1_net_return_pct",
-    "all_near_limit_net_return_pct",
     "historical_rules_complete",
   )
 
@@ -121,16 +123,36 @@ class FirstBoardPromotionStudy:
     config: FirstBoardResearchConfig | None = None,
     *,
     feature_columns: Sequence[str] = DEFAULT_FEATURE_COLUMNS,
+    replay_config: Any | None = None,
   ) -> None:
     self.config = config or FirstBoardResearchConfig()
     self.feature_columns = tuple(feature_columns)
+    self.replay_config = replay_config
 
-  def run(self, panel: pd.DataFrame) -> FirstBoardResearchResult:
+  def run(
+    self, panel: pd.DataFrame, *, ticks: pd.DataFrame | None = None
+  ) -> FirstBoardResearchResult:
+    replay_quality: dict[str, Any] | None = None
+    replay_trades: pd.DataFrame | None = None
+    replay_decisions: pd.DataFrame | None = None
+    if not {"eligible", "net_return_pct", "outcome_at"} <= set(panel.columns):
+      if ticks is None:
+        raise ValueError(
+          "raw first-board research requires point-in-time ticks; "
+          "precomputed eligible/net_return_pct labels are not accepted"
+        )
+      from quantx_research.studies.first_board_replay import FirstBoardPolicyReplay
+
+      replay = FirstBoardPolicyReplay(self.replay_config).run(panel, ticks)
+      panel = replay.trades
+      replay_quality = replay.quality.to_dict()
+      replay_trades = replay.trades.copy()
+      replay_decisions = replay.decisions.copy()
     sample = self._validated_sample(panel)
     predictions = self._walk_forward(sample)
     comparisons = self._compare_controls(predictions)
 
-    selected = predictions[predictions["selected_v2"]]
+    selected = predictions[predictions["selected_v2"].astype(bool)]
     observed_cvar = _cvar95_loss(selected["net_return_pct"].to_numpy())
     sample_days = int(selected["trade_date"].nunique())
     main_samples = int((selected["segment"] == "MAIN").sum())
@@ -175,6 +197,9 @@ class FirstBoardPromotionStudy:
       historical_rules_complete=rules_complete,
       release_ready_for_paper=release_ready,
       warnings=tuple(warnings),
+      replay_quality=replay_quality,
+      replay_trades=replay_trades,
+      replay_decisions=replay_decisions,
     )
 
   def _validated_sample(self, panel: pd.DataFrame) -> pd.DataFrame:
@@ -205,8 +230,11 @@ class FirstBoardPromotionStudy:
       "next_day_limit_touch",
       "next_day_limit_seal",
       "net_return_pct",
-      "v1_net_return_pct",
-      "all_near_limit_net_return_pct",
+    )
+    numeric += tuple(
+      column
+      for column in ("v1_net_return_pct", "all_near_limit_net_return_pct")
+      if column in sample.columns
     )
     for column in numeric:
       sample[column] = pd.to_numeric(sample[column], errors="coerce")
@@ -315,19 +343,42 @@ class FirstBoardPromotionStudy:
   ) -> tuple[PromotionComparison, ...]:
     if predictions.empty:
       return ()
-    selected = predictions[predictions["selected_v2"]]
+    selected = predictions[predictions["selected_v2"].astype(bool)]
     if selected.empty:
       return ()
 
     comparisons = []
-    for baseline, column in (
-      ("V1_RADAR", "v1_net_return_pct"),
-      ("ALL_NEAR_LIMIT", "all_near_limit_net_return_pct"),
-    ):
-      daily = selected.groupby("trade_date", sort=True)[
-        ["net_return_pct", column]
-      ].mean()
-      differences = (daily["net_return_pct"] - daily[column]).to_numpy()
+    baseline_specs = (
+      ("V1_RADAR", "v1_eligible", "v1_net_return_pct"),
+      (
+        "ALL_NEAR_LIMIT",
+        "all_near_limit_eligible",
+        "all_near_limit_net_return_pct",
+      ),
+    )
+    selected_daily = selected.groupby("trade_date", sort=True)[
+      "net_return_pct"
+    ].mean()
+    for baseline, flag, legacy_column in baseline_specs:
+      if flag in predictions.columns:
+        baseline_rows = predictions[predictions[flag].astype(bool)]
+        baseline_daily = baseline_rows.groupby("trade_date", sort=True)[
+          "net_return_pct"
+        ].mean()
+      elif legacy_column in selected.columns:
+        baseline_daily = selected.groupby("trade_date", sort=True)[
+          legacy_column
+        ].mean()
+      else:
+        continue
+      daily = pd.concat(
+        [selected_daily.rename("selected"), baseline_daily.rename("baseline")],
+        axis=1,
+        join="inner",
+      ).dropna()
+      if daily.empty:
+        continue
+      differences = (daily["selected"] - daily["baseline"]).to_numpy()
       lower, upper = _date_block_bootstrap_interval(differences, self.config)
       comparisons.append(
         PromotionComparison(

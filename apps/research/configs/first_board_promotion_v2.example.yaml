@@ -1,0 +1,41 @@
+study: first-board-promotion
+version: v2
+
+# Both archives must be immutable point-in-time exports. Relative paths are
+# resolved from this configuration file.
+feature_snapshots: ../../../.runtime/research-inputs/first-board-features.parquet
+tick_archive: ../../../.runtime/research-inputs/first-board-ticks.parquet
+output_root: ../../../.runtime/research-runs
+
+minimum_replay_coverage_ratio: 0.8
+entry_volume: 100
+entry_order_ttl_ms: 15000
+book_depth_participation_pct: 0.25
+
+entry_policy:
+  entry_start_time: "09:30"
+  entry_end_time: "14:50"
+  entry_distance_ticks: 1
+  min_bid1_volume: 0
+  min_daily_amount: 0
+  exclude_one_word_limit_up: true
+  require_data_quality_ok: true
+
+exit_policy:
+  exit_limit_break_ticks: 1
+  exit_min_seal_seconds: 3
+  exit_trailing_arm_profit_pct: 2
+  exit_trailing_drawdown_pct: 3
+  max_holding_trading_days: 2
+  max_holding_exit_time: "14:50"
+  exit_max_slippage_bps: 50
+  commission_rate: 0.0003
+  minimum_commission: 5
+  stamp_tax_rate: 0.0005
+  transfer_fee_rate: 0.00001
+
+model:
+  min_train_trading_days: 60
+  refit_interval_days: 5
+  bootstrap_samples: 2000
+  bootstrap_seed: 20260814
