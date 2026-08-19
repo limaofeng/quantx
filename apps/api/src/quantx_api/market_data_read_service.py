@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from quantx_infrastructure.core.data.tick_identity import merge_ticks_losslessly
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
@@ -132,12 +133,7 @@ class ApiMarketDataReadService:
         },
       )
       warm = [_model(Tick, row) for row in rows]
-    merged = {
-      _time_key(item.time): item
-      for item in [*historical, *warm]
-      if _time_key(item.time)
-    }
-    values = sorted(merged.values(), key=lambda item: _time_key(item.time))
+    values = merge_ticks_losslessly(historical, warm)
     if (order or "desc").lower() == "desc":
       values.reverse()
     return values[:limit] if limit is not None and limit > 0 else values

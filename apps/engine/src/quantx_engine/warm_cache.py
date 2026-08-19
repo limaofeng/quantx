@@ -10,10 +10,15 @@ never invoke a local trading terminal.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from threading import Lock
 from typing import Dict, Iterable, List, Optional, Set
 
+from quantx_infrastructure.core.data.tick_identity import (
+  normalize_ticks_losslessly,
+  tick_snapshot_identity,
+  tick_source_time_ms,
+)
 from quantx_infrastructure.core.data.unified_subscription_manager import (
   unified_subscription_manager,
 )
@@ -64,7 +69,7 @@ class IntradayWarmCacheService:
     self.subscription_manager = unified_subscription_manager
     self._lock = Lock()
     self._states: Dict[str, WarmSymbolState] = {}
-    self._ticks: Dict[str, Dict[datetime, Tick]] = {}
+    self._ticks: Dict[str, Dict[tuple[int, str], Tick]] = {}
     self._klines: Dict[str, Dict[datetime, KLine]] = {}
     self._source_symbols: Dict[str, Set[str]] = {}
     self._initial_downloads: Set[str] = set()
@@ -320,8 +325,9 @@ class IntradayWarmCacheService:
     if not stock_code or tick_time is None:
       return
     tick_time = time_utils.to_shanghai(tick_time)
+    tick_key = (tick_source_time_ms(tick), tick_snapshot_identity(tick))
     with self._lock:
-      self._ticks.setdefault(stock_code, {})[tick_time] = tick
+      self._ticks.setdefault(stock_code, {})[tick_key] = tick
       state = self._states.get(stock_code)
       if state is not None:
         state.last_tick_at = tick_time
@@ -375,14 +381,15 @@ class IntradayWarmCacheService:
       values = list(self._ticks.get(normalized_code, {}).values())
     result = []
     for tick in values:
-      tick_time = time_utils.to_shanghai(tick.time)
-      if start is not None and tick_time < start:
+      source_time = time_utils.to_shanghai(
+        datetime.fromtimestamp(tick_source_time_ms(tick) / 1000, timezone.utc)
+      )
+      if start is not None and source_time < start:
         continue
-      if end is not None and tick_time > end:
+      if end is not None and source_time > end:
         continue
       result.append(tick)
-    result.sort(key=lambda item: time_utils.to_shanghai(item.time))
-    return result
+    return normalize_ticks_losslessly(result)
 
   def get_status(self, symbols: Optional[Iterable[str]] = None) -> List[dict]:
     with self._lock:

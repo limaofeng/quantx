@@ -49,6 +49,15 @@ QMT 回调只做快速捕获；READY 捕获入口最多保留 8 个原始批次�
 快照收敛，但不得拖垮交易连接、心跳或成交回报。批量历史行情仍按请求 ID、批次
 序号、压缩和 SHA256 通过 HTTP 上传；交易连接重连后先上报完整账户快照。
 
+历史 `tick` 上传保留 XTData 的原始毫秒时间戳 `time`，并为同一
+`code + time` 下的每条快照生成从 0 开始且连续的 `tick_ordinal`，
+取值范围为 0–999。Agent 不删除同毫秒快照，也不修改原始毫秒时间。
+`tick` 的唯一键为
+`(code, period, time, tick_ordinal)`；非 `tick` 周期不携带该序号，
+仍要求 `(code, period, time)` 唯一。`tick_ordinal` 是根据稳定快照字段生成的
+确定性代理顺序，用于重拉、分片和存储的一致性；它不声称代表交易所未提供的
+同毫秒内部先后顺序。
+
 性能回归使用固定 5,000 标的、30 个批次运行
 `python ops/benchmark-market-stream.py`，记录 orjson 编解码 p50/p95/p99、帧大小、
 CPU 时间和峰值内存；实机验收再结合各阶段日志比较 WebSocket ACK、Redis 应用

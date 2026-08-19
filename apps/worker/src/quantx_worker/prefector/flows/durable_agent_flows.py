@@ -15,6 +15,11 @@ from typing import Any, Optional
 
 import pandas as pd
 from prefect import flow, get_run_logger
+from quantx_contracts import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
+)
 from quantx_infrastructure import DurableRuntimeStore
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -48,6 +53,75 @@ _FINANCIAL_TABLES = ("Balance", "Income", "CashFlow", "Capital")
 _FINANCIAL_RECORD_FORMAT = "financial-row-v1"
 _FINANCIAL_BATCH_SIZE = 100
 _FINANCIAL_LOOKBACK_DAYS = 1095
+
+
+def _validate_bar_record_keys(records: list[dict[str, Any]]) -> None:
+  """Validate the lossless historical-tick key contract before persistence."""
+  non_tick_keys: set[tuple[str, str, int]] = set()
+  tick_keys: set[tuple[str, str, int, int]] = set()
+  tick_ordinals: dict[tuple[str, str, int], set[int]] = {}
+
+  for index, record in enumerate(records):
+    code = record.get("code")
+    period = record.get("period")
+    source_time = record.get("time")
+    if not isinstance(code, str) or not code.strip():
+      raise RuntimeError(f"bar record has invalid code: index={index}")
+    if not isinstance(period, str) or not period.strip():
+      raise RuntimeError(f"bar record has invalid period: index={index}")
+    if isinstance(source_time, bool) or not isinstance(source_time, int):
+      raise RuntimeError(
+        f"bar record time must be integer milliseconds: "
+        f"index={index} code={code} period={period}"
+      )
+    if HISTORICAL_TICK_SOURCE_TIME_FIELD in record:
+      raise RuntimeError(
+        f"bar record contains storage-only field "
+        f"{HISTORICAL_TICK_SOURCE_TIME_FIELD}: "
+        f"index={index} code={code} period={period}"
+      )
+
+    base_key = (code, period, source_time)
+    if period != "tick":
+      if HISTORICAL_TICK_ORDINAL_FIELD in record:
+        raise RuntimeError(
+          f"non-tick bar contains {HISTORICAL_TICK_ORDINAL_FIELD}: "
+          f"index={index} code={code} period={period}"
+        )
+      if base_key in non_tick_keys:
+        raise RuntimeError(
+          f"duplicate historical bar key: {code}/{period}/{source_time}"
+        )
+      non_tick_keys.add(base_key)
+      continue
+
+    ordinal = record.get(HISTORICAL_TICK_ORDINAL_FIELD)
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+      raise RuntimeError(
+        f"tick {HISTORICAL_TICK_ORDINAL_FIELD} must be an integer: "
+        f"index={index} code={code} time={source_time}"
+      )
+    if not 0 <= ordinal < HISTORICAL_TICK_ORDINALS_PER_MILLISECOND:
+      raise RuntimeError(
+        f"tick {HISTORICAL_TICK_ORDINAL_FIELD} is out of range: "
+        f"index={index} code={code} time={source_time} ordinal={ordinal}"
+      )
+    tick_key = (*base_key, ordinal)
+    if tick_key in tick_keys:
+      raise RuntimeError(
+        f"duplicate historical tick key: {code}/{period}/{source_time}/{ordinal}"
+      )
+    tick_keys.add(tick_key)
+    tick_ordinals.setdefault(base_key, set()).add(ordinal)
+
+  for (code, period, source_time), ordinals in tick_ordinals.items():
+    actual = sorted(ordinals)
+    expected = list(range(len(actual)))
+    if actual != expected:
+      raise RuntimeError(
+        f"historical tick ordinals are not contiguous: "
+        f"{code}/{period}/{source_time} expected={expected} actual={actual}"
+      )
 
 
 async def _persisted_instrument_codes() -> list[str]:
@@ -185,7 +259,9 @@ async def _ingest_uploaded_request(
       raise RuntimeError(f"Market-data chunk is not an array: {path.name}")
     if len(chunk) != int(item["record_count"]):
       raise RuntimeError(f"Market-data chunk record count mismatch: {path.name}")
-    records.extend(item for item in chunk if isinstance(item, dict))
+    if any(not isinstance(record, dict) for record in chunk):
+      raise RuntimeError(f"Market-data chunk contains a non-object record: {path.name}")
+    records.extend(chunk)
 
   payload = request.get("request_payload") or {}
   if isinstance(payload, str):
@@ -194,6 +270,7 @@ async def _ingest_uploaded_request(
   saved = 0
   replacement_audit: dict[str, Any] | None = None
   if operation == "bars" and records:
+    _validate_bar_record_keys(records)
     periods = sorted({str(item.get("period") or "1d") for item in records})
     for period in periods:
       frames = {}

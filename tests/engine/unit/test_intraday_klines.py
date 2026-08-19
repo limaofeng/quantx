@@ -316,6 +316,109 @@ async def test_realtime_tick_query_merges_warm_cache_without_scheduling_download
 
 
 @pytest.mark.asyncio
+async def test_realtime_tick_query_preserves_distinct_same_millisecond_snapshots(
+  monkeypatch,
+):
+  stock_code = "601318.SH"
+  adapter = RealtimeDataAdapter()
+  adapter.is_connected = True
+
+  now = datetime(2026, 8, 19, 10, 0)
+  source_time = datetime(2026, 8, 19, 9, 31, 0, 123000)
+  monkeypatch.setattr(realtime_module.time_utils, "now", lambda: now)
+
+  from quantx_engine import warm_cache as warm_cache_module
+
+  first = _tick(stock_code, source_time, 59.01, 100, 5901.0, 10)
+  second = _tick(stock_code, source_time, 59.01, 200, 11802.0, 100)
+
+  async def fake_ensure_symbol(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(
+    warm_cache_module.intraday_warm_cache, "ensure_symbol", fake_ensure_symbol
+  )
+  monkeypatch.setattr(
+    warm_cache_module.intraday_warm_cache,
+    "get_ticks",
+    lambda *args, **kwargs: [second, first],
+  )
+
+  ticks = await adapter.get_realtime_ticks_range(
+    instrument_code=stock_code,
+    start_time=datetime(2026, 8, 19, 9, 30),
+    end_time=source_time,
+    limit=None,
+    order="asc",
+  )
+
+  assert len(ticks) == 2
+  assert [tick.time for tick in ticks] == [
+    source_time,
+    source_time + timedelta(microseconds=1),
+  ]
+  assert [tick.tick_ordinal for tick in ticks] == [0, 1]
+
+
+def test_tick_merge_preserves_same_millisecond_snapshots_and_prefers_history():
+  stock_code = "601318.SH"
+  source_time = datetime(2026, 8, 19, 9, 31, 0, 123000)
+  adapter = RealtimeDataAdapter()
+
+  historical = _tick(stock_code, source_time, 59.01, 100, 5901.0, 10)
+  warm_duplicate = _tick(stock_code, source_time, 59.01, 100, 5901.0, 99)
+  warm_distinct = _tick(stock_code, source_time, 59.01, 200, 11802.0, 100)
+
+  ticks = adapter._merge_ticks(
+    historical_ticks=[historical],
+    realtime_ticks=[warm_duplicate, warm_distinct],
+    order="asc",
+    limit=None,
+  )
+
+  assert len(ticks) == 2
+  assert [tick.time for tick in ticks] == [
+    source_time,
+    source_time + timedelta(microseconds=1),
+  ]
+  assert [tick.tick_ordinal for tick in ticks] == [0, 1]
+  assert ticks[0].tickvol == 10
+
+
+def test_warm_cache_tick_identity_keeps_full_same_millisecond_group_at_end_time():
+  from quantx_engine import warm_cache as warm_cache_module
+
+  service = warm_cache_module.IntradayWarmCacheService()
+  stock_code = "601318.SH"
+  source_time = datetime(2026, 8, 19, 9, 31, 0, 123000)
+
+  first = _tick(stock_code, source_time, 59.01, 100, 5901.0, 10)
+  second = _tick(stock_code, source_time, 59.01, 200, 11802.0, 100)
+  first_update = _tick(stock_code, source_time, 59.01, 100, 5901.0, 99)
+  first_update.pvolume = 999999
+  first_update.stock_status = 1
+
+  service.store_tick(first)
+  service.store_tick(second)
+  service.store_tick(first_update)
+
+  ticks = service.get_ticks(
+    stock_code,
+    start_time=source_time,
+    end_time=source_time,
+  )
+
+  assert len(ticks) == 2
+  assert [tick.time for tick in ticks] == [
+    source_time,
+    source_time + timedelta(microseconds=1),
+  ]
+  assert [tick.tick_ordinal for tick in ticks] == [0, 1]
+  assert ticks[0].tickvol == 99
+  assert service.get_status([stock_code])[0]["tick_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_warm_cache_initializes_symbol_once_per_trading_day(monkeypatch):
   from quantx_engine import warm_cache as warm_cache_module
 

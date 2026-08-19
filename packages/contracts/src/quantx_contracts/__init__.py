@@ -1,6 +1,9 @@
 """Versioned contracts shared by QuantX runtimes."""
 
 from .agent import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
   PROTOCOL_VERSION,
   SUPPORTED_PROTOCOL_VERSIONS,
   AccountSnapshotPayload,
@@ -35,6 +38,9 @@ from .order_lifecycle import (
 )
 
 __all__ = [
+  "HISTORICAL_TICK_ORDINAL_FIELD",
+  "HISTORICAL_TICK_ORDINALS_PER_MILLISECOND",
+  "HISTORICAL_TICK_SOURCE_TIME_FIELD",
   "PROTOCOL_VERSION",
   "SUPPORTED_PROTOCOL_VERSIONS",
   "AccountSnapshotPayload",

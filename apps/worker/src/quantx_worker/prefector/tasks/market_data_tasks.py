@@ -4,6 +4,11 @@ from typing import Any, Dict
 
 import pandas as pd
 from prefect import get_run_logger, task
+from quantx_contracts import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
+)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.timeseries_connection import is_fatal_wal_error
 from quantx_infrastructure.services.historical_market_data_service import (
@@ -84,12 +89,26 @@ def preprocess_market_data(
   logger.info("对数据进行清洗和格式化...")
 
   all_market_data["period"] = period
-  all_market_data["time"] = pd.to_datetime(
-    all_market_data["time"], unit="ms", utc=True
-  ).dt.tz_convert("Asia/Shanghai")
 
   if period == "tick":
-    pass
+    source_time_ms = all_market_data["time"]
+    ordinal = all_market_data[HISTORICAL_TICK_ORDINAL_FIELD]
+    if not pd.api.types.is_integer_dtype(source_time_ms.dtype):
+      raise ValueError("tick time must contain integer milliseconds")
+    if not pd.api.types.is_integer_dtype(ordinal.dtype):
+      raise ValueError(f"tick {HISTORICAL_TICK_ORDINAL_FIELD} must contain integers")
+    source_time_ms = source_time_ms.astype("int64")
+    ordinal = ordinal.astype("int64")
+    if (ordinal < 0).any() or (
+      ordinal >= HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
+    ).any():
+      raise ValueError(f"tick {HISTORICAL_TICK_ORDINAL_FIELD} is out of range")
+    all_market_data[HISTORICAL_TICK_SOURCE_TIME_FIELD] = source_time_ms
+    all_market_data[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
+    all_market_data["time"] = (
+      pd.to_datetime(source_time_ms, unit="ms", utc=True)
+      + pd.to_timedelta(ordinal, unit="us")
+    ).dt.tz_convert("Asia/Shanghai")
     all_market_data.rename(
       columns={
         "lastPrice": "last_price",
@@ -124,6 +143,9 @@ def preprocess_market_data(
       .astype(int)
     )
   else:
+    all_market_data["time"] = pd.to_datetime(
+      all_market_data["time"], unit="ms", utc=True
+    ).dt.tz_convert("Asia/Shanghai")
     all_market_data.rename(
       columns={
         "settelementPrice": "settelement_price",

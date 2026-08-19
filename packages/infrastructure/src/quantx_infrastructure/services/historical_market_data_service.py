@@ -503,6 +503,7 @@ class HistoricalMarketDataService:
     """获取Tick数据（异步）"""
     from datetime import timedelta
 
+    from quantx_infrastructure.core.data.tick_identity import tick_query_end_time
     from quantx_infrastructure.core.utils import time_utils
 
     # 如果未指定时间范围，默认查最近1天（避免全表扫描）
@@ -515,7 +516,7 @@ class HistoricalMarketDataService:
     ticks = self.tick_repo.find_all(
       filters={"stock_code": stock_code},
       start_time=start_time,
-      end_time=end_time,
+      end_time=tick_query_end_time(end_time),
       order_by=order_by,
       as_frame=as_frame,
       limit=limit,

@@ -3,6 +3,11 @@ import hashlib
 import json
 
 import pytest
+from quantx_contracts import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
+)
 from quantx_worker.prefector.flows import durable_agent_flows
 
 
@@ -20,12 +25,12 @@ class FakeStore:
     return self.manifest
 
 
-def _transfer(tmp_path, records):
+def _transfer(tmp_path, records, *, index=0):
   compressed = gzip.compress(json.dumps(records).encode("utf-8"))
-  path = tmp_path / "00000000.json.gz"
+  path = tmp_path / f"{index:08d}.json.gz"
   path.write_bytes(compressed)
   return {
-    "chunk_index": 0,
+    "chunk_index": index,
     "checksum_sha256": hashlib.sha256(compressed).hexdigest(),
     "record_count": len(records),
     "compressed": True,
@@ -82,6 +87,169 @@ async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
   }
   assert calls[0][0] == "1d"
   assert calls[0][1]["600000.SH"].iloc[0]["close"] == 10.5
+
+
+@pytest.mark.asyncio
+async def test_same_millisecond_ticks_are_preserved_across_chunks(
+  tmp_path,
+  monkeypatch,
+):
+  source_time = 1_700_000_000_123
+  chunks = [
+    [
+      {
+        "code": "601318.SH",
+        "period": "tick",
+        "time": source_time,
+        HISTORICAL_TICK_ORDINAL_FIELD: 0,
+        "lastPrice": 50.1,
+      }
+    ],
+    [
+      {
+        "code": "601318.SH",
+        "period": "tick",
+        "time": source_time,
+        HISTORICAL_TICK_ORDINAL_FIELD: 1,
+        "lastPrice": 50.2,
+      }
+    ],
+  ]
+  store = FakeStore(
+    request={
+      "expected_chunks": 2,
+      "request_payload": {"operation": "bars"},
+    },
+    manifest=[
+      _transfer(tmp_path, chunk, index=index) for index, chunk in enumerate(chunks)
+    ],
+  )
+  captured = {}
+
+  async def fake_save_market_data(*, period, market_data):
+    captured["period"] = period
+    captured["frame"] = market_data["601318.SH"]
+    return {"saved_count": len(captured["frame"]), "status": "success"}
+
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "save_market_data",
+    fake_save_market_data,
+  )
+
+  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  assert result["records_received"] == 2
+  assert result["records_saved"] == 2
+  assert captured["period"] == "tick"
+  assert captured["frame"]["time"].tolist() == [source_time, source_time]
+  assert captured["frame"][HISTORICAL_TICK_ORDINAL_FIELD].tolist() == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tick_composite_key_across_chunks_fails(tmp_path):
+  source_time = 1_700_000_000_123
+  duplicate = {
+    "code": "601318.SH",
+    "period": "tick",
+    "time": source_time,
+    HISTORICAL_TICK_ORDINAL_FIELD: 0,
+  }
+  store = FakeStore(
+    request={
+      "expected_chunks": 2,
+      "request_payload": {"operation": "bars"},
+    },
+    manifest=[
+      _transfer(tmp_path, [duplicate], index=0),
+      _transfer(tmp_path, [duplicate], index=1),
+    ],
+  )
+
+  with pytest.raises(RuntimeError, match="duplicate historical tick key"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.parametrize(
+  ("ordinals", "match"),
+  [
+    pytest.param([None], "must be an integer", id="missing"),
+    pytest.param([-1], "out of range", id="negative"),
+    pytest.param([True], "must be an integer", id="boolean"),
+    pytest.param([0.5], "must be an integer", id="fractional"),
+    pytest.param(
+      [HISTORICAL_TICK_ORDINALS_PER_MILLISECOND],
+      "out of range",
+      id="upper-bound",
+    ),
+    pytest.param([0, 2], "not contiguous", id="gap"),
+  ],
+)
+@pytest.mark.asyncio
+async def test_invalid_tick_ordinal_contract_fails(tmp_path, ordinals, match):
+  records = []
+  for ordinal in ordinals:
+    record = {
+      "code": "601318.SH",
+      "period": "tick",
+      "time": 1_700_000_000_123,
+    }
+    if ordinal is not None:
+      record[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
+    records.append(record)
+  store = FakeStore(
+    request={
+      "expected_chunks": 1,
+      "request_payload": {"operation": "bars"},
+    },
+    manifest=[_transfer(tmp_path, records)],
+  )
+
+  with pytest.raises(RuntimeError, match=match):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.asyncio
+async def test_non_tick_duplicate_time_fails(tmp_path):
+  record = {
+    "code": "600000.SH",
+    "period": "1m",
+    "time": 1_700_000_000_000,
+  }
+  store = FakeStore(
+    request={
+      "expected_chunks": 1,
+      "request_payload": {"operation": "bars"},
+    },
+    manifest=[_transfer(tmp_path, [record, record])],
+  )
+
+  with pytest.raises(RuntimeError, match="duplicate historical bar key"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.parametrize(
+  "reserved_field",
+  [HISTORICAL_TICK_ORDINAL_FIELD, HISTORICAL_TICK_SOURCE_TIME_FIELD],
+)
+@pytest.mark.asyncio
+async def test_non_tick_internal_tick_field_fails(tmp_path, reserved_field):
+  record = {
+    "code": "600000.SH",
+    "period": "1d",
+    "time": 1_700_000_000_000,
+    reserved_field: 0,
+  }
+  store = FakeStore(
+    request={
+      "expected_chunks": 1,
+      "request_payload": {"operation": "bars"},
+    },
+    manifest=[_transfer(tmp_path, [record])],
+  )
+
+  with pytest.raises(RuntimeError, match="tick_ordinal|storage-only field"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
 
 @pytest.mark.asyncio

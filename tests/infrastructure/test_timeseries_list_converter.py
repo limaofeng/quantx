@@ -1,7 +1,9 @@
-from datetime import datetime
+from dataclasses import fields
+from datetime import datetime, timedelta
 
 import pandas as pd
 from quantx_infrastructure.database.timeseries_base import ListAttributeConverter
+from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.repositories.tick_repository import TickRepository
 
 
@@ -65,3 +67,52 @@ def test_tick_bulk_save_expands_order_book_arrays_before_writing():
   assert written.loc[0, "bid5"] == 9.95
   assert written.loc[0, "ask_vol5"] == 5
   assert written.loc[0, "bid_vol1"] == 5
+
+
+def test_tick_bulk_save_keeps_reversible_same_millisecond_identity_as_fields():
+  class Operations:
+    def write_records(self, **kwargs):
+      self.kwargs = kwargs
+
+  repository = TickRepository()
+  repository.operations = Operations()
+  model_fields = {model_field.name for model_field in fields(Tick)}
+  assert {"source_time_ms", "tick_ordinal"} <= model_fields
+  assert Tick().get_tag_columns() == ["stock_code", "period"]
+
+  source_time_ms = 1786671000123
+  effective_time = datetime(2026, 8, 14, 9, 30, 0, 123000)
+  records = pd.DataFrame(
+    [
+      {
+        "stock_code": "601318.SH",
+        "period": "tick",
+        "time": effective_time,
+        "last_price": 50.0,
+        "source_time_ms": source_time_ms,
+        "tick_ordinal": 0,
+      },
+      {
+        "stock_code": "601318.SH",
+        "period": "tick",
+        "time": effective_time + timedelta(microseconds=1),
+        "last_price": 50.01,
+        "source_time_ms": source_time_ms,
+        "tick_ordinal": 1,
+      },
+    ]
+  )
+
+  assert repository.bulk_save(records) == 2
+
+  written = repository.operations.kwargs["records"]
+  assert written["time"].is_unique
+  assert written.loc[1, "time"] - written.loc[0, "time"] == timedelta(
+    microseconds=1
+  )
+  assert written["source_time_ms"].tolist() == [source_time_ms, source_time_ms]
+  assert written["tick_ordinal"].tolist() == [0, 1]
+  assert repository.operations.kwargs["tag_columns"] == [
+    "stock_code",
+    "period",
+  ]

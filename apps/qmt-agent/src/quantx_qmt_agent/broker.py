@@ -17,7 +17,13 @@ from numbers import Integral, Real
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
-from quantx_contracts import AgentEnvelope, AgentMessageType
+from quantx_contracts import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  AgentEnvelope,
+  AgentMessageType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +80,22 @@ ESTIMATED_BAR_RECORDS_PER_DAY = {
 MIN_MARKET_TIMESTAMP = datetime(1990, 1, 1, tzinfo=timezone.utc)
 MARKET_TIMESTAMP_MAX_FUTURE_DAYS = 366
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_NORMALIZED_MARKET_TIME_COLUMN = "__quantx_normalized_time_ms"
+_RESERVED_HISTORICAL_BAR_COLUMNS = frozenset(
+  {
+    _NORMALIZED_MARKET_TIME_COLUMN,
+    HISTORICAL_TICK_ORDINAL_FIELD,
+    HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  }
+)
+_UNSTABLE_TICK_ORDER_FIELDS = frozenset(
+  {
+    "time",
+    "tickvol",
+    "pvolume",
+    "stockStatus",
+  }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +177,48 @@ def _json_safe(value: Any) -> Any:
     except Exception:
       pass
   return value
+
+
+def _canonical_tick_payload(
+  record: dict[str, Any],
+  *,
+  excluded_fields: frozenset[str],
+) -> str:
+  payload = {
+    str(key): _json_safe(value)
+    for key, value in record.items()
+    if key not in excluded_fields and not str(key).startswith("__quantx_")
+  }
+  return json.dumps(
+    payload,
+    sort_keys=True,
+    separators=(",", ":"),
+    default=str,
+  )
+
+
+def _tick_numeric_order_key(value: Any) -> tuple[int, float | str]:
+  if isinstance(value, bool):
+    return (1, str(value))
+  try:
+    number = float(value)
+  except (TypeError, ValueError, OverflowError):
+    return (1, _canonical_tick_payload({"value": value}, excluded_fields=frozenset()))
+  if not math.isfinite(number):
+    return (1, str(number))
+  return (0, number)
+
+
+def _tick_record_order_key(record: dict[str, Any]) -> tuple[Any, ...]:
+  stable_exclusions = _UNSTABLE_TICK_ORDER_FIELDS | _RESERVED_HISTORICAL_BAR_COLUMNS
+  reserved_exclusions = _RESERVED_HISTORICAL_BAR_COLUMNS
+  return (
+    _tick_numeric_order_key(record.get("transactionNum")),
+    _tick_numeric_order_key(record.get("volume")),
+    _tick_numeric_order_key(record.get("amount")),
+    _canonical_tick_payload(record, excluded_fields=stable_exclusions),
+    _canonical_tick_payload(record, excluded_fields=reserved_exclusions),
+  )
 
 
 def _object_payload(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -1312,9 +1376,14 @@ def _iter_market_data_records_unbounded(
         normalized = normalized.rename(columns={normalized.columns[0]: "time"})
       if "time" not in normalized.columns:
         raise ValueError(f"market data frame for {code} has no time column")
-      normalized_time_column = "__quantx_normalized_time_ms"
-      if normalized_time_column in normalized.columns:
-        raise ValueError(f"market data frame for {code} contains a reserved column")
+      reserved_columns = _RESERVED_HISTORICAL_BAR_COLUMNS.intersection(
+        str(column) for column in normalized.columns
+      )
+      if reserved_columns:
+        names = ", ".join(sorted(reserved_columns))
+        raise ValueError(
+          f"market data frame for {code} contains reserved columns: {names}"
+        )
       normalize_time = (
         _normalize_daily_market_timestamp
         if period == "1d"
@@ -1322,24 +1391,55 @@ def _iter_market_data_records_unbounded(
       )
       normalized_times = [normalize_time(value) for value in normalized["time"].array]
       normalized = normalized.assign(
-        **{normalized_time_column: normalized_times}
+        **{_NORMALIZED_MARKET_TIME_COLUMN: normalized_times}
       ).sort_values(
-        by=normalized_time_column,
+        by=_NORMALIZED_MARKET_TIME_COLUMN,
         kind="mergesort",
       )
       columns = tuple(normalized.columns)
-      seen_timestamps: set[int] = set()
+      records: list[dict[str, Any]] = []
       for values_tuple in normalized.itertuples(index=False, name=None):
         row = dict(zip(columns, values_tuple, strict=True))
         record = dict(row)
         record["code"] = normalized_code
         record["period"] = period
-        record["time"] = int(record.pop(normalized_time_column))
+        record["time"] = int(record.pop(_NORMALIZED_MARKET_TIME_COLUMN))
         if record["time"] < lower_bound or record["time"] > upper_bound:
           raise ValueError(
             "XTData returned bar time outside requested range: "
             f"{normalized_code}/{period}/{record['time']}"
           )
+        records.append(record)
+
+      if period == "tick":
+        group_start = 0
+        while group_start < len(records):
+          timestamp = int(records[group_start]["time"])
+          group_end = group_start + 1
+          while (
+            group_end < len(records)
+            and int(records[group_end]["time"]) == timestamp
+          ):
+            group_end += 1
+          group = records[group_start:group_end]
+          if len(group) > HISTORICAL_TICK_ORDINALS_PER_MILLISECOND:
+            raise ValueError(
+              "XTData returned too many ticks for one millisecond: "
+              f"{normalized_code}/{period}/{timestamp}/{len(group)}"
+            )
+          if len(group) == 1:
+            group[0][HISTORICAL_TICK_ORDINAL_FIELD] = 0
+            yield group[0]
+            group_start = group_end
+            continue
+          for ordinal, record in enumerate(sorted(group, key=_tick_record_order_key)):
+            record[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
+            yield record
+          group_start = group_end
+        continue
+
+      seen_timestamps: set[int] = set()
+      for record in records:
         if record["time"] in seen_timestamps:
           raise ValueError(
             "XTData returned duplicate normalized bar key: "

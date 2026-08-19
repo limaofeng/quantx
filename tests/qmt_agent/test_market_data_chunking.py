@@ -12,7 +12,13 @@ import pandas as pd
 import pytest
 import quantx_qmt_agent.broker as broker_module
 import quantx_qmt_agent.runtime as runtime_module
-from quantx_contracts import AgentEnvelope, AgentMessageType
+from quantx_contracts import (
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
+  HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  AgentEnvelope,
+  AgentMessageType,
+)
 from quantx_qmt_agent.broker import (
   _iter_market_data_records,
   _market_data_records,
@@ -1560,6 +1566,234 @@ def test_market_data_records_are_sorted_by_code_and_time() -> None:
       _normalize_market_timestamp(datetime(2025, 1, 3)),
     ),
   ]
+
+
+def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
+  source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
+  rows = [
+    {
+      "time": source_time,
+      "lastPrice": 10.0,
+      "amount": 1_000.0,
+      "volume": 100,
+      "transactionNum": 10,
+      "bidVol": [90, 0, 0, 0, 0],
+      "tickvol": 1,
+    },
+    {
+      "time": source_time,
+      "lastPrice": 10.0,
+      "amount": 1_000.0,
+      "volume": 100,
+      "transactionNum": 10,
+      "bidVol": [100, 0, 0, 0, 0],
+      "tickvol": 2,
+    },
+    {
+      "time": source_time + 1,
+      "lastPrice": 10.01,
+      "amount": 1_001.0,
+      "volume": 101,
+      "transactionNum": 11,
+      "bidVol": [101, 0, 0, 0, 0],
+      "tickvol": 1,
+    },
+  ]
+  payload = {
+    "operation": "bars",
+    "stock_list": ["601318.SH"],
+    "periods": ["tick"],
+    "start_time": "20250102",
+    "end_time": "20250102",
+    "download": False,
+  }
+
+  class Manager:
+    def __init__(self, values) -> None:
+      self.values = values
+
+    def get_market_data(self, **_kwargs):
+      return {"601318.SH": pd.DataFrame(self.values)}
+
+  forward = _market_data_records(Manager(rows), payload)
+  reversed_records = _market_data_records(Manager(list(reversed(rows))), payload)
+
+  def ordinal_by_snapshot(records):
+    return {
+      (record["time"], tuple(record["bidVol"])): record[
+        HISTORICAL_TICK_ORDINAL_FIELD
+      ]
+      for record in records
+    }
+
+  assert len(forward) == len(rows)
+  assert [record["time"] for record in forward] == [
+    source_time,
+    source_time,
+    source_time + 1,
+  ]
+  assert [record[HISTORICAL_TICK_ORDINAL_FIELD] for record in forward] == [0, 1, 0]
+  assert ordinal_by_snapshot(forward) == ordinal_by_snapshot(reversed_records)
+
+
+def test_tick_same_millisecond_spool_is_cold_restart_stable(tmp_path) -> None:
+  source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
+  rows = [
+    {
+      "time": source_time,
+      "lastPrice": 10.0,
+      "amount": 1_000.0,
+      "volume": 100,
+      "transactionNum": 10,
+      "bidVol": [90, 0, 0, 0, 0],
+      "tickvol": 1,
+    },
+    {
+      "time": source_time,
+      "lastPrice": 10.0,
+      "amount": 1_001.0,
+      "volume": 101,
+      "transactionNum": 11,
+      "bidVol": [100, 0, 0, 0, 0],
+      "tickvol": 2,
+    },
+  ]
+  payload = {
+    "operation": "bars",
+    "stock_list": ["601318.SH"],
+    "periods": ["tick"],
+    "start_time": "20250102",
+    "end_time": "20250102",
+    "download": False,
+  }
+
+  class Manager:
+    def __init__(self, values, columns) -> None:
+      self.values = values
+      self.columns = columns
+
+    def get_market_data(self, **_kwargs):
+      frame = pd.DataFrame(self.values)
+      return {"601318.SH": frame[self.columns]}
+
+  columns = list(rows[0])
+  first_records = _market_data_records(Manager(rows, columns), payload)
+  second_records = _market_data_records(
+    Manager(list(reversed(rows)), list(reversed(columns))),
+    payload,
+  )
+
+  class RecordsBroker:
+    def __init__(self, records) -> None:
+      self.records = records
+
+    def iter_market_data(self, _payload):
+      return iter(self.records)
+
+  first = _prepare_spool(RecordsBroker(first_records), tmp_path / "tick-first")
+  second = _prepare_spool(RecordsBroker(second_records), tmp_path / "tick-second")
+
+  assert _spool_bytes(first) == _spool_bytes(second)
+  assert [chunk.digest for chunk in first.chunks] == [
+    chunk.digest for chunk in second.chunks
+  ]
+
+
+@pytest.mark.parametrize(
+  ("period", "source_time"),
+  [
+    ("1m", _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))),
+    ("1d", 20250102),
+  ],
+)
+def test_non_tick_records_still_reject_duplicate_normalized_time(
+  period,
+  source_time,
+) -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [
+            {"time": source_time, "close": 10.0},
+            {"time": source_time, "close": 10.1},
+          ]
+        )
+      }
+
+  with pytest.raises(ValueError, match="duplicate normalized bar key"):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["601318.SH"],
+        "periods": [period],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+
+@pytest.mark.parametrize(
+  "reserved_field",
+  [
+    HISTORICAL_TICK_ORDINAL_FIELD,
+    HISTORICAL_TICK_SOURCE_TIME_FIELD,
+    broker_module._NORMALIZED_MARKET_TIME_COLUMN,
+  ],
+)
+def test_market_data_records_reject_reserved_source_columns(reserved_field) -> None:
+  source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
+
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [{"time": source_time, reserved_field: 0, "lastPrice": 10.0}]
+        )
+      }
+
+  with pytest.raises(ValueError, match="contains reserved columns"):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["601318.SH"],
+        "periods": ["tick"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+
+def test_tick_records_reject_exhausted_millisecond_ordinal_space() -> None:
+  source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
+
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [
+            {"time": source_time, "transactionNum": index}
+            for index in range(HISTORICAL_TICK_ORDINALS_PER_MILLISECOND + 1)
+          ]
+        )
+      }
+
+  with pytest.raises(ValueError, match="too many ticks for one millisecond"):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["601318.SH"],
+        "periods": ["tick"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
 
 
 def test_financial_data_downloads_before_streaming_normalized_rows() -> None:

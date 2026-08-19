@@ -71,6 +71,10 @@ class Tick(BaseModel):
     metadata={"converter": ListAttributeConverter(prefix="bid_vol", max_levels=5)},
   )
   """委买量"""
+  source_time_ms: int = 0
+  """XTData 原始毫秒时间戳"""
+  tick_ordinal: int = 0
+  """同一原始毫秒内的稳定序号"""
 
   def __init__(self, **kwargs):
     super().__init__()

@@ -9,6 +9,10 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 
 import pandas as pd
 
+from quantx_infrastructure.core.data.tick_identity import (
+  merge_ticks_losslessly,
+  normalize_ticks_losslessly,
+)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
@@ -531,7 +535,7 @@ class RealtimeDataAdapter(DataAdapter):
       limit=limit_remaining
     )
 
-    # 6) 合并去重（实时优先覆盖历史），再应用 limit。
+    # 6) 无损合并；跨来源的相同快照保留历史身份，再应用 limit。
     merged = self._merge_ticks(
       historical_ticks=historical_ticks,
       realtime_ticks=realtime_ticks,
@@ -555,22 +559,10 @@ class RealtimeDataAdapter(DataAdapter):
     order: str,
     limit: Optional[int],
   ) -> List[Tick]:
-    combined: Dict[datetime, Tick] = {}
-
-    for tick in historical_ticks:
-      tick_time = self._normalize_tick_time(tick)
-      if tick_time is None:
-        continue
-      combined[tick_time] = tick
-
-    for tick in realtime_ticks:
-      tick_time = self._normalize_tick_time(tick)
-      if tick_time is None:
-        continue
-      combined[tick_time] = tick
-
-    ticks = list(combined.values())
-    ticks.sort(key=lambda tick: self._normalize_tick_time(tick) or datetime.min)
+    # Historical rows retain their authoritative source identity when the same
+    # stable snapshot is also present in the warm cache. Distinct snapshots in
+    # one source millisecond remain independently addressable.
+    ticks = merge_ticks_losslessly(historical_ticks, realtime_ticks)
 
     if (order or "desc").lower() == "desc":
       ticks.reverse()
@@ -669,7 +661,7 @@ class RealtimeDataAdapter(DataAdapter):
 
       if not self.is_connected:
         if warm_ticks:
-          ticks = warm_ticks
+          ticks = normalize_ticks_losslessly(warm_ticks)
           order = (order or "asc").lower()
           if order == "desc":
             ticks = list(reversed(ticks))
@@ -679,15 +671,8 @@ class RealtimeDataAdapter(DataAdapter):
         self.logger.warning("实时数据适配器未连接")
         return []
 
-      ticks = list(warm_ticks)
+      ticks = normalize_ticks_losslessly(warm_ticks)
       order = (order or "asc").lower()
-      deduped = {
-        tick_time: tick
-        for tick in ticks
-        if (tick_time := self._normalize_tick_time(tick)) is not None
-      }
-      ticks = list(deduped.values())
-      ticks.sort(key=lambda tick: self._normalize_tick_time(tick) or datetime.min)
       if order == "desc":
         ticks.reverse()
 

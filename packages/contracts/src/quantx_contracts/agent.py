@@ -11,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 PROTOCOL_VERSION = "1.1"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset({"1.0", PROTOCOL_VERSION})
+HISTORICAL_TICK_ORDINAL_FIELD = "tick_ordinal"
+HISTORICAL_TICK_SOURCE_TIME_FIELD = "source_time_ms"
+HISTORICAL_TICK_ORDINALS_PER_MILLISECOND = 1000
 
 
 def utcnow() -> datetime:
