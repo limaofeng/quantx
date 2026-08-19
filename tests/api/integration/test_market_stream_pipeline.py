@@ -13,6 +13,7 @@ from quantx_contracts import (
   MarketStreamControl,
 )
 from quantx_infrastructure.core.data.market_stream_transport import (
+  MarketStreamFreshnessLease,
   MarketStreamState,
 )
 from quantx_infrastructure.core.data.whole_quote_hub import WholeQuoteHub
@@ -44,18 +45,27 @@ class InMemoryMarketStore:
     self.engine_watermark = None
     self.latest = {}
     self.subscription = InMemorySubscription()
+    self.freshness = None
+    self.state_history = []
 
   async def cleanup_legacy_whole_controls(self):
     return 0
 
-  async def mark_syncing(self, stream_id, *, reason):
+  async def allocate_generation(self):
+    return 1
+
+  async def mark_syncing(self, stream_id, *, generation, reason):
+    assert generation == 1
     self.latest = {}
     self.api_state = MarketStreamState(
       status="SYNCING",
       stream_id=stream_id,
+      generation=generation,
       updated_at=datetime.now(timezone.utc),
       reason=reason,
     )
+    self.freshness = None
+    self.state_history.append(self.api_state)
 
   async def write_batch(self, batch, payload):
     current = self.api_state
@@ -68,13 +78,23 @@ class InMemoryMarketStore:
       self.latest = {}
     self.latest.update(batch.data)
     self.api_state = MarketStreamState(
-      status="READY",
+      status=(
+        "SYNCING"
+        if batch.kind is MarketBatchKind.SNAPSHOT
+        else "READY"
+      ),
       stream_id=batch.stream_id,
+      generation=current.generation,
       sequence=batch.sequence,
       captured_at=batch.captured_at,
       updated_at=datetime.now(timezone.utc),
       instrument_count=len(self.latest),
     )
+    self.freshness = MarketStreamFreshnessLease(
+      stream_id=batch.stream_id,
+      sequence=batch.sequence,
+    )
+    self.state_history.append(self.api_state)
     await self.subscription.queue.put(payload)
     return self.api_state
 
@@ -90,6 +110,8 @@ class InMemoryMarketStore:
       instrument_count=len(self.latest),
       reason=reason,
     )
+    self.freshness = None
+    self.state_history.append(self.api_state)
     return True
 
   async def open_subscription(self):
@@ -97,6 +119,9 @@ class InMemoryMarketStore:
 
   async def state(self):
     return self.api_state
+
+  async def state_with_freshness(self):
+    return self.api_state, self.freshness
 
   async def load_snapshot(self):
     if self.api_state is None or self.api_state.status != "READY":
@@ -171,7 +196,7 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
       return {"600000.SH": {"UpStopPrice": 11.0, "PriceTick": 0.01}}
 
     def subscribe_whole_quote(self, codes, callback):
-      assert codes == ("000001.SH", "600000.SH")
+      assert codes == ["SH", "SZ"]
       callbacks.append(callback)
       return 1
 
@@ -213,6 +238,14 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
       sequence=2,
       kind=MarketBatchKind.DELTA,
       captured_at=datetime.now(timezone.utc),
+      instrument_count=0,
+      data={},
+    ),
+    MarketStreamBatch(
+      stream_id="pending",
+      sequence=3,
+      kind=MarketBatchKind.DELTA,
+      captured_at=datetime.now(timezone.utc),
       instrument_count=len(delta),
       data=delta,
     ),
@@ -248,18 +281,90 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
   try:
     await agent_api.agent_market_websocket(websocket)
     for _ in range(20):
-      if hub.sequence == 2:
+      if hub.sequence == 3:
         break
       await asyncio.sleep(0)
-    assert hub.sequence == 2
+    assert hub.sequence == 3
     assert hub.latest("600000.SH")["lastPrice"] == 10.2
     assert [control.type for control in websocket.sent_controls] == [
       MarketControlType.START,
       MarketControlType.ACK,
       MarketControlType.ACK,
+      MarketControlType.ACK,
     ]
-    assert store.engine_watermark["sequence"] == 2
+    assert [state.status for state in store.state_history] == [
+      "SYNCING",
+      "SYNCING",
+      "READY",
+      "READY",
+      "OFFLINE",
+    ]
+    assert store.state_history[1].sequence == 1
+    assert store.state_history[2].sequence == 2
+    assert store.engine_watermark["sequence"] == 3
   finally:
     await hub.stop()
     streamer.unsubscribe_whole_market()
+    agent_api._market_connections = original_registry
+
+
+@pytest.mark.asyncio
+async def test_snapshot_ack_then_disconnect_never_makes_store_ready(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  snapshot = MarketStreamBatch(
+    stream_id="pending",
+    sequence=1,
+    kind=MarketBatchKind.SNAPSHOT,
+    captured_at=datetime.now(timezone.utc),
+    instrument_count=1,
+    data={"600000.SH": {"lastPrice": 10.0, "time": 1_000}},
+  )
+  store = InMemoryMarketStore()
+  websocket = PipelineWebSocket([snapshot])
+
+  async def authenticate(_envelope):
+    return SimpleNamespace(
+      device=SimpleNamespace(id="device-1"),
+      expires_at=agent_api.utcnow() + timedelta(minutes=5),
+    )
+
+  async def allowed(_device_id):
+    return True
+
+  async def active(_device_id):
+    return None
+
+  original_registry = agent_api._market_connections
+  monkeypatch.setattr(agent_api, "_authenticate", authenticate)
+  monkeypatch.setattr(agent_api, "_ensure_device_active", active)
+  monkeypatch.setattr(
+    agent_api.agent_connection_hub,
+    "is_market_device",
+    allowed,
+  )
+  monkeypatch.setattr(agent_api, "market_stream_store", store)
+  monkeypatch.setattr(
+    agent_api,
+    "_market_connections",
+    agent_api._MarketConnectionRegistry(),
+  )
+
+  try:
+    await agent_api.agent_market_websocket(websocket)
+    assert [control.type for control in websocket.sent_controls] == [
+      MarketControlType.START,
+      MarketControlType.ACK,
+    ]
+    assert [state.status for state in store.state_history] == [
+      "SYNCING",
+      "SYNCING",
+      "OFFLINE",
+    ]
+    assert store.state_history[1].sequence == 1
+    assert store.api_state.status == "OFFLINE"
+    assert store.api_state.sequence == 1
+    assert store.freshness is None
+    assert await store.load_snapshot() is None
+  finally:
     agent_api._market_connections = original_registry

@@ -55,10 +55,19 @@ class _Consumer:
   task: asyncio.Task[None]
   status: QuoteConsumerStatus = QuoteConsumerStatus.READY
   coalesced_batches: int = 0
+  coalesced_updates: int = 0
+  lag_events: int = 0
+  invalidated_batches: int = 0
+  lag_reason: str = ""
 
 
 class WholeQuoteHub:
   """Hydrates Redis state, validates ordering, and fans out locally."""
+
+  _DECODE_OFFLOAD_BYTES = 256 * 1024
+  _SNAPSHOT_OFFLOAD_INSTRUMENTS = 1_000
+  _CONSUMER_CANCEL_TIMEOUT_SECONDS = 1.0
+  _AUTHORITY_AHEAD_GRACE_SECONDS = 1.0
 
   def __init__(
     self,
@@ -77,13 +86,23 @@ class WholeQuoteHub:
     self._latest: dict[str, dict[str, Any]] = {}
     self._source_times: dict[str, float] = {}
     self._consumers: dict[str, _Consumer] = {}
+    self._batch_consumers: dict[str, _Consumer] = {}
+    self._tick_consumers_by_code: dict[str, dict[str, _Consumer]] = {}
     self._subscription: BinaryMarketSubscription | None = None
     self._consume_task: asyncio.Task[None] | None = None
     self._freshness_task: asyncio.Task[None] | None = None
+    self._consumer_recovery_lock = asyncio.Lock()
     self._running = False
+    self._payloads_in_flight = 0
     self._last_received_monotonic = 0.0
+    self._last_sequence_progress_monotonic = 0.0
+    self._authority_ahead_since_monotonic: float | None = None
     self.sequence_gaps = 0
     self.resyncs = 0
+    self.invalidated_batches = 0
+    self.authority_rejections = 0
+    self.last_batch_age_seconds = 0.0
+    self.last_processing_age_ms = 0.0
     self.last_decode_ms = 0.0
     self.last_apply_ms = 0.0
     self.last_dispatch_ms = 0.0
@@ -96,7 +115,7 @@ class WholeQuoteHub:
     if self._running:
       return
     self._running = True
-    self.status = WholeQuoteStatus.STARTING
+    self._set_status(WholeQuoteStatus.STARTING)
     await self._open_and_hydrate()
     self._consume_task = asyncio.create_task(
       self._consume_forever(),
@@ -111,7 +130,10 @@ class WholeQuoteHub:
     self._running = False
     tasks = [
       task
-      for task in (self._consume_task, self._freshness_task)
+      for task in (
+        self._consume_task,
+        self._freshness_task,
+      )
       if task is not None
     ]
     for task in tasks:
@@ -123,18 +145,18 @@ class WholeQuoteHub:
     if self._subscription is not None:
       await self._subscription.close()
       self._subscription = None
+    self._set_status(WholeQuoteStatus.OFFLINE)
     for handle in list(self._consumers):
       await self.unsubscribe(handle)
-    self.status = WholeQuoteStatus.OFFLINE
     await self._publish_watermark(reason="WholeQuoteHub stopped")
 
   async def _open_and_hydrate(self) -> None:
-    self.status = WholeQuoteStatus.SYNCING
+    self._set_status(WholeQuoteStatus.SYNCING)
     self._subscription = await self.store.open_subscription()
     if not await self._hydrate_from_store():
       if self.status is WholeQuoteStatus.STALE:
         return
-      self.status = WholeQuoteStatus.SYNCING
+      self._set_status(WholeQuoteStatus.SYNCING)
       await self._publish_watermark(reason="Redis market snapshot unavailable")
     while self._subscription is not None:
       payload = await self._subscription.wait_for_message(timeout=0.01)
@@ -143,37 +165,39 @@ class WholeQuoteHub:
       await self._apply_payload(payload)
 
   async def _hydrate_from_store(self) -> bool:
+    received_monotonic = time.monotonic()
     hydrated = await self.store.load_snapshot()
     if hydrated is None:
       return False
     state, latest = hydrated
-    if await self._is_trading_session():
-      freshness_time = state.updated_at or state.captured_at
-      if freshness_time is None or (
-        datetime.now(timezone.utc) - freshness_time.astimezone(timezone.utc)
-      ).total_seconds() > self.stale_after_seconds:
-        self.stream_id = state.stream_id
-        self.sequence = 0
-        self.last_captured_at = state.captured_at
-        self._latest = {}
-        self._source_times = {}
-        self.status = WholeQuoteStatus.STALE
-        await self._publish_watermark(
-          reason="Redis market snapshot is stale for active session"
-        )
-        return False
     self.stream_id = state.stream_id
     self.sequence = state.sequence
+    self._last_sequence_progress_monotonic = time.monotonic()
     self.last_captured_at = state.captured_at
-    self._latest = {}
-    self._source_times = {}
-    for code, tick in latest.items():
-      self._apply_tick(code, tick, state.captured_at)
-    self._last_received_monotonic = time.monotonic()
+    self._latest, self._source_times = await self._prepare_snapshot(
+      latest,
+      state.captured_at,
+    )
+    if not await self._validate_authoritative_ready(
+      stream_id=state.stream_id,
+      sequence=state.sequence,
+      captured_at=state.captured_at,
+      received_monotonic=received_monotonic,
+      allow_authority_ahead=False,
+    ):
+      if self.status is WholeQuoteStatus.STALE:
+        self._latest = {}
+        self._source_times = {}
+      return False
+    self._last_received_monotonic = received_monotonic
+    if self._has_lagging_consumer():
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(reason="critical quote consumer is lagging")
+      return False
     self.status = WholeQuoteStatus.READY
     self.resyncs += 1
     await self._publish_watermark()
-    await self._dispatch(latest)
+    await self._dispatch(self._latest)
     return True
 
   async def _consume_forever(self) -> None:
@@ -187,7 +211,7 @@ class WholeQuoteHub:
       except asyncio.CancelledError:
         raise
       except Exception as exc:
-        self.status = WholeQuoteStatus.OFFLINE
+        self._set_status(WholeQuoteStatus.OFFLINE)
         logger.warning(
           "WholeQuoteHub Redis stream failed: error=%s: %s",
           exc.__class__.__name__,
@@ -202,13 +226,26 @@ class WholeQuoteHub:
         await asyncio.sleep(1)
 
   async def _apply_payload(self, payload: bytes) -> None:
+    self._payloads_in_flight += 1
+    try:
+      await self._apply_payload_inner(payload)
+    finally:
+      self._payloads_in_flight -= 1
+
+  async def _apply_payload_inner(self, payload: bytes) -> None:
+    received_monotonic = time.monotonic()
     apply_started = time.monotonic()
+    previous_status = self.status
+    previous_stream_id = self.stream_id
     try:
       decode_started = time.monotonic()
-      batch = MarketStreamBatch.from_bytes(payload)
+      if len(payload) >= self._DECODE_OFFLOAD_BYTES:
+        batch = await asyncio.to_thread(MarketStreamBatch.from_bytes, payload)
+      else:
+        batch = MarketStreamBatch.from_bytes(payload)
       self.last_decode_ms = (time.monotonic() - decode_started) * 1000
     except Exception as exc:
-      self.status = WholeQuoteStatus.SYNCING
+      self._set_status(WholeQuoteStatus.SYNCING)
       logger.warning("WholeQuoteHub rejected invalid batch: %s", exc)
       await self._publish_watermark(reason="invalid binary market batch")
       await self._hydrate_from_store()
@@ -216,7 +253,7 @@ class WholeQuoteHub:
 
     if batch.stream_id != self.stream_id:
       if batch.kind is not MarketBatchKind.SNAPSHOT or batch.sequence != 1:
-        self.status = WholeQuoteStatus.SYNCING
+        self._set_status(WholeQuoteStatus.SYNCING)
         await self._publish_watermark(reason="new stream did not start with snapshot")
         await self._hydrate_from_store()
         return
@@ -229,7 +266,7 @@ class WholeQuoteHub:
       return
     if batch.sequence != self.sequence + 1:
       self.sequence_gaps += 1
-      self.status = WholeQuoteStatus.SYNCING
+      self._set_status(WholeQuoteStatus.SYNCING)
       logger.warning(
         "WholeQuoteHub sequence gap: stream_id=%s expected=%s actual=%s",
         batch.stream_id,
@@ -245,24 +282,47 @@ class WholeQuoteHub:
         return
 
     if batch.kind is MarketBatchKind.SNAPSHOT:
-      self._latest = {}
-      self._source_times = {}
-    accepted: dict[str, dict[str, Any]] = {}
-    for code, tick in batch.data.items():
-      if self._apply_tick(code, tick, batch.captured_at):
-        accepted[code] = tick
+      self._latest, self._source_times = await self._prepare_snapshot(
+        batch.data,
+        batch.captured_at,
+      )
+      accepted = self._latest
+    else:
+      accepted: dict[str, dict[str, Any]] = {}
+      for code, tick in batch.data.items():
+        if self._apply_tick(code, tick, batch.captured_at):
+          accepted[code] = tick
     self.sequence = batch.sequence
+    self._last_sequence_progress_monotonic = time.monotonic()
     self.last_captured_at = batch.captured_at
-    self._last_received_monotonic = time.monotonic()
-    self.status = (
-      WholeQuoteStatus.STALE
-      if self._has_lagging_consumer()
-      else WholeQuoteStatus.READY
-    )
-    await self._publish_watermark()
+    if not await self._validate_authoritative_ready(
+      stream_id=batch.stream_id,
+      sequence=batch.sequence,
+      captured_at=batch.captured_at,
+      received_monotonic=received_monotonic,
+      allow_authority_ahead=(
+        previous_status is WholeQuoteStatus.READY
+        and self.status is WholeQuoteStatus.READY
+        and previous_stream_id == batch.stream_id
+      ),
+    ):
+      self.last_apply_ms = (time.monotonic() - apply_started) * 1000
+      return
+    self._last_received_monotonic = received_monotonic
+    if self._has_lagging_consumer():
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(reason="critical quote consumer is lagging")
+    else:
+      self.status = WholeQuoteStatus.READY
+      await self._publish_watermark()
     self.last_apply_ms = (time.monotonic() - apply_started) * 1000
-    if accepted:
-      await self._dispatch(accepted)
+    dispatch_data = (
+      accepted
+      if previous_status is WholeQuoteStatus.READY
+      else self._latest
+    )
+    if dispatch_data and self.is_ready:
+      await self._dispatch(dispatch_data)
 
   def _apply_tick(
     self,
@@ -277,6 +337,32 @@ class WholeQuoteHub:
     self._source_times[code] = source_time
     self._latest[code] = tick
     return True
+
+  async def _prepare_snapshot(
+    self,
+    data: dict[str, dict[str, Any]],
+    captured_at: datetime | None,
+  ) -> tuple[dict[str, dict[str, Any]], dict[str, float]]:
+    if len(data) >= self._SNAPSHOT_OFFLOAD_INSTRUMENTS:
+      return await asyncio.to_thread(
+        self._build_snapshot_state,
+        data,
+        captured_at,
+      )
+    return self._build_snapshot_state(data, captured_at)
+
+  @classmethod
+  def _build_snapshot_state(
+    cls,
+    data: dict[str, dict[str, Any]],
+    captured_at: datetime | None,
+  ) -> tuple[dict[str, dict[str, Any]], dict[str, float]]:
+    latest: dict[str, dict[str, Any]] = {}
+    source_times: dict[str, float] = {}
+    for code, tick in data.items():
+      latest[code] = tick
+      source_times[code] = cls._tick_source_time(tick, captured_at)
+    return latest, source_times
 
   @staticmethod
   def _tick_source_time(
@@ -305,38 +391,57 @@ class WholeQuoteHub:
   async def _dispatch(self, data: dict[str, dict[str, Any]]) -> None:
     started = time.monotonic()
     lagging_critical_consumer = False
-    for consumer in tuple(self._consumers.values()):
-      if consumer.status is not QuoteConsumerStatus.READY:
-        continue
-      if consumer.stock_code is None:
-        payload = data
-      else:
-        tick = data.get(consumer.stock_code)
-        if tick is None:
-          continue
-        payload = {consumer.stock_code: tick}
-      if consumer.queue.full():
-        if consumer.delivery is QuoteDeliveryMode.LATEST_ONLY:
-          try:
-            consumer.queue.get_nowait()
-            consumer.queue.task_done()
-          except asyncio.QueueEmpty:
-            pass
-          consumer.coalesced_batches += 1
-        else:
-          consumer.status = QuoteConsumerStatus.LAGGING
-          lagging_critical_consumer = True
-          logger.error(
-            "WholeQuoteHub critical consumer lagging: handle=%s stock=%s",
-            consumer.handle,
-            consumer.stock_code or "*",
-          )
-          continue
-      consumer.queue.put_nowait(payload)
+    # Full-market consumers receive the original batch object. Per-symbol payloads
+    # are allocated once per affected symbol and shared by all of its consumers.
+    for consumer in tuple(self._batch_consumers.values()):
+      lagging_critical_consumer |= not self._enqueue_consumer(consumer, data)
+    affected_codes = self._tick_consumers_by_code.keys() & data.keys()
+    for code in affected_codes:
+      tick = data[code]
+      indexed = self._tick_consumers_by_code[code]
+      payload = {code: tick}
+      for consumer in tuple(indexed.values()):
+        lagging_critical_consumer |= not self._enqueue_consumer(
+          consumer,
+          payload,
+        )
     self.last_dispatch_ms = (time.monotonic() - started) * 1000
     if lagging_critical_consumer:
-      self.status = WholeQuoteStatus.STALE
+      self._set_status(WholeQuoteStatus.SYNCING)
       await self._publish_watermark(reason="critical quote consumer is lagging")
+      await self._recover_lagging_consumers()
+
+  @staticmethod
+  def _enqueue_consumer(
+    consumer: _Consumer,
+    payload: dict[str, dict[str, Any]],
+  ) -> bool:
+    if consumer.status is not QuoteConsumerStatus.READY:
+      return True
+    queued_payload = payload
+    if consumer.queue.full():
+      if consumer.delivery is QuoteDeliveryMode.CRITICAL:
+        consumer.status = QuoteConsumerStatus.LAGGING
+        consumer.lag_events += 1
+        consumer.lag_reason = "queue_overflow"
+        logger.error(
+          "WholeQuoteHub critical consumer lagging: handle=%s stock=%s",
+          consumer.handle,
+          consumer.stock_code or "*",
+        )
+        return False
+      try:
+        previous = consumer.queue.get_nowait()
+        consumer.queue.task_done()
+      except asyncio.QueueEmpty:
+        previous = {}
+      # A batch latest-only consumer must retain symbols that have not changed in
+      # the incoming batch. Overlapping symbols converge to the newest tick.
+      queued_payload = previous | payload
+      consumer.coalesced_batches += 1
+      consumer.coalesced_updates += len(previous)
+    consumer.queue.put_nowait(queued_payload)
+    return True
 
   async def subscribe_tick(
     self,
@@ -382,17 +487,21 @@ class WholeQuoteHub:
       name=f"whole-quote-consumer:{handle}",
     )
     self._consumers[handle] = consumer
+    if stock_code is None:
+      self._batch_consumers[handle] = consumer
+    else:
+      self._tick_consumers_by_code.setdefault(stock_code, {})[handle] = consumer
     placeholder.cancel()
     await asyncio.gather(placeholder, return_exceptions=True)
     initial = self._latest if stock_code is None else {
       stock_code: self._latest[stock_code]
     } if stock_code in self._latest else {}
-    if initial:
+    if initial and self.is_ready:
       consumer.queue.put_nowait(initial)
     return handle
 
   async def _consumer_loop(self, consumer: _Consumer) -> None:
-    while True:
+    while consumer.status is not QuoteConsumerStatus.STOPPED:
       payload = await consumer.queue.get()
       try:
         result = consumer.callback(payload)
@@ -405,6 +514,15 @@ class WholeQuoteHub:
           "WholeQuoteHub consumer callback failed: handle=%s",
           consumer.handle,
         )
+        if consumer.delivery is QuoteDeliveryMode.CRITICAL:
+          consumer.status = QuoteConsumerStatus.LAGGING
+          consumer.lag_events += 1
+          consumer.lag_reason = "callback_failed"
+          self._set_status(WholeQuoteStatus.STALE)
+          await self._publish_watermark(
+            reason="critical quote consumer callback failed"
+          )
+          return
       finally:
         consumer.queue.task_done()
 
@@ -412,9 +530,25 @@ class WholeQuoteHub:
     consumer = self._consumers.pop(handle, None)
     if consumer is None:
       return False
+    if consumer.stock_code is None:
+      self._batch_consumers.pop(handle, None)
+    else:
+      indexed = self._tick_consumers_by_code.get(consumer.stock_code)
+      if indexed is not None:
+        indexed.pop(handle, None)
+        if not indexed:
+          self._tick_consumers_by_code.pop(consumer.stock_code, None)
     consumer.status = QuoteConsumerStatus.STOPPED
     consumer.task.cancel()
-    await asyncio.gather(consumer.task, return_exceptions=True)
+    _done, pending = await asyncio.wait(
+      [consumer.task],
+      timeout=self._CONSUMER_CANCEL_TIMEOUT_SECONDS,
+    )
+    if pending:
+      logger.error(
+        "WholeQuoteHub consumer stop timed out: handle=%s",
+        consumer.handle,
+      )
     return True
 
   def latest(self, stock_code: str) -> dict[str, Any] | None:
@@ -437,6 +571,11 @@ class WholeQuoteHub:
       "sequence_gaps": self.sequence_gaps,
       "resyncs": self.resyncs,
       "consumers": len(self._consumers),
+      "batch_consumers": len(self._batch_consumers),
+      "tick_consumers": sum(
+        len(consumers) for consumers in self._tick_consumers_by_code.values()
+      ),
+      "indexed_tick_symbols": len(self._tick_consumers_by_code),
       "lagging_consumers": sum(
         consumer.status is QuoteConsumerStatus.LAGGING
         for consumer in self._consumers.values()
@@ -444,6 +583,16 @@ class WholeQuoteHub:
       "coalesced_batches": sum(
         consumer.coalesced_batches for consumer in self._consumers.values()
       ),
+      "coalesced_updates": sum(
+        consumer.coalesced_updates for consumer in self._consumers.values()
+      ),
+      "consumer_lag_events": sum(
+        consumer.lag_events for consumer in self._consumers.values()
+      ),
+      "invalidated_batches": self.invalidated_batches,
+      "authority_rejections": self.authority_rejections,
+      "batch_age_seconds": round(self.last_batch_age_seconds, 3),
+      "processing_age_ms": round(self.last_processing_age_ms, 3),
       "queue_depth": sum(
         consumer.queue.qsize() for consumer in self._consumers.values()
       ),
@@ -455,59 +604,329 @@ class WholeQuoteHub:
   async def _freshness_loop(self) -> None:
     while True:
       await asyncio.sleep(1)
-      try:
-        api_state = await self.store.state()
-      except Exception as exc:
-        if self.status is not WholeQuoteStatus.OFFLINE:
-          logger.warning(
-            "WholeQuoteHub cannot read API stream state: error=%s",
-            exc.__class__.__name__,
-          )
-        self.status = WholeQuoteStatus.OFFLINE
-        continue
-      if api_state is None or api_state.status != "READY":
-        desired = (
-          WholeQuoteStatus.SYNCING
-          if api_state is not None and api_state.status == "SYNCING"
-          else WholeQuoteStatus.OFFLINE
+      await self._check_freshness_once()
+
+  async def _check_freshness_once(self) -> None:
+    try:
+      api_state, freshness = await self.store.state_with_freshness()
+    except Exception as exc:
+      if self.status is not WholeQuoteStatus.OFFLINE:
+        logger.warning(
+          "WholeQuoteHub cannot read API stream state: error=%s",
+          exc.__class__.__name__,
         )
-        if self.status is not desired:
-          self.status = desired
-          await self._publish_watermark(
-            reason="API market stream is not ready"
-          )
-        continue
-      if (
-        api_state.stream_id != self.stream_id
-        or api_state.sequence > self.sequence
-      ):
-        self.status = WholeQuoteStatus.SYNCING
-        await self._publish_watermark(reason="Engine market watermark is behind")
+      self._set_status(WholeQuoteStatus.OFFLINE)
+      return
+    if api_state is None or api_state.status != "READY":
+      desired = (
+        WholeQuoteStatus.SYNCING
+        if api_state is not None and api_state.status == "SYNCING"
+        else WholeQuoteStatus.STALE
+        if api_state is not None and api_state.status == "STALE"
+        else WholeQuoteStatus.OFFLINE
+      )
+      if self.status is not desired:
+        self._set_status(desired)
+        await self._publish_watermark(reason="API market stream is not ready")
+      return
+
+    trading_session = await self._is_trading_session()
+    if trading_session and not self._freshness_matches_state(
+      api_state,
+      freshness,
+    ):
+      if self.status is not WholeQuoteStatus.STALE:
+        self._set_status(WholeQuoteStatus.STALE)
+        await self._publish_watermark(
+          reason="API market freshness lease expired or mismatched"
+        )
+      return
+
+    if api_state.stream_id != self.stream_id:
+      self._authority_ahead_since_monotonic = None
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(reason="API market stream id changed")
+      if self._payloads_in_flight == 0:
         await self._hydrate_from_store()
-        continue
-      if self.status not in {WholeQuoteStatus.READY, WholeQuoteStatus.STALE}:
-        continue
-      if not await self._is_trading_session():
-        if self.status is WholeQuoteStatus.STALE and not self._has_lagging_consumer():
-          self.status = WholeQuoteStatus.READY
-          await self._publish_watermark()
-        continue
-      if (
-        self._last_received_monotonic <= 0
-        or time.monotonic() - self._last_received_monotonic
-        > self.stale_after_seconds
-      ):
-        if self.status is not WholeQuoteStatus.STALE:
-          self.status = WholeQuoteStatus.STALE
-          await self._publish_watermark(
-            reason="no fresh market batch for 10 seconds"
-          )
+      return
+
+    now_monotonic = time.monotonic()
+    if api_state.sequence > self.sequence:
+      receipt_stale = bool(
+        trading_session
+        and (
+          self._last_received_monotonic <= 0
+          or now_monotonic - self._last_received_monotonic
+          > self.stale_after_seconds
+        )
+      )
+      if receipt_stale:
+        desired = (
+          WholeQuoteStatus.STALE
+          if self._payloads_in_flight
+          else WholeQuoteStatus.SYNCING
+        )
+        self._set_status(desired)
+        await self._publish_watermark(
+          reason="no fresh Engine market batch for 10 seconds"
+        )
+        if self._payloads_in_flight == 0:
+          await self._hydrate_from_store()
+        return
+      if self.status is not WholeQuoteStatus.READY:
+        if self._payloads_in_flight == 0:
+          await self._hydrate_from_store()
+        return
+      if self._authority_ahead_since_monotonic is None:
+        self._authority_ahead_since_monotonic = now_monotonic
+        return
+      engine_is_progressing = bool(
+        self._payloads_in_flight
+        or now_monotonic - self._last_sequence_progress_monotonic
+        <= self._AUTHORITY_AHEAD_GRACE_SECONDS
+      )
+      within_grace = (
+        now_monotonic - self._authority_ahead_since_monotonic
+        <= self._AUTHORITY_AHEAD_GRACE_SECONDS
+      )
+      if engine_is_progressing or within_grace:
+        return
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(
+        reason="Engine market watermark remained behind"
+      )
+      await self._hydrate_from_store()
+      return
+    if api_state.sequence < self.sequence:
+      self._authority_ahead_since_monotonic = None
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(
+        reason="API market watermark is behind Engine"
+      )
+      return
+
+    self._authority_ahead_since_monotonic = None
+    if self._has_recoverable_lag():
+      await self._recover_lagging_consumers()
+      return
+    if self.status not in {WholeQuoteStatus.READY, WholeQuoteStatus.STALE}:
+      if self._payloads_in_flight == 0:
+        await self._hydrate_from_store()
+      return
+    if not trading_session:
+      if self.status is WholeQuoteStatus.STALE and not self._has_lagging_consumer():
+        self.status = WholeQuoteStatus.READY
+        await self._publish_watermark()
+      return
+    if (
+      self._last_received_monotonic <= 0
+      or now_monotonic - self._last_received_monotonic
+      > self.stale_after_seconds
+    ):
+      if self.status is not WholeQuoteStatus.STALE:
+        self._set_status(WholeQuoteStatus.STALE)
+        await self._publish_watermark(
+          reason="no fresh market batch for 10 seconds"
+        )
 
   def _has_lagging_consumer(self) -> bool:
     return any(
       consumer.status is QuoteConsumerStatus.LAGGING
       for consumer in self._consumers.values()
     )
+
+  def _has_recoverable_lag(self) -> bool:
+    return any(
+      consumer.status is QuoteConsumerStatus.LAGGING
+      and consumer.lag_reason == "queue_overflow"
+      for consumer in self._consumers.values()
+    )
+
+  def _set_status(self, status: WholeQuoteStatus) -> None:
+    self.status = status
+    if status is not WholeQuoteStatus.READY:
+      self._invalidate_pending_batches()
+
+  def _invalidate_pending_batches(self) -> int:
+    invalidated = 0
+    for consumer in tuple(self._consumers.values()):
+      consumer_invalidated = 0
+      while True:
+        try:
+          consumer.queue.get_nowait()
+          consumer.queue.task_done()
+          consumer_invalidated += 1
+        except asyncio.QueueEmpty:
+          break
+      consumer.invalidated_batches += consumer_invalidated
+      invalidated += consumer_invalidated
+    self.invalidated_batches += invalidated
+    return invalidated
+
+  async def _validate_authoritative_ready(
+    self,
+    *,
+    stream_id: str,
+    sequence: int,
+    captured_at: datetime | None,
+    received_monotonic: float,
+    allow_authority_ahead: bool,
+  ) -> bool:
+    self.last_processing_age_ms = max(
+      0.0,
+      (time.monotonic() - received_monotonic) * 1000,
+    )
+    try:
+      api_state, freshness = await self.store.state_with_freshness()
+    except Exception as exc:
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.OFFLINE)
+      logger.warning(
+        "WholeQuoteHub authority check failed: error=%s",
+        exc.__class__.__name__,
+      )
+      return False
+    if api_state is None or api_state.status != "READY":
+      self.authority_rejections += 1
+      desired = (
+        WholeQuoteStatus.SYNCING
+        if api_state is not None and api_state.status == "SYNCING"
+        else WholeQuoteStatus.STALE
+        if api_state is not None and api_state.status == "STALE"
+        else WholeQuoteStatus.OFFLINE
+      )
+      self._set_status(desired)
+      await self._publish_watermark(reason="API market stream is not ready")
+      return False
+    if api_state.stream_id != stream_id:
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(reason="API market stream id changed")
+      return False
+    trading_session = await self._is_trading_session()
+    if trading_session and not self._freshness_matches_state(
+      api_state,
+      freshness,
+    ):
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(
+        reason="API market freshness lease expired or mismatched"
+      )
+      return False
+    if api_state.sequence < sequence:
+      self.authority_rejections += 1
+      self._authority_ahead_since_monotonic = None
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(
+        reason="API market watermark is behind local batch"
+      )
+      return False
+    if api_state.sequence > sequence:
+      if not allow_authority_ahead:
+        self.authority_rejections += 1
+        self._set_status(WholeQuoteStatus.SYNCING)
+        await self._publish_watermark(
+          reason="API market watermark is ahead of recovering Engine"
+        )
+        return False
+      if self._authority_ahead_since_monotonic is None:
+        self._authority_ahead_since_monotonic = time.monotonic()
+    else:
+      self._authority_ahead_since_monotonic = None
+
+    captured_age = self._captured_age_seconds(captured_at)
+    self.last_batch_age_seconds = captured_age
+    processing_stale = (
+      self.last_processing_age_ms / 1000 > self.stale_after_seconds
+    )
+    if processing_stale and trading_session:
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(
+        reason="market batch processing exceeded freshness window"
+      )
+      return False
+    return True
+
+  @staticmethod
+  def _freshness_matches_state(api_state: Any, freshness: Any) -> bool:
+    return bool(
+      freshness is not None
+      and freshness.stream_id == api_state.stream_id
+      and freshness.sequence == api_state.sequence
+    )
+
+  @staticmethod
+  def _captured_age_seconds(captured_at: datetime | None) -> float:
+    if captured_at is None:
+      return float("inf")
+    normalized = (
+      captured_at.replace(tzinfo=timezone.utc)
+      if captured_at.tzinfo is None
+      else captured_at.astimezone(timezone.utc)
+    )
+    return max(0.0, (datetime.now(timezone.utc) - normalized).total_seconds())
+
+  async def _recover_lagging_consumers(self) -> bool:
+    async with self._consumer_recovery_lock:
+      lagging = [
+        consumer
+        for consumer in self._consumers.values()
+        if (
+          consumer.status is QuoteConsumerStatus.LAGGING
+          and consumer.lag_reason == "queue_overflow"
+        )
+      ]
+      if not lagging:
+        return self.is_ready
+      self._set_status(WholeQuoteStatus.SYNCING)
+      for consumer in lagging:
+        consumer.task.cancel()
+      _done, pending = await asyncio.wait(
+        [consumer.task for consumer in lagging],
+        timeout=self._CONSUMER_CANCEL_TIMEOUT_SECONDS,
+      )
+      if pending:
+        logger.error(
+          "WholeQuoteHub critical consumer cancellation timed out: handles=%s",
+          ",".join(
+            consumer.handle
+            for consumer in lagging
+            if consumer.task in pending
+          ),
+        )
+        self._set_status(WholeQuoteStatus.SYNCING)
+        await self._publish_watermark(
+          reason="critical consumer cancellation timed out"
+        )
+        return False
+      for consumer in lagging:
+        if consumer.handle not in self._consumers:
+          continue
+        consumer.status = QuoteConsumerStatus.READY
+        consumer.lag_reason = ""
+        consumer.task = asyncio.create_task(
+          self._consumer_loop(consumer),
+          name=f"whole-quote-consumer:{consumer.handle}",
+        )
+      try:
+        hydrated = await self._hydrate_from_store()
+      except Exception as exc:
+        logger.warning(
+          "WholeQuoteHub consumer recovery failed: error=%s: %s",
+          exc.__class__.__name__,
+          exc,
+        )
+        self._set_status(WholeQuoteStatus.SYNCING)
+        return False
+      if not hydrated:
+        self._set_status(WholeQuoteStatus.SYNCING)
+        await self._publish_watermark(
+          reason="critical consumer recovery snapshot unavailable"
+        )
+        return False
+      return self.is_ready
 
   async def _publish_watermark(self, *, reason: str = "") -> None:
     await self.store.write_engine_state(

@@ -4004,8 +4004,57 @@ class StrategyExecutor:
     broker = runtime.broker
     metrics = runtime.metrics
 
+    def market_stream_ready() -> bool:
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        return True
+      manager = getattr(
+        getattr(runtime, "data_adapter", None),
+        "subscription_manager",
+        None,
+      )
+      hub = getattr(manager, "hub", None)
+      # Production paper/live adapters always expose WholeQuoteHub. Missing
+      # wiring is itself unsafe and must fail closed; backtests are the only
+      # mode that intentionally has no live market gate.
+      return hub is not None and bool(getattr(hub, "is_ready", False))
+
+    async def reject_stale_market_stream() -> None:
+      reason = "MARKET_DATA_STREAM_NOT_READY"
+      if runtime.state_manager:
+        await runtime.state_manager.update_trade_intent_status(
+          intent.intent_id,
+          "REJECTED",
+          metadata={
+            **dict(intent.metadata or {}),
+            "market_data_gate": reason,
+          },
+          notes=reason,
+        )
+      await self._notify_strategy_order(
+        runtime,
+        OrderStateEvent(
+          order_id=None,
+          status=OrderStatus.REJECTED.value,
+          error_message="权威行情链路未就绪，已拒绝本次交易意图",
+          metadata={
+            **dict(intent.metadata or {}),
+            "intent_id": intent.intent_id,
+            "market_data_gate": reason,
+          },
+        ),
+      )
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"行情门禁拒绝交易意图: {intent.instrument_code} {reason}",
+      )
+
     try:
       from quantx_domain.brokers.base import PriceType
+
+      if not market_stream_ready():
+        await reject_stale_market_stream()
+        return
 
       if intent.direction == TradeIntentDirection.BUY:
         order_type = BrokerOrderType.BUY
@@ -4292,6 +4341,11 @@ class StrategyExecutor:
         return
 
       # 下单
+      if not market_stream_ready():
+        if runtime.state_manager:
+          runtime.state_manager.release_order_resources(reservation_key)
+        await reject_stale_market_stream()
+        return
       try:
         order = await broker.place_order(request)
       except Exception:

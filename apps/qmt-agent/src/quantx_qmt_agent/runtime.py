@@ -7,14 +7,17 @@ import gzip
 import hashlib
 import json
 import logging
+import random
 import shutil
 import stat
 import tempfile
 import threading
 import time
 import uuid
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, BinaryIO, Iterable, Iterator
 from zoneinfo import ZoneInfo
@@ -37,10 +40,18 @@ from quantx_contracts import (
   TradeCommandPayload,
 )
 
-from .broker import MAX_MARKET_DATA_RECORDS, enrich_report_payload
+from .broker import (
+  MAX_MARKET_DATA_RECORDS,
+  WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE,
+  enrich_report_payload,
+)
 from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
 from .journal import LocalJournal
+from .whole_market_capture import (
+  CapturedMarketEvent,
+  WholeMarketCapture,
+)
 
 logger = logging.getLogger(__name__)
 MAX_MARKET_DATA_CHUNK_RECORDS = 5000
@@ -64,9 +75,24 @@ WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
 MARKET_STREAM_ACK_TIMEOUT_SECONDS = 10
-MARKET_STREAM_CAPTURE_QUEUE_BATCHES = 8
-MARKET_STREAM_CAPTURE_QUEUE_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
+MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS = 10
+MARKET_STREAM_READY_INGRESS_CALLBACKS = 8
+MARKET_STREAM_READY_INGRESS_BYTES = 64 * 1024 * 1024
+# The callback path deliberately avoids JSON serialization.  Charge every tick
+# a conservative retained-memory estimate; the outbound cap below uses exact
+# encoded bytes.
+MARKET_STREAM_READY_ESTIMATED_TICK_BYTES = 2048
+MARKET_STREAM_OUTBOUND_BATCHES = 8
+MARKET_STREAM_OUTBOUND_BYTES = 64 * 1024 * 1024
 MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES = 2
+MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS = 5.0
+MARKET_STREAM_MICROBATCH_SECONDS = 0.010
+MARKET_STREAM_MICROBATCH_INSTRUMENTS = 512
+MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES = 512 * 1024
+MARKET_STREAM_STABLE_READY_SECONDS = 30.0
+MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS = 5.0
+MARKET_STREAM_NATIVE_SILENCE_SECONDS = 10.0
+MARKET_STREAM_NATIVE_SILENCE_CONFIRMATIONS = 2
 MARKET_DATA_UPLOAD_READ_BYTES = 256 * 1024
 MARKET_DATA_SPOOL_DIRECTORY_NAME = "market-data-spool"
 MARKET_DATA_SPOOL_REQUEST_PREFIX = "request-"
@@ -112,6 +138,74 @@ class _MarketUploadTombstone:
 class _MarketUploadTaskEntry:
   fingerprint: str
   task: asyncio.Task[None]
+
+
+class _MarketOutboundOverflow(RuntimeError):
+  """Encoded batches exceeded the bounded outbound window."""
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedMarketBatch:
+  batch: MarketStreamBatch
+  payload: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingMarketAck:
+  encoded: _EncodedMarketBatch
+  sent_monotonic: float
+
+
+class _BoundedMarketBatchBuffer:
+  """Bound queued and unacknowledged batches by their actual wire bytes."""
+
+  def __init__(self, *, max_batches: int, max_bytes: int) -> None:
+    self._queue: asyncio.Queue[_EncodedMarketBatch] = asyncio.Queue(
+      maxsize=max_batches
+    )
+    self._max_batches = max_batches
+    self._max_bytes = max_bytes
+    self._reserved_batches = 0
+    self._reserved_bytes = 0
+    self._capacity_changed = asyncio.Condition()
+
+  async def put(self, encoded: _EncodedMarketBatch) -> None:
+    payload_bytes = len(encoded.payload)
+    if payload_bytes > self._max_bytes:
+      raise _MarketOutboundOverflow(
+        "whole-market batch exceeds outbound byte budget: "
+        f"batch_bytes={payload_bytes} max_bytes={self._max_bytes}"
+      )
+    async with self._capacity_changed:
+      await self._capacity_changed.wait_for(
+        lambda: (
+          self._reserved_batches < self._max_batches
+          and self._reserved_bytes + payload_bytes <= self._max_bytes
+        )
+      )
+      self._queue.put_nowait(encoded)
+      self._reserved_batches += 1
+      self._reserved_bytes += payload_bytes
+
+  async def get(self) -> _EncodedMarketBatch:
+    return await self._queue.get()
+
+  async def acknowledge(self, encoded: _EncodedMarketBatch) -> None:
+    async with self._capacity_changed:
+      self._reserved_batches = max(0, self._reserved_batches - 1)
+      self._reserved_bytes = max(
+        0,
+        self._reserved_bytes - len(encoded.payload),
+      )
+      self._capacity_changed.notify_all()
+
+  @property
+  def depth(self) -> int:
+    return self._reserved_batches
+
+  @property
+  def bytes(self) -> int:
+    return self._reserved_bytes
 
 
 class _MarketDataRequestAlreadyCompleted(RuntimeError):
@@ -461,22 +555,35 @@ class AgentRuntime:
     self._stopped = asyncio.Event()
     self._access_token = ""
     self._access_token_expires_at = datetime.now(timezone.utc)
+    self._access_token_ready = asyncio.Event()
+    # Sticky process-lifetime gate. The market socket must not race ahead of
+    # the first successful control-hub registration, but later control socket
+    # reconnects must never tear down an already READY market stream.
+    self._control_hub_registered_once = asyncio.Event()
     self._session_loop: asyncio.AbstractEventLoop | None = None
     self._market_events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(
       maxsize=10_000
     )
     self._market_event_overflow = asyncio.Event()
-    self._whole_market_events: asyncio.Queue[
-      tuple[datetime, dict[str, dict[str, Any]]]
-    ] = asyncio.Queue(maxsize=MARKET_STREAM_CAPTURE_QUEUE_BATCHES)
-    self._whole_market_overflow = asyncio.Event()
-    self._whole_market_estimated_batch_bytes = (
-      MARKET_STREAM_CAPTURE_QUEUE_BYTES // MARKET_STREAM_CAPTURE_QUEUE_BATCHES
+    self._whole_market_capture = WholeMarketCapture(
+      max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS,
+      max_ready_estimated_bytes=MARKET_STREAM_READY_INGRESS_BYTES,
+      estimated_tick_bytes=MARKET_STREAM_READY_ESTIMATED_TICK_BYTES,
+    )
+    self._whole_market_subscription_ready = asyncio.Event()
+    self._whole_market_subscription_active = False
+    self._whole_market_native_reset = asyncio.Event()
+    self._whole_market_encode_executor = ThreadPoolExecutor(
+      max_workers=1,
+      thread_name_prefix="qmt-whole-market-encode",
     )
     self._market_stream_resyncs = 0
     self._market_stream_status = "OFFLINE"
     self._market_stream_sequence = 0
     self._market_stream_ack_latency_ms = 0.0
+    self._market_stream_ready_since_monotonic = 0.0
+    self._market_stream_outbound_depth = 0
+    self._market_stream_outbound_bytes = 0
     self._market_requests: asyncio.Queue[AgentEnvelope] = asyncio.Queue(
       maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
     )
@@ -506,9 +613,19 @@ class AgentRuntime:
 
   async def run_forever(self) -> None:
     self._ensure_market_upload_state()
+    self._ensure_whole_market_state()
+    self._whole_market_capture.bind_loop(asyncio.get_running_loop())
     cache_sweeper = asyncio.create_task(
       self._market_upload_cache_sweeper(),
       name="market-data-cache-sweeper",
+    )
+    capture_supervisor = asyncio.create_task(
+      self._whole_market_capture_supervisor(),
+      name="whole-market-capture-supervisor",
+    )
+    market_stream_supervisor = asyncio.create_task(
+      self._whole_market_stream_supervisor(),
+      name="whole-market-stream-supervisor",
     )
     try:
       delay = 1
@@ -531,8 +648,24 @@ class AgentRuntime:
             pass
           delay = min(delay * 2, 300)
     finally:
-      cache_sweeper.cancel()
-      await asyncio.gather(cache_sweeper, return_exceptions=True)
+      for task in (
+        cache_sweeper,
+        capture_supervisor,
+        market_stream_supervisor,
+      ):
+        task.cancel()
+      await asyncio.gather(
+        cache_sweeper,
+        capture_supervisor,
+        market_stream_supervisor,
+        return_exceptions=True,
+      )
+      await self._shutdown_whole_market_capture()
+      self._whole_market_capture.unbind_loop()
+      self._whole_market_encode_executor.shutdown(
+        wait=False,
+        cancel_futures=True,
+      )
       await self._cancel_market_upload_tasks()
       self._clear_market_upload_state()
     if self._fatal_market_data_error is not None:
@@ -600,7 +733,10 @@ class AgentRuntime:
     return token, expires_at
 
   async def _run_session(self) -> None:
-    self._access_token, self._access_token_expires_at = await self._issue_token()
+    access_token, expires_at = await self._issue_token()
+    self._access_token = access_token
+    self._access_token_expires_at = expires_at
+    self._access_token_ready.set()
     async with websockets.connect(
       _websocket_url(self.configuration.api_url),
       max_size=8 * 1024 * 1024,
@@ -626,16 +762,13 @@ class AgentRuntime:
         or not auth_result.payload.get("accepted")
       ):
         raise RuntimeError("QMT Agent authentication rejected")
+      self._control_hub_registered_once.set()
 
       self._session_loop = asyncio.get_running_loop()
       self._market_requests = asyncio.Queue(
         maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
       )
       self._market_event_overflow = asyncio.Event()
-      self._whole_market_events = asyncio.Queue(
-        maxsize=MARKET_STREAM_CAPTURE_QUEUE_BATCHES
-      )
-      self._whole_market_overflow = asyncio.Event()
       await self._ensure_trading_ready()
       await self._queue_full_snapshot()
       await self._heartbeat_checkpoint(socket, status="RECONCILING")
@@ -659,10 +792,6 @@ class AgentRuntime:
         "market-sender": asyncio.create_task(
           self._market_event_loop(socket),
           name="qmt-agent-market-sender",
-        ),
-        "whole-market-stream": asyncio.create_task(
-          self._whole_market_stream_supervisor(),
-          name="qmt-agent-whole-market-stream",
         ),
         "market-request": asyncio.create_task(
           self._market_request_loop(socket),
@@ -930,36 +1059,215 @@ class AgentRuntime:
         await asyncio.gather(queued, overflow, return_exceptions=True)
 
   def _enqueue_whole_market_event(self, data: Any) -> None:
-    loop = self._session_loop
-    if loop is None or loop.is_closed() or not isinstance(data, dict):
-      return
-    captured_at = datetime.now(timezone.utc)
+    self._ensure_whole_market_state()
+    self._whole_market_capture.capture(data)
 
-    def enqueue() -> None:
-      estimated_batch_bytes = getattr(
-        self,
-        "_whole_market_estimated_batch_bytes",
-        MARKET_STREAM_CAPTURE_QUEUE_BYTES
-        // MARKET_STREAM_CAPTURE_QUEUE_BATCHES,
-      )
-      projected_bytes = (
-        self._whole_market_events.qsize() + 1
-      ) * estimated_batch_bytes
-      if (
-        self._whole_market_events.full()
-        or projected_bytes > MARKET_STREAM_CAPTURE_QUEUE_BYTES
-      ):
-        logger.error(
-          "QMT whole-market capture queue overflow: depth=%s "
-          "projected_bytes=%s",
-          self._whole_market_events.qsize(),
-          projected_bytes,
+  async def _whole_market_capture_supervisor(self) -> None:
+    """Own the one native subscription for the lifetime of the Agent process."""
+    delay = 1.0
+    while not self._stopped.is_set():
+      try:
+        ensure_ready = getattr(self.broker, "ensure_market_data_ready", None)
+        if callable(ensure_ready):
+          await self._run_xtdata_control(
+            "whole-market-readiness",
+            ensure_ready,
+          )
+        accepted = bool(
+          await self._run_xtdata_control(
+            "subscribe-whole-market",
+            self.broker.subscribe_whole_market,
+            self._enqueue_whole_market_event,
+          )
         )
-        self._whole_market_overflow.set()
-        return
-      self._whole_market_events.put_nowait((captured_at, data))
+        if not accepted:
+          raise RuntimeError("XTData rejected whole-market subscription")
+        self._whole_market_subscription_active = True
+        self._whole_market_subscription_ready.set()
+        generation_reader = getattr(
+          self.broker,
+          "market_data_connection_generation",
+          None,
+        )
+        subscribed_generation = int(
+          generation_reader() if callable(generation_reader) else 0
+        )
+        subscription_started = time.monotonic()
+        silence_confirmations = 0
+        logger.info(
+          "QMT process-wide whole-market subscription is active: generation=%s",
+          subscribed_generation,
+        )
+        reset_reason = ""
+        while not self._stopped.is_set():
+          try:
+            await asyncio.wait_for(
+              self._stopped.wait(),
+              timeout=MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS,
+            )
+            return
+          except asyncio.TimeoutError:
+            pass
 
-    loop.call_soon_threadsafe(enqueue)
+          current_generation = int(
+            generation_reader() if callable(generation_reader) else 0
+          )
+          if (
+            subscribed_generation > 0
+            and current_generation != subscribed_generation
+          ):
+            reset_reason = (
+              "XTData connection generation changed: "
+              f"{subscribed_generation}->{current_generation}"
+            )
+            break
+
+          readiness = getattr(self.broker, "is_market_data_ready", None)
+          connected = bool(readiness()) if callable(readiness) else True
+          if not connected:
+            try:
+              connected = bool(
+                await self._run_xtdata_control(
+                  "whole-market-readiness",
+                  ensure_ready,
+                )
+              ) if callable(ensure_ready) else False
+            except Exception as exc:
+              logger.warning(
+                "QMT whole-market readiness probe failed: error=%s",
+                exc.__class__.__name__,
+              )
+              continue
+            if connected:
+              reset_reason = "XTData connection recovered after disconnect"
+              break
+
+          session_reader = getattr(
+            self.broker,
+            "is_whole_market_trading_session",
+            None,
+          )
+          in_trading_session = False
+          if callable(session_reader):
+            try:
+              in_trading_session = bool(
+                await self._run_xtdata_control(
+                  "whole-market-trading-session",
+                  session_reader,
+                )
+              )
+            except Exception as exc:
+              logger.warning(
+                "QMT trading-session probe failed: error=%s",
+                exc.__class__.__name__,
+              )
+          if not in_trading_session:
+            silence_confirmations = 0
+            continue
+          stats = self._whole_market_capture.stats()
+          last_callback = float(stats["last_callback_monotonic"])
+          silence_seconds = time.monotonic() - max(
+            subscription_started,
+            last_callback,
+          )
+          if silence_seconds >= MARKET_STREAM_NATIVE_SILENCE_SECONDS:
+            silence_confirmations += 1
+          else:
+            silence_confirmations = 0
+          if (
+            silence_confirmations
+            >= MARKET_STREAM_NATIVE_SILENCE_CONFIRMATIONS
+          ):
+            reset_reason = (
+              "XTData callback silence confirmed during trading session: "
+              f"seconds={silence_seconds:.3f}"
+            )
+            break
+
+        if not reset_reason:
+          return
+        logger.error("QMT whole-market native subscription reset: %s", reset_reason)
+        self._market_stream_status = "STALE"
+        self._whole_market_native_reset.set()
+        self._whole_market_capture.force_resync(reset_reason)
+        self._whole_market_subscription_ready.clear()
+        self._whole_market_subscription_active = False
+        try:
+          await self._run_xtdata_control(
+            "unsubscribe-whole-market",
+            self.broker.unsubscribe_whole_market,
+          )
+        except Exception as exc:
+          fatal = _FatalMarketDataPreparationError(
+            "could not cancel invalid native whole-market subscription; "
+            "Agent restart required"
+          )
+          self._trip_market_data_fatal(fatal)
+          raise fatal from exc
+        self._whole_market_capture.reset_source(reset_reason)
+        delay = 1.0
+      except asyncio.CancelledError:
+        raise
+      except _FatalMarketDataPreparationError:
+        raise
+      except Exception as exc:
+        logger.warning(
+          "QMT whole-market subscription retry: error=%s: %s",
+          exc.__class__.__name__,
+          exc,
+        )
+        try:
+          await asyncio.wait_for(self._stopped.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+          pass
+        delay = min(delay * 2, 30.0)
+
+  async def _shutdown_whole_market_capture(self) -> None:
+    if not self._whole_market_subscription_active:
+      return
+    self._whole_market_subscription_active = False
+    self._whole_market_subscription_ready.clear()
+    try:
+      await self._run_xtdata_control(
+        "unsubscribe-whole-market",
+        self.broker.unsubscribe_whole_market,
+      )
+    except Exception as exc:
+      logger.warning(
+        "Could not remove process-wide whole-market subscription: error=%s",
+        exc.__class__.__name__,
+      )
+
+  @staticmethod
+  def _market_stream_retry_delay(
+    current_delay: float,
+    *,
+    ready_seconds: float,
+  ) -> tuple[float, float]:
+    if ready_seconds >= MARKET_STREAM_STABLE_READY_SECONDS:
+      return 1.0, 1.0
+    return current_delay, min(current_delay * 2, 30.0)
+
+  async def _wait_for_fresh_access_token(self) -> None:
+    while True:
+      if (
+        self._access_token
+        and self._access_token_expires_at
+        > datetime.now(timezone.utc) + timedelta(seconds=5)
+      ):
+        return
+      self._access_token_ready.clear()
+      if (
+        self._access_token
+        and self._access_token_expires_at
+        > datetime.now(timezone.utc) + timedelta(seconds=5)
+      ):
+        continue
+      await self._access_token_ready.wait()
+
+  async def _wait_for_initial_control_hub_registration(self) -> None:
+    self._ensure_whole_market_state()
+    await self._control_hub_registered_once.wait()
 
   async def _whole_market_stream_supervisor(self) -> None:
     delay = 1.0
@@ -968,213 +1276,737 @@ class AgentRuntime:
         await self._run_whole_market_stream()
         raise RuntimeError("whole-market stream stopped unexpectedly")
       except asyncio.CancelledError:
+        self._whole_market_capture.begin_syncing()
         self._market_stream_status = "OFFLINE"
         raise
       except Exception as exc:
+        ready_since = self._market_stream_ready_since_monotonic
+        ready_seconds = (
+          max(0.0, time.monotonic() - ready_since)
+          if ready_since > 0
+          else 0.0
+        )
+        sleep_delay, delay = self._market_stream_retry_delay(
+          delay,
+          ready_seconds=ready_seconds,
+        )
         self._market_stream_resyncs += 1
         self._market_stream_status = "SYNCING"
+        self._market_stream_ready_since_monotonic = 0.0
         logger.warning(
-          "QMT whole-market stream reconnecting: resyncs=%s error=%s: %s",
+          "QMT whole-market stream reconnecting: resyncs=%s "
+          "ready_seconds=%.3f error=%s: %s",
           self._market_stream_resyncs,
+          ready_seconds,
           exc.__class__.__name__,
           exc,
         )
-        await asyncio.sleep(delay)
-        delay = min(delay * 2, 30.0)
+        await asyncio.sleep(
+          sleep_delay + random.uniform(0.0, min(1.0, sleep_delay * 0.2))
+        )
+
+  async def _perform_market_stream_handshake(
+    self,
+    socket,
+    *,
+    access_token: str,
+  ) -> MarketStreamControl:
+    auth = AgentEnvelope(
+      message_type=AgentMessageType.AUTH,
+      payload={
+        "device_id": self.configuration.device_id,
+        "access_token": access_token,
+        "agent_version": "0.1.0",
+        "capabilities": ["market-data", self.mode],
+      },
+    )
+    await asyncio.wait_for(
+      socket.send(auth.model_dump_json()),
+      timeout=MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS,
+    )
+    raw_auth_result = await asyncio.wait_for(
+      socket.recv(),
+      timeout=MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS,
+    )
+    auth_result = AgentEnvelope.model_validate_json(raw_auth_result)
+    if (
+      auth_result.message_type is not AgentMessageType.AUTH_RESULT
+      or not auth_result.payload.get("accepted")
+    ):
+      raise RuntimeError(
+        str(auth_result.payload.get("reason") or "market authentication rejected")
+      )
+    raw_start = await asyncio.wait_for(
+      socket.recv(),
+      timeout=MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS,
+    )
+    start = MarketStreamControl.model_validate_json(raw_start)
+    if (
+      start.type is not MarketControlType.START
+      or start.markets != MARKET_STREAM_MARKETS
+    ):
+      raise RuntimeError("invalid market stream START frame")
+    return start
 
   async def _run_whole_market_stream(self) -> None:
+    self._ensure_whole_market_state()
+    await self._wait_for_fresh_access_token()
+    await self._wait_for_initial_control_hub_registration()
+    market_access_token = self._access_token
+    market_token_expires_at = self._access_token_expires_at
     self._market_stream_status = "SYNCING"
     self._market_stream_sequence = 0
-    self._whole_market_events = asyncio.Queue(
-      maxsize=MARKET_STREAM_CAPTURE_QUEUE_BATCHES
-    )
-    self._whole_market_overflow = asyncio.Event()
-    self._whole_market_estimated_batch_bytes = (
-      MARKET_STREAM_CAPTURE_QUEUE_BYTES // MARKET_STREAM_CAPTURE_QUEUE_BATCHES
-    )
-    subscribed = False
+    self._market_stream_outbound_depth = 0
+    self._market_stream_outbound_bytes = 0
+    await self._whole_market_subscription_ready.wait()
+    self._whole_market_native_reset.clear()
+    self._whole_market_capture.begin_syncing()
     async with websockets.connect(
       _websocket_url(self.configuration.api_url, "/ws/agent/market"),
       subprotocols=[MARKET_STREAM_SUBPROTOCOL],
       max_size=MAX_MARKET_STREAM_FRAME_BYTES,
       ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,
       ping_timeout=WEBSOCKET_PING_TIMEOUT_SECONDS,
+      open_timeout=MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS,
     ) as socket:
-      auth = AgentEnvelope(
-        message_type=AgentMessageType.AUTH,
-        payload={
-          "device_id": self.configuration.device_id,
-          "access_token": self._access_token,
-          "agent_version": "0.1.0",
-          "capabilities": ["market-data", self.mode],
-        },
+      start = await self._perform_market_stream_handshake(
+        socket,
+        access_token=market_access_token,
       )
-      await socket.send(auth.model_dump_json())
-      auth_result = AgentEnvelope.model_validate_json(await socket.recv())
-      if (
-        auth_result.message_type is not AgentMessageType.AUTH_RESULT
-        or not auth_result.payload.get("accepted")
-      ):
-        raise RuntimeError(
-          str(auth_result.payload.get("reason") or "market authentication rejected")
-        )
-      start = MarketStreamControl.model_validate_json(await socket.recv())
-      if (
-        start.type is not MarketControlType.START
-        or start.markets != MARKET_STREAM_MARKETS
-      ):
-        raise RuntimeError("invalid market stream START frame")
-      try:
-        subscribed = bool(
-          await self._run_xtdata_control(
-            "subscribe-whole-market",
-            self.broker.subscribe_whole_market,
-            self._enqueue_whole_market_event,
-          )
-        )
-        if not subscribed:
-          raise RuntimeError("XTData rejected whole-market subscription")
-        snapshot = await self._run_xtdata_control(
-          "whole-market-snapshot",
-          self.broker.whole_market_snapshot,
-        )
-        if not isinstance(snapshot, dict) or not snapshot:
-          raise RuntimeError("XTData returned an empty SH/SZ snapshot")
-
-        sequence = 1
-        await self._send_market_batch_and_wait_ack(
+      stream_trading_date = datetime.now(SHANGHAI_ZONE).date()
+      snapshot_raw, snapshot_watermark = (
+        await self._build_whole_market_snapshot(stream_trading_date)
+      )
+      self._require_native_whole_market_sync("snapshot-build")
+      snapshot = await self._prepare_encoded_market_batch(
+        stream_id=start.stream_id,
+        sequence=1,
+        kind=MarketBatchKind.SNAPSHOT,
+        captured_at=datetime.now(timezone.utc),
+        raw_data=snapshot_raw,
+      )
+      self._require_native_whole_market_sync("snapshot-encode")
+      self._require_native_whole_market_sync("snapshot-send")
+      await self._send_encoded_market_batch_and_wait_ack(socket, snapshot)
+      self._require_native_whole_market_sync("snapshot-ack")
+      logger.info(
+        "QMT whole-market snapshot acknowledged: stream_id=%s "
+        "instruments=%s watermark=%s bytes=%s",
+        start.stream_id,
+        snapshot.batch.instrument_count,
+        snapshot_watermark,
+        len(snapshot.payload),
+      )
+      first_delta = self._whole_market_capture.activate_ready(
+        after_sequence=snapshot_watermark,
+        trading_date=stream_trading_date,
+      )
+      self._require_native_whole_market_sync("ready-cut")
+      ready_barrier = await self._prepare_encoded_market_batch(
+        stream_id=start.stream_id,
+        sequence=2,
+        kind=MarketBatchKind.DELTA,
+        captured_at=(
+          first_delta.captured_at
+          if first_delta is not None
+          else datetime.now(timezone.utc)
+        ),
+        raw_data=first_delta.data if first_delta is not None else {},
+      )
+      self._require_native_whole_market_sync("ready-barrier-encode")
+      self._require_native_whole_market_sync("ready-barrier-send")
+      await self._send_encoded_market_batch_and_wait_ack(socket, ready_barrier)
+      self._require_native_whole_market_sync("ready-barrier-ack")
+      self._market_stream_status = "READY"
+      self._market_stream_ready_since_monotonic = time.monotonic()
+      logger.info(
+        "QMT whole-market READY barrier acknowledged: "
+        "stream_id=%s sequence=2 instruments=%s",
+        start.stream_id,
+        ready_barrier.batch.instrument_count,
+      )
+      outbound = _BoundedMarketBatchBuffer(
+        max_batches=MARKET_STREAM_OUTBOUND_BATCHES,
+        max_bytes=MARKET_STREAM_OUTBOUND_BYTES,
+      )
+      producer = asyncio.create_task(
+        self._whole_market_batch_producer(
+          outbound,
+          stream_id=start.stream_id,
+          starting_sequence=2,
+          trading_date=stream_trading_date,
+          first_event=None,
+        ),
+        name="whole-market-batch-producer",
+      )
+      transport = asyncio.create_task(
+        self._transmit_market_batches(
           socket,
-          MarketStreamBatch(
-            stream_id=start.stream_id,
-            sequence=sequence,
-            kind=MarketBatchKind.SNAPSHOT,
-            captured_at=datetime.now(timezone.utc),
-            instrument_count=len(snapshot),
-            data=snapshot,
-          ),
-        )
-        logger.info(
-          "QMT whole-market snapshot acknowledged: stream_id=%s instruments=%s",
-          start.stream_id,
-          len(snapshot),
-        )
-        self._market_stream_status = "READY"
-        stream_trading_date = datetime.now(SHANGHAI_ZONE).date()
-        while True:
-          captured_at, raw_data = await self._next_whole_market_event()
-          if captured_at.astimezone(SHANGHAI_ZONE).date() != stream_trading_date:
-            raise RuntimeError("trading day changed; full snapshot required")
-          serialize_started = time.monotonic()
-          data = await asyncio.to_thread(
-            self.broker.prepare_whole_market_data,
-            raw_data,
-          )
-          if not data:
-            raise RuntimeError("XTData returned an empty whole-market batch")
-          serialize_ms = (time.monotonic() - serialize_started) * 1000
-          sequence += 1
-          await self._send_market_batch_and_wait_ack(
-            socket,
-            MarketStreamBatch(
-              stream_id=start.stream_id,
-              sequence=sequence,
-              kind=MarketBatchKind.DELTA,
-              captured_at=captured_at,
-              instrument_count=len(data),
-              data=data,
-            ),
-          )
-          logger.debug(
-            "QMT whole-market batch prepared: sequence=%s instruments=%s "
-            "serialize_ms=%.3f capture_queue=%s",
-            sequence,
-            len(data),
-            serialize_ms,
-            self._whole_market_events.qsize(),
-          )
-          self._whole_market_events.task_done()
-      finally:
-        if subscribed:
-          cleanup_task = asyncio.create_task(
-            self._run_xtdata_control(
-              "unsubscribe-whole-market",
-              self.broker.unsubscribe_whole_market,
-            ),
-            name="unsubscribe-whole-market",
-          )
-          try:
-            await asyncio.shield(cleanup_task)
-          except asyncio.CancelledError:
-            await cleanup_task
-            raise
-          except Exception as exc:
-            logger.warning(
-              "Could not remove whole-market subscription: error=%s",
-              exc.__class__.__name__,
-            )
-
-  async def _next_whole_market_event(
-    self,
-  ) -> tuple[datetime, dict[str, dict[str, Any]]]:
-    queued = asyncio.create_task(self._whole_market_events.get())
-    overflow = asyncio.create_task(self._whole_market_overflow.wait())
-    try:
-      done, _ = await asyncio.wait(
-        {queued, overflow},
-        return_when=asyncio.FIRST_COMPLETED,
+          outbound,
+          stream_id=start.stream_id,
+        ),
+        name="whole-market-batch-transport",
       )
-      if overflow in done and self._whole_market_overflow.is_set():
-        raise RuntimeError("whole-market capture queue overflow")
-      return queued.result()
+      renewal = asyncio.create_task(
+        self._close_before_token_expiry(
+          socket,
+          expires_at=market_token_expires_at,
+        ),
+        name="whole-market-token-renewal",
+      )
+      native_reset = asyncio.create_task(
+        self._whole_market_native_reset.wait(),
+        name="whole-market-native-reset",
+      )
+      capture_invalidated = asyncio.create_task(
+        self._whole_market_capture.wait_until_invalidated(),
+        name="whole-market-capture-invalidated",
+      )
+      try:
+        done, _ = await asyncio.wait(
+          {
+            producer,
+            transport,
+            renewal,
+            native_reset,
+            capture_invalidated,
+          },
+          return_when=asyncio.FIRST_COMPLETED,
+        )
+        if native_reset in done and self._whole_market_native_reset.is_set():
+          raise RuntimeError("native whole-market subscription was reset")
+        if capture_invalidated in done:
+          raise RuntimeError("whole-market READY capture was invalidated")
+        completed = next(iter(done))
+        await completed
+        raise RuntimeError("whole-market pipeline stopped unexpectedly")
+      finally:
+        for task in (
+          producer,
+          transport,
+          renewal,
+          native_reset,
+          capture_invalidated,
+        ):
+          if not task.done():
+            task.cancel()
+        await asyncio.gather(
+          producer,
+          transport,
+          renewal,
+          native_reset,
+          capture_invalidated,
+          return_exceptions=True,
+        )
+        self._whole_market_capture.begin_syncing()
+
+  def _require_native_whole_market_sync(self, stage: str) -> None:
+    if (
+      self._whole_market_native_reset.is_set()
+      or not self._whole_market_subscription_ready.is_set()
+    ):
+      raise RuntimeError(
+        "native whole-market subscription changed during sync: "
+        f"stage={stage}"
+      )
+
+  @staticmethod
+  def _whole_market_tick_source_time(tick: Any) -> float:
+    if not isinstance(tick, dict):
+      return 0.0
+    raw_time = tick.get("time")
+    try:
+      value = float(raw_time)
+    except (TypeError, ValueError):
+      value = 0.0
+    if value > 0:
+      return value / 1000.0 if value > 10_000_000_000 else value
+    timetag = str(tick.get("timetag") or "").strip()
+    digits = "".join(character for character in timetag if character.isdigit())
+    if len(digits) >= 14:
+      try:
+        parsed = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
+        return parsed.replace(tzinfo=SHANGHAI_ZONE).timestamp()
+      except ValueError:
+        return 0.0
+    return 0.0
+
+  @classmethod
+  def _merge_whole_market_snapshot(
+    cls,
+    fallback: dict[str, Any],
+    callback_latest: dict[str, Any],
+    *,
+    callback_capture_sequences: dict[str, int] | None = None,
+    callback_captured_monotonic: dict[str, float] | None = None,
+    fallback_completion_sequences: dict[str, int] | None = None,
+    fallback_completed_monotonic: dict[str, float] | None = None,
+  ) -> dict[str, Any]:
+    callback_sequences = callback_capture_sequences or {}
+    callback_monotonic = callback_captured_monotonic or {}
+    fallback_sequences = fallback_completion_sequences or {}
+    fallback_monotonic = fallback_completed_monotonic or {}
+    merged = dict(fallback)
+    for code, latest_tick in callback_latest.items():
+      fallback_tick = merged.get(code)
+      if fallback_tick is None:
+        merged[code] = latest_tick
+        continue
+      latest_time = cls._whole_market_tick_source_time(latest_tick)
+      fallback_time = cls._whole_market_tick_source_time(fallback_tick)
+      if latest_time > 0 and (
+        fallback_time <= 0 or latest_time >= fallback_time
+      ):
+        merged[code] = latest_tick
+        continue
+      if latest_time > 0 or fallback_time > 0:
+        continue
+      callback_sequence = callback_sequences.get(code, 0)
+      fallback_sequence = fallback_sequences.get(code, 0)
+      callback_completed_at = callback_monotonic.get(code, 0.0)
+      fallback_completed_at = fallback_monotonic.get(code, 0.0)
+      if (
+        callback_sequence > fallback_sequence > 0
+        or (
+          fallback_sequence <= 0
+          and callback_completed_at > fallback_completed_at > 0
+        )
+      ):
+        # Neither side exposes a source timestamp. A callback captured only
+        # after this code's native fragment completed is strictly newer than
+        # the fallback and must be included before the global watermark cut.
+        merged[code] = latest_tick
+    return merged
+
+  async def _build_whole_market_snapshot(
+    self,
+    trading_date: date,
+  ) -> tuple[dict[str, Any], int]:
+    codes_reader = getattr(self.broker, "whole_market_codes", None)
+    expected_values = (
+      await self._run_xtdata_control(
+        "whole-market-codes",
+        codes_reader,
+      )
+      if callable(codes_reader)
+      else ()
+    )
+    expected_codes = frozenset(expected_values or ())
+    deadline = time.monotonic() + MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS
+    latest = self._whole_market_capture.latest_snapshot(
+      trading_date=trading_date
+    )
+    while expected_codes and not expected_codes.issubset(latest.data):
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        break
+      try:
+        await self._whole_market_capture.wait_for_change(
+          after_sequence=latest.capture_watermark,
+          timeout=remaining,
+        )
+      except asyncio.TimeoutError:
+        break
+      latest = self._whole_market_capture.latest_snapshot(
+        trading_date=trading_date
+      )
+    if expected_codes and expected_codes.issubset(latest.data):
+      logger.info(
+        "QMT initial whole-quote push covers the full universe: instruments=%s",
+        len(latest.data),
+      )
+      return latest.data, latest.capture_watermark
+
+    chunk_reader = getattr(
+      self.broker,
+      "whole_market_snapshot_chunk",
+      None,
+    )
+    fallback_completion_sequences: dict[str, int] = {}
+    fallback_completed_monotonic: dict[str, float] = {}
+    if callable(chunk_reader) and expected_codes:
+      fallback: dict[str, Any] = {}
+      ordered_codes = tuple(
+        code for code in expected_values if code in expected_codes
+      )
+      for start in range(
+        0,
+        len(ordered_codes),
+        WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE,
+      ):
+        batch = list(
+          ordered_codes[start : start + WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE]
+        )
+
+        def read_fragment():
+          fragment = chunk_reader(batch)
+          return (
+            fragment,
+            self._whole_market_capture.capture_sequence,
+            time.monotonic(),
+          )
+
+        fragment, completion_sequence, completed_monotonic = (
+          await self._run_xtdata_control(
+            "whole-market-snapshot:"
+            f"{start // WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE}",
+            read_fragment,
+          )
+        )
+        if not isinstance(fragment, dict):
+          raise RuntimeError("XTData returned an invalid snapshot fragment")
+        fallback.update(fragment)
+        for code in batch:
+          fallback_completion_sequences[code] = completion_sequence
+          fallback_completed_monotonic[code] = completed_monotonic
+        # Each fragment has its own native timeout. Yield explicitly between
+        # calls so heartbeats and WebSocket control tasks remain schedulable.
+        await asyncio.sleep(0)
+    else:
+      def read_snapshot():
+        snapshot = self.broker.whole_market_snapshot()
+        return (
+          snapshot,
+          self._whole_market_capture.capture_sequence,
+          time.monotonic(),
+        )
+
+      fallback, completion_sequence, completed_monotonic = (
+        await self._run_xtdata_control(
+          "whole-market-snapshot",
+          read_snapshot,
+        )
+      )
+      for code in expected_codes:
+        fallback_completion_sequences[code] = completion_sequence
+        fallback_completed_monotonic[code] = completed_monotonic
+    if not isinstance(fallback, dict) or not fallback:
+      raise RuntimeError("XTData returned an empty SH/SZ snapshot")
+    latest = self._whole_market_capture.latest_snapshot(
+      trading_date=trading_date
+    )
+    merged = self._merge_whole_market_snapshot(
+      fallback,
+      latest.data,
+      callback_capture_sequences=latest.capture_sequences,
+      callback_captured_monotonic=latest.captured_monotonic,
+      fallback_completion_sequences=fallback_completion_sequences,
+      fallback_completed_monotonic=fallback_completed_monotonic,
+    )
+    missing_codes = expected_codes.difference(merged)
+    if missing_codes:
+      missing_samples = sorted(missing_codes)[:5]
+      logger.warning(
+        "QMT whole-market snapshot omits instruments without an available "
+        "tick: missing=%s expected=%s samples=%s",
+        len(missing_codes),
+        len(expected_codes),
+        missing_samples,
+      )
+    logger.info(
+      "QMT whole-market snapshot used get_full_tick fallback: "
+      "expected=%s callback_coverage=%s merged=%s",
+      len(expected_codes),
+      len(latest.data),
+      len(merged),
+    )
+    return merged, latest.capture_watermark
+
+  async def _prepare_encoded_market_batch(
+    self,
+    *,
+    stream_id: str,
+    sequence: int,
+    kind: MarketBatchKind,
+    captured_at: datetime,
+    raw_data: dict[str, Any],
+  ) -> _EncodedMarketBatch:
+    def prepare() -> _EncodedMarketBatch:
+      data = self.broker.prepare_whole_market_data(raw_data)
+      if not isinstance(data, dict) or (
+        kind is MarketBatchKind.SNAPSHOT and not data
+      ):
+        raise RuntimeError("XTData returned an empty whole-market batch")
+      batch = MarketStreamBatch(
+        stream_id=stream_id,
+        sequence=sequence,
+        kind=kind,
+        captured_at=captured_at,
+        instrument_count=len(data),
+        data=data,
+      )
+      return _EncodedMarketBatch(batch=batch, payload=batch.to_bytes())
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+      self._whole_market_encode_executor,
+      prepare,
+    )
+
+  async def _whole_market_batch_producer(
+    self,
+    outbound: _BoundedMarketBatchBuffer,
+    *,
+    stream_id: str,
+    starting_sequence: int,
+    trading_date: date,
+    first_event: CapturedMarketEvent | None,
+  ) -> None:
+    source_events: deque[CapturedMarketEvent] = deque()
+    fragments: deque[CapturedMarketEvent] = deque()
+    if first_event is not None:
+      source_events.append(first_event)
+    pending_fragment: CapturedMarketEvent | None = None
+    last_capture_sequence = 0
+    sequence = starting_sequence
+
+    async def next_fragment() -> CapturedMarketEvent:
+      nonlocal last_capture_sequence
+      if not fragments:
+        event = (
+          source_events.popleft()
+          if source_events
+          else await self._whole_market_capture.next_ready_event()
+        )
+        if event.capture_sequence <= last_capture_sequence:
+          raise RuntimeError("whole-market capture sequence is not increasing")
+        last_capture_sequence = event.capture_sequence
+        items = list(event.data.items())
+        for offset in range(
+          0,
+          len(items),
+          MARKET_STREAM_MICROBATCH_INSTRUMENTS,
+        ):
+          values = dict(
+            items[offset : offset + MARKET_STREAM_MICROBATCH_INSTRUMENTS]
+          )
+          fragments.append(
+            CapturedMarketEvent(
+              capture_sequence=event.capture_sequence,
+              captured_at=event.captured_at,
+              captured_monotonic=event.captured_monotonic,
+              data=values,
+              estimated_bytes=max(1024, len(values) * 512),
+            )
+          )
+      return fragments.popleft()
+
+    while True:
+      fragment = pending_fragment or await next_fragment()
+      pending_fragment = None
+      if fragment.captured_at.astimezone(SHANGHAI_ZONE).date() != trading_date:
+        raise RuntimeError("trading day changed; full snapshot required")
+      raw_data = dict(fragment.data)
+      codes = set(raw_data)
+      estimated_bytes = fragment.estimated_bytes
+      captured_at = fragment.captured_at
+      deadline = time.monotonic() + MARKET_STREAM_MICROBATCH_SECONDS
+      while (
+        len(raw_data) < MARKET_STREAM_MICROBATCH_INSTRUMENTS
+        and estimated_bytes < MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES
+      ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          break
+        try:
+          candidate = await asyncio.wait_for(
+            next_fragment(),
+            timeout=remaining,
+          )
+        except asyncio.TimeoutError:
+          break
+        if (
+          candidate.captured_at.astimezone(SHANGHAI_ZONE).date()
+          != trading_date
+        ):
+          raise RuntimeError("trading day changed; full snapshot required")
+        if (
+          codes.intersection(candidate.data)
+          or len(raw_data) + len(candidate.data)
+          > MARKET_STREAM_MICROBATCH_INSTRUMENTS
+          or estimated_bytes + candidate.estimated_bytes
+          > MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES
+        ):
+          pending_fragment = candidate
+          break
+        raw_data.update(candidate.data)
+        codes.update(candidate.data)
+        estimated_bytes += candidate.estimated_bytes
+        captured_at = min(captured_at, candidate.captured_at)
+
+      sequence += 1
+      serialize_started = time.monotonic()
+      encoded = await self._prepare_encoded_market_batch(
+        stream_id=stream_id,
+        sequence=sequence,
+        kind=MarketBatchKind.DELTA,
+        captured_at=captured_at,
+        raw_data=raw_data,
+      )
+      await outbound.put(encoded)
+      self._market_stream_outbound_depth = outbound.depth
+      self._market_stream_outbound_bytes = outbound.bytes
+      logger.debug(
+        "QMT whole-market batch prepared: sequence=%s instruments=%s "
+        "serialize_ms=%.3f bytes=%s capture_queue=%s outbound=%s",
+        sequence,
+        encoded.batch.instrument_count,
+        (time.monotonic() - serialize_started) * 1000,
+        len(encoded.payload),
+        self._whole_market_capture.queue_depth,
+        outbound.depth,
+      )
+
+  @staticmethod
+  def _parse_market_control_frame(raw_control: Any) -> MarketStreamControl:
+    if not isinstance(raw_control, str):
+      raise RuntimeError("market stream control must be a text frame")
+    control = MarketStreamControl.model_validate_json(raw_control)
+    if control.type is MarketControlType.RESYNC:
+      raise RuntimeError(control.reason or "API requested market resync")
+    return control
+
+  async def _transmit_market_batches(
+    self,
+    socket,
+    outbound: _BoundedMarketBatchBuffer,
+    *,
+    stream_id: str,
+  ) -> None:
+    pending: deque[_PendingMarketAck] = deque()
+    receive_task = asyncio.create_task(socket.recv())
+    get_task: asyncio.Task[_EncodedMarketBatch] | None = None
+    try:
+      while True:
+        if (
+          len(pending) < MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES
+          and get_task is None
+        ):
+          get_task = asyncio.create_task(outbound.get())
+        waiters: set[asyncio.Task[Any]] = {receive_task}
+        if get_task is not None:
+          waiters.add(get_task)
+        timeout = None
+        if pending:
+          timeout = max(
+            0.0,
+            MARKET_STREAM_ACK_TIMEOUT_SECONDS
+            - (time.monotonic() - pending[0].sent_monotonic),
+          )
+        done, _ = await asyncio.wait(
+          waiters,
+          timeout=timeout,
+          return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+          raise asyncio.TimeoutError("market stream ACK timed out")
+
+        if receive_task in done:
+          control = self._parse_market_control_frame(receive_task.result())
+          if not pending:
+            raise RuntimeError("market stream ACK arrived with no pending batch")
+          expected = pending.popleft()
+          if (
+            control.type is not MarketControlType.ACK
+            or control.stream_id != stream_id
+            or control.sequence != expected.encoded.batch.sequence
+          ):
+            raise RuntimeError("market stream ACK does not match sent batch")
+          latency_ms = (
+            time.monotonic() - expected.sent_monotonic
+          ) * 1000
+          await outbound.acknowledge(expected.encoded)
+          self._market_stream_sequence = expected.encoded.batch.sequence
+          self._market_stream_ack_latency_ms = latency_ms
+          self._market_stream_outbound_depth = outbound.depth
+          self._market_stream_outbound_bytes = outbound.bytes
+          logger.debug(
+            "QMT market batch ACK: sequence=%s bytes=%s latency_ms=%.3f "
+            "unacknowledged=%s outbound=%s",
+            expected.encoded.batch.sequence,
+            len(expected.encoded.payload),
+            latency_ms,
+            len(pending),
+            outbound.depth,
+          )
+          receive_task = asyncio.create_task(socket.recv())
+
+        if get_task is not None and get_task in done:
+          encoded = get_task.result()
+          get_task = None
+          if encoded.batch.stream_id != stream_id:
+            raise RuntimeError("market batch belongs to another stream")
+          started = time.monotonic()
+          await asyncio.wait_for(
+            socket.send(encoded.payload),
+            timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+          )
+          pending.append(
+            _PendingMarketAck(
+              encoded=encoded,
+              sent_monotonic=started,
+            )
+          )
     finally:
-      for task in (queued, overflow):
+      tasks = [receive_task]
+      if get_task is not None:
+        tasks.append(get_task)
+      for task in tasks:
         if not task.done():
           task.cancel()
-      await asyncio.gather(queued, overflow, return_exceptions=True)
+      await asyncio.gather(*tasks, return_exceptions=True)
 
   async def _send_market_batch_and_wait_ack(
     self,
     socket,
     batch: MarketStreamBatch,
   ) -> None:
-    if MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES < 1:
-      raise RuntimeError("invalid market stream ACK window")
-    payload = batch.to_bytes()
-    self._whole_market_estimated_batch_bytes = max(1, len(payload))
+    await self._send_encoded_market_batch_and_wait_ack(
+      socket,
+      _EncodedMarketBatch(batch=batch, payload=batch.to_bytes()),
+    )
+
+  async def _send_encoded_market_batch_and_wait_ack(
+    self,
+    socket,
+    encoded: _EncodedMarketBatch,
+  ) -> None:
     started = time.monotonic()
     await asyncio.wait_for(
-      socket.send(payload),
+      socket.send(encoded.payload),
       timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
     )
     raw_ack = await asyncio.wait_for(
       socket.recv(),
       timeout=MARKET_STREAM_ACK_TIMEOUT_SECONDS,
     )
-    if not isinstance(raw_ack, str):
-      raise RuntimeError("market stream ACK must be a text frame")
-    ack = MarketStreamControl.model_validate_json(raw_ack)
-    if ack.type is MarketControlType.RESYNC:
-      raise RuntimeError(ack.reason or "API requested market resync")
+    ack = self._parse_market_control_frame(raw_ack)
     if (
       ack.type is not MarketControlType.ACK
-      or ack.stream_id != batch.stream_id
-      or ack.sequence != batch.sequence
+      or ack.stream_id != encoded.batch.stream_id
+      or ack.sequence != encoded.batch.sequence
     ):
       raise RuntimeError("market stream ACK does not match sent batch")
     logger.debug(
-      "QMT market batch ACK: sequence=%s bytes=%s latency_ms=%.3f queue=%s",
-      batch.sequence,
-      len(payload),
+      "QMT market batch ACK: sequence=%s bytes=%s latency_ms=%.3f",
+      encoded.batch.sequence,
+      len(encoded.payload),
       (time.monotonic() - started) * 1000,
-      self._whole_market_events.qsize(),
     )
-    self._market_stream_sequence = batch.sequence
+    self._market_stream_sequence = encoded.batch.sequence
     self._market_stream_ack_latency_ms = (
       time.monotonic() - started
     ) * 1000
 
-  async def _close_before_token_expiry(self, socket) -> None:
-    renew_at = self._access_token_expires_at - timedelta(minutes=2)
+  async def _close_before_token_expiry(
+    self,
+    socket,
+    *,
+    expires_at: datetime | None = None,
+  ) -> None:
+    renew_at = (
+      expires_at or self._access_token_expires_at
+    ) - timedelta(minutes=2)
     delay = max(
       1.0,
       (renew_at - datetime.now(timezone.utc)).total_seconds(),
@@ -1209,7 +2041,10 @@ class AgentRuntime:
       ),
       market_stream_status=self._market_stream_status,
       market_stream_sequence=self._market_stream_sequence,
-      market_stream_queue_depth=self._whole_market_events.qsize(),
+      market_stream_queue_depth=(
+        self._whole_market_capture.queue_depth
+        + self._market_stream_outbound_depth
+      ),
       market_stream_resyncs=self._market_stream_resyncs,
       market_stream_ack_latency_ms=self._market_stream_ack_latency_ms,
     )
@@ -1882,17 +2717,7 @@ class AgentRuntime:
       self._session_loop = None
     if not hasattr(self, "_market_event_overflow"):
       self._market_event_overflow = asyncio.Event()
-    if not hasattr(self, "_whole_market_events"):
-      self._whole_market_events = asyncio.Queue(
-        maxsize=MARKET_STREAM_CAPTURE_QUEUE_BATCHES
-      )
-    if not hasattr(self, "_whole_market_overflow"):
-      self._whole_market_overflow = asyncio.Event()
-    if not hasattr(self, "_whole_market_estimated_batch_bytes"):
-      self._whole_market_estimated_batch_bytes = (
-        MARKET_STREAM_CAPTURE_QUEUE_BYTES
-        // MARKET_STREAM_CAPTURE_QUEUE_BATCHES
-      )
+    self._ensure_whole_market_state()
     if not hasattr(self, "_market_stream_resyncs"):
       self._market_stream_resyncs = 0
     if not hasattr(self, "_market_stream_status"):
@@ -1901,6 +2726,40 @@ class AgentRuntime:
       self._market_stream_sequence = 0
     if not hasattr(self, "_market_stream_ack_latency_ms"):
       self._market_stream_ack_latency_ms = 0.0
+
+  def _ensure_whole_market_state(self) -> None:
+    """Initialize capture state for focused harnesses using ``__new__``."""
+    if not hasattr(self, "_whole_market_capture"):
+      self._whole_market_capture = WholeMarketCapture(
+        max_ready_callbacks=MARKET_STREAM_READY_INGRESS_CALLBACKS,
+        max_ready_estimated_bytes=MARKET_STREAM_READY_INGRESS_BYTES,
+        estimated_tick_bytes=MARKET_STREAM_READY_ESTIMATED_TICK_BYTES,
+      )
+    if not hasattr(self, "_whole_market_subscription_ready"):
+      self._whole_market_subscription_ready = asyncio.Event()
+    if not hasattr(self, "_whole_market_subscription_active"):
+      self._whole_market_subscription_active = False
+    if not hasattr(self, "_whole_market_native_reset"):
+      self._whole_market_native_reset = asyncio.Event()
+    if not hasattr(self, "_access_token_ready"):
+      self._access_token_ready = asyncio.Event()
+    if not hasattr(self, "_control_hub_registered_once"):
+      self._control_hub_registered_once = asyncio.Event()
+    if not hasattr(self, "_access_token"):
+      self._access_token = ""
+    if not hasattr(self, "_access_token_expires_at"):
+      self._access_token_expires_at = datetime.now(timezone.utc)
+    if not hasattr(self, "_whole_market_encode_executor"):
+      self._whole_market_encode_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="qmt-whole-market-encode",
+      )
+    if not hasattr(self, "_market_stream_ready_since_monotonic"):
+      self._market_stream_ready_since_monotonic = 0.0
+    if not hasattr(self, "_market_stream_outbound_depth"):
+      self._market_stream_outbound_depth = 0
+    if not hasattr(self, "_market_stream_outbound_bytes"):
+      self._market_stream_outbound_bytes = 0
 
   def _cleanup_expired_market_uploads(self, now: float | None = None) -> None:
     self._ensure_market_upload_state()

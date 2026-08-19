@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timedelta, timezone
+from datetime import time as datetime_time
 from numbers import Integral, Real
 from typing import Any, Iterator
 from zoneinfo import ZoneInfo
@@ -25,7 +26,33 @@ MAX_MARKET_DATA_FRAME_RECORDS = 100_000
 MAX_MARKET_DATA_CODES = 300
 MAX_FINANCIAL_DATA_CODES = 100
 WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
+WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE = 256
 WHOLE_QUOTE_SECTORS = ("沪深A股", "沪深指数")
+WHOLE_QUOTE_TICK_FIELDS = (
+  "time",
+  "timetag",
+  "lastPrice",
+  "open",
+  "high",
+  "low",
+  "lastClose",
+  "amount",
+  "volume",
+  "pvolume",
+  "tickvol",
+  "stockStatus",
+  "openInt",
+  "lastSettlementPrice",
+  "settlementPrice",
+  "transactionNum",
+  "askPrice",
+  "bidPrice",
+  "askVol",
+  "bidVol",
+  "priceTick",
+  "upperLimit",
+  "lowerLimit",
+)
 FINANCIAL_DATA_RECORD_FORMAT = "financial-row-v1"
 SUPPORTED_FINANCIAL_TABLES = (
   "Balance",
@@ -417,7 +444,23 @@ class SimulatorBroker:
     del callback
     return False
 
+  def whole_market_codes(self) -> tuple[str, ...]:
+    return ()
+
+  def market_data_connection_generation(self) -> int:
+    return 0
+
+  def is_whole_market_trading_session(self) -> bool:
+    return False
+
   def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
+    return {}
+
+  def whole_market_snapshot_chunk(
+    self,
+    codes: list[str],
+  ) -> dict[str, dict[str, Any]]:
+    del codes
     return {}
 
   def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
@@ -447,6 +490,8 @@ class _LocalMarketStreamer:
     self._whole_quote_metadata_date = None
     self._whole_quote_metadata_refreshing = False
     self._whole_quote_subscription: int | list[int] | None = None
+    self._whole_quote_calendar_date = None
+    self._whole_quote_is_trading_date = False
 
   @staticmethod
   def _positive_number(value: Any) -> float:
@@ -492,6 +537,11 @@ class _LocalMarketStreamer:
           or detail.get("up_stop_price")
           or detail.get("upperLimit")
         )
+        lower_limit = self._positive_number(
+          detail.get("DownStopPrice")
+          or detail.get("down_stop_price")
+          or detail.get("lowerLimit")
+        )
         price_tick = self._positive_number(
           detail.get("PriceTick")
           or detail.get("price_tick")
@@ -500,6 +550,8 @@ class _LocalMarketStreamer:
         values: dict[str, float] = {}
         if upper_limit > 0:
           values["upperLimit"] = upper_limit
+        if lower_limit > 0:
+          values["lowerLimit"] = lower_limit
         if price_tick > 0:
           values["priceTick"] = price_tick
         if values:
@@ -581,6 +633,12 @@ class _LocalMarketStreamer:
         or raw_tick.get("up_stop_price")
       ) <= 0 and values.get("upperLimit", 0) > 0:
         raw_tick["upperLimit"] = values["upperLimit"]
+      if self._positive_number(
+        raw_tick.get("lowerLimit")
+        or raw_tick.get("DownStopPrice")
+        or raw_tick.get("down_stop_price")
+      ) <= 0 and values.get("lowerLimit", 0) > 0:
+        raw_tick["lowerLimit"] = values["lowerLimit"]
       if self._positive_number(
         raw_tick.get("priceTick")
         or raw_tick.get("PriceTick")
@@ -666,7 +724,7 @@ class _LocalMarketStreamer:
 
     with self._access_lock:
       local_id = self.data_manager.subscribe_whole_quote(
-        codes,
+        markets,
         callback=on_data,
       )
     if not self._valid_subscription(local_id):
@@ -678,8 +736,54 @@ class _LocalMarketStreamer:
     self._unsubscribe_local(local_id)
     return True
 
+  def whole_market_codes(self) -> tuple[str, ...]:
+    today = datetime.now(SHANGHAI_TIMEZONE).date()
+    with self._lock:
+      metadata_is_current = (
+        self._whole_quote_metadata_date == today
+        and bool(self._whole_quote_codes)
+      )
+    if not metadata_is_current:
+      self._refresh_whole_quote_metadata(["SH", "SZ"])
+    with self._lock:
+      return self._whole_quote_codes
+
+  def is_whole_market_trading_session(self) -> bool:
+    now = datetime.now(SHANGHAI_TIMEZONE)
+    local_time = now.time().replace(tzinfo=None)
+    if not (
+      datetime_time(9, 30) <= local_time <= datetime_time(11, 30)
+      or datetime_time(13, 0) <= local_time <= datetime_time(15, 0)
+    ):
+      return False
+    today = now.date()
+    with self._lock:
+      if self._whole_quote_calendar_date == today:
+        return self._whole_quote_is_trading_date
+    reader = getattr(self.data_manager, "get_trading_dates", None)
+    if not callable(reader):
+      return today.weekday() < 5
+    try:
+      with self._access_lock:
+        values = reader("SH", today, today)
+      today_text = today.strftime("%Y%m%d")
+      is_trading_date = any(
+        str(value).replace("-", "")[:8] == today_text
+        for value in (values or [])
+      )
+    except Exception as exc:
+      logger.warning(
+        "Could not verify whole-market trading date: error=%s",
+        exc.__class__.__name__,
+      )
+      return False
+    with self._lock:
+      self._whole_quote_calendar_date = today
+      self._whole_quote_is_trading_date = is_trading_date
+    return is_trading_date
+
   def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
-    """Read the latest complete SH/SZ state after subscription establishment."""
+    """Read a complete SH/SZ state using bounded native SDK calls."""
     markets = ["SH", "SZ"]
     today = datetime.now(SHANGHAI_TIMEZONE).date()
     with self._lock:
@@ -693,15 +797,57 @@ class _LocalMarketStreamer:
       codes = self._whole_quote_codes
     if not codes:
       raise RuntimeError("SH/SZ instrument universe is empty")
+    snapshot: dict[str, Any] = {}
+    for start in range(0, len(codes), WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE):
+      batch = list(codes[start : start + WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE])
+      # Do not expose a partial result: an exception from any native call
+      # aborts this method before the locally accumulated mapping is returned.
+      snapshot.update(self.whole_market_snapshot_chunk(batch))
+      if start + WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE < len(codes):
+        # get_full_tick may hold the GIL. Explicitly yield between native calls
+        # so the Agent heartbeat/event-loop thread gets a scheduling window.
+        time.sleep(0)
+    return self.prepare_whole_market_data(snapshot)
+
+  def whole_market_snapshot_chunk(
+    self,
+    codes: list[str],
+  ) -> dict[str, dict[str, Any]]:
+    """Read at most one bounded native full-tick fragment."""
+    requested = [str(code).strip().upper() for code in codes if str(code).strip()]
+    if not requested:
+      return {}
+    if len(requested) > WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE:
+      raise ValueError(
+        "whole-market snapshot fragment exceeds native batch limit: "
+        f"codes={len(requested)} max={WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE}"
+      )
+    with self._lock:
+      allowed_codes = self._whole_quote_code_set
+    if any(code not in allowed_codes for code in requested):
+      raise ValueError("whole-market snapshot fragment contains unknown code")
     with self._access_lock:
-      snapshot = self.data_manager.get_full_tick(codes)
-    safe_snapshot = _json_safe(snapshot)
-    enriched = self._enrich_whole_quote_data(safe_snapshot)
-    return enriched if isinstance(enriched, dict) else {}
+      raw_snapshot = self.data_manager.get_full_tick(list(requested))
+    if not isinstance(raw_snapshot, dict):
+      raise RuntimeError("XTData returned an invalid full-tick fragment")
+    safe_snapshot = _json_safe(raw_snapshot)
+    if not isinstance(safe_snapshot, dict):
+      raise RuntimeError("XTData full-tick fragment could not be normalized")
+    return safe_snapshot
 
   def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
     """Normalize one XT callback outside the callback thread."""
-    safe_data = _json_safe(self._filter_whole_quote_data(data))
+    filtered = self._filter_whole_quote_data(data)
+    selected = {
+      code: {
+        field: raw_tick[field]
+        for field in WHOLE_QUOTE_TICK_FIELDS
+        if field in raw_tick
+      }
+      for code, raw_tick in filtered.items()
+      if isinstance(raw_tick, dict)
+    }
+    safe_data = _json_safe(selected)
     enriched = self._enrich_whole_quote_data(safe_data)
     return enriched if isinstance(enriched, dict) else {}
 
@@ -710,16 +856,26 @@ class _LocalMarketStreamer:
       local_id = self._whole_quote_subscription
       self._whole_quote_subscription = None
     if local_id is not None:
-      self._unsubscribe_local(local_id)
+      self._unsubscribe_local(local_id, suppress_errors=False)
 
-  def _unsubscribe_local(self, local_id: int | list[int]) -> None:
+  def _unsubscribe_local(
+    self,
+    local_id: int | list[int],
+    *,
+    suppress_errors: bool = True,
+  ) -> None:
     values = local_id if isinstance(local_id, list) else [local_id]
+    errors: list[Exception] = []
     with self._access_lock:
       for value in values:
         try:
           self.data_manager.unsubscribe_quote(int(value))
-        except Exception:
-          pass
+        except Exception as exc:
+          errors.append(exc)
+    if errors and not suppress_errors:
+      raise RuntimeError(
+        f"failed to cancel {len(errors)} XTData subscription(s)"
+      ) from errors[0]
 
   def unsubscribe(self, subscription_id: str) -> None:
     with self._lock:
@@ -751,11 +907,15 @@ class QmtDataBroker(SimulatorBroker):
 
   def is_market_data_ready(self) -> bool:
     """Return cached readiness without invoking the native SDK."""
-    return bool(getattr(self.data_manager, "is_connected", False))
+    with self._xtdata_access_lock:
+      ready, _ = _observe_market_data_connection(self)
+      return ready
 
   def ensure_market_data_ready(self) -> bool:
     with self._xtdata_access_lock:
-      return _ensure_market_data_manager_connected(self.data_manager)
+      ready = _ensure_market_data_manager_connected(self.data_manager)
+      _observe_market_data_connection(self)
+      return ready
 
   def market_data(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
     return list(self.iter_market_data(payload))
@@ -782,8 +942,25 @@ class QmtDataBroker(SimulatorBroker):
   def subscribe_whole_market(self, callback) -> bool:
     return self.market_streamer.subscribe_whole_market(callback)
 
+  def whole_market_codes(self) -> tuple[str, ...]:
+    return self.market_streamer.whole_market_codes()
+
+  def market_data_connection_generation(self) -> int:
+    with self._xtdata_access_lock:
+      _, generation = _observe_market_data_connection(self)
+      return generation
+
+  def is_whole_market_trading_session(self) -> bool:
+    return self.market_streamer.is_whole_market_trading_session()
+
   def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
     return self.market_streamer.whole_market_snapshot()
+
+  def whole_market_snapshot_chunk(
+    self,
+    codes: list[str],
+  ) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.whole_market_snapshot_chunk(codes)
 
   def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
     return self.market_streamer.prepare_whole_market_data(data)
@@ -852,11 +1029,15 @@ class LiveBroker:
 
   def is_market_data_ready(self) -> bool:
     """Return cached readiness without invoking the native SDK."""
-    return bool(getattr(self.data_manager, "is_connected", False))
+    with self._xtdata_access_lock:
+      ready, _ = _observe_market_data_connection(self)
+      return ready
 
   def ensure_market_data_ready(self) -> bool:
     with self._xtdata_access_lock:
-      return _ensure_market_data_manager_connected(self.data_manager)
+      ready = _ensure_market_data_manager_connected(self.data_manager)
+      _observe_market_data_connection(self)
+      return ready
 
   def full_snapshot(self) -> dict[str, Any]:
     accounts = []
@@ -976,8 +1157,25 @@ class LiveBroker:
   def subscribe_whole_market(self, callback) -> bool:
     return self.market_streamer.subscribe_whole_market(callback)
 
+  def whole_market_codes(self) -> tuple[str, ...]:
+    return self.market_streamer.whole_market_codes()
+
+  def market_data_connection_generation(self) -> int:
+    with self._xtdata_access_lock:
+      _, generation = _observe_market_data_connection(self)
+      return generation
+
+  def is_whole_market_trading_session(self) -> bool:
+    return self.market_streamer.is_whole_market_trading_session()
+
   def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
     return self.market_streamer.whole_market_snapshot()
+
+  def whole_market_snapshot_chunk(
+    self,
+    codes: list[str],
+  ) -> dict[str, dict[str, Any]]:
+    return self.market_streamer.whole_market_snapshot_chunk(codes)
 
   def prepare_whole_market_data(self, data: Any) -> dict[str, dict[str, Any]]:
     return self.market_streamer.prepare_whole_market_data(data)
@@ -994,6 +1192,27 @@ def _iter_locked_market_data_records(
   with access_lock:
     _ensure_market_data_manager_connected(manager)
     yield from _iter_market_data_records(manager, payload)
+
+
+def _observe_market_data_connection(owner: Any) -> tuple[bool, int]:
+  """Track native connection continuity without modifying the SDK adapter."""
+  manager = owner.data_manager
+  ready = bool(getattr(manager, "is_connected", False))
+  client = getattr(manager, "_client", None)
+  identity = id(client) if client is not None else id(manager)
+  previous_ready = bool(
+    getattr(owner, "_observed_market_data_ready", False)
+  )
+  previous_identity = int(
+    getattr(owner, "_observed_market_data_identity", 0)
+  )
+  generation = int(getattr(owner, "_market_data_generation", 0))
+  if ready and (not previous_ready or identity != previous_identity):
+    generation += 1
+  owner._observed_market_data_ready = ready
+  owner._observed_market_data_identity = identity
+  owner._market_data_generation = generation
+  return ready, generation
 
 
 def _ensure_market_data_manager_connected(manager: Any) -> bool:

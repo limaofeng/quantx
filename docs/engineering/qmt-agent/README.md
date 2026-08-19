@@ -22,17 +22,32 @@ QMT Agent 子进程注入 `ENV=testing`、账户白名单和实盘开关。账�
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
 `/ws/agent/market`，子协议固定为 `quantx.market.v1`。Agent 只建立一个
-`subscribe_whole_quote(codes)`，其中 `codes` 是 QMT “沪深A股”与“沪深指数”
-板块的去重代码集合；回调入口再按同一集合防御性过滤，然后先发送完整快照，
-再发送递增序号的二进制增量批次。单标的 `1m/5m/1d` 等 QMT K 线仍由主连接控制
-`subscribe_quote`，不得从 tick 合成。
+原生 `subscribe_whole_quote(["SH", "SZ"])`。QMT 返回的数据在回调入口按本地
+沪深代码表过滤；代码表来自“沪深A股”和“沪深指数”，每日刷新后以不可变引用
+原子替换，不把代码集合改成原生订阅参数。单标的 `1m/5m/1d` 等 QMT K 线仍由
+主连接控制 `subscribe_quote`，不得从 tick 合成。
 
-whole-quote 回调只进入容量 8、估算上限 64 MiB 的捕获队列，序列化和网络 ACK
-在专用任务完成；
-队列溢出、10 秒 ACK 超时、连接故障或 RESYNC 都会关闭行情连接、取消本地
-whole-quote 并用新 `stream_id` 和全量快照恢复，不静默丢弃旧事件。交易连接
-不会被大行情帧阻塞。批量历史行情仍按请求 ID、批次序号、压缩和 SHA256
-通过 HTTP 上传。交易连接断线重连后 Agent 先上报完整账户快照。
+原生 whole-quote 采集与行情 WebSocket sink 生命周期分离：API 断线、ACK 超时、
+RESYNC 或下游 Redis 故障只会令 sink 进入 `SYNCING/STALE`，采集器继续维护每个
+标的的最新状态，不取消并重建 XTData 订阅。新 stream 从一致性 watermark 生成
+sequence 1 `SNAPSHOT`；其 ACK 后原子切换采集器，再把快照水位后的收敛更新作为
+sequence 2 `DELTA` 连续性屏障（没有变化时可为空）。只有屏障也被 ACK，Agent
+才进入 `READY`，屏障之后的真实增量从 sequence 3 开始；每日代码表刷新只替换
+本地过滤引用，只有 Agent 退出或确认 XTData 连接/回调失效时才串行重建原生订阅。
+收盘后初推不足时，完整快照按最多 256 个标的分块读取 `get_full_tick`；每块独立
+受 60 秒 native-call timeout 约束，全部分块齐全后才允许发送 `SNAPSHOT`，不会
+暴露部分结果。独立 Python 子进程每 5 秒检查 Agent 心跳；即使原生 SDK 持有 GIL
+令进程内超时无法运行，连续 90 秒无心跳也会强制终止父进程。不可恢复的 XTData
+超时或原生取消失败使用专用退出码 fail-stop，确保残留 SDK 线程不能留下“PID
+在线、心跳停止”的僵尸 Agent，并交由统一监督器重启。
+
+QMT 回调只做快速捕获；READY 捕获入口最多保留 8 个原始批次、预算 64 MiB，
+编码后发送队列同样最多 8 批、64 MiB，且最多 2 个批次处于未 ACK 状态。
+序列化和网络收发由专用任务处理。
+状态同步阶段允许按标的合并为最新值，`READY` 阶段同标的更新必须有序且不得静默
+覆盖。任何容量/字节上限、ACK 超时或序号异常都会显式使 stream 失效并从全量
+快照收敛，但不得拖垮交易连接、心跳或成交回报。批量历史行情仍按请求 ID、批次
+序号、压缩和 SHA256 通过 HTTP 上传；交易连接重连后先上报完整账户快照。
 
 性能回归使用固定 5,000 标的、30 个批次运行
 `python ops/benchmark-market-stream.py`，记录 orjson 编解码 p50/p95/p99、帧大小、

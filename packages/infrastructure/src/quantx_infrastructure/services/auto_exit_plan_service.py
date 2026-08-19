@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from quantx_domain.trading.exit_plan import (
   EXIT_PLAN_BOOK_STATE_KEY,
@@ -55,7 +55,12 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   validate_exact_auto_exit_authorization,
 )
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
-from quantx_infrastructure.services.trade_intent_processor import TradeIntentProcessor
+from quantx_infrastructure.services.trade_intent_processor import (
+  MARKET_DATA_STREAM_NOT_READY,
+  TradeIntentProcessor,
+)
+
+MARKET_DATA_CONTEXT_STALE_SECONDS = 10.0
 
 ADAPTIVE_RULE_ID_SUFFIX = "adaptive-volume-price"
 ACTIVE_ORDER_STATUSES = {
@@ -1168,24 +1173,22 @@ class AutoExitPlanService:
     plan_id: str,
     context: ExitEvaluationContext,
     position: Optional[Position],
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> Optional[dict[str, Any]]:
     async with AsyncSessionLocal() as db:
       record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
       if record is None or not record.enabled:
         return None
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
-      market_age = float(context.market_data_age_seconds or 0.0)
-      if market_age > 3.0:
-        record.data_quality = "MARKET_DATA_STALE"
-        record.last_error = "market_data_stale"
-        self._sync_record(record, plan, evaluated_at=context.timestamp)
-        await self._sync_source_order(
+      market_error = self._market_context_error(context, market_ready)
+      if market_error:
+        await self._persist_market_data_stale(
           db,
           record,
           plan,
-          checked_at=context.timestamp,
+          evaluated_at=context.timestamp,
+          error=market_error,
         )
-        await db.commit()
         return None
       record.data_quality = "GOOD"
       if plan.pending_intent_id and not plan.pending_order_id:
@@ -1211,6 +1214,7 @@ class AutoExitPlanService:
       decision=decision,
       context=context,
       position=position,
+      market_ready=market_ready,
     )
 
   async def apply_order_event_for_report(
@@ -1318,6 +1322,7 @@ class AutoExitPlanService:
     intent_id: str,
     context: ExitEvaluationContext,
     position: Optional[Position],
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     async with AsyncSessionLocal() as db:
       record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
@@ -1327,6 +1332,35 @@ class AutoExitPlanService:
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       if plan.pending_intent_id != intent_id:
         raise ValueError("卖出意图已变化，请刷新后重试")
+      market_error = self._market_context_error(context, market_ready)
+      if market_error:
+        intent.status = "REJECTED"
+        intent.notes = market_error
+        intent.intent_metadata = {
+          **dict(intent.intent_metadata or {}),
+          "market_data_gate": market_error,
+        }
+        ExitPlanBook([plan]).apply_order_event(
+          plan_id=plan_id,
+          intent_id=intent_id,
+          status="REJECTED",
+        )
+        await self._persist_market_data_stale(
+          db,
+          record,
+          plan,
+          evaluated_at=context.timestamp,
+          error=market_error,
+        )
+        return {
+          "success": False,
+          "code": (
+            MARKET_DATA_STREAM_NOT_READY
+            if market_error == MARKET_DATA_STREAM_NOT_READY
+            else "MARKET_DATA_STALE"
+          ),
+          "error": market_error,
+        }
       limit_price = self._protected_sell_price(context, record)
     result = await TradeIntentProcessor().process_approved_exit_intent(
       plan=record,
@@ -1334,6 +1368,7 @@ class AutoExitPlanService:
       context=context,
       position=position,
       limit_price=limit_price,
+      market_ready=market_ready,
     )
     if not result.get("success"):
       await self._release_failed_submission(
@@ -1373,6 +1408,49 @@ class AutoExitPlanService:
       )
       await db.commit()
     return result
+
+  @staticmethod
+  def _market_context_error(
+    context: ExitEvaluationContext,
+    market_ready: Optional[Callable[[], bool]],
+  ) -> str:
+    if market_ready is not None:
+      try:
+        if not bool(market_ready()):
+          return MARKET_DATA_STREAM_NOT_READY
+      except Exception:
+        return MARKET_DATA_STREAM_NOT_READY
+    # miniQMT whole-quote callbacks normally arrive on an approximately
+    # three-second cadence. A three-second cutoff rejects healthy data during
+    # ordinary scheduling jitter; keep this aligned with the authoritative
+    # WholeQuoteHub trading-session freshness window.
+    if (
+      float(context.market_data_age_seconds or 0.0)
+      > MARKET_DATA_CONTEXT_STALE_SECONDS
+    ):
+      return "market_data_stale"
+    return ""
+
+  async def _persist_market_data_stale(
+    self,
+    db,
+    record: AutoExitPlanRecord,
+    plan: ExitPlan,
+    *,
+    evaluated_at: datetime,
+    error: str,
+  ) -> None:
+    self._sync_record(record, plan, evaluated_at=evaluated_at)
+    # The persisted stream gate is authoritative over adaptive rule projections.
+    record.data_quality = "MARKET_DATA_STALE"
+    record.last_error = error
+    await self._sync_source_order(
+      db,
+      record,
+      plan,
+      checked_at=evaluated_at,
+    )
+    await db.commit()
 
   async def reject_exit_intent(
     self,
@@ -1416,6 +1494,7 @@ class AutoExitPlanService:
     decision: ExitDecision,
     context: ExitEvaluationContext,
     position: Optional[Position],
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> Optional[dict[str, Any]]:
     available = max(0, int(getattr(position, "can_use_volume", 0) or 0))
     total_position = max(0, int(getattr(position, "volume", 0) or 0))
@@ -1464,6 +1543,7 @@ class AutoExitPlanService:
         context=context,
         position=position,
         limit_price=price,
+        market_ready=market_ready,
       )
     except Exception as exc:
       await self._release_failed_submission(plan_id, intent_id, str(exc))
@@ -1590,8 +1670,10 @@ class AutoExitPlanService:
         intent_id=intent_id,
         status="REJECTED",
       )
-      record.last_error = error[:2000]
       self._sync_record(record, plan)
+      record.last_error = error[:2000]
+      if error == MARKET_DATA_STREAM_NOT_READY:
+        record.data_quality = "MARKET_DATA_STALE"
       await self._sync_source_order(db, record, plan)
       await db.commit()
 

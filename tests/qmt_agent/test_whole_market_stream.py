@@ -1,10 +1,28 @@
 import asyncio
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
-from quantx_contracts import MarketBatchKind, MarketStreamBatch
+from quantx_contracts import (
+  AgentEnvelope,
+  AgentMessageType,
+  MarketBatchKind,
+  MarketControlType,
+  MarketStreamBatch,
+  MarketStreamControl,
+)
 from quantx_qmt_agent import runtime as runtime_module
-from quantx_qmt_agent.runtime import AgentRuntime
+from quantx_qmt_agent.runtime import (
+  AgentRuntime,
+  _BoundedMarketBatchBuffer,
+  _EncodedMarketBatch,
+  _MarketOutboundOverflow,
+)
+from quantx_qmt_agent.whole_market_capture import (
+  WholeMarketCapture,
+  WholeMarketCaptureOverflow,
+)
 
 
 class NoAckSocket:
@@ -18,12 +36,62 @@ class NoAckSocket:
     await asyncio.sleep(1)
 
 
+class ControlledAckSocket:
+  def __init__(self) -> None:
+    self.sent: list[bytes] = []
+    self.controls: asyncio.Queue[str] = asyncio.Queue()
+
+  async def send(self, payload: bytes) -> None:
+    self.sent.append(payload)
+
+  async def recv(self) -> str:
+    return await self.controls.get()
+
+
+class NeverStartSocket:
+  def __init__(self) -> None:
+    self.sent: list[str] = []
+    self.receives = 0
+
+  async def send(self, payload: str) -> None:
+    self.sent.append(payload)
+
+  async def recv(self) -> str:
+    self.receives += 1
+    if self.receives == 1:
+      return AgentEnvelope(
+        message_type=AgentMessageType.AUTH_RESULT,
+        payload={"accepted": True},
+      ).model_dump_json()
+    await asyncio.Event().wait()
+    raise AssertionError("unreachable")
+
+
+def _encoded(sequence: int, *, code: str = "600000.SH") -> _EncodedMarketBatch:
+  batch = MarketStreamBatch(
+    stream_id="stream-1",
+    sequence=sequence,
+    kind=MarketBatchKind.DELTA,
+    captured_at=datetime.now(timezone.utc),
+    instrument_count=1,
+    data={code: {"lastPrice": float(sequence)}},
+  )
+  return _EncodedMarketBatch(batch=batch, payload=batch.to_bytes())
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+  deadline = asyncio.get_running_loop().time() + timeout
+  while not predicate():
+    if asyncio.get_running_loop().time() >= deadline:
+      raise AssertionError("condition was not reached before timeout")
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_whole_market_ack_timeout_requires_resync(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   runtime = AgentRuntime.__new__(AgentRuntime)
-  runtime._whole_market_events = asyncio.Queue(maxsize=8)
   socket = NoAckSocket()
   monkeypatch.setattr(
     runtime_module,
@@ -47,40 +115,1155 @@ async def test_whole_market_ack_timeout_requires_resync(
 
 
 @pytest.mark.asyncio
-async def test_whole_market_capture_overflow_is_not_silent_or_lossy() -> None:
+async def test_market_handshake_times_out_when_start_never_arrives(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
   runtime = AgentRuntime.__new__(AgentRuntime)
-  runtime._session_loop = asyncio.get_running_loop()
-  runtime._whole_market_events = asyncio.Queue(maxsize=1)
-  runtime._whole_market_overflow = asyncio.Event()
+  runtime.configuration = SimpleNamespace(device_id="device-1")
+  runtime.mode = "live"
+  socket = NeverStartSocket()
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS",
+    0.01,
+  )
 
-  first = {"600000.SH": {"lastPrice": 10.0}}
-  second = {"000001.SZ": {"lastPrice": 11.0}}
-  runtime._enqueue_whole_market_event(first)
-  await asyncio.sleep(0)
-  runtime._enqueue_whole_market_event(second)
-  await asyncio.sleep(0)
+  with pytest.raises(asyncio.TimeoutError):
+    await runtime._perform_market_stream_handshake(
+      socket,
+      access_token="token-1",
+    )
 
-  assert runtime._whole_market_overflow.is_set()
-  assert runtime._whole_market_events.qsize() == 1
-  _, retained = runtime._whole_market_events.get_nowait()
-  assert retained is first
+  assert len(socket.sent) == 1
 
 
 @pytest.mark.asyncio
-async def test_whole_market_capture_enforces_64_mib_budget() -> None:
+async def test_empty_delta_encodes_as_ready_barrier_but_snapshot_cannot_be_empty() -> None:
+  class Broker:
+    @staticmethod
+    def prepare_whole_market_data(data):
+      return data
+
   runtime = AgentRuntime.__new__(AgentRuntime)
-  runtime._session_loop = asyncio.get_running_loop()
-  runtime._whole_market_events = asyncio.Queue(maxsize=8)
-  runtime._whole_market_overflow = asyncio.Event()
-  runtime._whole_market_estimated_batch_bytes = 40 * 1024 * 1024
+  runtime.broker = Broker()
+  runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
+  try:
+    barrier = await runtime._prepare_encoded_market_batch(
+      stream_id="stream-1",
+      sequence=2,
+      kind=MarketBatchKind.DELTA,
+      captured_at=datetime.now(timezone.utc),
+      raw_data={},
+    )
 
-  runtime._enqueue_whole_market_event({"600000.SH": {"lastPrice": 10.0}})
-  await asyncio.sleep(0)
-  runtime._enqueue_whole_market_event({"000001.SZ": {"lastPrice": 11.0}})
-  await asyncio.sleep(0)
+    assert barrier.batch.sequence == 2
+    assert barrier.batch.kind is MarketBatchKind.DELTA
+    assert barrier.batch.instrument_count == 0
+    assert barrier.batch.data == {}
 
-  assert runtime._whole_market_overflow.is_set()
-  assert runtime._whole_market_events.qsize() == 1
+    with pytest.raises(RuntimeError, match="empty whole-market batch"):
+      await runtime._prepare_encoded_market_batch(
+        stream_id="stream-1",
+        sequence=1,
+        kind=MarketBatchKind.SNAPSHOT,
+        captured_at=datetime.now(timezone.utc),
+        raw_data={},
+      )
+  finally:
+    runtime._whole_market_encode_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Broker:
+    @staticmethod
+    def prepare_whole_market_data(data):
+      return data
+
+  class Socket:
+    def __init__(self) -> None:
+      self.handshake = [
+        AgentEnvelope(
+          message_type=AgentMessageType.AUTH_RESULT,
+          payload={"accepted": True},
+        ).model_dump_json(),
+        MarketStreamControl(
+          type=MarketControlType.START,
+          stream_id="stream-1",
+          markets=("SH", "SZ"),
+        ).model_dump_json(),
+      ]
+      self.controls: asyncio.Queue[str] = asyncio.Queue()
+      self.batches: list[MarketStreamBatch] = []
+      self.barrier_sent = asyncio.Event()
+      self.sequence_three_sent = asyncio.Event()
+
+    async def send(self, payload) -> None:
+      if isinstance(payload, str):
+        return
+      batch = MarketStreamBatch.from_bytes(payload)
+      self.batches.append(batch)
+      if batch.sequence == 1:
+        await self.controls.put(
+          MarketStreamControl(
+            type=MarketControlType.ACK,
+            stream_id="stream-1",
+            sequence=1,
+          ).model_dump_json()
+        )
+      elif batch.sequence == 2:
+        self.barrier_sent.set()
+      elif batch.sequence == 3:
+        self.sequence_three_sent.set()
+        await self.controls.put(
+          MarketStreamControl(
+            type=MarketControlType.ACK,
+            stream_id="stream-1",
+            sequence=3,
+          ).model_dump_json()
+        )
+
+    async def recv(self) -> str:
+      if self.handshake:
+        return self.handshake.pop(0)
+      return await self.controls.get()
+
+    async def close(self, **_kwargs) -> None:
+      return None
+
+  class SocketContext:
+    def __init__(self, socket) -> None:
+      self.socket = socket
+
+    async def __aenter__(self):
+      return self.socket
+
+    async def __aexit__(self, *_args):
+      return False
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.configuration = SimpleNamespace(
+    device_id="device-1",
+    api_url="http://api.test",
+  )
+  runtime.mode = "live"
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_ready.set()
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._access_token = "token-1"
+  runtime._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
+    hours=1
+  )
+  runtime._access_token_ready = asyncio.Event()
+  runtime._control_hub_registered_once = asyncio.Event()
+  runtime._control_hub_registered_once.set()
+  runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
+  runtime._market_stream_ready_since_monotonic = 0.0
+  socket = Socket()
+
+  async def build_snapshot(_trading_date):
+    watermark = runtime._whole_market_capture.capture_sequence
+    runtime._whole_market_capture.capture(
+      {"600000.SH": {"lastPrice": 11.0}}
+    )
+    return {"600000.SH": {"lastPrice": 10.0}}, watermark
+
+  runtime._build_whole_market_snapshot = build_snapshot
+  monkeypatch.setattr(
+    runtime_module.websockets,
+    "connect",
+    lambda *_args, **_kwargs: SocketContext(socket),
+  )
+  stream = asyncio.create_task(runtime._run_whole_market_stream())
+  try:
+    await asyncio.wait_for(socket.barrier_sent.wait(), timeout=1)
+    assert runtime._market_stream_status == "SYNCING"
+    assert [batch.sequence for batch in socket.batches] == [1, 2]
+    assert socket.batches[0].data["600000.SH"]["lastPrice"] == 10.0
+    assert socket.batches[1].data["600000.SH"]["lastPrice"] == 11.0
+
+    # This callback is newer than the barrier cut and must be the only seq3
+    # value. The seq2 convergence update must not be replayed.
+    runtime._whole_market_capture.capture(
+      {"600000.SH": {"lastPrice": 12.0}}
+    )
+    await socket.controls.put(
+      MarketStreamControl(
+        type=MarketControlType.ACK,
+        stream_id="stream-1",
+        sequence=2,
+      ).model_dump_json()
+    )
+    await asyncio.wait_for(socket.sequence_three_sent.wait(), timeout=1)
+    assert runtime._market_stream_status == "READY"
+    assert [batch.sequence for batch in socket.batches] == [1, 2, 3]
+    assert socket.batches[2].data == {
+      "600000.SH": {"lastPrice": 12.0}
+    }
+  finally:
+    stream.cancel()
+    await asyncio.gather(stream, return_exceptions=True)
+    runtime._whole_market_encode_executor.shutdown(wait=True)
+
+
+def test_native_reset_gate_rejects_every_snapshot_publication_stage() -> None:
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_ready.set()
+
+  runtime._require_native_whole_market_sync("snapshot-build")
+  runtime._whole_market_native_reset.set()
+  with pytest.raises(RuntimeError, match="stage=snapshot-encode"):
+    runtime._require_native_whole_market_sync("snapshot-encode")
+
+  runtime._whole_market_native_reset.clear()
+  runtime._whole_market_subscription_ready.clear()
+  with pytest.raises(RuntimeError, match="stage=snapshot-send"):
+    runtime._require_native_whole_market_sync("snapshot-send")
+
+
+@pytest.mark.asyncio
+async def test_syncing_converges_latest_state_then_ready_preserves_order() -> None:
+  capture = WholeMarketCapture(
+    max_ready_callbacks=4,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  capture.bind_loop(asyncio.get_running_loop())
+  capture.capture({"600000.SH": {"lastPrice": 10.0}})
+  snapshot = capture.latest_snapshot(trading_date=None)
+
+  capture.capture({"600000.SH": {"lastPrice": 10.1}})
+  capture.capture({"000001.SZ": {"lastPrice": 11.0}})
+  first_delta = capture.activate_ready(
+    after_sequence=snapshot.capture_watermark,
+    trading_date=None,
+  )
+
+  assert first_delta is not None
+  assert first_delta.data == {
+    "600000.SH": {"lastPrice": 10.1},
+    "000001.SZ": {"lastPrice": 11.0},
+  }
+
+  capture.capture({"600000.SH": {"lastPrice": 10.2}})
+  capture.capture({"600000.SH": {"lastPrice": 10.3}})
+  first = await capture.next_ready_event()
+  second = await capture.next_ready_event()
+
+  assert first.capture_sequence < second.capture_sequence
+  assert first.data["600000.SH"]["lastPrice"] == 10.2
+  assert second.data["600000.SH"]["lastPrice"] == 10.3
+
+
+@pytest.mark.asyncio
+async def test_capture_detaches_mutable_tick_values_from_callback_input() -> None:
+  capture = WholeMarketCapture(
+    max_ready_callbacks=4,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  capture.bind_loop(asyncio.get_running_loop())
+  tick = {"lastPrice": 10.0, "askPrice": [10.1, 10.2]}
+  capture.capture({"600000.SH": tick})
+
+  tick["lastPrice"] = 99.0
+  tick["askPrice"][0] = 99.0
+  snapshot = capture.latest_snapshot(trading_date=None)
+
+  assert snapshot.data["600000.SH"] == {
+    "lastPrice": 10.0,
+    "askPrice": [10.1, 10.2],
+  }
+  assert snapshot.capture_sequences["600000.SH"] == 1
+  assert snapshot.captured_monotonic["600000.SH"] > 0
+
+
+@pytest.mark.asyncio
+async def test_native_source_reset_cannot_publish_old_complete_snapshot(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.fallbacks = 0
+
+    @staticmethod
+    def whole_market_codes() -> tuple[str, ...]:
+      return ("600000.SH",)
+
+    def whole_market_snapshot(self):
+      self.fallbacks += 1
+      return {"600000.SH": {"lastPrice": 11.0}}
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_capture.capture(
+    {"600000.SH": {"lastPrice": 10.0}}
+  )
+  runtime._whole_market_capture.reset_source("native continuity lost")
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
+    0.0,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  snapshot, _ = await runtime._build_whole_market_snapshot(
+    datetime.now().astimezone().date()
+  )
+
+  assert runtime.broker.fallbacks == 1
+  assert snapshot["600000.SH"]["lastPrice"] == 11.0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_fallback_uses_independent_bounded_native_calls(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  codes = (
+    "000001.SH",
+    "000002.SZ",
+    "300001.SZ",
+    "399001.SZ",
+    "600000.SH",
+  )
+
+  class Broker:
+    def __init__(self) -> None:
+      self.fragments: list[list[str]] = []
+
+    @staticmethod
+    def whole_market_codes() -> tuple[str, ...]:
+      return codes
+
+    def whole_market_snapshot_chunk(self, batch):
+      self.fragments.append(list(batch))
+      return {code: {"lastPrice": 1.0} for code in batch}
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  operations: list[str] = []
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
+    0.0,
+  )
+  monkeypatch.setattr(
+    runtime_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    2,
+  )
+
+  async def direct_control(operation, function, *args):
+    operations.append(operation)
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  snapshot, _ = await runtime._build_whole_market_snapshot(
+    datetime.now().astimezone().date()
+  )
+
+  assert runtime.broker.fragments == [
+    ["000001.SH", "000002.SZ"],
+    ["300001.SZ", "399001.SZ"],
+    ["600000.SH"],
+  ]
+  assert operations == [
+    "whole-market-codes",
+    "whole-market-snapshot:0",
+    "whole-market-snapshot:1",
+    "whole-market-snapshot:2",
+  ]
+  assert set(snapshot) == set(codes)
+
+
+@pytest.mark.asyncio
+async def test_timestamp_less_callback_only_wins_after_its_fragment_watermark(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  codes = ("000001.SH", "000002.SZ")
+
+  class Broker:
+    @staticmethod
+    def whole_market_codes() -> tuple[str, ...]:
+      return codes
+
+    @staticmethod
+    def whole_market_snapshot_chunk(batch):
+      prices = {"000001.SH": 10.0, "000002.SZ": 20.0}
+      return {code: {"lastPrice": prices[code]} for code in batch}
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
+    0.0,
+  )
+  monkeypatch.setattr(
+    runtime_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    1,
+  )
+
+  async def direct_control(operation, function, *args):
+    if operation == "whole-market-snapshot:1":
+      # Captured before code 2's fragment completes: fallback wins when the
+      # callback source time is unavailable.
+      runtime._whole_market_capture.capture(
+        {"000002.SZ": {"lastPrice": 21.0}}
+      )
+    result = function(*args)
+    if operation == "whole-market-snapshot:0":
+      # Captured after code 1's fragment completion watermark: callback wins
+      # and will not be skipped by the final global snapshot watermark.
+      runtime._whole_market_capture.capture(
+        {"000001.SH": {"lastPrice": 11.0}}
+      )
+    return result
+
+  runtime._run_xtdata_control = direct_control
+  snapshot, watermark = await runtime._build_whole_market_snapshot(
+    datetime.now().astimezone().date()
+  )
+
+  assert watermark == 2
+  assert snapshot["000001.SH"]["lastPrice"] == 11.0
+  assert snapshot["000002.SZ"]["lastPrice"] == 20.0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_allows_missing_qmt_ticks_and_logs_bounded_samples(
+  monkeypatch: pytest.MonkeyPatch,
+  caplog: pytest.LogCaptureFixture,
+) -> None:
+  codes = (
+    "000001.SH",
+    "000002.SH",
+    "000003.SH",
+    "000004.SH",
+    "000005.SH",
+    "000006.SH",
+    "600000.SH",
+  )
+
+  class Broker:
+    def __init__(self) -> None:
+      self.calls = 0
+
+    @staticmethod
+    def whole_market_codes() -> tuple[str, ...]:
+      return codes
+
+    def whole_market_snapshot_chunk(self, batch):
+      self.calls += 1
+      if self.calls == 1:
+        return {batch[0]: {"lastPrice": 1.0}}
+      return {}
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
+    0.0,
+  )
+  monkeypatch.setattr(
+    runtime_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    3,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  with caplog.at_level("WARNING"):
+    snapshot, _ = await runtime._build_whole_market_snapshot(
+      datetime.now().astimezone().date()
+    )
+
+  assert snapshot == {"000001.SH": {"lastPrice": 1.0}}
+  missing_record = next(
+    record
+    for record in caplog.records
+    if "omits instruments without an available tick" in record.getMessage()
+  )
+  assert missing_record.args[0] == 6
+  assert missing_record.args[1] == 7
+  assert missing_record.args[2] == [
+    "000002.SH",
+    "000003.SH",
+    "000004.SH",
+    "000005.SH",
+    "000006.SH",
+  ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_fragment_failure_cannot_escape_as_partial_snapshot(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  codes = ("000001.SH", "000002.SZ", "300001.SZ")
+
+  class Broker:
+    def __init__(self) -> None:
+      self.calls = 0
+
+    @staticmethod
+    def whole_market_codes() -> tuple[str, ...]:
+      return codes
+
+    def whole_market_snapshot_chunk(self, batch):
+      self.calls += 1
+      if self.calls == 2:
+        raise RuntimeError("second native fragment failed")
+      return {code: {"lastPrice": 1.0} for code in batch}
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
+    0.0,
+  )
+  monkeypatch.setattr(
+    runtime_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    2,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+
+  with pytest.raises(RuntimeError, match="second native fragment failed"):
+    await runtime._build_whole_market_snapshot(
+      datetime.now().astimezone().date()
+    )
+
+  assert runtime.broker.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_market_stream_waits_for_first_control_hub_registration() -> None:
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._ensure_whole_market_state()
+
+  waiter = asyncio.create_task(
+    runtime._wait_for_initial_control_hub_registration()
+  )
+  await asyncio.sleep(0)
+  assert not waiter.done()
+
+  runtime._control_hub_registered_once.set()
+  await asyncio.wait_for(waiter, timeout=0.1)
+
+  # The gate is intentionally sticky: later control reconnects do not cancel
+  # or re-gate the independently owned market stream.
+  await asyncio.wait_for(
+    runtime._wait_for_initial_control_hub_registration(),
+    timeout=0.1,
+  )
+
+
+def test_snapshot_merge_keeps_newest_source_tick() -> None:
+  fallback = {
+    "600000.SH": {"time": 2_000, "lastPrice": 11.0},
+    "000001.SZ": {"time": 1_000, "lastPrice": 10.0},
+  }
+  callback = {
+    "600000.SH": {"time": 1_000, "lastPrice": 9.0},
+    "000001.SZ": {"time": 3_000, "lastPrice": 12.0},
+  }
+
+  merged = AgentRuntime._merge_whole_market_snapshot(fallback, callback)
+
+  assert merged["600000.SH"]["lastPrice"] == 11.0
+  assert merged["000001.SZ"]["lastPrice"] == 12.0
+
+
+def test_snapshot_merge_keeps_timed_fallback_over_untimed_callback() -> None:
+  fallback = {
+    "600000.SH": {"time": 2_000, "lastPrice": 11.0},
+  }
+  callback = {
+    "600000.SH": {"lastPrice": 12.0},
+  }
+
+  merged = AgentRuntime._merge_whole_market_snapshot(
+    fallback,
+    callback,
+    callback_capture_sequences={"600000.SH": 2},
+    callback_captured_monotonic={"600000.SH": 20.0},
+    fallback_completion_sequences={"600000.SH": 1},
+    fallback_completed_monotonic={"600000.SH": 10.0},
+  )
+
+  assert merged["600000.SH"] == {
+    "time": 2_000,
+    "lastPrice": 11.0,
+  }
+
+
+@pytest.mark.asyncio
+async def test_ready_overflow_enters_state_only_and_keeps_latest() -> None:
+  capture = WholeMarketCapture(
+    max_ready_callbacks=1,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  capture.bind_loop(asyncio.get_running_loop())
+  capture.capture({"600000.SH": {"lastPrice": 10.0}})
+  watermark = capture.latest_snapshot(trading_date=None).capture_watermark
+  assert capture.activate_ready(
+    after_sequence=watermark,
+    trading_date=None,
+  ) is None
+
+  capture.capture({"600000.SH": {"lastPrice": 10.1}})
+  capture.capture({"600000.SH": {"lastPrice": 10.2}})
+
+  with pytest.raises(WholeMarketCaptureOverflow):
+    await capture.next_ready_event()
+  latest = capture.latest_snapshot(trading_date=None)
+  assert latest.data["600000.SH"]["lastPrice"] == 10.2
+  assert capture.queue_depth == 0
+
+
+@pytest.mark.asyncio
+async def test_outbound_budget_uses_actual_encoded_bytes() -> None:
+  buffer = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=100)
+  first = _encoded(2)
+  second = _encoded(3, code="000001.SZ")
+  first = _EncodedMarketBatch(batch=first.batch, payload=b"x" * 60)
+  second = _EncodedMarketBatch(batch=second.batch, payload=b"y" * 101)
+
+  await buffer.put(first)
+  with pytest.raises(_MarketOutboundOverflow):
+    await buffer.put(second)
+
+  assert buffer.depth == 1
+  assert buffer.bytes == 60
+
+
+@pytest.mark.asyncio
+async def test_transport_allows_two_unacknowledged_batches() -> None:
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._market_stream_sequence = 1
+  runtime._market_stream_ack_latency_ms = 0.0
+  runtime._market_stream_outbound_depth = 0
+  runtime._market_stream_outbound_bytes = 0
+  outbound = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=1024 * 1024)
+  for sequence in (2, 3, 4):
+    await outbound.put(_encoded(sequence))
+  socket = ControlledAckSocket()
+  transport = asyncio.create_task(
+    runtime._transmit_market_batches(
+      socket,
+      outbound,
+      stream_id="stream-1",
+    )
+  )
+  try:
+    await _wait_until(lambda: len(socket.sent) == 2)
+    assert outbound.depth == 3
+
+    await socket.controls.put(
+      MarketStreamControl(
+        type=MarketControlType.ACK,
+        stream_id="stream-1",
+        sequence=2,
+      ).model_dump_json()
+    )
+    await _wait_until(lambda: len(socket.sent) == 3)
+    for sequence in (3, 4):
+      await socket.controls.put(
+        MarketStreamControl(
+          type=MarketControlType.ACK,
+          stream_id="stream-1",
+          sequence=sequence,
+        ).model_dump_json()
+      )
+    await _wait_until(lambda: runtime._market_stream_sequence == 4)
+    assert outbound.depth == 0
+  finally:
+    transport.cancel()
+    await asyncio.gather(transport, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_outbound_backpressure_drains_more_than_eight_microbatches() -> None:
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._market_stream_sequence = 1
+  runtime._market_stream_ack_latency_ms = 0.0
+  runtime._market_stream_outbound_depth = 0
+  runtime._market_stream_outbound_bytes = 0
+  outbound = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=1024 * 1024)
+  socket = ControlledAckSocket()
+
+  async def produce() -> None:
+    for sequence in range(2, 14):
+      await outbound.put(_encoded(sequence))
+
+  producer = asyncio.create_task(produce())
+  transport = asyncio.create_task(
+    runtime._transmit_market_batches(
+      socket,
+      outbound,
+      stream_id="stream-1",
+    )
+  )
+  try:
+    for sequence in range(2, 14):
+      await _wait_until(
+        lambda sequence=sequence: any(
+          MarketStreamBatch.from_bytes(payload).sequence == sequence
+          for payload in socket.sent
+        )
+      )
+      await socket.controls.put(
+        MarketStreamControl(
+          type=MarketControlType.ACK,
+          stream_id="stream-1",
+          sequence=sequence,
+        ).model_dump_json()
+      )
+    await producer
+    await _wait_until(lambda: runtime._market_stream_sequence == 13)
+    assert len(socket.sent) == 12
+    assert outbound.depth == 0
+  finally:
+    for task in (producer, transport):
+      task.cancel()
+    await asyncio.gather(producer, transport, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_microbatch_seals_before_duplicate_instrument() -> None:
+  class Broker:
+    @staticmethod
+    def prepare_whole_market_data(data):
+      return data
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_encode_executor = ThreadPoolExecutor(max_workers=1)
+  runtime._market_stream_outbound_depth = 0
+  runtime._market_stream_outbound_bytes = 0
+  watermark = runtime._whole_market_capture.latest_snapshot(
+    trading_date=None
+  ).capture_watermark
+  runtime._whole_market_capture.activate_ready(
+    after_sequence=watermark,
+    trading_date=None,
+  )
+  runtime._whole_market_capture.capture(
+    {"600000.SH": {"lastPrice": 10.1}}
+  )
+  runtime._whole_market_capture.capture(
+    {"600000.SH": {"lastPrice": 10.2}}
+  )
+  outbound = _BoundedMarketBatchBuffer(max_batches=8, max_bytes=1024 * 1024)
+  producer = asyncio.create_task(
+    runtime._whole_market_batch_producer(
+      outbound,
+      stream_id="stream-1",
+      starting_sequence=1,
+      trading_date=datetime.now().astimezone().date(),
+      first_event=None,
+    )
+  )
+  try:
+    await _wait_until(lambda: outbound.depth == 2)
+    first = await outbound.get()
+    second = await outbound.get()
+    assert first.batch.sequence == 2
+    assert second.batch.sequence == 3
+    assert first.batch.data["600000.SH"]["lastPrice"] == 10.1
+    assert second.batch.data["600000.SH"]["lastPrice"] == 10.2
+  finally:
+    producer.cancel()
+    await asyncio.gather(producer, return_exceptions=True)
+    runtime._whole_market_encode_executor.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_native_subscription_lives_until_process_shutdown() -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.subscriptions = 0
+      self.unsubscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    def subscribe_whole_market(self, callback) -> bool:
+      del callback
+      self.subscriptions += 1
+      return True
+
+    def unsubscribe_whole_market(self) -> None:
+      self.unsubscriptions += 1
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  await asyncio.wait_for(
+    runtime._whole_market_subscription_ready.wait(),
+    timeout=1,
+  )
+  await asyncio.sleep(0)
+  assert runtime.broker.subscriptions == 1
+  assert runtime.broker.unsubscriptions == 0
+
+  runtime._stopped.set()
+  await supervisor
+  await runtime._shutdown_whole_market_capture()
+  assert runtime.broker.subscriptions == 1
+  assert runtime.broker.unsubscriptions == 1
+
+
+@pytest.mark.asyncio
+async def test_native_subscription_recovers_after_connection_generation_change(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.generation = 1
+      self.subscriptions = 0
+      self.unsubscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_whole_market_trading_session() -> bool:
+      return False
+
+    def market_data_connection_generation(self) -> int:
+      return self.generation
+
+    def subscribe_whole_market(self, callback) -> bool:
+      del callback
+      self.subscriptions += 1
+      return True
+
+    def unsubscribe_whole_market(self) -> None:
+      self.unsubscriptions += 1
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._market_stream_status = "OFFLINE"
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS",
+    0.01,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  try:
+    await _wait_until(lambda: runtime.broker.subscriptions == 1)
+    runtime.broker.generation = 2
+    await _wait_until(lambda: runtime.broker.subscriptions == 2)
+    assert runtime.broker.unsubscriptions == 1
+    assert runtime._whole_market_native_reset.is_set()
+  finally:
+    runtime._stopped.set()
+    await supervisor
+    await runtime._shutdown_whole_market_capture()
+
+
+@pytest.mark.asyncio
+async def test_native_unsubscribe_failure_is_fail_stop_not_duplicate(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.generation = 1
+      self.subscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_whole_market_trading_session() -> bool:
+      return False
+
+    def market_data_connection_generation(self) -> int:
+      return self.generation
+
+    def subscribe_whole_market(self, callback) -> bool:
+      del callback
+      self.subscriptions += 1
+      return True
+
+    @staticmethod
+    def unsubscribe_whole_market() -> None:
+      raise RuntimeError("native cancellation failed")
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._market_stream_status = "OFFLINE"
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS",
+    0.01,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  await _wait_until(lambda: runtime.broker.subscriptions == 1)
+  runtime.broker.generation = 2
+
+  with pytest.raises(runtime_module._FatalMarketDataPreparationError):
+    await supervisor
+
+  assert runtime._stopped.is_set()
+  assert runtime._fatal_market_data_event.is_set()
+  assert runtime.broker.subscriptions == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmed_trading_session_silence_rebuilds_subscription(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.subscriptions = 0
+      self.unsubscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_whole_market_trading_session() -> bool:
+      return True
+
+    @staticmethod
+    def market_data_connection_generation() -> int:
+      return 1
+
+    def subscribe_whole_market(self, callback) -> bool:
+      del callback
+      self.subscriptions += 1
+      return True
+
+    def unsubscribe_whole_market(self) -> None:
+      self.unsubscriptions += 1
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._market_stream_status = "OFFLINE"
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS",
+    0.01,
+  )
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_NATIVE_SILENCE_SECONDS",
+    0.0,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  try:
+    await _wait_until(lambda: runtime.broker.subscriptions >= 2)
+    assert runtime.broker.unsubscriptions >= 1
+  finally:
+    runtime._stopped.set()
+    await supervisor
+    await runtime._shutdown_whole_market_capture()
+
+
+def test_stable_ready_resets_market_stream_backoff() -> None:
+  assert AgentRuntime._market_stream_retry_delay(
+    16.0,
+    ready_seconds=29.9,
+  ) == (16.0, 30.0)
+  assert AgentRuntime._market_stream_retry_delay(
+    16.0,
+    ready_seconds=30.0,
+  ) == (1.0, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_control_reconnect_does_not_restart_process_market_stream() -> None:
+  class Capture:
+    def bind_loop(self, loop) -> None:
+      del loop
+
+    def unbind_loop(self) -> None:
+      return None
+
+  class Executor:
+    def shutdown(self, **kwargs) -> None:
+      del kwargs
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._whole_market_capture = Capture()
+  runtime._whole_market_encode_executor = Executor()
+  control_sessions = 0
+  market_stream_starts = 0
+
+  runtime._ensure_market_upload_state = lambda: None
+  runtime._ensure_whole_market_state = lambda: None
+  runtime._clear_market_upload_state = lambda: None
+
+  async def wait_for_stop() -> None:
+    await runtime._stopped.wait()
+
+  async def market_stream() -> None:
+    nonlocal market_stream_starts
+    market_stream_starts += 1
+    await runtime._stopped.wait()
+
+  async def control_session() -> bool:
+    nonlocal control_sessions
+    control_sessions += 1
+    await asyncio.sleep(0)
+    if control_sessions == 1:
+      return True
+    runtime._stopped.set()
+    return False
+
+  async def no_op() -> None:
+    return None
+
+  runtime._market_upload_cache_sweeper = wait_for_stop
+  runtime._whole_market_capture_supervisor = wait_for_stop
+  runtime._whole_market_stream_supervisor = market_stream
+  runtime._run_session_until_fatal = control_session
+  runtime._shutdown_whole_market_capture = no_op
+  runtime._cancel_market_upload_tasks = no_op
+
+  await runtime.run_forever()
+
+  assert control_sessions == 2
+  assert market_stream_starts == 1
 
 
 @pytest.mark.asyncio

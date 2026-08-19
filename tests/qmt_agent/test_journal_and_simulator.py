@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from quantx_contracts import AgentEnvelope, AgentMessageType
+from quantx_qmt_agent import broker as broker_module
 from quantx_qmt_agent.broker import (
   QmtDataBroker,
   SimulatorBroker,
@@ -361,12 +362,7 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
       }
 
     def subscribe_whole_quote(self, codes, callback):
-      assert codes == (
-        "000001.SH",
-        "300001.SZ",
-        "399001.SZ",
-        "600000.SH",
-      )
+      assert codes == ["SH", "SZ"]
       callbacks.append(callback)
       return 202
 
@@ -379,9 +375,10 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
       )
       return {
         "000001.SH": {"lastPrice": 3500.0},
-        "600000.SH": {"lastPrice": 10.8},
+        "600000.SH": {"lastPrice": 10.8, "unused": "drop-me"},
         "300001.SZ": {"lastPrice": 23.5},
         "399001.SZ": {"lastPrice": 11000.0},
+        "510300.SH": {"lastPrice": 4.5},
       }
 
     def unsubscribe_quote(self, subscription_id):
@@ -421,7 +418,114 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
 
   snapshot = streamer.whole_market_snapshot()
   assert snapshot["600000.SH"]["upperLimit"] == 11.0
+  assert "510300.SH" not in snapshot
+  assert "unused" not in streamer.prepare_whole_market_data(snapshot)["600000.SH"]
   assert detail_batches == [["000001.SH", "300001.SZ", "399001.SZ", "600000.SH"]]
+
+
+def test_whole_market_snapshot_uses_bounded_native_fragments_and_merges(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  codes = (
+    "000001.SH",
+    "000002.SZ",
+    "300001.SZ",
+    "399001.SZ",
+    "600000.SH",
+  )
+  native_calls: list[list[str]] = []
+
+  class FakeDataManager:
+    @staticmethod
+    def get_full_tick(batch):
+      native_calls.append(list(batch))
+      return {
+        code: {"lastPrice": float(index + 1), "unused": "drop-me"}
+        for index, code in enumerate(batch)
+        if code != "600000.SH"
+      }
+
+  monkeypatch.setattr(
+    broker_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    2,
+  )
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  streamer._whole_quote_codes = codes
+  streamer._whole_quote_code_set = frozenset(codes)
+  streamer._whole_quote_metadata_date = broker_module.datetime.now(
+    broker_module.SHANGHAI_TIMEZONE
+  ).date()
+
+  snapshot = streamer.whole_market_snapshot()
+
+  assert native_calls == [
+    ["000001.SH", "000002.SZ"],
+    ["300001.SZ", "399001.SZ"],
+    ["600000.SH"],
+  ]
+  # A successful native query may legitimately omit an instrument for which
+  # QMT has no current tick. Do not synthesize an empty quote.
+  assert set(snapshot) == set(codes) - {"600000.SH"}
+  assert all("unused" not in tick for tick in snapshot.values())
+
+
+def test_whole_market_snapshot_fragment_failure_never_returns_partial_data(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  codes = ("000001.SH", "000002.SZ", "300001.SZ")
+  native_calls: list[list[str]] = []
+  preparation_calls = 0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_full_tick(batch):
+      native_calls.append(list(batch))
+      if len(native_calls) == 2:
+        raise RuntimeError("native fragment failed")
+      return {code: {"lastPrice": 1.0} for code in batch}
+
+  monkeypatch.setattr(
+    broker_module,
+    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
+    2,
+  )
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  streamer._whole_quote_codes = codes
+  streamer._whole_quote_code_set = frozenset(codes)
+  streamer._whole_quote_metadata_date = broker_module.datetime.now(
+    broker_module.SHANGHAI_TIMEZONE
+  ).date()
+  original_prepare = streamer.prepare_whole_market_data
+
+  def record_prepare(data):
+    nonlocal preparation_calls
+    preparation_calls += 1
+    return original_prepare(data)
+
+  monkeypatch.setattr(streamer, "prepare_whole_market_data", record_prepare)
+
+  with pytest.raises(RuntimeError, match="native fragment failed"):
+    streamer.whole_market_snapshot()
+
+  assert native_calls == [
+    ["000001.SH", "000002.SZ"],
+    ["300001.SZ"],
+  ]
+  assert preparation_calls == 0
+
+
+def test_whole_market_unsubscribe_does_not_hide_native_failure() -> None:
+  class FakeDataManager:
+    @staticmethod
+    def unsubscribe_quote(subscription_id):
+      raise RuntimeError(f"cannot cancel {subscription_id}")
+
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  streamer._whole_quote_subscription = 202
+
+  with pytest.raises(RuntimeError, match="failed to cancel"):
+    streamer.unsubscribe_whole_market()
 
 
 def test_data_only_simulator_rejects_trade_commands() -> None:

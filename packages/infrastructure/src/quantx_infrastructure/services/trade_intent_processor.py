@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from quantx_domain.brokers.base import (
   OrderRequest,
@@ -37,6 +37,8 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
 )
 from quantx_infrastructure.services.trading_service import TradingService
 
+MARKET_DATA_STREAM_NOT_READY = "MARKET_DATA_STREAM_NOT_READY"
+
 
 class TradeIntentProcessor:
   """Turn a SELL intent into a sized, risk-checked, durable broker command."""
@@ -50,6 +52,7 @@ class TradeIntentProcessor:
     context: ExitEvaluationContext,
     position: Optional[Position],
     limit_price: float,
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     authorization_code = "PAPER_NOT_REQUIRED"
     exact_auto_authorized = plan.execution_mode != "live"
@@ -103,6 +106,14 @@ class TradeIntentProcessor:
       metadata=metadata,
       trace_id=intent_id,
     )
+    if not self._market_is_ready(market_ready):
+      await self._create_intent_record(
+        plan,
+        intent,
+        status="REJECTED",
+        notes=MARKET_DATA_STREAM_NOT_READY,
+      )
+      return self._market_not_ready_result(intent.intent_id)
     approval_required = (
       plan.execution_mode == "live" and not exact_auto_authorized
     )
@@ -124,6 +135,7 @@ class TradeIntentProcessor:
       context=context,
       position=position,
       limit_price=limit_price,
+      market_ready=market_ready,
     )
 
   async def process_approved_exit_intent(
@@ -134,11 +146,23 @@ class TradeIntentProcessor:
     context: ExitEvaluationContext,
     position: Optional[Position],
     limit_price: float,
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     if record.owner_type != "EXIT_PLAN" or record.owner_id != plan.plan_id:
       raise ValueError("卖出意图不属于该退出计划")
     if record.status != "AWAITING_APPROVAL" or record.direction != "SELL":
       raise ValueError("卖出意图已处理或不再等待确认")
+    if not self._market_is_ready(market_ready):
+      await self._update_intent(
+        record.id,
+        status="REJECTED",
+        notes=MARKET_DATA_STREAM_NOT_READY,
+        metadata={
+          **dict(record.intent_metadata or {}),
+          "market_data_gate": MARKET_DATA_STREAM_NOT_READY,
+        },
+      )
+      return self._market_not_ready_result(record.id)
     intent = TradeIntent(
       intent_id=record.id,
       strategy_id=str(record.strategy_id or "exit-plan"),
@@ -160,6 +184,7 @@ class TradeIntentProcessor:
       context=context,
       position=position,
       limit_price=limit_price,
+      market_ready=market_ready,
     )
 
   async def _route(
@@ -170,7 +195,11 @@ class TradeIntentProcessor:
     context: ExitEvaluationContext,
     position: Optional[Position],
     limit_price: float,
+    market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
+    if not self._market_is_ready(market_ready):
+      await self._reject_market_not_ready(intent)
+      return self._market_not_ready_result(intent.intent_id)
     service = TradingService(
       account_id=plan.account_id,
       account_type=AccountType.STOCK,
@@ -282,6 +311,9 @@ class TradeIntentProcessor:
         "error": risk.reason_code,
         "risk_action": risk.action.value,
       }
+    if not self._market_is_ready(market_ready):
+      await self._reject_market_not_ready(intent)
+      return self._market_not_ready_result(intent.intent_id)
     final_volume = int(risk.final_volume or request.volume)
     result = await service.place_order(
       stock_code=plan.instrument_code,
@@ -326,6 +358,7 @@ class TradeIntentProcessor:
     intent: TradeIntent,
     *,
     status: str,
+    notes: Optional[str] = None,
   ) -> None:
     async with AsyncSessionLocal() as db:
       db.add(
@@ -348,9 +381,38 @@ class TradeIntentProcessor:
           trace_id=intent.trace_id,
           status=status,
           intent_metadata=dict(intent.metadata or {}),
+          notes=notes,
         )
       )
       await db.commit()
+
+  @staticmethod
+  def _market_is_ready(check: Optional[Callable[[], bool]]) -> bool:
+    if check is None:
+      return True
+    try:
+      return bool(check())
+    except Exception:
+      return False
+
+  @staticmethod
+  def _market_not_ready_result(intent_id: str) -> dict[str, Any]:
+    return {
+      "success": False,
+      "intent_id": intent_id,
+      "error": MARKET_DATA_STREAM_NOT_READY,
+    }
+
+  async def _reject_market_not_ready(self, intent: TradeIntent) -> None:
+    await self._update_intent(
+      intent.intent_id,
+      status="REJECTED",
+      notes=MARKET_DATA_STREAM_NOT_READY,
+      metadata={
+        **dict(intent.metadata or {}),
+        "market_data_gate": MARKET_DATA_STREAM_NOT_READY,
+      },
+    )
 
   @staticmethod
   async def _update_intent(intent_id: str, **updates: Any) -> None:

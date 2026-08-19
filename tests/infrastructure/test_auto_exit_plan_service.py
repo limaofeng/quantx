@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_domain.trading.exit_plan import (
@@ -347,3 +348,157 @@ async def test_liquidation_pending_sell_blocks_duplicate_plan(monkeypatch):
   assert session.added == []
   assert "待成交卖单" in result["items"][0]["error"]
   assert existing.enabled
+
+
+@pytest.mark.asyncio
+async def test_stale_market_context_is_persisted_without_exit_submit(
+  monkeypatch,
+):
+  record = active_record(plan_id="stale-evaluate")
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _model, _key):
+      return None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+
+  class Repository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, _plan_id, for_update=False):
+      del for_update
+      return record
+
+  submit = AsyncMock()
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=record.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=0.0,
+      market_data_age_seconds=999.0,
+      source="WHOLE_QUOTE_UNAVAILABLE",
+    ),
+    position=liquidation_position(),
+  )
+
+  assert result is None
+  assert record.data_quality == "MARKET_DATA_STALE"
+  assert record.last_error == "market_data_stale"
+  assert session.committed
+  submit.assert_not_awaited()
+
+
+def test_market_context_allows_normal_miniqmt_tick_jitter() -> None:
+  context = ExitEvaluationContext(
+    timestamp=datetime.now(),
+    current_price=10.0,
+    market_data_age_seconds=3.5,
+    source="WHOLE_QUOTE",
+  )
+
+  assert AutoExitPlanService._market_context_error(context, lambda: True) == ""
+  stale_context = ExitEvaluationContext(
+    timestamp=datetime.now(),
+    current_price=10.0,
+    market_data_age_seconds=10.001,
+    source="WHOLE_QUOTE",
+  )
+  assert (
+    AutoExitPlanService._market_context_error(stale_context, lambda: True)
+    == "market_data_stale"
+  )
+
+
+@pytest.mark.asyncio
+async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
+  monkeypatch,
+):
+  plan = pending_plan()
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  intent = SimpleNamespace(
+    id="intent-1",
+    status="AWAITING_APPROVAL",
+    notes=None,
+    intent_metadata={},
+  )
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _model, key):
+      return intent if key == "intent-1" else None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+
+  class Repository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, _plan_id, for_update=False):
+      del for_update
+      return record
+
+  processor = SimpleNamespace(process_approved_exit_intent=AsyncMock())
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(
+    service_module,
+    "TradeIntentProcessor",
+    lambda: processor,
+  )
+
+  result = await AutoExitPlanService().confirm_exit_intent(
+    plan_id=record.plan_id,
+    intent_id="intent-1",
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=10.0,
+      market_data_age_seconds=0.0,
+      source="QMT_WHOLE_QUOTE",
+    ),
+    position=liquidation_position(),
+    market_ready=lambda: False,
+  )
+
+  assert result == {
+    "success": False,
+    "code": "MARKET_DATA_STREAM_NOT_READY",
+    "error": "MARKET_DATA_STREAM_NOT_READY",
+  }
+  assert record.data_quality == "MARKET_DATA_STALE"
+  assert record.last_error == "MARKET_DATA_STREAM_NOT_READY"
+  assert intent.status == "REJECTED"
+  assert intent.notes == "MARKET_DATA_STREAM_NOT_READY"
+  assert intent.intent_metadata["market_data_gate"] == (
+    "MARKET_DATA_STREAM_NOT_READY"
+  )
+  assert record.plan_state["pending_intent_id"] == ""
+  assert session.committed
+  processor.process_approved_exit_intent.assert_not_awaited()

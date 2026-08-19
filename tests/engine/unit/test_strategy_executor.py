@@ -262,6 +262,88 @@ class TestStrategyExecutor:
     assert runtime.strategy.state.order_seen == "REJECTED"
 
   @pytest.mark.asyncio
+  async def test_non_ready_whole_quote_gate_rejects_paper_order(
+    self,
+    strategy_executor,
+  ):
+    context = StrategyContext(
+      run_id="test-paper-market-gate",
+      mode=StrategyRunMode.PAPER,
+      instruments=["000001.SZ"],
+      parameters={},
+      current_time=datetime(2024, 1, 2, 10, 0),
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=104,
+      strategy_class=PatchCallbackStrategy,
+      context=context,
+    )
+    runtime.strategy = PatchCallbackStrategy(context)
+    runtime.data_adapter = SimpleNamespace(
+      subscription_manager=SimpleNamespace(
+        hub=SimpleNamespace(is_ready=False),
+      )
+    )
+    runtime.broker = SimpleNamespace(place_order=AsyncMock())
+
+    await strategy_executor._process_trade_intent(
+      runtime,
+      TradeIntent(
+        strategy_id="104",
+        run_id=context.run_id,
+        instrument_code="000001.SZ",
+        direction=TradeIntentDirection.BUY,
+        bucket="swing",
+        reason="market_gate_test",
+        target_volume=100,
+        limit_price_hint=10.0,
+      ),
+    )
+
+    runtime.broker.place_order.assert_not_awaited()
+    assert runtime.strategy.state.order_seen == "REJECTED"
+
+  @pytest.mark.asyncio
+  async def test_missing_whole_quote_gate_fails_closed_for_paper_order(
+    self,
+    strategy_executor,
+  ):
+    context = StrategyContext(
+      run_id="test-paper-missing-market-gate",
+      mode=StrategyRunMode.PAPER,
+      instruments=["000001.SZ"],
+      parameters={},
+      current_time=datetime(2024, 1, 2, 10, 0),
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=105,
+      strategy_class=PatchCallbackStrategy,
+      context=context,
+    )
+    runtime.strategy = PatchCallbackStrategy(context)
+    runtime.data_adapter = SimpleNamespace()
+    runtime.broker = SimpleNamespace(place_order=AsyncMock())
+
+    await strategy_executor._process_trade_intent(
+      runtime,
+      TradeIntent(
+        strategy_id="105",
+        run_id=context.run_id,
+        instrument_code="000001.SZ",
+        direction=TradeIntentDirection.BUY,
+        bucket="swing",
+        reason="missing_market_gate_test",
+        target_volume=100,
+        limit_price_hint=10.0,
+      ),
+    )
+
+    runtime.broker.place_order.assert_not_awaited()
+    assert runtime.strategy.state.order_seen == "REJECTED"
+
+  @pytest.mark.asyncio
   async def test_paper_order_ttl_requests_cancel_and_prevents_late_fill(
     self,
     strategy_executor,

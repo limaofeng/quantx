@@ -6,7 +6,8 @@ Agent 回报收敛。它使用 PostgreSQL advisory lock 保证同数据库只运
 
 Engine 的 `WholeQuoteHub` 是沪深 tick 的唯一进程内入口。它先订阅 Redis 二进制
 批次频道，再加载最新全量快照与水位，按 `stream_id + sequence` 检查重复、
-乱序和缺口，并按标的源时间阻止旧 tick 回退。全市场雷达、退出监控、策略、
+乱序和缺口，并按标的源时间阻止旧 tick 回退；启动期间收到的批次在快照补水
+完成后按水位衔接，消除“先读快照、后订阅”的窗口。全市场雷达、退出监控、策略、
 暖缓存和单标的展示均在 Hub 内本地过滤；新增标的不再向 Agent 创建或重建
 whole-quote 订阅。每 3 秒把最新候选榜和通用盘中量能快照批量写入 Redis
 派生读模型。API 只读取该投影，不因页面访问创建行情订阅。首次触板、封板、
@@ -67,3 +68,8 @@ Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例�
 非交易日不误判。关键消费者使用容量 8 的有序队列，溢出后显式进入
 `LAGGING` 并停止相关回调；UI 使用容量 1 的 latest-only 队列并记录合并数。
 Pub/Sub 缺批时 Hub 从 Redis 最新全量快照收敛，不重放可能过时的中间 tick。
+缺口出现到补水完成期间停止增量分发，中央行情和关键消费者都不能恢复为
+`READY`。sequence 1 快照在 API 仍为 `SYNCING` 时只更新中央状态，不提前分发；
+sequence 2 连续性屏障使 API、Engine 与 Redis freshness lease 的 stream/sequence
+完全一致后，Hub 才首次向消费者分发完整中央快照。任一水位或租约不一致时，
+策略、条件清仓和自动退出等实时交易动作保持关闭。

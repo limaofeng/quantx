@@ -30,15 +30,23 @@ logger = logging.getLogger(__name__)
 
 
 class ConditionalLiquidationMonitor:
-  def __init__(self, interval_seconds: float = 1.0):
+  def __init__(
+    self,
+    interval_seconds: float = 1.0,
+    *,
+    scanner=intraday_volume_scanner,
+  ):
     self.interval_seconds = max(0.5, float(interval_seconds or 1.0))
+    self.scanner = scanner
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
+    self.market_data_gate_rejections = 0
+    self._market_gate_blocked = False
 
   async def start(self) -> None:
     if self._task and not self._task.done():
       return
-    await intraday_volume_scanner.start()
+    await self.scanner.start()
     self._stopping = asyncio.Event()
     self._task = asyncio.create_task(self._run(), name="ConditionalLiquidationMonitor")
     logger.info("条件清仓单监控器已启动")
@@ -88,10 +96,10 @@ class ConditionalLiquidationMonitor:
 
     results = []
     if orders:
-      if not intraday_volume_scanner.is_running:
-        await intraday_volume_scanner.start()
-      intraday_volume_scanner.touch()
-    states = intraday_volume_scanner.snapshot_states() if orders else {}
+      if not self.scanner.is_running:
+        await self.scanner.start()
+      self.scanner.touch()
+    states = self._ready_states() if orders else {}
     for order in orders:
       account_type = getattr(order, "account_type", None) or AccountType.STOCK
       if isinstance(account_type, str):
@@ -126,7 +134,11 @@ class ConditionalLiquidationMonitor:
         result = await self._evaluate_adaptive_order(
           order,
           service=service,
-          state=states.get(order.stock_code),
+          state=(
+            states.get(order.stock_code)
+            if self._market_data_ready()
+            else None
+          ),
         )
       else:
         result = ConditionalLiquidationEvaluation(
@@ -138,6 +150,27 @@ class ConditionalLiquidationMonitor:
         )
       results.append(result)
     return results
+
+  def _market_data_ready(self) -> bool:
+    return bool(getattr(getattr(self.scanner, "hub", None), "is_ready", False))
+
+  def _ready_states(self) -> dict:
+    if self._market_data_ready():
+      self._market_gate_blocked = False
+      return self.scanner.snapshot_states()
+    self.market_data_gate_rejections += 1
+    if not self._market_gate_blocked:
+      status = getattr(
+        getattr(getattr(self.scanner, "hub", None), "status", None),
+        "value",
+        "OFFLINE",
+      )
+      logger.warning(
+        "WholeQuoteHub 非 READY，条件清仓使用不可用行情上下文: status=%s",
+        status,
+      )
+      self._market_gate_blocked = True
+    return {}
 
   async def _evaluate_adaptive_order(self, order, *, service, state):
     now = time_utils.now()
@@ -159,6 +192,7 @@ class ConditionalLiquidationMonitor:
       plan_id=order.exit_plan_id,
       context=context,
       position=position,
+      market_ready=self._market_data_ready,
     )
     async for db in get_async_db():
       refreshed = await ConditionalLiquidationOrderRepository(db).find_by_id(order.id)

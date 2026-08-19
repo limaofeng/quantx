@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from quantx_engine.conditional_liquidation import ConditionalLiquidationMonitor
+from quantx_infrastructure.core.data.whole_quote_hub import WholeQuoteStatus
 from quantx_infrastructure.services.intraday_volume_scanner import (
   IntradayVolumeState,
 )
@@ -46,3 +48,16 @@ def test_adaptive_context_pauses_when_whole_quote_is_unavailable():
   assert context.market_data_age_seconds > 5
   assert context.volume_data_age_seconds > 5
   assert context.source == "WHOLE_QUOTE_UNAVAILABLE"
+
+
+def test_conditional_monitor_does_not_read_cached_states_while_hub_stale():
+  class StaleScanner:
+    hub = SimpleNamespace(is_ready=False, status=WholeQuoteStatus.STALE)
+
+    def snapshot_states(self):
+      raise AssertionError("stale cached states must not be read")
+
+  monitor = ConditionalLiquidationMonitor(scanner=StaleScanner())
+
+  assert monitor._ready_states() == {}
+  assert monitor.market_data_gate_rejections == 1

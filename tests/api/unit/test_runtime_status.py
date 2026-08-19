@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from quantx_api import agent_api, runtime_status
 from quantx_infrastructure.core.data.market_stream_transport import (
+  MarketStreamFreshnessLease,
   MarketStreamState,
 )
 from quantx_infrastructure.database.relational_base import Base
@@ -170,21 +171,28 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
     status="READY",
     stream_id="stream-1",
     sequence=5,
-    captured_at=datetime.now(timezone.utc),
-    updated_at=datetime.now(timezone.utc),
+    captured_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+    updated_at=datetime.now(timezone.utc) - timedelta(seconds=30),
     instrument_count=5_000,
   )
 
-  async def state():
-    return stream_state
+  async def state_with_freshness():
+    return stream_state, MarketStreamFreshnessLease(
+      stream_id=stream_state.stream_id,
+      sequence=stream_state.sequence,
+    )
 
   async def engine_state():
     return stream_state
 
-  async def outside_session(*_args):
-    return False
+  async def inside_session(*_args):
+    return True
 
-  monkeypatch.setattr(runtime_status.market_stream_store, "state", state)
+  monkeypatch.setattr(
+    runtime_status.market_stream_store,
+    "state_with_freshness",
+    state_with_freshness,
+  )
   monkeypatch.setattr(
     runtime_status.market_stream_store,
     "engine_state",
@@ -193,7 +201,7 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   monkeypatch.setattr(
     runtime_status.TradingTimeService,
     "is_trading_hours",
-    outside_session,
+    inside_session,
   )
   now = runtime_status.utcnow()
 
@@ -238,6 +246,8 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
     "latestSnapshotAgeSeconds": None,
   }
   assert components["market-data"]["status"] == "ready"
+  assert components["market-data"]["streamAgeSeconds"] >= 25
+  assert components["market-data"]["engineAgeSeconds"] >= 25
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
@@ -250,6 +260,17 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   assert components["qmt-agent"]["readyDevices"] == 1
   assert components["qmt-agent"]["reconcilingDevices"] == 0
   assert components["market-data"]["status"] == "ready"
+
+  async def state_without_freshness():
+    return stream_state, None
+
+  monkeypatch.setattr(
+    runtime_status.market_stream_store,
+    "state_with_freshness",
+    state_without_freshness,
+  )
+  components = await runtime_status._component_heartbeats()
+  assert components["market-data"]["status"] == "stale"
 
   async with session_factory() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")

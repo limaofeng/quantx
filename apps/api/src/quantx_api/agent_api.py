@@ -10,7 +10,8 @@ import logging
 import os
 import time
 import uuid
-from datetime import timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,9 +27,11 @@ from fastapi import (
 from quantx_contracts import (
   MARKET_STREAM_MARKETS,
   MARKET_STREAM_SUBPROTOCOL,
+  MAX_MARKET_STREAM_FRAME_BYTES,
   PROTOCOL_VERSION,
   AgentEnvelope,
   AgentMessageType,
+  MarketBatchKind,
   MarketControlType,
   MarketStreamBatch,
   MarketStreamControl,
@@ -92,6 +95,16 @@ REPORT_TYPES = {
 MAX_MARKET_DATA_CHUNK_BYTES = 32 * 1024 * 1024
 MAX_MARKET_DATA_CHUNK_RECORDS = 5000
 MAX_MARKET_DATA_CHUNKS = 100_000
+MARKET_STREAM_COMMIT_QUEUE_CAPACITY = 2
+MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = (
+  MARKET_STREAM_COMMIT_QUEUE_CAPACITY * MAX_MARKET_STREAM_FRAME_BYTES
+)
+MARKET_STREAM_DEVICE_REVALIDATE_SECONDS = 5.0
+MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS = 8.0
+MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
+MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
+MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
+MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
 
 
 class _MarketConnectionRegistry:
@@ -115,6 +128,97 @@ class _MarketConnectionRegistry:
 
 
 _market_connections = _MarketConnectionRegistry()
+
+
+@dataclass(frozen=True)
+class _MarketCommitItem:
+  batch: MarketStreamBatch
+  payload: bytes
+  received_monotonic: float
+
+
+@dataclass(frozen=True)
+class _MarketCommitQueueClosed:
+  disconnect: WebSocketDisconnect
+
+
+@dataclass
+class _MarketCommitState:
+  last_sequence: int = 0
+
+
+class _MarketCommitBuffer:
+  """Bound Redis work without silently dropping an accepted market frame."""
+
+  def __init__(
+    self,
+    *,
+    capacity: int = MARKET_STREAM_COMMIT_QUEUE_CAPACITY,
+    max_bytes: int = MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES,
+  ) -> None:
+    if capacity <= 0 or max_bytes <= 0:
+      raise ValueError("market commit buffer limits must be positive")
+    self._capacity = capacity
+    self._max_bytes = max_bytes
+    self._buffered_batches = 0
+    self._buffered_bytes = 0
+    self._condition = asyncio.Condition()
+    self._queue: asyncio.Queue[
+      _MarketCommitItem | _MarketCommitQueueClosed
+    ] = asyncio.Queue(maxsize=capacity)
+
+  @property
+  def buffered_batches(self) -> int:
+    return self._buffered_batches
+
+  @property
+  def buffered_bytes(self) -> int:
+    return self._buffered_bytes
+
+  async def reserve(self) -> None:
+    async with self._condition:
+      await self._condition.wait_for(
+        lambda: self._buffered_batches < self._capacity
+      )
+      self._buffered_batches += 1
+
+  async def put_reserved(self, item: _MarketCommitItem) -> None:
+    payload_bytes = len(item.payload)
+    async with self._condition:
+      if self._buffered_bytes + payload_bytes > self._max_bytes:
+        raise ValueError("market frame exceeds API commit buffer byte limit")
+      self._buffered_bytes += payload_bytes
+    try:
+      self._queue.put_nowait(item)
+    except BaseException:
+      async with self._condition:
+        self._buffered_bytes -= payload_bytes
+      raise
+
+  async def cancel_reservation(self) -> None:
+    async with self._condition:
+      self._buffered_batches -= 1
+      self._condition.notify_all()
+
+  async def put(self, item: _MarketCommitItem) -> None:
+    await self.reserve()
+    try:
+      await self.put_reserved(item)
+    except BaseException:
+      await self.cancel_reservation()
+      raise
+
+  async def close(self, disconnect: WebSocketDisconnect) -> None:
+    await self._queue.put(_MarketCommitQueueClosed(disconnect))
+
+  async def get(self) -> _MarketCommitItem | _MarketCommitQueueClosed:
+    return await self._queue.get()
+
+  async def complete(self, item: _MarketCommitItem) -> None:
+    async with self._condition:
+      self._buffered_batches -= 1
+      self._buffered_bytes -= len(item.payload)
+      self._condition.notify_all()
 
 
 async def _publish_market_event(
@@ -553,6 +657,42 @@ async def _process_message(
   raise ValueError(f"不支持的 Agent 消息类型: {envelope.message_type.value}")
 
 
+async def _send_market_text(websocket: WebSocket, payload: str) -> None:
+  await asyncio.wait_for(
+    websocket.send_text(payload),
+    timeout=MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS,
+  )
+
+
+async def _wait_for_active_market_device(device_id: str) -> None:
+  """Bridge the short race between control and market WebSocket startup."""
+  deadline = (
+    time.monotonic() + MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS
+  )
+  while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+    try:
+      is_active = await asyncio.wait_for(
+        agent_connection_hub.is_market_device(device_id),
+        timeout=remaining,
+      )
+    except asyncio.TimeoutError as exc:
+      raise AuthError(
+        "FORBIDDEN",
+        "当前设备不是活动行情 Agent",
+      ) from exc
+    if is_active:
+      return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+    await asyncio.sleep(
+      min(MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS, remaining)
+    )
+
+
 async def _request_market_resync(
   websocket: WebSocket,
   *,
@@ -561,16 +701,175 @@ async def _request_market_resync(
   reason: str,
 ) -> None:
   try:
-    await websocket.send_text(
+    await _send_market_text(
+      websocket,
       MarketStreamControl(
         type=MarketControlType.RESYNC,
         stream_id=stream_id,
         sequence=sequence,
         reason=reason[:256],
-      ).model_dump_json()
+      ).model_dump_json(),
     )
   except Exception:
     pass
+
+
+async def _receive_market_batches(
+  websocket: WebSocket,
+  *,
+  stream_id: str,
+  device_id: str,
+  session_expires_at: datetime,
+  buffer: _MarketCommitBuffer,
+) -> None:
+  expected_sequence = 1
+  next_device_check = 0.0
+  while True:
+    if utcnow() >= session_expires_at:
+      raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
+    now = time.monotonic()
+    if now >= next_device_check:
+      await _ensure_device_active(device_id)
+      next_device_check = now + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
+
+    await buffer.reserve()
+    reserved = True
+    try:
+      message = await websocket.receive()
+      if message["type"] == "websocket.disconnect":
+        await buffer.cancel_reservation()
+        reserved = False
+        await buffer.close(WebSocketDisconnect(message.get("code", 1000)))
+        return
+
+      # A quiet socket can remain blocked across token expiry or device
+      # revocation. Revalidate before parsing or exposing its first frame to
+      # the Redis committer so that frame can never be persisted or ACKed.
+      if utcnow() >= session_expires_at:
+        raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
+      now = time.monotonic()
+      if now >= next_device_check:
+        await _ensure_device_active(device_id)
+        next_device_check = (
+          time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
+        )
+
+      payload = message.get("bytes")
+      if not isinstance(payload, bytes):
+        raise ValueError("market stream only accepts binary data frames")
+
+      received_monotonic = time.monotonic()
+      batch = MarketStreamBatch.from_bytes(payload)
+      if batch.stream_id != stream_id:
+        raise ValueError("market stream id mismatch")
+      if batch.sequence != expected_sequence:
+        raise ValueError(
+          "market stream sequence gap: "
+          f"expected={expected_sequence} actual={batch.sequence}"
+        )
+      if (
+        expected_sequence == 1
+        and batch.kind is not MarketBatchKind.SNAPSHOT
+      ):
+        raise ValueError("first market stream batch must be SNAPSHOT")
+      if expected_sequence > 1 and batch.kind is MarketBatchKind.SNAPSHOT:
+        raise ValueError(
+          "market stream SNAPSHOT is only valid as the first batch"
+        )
+      await buffer.put_reserved(
+        _MarketCommitItem(
+          batch=batch,
+          payload=payload,
+          received_monotonic=received_monotonic,
+        )
+      )
+      reserved = False
+      expected_sequence += 1
+    except BaseException:
+      if reserved:
+        await buffer.cancel_reservation()
+      raise
+
+
+async def _commit_market_batches(
+  websocket: WebSocket,
+  *,
+  stream_id: str,
+  buffer: _MarketCommitBuffer,
+  commit_state: _MarketCommitState,
+) -> None:
+  while True:
+    queued = await buffer.get()
+    if isinstance(queued, _MarketCommitQueueClosed):
+      raise queued.disconnect
+
+    try:
+      state = await asyncio.wait_for(
+        market_stream_store.write_batch(
+          queued.batch,
+          queued.payload,
+        ),
+        timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
+      )
+      MARKET_STREAM_PROCESSING.observe(
+        time.monotonic() - queued.received_monotonic
+      )
+      MARKET_STREAM_FRAMES.labels(kind=queued.batch.kind.value).inc()
+      MARKET_STREAM_FRAME_BYTES.set(len(queued.payload))
+      MARKET_STREAM_INSTRUMENTS.set(queued.batch.instrument_count)
+      MARKET_STREAM_SEQUENCE.set(queued.batch.sequence)
+      commit_state.last_sequence = state.sequence
+    finally:
+      # Free one receive/commit slot only after Redis has either committed or
+      # rejected the frame. A successful commit may open the next Agent ACK
+      # window before the small control frame is written to the socket.
+      await buffer.complete(queued)
+
+    await _send_market_text(
+      websocket,
+      MarketStreamControl(
+        type=MarketControlType.ACK,
+        stream_id=stream_id,
+        sequence=commit_state.last_sequence,
+      ).model_dump_json(),
+    )
+
+
+async def _run_market_commit_pipeline(
+  websocket: WebSocket,
+  *,
+  stream_id: str,
+  device_id: str,
+  session_expires_at: datetime,
+  commit_state: _MarketCommitState,
+) -> None:
+  buffer = _MarketCommitBuffer()
+  receiver = asyncio.create_task(
+    _receive_market_batches(
+      websocket,
+      stream_id=stream_id,
+      device_id=device_id,
+      session_expires_at=session_expires_at,
+      buffer=buffer,
+    ),
+    name=f"market-receiver:{stream_id}",
+  )
+  committer = asyncio.create_task(
+    _commit_market_batches(
+      websocket,
+      stream_id=stream_id,
+      buffer=buffer,
+      commit_state=commit_state,
+    ),
+    name=f"market-redis-committer:{stream_id}",
+  )
+  try:
+    await asyncio.gather(receiver, committer)
+  finally:
+    for task in (receiver, committer):
+      if not task.done():
+        task.cancel()
+    await asyncio.gather(receiver, committer, return_exceptions=True)
 
 
 @agent_router.websocket("/ws/agent/market")
@@ -583,7 +882,7 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
   await websocket.accept(subprotocol=MARKET_STREAM_SUBPROTOCOL)
   connection_id = ""
   stream_id = ""
-  last_sequence = 0
+  commit_state = _MarketCommitState()
   disconnect_reason = "market websocket disconnected"
   try:
     first = AgentEnvelope.model_validate_json(await websocket.receive_text())
@@ -594,66 +893,58 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     }
     if "market-data" not in capabilities:
       raise AuthError("FORBIDDEN", "Agent 未声明 market-data 能力")
-    if not await agent_connection_hub.is_market_device(device.id):
-      raise AuthError("FORBIDDEN", "当前设备不是活动行情 Agent")
+    await _wait_for_active_market_device(device.id)
     connection_id = await _market_connections.register() or ""
     if not connection_id:
       raise AuthError("CONFLICT", "已存在活动行情连接")
     MARKET_STREAM_CONNECTIONS.set(1)
 
-    await websocket.send_text(
-      _auth_result(accepted=True).model_dump_json()
+    await _send_market_text(
+      websocket,
+      _auth_result(accepted=True).model_dump_json(),
     )
-    await market_stream_store.cleanup_legacy_whole_controls()
+    await asyncio.wait_for(
+      market_stream_store.cleanup_legacy_whole_controls(),
+      timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
+    )
+    stream_generation = await asyncio.wait_for(
+      market_stream_store.allocate_generation(),
+      timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
+    )
     stream_id = str(uuid.uuid4())
-    await market_stream_store.mark_syncing(
-      stream_id,
-      reason="market websocket connected",
+    await asyncio.wait_for(
+      market_stream_store.mark_syncing(
+        stream_id,
+        generation=stream_generation,
+        reason="market websocket connected",
+      ),
+      timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
     )
-    await websocket.send_text(
+    await _send_market_text(
+      websocket,
       MarketStreamControl(
         type=MarketControlType.START,
         stream_id=stream_id,
         markets=MARKET_STREAM_MARKETS,
-      ).model_dump_json()
+      ).model_dump_json(),
     )
 
-    while True:
-      if utcnow() >= session.expires_at:
-        raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
-      await _ensure_device_active(device.id)
-      message = await websocket.receive()
-      if message["type"] == "websocket.disconnect":
-        raise WebSocketDisconnect(message.get("code", 1000))
-      payload = message.get("bytes")
-      if not isinstance(payload, bytes):
-        raise ValueError("market stream only accepts binary data frames")
-      processing_started = time.monotonic()
-      batch = MarketStreamBatch.from_bytes(payload)
-      if batch.stream_id != stream_id:
-        raise ValueError("market stream id mismatch")
-      state = await market_stream_store.write_batch(batch, payload)
-      MARKET_STREAM_PROCESSING.observe(time.monotonic() - processing_started)
-      MARKET_STREAM_FRAMES.labels(kind=batch.kind.value).inc()
-      MARKET_STREAM_FRAME_BYTES.set(len(payload))
-      MARKET_STREAM_INSTRUMENTS.set(batch.instrument_count)
-      MARKET_STREAM_SEQUENCE.set(batch.sequence)
-      last_sequence = state.sequence
-      await websocket.send_text(
-        MarketStreamControl(
-          type=MarketControlType.ACK,
-          stream_id=stream_id,
-          sequence=last_sequence,
-        ).model_dump_json()
-      )
+    await _run_market_commit_pipeline(
+      websocket,
+      stream_id=stream_id,
+      device_id=device.id,
+      session_expires_at=session.expires_at,
+      commit_state=commit_state,
+    )
   except WebSocketDisconnect:
     disconnect_reason = "market websocket disconnected"
   except AuthError as exc:
     disconnect_reason = exc.message
     if not stream_id:
       try:
-        await websocket.send_text(
-          _auth_result(accepted=False, reason=exc.message).model_dump_json()
+        await _send_market_text(
+          websocket,
+          _auth_result(accepted=False, reason=exc.message).model_dump_json(),
         )
       except Exception:
         pass
@@ -661,7 +952,7 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       await _request_market_resync(
         websocket,
         stream_id=stream_id,
-        sequence=last_sequence,
+        sequence=commit_state.last_sequence,
         reason=exc.message,
       )
     try:
@@ -673,7 +964,7 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     logger.warning(
       "Agent market WebSocket resync: stream_id=%s sequence=%s error=%s",
       stream_id,
-      last_sequence,
+      commit_state.last_sequence,
       disconnect_reason,
     )
     MARKET_STREAM_RESYNCS.labels(reason=exc.__class__.__name__).inc()
@@ -681,7 +972,7 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
       await _request_market_resync(
         websocket,
         stream_id=stream_id,
-        sequence=last_sequence,
+        sequence=commit_state.last_sequence,
         reason=disconnect_reason,
       )
     try:
@@ -689,11 +980,20 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
     except Exception:
       pass
   finally:
+    # Release the single-connection lease before best-effort Redis cleanup.
+    # A black-holed Redis connection must never strand this registry and make
+    # every healthy Agent reconnect fail with CONFLICT.
+    if connection_id:
+      await _market_connections.unregister(connection_id)
+      MARKET_STREAM_CONNECTIONS.set(0)
     if stream_id:
       try:
-        await market_stream_store.mark_offline(
-          stream_id,
-          reason=disconnect_reason,
+        await asyncio.wait_for(
+          market_stream_store.mark_offline(
+            stream_id,
+            reason=disconnect_reason,
+          ),
+          timeout=MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS,
         )
       except Exception as exc:
         logger.warning(
@@ -701,9 +1001,6 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
           stream_id,
           exc.__class__.__name__,
         )
-    if connection_id:
-      await _market_connections.unregister(connection_id)
-      MARKET_STREAM_CONNECTIONS.set(0)
 
 
 @agent_router.websocket("/ws/agent")

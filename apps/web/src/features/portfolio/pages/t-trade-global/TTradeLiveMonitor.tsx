@@ -45,6 +45,7 @@ import type {
   QuoteHistoryByCode,
   QuoteHistoryPoint,
 } from './useLiveQuoteHistory';
+import { useMarketDataHealth } from './useMarketDataHealth';
 import {
   formatNumber,
   formatSignedPercent,
@@ -132,9 +133,20 @@ function freshnessTone(freshness: Freshness) {
   return 'text-slate-500';
 }
 
-function FreshnessLabel({ freshness }: { freshness: Freshness }) {
+function FreshnessLabel({
+  freshness,
+  source,
+}: {
+  freshness: Freshness;
+  source?: string;
+}) {
   return (
-    <span className={cn('inline-flex items-center gap-1.5', freshnessTone(freshness))}>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5',
+        freshnessTone(freshness)
+      )}
+    >
       <span
         aria-hidden="true"
         className={cn(
@@ -148,6 +160,7 @@ function FreshnessLabel({ freshness }: { freshness: Freshness }) {
                 : 'bg-rose-400'
         )}
       />
+      {source && <span className="text-slate-500">{source}</span>}
       {freshness.label}
       {freshness.ageSeconds != null && (
         <span className="font-mono text-slate-600">
@@ -217,6 +230,7 @@ export function TTradeHealthConsole({
   wsStatus: GraphqlWsStatus;
 }) {
   const now = useNow();
+  const marketData = useMarketDataHealth();
   const readiness = monitor?.readiness;
   const rows = monitor
     ? buildAttentionRows(
@@ -228,14 +242,20 @@ export function TTradeHealthConsole({
         isCurrentTradingDay
       )
     : [];
-  const telemetryCoverage = rows.filter(row => row.session?.latestEvaluation).length;
+  const telemetryCoverage = rows.filter(
+    row => row.session?.latestEvaluation
+  ).length;
   const staleCount = rows.filter(
     row =>
       ['STALE', 'MISSING'].includes(row.quoteFreshness.level) ||
       ['STALE', 'MISSING'].includes(row.heartbeatFreshness.level)
   ).length;
   const exceptionCount =
-    Number(Boolean(monitor?.lastError || monitor?.positionSnapshotError || quoteError)) +
+    Number(
+      Boolean(
+        monitor?.lastError || monitor?.positionSnapshotError || quoteError
+      )
+    ) +
     Number(readiness?.deadLetterCount || 0) +
     Number(readiness?.unresolvedCriticalAlertCount || 0);
   const blockedReason =
@@ -245,9 +265,13 @@ export function TTradeHealthConsole({
     monitor?.positionSnapshotError ||
     monitor?.lastError;
   const wsHealthy = wsStatus === 'connected';
+  const marketDataReady = marketData.status.toLowerCase() === 'ready';
+  const marketDataPending = ['checking', 'starting', 'syncing'].includes(
+    marketData.status.toLowerCase()
+  );
   const automaticReady = Boolean(
     (readiness?.automationReady ?? monitor?.canActivateLive) &&
-      !(readiness?.killSwitch ?? monitor?.killSwitch)
+    !(readiness?.killSwitch ?? monitor?.killSwitch)
   );
 
   return (
@@ -271,7 +295,10 @@ export function TTradeHealthConsole({
             onClick={onRefresh}
           >
             <RefreshCw
-              className={cn('h-4 w-4', refreshing && 'animate-spin motion-reduce:animate-none')}
+              className={cn(
+                'h-4 w-4',
+                refreshing && 'animate-spin motion-reduce:animate-none'
+              )}
             />
           </button>
         </div>
@@ -298,9 +325,27 @@ export function TTradeHealthConsole({
         />
         <StatusCell
           icon={Server}
-          label="GraphQL WS"
-          tone={wsHealthy ? 'emerald' : wsStatus === 'reconnecting' ? 'amber' : 'rose'}
+          label="页面 GraphQL WS"
+          tone={
+            wsHealthy
+              ? 'emerald'
+              : wsStatus === 'reconnecting'
+                ? 'amber'
+                : 'rose'
+          }
           value={wsStatus === 'connected' ? '已连接' : wsStatus}
+        />
+        <StatusCell
+          icon={Waves}
+          label="上游行情链路"
+          tone={
+            marketDataReady ? 'emerald' : marketDataPending ? 'amber' : 'rose'
+          }
+          value={
+            marketDataReady
+              ? `READY · #${marketData.engineSequence ?? marketData.sequence ?? 0}`
+              : marketData.status.toUpperCase()
+          }
         />
       </div>
 
@@ -313,10 +358,33 @@ export function TTradeHealthConsole({
           <div className="space-y-2 text-[10px]">
             <div className="flex items-center justify-between gap-3">
               <span className="inline-flex items-center gap-2 text-slate-400">
-                <Waves className="h-3.5 w-3.5 text-cyan-400" />实时行情流
+                <Waves className="h-3.5 w-3.5 text-cyan-400" />
+                页面行情推送
               </span>
-              <span className={quoteConnected ? 'text-emerald-300' : 'text-amber-300'}>
+              <span
+                className={
+                  quoteConnected ? 'text-emerald-300' : 'text-amber-300'
+                }
+              >
                 {quotes.size} / {monitor?.holdings.length || 0}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-2 text-slate-400">
+                <Server className="h-3.5 w-3.5 text-violet-400" />
+                Agent → Engine
+              </span>
+              <span
+                className={
+                  marketDataReady
+                    ? 'text-emerald-300'
+                    : marketDataPending
+                      ? 'text-amber-300'
+                      : 'text-rose-300'
+                }
+              >
+                {marketData.status.toUpperCase()} ·{' '}
+                {formatAge(marketData.engineAgeSeconds)}
               </span>
             </div>
             <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
@@ -329,9 +397,14 @@ export function TTradeHealthConsole({
             </div>
             <div className="flex items-center justify-between gap-3">
               <span className="inline-flex items-center gap-2 text-slate-400">
-                <HeartPulse className="h-3.5 w-3.5 text-red-400" />策略心跳
+                <HeartPulse className="h-3.5 w-3.5 text-red-400" />
+                策略心跳
               </span>
-              <span className={telemetryCoverage ? 'text-emerald-300' : 'text-amber-300'}>
+              <span
+                className={
+                  telemetryCoverage ? 'text-emerald-300' : 'text-amber-300'
+                }
+              >
                 {telemetryCoverage} / {monitor?.holdings.length || 0}
               </span>
             </div>
@@ -344,7 +417,8 @@ export function TTradeHealthConsole({
               />
             </div>
             <p className="pt-1 leading-4 text-slate-600">
-              行情通过 WebSocket 实时更新；策略心跳来自约 10 秒一次的监控投影。
+              页面由 GraphQL WS 推送；行情年龄取 miniQMT 源 Tick
+              时间，上游链路状态独立显示。
             </p>
           </div>
         </section>
@@ -425,7 +499,12 @@ export function TTradeHealthConsole({
             )}
             首要门禁
           </div>
-          <p className={cn('text-[10px] leading-4', blockedReason ? 'text-amber-100' : 'text-emerald-200')}>
+          <p
+            className={cn(
+              'text-[10px] leading-4',
+              blockedReason ? 'text-amber-100' : 'text-emerald-200'
+            )}
+          >
             {blockedReason || '当前没有阻断项'}
           </p>
           {readiness && (
@@ -458,7 +537,8 @@ export function TTradeHealthConsole({
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
-            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />刷新
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+            刷新
           </Button>
           <Button
             type="button"
@@ -467,7 +547,8 @@ export function TTradeHealthConsole({
             disabled={!accountId || actionLoading}
             onClick={onReconcile}
           >
-            <RotateCw className="mr-1.5 h-3.5 w-3.5" />同步持仓
+            <RotateCw className="mr-1.5 h-3.5 w-3.5" />
+            同步持仓
           </Button>
         </div>
         <Button
@@ -509,7 +590,10 @@ function Sparkline({
   if (points.length < 2) {
     return (
       <div
-        className={cn('flex items-center justify-center text-[9px] text-slate-700', className)}
+        className={cn(
+          'flex items-center justify-center text-[9px] text-slate-700',
+          className
+        )}
         role="img"
         aria-label={`${label}：等待实时行情样本`}
       >
@@ -538,7 +622,14 @@ function Sparkline({
       aria-label={`${label}：2 分钟价格走势，共 ${points.length} 个样本`}
     >
       <title>{label} 2 分钟实时走势</title>
-      <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="rgba(148,163,184,0.12)" strokeDasharray="3 4" />
+      <line
+        x1="0"
+        y1={height / 2}
+        x2={width}
+        y2={height / 2}
+        stroke="rgba(148,163,184,0.12)"
+        strokeDasharray="3 4"
+      />
       <path
         d={path}
         fill="none"
@@ -563,10 +654,14 @@ function InspectorMetric({
     <div className="border-b border-white/[0.05] py-2.5 last:border-b-0">
       <div className="flex items-center justify-between gap-4">
         <span className="text-[10px] text-slate-500">{label}</span>
-        <span className="font-mono text-xs font-bold text-slate-100">{value}</span>
+        <span className="font-mono text-xs font-bold text-slate-100">
+          {value}
+        </span>
       </div>
       {threshold && (
-        <div className="mt-1 text-right text-[9px] text-slate-600">阈值 {threshold}</div>
+        <div className="mt-1 text-right text-[9px] text-slate-600">
+          阈值 {threshold}
+        </div>
       )}
     </div>
   );
@@ -596,16 +691,32 @@ function TTradeInspector({
       <section className="border border-white/[0.07] bg-white/[0.02] p-3">
         <div className="flex items-end justify-between gap-3">
           <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">实时行情流</div>
-            <div className={cn('mt-1 font-mono text-2xl font-black', quoteTone(quote?.changePercent))}>
+            <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+              实时行情流
+            </div>
+            <div
+              className={cn(
+                'mt-1 font-mono text-2xl font-black',
+                quoteTone(quote?.changePercent)
+              )}
+            >
               {quote ? formatNumber(quote.currentPrice, 3) : '--'}
             </div>
           </div>
-          <div className={cn('font-mono text-sm font-bold', quoteTone(quote?.changePercent))}>
+          <div
+            className={cn(
+              'font-mono text-sm font-bold',
+              quoteTone(quote?.changePercent)
+            )}
+          >
             {formatSignedPercent(quote?.changePercent)}
           </div>
         </div>
-        <Sparkline className="mt-4 h-28 w-full" label={holding.stockCode} points={history} />
+        <Sparkline
+          className="mt-4 h-28 w-full"
+          label={holding.stockCode}
+          points={history}
+        />
         <div className="mt-2 flex justify-between font-mono text-[9px] text-slate-600">
           <span>2 分钟</span>
           <span>{formatTime(quote?.time)}</span>
@@ -632,31 +743,106 @@ function TTradeInspector({
           条件进度 {Math.round(progress * 100)}%
         </div>
         <div className="mt-3 border-y border-white/[0.06]">
-          <InspectorMetric label="回撤" value={metric(evaluation?.pullbackPct, 2, '%')} threshold={`≥ ${formatNumber(config.pullbackThresholdPct)}%`} />
-          <InspectorMetric label="反弹" value={metric(evaluation?.reboundPct, 2, '%')} threshold={`≥ ${formatNumber(config.reboundThresholdPct)}%`} />
-          <InspectorMetric label="动量涨幅" value={metric(evaluation?.momentumRisePct, 2, '%')} threshold={`≥ ${formatNumber(config.momentumMinRisePct)}%`} />
-          <InspectorMetric label="动量持续" value={metric(evaluation?.momentumMoveSeconds, 0, ' 秒')} threshold={`≥ ${config.momentumMinMoveSeconds} 秒`} />
-          <InspectorMetric label="成交加速比" value={metric(evaluation?.momentumAmountVelocityRatio, 2, 'x')} threshold={`≥ ${formatNumber(config.momentumMinAmountVelocityRatio)}x`} />
-          <InspectorMetric label="基线覆盖" value={metric(evaluation?.momentumBaselineCoverageSeconds, 0, ' 秒')} threshold={`${config.momentumBaselineSeconds} 秒`} />
-          <InspectorMetric label="VWAP / 溢价" value={`${metric(evaluation?.vwap, 3)} / ${metric(evaluation?.vwapPremiumPct, 2, '%')}`} threshold={`${formatNumber(config.momentumMinVwapPremiumPct)}%–${formatNumber(config.momentumMaxVwapPremiumPct)}%`} />
-          <InspectorMetric label="价差" value={`${metric(evaluation?.spreadTicks, 1, ' Tick')} / ${metric(evaluation?.spreadPct, 3, '%')}`} threshold={`回撤 ≤ ${config.maxSpreadTicks} Tick`} />
+          <InspectorMetric
+            label="回撤"
+            value={metric(evaluation?.pullbackPct, 2, '%')}
+            threshold={`≥ ${formatNumber(config.pullbackThresholdPct)}%`}
+          />
+          <InspectorMetric
+            label="反弹"
+            value={metric(evaluation?.reboundPct, 2, '%')}
+            threshold={`≥ ${formatNumber(config.reboundThresholdPct)}%`}
+          />
+          <InspectorMetric
+            label="动量涨幅"
+            value={metric(evaluation?.momentumRisePct, 2, '%')}
+            threshold={`≥ ${formatNumber(config.momentumMinRisePct)}%`}
+          />
+          <InspectorMetric
+            label="动量持续"
+            value={metric(evaluation?.momentumMoveSeconds, 0, ' 秒')}
+            threshold={`≥ ${config.momentumMinMoveSeconds} 秒`}
+          />
+          <InspectorMetric
+            label="成交加速比"
+            value={metric(evaluation?.momentumAmountVelocityRatio, 2, 'x')}
+            threshold={`≥ ${formatNumber(config.momentumMinAmountVelocityRatio)}x`}
+          />
+          <InspectorMetric
+            label="基线覆盖"
+            value={metric(
+              evaluation?.momentumBaselineCoverageSeconds,
+              0,
+              ' 秒'
+            )}
+            threshold={`${config.momentumBaselineSeconds} 秒`}
+          />
+          <InspectorMetric
+            label="VWAP / 溢价"
+            value={`${metric(evaluation?.vwap, 3)} / ${metric(evaluation?.vwapPremiumPct, 2, '%')}`}
+            threshold={`${formatNumber(config.momentumMinVwapPremiumPct)}%–${formatNumber(config.momentumMaxVwapPremiumPct)}%`}
+          />
+          <InspectorMetric
+            label="价差"
+            value={`${metric(evaluation?.spreadTicks, 1, ' Tick')} / ${metric(evaluation?.spreadPct, 3, '%')}`}
+            threshold={`回撤 ≤ ${config.maxSpreadTicks} Tick`}
+          />
         </div>
       </section>
 
       <section>
         <h3 className="text-xs font-black text-slate-200">持仓与批次</h3>
         <div className="mt-2 grid grid-cols-2 gap-2">
-          <StatusCell icon={DatabaseBackup} label="持仓 / 可用" tone="slate" value={`${holding.volume.toLocaleString()} / ${holding.availableVolume.toLocaleString()}`} />
-          <StatusCell icon={Activity} label="活跃仓" tone={session?.activeVolume ? 'emerald' : 'slate'} value={session?.activeVolume?.toLocaleString() || 0} />
-          <StatusCell icon={Gauge} label="批次盈亏" tone={(session?.lastNetProfitPct || 0) >= 0 ? 'rose' : 'sky'} value={session?.activeVolume ? `${formatNumber(session.lastNetProfitPct)}%` : '--'} />
-          <StatusCell icon={CheckCircle2} label="完成次数" tone="slate" value={session?.completedCycles || 0} />
+          <StatusCell
+            icon={DatabaseBackup}
+            label="持仓 / 可用"
+            tone="slate"
+            value={`${holding.volume.toLocaleString()} / ${holding.availableVolume.toLocaleString()}`}
+          />
+          <StatusCell
+            icon={Activity}
+            label="活跃仓"
+            tone={session?.activeVolume ? 'emerald' : 'slate'}
+            value={session?.activeVolume?.toLocaleString() || 0}
+          />
+          <StatusCell
+            icon={Gauge}
+            label="批次盈亏"
+            tone={(session?.lastNetProfitPct || 0) >= 0 ? 'rose' : 'sky'}
+            value={
+              session?.activeVolume
+                ? `${formatNumber(session.lastNetProfitPct)}%`
+                : '--'
+            }
+          />
+          <StatusCell
+            icon={CheckCircle2}
+            label="完成次数"
+            tone="slate"
+            value={session?.completedCycles || 0}
+          />
         </div>
         <div className="mt-3 border-y border-white/[0.06]">
-          <InspectorMetric label="策略状态" value={session?.status || holding.status} />
-          <InspectorMetric label="买入委托" value={session?.entryOrderStatus || '--'} />
-          <InspectorMetric label="卖出委托" value={session?.exitOrderStatus || '--'} />
-          <InspectorMetric label="买入均价 / 成交" value={`${metric(session?.entryAvgPrice, 3)} / ${(session?.entryFilledVolume || 0).toLocaleString()} 股`} />
-          <InspectorMetric label="卖出均价 / 成交" value={`${metric(session?.exitAvgPrice, 3)} / ${(session?.exitFilledVolume || 0).toLocaleString()} 股`} />
+          <InspectorMetric
+            label="策略状态"
+            value={session?.status || holding.status}
+          />
+          <InspectorMetric
+            label="买入委托"
+            value={session?.entryOrderStatus || '--'}
+          />
+          <InspectorMetric
+            label="卖出委托"
+            value={session?.exitOrderStatus || '--'}
+          />
+          <InspectorMetric
+            label="买入均价 / 成交"
+            value={`${metric(session?.entryAvgPrice, 3)} / ${(session?.entryFilledVolume || 0).toLocaleString()} 股`}
+          />
+          <InspectorMetric
+            label="卖出均价 / 成交"
+            value={`${metric(session?.exitAvgPrice, 3)} / ${(session?.exitFilledVolume || 0).toLocaleString()} 股`}
+          />
         </div>
       </section>
 
@@ -742,7 +928,10 @@ export function TTradeLiveBoard({
                       }}
                       ref={element => {
                         if (element) {
-                          rowButtonRefs.current.set(row.holding.stockCode, element);
+                          rowButtonRefs.current.set(
+                            row.holding.stockCode,
+                            element
+                          );
                         } else {
                           rowButtonRefs.current.delete(row.holding.stockCode);
                         }
@@ -754,41 +943,86 @@ export function TTradeLiveBoard({
                       </div>
                       <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px] text-slate-600">
                         <span>{row.holding.stockCode}</span>
-                        <span>{row.holding.volume.toLocaleString()} / {row.holding.availableVolume.toLocaleString()} 股</span>
+                        <span>
+                          {row.holding.volume.toLocaleString()} /{' '}
+                          {row.holding.availableVolume.toLocaleString()} 股
+                        </span>
                       </div>
                     </button>
                   </td>
                   <td className="px-3 py-3 text-right">
-                    <div className={cn('font-mono text-sm font-black tabular-nums', quoteTone(row.quote?.changePercent))}>
-                      {row.quote ? formatNumber(row.quote.currentPrice, 3) : '--'}
+                    <div
+                      className={cn(
+                        'font-mono text-sm font-black tabular-nums',
+                        quoteTone(row.quote?.changePercent)
+                      )}
+                    >
+                      {row.quote
+                        ? formatNumber(row.quote.currentPrice, 3)
+                        : '--'}
                     </div>
-                    <div className={cn('mt-0.5 font-mono text-[10px]', quoteTone(row.quote?.changePercent))}>
+                    <div
+                      className={cn(
+                        'mt-0.5 font-mono text-[10px]',
+                        quoteTone(row.quote?.changePercent)
+                      )}
+                    >
                       {formatSignedPercent(row.quote?.changePercent)}
                     </div>
-                    <div className="mt-1 text-[9px]"><FreshnessLabel freshness={row.quoteFreshness} /></div>
+                    <div className="mt-1 text-[9px]">
+                      <FreshnessLabel
+                        freshness={row.quoteFreshness}
+                        source="源 Tick"
+                      />
+                    </div>
                   </td>
                   <td className="px-3 py-3">
-                    <Sparkline className="h-10 w-36" label={row.holding.stockCode} points={history} />
-                    <div className="mt-1 font-mono text-[9px] text-slate-700">{history.length} / 120 点</div>
+                    <Sparkline
+                      className="h-10 w-36"
+                      label={row.holding.stockCode}
+                      points={history}
+                    />
+                    <div className="mt-1 font-mono text-[9px] text-slate-700">
+                      {history.length} / 120 点
+                    </div>
                   </td>
                   <td className="px-3 py-3">
                     <div className="text-[10px] font-bold text-slate-300">
                       {evaluation?.phase || '等待首个有效 Tick'}
                     </div>
-                    <div className="mt-1 text-[9px]"><FreshnessLabel freshness={row.heartbeatFreshness} /></div>
+                    <div className="mt-1 text-[9px]">
+                      <FreshnessLabel freshness={row.heartbeatFreshness} />
+                    </div>
                     <div className="mt-1 font-mono text-[9px] text-slate-700">
-                      Tick #{evaluation?.processedTickCount?.toLocaleString() || '--'} · 窗口 {evaluation?.windowSampleCount || 0}
+                      Tick #
+                      {evaluation?.processedTickCount?.toLocaleString() || '--'}{' '}
+                      · 窗口 {evaluation?.windowSampleCount || 0}
                     </div>
                   </td>
                   <td className="px-3 py-3">
-                    <div className={cn('max-w-[220px] truncate text-[10px] font-bold', evaluation?.triggered ? 'text-amber-200' : 'text-slate-300')} title={evaluationReasonLabel(evaluation?.reason)}>
+                    <div
+                      className={cn(
+                        'max-w-[220px] truncate text-[10px] font-bold',
+                        evaluation?.triggered
+                          ? 'text-amber-200'
+                          : 'text-slate-300'
+                      )}
+                      title={evaluationReasonLabel(evaluation?.reason)}
+                    >
                       {evaluationReasonLabel(evaluation?.reason)}
                     </div>
                     <div className="mt-2 flex items-center gap-2">
                       <div className="h-1 w-24 overflow-hidden rounded-full bg-white/[0.06]">
-                        <div className="h-full bg-red-400" style={{ width: `${Math.round(row.conditionProgress * 100)}%` }} />
+                        <div
+                          className="h-full bg-red-400"
+                          style={{
+                            width: `${Math.round(row.conditionProgress * 100)}%`,
+                          }}
+                        />
                       </div>
-                      <span className="font-mono text-[9px] text-slate-600">{Math.round(row.conditionProgress * 100)}%</span>
+                      <span className="font-mono text-[9px] text-slate-600">
+                        {Math.round(row.conditionProgress * 100)}%
+                      </span>
                     </div>
                   </td>
                   <td className="px-4 py-3">
@@ -796,10 +1030,14 @@ export function TTradeLiveBoard({
                       {row.session?.status || row.holding.status}
                     </div>
                     <div className="mt-1 font-mono text-[9px] text-slate-600">
-                      活跃 {row.session?.activeVolume?.toLocaleString() || 0} · 完成 {row.session?.completedCycles || 0}
+                      活跃 {row.session?.activeVolume?.toLocaleString() || 0} ·
+                      完成 {row.session?.completedCycles || 0}
                     </div>
-                    {(row.session?.pendingEntryIntentId || row.session?.pendingExitIntentId) && (
-                      <div className="mt-1 text-[9px] font-bold text-amber-300">等待订单确认 / 回报</div>
+                    {(row.session?.pendingEntryIntentId ||
+                      row.session?.pendingExitIntentId) && (
+                      <div className="mt-1 text-[9px] font-bold text-amber-300">
+                        等待订单确认 / 回报
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -811,24 +1049,39 @@ export function TTradeLiveBoard({
         {!loading && rows.length === 0 && (
           <div className="flex min-h-64 flex-col items-center justify-center text-center">
             <Radio className="h-10 w-10 text-slate-800" />
-            <div className="mt-3 text-sm font-bold text-slate-500">暂无作战台标的</div>
-            <div className="mt-1 text-[10px] text-slate-700">同步账户持仓后自动生成监控范围</div>
+            <div className="mt-3 text-sm font-bold text-slate-500">
+              暂无作战台标的
+            </div>
+            <div className="mt-1 text-[10px] text-slate-700">
+              同步账户持仓后自动生成监控范围
+            </div>
           </div>
         )}
         {loading && rows.length === 0 && (
           <div className="flex min-h-64 items-center justify-center gap-2 text-xs text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />加载监控投影
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+            加载监控投影
           </div>
         )}
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-white/[0.05] bg-[#07111f] px-4 py-2 text-[9px] text-slate-600">
-        <span className="inline-flex items-center gap-1.5"><Waves className="h-3 w-3 text-cyan-400" />行情 WebSocket 实时流</span>
-        <span className="inline-flex items-center gap-1.5"><HeartPulse className="h-3 w-3 text-red-400" />策略投影约 10 秒更新</span>
+        <span className="inline-flex items-center gap-1.5">
+          <Waves className="h-3 w-3 text-cyan-400" />
+          页面 GraphQL WS 推送
+        </span>
+        <span>行情年龄为 miniQMT 源 Tick 时间，不等同于链路传输延迟</span>
+        <span className="inline-flex items-center gap-1.5">
+          <HeartPulse className="h-3 w-3 text-red-400" />
+          策略投影约 10 秒更新
+        </span>
         <span>排序：异常 → 待确认 → 陈旧 → 活跃批次 → 条件接近</span>
       </div>
 
-      <Sheet open={Boolean(selected)} onOpenChange={open => !open && setSelectedCode(null)}>
+      <Sheet
+        open={Boolean(selected)}
+        onOpenChange={open => !open && setSelectedCode(null)}
+      >
         <SheetContent
           side="right"
           className="w-[92vw] overflow-y-auto border-white/[0.08] bg-[#081321] p-5 text-slate-100 motion-reduce:animate-none motion-reduce:transition-none sm:max-w-[540px] custom-scrollbar"
@@ -842,7 +1095,8 @@ export function TTradeLiveBoard({
             <>
               <SheetHeader className="border-b border-white/[0.06] pb-4 pr-8 text-left">
                 <SheetTitle className="text-lg font-black text-slate-100">
-                  {selected.holding.instrumentName || selected.holding.stockCode}
+                  {selected.holding.instrumentName ||
+                    selected.holding.stockCode}
                 </SheetTitle>
                 <SheetDescription className="font-mono text-[10px] text-slate-500">
                   {selected.holding.stockCode} · 策略与批次检查器

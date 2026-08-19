@@ -3,6 +3,7 @@
 """
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
@@ -57,6 +58,8 @@ class RealtimeDataAdapter(DataAdapter):
     self.subscription_manager = unified_subscription_manager
     self.subscriber_id = "realtime_data_adapter"
     self.price_cache: Dict[str, float] = {}
+    self.market_data_gate_rejections = 0
+    self._last_market_gate_log_monotonic = 0.0
     self.trading_time_service = TradingTimeService()
     # 股票名称缓存
     self.stock_name_cache: Dict[str, str] = {}
@@ -719,6 +722,21 @@ class RealtimeDataAdapter(DataAdapter):
   async def _handle_xt_tick_data(self, instrument_code: str, data: Dict):
     """处理来自XTQuant的实时数据回调并转换为Tick格式"""
     try:
+      hub = getattr(self.subscription_manager, "hub", None)
+      if not bool(getattr(hub, "is_ready", False)):
+        self.market_data_gate_rejections += 1
+        now = time.monotonic()
+        if now - self._last_market_gate_log_monotonic >= 5.0:
+          status = getattr(getattr(hub, "status", None), "value", "OFFLINE")
+          self.logger.warning(
+            "WholeQuoteHub 非 READY，拒绝分发实时 Tick: "
+            "status=%s rejected=%s",
+            status,
+            self.market_data_gate_rejections,
+          )
+          self._last_market_gate_log_monotonic = now
+        return
+
       # 解析XTQuant返回的数据格式
       if not data or instrument_code not in data:
         self.logger.warning(f"收到空数据或不包含股票代码: {instrument_code}")

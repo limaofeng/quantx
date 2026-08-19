@@ -27,11 +27,21 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 - Agent 回报先进入 `agent_report_inbox`；Engine 消费后才推进订单和持仓。
 - API 源码禁止导入 `miniqmt`、`xtquant`、`quantx_engine` 或 `quantx_worker`。
 - GraphQL 契约变化后，通过 Caddy 公共入口运行前端 codegen。
-- API 行情中继在 Redis 最新 tick Hash、stream 状态和二进制 Pub/Sub 原子提交
-  后才 ACK Agent。首帧非快照、序号缺口、非法帧或 Redis 失败一律不 ACK，
-  将 stream 置为失效并要求全量重建；不提供旧 whole JSON 双读或直通降级。
-- `marketData=ready` 同时要求活动 Agent 行情连接、API 完整快照和 Engine
-  水位一致；交易时段还要求两端最近 10 秒内收到并应用行情。
+- API 行情中继用容量 2、按原始字节计限的队列解耦 WebSocket 接收与严格有序的
+  Redis 提交。sequence 1 `SNAPSHOT` 分块写入 stream 专属 staging Hash，最后
+  原子执行 `RENAME + SYNCING state + binary publish`；sequence 2 收敛 `DELTA`
+  是连续性屏障（没有变化时可为空），只有它通过 Redis Lua 的
+  `stream_id/status/previous sequence` 校验后才原子切换 `READY`。sequence 3
+  起的普通 `DELTA` 沿用同一 CAS，再更新
+  最新 tick、水位并发布原始批次。
+  只有 Redis CAS commit 成功才 ACK Agent，旧连接的迟到写不能覆盖新 stream。
+- 首帧非快照、序号缺口、快照外新代码、非法帧、Redis 失败或提交超时一律不
+  ACK，并通过 `RESYNC` 使 stream 失效。Redis 最新 Hash 还按源时间拒绝旧 tick
+  回退；不提供旧 whole JSON 双读、双写或不可靠直通降级。
+- 每次批次 CAS commit 同时原子刷新 10 秒 Redis freshness lease；`SYNCING`、
+  `OFFLINE` 会删除租约。`marketData=ready` 同时要求活动 Agent 行情连接、API
+  完整快照、Engine 水位与 lease 的 stream/sequence 一致；交易时段租约过期立即
+  关闭实时交易门禁。
 
 ## 开发认证与交易审批
 

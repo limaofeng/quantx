@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 
@@ -16,7 +17,67 @@ from .broker import LiveBroker, QmtDataBroker
 from .credentials import DeviceCredentialStore, state_directory
 from .emergency import EmergencyStopStore
 from .journal import LocalJournal
-from .runtime import AgentRuntime
+from .process_watchdog import AgentProcessWatchdog
+from .runtime import AgentRuntime, _FatalMarketDataPreparationError
+
+FATAL_MARKET_DATA_EXIT_CODE = 70
+
+
+def _hard_exit_for_fatal_market_data(exit_code: int) -> NoReturn:
+  """Terminate even when an orphaned native XTData thread remains alive."""
+  os._exit(exit_code)
+
+
+async def _run_runtime_guarded(
+  runtime: AgentRuntime,
+  watchdog: AgentProcessWatchdog,
+) -> None:
+  runtime_task = asyncio.create_task(
+    runtime.run_forever(),
+    name="qmt-agent-runtime",
+  )
+  heartbeat_task = asyncio.create_task(
+    watchdog.heartbeat_loop(),
+    name="qmt-agent-process-watchdog-heartbeat",
+  )
+  try:
+    done, _ = await asyncio.wait(
+      {runtime_task, heartbeat_task},
+      return_when=asyncio.FIRST_COMPLETED,
+    )
+    if heartbeat_task in done:
+      await heartbeat_task
+      raise RuntimeError("Agent process watchdog stopped unexpectedly")
+    await runtime_task
+  finally:
+    for task in (runtime_task, heartbeat_task):
+      if not task.done():
+        task.cancel()
+    await asyncio.gather(runtime_task, heartbeat_task, return_exceptions=True)
+
+
+def _run_runtime(
+  runtime: AgentRuntime,
+  watchdog: AgentProcessWatchdog | None = None,
+) -> None:
+  owned_watchdog = watchdog
+  if owned_watchdog is None:
+    owned_watchdog = AgentProcessWatchdog.create(state_directory())
+    owned_watchdog.start()
+  try:
+    try:
+      asyncio.run(_run_runtime_guarded(runtime, owned_watchdog))
+    except _FatalMarketDataPreparationError:
+      logging.getLogger(__name__).critical(
+        "Fatal XTData state requires a supervised process restart",
+        exc_info=True,
+      )
+      _hard_exit_for_fatal_market_data(FATAL_MARKET_DATA_EXIT_CODE)
+      # The production implementation never returns. Keep the exception path
+      # explicit so tests can monkeypatch the hard-exit boundary safely.
+      raise
+  finally:
+    owned_watchdog.close()
 
 
 def _accounts() -> set[str]:
@@ -120,28 +181,36 @@ def _enroll(api_url: str, code: str) -> None:
 def _run(mode: str) -> None:
   allowed_accounts = _accounts()
   _require_safe_run_mode(mode, allowed_accounts)
+  # Start before constructing XTData/XTTrading managers: their native connect
+  # paths can also hold the GIL, before AgentRuntime exists.
+  watchdog = AgentProcessWatchdog.create(state_directory())
+  watchdog.start()
   try:
-    configuration, secret = DeviceCredentialStore().load()
-  except RuntimeError as exc:
-    raise SystemExit(str(exc)) from None
-  journal = LocalJournal(state_directory() / "idempotency.sqlite3")
-  broker = (
-    LiveBroker(allowed_accounts, journal=journal)
-    if mode == "live"
-    else QmtDataBroker(allowed_accounts, data_only=mode == "data-only")
-  )
-  runtime = AgentRuntime(
-    configuration=configuration,
-    device_secret=secret,
-    mode=mode,
-    allowed_accounts=allowed_accounts,
-    broker=broker,
-    journal=journal,
-    emergency_stop=EmergencyStopStore(
-      state_directory() / "emergency-stop.json"
-    ),
-  )
-  asyncio.run(runtime.run_forever())
+    try:
+      configuration, secret = DeviceCredentialStore().load()
+    except RuntimeError as exc:
+      raise SystemExit(str(exc)) from None
+    journal = LocalJournal(state_directory() / "idempotency.sqlite3")
+    broker = (
+      LiveBroker(allowed_accounts, journal=journal)
+      if mode == "live"
+      else QmtDataBroker(allowed_accounts, data_only=mode == "data-only")
+    )
+    runtime = AgentRuntime(
+      configuration=configuration,
+      device_secret=secret,
+      mode=mode,
+      allowed_accounts=allowed_accounts,
+      broker=broker,
+      journal=journal,
+      emergency_stop=EmergencyStopStore(
+        state_directory() / "emergency-stop.json"
+      ),
+    )
+  except BaseException:
+    watchdog.close()
+    raise
+  _run_runtime(runtime, watchdog)
 
 
 def main() -> None:

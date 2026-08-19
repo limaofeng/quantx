@@ -195,10 +195,11 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     if market_stream_status == "READY":
       ready_market_stream_agents.append(agent)
   try:
-    stream_state, engine_state = await asyncio.gather(
-      market_stream_store.state(),
+    stream_authority, engine_state = await asyncio.gather(
+      market_stream_store.state_with_freshness(),
       market_stream_store.engine_state(),
     )
+    stream_state, freshness_lease = stream_authority
     trading_session = await TradingTimeService().is_trading_hours(
       "SH",
       time_utils.now(),
@@ -220,10 +221,10 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     fresh = bool(
       not trading_session
       or (
-        stream_age is not None
-        and engine_age is not None
-        and stream_age <= 10
-        and engine_age <= 10
+        stream_state is not None
+        and freshness_lease is not None
+        and freshness_lease.stream_id == stream_state.stream_id
+        and freshness_lease.sequence == stream_state.sequence
       )
     )
     ready = bool(
