@@ -13,6 +13,7 @@ from quantx_contracts import (
   MarketStreamControl,
 )
 from quantx_qmt_agent import runtime as runtime_module
+from quantx_qmt_agent.broker import _LocalMarketStreamer
 from quantx_qmt_agent.runtime import (
   AgentRuntime,
   _BoundedMarketBatchBuffer,
@@ -981,6 +982,185 @@ async def test_native_subscription_lives_until_process_shutdown() -> None:
   await runtime._shutdown_whole_market_capture()
   assert runtime.broker.subscriptions == 1
   assert runtime.broker.unsubscriptions == 1
+
+
+@pytest.mark.asyncio
+async def test_rejected_native_subscription_clears_failed_source_capture() -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.subscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    def subscribe_whole_market(self, callback) -> bool:
+      self.subscriptions += 1
+      if self.subscriptions == 1:
+        callback({"600000.SH": {"lastPrice": 10.0}})
+        return False
+      return True
+
+    @staticmethod
+    def unsubscribe_whole_market() -> None:
+      return None
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  try:
+    await asyncio.wait_for(
+      runtime._whole_market_subscription_ready.wait(),
+      timeout=2,
+    )
+    assert runtime.broker.subscriptions == 2
+    assert runtime._whole_market_capture.latest_snapshot(
+      trading_date=None
+    ).data == {}
+  finally:
+    runtime._stopped.set()
+    await supervisor
+    await runtime._shutdown_whole_market_capture()
+
+
+@pytest.mark.asyncio
+async def test_universe_generation_change_rebinds_native_subscription(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  sectors = {
+    "沪深A股": ["600000.SH"],
+    "沪深指数": ["000001.SH"],
+  }
+  operations = []
+  callbacks = []
+  active_native_subscriptions = 0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(sector):
+      return list(sectors[sector])
+
+    @staticmethod
+    def get_instrument_detail_list(codes, iscomplete=False):
+      assert iscomplete is True
+      return {code: {} for code in codes}
+
+    @staticmethod
+    def subscribe_whole_quote(codes, callback):
+      nonlocal active_native_subscriptions
+      assert active_native_subscriptions == 0
+      active_native_subscriptions += 1
+      subscription_id = len(callbacks) + 1
+      callbacks.append(callback)
+      operations.append(("subscribe", subscription_id, list(codes)))
+      return subscription_id
+
+    @staticmethod
+    def unsubscribe_quote(subscription_id):
+      nonlocal active_native_subscriptions
+      assert active_native_subscriptions == 1
+      active_native_subscriptions -= 1
+      operations.append(("unsubscribe", subscription_id))
+
+  class Broker:
+    def __init__(self) -> None:
+      self.streamer = _LocalMarketStreamer(FakeDataManager())
+      self.subscriptions = 0
+
+    @staticmethod
+    def ensure_market_data_ready() -> bool:
+      return True
+
+    @staticmethod
+    def is_market_data_ready() -> bool:
+      return True
+
+    def subscribe_whole_market(self, callback) -> bool:
+      accepted = self.streamer.subscribe_whole_market(callback)
+      if accepted:
+        self.subscriptions += 1
+      if accepted and self.subscriptions == 1:
+        sectors["沪深A股"] = ["600000.SH", "600001.SH"]
+        with self.streamer._lock:
+          active = self.streamer._whole_quote_active_universe
+          assert active is not None
+          self.streamer._whole_quote_active_universe = (
+            self.streamer._build_whole_quote_universe(
+              trading_date=active.trading_date - timedelta(days=1),
+              codes=active.codes,
+              metadata=active.metadata,
+            )
+          )
+          self.streamer._whole_quote_metadata_last_attempt_monotonic = 0.0
+      return accepted
+
+    def unsubscribe_whole_market(self) -> None:
+      self.streamer.unsubscribe_whole_market()
+
+    def market_data_subscription_generation(self) -> int:
+      return self.streamer.whole_market_bound_universe_generation()
+
+    def market_data_connection_generation(self) -> int:
+      return self.streamer.whole_market_universe_generation()
+
+    def is_whole_market_trading_session(self) -> bool:
+      self.streamer._ensure_whole_quote_metadata_current(["SH", "SZ"])
+      return False
+
+  runtime = AgentRuntime.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime._stopped = asyncio.Event()
+  runtime._fatal_market_data_error = None
+  runtime._fatal_market_data_event = asyncio.Event()
+  runtime._whole_market_capture = WholeMarketCapture(
+    max_ready_callbacks=8,
+    max_ready_estimated_bytes=1024 * 1024,
+  )
+  runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_subscription_ready = asyncio.Event()
+  runtime._whole_market_subscription_active = False
+  runtime._whole_market_native_reset = asyncio.Event()
+  runtime._market_stream_status = "OFFLINE"
+  monkeypatch.setattr(
+    runtime_module,
+    "MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS",
+    0.01,
+  )
+
+  async def direct_control(operation, function, *args):
+    del operation
+    return function(*args)
+
+  runtime._run_xtdata_control = direct_control
+  supervisor = asyncio.create_task(runtime._whole_market_capture_supervisor())
+  try:
+    await _wait_until(lambda: runtime.broker.subscriptions == 2)
+    assert operations[:3] == [
+      ("subscribe", 1, ["000001.SH", "600000.SH"]),
+      ("unsubscribe", 1),
+      ("subscribe", 2, ["000001.SH", "600000.SH", "600001.SH"]),
+    ]
+    assert runtime._whole_market_native_reset.is_set()
+  finally:
+    runtime._stopped.set()
+    await supervisor
+    await runtime._shutdown_whole_market_capture()
 
 
 @pytest.mark.asyncio

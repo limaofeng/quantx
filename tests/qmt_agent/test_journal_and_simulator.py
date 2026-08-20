@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -362,7 +363,12 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
       }
 
     def subscribe_whole_quote(self, codes, callback):
-      assert codes == ["SH", "SZ"]
+      assert codes == [
+        "000001.SH",
+        "300001.SZ",
+        "399001.SZ",
+        "600000.SH",
+      ]
       callbacks.append(callback)
       return 202
 
@@ -423,6 +429,284 @@ def test_whole_market_streamer_enriches_ticks_with_qmt_limit_metadata() -> None:
   assert detail_batches == [["000001.SH", "300001.SZ", "399001.SZ", "600000.SH"]]
 
 
+def test_whole_market_universe_change_rebinds_without_subscription_overlap() -> None:
+  sectors = {
+    "沪深A股": ["600000.SH"],
+    "沪深指数": ["000001.SH"],
+  }
+  callbacks = []
+  operations = []
+  active_native_subscriptions = 0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(sector):
+      return list(sectors[sector])
+
+    @staticmethod
+    def get_instrument_detail_list(codes, iscomplete=False):
+      assert iscomplete is True
+      return {code: {} for code in codes}
+
+    @staticmethod
+    def get_full_tick(codes):
+      return {code: {"lastPrice": 10.0} for code in codes}
+
+    @staticmethod
+    def subscribe_whole_quote(codes, callback):
+      nonlocal active_native_subscriptions
+      assert active_native_subscriptions == 0
+      active_native_subscriptions += 1
+      subscription_id = len(callbacks) + 1
+      callbacks.append(callback)
+      operations.append(("subscribe", subscription_id, list(codes)))
+      return subscription_id
+
+    @staticmethod
+    def unsubscribe_quote(subscription_id):
+      nonlocal active_native_subscriptions
+      assert active_native_subscriptions == 1
+      active_native_subscriptions -= 1
+      operations.append(("unsubscribe", subscription_id))
+
+  events = []
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  assert streamer.subscribe_whole_market(events.append)
+  initial_generation = streamer.whole_market_universe_generation()
+  assert streamer.whole_market_codes() == ("000001.SH", "600000.SH")
+
+  sectors["沪深A股"] = ["600000.SH", "600001.SH"]
+  assert streamer._refresh_whole_quote_metadata(["SH", "SZ"])
+  assert streamer.whole_market_universe_generation() == initial_generation + 1
+  # The active universe must remain identical to the still-live native source.
+  assert streamer.whole_market_codes() == ("000001.SH", "600000.SH")
+
+  callbacks[0](
+    {
+      "600000.SH": {"lastPrice": 10.0},
+      "600001.SH": {"lastPrice": 11.0},
+    }
+  )
+  assert set(events[-1]) == {"600000.SH"}
+
+  streamer.unsubscribe_whole_market()
+  event_count = len(events)
+  callbacks[0]({"600000.SH": {"lastPrice": 10.1}})
+  assert len(events) == event_count
+
+  assert streamer.subscribe_whole_market(events.append)
+  assert streamer.whole_market_codes() == (
+    "000001.SH",
+    "600000.SH",
+    "600001.SH",
+  )
+  assert set(streamer.whole_market_snapshot()) == {
+    "000001.SH",
+    "600000.SH",
+    "600001.SH",
+  }
+  callbacks[1]({"600001.SH": {"lastPrice": 11.1}})
+  assert set(events[-1]) == {"600001.SH"}
+  assert operations == [
+    ("subscribe", 1, ["000001.SH", "600000.SH"]),
+    ("unsubscribe", 1),
+    ("subscribe", 2, ["000001.SH", "600000.SH", "600001.SH"]),
+  ]
+
+  stable_generation = streamer.whole_market_universe_generation()
+  assert streamer._refresh_whole_quote_metadata(["SH", "SZ"])
+  assert streamer.whole_market_universe_generation() == stable_generation
+
+
+def test_whole_market_refresh_waits_for_native_subscription_binding() -> None:
+  sectors = {
+    "沪深A股": ["600000.SH"],
+    "沪深指数": ["000001.SH"],
+  }
+  second_subscribe_started = threading.Event()
+  release_second_subscribe = threading.Event()
+  refresh_finished = threading.Event()
+  subscribe_calls = 0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(sector):
+      return list(sectors[sector])
+
+    @staticmethod
+    def get_instrument_detail_list(codes, iscomplete=False):
+      assert iscomplete is True
+      return {code: {} for code in codes}
+
+    @staticmethod
+    def subscribe_whole_quote(_codes, callback):
+      del callback
+      nonlocal subscribe_calls
+      subscribe_calls += 1
+      if subscribe_calls == 2:
+        second_subscribe_started.set()
+        assert release_second_subscribe.wait(timeout=2)
+      return subscribe_calls
+
+    @staticmethod
+    def unsubscribe_quote(_subscription_id):
+      return None
+
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  assert streamer.subscribe_whole_market(lambda _data: None)
+  streamer.unsubscribe_whole_market()
+  bound_generation = streamer.whole_market_universe_generation()
+
+  subscribe_thread = threading.Thread(
+    target=lambda: streamer.subscribe_whole_market(lambda _data: None),
+  )
+  subscribe_thread.start()
+  assert second_subscribe_started.wait(timeout=2)
+
+  sectors["沪深A股"] = ["600000.SH", "600001.SH"]
+
+  def refresh() -> None:
+    streamer._refresh_whole_quote_metadata(["SH", "SZ"])
+    refresh_finished.set()
+
+  refresh_thread = threading.Thread(target=refresh)
+  refresh_thread.start()
+  assert not refresh_finished.wait(timeout=0.05)
+  assert streamer.whole_market_codes() == ("000001.SH", "600000.SH")
+
+  release_second_subscribe.set()
+  subscribe_thread.join(timeout=2)
+  refresh_thread.join(timeout=2)
+  assert not subscribe_thread.is_alive()
+  assert not refresh_thread.is_alive()
+  assert refresh_finished.is_set()
+
+  assert streamer.whole_market_codes() == ("000001.SH", "600000.SH")
+  assert streamer.whole_market_bound_universe_generation() == bound_generation
+  desired_generation = streamer.whole_market_universe_generation()
+  assert desired_generation == bound_generation + 1
+  assert broker_module._combine_market_data_source_generation(
+    1,
+    streamer.whole_market_bound_universe_generation(),
+  ) != broker_module._combine_market_data_source_generation(
+    1,
+    desired_generation,
+  )
+
+
+def test_whole_market_universe_refresh_failure_is_rate_limited(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  refresh_attempts = 0
+  monotonic_now = 100.0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(_sector):
+      nonlocal refresh_attempts
+      refresh_attempts += 1
+      raise RuntimeError("sector table unavailable")
+
+  class ImmediateThread:
+    def __init__(self, *, target, args, name, daemon):
+      del name, daemon
+      self._target = target
+      self._args = args
+
+    def start(self):
+      self._target(*self._args)
+
+  monkeypatch.setattr(broker_module.threading, "Thread", ImmediateThread)
+  monkeypatch.setattr(broker_module.time, "monotonic", lambda: monotonic_now)
+  streamer = _LocalMarketStreamer(FakeDataManager())
+
+  streamer._ensure_whole_quote_metadata_current(["SH", "SZ"])
+  streamer._ensure_whole_quote_metadata_current(["SH", "SZ"])
+  assert refresh_attempts == 1
+  assert streamer._whole_quote_active_universe is None
+
+  monotonic_now += broker_module.WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS + 1
+  streamer._ensure_whole_quote_metadata_current(["SH", "SZ"])
+  assert refresh_attempts == 2
+
+
+def test_whole_market_subscription_metadata_failure_honors_retry_interval(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  refresh_attempts = 0
+  monotonic_now = 100.0
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(_sector):
+      nonlocal refresh_attempts
+      refresh_attempts += 1
+      raise RuntimeError("sector table unavailable")
+
+  monkeypatch.setattr(broker_module.time, "monotonic", lambda: monotonic_now)
+  streamer = _LocalMarketStreamer(FakeDataManager())
+
+  assert not streamer.subscribe_whole_market(lambda _data: None)
+  assert not streamer.subscribe_whole_market(lambda _data: None)
+  assert refresh_attempts == 1
+
+  monotonic_now += broker_module.WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS + 1
+  assert not streamer.subscribe_whole_market(lambda _data: None)
+  assert refresh_attempts == 2
+
+
+def test_failed_whole_market_subscription_drains_inflight_callback() -> None:
+  callback_started = threading.Event()
+  release_callback = threading.Event()
+  callback_finished = threading.Event()
+  native_returned = threading.Event()
+  subscription_result = []
+
+  class FakeDataManager:
+    @staticmethod
+    def get_stock_list_in_sector(sector):
+      return {
+        "沪深A股": ["600000.SH"],
+        "沪深指数": ["000001.SH"],
+      }[sector]
+
+    @staticmethod
+    def get_instrument_detail_list(codes, iscomplete=False):
+      assert iscomplete is True
+      return {code: {} for code in codes}
+
+    @staticmethod
+    def subscribe_whole_quote(_codes, callback):
+      callback_thread = threading.Thread(
+        target=lambda: callback({"600000.SH": {"lastPrice": 10.0}}),
+      )
+      callback_thread.start()
+      assert callback_started.wait(timeout=2)
+      native_returned.set()
+      return -1
+
+  def consume(_data) -> None:
+    callback_started.set()
+    assert release_callback.wait(timeout=2)
+    callback_finished.set()
+
+  streamer = _LocalMarketStreamer(FakeDataManager())
+  subscribe_thread = threading.Thread(
+    target=lambda: subscription_result.append(
+      streamer.subscribe_whole_market(consume)
+    ),
+  )
+  subscribe_thread.start()
+  assert native_returned.wait(timeout=2)
+  assert subscribe_thread.is_alive()
+
+  release_callback.set()
+  subscribe_thread.join(timeout=2)
+  assert not subscribe_thread.is_alive()
+  assert callback_finished.is_set()
+  assert subscription_result == [False]
+
+
 def test_whole_market_snapshot_uses_bounded_native_fragments_and_merges(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -451,11 +735,13 @@ def test_whole_market_snapshot_uses_bounded_native_fragments_and_merges(
     2,
   )
   streamer = _LocalMarketStreamer(FakeDataManager())
-  streamer._whole_quote_codes = codes
-  streamer._whole_quote_code_set = frozenset(codes)
-  streamer._whole_quote_metadata_date = broker_module.datetime.now(
-    broker_module.SHANGHAI_TIMEZONE
-  ).date()
+  streamer._whole_quote_active_universe = streamer._build_whole_quote_universe(
+    trading_date=broker_module.datetime.now(
+      broker_module.SHANGHAI_TIMEZONE
+    ).date(),
+    codes=codes,
+    metadata={},
+  )
 
   snapshot = streamer.whole_market_snapshot()
 
@@ -491,11 +777,13 @@ def test_whole_market_snapshot_fragment_failure_never_returns_partial_data(
     2,
   )
   streamer = _LocalMarketStreamer(FakeDataManager())
-  streamer._whole_quote_codes = codes
-  streamer._whole_quote_code_set = frozenset(codes)
-  streamer._whole_quote_metadata_date = broker_module.datetime.now(
-    broker_module.SHANGHAI_TIMEZONE
-  ).date()
+  streamer._whole_quote_active_universe = streamer._build_whole_quote_universe(
+    trading_date=broker_module.datetime.now(
+      broker_module.SHANGHAI_TIMEZONE
+    ).date(),
+    codes=codes,
+    metadata={},
+  )
   original_prepare = streamer.prepare_whole_market_data
 
   def record_prepare(data):

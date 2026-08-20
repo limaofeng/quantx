@@ -196,7 +196,7 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
       return {"600000.SH": {"UpStopPrice": 11.0, "PriceTick": 0.01}}
 
     def subscribe_whole_quote(self, codes, callback):
-      assert codes == ["SH", "SZ"]
+      assert codes == ["000001.SH", "600000.SH"]
       callbacks.append(callback)
       return 1
 

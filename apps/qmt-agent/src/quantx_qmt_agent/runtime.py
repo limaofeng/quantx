@@ -1089,8 +1089,15 @@ class AgentRuntime:
           "market_data_connection_generation",
           None,
         )
+        subscription_generation_reader = getattr(
+          self.broker,
+          "market_data_subscription_generation",
+          generation_reader,
+        )
         subscribed_generation = int(
-          generation_reader() if callable(generation_reader) else 0
+          subscription_generation_reader()
+          if callable(subscription_generation_reader)
+          else 0
         )
         subscription_started = time.monotonic()
         silence_confirmations = 0
@@ -1117,7 +1124,7 @@ class AgentRuntime:
             and current_generation != subscribed_generation
           ):
             reset_reason = (
-              "XTData connection generation changed: "
+              "XTData source generation changed: "
               f"{subscribed_generation}->{current_generation}"
             )
             break
@@ -1211,6 +1218,12 @@ class AgentRuntime:
       except _FatalMarketDataPreparationError:
         raise
       except Exception as exc:
+        if not self._whole_market_subscription_active:
+          self._whole_market_subscription_ready.clear()
+          self._whole_market_capture.reset_source(
+            "whole-market native subscription attempt failed: "
+            f"{exc.__class__.__name__}"
+          )
         logger.warning(
           "QMT whole-market subscription retry: error=%s: %s",
           exc.__class__.__name__,

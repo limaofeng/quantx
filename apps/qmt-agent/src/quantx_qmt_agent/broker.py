@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from numbers import Integral, Real
 from typing import Any, Iterator
@@ -33,6 +33,7 @@ MAX_MARKET_DATA_CODES = 300
 MAX_FINANCIAL_DATA_CODES = 100
 WHOLE_QUOTE_INSTRUMENT_DETAIL_BATCH_SIZE = 500
 WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE = 256
+WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS = 60.0
 WHOLE_QUOTE_SECTORS = ("沪深A股", "沪深指数")
 WHOLE_QUOTE_TICK_FIELDS = (
   "time",
@@ -88,6 +89,17 @@ _RESERVED_HISTORICAL_BAR_COLUMNS = frozenset(
     HISTORICAL_TICK_SOURCE_TIME_FIELD,
   }
 )
+
+
+@dataclass(frozen=True)
+class _WholeQuoteUniverse:
+  trading_date: date
+  codes: tuple[str, ...]
+  code_set: frozenset[str]
+  metadata: dict[str, dict[str, float]]
+  fingerprint: str
+
+
 _UNSTABLE_TICK_ORDER_FIELDS = frozenset(
   {
     "time",
@@ -514,6 +526,9 @@ class SimulatorBroker:
   def market_data_connection_generation(self) -> int:
     return 0
 
+  def market_data_subscription_generation(self) -> int:
+    return self.market_data_connection_generation()
+
   def is_whole_market_trading_session(self) -> bool:
     return False
 
@@ -548,12 +563,17 @@ class _LocalMarketStreamer:
     self._access_lock = access_lock or threading.RLock()
     self._subscriptions: dict[str, int | list[int]] = {}
     self._lock = threading.RLock()
-    self._whole_quote_metadata: dict[str, dict[str, float]] = {}
-    self._whole_quote_codes: tuple[str, ...] = ()
-    self._whole_quote_code_set: frozenset[str] = frozenset()
-    self._whole_quote_metadata_date = None
+    self._whole_quote_lifecycle_lock = threading.RLock()
+    self._whole_quote_callback_condition = threading.Condition(self._lock)
+    self._whole_quote_callbacks_inflight = 0
+    self._whole_quote_active_universe: _WholeQuoteUniverse | None = None
+    self._whole_quote_pending_universe: _WholeQuoteUniverse | None = None
+    self._whole_quote_universe_generation = 0
+    self._whole_quote_bound_universe_generation = 0
     self._whole_quote_metadata_refreshing = False
+    self._whole_quote_metadata_last_attempt_monotonic = 0.0
     self._whole_quote_subscription: int | list[int] | None = None
+    self._whole_quote_callback_epoch = 0
     self._whole_quote_calendar_date = None
     self._whole_quote_is_trading_date = False
 
@@ -564,6 +584,22 @@ class _LocalMarketStreamer:
     except (TypeError, ValueError):
       return 0.0
     return number if math.isfinite(number) and number > 0 else 0.0
+
+  @staticmethod
+  def _build_whole_quote_universe(
+    *,
+    trading_date: date,
+    codes: tuple[str, ...],
+    metadata: dict[str, dict[str, float]],
+  ) -> _WholeQuoteUniverse:
+    fingerprint = hashlib.sha256("\n".join(codes).encode("utf-8")).hexdigest()[:16]
+    return _WholeQuoteUniverse(
+      trading_date=trading_date,
+      codes=codes,
+      code_set=frozenset(codes),
+      metadata=metadata,
+      fingerprint=fingerprint,
+    )
 
   def _load_whole_quote_metadata(
     self,
@@ -622,28 +658,71 @@ class _LocalMarketStreamer:
           metadata[str(code).strip().upper()] = values
     return tuple(codes), metadata
 
-  def _refresh_whole_quote_metadata(self, markets: list[str]) -> None:
+  def _refresh_whole_quote_metadata(self, markets: list[str]) -> bool:
+    with self._whole_quote_lifecycle_lock:
+      return self._refresh_whole_quote_metadata_serialized(markets)
+
+  def _refresh_whole_quote_metadata_serialized(self, markets: list[str]) -> bool:
+    refresh_date = datetime.now(SHANGHAI_TIMEZONE).date()
+    with self._lock:
+      self._whole_quote_metadata_last_attempt_monotonic = time.monotonic()
     try:
       with self._access_lock:
         codes, metadata = self._load_whole_quote_metadata(markets)
       if not codes:
         raise RuntimeError("QMT returned no SH/SZ instruments")
+      candidate = self._build_whole_quote_universe(
+        trading_date=refresh_date,
+        codes=codes,
+        metadata=metadata,
+      )
       with self._lock:
-        self._whole_quote_codes = codes
-        self._whole_quote_code_set = frozenset(codes)
-        self._whole_quote_metadata = metadata
-        self._whole_quote_metadata_date = datetime.now(SHANGHAI_TIMEZONE).date()
+        active = self._whole_quote_active_universe
+        subscription_active = self._whole_quote_subscription is not None
+        action = "metadata-updated"
+        if active is None:
+          self._whole_quote_active_universe = candidate
+          self._whole_quote_pending_universe = None
+          self._whole_quote_universe_generation += 1
+          action = "activated"
+        elif subscription_active and active.codes != candidate.codes:
+          pending = self._whole_quote_pending_universe
+          if pending is None or pending.codes != candidate.codes:
+            self._whole_quote_universe_generation += 1
+          self._whole_quote_pending_universe = candidate
+          action = "staged"
+        else:
+          codes_changed = active.codes != candidate.codes
+          self._whole_quote_active_universe = candidate
+          self._whole_quote_pending_universe = None
+          if codes_changed:
+            self._whole_quote_universe_generation += 1
+            action = "activated"
+        generation = self._whole_quote_universe_generation
       logger.info(
-        "Whole-quote instrument metadata refreshed: markets=%s instruments=%s",
+        "Whole-quote universe refreshed: markets=%s instruments=%s "
+        "fingerprint=%s generation=%s action=%s",
         markets,
         len(codes),
+        candidate.fingerprint,
+        generation,
+        action,
       )
+      return True
     except Exception as exc:
       logger.warning(
-        "Whole-quote instrument metadata refresh failed: markets=%s error=%s",
+        "Whole-quote universe refresh failed: markets=%s error=%s",
         markets,
         exc.__class__.__name__,
       )
+      return False
+
+  def _refresh_whole_quote_metadata_in_background(
+    self,
+    markets: list[str],
+  ) -> None:
+    try:
+      self._refresh_whole_quote_metadata(markets)
     finally:
       with self._lock:
         self._whole_quote_metadata_refreshing = False
@@ -652,7 +731,8 @@ class _LocalMarketStreamer:
     if not isinstance(data, dict):
       return {}
     with self._lock:
-      allowed_codes = self._whole_quote_code_set
+      active = self._whole_quote_active_universe
+      allowed_codes = active.code_set if active is not None else frozenset()
     if not allowed_codes:
       return {}
     return {
@@ -661,17 +741,35 @@ class _LocalMarketStreamer:
       if (normalized_code := str(code).strip().upper()) in allowed_codes
     }
 
+  def _invalidate_whole_quote_callback_epoch(self, callback_epoch: int) -> None:
+    with self._whole_quote_callback_condition:
+      if callback_epoch == self._whole_quote_callback_epoch:
+        self._whole_quote_callback_epoch += 1
+      while self._whole_quote_callbacks_inflight > 0:
+        self._whole_quote_callback_condition.wait()
+
   def _ensure_whole_quote_metadata_current(self, markets: list[str]) -> None:
     today = datetime.now(SHANGHAI_TIMEZONE).date()
+    now_monotonic = time.monotonic()
     with self._lock:
+      newest = (
+        self._whole_quote_pending_universe
+        or self._whole_quote_active_universe
+      )
       if (
-        self._whole_quote_metadata_date == today
+        (newest is not None and newest.trading_date == today)
         or self._whole_quote_metadata_refreshing
+        or (
+          self._whole_quote_metadata_last_attempt_monotonic > 0
+          and now_monotonic - self._whole_quote_metadata_last_attempt_monotonic
+          < WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS
+        )
       ):
         return
       self._whole_quote_metadata_refreshing = True
+      self._whole_quote_metadata_last_attempt_monotonic = now_monotonic
     threading.Thread(
-      target=self._refresh_whole_quote_metadata,
+      target=self._refresh_whole_quote_metadata_in_background,
       args=(list(markets),),
       name="qmt-whole-quote-metadata-refresh",
       daemon=True,
@@ -680,11 +778,9 @@ class _LocalMarketStreamer:
   def _enrich_whole_quote_data(self, data: Any) -> Any:
     if not isinstance(data, dict):
       return data
-    today = datetime.now(SHANGHAI_TIMEZONE).date()
     with self._lock:
-      if self._whole_quote_metadata_date != today:
-        return data
-      metadata = self._whole_quote_metadata
+      active = self._whole_quote_active_universe
+      metadata = active.metadata if active is not None else {}
     for code, raw_tick in data.items():
       if not isinstance(raw_tick, dict):
         continue
@@ -764,38 +860,85 @@ class _LocalMarketStreamer:
 
   def subscribe_whole_market(self, callback) -> bool:
     """Subscribe once to the fixed SH/SZ A-share and index universe."""
+    with self._whole_quote_lifecycle_lock:
+      return self._subscribe_whole_market_serialized(callback)
+
+  def _subscribe_whole_market_serialized(self, callback) -> bool:
     markets = ["SH", "SZ"]
+    today = datetime.now(SHANGHAI_TIMEZONE).date()
     with self._lock:
       if self._whole_quote_subscription is not None:
         return True
-      metadata_is_current = (
-        self._whole_quote_metadata_date
-        == datetime.now(SHANGHAI_TIMEZONE).date()
-        and bool(self._whole_quote_codes)
-      )
-    if not metadata_is_current:
-      self._refresh_whole_quote_metadata(markets)
+      pending = self._whole_quote_pending_universe
+      if pending is not None and pending.trading_date == today:
+        self._whole_quote_active_universe = pending
+        self._whole_quote_pending_universe = None
+      active = self._whole_quote_active_universe
+      universe_is_current = active is not None and active.trading_date == today
+    if not universe_is_current:
+      now_monotonic = time.monotonic()
+      with self._lock:
+        retry_allowed = (
+          self._whole_quote_metadata_last_attempt_monotonic <= 0
+          or now_monotonic - self._whole_quote_metadata_last_attempt_monotonic
+          >= WHOLE_QUOTE_METADATA_REFRESH_RETRY_SECONDS
+        )
+      if retry_allowed:
+        self._refresh_whole_quote_metadata(markets)
     with self._lock:
-      codes = self._whole_quote_codes
+      active = self._whole_quote_active_universe
+      if active is None:
+        return False
+      codes = active.codes
+      callback_epoch = self._whole_quote_callback_epoch + 1
+      self._whole_quote_callback_epoch = callback_epoch
     if not codes:
       return False
 
     def on_data(data: Any) -> None:
-      self._ensure_whole_quote_metadata_current(markets)
       filtered = self._filter_whole_quote_data(data)
-      if filtered:
+      if not filtered:
+        return
+      # The native SDK may deliver a callback after unsubscribe_quote returns.
+      # Invalidation rejects late callbacks and waits for callbacks that already
+      # crossed this boundary before reset_source() can clear the old capture.
+      with self._whole_quote_callback_condition:
+        if callback_epoch != self._whole_quote_callback_epoch:
+          return
+        self._whole_quote_callbacks_inflight += 1
+      try:
         callback(filtered)
+      finally:
+        with self._whole_quote_callback_condition:
+          self._whole_quote_callbacks_inflight -= 1
+          if self._whole_quote_callbacks_inflight == 0:
+            self._whole_quote_callback_condition.notify_all()
 
-    with self._access_lock:
-      local_id = self.data_manager.subscribe_whole_quote(
-        markets,
-        callback=on_data,
-      )
+    try:
+      with self._access_lock:
+        local_id = self.data_manager.subscribe_whole_quote(
+          list(codes),
+          callback=on_data,
+        )
+    except Exception:
+      self._invalidate_whole_quote_callback_epoch(callback_epoch)
+      raise
     if not self._valid_subscription(local_id):
+      self._invalidate_whole_quote_callback_epoch(callback_epoch)
       return False
     with self._lock:
       if self._whole_quote_subscription is None:
         self._whole_quote_subscription = local_id
+        self._whole_quote_bound_universe_generation = (
+          self._whole_quote_universe_generation
+        )
+        logger.info(
+          "Whole-quote explicit universe subscribed: instruments=%s "
+          "fingerprint=%s generation=%s",
+          len(codes),
+          active.fingerprint,
+          self._whole_quote_universe_generation,
+        )
         return True
     self._unsubscribe_local(local_id)
     return True
@@ -803,16 +946,32 @@ class _LocalMarketStreamer:
   def whole_market_codes(self) -> tuple[str, ...]:
     today = datetime.now(SHANGHAI_TIMEZONE).date()
     with self._lock:
-      metadata_is_current = (
-        self._whole_quote_metadata_date == today
-        and bool(self._whole_quote_codes)
+      active = self._whole_quote_active_universe
+      needs_refresh = (
+        active is None
+        or (
+          self._whole_quote_subscription is None
+          and active.trading_date != today
+        )
       )
-    if not metadata_is_current:
+    if needs_refresh:
       self._refresh_whole_quote_metadata(["SH", "SZ"])
     with self._lock:
-      return self._whole_quote_codes
+      active = self._whole_quote_active_universe
+      return active.codes if active is not None else ()
+
+  def whole_market_universe_generation(self) -> int:
+    with self._lock:
+      return self._whole_quote_universe_generation
+
+  def whole_market_bound_universe_generation(self) -> int:
+    with self._lock:
+      return self._whole_quote_bound_universe_generation
 
   def is_whole_market_trading_session(self) -> bool:
+    # This health probe also drives the low-frequency daily universe refresh.
+    # Loading happens on a daemon worker and never blocks the event loop.
+    self._ensure_whole_quote_metadata_current(["SH", "SZ"])
     now = datetime.now(SHANGHAI_TIMEZONE)
     local_time = now.time().replace(tzinfo=None)
     if not (
@@ -848,17 +1007,7 @@ class _LocalMarketStreamer:
 
   def whole_market_snapshot(self) -> dict[str, dict[str, Any]]:
     """Read a complete SH/SZ state using bounded native SDK calls."""
-    markets = ["SH", "SZ"]
-    today = datetime.now(SHANGHAI_TIMEZONE).date()
-    with self._lock:
-      metadata_is_current = (
-        self._whole_quote_metadata_date == today
-        and bool(self._whole_quote_codes)
-      )
-    if not metadata_is_current:
-      self._refresh_whole_quote_metadata(markets)
-    with self._lock:
-      codes = self._whole_quote_codes
+    codes = self.whole_market_codes()
     if not codes:
       raise RuntimeError("SH/SZ instrument universe is empty")
     snapshot: dict[str, Any] = {}
@@ -887,7 +1036,8 @@ class _LocalMarketStreamer:
         f"codes={len(requested)} max={WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE}"
       )
     with self._lock:
-      allowed_codes = self._whole_quote_code_set
+      active = self._whole_quote_active_universe
+      allowed_codes = active.code_set if active is not None else frozenset()
     if any(code not in allowed_codes for code in requested):
       raise ValueError("whole-market snapshot fragment contains unknown code")
     with self._access_lock:
@@ -916,9 +1066,18 @@ class _LocalMarketStreamer:
     return enriched if isinstance(enriched, dict) else {}
 
   def unsubscribe_whole_market(self) -> None:
-    with self._lock:
+    with self._whole_quote_lifecycle_lock:
+      self._unsubscribe_whole_market_serialized()
+
+  def _unsubscribe_whole_market_serialized(self) -> None:
+    with self._whole_quote_callback_condition:
       local_id = self._whole_quote_subscription
       self._whole_quote_subscription = None
+      if local_id is not None:
+        self._whole_quote_callback_epoch += 1
+        self._whole_quote_bound_universe_generation = 0
+        while self._whole_quote_callbacks_inflight > 0:
+          self._whole_quote_callback_condition.wait()
     if local_id is not None:
       self._unsubscribe_local(local_id, suppress_errors=False)
 
@@ -1011,8 +1170,19 @@ class QmtDataBroker(SimulatorBroker):
 
   def market_data_connection_generation(self) -> int:
     with self._xtdata_access_lock:
-      _, generation = _observe_market_data_connection(self)
-      return generation
+      _, connection_generation = _observe_market_data_connection(self)
+    return _combine_market_data_source_generation(
+      connection_generation,
+      self.market_streamer.whole_market_universe_generation(),
+    )
+
+  def market_data_subscription_generation(self) -> int:
+    with self._xtdata_access_lock:
+      _, connection_generation = _observe_market_data_connection(self)
+    return _combine_market_data_source_generation(
+      connection_generation,
+      self.market_streamer.whole_market_bound_universe_generation(),
+    )
 
   def is_whole_market_trading_session(self) -> bool:
     return self.market_streamer.is_whole_market_trading_session()
@@ -1226,8 +1396,19 @@ class LiveBroker:
 
   def market_data_connection_generation(self) -> int:
     with self._xtdata_access_lock:
-      _, generation = _observe_market_data_connection(self)
-      return generation
+      _, connection_generation = _observe_market_data_connection(self)
+    return _combine_market_data_source_generation(
+      connection_generation,
+      self.market_streamer.whole_market_universe_generation(),
+    )
+
+  def market_data_subscription_generation(self) -> int:
+    with self._xtdata_access_lock:
+      _, connection_generation = _observe_market_data_connection(self)
+    return _combine_market_data_source_generation(
+      connection_generation,
+      self.market_streamer.whole_market_bound_universe_generation(),
+    )
 
   def is_whole_market_trading_session(self) -> bool:
     return self.market_streamer.is_whole_market_trading_session()
@@ -1277,6 +1458,16 @@ def _observe_market_data_connection(owner: Any) -> tuple[bool, int]:
   owner._observed_market_data_identity = identity
   owner._market_data_generation = generation
   return ready, generation
+
+
+def _combine_market_data_source_generation(
+  connection_generation: int,
+  universe_generation: int,
+) -> int:
+  """Expose native reconnects and universe changes through one monotonic token."""
+  connection = max(0, int(connection_generation))
+  universe = max(0, int(universe_generation))
+  return (connection << 32) | (universe & 0xFFFFFFFF)
 
 
 def _ensure_market_data_manager_connected(manager: Any) -> bool:
