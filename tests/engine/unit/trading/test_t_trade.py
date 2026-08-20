@@ -127,6 +127,77 @@ def test_signal_requires_the_high_to_precede_the_low():
   assert signal.reason == "PULLBACK_TOO_SMALL"
 
 
+@pytest.mark.parametrize(
+  ("ask_price", "expected_ticks", "expected_triggered", "expected_reason"),
+  [
+    (44.59, 3, True, "PULLBACK_REBOUND_CONFIRMED"),
+    (44.60, 4, False, "SPREAD_TOO_WIDE"),
+  ],
+)
+def test_pullback_signal_uses_integer_price_ticks_for_spread_boundary(
+  ask_price: float,
+  expected_ticks: int,
+  expected_triggered: bool,
+  expected_reason: str,
+):
+  samples = [
+    TickSample(0, 45.0),
+    TickSample(60_000, 44.4),
+    TickSample(
+      80_000,
+      44.59,
+      bid_price=44.56,
+      ask_price=ask_price,
+      cumulative_amount=447_000,
+      cumulative_volume=10_000,
+    ),
+  ]
+
+  signal = evaluate_intraday_t_signal(
+    samples,
+    policy=SignalPolicy(max_spread_ticks=3, momentum_enabled=False),
+  )
+
+  assert signal.triggered is expected_triggered
+  assert signal.reason == expected_reason
+  assert signal.spread_ticks == expected_ticks
+
+
+@pytest.mark.parametrize(
+  ("bid_price", "ask_price", "price_tick"),
+  [
+    (float("nan"), 44.59, 0.01),
+    (44.56, float("inf"), 0.01),
+    (44.56, 44.59, float("nan")),
+    (44.60, 44.59, 0.01),
+  ],
+)
+def test_pullback_signal_fails_closed_for_untrustworthy_order_book(
+  bid_price: float,
+  ask_price: float,
+  price_tick: float,
+):
+  signal = evaluate_intraday_t_signal(
+    [
+      TickSample(0, 45.0),
+      TickSample(60_000, 44.4),
+      TickSample(
+        80_000,
+        44.59,
+        bid_price=bid_price,
+        ask_price=ask_price,
+        cumulative_amount=447_000,
+        cumulative_volume=10_000,
+      ),
+    ],
+    policy=SignalPolicy(price_tick=price_tick),
+  )
+
+  assert signal.triggered is False
+  assert signal.reason == "ORDER_BOOK_UNAVAILABLE"
+  assert signal.spread_ticks == 0
+
+
 def test_momentum_signal_detects_early_acceleration_without_future_ticks():
   # Recorded from 300917.SZ (特发服务) on 2026-08-12.  The last sample is
   # 13:49:57; no observation from the later 14:02 vertical move is present.
@@ -168,6 +239,90 @@ def test_momentum_signal_detects_early_acceleration_without_future_ticks():
   assert signal.vwap == pytest.approx(27.1505151183)
   assert signal.vwap_premium_pct == pytest.approx(2.3185006948)
   assert signal.spread_ticks == pytest.approx(5)
+
+
+def test_momentum_signal_never_bypasses_invalid_order_book():
+  samples = [
+    TickSample(0, 27.35, cumulative_amount=139_550_205.23, cumulative_volume=5_151_984),
+    TickSample(
+      60_000, 27.41, cumulative_amount=140_158_282.23, cumulative_volume=5_174_184
+    ),
+    TickSample(
+      120_000, 27.50, cumulative_amount=146_892_465.23, cumulative_volume=5_418_784
+    ),
+    TickSample(
+      180_000, 27.58, cumulative_amount=150_553_455.23, cumulative_volume=5_551_684
+    ),
+    TickSample(
+      240_000, 27.53, cumulative_amount=152_226_340.73, cumulative_volume=5_612_473
+    ),
+    TickSample(
+      300_000, 27.53, cumulative_amount=154_724_134.73, cumulative_volume=5_703_073
+    ),
+    TickSample(
+      360_000,
+      27.78,
+      bid_price=float("nan"),
+      ask_price=27.80,
+      cumulative_amount=161_167_439.73,
+      cumulative_volume=5_936_073,
+    ),
+  ]
+
+  signal = evaluate_intraday_t_signal(samples)
+
+  assert signal.triggered is False
+  assert signal.reason == "ORDER_BOOK_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+  ("ask_price", "expected_ticks", "expected_triggered", "expected_reason"),
+  [
+    (44.59, 3, True, "MOMENTUM_ACCELERATION_CONFIRMED"),
+    (44.60, 4, False, "MOMENTUM_SPREAD_TOO_WIDE"),
+  ],
+)
+def test_momentum_signal_uses_integer_price_ticks_for_spread_boundary(
+  ask_price: float,
+  expected_ticks: int,
+  expected_triggered: bool,
+  expected_reason: str,
+):
+  samples = [
+    TickSample(0, 44.20, cumulative_amount=100_000_000, cumulative_volume=2_300_000),
+    TickSample(
+      60_000, 44.25, cumulative_amount=100_300_000, cumulative_volume=2_306_000
+    ),
+    TickSample(
+      120_000, 44.30, cumulative_amount=100_600_000, cumulative_volume=2_312_000
+    ),
+    TickSample(
+      180_000, 44.35, cumulative_amount=100_900_000, cumulative_volume=2_318_000
+    ),
+    TickSample(
+      240_000, 44.31, cumulative_amount=101_200_000, cumulative_volume=2_324_000
+    ),
+    TickSample(
+      300_000, 44.19, cumulative_amount=101_500_000, cumulative_volume=2_330_000
+    ),
+    TickSample(
+      360_000,
+      44.59,
+      bid_price=44.56,
+      ask_price=ask_price,
+      cumulative_amount=102_200_000,
+      cumulative_volume=2_350_000,
+    ),
+  ]
+
+  signal = evaluate_intraday_t_signal(
+    samples,
+    policy=SignalPolicy(momentum_max_spread_ticks=3),
+  )
+
+  assert signal.triggered is expected_triggered
+  assert signal.reason == expected_reason
+  assert signal.spread_ticks == expected_ticks
 
 
 def test_momentum_signal_rejects_late_vertical_chase_above_vwap_band():

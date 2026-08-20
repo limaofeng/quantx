@@ -19,9 +19,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 SHANGHAI_ZONE = ZoneInfo("Asia/Shanghai")
+MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES = 1024
 
 
-class WholeMarketCaptureOverflow(RuntimeError):
+class WholeMarketCaptureInvalidated(RuntimeError):
+  """READY delivery lost continuity and requires a full resynchronization."""
+
+
+class WholeMarketCaptureOverflow(WholeMarketCaptureInvalidated):
   """The READY stream cannot preserve every callback within its ingress cap."""
 
 
@@ -75,7 +80,8 @@ class WholeMarketCapture:
     self._ready_estimated_bytes = 0
     self._capture_sequence = 0
     self._ready = False
-    self._overflow_reason = ""
+    self._invalidation_reason = ""
+    self._invalidation_is_overflow = False
     self._loop: asyncio.AbstractEventLoop | None = None
     self._wake: asyncio.Event | None = None
     self._invalidated: asyncio.Event | None = None
@@ -83,14 +89,26 @@ class WholeMarketCapture:
     self._sync_merged_callbacks = 0
     self._last_callback_monotonic = 0.0
 
+  def _invalidation_exception_locked(
+    self,
+  ) -> WholeMarketCaptureInvalidated | None:
+    if not self._invalidation_reason:
+      return None
+    exception_type = (
+      WholeMarketCaptureOverflow
+      if self._invalidation_is_overflow
+      else WholeMarketCaptureInvalidated
+    )
+    return exception_type(self._invalidation_reason)
+
   def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
     with self._lock:
       self._loop = loop
       self._wake = asyncio.Event()
       self._invalidated = asyncio.Event()
-      if self._latest or self._ready_events or self._overflow_reason:
+      if self._latest or self._ready_events or self._invalidation_reason:
         self._wake.set()
-      if self._overflow_reason:
+      if self._invalidation_reason:
         self._invalidated.set()
 
   def unbind_loop(self) -> None:
@@ -141,7 +159,7 @@ class WholeMarketCapture:
     captured_at = datetime.now(timezone.utc)
     captured_monotonic = time.monotonic()
     estimated_bytes = max(
-      1024,
+      MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
       len(normalized) * self._estimated_tick_bytes,
     )
     should_wake = False
@@ -173,13 +191,14 @@ class WholeMarketCapture:
         self._ready = False
         self._ready_events.clear()
         self._ready_estimated_bytes = 0
-        self._overflow_reason = (
+        self._invalidation_reason = (
           "whole-market READY ingress overflow: "
           f"depth={current_depth} "
           f"projected_estimated_bytes={projected_estimated_bytes} "
           f"max_callbacks={self._max_ready_callbacks} "
           f"max_estimated_bytes={self._max_ready_estimated_bytes}"
         )
+        self._invalidation_is_overflow = True
         should_wake = True
         invalidated = True
       else:
@@ -227,7 +246,8 @@ class WholeMarketCapture:
       self._ready = False
       self._ready_events.clear()
       self._ready_estimated_bytes = 0
-      self._overflow_reason = ""
+      self._invalidation_reason = ""
+      self._invalidation_is_overflow = False
       invalidated = self._invalidated
       if invalidated is not None:
         invalidated.clear()
@@ -238,7 +258,10 @@ class WholeMarketCapture:
       self._ready = False
       self._ready_events.clear()
       self._ready_estimated_bytes = 0
-      self._overflow_reason = str(reason or "whole-market capture invalidated")
+      self._invalidation_reason = str(
+        reason or "whole-market capture invalidated"
+      )
+      self._invalidation_is_overflow = False
     self._notify()
     self._notify_invalidation()
 
@@ -249,7 +272,8 @@ class WholeMarketCapture:
       self._latest.clear()
       self._ready_events.clear()
       self._ready_estimated_bytes = 0
-      self._overflow_reason = str(reason or "whole-market source reset")
+      self._invalidation_reason = str(reason or "whole-market source reset")
+      self._invalidation_is_overflow = False
     self._notify()
     self._notify_invalidation()
 
@@ -291,60 +315,85 @@ class WholeMarketCapture:
       captured_monotonic=monotonic_values,
     )
 
+  def _converged_event_locked(
+    self,
+    *,
+    after_sequence: int,
+    trading_date: date | None,
+  ) -> CapturedMarketEvent:
+    values: dict[str, Any] = {}
+    captured_at: datetime | None = None
+    captured_monotonic: float | None = None
+    for code, latest in self._latest.items():
+      if latest.capture_sequence <= after_sequence:
+        continue
+      if (
+        trading_date is not None
+        and latest.captured_at.astimezone(SHANGHAI_ZONE).date()
+        != trading_date
+      ):
+        continue
+      values[code] = latest.value
+      if captured_at is None or latest.captured_at < captured_at:
+        captured_at = latest.captured_at
+      if (
+        captured_monotonic is None
+        or latest.captured_monotonic < captured_monotonic
+      ):
+        captured_monotonic = latest.captured_monotonic
+    return CapturedMarketEvent(
+      capture_sequence=self._capture_sequence,
+      captured_at=captured_at or datetime.now(timezone.utc),
+      captured_monotonic=captured_monotonic or time.monotonic(),
+      data=values,
+      estimated_bytes=max(
+        MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
+        len(values) * self._estimated_tick_bytes,
+      ),
+    )
+
+  def converged_event(
+    self,
+    *,
+    after_sequence: int,
+    trading_date: date | None,
+  ) -> CapturedMarketEvent:
+    """Read a latest-per-instrument delta while remaining in SYNCING."""
+    with self._lock:
+      return self._converged_event_locked(
+        after_sequence=after_sequence,
+        trading_date=trading_date,
+      )
+
   def activate_ready(
     self,
     *,
     after_sequence: int,
     trading_date: date | None,
-  ) -> CapturedMarketEvent | None:
+  ) -> CapturedMarketEvent:
     """Atomically cut from state convergence to ordered callback capture."""
     with self._lock:
-      values: dict[str, Any] = {}
-      captured_at: datetime | None = None
-      captured_monotonic: float | None = None
-      for code, latest in self._latest.items():
-        if latest.capture_sequence <= after_sequence:
-          continue
-        if (
-          trading_date is not None
-          and latest.captured_at.astimezone(SHANGHAI_ZONE).date()
-          != trading_date
-        ):
-          continue
-        values[code] = latest.value
-        if captured_at is None or latest.captured_at < captured_at:
-          captured_at = latest.captured_at
-        if (
-          captured_monotonic is None
-          or latest.captured_monotonic < captured_monotonic
-        ):
-          captured_monotonic = latest.captured_monotonic
-      watermark = self._capture_sequence
+      invalidation = self._invalidation_exception_locked()
+      if invalidation is not None:
+        raise invalidation
+      event = self._converged_event_locked(
+        after_sequence=after_sequence,
+        trading_date=trading_date,
+      )
       self._ready_events.clear()
       self._ready_estimated_bytes = 0
-      self._overflow_reason = ""
       self._ready = True
       invalidated = self._invalidated
       if invalidated is not None:
         invalidated.clear()
-      if not values:
-        return None
-      return CapturedMarketEvent(
-        capture_sequence=watermark,
-        captured_at=captured_at or datetime.now(timezone.utc),
-        captured_monotonic=captured_monotonic or time.monotonic(),
-        data=values,
-        estimated_bytes=max(
-          1024,
-          len(values) * self._estimated_tick_bytes,
-        ),
-      )
+      return event
 
   async def next_ready_event(self) -> CapturedMarketEvent:
     while True:
       with self._lock:
-        if self._overflow_reason:
-          raise WholeMarketCaptureOverflow(self._overflow_reason)
+        invalidation = self._invalidation_exception_locked()
+        if invalidation is not None:
+          raise invalidation
         if self._ready_events:
           event = self._ready_events.popleft()
           self._ready_estimated_bytes = max(
@@ -380,6 +429,18 @@ class WholeMarketCapture:
         raise RuntimeError("whole-market capture has no bound event loop")
     await invalidated.wait()
 
+  def raise_if_invalidated(self) -> None:
+    """Raise the original continuity-loss reason without replacing it."""
+    with self._lock:
+      invalidation = self._invalidation_exception_locked()
+    if invalidation is not None:
+      raise invalidation
+
+  @property
+  def invalidation_reason(self) -> str:
+    with self._lock:
+      return self._invalidation_reason
+
   @property
   def queue_depth(self) -> int:
     with self._lock:
@@ -406,5 +467,10 @@ class WholeMarketCapture:
         "callback_count": self._callback_count,
         "sync_merged_callbacks": self._sync_merged_callbacks,
         "last_callback_monotonic": self._last_callback_monotonic,
-        "overflow_reason": self._overflow_reason,
+        "invalidation_reason": self._invalidation_reason,
+        "overflow_reason": (
+          self._invalidation_reason
+          if self._invalidation_is_overflow
+          else ""
+        ),
       }

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from quantx_contracts import (
   MarketStreamBatch,
   MarketStreamControl,
 )
+from starlette.websockets import WebSocketState
 
 
 class FakeWebSocket:
@@ -64,7 +66,8 @@ class FailingStore:
     del generation, reason
     self.stream_id = stream_id
 
-  async def write_batch(self, _batch, _payload):
+  async def write_batch(self, _batch, _payload, *, received_at):
+    del received_at
     raise ConnectionError("redis unavailable")
 
   async def mark_offline(self, stream_id, *, reason):
@@ -73,7 +76,8 @@ class FailingStore:
 
 
 class HangingStore(FailingStore):
-  async def write_batch(self, _batch, _payload):
+  async def write_batch(self, _batch, _payload, *, received_at):
+    del received_at
     await asyncio.Event().wait()
 
   async def mark_offline(self, stream_id, *, reason):
@@ -82,7 +86,8 @@ class HangingStore(FailingStore):
 
 
 class SuccessfulStore(FailingStore):
-  async def write_batch(self, batch, _payload):
+  async def write_batch(self, batch, _payload, *, received_at):
+    del received_at
     return SimpleNamespace(sequence=batch.sequence)
 
 
@@ -384,6 +389,7 @@ def _commit_item(sequence: int, payload: bytes) -> agent_api._MarketCommitItem:
       data={"600000.SH": {"lastPrice": 10.0}},
     ),
     payload=payload,
+    received_at=datetime.now(timezone.utc),
     received_monotonic=0.0,
   )
 
@@ -413,6 +419,135 @@ async def test_market_commit_buffer_bounds_batches_and_bytes() -> None:
   oversized = agent_api._MarketCommitBuffer(capacity=2, max_bytes=3)
   with pytest.raises(ValueError, match="byte limit"):
     await oversized.put(first)
+
+
+@pytest.mark.asyncio
+async def test_market_commit_buffer_balances_queue_task_accounting() -> None:
+  buffer = agent_api._MarketCommitBuffer(capacity=1, max_bytes=8)
+  item = _commit_item(1, b"1111")
+  await buffer.put(item)
+  assert await buffer.get() is item
+  await buffer.complete(item)
+
+  disconnect = agent_api.WebSocketDisconnect(code=1000)
+  await buffer.close(disconnect)
+  closed = await buffer.get()
+  assert isinstance(closed, agent_api._MarketCommitQueueClosed)
+  buffer.complete_closed()
+
+  await asyncio.wait_for(buffer.join(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_large_market_frame_decode_keeps_event_loop_schedulable(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  batch = _commit_item(1, b"").batch
+  large_payload = b"x" * (agent_api.MARKET_STREAM_DECODE_OFFLOAD_BYTES + 1)
+  decode_started = threading.Event()
+  release_decode = threading.Event()
+  decode_thread_ids: list[int] = []
+  loop_progressed = asyncio.Event()
+
+  def controlled_decode(payload: bytes) -> MarketStreamBatch:
+    assert payload is large_payload
+    decode_thread_ids.append(threading.get_ident())
+    decode_started.set()
+    assert release_decode.wait(timeout=2)
+    return batch
+
+  class LargeFrameWebSocket:
+    def __init__(self) -> None:
+      self.receive_count = 0
+
+    async def receive(self):
+      self.receive_count += 1
+      if self.receive_count == 1:
+        return {"type": "websocket.receive", "bytes": large_payload}
+      return {"type": "websocket.disconnect", "code": 1000}
+
+  async def ensure_device_active(_device_id):
+    return None
+
+  async def heartbeat() -> None:
+    while not decode_started.is_set():
+      await asyncio.sleep(0)
+    loop_progressed.set()
+
+  monkeypatch.setattr(
+    agent_api.MarketStreamBatch,
+    "from_bytes",
+    staticmethod(controlled_decode),
+  )
+  monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
+  buffer = agent_api._MarketCommitBuffer()
+  heartbeat_task = asyncio.create_task(heartbeat())
+  receiver = asyncio.create_task(
+    agent_api._receive_market_batches(
+      LargeFrameWebSocket(),
+      stream_id="stream-1",
+      device_id="device-1",
+      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
+      buffer=buffer,
+    )
+  )
+  try:
+    await asyncio.wait_for(loop_progressed.wait(), timeout=1)
+    assert len(decode_thread_ids) == 1
+    assert decode_thread_ids[0] != threading.get_ident()
+  finally:
+    release_decode.set()
+  await asyncio.wait_for(heartbeat_task, timeout=1)
+  await asyncio.wait_for(receiver, timeout=1)
+
+  queued = await buffer.get()
+  assert isinstance(queued, agent_api._MarketCommitItem)
+  assert queued.batch is batch
+  assert queued.payload is large_payload
+  assert buffer.buffered_bytes == len(large_payload)
+  await buffer.complete(queued)
+  closed = await buffer.get()
+  assert isinstance(closed, agent_api._MarketCommitQueueClosed)
+  buffer.complete_closed()
+  await asyncio.wait_for(buffer.join(), timeout=1)
+  assert buffer.buffered_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_large_market_frame_decode_failure_releases_reservations(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  payload = b"x" * (agent_api.MARKET_STREAM_DECODE_OFFLOAD_BYTES + 1)
+
+  class InvalidLargeFrameWebSocket:
+    async def receive(self):
+      return {"type": "websocket.receive", "bytes": payload}
+
+  async def ensure_device_active(_device_id):
+    return None
+
+  def fail_decode(_payload: bytes) -> MarketStreamBatch:
+    raise ValueError("controlled large-frame decode failure")
+
+  monkeypatch.setattr(
+    agent_api.MarketStreamBatch,
+    "from_bytes",
+    staticmethod(fail_decode),
+  )
+  monkeypatch.setattr(agent_api, "_ensure_device_active", ensure_device_active)
+  buffer = agent_api._MarketCommitBuffer()
+
+  with pytest.raises(ValueError, match="controlled large-frame decode failure"):
+    await agent_api._receive_market_batches(
+      InvalidLargeFrameWebSocket(),
+      stream_id="stream-1",
+      device_id="device-1",
+      session_expires_at=agent_api.utcnow() + timedelta(minutes=5),
+      buffer=buffer,
+    )
+
+  assert buffer.buffered_batches == 0
+  assert buffer.buffered_bytes == 0
 
 
 @pytest.mark.asyncio
@@ -447,7 +582,8 @@ async def test_market_pipeline_receives_two_frames_but_acks_only_after_commit(
     def __init__(self) -> None:
       self.calls = 0
 
-    async def write_batch(self, batch, _payload):
+    async def write_batch(self, batch, _payload, *, received_at):
+      assert received_at.tzinfo is not None
       self.calls += 1
       if self.calls == 1:
         await release_redis.wait()
@@ -484,6 +620,54 @@ async def test_market_pipeline_receives_two_frames_but_acks_only_after_commit(
 
 
 @pytest.mark.asyncio
+async def test_market_committer_treats_ack_after_peer_close_as_disconnect(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  item = _commit_item(1, b"payload")
+  buffer = agent_api._MarketCommitBuffer()
+  await buffer.put(item)
+
+  class DisconnectedWebSocket:
+    client_state = WebSocketState.DISCONNECTED
+    application_state = WebSocketState.CONNECTED
+
+    async def send_text(self, _payload):
+      raise AssertionError("a disconnected WebSocket must not be written")
+
+  class Store:
+    async def write_batch(self, batch, _payload, *, received_at):
+      assert received_at.tzinfo is not None
+      return SimpleNamespace(sequence=batch.sequence)
+
+  monkeypatch.setattr(agent_api, "market_stream_store", Store())
+
+  with pytest.raises(agent_api.WebSocketDisconnect):
+    await agent_api._commit_market_batches(
+      DisconnectedWebSocket(),
+      stream_id="stream-1",
+      buffer=buffer,
+      commit_state=agent_api._MarketCommitState(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_market_send_classifies_disconnect_racing_with_ack_write() -> None:
+  class RacingWebSocket:
+    client_state = WebSocketState.CONNECTED
+    application_state = WebSocketState.CONNECTED
+
+    async def send_text(self, _payload):
+      self.client_state = WebSocketState.DISCONNECTED
+      raise RuntimeError(
+        "Unexpected ASGI message 'websocket.send', after sending "
+        "'websocket.close' or response already completed."
+      )
+
+  with pytest.raises(agent_api.WebSocketDisconnect):
+    await agent_api._send_market_text(RacingWebSocket(), "ack")
+
+
+@pytest.mark.asyncio
 async def test_idle_frame_crossing_session_expiry_is_not_committed_or_acked(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -508,7 +692,8 @@ async def test_idle_frame_crossing_session_expiry_is_not_committed_or_acked(
     def __init__(self) -> None:
       self.calls = 0
 
-    async def write_batch(self, _batch, _payload):
+    async def write_batch(self, _batch, _payload, *, received_at):
+      del received_at
       self.calls += 1
       return SimpleNamespace(sequence=1)
 
@@ -560,7 +745,8 @@ async def test_idle_frame_after_device_revocation_is_not_committed(
     def __init__(self) -> None:
       self.calls = 0
 
-    async def write_batch(self, _batch, _payload):
+    async def write_batch(self, _batch, _payload, *, received_at):
+      del received_at
       self.calls += 1
       return SimpleNamespace(sequence=1)
 

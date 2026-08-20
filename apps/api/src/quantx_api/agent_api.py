@@ -31,6 +31,7 @@ from quantx_contracts import (
   PROTOCOL_VERSION,
   AgentEnvelope,
   AgentMessageType,
+  CommandAckPayload,
   MarketBatchKind,
   MarketControlType,
   MarketStreamBatch,
@@ -50,11 +51,17 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentReportInbox,
   MarketDataRequest,
   MarketDataTransfer,
+  PendingTradeOrder,
   RuntimeComponentHeartbeat,
+  StrategyOrderCorrelation,
+  StrategyRuntimeEvent,
   TradeCommandOutbox,
+  TTradeBatch,
 )
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
+from starlette.websockets import WebSocketState
 
 from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.agent_service import AgentAuthService
@@ -96,15 +103,16 @@ MAX_MARKET_DATA_CHUNK_BYTES = 32 * 1024 * 1024
 MAX_MARKET_DATA_CHUNK_RECORDS = 5000
 MAX_MARKET_DATA_CHUNKS = 100_000
 MARKET_STREAM_COMMIT_QUEUE_CAPACITY = 2
-MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = (
-  MARKET_STREAM_COMMIT_QUEUE_CAPACITY * MAX_MARKET_STREAM_FRAME_BYTES
-)
+MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
+MARKET_STREAM_DECODE_OFFLOAD_BYTES = 256 * 1024
 MARKET_STREAM_DEVICE_REVALIDATE_SECONDS = 5.0
 MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS = 8.0
 MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
+TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS = 1.0
+TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE = 100
 
 
 class _MarketConnectionRegistry:
@@ -134,6 +142,7 @@ _market_connections = _MarketConnectionRegistry()
 class _MarketCommitItem:
   batch: MarketStreamBatch
   payload: bytes
+  received_at: datetime
   received_monotonic: float
 
 
@@ -184,20 +193,35 @@ class _MarketCommitBuffer:
 
   async def put_reserved(self, item: _MarketCommitItem) -> None:
     payload_bytes = len(item.payload)
+    await self.reserve_payload(payload_bytes)
+    try:
+      self._queue.put_nowait(item)
+    except BaseException:
+      await self.release_payload(payload_bytes)
+      raise
+
+  async def put_pre_reserved(self, item: _MarketCommitItem) -> None:
+    """Queue an item whose payload bytes were reserved before decoding."""
+
+    self._queue.put_nowait(item)
+
+  async def reserve_payload(self, payload_bytes: int) -> None:
+    if payload_bytes < 0:
+      raise ValueError("market frame byte size must be non-negative")
     async with self._condition:
       if self._buffered_bytes + payload_bytes > self._max_bytes:
         raise ValueError("market frame exceeds API commit buffer byte limit")
       self._buffered_bytes += payload_bytes
-    try:
-      self._queue.put_nowait(item)
-    except BaseException:
-      async with self._condition:
-        self._buffered_bytes -= payload_bytes
-      raise
 
-  async def cancel_reservation(self) -> None:
+  async def release_payload(self, payload_bytes: int) -> None:
+    async with self._condition:
+      self._buffered_bytes -= payload_bytes
+      self._condition.notify_all()
+
+  async def cancel_reservation(self, *, payload_bytes: int = 0) -> None:
     async with self._condition:
       self._buffered_batches -= 1
+      self._buffered_bytes -= payload_bytes
       self._condition.notify_all()
 
   async def put(self, item: _MarketCommitItem) -> None:
@@ -214,11 +238,18 @@ class _MarketCommitBuffer:
   async def get(self) -> _MarketCommitItem | _MarketCommitQueueClosed:
     return await self._queue.get()
 
+  async def join(self) -> None:
+    await self._queue.join()
+
+  def complete_closed(self) -> None:
+    self._queue.task_done()
+
   async def complete(self, item: _MarketCommitItem) -> None:
     async with self._condition:
       self._buffered_batches -= 1
       self._buffered_bytes -= len(item.payload)
       self._condition.notify_all()
+    self._queue.task_done()
 
 
 async def _publish_market_event(
@@ -344,28 +375,508 @@ async def _ensure_device_active(device_id: str) -> None:
       raise AuthError("UNAUTHENTICATED", "Agent 设备已撤销")
 
 
+_PRE_EXECUTION_REJECTION_REASONS = frozenset(
+  {
+    # Runtime validation and capability gates run before Broker.execute().
+    "command_expired",
+    "account_not_whitelisted",
+    "data_only_agent",
+    "execution_mode_mismatch",
+    "local_emergency_stop",
+    "invalid_command_payload",
+    "invalid_command_expiry",
+    # MiniQMTBroker rejects these before calling XTTrader.order_stock().
+    "miniQMT trading connection unavailable",
+    "miniQMT disconnected",
+    "broker report stale",
+    "invalid order command",
+    "invalid A-share code",
+    "invalid order side",
+    "buy volume must be a board lot",
+    "invalid protected limit price",
+    "outside trading session",
+    "insufficient cash",
+    "insufficient available volume",
+    "live market metadata unavailable",
+    "live quote or instrument metadata unavailable",
+    "instrument suspended",
+    "quote timestamp unavailable",
+    "stale live quote",
+    "incomplete live trading limits",
+    "invalid price tick",
+    "price outside daily limits",
+    "limit-up buy blocked",
+    "limit-down sell blocked",
+  }
+)
+
+
+def _is_place_order(command: TradeCommandOutbox) -> bool:
+  return str((command.payload or {}).get("command_kind") or "").upper() == "PLACE_ORDER"
+
+
+async def _stage_command_runtime_event(
+  db,
+  *,
+  command: TradeCommandOutbox,
+  pending: PendingTradeOrder,
+  correlation: StrategyOrderCorrelation | None,
+  status: str,
+  reason: str,
+  now: datetime,
+) -> bool:
+  if correlation is None:
+    return False
+  normalized_status = str(status or "").upper()
+  business_key = (
+    f"command:{pending.client_order_id}:RECONCILE_REQUIRED"
+    if normalized_status == "RECONCILE_REQUIRED"
+    else f"order:{pending.client_order_id}::{normalized_status}:0"
+  )[:192]
+  existing = await db.scalar(
+    select(StrategyRuntimeEvent.event_id).where(
+      StrategyRuntimeEvent.business_key == business_key
+    )
+  )
+  if existing is not None:
+    return False
+  metadata = {
+    **dict(correlation.request_metadata or {}),
+    "strategy_run_id": correlation.strategy_run_id,
+    "strategy_order_id": correlation.strategy_order_id,
+    "intent_id": correlation.intent_id,
+    "instrument_code": pending.instrument_code,
+    "t_batch_id": correlation.batch_id or "",
+    "bucket": correlation.bucket,
+    "t_trade_role": str(correlation.t_trade_role or "").lower(),
+    "risk_decision_id": correlation.risk_decision_id or "",
+    "trace_id": correlation.trace_id,
+    "substitution_plan": correlation.substitution_plan,
+    "execution_mode": correlation.execution_mode,
+    "approval_reason": reason,
+    "runtime_event_key": business_key,
+    "command_message_id": command.message_id,
+  }
+  event = StrategyRuntimeEvent(
+    event_id=str(uuid.uuid4()),
+    business_key=business_key,
+    strategy_run_id=correlation.strategy_run_id,
+    client_order_id=correlation.client_order_id,
+    broker_order_id=correlation.broker_order_id,
+    event_type="ORDER",
+    payload={
+      "report": {
+        "client_order_id": pending.client_order_id,
+        "account_id": pending.account_id,
+        "stock_code": pending.instrument_code,
+        "side": pending.side,
+        "order_volume": int(pending.volume or 0),
+        "price": float(pending.limit_price or 0),
+        "traded_volume": 0,
+        "status": normalized_status,
+        "order_status": normalized_status,
+        "status_msg": reason,
+      },
+      "metadata": metadata,
+    },
+    application_status="PENDING",
+    application_attempts=0,
+    created_at=now,
+  )
+  try:
+    async with db.begin_nested():
+      db.add(event)
+      await db.flush()
+  except IntegrityError:
+    # A report consumer or duplicate ACK may stage the same semantic outcome
+    # concurrently.  The unique business key is the final idempotency gate;
+    # keep the surrounding lifecycle transaction intact.
+    return False
+  return True
+
+
+async def _project_command_batch_status(
+  db,
+  *,
+  pending: PendingTradeOrder,
+  status: str,
+  reason: str,
+) -> None:
+  if not pending.batch_id:
+    return
+  batch = await db.get(TTradeBatch, pending.batch_id, with_for_update=True)
+  if batch is None:
+    return
+  normalized_status = str(status or "").upper()
+  role = str(pending.t_trade_role or "").upper()
+  if normalized_status == "RECONCILE_REQUIRED":
+    batch.status = "RECONCILE_REQUIRED"
+    batch.exception_reason = reason
+  elif role == "ENTRY":
+    batch.status = (
+      "ENTRY_EXPIRED" if normalized_status == "EXPIRED" else "ENTRY_REJECTED"
+    )
+    batch.exception_reason = reason
+  elif role == "EXIT":
+    batch.status = "EXIT_REJECTED"
+    batch.exception_reason = reason
+
+
+async def _transition_place_order_command(
+  db,
+  *,
+  command: TradeCommandOutbox,
+  requested_status: str,
+  reason: str,
+  now: datetime,
+  pre_execution_proven: bool,
+) -> bool:
+  """Atomically converge a non-broker command outcome into durable truth.
+
+  A terminal status is legal only while every durable row still proves that
+  no broker-side effect exists.  Any contradictory evidence is fail-closed as
+  RECONCILE_REQUIRED; broker reports remain the only fill/acceptance truth.
+  """
+
+  pending = await db.get(
+    PendingTradeOrder,
+    command.client_order_id,
+    with_for_update=True,
+  )
+  correlation = (
+    await db.execute(
+      select(StrategyOrderCorrelation)
+      .where(
+        StrategyOrderCorrelation.client_order_id == command.client_order_id
+      )
+      .with_for_update()
+    )
+  ).scalar_one_or_none()
+  intent = None
+  if pending is not None and pending.intent_id:
+    intent = await db.get(
+      TradeIntentRecord,
+      pending.intent_id,
+      with_for_update=True,
+    )
+  batch = None
+  if pending is not None and pending.batch_id:
+    batch = await db.get(TTradeBatch, pending.batch_id, with_for_update=True)
+
+  normalized_status = str(requested_status or "").upper()
+  role = str(pending.t_trade_role or "").upper() if pending is not None else ""
+  batch_fill_volume = 0
+  if role == "ENTRY" and batch is not None:
+    batch_fill_volume = int(batch.entry_filled_volume or 0)
+  elif role == "EXIT" and batch is not None:
+    batch_fill_volume = int(batch.exit_filled_volume or 0)
+  batch_pre_execution_state = bool(
+    batch is None
+    or (role == "ENTRY" and str(batch.status or "").upper() == "ENTRY_QUEUED")
+    or (role == "EXIT" and str(batch.status or "").upper() == "EXIT_TRIGGERED")
+  )
+  already_same_pre_execution_outcome = bool(
+    pending is not None
+    and normalized_status in {"EXPIRED", "REJECTED"}
+    and str(pending.status or "").upper() == normalized_status
+    and str(pending.status_reason or "") == reason
+    and not pending.broker_order_id
+    and (correlation is None or not correlation.broker_order_id)
+    and (not pending.strategy_run_id or correlation is not None)
+    and (not pending.intent_id or intent is not None)
+    and (not pending.batch_id or batch is not None)
+    and batch_fill_volume == 0
+    and (intent is None or int(intent.executed_volume or 0) == 0)
+  )
+  safe_pre_execution_state = bool(
+    already_same_pre_execution_outcome
+    or (
+      pre_execution_proven
+      and pending is not None
+      and str(pending.status or "").upper() == "QUEUED"
+      and not pending.broker_order_id
+      and (correlation is None or not correlation.broker_order_id)
+      and (not pending.strategy_run_id or correlation is not None)
+      and (not pending.batch_id or batch is not None)
+      and batch_fill_volume == 0
+      and batch_pre_execution_state
+      and (
+        not pending.intent_id
+        or (intent is not None and int(intent.executed_volume or 0) == 0)
+      )
+    )
+  )
+  if normalized_status in {"EXPIRED", "REJECTED"} and not safe_pre_execution_state:
+    normalized_status = "RECONCILE_REQUIRED"
+    reason = f"{reason}:durable_pre_execution_proof_missing"[:256]
+
+  if normalized_status == "RECONCILE_REQUIRED":
+    command.delivery_status = "RECONCILE_REQUIRED"
+  else:
+    command.delivery_status = normalized_status
+  command.last_error = reason[:256] or None
+
+  if pending is None:
+    logger.error(
+      "Trade command lifecycle lost pending row; reconciliation required: message=%s client=%s",
+      command.message_id,
+      command.client_order_id,
+    )
+    return False
+
+  pending.status = normalized_status
+  pending.status_reason = reason[:256] or None
+  if intent is not None:
+    intent.status = normalized_status
+    intent.notes = reason[:2000] or intent.notes
+  await _project_command_batch_status(
+    db,
+    pending=pending,
+    status=normalized_status,
+    reason=reason,
+  )
+  return await _stage_command_runtime_event(
+    db,
+    command=command,
+    pending=pending,
+    correlation=correlation,
+    status=normalized_status,
+    reason=reason,
+    now=now,
+  )
+
+
+async def _wake_runtime_event_consumer() -> None:
+  try:
+    await asyncio.wait_for(
+      redis_pubsub.publish(
+        AGENT_REPORT_WAKE_CHANNEL,
+        {"source": "trade_command_lifecycle"},
+      ),
+      timeout=0.5,
+    )
+  except Exception as exc:
+    logger.debug(
+      "Command lifecycle Redis wake-up failed; database polling remains active: %s",
+      exc.__class__.__name__,
+    )
+
+
+async def _expire_trade_commands_in_session(
+  db,
+  *,
+  now: datetime,
+  device_id: str | None = None,
+  batch_size: int = TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE,
+) -> tuple[int, bool]:
+  """Lock and converge one bounded batch of expired command rows.
+
+  The cross-device API-owned sweeper and the connected-Agent delivery path use
+  this same transition. PostgreSQL ``SKIP LOCKED`` lets multiple API processes
+  run it safely without serializing unrelated devices or applying one command
+  outcome twice.
+  """
+
+  query = select(TradeCommandOutbox).where(
+    TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
+    TradeCommandOutbox.expires_at <= now,
+  )
+  if device_id:
+    query = query.where(TradeCommandOutbox.device_id == device_id)
+  expired_commands = (
+    await db.execute(
+      query.order_by(TradeCommandOutbox.expires_at, TradeCommandOutbox.created_at)
+      .limit(max(1, int(batch_size)))
+      .with_for_update(skip_locked=True)
+    )
+  ).scalars().all()
+
+  staged_runtime_event = False
+  for expired in expired_commands:
+    previous_status = str(expired.delivery_status or "").upper()
+    if _is_place_order(expired):
+      if previous_status == "QUEUED":
+        staged_runtime_event = (
+          await _transition_place_order_command(
+            db,
+            command=expired,
+            requested_status="EXPIRED",
+            reason="command_expired_before_delivery",
+            now=now,
+            pre_execution_proven=True,
+          )
+          or staged_runtime_event
+        )
+      else:
+        staged_runtime_event = (
+          await _transition_place_order_command(
+            db,
+            command=expired,
+            requested_status="RECONCILE_REQUIRED",
+            reason="delivered_command_expired_without_ack",
+            now=now,
+            pre_execution_proven=False,
+          )
+          or staged_runtime_event
+        )
+    else:
+      expired.delivery_status = (
+        "EXPIRED" if previous_status == "QUEUED" else "RECONCILE_REQUIRED"
+      )
+      expired.last_error = (
+        "command_expired_before_delivery"
+        if previous_status == "QUEUED"
+        else "delivered_command_expired_without_ack"
+      )
+  return len(expired_commands), staged_runtime_event
+
+
+async def sweep_expired_trade_commands(
+  *,
+  now: datetime | None = None,
+  batch_size: int = TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE,
+) -> int:
+  """Converge expired commands even when their QMT Agent is disconnected."""
+
+  effective_batch_size = max(1, int(batch_size))
+  total = 0
+  staged_runtime_event = False
+  while True:
+    async with AsyncSessionLocal() as db:
+      count, staged = await _expire_trade_commands_in_session(
+        db,
+        now=now or utcnow(),
+        batch_size=effective_batch_size,
+      )
+      await db.commit()
+    total += count
+    staged_runtime_event = staged_runtime_event or staged
+    if count < effective_batch_size:
+      break
+  if staged_runtime_event:
+    await _wake_runtime_event_consumer()
+  return total
+
+
+async def run_trade_command_expiry_sweeper(
+  stopped: asyncio.Event,
+  *,
+  interval_seconds: float = TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS,
+) -> None:
+  """Run an immediate startup sweep followed by bounded periodic recovery."""
+
+  interval = max(0.1, float(interval_seconds))
+  while not stopped.is_set():
+    try:
+      await sweep_expired_trade_commands()
+    except asyncio.CancelledError:
+      raise
+    except Exception:
+      logger.exception("Trade command expiry sweep failed")
+    try:
+      await asyncio.wait_for(stopped.wait(), timeout=interval)
+    except asyncio.TimeoutError:
+      pass
+
+
 async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
-  message_id = str(payload.get("command_message_id", ""))
-  client_order_id = str(payload.get("client_order_id", ""))
-  if not message_id and not client_order_id:
-    raise ValueError("command_ack 缺少命令标识")
+  ack = CommandAckPayload.model_validate(payload)
+  message_id = ack.command_message_id
+  client_order_id = ack.client_order_id
+  accepted = ack.accepted
+  reason = ack.reason.strip()
+  staged_runtime_event = False
   async with AsyncSessionLocal() as db:
     query = select(TradeCommandOutbox).where(
-      TradeCommandOutbox.device_id == device_id
+      TradeCommandOutbox.device_id == device_id,
+      TradeCommandOutbox.message_id == message_id,
     )
-    if message_id:
-      query = query.where(TradeCommandOutbox.message_id == message_id)
-    else:
-      query = query.where(TradeCommandOutbox.client_order_id == client_order_id)
     command = (await db.execute(query.with_for_update())).scalar_one_or_none()
     if command is None:
       return
-    command.delivery_status = (
-      "ACKNOWLEDGED" if bool(payload.get("accepted")) else "REJECTED"
-    )
-    command.acknowledged_at = utcnow()
-    command.last_error = str(payload.get("reason", ""))[:256] or None
+    if command.client_order_id != client_order_id:
+      raise ValueError("command_ack 命令与 client_order_id 不匹配")
+    now = utcnow()
+    previous_status = str(command.delivery_status or "").upper()
+    command.acknowledged_at = now
+    if not _is_place_order(command):
+      if accepted:
+        command.delivery_status = "ACKNOWLEDGED"
+        command.last_error = reason[:256] or None
+      elif reason in _PRE_EXECUTION_REJECTION_REASONS:
+        command.delivery_status = (
+          "EXPIRED" if reason == "command_expired" else "REJECTED"
+        )
+        command.last_error = reason[:256] or None
+      else:
+        command.delivery_status = "RECONCILE_REQUIRED"
+        command.last_error = (
+          reason or "indeterminate_cancel_command_rejection"
+        )[:256]
+    elif accepted and previous_status == "ACKNOWLEDGED":
+      # Idempotent replay of the Agent journal result.
+      command.last_error = reason[:256] or None
+    elif accepted and previous_status in {"QUEUED", "DELIVERED", "RECONCILE_REQUIRED"}:
+      # ACK is delivery/local-processing evidence only.  Pending order truth
+      # still waits for a durable broker report.
+      command.delivery_status = "ACKNOWLEDGED"
+      command.last_error = reason[:256] or None
+    elif accepted:
+      # An accepted ACK contradicting a server-side terminal outcome is not
+      # proof of broker acceptance or non-acceptance.  Preserve every link and
+      # force reconciliation.
+      staged_runtime_event = await _transition_place_order_command(
+        db,
+        command=command,
+        requested_status="RECONCILE_REQUIRED",
+        reason="accepted_ack_conflicts_with_terminal_command_state",
+        now=now,
+        pre_execution_proven=False,
+      )
+    elif previous_status == "ACKNOWLEDGED":
+      staged_runtime_event = await _transition_place_order_command(
+        db,
+        command=command,
+        requested_status="RECONCILE_REQUIRED",
+        reason=(reason or "rejected_ack_conflicts_with_acknowledged_command"),
+        now=now,
+        pre_execution_proven=False,
+      )
+    elif (
+      previous_status in {"REJECTED", "EXPIRED"}
+      and (
+        (previous_status == "EXPIRED" and reason == "command_expired")
+        or (
+          previous_status == "REJECTED"
+          and reason in _PRE_EXECUTION_REJECTION_REASONS
+          and reason != "command_expired"
+        )
+      )
+    ):
+      # The same deterministic rejection may be replayed after reconnect.
+      command.last_error = reason[:256] or command.last_error
+    elif reason in _PRE_EXECUTION_REJECTION_REASONS:
+      terminal_status = "EXPIRED" if reason == "command_expired" else "REJECTED"
+      staged_runtime_event = await _transition_place_order_command(
+        db,
+        command=command,
+        requested_status=terminal_status,
+        reason=reason,
+        now=now,
+        pre_execution_proven=True,
+      )
+    else:
+      staged_runtime_event = await _transition_place_order_command(
+        db,
+        command=command,
+        requested_status="RECONCILE_REQUIRED",
+        reason=reason or "indeterminate_command_rejection",
+        now=now,
+        pre_execution_proven=False,
+      )
     await db.commit()
+  if staged_runtime_event:
+    await _wake_runtime_event_consumer()
 
 
 async def _record_report(
@@ -505,18 +1016,17 @@ async def _next_command(
 ) -> Optional[AgentEnvelope]:
   now = utcnow()
   async with AsyncSessionLocal() as db:
-    await db.execute(
-      update(TradeCommandOutbox)
-      .where(
-        TradeCommandOutbox.device_id == device_id,
-        TradeCommandOutbox.delivery_status.in_(("QUEUED", "DELIVERED")),
-        TradeCommandOutbox.expires_at <= now,
-      )
-      .values(
-        delivery_status="EXPIRED",
-        last_error="command_expired",
-      )
+    expired_count, staged_runtime_event = await _expire_trade_commands_in_session(
+      db,
+      now=now,
+      device_id=device_id,
     )
+    if expired_count:
+      # Expiry convergence is an independent lifecycle transaction. Commit and
+      # wake Engine before readiness checks can return early for this device.
+      await db.commit()
+      if staged_runtime_event:
+        await _wake_runtime_event_consumer()
     result = await db.execute(
       select(TradeCommandOutbox)
       .where(
@@ -658,10 +1168,32 @@ async def _process_message(
 
 
 async def _send_market_text(websocket: WebSocket, payload: str) -> None:
-  await asyncio.wait_for(
-    websocket.send_text(payload),
-    timeout=MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS,
-  )
+  def disconnected() -> bool:
+    return (
+      getattr(websocket, "client_state", None) is WebSocketState.DISCONNECTED
+      or getattr(websocket, "application_state", None)
+      is WebSocketState.DISCONNECTED
+    )
+
+  if disconnected():
+    # The receiver and Redis committer deliberately run concurrently.  The
+    # receiver may observe the peer disconnect while the committer is
+    # finishing an already accepted batch.  Treat that race as the original
+    # disconnect instead of attempting an ASGI send on a completed response
+    # and misclassifying it as a stream fault that requires RESYNC.
+    raise WebSocketDisconnect(code=1006)
+  try:
+    await asyncio.wait_for(
+      websocket.send_text(payload),
+      timeout=MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS,
+    )
+  except RuntimeError as exc:
+    # The peer may disconnect after the preflight check but before Starlette
+    # reaches the ASGI send.  Preserve the disconnect classification in that
+    # race as well; unrelated RuntimeErrors still propagate as stream faults.
+    if disconnected():
+      raise WebSocketDisconnect(code=1006) from exc
+    raise
 
 
 async def _wait_for_active_market_device(device_id: str) -> None:
@@ -734,6 +1266,7 @@ async def _receive_market_batches(
 
     await buffer.reserve()
     reserved = True
+    reserved_payload_bytes = 0
     try:
       message = await websocket.receive()
       if message["type"] == "websocket.disconnect":
@@ -757,9 +1290,27 @@ async def _receive_market_batches(
       payload = message.get("bytes")
       if not isinstance(payload, bytes):
         raise ValueError("market stream only accepts binary data frames")
+      payload_bytes = len(payload)
+      if payload_bytes > MAX_MARKET_STREAM_FRAME_BYTES:
+        raise ValueError("market stream frame exceeds 64 MiB")
+      # Reserve the aggregate raw-byte budget before allocating the decoded
+      # object graph. This mirrors the Agent's 64 MiB ACK-held outbound budget
+      # and keeps the two-frame pipeline from decoding 128 MiB of raw frames.
+      await buffer.reserve_payload(payload_bytes)
+      reserved_payload_bytes = payload_bytes
 
       received_monotonic = time.monotonic()
-      batch = MarketStreamBatch.from_bytes(payload)
+      # Capture an aware server-side wall clock before decode/queueing. Database
+      # helpers intentionally use naive UTC in parts of the API, but ingress
+      # freshness validation requires an unambiguous instant.
+      received_at = datetime.now(timezone.utc)
+      if payload_bytes >= MARKET_STREAM_DECODE_OFFLOAD_BYTES:
+        # asyncio.to_thread forwards the existing immutable bytes reference;
+        # it does not make another 64 MiB payload copy. Only the unavoidable
+        # decoded object graph is allocated off the event-loop thread.
+        batch = await asyncio.to_thread(MarketStreamBatch.from_bytes, payload)
+      else:
+        batch = MarketStreamBatch.from_bytes(payload)
       if batch.stream_id != stream_id:
         raise ValueError("market stream id mismatch")
       if batch.sequence != expected_sequence:
@@ -776,18 +1327,22 @@ async def _receive_market_batches(
         raise ValueError(
           "market stream SNAPSHOT is only valid as the first batch"
         )
-      await buffer.put_reserved(
+      await buffer.put_pre_reserved(
         _MarketCommitItem(
           batch=batch,
           payload=payload,
+          received_at=received_at,
           received_monotonic=received_monotonic,
         )
       )
       reserved = False
+      reserved_payload_bytes = 0
       expected_sequence += 1
     except BaseException:
       if reserved:
-        await buffer.cancel_reservation()
+        await buffer.cancel_reservation(
+          payload_bytes=reserved_payload_bytes
+        )
       raise
 
 
@@ -801,6 +1356,7 @@ async def _commit_market_batches(
   while True:
     queued = await buffer.get()
     if isinstance(queued, _MarketCommitQueueClosed):
+      buffer.complete_closed()
       raise queued.disconnect
 
     try:
@@ -808,6 +1364,7 @@ async def _commit_market_batches(
         market_stream_store.write_batch(
           queued.batch,
           queued.payload,
+          received_at=queued.received_at,
         ),
         timeout=MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS,
       )

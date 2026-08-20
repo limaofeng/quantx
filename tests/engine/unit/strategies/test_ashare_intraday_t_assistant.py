@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
@@ -242,6 +243,222 @@ async def test_multi_instrument_manual_entry_then_trailing_auto_exit():
 
 
 @pytest.mark.asyncio
+async def test_restart_restores_causal_entry_signal_window(monkeypatch):
+  checkpoint_at = [100.0]
+  monkeypatch.setattr(
+    "quantx_domain.strategies.ashare_intraday_t_assistant.monotonic",
+    lambda: checkpoint_at[0],
+  )
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  start = datetime(2026, 7, 13, 9, 30)
+  await strategy.step(make_input(start, make_tick(start, 100.0)))
+  checkpoint_at[0] += 4.0
+  await strategy.step(
+    make_input(
+      start + timedelta(seconds=60),
+      make_tick(start + timedelta(seconds=60), 99.0),
+    )
+  )
+
+  snapshot = strategy.state.to_dict()
+  assert len(
+    snapshot["signal_sample_windows"]["instruments"]["600000.SH"]
+  ) == 2
+
+  restarted = make_strategy()
+  restarted.context.instruments = ["600000.SH"]
+  restarted.apply_state_snapshot(snapshot)
+  await restarted.initialize()
+
+  assert len(restarted._samples_by_instrument["600000.SH"]) == 2
+  output = await restarted.step(
+    make_input(
+      start + timedelta(seconds=80),
+      make_tick(
+        start + timedelta(seconds=80),
+        99.3,
+        amount=995_000,
+        volume=10_000,
+      ),
+    )
+  )
+
+  assert len(output.trade_intents) == 1
+  assert output.trade_intents[0].reason == "T_TRADE_PULLBACK_REBOUND_ENTRY"
+  restored_state = output.runtime_state_patch.set["instrument_states"]["600000.SH"]
+  assert restored_state["monitoring_telemetry"]["window_restored_sample_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_high_frequency_ticks_checkpoint_window_on_bounded_cadence_and_stop(
+  monkeypatch,
+):
+  monkeypatch.setattr(
+    "quantx_domain.strategies.ashare_intraday_t_assistant.monotonic",
+    lambda: 100.0,
+  )
+  strategy = make_strategy()
+  await strategy.start()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  state_events = strategy.subscribe_state()
+  start = datetime(2026, 7, 13, 9, 30)
+
+  for index in range(20):
+    tick_at = start + timedelta(milliseconds=index * 100)
+    await strategy.step(make_input(tick_at, make_tick(tick_at, 100.0)))
+
+  checkpoint_events = []
+  while not state_events.empty():
+    event = state_events.get_nowait()
+    if "signal_sample_windows" in dict(event.changes or {}):
+      checkpoint_events.append(event)
+
+  assert len(strategy._samples_by_instrument["600000.SH"]) == 20
+  assert len(checkpoint_events) == 1
+  assert len(
+    strategy.state["signal_sample_windows"]["instruments"]["600000.SH"]
+  ) == 1
+
+  await strategy.stop()
+
+  stop_event = state_events.get_nowait()
+  assert "signal_sample_windows" in dict(stop_event.changes or {})
+  assert state_events.empty()
+  assert len(
+    strategy.state["signal_sample_windows"]["instruments"]["600000.SH"]
+  ) == 20
+
+
+@pytest.mark.asyncio
+async def test_backtest_ticks_do_not_checkpoint_signal_window_state():
+  strategy = make_strategy()
+  strategy.context.mode = StrategyRunMode.BACKTEST
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  state_events = strategy.subscribe_state()
+  tick_at = datetime(2026, 7, 13, 9, 30)
+
+  await strategy.step(make_input(tick_at, make_tick(tick_at, 100.0)))
+  await strategy.on_stop()
+
+  assert strategy.state["signal_sample_windows"] == {}
+  assert state_events.empty()
+
+
+@pytest.mark.asyncio
+async def test_restored_signal_window_prunes_against_current_tick_horizon():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  start = datetime(2026, 7, 13, 9, 30)
+  await strategy.step(make_input(start, make_tick(start, 100.0)))
+  await strategy.step(
+    make_input(
+      start + timedelta(seconds=60),
+      make_tick(start + timedelta(seconds=60), 99.0),
+    )
+  )
+  strategy._checkpoint_signal_sample_windows(force=True)
+
+  restarted = make_strategy()
+  restarted.context.instruments = ["600000.SH"]
+  restarted.apply_state_snapshot(strategy.state.to_dict())
+  await restarted.initialize()
+  current_tick_at = start + timedelta(minutes=10)
+
+  await restarted.step(
+    make_input(current_tick_at, make_tick(current_tick_at, 99.5))
+  )
+
+  [retained] = restarted._samples_by_instrument["600000.SH"]
+  assert retained.timestamp_ms == int(current_tick_at.timestamp() * 1000)
+
+
+@pytest.mark.asyncio
+async def test_restored_signal_window_drops_samples_ahead_of_current_tick():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  current_tick_at = datetime(2026, 7, 13, 9, 40)
+  valid_at = current_tick_at - timedelta(seconds=30)
+  future_at = current_tick_at + timedelta(minutes=20)
+  snapshot = strategy.state.to_dict()
+  snapshot["signal_sample_windows"] = {
+    "version": 1,
+    "instruments": {
+      "600000.SH": [
+        [int(valid_at.timestamp() * 1000), 99.0, 98.99, 99.0, 0.0, 0.0],
+        [int(future_at.timestamp() * 1000), 100.0, 99.99, 100.0, 0.0, 0.0],
+      ]
+    },
+  }
+
+  restarted = make_strategy()
+  restarted.context.instruments = ["600000.SH"]
+  restarted.apply_state_snapshot(snapshot)
+  await restarted.initialize()
+  await restarted.step(
+    make_input(current_tick_at, make_tick(current_tick_at, 99.5))
+  )
+
+  retained_timestamps = [
+    sample.timestamp_ms
+    for sample in restarted._samples_by_instrument["600000.SH"]
+  ]
+  assert retained_timestamps == [
+    int(valid_at.timestamp() * 1000),
+    int(current_tick_at.timestamp() * 1000),
+  ]
+
+
+@pytest.mark.asyncio
 async def test_call_auction_ticks_do_not_generate_or_seed_entry_signal():
   strategy = make_strategy()
   await strategy.initialize()
@@ -349,6 +566,467 @@ async def test_every_valid_tick_advances_telemetry_without_creating_false_signal
     ["processed_tick_count"]
     == 4
   )
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_required_blocks_entries_across_managed_universe():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+      "000001.SZ": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"]["pending_entry_intent_id"] = "intent-needs-reconcile"
+  states["600000.SH"]["entry_order_status"] = "RECONCILE_REQUIRED"
+  states["600000.SH"]["status"] = "RECONCILE_REQUIRED"
+  strategy.state.update({"instrument_states": states})
+  start = datetime(2026, 7, 13, 9, 30)
+
+  outputs = []
+  for seconds, price in ((0, 20.0), (60, 19.8), (80, 19.86)):
+    tick_at = start + timedelta(seconds=seconds)
+    outputs.append(
+      await strategy.step(
+        make_input(
+          tick_at,
+          make_tick(
+            tick_at,
+            price,
+            stock_code="000001.SZ",
+            amount=198_500.0,
+            volume=10_000.0,
+          ),
+        )
+      )
+    )
+
+  assert all(output.trade_intents == [] for output in outputs)
+  assert outputs[-1].trace_payload["reason"] == "T_TRADE_RECONCILIATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_exit_reconciliation_required_blocks_entry_on_other_instrument():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+      "000001.SZ": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"].update(
+    {
+      "status": "EXIT_SUBMITTED",
+      "pending_exit_intent_id": "exit-intent-needs-reconcile",
+      "exit_order_status": "SUBMITTED",
+      "entry_filled_volume": 100,
+    }
+  )
+  strategy.state.update({"instrument_states": states})
+
+  patch = await strategy.on_order(
+    OrderStateEvent(
+      order_id="ambiguous-exit-order",
+      status="RECONCILE_REQUIRED",
+      metadata={
+        "intent_id": "exit-intent-needs-reconcile",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+        "approval_reason": "DELIVERED_COMMAND_OUTCOME_UNKNOWN",
+      },
+    )
+  )
+  assert patch is not None
+  strategy.state.update(patch.set)
+  exit_state = strategy.state["instrument_states"]["600000.SH"]
+  assert exit_state["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert exit_state["exit_order_status"] == "RECONCILE_REQUIRED"
+  assert exit_state["reconciliation_reason"] == "DELIVERED_COMMAND_OUTCOME_UNKNOWN"
+
+  start = datetime(2026, 7, 13, 9, 30)
+  outputs = []
+  for seconds, price in ((0, 20.0), (60, 19.8), (80, 19.86)):
+    tick_at = start + timedelta(seconds=seconds)
+    outputs.append(
+      await strategy.step(
+        make_input(
+          tick_at,
+          make_tick(
+            tick_at,
+            price,
+            stock_code="000001.SZ",
+            amount=198_500.0,
+            volume=10_000.0,
+          ),
+        )
+      )
+    )
+
+  assert all(output.trade_intents == [] for output in outputs)
+  assert outputs[-1].trace_payload["reason"] == "T_TRADE_RECONCILIATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_first_exit_report_adopts_intent_from_matching_exit_plan():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"].update(
+    {
+      "status": TTradeStatus.MONITORING,
+      "entry_filled_volume": 100,
+      "entry_avg_price": 10.0,
+      "batch_id": "batch-first-exit-report",
+      "exit_plan_id": "exit-plan-first-report",
+      "pending_exit_intent_id": "",
+    }
+  )
+  strategy.state.update({"instrument_states": states})
+
+  patch = await strategy.on_order(
+    OrderStateEvent(
+      order_id="exit-order-first-report",
+      status="RECONCILE_REQUIRED",
+      metadata={
+        "intent_id": "exit-intent-first-report",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+        "exit_plan_id": "exit-plan-first-report",
+        "approval_reason": "DELIVERED_COMMAND_OUTCOME_UNKNOWN",
+      },
+    )
+  )
+
+  assert patch is not None
+  state = strategy.state["instrument_states"]["600000.SH"]
+  assert state["pending_exit_intent_id"] == "exit-intent-first-report"
+  assert state["exit_order_status"] == "RECONCILE_REQUIRED"
+  assert state["status"] == TTradeStatus.RECONCILE_REQUIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("terminal_status", "reported_fill"),
+  [("FILLED", 100), ("CANCELLED", 40)],
+)
+async def test_terminal_entry_order_waits_for_independent_trade_report(
+  terminal_status: str,
+  reported_fill: int,
+):
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+      "000001.SZ": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      },
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"].update(
+    {
+      "status": TTradeStatus.ENTRY_SUBMITTED,
+      "pending_entry_intent_id": "entry-intent",
+      "entry_order_status": "SUBMITTED",
+      "entry_pending_fill_base": 0,
+      "requested_entry_volume": 100,
+      "batch_id": "batch-entry",
+      "exit_plan_id": "exit-plan-entry",
+    }
+  )
+  strategy.state.update({"instrument_states": states})
+
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id="entry-order",
+      status=terminal_status,
+      request=SimpleNamespace(volume=100),
+      filled_volume=reported_fill,
+      metadata={
+        "intent_id": "entry-intent",
+        "t_trade_role": "entry",
+        "instrument_code": "600000.SH",
+      },
+    )
+  )
+  waiting = strategy.state["instrument_states"]["600000.SH"]
+  assert waiting["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert waiting["pending_entry_intent_id"] == "entry-intent"
+  assert waiting["entry_expected_fill_volume"] == reported_fill
+
+  first_fill = reported_fill // 2
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="entry-order",
+      instrument_code="600000.SH",
+      trade_type="BUY",
+      price=10.0,
+      volume=first_fill,
+      trade_time=datetime(2026, 7, 13, 9, 31),
+      metadata={
+        "intent_id": "entry-intent",
+        "t_trade_role": "entry",
+        "instrument_code": "600000.SH",
+        "t_batch_id": "batch-entry",
+        "exit_plan_id": "exit-plan-entry",
+      },
+    )
+  )
+  still_waiting = strategy.state["instrument_states"]["600000.SH"]
+  assert still_waiting["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert still_waiting["pending_entry_intent_id"] == "entry-intent"
+
+  start = datetime(2026, 7, 13, 9, 32)
+  outputs = []
+  for seconds, price in ((0, 20.0), (60, 19.8), (80, 19.86)):
+    tick_at = start + timedelta(seconds=seconds)
+    outputs.append(
+      await strategy.step(
+        make_input(
+          tick_at,
+          make_tick(
+            tick_at,
+            price,
+            stock_code="000001.SZ",
+            amount=198_500.0,
+            volume=10_000.0,
+          ),
+        )
+      )
+    )
+  assert all(output.trade_intents == [] for output in outputs)
+  assert outputs[-1].trace_payload["reason"] == "T_TRADE_RECONCILIATION_REQUIRED"
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="entry-order",
+      instrument_code="600000.SH",
+      trade_type="BUY",
+      price=10.0,
+      volume=reported_fill - first_fill,
+      trade_time=datetime(2026, 7, 13, 9, 34),
+      metadata={
+        "intent_id": "entry-intent",
+        "t_trade_role": "entry",
+        "instrument_code": "600000.SH",
+        "t_batch_id": "batch-entry",
+        "exit_plan_id": "exit-plan-entry",
+      },
+    )
+  )
+  settled = strategy.state["instrument_states"]["600000.SH"]
+  assert settled["status"] == TTradeStatus.MONITORING
+  assert settled["pending_entry_intent_id"] == ""
+  assert settled["entry_order_status"] == terminal_status
+  assert settled["entry_expected_fill_volume"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("reported_fill", "expected_status"),
+  [(40, TTradeStatus.MONITORING), (100, TTradeStatus.COOLDOWN)],
+)
+async def test_terminal_exit_order_waits_for_trade_and_preserves_final_state(
+  reported_fill: int,
+  expected_status: TTradeStatus,
+):
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"].update(
+    {
+      "status": TTradeStatus.EXIT_SUBMITTED,
+      "pending_exit_intent_id": "exit-intent",
+      "exit_order_status": "SUBMITTED",
+      "exit_pending_fill_base": 0,
+      "entry_filled_volume": 100,
+      "entry_avg_price": 10.0,
+      "batch_id": "batch-exit",
+      "exit_plan_id": "exit-plan-exit",
+      "exit_policy_snapshot": {"cooldown_seconds": 300},
+    }
+  )
+  strategy.state.update({"instrument_states": states})
+
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id="exit-order",
+      status="CANCELLED",
+      request=SimpleNamespace(volume=100),
+      filled_volume=reported_fill,
+      metadata={
+        "intent_id": "exit-intent",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+      },
+    )
+  )
+  waiting = strategy.state["instrument_states"]["600000.SH"]
+  assert waiting["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert waiting["pending_exit_intent_id"] == "exit-intent"
+
+  first_fill = reported_fill // 2
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="exit-order",
+      instrument_code="600000.SH",
+      trade_type="SELL",
+      price=10.1,
+      volume=first_fill,
+      trade_time=datetime(2026, 7, 13, 10, 0),
+      metadata={
+        "intent_id": "exit-intent",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+        "exit_plan_id": "exit-plan-exit",
+      },
+    )
+  )
+  still_waiting = strategy.state["instrument_states"]["600000.SH"]
+  assert still_waiting["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert still_waiting["pending_exit_intent_id"] == "exit-intent"
+  assert still_waiting["batch_id"] == "batch-exit"
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="exit-order",
+      instrument_code="600000.SH",
+      trade_type="SELL",
+      price=10.1,
+      volume=reported_fill - first_fill,
+      trade_time=datetime(2026, 7, 13, 10, 1),
+      metadata={
+        "intent_id": "exit-intent",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+        "exit_plan_id": "exit-plan-exit",
+      },
+    )
+  )
+  settled = strategy.state["instrument_states"]["600000.SH"]
+  assert settled["status"] == expected_status
+  assert settled["pending_exit_intent_id"] == ""
+  assert settled["exit_order_status"] == "CANCELLED"
+  assert settled["exit_expected_fill_volume"] == 0
+  if reported_fill == 100:
+    assert settled["batch_id"] == ""
+  else:
+    assert settled["batch_id"] == "batch-exit"
+
+
+@pytest.mark.asyncio
+async def test_exit_execution_report_underfill_keeps_pending_even_after_active_zero():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "position_shares": 1000,
+        "position_available_shares": 1000,
+      }
+    },
+  )
+  states = strategy.state["instrument_states"]
+  states["600000.SH"].update(
+    {
+      "status": TTradeStatus.EXIT_SUBMITTED,
+      "pending_exit_intent_id": "exit-overfill-intent",
+      "exit_order_status": "SUBMITTED",
+      "entry_filled_volume": 100,
+      "entry_avg_price": 10.0,
+      "batch_id": "batch-overfill",
+      "exit_plan_id": "exit-plan-overfill",
+      "exit_policy_snapshot": {"cooldown_seconds": 300},
+    }
+  )
+  strategy.state.update({"instrument_states": states})
+  await strategy.on_order(
+    OrderStateEvent(
+      order_id="exit-overfill-order",
+      status="CANCELLED",
+      request=SimpleNamespace(volume=120),
+      filled_volume=120,
+      metadata={
+        "intent_id": "exit-overfill-intent",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+      },
+    )
+  )
+
+  await strategy.on_trade(
+    TradeExecutionEvent(
+      order_id="exit-overfill-order",
+      instrument_code="600000.SH",
+      trade_type="SELL",
+      price=10.1,
+      volume=100,
+      trade_time=datetime(2026, 7, 13, 10, 0),
+      metadata={
+        "intent_id": "exit-overfill-intent",
+        "t_trade_role": "exit",
+        "instrument_code": "600000.SH",
+        "exit_plan_id": "exit-plan-overfill",
+      },
+    )
+  )
+  state = strategy.state["instrument_states"]["600000.SH"]
+  assert state["status"] == TTradeStatus.RECONCILE_REQUIRED
+  assert state["pending_exit_intent_id"] == "exit-overfill-intent"
+  assert state["batch_id"] == "batch-overfill"
+  assert state["exit_expected_fill_volume"] == 120
 
 
 def test_default_entry_cutoff_keeps_signals_open_until_1450():

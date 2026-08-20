@@ -1607,7 +1607,7 @@ class StrategyResolver:
         )
       else:
         custom_state[GRID_BOOK_CUSTOM_STATE_KEY] = snapshot
-        await state_repo.upsert_state(
+        state_saved = await state_repo.upsert_state(
           run_id=instance_id,
           cash=float(getattr(state_record, "cash", 0.0) or 0.0),
           frozen_cash=float(getattr(state_record, "frozen_cash", 0.0) or 0.0),
@@ -1615,6 +1615,8 @@ class StrategyResolver:
           custom_state=custom_state,
           expected_version=getattr(state_record, "version", None),
         )
+        if not state_saved:
+          raise ValueError("策略运行状态已被并发更新，请刷新后重试")
         await snapshot_repo.upsert_current(
           strategy_run_id=instance_id,
           snapshot=snapshot,

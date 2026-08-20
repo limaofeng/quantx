@@ -8,6 +8,7 @@ from quantx_engine.main import (
   _lease_watchdog,
   _wait_for_stop_or_failure,
 )
+from quantx_infrastructure.database import relational_connection
 
 
 @pytest.mark.asyncio
@@ -104,6 +105,64 @@ async def test_engine_supervisor_restarts_after_critical_failure(
   await engine_main.run_engine_supervised()
 
   assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_database_shutdown_keeps_supervised_restart_session_factory(
+  monkeypatch,
+) -> None:
+  class RestartableEngine:
+    def __init__(self) -> None:
+      self.dispose_count = 0
+
+    async def dispose(self) -> None:
+      self.dispose_count += 1
+
+  session = object()
+
+  class SessionContext:
+    async def __aenter__(self):
+      return session
+
+    async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+      return None
+
+  def session_factory():
+    return SessionContext()
+
+  restartable_engine = RestartableEngine()
+  monkeypatch.setattr(relational_connection, "engine", restartable_engine)
+  monkeypatch.setattr(
+    relational_connection,
+    "AsyncSessionLocal",
+    session_factory,
+  )
+  attempts = 0
+  restarted_sessions: list[object] = []
+
+  async def run_once() -> None:
+    nonlocal attempts
+    attempts += 1
+    if attempts == 1:
+      await relational_connection.close_database()
+      raise ConnectionError("lease connection closed")
+    database_session = relational_connection.get_async_db()
+    restarted_sessions.append(await anext(database_session))
+    await database_session.aclose()
+
+  async def no_wait(_seconds: float) -> None:
+    return None
+
+  monkeypatch.setattr(engine_main, "run_engine", run_once)
+  monkeypatch.setattr(engine_main.asyncio, "sleep", no_wait)
+
+  await engine_main.run_engine_supervised()
+
+  assert attempts == 2
+  assert restarted_sessions == [session]
+  assert relational_connection.engine is restartable_engine
+  assert relational_connection.AsyncSessionLocal is session_factory
+  assert restartable_engine.dispose_count == 1
 
 
 @pytest.mark.asyncio

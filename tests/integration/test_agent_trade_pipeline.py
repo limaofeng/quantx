@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
@@ -9,7 +10,18 @@ import pytest
 from quantx_api import agent_api
 from quantx_contracts import AgentEnvelope, AgentMessageType
 from quantx_domain.clock import utcnow
+from quantx_domain.strategies.ashare_intraday_t_assistant import (
+  AshareIntradayTAssistantStrategy,
+)
+from quantx_domain.strategies.base import StrategyContext, StrategyRunMode
 from quantx_engine import report_processor
+from quantx_engine.strategy_executor import (
+  ExecutionStatus,
+  StrategyExecutor,
+  StrategyRuntime,
+)
+from quantx_engine.strategy_manager import strategy_manager
+from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
@@ -17,11 +29,14 @@ from quantx_infrastructure.models.agent_runtime import (
   PendingTradeOrder,
   RuntimeComponentHeartbeat,
   StrategyOrderCorrelation,
+  StrategyRuntimeEvent,
   TradeCommandOutbox,
+  TTradeBatch,
 )
 from quantx_infrastructure.models.auth import AuthUser
 from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.trade import Trade
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services import (
   auto_exit_plan_service,
   order_service,
@@ -47,6 +62,9 @@ TABLES = [
   PendingTradeOrder.__table__,
   StrategyOrderCorrelation.__table__,
   TradeCommandOutbox.__table__,
+  StrategyRuntimeEvent.__table__,
+  TTradeBatch.__table__,
+  TradeIntentRecord.__table__,
   AgentReportInbox.__table__,
   RuntimeComponentHeartbeat.__table__,
   Order.__table__,
@@ -64,8 +82,17 @@ class CapturingSocket:
 
 async def _database(
   monkeypatch: pytest.MonkeyPatch,
+  database_path: Path | None = None,
 ) -> tuple[async_sessionmaker[AsyncSession], object]:
-  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  database_url = (
+    f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    if database_path is not None
+    else "sqlite+aiosqlite:///:memory:"
+  )
+  engine = create_async_engine(
+    database_url,
+    connect_args={"timeout": 10},
+  )
   async with engine.begin() as connection:
     await connection.run_sync(
       lambda sync_connection: Base.metadata.create_all(
@@ -81,6 +108,15 @@ async def _database(
 
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", session_factory)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", session_factory)
+
+  async def ignore_runtime_wakeup() -> None:
+    return None
+
+  monkeypatch.setattr(
+    agent_api,
+    "_wake_runtime_event_consumer",
+    ignore_runtime_wakeup,
+  )
   monkeypatch.setattr(
     auto_exit_plan_service,
     "AsyncSessionLocal",
@@ -135,6 +171,57 @@ async def _enqueue_order(
       volume=100,
       idempotency_key="pipeline-request-1",
     )
+
+
+async def _enqueue_strategy_order(
+  session_factory: async_sessionmaker[AsyncSession],
+  *,
+  idempotency_key: str,
+):
+  intent_id = f"intent-{idempotency_key}"
+  batch_id = f"batch-{idempotency_key}"
+  async with session_factory() as db:
+    db.add(
+      TradeIntentRecord(
+        id=intent_id,
+        strategy_run_id=None,
+        owner_type="STRATEGY_RUN",
+        owner_id="run-1",
+        account_id="account-1",
+        strategy_id="t-trade",
+        instrument_code="600000.SH",
+        direction="BUY",
+        bucket="swing",
+        reason="T_TRADE_PULLBACK_REBOUND_ENTRY",
+        status="PENDING",
+        target_volume=100,
+        limit_price_hint=10.5,
+        executed_volume=0,
+        intent_metadata={"t_trade_role": "entry"},
+      )
+    )
+    await db.flush()
+    queued = await TradeCommandService(db).enqueue_order(
+      user_id="user-1",
+      account_id="account-1",
+      instrument_code="600000.SH",
+      side="BUY",
+      order_type="FIX_PRICE",
+      limit_price=Decimal("10.50"),
+      volume=100,
+      strategy_name="t-trade",
+      trace_id=f"trace-{idempotency_key}",
+      idempotency_key=idempotency_key,
+      execution_mode="paper",
+      strategy_run_id="run-1",
+      strategy_order_id=f"strategy-order-{idempotency_key}",
+      intent_id=intent_id,
+      batch_id=batch_id,
+      bucket="swing",
+      t_trade_role="ENTRY",
+      request_metadata={"instrument_code": "600000.SH"},
+    )
+  return queued, intent_id, batch_id
 
 
 def _runtime(
@@ -373,7 +460,7 @@ async def test_partial_fill_converges_before_final_fill(
 
 
 @pytest.mark.asyncio
-async def test_rejected_order_and_cancel_ack_only_change_delivery_state(
+async def test_pre_execution_rejection_closes_pending_order_and_cancel_ack_is_delivery_only(
   monkeypatch: pytest.MonkeyPatch,
   tmp_path: Path,
 ) -> None:
@@ -419,7 +506,8 @@ async def test_rejected_order_and_cancel_ack_only_change_delivery_state(
     )
     assert order_outbox is not None
     assert order_outbox.delivery_status == "REJECTED"
-    assert pending is not None and pending.status == "QUEUED"
+    assert pending is not None and pending.status == "REJECTED"
+    assert pending.status_reason == "account_not_whitelisted"
   assert broker.execute_calls == 0
 
   cancel_command = await agent_api._next_command("device-1")
@@ -451,7 +539,7 @@ async def test_rejected_order_and_cancel_ack_only_change_delivery_state(
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     assert cancel_outbox is not None
     assert cancel_outbox.delivery_status == "ACKNOWLEDGED"
-    assert pending is not None and pending.status == "QUEUED"
+    assert pending is not None and pending.status == "REJECTED"
   await engine.dispose()
 
 
@@ -472,8 +560,508 @@ async def test_expired_command_is_closed_without_delivery(
     outbox = await db.get(TradeCommandOutbox, queued.message_id)
     pending = await db.get(PendingTradeOrder, queued.client_order_id)
     assert outbox is not None and outbox.delivery_status == "EXPIRED"
-    assert outbox.last_error == "command_expired"
-    assert pending is not None and pending.status == "QUEUED"
+    assert outbox.last_error == "command_expired_before_delivery"
+    assert pending is not None and pending.status == "EXPIRED"
+    assert pending.status_reason == "command_expired_before_delivery"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expiry_sweeper_closes_disconnected_command_and_restart_is_idempotent(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="disconnected-expiry-sweep",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  # No Agent command pull occurs: the API-owned startup/periodic sweep is the
+  # only actor converging this never-delivered command.
+  assert await agent_api.sweep_expired_trade_commands() == 1
+  assert await agent_api.sweep_expired_trade_commands() == 0
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    batch = await db.get(TTradeBatch, batch_id)
+    events = (await db.execute(select(StrategyRuntimeEvent))).scalars().all()
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert pending is not None and pending.status == "EXPIRED"
+    assert intent is not None and intent.status == "EXPIRED"
+    assert batch is not None and batch.status == "ENTRY_EXPIRED"
+    assert [event.business_key for event in events] == [
+      f"order:{queued.client_order_id}::EXPIRED:0"
+    ]
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_expiry_sweepers_stage_one_runtime_event(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  session_factory, engine = await _database(
+    monkeypatch,
+    tmp_path / "concurrent-expiry.db",
+  )
+  queued, intent_id, _batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="concurrent-expiry-sweep",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  await asyncio.gather(
+    agent_api.sweep_expired_trade_commands(),
+    agent_api.sweep_expired_trade_commands(),
+  )
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    event_count = await db.scalar(
+      select(func.count()).select_from(StrategyRuntimeEvent)
+    )
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert pending is not None and pending.status == "EXPIRED"
+    assert intent is not None and intent.status == "EXPIRED"
+    assert event_count == 1
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expiry_sweeper_runs_immediately_on_startup(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  stopped = asyncio.Event()
+  calls = 0
+
+  async def sweep_once() -> int:
+    nonlocal calls
+    calls += 1
+    stopped.set()
+    return 0
+
+  monkeypatch.setattr(agent_api, "sweep_expired_trade_commands", sweep_once)
+  await agent_api.run_trade_command_expiry_sweeper(
+    stopped,
+    interval_seconds=60.0,
+  )
+  assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_queued_strategy_command_atomically_closes_gate_and_callbacks_once(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="strategy-expiry",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api._next_command("device-1") is None
+  assert await agent_api._next_command("device-1") is None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    batch = await db.get(TTradeBatch, batch_id)
+    events = (await db.execute(select(StrategyRuntimeEvent))).scalars().all()
+    assert outbox is not None and outbox.delivery_status == "EXPIRED"
+    assert pending is not None and pending.status == "EXPIRED"
+    assert intent is not None and intent.status == "EXPIRED"
+    assert batch is not None and batch.status == "ENTRY_EXPIRED"
+    assert len(events) == 1
+    assert events[0].business_key == (
+      f"order:{queued.client_order_id}::EXPIRED:0"
+    )
+    assert events[0].payload["metadata"]["runtime_event_key"] == (
+      events[0].business_key
+    )
+
+  context = StrategyContext(
+    run_id="run-1",
+    mode=StrategyRunMode.PAPER,
+    instruments=["600000.SH"],
+    parameters={"account_id": "account-1"},
+  )
+  strategy = AshareIntradayTAssistantStrategy(context)
+  strategy.state.update(
+    {
+      "instrument_states": {
+        "600000.SH": {
+          "status": "ENTRY_SUBMITTED",
+          "pending_entry_intent_id": intent_id,
+          "entry_order_status": "PENDING",
+          "current_signal": {"intent_id": intent_id},
+          "batch_id": batch_id,
+          "requested_entry_volume": 100,
+          "entry_filled_volume": 0,
+          "entry_avg_price": 0.0,
+          "exit_filled_volume": 0,
+        }
+      }
+    }
+  )
+  executor = StrategyExecutor()
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="command-expiry-gate",
+    strategy_id=1,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+    strategy=strategy,
+    status=ExecutionStatus.RUNNING,
+  )
+  runtime.state_manager = RuntimeStateManager(
+    run_id=context.run_id,
+    persist_enabled=False,
+    log_dir=str(tmp_path / "runtime-state"),
+  )
+  executor.runs[runtime.run_id] = runtime
+  runtime.event_task = asyncio.create_task(executor._process_event_queue(runtime))
+  monkeypatch.setattr(strategy_manager, "executor", executor)
+  try:
+    await report_processor._drain_runtime_events()
+    await report_processor._drain_runtime_events()
+    state = strategy.state["instrument_states"]["600000.SH"]
+    assert state["status"] == "OBSERVING"
+    assert state["pending_entry_intent_id"] == ""
+    assert state["entry_order_status"] == "EXPIRED"
+    assert state["batch_id"] == ""
+    async with session_factory() as db:
+      event = (await db.execute(select(StrategyRuntimeEvent))).scalar_one()
+      assert event.application_status == "APPLIED"
+      assert runtime.state_manager.has_applied_runtime_event(event.business_key)
+  finally:
+    runtime.status = ExecutionStatus.STOPPED
+    if runtime.event_task:
+      runtime.event_task.cancel()
+      await asyncio.gather(runtime.event_task, return_exceptions=True)
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_expired_delivered_strategy_command_fails_closed_for_reconciliation(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="delivered-expiry",
+  )
+  assert await agent_api._next_command("device-1") is not None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    assert outbox is not None and outbox.delivery_status == "DELIVERED"
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.commit()
+
+  assert await agent_api._next_command("device-1") is None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    batch = await db.get(TTradeBatch, batch_id)
+    event = (await db.execute(select(StrategyRuntimeEvent))).scalar_one()
+    assert outbox is not None
+    assert outbox.delivery_status == "RECONCILE_REQUIRED"
+    assert outbox.last_error == "delivered_command_expired_without_ack"
+    assert pending is not None and pending.status == "RECONCILE_REQUIRED"
+    assert intent is not None and intent.status == "RECONCILE_REQUIRED"
+    assert batch is not None and batch.status == "RECONCILE_REQUIRED"
+    assert event.business_key == (
+      f"command:{queued.client_order_id}:RECONCILE_REQUIRED"
+    )
+
+  received = []
+
+  class CapturingExecutor:
+    async def apply_durable_order_report(self, run_id, order) -> None:
+      received.append((run_id, order))
+
+  monkeypatch.setattr(strategy_manager, "executor", CapturingExecutor())
+  await report_processor._drain_runtime_events()
+  assert len(received) == 1
+  assert received[0][0] == "run-1"
+  assert received[0][1].status == "RECONCILE_REQUIRED"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_queued_expiry_with_broker_evidence_cannot_be_declared_unexecuted(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, _ = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="queued-contradiction",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    correlation = await db.scalar(
+      select(StrategyOrderCorrelation).where(
+        StrategyOrderCorrelation.client_order_id == queued.client_order_id
+      )
+    )
+    assert outbox is not None and pending is not None and correlation is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    pending.broker_order_id = "broker-contradiction"
+    correlation.broker_order_id = "broker-contradiction"
+    await db.commit()
+
+  assert await agent_api._next_command("device-1") is None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    assert outbox is not None
+    assert outbox.delivery_status == "RECONCILE_REQUIRED"
+    assert "durable_pre_execution_proof_missing" in str(outbox.last_error)
+    assert pending is not None and pending.status == "RECONCILE_REQUIRED"
+    assert pending.broker_order_id == "broker-contradiction"
+    assert intent is not None and intent.status == "RECONCILE_REQUIRED"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_row", ["correlation", "pending"])
+async def test_missing_durable_command_link_never_clears_strategy_gate(
+  monkeypatch: pytest.MonkeyPatch,
+  missing_row: str,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key=f"missing-{missing_row}",
+  )
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    correlation = await db.scalar(
+      select(StrategyOrderCorrelation).where(
+        StrategyOrderCorrelation.client_order_id == queued.client_order_id
+      )
+    )
+    assert outbox is not None and pending is not None and correlation is not None
+    outbox.expires_at = utcnow() - timedelta(seconds=1)
+    await db.delete(correlation)
+    if missing_row == "pending":
+      await db.delete(pending)
+    await db.commit()
+
+  assert await agent_api._next_command("device-1") is None
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    batch = await db.get(TTradeBatch, batch_id)
+    event_count = await db.scalar(
+      select(func.count()).select_from(StrategyRuntimeEvent)
+    )
+    assert outbox is not None
+    assert outbox.delivery_status == "RECONCILE_REQUIRED"
+    assert "durable_pre_execution_proof_missing" in str(outbox.last_error)
+    assert event_count == 0
+    if missing_row == "correlation":
+      assert pending is not None and pending.status == "RECONCILE_REQUIRED"
+      assert intent is not None and intent.status == "RECONCILE_REQUIRED"
+      assert batch is not None and batch.status == "RECONCILE_REQUIRED"
+    else:
+      assert pending is None
+      assert intent is not None and intent.status == "PENDING"
+      assert batch is not None and batch.status == "ENTRY_QUEUED"
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("case_id", "reason", "expected_status"),
+  [
+    ("precheck", "account_not_whitelisted", "REJECTED"),
+    ("expired", "command_expired", "EXPIRED"),
+    ("local-gap", "local_reconciliation_required", "RECONCILE_REQUIRED"),
+    ("broker-gap", "下单异常: connection reset", "RECONCILE_REQUIRED"),
+  ],
+)
+async def test_rejected_ack_classification_is_fail_closed_and_idempotent(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+  case_id: str,
+  reason: str,
+  expected_status: str,
+) -> None:
+  session_factory, engine = await _database(
+    monkeypatch,
+    tmp_path / f"{case_id}.sqlite3",
+  )
+  queued, intent_id, _ = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key=f"ack-{case_id}",
+  )
+  assert await agent_api._next_command("device-1") is not None
+  ack = {
+    "command_message_id": queued.message_id,
+    "client_order_id": queued.client_order_id,
+    "accepted": False,
+    "reason": reason,
+  }
+  await asyncio.gather(
+    agent_api._record_command_ack("device-1", ack),
+    agent_api._record_command_ack("device-1", ack),
+  )
+
+  async with session_factory() as db:
+    outbox = await db.get(TradeCommandOutbox, queued.message_id)
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    event_count = await db.scalar(
+      select(func.count()).select_from(StrategyRuntimeEvent)
+    )
+    assert outbox is not None and outbox.delivery_status == expected_status
+    assert pending is not None and pending.status == expected_status
+    assert intent is not None and intent.status == expected_status
+    assert event_count == 1
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_broker_reports_override_reconcile_gate_and_restore_monitoring(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path: Path,
+) -> None:
+  session_factory, engine = await _database(monkeypatch)
+  queued, intent_id, batch_id = await _enqueue_strategy_order(
+    session_factory,
+    idempotency_key="reconcile-then-report",
+  )
+  command = await agent_api._next_command("device-1")
+  assert command is not None
+  await agent_api._record_command_ack(
+    "device-1",
+    {
+      "command_message_id": queued.message_id,
+      "client_order_id": queued.client_order_id,
+      "accepted": False,
+      "reason": "local_reconciliation_required",
+    },
+  )
+
+  simulated = SimulatorBroker({"account-1"}, data_only=False).execute(
+    command.payload
+  )
+  for message_type, report_payload in simulated["reports"]:
+    envelope = AgentEnvelope(
+      message_type=AgentMessageType(message_type),
+      payload=report_payload,
+    )
+    assert (await agent_api._record_report("device-1", envelope)).accepted
+    async with session_factory() as db:
+      inbox = await db.get(AgentReportInbox, envelope.message_id)
+    assert inbox is not None
+    await report_processor._process(inbox)
+    await report_processor._stage_runtime_events(inbox)
+
+  final_order_payload = deepcopy(simulated["reports"][0][1])
+  final_order_payload["order"]["order_status"] = 56
+  final_order_payload["order"]["traded_volume"] = 100
+  final_order_payload["order"]["traded_price"] = 10.5
+  final_order = AgentEnvelope(
+    message_type=AgentMessageType.ORDER_REPORT,
+    payload=final_order_payload,
+  )
+  assert (await agent_api._record_report("device-1", final_order)).accepted
+  async with session_factory() as db:
+    final_order_inbox = await db.get(AgentReportInbox, final_order.message_id)
+  assert final_order_inbox is not None
+  await report_processor._process(final_order_inbox)
+  await report_processor._stage_runtime_events(final_order_inbox)
+
+  async with session_factory() as db:
+    pending = await db.get(PendingTradeOrder, queued.client_order_id)
+    intent = await db.get(TradeIntentRecord, intent_id)
+    batch = await db.get(TTradeBatch, batch_id)
+    assert pending is not None and pending.status == "FILLED"
+    assert pending.broker_order_id
+    assert intent is not None and intent.status == "FILLED"
+    assert intent.executed_volume == 100
+    assert batch is not None and batch.status == "OPEN"
+    assert batch.entry_filled_volume == 100
+
+  context = StrategyContext(
+    run_id="run-1",
+    mode=StrategyRunMode.PAPER,
+    instruments=["600000.SH"],
+    parameters={"account_id": "account-1"},
+  )
+  strategy = AshareIntradayTAssistantStrategy(context)
+  strategy.state.update(
+    {
+      "instrument_states": {
+        "600000.SH": {
+          "status": "ENTRY_SUBMITTED",
+          "pending_entry_intent_id": intent_id,
+          "entry_order_status": "PENDING",
+          "current_signal": {"intent_id": intent_id},
+          "batch_id": batch_id,
+          "requested_entry_volume": 100,
+          "entry_filled_volume": 0,
+          "entry_avg_price": 0.0,
+          "exit_filled_volume": 0,
+        }
+      }
+    }
+  )
+  executor = StrategyExecutor()
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="reconcile-then-report",
+    strategy_id=1,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+    strategy=strategy,
+    status=ExecutionStatus.RUNNING,
+  )
+  runtime.state_manager = RuntimeStateManager(
+    run_id=context.run_id,
+    persist_enabled=False,
+    log_dir=str(tmp_path / "reconcile-runtime-state"),
+  )
+  executor.runs[runtime.run_id] = runtime
+  runtime.event_task = asyncio.create_task(executor._process_event_queue(runtime))
+  monkeypatch.setattr(strategy_manager, "executor", executor)
+  try:
+    await report_processor._drain_runtime_events()
+    state = strategy.state["instrument_states"]["600000.SH"]
+    assert state["status"] == "MONITORING"
+    assert state["pending_entry_intent_id"] == ""
+    assert state["entry_filled_volume"] == 100
+    assert state["entry_avg_price"] == pytest.approx(10.5)
+    assert state["batch_id"] == batch_id
+  finally:
+    runtime.status = ExecutionStatus.STOPPED
+    if runtime.event_task:
+      runtime.event_task.cancel()
+      await asyncio.gather(runtime.event_task, return_exceptions=True)
   await engine.dispose()
 
 

@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from quantx_infrastructure.database.relational_base import BaseRepository
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 
+_T_TRADE_ENTRY_REASONS = (
+  "T_TRADE_PULLBACK_REBOUND_ENTRY",
+  "T_TRADE_MOMENTUM_ACCELERATION_ENTRY",
+)
+
 
 class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
   """交易意图仓储实现。"""
@@ -75,7 +80,7 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       select(TradeIntentRecord)
       .filter(TradeIntentRecord.strategy_run_id.in_(normalized_run_ids))
       .filter(TradeIntentRecord.direction == "BUY")
-      .filter(TradeIntentRecord.reason == "T_TRADE_PULLBACK_REBOUND_ENTRY")
+      .filter(TradeIntentRecord.reason.in_(_T_TRADE_ENTRY_REASONS))
       .order_by(desc(TradeIntentRecord.created_at))
       .limit(max(1, min(int(limit or 50), 200)))
     )
@@ -97,7 +102,7 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
       select(TradeIntentRecord)
       .filter(TradeIntentRecord.strategy_run_id.in_(normalized_run_ids))
       .filter(TradeIntentRecord.direction == "BUY")
-      .filter(TradeIntentRecord.reason == "T_TRADE_PULLBACK_REBOUND_ENTRY")
+      .filter(TradeIntentRecord.reason.in_(_T_TRADE_ENTRY_REASONS))
     )
     if cursor_created_at is not None and cursor_id:
       stmt = stmt.filter(

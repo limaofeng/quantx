@@ -1,8 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
-from quantx_contracts import MarketBatchKind, MarketStreamBatch
+from quantx_contracts import (
+  MarketBatchKind,
+  MarketStreamBatch,
+  market_tick_source_time,
+  validate_market_stream_capture_time,
+)
 
 
 def test_market_stream_batch_binary_round_trip() -> None:
@@ -64,3 +69,54 @@ def test_market_stream_snapshot_cannot_be_empty() -> None:
       instrument_count=0,
       data={},
     )
+
+
+def test_market_tick_source_time_preserves_timetag_subseconds() -> None:
+  later = market_tick_source_time({"timetag": "20260819 09:30:00.900"})
+  earlier = market_tick_source_time({"timetag": "20260819 09:30:00.100"})
+
+  assert later - earlier == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(
+  "future_time",
+  [
+    1_800_000_006,
+    1_800_000_006_000,
+  ],
+)
+def test_market_tick_source_time_rejects_future_values(
+  future_time: int,
+) -> None:
+  reference_at = datetime.fromtimestamp(1_800_000_000, timezone.utc)
+
+  with pytest.raises(ValueError, match="in the future"):
+    market_tick_source_time(
+      {"time": future_time},
+      reference_at=reference_at,
+    )
+
+
+def test_market_tick_source_time_rejects_microsecond_units() -> None:
+  with pytest.raises(ValueError, match="seconds or milliseconds"):
+    market_tick_source_time({"time": 1_800_000_000_000_000})
+
+
+def test_market_stream_capture_time_rejects_stale_and_future_values() -> None:
+  received_at = datetime(2026, 8, 19, 9, 30, tzinfo=timezone.utc)
+
+  with pytest.raises(ValueError, match="stale"):
+    validate_market_stream_capture_time(
+      received_at - timedelta(seconds=11),
+      received_at=received_at,
+    )
+  with pytest.raises(ValueError, match="future"):
+    validate_market_stream_capture_time(
+      received_at + timedelta(seconds=6),
+      received_at=received_at,
+    )
+  assert validate_market_stream_capture_time(
+    received_at - timedelta(days=1),
+    received_at=received_at,
+    max_age_seconds=None,
+  ) == pytest.approx(24 * 60 * 60)

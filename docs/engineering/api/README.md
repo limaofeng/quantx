@@ -27,13 +27,15 @@ Engine、Prefect Worker 或 QMT SDK 生命周期。
 - Agent 回报先进入 `agent_report_inbox`；Engine 消费后才推进订单和持仓。
 - API 源码禁止导入 `miniqmt`、`xtquant`、`quantx_engine` 或 `quantx_worker`。
 - GraphQL 契约变化后，通过 Caddy 公共入口运行前端 codegen。
-- API 行情中继用容量 2、按原始字节计限的队列解耦 WebSocket 接收与严格有序的
-  Redis 提交。sequence 1 `SNAPSHOT` 分块写入 stream 专属 staging Hash，最后
+- API 行情中继用容量 2、总计 64 MiB 原始字节上限的队列解耦 WebSocket 接收与
+  严格有序的 Redis 提交；大帧在预留该预算后转到工作线程解码，不阻塞 event loop，
+  解码异常会原样传播并释放预留。sequence 1 `SNAPSHOT` 分块写入 stream 专属
+  staging Hash，最后
   原子执行 `RENAME + SYNCING state + binary publish`；sequence 2 收敛 `DELTA`
-  是连续性屏障（没有变化时可为空），只有它通过 Redis Lua 的
-  `stream_id/status/previous sequence` 校验后才原子切换 `READY`。sequence 3
-  起的普通 `DELTA` 沿用同一 CAS，再更新
-  最新 tick、水位并发布原始批次。
+  是 pre-cut 连续性屏障（没有变化时可为空），通过 Redis Lua 的
+  `stream_id/status/previous sequence` 校验后仍保持 `SYNCING`。Agent 收到它的
+  ACK 后才启用有序捕获；强制 sequence 3 readiness-confirm 以同一 CAS 原子切换
+  `READY`，真实回调从 sequence 4 起继续更新最新 tick、水位并发布原始批次。
   只有 Redis CAS commit 成功才 ACK Agent，旧连接的迟到写不能覆盖新 stream。
 - 首帧非快照、序号缺口、快照外新代码、非法帧、Redis 失败或提交超时一律不
   ACK，并通过 `RESYNC` 使 stream 失效。Redis 最新 Hash 还按源时间拒绝旧 tick

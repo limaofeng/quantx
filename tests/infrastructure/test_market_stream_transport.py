@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from quantx_contracts import MarketBatchKind, MarketStreamBatch
@@ -202,12 +202,28 @@ class FakeRedis:
         return b"MISSING_STATE"
       if current.stream_id != stream_id:
         return b"STREAM_MISMATCH"
-      if current.status == "SYNCING" and int(previous_sequence) != 1:
+      incoming = MarketStreamState.from_bytes(state_payload)
+      previous = int(previous_sequence)
+      if current.status == "SYNCING" and previous not in {1, 2}:
         return b"BARRIER_MISMATCH"
       if current.status not in {"SYNCING", "READY"}:
         return b"STATUS_MISMATCH"
-      if current.sequence != int(previous_sequence):
+      if current.sequence != previous:
         return b"SEQUENCE_MISMATCH"
+      if (
+        current.status == "SYNCING"
+        and previous == 1
+        and incoming.status != "SYNCING"
+      ):
+        return b"PHASE_MISMATCH"
+      if (
+        current.status == "SYNCING"
+        and previous == 2
+        and incoming.status != "READY"
+      ):
+        return b"PHASE_MISMATCH"
+      if current.status == "READY" and incoming.status != "READY":
+        return b"PHASE_MISMATCH"
       assert len(tick_arguments) % 2 == 0
       latest = self.hashes.setdefault(latest_key, {})
       for index in range(0, len(tick_arguments), 2):
@@ -255,12 +271,19 @@ class FakeRedis:
     )
 
 
-def make_batch(sequence, kind, data, *, stream_id="stream-1"):
+def make_batch(
+  sequence,
+  kind,
+  data,
+  *,
+  stream_id="stream-1",
+  captured_at=None,
+):
   return MarketStreamBatch(
     stream_id=stream_id,
     sequence=sequence,
     kind=kind,
-    captured_at=datetime.now(timezone.utc),
+    captured_at=captured_at or datetime.now(timezone.utc),
     instrument_count=len(data),
     data=data,
   )
@@ -279,7 +302,7 @@ async def test_store_requires_snapshot_then_commits_before_binary_publish() -> N
   snapshot = make_batch(
     1,
     MarketBatchKind.SNAPSHOT,
-    {"600000.SH": {"lastPrice": 10.0}},
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
   )
   await store.write_batch(snapshot, snapshot.to_bytes())
 
@@ -306,29 +329,39 @@ async def test_store_requires_snapshot_then_commits_before_binary_publish() -> N
 
   barrier = make_batch(2, MarketBatchKind.DELTA, {})
   barrier_state = await store.write_batch(barrier, barrier.to_bytes())
-  assert barrier_state.status == "READY"
+  assert barrier_state.status == "SYNCING"
   assert barrier_state.sequence == 2
+  assert await store.load_snapshot() is None
+
+  confirmation = make_batch(3, MarketBatchKind.DELTA, {})
+  confirmation_state = await store.write_batch(
+    confirmation,
+    confirmation.to_bytes(),
+  )
+  assert confirmation_state.status == "READY"
+  assert confirmation_state.sequence == 3
 
   update = make_batch(
-    3,
+    4,
     MarketBatchKind.DELTA,
-    {"600000.SH": {"lastPrice": 10.2}},
+    {"600000.SH": {"lastPrice": 10.2, "time": 120}},
   )
   await store.write_batch(update, update.to_bytes())
   loaded = await store.load_snapshot()
   assert loaded is not None
   state, latest = loaded
   assert state.status == "READY"
-  assert state.sequence == 3
+  assert state.sequence == 4
   assert latest["600000.SH"]["lastPrice"] == 10.2
   _, freshness = await store.state_with_freshness()
   assert freshness == MarketStreamFreshnessLease(
     stream_id="stream-1",
-    sequence=3,
+    sequence=4,
   )
   assert redis.published == [
     (MARKET_STREAM_BATCH_CHANNEL, snapshot.to_bytes()),
     (MARKET_STREAM_BATCH_CHANNEL, barrier.to_bytes()),
+    (MARKET_STREAM_BATCH_CHANNEL, confirmation.to_bytes()),
     (MARKET_STREAM_BATCH_CHANNEL, update.to_bytes()),
   ]
 
@@ -341,7 +374,7 @@ async def test_snapshot_disconnect_never_becomes_ready() -> None:
   snapshot = make_batch(
     1,
     MarketBatchKind.SNAPSHOT,
-    {"600000.SH": {"lastPrice": 10.0}},
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
   )
   committed = await store.write_batch(snapshot, snapshot.to_bytes())
   assert committed.status == "SYNCING"
@@ -373,7 +406,7 @@ async def test_snapshot_is_chunked_in_staging_then_atomically_replaced() -> None
   # the replacement is complete.
   assert b"old.SH" in redis.hashes[MARKET_STREAM_LATEST_KEY]
   data = {
-    f"{index:06d}.SZ": {"lastPrice": float(index)}
+    f"{index:06d}.SZ": {"lastPrice": float(index), "time": 100}
     for index in range(MARKET_STREAM_SNAPSHOT_CHUNK_SIZE + 1)
   }
   snapshot = make_batch(1, MarketBatchKind.SNAPSHOT, data)
@@ -395,7 +428,7 @@ async def test_delta_rejects_code_outside_committed_snapshot() -> None:
   snapshot = make_batch(
     1,
     MarketBatchKind.SNAPSHOT,
-    {"600000.SH": {"lastPrice": 10.0}},
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
   )
   await store.write_batch(snapshot, snapshot.to_bytes())
   published_before = list(redis.published)
@@ -422,39 +455,212 @@ async def test_snapshot_plus_known_delta_can_be_loaded_after_store_restart() -> 
     1,
     MarketBatchKind.SNAPSHOT,
     {
-      "000001.SZ": {"lastPrice": 11.0},
-      "600000.SH": {"lastPrice": 10.0},
+      "000001.SZ": {"lastPrice": 11.0, "time": 100},
+      "600000.SH": {"lastPrice": 10.0, "time": 100},
     },
   )
   await store.write_batch(snapshot, snapshot.to_bytes())
   delta = make_batch(
     2,
     MarketBatchKind.DELTA,
-    {"600000.SH": {"lastPrice": 10.2}},
+    {"600000.SH": {"lastPrice": 10.2, "time": 110}},
   )
   await store.write_batch(delta, delta.to_bytes())
+  confirmation = make_batch(3, MarketBatchKind.DELTA, {})
+  await store.write_batch(confirmation, confirmation.to_bytes())
 
   restarted_store = MarketStreamStore(redis)
   state, latest = await restarted_store.load_snapshot()
-  assert state.sequence == 2
+  assert state.sequence == 3
   assert state.instrument_count == 2
   assert len(latest) == 2
   assert latest["600000.SH"]["lastPrice"] == 10.2
 
 
-def test_store_source_time_matches_hub_time_timetag_and_capture_fallback() -> None:
-  captured_at = datetime(2026, 8, 19, 2, 0, tzinfo=timezone.utc)
+def test_store_source_time_accepts_valid_time_and_timetag() -> None:
   assert market_stream_transport._tick_source_time(
     {"time": 1_700_000_000_000},
-    captured_at,
   ) == 1_700_000_000
   assert market_stream_transport._tick_source_time(
     {"timetag": "20260819 09:30:00"},
-    captured_at,
   ) == datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc).timestamp()
-  assert market_stream_transport._tick_source_time({}, captured_at) == (
-    captured_at.timestamp()
+
+
+@pytest.mark.asyncio
+async def test_fractional_timetag_regression_does_not_roll_back_cache(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  captured_at = datetime(2026, 8, 19, 1, 30, 1, tzinfo=timezone.utc)
+  monkeypatch.setattr(market_stream_transport, "_utcnow", lambda: captured_at)
+  snapshot = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {
+      "600000.SH": {
+        "lastPrice": 10.9,
+        "timetag": "20260819 09:30:00.900",
+      }
+    },
+    captured_at=captured_at,
   )
+  await store.write_batch(
+    snapshot,
+    snapshot.to_bytes(),
+    received_at=captured_at,
+  )
+  older = make_batch(
+    2,
+    MarketBatchKind.DELTA,
+    {
+      "600000.SH": {
+        "lastPrice": 10.1,
+        "timetag": "20260819 09:30:00.100",
+      }
+    },
+    captured_at=captured_at,
+  )
+  await store.write_batch(
+    older,
+    older.to_bytes(),
+    received_at=captured_at,
+  )
+  confirmation = make_batch(
+    3,
+    MarketBatchKind.DELTA,
+    {},
+    captured_at=captured_at,
+  )
+  await store.write_batch(
+    confirmation,
+    confirmation.to_bytes(),
+    received_at=captured_at,
+  )
+
+  _state, latest = await MarketStreamStore(redis).load_snapshot()
+  assert latest["600000.SH"]["lastPrice"] == 10.9
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["future-source", "stale", "future"])
+async def test_store_rejects_invalid_batch_time_before_commit(
+  invalid_kind: str,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  received_at = datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc)
+  monkeypatch.setattr(market_stream_transport, "_utcnow", lambda: received_at)
+  captured_at = received_at
+  source_time = int(received_at.timestamp() * 1000)
+  expected_error = "source time is in the future"
+  if invalid_kind == "future-source":
+    source_time += 6_000
+  elif invalid_kind == "stale":
+    captured_at -= timedelta(seconds=11)
+    expected_error = "captured_at is stale"
+  else:
+    captured_at += timedelta(seconds=6)
+    expected_error = "captured_at is in the future"
+  snapshot = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {"600000.SH": {"lastPrice": 10.0, "time": source_time}},
+    captured_at=captured_at,
+  )
+
+  with pytest.raises(ValueError, match=expected_error):
+    await store.write_batch(
+      snapshot,
+      snapshot.to_bytes(),
+      received_at=received_at,
+    )
+
+  assert (await store.state()).sequence == 0
+  assert redis.published == []
+  assert MARKET_STREAM_LATEST_KEY not in redis.hashes
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_batch_stale_in_ingress_commit_backlog(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  received_at = datetime(2026, 8, 19, 1, 30, tzinfo=timezone.utc)
+  monkeypatch.setattr(
+    market_stream_transport,
+    "_utcnow",
+    lambda: received_at + timedelta(seconds=11),
+  )
+  snapshot = make_batch(
+    1,
+    MarketBatchKind.SNAPSHOT,
+    {
+      "600000.SH": {
+        "lastPrice": 10.0,
+        "time": int(received_at.timestamp() * 1000),
+      }
+    },
+    captured_at=received_at,
+  )
+
+  with pytest.raises(ValueError, match="captured_at is stale"):
+    await store.write_batch(
+      snapshot,
+      snapshot.to_bytes(),
+      received_at=received_at,
+    )
+
+  assert (await store.state()).sequence == 0
+  assert redis.published == []
+  assert MARKET_STREAM_LATEST_KEY not in redis.hashes
+
+
+@pytest.mark.parametrize(
+  ("kind", "invalid_tick"),
+  [
+    (MarketBatchKind.SNAPSHOT, {}),
+    (MarketBatchKind.SNAPSHOT, {"time": float("nan")}),
+    (MarketBatchKind.DELTA, {"time": float("inf")}),
+    (MarketBatchKind.DELTA, {"time": 0, "timetag": "not-a-time"}),
+  ],
+)
+@pytest.mark.asyncio
+async def test_store_rejects_ticks_without_valid_source_time_before_commit(
+  kind: MarketBatchKind,
+  invalid_tick: dict,
+) -> None:
+  redis = FakeRedis()
+  store = MarketStreamStore(redis)
+  await store.mark_syncing("stream-1")
+  previous_sequence = 0
+  if kind is MarketBatchKind.DELTA:
+    snapshot = make_batch(
+      1,
+      MarketBatchKind.SNAPSHOT,
+      {"600000.SH": {"lastPrice": 10.0, "time": 100}},
+    )
+    await store.write_batch(snapshot, snapshot.to_bytes())
+    previous_sequence = 1
+  published_before = list(redis.published)
+  latest_before = dict(redis.hashes.get(MARKET_STREAM_LATEST_KEY, {}))
+  invalid = make_batch(
+    previous_sequence + 1,
+    kind,
+    {"600000.SH": invalid_tick},
+  )
+
+  with pytest.raises(ValueError, match="tick without a valid source time"):
+    await store.write_batch(invalid, invalid.to_bytes())
+
+  assert (await store.state()).sequence == previous_sequence
+  assert redis.published == published_before
+  assert redis.hashes.get(MARKET_STREAM_LATEST_KEY, {}) == latest_before
 
 
 @pytest.mark.asyncio
@@ -474,12 +680,14 @@ async def test_older_delta_advances_sequence_without_regressing_cache() -> None:
     {"600000.SH": {"lastPrice": 9.0, "time": 90}},
   )
   await store.write_batch(older, older.to_bytes())
+  confirmation = make_batch(3, MarketBatchKind.DELTA, {})
+  await store.write_batch(confirmation, confirmation.to_bytes())
 
   restarted_store = MarketStreamStore(redis)
   state, latest = await restarted_store.load_snapshot()
-  assert state.sequence == 2
+  assert state.sequence == 3
   assert latest["600000.SH"] == {"lastPrice": 10.0, "time": 100}
-  assert redis.published[-1] == (MARKET_STREAM_BATCH_CHANNEL, older.to_bytes())
+  assert (MARKET_STREAM_BATCH_CHANNEL, older.to_bytes()) in redis.published
 
 
 @pytest.mark.asyncio
@@ -511,9 +719,11 @@ async def test_mixed_delta_only_updates_ticks_with_non_regressing_source_time() 
     },
   )
   await store.write_batch(mixed, mixed.to_bytes())
+  confirmation = make_batch(3, MarketBatchKind.DELTA, {})
+  await store.write_batch(confirmation, confirmation.to_bytes())
 
   state, latest = await MarketStreamStore(redis).load_snapshot()
-  assert state.sequence == 2
+  assert state.sequence == 3
   assert latest["000001.SZ"]["lastPrice"] == 11.0
   assert latest["600000.SH"]["lastPrice"] == 10.2
 
@@ -554,6 +764,13 @@ async def test_late_old_mark_syncing_cannot_overwrite_new_ready_generation() -> 
     stream_id="new-stream",
   )
   await store.write_batch(barrier, barrier.to_bytes())
+  confirmation = make_batch(
+    3,
+    MarketBatchKind.DELTA,
+    {},
+    stream_id="new-stream",
+  )
+  await store.write_batch(confirmation, confirmation.to_bytes())
   new_staging = f"{MARKET_STREAM_STAGING_PREFIX}:new-stream"
   old_staging = f"{MARKET_STREAM_STAGING_PREFIX}:old-stream"
   redis.hashes[new_staging] = {b"new": b"staging"}
@@ -570,7 +787,7 @@ async def test_late_old_mark_syncing_cannot_overwrite_new_ready_generation() -> 
   assert state.status == "READY"
   assert state.stream_id == "new-stream"
   assert state.generation == new_generation
-  assert state.sequence == 2
+  assert state.sequence == 3
   assert redis.hashes[MARKET_STREAM_LATEST_KEY] == latest_before
   assert redis.hashes[new_staging] == {b"new": b"staging"}
   assert redis.hashes[old_staging] == {b"old": b"staging"}
@@ -681,10 +898,15 @@ async def test_delta_cas_rejects_writer_with_stale_previous_sequence() -> None:
   with pytest.raises(ValueError, match="CAS rejected: SEQUENCE_MISMATCH"):
     await store.write_batch(stale, stale.to_bytes())
 
+  confirmation = make_batch(3, MarketBatchKind.DELTA, {})
+  await store.write_batch(confirmation, confirmation.to_bytes())
   state, latest = await MarketStreamStore(redis).load_snapshot()
-  assert state.sequence == 2
+  assert state.sequence == 3
   assert latest["600000.SH"]["lastPrice"] == 10.1
-  assert redis.published[-1] == (MARKET_STREAM_BATCH_CHANNEL, competing.to_bytes())
+  assert (
+    MARKET_STREAM_BATCH_CHANNEL,
+    competing.to_bytes(),
+  ) in redis.published
 
 
 @pytest.mark.asyncio
@@ -696,7 +918,7 @@ async def test_store_redis_failure_prevents_publish_and_ready_state() -> None:
   snapshot = make_batch(
     1,
     MarketBatchKind.SNAPSHOT,
-    {"600000.SH": {"lastPrice": 10.0}},
+    {"600000.SH": {"lastPrice": 10.0, "time": 100}},
   )
 
   with pytest.raises(ConnectionError, match="redis unavailable"):

@@ -58,6 +58,7 @@ def make_runtime():
   )
   runtime.strategy = AshareIntradayTAssistantStrategy(context)
   runtime.state_manager = FakeStateManager()
+  runtime.status = ExecutionStatus.RUNNING
   return runtime
 
 

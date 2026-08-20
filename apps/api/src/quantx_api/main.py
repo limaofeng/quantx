@@ -23,7 +23,7 @@ from quantx_infrastructure.core.data.market_stream_transport import (
 from quantx_infrastructure.database.manager import db_manager
 from quantx_infrastructure.database.relational_connection import get_async_db
 
-from quantx_api.agent_api import agent_router
+from quantx_api.agent_api import agent_router, run_trade_command_expiry_sweeper
 from quantx_api.agent_hub import agent_connection_hub
 from quantx_api.auth.router import auth_router
 from quantx_api.auth.service import AuthService
@@ -358,10 +358,21 @@ async def lifespan(app: FastAPI):
   agent_hub_task = asyncio.create_task(
     agent_connection_hub.run_control_relay(agent_hub_stopped)
   )
+  command_expiry_stopped = asyncio.Event()
+  command_expiry_task = asyncio.create_task(
+    run_trade_command_expiry_sweeper(command_expiry_stopped),
+    name="trade-command-expiry-sweeper",
+  )
   yield
   agent_hub_stopped.set()
+  command_expiry_stopped.set()
   agent_hub_task.cancel()
-  await asyncio.gather(agent_hub_task, return_exceptions=True)
+  command_expiry_task.cancel()
+  await asyncio.gather(
+    agent_hub_task,
+    command_expiry_task,
+    return_exceptions=True,
+  )
   try:
     await asyncio.wait_for(db_manager.shutdown(), timeout=3.0)
   except asyncio.TimeoutError:

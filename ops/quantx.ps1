@@ -1552,6 +1552,34 @@ function Invoke-Down {
   Stop-TrackedProcesses -Entries $entries
 }
 
+function ConvertTo-LocalStatusTimestamp {
+  param([AllowNull()][object]$Value)
+
+  if ($null -eq $Value -or -not ([string]$Value).Trim()) {
+    return ""
+  }
+  try {
+    $instant = if ($Value -is [datetimeoffset]) {
+      [datetimeoffset]$Value
+    } elseif ($Value -is [datetime]) {
+      [datetimeoffset]([datetime]$Value)
+    } else {
+      [datetimeoffset]::Parse(
+        [string]$Value,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind
+      )
+    }
+    return $instant.ToLocalTime().ToString(
+      "yyyy-MM-dd HH:mm:ss zzz",
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+  } catch {
+    # Preserve legacy/unparseable state values instead of breaking status.
+    return [string]$Value
+  }
+}
+
 function Invoke-Status {
   Import-QuantXEnvironment
   $entries = @(Read-State)
@@ -1564,7 +1592,7 @@ function Invoke-Status {
         Component = $entry.name
         PID = $entry.pid
         State = if ($process) { "RUNNING" } else { "STALE" }
-        StartedAt = $entry.startedAt
+        StartedAt = ConvertTo-LocalStatusTimestamp -Value $entry.startedAt
       }
     }
     $rows | Format-Table -AutoSize

@@ -6,8 +6,10 @@ owns the account holdings universe, legal sizing, T+1 checks and broker truth.
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime, time
+from time import monotonic
 from typing import Any, Dict, List, Optional
 
 from quantx_domain.clock import SHANGHAI
@@ -25,6 +27,7 @@ from quantx_domain.strategies.base import (
   StrategyCadence,
   StrategyInput,
   StrategyOutput,
+  StrategyRunMode,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
@@ -52,10 +55,16 @@ from quantx_domain.trading.t_trade import (
   evaluate_intraday_t_signal,
 )
 
+_SIGNAL_SAMPLE_WINDOWS_STATE_KEY = "signal_sample_windows"
+_SIGNAL_SAMPLE_WINDOWS_VERSION = 1
+_MAX_SIGNAL_SAMPLES_PER_INSTRUMENT = 3000
+_SIGNAL_SAMPLE_WINDOW_CHECKPOINT_SECONDS = 3.0
+
 
 class TTradeStatus:
   OBSERVING = "OBSERVING"
   AWAITING_APPROVAL = "AWAITING_APPROVAL"
+  RECONCILE_REQUIRED = "RECONCILE_REQUIRED"
   ENTRY_SUBMITTED = "ENTRY_SUBMITTED"
   ENTRY_PARTIAL = "ENTRY_PARTIAL"
   MONITORING = "MONITORING"
@@ -280,6 +289,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       properties={
         "instrument_states": StateProperty(type="object", default={}),
         "universe_revision": StateProperty(type="integer", default=0),
+        _SIGNAL_SAMPLE_WINDOWS_STATE_KEY: StateProperty(type="object", default={}),
       },
     )
 
@@ -292,6 +302,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
 
     snapshot = dict(state or {})
     instrument_states = dict(snapshot.get("instrument_states") or {})
+    sample_windows = self._decode_signal_sample_windows(
+      snapshot.get(_SIGNAL_SAMPLE_WINDOWS_STATE_KEY)
+    )
     if not instrument_states and snapshot.get("status"):
       code = str((self.context.instruments or [""])[0] or "")
       if code:
@@ -303,6 +316,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       {
         "instrument_states": instrument_states,
         "universe_revision": int(snapshot.get("universe_revision", 0) or 0),
+        _SIGNAL_SAMPLE_WINDOWS_STATE_KEY: self._encode_signal_sample_windows(
+          sample_windows
+        ),
       }
     )
 
@@ -313,16 +329,31 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       if (
         intent_id
         and str(state.get("entry_order_status", "") or "").upper()
-        == "AWAITING_APPROVAL"
+        in {"AWAITING_APPROVAL", "RECONCILE_REQUIRED"}
       ):
         pending.append(intent_id)
     return pending
 
   async def on_init(self) -> None:
-    self._samples_by_instrument: Dict[str, List[TickSample]] = {}
+    self._samples_by_instrument = self._decode_signal_sample_windows(
+      self.state.get(_SIGNAL_SAMPLE_WINDOWS_STATE_KEY)
+    )
+    self._restored_sample_counts = {
+      code: len(samples)
+      for code, samples in self._samples_by_instrument.items()
+      if samples
+    }
+    self._last_signal_window_checkpoint_at = 0.0
+    if self._restored_sample_counts:
+      self.logger.info(
+        "已恢复做 T 信号识别窗口: %s",
+        ", ".join(
+          f"{code}={count}" for code, count in self._restored_sample_counts.items()
+        ),
+      )
 
   async def on_stop(self) -> None:
-    return None
+    self._checkpoint_signal_sample_windows(force=True)
 
   def import_external_entry(
     self,
@@ -371,6 +402,8 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "pending_exit_intent_id": "",
         "entry_order_status": "EXTERNAL_FILLED",
         "exit_order_status": "",
+        "entry_pending_fill_base": 0,
+        "exit_pending_fill_base": 0,
         "entry_filled_volume": int(volume),
         "entry_avg_price": float(price),
         "exit_filled_volume": 0,
@@ -452,19 +485,80 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
 
     state = self._instrument_state(code)
     pending_key = f"pending_{role}_intent_id"
-    if intent_id and intent_id != str(state.get(pending_key, "") or ""):
-      return None
+    current_pending_intent_id = str(state.get(pending_key, "") or "")
+    if intent_id and intent_id != current_pending_intent_id:
+      event_exit_plan_id = str(event.metadata.get("exit_plan_id", "") or "")
+      state_exit_plan_id = str(state.get("exit_plan_id", "") or "")
+      if (
+        role == "exit"
+        and not current_pending_intent_id
+        and event_exit_plan_id
+        and event_exit_plan_id == state_exit_plan_id
+      ):
+        # Exit intents are emitted by the executor's exit-plan engine, so the
+        # first broker report can beat the next strategy projection. The stable
+        # plan correlation safely installs that pending intent before applying
+        # the report; an unrelated report remains ignored.
+        state[pending_key] = intent_id
+        state["exit_pending_fill_base"] = int(
+          state.get("exit_filled_volume", 0) or 0
+        )
+      else:
+        return None
+
+    previous_role_status = str(state.get(f"{role}_order_status", "") or "").upper()
+    terminal = status in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
+    current_fill = max(0, int(state.get(f"{role}_filled_volume", 0) or 0))
+    reported_fill = max(0, int(event.filled_volume or 0))
+    request_volume = max(
+      0,
+      int(getattr(event.request, "volume", 0) or 0),
+      int(event.metadata.get("requested_entry_volume", 0) or 0),
+    )
+    fill_base = max(
+      0,
+      int(state.get(f"{role}_pending_fill_base", 0) or 0),
+    )
+    expected_fill = fill_base + reported_fill
+    if status == "FILLED" and reported_fill <= 0:
+      expected_fill = (
+        fill_base + request_volume if request_volume > 0 else current_fill + 1
+      )
+    if terminal and expected_fill > current_fill:
+      state.update(
+        {
+          f"{role}_order_status": "RECONCILE_REQUIRED",
+          f"{role}_terminal_order_status": status,
+          f"{role}_expected_fill_volume": expected_fill,
+          "status": TTradeStatus.RECONCILE_REQUIRED,
+          "reconciliation_reason": (
+            f"AWAITING_{role.upper()}_EXECUTION_REPORT"
+          ),
+        }
+      )
+      return self._apply_callback_state(code, state)
 
     state[f"{role}_order_status"] = status
-    terminal = status in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
+    if status == "RECONCILE_REQUIRED":
+      state["reconciliation_reason"] = (
+        str(event.metadata.get("approval_reason", "") or "")
+        or "DURABLE_ORDER_OUTCOME_INDETERMINATE"
+      )
+    elif role == "entry" or previous_role_status == "RECONCILE_REQUIRED":
+      state["reconciliation_reason"] = ""
     if terminal:
       state[pending_key] = ""
+      state[f"{role}_terminal_order_status"] = ""
+      state[f"{role}_expected_fill_volume"] = 0
+      state[f"{role}_pending_fill_base"] = 0
 
     if role == "entry":
       if status == "PARTIAL_FILLED":
         state["status"] = TTradeStatus.ENTRY_PARTIAL
       elif status in {"PENDING", "SUBMITTED", "ACCEPTED"}:
         state["status"] = TTradeStatus.ENTRY_SUBMITTED
+      elif status == "RECONCILE_REQUIRED":
+        state["status"] = TTradeStatus.RECONCILE_REQUIRED
       elif status in {"REJECTED", "CANCELLED", "EXPIRED"}:
         if self._active_volume(state) > 0:
           state["status"] = TTradeStatus.MONITORING
@@ -484,6 +578,8 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         state["status"] = TTradeStatus.EXIT_PARTIAL
       elif status in {"PENDING", "SUBMITTED", "ACCEPTED"}:
         state["status"] = TTradeStatus.EXIT_SUBMITTED
+      elif status == "RECONCILE_REQUIRED":
+        state["status"] = TTradeStatus.RECONCILE_REQUIRED
       elif status in {"REJECTED", "CANCELLED", "EXPIRED"}:
         state["status"] = TTradeStatus.MONITORING
       elif status == "FILLED" and self._active_volume(state) <= 0:
@@ -492,14 +588,34 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     return self._apply_callback_state(code, state)
 
   async def on_trade(self, event: TradeExecutionEvent) -> Optional[RuntimeStatePatch]:
-    role = str(event.metadata.get("t_trade_role", "") or "")
-    code = str(event.instrument_code or event.metadata.get("instrument_code", "") or "")
+    metadata = dict(event.metadata or {})
+    role = str(metadata.get("t_trade_role", "") or "")
+    code = str(event.instrument_code or metadata.get("instrument_code", "") or "")
     if (
       role not in {"entry", "exit"} or not code or event.volume <= 0 or event.price <= 0
     ):
       return None
 
     state = self._instrument_state(code)
+    if role == "entry":
+      batch_id = str(
+        metadata.get("t_batch_id") or metadata.get("batch_id") or ""
+      )
+      exit_plan_template = metadata.get("exit_plan_template")
+      template_plan_id = (
+        str(exit_plan_template.get("plan_id") or "")
+        if isinstance(exit_plan_template, dict)
+        else ""
+      )
+      exit_plan_id = str(metadata.get("exit_plan_id") or template_plan_id or "")
+      if batch_id and not state.get("batch_id"):
+        state["batch_id"] = batch_id
+      if exit_plan_id and not state.get("exit_plan_id"):
+        state["exit_plan_id"] = exit_plan_id
+      if not int(state.get("requested_entry_volume", 0) or 0):
+        requested_volume = int(metadata.get("requested_entry_volume", 0) or 0)
+        if requested_volume > 0:
+          state["requested_entry_volume"] = requested_volume
     volume_key = f"{role}_filled_volume"
     price_key = f"{role}_avg_price"
     previous_volume = int(state.get(volume_key, 0) or 0)
@@ -511,6 +627,15 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     state[volume_key] = total_volume
     state[price_key] = average_price
 
+    expected_fill = max(
+      0,
+      int(state.get(f"{role}_expected_fill_volume", 0) or 0),
+    )
+    terminal_status = str(
+      state.get(f"{role}_terminal_order_status", "") or ""
+    ).upper()
+    awaiting_execution_report = expected_fill > 0 and total_volume < expected_fill
+
     if role == "entry":
       if not state.get("exit_policy_snapshot"):
         state["exit_policy_snapshot"] = self._exit_policy_snapshot()
@@ -521,14 +646,20 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
           state["batch_started_trade_date"] = trade_date
           state["last_holding_trade_date"] = trade_date
           state["holding_trading_days"] = 1
-      state["status"] = TTradeStatus.MONITORING
+      state["status"] = (
+        TTradeStatus.RECONCILE_REQUIRED
+        if awaiting_execution_report
+        else TTradeStatus.MONITORING
+      )
       state["current_signal"] = {
         **dict(state.get("current_signal") or {}),
         "entry_price": average_price,
         "entry_volume": total_volume,
       }
     else:
-      if self._active_volume(state) <= 0:
+      if awaiting_execution_report:
+        state["status"] = TTradeStatus.RECONCILE_REQUIRED
+      elif self._active_volume(state) <= 0:
         policy = dict(state.get("exit_policy_snapshot") or {})
         cooldown_ms = (
           int(
@@ -554,6 +685,28 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         )
       else:
         state["status"] = TTradeStatus.EXIT_PARTIAL
+
+    if expected_fill > 0:
+      if awaiting_execution_report:
+        state[f"{role}_order_status"] = "RECONCILE_REQUIRED"
+        state["status"] = TTradeStatus.RECONCILE_REQUIRED
+        state["reconciliation_reason"] = (
+          f"AWAITING_{role.upper()}_EXECUTION_REPORT"
+        )
+      else:
+        state[f"pending_{role}_intent_id"] = ""
+        state[f"{role}_order_status"] = terminal_status
+        state[f"{role}_terminal_order_status"] = ""
+        state[f"{role}_expected_fill_volume"] = 0
+        state[f"{role}_pending_fill_base"] = 0
+        state["reconciliation_reason"] = ""
+        if role == "exit" and terminal_status in {
+          "REJECTED",
+          "CANCELLED",
+          "EXPIRED",
+        }:
+          if self._active_volume(state) > 0:
+            state["status"] = TTradeStatus.MONITORING
 
     return self._apply_callback_state(code, state)
 
@@ -582,6 +735,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
           state["entry_eligible"] = False
       states[code] = state
 
+    removed_sample_window = False
     for code in list(states):
       if code in desired:
         continue
@@ -598,7 +752,11 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         states[code] = state
       else:
         states.pop(code, None)
-        self._samples_by_instrument.pop(code, None)
+        if self._samples_by_instrument.pop(code, None) is not None:
+          removed_sample_window = True
+
+    if removed_sample_window:
+      self._checkpoint_signal_sample_windows(force=True)
 
     return StrategyOutput(
       runtime_state_patch=RuntimeStatePatch(
@@ -620,6 +778,14 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     self, input: StrategyInput, sample: TickSample, state: Dict[str, Any]
   ) -> StrategyOutput:
     code = input.instrument_code
+    if self._has_reconciliation_gate():
+      state.update({"last_price": sample.price, "current_signal": {}})
+      return self._state_output(
+        code,
+        state,
+        tags=["reconcile_required", "entry_blocked", "no_trade"],
+        reason="T_TRADE_RECONCILIATION_REQUIRED",
+      )
     if state.get("draining") or not state.get("entry_eligible"):
       state.update({"last_price": sample.price, "current_signal": {}})
       return self._state_output(
@@ -803,6 +969,8 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "status": TTradeStatus.AWAITING_APPROVAL,
         "pending_entry_intent_id": intent.intent_id,
         "entry_order_status": "AWAITING_APPROVAL",
+        "entry_pending_fill_base": 0,
+        "exit_pending_fill_base": 0,
         "entry_filled_volume": 0,
         "entry_avg_price": 0.0,
         "exit_filled_volume": 0,
@@ -899,8 +1067,13 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       }
     )
     if plan_status == ExitPlanStatus.EXIT_PENDING.value:
+      pending_intent_id = str(plan.get("pending_intent_id", "") or "")
+      if pending_intent_id != str(state.get("pending_exit_intent_id", "") or ""):
+        state["exit_pending_fill_base"] = int(
+          state.get("exit_filled_volume", 0) or 0
+        )
       state["status"] = TTradeStatus.EXIT_SUBMITTED
-      state["pending_exit_intent_id"] = str(plan.get("pending_intent_id", "") or "")
+      state["pending_exit_intent_id"] = pending_intent_id
       state["exit_order_status"] = "PENDING"
     elif plan_status == ExitPlanStatus.PARTIALLY_EXITED.value:
       state["status"] = TTradeStatus.EXIT_PARTIAL
@@ -942,6 +1115,12 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       "pending_exit_intent_id": "",
       "entry_order_status": "",
       "exit_order_status": "",
+      "entry_terminal_order_status": "",
+      "exit_terminal_order_status": "",
+      "entry_expected_fill_volume": 0,
+      "exit_expected_fill_volume": 0,
+      "entry_pending_fill_base": 0,
+      "exit_pending_fill_base": 0,
       "entry_filled_volume": 0,
       "entry_avg_price": 0.0,
       "exit_filled_volume": 0,
@@ -961,6 +1140,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       "holding_trading_days": 0,
       "exit_policy_snapshot": {},
       "monitoring_telemetry": {},
+      "reconciliation_reason": "",
     }
 
   def _instrument_states(self) -> Dict[str, Dict[str, Any]]:
@@ -1045,6 +1225,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       + 1,
       "window_sample_count": len(samples),
       "window_coverage_seconds": coverage_seconds,
+      "window_restored_sample_count": int(
+        self._restored_sample_counts.get(code, 0) or 0
+      ),
       "triggered": False,
       "reason": "TICK_PROCESSED",
       "signal_type": "NONE",
@@ -1077,6 +1260,21 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       state.get("pending_entry_intent_id") or state.get("pending_exit_intent_id")
     )
 
+  def _has_reconciliation_gate(self) -> bool:
+    return any(
+      (
+        str(state.get("entry_order_status", "") or "").upper()
+        == "RECONCILE_REQUIRED"
+        and bool(state.get("pending_entry_intent_id"))
+      )
+      or (
+        str(state.get("exit_order_status", "") or "").upper()
+        == "RECONCILE_REQUIRED"
+        and bool(state.get("pending_exit_intent_id"))
+      )
+      for state in self._instrument_states().values()
+    )
+
   def _event_instrument_code(self, event: OrderStateEvent, intent_id: str) -> str:
     code = str(event.metadata.get("instrument_code", "") or "")
     if not code and event.request is not None:
@@ -1102,8 +1300,104 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     samples = list(self._samples_by_instrument.get(code, []))
     samples.append(sample)
     self._samples_by_instrument[code] = [
-      item for item in samples[-3000:] if item.timestamp_ms >= cutoff
+      item
+      for item in samples[-_MAX_SIGNAL_SAMPLES_PER_INSTRUMENT:]
+      if cutoff <= item.timestamp_ms <= sample.timestamp_ms
     ]
+    self._checkpoint_signal_sample_windows()
+
+  def _checkpoint_signal_sample_windows(self, *, force: bool = False) -> bool:
+    """Checkpoint the causal signal window in strategy-owned durable state.
+
+    Backtests are deterministic replays and never restore RuntimeState, so avoid
+    serializing a rolling window there. Paper/live runtimes encode the complete
+    bounded window at a low fixed cadence; graceful stop and universe removal
+    force a final checkpoint. RuntimeState then resumes from the latest durable
+    window after an Engine restart without allocating a large payload per tick.
+    """
+
+    if self.context.mode == StrategyRunMode.BACKTEST:
+      return False
+    checkpoint_at = monotonic()
+    last_checkpoint_at = float(
+      getattr(self, "_last_signal_window_checkpoint_at", 0.0) or 0.0
+    )
+    if (
+      not force
+      and last_checkpoint_at > 0
+      and checkpoint_at - last_checkpoint_at
+      < _SIGNAL_SAMPLE_WINDOW_CHECKPOINT_SECONDS
+    ):
+      return False
+    self.state.set(
+      _SIGNAL_SAMPLE_WINDOWS_STATE_KEY,
+      self._encode_signal_sample_windows(self._samples_by_instrument),
+      persist=True,
+      notify=True,
+    )
+    self._last_signal_window_checkpoint_at = checkpoint_at
+    return True
+
+  @staticmethod
+  def _encode_signal_sample_windows(
+    windows: Dict[str, List[TickSample]],
+  ) -> Dict[str, Any]:
+    return {
+      "version": _SIGNAL_SAMPLE_WINDOWS_VERSION,
+      "instruments": {
+        str(code): [
+          [
+            int(sample.timestamp_ms),
+            float(sample.price),
+            float(sample.bid_price),
+            float(sample.ask_price),
+            float(sample.cumulative_amount),
+            float(sample.cumulative_volume),
+          ]
+          for sample in list(samples)[-_MAX_SIGNAL_SAMPLES_PER_INSTRUMENT:]
+        ]
+        for code, samples in dict(windows or {}).items()
+        if code and samples
+      },
+    }
+
+  @staticmethod
+  def _decode_signal_sample_windows(value: Any) -> Dict[str, List[TickSample]]:
+    payload = dict(value or {}) if isinstance(value, dict) else {}
+    try:
+      version = int(payload.get("version", 0) or 0)
+    except (TypeError, ValueError):
+      version = 0
+    if version != _SIGNAL_SAMPLE_WINDOWS_VERSION:
+      return {}
+
+    restored: Dict[str, List[TickSample]] = {}
+    raw_instruments = payload.get("instruments")
+    if not isinstance(raw_instruments, dict):
+      return restored
+    for raw_code, raw_samples in raw_instruments.items():
+      code = str(raw_code or "").strip().upper()
+      if not code or not isinstance(raw_samples, list):
+        continue
+      samples: List[TickSample] = []
+      for raw_sample in raw_samples[-_MAX_SIGNAL_SAMPLES_PER_INSTRUMENT:]:
+        if not isinstance(raw_sample, (list, tuple)) or len(raw_sample) != 6:
+          continue
+        try:
+          timestamp_ms = int(raw_sample[0])
+          numeric = [float(item) for item in raw_sample[1:]]
+        except (TypeError, ValueError, OverflowError):
+          continue
+        if (
+          timestamp_ms <= 0
+          or numeric[0] <= 0
+          or not all(math.isfinite(item) for item in numeric)
+        ):
+          continue
+        samples.append(TickSample(timestamp_ms, *numeric))
+      if samples:
+        restored[code] = sorted(samples, key=lambda item: item.timestamp_ms)
+    return restored
 
   def _is_bound_instrument(self, code: str) -> bool:
     return bool(code) and code in set(self.context.instruments or [])

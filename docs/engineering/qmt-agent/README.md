@@ -31,13 +31,18 @@ K 线仍由主连接控制 `subscribe_quote`，不得从 tick 合成。
 原生 whole-quote 采集与行情 WebSocket sink 生命周期分离：API 断线、ACK 超时、
 RESYNC 或下游 Redis 故障只会令 sink 进入 `SYNCING/STALE`，采集器继续维护每个
 标的的最新状态，不取消并重建 XTData 订阅。新 stream 从一致性 watermark 生成
-sequence 1 `SNAPSHOT`；其 ACK 后原子切换采集器，再把快照水位后的收敛更新作为
-sequence 2 `DELTA` 连续性屏障（没有变化时可为空）。只有屏障也被 ACK，Agent
-才进入 `READY`，屏障之后的真实增量从 sequence 3 开始。每日代码表刷新若发现
-代码集合变化，会提升 source generation 并使 stream 失效；唯一 supervisor
-严格先退订旧 source，再激活 pending universe、建立一次新订阅并从全量快照
-恢复。取消失败时 fail-stop，禁止重叠两路，也不回退到 `["SH", "SZ"]`。相同
-代码集合只更新 metadata，不重订。
+sequence 1 `SNAPSHOT`；其 ACK 后仍保持 latest-state convergence，只把快照水位后
+的收敛更新生成为 sequence 2 `DELTA` pre-cut 连续性屏障（没有变化时可为空），
+API 提交后仍保持 `SYNCING`。
+Agent 收到 sequence 2 ACK 后原子启用有序捕获，并强制把 ACK 窗口内的收敛更新
+作为 sequence 3 `DELTA` readiness-confirm 发送（没有变化时也必须发送空批次）。
+sequence 3 通过普通有界发送管线并被 API 原子提交后服务端进入 `READY`；API 返回
+该批次 ACK 后 Agent 才进入 `READY`。之后的真实有序回调从 sequence 4 开始。每日
+代码表刷新若发现代码集合
+变化，会提升 source generation 并使 stream 失效；唯一 supervisor 严格先退订
+旧 source，再激活 pending universe、建立一次新订阅并从全量快照恢复。取消失败
+时 fail-stop，禁止重叠两路，也不回退到 `["SH", "SZ"]`。相同代码集合只更新
+metadata，不重订。
 收盘后初推不足时，完整快照按最多 256 个标的分块读取 `get_full_tick`；每块独立
 受 60 秒 native-call timeout 约束，全部分块齐全后才允许发送 `SNAPSHOT`，不会
 暴露部分结果。独立 Python 子进程每 5 秒检查 Agent 心跳；即使原生 SDK 持有 GIL
@@ -45,13 +50,25 @@ sequence 2 `DELTA` 连续性屏障（没有变化时可为空）。只有屏障�
 超时或原生取消失败使用专用退出码 fail-stop，确保残留 SDK 线程不能留下“PID
 在线、心跳停止”的僵尸 Agent，并交由统一监督器重启。
 
-QMT 回调只做快速捕获；READY 捕获入口最多保留 8 个原始批次、预算 64 MiB，
-编码后发送队列同样最多 8 批、64 MiB，且最多 2 个批次处于未 ACK 状态。
+QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节预算为主约束，
+结构上限由每批至少 1 KiB 的计费下限推导为 65,536 个回调，因此不会在字节预算
+尚充足时因固定 8 回调阈值误触发重同步。编码后发送队列最多 8 批、64 MiB，且
+最多 2 个批次处于未 ACK 状态。
 序列化和网络收发由专用任务处理。
 状态同步阶段允许按标的合并为最新值，`READY` 阶段同标的更新必须有序且不得静默
 覆盖。任何容量/字节上限、ACK 超时或序号异常都会显式使 stream 失效并从全量
 快照收敛，但不得拖垮交易连接、心跳或成交回报。批量历史行情仍按请求 ID、批次
 序号、压缩和 SHA256 通过 HTTP 上传；交易连接重连后先上报完整账户快照。
+每条 whole-quote tick 在线路编码前必须带有可比较的合法来源时间 `time` 或
+`timetag`；缺失、非有限或非法值会精确使当前行情 stream 失效并重新同步，不得
+回退到本机墙钟时间，也不得把单个 stream 的数据错误升级为整个 Agent 进程故障。
+`time` 只接受 epoch 秒或毫秒，`timetag` 按上海时区解析并保留亚秒；Agent、API
+Store 与 Engine Hub 共用 contracts 中的唯一解析器。个人单账户部署要求三者使用
+同一台已校时主机的 UTC 时钟：来源时间或 `captured_at` 超前 API ingress 5 秒即
+拒绝；Store 在实际 commit 时再按 10 秒 freshness 窗口检查 `captured_at`，因此
+排队积压不能刷新一个过期的 `READY` lease。Engine 在交易时段同样按 10 秒
+`captured_at` age fail-closed；非交易时段允许保留昨日快照，但未来超过 5 秒仍
+无条件拒绝。
 
 历史 `tick` 上传保留 XTData 的原始毫秒时间戳 `time`，并为同一
 `code + time` 下的每条快照生成从 0 开始且连续的 `tick_ordinal`，

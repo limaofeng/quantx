@@ -883,3 +883,43 @@ def test_release_bundle_is_versioned_offline_and_checksum_verified() -> None:
   assert "--ignore-installed" in install
   assert "New-Item -ItemType Junction" in install
   assert "automatic database downgrade is forbidden" in install
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell status timestamp formatting")
+def test_status_formats_managed_process_start_time_in_local_timezone() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+  formatter = "function ConvertTo-LocalStatusTimestamp" + script.split(
+    "function ConvertTo-LocalStatusTimestamp",
+    1,
+  )[1].split("function Invoke-Status", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+{formatter}
+$source = "2026-08-20T05:33:53Z"
+[ordered]@{{
+  actual = ConvertTo-LocalStatusTimestamp -Value $source
+  expected = ([datetimeoffset]::Parse($source)).ToLocalTime().ToString(
+    "yyyy-MM-dd HH:mm:ss zzz",
+    [Globalization.CultureInfo]::InvariantCulture
+  )
+}} | ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  payload = json.loads(result.stdout.strip())
+  assert payload["actual"] == payload["expected"]
+  status = script.split("function Invoke-Status", 1)[1].split(
+    "function Invoke-Logs",
+    1,
+  )[0]
+  assert "ConvertTo-LocalStatusTimestamp -Value $entry.startedAt" in status

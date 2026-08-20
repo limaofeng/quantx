@@ -9,6 +9,7 @@
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -35,6 +36,9 @@ APPLIED_CORPORATE_ACTIONS_KEY = "applied_corporate_actions"
 GRID_BOOK_CUSTOM_STATE_KEY = "grid_book_snapshot"
 ORDER_CASH_RESERVATIONS_KEY = "order_cash_reservations"
 ORDER_POSITION_RESERVATIONS_KEY = "order_position_reservations"
+APPLIED_RUNTIME_EVENT_KEYS = "applied_runtime_event_keys"
+RUNTIME_SNAPSHOT_ATTEMPT_KEY = "runtime_snapshot_attempt"
+_MAX_APPLIED_RUNTIME_EVENT_KEYS = 2_000
 
 
 @dataclass
@@ -72,6 +76,8 @@ class RuntimeStateManager:
 
     # 标记是否有未保存的更改
     _dirty: bool = field(default=False, repr=False)
+    _dirty_revision: int = field(default=0, repr=False)
+    _last_snapshot_attempt_revision: int = field(default=-1, repr=False)
 
     # 资金/持仓冻结索引；镜像到 custom state，供 Engine 重启恢复。
     _reservations: Dict[str, float] = field(default_factory=dict, repr=False)
@@ -86,6 +92,7 @@ class RuntimeStateManager:
     _running: bool = field(default=False, repr=False)
     _state_queue: Optional[asyncio.Queue] = field(default=None, repr=False)
     _state_sync_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    _snapshot_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     # 文件句柄
     _log_file_path: Optional[str] = field(default=None, repr=False)
@@ -135,8 +142,13 @@ class RuntimeStateManager:
             except asyncio.CancelledError:
                 pass
 
-        # 最后一次保存
-        await self.save_snapshot()
+        # 最后一次保存是停止边界的权威持久化点。版本冲突、
+        # 提交结果无法确认等失败不得被吞掉，否则 Executor 会继续
+        # 断开 Broker 并把未落盘的运行标记为 STOPPED。
+        if not await self.save_snapshot():
+            raise RuntimeError(
+                f"最终状态快照保存失败: run_id={self.run_id}"
+            )
 
         self.logger.info(f"状态管理器已停止: {self.run_id}")
 
@@ -157,6 +169,14 @@ class RuntimeStateManager:
     async def stop_state_sync(self, strategy=None) -> None:
         """停止策略状态同步任务"""
         if self._state_sync_task and not self._state_sync_task.done():
+            if self._state_queue:
+                try:
+                    await asyncio.wait_for(self._state_queue.join(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self.logger.warning(
+                        "策略状态同步队列停止前未能完全排空: run_id=%s",
+                        self.run_id,
+                    )
             self._state_sync_task.cancel()
             try:
                 await self._state_sync_task
@@ -325,13 +345,125 @@ class RuntimeStateManager:
             self.logger.error(f"恢复人工确认交易意图失败: intent_id={intent_id}, error={e}")
         return None
 
+    async def get_trade_intent_snapshot(
+        self, intent_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return durable intent execution truth for startup reconciliation."""
+        if not self.persist_enabled or not intent_id:
+            return None
+
+        try:
+            from quantx_infrastructure.database.connection import get_async_db
+            from quantx_infrastructure.repositories.trade_intent_repository import (
+                TradeIntentRepository,
+            )
+
+            async for db in get_async_db():
+                record = await TradeIntentRepository(db).find_by_id(intent_id)
+                if record is None:
+                    return None
+                return dict(record.to_dict())
+        except Exception as e:
+            self.logger.error(f"读取交易意图快照失败: intent_id={intent_id}, error={e}")
+        return None
+
+    async def get_earliest_unapplied_runtime_event_key(self) -> Optional[str]:
+        """Return the startup barrier key for this strategy run, if any."""
+        if not self.persist_enabled:
+            return None
+
+        from sqlalchemy import select
+
+        from quantx_infrastructure.database.connection import get_async_db
+        from quantx_infrastructure.models.agent_runtime import StrategyRuntimeEvent
+
+        async for db in get_async_db():
+            return await db.scalar(
+                select(StrategyRuntimeEvent.business_key)
+                .where(
+                    StrategyRuntimeEvent.strategy_run_id == self.run_id,
+                    StrategyRuntimeEvent.application_status != "APPLIED",
+                )
+                .order_by(
+                    StrategyRuntimeEvent.created_at,
+                    StrategyRuntimeEvent.event_id,
+                )
+                .limit(1)
+            )
+        raise RuntimeError("数据库会话未返回，无法检查持久化运行时事件")
+
     # ==================== 快照管理 ====================
 
-    async def save_snapshot(self) -> bool:
-        """保存状态快照到数据库"""
-        if not self.persist_enabled or not self._dirty:
-            return True
+    def has_applied_runtime_event(self, event_key: str) -> bool:
+        """Return whether this runtime snapshot already contains the event effect."""
+        if not event_key:
+            return False
+        return event_key in set(
+            str(value)
+            for value in list(
+                self._state.get("custom", {}).get(APPLIED_RUNTIME_EVENT_KEYS, [])
+                or []
+            )
+            if value
+        )
 
+    async def checkpoint_durable_runtime_event(
+        self,
+        event_key: str,
+        *,
+        custom_updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Persist one durable event marker with all current runtime effects.
+
+        The marker stays in memory if a database write fails. A same-process retry
+        therefore skips the already-applied callbacks and retries only this atomic
+        checkpoint. After a process crash, an uncommitted marker disappears with
+        the uncommitted account/position/strategy state and the event is safe to
+        apply again.
+        """
+        normalized_key = str(event_key or "").strip()
+        if not normalized_key:
+            raise ValueError("durable runtime event key is required")
+        if custom_updates:
+            manager_owned_keys = {
+                APPLIED_CORPORATE_ACTIONS_KEY,
+                APPLIED_RUNTIME_EVENT_KEYS,
+                BUCKET_LEDGER_CUSTOM_STATE_KEY,
+                ORDER_CASH_RESERVATIONS_KEY,
+                ORDER_POSITION_RESERVATIONS_KEY,
+                RUNTIME_SNAPSHOT_ATTEMPT_KEY,
+            }
+            self.update_custom_state(
+                {
+                    key: value
+                    for key, value in dict(custom_updates).items()
+                    if key not in manager_owned_keys
+                }
+            )
+        keys = [
+            str(value)
+            for value in list(
+                self._state.get("custom", {}).get(APPLIED_RUNTIME_EVENT_KEYS, [])
+                or []
+            )
+            if value
+        ]
+        if normalized_key not in keys:
+            keys.append(normalized_key)
+            self._state.setdefault("custom", {})[APPLIED_RUNTIME_EVENT_KEYS] = keys[
+                -_MAX_APPLIED_RUNTIME_EVENT_KEYS:
+            ]
+            self._mark_dirty()
+        if not self.persist_enabled:
+            return True
+        if not self._dirty:
+            return True
+        if await self.save_snapshot():
+            return True
+        return await self._adopt_committed_runtime_event(normalized_key)
+
+    async def _adopt_committed_runtime_event(self, event_key: str) -> bool:
+        """Recover a commit-unknown snapshot when PostgreSQL has the marker."""
         try:
             from quantx_infrastructure.database.connection import get_async_db
             from quantx_infrastructure.repositories.strategy_run_state_repository import (
@@ -339,57 +471,266 @@ class RuntimeStateManager:
                 StrategyRunStateRepository,
             )
 
-            self._state["last_updated"] = time_utils.now().isoformat()
-            custom_state = dict(self._state.get("custom", {}) or {})
-            custom_state[BUCKET_LEDGER_CUSTOM_STATE_KEY] = self.get_bucket_ledger_snapshot()
-            
             async for db in get_async_db():
-                # 1. 保存资金与自定义状态
-                state_repo = StrategyRunStateRepository(db)
-                expected_version = int(self._state.get("version", 0) or 0)
-                saved = await state_repo.upsert_state(
-                    run_id=self.run_id,
-                    cash=self._state["account"].get("cash", 0.0),
-                    frozen_cash=self._state["account"].get("frozen_cash", 0.0),
-                    total_asset=self._state["account"].get("total_asset", 0.0),
-                    custom_state=custom_state,
-                    expected_version=expected_version,
+                state_record = await StrategyRunStateRepository(db).get_state(
+                    self.run_id
                 )
-                if not saved:
-                    raise RuntimeError(
-                        "runtime state snapshot version conflict: "
-                        f"run_id={self.run_id}, expected_version={expected_version}"
+                if state_record is None:
+                    return False
+                custom_state = copy.deepcopy(state_record.custom_state or {})
+                applied_keys = {
+                    str(value)
+                    for value in list(
+                        custom_state.get(APPLIED_RUNTIME_EVENT_KEYS, []) or []
                     )
-                # Keep the in-memory optimistic-lock token aligned with the row
-                # written above.  Otherwise only the first snapshot succeeds and
-                # every later save conflicts with its own previous write.
-                self._state["version"] = expected_version + 1
-                
-                # 2. 保存所有持仓（简单起见，逐个保存，可优化为批量）
-                pos_repo = StrategyRunPositionRepository(db)
-                positions = self._state.get("positions", {})
-                for code, pos_data in positions.items():
-                    await pos_repo.update_position(
-                        run_id=self.run_id,
-                        instrument_code=code,
-                        long_volume=pos_data.get("long_volume", 0),
-                        short_volume=pos_data.get("short_volume", 0),
-                        long_avg_price=pos_data.get("long_avg_price", 0.0),
-                        short_avg_price=pos_data.get("short_avg_price", 0.0),
-                        market_value=pos_data.get("market_value", 0.0),
-                        pnl=pos_data.get("pnl", 0.0),
-                        last_price=pos_data.get("last_price", 0.0),
+                    if value
+                }
+                if event_key not in applied_keys:
+                    return False
+
+                positions = await StrategyRunPositionRepository(db).get_all_positions(
+                    self.run_id
+                )
+                self._state["version"] = int(state_record.version or 0)
+                if self._dirty_revision == self._last_snapshot_attempt_revision:
+                    self._state["custom"] = custom_state
+                    self._state["account"] = {
+                        "cash": float(state_record.cash or 0.0),
+                        "frozen_cash": float(state_record.frozen_cash or 0.0),
+                        "total_asset": float(state_record.total_asset or 0.0),
+                    }
+                    self._state["positions"] = {
+                        position.instrument_code: position.to_dict()
+                        for position in positions
+                    }
+                    self._restore_reservation_state()
+                    ledger_snapshot = custom_state.get(
+                        BUCKET_LEDGER_CUSTOM_STATE_KEY
                     )
-                
-                self._dirty = False
-                self.logger.debug(f"状态快照已保存: v{self._state.get('version')}")
-                break
+                    restored_ledger = False
+                    if ledger_snapshot:
+                        from quantx_domain.trading.bucket_ledger import BucketLedger
 
-            return True
-
+                        self._bucket_ledger = BucketLedger.from_dict(ledger_snapshot)
+                        if not self._bucket_ledger.run_id:
+                            self._bucket_ledger.run_id = self.run_id
+                        restored_ledger = True
+                    if restored_ledger:
+                        violations = self._bucket_ledger.validate_invariants(
+                            self._state["positions"]
+                        )
+                        if violations:
+                            self._state["custom"][
+                                "bucket_ledger_reconcile_required"
+                            ] = True
+                            self._state["custom"][
+                                "bucket_ledger_violations"
+                            ] = violations
+                        self._hydrate_positions_from_bucket_ledger()
+                        self._state["bucket_ledger"] = self._bucket_ledger.to_dict()
+                    else:
+                        for code, position in self._state["positions"].items():
+                            self._bucket_ledger.sync_position(code, position)
+                        self._state["bucket_ledger"] = (
+                            self.get_bucket_ledger_snapshot()
+                        )
+                    self._dirty = False
+                else:
+                    # Preserve changes created after the uncertain commit. The
+                    # adopted version lets the normal snapshot loop persist them.
+                    self._dirty = True
+                return True
         except Exception as e:
-            self.logger.error(f"保存快照失败: {e}")
-            return False
+            self.logger.error(
+                "恢复提交结果失败: run_id=%s, event_key=%s, error=%s",
+                self.run_id,
+                event_key,
+                e,
+            )
+        return False
+
+    async def _reconcile_snapshot_attempt(
+        self,
+        snapshot_token: str,
+        *,
+        snapshot_revision: int,
+        expected_version: int,
+    ) -> bool:
+        """Resolve commit-unknown and advance past a genuine external CAS win."""
+        try:
+            from quantx_infrastructure.database.connection import get_async_db
+            from quantx_infrastructure.repositories.strategy_run_state_repository import (
+                StrategyRunPositionRepository,
+                StrategyRunStateRepository,
+            )
+
+            async for db in get_async_db():
+                state_record = await StrategyRunStateRepository(db).get_state(
+                    self.run_id
+                )
+                if state_record is None:
+                    return False
+                authoritative_version = int(state_record.version or 0)
+                custom_state = copy.deepcopy(state_record.custom_state or {})
+                if custom_state.get(RUNTIME_SNAPSHOT_ATTEMPT_KEY) == snapshot_token:
+                    positions = (
+                        await StrategyRunPositionRepository(db).get_all_positions(
+                            self.run_id
+                        )
+                    )
+                    self._state["version"] = authoritative_version
+                    if self._dirty_revision == snapshot_revision:
+                        self._state["custom"] = custom_state
+                        self._state["account"] = {
+                            "cash": float(state_record.cash or 0.0),
+                            "frozen_cash": float(state_record.frozen_cash or 0.0),
+                            "total_asset": float(state_record.total_asset or 0.0),
+                        }
+                        self._state["positions"] = {
+                            position.instrument_code: position.to_dict()
+                            for position in positions
+                        }
+                        self._restore_reservation_state()
+                        ledger_snapshot = custom_state.get(
+                            BUCKET_LEDGER_CUSTOM_STATE_KEY
+                        )
+                        if ledger_snapshot:
+                            from quantx_domain.trading.bucket_ledger import BucketLedger
+
+                            self._bucket_ledger = BucketLedger.from_dict(
+                                ledger_snapshot
+                            )
+                            if not self._bucket_ledger.run_id:
+                                self._bucket_ledger.run_id = self.run_id
+                            violations = self._bucket_ledger.validate_invariants(
+                                self._state["positions"]
+                            )
+                            if violations:
+                                self._state["custom"][
+                                    "bucket_ledger_reconcile_required"
+                                ] = True
+                                self._state["custom"][
+                                    "bucket_ledger_violations"
+                                ] = violations
+                            self._hydrate_positions_from_bucket_ledger()
+                            self._state["bucket_ledger"] = (
+                                self._bucket_ledger.to_dict()
+                            )
+                        self._dirty = False
+                    else:
+                        self._state.setdefault("custom", {})[
+                            RUNTIME_SNAPSHOT_ATTEMPT_KEY
+                        ] = snapshot_token
+                        self._dirty = True
+                    return True
+
+                if authoritative_version > expected_version:
+                    # A different writer won the CAS. Adopt its version and its
+                    # API-owned grid snapshot, while retaining Engine changes for
+                    # the next CAS attempt instead of overwriting the winner.
+                    self._state["version"] = authoritative_version
+                    local_custom = self._state.setdefault("custom", {})
+                    if GRID_BOOK_CUSTOM_STATE_KEY in custom_state:
+                        local_custom[GRID_BOOK_CUSTOM_STATE_KEY] = copy.deepcopy(
+                            custom_state[GRID_BOOK_CUSTOM_STATE_KEY]
+                        )
+                    else:
+                        local_custom.pop(GRID_BOOK_CUSTOM_STATE_KEY, None)
+                    self._dirty = True
+                return False
+        except Exception as e:
+            self.logger.error(
+                "恢复快照提交结果失败: run_id=%s, token=%s, error=%s",
+                self.run_id,
+                snapshot_token,
+                e,
+            )
+        return False
+
+    async def save_snapshot(self) -> bool:
+        """保存状态快照到数据库"""
+        if not self.persist_enabled or not self._dirty:
+            return True
+        async with self._snapshot_lock:
+            if not self._dirty:
+                return True
+            snapshot_token = ""
+            snapshot_revision = self._dirty_revision
+            expected_version = int(self._state.get("version", 0) or 0)
+            try:
+                from quantx_infrastructure.database.connection import get_async_db
+                from quantx_infrastructure.repositories.strategy_run_state_repository import (
+                    StrategyRunPositionRepository,
+                    StrategyRunStateRepository,
+                )
+
+                self._state["last_updated"] = time_utils.now().isoformat()
+                custom_state = copy.deepcopy(self._state.get("custom", {}) or {})
+                snapshot_token = str(uuid.uuid4())
+                custom_state[RUNTIME_SNAPSHOT_ATTEMPT_KEY] = snapshot_token
+                custom_state[BUCKET_LEDGER_CUSTOM_STATE_KEY] = copy.deepcopy(
+                    self.get_bucket_ledger_snapshot()
+                )
+                account = copy.deepcopy(self._state.get("account", {}) or {})
+                positions = copy.deepcopy(self._state.get("positions", {}) or {})
+                self._last_snapshot_attempt_revision = snapshot_revision
+
+                async for db in get_async_db():
+                    state_repo = StrategyRunStateRepository(db)
+                    saved = await state_repo.upsert_state(
+                        run_id=self.run_id,
+                        cash=account.get("cash", 0.0),
+                        frozen_cash=account.get("frozen_cash", 0.0),
+                        total_asset=account.get("total_asset", 0.0),
+                        custom_state=custom_state,
+                        expected_version=expected_version,
+                        commit=False,
+                    )
+                    if not saved:
+                        raise RuntimeError(
+                            "runtime state snapshot version conflict: "
+                            f"run_id={self.run_id}, expected_version={expected_version}"
+                        )
+                    pos_repo = StrategyRunPositionRepository(db)
+                    await pos_repo.delete_missing_positions(
+                        self.run_id,
+                        list(positions),
+                        commit=False,
+                    )
+                    for code, pos_data in positions.items():
+                        await pos_repo.update_position(
+                            run_id=self.run_id,
+                            instrument_code=code,
+                            long_volume=pos_data.get("long_volume", 0),
+                            short_volume=pos_data.get("short_volume", 0),
+                            long_avg_price=pos_data.get("long_avg_price", 0.0),
+                            short_avg_price=pos_data.get("short_avg_price", 0.0),
+                            market_value=pos_data.get("market_value", 0.0),
+                            pnl=pos_data.get("pnl", 0.0),
+                            last_price=pos_data.get("last_price", 0.0),
+                            commit=False,
+                        )
+                    await db.commit()
+                    self._state["version"] = expected_version + 1
+                    self._state.setdefault("custom", {})[
+                        RUNTIME_SNAPSHOT_ATTEMPT_KEY
+                    ] = snapshot_token
+                    if self._dirty_revision == snapshot_revision:
+                        self._dirty = False
+                    self.logger.debug(
+                        f"状态快照已保存: v{self._state.get('version')}"
+                    )
+                    break
+                return True
+            except Exception as e:
+                self.logger.error(f"保存快照失败: {e}")
+                if snapshot_token:
+                    return await self._reconcile_snapshot_attempt(
+                        snapshot_token,
+                        snapshot_revision=snapshot_revision,
+                        expected_version=expected_version,
+                    )
+                return False
 
     async def _snapshot_loop(self) -> None:
         """后台快照循环"""
@@ -405,6 +746,7 @@ class RuntimeStateManager:
 
     def _mark_dirty(self) -> None:
         """标记状态已更改"""
+        self._dirty_revision += 1
         self._dirty = True
 
     # ==================== 日志管理 (文件存储) ====================

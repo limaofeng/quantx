@@ -7,11 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice
 from typing import AsyncIterator
-from zoneinfo import ZoneInfo
 
 import orjson
 import redis.asyncio as aioredis
-from quantx_contracts import MarketBatchKind, MarketStreamBatch
+from quantx_contracts import (
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
+  MarketBatchKind,
+  MarketStreamBatch,
+  market_tick_source_time,
+  validate_market_stream_capture_time,
+)
 
 from quantx_infrastructure.config.settings import settings
 
@@ -26,7 +31,9 @@ MARKET_STREAM_FRESHNESS_KEY = "market-data:whole:v1:freshness"
 MARKET_STREAM_STAGING_PREFIX = "market-data:whole:v1:staging"
 MARKET_STREAM_SNAPSHOT_CHUNK_SIZE = 512
 MARKET_STREAM_STAGING_TTL_SECONDS = 60
-MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS = 10_000
+MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS = int(
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS * 1000
+)
 LEGACY_ACTIVE_SUBSCRIPTIONS_KEY = "market-data:active-subscriptions"
 
 _MARKET_STREAM_MARK_OFFLINE_SCRIPT = """
@@ -128,7 +135,11 @@ if tostring(current['stream_id'] or '') ~= ARGV[1] then
 end
 local current_status = tostring(current['status'] or '')
 local previous_sequence = tonumber(ARGV[2])
-if current_status == 'SYNCING' and previous_sequence ~= 1 then
+local incoming = cjson.decode(ARGV[3])
+local incoming_status = tostring(incoming['status'] or '')
+if current_status == 'SYNCING'
+  and previous_sequence ~= 1
+  and previous_sequence ~= 2 then
   return 'BARRIER_MISMATCH'
 end
 if current_status ~= 'SYNCING' and current_status ~= 'READY' then
@@ -136,6 +147,19 @@ if current_status ~= 'SYNCING' and current_status ~= 'READY' then
 end
 if tonumber(current['sequence'] or 0) ~= previous_sequence then
   return 'SEQUENCE_MISMATCH'
+end
+if current_status == 'SYNCING'
+  and previous_sequence == 1
+  and incoming_status ~= 'SYNCING' then
+  return 'PHASE_MISMATCH'
+end
+if current_status == 'SYNCING'
+  and previous_sequence == 2
+  and incoming_status ~= 'READY' then
+  return 'PHASE_MISMATCH'
+end
+if current_status == 'READY' and incoming_status ~= 'READY' then
+  return 'PHASE_MISMATCH'
 end
 for index = 7, #ARGV, 2 do
   redis.call('HSET', KEYS[2], ARGV[index], ARGV[index + 1])
@@ -166,27 +190,39 @@ def _staging_key(stream_id: str) -> str:
 
 def _tick_source_time(
   tick: dict,
-  captured_at: datetime | None,
+  *,
+  received_at: datetime | None = None,
 ) -> float:
-  """Match WholeQuoteHub's source ordering without a Redis read per DELTA."""
-  raw_time = tick.get("time")
-  try:
-    value = float(raw_time)
-    if value > 0:
-      return value / 1000 if value > 10_000_000_000 else value
-  except (TypeError, ValueError):
-    pass
-  timetag = tick.get("timetag")
-  if isinstance(timetag, str):
-    for fmt in ("%Y%m%d %H:%M:%S.%f", "%Y%m%d %H:%M:%S"):
-      try:
-        parsed = datetime.strptime(timetag, fmt).replace(
-          tzinfo=ZoneInfo("Asia/Shanghai")
-        )
-        return parsed.timestamp()
-      except ValueError:
-        continue
-  return (captured_at or _utcnow()).timestamp()
+  """Return a comparable broker source time or reject the untrusted tick."""
+  return market_tick_source_time(tick, reference_at=received_at)
+
+
+def _batch_source_times(
+  batch: MarketStreamBatch,
+  *,
+  received_at: datetime | None = None,
+) -> dict[str, float]:
+  source_times: dict[str, float] = {}
+  invalid_codes: list[str] = []
+  invalid_reasons: list[str] = []
+  for code, tick in batch.data.items():
+    try:
+      source_times[code] = _tick_source_time(
+        tick,
+        received_at=received_at,
+      )
+    except ValueError as exc:
+      invalid_codes.append(code)
+      invalid_reasons.append(str(exc))
+  if invalid_codes:
+    raise ValueError(
+      "market stream batch contains tick without a valid source time: "
+      f"stream_id={batch.stream_id} sequence={batch.sequence} "
+      f"kind={batch.kind.value} invalid={len(invalid_codes)} "
+      f"samples={','.join(invalid_codes[:5])} "
+      f"reason={invalid_reasons[0]}"
+    )
+  return source_times
 
 
 def _require_commit_success(result: object, *, kind: MarketBatchKind) -> None:
@@ -429,7 +465,23 @@ class MarketStreamStore:
     self,
     batch: MarketStreamBatch,
     payload: bytes,
+    *,
+    received_at: datetime | None = None,
   ) -> MarketStreamState:
+    observed_at = received_at or _utcnow()
+    # Future skew is judged against the instant the API received the frame;
+    # queueing must not turn an invalid future timestamp into a valid one.
+    validate_market_stream_capture_time(
+      batch.captured_at,
+      received_at=observed_at,
+      max_age_seconds=None,
+    )
+    # Freshness is judged again at commit time so an ingress/commit backlog
+    # cannot refresh Redis READY and its lease with an already-stale capture.
+    validate_market_stream_capture_time(
+      batch.captured_at,
+      received_at=_utcnow(),
+    )
     current = await self.state()
     if (
       current is None
@@ -456,12 +508,27 @@ class MarketStreamStore:
         + ",".join(unknown[:5])
       )
 
+    if batch.kind is MarketBatchKind.SNAPSHOT:
+      next_status = "SYNCING"
+    elif current.status == "SYNCING" and current.sequence == 1:
+      # Sequence 2 is the pre-cut convergence barrier.  Committing and ACKing
+      # it cannot make the API/Engine READY because the Agent has not yet
+      # observed that ACK or switched to ordered callback capture.
+      next_status = "SYNCING"
+    elif current.status == "SYNCING" and current.sequence == 2:
+      # Mandatory sequence 3 is the Agent's post-ACK readiness confirmation.
+      # Its CAS is the one and only SYNCING -> READY transition.
+      next_status = "READY"
+    elif current.status == "READY" and current.sequence >= 3:
+      next_status = "READY"
+    else:
+      raise ValueError(
+        "market stream DELTA is invalid for current phase: "
+        f"status={current.status} sequence={current.sequence}"
+      )
+
     state = MarketStreamState(
-      status=(
-        "SYNCING"
-        if batch.kind is MarketBatchKind.SNAPSHOT
-        else "READY"
-      ),
+      status=next_status,
       stream_id=batch.stream_id,
       generation=current.generation,
       sequence=batch.sequence,
@@ -479,11 +546,11 @@ class MarketStreamStore:
       sequence=batch.sequence,
     ).to_bytes()
     redis = await self.redis()
+    batch_source_times = _batch_source_times(
+      batch,
+      received_at=observed_at,
+    )
     if batch.kind is MarketBatchKind.SNAPSHOT:
-      snapshot_source_times = {
-        code: _tick_source_time(tick, batch.captured_at)
-        for code, tick in batch.data.items()
-      }
       staging_key = _staging_key(batch.stream_id)
       entries = iter(batch.data.items())
       while chunk := list(islice(entries, MARKET_STREAM_SNAPSHOT_CHUNK_SIZE)):
@@ -515,12 +582,12 @@ class MarketStreamStore:
       _require_commit_success(result, kind=batch.kind)
       if self._active_stream_id == batch.stream_id:
         self._active_codes = frozenset(batch.data)
-        self._source_times = snapshot_source_times
+        self._source_times = batch_source_times
     else:
       accepted: dict[str, dict] = {}
       accepted_source_times: dict[str, float] = {}
       for code, tick in batch.data.items():
-        source_time = _tick_source_time(tick, batch.captured_at)
+        source_time = batch_source_times[code]
         previous = self._source_times.get(code)
         if previous is not None and source_time < previous:
           continue

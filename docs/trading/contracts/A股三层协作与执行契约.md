@@ -228,6 +228,18 @@ OrderRiskDecision[ALLOW/CAP]
 10. 记录 DecisionTrace。
 ```
 
+实时 tick 动作只能在中央行情完成唯一三阶段就绪契约后执行：
+sequence 1 全量快照和 sequence 2 切换前连续性屏障均保持
+`SYNCING`；Agent 收到 sequence 2 ACK 后才切换有序捕获，并强制
+发送 sequence 3 readiness-confirm（可为空）；只有 sequence 3 原子提交
+后才能进入 `READY`，真实增量从 sequence 4 开始。每条 tick 必须
+使用保留亚秒精度的券商源时间；非法、超前或积压过期的批次不得
+刷新 `READY` 或 freshness lease。
+
+需要跨重启识别形态的策略，必须把有界、因果的滑动观察窗写入
+PAPER/LIVE RuntimeState；恢复样本必须再按当前 tick 过滤到
+`[current - lookback, current]`，禁止使用未来样本。BACKTEST 不持久化该窗口。
+
 对当前双仓策略：
 
 - `BUILDING_CORE` 阶段普通网格不得卖出 core。
@@ -248,6 +260,36 @@ OrderRiskDecision[ALLOW/CAP]
 7. 调用 Strategy on_order / on_trade 更新算法状态，例如 pending 网格、最近成交层级。
 8. 记录 BrokerExecutionReport 和 DecisionTrace 补充事件。
 ```
+
+实盘回报必须先写入 durable inbox，再以稳定业务键唯一生成
+runtime event。该事件对 TradeIntent/T 批次的投影只允许在唯一事件
+首次落库的同一事务内执行。Engine 应用事件后，必须把事件 marker、
+资金、持仓、策略状态与退出计划作为一个原子快照提交，然后才能
+把 runtime event 标记为 `APPLIED`。回调失败必须回滚本次内存效果；
+快照结果不确定或未成功时，运行时必须安装同业务键屏障，在安全重试
+收敛前不得消费新 tick/kline 或确认新交易意图。
+
+同一策略运行的 runtime event 必须按 `(created_at, event_id)` 的唯一顺序处理。
+运行处于暂停、停止或尚未启动且没有串行消费者时，事件保持 `PENDING`，不得增加
+失败次数或阻塞其他运行；恢复后继续从该运行最早未应用事件收敛。暂停或停止前必须
+证明不存在待审批意图、活动委托、资金/持仓预留与 durable barrier，停止顺序必须
+保证最终策略回调先于最终 RuntimeState 快照，Broker 断开只能发生在快照之后。
+
+RuntimeState 更新必须使用数据库版本条件的原子 CAS。每次 Engine 快照应携带
+manager-owned attempt token；数据库提交成功但客户端结果未知时，只有权威记录中的
+token 匹配才能采纳该版本。若其他合法写入先赢得 CAS，Engine 必须保留本地 dirty
+状态、合并对方归属字段，并基于权威新版本继续保存，禁止覆盖事件 marker 或预留。
+
+终态委托回报不得覆盖部分成交事实。例如 `CANCELLED + executed_volume>0`
+必须继续等待并幂等应用对应 TRADE 回报，恢复真实 T 批次和退出计划；
+不得仅根据委托终态清空 pending 并将已成交仓位当作零。
+
+委托终态与成交回报分属独立消息。`FILLED`，或携带累计成交量的
+`CANCELLED / REJECTED / EXPIRED`，若其报告量领先于该 intent 已收敛的真实 TRADE，
+TradeIntent、T 批次、策略状态和退出计划必须统一进入 `RECONCILE_REQUIRED`，保留
+pending intent 与期望累计量。每笔 TRADE 只按唯一执行 ID 累计；未追平时继续门控，
+追平后才根据委托终态和剩余活跃仓派生 `FILLED / CANCELLED`、`OPEN / EXIT_PARTIAL /
+CLOSED`。委托回报本身不得被当作成交事件。
 
 ### 2.5 对账动作
 
@@ -601,7 +643,14 @@ Agent 离线时：
 
 ### 7.3 订单回报延迟
 
-当订单处于 `SUBMITTED / ACCEPTED / PARTIALLY_FILLED` 且超过超时阈值未收到完整回报：
+`command_ack` 只证明命令已投递或 Agent 已完成本地前置检查，不得把
+订单推进为已受理、部分成交或已成交。只有仍为 `QUEUED`、从未投递，
+且持久化链路能证明无 broker order id、无成交、无矛盾关联时，过期或
+Agent 明确的下单前拒绝才能终结为 `EXPIRED / REJECTED`。已进入
+`DELIVERED`却未收到 ACK、拒绝原因不能证明下单前失败，或出现任何
+券商副作用证据时，必须保留全部关联并进入 `RECONCILE_REQUIRED`。
+
+当订单处于 `SUBMITTED / ACCEPTED / PARTIAL_FILLED` 且超过超时阈值未收到完整回报：
 
 - 禁止同一 bucket、同一方向、同一网格层级重复发单。
 - 可以查询 broker 委托状态。

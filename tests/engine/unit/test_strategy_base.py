@@ -228,6 +228,18 @@ def test_runtime_state_patch_rejects_account_fields():
     RuntimeStatePatch(set={"available_cash": 1000})
 
 
+@pytest.mark.asyncio
+async def test_state_subscriber_queue_drop_balances_unfinished_tasks(strategy):
+  queue = strategy.subscribe_state(maxsize=1)
+  strategy.state.set("checkpoint", 1)
+  strategy.state.set("checkpoint", 2)
+
+  event = queue.get_nowait()
+  assert event.changes == {"checkpoint": 2}
+  queue.task_done()
+  await asyncio.wait_for(queue.join(), timeout=0.1)
+
+
 def test_get_statistics(strategy):
   stats = strategy.get_statistics()
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Iterable, Optional
 
 from quantx_domain.trading.exit_plan import (  # noqa: F401
@@ -73,6 +75,35 @@ class TTradeSizingResult:
   reason: str
 
 
+def _spread_tick_count(
+  *,
+  bid_price: float,
+  ask_price: float,
+  price_tick: float,
+) -> Optional[int]:
+  """Return spread ticks, or ``None`` when the order book is not trustworthy."""
+
+  try:
+    tick = Decimal(str(price_tick))
+    bid = Decimal(str(bid_price))
+    ask = Decimal(str(ask_price))
+    if (
+      not tick.is_finite()
+      or tick <= 0
+      or not bid.is_finite()
+      or not ask.is_finite()
+      or bid <= 0
+      or ask <= 0
+      or ask < bid
+    ):
+      return None
+    bid_tick = (bid / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    ask_tick = (ask / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+  except (InvalidOperation, TypeError, ValueError):
+    return None
+  return max(0, int(ask_tick - bid_tick))
+
+
 def calculate_target_trade_volume(
   *,
   entry_price: float,
@@ -131,7 +162,8 @@ def evaluate_intraday_t_signal(
 
   config = policy or SignalPolicy()
   ordered = sorted(
-    (item for item in samples if item.price > 0), key=lambda item: item.timestamp_ms
+    (item for item in samples if math.isfinite(item.price) and item.price > 0),
+    key=lambda item: item.timestamp_ms,
   )
   if len(ordered) < 3:
     return _empty_signal("INSUFFICIENT_TICKS", ordered)
@@ -163,12 +195,13 @@ def evaluate_intraday_t_signal(
   low = low_sample.price
   pullback_pct = (high - low) / high * 100.0 if high > 0 else 0.0
   rebound_pct = (latest.price - low) / low * 100.0 if low > 0 else 0.0
-  tick_size = max(config.price_tick, 1e-8)
-  spread_ticks = (
-    max(0.0, latest.ask_price - latest.bid_price) / tick_size
-    if latest.ask_price > 0 and latest.bid_price > 0
-    else 0.0
+  spread_tick_count = _spread_tick_count(
+    bid_price=latest.bid_price,
+    ask_price=latest.ask_price,
+    price_tick=config.price_tick,
   )
+  order_book_available = spread_tick_count is not None
+  spread_ticks = float(spread_tick_count or 0)
   vwap = (
     latest.cumulative_amount / latest.cumulative_volume
     if latest.cumulative_amount > 0 and latest.cumulative_volume > 0
@@ -176,12 +209,12 @@ def evaluate_intraday_t_signal(
   )
   spread_pct = (
     max(0.0, latest.ask_price - latest.bid_price) / latest.price * 100.0
-    if latest.price > 0 and latest.ask_price > 0 and latest.bid_price > 0
+    if order_book_available and latest.price > 0
     else 0.0
   )
   vwap_premium_pct = (latest.price / vwap - 1.0) * 100.0 if vwap > 0 else 0.0
 
-  if latest.ask_price <= 0 or latest.bid_price <= 0:
+  if not order_book_available:
     pullback_reason = "ORDER_BOOK_UNAVAILABLE"
   elif pullback_pct < config.pullback_threshold_pct:
     pullback_reason = "PULLBACK_TOO_SMALL"
@@ -214,13 +247,17 @@ def evaluate_intraday_t_signal(
       spread_pct=spread_pct,
     )
 
-  momentum = _evaluate_momentum_signal(
-    ordered,
-    policy=config,
-    vwap=vwap,
-    spread_ticks=spread_ticks,
-    spread_pct=spread_pct,
-    vwap_premium_pct=vwap_premium_pct,
+  momentum = (
+    _evaluate_momentum_signal(
+      ordered,
+      policy=config,
+      vwap=vwap,
+      spread_ticks=spread_ticks,
+      spread_pct=spread_pct,
+      vwap_premium_pct=vwap_premium_pct,
+    )
+    if order_book_available
+    else _empty_signal("ORDER_BOOK_UNAVAILABLE", ordered)
   )
   if momentum.triggered:
     return momentum

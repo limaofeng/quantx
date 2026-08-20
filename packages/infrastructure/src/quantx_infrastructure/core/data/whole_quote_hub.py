@@ -13,7 +13,13 @@ from enum import Enum
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from quantx_contracts import MarketBatchKind, MarketStreamBatch
+from quantx_contracts import (
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
+  MarketBatchKind,
+  MarketStreamBatch,
+  market_tick_source_time,
+  validate_market_stream_capture_time,
+)
 
 from quantx_infrastructure.config.settings import settings
 from quantx_infrastructure.core.data.market_stream_transport import (
@@ -74,7 +80,7 @@ class WholeQuoteHub:
     *,
     store: MarketStreamStore = market_stream_store,
     trading_time_service: TradingTimeService | None = None,
-    stale_after_seconds: float = 10.0,
+    stale_after_seconds: float = MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   ) -> None:
     self.store = store
     self.trading_time_service = trading_time_service or TradingTimeService()
@@ -369,24 +375,11 @@ class WholeQuoteHub:
     tick: dict[str, Any],
     captured_at: datetime | None,
   ) -> float:
-    raw_time = tick.get("time")
-    try:
-      value = float(raw_time)
-      if value > 0:
-        return value / 1000 if value > 10_000_000_000 else value
-    except (TypeError, ValueError):
-      pass
-    timetag = tick.get("timetag")
-    if isinstance(timetag, str):
-      for fmt in ("%Y%m%d %H:%M:%S.%f", "%Y%m%d %H:%M:%S"):
-        try:
-          parsed = datetime.strptime(timetag, fmt).replace(
-            tzinfo=ZoneInfo("Asia/Shanghai")
-          )
-          return parsed.timestamp()
-        except ValueError:
-          continue
-    return (captured_at or datetime.now(timezone.utc)).timestamp()
+    del captured_at
+    return market_tick_source_time(
+      tick,
+      reference_at=datetime.now(timezone.utc),
+    )
 
   async def _dispatch(self, data: dict[str, dict[str, Any]]) -> None:
     started = time.monotonic()
@@ -642,6 +635,19 @@ class WholeQuoteHub:
         )
       return
 
+    try:
+      self.last_batch_age_seconds = validate_market_stream_capture_time(
+        api_state.captured_at,
+        received_at=datetime.now(timezone.utc),
+        max_age_seconds=(
+          self.stale_after_seconds if trading_session else None
+        ),
+      )
+    except ValueError as exc:
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(reason=str(exc))
+      return
+
     if api_state.stream_id != self.stream_id:
       self._authority_ahead_since_monotonic = None
       self._set_status(WholeQuoteStatus.SYNCING)
@@ -835,7 +841,20 @@ class WholeQuoteHub:
     else:
       self._authority_ahead_since_monotonic = None
 
-    captured_age = self._captured_age_seconds(captured_at)
+    try:
+      captured_age = validate_market_stream_capture_time(
+        captured_at,
+        received_at=datetime.now(timezone.utc),
+        max_age_seconds=(
+          self.stale_after_seconds if trading_session else None
+        ),
+      )
+    except ValueError as exc:
+      self.authority_rejections += 1
+      self.last_batch_age_seconds = self._captured_age_seconds(captured_at)
+      self._set_status(WholeQuoteStatus.STALE)
+      await self._publish_watermark(reason=str(exc))
+      return False
     self.last_batch_age_seconds = captured_age
     processing_stale = (
       self.last_processing_age_ms / 1000 > self.stale_after_seconds

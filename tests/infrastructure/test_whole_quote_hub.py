@@ -562,7 +562,7 @@ async def test_hub_marks_active_session_stale_and_recovers_on_next_batch() -> No
 
 
 @pytest.mark.asyncio
-async def test_agent_clock_30_seconds_slow_with_valid_lease_stays_ready() -> None:
+async def test_active_session_rejects_30_second_old_incremental_capture() -> None:
   store = FakeStore()
   hub = WholeQuoteHub(
     store=store,
@@ -591,15 +591,15 @@ async def test_agent_clock_30_seconds_slow_with_valid_lease_stays_ready() -> Non
       )
       await hub._apply_payload(delta.to_bytes())
 
-      assert hub.status is WholeQuoteStatus.READY
+      assert hub.status is WholeQuoteStatus.STALE
 
     for _ in range(10):
       if len(prices) == 3:
         break
       await asyncio.sleep(0)
-    assert prices == [10.0, 10.2, 10.3]
+    assert prices == [10.0]
     assert hub.last_batch_age_seconds >= 25
-    assert hub.authority_rejections == 0
+    assert hub.authority_rejections == 2
   finally:
     await hub.unsubscribe(handle)
     await hub.stop()
@@ -688,7 +688,7 @@ async def test_ready_hub_dispatches_ordered_batches_while_api_is_ahead() -> None
 
 
 @pytest.mark.asyncio
-async def test_slow_agent_clock_does_not_reject_hydrated_snapshot() -> None:
+async def test_active_session_rejects_stale_hydrated_snapshot() -> None:
   store = FakeStore()
   stale_state, latest = store.snapshot
   store.snapshot = (
@@ -710,9 +710,67 @@ async def test_slow_agent_clock_does_not_reject_hydrated_snapshot() -> None:
 
   await hub.start()
   try:
+    assert hub.status is WholeQuoteStatus.STALE
+    assert hub.snapshot() == {}
+    assert hub.last_batch_age_seconds >= 15
+  finally:
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_closed_session_accepts_old_hydrated_snapshot() -> None:
+  store = FakeStore()
+  stale_state, latest = store.snapshot
+  store.snapshot = (
+    MarketStreamState(
+      status="READY",
+      stream_id=stale_state.stream_id,
+      sequence=stale_state.sequence,
+      captured_at=datetime.now(timezone.utc) - timedelta(days=1),
+      updated_at=datetime.now(timezone.utc) - timedelta(days=1),
+      instrument_count=stale_state.instrument_count,
+    ),
+    latest,
+  )
+  hub = WholeQuoteHub(
+    store=store,
+    trading_time_service=AlwaysClosed(),
+    stale_after_seconds=10,
+  )
+
+  await hub.start()
+  try:
     assert hub.status is WholeQuoteStatus.READY
     assert hub.snapshot() == latest
-    assert hub.last_batch_age_seconds >= 15
+    assert hub.last_batch_age_seconds >= 23 * 60 * 60
+  finally:
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_closed_session_still_rejects_future_capture_time() -> None:
+  store = FakeStore()
+  future_state, latest = store.snapshot
+  store.snapshot = (
+    MarketStreamState(
+      status="READY",
+      stream_id=future_state.stream_id,
+      sequence=future_state.sequence,
+      captured_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+      updated_at=datetime.now(timezone.utc),
+      instrument_count=future_state.instrument_count,
+    ),
+    latest,
+  )
+  hub = WholeQuoteHub(
+    store=store,
+    trading_time_service=AlwaysClosed(),
+  )
+
+  await hub.start()
+  try:
+    assert hub.status is WholeQuoteStatus.STALE
+    assert hub.snapshot() == {}
   finally:
     await hub.stop()
 
@@ -721,14 +779,14 @@ async def test_slow_agent_clock_does_not_reject_hydrated_snapshot() -> None:
 async def test_hydration_freshness_uses_local_monotonic_receipt_time() -> None:
   store = FakeStore()
   state, latest = store.snapshot
-  slow_clock = datetime.now(timezone.utc) - timedelta(seconds=30)
+  slow_update_clock = datetime.now(timezone.utc) - timedelta(seconds=30)
   store.snapshot = (
     MarketStreamState(
       status="READY",
       stream_id=state.stream_id,
       sequence=state.sequence,
-      captured_at=slow_clock,
-      updated_at=slow_clock,
+      captured_at=datetime.now(timezone.utc),
+      updated_at=slow_update_clock,
       instrument_count=state.instrument_count,
     ),
     latest,

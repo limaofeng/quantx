@@ -31,11 +31,7 @@ async def get_async_db():
 
 
 async def close_database():
-  """关闭数据库连接"""
-  global engine, AsyncSessionLocal
-
+  """关闭当前数据库连接池，保留可重启的 Engine 与会话工厂。"""
   if engine is not None:
     await engine.dispose()
     logger.info("关系型数据库连接已关闭")
-    engine = None
-    AsyncSessionLocal = None

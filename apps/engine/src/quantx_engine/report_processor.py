@@ -43,6 +43,7 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.enums import AccountType
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.account_repository import AccountRepository
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.operational_alert_service import (
@@ -54,9 +55,17 @@ from quantx_infrastructure.services.runtime_subscription_bridge import (
   TRADING_EVENT_CHANNEL,
 )
 from quantx_infrastructure.services.trade_service import TradeService
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 logger = logging.getLogger(__name__)
+
+# Production owns a single Engine report consumer, while this lock also makes
+# direct/test drain calls obey the same invariant. Recovery of PROCESSING rows
+# is performed only while this lock is held, so it cannot reclaim an event that
+# this process is still applying.
+_runtime_event_drain_lock = asyncio.Lock()
 
 _ORDER_STATUS_NAMES = {
   48: "PENDING",
@@ -410,6 +419,11 @@ async def _process_delta_report(
     await _upsert_account(dict(account))
   for error in payload.get("order_errors") or []:
     reason = str(error.get("error_msg") or error.get("reason") or "")
+    terminal_status = (
+      "EXPIRED"
+      if str(error.get("reason") or "").strip().lower() == "command_expired"
+      else "REJECTED"
+    )
     client_order_id = str(error.get("client_order_id") or "")
     broker_order_id = str(
       error.get("order_id") or error.get("broker_order_id") or ""
@@ -417,13 +431,13 @@ async def _process_delta_report(
     if client_order_id:
       await _update_pending(
         client_order_id,
-        status="REJECTED",
+        status=terminal_status,
         reason=reason,
       )
     else:
       await _update_pending_by_broker(
         broker_order_id,
-        status="REJECTED",
+        status=terminal_status,
         reason=reason,
       )
     await AutoExitPlanService().apply_order_event_for_report(
@@ -792,6 +806,8 @@ async def _process(report: AgentReportInbox) -> None:
 def _normalized_order_status(value: Any) -> str:
   if hasattr(value, "name"):
     value = value.name
+  if str(value or "").strip().upper() == "RECONCILE_REQUIRED":
+    return "RECONCILE_REQUIRED"
   try:
     return _ORDER_STATUS_NAMES[int(value)]
   except (TypeError, ValueError, KeyError):
@@ -813,6 +829,102 @@ def _parse_report_time(value: Any) -> datetime:
   return time_utils.now()
 
 
+_FILL_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
+
+
+async def _terminal_order_fill_projection(
+  db,
+  correlation: StrategyOrderCorrelation,
+  intent: TradeIntentRecord,
+  *,
+  current_order: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
+  """Return the terminal order target and execution-report progress for one intent."""
+  pending = await db.get(PendingTradeOrder, correlation.client_order_id)
+  report = dict(current_order or {})
+  status = _normalized_order_status(
+    report.get("effective_order_status")
+    or report.get("status")
+    or report.get("order_status")
+  )
+  if current_order is None:
+    candidates = (
+      await db.execute(
+        select(StrategyRuntimeEvent)
+        .where(
+          StrategyRuntimeEvent.client_order_id == correlation.client_order_id,
+          StrategyRuntimeEvent.event_type == "ORDER",
+        )
+        .order_by(
+          StrategyRuntimeEvent.created_at.desc(),
+          StrategyRuntimeEvent.event_id.desc(),
+        )
+        .limit(20)
+      )
+    ).scalars()
+    report = {}
+    status = ""
+    for candidate in candidates:
+      candidate_report = dict(dict(candidate.payload or {}).get("report") or {})
+      candidate_status = _normalized_order_status(
+        candidate_report.get("effective_order_status")
+        or candidate_report.get("status")
+        or candidate_report.get("order_status")
+      )
+      if candidate_status in _FILL_TERMINAL_ORDER_STATUSES:
+        report = candidate_report
+        status = candidate_status
+        break
+    if not status and pending is not None:
+      pending_status = _normalized_order_status(pending.status)
+      if pending_status in _FILL_TERMINAL_ORDER_STATUSES:
+        status = pending_status
+
+  if status not in _FILL_TERMINAL_ORDER_STATUSES:
+    return None
+  received = max(0, int(intent.executed_volume or 0))
+  reported = max(
+    0,
+    int(report.get("traded_volume") or report.get("filled_volume") or 0),
+  )
+  requested = max(
+    0,
+    int(
+      (pending.volume if pending is not None else None)
+      or intent.target_volume
+      or report.get("order_volume")
+      or report.get("volume")
+      or 0
+    ),
+  )
+  expected = (
+    reported
+    if reported > 0
+    else (max(1, requested) if status == "FILLED" else 0)
+  )
+  role = str(correlation.t_trade_role or "").strip().upper()
+  reason = str(
+    report.get("effective_status_reason") or report.get("status_msg") or ""
+  )
+  return {
+    "status": status,
+    "expected": expected,
+    "received": received,
+    "role": role,
+    "reason": reason,
+  }
+
+
+def _fill_projection_note(projection: dict[str, Any]) -> str:
+  role = str(projection.get("role") or "ORDER")
+  return (
+    f"AWAITING_{role}_EXECUTION_REPORT: "
+    f"terminal={projection.get('status')}, "
+    f"expected={int(projection.get('expected') or 0)}, "
+    f"received={int(projection.get('received') or 0)}"
+  )
+
+
 def _report_items(report: AgentReportInbox) -> list[tuple[str, dict[str, Any]]]:
   payload = dict(report.payload or {})
   if report.message_type == "order_report":
@@ -822,11 +934,16 @@ def _report_items(report: AgentReportInbox) -> list[tuple[str, dict[str, Any]]]:
   if report.message_type == "delta_report":
     rejected_orders = []
     for error in payload.get("order_errors") or []:
+      terminal_status = (
+        "EXPIRED"
+        if str(error.get("reason") or "").strip().lower() == "command_expired"
+        else "REJECTED"
+      )
       rejected_orders.append(
         {
           **dict(error),
-          "order_status": "REJECTED",
-          "status": "REJECTED",
+          "order_status": terminal_status,
+          "status": terminal_status,
           "status_msg": error.get("error_msg") or error.get("reason") or "",
           "broker_order_id": error.get("broker_order_id")
           or error.get("order_id"),
@@ -884,6 +1001,8 @@ def _runtime_business_key(
 def _event_payload(
   correlation: StrategyOrderCorrelation,
   item: dict[str, Any],
+  *,
+  business_key: str,
 ) -> dict[str, Any]:
   metadata = {
     **dict(correlation.request_metadata or {}),
@@ -892,13 +1011,89 @@ def _event_payload(
     "intent_id": correlation.intent_id,
     "t_batch_id": correlation.batch_id or "",
     "bucket": correlation.bucket,
-    "t_trade_role": correlation.t_trade_role or "",
+    "t_trade_role": str(correlation.t_trade_role or "").lower(),
     "risk_decision_id": correlation.risk_decision_id or "",
     "trace_id": correlation.trace_id,
     "substitution_plan": correlation.substitution_plan,
     "execution_mode": correlation.execution_mode,
+    "runtime_event_key": business_key,
   }
   return {"report": item, "metadata": metadata}
+
+
+async def _project_trade_intent_event(
+  db,
+  correlation: StrategyOrderCorrelation,
+  *,
+  event_type: str,
+  item: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+  """Project one uniquely staged broker event into durable intent audit truth."""
+  intent = await db.get(TradeIntentRecord, correlation.intent_id, with_for_update=True)
+  if intent is None:
+    return None
+  intent.order_id = correlation.strategy_order_id or intent.order_id
+  if correlation.risk_decision_id:
+    intent.risk_decision_id = correlation.risk_decision_id
+  if event_type == "ORDER":
+    order_status = _normalized_order_status(
+      item.get("effective_order_status")
+      or item.get("status")
+      or item.get("order_status")
+    )
+    projection = await _terminal_order_fill_projection(
+      db,
+      correlation,
+      intent,
+      current_order=item,
+    )
+    if projection and int(projection["expected"]) > int(projection["received"]):
+      intent.status = "RECONCILE_REQUIRED"
+      intent.notes = _fill_projection_note(projection)
+    else:
+      intent.status = order_status
+      intent.notes = str(
+        item.get("effective_status_reason") or item.get("status_msg") or ""
+      ) or None
+    return projection
+
+  fill_volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
+  fill_price = float(item.get("traded_price") or item.get("price") or 0.0)
+  if fill_volume <= 0 or fill_price <= 0:
+    return None
+  previous_volume = max(0, int(intent.executed_volume or 0))
+  previous_price = float(intent.executed_price or 0.0)
+  total_volume = previous_volume + fill_volume
+  intent.executed_volume = total_volume
+  intent.executed_price = (
+    (previous_price * previous_volume + fill_price * fill_volume) / total_volume
+  )
+  intent.executed_time = to_naive_utc(
+    _parse_report_time(item.get("traded_time") or item.get("trade_time"))
+  )
+  pending = await db.get(PendingTradeOrder, correlation.client_order_id)
+  requested_volume = max(
+    0,
+    int(
+      (pending.volume if pending is not None else None)
+      or intent.target_volume
+      or 0
+    ),
+  )
+  projection = await _terminal_order_fill_projection(db, correlation, intent)
+  if projection and int(projection["expected"]) > int(projection["received"]):
+    intent.status = "RECONCILE_REQUIRED"
+    intent.notes = _fill_projection_note(projection)
+  elif projection:
+    intent.status = str(projection["status"])
+    intent.notes = str(projection.get("reason") or "") or None
+  elif str(intent.status or "").upper() not in {"REJECTED", "CANCELLED", "EXPIRED"}:
+    intent.status = (
+      "FILLED"
+      if requested_volume > 0 and total_volume >= requested_volume
+      else "PARTIAL_FILLED"
+    )
+  return projection
 
 
 async def _project_t_trade_event(
@@ -907,7 +1102,18 @@ async def _project_t_trade_event(
   event_type: str,
   role: str,
   item: dict[str, Any],
+  terminal_projection: Optional[dict[str, Any]] = None,
 ) -> None:
+  previous_projection = (
+    batch.status,
+    batch.exception_reason,
+    batch.entry_broker_order_id,
+    batch.exit_broker_order_id,
+    int(batch.entry_filled_volume or 0),
+    float(batch.entry_avg_price or 0.0),
+    int(batch.exit_filled_volume or 0),
+    float(batch.exit_avg_price or 0.0),
+  )
   broker_order_id = str(
     item.get("order_id") or item.get("broker_order_id") or ""
   )
@@ -919,6 +1125,21 @@ async def _project_t_trade_event(
     )
     if role == "ENTRY":
       batch.entry_broker_order_id = broker_order_id or batch.entry_broker_order_id
+    elif role == "EXIT":
+      batch.exit_broker_order_id = broker_order_id or batch.exit_broker_order_id
+    if status == "RECONCILE_REQUIRED":
+      batch.status = "RECONCILE_REQUIRED"
+      batch.exception_reason = str(
+        item.get("effective_status_reason")
+        or item.get("status_msg")
+        or "RECONCILE_REQUIRED"
+      )
+    elif terminal_projection and int(terminal_projection["expected"]) > int(
+      terminal_projection["received"]
+    ):
+      batch.status = "RECONCILE_REQUIRED"
+      batch.exception_reason = _fill_projection_note(terminal_projection)
+    elif role == "ENTRY":
       batch.status = {
         "PENDING": "ENTRY_QUEUED",
         "SUBMITTED": "ENTRY_SUBMITTED",
@@ -928,8 +1149,10 @@ async def _project_t_trade_event(
         "CANCELLED": "ENTRY_REJECTED",
         "EXPIRED": "ENTRY_EXPIRED",
       }.get(status, batch.status)
+      batch.exception_reason = str(
+        item.get("effective_status_reason") or item.get("status_msg") or ""
+      ) or None
     elif role == "EXIT":
-      batch.exit_broker_order_id = broker_order_id or batch.exit_broker_order_id
       batch.status = {
         "PENDING": "EXIT_TRIGGERED",
         "SUBMITTED": "EXIT_SUBMITTED",
@@ -945,6 +1168,8 @@ async def _project_t_trade_event(
           or item.get("status_msg")
           or status
         )
+      else:
+        batch.exception_reason = None
   else:
     volume = max(0, int(item.get("traded_volume") or item.get("volume") or 0))
     price = float(item.get("traded_price") or item.get("price") or 0.0)
@@ -956,9 +1181,16 @@ async def _project_t_trade_event(
           float(batch.entry_avg_price or 0.0) * previous + price * volume
         ) / total
       batch.entry_filled_volume = total
-      batch.status = (
-        "OPEN" if total >= int(batch.target_volume or total) else "ENTRY_PARTIAL"
-      )
+      if terminal_projection and int(terminal_projection["expected"]) > int(
+        terminal_projection["received"]
+      ):
+        batch.status = "RECONCILE_REQUIRED"
+        batch.exception_reason = _fill_projection_note(terminal_projection)
+      else:
+        batch.status = (
+          "OPEN" if total >= int(batch.target_volume or total) else "ENTRY_PARTIAL"
+        )
+        batch.exception_reason = None
     elif role == "EXIT":
       previous = int(batch.exit_filled_volume or 0)
       total = previous + volume
@@ -967,69 +1199,314 @@ async def _project_t_trade_event(
           float(batch.exit_avg_price or 0.0) * previous + price * volume
         ) / total
       batch.exit_filled_volume = total
-      batch.status = (
-        "CLOSED"
-        if total >= int(batch.entry_filled_volume or total)
-        else "EXIT_PARTIAL"
-      )
+      if terminal_projection and int(terminal_projection["expected"]) > int(
+        terminal_projection["received"]
+      ):
+        batch.status = "RECONCILE_REQUIRED"
+        batch.exception_reason = _fill_projection_note(terminal_projection)
+      else:
+        batch.status = (
+          "CLOSED"
+          if total >= int(batch.entry_filled_volume or total)
+          else "EXIT_PARTIAL"
+        )
+        batch.exception_reason = None
+  current_projection = (
+    batch.status,
+    batch.exception_reason,
+    batch.entry_broker_order_id,
+    batch.exit_broker_order_id,
+    int(batch.entry_filled_volume or 0),
+    float(batch.entry_avg_price or 0.0),
+    int(batch.exit_filled_volume or 0),
+    float(batch.exit_avg_price or 0.0),
+  )
+  if current_projection != previous_projection:
     batch.version = int(batch.version or 0) + 1
 
 
-async def _stage_runtime_events(report: AgentReportInbox) -> None:
-  async with AsyncSessionLocal() as db:
-    for event_type, item in _report_items(report):
-      broker_order_id = str(
-        item.get("order_id") or item.get("broker_order_id") or ""
+async def _reconcile_t_trade_batch_after_runtime_event(
+  db,
+  event: StrategyRuntimeEvent,
+) -> None:
+  """Restore the staged batch projection after a transient apply failure."""
+  payload = dict(event.payload or {})
+  metadata = dict(payload.get("metadata") or {})
+  report = dict(payload.get("report") or {})
+  batch_id = str(metadata.get("t_batch_id") or metadata.get("batch_id") or "")
+  role = str(metadata.get("t_trade_role") or "").strip().upper()
+  if not batch_id or role not in {"ENTRY", "EXIT"}:
+    return
+  batch = await db.get(TTradeBatch, batch_id)
+  if batch is None:
+    return
+  correlation = (
+    await db.execute(
+      select(StrategyOrderCorrelation).where(
+        StrategyOrderCorrelation.client_order_id == event.client_order_id
       )
-      client_order_id = str(
-        item.get("client_order_id")
-        or report.client_order_id
-        or report.payload.get("client_order_id")
-        or ""
-      )
-      correlation = await _correlation_for_report(
+    )
+  ).scalar_one_or_none()
+  terminal_projection = None
+  if correlation is not None:
+    intent = await db.get(TradeIntentRecord, correlation.intent_id)
+    if intent is not None:
+      terminal_projection = await _terminal_order_fill_projection(
         db,
-        client_order_id=client_order_id,
-        broker_order_id=broker_order_id,
+        correlation,
+        intent,
+        current_order=report if event.event_type == "ORDER" else None,
       )
-      if correlation is None:
-        continue
-      if broker_order_id and not correlation.broker_order_id:
-        correlation.broker_order_id = broker_order_id
-      business_key = _runtime_business_key(event_type, correlation, item)
-      existing = (
-        await db.execute(
-          select(StrategyRuntimeEvent).where(
-            StrategyRuntimeEvent.business_key == business_key
-          )
+
+  previous = (batch.status, batch.exception_reason)
+  order_status = (
+    _normalized_order_status(
+      report.get("effective_order_status")
+      or report.get("status")
+      or report.get("order_status")
+    )
+    if event.event_type == "ORDER"
+    else ""
+  )
+  if order_status == "RECONCILE_REQUIRED":
+    batch.status = "RECONCILE_REQUIRED"
+    batch.exception_reason = str(
+      report.get("effective_status_reason")
+      or report.get("status_msg")
+      or metadata.get("approval_reason")
+      or "RECONCILE_REQUIRED"
+    )
+  elif terminal_projection and int(terminal_projection["expected"]) > int(
+    terminal_projection["received"]
+  ):
+    batch.status = "RECONCILE_REQUIRED"
+    batch.exception_reason = _fill_projection_note(terminal_projection)
+  elif role == "ENTRY":
+    filled = max(0, int(batch.entry_filled_volume or 0))
+    target = max(0, int(batch.target_volume or 0))
+    if filled > 0:
+      batch.status = "OPEN" if filled >= (target or filled) else "ENTRY_PARTIAL"
+      batch.exception_reason = None
+    elif event.event_type == "ORDER":
+      batch.status = {
+        "PENDING": "ENTRY_QUEUED",
+        "SUBMITTED": "ENTRY_SUBMITTED",
+        "PARTIAL_FILLED": "ENTRY_PARTIAL",
+        "FILLED": "OPEN",
+        "REJECTED": "ENTRY_REJECTED",
+        "CANCELLED": "ENTRY_REJECTED",
+        "EXPIRED": "ENTRY_EXPIRED",
+      }.get(order_status, batch.status)
+      batch.exception_reason = (
+        str(report.get("effective_status_reason") or report.get("status_msg") or "")
+        or None
+      )
+  else:
+    exited = max(0, int(batch.exit_filled_volume or 0))
+    entered = max(0, int(batch.entry_filled_volume or 0))
+    if exited > 0:
+      batch.status = "CLOSED" if exited >= (entered or exited) else "EXIT_PARTIAL"
+      batch.exception_reason = None
+    elif event.event_type == "ORDER":
+      batch.status = {
+        "PENDING": "EXIT_TRIGGERED",
+        "SUBMITTED": "EXIT_SUBMITTED",
+        "PARTIAL_FILLED": "EXIT_PARTIAL",
+        "FILLED": "CLOSED",
+        "REJECTED": "EXIT_REJECTED",
+        "CANCELLED": "EXIT_REJECTED",
+        "EXPIRED": "EXIT_REJECTED",
+      }.get(order_status, batch.status)
+      batch.exception_reason = (
+        str(report.get("effective_status_reason") or report.get("status_msg") or "")
+        or None
+      )
+  if previous != (batch.status, batch.exception_reason):
+    batch.version = int(batch.version or 0) + 1
+
+
+async def _insert_runtime_event(db, event: StrategyRuntimeEvent) -> None:
+  async with db.begin_nested():
+    db.add(event)
+    await db.flush()
+
+
+async def _stage_runtime_events(report: AgentReportInbox) -> None:
+  from .strategy_manager import strategy_manager
+
+  executor = strategy_manager.executor
+  arm_barrier = getattr(
+    executor,
+    "arm_durable_event_barrier",
+    None,
+  )
+  refresh_barrier = getattr(
+    executor,
+    "refresh_durable_event_barrier",
+    None,
+  )
+  barrier_checked_runs: set[str] = set()
+  affected_run_ids: set[str] = set()
+  payload = dict(report.payload or {})
+  try:
+    db = AsyncSessionLocal()
+    try:
+      # Establish the outer transaction before any SAVEPOINT. Without this,
+      # SQLite can release the first nested savepoint as a standalone commit,
+      # breaking the event+projection atomicity exercised by local tests.
+      await db.begin()
+      for event_type, raw_item in _report_items(report):
+        item = dict(raw_item)
+        broker_order_id = str(
+          item.get("order_id") or item.get("broker_order_id") or ""
         )
-      ).scalar_one_or_none()
-      if existing is not None:
-        continue
-      db.add(
-        StrategyRuntimeEvent(
+        client_order_id = str(
+          item.get("client_order_id")
+          or report.client_order_id
+          or payload.get("client_order_id")
+          or ""
+        )
+        correlation = await _correlation_for_report(
+          db,
+          client_order_id=client_order_id,
+          broker_order_id=broker_order_id,
+        )
+        if correlation is None:
+          continue
+        run_id = correlation.strategy_run_id
+        affected_run_ids.add(run_id)
+        if arm_barrier is not None and run_id not in barrier_checked_runs:
+          earliest_backlog_key = (
+            await db.execute(
+              select(StrategyRuntimeEvent.business_key)
+              .where(
+                StrategyRuntimeEvent.strategy_run_id == run_id,
+                StrategyRuntimeEvent.application_status != "APPLIED",
+              )
+              .order_by(
+                StrategyRuntimeEvent.created_at,
+                StrategyRuntimeEvent.event_id,
+              )
+              .limit(1)
+            )
+          ).scalar_one_or_none()
+          if earliest_backlog_key:
+            arm_barrier(run_id, earliest_backlog_key)
+          barrier_checked_runs.add(run_id)
+
+        if event_type == "ORDER":
+          proposed_status = _normalized_order_status(
+            item.get("effective_order_status")
+            or item.get("status")
+            or item.get("order_status")
+          )
+          if proposed_status != "RECONCILE_REQUIRED":
+            pending = await db.get(
+              PendingTradeOrder,
+              correlation.client_order_id,
+              with_for_update=True,
+            )
+            if pending is not None:
+              source_sequence = max(
+                0,
+                int(
+                  item.get("source_sequence")
+                  or payload.get("source_sequence")
+                  or payload.get("sequence")
+                  or 0
+                ),
+              )
+              stored_sequence = max(0, int(pending.last_source_sequence or 0))
+              if (
+                source_sequence
+                and stored_sequence
+                and source_sequence < stored_sequence
+              ) or not can_transition_order_status(
+                pending.status,
+                proposed_status,
+              ):
+                continue
+          item["effective_order_status"] = proposed_status
+
+        if broker_order_id and not correlation.broker_order_id:
+          correlation.broker_order_id = broker_order_id
+        business_key = _runtime_business_key(event_type, correlation, item)
+        existing = (
+          await db.execute(
+            select(StrategyRuntimeEvent).where(
+              StrategyRuntimeEvent.business_key == business_key
+            )
+          )
+        ).scalar_one_or_none()
+        if existing is not None:
+          if existing.application_status != "APPLIED" and arm_barrier is not None:
+            arm_barrier(existing.strategy_run_id, existing.business_key)
+          continue
+        runtime_event = StrategyRuntimeEvent(
           event_id=str(uuid.uuid4()),
           business_key=business_key,
-          strategy_run_id=correlation.strategy_run_id,
+          strategy_run_id=run_id,
           client_order_id=correlation.client_order_id,
           broker_order_id=broker_order_id or None,
           event_type=event_type,
-          payload=_event_payload(correlation, item),
+          payload=_event_payload(
+            correlation,
+            item,
+            business_key=business_key,
+          ),
           application_status="PENDING",
           application_attempts=0,
           created_at=utcnow(),
         )
-      )
-      if correlation.batch_id:
-        batch = await db.get(TTradeBatch, correlation.batch_id)
-        if batch is not None:
-          await _project_t_trade_event(
-            batch,
-            event_type=event_type,
-            role=str(correlation.t_trade_role or "").upper(),
-            item=item,
+        if arm_barrier is not None:
+          arm_barrier(run_id, business_key)
+        try:
+          await _insert_runtime_event(db, runtime_event)
+        except IntegrityError:
+          # Another producer won the durable business-key race. Its event and
+          # projections are authoritative; do not apply this report twice.
+          if arm_barrier is not None:
+            arm_barrier(run_id, business_key)
+          continue
+        terminal_projection = await _project_trade_intent_event(
+          db,
+          correlation,
+          event_type=event_type,
+          item=item,
+        )
+        if correlation.batch_id:
+          batch = await db.get(TTradeBatch, correlation.batch_id)
+          if batch is not None:
+            await _project_t_trade_event(
+              batch,
+              event_type=event_type,
+              role=str(correlation.t_trade_role or "").upper(),
+              item=item,
+              terminal_projection=terminal_projection,
+            )
+      await db.commit()
+    except Exception:
+      await db.rollback()
+      raise
+    finally:
+      await db.close()
+  except Exception as exc:
+    if refresh_barrier is not None:
+      for run_id in affected_run_ids:
+        try:
+          await refresh_barrier(run_id)
+        except Exception as refresh_exc:
+          logger.error(
+            "Failed to reconcile durable barrier after staging rollback: "
+            "run_id=%s error=%s",
+            run_id,
+            refresh_exc,
           )
-    await db.commit()
+    raise RetryableReportError(str(exc)) from exc
+
+  if refresh_barrier is not None:
+    for run_id in affected_run_ids:
+      await refresh_barrier(run_id)
 
 
 async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
@@ -1037,7 +1514,10 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
 
   payload = dict(event.payload or {})
   report = dict(payload.get("report") or {})
-  metadata = dict(payload.get("metadata") or {})
+  metadata = {
+    **dict(payload.get("metadata") or {}),
+    "runtime_event_key": event.business_key,
+  }
   order_id = str(metadata.get("strategy_order_id") or "")
   side = str(report.get("side") or report.get("order_type") or "").upper()
   order_type = OrderType.SELL if side in {"SELL", "24", "ORDER_SELL"} else OrderType.BUY
@@ -1061,12 +1541,19 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
       metadata=metadata,
     )
     status_name = _normalized_order_status(
-      report.get("status") or report.get("order_status")
+      report.get("effective_order_status")
+      or report.get("status")
+      or report.get("order_status")
+    )
+    order_status: OrderStatus | str = (
+      status_name
+      if status_name == "RECONCILE_REQUIRED"
+      else OrderStatus[status_name]
     )
     order = OrderResponse(
       order_id=order_id,
       request=request,
-      status=OrderStatus[status_name],
+      status=order_status,
       submit_time=_parse_report_time(
         report.get("order_time") or report.get("submit_time")
       ),
@@ -1117,49 +1604,148 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
 
 
 async def _drain_runtime_events() -> None:
+  async with _runtime_event_drain_lock:
+    # The previous drain may have applied/checkpointed an event and then failed
+    # to open the compensating session that returns it to PENDING. Reclaim such
+    # rows on every active/idle pass rather than only after an Engine restart.
+    await _recover_stuck_runtime_events(
+      application_error="recovered before Engine runtime-event drain"
+    )
+    await _drain_runtime_events_locked()
+
+
+async def _drain_runtime_events_locked() -> None:
+  from .strategy_executor import RuntimeConsumerUnavailable
+  from .strategy_manager import strategy_manager
+
+  blocked_run_ids: set[str] = set()
+  first_retry_error: Optional[RetryableReportError] = None
   while True:
     async with AsyncSessionLocal() as db:
+      earlier_event = aliased(StrategyRuntimeEvent)
+      unapplied_earlier_event = (
+        select(earlier_event.event_id)
+        .where(
+          earlier_event.strategy_run_id == StrategyRuntimeEvent.strategy_run_id,
+          earlier_event.application_status != "APPLIED",
+          or_(
+            earlier_event.created_at < StrategyRuntimeEvent.created_at,
+            and_(
+              earlier_event.created_at == StrategyRuntimeEvent.created_at,
+              earlier_event.event_id < StrategyRuntimeEvent.event_id,
+            ),
+          ),
+        )
+        .exists()
+      )
+      statement = select(StrategyRuntimeEvent).where(
+        StrategyRuntimeEvent.application_status == "PENDING",
+        ~unapplied_earlier_event,
+      )
+      if blocked_run_ids:
+        statement = statement.where(
+          StrategyRuntimeEvent.strategy_run_id.not_in(blocked_run_ids)
+        )
       event = (
         await db.execute(
-          select(StrategyRuntimeEvent)
-          .where(StrategyRuntimeEvent.application_status == "PENDING")
-          .order_by(StrategyRuntimeEvent.created_at)
+          statement.order_by(
+            StrategyRuntimeEvent.created_at,
+            StrategyRuntimeEvent.event_id,
+          )
           .limit(1)
           .with_for_update(skip_locked=True)
         )
       ).scalar_one_or_none()
       if event is None:
+        if first_retry_error is not None:
+          raise first_retry_error
         return
+      require_consumer = getattr(
+        strategy_manager.executor,
+        "require_durable_event_consumer",
+        None,
+      )
+      if require_consumer is not None:
+        try:
+          require_consumer(event.strategy_run_id)
+        except RuntimeConsumerUnavailable:
+          blocked_run_ids.add(event.strategy_run_id)
+          continue
+      prior_attempts = int(event.application_attempts or 0)
+      prior_error = event.application_error
       event.application_status = "PROCESSING"
-      event.application_attempts = int(event.application_attempts or 0) + 1
+      event.application_attempts = prior_attempts + 1
       await db.commit()
       event_id = event.event_id
+      event_run_id = event.strategy_run_id
     try:
       async with AsyncSessionLocal() as db:
         event = await db.get(StrategyRuntimeEvent, event_id)
         if event is None:
           continue
+        arm_barrier = getattr(
+          strategy_manager.executor,
+          "arm_durable_event_barrier",
+          None,
+        )
+        if arm_barrier is not None:
+          arm_barrier(event.strategy_run_id, event.business_key)
         await _apply_runtime_event(event)
+        await _reconcile_t_trade_batch_after_runtime_event(db, event)
         event.application_status = "APPLIED"
         event.applied_at = utcnow()
         event.application_error = None
         await db.commit()
+        advance_barrier = getattr(
+          strategy_manager.executor,
+          "advance_durable_event_barrier",
+          None,
+        )
+        if advance_barrier is not None:
+          await advance_barrier(
+            event.strategy_run_id,
+            event.business_key,
+          )
+    except RuntimeConsumerUnavailable:
+      # Pause/stop/startup gaps are expected availability states, not failed
+      # applications. Leave the event untouched for resume and keep draining
+      # other runs without violating this run's event order.
+      async with AsyncSessionLocal() as db:
+        event = await db.get(StrategyRuntimeEvent, event_id)
+        if event is not None:
+          event.application_status = "PENDING"
+          event.application_attempts = prior_attempts
+          event.application_error = prior_error
+          await db.commit()
+      blocked_run_ids.add(event_run_id)
+      continue
     except Exception as exc:
       async with AsyncSessionLocal() as db:
         event = await db.get(StrategyRuntimeEvent, event_id)
         if event is not None:
           event.application_status = "PENDING"
           event.application_error = str(exc)[:2000]
-          if event.batch_id:
-            batch = await db.get(TTradeBatch, event.batch_id)
+          event_metadata = dict(
+            dict(event.payload or {}).get("metadata") or {}
+          )
+          batch_id = str(
+            event_metadata.get("t_batch_id")
+            or event_metadata.get("batch_id")
+            or ""
+          )
+          if batch_id:
+            batch = await db.get(TTradeBatch, batch_id)
             if batch is not None and batch.status != "CLOSED":
               batch.status = "RECONCILE_REQUIRED"
-              batch.exception_status = "RECONCILE_REQUIRED"
               batch.exception_reason = (
                 f"策略运行时事件应用失败：{str(exc)[:1000]}"
               )
           await db.commit()
-      raise RetryableReportError(str(exc)) from exc
+      blocked_run_ids.add(event_run_id)
+      if first_retry_error is None:
+        first_retry_error = RetryableReportError(str(exc))
+        first_retry_error.__cause__ = exc
+      continue
 
 
 def _broker_order_ids(report: AgentReportInbox) -> list[int]:
@@ -1229,14 +1815,17 @@ async def _recover_stuck_reports() -> None:
     await db.commit()
 
 
-async def _recover_stuck_runtime_events() -> None:
+async def _recover_stuck_runtime_events(
+  *,
+  application_error: str = "recovered after Engine restart",
+) -> None:
   async with AsyncSessionLocal() as db:
     await db.execute(
       update(StrategyRuntimeEvent)
       .where(StrategyRuntimeEvent.application_status == "PROCESSING")
       .values(
         application_status="PENDING",
-        application_error="recovered after Engine restart",
+        application_error=application_error,
       )
     )
     await db.commit()
@@ -1408,6 +1997,18 @@ async def _wait_for_work(
     return None
 
 
+async def _refresh_runtime_event_barriers() -> None:
+  from .strategy_manager import strategy_manager
+
+  refresh = getattr(
+    strategy_manager.executor,
+    "refresh_armed_durable_event_barriers",
+    None,
+  )
+  if refresh is not None:
+    await refresh()
+
+
 async def run_report_consumer(stopped: asyncio.Event) -> None:
   await _recover_stuck_reports()
   await _recover_stuck_runtime_events()
@@ -1417,8 +2018,13 @@ async def run_report_consumer(stopped: asyncio.Event) -> None:
       message_id = await _claim()
       if message_id is None:
         try:
+          await _refresh_runtime_event_barriers()
           await _drain_runtime_events()
-        except RetryableReportError:
+        except Exception as exc:
+          logger.debug(
+            "Durable runtime barrier refresh/drain deferred: %s",
+            exc,
+          )
           pass
         subscription = await _wait_for_work(stopped, subscription)
         continue

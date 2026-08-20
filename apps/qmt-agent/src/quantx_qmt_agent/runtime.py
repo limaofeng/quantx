@@ -27,6 +27,7 @@ import websockets
 from pydantic import ValidationError
 from quantx_contracts import (
   MARKET_STREAM_MARKETS,
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   MARKET_STREAM_SUBPROTOCOL,
   MAX_MARKET_STREAM_FRAME_BYTES,
   AgentEnvelope,
@@ -38,6 +39,7 @@ from quantx_contracts import (
   MarketStreamBatch,
   MarketStreamControl,
   TradeCommandPayload,
+  market_tick_source_time,
 )
 
 from .broker import (
@@ -49,6 +51,7 @@ from .credentials import DeviceConfiguration, state_directory
 from .emergency import EmergencyStopStore
 from .journal import LocalJournal
 from .whole_market_capture import (
+  MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES,
   CapturedMarketEvent,
   WholeMarketCapture,
 )
@@ -74,10 +77,16 @@ XTTRADING_RECONNECT_TIMEOUT_SECONDS = 30
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
-MARKET_STREAM_ACK_TIMEOUT_SECONDS = 10
+MARKET_STREAM_ACK_TIMEOUT_SECONDS = MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS
 MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS = 10
-MARKET_STREAM_READY_INGRESS_CALLBACKS = 8
 MARKET_STREAM_READY_INGRESS_BYTES = 64 * 1024 * 1024
+# Every retained callback is charged at least this many estimated bytes.  Set
+# the structural ceiling from the same budget so it cannot reject a valid burst
+# before the 64 MiB retained-memory authority does.
+MARKET_STREAM_READY_INGRESS_CALLBACKS = (
+  MARKET_STREAM_READY_INGRESS_BYTES
+  // MIN_CAPTURED_MARKET_EVENT_ESTIMATED_BYTES
+)
 # The callback path deliberately avoids JSON serialization.  Charge every tick
 # a conservative retained-memory estimate; the outbound cap below uses exact
 # encoded bytes.
@@ -87,8 +96,18 @@ MARKET_STREAM_OUTBOUND_BYTES = 64 * 1024 * 1024
 MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES = 2
 MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS = 5.0
 MARKET_STREAM_MICROBATCH_SECONDS = 0.010
-MARKET_STREAM_MICROBATCH_INSTRUMENTS = 512
-MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES = 512 * 1024
+# A native whole-quote callback normally contains the entire Shanghai/Shenzhen
+# universe.  Splitting that callback into fixed 512-instrument fragments can
+# create more structural batches than both bounded queues can absorb under ACK
+# backpressure.  Size one microbatch against the actual 64 MiB wire contract
+# instead, using the same conservative retained-byte estimate as the callback
+# ingress.  The encoder remains the final fail-closed authority when a
+# pathological payload is larger than the wire limit.
+MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
+MARKET_STREAM_MICROBATCH_INSTRUMENTS = (
+  MARKET_STREAM_MICROBATCH_ESTIMATED_BYTES
+  // MARKET_STREAM_READY_ESTIMATED_TICK_BYTES
+)
 MARKET_STREAM_STABLE_READY_SECONDS = 30.0
 MARKET_STREAM_NATIVE_HEALTH_CHECK_SECONDS = 5.0
 MARKET_STREAM_NATIVE_SILENCE_SECONDS = 10.0
@@ -198,6 +217,10 @@ class _BoundedMarketBatchBuffer:
         self._reserved_bytes - len(encoded.payload),
       )
       self._capacity_changed.notify_all()
+    self._queue.task_done()
+
+  async def join(self) -> None:
+    await self._queue.join()
 
   @property
   def depth(self) -> int:
@@ -1195,8 +1218,11 @@ class AgentRuntime:
           return
         logger.error("QMT whole-market native subscription reset: %s", reset_reason)
         self._market_stream_status = "STALE"
-        self._whole_market_native_reset.set()
+        # Publish the exact continuity-loss reason before waking the stream
+        # task.  Otherwise the event can win the scheduling race and the
+        # stream supervisor can only report a generic native-reset error.
         self._whole_market_capture.force_resync(reset_reason)
+        self._whole_market_native_reset.set()
         self._whole_market_subscription_ready.clear()
         self._whole_market_subscription_active = False
         try:
@@ -1369,6 +1395,7 @@ class AgentRuntime:
     market_token_expires_at = self._access_token_expires_at
     self._market_stream_status = "SYNCING"
     self._market_stream_sequence = 0
+    self._market_stream_ready_since_monotonic = 0.0
     self._market_stream_outbound_depth = 0
     self._market_stream_outbound_bytes = 0
     await self._whole_market_subscription_ready.wait()
@@ -1410,72 +1437,143 @@ class AgentRuntime:
         snapshot_watermark,
         len(snapshot.payload),
       )
-      first_delta = self._whole_market_capture.activate_ready(
+      ready_barrier_delta = self._whole_market_capture.converged_event(
         after_sequence=snapshot_watermark,
         trading_date=stream_trading_date,
       )
-      self._require_native_whole_market_sync("ready-cut")
+      ready_barrier_watermark = ready_barrier_delta.capture_sequence
       ready_barrier = await self._prepare_encoded_market_batch(
         stream_id=start.stream_id,
         sequence=2,
         kind=MarketBatchKind.DELTA,
-        captured_at=(
-          first_delta.captured_at
-          if first_delta is not None
-          else datetime.now(timezone.utc)
-        ),
-        raw_data=first_delta.data if first_delta is not None else {},
+        captured_at=ready_barrier_delta.captured_at,
+        raw_data=ready_barrier_delta.data,
       )
       self._require_native_whole_market_sync("ready-barrier-encode")
-      self._require_native_whole_market_sync("ready-barrier-send")
-      await self._send_encoded_market_batch_and_wait_ack(socket, ready_barrier)
+      self._whole_market_capture.raise_if_invalidated()
+
+      # Keep the capture in latest-state convergence while sequence 2 waits
+      # for its ACK.  A slow downstream cannot force us to retain every native
+      # callback before the stream is READY; the post-ACK atomic cut below
+      # turns all updates after this watermark into one sequence 3 event.
+      barrier_tasks: list[asyncio.Task[Any]] = []
+      try:
+        native_reset = asyncio.create_task(
+          self._whole_market_native_reset.wait(),
+          name="whole-market-ready-barrier-native-reset",
+        )
+        capture_invalidated = asyncio.create_task(
+          self._whole_market_capture.wait_until_invalidated(),
+          name="whole-market-ready-barrier-capture-invalidated",
+        )
+        barrier_ack = asyncio.create_task(
+          self._send_encoded_market_batch_and_wait_ack(socket, ready_barrier),
+          name="whole-market-ready-barrier-ack",
+        )
+        barrier_tasks.extend(
+          [native_reset, capture_invalidated, barrier_ack]
+        )
+        done, _ = await asyncio.wait(
+          {native_reset, capture_invalidated, barrier_ack},
+          return_when=asyncio.FIRST_COMPLETED,
+        )
+        if capture_invalidated in done:
+          self._whole_market_capture.raise_if_invalidated()
+          raise RuntimeError(
+            "whole-market capture invalidated without a recorded reason"
+          )
+        if native_reset in done and self._whole_market_native_reset.is_set():
+          self._whole_market_capture.raise_if_invalidated()
+          raise RuntimeError(
+            "native whole-market subscription reset without a recorded reason"
+          )
+        await barrier_ack
+      finally:
+        for task in barrier_tasks:
+          if not task.done():
+            task.cancel()
+        if barrier_tasks:
+          await asyncio.gather(*barrier_tasks, return_exceptions=True)
+
       self._require_native_whole_market_sync("ready-barrier-ack")
-      self._market_stream_status = "READY"
-      self._market_stream_ready_since_monotonic = time.monotonic()
-      logger.info(
-        "QMT whole-market READY barrier acknowledged: "
-        "stream_id=%s sequence=2 instruments=%s",
-        start.stream_id,
-        ready_barrier.batch.instrument_count,
+      self._whole_market_capture.raise_if_invalidated()
+      ready_confirmation_event = self._whole_market_capture.activate_ready(
+        after_sequence=ready_barrier_watermark,
+        trading_date=stream_trading_date,
       )
+      self._require_native_whole_market_sync("ready-cut")
+      self._whole_market_capture.raise_if_invalidated()
+      ready_confirmation = await self._prepare_encoded_market_batch(
+        stream_id=start.stream_id,
+        sequence=3,
+        kind=MarketBatchKind.DELTA,
+        captured_at=ready_confirmation_event.captured_at,
+        raw_data=ready_confirmation_event.data,
+      )
+      self._require_native_whole_market_sync("ready-confirmation-encode")
+      self._whole_market_capture.raise_if_invalidated()
+
       outbound = _BoundedMarketBatchBuffer(
         max_batches=MARKET_STREAM_OUTBOUND_BATCHES,
         max_bytes=MARKET_STREAM_OUTBOUND_BYTES,
       )
-      producer = asyncio.create_task(
-        self._whole_market_batch_producer(
-          outbound,
-          stream_id=start.stream_id,
-          starting_sequence=2,
-          trading_date=stream_trading_date,
-          first_event=None,
-        ),
-        name="whole-market-batch-producer",
+      # Sequence 3 is mandatory, even when no instrument changed while the
+      # sequence-2 ACK was in flight.  It proves to the API that the Agent has
+      # received that ACK and atomically switched to ordered READY capture.
+      # Sending it through the normal bounded transport lets sequence 4+
+      # callbacks apply the same two-unacknowledged-batch backpressure rather
+      # than reopening a special unbounded ACK window.
+      await outbound.put(ready_confirmation)
+      self._market_stream_outbound_depth = outbound.depth
+      self._market_stream_outbound_bytes = outbound.bytes
+      logger.info(
+        "QMT whole-market ordered capture activated; awaiting readiness ACK: "
+        "stream_id=%s barrier_sequence=2 confirmation_sequence=3 "
+        "barrier_instruments=%s watermark=%s "
+        "confirmation_instruments=%s",
+        start.stream_id,
+        ready_barrier.batch.instrument_count,
+        ready_barrier_watermark,
+        ready_confirmation.batch.instrument_count,
       )
-      transport = asyncio.create_task(
-        self._transmit_market_batches(
-          socket,
-          outbound,
-          stream_id=start.stream_id,
-        ),
-        name="whole-market-batch-transport",
-      )
-      renewal = asyncio.create_task(
-        self._close_before_token_expiry(
-          socket,
-          expires_at=market_token_expires_at,
-        ),
-        name="whole-market-token-renewal",
-      )
-      native_reset = asyncio.create_task(
-        self._whole_market_native_reset.wait(),
-        name="whole-market-native-reset",
-      )
-      capture_invalidated = asyncio.create_task(
-        self._whole_market_capture.wait_until_invalidated(),
-        name="whole-market-capture-invalidated",
-      )
+      pipeline_tasks: list[asyncio.Task[Any]] = []
       try:
+        producer = asyncio.create_task(
+          self._whole_market_batch_producer(
+            outbound,
+            stream_id=start.stream_id,
+            starting_sequence=3,
+            trading_date=stream_trading_date,
+            first_event=None,
+          ),
+          name="whole-market-batch-producer",
+        )
+        transport = asyncio.create_task(
+          self._transmit_market_batches(
+            socket,
+            outbound,
+            stream_id=start.stream_id,
+          ),
+          name="whole-market-batch-transport",
+        )
+        renewal = asyncio.create_task(
+          self._close_before_token_expiry(
+            socket,
+            expires_at=market_token_expires_at,
+          ),
+          name="whole-market-token-renewal",
+        )
+        native_reset = asyncio.create_task(
+          self._whole_market_native_reset.wait(),
+          name="whole-market-native-reset",
+        )
+        capture_invalidated = asyncio.create_task(
+          self._whole_market_capture.wait_until_invalidated(),
+          name="whole-market-capture-invalidated",
+        )
+        pipeline_tasks.extend(
+          [producer, transport, renewal, native_reset, capture_invalidated]
+        )
         done, _ = await asyncio.wait(
           {
             producer,
@@ -1486,63 +1584,59 @@ class AgentRuntime:
           },
           return_when=asyncio.FIRST_COMPLETED,
         )
-        if native_reset in done and self._whole_market_native_reset.is_set():
-          raise RuntimeError("native whole-market subscription was reset")
         if capture_invalidated in done:
-          raise RuntimeError("whole-market READY capture was invalidated")
-        completed = next(iter(done))
-        await completed
-        raise RuntimeError("whole-market pipeline stopped unexpectedly")
+          self._whole_market_capture.raise_if_invalidated()
+          raise RuntimeError(
+            "whole-market capture invalidated without a recorded reason"
+          )
+        if native_reset in done and self._whole_market_native_reset.is_set():
+          self._whole_market_capture.raise_if_invalidated()
+          raise RuntimeError(
+            "native whole-market subscription reset without a recorded reason"
+          )
+        if producer in done:
+          await producer
+          raise RuntimeError("whole-market batch producer stopped unexpectedly")
+        if transport in done:
+          await transport
+          raise RuntimeError("whole-market batch transport stopped unexpectedly")
+        await renewal
+        raise RuntimeError("whole-market access token renewal closed the stream")
       finally:
-        for task in (
-          producer,
-          transport,
-          renewal,
-          native_reset,
-          capture_invalidated,
-        ):
+        for task in pipeline_tasks:
           if not task.done():
             task.cancel()
-        await asyncio.gather(
-          producer,
-          transport,
-          renewal,
-          native_reset,
-          capture_invalidated,
-          return_exceptions=True,
-        )
+        if pipeline_tasks:
+          await asyncio.gather(*pipeline_tasks, return_exceptions=True)
         self._whole_market_capture.begin_syncing()
+        self._market_stream_status = "SYNCING"
+        self._market_stream_ready_since_monotonic = 0.0
 
   def _require_native_whole_market_sync(self, stage: str) -> None:
     if (
       self._whole_market_native_reset.is_set()
       or not self._whole_market_subscription_ready.is_set()
     ):
+      capture = getattr(self, "_whole_market_capture", None)
+      reason = (
+        capture.invalidation_reason if capture is not None else ""
+      )
+      reason_suffix = f" reason={reason}" if reason else ""
       raise RuntimeError(
         "native whole-market subscription changed during sync: "
-        f"stage={stage}"
+        f"stage={stage}{reason_suffix}"
       )
 
   @staticmethod
-  def _whole_market_tick_source_time(tick: Any) -> float:
-    if not isinstance(tick, dict):
-      return 0.0
-    raw_time = tick.get("time")
+  def _whole_market_tick_source_time(
+    tick: Any,
+    *,
+    reference_at: datetime | None = None,
+  ) -> float:
     try:
-      value = float(raw_time)
-    except (TypeError, ValueError):
-      value = 0.0
-    if value > 0:
-      return value / 1000.0 if value > 10_000_000_000 else value
-    timetag = str(tick.get("timetag") or "").strip()
-    digits = "".join(character for character in timetag if character.isdigit())
-    if len(digits) >= 14:
-      try:
-        parsed = datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
-        return parsed.replace(tzinfo=SHANGHAI_ZONE).timestamp()
-      except ValueError:
-        return 0.0
-    return 0.0
+      return market_tick_source_time(tick, reference_at=reference_at)
+    except ValueError:
+      return 0.0
 
   @classmethod
   def _merge_whole_market_snapshot(
@@ -1735,11 +1829,29 @@ class AgentRuntime:
     raw_data: dict[str, Any],
   ) -> _EncodedMarketBatch:
     def prepare() -> _EncodedMarketBatch:
+      validation_reference_at = datetime.now(timezone.utc)
       data = self.broker.prepare_whole_market_data(raw_data)
       if not isinstance(data, dict) or (
         kind is MarketBatchKind.SNAPSHOT and not data
       ):
         raise RuntimeError("XTData returned an empty whole-market batch")
+      missing_source_time = [
+        code
+        for code, tick in data.items()
+        if self._whole_market_tick_source_time(
+          tick,
+          reference_at=validation_reference_at,
+        )
+        <= 0
+      ]
+      if missing_source_time:
+        samples = ",".join(sorted(missing_source_time)[:5])
+        raise RuntimeError(
+          "whole-market batch contains tick without a valid source time: "
+          f"stream_id={stream_id} sequence={sequence} "
+          f"kind={kind.value} invalid={len(missing_source_time)} "
+          f"samples={samples}"
+        )
       batch = MarketStreamBatch(
         stream_id=stream_id,
         sequence=sequence,
@@ -1748,7 +1860,15 @@ class AgentRuntime:
         instrument_count=len(data),
         data=data,
       )
-      return _EncodedMarketBatch(batch=batch, payload=batch.to_bytes())
+      try:
+        payload = batch.to_bytes()
+      except ValueError as exc:
+        raise RuntimeError(
+          "whole-market batch encoding failed: "
+          f"stream_id={stream_id} sequence={sequence} "
+          f"kind={kind.value} instruments={len(data)} error={exc}"
+        ) from exc
+      return _EncodedMarketBatch(batch=batch, payload=payload)
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -1793,13 +1913,22 @@ class AgentRuntime:
           values = dict(
             items[offset : offset + MARKET_STREAM_MICROBATCH_INSTRUMENTS]
           )
+          fragment_estimated_bytes = max(
+            1024,
+            (
+              event.estimated_bytes * len(values)
+              + max(1, len(items))
+              - 1
+            )
+            // max(1, len(items)),
+          )
           fragments.append(
             CapturedMarketEvent(
               capture_sequence=event.capture_sequence,
               captured_at=event.captured_at,
               captured_monotonic=event.captured_monotonic,
               data=values,
-              estimated_bytes=max(1024, len(values) * 512),
+              estimated_bytes=fragment_estimated_bytes,
             )
           )
       return fragments.popleft()
@@ -1912,19 +2041,36 @@ class AgentRuntime:
           return_when=asyncio.FIRST_COMPLETED,
         )
         if not done:
-          raise asyncio.TimeoutError("market stream ACK timed out")
+          expected_sequence = (
+            pending[0].encoded.batch.sequence if pending else 0
+          )
+          raise asyncio.TimeoutError(
+            "market stream ACK timed out: "
+            f"stream_id={stream_id} sequence={expected_sequence} "
+            f"unacknowledged={len(pending)} outbound={outbound.depth}"
+          )
 
         if receive_task in done:
           control = self._parse_market_control_frame(receive_task.result())
           if not pending:
-            raise RuntimeError("market stream ACK arrived with no pending batch")
+            raise RuntimeError(
+              "market stream ACK arrived with no pending batch: "
+              f"stream_id={control.stream_id} sequence={control.sequence}"
+            )
           expected = pending.popleft()
           if (
             control.type is not MarketControlType.ACK
             or control.stream_id != stream_id
             or control.sequence != expected.encoded.batch.sequence
           ):
-            raise RuntimeError("market stream ACK does not match sent batch")
+            raise RuntimeError(
+              "market stream ACK does not match sent batch: "
+              f"expected_stream_id={stream_id} "
+              f"expected_sequence={expected.encoded.batch.sequence} "
+              f"actual_type={control.type.value} "
+              f"actual_stream_id={control.stream_id} "
+              f"actual_sequence={control.sequence}"
+            )
           latency_ms = (
             time.monotonic() - expected.sent_monotonic
           ) * 1000
@@ -1933,6 +2079,17 @@ class AgentRuntime:
           self._market_stream_ack_latency_ms = latency_ms
           self._market_stream_outbound_depth = outbound.depth
           self._market_stream_outbound_bytes = outbound.bytes
+          if expected.encoded.batch.sequence == 3:
+            # Sequence 3 is the readiness commit: the API has durably applied
+            # the post-barrier convergence batch and acknowledged it.  The
+            # capture is already ordered at this point, but the Agent's public
+            # stream status must remain fail-closed until this ACK arrives.
+            self._market_stream_status = "READY"
+            self._market_stream_ready_since_monotonic = time.monotonic()
+            logger.info(
+              "QMT whole-market stream ready: stream_id=%s sequence=3",
+              stream_id,
+            )
           logger.debug(
             "QMT market batch ACK: sequence=%s bytes=%s latency_ms=%.3f "
             "unacknowledged=%s outbound=%s",
@@ -1989,17 +2146,31 @@ class AgentRuntime:
       socket.send(encoded.payload),
       timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
     )
-    raw_ack = await asyncio.wait_for(
-      socket.recv(),
-      timeout=MARKET_STREAM_ACK_TIMEOUT_SECONDS,
-    )
+    try:
+      raw_ack = await asyncio.wait_for(
+        socket.recv(),
+        timeout=MARKET_STREAM_ACK_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      raise asyncio.TimeoutError(
+        "market stream ACK timed out: "
+        f"stream_id={encoded.batch.stream_id} "
+        f"sequence={encoded.batch.sequence}"
+      ) from exc
     ack = self._parse_market_control_frame(raw_ack)
     if (
       ack.type is not MarketControlType.ACK
       or ack.stream_id != encoded.batch.stream_id
       or ack.sequence != encoded.batch.sequence
     ):
-      raise RuntimeError("market stream ACK does not match sent batch")
+      raise RuntimeError(
+        "market stream ACK does not match sent batch: "
+        f"expected_stream_id={encoded.batch.stream_id} "
+        f"expected_sequence={encoded.batch.sequence} "
+        f"actual_type={ack.type.value} "
+        f"actual_stream_id={ack.stream_id} "
+        f"actual_sequence={ack.sequence}"
+      )
     logger.debug(
       "QMT market batch ACK: sequence=%s bytes=%s latency_ms=%.3f",
       encoded.batch.sequence,

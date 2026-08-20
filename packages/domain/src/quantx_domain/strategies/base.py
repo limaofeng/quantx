@@ -770,6 +770,7 @@ class StrategyBase(ABC):
       except asyncio.QueueFull:
         try:
           queue.get_nowait()
+          queue.task_done()
           queue.put_nowait(event)
         except (asyncio.QueueEmpty, asyncio.QueueFull):
           pass

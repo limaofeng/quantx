@@ -22,6 +22,8 @@ from .agent import (
 )
 from .market_stream import (
   MARKET_STREAM_MARKETS,
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
+  MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS,
   MARKET_STREAM_SUBPROTOCOL,
   MARKET_STREAM_VERSION,
   MAX_MARKET_STREAM_FRAME_BYTES,
@@ -29,6 +31,8 @@ from .market_stream import (
   MarketControlType,
   MarketStreamBatch,
   MarketStreamControl,
+  market_tick_source_time,
+  validate_market_stream_capture_time,
 )
 from .order_lifecycle import (
   TERMINAL_ORDER_STATUSES,
@@ -61,6 +65,8 @@ __all__ = [
   "can_transition_order_status",
   "normalize_order_status",
   "MARKET_STREAM_MARKETS",
+  "MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS",
+  "MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS",
   "MARKET_STREAM_SUBPROTOCOL",
   "MARKET_STREAM_VERSION",
   "MAX_MARKET_STREAM_FRAME_BYTES",
@@ -68,4 +74,6 @@ __all__ = [
   "MarketControlType",
   "MarketStreamBatch",
   "MarketStreamControl",
+  "market_tick_source_time",
+  "validate_market_stream_capture_time",
 ]

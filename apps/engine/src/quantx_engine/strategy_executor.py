@@ -14,6 +14,7 @@ Engine 策略执行器 - 专注于策略运行的并发执行和资源管理
 """
 
 import asyncio
+import copy
 import inspect
 import logging
 import os
@@ -99,6 +100,13 @@ if TYPE_CHECKING:
   from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 
 
+_DURABLE_EVENT_APPLY_TIMEOUT_SECONDS = 10.0
+
+
+class RuntimeConsumerUnavailable(RuntimeError):
+  """A durable report cannot currently reach a live serial consumer."""
+
+
 class ExecutionStatus(Enum):
   """执行状态"""
 
@@ -147,6 +155,10 @@ class StrategyRuntime:
   event_task: Optional[asyncio.Task] = field(default=None, repr=False)
   #: 串行事件队列
   event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+  #: Durable report whose effects exist only in memory until checkpoint retry.
+  durable_event_barrier_key: Optional[str] = field(default=None, repr=False)
+  #: DB-backlog barriers are released only after every event row is APPLIED.
+  durable_startup_barrier: bool = field(default=False, repr=False)
   #: 仅 BACKTEST 使用的运行实例局部历史时钟。
   replay_clock: Optional[ReplayClock] = field(default=None, repr=False)
   #: 运行进程ID
@@ -575,6 +587,12 @@ class StrategyExecutor:
         strategy_snapshot = dict((restored_state or {}).get("custom") or {})
         strategy_snapshot.pop(EXIT_PLAN_BOOK_STATE_KEY, None)
         runtime.strategy.apply_state_snapshot(strategy_snapshot)
+      runtime.durable_event_barrier_key = (
+        await runtime.state_manager.get_earliest_unapplied_runtime_event_key()
+        if runtime.context.mode == StrategyRunMode.LIVE
+        else None
+      )
+      runtime.durable_startup_barrier = bool(runtime.durable_event_barrier_key)
       await self._restore_pending_manual_approvals(runtime)
       self._restore_t_trade_entry_reservations(runtime)
       if restored_state.get("positions"):
@@ -872,6 +890,121 @@ class StrategyExecutor:
     """Backward-compatible wrapper for tests and older callers."""
     self._seed_simulated_broker_positions(runtime)
 
+  @staticmethod
+  def _runtime_lifecycle_blocker(runtime: StrategyRuntime) -> Optional[str]:
+    """Return the first lifecycle item that must converge before pause/stop."""
+    if runtime.durable_event_barrier_key:
+      return f"持久化券商回报尚未收敛: {runtime.durable_event_barrier_key}"
+    if runtime.pending_approvals:
+      return f"仍有 {len(runtime.pending_approvals)} 个交易信号等待确认"
+    if runtime.t_trade_entry_reservations:
+      return "仍有做 T 入场委托等待券商回报"
+
+    state_manager = runtime.state_manager
+    if state_manager is not None:
+      cash_reservations = getattr(state_manager, "_reservations", {})
+      if isinstance(cash_reservations, dict) and cash_reservations:
+        return "仍有买入委托资金冻结等待券商回报"
+      position_reservations = getattr(state_manager, "_position_reservations", {})
+      if isinstance(position_reservations, dict) and position_reservations:
+        return "仍有卖出委托持仓冻结等待券商回报"
+
+    broker = runtime.broker
+    raw_orders = getattr(broker, "orders", {})
+    orders = raw_orders if isinstance(raw_orders, dict) else {}
+    active_statuses = {
+      OrderStatus.PENDING.value,
+      OrderStatus.SUBMITTED.value,
+      OrderStatus.PARTIAL_FILLED.value,
+    }
+    if any(
+      str(
+        getattr(
+          getattr(order, "status", ""),
+          "value",
+          getattr(order, "status", ""),
+        )
+      ).upper()
+      in active_statuses
+      for order in orders.values()
+    ):
+      return "仍有活动委托等待券商终态回报"
+
+    strategy = runtime.strategy
+    if strategy is not None:
+      try:
+        instrument_states = dict(
+          strategy.state.to_dict().get("instrument_states", {}) or {}
+        )
+      except (AttributeError, TypeError, ValueError):
+        instrument_states = {}
+      if any(
+        bool(
+          raw_state.get("pending_entry_intent_id")
+          or raw_state.get("pending_exit_intent_id")
+        )
+        for raw_state in instrument_states.values()
+        if isinstance(raw_state, dict)
+      ):
+        return "仍有策略交易意图等待券商回报"
+    return None
+
+  @staticmethod
+  def _accepts_non_durable_output(runtime: StrategyRuntime) -> bool:
+    return runtime.status == ExecutionStatus.RUNNING
+
+  async def _quiesce_runtime_tasks(self, runtime: StrategyRuntime) -> None:
+    """Stop producers, then let the serial consumer finish its current item."""
+    current_task = asyncio.current_task()
+    if (
+      runtime.task is not None
+      and runtime.task is not current_task
+      and not runtime.task.done()
+    ):
+      runtime.task.cancel()
+      try:
+        await asyncio.wait_for(runtime.task, timeout=5.0)
+      except asyncio.CancelledError:
+        pass
+      except asyncio.TimeoutError:
+        self.logger.warning("策略任务 %s 停止超时,强制跳过", runtime.run_id)
+
+    event_task = runtime.event_task
+    if event_task is not None and event_task is not current_task and not event_task.done():
+      # A consumer blocked on queue.get() observes STOPPING at its one-second
+      # timeout. A consumer already processing an item exits at the next loop
+      # boundary, after balancing task_done for the acquired item.
+      try:
+        await asyncio.wait_for(asyncio.shield(event_task), timeout=5.0)
+      except asyncio.TimeoutError:
+        self.logger.warning(
+          "策略事件任务 %s 未在停止窗口内收敛,执行取消", runtime.run_id
+        )
+        event_task.cancel()
+        await asyncio.gather(event_task, return_exceptions=True)
+
+    if event_task is current_task:
+      return
+    while True:
+      try:
+        event_type, data = runtime.event_queue.get_nowait()
+      except asyncio.QueueEmpty:
+        break
+      try:
+        completion = None
+        if event_type in {"durable_order", "durable_trade"}:
+          _payload, completion = data
+        elif event_type == "universe" and isinstance(data, dict):
+          completion = data.get("future")
+        if completion is not None and not completion.done():
+          completion.set_exception(
+            RuntimeConsumerUnavailable(
+              f"策略运行已停止消费事件: {runtime.run_id}"
+            )
+          )
+      finally:
+        runtime.event_queue.task_done()
+
   async def stop(self, run_id: str, *, force: bool = False) -> bool:
     """
     停止策略运行并清理资源
@@ -903,9 +1036,18 @@ class StrategyExecutor:
         "仍有自动退出计划保护未退出仓位，运行保持监控；请先进入 DRAINING",
       )
       return False
+    lifecycle_blocker = self._runtime_lifecycle_blocker(runtime)
+    if lifecycle_blocker and not force:
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"运行仍有未完成交易生命周期，拒绝停止: {lifecycle_blocker}",
+      )
+      return False
 
     try:
       runtime.status = ExecutionStatus.STOPPING
+      await self._quiesce_runtime_tasks(runtime)
 
       # 停止策略
       if runtime.strategy:
@@ -920,27 +1062,6 @@ class StrategyExecutor:
       # 停止策略状态同步
       if runtime.state_manager:
         await runtime.state_manager.stop_state_sync(runtime.strategy)
-
-      # 断开 Broker 和释放 DataAdapter 引用
-      if runtime.broker:
-        await runtime.broker.disconnect()
-      if runtime.data_adapter:
-        # 释放适配器引用而不是直接断开
-        adapter_manager.release_adapter_for_mode(runtime.context.mode.value.lower())
-
-      # 取消任务
-      if runtime.task and not runtime.task.done():
-        runtime.task.cancel()
-        try:
-          await asyncio.wait_for(runtime.task, timeout=5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-          self.logger.warning(f"策略任务 {run_id} 停止超时,强制跳过")
-      if runtime.event_task and not runtime.event_task.done():
-        runtime.event_task.cancel()
-        try:
-          await asyncio.wait_for(runtime.event_task, timeout=5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-          self.logger.warning(f"策略事件任务 {run_id} 停止超时,强制跳过")
 
       # 更新指标
       if runtime.metrics and runtime.broker:
@@ -969,6 +1090,13 @@ class StrategyExecutor:
         await runtime.performance_recorder.flush()
       if runtime.state_manager:
         await runtime.state_manager.stop()
+
+      # Final snapshot is authoritative; only then release the broker and data
+      # adapter so no callback can mutate state after the persisted stop point.
+      if runtime.broker:
+        await runtime.broker.disconnect()
+      if runtime.data_adapter:
+        adapter_manager.release_adapter_for_mode(runtime.context.mode.value.lower())
 
       if (
         runtime.context.parameters.get("limit_up_board_replay")
@@ -1016,6 +1144,14 @@ class StrategyExecutor:
         "仍有自动退出计划保护未退出仓位，不能暂停行情监控",
       )
       return False
+    lifecycle_blocker = self._runtime_lifecycle_blocker(runtime)
+    if lifecycle_blocker:
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"运行仍有未完成交易生命周期，拒绝暂停: {lifecycle_blocker}",
+      )
+      return False
 
     runtime.status = ExecutionStatus.PAUSED
     self.logger.info(f"策略运行已暂停: {run_id}")
@@ -1040,6 +1176,12 @@ class StrategyExecutor:
       return False
 
     runtime.status = ExecutionStatus.RUNNING
+    if runtime.event_task is None or runtime.event_task.done():
+      if runtime.state_manager is None:
+        runtime.status = ExecutionStatus.PAUSED
+        self.logger.warning("策略运行缺少状态管理器，无法恢复事件消费: %s", run_id)
+        return False
+      runtime.event_task = asyncio.create_task(self._process_event_queue(runtime))
     self.logger.info(f"策略运行已恢复: {run_id}")
     return True
 
@@ -1439,7 +1581,9 @@ class StrategyExecutor:
           await runtime.performance_recorder.flush()
         except Exception as e:
           self.logger.error(f"绩效采样刷新失败: {e}")
-      if strategy:
+      # Explicit stop owns the final lifecycle ordering: event consumer first,
+      # then one strategy stop, state snapshot, and broker disconnect.
+      if strategy and runtime.status != ExecutionStatus.STOPPING:
         try:
           await strategy.stop()
         except Exception as e:
@@ -2529,11 +2673,25 @@ class StrategyExecutor:
     plan_id = str(metadata.get("exit_plan_id", "") or "")
     if not plan_id:
       return
+    effective_status = event.status
+    plan = runtime.exit_plan_book.plans.get(plan_id)
+    normalized_status = str(event.status or "").upper()
+    if (
+      plan is not None
+      and normalized_status in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
+      and int(event.filled_volume or 0) > int(plan.pending_filled_volume or 0)
+    ):
+      # The terminal order projection can lead its execution report. Keep the
+      # plan pending until fills catch up; otherwise the next tick can emit a
+      # duplicate exit. A partial cancel's reported fill is the terminal target.
+      if normalized_status != "FILLED":
+        plan.pending_requested_volume = int(event.filled_volume or 0)
+      effective_status = "FILLED"
     event_time = event.timestamp or runtime.context.current_time or time_utils.now()
     runtime.exit_plan_book.apply_order_event(
       plan_id=plan_id,
       intent_id=str(metadata.get("intent_id", "") or ""),
-      status=event.status,
+      status=effective_status,
       order_id=str(event.order_id or ""),
       risk_action=str(metadata.get("risk_action", "") or ""),
       timestamp_ms=int(event_time.timestamp() * 1000),
@@ -3022,6 +3180,8 @@ class StrategyExecutor:
     self,
     runtime: StrategyRuntime,
     event: OrderStateEvent,
+    *,
+    raise_on_error: bool = False,
   ) -> None:
     """Notify strategy about an order event and consume any returned state patch."""
     if not runtime.strategy:
@@ -3038,11 +3198,15 @@ class StrategyExecutor:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略订单回调失败: {exc}")
+      if raise_on_error:
+        raise
 
   async def _notify_strategy_trade(
     self,
     runtime: StrategyRuntime,
     event: TradeExecutionEvent,
+    *,
+    raise_on_error: bool = False,
   ) -> None:
     """Notify strategy about a trade event and consume any returned state patch."""
     if not runtime.strategy:
@@ -3058,6 +3222,8 @@ class StrategyExecutor:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略成交回调失败: {exc}")
+      if raise_on_error:
+        raise
 
   def _update_broker_report_health(
     self,
@@ -3246,12 +3412,86 @@ class StrategyExecutor:
       return source.get(key, default)
     return getattr(source, key, default)
 
+  def _durable_runtime_event_key(self, data: Any) -> str:
+    request = self._get_value(data, "request")
+    metadata = dict(self._get_value(data, "metadata", {}) or {})
+    if not metadata:
+      metadata = dict(self._get_value(request, "metadata", {}) or {})
+    return str(metadata.get("runtime_event_key") or "").strip()
+
+  def _capture_durable_runtime_state(self, runtime: StrategyRuntime) -> dict[str, Any]:
+    """Capture all in-memory truth touched before a durable checkpoint."""
+    state_manager = runtime.state_manager
+    return {
+      "manager_state": copy.deepcopy(state_manager._state),
+      "manager_dirty": state_manager._dirty,
+      "manager_dirty_revision": state_manager._dirty_revision,
+      "manager_last_snapshot_attempt_revision": (
+        state_manager._last_snapshot_attempt_revision
+      ),
+      "manager_reservations": copy.deepcopy(state_manager._reservations),
+      "manager_position_reservations": copy.deepcopy(
+        state_manager._position_reservations
+      ),
+      "manager_bucket_ledger": copy.deepcopy(state_manager._bucket_ledger),
+      "t_trade_entry_reservations": copy.deepcopy(
+        runtime.t_trade_entry_reservations
+      ),
+      "strategy_state": (
+        copy.deepcopy(runtime.strategy.state.to_dict())
+        if runtime.strategy is not None
+        else None
+      ),
+      "exit_plan_book": copy.deepcopy(runtime.exit_plan_book.to_dict()),
+      "metrics": copy.deepcopy(runtime.metrics),
+      "last_order_report_at": runtime.last_order_report_at,
+      "last_trade_report_at": runtime.last_trade_report_at,
+      "last_broker_report_at": runtime.last_broker_report_at,
+    }
+
+  def _restore_durable_runtime_state(
+    self,
+    runtime: StrategyRuntime,
+    snapshot: dict[str, Any],
+  ) -> None:
+    """Rollback a durable callback that failed before installing its marker."""
+    state_manager = runtime.state_manager
+    state_manager._state = copy.deepcopy(snapshot["manager_state"])
+    state_manager._dirty = bool(snapshot["manager_dirty"])
+    state_manager._dirty_revision = int(snapshot["manager_dirty_revision"])
+    state_manager._last_snapshot_attempt_revision = int(
+      snapshot["manager_last_snapshot_attempt_revision"]
+    )
+    state_manager._reservations = copy.deepcopy(snapshot["manager_reservations"])
+    state_manager._position_reservations = copy.deepcopy(
+      snapshot["manager_position_reservations"]
+    )
+    state_manager._bucket_ledger = copy.deepcopy(snapshot["manager_bucket_ledger"])
+    runtime.t_trade_entry_reservations = copy.deepcopy(
+      snapshot["t_trade_entry_reservations"]
+    )
+    if runtime.strategy is not None and snapshot["strategy_state"] is not None:
+      runtime.strategy.state.replace(
+        copy.deepcopy(snapshot["strategy_state"]),
+        notify=False,
+      )
+    runtime.exit_plan_book = ExitPlanBook.from_dict(
+      copy.deepcopy(snapshot["exit_plan_book"]),
+      evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
+    )
+    runtime.metrics = copy.deepcopy(snapshot["metrics"])
+    runtime.last_order_report_at = snapshot["last_order_report_at"]
+    runtime.last_trade_report_at = snapshot["last_trade_report_at"]
+    runtime.last_broker_report_at = snapshot["last_broker_report_at"]
+
   async def _process_event_queue(self, runtime: StrategyRuntime) -> None:
     """串行处理事件队列"""
     while (
       runtime.status in [ExecutionStatus.RUNNING, ExecutionStatus.PAUSED]
       and not self._shutdown_event.is_set()
     ):
+      item_acquired = False
+      durable_rollback_snapshot = None
       try:
         completion = None
         # 获取下一个事件
@@ -3259,19 +3499,61 @@ class StrategyExecutor:
           event_type, data = await asyncio.wait_for(
             runtime.event_queue.get(), timeout=1.0
           )
+          item_acquired = True
         except asyncio.TimeoutError:
           continue
 
-        if event_type in {"durable_order", "durable_trade"}:
+        durable_event = event_type in {"durable_order", "durable_trade"}
+        durable_event_key = ""
+        if runtime.durable_event_barrier_key and not durable_event:
+          if event_type == "universe" and isinstance(data, dict):
+            future = data.get("future")
+            if future is not None and not future.done():
+              future.set_exception(
+                RuntimeError(
+                  "持久化回报尚未完成快照，暂不执行标的池变更"
+                )
+              )
+          continue
+        if durable_event:
           data, completion = data
           event_type = event_type.removeprefix("durable_")
+          durable_event_key = self._durable_runtime_event_key(data)
+          if not durable_event_key:
+            raise RuntimeError("持久化运行时事件缺少稳定业务键")
+          if runtime.state_manager is None:
+            raise RuntimeError("持久化运行时事件缺少状态管理器")
+          if (
+            runtime.durable_event_barrier_key
+            and durable_event_key != runtime.durable_event_barrier_key
+          ):
+            raise RuntimeError(
+              "持久化运行时事件屏障仍在等待: "
+              f"{runtime.durable_event_barrier_key}"
+            )
+          if runtime.state_manager.has_applied_runtime_event(durable_event_key):
+            checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
+              durable_event_key
+            )
+            if not checkpointed:
+              raise RuntimeError(
+                f"持久化运行时事件快照重试失败: {durable_event_key}"
+              )
+            if (
+              runtime.durable_event_barrier_key == durable_event_key
+              and not runtime.durable_startup_barrier
+            ):
+              runtime.durable_event_barrier_key = None
+            if completion is not None and not completion.done():
+              completion.set_result(True)
+            continue
+          durable_rollback_snapshot = self._capture_durable_runtime_state(runtime)
 
         if runtime.status == ExecutionStatus.PAUSED and event_type not in [
           "order",
           "trade",
           "universe",
         ]:
-          runtime.event_queue.task_done()
           continue
 
         # 根据事件类型分发
@@ -3285,12 +3567,13 @@ class StrategyExecutor:
             status = data.status
             request = getattr(data, "request", None)
             metadata = dict(getattr(request, "metadata", {}) or {})
-            await runtime.state_manager.update_trade_intent_status(
-              metadata.get("intent_id"),
-              getattr(status, "value", str(status)),
-              order_id=getattr(data, "order_id", None),
-              risk_decision_id=metadata.get("risk_decision_id"),
-            )
+            if not durable_event:
+              await runtime.state_manager.update_trade_intent_status(
+                metadata.get("intent_id"),
+                getattr(status, "value", str(status)),
+                order_id=getattr(data, "order_id", None),
+                risk_decision_id=metadata.get("risk_decision_id"),
+              )
             if status in [
               OrderStatus.CANCELLED,
               OrderStatus.REJECTED,
@@ -3303,8 +3586,23 @@ class StrategyExecutor:
                 else:
                   runtime.metrics.rejected_orders += 1
 
-          await self._notify_strategy_order(runtime, OrderStateEvent.from_raw(data))
-          if runtime.performance_recorder:
+          if durable_event and runtime.strategy is not None:
+            with runtime.strategy.state.silent(
+              persist=False,
+              notify=False,
+              flush_on_exit=False,
+            ):
+              await self._notify_strategy_order(
+                runtime,
+                OrderStateEvent.from_raw(data),
+                raise_on_error=True,
+              )
+          else:
+            await self._notify_strategy_order(
+              runtime,
+              OrderStateEvent.from_raw(data),
+            )
+          if runtime.performance_recorder and not durable_event:
             await runtime.performance_recorder.record(runtime, "order", data)
 
         elif event_type == "trade":
@@ -3322,18 +3620,34 @@ class StrategyExecutor:
                 trade_status = "PARTIAL_FILLED"
             except Exception:
               trade_status = "FILLED"
-            await runtime.state_manager.update_trade_intent_status(
-              metadata.get("intent_id"),
-              trade_status,
-              order_id=getattr(data, "order_id", None),
-              executed_price=float(getattr(data, "price", 0.0) or 0.0),
-              executed_volume=int(getattr(data, "volume", 0) or 0),
-              executed_time=getattr(data, "trade_time", None),
-              accumulate_executed_volume=True,
-            )
+            if not durable_event:
+              await runtime.state_manager.update_trade_intent_status(
+                metadata.get("intent_id"),
+                trade_status,
+                order_id=getattr(data, "order_id", None),
+                executed_price=float(getattr(data, "price", 0.0) or 0.0),
+                executed_volume=int(getattr(data, "volume", 0) or 0),
+                executed_time=getattr(data, "trade_time", None),
+                accumulate_executed_volume=True,
+              )
 
-          await self._notify_strategy_trade(runtime, TradeExecutionEvent.from_raw(data))
-          if runtime.performance_recorder:
+          if durable_event and runtime.strategy is not None:
+            with runtime.strategy.state.silent(
+              persist=False,
+              notify=False,
+              flush_on_exit=False,
+            ):
+              await self._notify_strategy_trade(
+                runtime,
+                TradeExecutionEvent.from_raw(data),
+                raise_on_error=True,
+              )
+          else:
+            await self._notify_strategy_trade(
+              runtime,
+              TradeExecutionEvent.from_raw(data),
+            )
+          if runtime.performance_recorder and not durable_event:
             await runtime.performance_recorder.record(runtime, "trade", data)
 
         elif event_type == "universe":
@@ -3358,16 +3672,54 @@ class StrategyExecutor:
               future.set_exception(exc)
             raise
 
+        if durable_event:
+          custom_updates = (
+            runtime.strategy.state.to_dict() if runtime.strategy is not None else {}
+          )
+          custom_updates[EXIT_PLAN_BOOK_STATE_KEY] = runtime.exit_plan_book.to_dict()
+          checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
+            durable_event_key,
+            custom_updates=custom_updates,
+          )
+          if not checkpointed:
+            raise RuntimeError(
+              f"持久化运行时事件原子快照失败: {durable_event_key}"
+            )
+          if (
+            runtime.durable_event_barrier_key == durable_event_key
+            and not runtime.durable_startup_barrier
+          ):
+            runtime.durable_event_barrier_key = None
         if completion is not None and not completion.done():
           completion.set_result(True)
-        runtime.event_queue.task_done()
 
       except Exception as e:
+        marker_installed = bool(
+          durable_rollback_snapshot is not None
+          and runtime.state_manager is not None
+          and runtime.state_manager.has_applied_runtime_event(durable_event_key)
+        )
+        if (
+          durable_rollback_snapshot is not None
+          and runtime.state_manager is not None
+          and not marker_installed
+        ):
+          self._restore_durable_runtime_state(
+            runtime,
+            durable_rollback_snapshot,
+          )
+        if durable_event_key and (
+          runtime.durable_event_barrier_key in {None, durable_event_key}
+        ):
+          runtime.durable_event_barrier_key = durable_event_key
         if completion is not None and not completion.done():
           completion.set_exception(e)
         self.logger.error(f"处理事件失败: {e}")
         if runtime.metrics:
           runtime.metrics.error_count += 1
+      finally:
+        if item_acquired:
+          runtime.event_queue.task_done()
 
   async def apply_durable_order_report(
     self,
@@ -3375,12 +3727,93 @@ class StrategyExecutor:
     order: Any,
   ) -> None:
     """Apply a persisted order report on the runtime's serial event queue."""
-    runtime = self.runs.get(run_id)
-    if runtime is None:
-      raise RuntimeError(f"策略运行尚未恢复: {run_id}")
+    runtime = self.require_durable_event_consumer(run_id)
     future = asyncio.get_running_loop().create_future()
     await runtime.event_queue.put(("durable_order", (order, future)))
-    await future
+    await self._await_durable_event_completion(runtime, future)
+
+  def require_durable_event_consumer(self, run_id: str) -> StrategyRuntime:
+    """Return a running durable consumer or raise a deferrable exception."""
+    runtime = self.runs.get(run_id)
+    if runtime is None:
+      raise RuntimeConsumerUnavailable(f"策略运行尚未恢复: {run_id}")
+    if runtime.status != ExecutionStatus.RUNNING:
+      raise RuntimeConsumerUnavailable(
+        f"策略运行当前不消费持久化回报: {run_id} ({runtime.status.value})"
+      )
+    if self._shutdown_event.is_set():
+      raise RuntimeConsumerUnavailable("策略执行器正在关闭，暂缓持久化回报")
+    if runtime.state_manager is None:
+      raise RuntimeConsumerUnavailable(f"策略运行缺少状态管理器: {run_id}")
+    if runtime.event_task is None or runtime.event_task.done():
+      raise RuntimeConsumerUnavailable(f"策略运行事件消费者未运行: {run_id}")
+    return runtime
+
+  async def _await_durable_event_completion(
+    self,
+    runtime: StrategyRuntime,
+    future: asyncio.Future,
+  ) -> None:
+    try:
+      await asyncio.wait_for(
+        asyncio.shield(future),
+        timeout=_DURABLE_EVENT_APPLY_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      future.cancel()
+      raise RuntimeConsumerUnavailable(
+        "策略运行事件消费者未在时限内确认持久化回报: "
+        f"{runtime.run_id}"
+      ) from exc
+
+  def arm_durable_event_barrier(
+    self,
+    run_id: str,
+    event_key: str,
+  ) -> None:
+    """Fail closed from durable staging until the whole DB backlog is APPLIED."""
+    runtime = self.runs.get(run_id)
+    if runtime is None or not event_key:
+      return
+    if runtime.durable_event_barrier_key is None:
+      runtime.durable_event_barrier_key = event_key
+    # A different key is an already armed earlier backlog item. Its APPLIED
+    # transition will query and advance to this event in authoritative order.
+    runtime.durable_startup_barrier = True
+
+  async def refresh_durable_event_barrier(self, run_id: str) -> Optional[str]:
+    """Reconcile a runtime barrier to the authoritative unapplied DB backlog."""
+    runtime = self.runs.get(run_id)
+    if runtime is None or runtime.state_manager is None:
+      return None
+    next_key = (
+      await runtime.state_manager.get_earliest_unapplied_runtime_event_key()
+    )
+    runtime.durable_event_barrier_key = next_key
+    runtime.durable_startup_barrier = bool(next_key)
+    return next_key
+
+  async def refresh_armed_durable_event_barriers(self) -> None:
+    """Reconcile fail-closed barriers after transient staging/database errors."""
+    for run_id, runtime in list(self.runs.items()):
+      if runtime.durable_event_barrier_key and runtime.state_manager is not None:
+        await self.refresh_durable_event_barrier(run_id)
+
+  async def advance_durable_event_barrier(
+    self,
+    run_id: str,
+    applied_event_key: str,
+  ) -> None:
+    """Advance a durable backlog barrier only after its DB event is APPLIED."""
+    runtime = self.runs.get(run_id)
+    if (
+      runtime is None
+      or not runtime.durable_startup_barrier
+      or runtime.durable_event_barrier_key != applied_event_key
+      or runtime.state_manager is None
+    ):
+      return
+    await self.refresh_durable_event_barrier(run_id)
 
   async def apply_durable_trade_report(
     self,
@@ -3388,12 +3821,10 @@ class StrategyExecutor:
     trade: Any,
   ) -> None:
     """Apply a persisted execution report on the runtime's serial event queue."""
-    runtime = self.runs.get(run_id)
-    if runtime is None:
-      raise RuntimeError(f"策略运行尚未恢复: {run_id}")
+    runtime = self.require_durable_event_consumer(run_id)
     future = asyncio.get_running_loop().create_future()
     await runtime.event_queue.put(("durable_trade", (trade, future)))
-    await future
+    await self._await_durable_event_completion(runtime, future)
 
   async def _process_tick(self, runtime: StrategyRuntime, tick) -> None:
     """处理Tick数据"""
@@ -3849,6 +4280,13 @@ class StrategyExecutor:
   ) -> None:
     if not output:
       return
+    if not self._accepts_non_durable_output(runtime):
+      self._runtime_log(
+        runtime,
+        "INFO",
+        f"运行状态 {runtime.status.value}，忽略尚未进入下单链路的策略输出",
+      )
+      return
     if output.runtime_state_patch:
       self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
     if output.exit_plan_commands:
@@ -3874,6 +4312,10 @@ class StrategyExecutor:
       for intent in intents:
         runtime.strategy.record_trade_intent(intent)
     self._record_strategy_output_trace(runtime, output, input_snapshot)
+    if not self._accepts_non_durable_output(runtime):
+      for intent in intents:
+        await self._reject_intent_during_runtime_transition(runtime, intent)
+      return
     for intent in intents:
       if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
         runtime.pending_approvals[intent.intent_id] = intent
@@ -3912,6 +4354,12 @@ class StrategyExecutor:
           "success": False,
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
+        }
+      if runtime.durable_event_barrier_key:
+        return {
+          "success": False,
+          "code": "DURABLE_RECONCILIATION_REQUIRED",
+          "message": "成交回报状态正在安全落盘，请稍后重试确认",
         }
 
       failure = self._approval_failure(runtime, intent)
@@ -3968,6 +4416,7 @@ class StrategyExecutor:
     for intent_id in runtime.strategy.pending_manual_intent_ids():
       intent = await runtime.state_manager.restore_manual_trade_intent(intent_id)
       if intent is None:
+        await self._converge_restored_manual_intent_status(runtime, intent_id)
         continue
       failure = self._approval_failure(runtime, intent)
       if failure and failure[0] == "APPROVAL_TTL_EXPIRED":
@@ -3978,6 +4427,7 @@ class StrategyExecutor:
           reason=failure[0],
           message=failure[1],
         )
+        self._checkpoint_restored_strategy_state(runtime)
         continue
       runtime.pending_approvals[intent.intent_id] = intent
       self._runtime_log(
@@ -3985,6 +4435,200 @@ class StrategyExecutor:
         "INFO",
         f"已恢复待人工确认交易信号: intent_id={intent.intent_id}",
       )
+
+  async def _converge_restored_manual_intent_status(
+    self,
+    runtime: StrategyRuntime,
+    intent_id: str,
+  ) -> None:
+    """Converge a stale strategy snapshot against durable intent truth.
+
+    A crash can persist the strategy's AWAITING_APPROVAL marker after the intent
+    row has already advanced. Only zero-fill terminal truth is replayed directly.
+    Ambiguous pre-order gaps and any recorded fill remain fail-closed until the
+    idempotent durable report inbox replays the broker lifecycle.
+    """
+
+    instrument_states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
+    matched_entry = next(
+      (
+        (str(code), dict(raw_state or {}))
+        for code, raw_state in instrument_states.items()
+        if str(dict(raw_state or {}).get("pending_entry_intent_id", "") or "")
+        == intent_id
+      ),
+      None,
+    )
+    if matched_entry is None:
+      return
+    instrument_code, _entry_state = matched_entry
+
+    snapshot_reader = getattr(
+      runtime.state_manager, "get_trade_intent_snapshot", None
+    )
+    if not callable(snapshot_reader):
+      return
+    durable = await snapshot_reader(intent_id)
+    if not isinstance(durable, dict):
+      return
+    durable_status = str(durable.get("status") or "").strip().upper()
+    if not durable_status or durable_status == "AWAITING_APPROVAL":
+      return
+    if durable_status == "PARTIALLY_FILLED":
+      durable_status = "PARTIAL_FILLED"
+
+    durable_code = str(durable.get("instrument_code") or "").strip().upper()
+    if durable_code and durable_code != instrument_code.upper():
+      self._runtime_log(
+        runtime,
+        "ERROR",
+        "待确认信号快照与数据库标的不一致，保持保守门控: "
+        f"intent_id={intent_id}, snapshot_code={instrument_code}, "
+        f"durable_code={durable_code}",
+      )
+      return
+
+    order_id = str(durable.get("order_id") or "").strip()
+    raw_metadata = durable.get("metadata")
+    metadata = {
+      **(dict(raw_metadata) if isinstance(raw_metadata, dict) else {}),
+      "t_trade_role": "entry",
+      "intent_id": intent_id,
+      "instrument_code": instrument_code,
+      "approval_reason": "RESTORED_DURABLE_INTENT_STATUS",
+    }
+    try:
+      executed_volume = max(0, int(durable.get("executed_volume") or 0))
+    except (TypeError, ValueError, OverflowError):
+      executed_volume = 0
+
+    if executed_volume > 0:
+      await self._mark_restored_intent_reconcile_required(
+        runtime,
+        intent_id=intent_id,
+        instrument_code=instrument_code,
+        order_id=order_id,
+        metadata=metadata,
+        reason=(
+          "DURABLE_FILL_AWAITS_IDEMPOTENT_INBOX_REPLAY: "
+          f"status={durable_status}, executed_volume={executed_volume}"
+        ),
+      )
+      return
+
+    if durable_status == "FILLED":
+      await self._mark_restored_intent_reconcile_required(
+        runtime,
+        intent_id=intent_id,
+        instrument_code=instrument_code,
+        order_id=order_id,
+        metadata=metadata,
+        reason="FILLED_INTENT_MISSING_DURABLE_EXECUTION_DETAILS",
+      )
+      return
+
+    active_statuses = {
+      "APPROVED": "PENDING",
+      "PENDING": "PENDING",
+      "ROUTED": "PENDING",
+      "SIZED": "PENDING",
+      "ORDER_RISK_ALLOWED": "PENDING",
+      "DELAYED": "PENDING",
+      "SUBMITTED": "SUBMITTED",
+      "ACCEPTED": "ACCEPTED",
+      "PARTIAL_FILLED": "PARTIAL_FILLED",
+    }
+    terminal_statuses = {
+      "REJECTED": "REJECTED",
+      "CANCELLED": "CANCELLED",
+      "CANCELED": "CANCELLED",
+      "EXPIRED": "EXPIRED",
+    }
+    callback_status = terminal_statuses.get(durable_status)
+    if callback_status is None and durable_status in active_statuses:
+      if order_id:
+        callback_status = active_statuses[durable_status]
+      else:
+        await self._mark_restored_intent_reconcile_required(
+          runtime,
+          intent_id=intent_id,
+          instrument_code=instrument_code,
+          order_id="",
+          metadata=metadata,
+          reason=f"{durable_status}_WITHOUT_DURABLE_ORDER_CORRELATION",
+        )
+        return
+    if callback_status is None:
+      await self._mark_restored_intent_reconcile_required(
+        runtime,
+        intent_id=intent_id,
+        instrument_code=instrument_code,
+        order_id=order_id,
+        metadata=metadata,
+        reason=f"UNKNOWN_DURABLE_INTENT_STATUS:{durable_status}",
+      )
+      return
+
+    await self._notify_strategy_order(
+      runtime,
+      OrderStateEvent(
+        order_id=order_id or None,
+        status=callback_status,
+        filled_volume=executed_volume,
+        metadata=metadata,
+      ),
+    )
+    self._checkpoint_restored_strategy_state(runtime)
+    self._runtime_log(
+      runtime,
+      "INFO",
+      "已按数据库真源收敛待确认信号快照: "
+      f"intent_id={intent_id}, durable_status={durable_status}, "
+      f"order_id={order_id or '-'}, "
+      f"callback_status={callback_status}",
+    )
+
+  async def _mark_restored_intent_reconcile_required(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    intent_id: str,
+    instrument_code: str,
+    order_id: str,
+    metadata: Dict[str, Any],
+    reason: str,
+  ) -> None:
+    """Keep the entry gate closed until durable broker reports are replayed."""
+
+    reconcile_metadata = {
+      **metadata,
+      "approval_reason": reason,
+    }
+    await self._notify_strategy_order(
+      runtime,
+      OrderStateEvent(
+        order_id=order_id or None,
+        status="RECONCILE_REQUIRED",
+        metadata=reconcile_metadata,
+      ),
+    )
+    self._checkpoint_restored_strategy_state(runtime)
+    self._runtime_log(
+      runtime,
+      "WARNING",
+      "待确认信号需要等待持久化券商回报收敛，保持禁止新单: "
+      f"intent_id={intent_id}, order_id={order_id or '-'}, reason={reason}",
+    )
+
+  @staticmethod
+  def _checkpoint_restored_strategy_state(runtime: StrategyRuntime) -> None:
+    """Mirror startup callback changes before state-sync subscription begins."""
+
+    if not runtime.strategy or not runtime.state_manager:
+      return
+    update_custom_state = getattr(runtime.state_manager, "update_custom_state", None)
+    if callable(update_custom_state):
+      update_custom_state(runtime.strategy.state.to_dict())
 
   def _restore_t_trade_entry_reservations(self, runtime: StrategyRuntime) -> None:
     """Rebuild approved-but-unfinished T entry exposure after a restart."""
@@ -4000,6 +4644,7 @@ class StrategyExecutor:
         "SUBMITTED",
         "ACCEPTED",
         "PARTIAL_FILLED",
+        "RECONCILE_REQUIRED",
       }:
         continue
       requested = int(state.get("requested_entry_volume", 0) or 0)
@@ -4185,6 +4830,19 @@ class StrategyExecutor:
     states = {}
     if runtime.strategy:
       states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
+    if any(
+      any(
+        str(item.get(f"{role}_order_status", "") or "").upper()
+        == "RECONCILE_REQUIRED"
+        and bool(item.get(f"pending_{role}_intent_id"))
+        for role in ("entry", "exit")
+      )
+      for item in (dict(raw_state or {}) for raw_state in states.values())
+    ):
+      return (
+        "T_TRADE_RECONCILIATION_REQUIRED",
+        "存在尚未由持久化券商回报收敛的做 T 委托，暂不允许确认新批次",
+      )
 
     active_batch_keys: set[str] = set()
     active_exposure = 0.0
@@ -4534,12 +5192,52 @@ class StrategyExecutor:
       raise ValueError("策略运行不存在或尚未启动")
     self._apply_runtime_state_patch(runtime, patch)
 
+  async def _reject_intent_during_runtime_transition(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    reservation_key: Optional[str] = None,
+  ) -> None:
+    """Converge an intent that lost the race with pause/stop before routing."""
+    if runtime.state_manager:
+      if reservation_key:
+        runtime.state_manager.release_order_resources(reservation_key)
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id,
+        "REJECTED",
+        metadata={
+          **dict(intent.metadata or {}),
+          "runtime_gate": runtime.status.value,
+        },
+        notes=f"RUNTIME_{runtime.status.value}",
+      )
+    runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
+    await self._notify_strategy_order(
+      runtime,
+      OrderStateEvent(
+        order_id=None,
+        status=OrderStatus.REJECTED.value,
+        error_message=f"策略运行已进入 {runtime.status.value}，未向券商提交委托",
+        metadata={
+          **dict(intent.metadata or {}),
+          "intent_id": intent.intent_id,
+          "instrument_code": intent.instrument_code,
+          "runtime_gate": runtime.status.value,
+        },
+      ),
+    )
+
   async def _process_trade_intent(
     self, runtime: StrategyRuntime, intent: TradeIntent
   ) -> None:
     """处理策略交易意图"""
     broker = runtime.broker
     metrics = runtime.metrics
+
+    if not self._accepts_non_durable_output(runtime):
+      await self._reject_intent_during_runtime_transition(runtime, intent)
+      return
 
     def market_stream_ready() -> bool:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
@@ -4834,6 +5532,10 @@ class StrategyExecutor:
       if decision.final_volume != request.volume:
         request.volume = decision.final_volume
 
+      if not self._accepts_non_durable_output(runtime):
+        await self._reject_intent_during_runtime_transition(runtime, intent)
+        return
+
       reservation_key = intent.intent_id
       reserved = await self._reserve_order_resources(runtime, reservation_key, request)
       if not reserved:
@@ -4874,6 +5576,14 @@ class StrategyExecutor:
         self.logger.warning(
           f"订单资源冻结失败: {intent.instrument_code} {order_type.value} "
           f"{request.volume}股"
+        )
+        return
+
+      if not self._accepts_non_durable_output(runtime):
+        await self._reject_intent_during_runtime_transition(
+          runtime,
+          intent,
+          reservation_key=reservation_key,
         )
         return
 

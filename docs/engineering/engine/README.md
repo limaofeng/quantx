@@ -19,6 +19,35 @@ Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 订单、成交、持仓与对账结果。进程重启后会恢复超时的 `PROCESSING` 消息，
 并继续从数据库推进。
 
+订单/成交回报由 `business_key` 唯一的 `strategy_runtime_events`
+串行进入策略。TradeIntent 和做 T 批次投影与该事件的首次落库在
+同一事务内完成；Engine 回调后再把 event marker、资金、持仓、策略状态
+和 `ExitPlanBook` 作为一个 RuntimeState 快照提交，最后才把事件设为
+`APPLIED`。回调异常会回滚当次内存效果；快照提交失败、结果不确定，
+或启动时存在未应用事件时，runtime 安装同业务键屏障，丢弃新的
+tick/kline 决策并拒绝人工确认，直到同事件幂等收敛。
+
+同一运行的 durable event 严格按 `(created_at, event_id)` 串行推进。暂停、停止或
+尚未启动的运行没有可用消费者时，事件保持 `PENDING` 且不消耗失败次数；消费者
+会跳过该运行继续处理其他运行，避免全局队头阻塞。暂停和停止在存在待审批意图、
+活动委托、冻结预留或 durable barrier 时必须拒绝；正常停止顺序固定为停止生产者、
+有界等待当前串行事件、停止策略并写最终快照，最后才断开 Broker。
+
+委托终态和成交回报是两条独立消息。`FILLED`，或带累计成交量的
+`CANCELLED / REJECTED / EXPIRED`，若领先于已持久化 TRADE，TradeIntent、T 批次、
+策略与退出计划必须保持 `RECONCILE_REQUIRED` 和原 pending 关联；只有真实 TRADE
+累计追平该委托报告量后，才能进入最终 `FILLED / CANCELLED`、`OPEN / CLOSED` 等
+状态。委托报告不得单独生成成交或释放入场/退出门控。
+
+RuntimeState 版本更新使用数据库原子 CAS。每次 Engine 快照带 manager-owned attempt
+token；提交结果不确定时以数据库 token 和版本为准采纳已提交结果，外部写入赢得
+CAS 时只合并其归属字段并保留 Engine dirty state，随后基于新版本继续保存。
+
+PAPER/LIVE 做 T 策略把有界的因果 tick 观察窗作为策略 RuntimeState
+的一部分，最多每 3 秒提交一次完整窗口，正常停止和实际移除标的时
+强制刷盘。恢复后每个新 tick 都会同时裁掉超出 lookback 的旧样本和
+晚于当前 tick 的未来样本。BACKTEST 保持确定性回放，不持久化该窗口。
+
 完整账户快照的对账按灰度阶段处理。`SHADOW` 是手工交易共存的准备阶段：QMT
 客户端产生且没有 QuantX 关联 ID 的委托/成交会作为外部活动持久化并计数，
 不会阻止账户事实收敛；`CANARY / LIVE` 中出现同类活动则暂停自动执行。成功的
@@ -70,6 +99,8 @@ Engine 使用 PostgreSQL advisory lock 保证同一数据库只有一个实例�
 Pub/Sub 缺批时 Hub 从 Redis 最新全量快照收敛，不重放可能过时的中间 tick。
 缺口出现到补水完成期间停止增量分发，中央行情和关键消费者都不能恢复为
 `READY`。sequence 1 快照在 API 仍为 `SYNCING` 时只更新中央状态，不提前分发；
-sequence 2 连续性屏障使 API、Engine 与 Redis freshness lease 的 stream/sequence
-完全一致后，Hub 才首次向消费者分发完整中央快照。任一水位或租约不一致时，
-策略、条件清仓和自动退出等实时交易动作保持关闭。
+sequence 2 连续性屏障提交后仍保持 `SYNCING`。Agent 收到其 ACK 后强制发送
+sequence 3 readiness-confirm（可为空），只有该批次被同一 Redis CAS 提交后，
+API、Engine 与 freshness lease 的 stream/sequence 才完全一致，Hub 才首次向
+消费者分发完整中央快照；之后真实有序回调从 sequence 4 开始。任一水位或租约
+不一致时，策略、条件清仓和自动退出等实时交易动作保持关闭。
