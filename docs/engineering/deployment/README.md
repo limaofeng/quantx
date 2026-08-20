@@ -13,6 +13,10 @@
 
 普通开发 `up`（包括未显式指定模式的 `-Profile web`）会提升为 `full/live`，
 启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和 QMT Agent。
+成功启动 `dev/full/live` 后会幂等注册当前用户的
+`QuantX-Dev-Daily-Backup` 任务，每天（含周末）16:30 备份 PostgreSQL 与
+QMT Agent journal；错过触发时间时会在主机恢复可用后补跑。该任务不会提升权限，
+注册失败时实盘备份门禁继续失败关闭。
 Prefect Server 由外部管理。开发实盘优先使用 `-AccountId`，未传时从 `QMT_ACCOUNT_WHITELIST`、
 `REAL_TRADING_ACCOUNT_ALLOWLIST` 或 `AUTH_BOOTSTRAP_ACCOUNT_IDS` 中自动解析唯一账户；
 多个账户仍需显式选择。开发启动不要求 `-ConfirmLive`；`-Mode data-only` 是唯一

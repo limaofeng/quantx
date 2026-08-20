@@ -40,7 +40,8 @@ PostgreSQL、Redis、InfluxDB 和精确的 loopback HTTPS 配置后重试。安�
    `qmt-site-packages`；不读取、不修改 XTQuant 厂商 site-packages；
 4. 在服务启动前执行 schema doctor、备份和显式 Alembic 升级；
 5. 原子切换 `current`、安装 WinSW、信任 Caddy 本地 CA并验证 HTTPS；
-6. 注册工作日 16:30 的收盘后备份任务。
+6. 注册每天（含周末）16:30 的收盘后备份任务；严格 24 小时门禁要求周末与
+   长假期间也持续保留新鲜恢复点。
 
 生产启动本身只检查 Alembic revision，不执行 DDL。手工操作入口：
 

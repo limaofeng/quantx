@@ -1532,6 +1532,15 @@ function Invoke-Up {
       "were stopped manually."
     )
   }
+  if (
+    $Profile -eq "full" -and
+    $agentMode -eq "live" -and
+    $env:ENABLE_REAL_TRADING -eq "true" -and
+    $env:QMT_REAL_TRADING_ENABLED -eq "true" -and
+    $env:T_TRADE_LIVE_ENABLED -eq "true"
+  ) {
+    $null = Register-DevBackupMaintenance
+  }
 }
 
 function Invoke-Down {
@@ -2302,11 +2311,11 @@ function Register-ProductionMaintenance {
     -Argument $arguments `
     -WorkingDirectory $Root
   $trigger = New-ScheduledTaskTrigger `
-    -Weekly `
-    -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
+    -Daily `
     -At "16:30"
   $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
   Register-ScheduledTask `
     -TaskName "QuantX-Daily-Backup" `
@@ -2316,6 +2325,59 @@ function Register-ProductionMaintenance {
     -RunLevel Highest `
     -Force |
     Out-Null
+}
+
+function Register-DevBackupMaintenance {
+  $scheduledTaskCommand = Get-Command Register-ScheduledTask `
+    -ErrorAction SilentlyContinue
+  if (-not $scheduledTaskCommand) {
+    Write-Warning (
+      "ScheduledTasks module is unavailable; the dev live backup task was " +
+      "not registered. Automatic trading will remain fail-closed when the " +
+      "last successful backup exceeds 24 hours."
+    )
+    return $false
+  }
+
+  try {
+    $powerShellCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($powerShellCommand) {
+      $powerShell = $powerShellCommand.Source
+    } else {
+      $powerShell = (Get-Command powershell -ErrorAction Stop).Source
+    }
+    $arguments = (
+      '-NoProfile -ExecutionPolicy Bypass -File "{0}" backup ' +
+      '-Environment dev'
+    ) -f $PSCommandPath
+    $action = New-ScheduledTaskAction `
+      -Execute $powerShell `
+      -Argument $arguments `
+      -WorkingDirectory $Root
+    $trigger = New-ScheduledTaskTrigger -Daily -At "16:30"
+    $settings = New-ScheduledTaskSettingsSet `
+      -StartWhenAvailable `
+      -MultipleInstances IgnoreNew `
+      -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+    Register-ScheduledTask `
+      -TaskName "QuantX-Dev-Daily-Backup" `
+      -Action $action `
+      -Trigger $trigger `
+      -Settings $settings `
+      -RunLevel Limited `
+      -Force |
+      Out-Null
+    Write-Host (
+      "QuantX dev daily backup task is registered for 16:30."
+    ) -ForegroundColor Green
+    return $true
+  } catch {
+    Write-Warning (
+      "Failed to register QuantX-Dev-Daily-Backup: " +
+      $_.Exception.Message
+    )
+    return $false
+  }
 }
 
 function Install-CaddyRootCertificate {
@@ -2677,18 +2739,13 @@ function Invoke-Backup {
   } | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath $manifestPath -Encoding utf8
 
+  $previousPythonPath = $env:PYTHONPATH
   try {
-    $previousPythonPath = $env:PYTHONPATH
     $env:PYTHONPATH = Get-WorkspacePythonPath
     & $python -m quantx_infrastructure.database.backup_registry $manifestPath
     if ($LASTEXITCODE -ne 0) {
-      Write-Warning "Backup completed but database backup age was not recorded."
+      throw "Backup files were created, but the successful backup was not recorded."
     }
-  } catch {
-    Write-Warning (
-      "Backup completed but database backup age was not recorded: " +
-      $_.Exception.Message
-    )
   } finally {
     $env:PYTHONPATH = $previousPythonPath
   }

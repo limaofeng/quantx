@@ -19,9 +19,13 @@ async def record_backup(manifest_path: str) -> None:
   if not path.is_file():
     raise ValueError("backup manifest does not exist")
   async with AsyncSessionLocal() as db:
-    await db.execute(
+    result = await db.execute(
       update(AccountTradingRollout).values(last_backup_at=utcnow())
     )
+    if result.rowcount != 1:
+      raise RuntimeError(
+        "successful backup registration requires exactly one account rollout"
+      )
     await db.commit()
   print(json.dumps({"recorded": True, "manifest": str(path)}))
 
