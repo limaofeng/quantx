@@ -1,14 +1,25 @@
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+from quantx_infrastructure.models.first_board_promotion import (
+  LimitUpLifecycleSnapshot,
+)
+from quantx_infrastructure.models.limit_up_board_replay import (
+  LimitUpBoardUniverseSnapshot,
+)
+from quantx_infrastructure.services import limit_up_radar as radar_module
 from quantx_infrastructure.services.intraday_volume_scanner import (
   IntradayVolumeScanner,
 )
 from quantx_infrastructure.services.limit_up_radar import (
   LimitUpRadarBuilder,
+  LimitUpRadarMonitor,
   _resolved_listing_history_days,
   select_latest_intraday_projection,
 )
+from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
 
 
 def test_listing_history_falls_back_to_conservative_open_date_tenure() -> None:
@@ -354,3 +365,91 @@ def test_intraday_projection_replaces_retained_snapshot_with_newer_market_data()
   }
 
   assert select_latest_intraday_projection(current, candidate) is candidate
+
+
+def _postgres_json_bind(column, value):
+  dialect = PGDialect_asyncpg()
+  processor = column.type.dialect_impl(dialect).bind_processor(dialect)
+  assert processor is not None
+  return json.loads(processor(value))
+
+
+@pytest.mark.asyncio
+async def test_limit_up_snapshot_persistence_normalizes_native_datetimes(
+  monkeypatch,
+) -> None:
+  observed_at = datetime(2026, 8, 20, 10, 5, 6, tzinfo=timezone.utc)
+  captured_lifecycle = []
+  captured_universe = []
+
+  class SessionContext:
+    async def __aenter__(self):
+      return object()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      return False
+
+  class PromotionRepository:
+    def __init__(self, db):
+      del db
+
+    async def save_lifecycle_and_assessment(self, **kwargs):
+      captured_lifecycle.append(kwargs["lifecycle_payload"])
+
+    async def save_chain(self, snapshot):
+      del snapshot
+
+  class ReplayRepository:
+    def __init__(self, db):
+      del db
+
+    async def save_universe_snapshot(self, **kwargs):
+      captured_universe.append(kwargs["payload"])
+
+  monkeypatch.setattr(radar_module, "AsyncSessionLocal", SessionContext)
+  monkeypatch.setattr(
+    radar_module,
+    "FirstBoardPromotionRepository",
+    PromotionRepository,
+  )
+  monkeypatch.setattr(
+    radar_module,
+    "LimitUpBoardReplayRepository",
+    ReplayRepository,
+  )
+
+  radar = {
+    "updated_at": observed_at,
+    "items": [
+      {
+        "code": "000001.SZ",
+        "updated_at": observed_at,
+        "promotion_snapshot_version": "snapshot-native-datetime",
+        "promotion_eligible": False,
+      }
+    ],
+    "summary": {},
+    "chain": {},
+    "warnings": [],
+    "is_scanner_running": True,
+  }
+  monitor = LimitUpRadarMonitor()
+
+  with pytest.raises(TypeError, match="datetime is not JSON serializable"):
+    _postgres_json_bind(
+      LimitUpLifecycleSnapshot.__table__.c.payload,
+      radar["items"][0],
+    )
+  await monitor._persist_market_facts(radar)
+  await monitor._persist_replay_universe(radar)
+
+  assert captured_lifecycle[0]["updated_at"] == observed_at.isoformat()
+  assert captured_universe[0]["candidates"][0]["updated_at"] == observed_at.isoformat()
+  assert _postgres_json_bind(
+    LimitUpLifecycleSnapshot.__table__.c.payload,
+    captured_lifecycle[0],
+  )["updated_at"] == observed_at.isoformat()
+  assert _postgres_json_bind(
+    LimitUpBoardUniverseSnapshot.__table__.c.payload,
+    captured_universe[0],
+  )["candidates"][0]["updated_at"] == observed_at.isoformat()

@@ -166,6 +166,18 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
   return value.isoformat() if value else None
 
 
+def _json_safe_payload(value: Any) -> Any:
+  """Normalize supported temporal containers before PostgreSQL JSON binding."""
+
+  if isinstance(value, dict):
+    return {str(key): _json_safe_payload(item) for key, item in value.items()}
+  if isinstance(value, (list, tuple)):
+    return [_json_safe_payload(item) for item in value]
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  return value
+
+
 def _stable_version(value: Dict[str, Any]) -> str:
   return hashlib.sha256(
     json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1175,7 +1187,7 @@ class LimitUpRadarMonitor:
             stage=str(item.get("stage") or ""),
             ever_touched_limit=bool(item.get("first_touch_at")),
             break_count=int(item.get("break_count", 0) or 0),
-            lifecycle_payload=dict(item),
+            lifecycle_payload=_json_safe_payload(dict(item)),
             assessment_payload=assessment_payload,
           )
           self._persisted_snapshot_versions.add(snapshot_version)
@@ -1191,7 +1203,7 @@ class LimitUpRadarMonitor:
               sealed_count=int(chain.get("sealed_count", 0) or 0),
               broken_count=int(chain.get("broken_count", 0) or 0),
               break_rate=_number(chain.get("break_rate")),
-              payload=chain,
+              payload=_json_safe_payload(chain),
             )
           )
           self._persisted_chain_versions.add(chain_version)
@@ -1252,7 +1264,7 @@ class LimitUpRadarMonitor:
       for index, item in enumerate(list(radar.get("items") or []), start=1)
       if item.get("code")
     ]
-    payload = {
+    payload = _json_safe_payload({
       "schema_version": 1,
       "observed_at": observed_at.isoformat(),
       "source_max_at": source_max_at.isoformat() if source_max_at else None,
@@ -1263,7 +1275,7 @@ class LimitUpRadarMonitor:
       ),
       "warnings": list(radar.get("warnings") or []),
       "candidates": candidates,
-    }
+    })
     snapshot_version = _stable_version(payload)
     snapshot_key = _stable_version(
       {
