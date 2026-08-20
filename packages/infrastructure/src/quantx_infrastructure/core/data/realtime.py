@@ -101,12 +101,14 @@ class RealtimeDataAdapter(DataAdapter):
         await self.unsubscribe(sub_id)
 
       # 通过统一管理器取消所有订阅
-      await self.subscription_manager.unsubscribe_all(self.subscriber_id)
+      if not await self.subscription_manager.unsubscribe_all(self.subscriber_id):
+        raise RuntimeError("统一订阅管理器未能取消全部实时订阅")
 
       self.is_connected = False
       self.logger.info("实时数据适配器已断开")
     except Exception as e:
       self.logger.error(f"断开连接失败: {e}")
+      raise
 
   async def subscribe_kline(
     self,
@@ -190,22 +192,29 @@ class RealtimeDataAdapter(DataAdapter):
 
   async def unsubscribe(self, subscription_id: str) -> bool:
     """取消订阅"""
-    if subscription_id not in self.subscriptions:
-      return False
+    subscription = self.subscriptions.get(subscription_id)
+    if subscription is None:
+      return True
 
-    subscription = self.subscriptions[subscription_id]
     instrument_code = subscription.instrument_code
-
-    # 移除订阅记录
-    del self.subscriptions[subscription_id]
 
     if subscription.manager_handle:
       try:
-        await self.subscription_manager.unsubscribe(subscription.manager_handle)
+        removed = await self.subscription_manager.unsubscribe(
+          subscription.manager_handle
+        )
+        if removed is not True:
+          raise RuntimeError(
+            f"统一订阅管理器拒绝取消句柄: {subscription.manager_handle}"
+          )
         self.logger.info(f"通过统一管理器取消订阅: {instrument_code}")
       except Exception as e:
         self.logger.error(f"取消订阅失败: {instrument_code}, {e}")
+        raise
 
+    # Keep the local ownership record until the underlying handle is known to
+    # be gone, so a transient failure can be retried safely.
+    self.subscriptions.pop(subscription_id, None)
     self.logger.info(f"取消订阅: {subscription_id}")
     return True
 

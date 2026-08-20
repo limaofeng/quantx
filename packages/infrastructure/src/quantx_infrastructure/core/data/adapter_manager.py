@@ -3,15 +3,15 @@
 负责管理全局的数据适配器实例，避免重复创建
 """
 
+import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from quantx_infrastructure.core.utils import time_utils
-from quantx_infrastructure.services.trading_time_service import TradingTimeService
-
 from quantx_infrastructure.models.enums import StrategyRunMode
+from quantx_infrastructure.services.trading_time_service import TradingTimeService
 
 from .adapter import DataAdapter
 from .historical import HistoricalDataAdapter
@@ -31,6 +31,7 @@ class AdapterManager:
       cls._instance.logger = logging.getLogger(__name__)
       # 初始化引用计数器
       cls._instance._ref_counts = defaultdict(int)
+      cls._instance._lifecycle_locks = defaultdict(asyncio.Lock)
       cls._instance.trading_time_service = TradingTimeService()
     return cls._instance
 
@@ -106,7 +107,7 @@ class AdapterManager:
     except Exception as e:
       self.logger.error(f"关闭适配器失败: {e}")
 
-  def get_adapter_for_mode(self, mode: StrategyRunMode) -> DataAdapter:
+  async def get_adapter_for_mode(self, mode: StrategyRunMode) -> DataAdapter:
     """
     根据策略模式获取适配器实例（工厂方法）
 
@@ -125,15 +126,36 @@ class AdapterManager:
     else:
       raise ValueError(f"不支持的策略模式: {mode}")
 
-    # 增加引用计数
-    self._ref_counts[adapter_type] += 1
-    self.logger.info(
-      f"获取 {adapter_type} 适配器，当前引用计数: {self._ref_counts[adapter_type]}"
-    )
+    async with self._lifecycle_locks[adapter_type]:
+      # 增加引用计数。与最后一个 owner 的 disconnect 共用同一把锁，
+      # 防止失败释放与新 acquire 交错后误断新 owner 的连接。
+      self._ref_counts[adapter_type] += 1
+      self.logger.info(
+        f"获取 {adapter_type} 适配器，当前引用计数: {self._ref_counts[adapter_type]}"
+      )
 
     return adapter
 
-  def release_adapter_for_mode(self, mode: str) -> None:
+  async def ensure_adapter_connected_for_mode(
+    self,
+    mode: StrategyRunMode,
+    adapter: DataAdapter,
+  ) -> bool:
+    """Serialize connection of the shared adapter selected for ``mode``."""
+
+    if mode == StrategyRunMode.BACKTEST:
+      adapter_type = "historical"
+    elif mode in (StrategyRunMode.PAPER, StrategyRunMode.LIVE):
+      adapter_type = "realtime"
+    else:
+      raise ValueError(f"不支持的策略模式: {mode}")
+
+    async with self._lifecycle_locks[adapter_type]:
+      if getattr(adapter, "is_connected", False) is True:
+        return True
+      return bool(await adapter.connect())
+
+  async def release_adapter_for_mode(self, mode: str) -> None:
     """
     释放指定模式的适配器引用
 
@@ -150,19 +172,29 @@ class AdapterManager:
       self.logger.warning(f"无法释放未知模式的适配器: {mode}")
       return
 
-    # 减少引用计数
-    if self._ref_counts[adapter_type] > 0:
-      self._ref_counts[adapter_type] -= 1
-      self.logger.info(
-        f"释放 {adapter_type} 适配器，当前引用计数: {self._ref_counts[adapter_type]}"
-      )
+    async with self._lifecycle_locks[adapter_type]:
+      refs = self._ref_counts[adapter_type]
+      if refs <= 0:
+        self.logger.warning(f"{adapter_type} 适配器没有可释放的引用")
+        return
+      if refs > 1:
+        self._ref_counts[adapter_type] = refs - 1
+        self.logger.info(
+          f"释放 {adapter_type} 适配器，当前引用计数: {refs - 1}"
+        )
+        return
 
-      # 如果引用计数为0，断开连接（但保持实例）
-      if self._ref_counts[adapter_type] == 0 and adapter:
-        import asyncio
-
-        asyncio.create_task(adapter.disconnect())
-        self.logger.info(f"{adapter_type} 适配器无引用，已断开连接")
+      # The final reference remains owned until disconnect succeeds. If it
+      # fails, retrying this same release is safe; a new acquire cannot cross
+      # this await because it uses the same lifecycle lock.
+      if adapter:
+        await adapter.disconnect()
+        if bool(getattr(adapter, "is_connected", False)):
+          raise RuntimeError(
+            f"{adapter_type} 适配器断开后仍报告 connected"
+          )
+      self._ref_counts[adapter_type] = 0
+      self.logger.info(f"{adapter_type} 适配器无引用，已断开连接")
 
   def get_adapter_stats(self) -> Dict[str, Any]:
     """获取适配器统计信息"""
@@ -182,6 +214,7 @@ class AdapterManager:
     self._realtime_adapter = None
     self._historical_adapter = None
     self._ref_counts.clear()
+    self._lifecycle_locks.clear()
     self.logger.info("适配器管理器已重置")
 
 

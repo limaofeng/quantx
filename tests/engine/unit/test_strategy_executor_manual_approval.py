@@ -196,6 +196,7 @@ async def test_manual_approval_fails_closed_while_durable_barrier_is_active():
     strategy_id=1,
     strategy_class=AshareIntradayTAssistantStrategy,
     context=context,
+    status=ExecutionStatus.RUNNING,
   )
   intent = TradeIntent(
     strategy_id="1",
@@ -779,11 +780,15 @@ async def test_approved_t_entry_persists_routing_state_for_restart():
     strategy_id=1,
     strategy_class=AshareIntradayTAssistantStrategy,
     context=context,
+    status=ExecutionStatus.RUNNING,
   )
   runtime.strategy = AshareIntradayTAssistantStrategy(context)
   runtime.state_manager = FakeStateManager()
   runtime.latest_market_data["600000.SH"] = MarketDataSnapshot(
-    instrument_code="600000.SH", price=10.0, ask_price=[10.0]
+    instrument_code="600000.SH",
+    timestamp=time_utils.now(),
+    price=10.0,
+    ask_price=[10.0],
   )
   intent = TradeIntent(
     strategy_id="1",
@@ -810,7 +815,7 @@ async def test_approved_t_entry_persists_routing_state_for_restart():
           "entry_order_status": "AWAITING_APPROVAL",
           "requested_entry_volume": 100,
           "batch_id": "batch-restart",
-          "current_signal": {"signal_price": 10.0},
+          "current_signal": {"triggered": True, "signal_price": 10.0},
         }
       }
     }
@@ -850,6 +855,7 @@ async def test_t_trade_account_batch_limit_keeps_signal_pending():
     strategy_id=1,
     strategy_class=AshareIntradayTAssistantStrategy,
     context=context,
+    status=ExecutionStatus.RUNNING,
   )
   runtime.strategy = AshareIntradayTAssistantStrategy(context)
   runtime.strategy.state.update(
@@ -865,7 +871,10 @@ async def test_t_trade_account_batch_limit_keeps_signal_pending():
   )
   runtime.state_manager = FakeStateManager()
   runtime.latest_market_data["600000.SH"] = MarketDataSnapshot(
-    instrument_code="600000.SH", price=10.0, ask_price=[10.0]
+    instrument_code="600000.SH",
+    timestamp=time_utils.now(),
+    price=10.0,
+    ask_price=[10.0],
   )
   executor.runs[runtime.run_id] = runtime
   executor._process_trade_intent = AsyncMock()
@@ -883,6 +892,13 @@ async def test_t_trade_account_batch_limit_keeps_signal_pending():
     metadata={"t_trade_role": "entry", "instrument_code": "600000.SH"},
   )
   runtime.pending_approvals[intent.intent_id] = intent
+  instrument_states = dict(runtime.strategy.state.get("instrument_states") or {})
+  instrument_states["600000.SH"] = {
+    "pending_entry_intent_id": intent.intent_id,
+    "entry_order_status": "AWAITING_APPROVAL",
+    "current_signal": {"triggered": True, "signal_price": 10.0},
+  }
+  runtime.strategy.state.set("instrument_states", instrument_states)
 
   result = await executor.approve_trade_intent(runtime.run_id, intent.intent_id)
 

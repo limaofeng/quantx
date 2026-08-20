@@ -154,32 +154,40 @@ class UnifiedDataSubscriptionManager:
     shared.callbacks[handle] = record.callback
 
   async def unsubscribe(self, handle: str) -> bool:
-    record = self._handles.pop(str(handle), None)
+    handle = str(handle)
+    record = self._handles.get(handle)
     if record is None:
-      return False
+      return True
+
+    if record.period == "tick":
+      if await self.hub.unsubscribe(record.hub_handle) is not True:
+        return False
+    else:
+      key = f"{record.stock_code}:{record.period}"
+      shared = self._period_subscriptions.get(key)
+      if shared is not None and handle in shared.callbacks:
+        if len(shared.callbacks) == 1:
+          # The remote ownership stays discoverable until cancellation has
+          # returned without error, so the same handle can retry safely.
+          self.data_manager.unsubscribe_quote(shared.remote_subscription_id)
+          self._period_subscriptions.pop(key, None)
+        else:
+          shared.callbacks.pop(handle, None)
+
+    self._handles.pop(handle, None)
     owner_handles = self._owner_handles.get(record.owner)
     if owner_handles is not None:
       owner_handles.discard(handle)
       if not owner_handles:
         self._owner_handles.pop(record.owner, None)
-    if record.period == "tick":
-      return await self.hub.unsubscribe(record.hub_handle)
-
-    key = f"{record.stock_code}:{record.period}"
-    shared = self._period_subscriptions.get(key)
-    if shared is None:
-      return True
-    shared.callbacks.pop(handle, None)
-    if not shared.callbacks:
-      self._period_subscriptions.pop(key, None)
-      self.data_manager.unsubscribe_quote(shared.remote_subscription_id)
     return True
 
   async def unsubscribe_all(self, subscriber_id: str) -> bool:
     handles = tuple(self._owner_handles.get(str(subscriber_id), ()))
+    removed = True
     for handle in handles:
-      await self.unsubscribe(handle)
-    return bool(handles)
+      removed = await self.unsubscribe(handle) and removed
+    return removed
 
   def get_latest_tick(self, stock_code: str) -> dict[str, Any] | None:
     return self.hub.latest(stock_code)

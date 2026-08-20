@@ -27,6 +27,10 @@ from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
 
+from quantx_contracts.market_stream import (
+  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
+  MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS,
+)
 from quantx_domain.brokers.backtest import BacktestBroker
 from quantx_domain.brokers.base import BrokerBase, OrderRequest, OrderStatus, Position
 from quantx_domain.brokers.base import OrderType as BrokerOrderType
@@ -120,6 +124,8 @@ if TYPE_CHECKING:
 
 
 _DURABLE_EVENT_APPLY_TIMEOUT_SECONDS = 10.0
+_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY = 256
+_T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS = 3.0
 
 
 class RuntimeConsumerUnavailable(RuntimeError):
@@ -137,6 +143,15 @@ class ExecutionStatus(Enum):
   COMPLETED = "COMPLETED"
   ERROR = "ERROR"
   PAUSED = "PAUSED"
+
+
+@dataclass(frozen=True)
+class RuntimeMarketEvent:
+  """A discardable market event with queue-age provenance."""
+
+  event_type: str
+  data: Any
+  enqueued_at: float
 
 
 @dataclass
@@ -172,8 +187,52 @@ class StrategyRuntime:
   task: Optional[asyncio.Task] = None
   #: 串行事件处理任务；回测撮合后用它完成订单/成交回报 barrier。
   event_task: Optional[asyncio.Task] = field(default=None, repr=False)
-  #: 串行事件队列
+  #: 不可丢弃的控制、委托与成交事件队列。
   event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+  #: 可丢弃但有界的实时行情队列；不得承载控制或券商回报。
+  market_event_queue: asyncio.Queue = field(
+    default_factory=lambda: asyncio.Queue(
+      maxsize=_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY
+    ),
+    repr=False,
+  )
+  _event_queue_wakeup: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+  _pending_market_invalidations: Dict[str, str] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _active_market_continuity_losses: Dict[str, str] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _market_fail_closed_codes: Dict[str, str] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _market_continuity_generations: Dict[str, int] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _processing_market_events: Dict[str, tuple[int, float]] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _market_invalidation_checkpoints: Dict[str, int] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _handled_market_invalidations: Dict[str, int] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  market_events_enqueued: int = 0
+  market_events_processed: int = 0
+  market_events_dropped: int = 0
+  market_events_expired: int = 0
+  market_tick_source_rejections: int = 0
+  market_event_overflows: int = 0
+  market_window_invalidations: int = 0
+  market_queue_high_watermark: int = 0
   #: Durable report whose effects exist only in memory until checkpoint retry.
   durable_event_barrier_key: Optional[str] = field(default=None, repr=False)
   #: DB-backlog barriers are released only after every event row is APPLIED.
@@ -222,6 +281,22 @@ class StrategyRuntime:
   realtime_subscription_lock: asyncio.Lock = field(
     default_factory=asyncio.Lock, repr=False
   )
+  #: Serializes start/stop ownership without reporting in-flight work as success.
+  lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+  _lifecycle_operation_task: Optional[asyncio.Task] = field(
+    default=None,
+    repr=False,
+  )
+  _lifecycle_operation_kind: Optional[str] = field(default=None, repr=False)
+  #: AdapterManager reference owned by this runtime. It must be released once.
+  _adapter_ref_acquired: bool = field(default=False, repr=False)
+  #: Failed startup and terminal-error cleanup have different snapshot semantics.
+  _startup_abort_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+  _startup_abort_complete: bool = field(default=False, repr=False)
+  _startup_abort_task: Optional[asyncio.Task] = field(default=None, repr=False)
+  _terminal_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+  _terminal_cleanup_complete: bool = field(default=False, repr=False)
+  _terminal_cleanup_task: Optional[asyncio.Task] = field(default=None, repr=False)
   #: 已确认但尚未完全由成交持仓接管的 T 入场金额预留。
   t_trade_entry_reservations: Dict[str, Dict[str, Any]] = field(
     default_factory=dict, repr=False
@@ -512,7 +587,147 @@ class StrategyExecutor:
     self.logger.info(f"创建策略运行时: {run_id}")
     return strategy_runtime
 
+  async def _run_lifecycle_operation(
+    self,
+    runtime: StrategyRuntime,
+    operation: str,
+    operation_factory,
+  ) -> bool:
+    """Run one transition and make duplicate callers await its exact result."""
+
+    waiter_task = asyncio.current_task()
+    if waiter_task is None:
+      raise RuntimeError("策略生命周期操作必须运行在 asyncio Task 中")
+
+    while True:
+      async with runtime.lifecycle_lock:
+        existing_task = runtime._lifecycle_operation_task
+        existing_kind = runtime._lifecycle_operation_kind
+        if existing_task is None or existing_task.done():
+          operation_task = asyncio.create_task(
+            operation_factory(),
+            name=f"strategy-{operation}:{runtime.run_id}",
+          )
+          runtime._lifecycle_operation_task = operation_task
+          runtime._lifecycle_operation_kind = operation
+          owns_operation = True
+          same_operation = True
+        else:
+          operation_task = existing_task
+          owns_operation = False
+          same_operation = existing_kind == operation
+
+      try:
+        result = (
+          await operation_task
+          if owns_operation
+          else await asyncio.shield(operation_task)
+        )
+      except asyncio.CancelledError:
+        if waiter_task.cancelling():
+          raise
+        if same_operation:
+          return False
+        continue
+      except Exception:
+        if same_operation:
+          return False
+        continue
+      if same_operation:
+        return bool(result)
+
+  @staticmethod
+  def _reset_runtime_generation_transients(runtime: StrategyRuntime) -> None:
+    """Drop process-local state; durable restore is the only restart source."""
+
+    runtime.pending_approvals.clear()
+    runtime.t_trade_entry_reservations.clear()
+    runtime.latest_market_data.clear()
+    runtime.realtime_subscription_ids.clear()
+    runtime.durable_event_barrier_key = None
+    runtime.durable_startup_barrier = False
+    runtime.last_order_report_at = None
+    runtime.last_trade_report_at = None
+    runtime.last_broker_report_at = None
+    runtime._pending_market_invalidations.clear()
+    runtime._active_market_continuity_losses.clear()
+    runtime._market_fail_closed_codes.clear()
+    runtime._market_continuity_generations.clear()
+    runtime._processing_market_events.clear()
+    runtime._market_invalidation_checkpoints.clear()
+    runtime._handled_market_invalidations.clear()
+    runtime.event_queue = asyncio.Queue()
+    runtime.market_event_queue = asyncio.Queue(
+      maxsize=_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY
+    )
+    runtime._event_queue_wakeup = asyncio.Event()
+    for attribute in ("account_info", "positions"):
+      if hasattr(runtime.context, attribute):
+        delattr(runtime.context, attribute)
+
+  def _replay_restored_market_continuity_gates(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    """Rebuild strategy windows before clearing any restored durable gate."""
+
+    state_manager = runtime.state_manager
+    strategy = runtime.strategy
+    get_gates = getattr(state_manager, "market_continuity_reconciliation", None)
+    if not callable(get_gates):
+      return
+    restored_gates = {
+      str(code or "").strip().upper(): str(reason or "MARKET_DATA_CONTINUITY_LOST")
+      for code, reason in dict(get_gates() or {}).items()
+      if str(code or "").strip()
+    }
+    if not restored_gates:
+      return
+
+    invalidate = getattr(strategy, "invalidate_realtime_market_window", None)
+    clear_gate = getattr(
+      state_manager,
+      "clear_market_continuity_reconciliation",
+      None,
+    )
+    for code, reason in restored_gates.items():
+      handled = False
+      try:
+        handled = bool(
+          invalidate(code, reason=reason) if callable(invalidate) else False
+        )
+      except Exception:
+        self.logger.exception(
+          "恢复行情连续性门禁时策略失效钩子失败: run_id=%s instrument=%s",
+          runtime.run_id,
+          code,
+        )
+      if not handled:
+        runtime._market_fail_closed_codes[code] = reason
+        continue
+
+      # No snapshot task exists during startup.  Merge the invalidated window
+      # first, then clear the manager-owned gate; the first startup checkpoint
+      # persists both changes atomically before RUNNING.
+      state_manager.update_strategy_custom_state(
+        strategy.state.to_dict(),
+        full_snapshot=True,
+      )
+      if callable(clear_gate):
+        clear_gate(code)
+
   async def start(self, run_id: str) -> bool:
+    if run_id not in self.runs:
+      self.logger.error(f"策略运行不存在: {run_id}")
+      return False
+    runtime = self.runs[run_id]
+    return await self._run_lifecycle_operation(
+      runtime,
+      "start",
+      lambda: self._start_runtime(run_id),
+    )
+
+  async def _start_runtime(self, run_id: str) -> bool:
     """
     启动策略运行
 
@@ -531,9 +746,36 @@ class StrategyExecutor:
 
     runtime = self.runs[run_id]
 
-    if runtime.status in [ExecutionStatus.RUNNING, ExecutionStatus.STARTING]:
+    if runtime.status == ExecutionStatus.RUNNING:
       self.logger.warning(f"策略运行已在运行: {run_id}")
       return True
+    if runtime.status == ExecutionStatus.STARTING:
+      self.logger.error("策略启动状态无活动 owner，拒绝提前报告成功: %s", run_id)
+      return False
+
+    if runtime.status == ExecutionStatus.ERROR:
+      if not await self._retry_previous_cleanup_before_start(runtime):
+        self.logger.error(
+          "上一次运行资源尚未收敛，拒绝创建新的启动代次: %s",
+          run_id,
+        )
+        return False
+    elif runtime._adapter_ref_acquired:
+      self.logger.error("运行仍持有旧数据适配器引用，拒绝重新启动: %s", run_id)
+      return False
+
+    runtime._startup_abort_complete = False
+    runtime._terminal_cleanup_complete = False
+    runtime._adapter_ref_acquired = False
+    runtime._startup_abort_task = None
+    runtime._terminal_cleanup_task = None
+    runtime.task = None
+    runtime.event_task = None
+    runtime.broker = None
+    runtime.data_adapter = None
+    runtime.performance_recorder = None
+    runtime.error_message = None
+    self._reset_runtime_generation_transients(runtime)
 
     try:
       # 更新状态
@@ -551,7 +793,10 @@ class StrategyExecutor:
       runtime.strategy = runtime.strategy_class(runtime.context)
 
       # 初始化状态管理器（回测模式不持久化，仅维护策略额度与状态）
-      from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
+      from quantx_infrastructure.core.runtime_state_manager import (
+        RuntimeStateManager,
+        RuntimeStateRestoreStatus,
+      )
 
       enable_reserve = bool(runtime.context.parameters.get("enable_reserve", True))
       runtime.state_manager = RuntimeStateManager(
@@ -592,10 +837,11 @@ class StrategyExecutor:
           ),
         )
 
-      await runtime.state_manager.start()
-
       # 恢复之前的状态（如果有）
-      restored_state = await runtime.state_manager.restore()
+      restore_result = await runtime.state_manager.restore()
+      restored_state = restore_result.state
+      if restore_result.status == RuntimeStateRestoreStatus.NOT_FOUND:
+        self.logger.info("未找到持久化运行状态，按新运行初始化: %s", run_id)
       runtime.exit_plan_book = ExitPlanBook.from_dict(
         (restored_state.get("custom") or {}).get(EXIT_PLAN_BOOK_STATE_KEY)
         if restored_state
@@ -612,8 +858,6 @@ class StrategyExecutor:
         else None
       )
       runtime.durable_startup_barrier = bool(runtime.durable_event_barrier_key)
-      await self._restore_pending_manual_approvals(runtime)
-      self._restore_t_trade_entry_reservations(runtime)
       if restored_state.get("positions"):
         self.logger.info(f"恢复持仓: {len(restored_state['positions'])} 个")
       if restored_state.get("active_orders"):
@@ -644,6 +888,31 @@ class StrategyExecutor:
             self._sync_dynamic_holding_inventory(runtime, initial_metadata)
           else:
             self._seed_bucket_ledger_from_parameters(runtime)
+      # Strategy initialization is part of the foreground startup contract.
+      # Returning success before it completes would let StrategyManager persist
+      # RUNNING while a background task can still fail and leak broker/state
+      # resources.
+      await runtime.strategy.initialize()
+      self._replay_restored_market_continuity_gates(runtime)
+      await self._restore_pending_manual_approvals(runtime)
+      self._restore_t_trade_entry_reservations(runtime)
+      invalidated_intent_ids = set(runtime.strategy.invalidated_manual_intent_ids())
+      for intent_id in invalidated_intent_ids:
+        intent = runtime.pending_approvals.get(intent_id)
+        if intent is None:
+          continue
+        await self._reject_pending_approval(
+          runtime,
+          intent,
+          status="EXPIRED",
+          reason="MARKET_DATA_CONTINUITY_LOST",
+          message="恢复的行情观察窗无法验证连续性，旧信号已失效",
+        )
+      await runtime.strategy.start()
+      runtime.state_manager.update_strategy_custom_state(
+        runtime.strategy.state.to_dict(),
+        full_snapshot=True,
+      )
 
       # 根据模式创建 Broker 和 DataAdapter
       await self._setup_broker_and_data(runtime)
@@ -657,7 +926,17 @@ class StrategyExecutor:
 
       # 启动策略执行任务
       if runtime.state_manager and runtime.strategy:
+        # Durable truth has already been restored successfully. Starting this
+        # loop earlier can overwrite PostgreSQL with an empty default snapshot
+        # when the restore query itself fails.
+        await runtime.state_manager.start()
         await runtime.state_manager.start_state_sync(runtime.strategy)
+        if runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+          checkpointed = (
+            await runtime.state_manager.checkpoint_strategy_state_changes()
+          )
+          if not checkpointed:
+            raise RuntimeError("策略启动状态安全快照失败，拒绝进入实时执行循环")
       runtime.task = asyncio.create_task(self._run_strategy_loop(runtime))
 
       # 启动事件处理循环
@@ -669,10 +948,21 @@ class StrategyExecutor:
       self._runtime_log(runtime, "SUCCESS", f"策略运行启动成功: {run_id}")
       return True
 
+    except asyncio.CancelledError:
+      runtime.status = ExecutionStatus.ERROR
+      runtime.error_message = "策略启动任务被取消"
+      self._runtime_log(runtime, "ERROR", f"策略启动任务被取消: {run_id}")
+      try:
+        await self._ensure_startup_abort(runtime)
+      except asyncio.CancelledError:
+        # The shielded cleanup task remains owned by the runtime and continues.
+        pass
+      raise
     except Exception as e:
       runtime.status = ExecutionStatus.ERROR
       runtime.error_message = str(e)
       self._runtime_log(runtime, "ERROR", f"启动策略运行失败: {run_id}, 错误: {e}")
+      await self._ensure_startup_abort(runtime)
       return False
 
   def _seed_bucket_ledger_from_parameters(self, runtime) -> None:
@@ -972,37 +1262,495 @@ class StrategyExecutor:
   def _accepts_non_durable_output(runtime: StrategyRuntime) -> bool:
     return runtime.status == ExecutionStatus.RUNNING
 
-  async def _quiesce_runtime_tasks(self, runtime: StrategyRuntime) -> None:
+  @staticmethod
+  def _runtime_state_reconciliation_failure(
+    runtime: StrategyRuntime,
+  ) -> Optional[tuple[str, str]]:
+    """Return the fail-closed gate installed by durable state recovery."""
+    state_manager = runtime.state_manager
+    continuity_checker = getattr(
+      state_manager,
+      "market_continuity_reconciliation",
+      None,
+    )
+    if callable(continuity_checker):
+      try:
+        continuity_gates = dict(continuity_checker() or {})
+      except Exception:
+        return (
+          "RUNTIME_RECONCILIATION_STATUS_UNAVAILABLE",
+          "行情连续性对账状态不可确认，已暂停新的交易决策",
+        )
+      if continuity_gates:
+        return (
+          "MARKET_CONTINUITY_RECONCILE_REQUIRED",
+          "行情连续性失效且策略无法安全重建观察窗，需显式权威处置",
+        )
+    checker = getattr(state_manager, "requires_reconciliation", None)
+    if not callable(checker):
+      return None
+    try:
+      required = bool(checker())
+    except Exception:
+      return (
+        "RUNTIME_RECONCILIATION_STATUS_UNAVAILABLE",
+        "运行时对账状态不可确认，已暂停新的交易决策",
+      )
+    if not required:
+      return None
+    return (
+      "RUNTIME_RECONCILE_REQUIRED",
+      "持仓与 Bucket 账本不一致，等待权威对账后才能继续交易",
+    )
+
+  @staticmethod
+  async def _put_runtime_control_event(
+    runtime: StrategyRuntime,
+    item: tuple[str, Any],
+  ) -> None:
+    await runtime.event_queue.put(item)
+    runtime._event_queue_wakeup.set()
+
+  @staticmethod
+  def _put_runtime_control_event_nowait(
+    runtime: StrategyRuntime,
+    item: tuple[str, Any],
+  ) -> None:
+    runtime.event_queue.put_nowait(item)
+    runtime._event_queue_wakeup.set()
+
+  @staticmethod
+  def _runtime_market_event_code(data: Any) -> str:
+    return str(
+      getattr(data, "stock_code", None)
+      or getattr(data, "instrument_code", None)
+      or ""
+    ).strip().upper()
+
+  @staticmethod
+  def _runtime_tick_source_age_seconds(data: Any) -> Optional[float]:
+    timestamp = getattr(data, "time", None)
+    if hasattr(timestamp, "to_pydatetime"):
+      timestamp = timestamp.to_pydatetime()
+    if not isinstance(timestamp, datetime):
+      return None
+    return (
+      time_utils.now() - time_utils.to_shanghai(timestamp)
+    ).total_seconds()
+
+  def _mark_runtime_market_continuity_lost(
+    self,
+    runtime: StrategyRuntime,
+    instrument_codes: Any,
+    *,
+    reason: str,
+  ) -> None:
+    codes = {
+      str(code or "").strip().upper()
+      for code in instrument_codes
+      if str(code or "").strip()
+    }
+    if not codes:
+      codes = {
+        str(code or "").strip().upper()
+        for code in list(runtime.context.instruments or [])
+        if str(code or "").strip()
+      }
+    for code in codes:
+      runtime.latest_market_data.pop(code, None)
+      runtime._market_continuity_generations[code] = (
+        runtime._market_continuity_generations.get(code, 0) + 1
+      )
+      generation = runtime._market_continuity_generations[code]
+      runtime._active_market_continuity_losses[code] = str(reason)
+      runtime._pending_market_invalidations[code] = str(reason)
+      runtime._market_invalidation_checkpoints[code] = generation
+      runtime._handled_market_invalidations.pop(code, None)
+      # Install the routing gate synchronously. The strategy invalidation hook is
+      # deliberately deferred to the serial consumer, but no in-flight Tick may
+      # route an intent in the meantime.
+      runtime._market_fail_closed_codes[code] = str(reason)
+      install_durable_gate = getattr(
+        runtime.state_manager,
+        "require_market_continuity_reconciliation",
+        None,
+      )
+      if callable(install_durable_gate):
+        try:
+          install_durable_gate(code, str(reason))
+        except Exception:
+          self.logger.exception(
+            "持久化行情连续性门禁安装失败: run_id=%s instrument=%s",
+            runtime.run_id,
+            code,
+          )
+
+  @staticmethod
+  def _drain_runtime_market_queue(
+    runtime: StrategyRuntime,
+  ) -> tuple[int, set[str]]:
+    dropped = 0
+    affected: set[str] = set()
+    while True:
+      try:
+        queued = runtime.market_event_queue.get_nowait()
+      except asyncio.QueueEmpty:
+        break
+      try:
+        dropped += 1
+        data = queued.data if isinstance(queued, RuntimeMarketEvent) else queued[1]
+        code = StrategyExecutor._runtime_market_event_code(data)
+        if code:
+          affected.add(code)
+      finally:
+        runtime.market_event_queue.task_done()
+    runtime.market_events_dropped += dropped
+    return dropped, affected
+
+  def _enqueue_runtime_market_event(
+    self,
+    runtime: StrategyRuntime,
+    event_type: str,
+    data: Any,
+  ) -> None:
+    # Historical replays are lossless and already drive their own serial clock.
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      self._put_runtime_control_event_nowait(runtime, (event_type, data))
+      return
+
+    code = self._runtime_market_event_code(data)
+    if runtime.market_event_queue.full():
+      dropped, affected = self._drain_runtime_market_queue(runtime)
+      if code:
+        affected.add(code)
+      runtime.market_event_overflows += 1
+      self._mark_runtime_market_continuity_lost(
+        runtime,
+        affected,
+        reason="MARKET_EVENT_QUEUE_OVERFLOW",
+      )
+      self.logger.warning(
+        "策略实时行情队列过载，已清空积压并失效观察窗: "
+        "run_id=%s dropped=%s instruments=%s",
+        runtime.run_id,
+        dropped,
+        sorted(affected),
+      )
+
+    queued = RuntimeMarketEvent(
+      event_type=event_type,
+      data=data,
+      enqueued_at=monotonic(),
+    )
+    try:
+      runtime.market_event_queue.put_nowait(queued)
+    except asyncio.QueueFull:
+      runtime.market_events_dropped += 1
+      self._mark_runtime_market_continuity_lost(
+        runtime,
+        [code],
+        reason="MARKET_EVENT_QUEUE_OVERFLOW",
+      )
+      return
+    runtime.market_events_enqueued += 1
+    runtime.market_queue_high_watermark = max(
+      runtime.market_queue_high_watermark,
+      runtime.market_event_queue.qsize(),
+    )
+    runtime._event_queue_wakeup.set()
+
+  async def _apply_pending_runtime_market_invalidations(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    pending = dict(runtime._pending_market_invalidations)
+    runtime._pending_market_invalidations.clear()
+    strategy = runtime.strategy
+    hook = getattr(strategy, "invalidate_realtime_market_window", None)
+    for code, reason in pending.items():
+      generation = runtime._market_continuity_generations.get(code, 0)
+      handled = False
+      try:
+        handled = bool(hook(code, reason=reason)) if callable(hook) else False
+      except Exception:
+        self.logger.exception(
+          "策略行情观察窗失效钩子执行失败: run_id=%s instrument=%s",
+          runtime.run_id,
+          code,
+        )
+      if handled:
+        first_checkpoint_attempt = (
+          runtime._handled_market_invalidations.get(code) != generation
+        )
+        runtime._handled_market_invalidations[code] = generation
+        if first_checkpoint_attempt:
+          runtime.market_window_invalidations += 1
+        for intent in list(runtime.pending_approvals.values()):
+          metadata = dict(intent.metadata or {})
+          if (
+            intent.direction != TradeIntentDirection.BUY
+            or intent.execution_mode
+            != TradeIntentExecutionMode.MANUAL_CONFIRM
+            or str(metadata.get("t_trade_role") or "").lower() != "entry"
+            or str(intent.instrument_code or "").strip().upper() != code
+          ):
+            continue
+          try:
+            await self._reject_pending_approval(
+              runtime,
+              intent,
+              status="EXPIRED",
+              reason="MARKET_DATA_CONTINUITY_LOST",
+              message="信号行情连续性已失效，请等待观察窗重新预热后的新信号",
+            )
+          except Exception:
+            runtime._pending_market_invalidations[code] = reason
+            self.logger.exception(
+              "做 T 待确认信号失效收敛失败，保持行情门禁: "
+              "run_id=%s instrument=%s intent_id=%s",
+              runtime.run_id,
+              code,
+              intent.intent_id,
+            )
+      else:
+        runtime._market_fail_closed_codes[code] = reason
+
+    if not runtime._market_invalidation_checkpoints:
+      return
+    checkpoint = getattr(
+      runtime.state_manager,
+      "checkpoint_strategy_state_changes",
+      None,
+    )
+    saved = False
+    if callable(checkpoint):
+      try:
+        saved = bool(await checkpoint())
+      except Exception:
+        self.logger.exception(
+          "策略行情观察窗失效快照保存失败: run_id=%s",
+          runtime.run_id,
+        )
+    if not saved:
+      self.logger.error(
+        "策略行情观察窗失效尚未持久化，保持交易门禁: "
+        "run_id=%s instruments=%s",
+        runtime.run_id,
+        sorted(runtime._market_invalidation_checkpoints),
+      )
+      return
+
+    clear_candidates: List[tuple[str, int]] = []
+    for code, generation in list(
+      runtime._market_invalidation_checkpoints.items()
+    ):
+      if (
+        runtime._market_continuity_generations.get(code, 0) == generation
+        and code not in runtime._pending_market_invalidations
+      ):
+        if runtime._handled_market_invalidations.get(code) == generation:
+          clear_candidates.append((code, generation))
+        else:
+          # A continuity-blind strategy can never prove a rebuilt observation
+          # window.  Its durable and process-local gates intentionally remain,
+          # but no repeated checkpoint attempt is useful in this generation.
+          runtime._market_invalidation_checkpoints.pop(code, None)
+
+    if not clear_candidates:
+      return
+
+    clear_durable_gate = getattr(
+      runtime.state_manager,
+      "clear_market_continuity_reconciliation",
+      None,
+    )
+    try:
+      if callable(clear_durable_gate):
+        for code, _generation in clear_candidates:
+          clear_durable_gate(code)
+    except Exception:
+      self.logger.exception(
+        "清除持久化行情连续性门禁失败，保持运行时门禁: run_id=%s",
+        runtime.run_id,
+      )
+      return
+
+    # Phase two publishes the gate removal only after phase one durably stored
+    # the cleared sample window/rewarm marker while the gate was still present.
+    # A crash or commit-unknown result therefore always restores at least one
+    # safe barrier.
+    clear_saved = False
+    force_save = getattr(runtime.state_manager, "force_save", None)
+    if callable(force_save):
+      try:
+        clear_saved = bool(await force_save())
+      except Exception:
+        self.logger.exception(
+          "行情连续性门禁清除快照保存失败: run_id=%s",
+          runtime.run_id,
+        )
+    if not clear_saved:
+      self.logger.error(
+        "行情连续性门禁清除尚未持久化，保持运行时门禁: "
+        "run_id=%s instruments=%s",
+        runtime.run_id,
+        sorted(code for code, _generation in clear_candidates),
+      )
+      return
+
+    for code, generation in clear_candidates:
+      if (
+        runtime._market_continuity_generations.get(code, 0) == generation
+        and code not in runtime._pending_market_invalidations
+        and runtime._handled_market_invalidations.get(code) == generation
+      ):
+        runtime._market_invalidation_checkpoints.pop(code, None)
+        runtime._market_fail_closed_codes.pop(code, None)
+        runtime._handled_market_invalidations.pop(code, None)
+
+  def _runtime_market_continuity_failure(
+    self,
+    runtime: StrategyRuntime,
+    instrument_code: str,
+  ) -> Optional[tuple[str, str]]:
+    """Return the fail-closed reason for an intent's market-data lineage."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return None
+    code = str(instrument_code or "").strip().upper()
+    if not code:
+      return None
+
+    processing = runtime._processing_market_events.get(code)
+    if processing is not None:
+      expected_generation, enqueued_at = processing
+      current_generation = runtime._market_continuity_generations.get(code, 0)
+      if current_generation != expected_generation:
+        reason = runtime._active_market_continuity_losses.get(
+          code,
+          "MARKET_DATA_CONTINUITY_GENERATION_CHANGED",
+        )
+        return "MARKET_DATA_CONTINUITY_LOST", (
+          f"{code} 行情连续性已变化（{reason}），旧行情不得生成或执行交易意图"
+        )
+      processing_age = max(0.0, monotonic() - enqueued_at)
+      if processing_age > MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS:
+        runtime.market_events_expired += 1
+        runtime.market_events_dropped += 1
+        self._mark_runtime_market_continuity_lost(
+          runtime,
+          [code],
+          reason="MARKET_EVENT_PROCESSING_EXPIRED",
+        )
+
+    reason = runtime._pending_market_invalidations.get(code)
+    if reason is None:
+      reason = runtime._market_fail_closed_codes.get(code)
+    if reason is None:
+      reason = runtime._active_market_continuity_losses.get(code)
+    if reason is None:
+      return None
+    return "MARKET_DATA_CONTINUITY_LOST", (
+      f"{code} 行情连续性失效（{reason}），等待观察窗完整预热"
+    )
+
+  async def _next_runtime_event(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    timeout: float = 1.0,
+  ) -> Optional[tuple[asyncio.Queue, str, Any, Optional[float]]]:
+    """Get one event while always checking durable/control work first."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    while True:
+      if (
+        runtime.status not in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}
+        or self._shutdown_event.is_set()
+      ):
+        return None
+      try:
+        event_type, data = runtime.event_queue.get_nowait()
+        return runtime.event_queue, event_type, data, None
+      except asyncio.QueueEmpty:
+        pass
+      try:
+        queued = runtime.market_event_queue.get_nowait()
+        if isinstance(queued, RuntimeMarketEvent):
+          return (
+            runtime.market_event_queue,
+            queued.event_type,
+            queued.data,
+            queued.enqueued_at,
+          )
+        event_type, data = queued
+        return runtime.market_event_queue, event_type, data, None
+      except asyncio.QueueEmpty:
+        pass
+
+      remaining = deadline - loop.time()
+      if remaining <= 0:
+        return None
+      runtime._event_queue_wakeup.clear()
+      if not runtime.event_queue.empty() or not runtime.market_event_queue.empty():
+        continue
+      try:
+        await asyncio.wait_for(
+          runtime._event_queue_wakeup.wait(),
+          timeout=min(remaining, 0.05),
+        )
+      except asyncio.TimeoutError:
+        continue
+
+  async def _quiesce_runtime_tasks(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    owner_task: Optional[asyncio.Task] = None,
+  ) -> None:
     """Stop producers, then let the serial consumer finish its current item."""
     current_task = asyncio.current_task()
     if (
       runtime.task is not None
       and runtime.task is not current_task
+      and runtime.task is not owner_task
       and not runtime.task.done()
     ):
       runtime.task.cancel()
-      try:
-        await asyncio.wait_for(runtime.task, timeout=5.0)
-      except asyncio.CancelledError:
-        pass
-      except asyncio.TimeoutError:
-        self.logger.warning("策略任务 %s 停止超时,强制跳过", runtime.run_id)
+      done, pending = await asyncio.wait({runtime.task}, timeout=5.0)
+      if pending:
+        self.logger.warning("策略任务 %s 停止超时,再次执行取消", runtime.run_id)
+        runtime.task.cancel()
+        done, pending = await asyncio.wait({runtime.task}, timeout=1.0)
+      if pending:
+        raise RuntimeError(f"策略任务未能收敛: {runtime.run_id}")
+      await asyncio.gather(*done, return_exceptions=True)
 
     event_task = runtime.event_task
-    if event_task is not None and event_task is not current_task and not event_task.done():
+    if (
+      event_task is not None
+      and event_task is not current_task
+      and event_task is not owner_task
+      and not event_task.done()
+    ):
       # A consumer blocked on queue.get() observes STOPPING at its one-second
       # timeout. A consumer already processing an item exits at the next loop
       # boundary, after balancing task_done for the acquired item.
-      try:
-        await asyncio.wait_for(asyncio.shield(event_task), timeout=5.0)
-      except asyncio.TimeoutError:
+      done, pending = await asyncio.wait({event_task}, timeout=5.0)
+      if pending:
         self.logger.warning(
           "策略事件任务 %s 未在停止窗口内收敛,执行取消", runtime.run_id
         )
         event_task.cancel()
-        await asyncio.gather(event_task, return_exceptions=True)
+        done, pending = await asyncio.wait({event_task}, timeout=1.0)
+      if pending:
+        raise RuntimeError(f"策略事件任务未能收敛: {runtime.run_id}")
+      await asyncio.gather(*done, return_exceptions=True)
 
-    if event_task is current_task:
+    if event_task is not None and (
+      event_task is current_task or event_task is owner_task
+    ):
       return
     while True:
       try:
@@ -1023,8 +1771,346 @@ class StrategyExecutor:
           )
       finally:
         runtime.event_queue.task_done()
+    self._drain_runtime_market_queue(runtime)
+
+  async def _release_runtime_adapter(self, runtime: StrategyRuntime) -> None:
+    """Release exactly the AdapterManager reference owned by this runtime."""
+
+    if not runtime._adapter_ref_acquired:
+      return
+    await adapter_manager.release_adapter_for_mode(
+      runtime.context.mode.value.lower()
+    )
+    # AdapterManager keeps the final reference until disconnect succeeds, so
+    # this flag remains set when the awaited release raises and can be retried.
+    runtime._adapter_ref_acquired = False
+
+  async def _retry_previous_cleanup_before_start(
+    self,
+    runtime: StrategyRuntime,
+  ) -> bool:
+    """Finish the previous ERROR generation before any ownership flag resets."""
+
+    try:
+      if runtime._startup_abort_task is not None or runtime.task is None:
+        await self._ensure_startup_abort(runtime)
+        cleanup_complete = runtime._startup_abort_complete
+      else:
+        await self._ensure_terminal_cleanup(runtime)
+        cleanup_complete = runtime._terminal_cleanup_complete
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:
+      self.logger.error("重试旧运行资源清理失败: %s, %s", runtime.run_id, exc)
+      return False
+
+    return self._runtime_cleanup_converged(runtime, cleanup_complete)
+
+  @staticmethod
+  def _runtime_cleanup_converged(
+    runtime: StrategyRuntime,
+    cleanup_complete: bool,
+  ) -> bool:
+    """Verify that a cleanup flag corresponds to actually closed resources."""
+
+    state_manager = runtime.state_manager
+    state_tasks_stopped = bool(
+      state_manager is None
+      or (
+        not state_manager._running
+        and (
+          state_manager._snapshot_task is None
+          or state_manager._snapshot_task.done()
+        )
+        and (
+          state_manager._state_sync_task is None
+          or state_manager._state_sync_task.done()
+        )
+        and state_manager._state_queue is None
+      )
+    )
+    broker_connected = getattr(runtime.broker, "is_connected", False) is True
+    runtime_task_stopped = runtime.task is None or runtime.task.done()
+    event_task_stopped = runtime.event_task is None or runtime.event_task.done()
+    control_queue_drained = bool(
+      runtime.event_queue.empty()
+      and int(getattr(runtime.event_queue, "_unfinished_tasks", 0) or 0) == 0
+    )
+    market_queue_drained = bool(
+      runtime.market_event_queue.empty()
+      and int(getattr(runtime.market_event_queue, "_unfinished_tasks", 0) or 0) == 0
+    )
+    return bool(
+      cleanup_complete
+      and state_tasks_stopped
+      and runtime_task_stopped
+      and event_task_stopped
+      and not runtime._adapter_ref_acquired
+      and not broker_connected
+      and not runtime.realtime_subscription_ids
+      and control_queue_drained
+      and market_queue_drained
+    )
+
+  async def _ensure_startup_abort(self, runtime: StrategyRuntime) -> None:
+    """Run startup cleanup in an owned task so caller cancellation cannot kill it."""
+
+    task = runtime._startup_abort_task
+    if task is None or task.done():
+      task = asyncio.create_task(
+        self._abort_failed_start(runtime),
+        name=f"strategy-startup-abort:{runtime.run_id}",
+      )
+      runtime._startup_abort_task = task
+    await asyncio.shield(task)
+
+  async def _abort_failed_start(self, runtime: StrategyRuntime) -> None:
+    """Roll back a partially acquired startup without persisting half-state."""
+
+    async with runtime._startup_abort_lock:
+      if runtime._startup_abort_complete:
+        if self._runtime_cleanup_converged(runtime, True):
+          return
+        runtime._startup_abort_complete = False
+      runtime.status = ExecutionStatus.ERROR
+      cleanup_errors: List[str] = []
+
+      try:
+        await self._quiesce_runtime_tasks(runtime)
+      except Exception as exc:
+        cleanup_errors.append("tasks")
+        self.logger.error("启动回滚停止任务失败: %s, %s", runtime.run_id, exc)
+      try:
+        await self._clear_realtime_subscriptions(runtime)
+      except Exception as exc:
+        cleanup_errors.append("subscriptions")
+        self.logger.error("启动回滚取消行情订阅失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.state_manager:
+          await runtime.state_manager.abort_without_final_snapshot(runtime.strategy)
+      except Exception as exc:
+        cleanup_errors.append("state_manager")
+        self.logger.error("启动回滚中止状态管理器失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.broker:
+          await runtime.broker.disconnect()
+      except Exception as exc:
+        cleanup_errors.append("broker")
+        self.logger.error("启动回滚断开 Broker 失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.strategy:
+          await runtime.strategy.stop()
+      except Exception as exc:
+        cleanup_errors.append("strategy")
+        self.logger.error("启动回滚停止策略失败: %s, %s", runtime.run_id, exc)
+      try:
+        await self._release_runtime_adapter(runtime)
+      except Exception as exc:
+        cleanup_errors.append("adapter")
+        self.logger.error("启动回滚释放数据适配器失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.log_manager and runtime.strategy:
+          runtime.log_manager.detach_handler(
+            run_id=runtime.run_id,
+            logger=runtime.strategy.logger,
+          )
+      except Exception as exc:
+        cleanup_errors.append("log_handler")
+        self.logger.error("启动回滚移除日志 Handler 失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.log_manager:
+          await runtime.log_manager.flush(runtime.run_id)
+      except Exception as exc:
+        cleanup_errors.append("log_flush")
+        self.logger.error("启动回滚刷新日志失败: %s, %s", runtime.run_id, exc)
+
+      # A callback racing with disconnect may have queued one last item after
+      # the first drain. No consumer exists after a failed startup.
+      try:
+        await self._quiesce_runtime_tasks(runtime)
+      except Exception as exc:
+        cleanup_errors.append("final_drain")
+        self.logger.error("启动回滚最终排空任务失败: %s, %s", runtime.run_id, exc)
+      runtime._startup_abort_complete = not cleanup_errors
+      if cleanup_errors:
+        self.logger.error(
+          "启动回滚尚未完全收敛，可安全重试: %s, pending=%s",
+          runtime.run_id,
+          sorted(set(cleanup_errors)),
+        )
+      runtime.status = ExecutionStatus.ERROR
+
+  async def _ensure_terminal_cleanup(self, runtime: StrategyRuntime) -> None:
+    """Run ERROR teardown independently from the failing strategy task."""
+
+    task = runtime._terminal_cleanup_task
+    if task is None or task.done():
+      current_task = asyncio.current_task()
+      owner_task = runtime.task if current_task is runtime.task else None
+      task = asyncio.create_task(
+        self._cleanup_runtime_after_error(runtime, owner_task=owner_task),
+        name=f"strategy-error-cleanup:{runtime.run_id}",
+      )
+      runtime._terminal_cleanup_task = task
+    await asyncio.shield(task)
+
+  async def _cleanup_runtime_after_error(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    owner_task: Optional[asyncio.Task] = None,
+  ) -> None:
+    """Release an operational runtime while preserving its ERROR state."""
+
+    async with runtime._terminal_cleanup_lock:
+      if runtime._terminal_cleanup_complete:
+        if self._runtime_cleanup_converged(runtime, True):
+          runtime.status = ExecutionStatus.ERROR
+          return
+        runtime._terminal_cleanup_complete = False
+      if runtime._startup_abort_complete:
+        if self._runtime_cleanup_converged(runtime, True):
+          runtime.status = ExecutionStatus.ERROR
+          return
+        # A late callback can invalidate a previously completed startup abort.
+        # Retry the no-snapshot cleanup rather than entering terminal snapshot
+        # semantics for a generation that never became operational.
+        runtime._startup_abort_complete = False
+        await self._abort_failed_start(runtime)
+        runtime.status = ExecutionStatus.ERROR
+        return
+      runtime.status = ExecutionStatus.ERROR
+      cleanup_errors: List[str] = []
+      final_snapshot_ready = True
+
+      # An approval that passed the RUNNING gate owns this lock through its
+      # durable status transition and routing attempt. Let it converge before
+      # tearing down the consumer or taking the final snapshot.
+      async with runtime.approval_lock:
+        pass
+
+      try:
+        await self._quiesce_runtime_tasks(runtime, owner_task=owner_task)
+      except Exception as exc:
+        cleanup_errors.append("tasks")
+        final_snapshot_ready = False
+        self.logger.error("异常终止停止任务失败: %s, %s", runtime.run_id, exc)
+      try:
+        await self._clear_realtime_subscriptions(runtime)
+      except Exception as exc:
+        cleanup_errors.append("subscriptions")
+        final_snapshot_ready = False
+        self.logger.error("异常终止取消行情订阅失败: %s, %s", runtime.run_id, exc)
+      try:
+        # Disconnecting subscriptions may race with one last callback. Drain it
+        # before declaring the final durable snapshot authoritative.
+        await self._quiesce_runtime_tasks(runtime, owner_task=owner_task)
+      except Exception as exc:
+        cleanup_errors.append("post_subscription_tasks")
+        final_snapshot_ready = False
+        self.logger.error("异常终止排空末尾事件失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.strategy:
+          await runtime.strategy.stop()
+      except Exception as exc:
+        cleanup_errors.append("strategy")
+        final_snapshot_ready = False
+        self.logger.error("异常终止停止策略失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.state_manager:
+          await runtime.state_manager.stop_state_sync(runtime.strategy)
+      except Exception as exc:
+        cleanup_errors.append("state_sync")
+        final_snapshot_ready = False
+        self.logger.error("异常终止停止状态同步失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.performance_recorder:
+          await runtime.performance_recorder.flush()
+      except Exception as exc:
+        cleanup_errors.append("performance")
+        self.logger.error("异常终止刷新绩效失败: %s, %s", runtime.run_id, exc)
+
+      final_snapshot_saved = bool(
+        final_snapshot_ready and runtime.state_manager is None
+      )
+      if final_snapshot_ready and runtime.state_manager:
+        try:
+          await runtime.state_manager.stop()
+          final_snapshot_saved = True
+        except Exception as exc:
+          cleanup_errors.append("state_manager")
+          self.logger.error("异常终止保存最终状态失败: %s, %s", runtime.run_id, exc)
+      elif not final_snapshot_ready:
+        cleanup_errors.append("final_snapshot_deferred")
+        self.logger.error(
+          "异常终止前置资源未收敛，延后最终状态快照: %s",
+          runtime.run_id,
+        )
+
+      if final_snapshot_saved:
+        try:
+          if runtime.broker:
+            await runtime.broker.disconnect()
+        except Exception as exc:
+          cleanup_errors.append("broker")
+          self.logger.error("异常终止断开 Broker 失败: %s, %s", runtime.run_id, exc)
+        try:
+          await self._release_runtime_adapter(runtime)
+        except Exception as exc:
+          cleanup_errors.append("adapter")
+          self.logger.error("异常终止释放数据适配器失败: %s, %s", runtime.run_id, exc)
+        try:
+          # Broker/adapter disconnect may synchronously emit one last callback.
+          # Never carry that control or market event into a later generation.
+          await self._quiesce_runtime_tasks(runtime, owner_task=owner_task)
+        except Exception as exc:
+          cleanup_errors.append("post_disconnect_tasks")
+          self.logger.error(
+            "异常终止断开资源后排空事件失败: %s, %s",
+            runtime.run_id,
+            exc,
+          )
+      else:
+        self.logger.error(
+          "最终状态尚未形成权威快照，保留 Broker/Adapter 所有权: %s",
+          runtime.run_id,
+        )
+      try:
+        if runtime.log_manager and runtime.strategy:
+          runtime.log_manager.detach_handler(
+            run_id=runtime.run_id,
+            logger=runtime.strategy.logger,
+          )
+      except Exception as exc:
+        cleanup_errors.append("log_handler")
+        self.logger.error("异常终止移除日志 Handler 失败: %s, %s", runtime.run_id, exc)
+      try:
+        if runtime.log_manager:
+          await runtime.log_manager.flush(runtime.run_id)
+      except Exception as exc:
+        cleanup_errors.append("log_flush")
+        self.logger.error("异常终止刷新日志失败: %s, %s", runtime.run_id, exc)
+
+      runtime._terminal_cleanup_complete = not cleanup_errors
+      if cleanup_errors:
+        self.logger.error(
+          "异常终止资源尚未完全收敛，可安全重试: %s, pending=%s",
+          runtime.run_id,
+          sorted(set(cleanup_errors)),
+        )
+      runtime.status = ExecutionStatus.ERROR
 
   async def stop(self, run_id: str, *, force: bool = False) -> bool:
+    if run_id not in self.runs:
+      return False
+    runtime = self.runs[run_id]
+    return await self._run_lifecycle_operation(
+      runtime,
+      "stop",
+      lambda: self._stop_runtime(run_id, force=force),
+    )
+
+  async def _stop_runtime(self, run_id: str, *, force: bool = False) -> bool:
     """
     停止策略运行并清理资源
 
@@ -1043,9 +2129,33 @@ class StrategyExecutor:
       return False
 
     runtime = self.runs[run_id]
+
     previous_status = runtime.status
 
-    if runtime.status in [ExecutionStatus.STOPPED, ExecutionStatus.STOPPING]:
+    if runtime.status == ExecutionStatus.STOPPED:
+      return True
+    if runtime.status == ExecutionStatus.STOPPING:
+      self.logger.error("策略停止状态无活动 owner，拒绝提前报告成功: %s", run_id)
+      return False
+    if previous_status == ExecutionStatus.ERROR and (
+      runtime._startup_abort_task is not None
+      or runtime._startup_abort_complete
+    ):
+      try:
+        await self._ensure_startup_abort(runtime)
+      except asyncio.CancelledError:
+        raise
+      except Exception as exc:
+        self.logger.error("停止失败启动代时清理异常: %s, %s", run_id, exc)
+        return False
+      if not self._runtime_cleanup_converged(
+        runtime,
+        runtime._startup_abort_complete,
+      ):
+        self.logger.error("失败启动代资源尚未收敛，拒绝标记已停止: %s", run_id)
+        return False
+      runtime.status = ExecutionStatus.STOPPED
+      self.logger.info("失败启动代已安全停止（未写最终快照）: %s", run_id)
       return True
     active_exit_plans = runtime.exit_plan_book.active_plans()
     if active_exit_plans and not force:
@@ -1065,8 +2175,27 @@ class StrategyExecutor:
       return False
 
     try:
-      runtime.status = ExecutionStatus.STOPPING
+      async with runtime.approval_lock:
+        if not force:
+          active_exit_plans = runtime.exit_plan_book.active_plans()
+          if active_exit_plans:
+            self._runtime_log(
+              runtime,
+              "WARNING",
+              "审批并发期间出现自动退出计划，拒绝停止运行",
+            )
+            return False
+          lifecycle_blocker = self._runtime_lifecycle_blocker(runtime)
+          if lifecycle_blocker:
+            self._runtime_log(
+              runtime,
+              "WARNING",
+              f"审批并发期间新增交易生命周期，拒绝停止: {lifecycle_blocker}",
+            )
+            return False
+        runtime.status = ExecutionStatus.STOPPING
       await self._quiesce_runtime_tasks(runtime)
+      await self._clear_realtime_subscriptions(runtime)
 
       # 停止策略
       if runtime.strategy:
@@ -1114,8 +2243,8 @@ class StrategyExecutor:
       # adapter so no callback can mutate state after the persisted stop point.
       if runtime.broker:
         await runtime.broker.disconnect()
-      if runtime.data_adapter:
-        adapter_manager.release_adapter_for_mode(runtime.context.mode.value.lower())
+      await self._release_runtime_adapter(runtime)
+      await self._quiesce_runtime_tasks(runtime)
 
       if (
         runtime.context.parameters.get("limit_up_board_replay")
@@ -1133,10 +2262,21 @@ class StrategyExecutor:
       self.logger.info(f"策略运行停止成功: {run_id}")
       return True
 
+    except asyncio.CancelledError:
+      runtime.status = ExecutionStatus.ERROR
+      runtime.error_message = "策略停止任务被取消"
+      self.logger.error("停止策略运行被取消: %s", run_id)
+      try:
+        await self._ensure_terminal_cleanup(runtime)
+      except asyncio.CancelledError:
+        # The runtime-owned cleanup task is shielded and continues independently.
+        pass
+      raise
     except Exception as e:
       runtime.status = ExecutionStatus.ERROR
       runtime.error_message = str(e)
       self.logger.error(f"停止策略运行失败: {run_id}, 错误: {e}")
+      await self._ensure_terminal_cleanup(runtime)
       return False
 
   async def pause(self, run_id: str) -> bool:
@@ -1154,25 +2294,25 @@ class StrategyExecutor:
 
     runtime = self.runs[run_id]
 
-    if runtime.status != ExecutionStatus.RUNNING:
-      return False
-    if runtime.exit_plan_book.active_plans():
-      self._runtime_log(
-        runtime,
-        "WARNING",
-        "仍有自动退出计划保护未退出仓位，不能暂停行情监控",
-      )
-      return False
-    lifecycle_blocker = self._runtime_lifecycle_blocker(runtime)
-    if lifecycle_blocker:
-      self._runtime_log(
-        runtime,
-        "WARNING",
-        f"运行仍有未完成交易生命周期，拒绝暂停: {lifecycle_blocker}",
-      )
-      return False
-
-    runtime.status = ExecutionStatus.PAUSED
+    async with runtime.approval_lock:
+      if runtime.status != ExecutionStatus.RUNNING:
+        return False
+      if runtime.exit_plan_book.active_plans():
+        self._runtime_log(
+          runtime,
+          "WARNING",
+          "仍有自动退出计划保护未退出仓位，不能暂停行情监控",
+        )
+        return False
+      lifecycle_blocker = self._runtime_lifecycle_blocker(runtime)
+      if lifecycle_blocker:
+        self._runtime_log(
+          runtime,
+          "WARNING",
+          f"运行仍有未完成交易生命周期，拒绝暂停: {lifecycle_blocker}",
+        )
+        return False
+      runtime.status = ExecutionStatus.PAUSED
     self.logger.info(f"策略运行已暂停: {run_id}")
     return True
 
@@ -1256,7 +2396,8 @@ class StrategyExecutor:
       and runtime.status in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}
     ):
       future = asyncio.get_running_loop().create_future()
-      await runtime.event_queue.put(
+      await self._put_runtime_control_event(
+        runtime,
         (
           "universe",
           {
@@ -1297,17 +2438,68 @@ class StrategyExecutor:
     Args:
         timeout: 总超时时间(秒),默认10秒
     """
-    tasks = []
-    for run_id in list(self.runs.keys()):
-      tasks.append(self.stop(run_id, force=True))
+    stop_tasks = {
+      run_id: asyncio.create_task(
+        self.stop(run_id, force=True),
+        name=f"strategy-shutdown-stop:{run_id}",
+      )
+      for run_id in list(self.runs)
+    }
+    if not stop_tasks:
+      return
 
-    if tasks:
+    done, pending = await asyncio.wait(
+      set(stop_tasks.values()),
+      timeout=max(0.1, timeout),
+    )
+    for task in pending:
+      task.cancel()
+
+    failures: List[str] = []
+    for run_id, task in stop_tasks.items():
+      if task not in done:
+        failures.append(f"{run_id}: stop timeout")
+        continue
       try:
-        await asyncio.wait_for(
-          asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
+        stopped = bool(task.result())
+      except BaseException as exc:
+        failures.append(f"{run_id}: stop raised {type(exc).__name__}: {exc}")
+        continue
+      if not stopped:
+        failures.append(f"{run_id}: stop returned false")
+
+    owned_cleanup_tasks = set(pending) | {
+      task
+      for runtime in self.runs.values()
+      for task in (
+        runtime._lifecycle_operation_task,
+        runtime._startup_abort_task,
+        runtime._terminal_cleanup_task,
+      )
+      if task is not None and not task.done()
+    }
+    if owned_cleanup_tasks:
+      cleanup_done, cleanup_pending = await asyncio.wait(
+        owned_cleanup_tasks,
+        timeout=max(0.1, timeout),
+      )
+      if cleanup_done:
+        await asyncio.gather(*cleanup_done, return_exceptions=True)
+      if cleanup_pending:
+        failures.append(
+          "owned lifecycle/cleanup timeout: "
+          + ",".join(sorted(task.get_name() for task in cleanup_pending))
         )
-      except asyncio.TimeoutError:
-        self.logger.warning(f"停止所有策略超时({timeout}秒),部分策略可能未完全停止")
+
+    for run_id, runtime in self.runs.items():
+      if runtime.status != ExecutionStatus.STOPPED:
+        failures.append(f"{run_id}: status={runtime.status.value}")
+        continue
+      if not self._runtime_cleanup_converged(runtime, True):
+        failures.append(f"{run_id}: resources not converged")
+
+    if failures:
+      raise RuntimeError("策略执行器关闭失败: " + "; ".join(failures))
 
   async def shutdown(self) -> None:
     """关闭执行器"""
@@ -1369,20 +2561,32 @@ class StrategyExecutor:
       )
 
     # 使用 AdapterManager 获取数据适配器
-    runtime.data_adapter = adapter_manager.get_adapter_for_mode(mode)
+    runtime.data_adapter = await adapter_manager.get_adapter_for_mode(mode)
+    runtime._adapter_ref_acquired = True
 
     # 连接 Broker 和 DataAdapter（适配器可能已连接，会自动处理）
-    await runtime.broker.connect()
-    await runtime.data_adapter.connect()
+    broker_connected = await runtime.broker.connect()
+    if not broker_connected:
+      raise RuntimeError(f"Broker 连接失败: mode={mode.value}")
+    adapter_connected = await adapter_manager.ensure_adapter_connected_for_mode(
+      mode,
+      runtime.data_adapter,
+    )
+    if not adapter_connected:
+      raise RuntimeError(f"DataAdapter 连接失败: mode={mode.value}")
 
     # 订阅订单和成交回调
     order_subscription = runtime.broker.subscribe_order_updates(
-      lambda order: runtime.event_queue.put_nowait(("order", order))
+      lambda order: self._put_runtime_control_event_nowait(
+        runtime, ("order", order)
+      )
     )
     if inspect.isawaitable(order_subscription):
       await order_subscription
     trade_subscription = runtime.broker.subscribe_trade_updates(
-      lambda trade: runtime.event_queue.put_nowait(("trade", trade))
+      lambda trade: self._put_runtime_control_event_nowait(
+        runtime, ("trade", trade)
+      )
     )
     if inspect.isawaitable(trade_subscription):
       await trade_subscription
@@ -1429,9 +2633,6 @@ class StrategyExecutor:
     strategy = runtime.strategy
 
     try:
-      # 初始化策略
-      await strategy.initialize()
-      await strategy.start()
       await self._initialize_backtest_dynamic_universe(runtime)
       self._runtime_log(runtime, "INFO", "策略初始化完成，进入执行循环")
 
@@ -1580,6 +2781,16 @@ class StrategyExecutor:
                 result_ready=True,
               )
 
+    except asyncio.CancelledError:
+      if runtime.status != ExecutionStatus.STOPPING:
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "策略运行任务被意外取消"
+        self._runtime_log(
+          runtime,
+          "ERROR",
+          f"策略运行任务被意外取消: {runtime.run_id}",
+        )
+      raise
     except Exception as e:
       runtime.status = ExecutionStatus.ERROR
       runtime.error_message = str(e)
@@ -1595,20 +2806,28 @@ class StrategyExecutor:
           error_message=str(e),
         )
     finally:
-      if runtime.performance_recorder:
+      if runtime.status == ExecutionStatus.ERROR:
         try:
-          await runtime.performance_recorder.flush()
-        except Exception as e:
-          self.logger.error(f"绩效采样刷新失败: {e}")
-      # Explicit stop owns the final lifecycle ordering: event consumer first,
-      # then one strategy stop, state snapshot, and broker disconnect.
-      if strategy and runtime.status != ExecutionStatus.STOPPING:
-        try:
-          await strategy.stop()
-        except Exception as e:
-          self._runtime_log(runtime, "ERROR", f"策略停止异常: {e}")
-      if runtime.log_manager:
-        await runtime.log_manager.flush(runtime.run_id)
+          await self._ensure_terminal_cleanup(runtime)
+        except asyncio.CancelledError:
+          # The owned cleanup task continues even if the failing loop is
+          # cancelled again while unwinding.
+          pass
+      else:
+        if runtime.performance_recorder:
+          try:
+            await runtime.performance_recorder.flush()
+          except Exception as e:
+            self.logger.error(f"绩效采样刷新失败: {e}")
+        # Explicit stop owns the final lifecycle ordering: event consumer first,
+        # then one strategy stop, state snapshot, and broker disconnect.
+        if strategy and runtime.status != ExecutionStatus.STOPPING:
+          try:
+            await strategy.stop()
+          except Exception as e:
+            self._runtime_log(runtime, "ERROR", f"策略停止异常: {e}")
+        if runtime.log_manager:
+          await runtime.log_manager.flush(runtime.run_id)
 
   async def _run_backtest_loop(self, runtime: StrategyRuntime) -> None:
     """运行回测循环 - 支持tick和K线双数据流"""
@@ -1672,14 +2891,16 @@ class StrategyExecutor:
         # 双数据流模式：订阅tick和K线
         await data_adapter.subscribe_tick(
           instrument_code,
-          lambda tick: runtime.event_queue.put_nowait(("tick", tick)),
+          lambda tick: self._enqueue_runtime_market_event(runtime, "tick", tick),
         )
 
         for period in periods:
           await data_adapter.subscribe_kline(
             instrument_code,
             period,
-            lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
+            lambda kline: self._enqueue_runtime_market_event(
+              runtime, "kline", kline
+            ),
           )
       else:
         # 仅K线模式 - 支持多周期
@@ -1687,7 +2908,9 @@ class StrategyExecutor:
           await data_adapter.subscribe_kline(
             instrument_code,
             period,
-            lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
+            lambda kline: self._enqueue_runtime_market_event(
+              runtime, "kline", kline
+            ),
           )
 
   async def _run_limit_up_board_replay(
@@ -3201,10 +4424,10 @@ class StrategyExecutor:
     event: OrderStateEvent,
     *,
     raise_on_error: bool = False,
-  ) -> None:
+  ) -> Any:
     """Notify strategy about an order event and consume any returned state patch."""
     if not runtime.strategy:
-      return
+      return None
     try:
       self._apply_exit_plan_order_event(runtime, event)
       self._update_t_trade_entry_reservation(runtime, event)
@@ -3213,12 +4436,14 @@ class StrategyExecutor:
       if patch:
         self._apply_runtime_state_patch(runtime, patch)
       self._refresh_t_trade_entry_reservation(runtime, event)
+      return patch
     except Exception as exc:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略订单回调失败: {exc}")
       if raise_on_error:
         raise
+      return None
 
   async def _notify_strategy_trade(
     self,
@@ -3226,10 +4451,10 @@ class StrategyExecutor:
     event: TradeExecutionEvent,
     *,
     raise_on_error: bool = False,
-  ) -> None:
+  ) -> Any:
     """Notify strategy about a trade event and consume any returned state patch."""
     if not runtime.strategy:
-      return
+      return None
     try:
       self._apply_exit_plan_trade_event(runtime, event)
       result = runtime.strategy.on_trade(event)
@@ -3237,12 +4462,14 @@ class StrategyExecutor:
       if patch:
         self._apply_runtime_state_patch(runtime, patch)
       self._refresh_t_trade_entry_reservation(runtime, event)
+      return patch
     except Exception as exc:
       if runtime.metrics:
         runtime.metrics.error_count += 1
       self._runtime_log(runtime, "ERROR", f"策略成交回调失败: {exc}")
       if raise_on_error:
         raise
+      return None
 
   def _update_broker_report_health(
     self,
@@ -3509,22 +4736,94 @@ class StrategyExecutor:
       runtime.status in [ExecutionStatus.RUNNING, ExecutionStatus.PAUSED]
       and not self._shutdown_event.is_set()
     ):
-      item_acquired = False
+      acquired_queue: Optional[asyncio.Queue] = None
+      market_processing_context: Optional[tuple[str, int, float]] = None
       durable_rollback_snapshot = None
+      durable_event_key = ""
+      durable_strategy_patch = None
       try:
         completion = None
-        # 获取下一个事件
-        try:
-          event_type, data = await asyncio.wait_for(
-            runtime.event_queue.get(), timeout=1.0
-          )
-          item_acquired = True
-        except asyncio.TimeoutError:
+        next_event = await self._next_runtime_event(runtime)
+        if next_event is None:
           continue
+        acquired_queue, event_type, data, enqueued_at = next_event
+        market_event = acquired_queue is runtime.market_event_queue
+        market_event_code = self._runtime_market_event_code(data)
+        if market_event:
+          queued_at = monotonic() if enqueued_at is None else float(enqueued_at)
+          queue_age = max(0.0, monotonic() - queued_at)
+          if queue_age > MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS:
+            runtime.market_events_expired += 1
+            runtime.market_events_dropped += 1
+            dropped, affected = self._drain_runtime_market_queue(runtime)
+            if market_event_code:
+              affected.add(market_event_code)
+            self._mark_runtime_market_continuity_lost(
+              runtime,
+              affected,
+              reason="MARKET_EVENT_PROCESSING_EXPIRED",
+            )
+            await self._apply_pending_runtime_market_invalidations(runtime)
+            self.logger.warning(
+              "策略实时行情处理超时，已清空积压并失效观察窗: "
+              "run_id=%s age=%.3fs additionally_dropped=%s instruments=%s",
+              runtime.run_id,
+              queue_age,
+              dropped,
+              sorted(affected),
+            )
+            continue
+          if event_type == "tick":
+            source_age = self._runtime_tick_source_age_seconds(data)
+            if (
+              source_age is None
+              or source_age > MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS
+              or source_age < -MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS
+            ):
+              runtime.market_tick_source_rejections += 1
+              runtime.market_events_dropped += 1
+              dropped, affected = self._drain_runtime_market_queue(runtime)
+              if market_event_code:
+                affected.add(market_event_code)
+              reason = (
+                "MARKET_TICK_SOURCE_TIMESTAMP_INVALID"
+                if source_age is None
+                else "MARKET_TICK_SOURCE_STALE"
+              )
+              self._mark_runtime_market_continuity_lost(
+                runtime,
+                affected,
+                reason=reason,
+              )
+              await self._apply_pending_runtime_market_invalidations(runtime)
+              self.logger.warning(
+                "策略实时 Tick 源时间不新鲜，已清空积压并失效观察窗: "
+                "run_id=%s source_age=%s additionally_dropped=%s instruments=%s",
+                runtime.run_id,
+                source_age,
+                dropped,
+                sorted(affected),
+              )
+              continue
+          await self._apply_pending_runtime_market_invalidations(runtime)
+          if market_event_code in runtime._market_fail_closed_codes:
+            runtime.market_events_dropped += 1
+            continue
 
         durable_event = event_type in {"durable_order", "durable_trade"}
-        durable_event_key = ""
         if runtime.durable_event_barrier_key and not durable_event:
+          if event_type in {"tick", "kline"}:
+            _dropped, affected = self._drain_runtime_market_queue(runtime)
+            if market_event:
+              runtime.market_events_dropped += 1
+            if market_event_code:
+              affected.add(market_event_code)
+            self._mark_runtime_market_continuity_lost(
+              runtime,
+              affected,
+              reason="DURABLE_EVENT_BARRIER",
+            )
+            await self._apply_pending_runtime_market_invalidations(runtime)
           if event_type == "universe" and isinstance(data, dict):
             future = data.get("future")
             if future is not None and not future.done():
@@ -3573,13 +4872,67 @@ class StrategyExecutor:
           "trade",
           "universe",
         ]:
+          if event_type in {"tick", "kline"}:
+            _dropped, affected = self._drain_runtime_market_queue(runtime)
+            if market_event:
+              runtime.market_events_dropped += 1
+            if market_event_code:
+              affected.add(market_event_code)
+            self._mark_runtime_market_continuity_lost(
+              runtime,
+              affected,
+              reason="RUNTIME_PAUSED",
+            )
+            await self._apply_pending_runtime_market_invalidations(runtime)
           continue
+
+        if market_event and event_type in {"tick", "kline"}:
+          processing_enqueued_at = (
+            monotonic() if enqueued_at is None else float(enqueued_at)
+          )
+          processing_generation = runtime._market_continuity_generations.get(
+            market_event_code,
+            0,
+          )
+          market_processing_context = (
+            market_event_code,
+            processing_generation,
+            processing_enqueued_at,
+          )
+          runtime._processing_market_events[market_event_code] = (
+            processing_generation,
+            processing_enqueued_at,
+          )
 
         # 根据事件类型分发
         if event_type == "kline":
           await self._process_kline(runtime, data)
+          if market_event:
+            if runtime._pending_market_invalidations:
+              await self._apply_pending_runtime_market_invalidations(runtime)
+            if (
+              market_processing_context is not None
+              and runtime._market_continuity_generations.get(
+                market_event_code,
+                0,
+              )
+              == market_processing_context[1]
+            ):
+              runtime.market_events_processed += 1
         elif event_type == "tick":
           await self._process_tick(runtime, data)
+          if market_event:
+            if runtime._pending_market_invalidations:
+              await self._apply_pending_runtime_market_invalidations(runtime)
+            if (
+              market_processing_context is not None
+              and runtime._market_continuity_generations.get(
+                market_event_code,
+                0,
+              )
+              == market_processing_context[1]
+            ):
+              runtime.market_events_processed += 1
         elif event_type == "entry_plan_evaluate":
           await self._process_entry_plan_evaluate(runtime, data)
         elif event_type == "order":
@@ -3613,7 +4966,7 @@ class StrategyExecutor:
               notify=False,
               flush_on_exit=False,
             ):
-              await self._notify_strategy_order(
+              durable_strategy_patch = await self._notify_strategy_order(
                 runtime,
                 OrderStateEvent.from_raw(data),
                 raise_on_error=True,
@@ -3658,7 +5011,7 @@ class StrategyExecutor:
               notify=False,
               flush_on_exit=False,
             ):
-              await self._notify_strategy_trade(
+              durable_strategy_patch = await self._notify_strategy_trade(
                 runtime,
                 TradeExecutionEvent.from_raw(data),
                 raise_on_error=True,
@@ -3693,6 +5046,15 @@ class StrategyExecutor:
               future.set_exception(exc)
             raise
 
+        if market_processing_context is not None:
+          code, generation, _queued_at = market_processing_context
+          if (
+            runtime._market_continuity_generations.get(code, 0) == generation
+            and code not in runtime._pending_market_invalidations
+            and code not in runtime._market_fail_closed_codes
+          ):
+            runtime._active_market_continuity_losses.pop(code, None)
+
         if durable_event:
           custom_updates = (
             runtime.strategy.state.to_dict() if runtime.strategy is not None else {}
@@ -3701,6 +5063,16 @@ class StrategyExecutor:
           checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
             durable_event_key,
             custom_updates=custom_updates,
+            strategy_updates=(
+              dict(getattr(durable_strategy_patch, "set", {}) or {})
+              if durable_strategy_patch is not None
+              else None
+            ),
+            strategy_unsets=(
+              list(getattr(durable_strategy_patch, "unset", []) or [])
+              if durable_strategy_patch is not None
+              else None
+            ),
           )
           if not checkpointed:
             raise RuntimeError(
@@ -3739,8 +5111,15 @@ class StrategyExecutor:
         if runtime.metrics:
           runtime.metrics.error_count += 1
       finally:
-        if item_acquired:
-          runtime.event_queue.task_done()
+        if market_processing_context is not None:
+          code, generation, queued_at = market_processing_context
+          if runtime._processing_market_events.get(code) == (
+            generation,
+            queued_at,
+          ):
+            runtime._processing_market_events.pop(code, None)
+        if acquired_queue is not None:
+          acquired_queue.task_done()
 
   async def apply_durable_order_report(
     self,
@@ -3750,7 +5129,10 @@ class StrategyExecutor:
     """Apply a persisted order report on the runtime's serial event queue."""
     runtime = self.require_durable_event_consumer(run_id)
     future = asyncio.get_running_loop().create_future()
-    await runtime.event_queue.put(("durable_order", (order, future)))
+    await self._put_runtime_control_event(
+      runtime,
+      ("durable_order", (order, future)),
+    )
     await self._await_durable_event_completion(runtime, future)
 
   def require_durable_event_consumer(self, run_id: str) -> StrategyRuntime:
@@ -3844,7 +5226,10 @@ class StrategyExecutor:
     """Apply a persisted execution report on the runtime's serial event queue."""
     runtime = self.require_durable_event_consumer(run_id)
     future = asyncio.get_running_loop().create_future()
-    await runtime.event_queue.put(("durable_trade", (trade, future)))
+    await self._put_runtime_control_event(
+      runtime,
+      ("durable_trade", (trade, future)),
+    )
     await self._await_durable_event_completion(runtime, future)
 
   async def _process_tick(self, runtime: StrategyRuntime, tick) -> None:
@@ -4348,6 +5733,7 @@ class StrategyExecutor:
   ) -> None:
     if not output:
       return
+    intents = output.trade_intents or []
     if not self._accepts_non_durable_output(runtime):
       self._runtime_log(
         runtime,
@@ -4355,13 +5741,50 @@ class StrategyExecutor:
         f"运行状态 {runtime.status.value}，忽略尚未进入下单链路的策略输出",
       )
       return
+    reconciliation_failure = self._runtime_state_reconciliation_failure(runtime)
+    if reconciliation_failure is not None and output.trade_intents:
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"{reconciliation_failure[0]}: {reconciliation_failure[1]}",
+      )
+      return
+    input_continuity_failure = (
+      self._runtime_market_continuity_failure(
+        runtime,
+        input_snapshot.instrument_code,
+      )
+      if input_snapshot is not None
+      else None
+    )
+    continuity_failures: list[tuple[TradeIntent, tuple[str, str]]] = []
+    if input_continuity_failure is not None:
+      continuity_failures = [
+        (intent, input_continuity_failure) for intent in intents
+      ]
+    else:
+      for intent in intents:
+        failure = self._runtime_market_continuity_failure(
+          runtime,
+          intent.instrument_code,
+        )
+        if failure is not None:
+          continuity_failures.append((intent, failure))
+    if input_continuity_failure is not None or continuity_failures:
+      self._record_strategy_output_trace(runtime, output, input_snapshot)
+      for intent, failure in continuity_failures:
+        await self._reject_intent_for_market_continuity(
+          runtime,
+          intent,
+          failure=failure,
+        )
+      return
     if output.runtime_state_patch:
       self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
     if output.exit_plan_commands:
       for command in output.exit_plan_commands:
         runtime.exit_plan_book.apply_command(command)
       self._persist_exit_plan_book(runtime)
-    intents = output.trade_intents or []
     if runtime.context.mode == StrategyRunMode.BACKTEST:
       created_at = self._runtime_now(runtime)
       for intent in intents:
@@ -4422,6 +5845,12 @@ class StrategyExecutor:
     if runtime is None:
       return {"success": False, "code": "RUN_NOT_FOUND", "message": "策略运行不存在"}
     async with runtime.approval_lock:
+      if not self._accepts_non_durable_output(runtime):
+        return {
+          "success": False,
+          "code": "RUNTIME_NOT_RUNNING",
+          "message": "策略运行不在 RUNNING 状态，不能确认交易信号",
+        }
       intent = runtime.pending_approvals.get(intent_id)
       if intent is None:
         return {
@@ -4445,6 +5874,13 @@ class StrategyExecutor:
           "success": False,
           "code": "DURABLE_RECONCILIATION_REQUIRED",
           "message": "成交回报状态正在安全落盘，请稍后重试确认",
+        }
+      reconciliation_failure = self._runtime_state_reconciliation_failure(runtime)
+      if reconciliation_failure is not None:
+        return {
+          "success": False,
+          "code": reconciliation_failure[0],
+          "message": reconciliation_failure[1],
         }
 
       failure = self._approval_failure(runtime, intent)
@@ -4570,16 +6006,42 @@ class StrategyExecutor:
       if intent is None:
         await self._converge_restored_manual_intent_status(runtime, intent_id)
         continue
+      strategy_failure = runtime.strategy.validate_manual_approval(intent, None)
+      metadata = dict(intent.metadata or {})
+      # A restored T entry has no verifiable quote-stream epoch.  Even when an
+      # older snapshot omitted both the rolling window and rewarm marker, it
+      # must expire before the runtime is exposed as RUNNING; on_init will then
+      # install the all-instrument rewarm gate for subsequent observations.
+      if (
+        strategy_failure is None
+        and runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}
+        and intent.direction == TradeIntentDirection.BUY
+        and intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+        and str(metadata.get("t_trade_role") or "").lower() == "entry"
+      ):
+        strategy_failure = (
+          "APPROVAL_SIGNAL_INVALIDATED",
+          "重启后无法验证旧信号行情连续性，请等待观察窗重新预热",
+        )
       failure = self._approval_failure(runtime, intent)
-      if failure and failure[0] == "APPROVAL_TTL_EXPIRED":
+      invalidation = strategy_failure or failure
+      if invalidation and invalidation[0] in {
+        "APPROVAL_SIGNAL_INVALIDATED",
+        "APPROVAL_TTL_EXPIRED",
+      }:
         await self._reject_pending_approval(
           runtime,
           intent,
           status="EXPIRED",
-          reason=failure[0],
-          message=failure[1],
+          reason=invalidation[0],
+          message=invalidation[1],
         )
         self._checkpoint_restored_strategy_state(runtime)
+        force_save = getattr(runtime.state_manager, "force_save", None)
+        if callable(force_save) and not await force_save():
+          raise RuntimeError(
+            "恢复的待确认信号失效状态保存失败，拒绝启动策略运行"
+          )
         continue
       runtime.pending_approvals[intent.intent_id] = intent
       self._runtime_log(
@@ -4724,6 +6186,7 @@ class StrategyExecutor:
       "CANCELLED": "CANCELLED",
       "CANCELED": "CANCELLED",
       "EXPIRED": "EXPIRED",
+      "RECONCILED_ZERO_FILL": "RECONCILED_ZERO_FILL",
     }
     callback_status = terminal_statuses.get(durable_status)
     if callback_status is None and durable_status in active_statuses:
@@ -5259,11 +6722,45 @@ class StrategyExecutor:
         )
       return len(requests)
 
+  @staticmethod
+  def _execution_quote_max_age_seconds(
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> float:
+    metadata = dict(intent.metadata or {})
+    is_t_manual_entry = bool(
+      intent.direction == TradeIntentDirection.BUY
+      and intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+      and str(metadata.get("t_trade_role") or "").lower() == "entry"
+    )
+    default = (
+      _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS
+      if is_t_manual_entry
+      else 0.0
+    )
+    raw_value = dict(runtime.context.parameters or {}).get(
+      "execution_quote_max_age_seconds",
+      default,
+    )
+    try:
+      value = float(raw_value or 0.0)
+    except (TypeError, ValueError, OverflowError):
+      value = 0.0
+    if is_t_manual_entry and not value > 0:
+      return _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS
+    return max(0.0, value)
+
   def _approval_failure(
     self, runtime: StrategyRuntime, intent: TradeIntent
   ) -> Optional[tuple[str, str]]:
     approval_at = self._runtime_now(runtime)
     metadata = dict(intent.metadata or {})
+    continuity_failure = self._runtime_market_continuity_failure(
+      runtime,
+      intent.instrument_code,
+    )
+    if continuity_failure is not None:
+      return continuity_failure
     if str(metadata.get("entry_plan_id") or "") == runtime.run_id:
       parameters = dict(runtime.context.parameters or {})
       if parameters.get("entry_plan_enabled") is not True:
@@ -5296,13 +6793,7 @@ class StrategyExecutor:
         return "APPROVAL_TTL_EXPIRED", "信号已超过确认有效期，请等待新信号"
 
     market_data = runtime.latest_market_data.get(intent.instrument_code)
-    quote_max_age = float(
-      dict(runtime.context.parameters or {}).get(
-        "execution_quote_max_age_seconds",
-        0.0,
-      )
-      or 0.0
-    )
+    quote_max_age = self._execution_quote_max_age_seconds(runtime, intent)
     if intent.direction == TradeIntentDirection.BUY and quote_max_age > 0:
       if market_data is None:
         return "APPROVAL_QUOTE_MISSING", "确认时缺少最新执行行情，请等待新信号"
@@ -5630,13 +7121,13 @@ class StrategyExecutor:
     reason: str,
     message: str,
   ) -> None:
-    runtime.pending_approvals.pop(intent.intent_id, None)
     if runtime.state_manager:
       await runtime.state_manager.update_trade_intent_status(
         intent.intent_id,
         status,
         notes=reason,
       )
+    runtime.pending_approvals.pop(intent.intent_id, None)
     await self._notify_strategy_order(
       runtime,
       OrderStateEvent(
@@ -5718,6 +7209,51 @@ class StrategyExecutor:
     if runtime is None or runtime.strategy is None:
       raise ValueError("策略运行不存在或尚未启动")
     self._apply_runtime_state_patch(runtime, patch)
+
+  async def _reject_intent_for_market_continuity(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    failure: tuple[str, str],
+    reservation_key: Optional[str] = None,
+  ) -> None:
+    """Audit and converge an intent whose source market window is invalid."""
+
+    code, message = failure
+    if runtime.state_manager:
+      if reservation_key:
+        runtime.state_manager.release_order_resources(reservation_key)
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id,
+        "REJECTED",
+        metadata={
+          **dict(intent.metadata or {}),
+          "market_data_gate": code,
+        },
+        notes=code,
+      )
+    runtime.pending_approvals.pop(intent.intent_id, None)
+    runtime.t_trade_entry_reservations.pop(intent.intent_id, None)
+    await self._notify_strategy_order(
+      runtime,
+      OrderStateEvent(
+        order_id=None,
+        status=OrderStatus.REJECTED.value,
+        error_message=message,
+        metadata={
+          **dict(intent.metadata or {}),
+          "intent_id": intent.intent_id,
+          "instrument_code": intent.instrument_code,
+          "market_data_gate": code,
+        },
+      ),
+    )
+    self._runtime_log(
+      runtime,
+      "WARNING",
+      f"行情连续性门禁拒绝交易意图: {intent.instrument_code} {code}",
+    )
 
   async def _reject_intent_during_runtime_transition(
     self,
@@ -5968,6 +7504,25 @@ class StrategyExecutor:
 
     if not self._accepts_non_durable_output(runtime):
       await self._reject_intent_during_runtime_transition(runtime, intent)
+      return
+    continuity_failure = self._runtime_market_continuity_failure(
+      runtime,
+      intent.instrument_code,
+    )
+    if continuity_failure is not None:
+      await self._reject_intent_for_market_continuity(
+        runtime,
+        intent,
+        failure=continuity_failure,
+      )
+      return
+    reconciliation_failure = self._runtime_state_reconciliation_failure(runtime)
+    if reconciliation_failure is not None:
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"{reconciliation_failure[0]}: {reconciliation_failure[1]}",
+      )
       return
 
     def market_stream_ready() -> bool:
@@ -6348,6 +7903,19 @@ class StrategyExecutor:
         )
         return
 
+      continuity_failure = self._runtime_market_continuity_failure(
+        runtime,
+        intent.instrument_code,
+      )
+      if continuity_failure is not None:
+        await self._reject_intent_for_market_continuity(
+          runtime,
+          intent,
+          failure=continuity_failure,
+          reservation_key=reservation_key,
+        )
+        return
+
       # 下单
       if not market_stream_ready():
         if runtime.state_manager:
@@ -6654,7 +8222,9 @@ class StrategyExecutor:
         subscription_ids.append(
           await data_adapter.subscribe_tick(
             instrument_code=instrument,
-            callback=lambda tick: runtime.event_queue.put_nowait(("tick", tick)),
+            callback=lambda tick: self._enqueue_runtime_market_event(
+              runtime, "tick", tick
+            ),
           )
         )
       for period in periods:
@@ -6662,7 +8232,9 @@ class StrategyExecutor:
           await data_adapter.subscribe_kline(
             instrument_code=instrument,
             period=period,
-            callback=lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
+            callback=lambda kline: self._enqueue_runtime_market_event(
+              runtime, "kline", kline
+            ),
           )
         )
     except Exception:
@@ -6902,11 +8474,26 @@ class StrategyExecutor:
     if data_adapter is None:
       return
     async with runtime.realtime_subscription_lock:
-      subscription_groups = list(runtime.realtime_subscription_ids.values())
-      runtime.realtime_subscription_ids.clear()
-      for subscription_ids in subscription_groups:
+      failures: List[tuple[str, Exception]] = []
+      for instrument, subscription_ids in list(
+        runtime.realtime_subscription_ids.items()
+      ):
+        remaining: List[str] = []
         for subscription_id in subscription_ids:
-          await data_adapter.unsubscribe(subscription_id)
+          try:
+            removed = await data_adapter.unsubscribe(subscription_id)
+            if removed is not True:
+              raise RuntimeError("数据适配器未确认订阅已取消")
+          except Exception as exc:
+            remaining.append(subscription_id)
+            failures.append((subscription_id, exc))
+        if remaining:
+          runtime.realtime_subscription_ids[instrument] = remaining
+        else:
+          runtime.realtime_subscription_ids.pop(instrument, None)
+      if failures:
+        failed_ids = ", ".join(item[0] for item in failures)
+        raise RuntimeError(f"实时订阅取消失败: {failed_ids}") from failures[0][1]
 
   async def _run_realtime_loop(self, runtime: StrategyRuntime) -> None:
     """运行实时交易循环"""
@@ -6985,4 +8572,20 @@ class StrategyExecutor:
       "max_workers": self.max_workers,
       "status_distribution": status_counts,
       "running_runs": len(self.get_running()),
+      "market_event_queues": {
+        runtime.run_id: {
+          "capacity": runtime.market_event_queue.maxsize,
+          "depth": runtime.market_event_queue.qsize(),
+          "high_watermark": runtime.market_queue_high_watermark,
+          "enqueued": runtime.market_events_enqueued,
+          "processed": runtime.market_events_processed,
+          "dropped": runtime.market_events_dropped,
+          "expired": runtime.market_events_expired,
+          "tick_source_rejections": runtime.market_tick_source_rejections,
+          "overflows": runtime.market_event_overflows,
+          "window_invalidations": runtime.market_window_invalidations,
+          "fail_closed_instruments": sorted(runtime._market_fail_closed_codes),
+        }
+        for runtime in self.runs.values()
+      },
     }

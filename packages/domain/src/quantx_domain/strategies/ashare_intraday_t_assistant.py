@@ -57,8 +57,11 @@ from quantx_domain.trading.t_trade import (
 
 _SIGNAL_SAMPLE_WINDOWS_STATE_KEY = "signal_sample_windows"
 _SIGNAL_SAMPLE_WINDOWS_VERSION = 1
+_SIGNAL_WINDOW_REWARM_STATE_KEY = "signal_window_rewarm"
+_SIGNAL_WINDOW_REWARM_VERSION = 1
 _MAX_SIGNAL_SAMPLES_PER_INSTRUMENT = 3000
 _SIGNAL_SAMPLE_WINDOW_CHECKPOINT_SECONDS = 3.0
+_SIGNAL_SAMPLE_MAX_GAP_SECONDS = 5.0
 
 
 class TTradeStatus:
@@ -197,6 +200,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "max_price_deviation_pct": ParameterProperty(
           type="number", minimum=0.05, maximum=2.0, default=0.3, group="approval"
         ),
+        "execution_quote_max_age_seconds": ParameterProperty(
+          type="number", minimum=0.1, maximum=30.0, default=3.0, group="approval"
+        ),
         "entry_cutoff_time": ParameterProperty(
           type="string", default="14:50", group="risk"
         ),
@@ -290,6 +296,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "instrument_states": StateProperty(type="object", default={}),
         "universe_revision": StateProperty(type="integer", default=0),
         _SIGNAL_SAMPLE_WINDOWS_STATE_KEY: StateProperty(type="object", default={}),
+        _SIGNAL_WINDOW_REWARM_STATE_KEY: StateProperty(type="object", default={}),
       },
     )
 
@@ -305,6 +312,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     sample_windows = self._decode_signal_sample_windows(
       snapshot.get(_SIGNAL_SAMPLE_WINDOWS_STATE_KEY)
     )
+    rewarm_windows = self._decode_signal_window_rewarm(
+      snapshot.get(_SIGNAL_WINDOW_REWARM_STATE_KEY)
+    )
     if not instrument_states and snapshot.get("status"):
       code = str((self.context.instruments or [""])[0] or "")
       if code:
@@ -318,6 +328,9 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "universe_revision": int(snapshot.get("universe_revision", 0) or 0),
         _SIGNAL_SAMPLE_WINDOWS_STATE_KEY: self._encode_signal_sample_windows(
           sample_windows
+        ),
+        _SIGNAL_WINDOW_REWARM_STATE_KEY: self._encode_signal_window_rewarm(
+          rewarm_windows
         ),
       }
     )
@@ -334,16 +347,126 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         pending.append(intent_id)
     return pending
 
+  def invalidated_manual_intent_ids(self) -> List[str]:
+    rewarm = getattr(self, "_signal_window_rewarm", None)
+    if not isinstance(rewarm, dict):
+      rewarm = self._decode_signal_window_rewarm(
+        self.state.get(_SIGNAL_WINDOW_REWARM_STATE_KEY)
+      )
+    invalidated = []
+    for code in rewarm:
+      state = self._instrument_state(code)
+      intent_id = str(state.get("pending_entry_intent_id") or "")
+      if intent_id and str(state.get("entry_order_status") or "").upper() in {
+        "AWAITING_APPROVAL",
+        "RECONCILE_REQUIRED",
+      }:
+        invalidated.append(intent_id)
+    return invalidated
+
+  def validate_manual_approval(
+    self,
+    intent: TradeIntent,
+    market_data: Any,
+  ) -> Optional[tuple[str, str]]:
+    """Reject a T entry when its causal signal window is no longer current."""
+
+    metadata = dict(intent.metadata or {})
+    if (
+      intent.direction != TradeIntentDirection.BUY
+      or intent.execution_mode != TradeIntentExecutionMode.MANUAL_CONFIRM
+      or str(metadata.get("t_trade_role") or "").lower() != "entry"
+    ):
+      return None
+    code = str(intent.instrument_code or "").strip().upper()
+    rewarm = getattr(self, "_signal_window_rewarm", None)
+    if not isinstance(rewarm, dict):
+      rewarm = self._decode_signal_window_rewarm(
+        self.state.get(_SIGNAL_WINDOW_REWARM_STATE_KEY)
+      )
+    if code in rewarm:
+      return (
+        "APPROVAL_SIGNAL_INVALIDATED",
+        "信号行情窗口已失效并正在重新预热，请等待新信号",
+      )
+
+    state = self._instrument_state(code)
+    if (
+      str(state.get("pending_entry_intent_id") or "") != intent.intent_id
+      or str(state.get("entry_order_status") or "").upper()
+      != "AWAITING_APPROVAL"
+    ):
+      return (
+        "APPROVAL_SIGNAL_INVALIDATED",
+        "待确认信号已不再匹配策略当前状态，请等待新信号",
+      )
+    current_signal = dict(state.get("current_signal") or {})
+    if current_signal.get("triggered") is not True:
+      return (
+        "APPROVAL_SIGNAL_INVALIDATED",
+        "策略当前已无有效触发信号，请等待新信号",
+      )
+    intent_signal = dict(metadata.get("signal") or {})
+    current_detected_at = int(current_signal.get("detected_at_ms", 0) or 0)
+    intent_detected_at = int(intent_signal.get("detected_at_ms", 0) or 0)
+    if intent_signal and (
+      current_detected_at <= 0 or current_detected_at != intent_detected_at
+    ):
+      return (
+        "APPROVAL_SIGNAL_INVALIDATED",
+        "待确认意图对应的触发信号已被更新，请等待新信号",
+      )
+    return None
+
   async def on_init(self) -> None:
     self._samples_by_instrument = self._decode_signal_sample_windows(
       self.state.get(_SIGNAL_SAMPLE_WINDOWS_STATE_KEY)
     )
+    self._signal_window_rewarm = self._decode_signal_window_rewarm(
+      self.state.get(_SIGNAL_WINDOW_REWARM_STATE_KEY)
+    )
+    if self.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+      # A process restart (including a brand-new runtime) has no durable quote
+      # stream epoch proving that any restored or initially empty observation
+      # window is contiguous with the live subscription.  Every bound
+      # instrument must therefore earn a complete lookback before entry logic
+      # can run.  Instrument state is included because a crash can persist a
+      # pending signal while its throttled sample-window checkpoint is absent.
+      restart_codes = {
+        str(code or "").strip()
+        for code in (
+          list(self.context.instruments or [])
+          + list(self._instrument_states().keys())
+          + list(self._samples_by_instrument.keys())
+          + list(self._signal_window_rewarm.keys())
+        )
+        if str(code or "").strip()
+      }
+      for code in restart_codes:
+        self._signal_window_rewarm.setdefault(
+          code,
+          {
+            "reason": "RUNTIME_RESTART_REWARM_REQUIRED",
+            "started_at_ms": 0,
+          },
+        )
+      if restart_codes:
+        self.state.set(
+          _SIGNAL_WINDOW_REWARM_STATE_KEY,
+          self._encode_signal_window_rewarm(self._signal_window_rewarm),
+          persist=True,
+          notify=True,
+        )
+    for code in self._signal_window_rewarm:
+      self._samples_by_instrument.pop(code, None)
     self._restored_sample_counts = {
       code: len(samples)
       for code, samples in self._samples_by_instrument.items()
       if samples
     }
     self._last_signal_window_checkpoint_at = 0.0
+    if self._signal_window_rewarm:
+      self._checkpoint_signal_sample_windows(force=True)
     if self._restored_sample_counts:
       self.logger.info(
         "已恢复做 T 信号识别窗口: %s",
@@ -471,6 +594,41 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       state,
       phase="EXIT_MONITOR" if active_volume > 0 else "ENTRY_SCAN",
     )
+    if active_volume <= 0:
+      rewarm_ready, observed_seconds, required_seconds = (
+        self._advance_signal_window_rewarm(
+          input.instrument_code,
+          sample,
+          input.timestamp,
+        )
+      )
+      if not rewarm_ready:
+        telemetry = dict(state.get("monitoring_telemetry", {}) or {})
+        telemetry.update(
+          {
+            "reason": "SIGNAL_WINDOW_REWARMING",
+            "rewarm_observed_seconds": observed_seconds,
+            "rewarm_required_seconds": required_seconds,
+          }
+        )
+        state.update(
+          {
+            "status": TTradeStatus.OBSERVING,
+            "last_price": sample.price,
+            "current_signal": {},
+            "monitoring_telemetry": telemetry,
+          }
+        )
+        return self._state_output(
+          input.instrument_code,
+          state,
+          tags=["signal_window_rewarming", "no_trade"],
+          reason="SIGNAL_WINDOW_REWARMING",
+          trace={
+            "observed_seconds": observed_seconds,
+            "required_seconds": required_seconds,
+          },
+        )
     if active_volume > 0:
       return self._monitor_open_lot(input, sample, state, active_volume)
     return self._observe_for_entry(input, sample, state)
@@ -736,6 +894,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       states[code] = state
 
     removed_sample_window = False
+    removed_rewarm_gate = False
     for code in list(states):
       if code in desired:
         continue
@@ -754,9 +913,18 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         states.pop(code, None)
         if self._samples_by_instrument.pop(code, None) is not None:
           removed_sample_window = True
+        if self._signal_window_rewarm.pop(code, None) is not None:
+          removed_rewarm_gate = True
 
     if removed_sample_window:
       self._checkpoint_signal_sample_windows(force=True)
+    if removed_rewarm_gate:
+      self.state.set(
+        _SIGNAL_WINDOW_REWARM_STATE_KEY,
+        self._encode_signal_window_rewarm(self._signal_window_rewarm),
+        persist=True,
+        notify=True,
+      )
 
     return StrategyOutput(
       runtime_state_patch=RuntimeStatePatch(
@@ -1290,14 +1458,163 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
           return candidate
     return ""
 
-  def _append_sample(self, code: str, sample: TickSample) -> None:
+  def invalidate_realtime_market_window(
+    self,
+    instrument_code: str,
+    *,
+    reason: str,
+  ) -> bool:
+    """Clear one causal signal window and persist a full-lookback rewarm gate."""
+
+    code = str(instrument_code or "").strip().upper()
+    if not self._is_bound_instrument(code):
+      return False
+    samples = getattr(self, "_samples_by_instrument", None)
+    if samples is None:
+      self._samples_by_instrument = {}
+    self._samples_by_instrument.pop(code, None)
+    restored_counts = getattr(self, "_restored_sample_counts", None)
+    if isinstance(restored_counts, dict):
+      restored_counts.pop(code, None)
+    rewarm = getattr(self, "_signal_window_rewarm", None)
+    if not isinstance(rewarm, dict):
+      rewarm = self._decode_signal_window_rewarm(
+        self.state.get(_SIGNAL_WINDOW_REWARM_STATE_KEY)
+      )
+      self._signal_window_rewarm = rewarm
+    rewarm[code] = {
+      "reason": str(reason or "MARKET_DATA_CONTINUITY_LOST"),
+      "started_at_ms": 0,
+    }
+    self.state.set(
+      _SIGNAL_WINDOW_REWARM_STATE_KEY,
+      self._encode_signal_window_rewarm(rewarm),
+      persist=True,
+      notify=True,
+    )
+    state = self._instrument_state(code)
+    telemetry = dict(state.get("monitoring_telemetry", {}) or {})
+    telemetry.update(
+      {
+        "reason": "SIGNAL_WINDOW_INVALIDATED",
+        "continuity_loss_reason": str(reason or "MARKET_DATA_CONTINUITY_LOST"),
+        "rewarm_observed_seconds": 0.0,
+        "rewarm_required_seconds": self._required_signal_lookback_seconds(),
+      }
+    )
+    state.update({"current_signal": {}, "monitoring_telemetry": telemetry})
+    states = self._instrument_states()
+    states[code] = state
+    self.state.set("instrument_states", states, persist=True, notify=True)
+    self._checkpoint_signal_sample_windows(force=True)
+    self.logger.warning(
+      "做 T 行情连续性丢失，已清空观察窗并进入完整预热: %s (%s)",
+      code,
+      reason,
+    )
+    return True
+
+  def _advance_signal_window_rewarm(
+    self,
+    code: str,
+    sample: TickSample,
+    timestamp: datetime,
+  ) -> tuple[bool, float, float]:
+    rewarm = getattr(self, "_signal_window_rewarm", {})
+    marker = dict(rewarm.get(code) or {})
+    required_seconds = self._required_signal_lookback_seconds()
+    if not marker:
+      return True, required_seconds, required_seconds
+
+    started_at_ms = int(marker.get("started_at_ms", 0) or 0)
+    marker_changed = started_at_ms <= 0
+    current = timestamp.astimezone(SHANGHAI) if timestamp.tzinfo else timestamp.replace(
+      tzinfo=SHANGHAI
+    )
+    started_at = (
+      datetime.fromtimestamp(started_at_ms / 1000.0, tz=SHANGHAI)
+      if started_at_ms > 0
+      else current
+    )
+    if started_at.date() != current.date() or current < started_at:
+      started_at = current
+      marker_changed = True
+    marker["started_at_ms"] = int(started_at.timestamp() * 1000)
+    rewarm[code] = marker
+    session_seconds = self._continuous_session_seconds(started_at, current)
+    samples = list(self._samples_by_instrument.get(code, []))
+    sample_coverage_seconds = self._continuous_sample_tail_coverage_seconds(samples)
+    covered_seconds = min(
+      session_seconds,
+      sample_coverage_seconds,
+    )
+    if covered_seconds < required_seconds:
+      if marker_changed:
+        self.state.set(
+          _SIGNAL_WINDOW_REWARM_STATE_KEY,
+          self._encode_signal_window_rewarm(rewarm),
+          persist=True,
+          notify=True,
+        )
+      return False, covered_seconds, required_seconds
+
+    # Persist the complete fresh window before removing the fail-closed marker.
+    self._checkpoint_signal_sample_windows(force=True)
+    rewarm.pop(code, None)
+    self.state.set(
+      _SIGNAL_WINDOW_REWARM_STATE_KEY,
+      self._encode_signal_window_rewarm(rewarm),
+      persist=True,
+      notify=True,
+    )
+    return True, covered_seconds, required_seconds
+
+  def _required_signal_lookback_seconds(self) -> float:
     signal_lookback = int(self.get_parameter("signal_lookback_seconds", 300))
     momentum_history = int(self.get_parameter("momentum_window_seconds", 60)) + int(
       self.get_parameter("momentum_baseline_seconds", 300)
     )
-    lookback_ms = max(signal_lookback, momentum_history) * 1000
+    return float(max(signal_lookback, momentum_history))
+
+  @staticmethod
+  def _continuous_session_seconds(start: datetime, end: datetime) -> float:
+    if end <= start or start.date() != end.date():
+      return 0.0
+    total = 0.0
+    sessions = ((time(9, 30), time(11, 30)), (time(13), time(14, 57)))
+    for session_start, session_end in sessions:
+      lower = max(
+        start,
+        datetime.combine(start.date(), session_start, tzinfo=SHANGHAI),
+      )
+      upper = min(
+        end,
+        datetime.combine(start.date(), session_end, tzinfo=SHANGHAI),
+      )
+      if upper > lower:
+        total += (upper - lower).total_seconds()
+    return total
+
+  def _append_sample(self, code: str, sample: TickSample) -> None:
+    lookback_ms = int(self._required_signal_lookback_seconds() * 1000)
     cutoff = sample.timestamp_ms - lookback_ms
     samples = list(self._samples_by_instrument.get(code, []))
+    if samples:
+      previous_at = datetime.fromtimestamp(
+        samples[-1].timestamp_ms / 1000.0,
+        tz=SHANGHAI,
+      )
+      current_at = datetime.fromtimestamp(
+        sample.timestamp_ms / 1000.0,
+        tz=SHANGHAI,
+      )
+      trading_gap = self._continuous_session_seconds(previous_at, current_at)
+      if trading_gap > _SIGNAL_SAMPLE_MAX_GAP_SECONDS:
+        self.invalidate_realtime_market_window(
+          code,
+          reason="SIGNAL_SAMPLE_GAP",
+        )
+        samples = []
     samples.append(sample)
     self._samples_by_instrument[code] = [
       item
@@ -1305,6 +1622,30 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       if cutoff <= item.timestamp_ms <= sample.timestamp_ms
     ]
     self._checkpoint_signal_sample_windows()
+
+  @classmethod
+  def _continuous_sample_tail_coverage_seconds(
+    cls,
+    samples: List[TickSample],
+  ) -> float:
+    if len(samples) < 2:
+      return 0.0
+    tail_start = datetime.fromtimestamp(
+      samples[0].timestamp_ms / 1000.0,
+      tz=SHANGHAI,
+    )
+    previous = tail_start
+    for sample in samples[1:]:
+      current = datetime.fromtimestamp(
+        sample.timestamp_ms / 1000.0,
+        tz=SHANGHAI,
+      )
+      if cls._continuous_session_seconds(previous, current) > (
+        _SIGNAL_SAMPLE_MAX_GAP_SECONDS
+      ):
+        tail_start = current
+      previous = current
+    return cls._continuous_session_seconds(tail_start, previous)
 
   def _checkpoint_signal_sample_windows(self, *, force: bool = False) -> bool:
     """Checkpoint the causal signal window in strategy-owned durable state.
@@ -1398,6 +1739,52 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       if samples:
         restored[code] = sorted(samples, key=lambda item: item.timestamp_ms)
     return restored
+
+  @staticmethod
+  def _encode_signal_window_rewarm(
+    markers: Dict[str, Dict[str, Any]],
+  ) -> Dict[str, Any]:
+    return {
+      "version": _SIGNAL_WINDOW_REWARM_VERSION,
+      "instruments": {
+        str(code): {
+          "reason": str(dict(marker or {}).get("reason") or ""),
+          "started_at_ms": max(
+            0,
+            int(dict(marker or {}).get("started_at_ms", 0) or 0),
+          ),
+        }
+        for code, marker in dict(markers or {}).items()
+        if code
+      },
+    }
+
+  @staticmethod
+  def _decode_signal_window_rewarm(value: Any) -> Dict[str, Dict[str, Any]]:
+    payload = dict(value or {}) if isinstance(value, dict) else {}
+    try:
+      version = int(payload.get("version", 0) or 0)
+    except (TypeError, ValueError):
+      version = 0
+    if version != _SIGNAL_WINDOW_REWARM_VERSION:
+      return {}
+    raw_instruments = payload.get("instruments")
+    if not isinstance(raw_instruments, dict):
+      return {}
+    markers: Dict[str, Dict[str, Any]] = {}
+    for raw_code, raw_marker in raw_instruments.items():
+      code = str(raw_code or "").strip().upper()
+      if not code or not isinstance(raw_marker, dict):
+        continue
+      try:
+        started_at_ms = max(0, int(raw_marker.get("started_at_ms", 0) or 0))
+      except (TypeError, ValueError, OverflowError):
+        started_at_ms = 0
+      markers[code] = {
+        "reason": str(raw_marker.get("reason") or "MARKET_DATA_CONTINUITY_LOST"),
+        "started_at_ms": started_at_ms,
+      }
+    return markers
 
   def _is_bound_instrument(self, code: str) -> bool:
     return bool(code) and code in set(self.context.instruments or [])

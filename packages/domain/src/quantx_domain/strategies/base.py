@@ -3,10 +3,11 @@
 """
 
 import asyncio
+import copy
 import logging
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -611,11 +612,30 @@ class StrategyBase(ABC):
     """Return persisted manual-confirm intents that should survive a restart."""
     return []
 
+  def invalidated_manual_intent_ids(self) -> List[str]:
+    """Return restored manual intents invalidated during strategy initialization."""
+    return []
+
   def validate_manual_approval(
     self, intent: TradeIntent, market_data: Any
   ) -> Optional[tuple[str, str]]:
     """Optionally reject a manual intent against the latest in-memory quote."""
     return None
+
+  def invalidate_realtime_market_window(
+    self,
+    instrument_code: str,
+    *,
+    reason: str,
+  ) -> bool:
+    """Fail closed after the runtime loses realtime market-data continuity.
+
+    Stateful tick strategies override this hook to clear causal observation
+    windows and suppress new intents until their full lookback is rebuilt.
+    Returning ``True`` means the strategy installed that gate.
+    """
+
+    return False
 
   @abstractmethod
   async def on_init(self) -> None:
@@ -767,7 +787,6 @@ class StrategyBase(ABC):
       key=key,
       value=value,
       changes=changes,
-      state=self.state.to_dict(),
     )
 
     for queue in self._state_subscribers:
@@ -775,10 +794,44 @@ class StrategyBase(ABC):
         queue.put_nowait(event)
       except asyncio.QueueFull:
         try:
-          queue.get_nowait()
-          queue.task_done()
-          queue.put_nowait(event)
-        except (asyncio.QueueEmpty, asyncio.QueueFull):
+          queued_events = []
+          while True:
+            try:
+              queued_events.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+              break
+            else:
+              queue.task_done()
+          queued_events.append(event)
+          persisted_changes: Dict[str, Any] = {}
+          for queued_event in queued_events:
+            if not getattr(queued_event, "persist", True):
+              continue
+            explicit_changes = dict(
+              getattr(queued_event, "changes", None) or {}
+            )
+            queued_key = getattr(queued_event, "key", None)
+            if not explicit_changes and queued_key is not None:
+              explicit_changes[queued_key] = getattr(
+                queued_event,
+                "value",
+                None,
+              )
+            persisted_changes.update(explicit_changes)
+          coalesced_event = (
+            replace(
+              event,
+              persist=True,
+              key=None,
+              value=None,
+              changes=copy.deepcopy(persisted_changes),
+              state={},
+            )
+            if persisted_changes
+            else replace(event, state={})
+          )
+          queue.put_nowait(coalesced_event)
+        except asyncio.QueueFull:
           pass
 
   def _on_state_change(

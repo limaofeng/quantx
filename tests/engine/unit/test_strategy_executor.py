@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import quantx_engine.strategy_executor as strategy_executor_module
 from quantx_domain.brokers.base import (
   OrderRequest,
   OrderResponse,
@@ -44,6 +45,11 @@ from quantx_engine.strategy_executor import (
   ExecutionStatus,
   StrategyExecutor,
   StrategyRuntime,
+)
+from quantx_infrastructure.core.runtime_state_manager import (
+  RuntimeStateManager,
+  RuntimeStateRestoreResult,
+  RuntimeStateRestoreStatus,
 )
 from quantx_infrastructure.models.enums import StrategyRunMode
 
@@ -98,6 +104,74 @@ class PatchCallbackStrategy(MockStrategy):
 async def keep_running_loop(runtime):
   """测试用：让执行循环保持运行，直到任务被取消。"""
   await asyncio.Event().wait()
+
+
+@pytest.fixture(autouse=True)
+def isolate_executor_tests_from_runtime_state_database():
+  """Executor unit tests must not read or write the durable runtime store."""
+
+  async def restore_without_database(manager):
+    status = (
+      RuntimeStateRestoreStatus.PERSISTENCE_DISABLED
+      if not manager.persist_enabled
+      else RuntimeStateRestoreStatus.NOT_FOUND
+    )
+    return RuntimeStateRestoreResult(status=status, state=manager._state)
+
+  async def checkpoint_without_database(manager):
+    manager._dirty = False
+    return True
+
+  async def save_without_database(manager):
+    manager._dirty = False
+    return True
+
+  async def no_unapplied_runtime_event(_manager):
+    return None
+
+  async def connect_without_shared_adapter_manager(_mode, adapter):
+    if getattr(adapter, "is_connected", False) is True:
+      return True
+    return bool(await adapter.connect())
+
+  original_seed_simulated_positions = (
+    StrategyExecutor._seed_simulated_broker_positions
+  )
+
+  def seed_without_mocked_backtest_broker(executor, runtime) -> None:
+    if not isinstance(strategy_executor_module.BacktestBroker, type):
+      return
+    original_seed_simulated_positions(executor, runtime)
+
+  with (
+    patch.object(RuntimeStateManager, "restore", restore_without_database),
+    patch.object(
+      RuntimeStateManager,
+      "checkpoint_strategy_state_changes",
+      checkpoint_without_database,
+    ),
+    patch.object(RuntimeStateManager, "save_snapshot", save_without_database),
+    patch.object(
+      RuntimeStateManager,
+      "get_earliest_unapplied_runtime_event_key",
+      no_unapplied_runtime_event,
+    ),
+    patch(
+      "quantx_engine.strategy_executor.adapter_manager.ensure_adapter_connected_for_mode",
+      new_callable=AsyncMock,
+      side_effect=connect_without_shared_adapter_manager,
+    ),
+    patch(
+      "quantx_engine.strategy_executor.adapter_manager.release_adapter_for_mode",
+      new_callable=AsyncMock,
+    ),
+    patch.object(
+      StrategyExecutor,
+      "_seed_simulated_broker_positions",
+      seed_without_mocked_backtest_broker,
+    ),
+  ):
+    yield
 
 
 @pytest.mark.unit
@@ -303,6 +377,7 @@ class TestStrategyExecutor:
 
     runtime.broker.place_order.assert_not_awaited()
     assert runtime.strategy.state.order_seen == "REJECTED"
+    runtime.status = ExecutionStatus.STOPPED
 
   @pytest.mark.asyncio
   async def test_missing_whole_quote_gate_fails_closed_for_paper_order(
@@ -342,6 +417,7 @@ class TestStrategyExecutor:
 
     runtime.broker.place_order.assert_not_awaited()
     assert runtime.strategy.state.order_seen == "REJECTED"
+    runtime.status = ExecutionStatus.STOPPED
 
   @pytest.mark.asyncio
   async def test_paper_order_ttl_requests_cancel_and_prevents_late_fill(
@@ -462,6 +538,7 @@ class TestStrategyExecutor:
     assert metadata["order_state"]["open_order_count"] == 1
     assert metadata["order_state"]["buy_open_order_count"] == 1
     assert metadata["broker_report"]["report_lag_seconds"] == 60.0
+    runtime.status = ExecutionStatus.STOPPED
 
   def test_order_risk_strict_flags_default_by_mode(self, strategy_executor):
     backtest_runtime = strategy_executor.create(
@@ -606,7 +683,12 @@ class TestStrategyExecutor:
         )
 
         # 启动策略
-        success = await strategy_executor.start(run_id)
+        with patch.object(
+          strategy_executor,
+          "_run_strategy_loop",
+          side_effect=keep_running_loop,
+        ):
+          success = await strategy_executor.start(run_id)
         assert success is True
 
         # 验证状态
@@ -691,6 +773,8 @@ class TestStrategyExecutor:
     with patch('quantx_engine.strategy_executor.adapter_manager.get_adapter_for_mode') as mock_get_adapter:
       mock_data_adapter = AsyncMock()
       mock_data_adapter.connect = AsyncMock()
+      mock_data_adapter.subscribe_kline = AsyncMock(return_value="subscription-id")
+      mock_data_adapter.unsubscribe = AsyncMock(return_value=True)
       mock_get_adapter.return_value = mock_data_adapter
 
       # Mock SimulatorBroker (PAPER 模式)

@@ -49,6 +49,7 @@ class LiveBroker(BrokerBase):
 
     # 连接状态
     self.is_connected = False
+    self._monitor_task: Optional[asyncio.Task] = None
 
     self.logger = logging.getLogger("LiveBroker")
 
@@ -74,8 +75,12 @@ class LiveBroker(BrokerBase):
         f"可用资金: {account.cash:.2f}"
       )
 
-      # 启动订单状态监控
-      asyncio.create_task(self._monitor_orders())
+      # 启动订单状态监控，并由 Broker 显式拥有其生命周期。
+      if self._monitor_task is None or self._monitor_task.done():
+        self._monitor_task = asyncio.create_task(
+          self._monitor_orders(),
+          name=f"live-broker-monitor:{self.account_id}",
+        )
 
       return True
 
@@ -86,6 +91,12 @@ class LiveBroker(BrokerBase):
   async def disconnect(self) -> None:
     """断开连接"""
     self.is_connected = False
+    monitor_task = self._monitor_task
+    self._monitor_task = None
+    if monitor_task is not None and monitor_task is not asyncio.current_task():
+      if not monitor_task.done():
+        monitor_task.cancel()
+      await asyncio.gather(monitor_task, return_exceptions=True)
     self.logger.info("实盘 Broker 断开连接")
 
   async def place_order(self, request: OrderRequest) -> OrderResponse:

@@ -520,19 +520,12 @@ class WholeQuoteHub:
         consumer.queue.task_done()
 
   async def unsubscribe(self, handle: str) -> bool:
-    consumer = self._consumers.pop(handle, None)
+    consumer = self._consumers.get(handle)
     if consumer is None:
-      return False
-    if consumer.stock_code is None:
-      self._batch_consumers.pop(handle, None)
-    else:
-      indexed = self._tick_consumers_by_code.get(consumer.stock_code)
-      if indexed is not None:
-        indexed.pop(handle, None)
-        if not indexed:
-          self._tick_consumers_by_code.pop(consumer.stock_code, None)
+      return True
     consumer.status = QuoteConsumerStatus.STOPPED
-    consumer.task.cancel()
+    if not consumer.task.done():
+      consumer.task.cancel()
     _done, pending = await asyncio.wait(
       [consumer.task],
       timeout=self._CONSUMER_CANCEL_TIMEOUT_SECONDS,
@@ -542,6 +535,17 @@ class WholeQuoteHub:
         "WholeQuoteHub consumer stop timed out: handle=%s",
         consumer.handle,
       )
+      return False
+
+    self._consumers.pop(handle, None)
+    if consumer.stock_code is None:
+      self._batch_consumers.pop(handle, None)
+    else:
+      indexed = self._tick_consumers_by_code.get(consumer.stock_code)
+      if indexed is not None:
+        indexed.pop(handle, None)
+        if not indexed:
+          self._tick_consumers_by_code.pop(consumer.stock_code, None)
     return True
 
   def latest(self, stock_code: str) -> dict[str, Any] | None:

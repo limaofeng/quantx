@@ -144,9 +144,12 @@ async def test_stop_snapshot_failure_keeps_broker_connected_and_enters_error(
   executor.runs[runtime.run_id] = runtime
 
   assert await executor.stop(runtime.run_id) is False
-  save_snapshot.assert_awaited_once_with()
+  # The normal stop attempt and its owned terminal-cleanup retry both preserve
+  # broker ownership when the authoritative snapshot remains unavailable.
+  assert save_snapshot.await_count == 2
   broker.disconnect.assert_not_awaited()
   assert runtime.status == ExecutionStatus.ERROR
+  assert runtime._terminal_cleanup_complete is False
   assert "最终状态快照保存失败" in (runtime.error_message or "")
   executor.thread_pool.shutdown(wait=False)
 

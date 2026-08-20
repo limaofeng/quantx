@@ -1038,7 +1038,7 @@ async def test_cancelled_partial_fill_replays_order_then_trade_into_real_strateg
       persist_enabled=True,
       log_dir=str(tmp_path / "restored-runtime-state"),
     )
-    restored = await restored_manager.restore()
+    restored = (await restored_manager.restore()).state
     assert restored_manager.has_applied_runtime_event(trade_event.business_key)
 
     fresh_strategy = AshareIntradayTAssistantStrategy(context)

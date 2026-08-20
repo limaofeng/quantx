@@ -27,6 +27,20 @@ from quantx_domain.trading.exit_plan import (
 from quantx_infrastructure.models.tick import Tick
 
 
+@pytest.fixture(autouse=True)
+def _allow_sparse_ticks_in_legacy_signal_unit_fixtures(monkeypatch):
+  """Keep legacy minute-spaced fixtures focused on signal/business semantics.
+
+  Real-time five-second continuity fail-closed behavior has dedicated coverage
+  in ``test_strategy_market_event_backpressure.py``.
+  """
+
+  monkeypatch.setattr(
+    "quantx_domain.strategies.ashare_intraday_t_assistant._SIGNAL_SAMPLE_MAX_GAP_SECONDS",
+    3_600.0,
+  )
+
+
 def make_tick(
   timestamp: datetime,
   price: float,
@@ -243,7 +257,7 @@ async def test_multi_instrument_manual_entry_then_trailing_auto_exit():
 
 
 @pytest.mark.asyncio
-async def test_restart_restores_causal_entry_signal_window(monkeypatch):
+async def test_restart_discards_causal_entry_signal_window(monkeypatch):
   checkpoint_at = [100.0]
   monkeypatch.setattr(
     "quantx_domain.strategies.ashare_intraday_t_assistant.monotonic",
@@ -281,7 +295,8 @@ async def test_restart_restores_causal_entry_signal_window(monkeypatch):
   restarted.apply_state_snapshot(snapshot)
   await restarted.initialize()
 
-  assert len(restarted._samples_by_instrument["600000.SH"]) == 2
+  assert restarted._samples_by_instrument.get("600000.SH") is None
+  assert "600000.SH" in restarted.state["signal_window_rewarm"]["instruments"]
   output = await restarted.step(
     make_input(
       start + timedelta(seconds=80),
@@ -294,10 +309,10 @@ async def test_restart_restores_causal_entry_signal_window(monkeypatch):
     )
   )
 
-  assert len(output.trade_intents) == 1
-  assert output.trade_intents[0].reason == "T_TRADE_PULLBACK_REBOUND_ENTRY"
+  assert output.trade_intents == []
+  assert output.trace_payload["reason"] == "SIGNAL_WINDOW_REWARMING"
   restored_state = output.runtime_state_patch.set["instrument_states"]["600000.SH"]
-  assert restored_state["monitoring_telemetry"]["window_restored_sample_count"] == 2
+  assert restored_state["monitoring_telemetry"]["window_restored_sample_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -413,7 +428,7 @@ async def test_restored_signal_window_prunes_against_current_tick_horizon():
 
 
 @pytest.mark.asyncio
-async def test_restored_signal_window_drops_samples_ahead_of_current_tick():
+async def test_restart_discards_signal_window_ahead_of_current_tick():
   strategy = make_strategy()
   await strategy.initialize()
   await reconcile(
@@ -452,10 +467,7 @@ async def test_restored_signal_window_drops_samples_ahead_of_current_tick():
     sample.timestamp_ms
     for sample in restarted._samples_by_instrument["600000.SH"]
   ]
-  assert retained_timestamps == [
-    int(valid_at.timestamp() * 1000),
-    int(current_tick_at.timestamp() * 1000),
-  ]
+  assert retained_timestamps == [int(current_tick_at.timestamp() * 1000)]
 
 
 @pytest.mark.asyncio

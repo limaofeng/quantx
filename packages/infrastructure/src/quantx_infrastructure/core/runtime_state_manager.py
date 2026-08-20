@@ -16,7 +16,8 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional
 
 from quantx_infrastructure.core.utils import time_utils
 
@@ -38,7 +39,49 @@ ORDER_CASH_RESERVATIONS_KEY = "order_cash_reservations"
 ORDER_POSITION_RESERVATIONS_KEY = "order_position_reservations"
 APPLIED_RUNTIME_EVENT_KEYS = "applied_runtime_event_keys"
 RUNTIME_SNAPSHOT_ATTEMPT_KEY = "runtime_snapshot_attempt"
+RUNTIME_RECONCILIATION_STATUS_KEY = "runtime_reconciliation_status"
+RUNTIME_RECONCILIATION_REASON_KEY = "runtime_reconciliation_reason"
+BUCKET_LEDGER_RECONCILE_REQUIRED_KEY = "bucket_ledger_reconcile_required"
+BUCKET_LEDGER_VIOLATIONS_KEY = "bucket_ledger_violations"
+MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY = (
+    "market_continuity_reconcile_required"
+)
 _MAX_APPLIED_RUNTIME_EVENT_KEYS = 2_000
+_MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
+    {
+        APPLIED_CORPORATE_ACTIONS_KEY,
+        APPLIED_RUNTIME_EVENT_KEYS,
+        BUCKET_LEDGER_CUSTOM_STATE_KEY,
+        BUCKET_LEDGER_RECONCILE_REQUIRED_KEY,
+        BUCKET_LEDGER_VIOLATIONS_KEY,
+        MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY,
+        ORDER_CASH_RESERVATIONS_KEY,
+        ORDER_POSITION_RESERVATIONS_KEY,
+        RUNTIME_RECONCILIATION_REASON_KEY,
+        RUNTIME_RECONCILIATION_STATUS_KEY,
+        RUNTIME_SNAPSHOT_ATTEMPT_KEY,
+    }
+)
+
+
+class RuntimeStateRestoreStatus(str, Enum):
+    """Outcome of a completed runtime-state restore attempt."""
+
+    RESTORED = "RESTORED"
+    NOT_FOUND = "NOT_FOUND"
+    PERSISTENCE_DISABLED = "PERSISTENCE_DISABLED"
+
+
+@dataclass(frozen=True)
+class RuntimeStateRestoreResult:
+    """A successful restore query, including the intentional no-row case."""
+
+    status: RuntimeStateRestoreStatus
+    state: Dict[str, Any]
+
+
+class RuntimeStateRestoreError(RuntimeError):
+    """The durable runtime state could not be read safely."""
 
 
 @dataclass
@@ -92,7 +135,9 @@ class RuntimeStateManager:
     _running: bool = field(default=False, repr=False)
     _state_queue: Optional[asyncio.Queue] = field(default=None, repr=False)
     _state_sync_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    _state_sync_error: Optional[str] = field(default=None, repr=False)
     _snapshot_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _final_snapshot_saved: bool = field(default=False, repr=False)
 
     # 文件句柄
     _log_file_path: Optional[str] = field(default=None, repr=False)
@@ -123,6 +168,7 @@ class RuntimeStateManager:
         if self._running:
             return
 
+        self._final_snapshot_saved = False
         self._running = True
 
         # 启动后台快照任务
@@ -135,22 +181,67 @@ class RuntimeStateManager:
         self._running = False
 
         # 取消后台任务
-        if self._snapshot_task and not self._snapshot_task.done():
-            self._snapshot_task.cancel()
-            try:
-                await self._snapshot_task
-            except asyncio.CancelledError:
-                pass
+        snapshot_task = self._snapshot_task
+        self._snapshot_task = None
+        if snapshot_task and snapshot_task is not asyncio.current_task():
+            if not snapshot_task.done():
+                snapshot_task.cancel()
+            await asyncio.gather(snapshot_task, return_exceptions=True)
+
+        if (
+            self._state_sync_error is not None
+            or self._state_queue is not None
+            or (
+                self._state_sync_task is not None
+                and not self._state_sync_task.done()
+            )
+        ):
+            raise RuntimeError(
+                "策略状态同步尚未权威收敛，拒绝保存最终快照: "
+                f"run_id={self.run_id}, error={self._state_sync_error or '-'}"
+            )
 
         # 最后一次保存是停止边界的权威持久化点。版本冲突、
         # 提交结果无法确认等失败不得被吞掉，否则 Executor 会继续
         # 断开 Broker 并把未落盘的运行标记为 STOPPED。
-        if not await self.save_snapshot():
-            raise RuntimeError(
-                f"最终状态快照保存失败: run_id={self.run_id}"
-            )
+        if not self._final_snapshot_saved:
+            if not await self.save_snapshot():
+                raise RuntimeError(
+                    f"最终状态快照保存失败: run_id={self.run_id}"
+                )
+            self._final_snapshot_saved = True
 
         self.logger.info(f"状态管理器已停止: {self.run_id}")
+
+    async def abort_without_final_snapshot(self, strategy=None) -> None:
+        """Cancel startup-owned tasks without persisting partial state.
+
+        A runtime that never reached RUNNING has no authoritative final state to
+        publish. In particular, this path must not call ``save_snapshot`` and
+        overwrite the durable state that was restored at startup.
+        """
+
+        self._running = False
+        current_task = asyncio.current_task()
+        tasks = [
+            task
+            for task in (self._snapshot_task, self._state_sync_task)
+            if task is not None and task is not current_task
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._snapshot_task = None
+        self._state_sync_task = None
+        queue = self._state_queue
+        self._state_queue = None
+        self._state_sync_error = None
+        if queue is not None and strategy and hasattr(strategy, "unsubscribe_state"):
+            strategy.unsubscribe_state(queue)
+        self.logger.info("状态管理器启动已中止（未保存快照）: %s", self.run_id)
 
     async def start_state_sync(self, strategy) -> None:
         """启动策略状态同步任务（通过订阅事件持久化）"""
@@ -159,7 +250,12 @@ class RuntimeStateManager:
 
         if self._state_sync_task and not self._state_sync_task.done():
             return
+        if self._state_queue is not None or self._state_sync_error is not None:
+            raise RuntimeError(
+                f"上一次策略状态同步未收敛: run_id={self.run_id}"
+            )
 
+        self._state_sync_error = None
         self._state_queue = strategy.subscribe_state()
         self._state_sync_task = asyncio.create_task(
             self._state_sync_loop(),
@@ -168,24 +264,50 @@ class RuntimeStateManager:
 
     async def stop_state_sync(self, strategy=None) -> None:
         """停止策略状态同步任务"""
-        if self._state_sync_task and not self._state_sync_task.done():
-            if self._state_queue:
+        task = self._state_sync_task
+        queue = self._state_queue
+        failure = self._state_sync_error
+        unfinished = int(getattr(queue, "_unfinished_tasks", 0) or 0)
+
+        if failure is None and queue is not None and unfinished > 0:
+            if task is None or task.done():
+                failure = (
+                    "策略状态同步任务已停止但队列仍有未处理事件: "
+                    f"run_id={self.run_id}, unfinished={unfinished}"
+                )
+            else:
                 try:
-                    await asyncio.wait_for(self._state_queue.join(), timeout=5.0)
+                    await asyncio.wait_for(queue.join(), timeout=5.0)
                 except asyncio.TimeoutError:
-                    self.logger.warning(
-                        "策略状态同步队列停止前未能完全排空: run_id=%s",
-                        self.run_id,
+                    failure = (
+                        "策略状态同步队列停止前未能完全排空: "
+                        f"run_id={self.run_id}"
                     )
-            self._state_sync_task.cancel()
-            try:
-                await self._state_sync_task
-            except asyncio.CancelledError:
-                pass
+
+        # The consumer can fail while ``queue.join`` is waiting.  Its finally
+        # block balances the acquired item, so join may return even though that
+        # delta was never applied.  Re-read the shared failure evidence before
+        # treating the queue as authoritative.
+        failure = failure or self._state_sync_error
+
+        if failure is not None:
+            self._state_sync_error = failure
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            # Keep the queue and error evidence. Clearing either would let a
+            # later final snapshot falsely claim that every strategy delta was
+            # incorporated.
+            raise RuntimeError(failure)
+
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         self._state_sync_task = None
 
-        if self._state_queue and strategy and hasattr(strategy, "unsubscribe_state"):
-            strategy.unsubscribe_state(self._state_queue)
+        if queue and strategy and hasattr(strategy, "unsubscribe_state"):
+            strategy.unsubscribe_state(queue)
         self._state_queue = None
 
     async def _state_sync_loop(self) -> None:
@@ -208,23 +330,110 @@ class RuntimeStateManager:
                 changes = getattr(event, "changes", None)
                 key = getattr(event, "key", None)
                 value = getattr(event, "value", None)
-
                 if changes:
-                    self.update_custom_state(changes)
+                    self.update_strategy_custom_state(changes)
                 elif key is not None:
-                    self.set_custom(key, value)
+                    self.update_strategy_custom_state({key: value})
             except Exception as e:
-                self.logger.error(f"策略状态同步失败: {e}")
+                self._state_sync_error = (
+                    f"策略状态同步应用失败: run_id={self.run_id}, error={e}"
+                )
+                self.logger.exception(self._state_sync_error)
+                break
             finally:
                 try:
                     queue.task_done()
                 except ValueError:
                     pass
 
-    async def restore(self) -> Dict[str, Any]:
-        """从数据库恢复状态"""
+    async def checkpoint_strategy_state_changes(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> bool:
+        """Drain strategy deltas and durably checkpoint them before routing resumes."""
+
+        queue = self._state_queue
+        sync_task = self._state_sync_task
+        if self._state_sync_error is not None:
+            self.logger.error(
+                "策略状态同步已有失败，拒绝持久化检查点: run_id=%s, error=%s",
+                self.run_id,
+                self._state_sync_error,
+            )
+            return False
+        if queue is None or sync_task is None or sync_task.done():
+            self.logger.error(
+                "策略状态同步未运行，拒绝确认行情失效快照: run_id=%s",
+                self.run_id,
+            )
+            return False
+        try:
+            await asyncio.wait_for(queue.join(), timeout=max(0.1, timeout_seconds))
+        except asyncio.TimeoutError:
+            self.logger.error(
+                "策略状态同步排空超时，拒绝解除行情门禁: run_id=%s",
+                self.run_id,
+            )
+            return False
+        if self._state_sync_error is not None or sync_task.done():
+            self.logger.error(
+                "策略状态同步在检查点期间失败: run_id=%s, error=%s",
+                self.run_id,
+                self._state_sync_error or "task stopped",
+            )
+            return False
+        return await self.force_save()
+
+    def require_market_continuity_reconciliation(
+        self,
+        instrument_code: str,
+        reason: str,
+    ) -> None:
+        code = str(instrument_code or "").strip().upper()
+        if not code:
+            return
+        gates = dict(
+            self.get_custom(MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY, {}) or {}
+        )
+        gates[code] = str(reason or "MARKET_DATA_CONTINUITY_LOST")
+        self.set_custom(MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY, gates)
+
+    def clear_market_continuity_reconciliation(self, instrument_code: str) -> None:
+        code = str(instrument_code or "").strip().upper()
+        gates = dict(
+            self.get_custom(MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY, {}) or {}
+        )
+        if code not in gates:
+            return
+        gates.pop(code, None)
+        self.set_custom(MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY, gates)
+
+    def market_continuity_reconciliation(self) -> Dict[str, str]:
+        return {
+            str(code): str(reason)
+            for code, reason in dict(
+                self.get_custom(
+                    MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY,
+                    {},
+                )
+                or {}
+            ).items()
+            if code
+        }
+
+    async def restore(self) -> RuntimeStateRestoreResult:
+        """Restore durable state or raise when its truth cannot be queried.
+
+        ``NOT_FOUND`` is a successful query for a genuinely new run. Database
+        failures are never represented as an empty state because PAPER/LIVE
+        callers must not continue from fabricated account and position facts.
+        """
         if not self.persist_enabled:
-            return self._state
+            return RuntimeStateRestoreResult(
+                status=RuntimeStateRestoreStatus.PERSISTENCE_DISABLED,
+                state=self._state,
+            )
 
         try:
             from quantx_infrastructure.database.connection import get_async_db
@@ -233,10 +442,23 @@ class RuntimeStateManager:
                 StrategyRunStateRepository,
             )
 
+            queried = False
+            found = False
             async for db in get_async_db():
-                # 1. 恢复资金与自定义状态
+                queried = True
+                # Read the complete durable snapshot before mutating memory.
+                # A position query failure after a successful state query must
+                # not leave a half-restored manager that a caller could retry.
                 state_repo = StrategyRunStateRepository(db)
                 state_record = await state_repo.get_state(self.run_id)
+                pos_repo = StrategyRunPositionRepository(db)
+                positions = await pos_repo.get_all_positions(self.run_id)
+                if state_record is None and positions:
+                    raise RuntimeStateRestoreError(
+                        "状态主记录缺失但存在持仓快照，拒绝从不完整运行状态启动: "
+                        f"run_id={self.run_id}, positions={len(positions)}"
+                    )
+                found = state_record is not None or bool(positions)
                 restored_ledger = False
 
                 if state_record:
@@ -257,21 +479,24 @@ class RuntimeStateManager:
                             self._bucket_ledger.run_id = self.run_id
                         restored_ledger = True
 
-                # 2. 恢复持仓
-                pos_repo = StrategyRunPositionRepository(db)
-                positions = await pos_repo.get_all_positions(self.run_id)
                 self._state["positions"] = {
                     p.instrument_code: p.to_dict() for p in positions
                 }
                 if restored_ledger:
-                    violations = self._bucket_ledger.validate_invariants(
-                        self._state["positions"]
+                    reconcile_required, _ = self._adopt_restored_bucket_ledger(
+                        self._state["positions"],
+                        mark_dirty=True,
                     )
-                    if violations:
-                        self._state["custom"]["bucket_ledger_reconcile_required"] = True
-                        self._state["custom"]["bucket_ledger_violations"] = violations
-                    self._hydrate_positions_from_bucket_ledger()
                     self._state["bucket_ledger"] = self._bucket_ledger.to_dict()
+                    if reconcile_required:
+                        self.logger.error(
+                            "Bucket ledger 恢复校验失败，运行进入 RECONCILE_REQUIRED: "
+                            "run_id=%s violations=%s",
+                            self.run_id,
+                            self._state["custom"].get(
+                                BUCKET_LEDGER_VIOLATIONS_KEY, []
+                            ),
+                        )
                 else:
                     for code, position in self._state["positions"].items():
                         self._bucket_ledger.sync_position(code, position)
@@ -279,14 +504,31 @@ class RuntimeStateManager:
 
                 self.logger.info(f"状态恢复完成: positions={len(positions)}")
                 break
-            
+
+            if not queried:
+                raise RuntimeStateRestoreError(
+                    f"状态恢复未获得数据库会话: run_id={self.run_id}"
+                )
+
             # 恢复日志路径
             self._state["log_file"] = self._log_file_path
 
         except Exception as e:
-            self.logger.error(f"状态恢复失败: {e}")
+            self.logger.exception("状态恢复失败: run_id=%s", self.run_id)
+            if isinstance(e, RuntimeStateRestoreError):
+                raise
+            raise RuntimeStateRestoreError(
+                f"状态恢复查询失败: run_id={self.run_id}"
+            ) from e
 
-        return self._state
+        return RuntimeStateRestoreResult(
+            status=(
+                RuntimeStateRestoreStatus.RESTORED
+                if found
+                else RuntimeStateRestoreStatus.NOT_FOUND
+            ),
+            state=self._state,
+        )
 
     async def restore_manual_trade_intent(self, intent_id: str):
         """Rebuild one still-pending manual intent from its durable record."""
@@ -412,6 +654,8 @@ class RuntimeStateManager:
         event_key: str,
         *,
         custom_updates: Optional[Dict[str, Any]] = None,
+        strategy_updates: Optional[Dict[str, Any]] = None,
+        strategy_unsets: Optional[Iterable[str]] = None,
     ) -> bool:
         """Persist one durable event marker with all current runtime effects.
 
@@ -425,21 +669,20 @@ class RuntimeStateManager:
         if not normalized_key:
             raise ValueError("durable runtime event key is required")
         if custom_updates:
-            manager_owned_keys = {
-                APPLIED_CORPORATE_ACTIONS_KEY,
-                APPLIED_RUNTIME_EVENT_KEYS,
-                BUCKET_LEDGER_CUSTOM_STATE_KEY,
-                ORDER_CASH_RESERVATIONS_KEY,
-                ORDER_POSITION_RESERVATIONS_KEY,
-                RUNTIME_SNAPSHOT_ATTEMPT_KEY,
-            }
-            self.update_custom_state(
-                {
-                    key: value
-                    for key, value in dict(custom_updates).items()
-                    if key not in manager_owned_keys
-                }
+            self.update_strategy_custom_state(
+                custom_updates,
+                full_snapshot=True,
             )
+        # ``custom_updates`` is the strategy's complete in-memory snapshot.  It
+        # must not overwrite manager/API-owned values such as the grid book.
+        # The callback patch, however, is the causal delta produced by this
+        # durable report and therefore retains normal strategy ownership,
+        # including an explicit grid-book mutation.  Apply both before the
+        # marker so they are committed as one atomic snapshot.
+        if strategy_updates:
+            self.update_strategy_custom_state(strategy_updates)
+        if strategy_unsets:
+            self.unset_strategy_custom_state(strategy_unsets)
         keys = [
             str(value)
             for value in list(
@@ -516,17 +759,13 @@ class RuntimeStateManager:
                             self._bucket_ledger.run_id = self.run_id
                         restored_ledger = True
                     if restored_ledger:
-                        violations = self._bucket_ledger.validate_invariants(
-                            self._state["positions"]
+                        (
+                            _,
+                            reconciliation_changed,
+                        ) = self._adopt_restored_bucket_ledger(
+                            self._state["positions"],
+                            mark_dirty=True,
                         )
-                        if violations:
-                            self._state["custom"][
-                                "bucket_ledger_reconcile_required"
-                            ] = True
-                            self._state["custom"][
-                                "bucket_ledger_violations"
-                            ] = violations
-                        self._hydrate_positions_from_bucket_ledger()
                         self._state["bucket_ledger"] = self._bucket_ledger.to_dict()
                     else:
                         for code, position in self._state["positions"].items():
@@ -534,7 +773,9 @@ class RuntimeStateManager:
                         self._state["bucket_ledger"] = (
                             self.get_bucket_ledger_snapshot()
                         )
-                    self._dirty = False
+                    self._dirty = bool(
+                        restored_ledger and reconciliation_changed
+                    )
                 else:
                     # Preserve changes created after the uncertain commit. The
                     # adopted version lets the normal snapshot loop persist them.
@@ -602,21 +843,19 @@ class RuntimeStateManager:
                             )
                             if not self._bucket_ledger.run_id:
                                 self._bucket_ledger.run_id = self.run_id
-                            violations = self._bucket_ledger.validate_invariants(
-                                self._state["positions"]
+                            (
+                                _,
+                                reconciliation_changed,
+                            ) = self._adopt_restored_bucket_ledger(
+                                self._state["positions"],
+                                mark_dirty=True,
                             )
-                            if violations:
-                                self._state["custom"][
-                                    "bucket_ledger_reconcile_required"
-                                ] = True
-                                self._state["custom"][
-                                    "bucket_ledger_violations"
-                                ] = violations
-                            self._hydrate_positions_from_bucket_ledger()
                             self._state["bucket_ledger"] = (
                                 self._bucket_ledger.to_dict()
                             )
-                        self._dirty = False
+                        self._dirty = bool(
+                            ledger_snapshot and reconciliation_changed
+                        )
                     else:
                         self._state.setdefault("custom", {})[
                             RUNTIME_SNAPSHOT_ATTEMPT_KEY
@@ -809,7 +1048,7 @@ class RuntimeStateManager:
             },
         )
         self._state["positions"] = positions
-        if self._bucket_ledger:
+        if self._bucket_ledger and not self.requires_bucket_reconciliation():
             self._bucket_ledger.sync_position(instrument_code, positions[instrument_code])
             self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
         self._mark_dirty()
@@ -821,7 +1060,7 @@ class RuntimeStateManager:
         from quantx_domain.trading.portfolio_state import ensure_position_dict
 
         data = ensure_position_dict(instrument_code, position)
-        if self._bucket_ledger:
+        if self._bucket_ledger and not self.requires_bucket_reconciliation():
             data = self._bucket_ledger.decorate_position(instrument_code, data)
         return data
 
@@ -831,13 +1070,15 @@ class RuntimeStateManager:
         positions = {}
         for code, position in self._state.get("positions", {}).items():
             data = ensure_position_dict(code, position)
-            if self._bucket_ledger:
+            if self._bucket_ledger and not self.requires_bucket_reconciliation():
                 data = self._bucket_ledger.decorate_position(code, data)
             positions[code] = data
         return positions
 
     def settle_trading_day(self, trading_date: date) -> None:
         """Make previous trading-day buys sellable and reset intraday counters."""
+        if self.requires_bucket_reconciliation():
+            return
         from quantx_domain.trading.portfolio_state import settle_position
 
         positions = self._state.get("positions", {})
@@ -1298,11 +1539,84 @@ class RuntimeStateManager:
         self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
         self._mark_dirty()
 
+    def reconciliation_status(self) -> str:
+        """Return the runtime-local reconciliation gate status."""
+        custom = self._state.get("custom", {})
+        if custom.get(BUCKET_LEDGER_RECONCILE_REQUIRED_KEY):
+            return "RECONCILE_REQUIRED"
+        status = str(custom.get(RUNTIME_RECONCILIATION_STATUS_KEY, "") or "").upper()
+        if status:
+            return status
+        return "READY"
+
+    def requires_reconciliation(self) -> bool:
+        """Whether new trade decisions must wait for authoritative reconcile."""
+        return bool(self.market_continuity_reconciliation()) or (
+            self.requires_bucket_reconciliation()
+        )
+
+    def requires_bucket_reconciliation(self) -> bool:
+        """Whether bucket attribution is unsafe to update from positions."""
+        return self.reconciliation_status() != "READY"
+
+    def _adopt_restored_bucket_ledger(
+        self,
+        positions: Dict[str, Dict[str, Any]],
+        *,
+        mark_dirty: bool,
+    ) -> tuple[bool, bool]:
+        """Validate restored ledger without overwriting conflicting positions."""
+        if not self._bucket_ledger:
+            return self.requires_bucket_reconciliation(), False
+
+        violations = self._bucket_ledger.validate_invariants(positions)
+        custom = self._state.setdefault("custom", {})
+        if violations:
+            changed = (
+                custom.get(RUNTIME_RECONCILIATION_STATUS_KEY)
+                != "RECONCILE_REQUIRED"
+                or custom.get(RUNTIME_RECONCILIATION_REASON_KEY)
+                != "BUCKET_LEDGER_INVARIANT_BROKEN"
+                or custom.get(BUCKET_LEDGER_RECONCILE_REQUIRED_KEY) is not True
+                or custom.get(BUCKET_LEDGER_VIOLATIONS_KEY) != violations
+            )
+            custom[RUNTIME_RECONCILIATION_STATUS_KEY] = "RECONCILE_REQUIRED"
+            custom[RUNTIME_RECONCILIATION_REASON_KEY] = (
+                "BUCKET_LEDGER_INVARIANT_BROKEN"
+            )
+            custom[BUCKET_LEDGER_RECONCILE_REQUIRED_KEY] = True
+            custom[BUCKET_LEDGER_VIOLATIONS_KEY] = violations
+            if changed and mark_dirty:
+                self._mark_dirty()
+            return True, changed
+
+        # This helper is invoked only after atomically reading the authoritative
+        # state row and its position rows. A now-consistent snapshot is the
+        # durable proof that can clear a previously persisted recovery gate.
+        # These four keys are manager-owned exclusively by the bucket
+        # invariant recovery path, so clearing them cannot release another
+        # reconciliation subsystem's gate.
+        reconciliation_keys = {
+            RUNTIME_RECONCILIATION_STATUS_KEY,
+            RUNTIME_RECONCILIATION_REASON_KEY,
+            BUCKET_LEDGER_RECONCILE_REQUIRED_KEY,
+            BUCKET_LEDGER_VIOLATIONS_KEY,
+        }
+        cleared = any(key in custom for key in reconciliation_keys)
+        for key in reconciliation_keys:
+            custom.pop(key, None)
+        if cleared and mark_dirty:
+            self._mark_dirty()
+
+        self._hydrate_positions_from_bucket_ledger()
+        return False, cleared
+
     def get_bucket_ledger_snapshot(self) -> Dict[str, Any]:
         if not self._bucket_ledger:
             return {}
-        for code, position in self._state.get("positions", {}).items():
-            self._bucket_ledger.sync_position(code, position)
+        if not self.requires_bucket_reconciliation():
+            for code, position in self._state.get("positions", {}).items():
+                self._bucket_ledger.sync_position(code, position)
         return self._bucket_ledger.to_dict()
 
     def _hydrate_positions_from_bucket_ledger(self) -> None:
@@ -1729,6 +2043,43 @@ class RuntimeStateManager:
                 dict(updates.get(GRID_BOOK_CUSTOM_STATE_KEY) or {})
             )
         self._mark_dirty()
+
+    def update_strategy_custom_state(
+        self,
+        updates: Dict[str, Any],
+        *,
+        full_snapshot: bool = False,
+    ) -> None:
+        """Merge strategy-owned state without overwriting Engine/API ownership."""
+
+        excluded = _MANAGER_OWNED_CUSTOM_STATE_KEYS
+        if full_snapshot:
+            excluded = excluded | {GRID_BOOK_CUSTOM_STATE_KEY}
+        self.update_custom_state(
+            {
+                key: copy.deepcopy(value)
+                for key, value in dict(updates or {}).items()
+                if key not in excluded
+            }
+        )
+
+    def unset_strategy_custom_state(self, keys: Iterable[str]) -> None:
+        """Delete explicit strategy-owned keys while preserving manager gates."""
+
+        custom = self._state.setdefault("custom", {})
+        changed = False
+        for key in keys:
+            normalized_key = str(key or "")
+            if (
+                not normalized_key
+                or normalized_key in _MANAGER_OWNED_CUSTOM_STATE_KEYS
+            ):
+                continue
+            if normalized_key in custom:
+                custom.pop(normalized_key, None)
+                changed = True
+        if changed:
+            self._mark_dirty()
 
     def set_custom_state(self, state: Dict[str, Any]) -> None:
         """覆盖自定义状态"""

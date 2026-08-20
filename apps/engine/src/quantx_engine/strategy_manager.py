@@ -436,8 +436,21 @@ class StrategyManager:
                 self.logger.info(f"打板回放 {run.id} 已恢复后台启动")
               else:
                 # 普通运行维持原有同步恢复语义。
-                await self.start_strategy(run.id)
-                self.logger.info(f"策略运行 {run.id} 恢复并启动成功")
+                started = await self.start_strategy(run.id)
+                if started:
+                  self.logger.info(f"策略运行 {run.id} 恢复并启动成功")
+                else:
+                  runtime = self.executor.get(run.id)
+                  error_message = (
+                    str(runtime.error_message or "")
+                    if runtime is not None
+                    else ""
+                  )
+                  self.logger.error(
+                    "策略运行 %s 恢复启动失败%s",
+                    run.id,
+                    f": {error_message}" if error_message else "",
+                  )
             else:
               # PAUSED 和 PENDING 状态只加载到 executor，等待用户操作
               self.logger.info(f"策略运行 {run.id} 已加载到 executor (状态: {status_name})")
