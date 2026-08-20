@@ -1,3 +1,5 @@
+import json
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -73,19 +75,65 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
     async def __aexit__(self, *_):
       return None
 
-    async def get(self, *_):
+    async def get(self, *_, **__):
+      return None
+
+    def add(self, _value):
+      return None
+
+    async def commit(self):
       return None
 
   monkeypatch.setattr(report_processor, "PositionService", FakePositionService)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", FakeDatabase)
+  monkeypatch.setattr(
+    report_processor,
+    "_upsert_account",
+    lambda value: _async_noop(value),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "_snapshot_discrepancies",
+    lambda *_args, **_kwargs: _async_result(
+      {
+        "blocking_discrepancies": [],
+        "external_orders": [],
+        "external_trades": [],
+      }
+    ),
+  )
+
+  payload = {
+    "snapshot_id": "snapshot-101",
+    "positions_by_account": {"account-1": []},
+    "accounts": [{"account_id": "account-1"}],
+    "orders": [],
+    "trades": [],
+    "section_completeness_by_account": {
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
+    "unavailable_accounts": [],
+    "is_complete": True,
+    "sequence": 101,
+  }
+  payload["snapshot_hash"] = sha256(
+    json.dumps(
+      payload,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
 
   await report_processor._process_delta_report(
     "device-1",
-    {
-      "positions_by_account": {"account-1": []},
-      "is_complete": True,
-      "sequence": 101,
-    },
+    payload,
+    protocol_version="1.1",
   )
 
   assert calls.delta == []
@@ -96,6 +144,10 @@ async def test_complete_delta_still_applies_authoritative_snapshot(
 
 async def _async_noop(_value):
   return None
+
+
+async def _async_result(value):
+  return value
 
 
 @pytest.mark.asyncio

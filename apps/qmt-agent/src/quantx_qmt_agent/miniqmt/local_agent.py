@@ -181,6 +181,7 @@ class MiniQmtLocalAgent:
     self.status = LocalAgentStatus.READY
     self.last_report_time: Optional[datetime] = None
     self.last_full_snapshot: Dict[str, Any] = {}
+    self._snapshot_reconcile_required = False
 
   def mark_report_received(self, at: Optional[datetime] = None) -> None:
     """Record a locally persisted callback or successful reconciliation snapshot."""
@@ -459,6 +460,13 @@ class MiniQmtLocalAgent:
     if not bool(getattr(self.trading_manager, "is_connected", False)):
       self.status = LocalAgentStatus.DISCONNECTED
       return {"ok": False, "status": self.status.value, "reason": "miniQMT disconnected"}
+    if self._snapshot_reconcile_required:
+      self.status = LocalAgentStatus.RECONCILE_REQUIRED
+      return {
+        "ok": False,
+        "status": self.status.value,
+        "reason": "miniQMT account snapshot incomplete",
+      }
     if self.should_kill_switch():
       self.status = LocalAgentStatus.KILL_SWITCH
       return {"ok": False, "status": self.status.value, "reason": "broker report stale"}
@@ -497,13 +505,20 @@ class MiniQmtLocalAgent:
       ),
       account_delta=_diff_dict(expected_snapshot.get("account", {}), actual.get("account", {})),
     )
-    if report.order_delta or report.trade_delta or report.position_delta or report.account_delta:
+    if actual.get("is_complete") is not True:
+      report.status = LocalAgentStatus.RECONCILE_REQUIRED
+      report.reason = "snapshot_incomplete"
+      self.status = LocalAgentStatus.RECONCILE_REQUIRED
+      self._snapshot_reconcile_required = True
+    elif report.order_delta or report.trade_delta or report.position_delta or report.account_delta:
       report.status = LocalAgentStatus.RECONCILE_REQUIRED
       report.reason = "snapshot_mismatch"
       self.status = LocalAgentStatus.RECONCILE_REQUIRED
+      self._snapshot_reconcile_required = True
     else:
       report.status = LocalAgentStatus.READY
       self.status = LocalAgentStatus.READY
+      self._snapshot_reconcile_required = False
     self.last_report_time = report.generated_at
     self.last_full_snapshot = actual
     return report
@@ -513,26 +528,89 @@ class MiniQmtLocalAgent:
 
   def full_snapshot(self) -> Dict[str, Any]:
     observed_at = clock.now_aware()
-    orders = self.query_orders()
+    account, account_complete = _snapshot_query(
+      self.trading_manager,
+      "get_account_info",
+      default={},
+    )
+    positions, positions_complete = _snapshot_query(
+      self.trading_manager,
+      "query_positions_snapshot",
+      fallback_method_name="get_positions",
+      default=[],
+    )
+    try:
+      orders = self.trading_manager.get_orders(False)
+      orders_complete = orders is not None
+    except TypeError:
+      orders, orders_complete = _snapshot_query(
+        self.trading_manager,
+        "get_orders",
+        default=[],
+      )
+    except Exception:
+      orders = []
+      orders_complete = False
+    trades, trades_complete = _snapshot_query(
+      self.trading_manager,
+      "get_trades",
+      default=[],
+    )
+    try:
+      normalized_account = dict(account or {})
+      normalized_positions = [_to_dict(item) for item in positions or []]
+      normalized_orders = [_to_dict(item) for item in orders or []]
+      normalized_trades = [_to_dict(item) for item in trades or []]
+    except Exception:
+      # A malformed section is not an authoritative empty section.
+      normalized_account = {}
+      normalized_positions = []
+      normalized_orders = []
+      normalized_trades = []
+      account_complete = False
+      positions_complete = False
+      orders_complete = False
+      trades_complete = False
+    account_complete = bool(account_complete and normalized_account)
+    section_completeness = {
+      "account": account_complete,
+      "positions": bool(positions_complete),
+      "orders": bool(orders_complete),
+      "trades": bool(trades_complete),
+    }
     cancelable_orders = self.query_cancelable_orders()
     cancelable_order_ids = (
       {_order_identity(item) for item in cancelable_orders if _order_identity(item)}
       if cancelable_orders is not None
       else None
     )
+    connected = bool(getattr(self.trading_manager, "is_connected", False))
+    snapshot_complete = bool(connected and all(section_completeness.values()))
+    self._snapshot_reconcile_required = not snapshot_complete
+    self.status = (
+      LocalAgentStatus.READY
+      if snapshot_complete
+      else (
+        LocalAgentStatus.RECONCILE_REQUIRED
+        if connected
+        else LocalAgentStatus.DISCONNECTED
+      )
+    )
     return {
-      "account": self.query_account(),
-      "positions": self.query_positions(),
+      "account": normalized_account,
+      "positions": normalized_positions,
       "orders": [
         _with_effective_order_status(
           order,
           observed_at=observed_at,
           cancelable_order_ids=cancelable_order_ids,
         )
-        for order in orders
+        for order in normalized_orders
       ],
-      "trades": self.query_trades(),
-      "connected": bool(getattr(self.trading_manager, "is_connected", False)),
+      "trades": normalized_trades,
+      "connected": connected,
+      "section_completeness": section_completeness,
+      "is_complete": snapshot_complete,
     }
 
   def should_kill_switch(self, now: Optional[datetime] = None) -> bool:
@@ -554,6 +632,33 @@ def _safe_call(obj: Any, method_name: str, *, default: Any) -> Any:
     return method()
   except Exception:
     return default
+
+
+def _snapshot_query(
+  obj: Any,
+  method_name: str,
+  *,
+  fallback_method_name: Optional[str] = None,
+  default: Any,
+) -> tuple[Any, bool]:
+  """Query one authoritative snapshot section without hiding failures as empty."""
+
+  try:
+    method = getattr(obj, method_name)
+  except AttributeError:
+    if fallback_method_name is None:
+      return default, False
+    try:
+      method = getattr(obj, fallback_method_name)
+    except AttributeError:
+      return default, False
+  try:
+    value = method()
+  except Exception:
+    return default, False
+  if value is None:
+    return default, False
+  return value, True
 
 
 def _safe_call_with_args(obj: Any, method_name: str, *args: Any, default: Any) -> Any:

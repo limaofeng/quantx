@@ -6,6 +6,7 @@ import pytest
 from quantx_domain.trading.exit_plan import (
   ExitDecision,
   ExitEvaluationContext,
+  ExitPlan,
   ExitPlanBook,
   ExitPlanStatus,
   ExitPlanTemplate,
@@ -192,6 +193,139 @@ def pending_plan():
     "intent-1",
   )
   return plan
+
+
+def strategy_exit_template(
+  *,
+  config_version: int = 1,
+  auto_exit_authorized: bool = True,
+) -> ExitPlanTemplate:
+  return ExitPlanTemplate(
+    plan_id="entry:managed-plan:slice:stage-1",
+    source_type="ENTRY_PLAN",
+    source_id="stage-1",
+    account_id="account-a",
+    instrument_code="600000.SH",
+    bucket="core",
+    run_id="managed-plan",
+    config_version=config_version,
+    auto_exit_authorized=auto_exit_authorized,
+    rules=[
+      ExitRuleSpec(
+        rule_id="stage-1:target",
+        strategy=ExitRuleType.TARGET_PRICE,
+        parameters={"target_price": 20},
+      )
+    ],
+  )
+
+
+def strategy_exit_book(
+  *fills: tuple[int, float],
+  config_version: int = 1,
+) -> ExitPlanBook:
+  book = ExitPlanBook()
+  template = strategy_exit_template(
+    config_version=config_version,
+    auto_exit_authorized=False,
+  )
+  for volume, price in fills:
+    book.register_entry_fill(template, volume=volume, price=price)
+  return book
+
+
+def strategy_exit_record(
+  plan: ExitPlan,
+  *,
+  config_version: int = 1,
+  enabled: bool = True,
+  authorized: bool = True,
+) -> AutoExitPlanRecord:
+  if authorized:
+    plan.template = strategy_exit_template(
+      config_version=config_version,
+      auto_exit_authorized=True,
+    )
+  now = datetime.now()
+  return AutoExitPlanRecord(
+    plan_id=plan.plan_id,
+    account_id=plan.template.account_id,
+    instrument_code=plan.template.instrument_code,
+    bucket=plan.template.bucket,
+    source_type=plan.template.source_type,
+    source_id=plan.template.source_id,
+    strategy_run_id="managed-plan",
+    enabled=enabled,
+    status=plan.status.value,
+    execution_mode="live",
+    auto_exit_authorized=authorized,
+    auto_exit_authorization_fingerprint="fingerprint" if authorized else None,
+    auto_exit_authorization_config_version=(
+      config_version if authorized else None
+    ),
+    auto_exit_authorized_at=now if authorized else None,
+    auto_exit_authorization_expires_at=(
+      now + timedelta(minutes=5) if authorized else None
+    ),
+    auto_exit_authorization_challenge_id=(
+      "challenge-1" if authorized else None
+    ),
+    auto_exit_authorization_user_id="user-1" if authorized else None,
+    auto_exit_authorization_device_session_id=(
+      "device-session-1" if authorized else None
+    ),
+    config_version=config_version,
+    protected_volume=plan.entry_filled_volume,
+    exited_volume=plan.exited_volume,
+    remaining_volume=plan.remaining_volume,
+    entry_avg_price=plan.entry_avg_price,
+    plan_state=plan.to_dict(),
+    pending_client_order_id=plan.pending_order_id or None,
+  )
+
+
+def install_strategy_sync_fakes(monkeypatch, record):
+  class Session:
+    def __init__(self):
+      self.added = []
+      self.commits = 0
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    def add(self, value):
+      self.added.append(value)
+
+    async def commit(self):
+      self.commits += 1
+
+  session = Session()
+  lock_requests = []
+
+  class Repository:
+    def __init__(self, _db):
+      pass
+
+    async def find_by_id(self, plan_id, *, for_update=False):
+      lock_requests.append((plan_id, for_update))
+      return record
+
+  events = []
+
+  async def append_event(_db, **kwargs):
+    events.append(dict(kwargs))
+
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "_append_event",
+    staticmethod(append_event),
+  )
+  return session, lock_requests, events
 
 
 @pytest.mark.asyncio
@@ -502,3 +636,266 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
   assert record.plan_state["pending_intent_id"] == ""
   assert session.committed
   processor.process_approved_exit_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_expands_same_version_cumulative_fill(
+  monkeypatch,
+):
+  initial_plan = next(iter(strategy_exit_book((100, 10)).plans.values()))
+  record = strategy_exit_record(initial_plan)
+  _session, lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+  incoming = strategy_exit_book((100, 10), (100, 12))
+
+  synced = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=incoming.to_dict(),
+    execution_mode="live",
+  )
+
+  stored = ExitPlan.from_dict(record.plan_state)
+  assert synced == 1
+  assert lock_requests == [(record.plan_id, True)]
+  assert record.config_version == 1
+  assert record.protected_volume == 200
+  assert record.remaining_volume == 200
+  assert record.entry_avg_price == pytest.approx(11)
+  assert stored.entry_filled_volume == 200
+  assert stored.entry_avg_price == pytest.approx(11)
+  assert not stored.template.auto_exit_authorized
+  assert record.auto_exit_authorized is False
+  assert record.auto_exit_authorization_fingerprint is None
+  assert record.auto_exit_authorization_config_version is None
+  assert record.auto_exit_authorization_challenge_id is None
+  assert events == [
+    {
+      "business_key": (
+        f"strategy-plan-entry-expanded:{record.plan_id}:1:200"
+      ),
+      "plan_id": record.plan_id,
+      "event_type": "STRATEGY_PLAN_ENTRY_EXPANDED",
+      "payload": {
+        "strategy_run_id": "managed-plan",
+        "source_type": "ENTRY_PLAN",
+        "config_version": 1,
+        "incoming_template_version": 1,
+        "previous_entry_filled_volume": 100,
+        "entry_filled_volume": 200,
+        "previous_entry_avg_price": 10,
+        "entry_avg_price": pytest.approx(11),
+        "reactivated_from_completed": False,
+        "status": "ACTIVE",
+        "monitor_enabled": True,
+        "unprotected_terminal": False,
+      },
+    }
+  ]
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_replay_and_smaller_snapshot_are_noops(
+  monkeypatch,
+):
+  cumulative = strategy_exit_book((100, 10), (100, 12))
+  record = strategy_exit_record(next(iter(cumulative.plans.values())))
+  _session, lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  replayed = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=cumulative.to_dict(),
+    execution_mode="live",
+  )
+  stale = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=strategy_exit_book((100, 10)).to_dict(),
+    execution_mode="live",
+  )
+
+  assert replayed == 0
+  assert stale == 0
+  assert lock_requests == [(record.plan_id, True), (record.plan_id, True)]
+  assert events == []
+  assert record.protected_volume == 200
+  assert record.entry_avg_price == pytest.approx(11)
+  assert record.auto_exit_authorized is True
+  assert record.auto_exit_authorization_fingerprint == "fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_old_template_expands_newer_persistent_policy(
+  monkeypatch,
+):
+  initial = strategy_exit_book((100, 10), config_version=2)
+  record = strategy_exit_record(
+    next(iter(initial.plans.values())),
+    config_version=2,
+  )
+  _session, _lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  synced = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=strategy_exit_book(
+      (100, 10),
+      (100, 12),
+      config_version=1,
+    ).to_dict(),
+    execution_mode="live",
+  )
+
+  stored = ExitPlan.from_dict(record.plan_state)
+  assert synced == 1
+  assert record.config_version == 2
+  assert stored.template.config_version == 2
+  assert stored.entry_filled_volume == 200
+  assert stored.entry_avg_price == pytest.approx(11)
+  assert record.auto_exit_authorized is False
+  assert events[0]["payload"]["config_version"] == 2
+  assert events[0]["payload"]["incoming_template_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_preserves_exit_and_pending_runtime_facts(
+  monkeypatch,
+):
+  plan = next(iter(strategy_exit_book((100, 10)).plans.values()))
+  plan.exited_volume = 40
+  plan.exit_avg_price = 13
+  plan.status = ExitPlanStatus.EXIT_PENDING
+  plan.peak_price = 15
+  plan.trailing_floor_pct = 4.5
+  plan.pending_intent_id = "exit-intent-1"
+  plan.pending_order_id = "exit-order-1"
+  plan.pending_rule_id = "stage-1:target"
+  plan.pending_requested_volume = 60
+  plan.pending_filled_volume = 20
+  plan.pending_order_terminal = False
+  plan.rule_state = {"stage-1:target": {"armed": True}}
+  plan.rule_filled_volumes = {"stage-1:target": 40}
+  record = strategy_exit_record(plan)
+  record.last_error = "keep-me"
+  _session, _lock_requests, _events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  synced = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=strategy_exit_book((100, 10), (100, 12)).to_dict(),
+    execution_mode="live",
+  )
+
+  stored = ExitPlan.from_dict(record.plan_state)
+  assert synced == 1
+  assert stored.entry_filled_volume == 200
+  assert stored.exited_volume == 40
+  assert stored.exit_avg_price == 13
+  assert stored.remaining_volume == 160
+  assert stored.status == ExitPlanStatus.EXIT_PENDING
+  assert stored.peak_price == 15
+  assert stored.trailing_floor_pct == 4.5
+  assert stored.pending_intent_id == "exit-intent-1"
+  assert stored.pending_order_id == "exit-order-1"
+  assert stored.pending_rule_id == "stage-1:target"
+  assert stored.pending_requested_volume == 60
+  assert stored.pending_filled_volume == 20
+  assert stored.rule_state == {"stage-1:target": {"armed": True}}
+  assert stored.rule_filled_volumes == {"stage-1:target": 40}
+  assert record.pending_client_order_id == "exit-order-1"
+  assert record.last_error == "keep-me"
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_late_fill_reopens_completed_plan(monkeypatch):
+  plan = next(iter(strategy_exit_book((100, 10)).plans.values()))
+  plan.exited_volume = 100
+  plan.exit_avg_price = 13
+  plan.status = ExitPlanStatus.COMPLETED
+  record = strategy_exit_record(plan, enabled=False)
+  _session, _lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  incoming = strategy_exit_book((100, 10), (100, 12))
+  next(iter(incoming.plans.values())).status = ExitPlanStatus.COMPLETED
+  synced = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=incoming.to_dict(),
+    execution_mode="live",
+  )
+
+  stored = ExitPlan.from_dict(record.plan_state)
+  assert synced == 1
+  assert stored.entry_filled_volume == 200
+  assert stored.exited_volume == 100
+  assert stored.remaining_volume == 100
+  assert stored.status == ExitPlanStatus.PARTIALLY_EXITED
+  assert record.enabled is True
+  assert events[0]["payload"]["reactivated_from_completed"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "status",
+  [ExitPlanStatus.PAUSED, ExitPlanStatus.CANCELLED],
+)
+async def test_strategy_plan_sync_late_fill_preserves_user_terminal_intent(
+  monkeypatch,
+  status,
+):
+  plan = next(iter(strategy_exit_book((100, 10)).plans.values()))
+  plan.status = status
+  record = strategy_exit_record(plan, enabled=False)
+  _session, _lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  incoming = strategy_exit_book((100, 10), (100, 12))
+  next(iter(incoming.plans.values())).status = status
+  synced = await AutoExitPlanService().sync_strategy_plan_book(
+    strategy_run_id="managed-plan",
+    book_state=incoming.to_dict(),
+    execution_mode="live",
+  )
+
+  stored = ExitPlan.from_dict(record.plan_state)
+  assert synced == 1
+  assert stored.entry_filled_volume == 200
+  assert stored.status == status
+  assert record.enabled is False
+  assert events[0]["payload"]["monitor_enabled"] is False
+  assert events[0]["payload"]["unprotected_terminal"] is (
+    status == ExitPlanStatus.CANCELLED
+  )
+
+
+@pytest.mark.asyncio
+async def test_strategy_plan_sync_rejects_cross_binding_snapshot(monkeypatch):
+  initial_plan = next(iter(strategy_exit_book((100, 10)).plans.values()))
+  record = strategy_exit_record(initial_plan)
+  record.instrument_code = "000001.SZ"
+  _session, _lock_requests, events = install_strategy_sync_fakes(
+    monkeypatch,
+    record,
+  )
+
+  with pytest.raises(ValueError, match="instrument_code binding mismatch"):
+    await AutoExitPlanService().sync_strategy_plan_book(
+      strategy_run_id="managed-plan",
+      book_state=strategy_exit_book((100, 10), (100, 12)).to_dict(),
+      execution_mode="live",
+    )
+
+  assert record.protected_volume == 100
+  assert record.auto_exit_authorized is True
+  assert events == []

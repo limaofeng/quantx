@@ -120,6 +120,7 @@ class TradingService:
         ),
         policy_version=int(
           context.get("exit_policy_version")
+          or context.get("entry_config_version")
           or context.get("config_version")
           or 0
         ),

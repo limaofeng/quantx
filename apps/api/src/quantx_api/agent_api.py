@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
@@ -456,6 +457,7 @@ async def _stage_command_runtime_event(
     "approval_reason": reason,
     "runtime_event_key": business_key,
     "command_message_id": command.message_id,
+    "command_lifecycle_status": str(pending.status or "").upper(),
   }
   event = StrategyRuntimeEvent(
     event_id=str(uuid.uuid4()),
@@ -476,6 +478,7 @@ async def _stage_command_runtime_event(
         "status": normalized_status,
         "order_status": normalized_status,
         "status_msg": reason,
+        "command_lifecycle_status": str(pending.status or "").upper(),
       },
       "metadata": metadata,
     },
@@ -575,6 +578,21 @@ async def _transition_place_order_command(
     or (role == "ENTRY" and str(batch.status or "").upper() == "ENTRY_QUEUED")
     or (role == "EXIT" and str(batch.status or "").upper() == "EXIT_TRIGGERED")
   )
+  try:
+    intent_executed_volume = int(intent.executed_volume or 0) if intent else 0
+    intent_executed_price = float(intent.executed_price or 0.0) if intent else 0.0
+    intent_zero_execution = bool(
+      intent is None
+      or (
+        intent_executed_volume == 0
+        and isfinite(intent_executed_price)
+        and intent_executed_price <= 0
+        and intent.executed_time is None
+      )
+    )
+  except (TypeError, ValueError, OverflowError):
+    intent_executed_volume = -1
+    intent_zero_execution = False
   already_same_pre_execution_outcome = bool(
     pending is not None
     and normalized_status in {"EXPIRED", "REJECTED"}
@@ -586,14 +604,21 @@ async def _transition_place_order_command(
     and (not pending.intent_id or intent is not None)
     and (not pending.batch_id or batch is not None)
     and batch_fill_volume == 0
-    and (intent is None or int(intent.executed_volume or 0) == 0)
+    and intent_zero_execution
   )
   safe_pre_execution_state = bool(
     already_same_pre_execution_outcome
     or (
       pre_execution_proven
       and pending is not None
-      and str(pending.status or "").upper() == "QUEUED"
+      and (
+        str(pending.status or "").upper() == "QUEUED"
+        or (
+          normalized_status == "EXPIRED"
+          and reason == "command_expired"
+          and str(pending.status or "").upper() == "RECONCILE_REQUIRED"
+        )
+      )
       and not pending.broker_order_id
       and (correlation is None or not correlation.broker_order_id)
       and (not pending.strategy_run_id or correlation is not None)
@@ -602,13 +627,48 @@ async def _transition_place_order_command(
       and batch_pre_execution_state
       and (
         not pending.intent_id
-        or (intent is not None and int(intent.executed_volume or 0) == 0)
+        or (intent is not None and intent_zero_execution)
       )
     )
   )
   if normalized_status in {"EXPIRED", "REJECTED"} and not safe_pre_execution_state:
     normalized_status = "RECONCILE_REQUIRED"
     reason = f"{reason}:durable_pre_execution_proof_missing"[:256]
+
+  request_metadata = {
+    **(dict(pending.request_metadata or {}) if pending is not None else {}),
+    **(
+      dict(correlation.request_metadata or {})
+      if correlation is not None
+      else {}
+    ),
+  }
+  intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
+  entry_plan_id = str(
+    request_metadata.get("entry_plan_id")
+    or intent_metadata.get("entry_plan_id")
+    or ""
+  ).strip()
+  managed_entry_zero_fill = bool(
+    normalized_status == "EXPIRED"
+    and safe_pre_execution_state
+    and entry_plan_id
+    and pending is not None
+    and correlation is not None
+    and intent is not None
+    and str(pending.side or "").upper() == "BUY"
+    and str(pending.strategy_run_id or "") == entry_plan_id
+    and str(correlation.strategy_run_id or "") == entry_plan_id
+    and str(intent.strategy_run_id or "") == entry_plan_id
+    and str(intent.direction or "").upper() == "BUY"
+    and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
+    and intent_zero_execution
+  )
+  strategy_status = (
+    "RECONCILED_ZERO_FILL"
+    if managed_entry_zero_fill
+    else normalized_status
+  )
 
   if normalized_status == "RECONCILE_REQUIRED":
     command.delivery_status = "RECONCILE_REQUIRED"
@@ -627,8 +687,16 @@ async def _transition_place_order_command(
   pending.status = normalized_status
   pending.status_reason = reason[:256] or None
   if intent is not None:
-    intent.status = normalized_status
+    intent.status = strategy_status
     intent.notes = reason[:2000] or intent.notes
+    if managed_entry_zero_fill:
+      intent.intent_metadata = {
+        **intent_metadata,
+        "execution_terminal_source": "AGENT_COMMAND_LIFECYCLE",
+        "execution_terminal_reason": reason,
+        "command_lifecycle_status": normalized_status,
+        "execution_terminal_at": now.isoformat(),
+      }
   await _project_command_batch_status(
     db,
     pending=pending,
@@ -640,7 +708,7 @@ async def _transition_place_order_command(
     command=command,
     pending=pending,
     correlation=correlation,
-    status=normalized_status,
+    status=strategy_status,
     reason=reason,
     now=now,
   )

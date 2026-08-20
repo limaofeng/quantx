@@ -21,9 +21,11 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from enum import Enum
+from math import isfinite
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
 
 from quantx_domain.brokers.backtest import BacktestBroker
 from quantx_domain.brokers.base import BrokerBase, OrderRequest, OrderStatus, Position
@@ -49,6 +51,7 @@ from quantx_domain.trading import (
   AShareMarketRules,
   ContextRiskLayer,
   DecisionTrace,
+  EntryPlanStatus,
   ExitDecision,
   ExitEvaluationContext,
   ExitPlanBook,
@@ -58,6 +61,7 @@ from quantx_domain.trading import (
   ExitRuleType,
   ExitStrategyRegistry,
   ExitT1Policy,
+  ManagedEntryPlanState,
   MarketDataSnapshot,
   OrderRiskDecision,
   OrderSizer,
@@ -84,13 +88,28 @@ from quantx_infrastructure.core.strategy_performance import (
   StrategyPerformanceService,
 )
 from quantx_infrastructure.core.utils import time_utils
+from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models import ExecutionMetrics, KLine
+from quantx_infrastructure.models.agent_runtime import (
+  PendingTradeOrder,
+  StrategyOrderCorrelation,
+  StrategyRuntimeEvent,
+  TradeCommandOutbox,
+)
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.entry_plan_authorization_service import (
+  EntryPlanAuthorizationError,
+  EntryPlanAuthorizationService,
+  scope_from_managed_entry_config,
+)
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
   TTradeReplayUpdateKind,
   t_trade_replay_projection_service,
 )
+from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+from sqlalchemy import select
 
 from .replay_clock import ReplayClock
 
@@ -3561,6 +3580,8 @@ class StrategyExecutor:
           await self._process_kline(runtime, data)
         elif event_type == "tick":
           await self._process_tick(runtime, data)
+        elif event_type == "entry_plan_evaluate":
+          await self._process_entry_plan_evaluate(runtime, data)
         elif event_type == "order":
           self._update_broker_report_health(runtime, "order", data)
           if runtime.state_manager and hasattr(data, "status"):
@@ -3896,6 +3917,35 @@ class StrategyExecutor:
       if self._uses_strict_board_replay(runtime):
         raise
 
+  async def _process_entry_plan_evaluate(
+    self,
+    runtime: StrategyRuntime,
+    payload: Any,
+  ) -> None:
+    """Evaluate an EntryPlan action on the runtime's serial queue."""
+
+    if runtime.strategy is None or not isinstance(payload, dict):
+      raise ValueError("人工建仓触发缺少运行策略或结构化事件")
+    instrument_code = str(payload.get("instrument_code") or "").upper()
+    if instrument_code not in set(runtime.context.instruments or []):
+      raise ValueError("人工建仓触发标的与固定策略运行不匹配")
+    market_data = payload.get("market_data")
+    if not isinstance(market_data, MarketDataSnapshot):
+      raise ValueError("人工建仓触发缺少最新权威行情快照")
+    timestamp = market_data.timestamp or runtime.context.current_time
+    if not isinstance(timestamp, datetime):
+      raise ValueError("人工建仓触发行情时间无效")
+    strategy_input = self._build_strategy_input(
+      runtime,
+      cadence=StrategyCadence.RECONCILE,
+      instrument_code=instrument_code,
+      timestamp=timestamp,
+      market_data=market_data,
+      event=payload,
+    )
+    output = await runtime.strategy.step(strategy_input)
+    await self._process_strategy_output(runtime, output, strategy_input)
+
   async def _process_kline(self, runtime: StrategyRuntime, kline: KLine) -> None:
     """处理K线数据"""
     strategy = runtime.strategy
@@ -4068,6 +4118,24 @@ class StrategyExecutor:
       runtime_state=runtime_state,
       parameters=parameters,
     )
+    managed_entry = dict(parameters.get("managed_entry_plan") or {})
+    pacing = dict(managed_entry.get("pacing_policy") or {})
+    try:
+      plan_cash_buffer = float(pacing.get("cash_buffer_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+      plan_cash_buffer = -1.0
+    if plan_cash_buffer == plan_cash_buffer and 0 <= plan_cash_buffer < 1:
+      try:
+        existing_cash_buffer = float(
+          risk_caps.get("min_cash_buffer_pct", 0.0) or 0.0
+        )
+      except (TypeError, ValueError):
+        existing_cash_buffer = 0.0
+      risk_caps["min_cash_buffer_pct"] = max(
+        0.0,
+        existing_cash_buffer,
+        plan_cash_buffer,
+      )
     portfolio_state = {"account": account, "positions": positions}
     position_profile = self._build_position_profile(
       runtime,
@@ -4341,7 +4409,13 @@ class StrategyExecutor:
         continue
       await self._process_trade_intent(runtime, intent)
 
-  async def approve_trade_intent(self, run_id: str, intent_id: str) -> Dict[str, Any]:
+  async def approve_trade_intent(
+    self,
+    run_id: str,
+    intent_id: str,
+    *,
+    approval_audit: Optional[Mapping[str, Any]] = None,
+  ) -> Dict[str, Any]:
     """Approve one manual-confirm intent after rechecking TTL and price drift."""
 
     runtime = self.runs.get(run_id)
@@ -4354,6 +4428,17 @@ class StrategyExecutor:
           "success": False,
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
+        }
+      challenge_failure = await self._managed_entry_approval_challenge_failure(
+        runtime,
+        intent,
+        approval_audit=approval_audit,
+      )
+      if challenge_failure is not None:
+        return {
+          "success": False,
+          "code": challenge_failure[0],
+          "message": challenge_failure[1],
         }
       if runtime.durable_event_barrier_key:
         return {
@@ -4409,11 +4494,78 @@ class StrategyExecutor:
         "message": "信号已确认并进入下单风控",
       }
 
+  async def _managed_entry_approval_challenge_failure(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    approval_audit: Optional[Mapping[str, Any]],
+  ) -> Optional[tuple[str, str]]:
+    if (
+      getattr(runtime.strategy_class, "__name__", "")
+      != "AshareManagedEntryPlanStrategy"
+      or intent.direction != TradeIntentDirection.BUY
+    ):
+      return None
+
+    failure = (
+      "ENTRY_PLAN_DEVICE_CHALLENGE_REQUIRED",
+      "托管买入必须使用 confirmEntryIntent 完成设备挑战后确认",
+    )
+    audit = dict(approval_audit or {})
+    challenge_id = str(audit.get("challenge_id") or "")
+    actor_id = str(audit.get("actor_id") or "")
+    device_session_id = str(audit.get("device_session_id") or "")
+    channel = str(audit.get("channel") or "")
+    if (
+      not challenge_id
+      or not actor_id
+      or not device_session_id
+      or channel not in {"ENTRY_PLAN_DEVICE_CHALLENGE", "IOS_BIOMETRIC"}
+    ):
+      return failure
+
+    async with AsyncSessionLocal() as db:
+      record = await db.get(TradeIntentRecord, intent.intent_id)
+    if (
+      record is None
+      or str(record.strategy_run_id or "") != runtime.run_id
+      or str(record.direction or "").upper() != "BUY"
+      or str(record.status or "").upper() != "AWAITING_APPROVAL"
+    ):
+      return failure
+    challenge = dict(
+      dict(record.intent_metadata or {}).get(
+        "mobile_trade_approval_challenge_v1",
+        {},
+      )
+      or {}
+    )
+    expected = {
+      "challenge_id": challenge_id,
+      "action": "STRATEGY_TRADE_INTENT_APPROVAL",
+      "user_id": actor_id,
+      "device_session_id": device_session_id,
+      "run_id": runtime.run_id,
+      "intent_id": intent.intent_id,
+    }
+    account_id = str(runtime.context.parameters.get("account_id") or "")
+    if account_id:
+      expected["account_id"] = account_id
+    if not challenge.get("consumed_at") or any(
+      str(challenge.get(key) or "") != str(value)
+      for key, value in expected.items()
+    ):
+      return failure
+    return None
+
   async def _restore_pending_manual_approvals(self, runtime: StrategyRuntime) -> None:
     """Restore only strategy-declared manual intents, preserving TTL semantics."""
     if not runtime.strategy or not runtime.state_manager:
       return
+    inspected_intent_ids: set[str] = set()
     for intent_id in runtime.strategy.pending_manual_intent_ids():
+      inspected_intent_ids.add(intent_id)
       intent = await runtime.state_manager.restore_manual_trade_intent(intent_id)
       if intent is None:
         await self._converge_restored_manual_intent_status(runtime, intent_id)
@@ -4435,6 +4587,24 @@ class StrategyExecutor:
         "INFO",
         f"已恢复待人工确认交易信号: intent_id={intent.intent_id}",
       )
+    managed_state = ManagedEntryPlanState.from_dict(
+      dict(runtime.strategy.state.get("managed_entry_plan", {}) or {})
+    )
+    if (
+      managed_state.pending_intent_id
+      and managed_state.pending_intent_id not in inspected_intent_ids
+      and managed_state.phase
+      in {
+        EntryPlanStatus.AWAITING_APPROVAL,
+        EntryPlanStatus.ENTRY_PENDING,
+        EntryPlanStatus.DRAINING,
+      }
+    ):
+      await self._converge_restored_managed_entry_intent(
+        runtime,
+        intent_id=managed_state.pending_intent_id,
+        state=managed_state,
+      )
 
   async def _converge_restored_manual_intent_status(
     self,
@@ -4448,6 +4618,17 @@ class StrategyExecutor:
     Ambiguous pre-order gaps and any recorded fill remain fail-closed until the
     idempotent durable report inbox replays the broker lifecycle.
     """
+
+    managed_entry_state = ManagedEntryPlanState.from_dict(
+      dict(runtime.strategy.state.get("managed_entry_plan", {}) or {})
+    )
+    if managed_entry_state.pending_intent_id == intent_id:
+      await self._converge_restored_managed_entry_intent(
+        runtime,
+        intent_id=intent_id,
+        state=managed_entry_state,
+      )
+      return
 
     instrument_states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
     matched_entry = next(
@@ -4588,6 +4769,319 @@ class StrategyExecutor:
       f"callback_status={callback_status}",
     )
 
+  async def _converge_restored_managed_entry_intent(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    intent_id: str,
+    state: ManagedEntryPlanState,
+  ) -> None:
+    """Converge an approved managed BUY without ever replaying the order."""
+
+    configured = dict(runtime.context.parameters.get("managed_entry_plan") or {})
+    instrument_code = str(configured.get("instrument_code") or "").upper()
+    truth = await self._managed_entry_restore_truth(
+      runtime,
+      intent_id=intent_id,
+      instrument_code=instrument_code,
+    )
+    kind = str(truth.get("kind") or "RECONCILE_REQUIRED")
+    if kind == "RECONCILED_ZERO_FILL":
+      metadata = {
+        **dict(truth.get("metadata") or {}),
+        "entry_plan_id": runtime.run_id,
+        "entry_stage_id": state.pending_stage_id,
+        "entry_rule_id": state.pending_rule_id,
+        "intent_id": intent_id,
+        "instrument_code": instrument_code,
+        "approval_reason": str(
+          truth.get("reason") or "APPROVED_WITHOUT_DURABLE_ORDER"
+        ),
+      }
+      runtime.pending_approvals.pop(intent_id, None)
+      if runtime.state_manager:
+        release_order_resources = getattr(
+          runtime.state_manager,
+          "release_order_resources",
+          None,
+        )
+        if callable(release_order_resources):
+          release_order_resources(intent_id)
+      await self._notify_strategy_order(
+        runtime,
+        OrderStateEvent(
+          order_id=None,
+          status="RECONCILED_ZERO_FILL",
+          timestamp=self._runtime_now(runtime),
+          metadata=metadata,
+        ),
+        raise_on_error=True,
+      )
+      self._checkpoint_restored_strategy_state(runtime)
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        "已确认买入在崩溃前未形成任何持久订单，按零成交安全释放；"
+        f"不会重下单: intent_id={intent_id}",
+      )
+      return
+
+    state.phase = (
+      EntryPlanStatus.DRAINING
+      if state.terminal_requested is not None
+      else EntryPlanStatus.ENTRY_PENDING
+    )
+    if kind != "ORDER_PENDING":
+      state.data_quality = "RECONCILE_REQUIRED"
+    state.last_decision = {
+      **dict(state.last_decision or {}),
+      "reason": str(truth.get("reason") or kind),
+      "durable_status": str(truth.get("durable_status") or ""),
+      "order_status": str(truth.get("order_status") or ""),
+      "client_order_id": str(truth.get("client_order_id") or ""),
+      "broker_order_id": str(truth.get("broker_order_id") or ""),
+    }
+    snapshot = state.to_dict()
+    runtime.strategy.state.set(
+      "managed_entry_plan",
+      snapshot,
+      persist=False,
+      notify=False,
+    )
+    self._checkpoint_restored_strategy_state(runtime)
+    self._runtime_log(
+      runtime,
+      "INFO" if kind == "ORDER_PENDING" else "WARNING",
+      "已按持久订单真源恢复托管买入状态: "
+      f"intent_id={intent_id}, kind={kind}, "
+      f"order_status={truth.get('order_status') or '-'}",
+    )
+
+  @staticmethod
+  async def _managed_entry_restore_truth(
+    runtime: StrategyRuntime,
+    *,
+    intent_id: str,
+    instrument_code: str,
+  ) -> Dict[str, Any]:
+    """Lock every durable order artifact before proving an approved intent is empty."""
+
+    account_id = str(runtime.context.parameters.get("account_id") or "")
+    async with AsyncSessionLocal() as db:
+      intent = await db.get(
+        TradeIntentRecord,
+        intent_id,
+        with_for_update=True,
+      )
+      if intent is None:
+        return {
+          "kind": "RECONCILE_REQUIRED",
+          "reason": "MANAGED_ENTRY_INTENT_RECORD_MISSING",
+        }
+      durable_status = str(intent.status or "").strip().upper()
+      metadata = dict(intent.intent_metadata or {})
+      execution_mode = str(metadata.get("execution_mode") or "").strip().upper()
+      if (
+        str(intent.strategy_run_id or "") != runtime.run_id
+        or str(intent.direction or "").upper() != "BUY"
+        or str(metadata.get("entry_plan_id") or "") != runtime.run_id
+        or execution_mode not in {"AUTO", "MANUAL_CONFIRM"}
+        or not instrument_code
+        or str(intent.instrument_code or "").upper() != instrument_code
+        or (intent.account_id and str(intent.account_id) != account_id)
+      ):
+        return {
+          "kind": "RECONCILE_REQUIRED",
+          "durable_status": durable_status,
+          "reason": "MANAGED_ENTRY_INTENT_BINDING_MISMATCH",
+          "metadata": metadata,
+        }
+      if durable_status == "RECONCILED_ZERO_FILL":
+        return {
+          "kind": "RECONCILED_ZERO_FILL",
+          "durable_status": durable_status,
+          "reason": str(intent.notes or "APPROVED_WITHOUT_DURABLE_ORDER"),
+          "metadata": metadata,
+        }
+
+      pending_orders = list(
+        (
+          await db.execute(
+            select(PendingTradeOrder)
+            .where(
+              PendingTradeOrder.strategy_run_id == runtime.run_id,
+              PendingTradeOrder.intent_id == intent_id,
+            )
+            .with_for_update()
+          )
+        )
+        .scalars()
+        .all()
+      )
+      correlations = list(
+        (
+          await db.execute(
+            select(StrategyOrderCorrelation)
+            .where(
+              StrategyOrderCorrelation.strategy_run_id == runtime.run_id,
+              StrategyOrderCorrelation.intent_id == intent_id,
+            )
+            .with_for_update()
+          )
+        )
+        .scalars()
+        .all()
+      )
+      outboxes = list(
+        (
+          await db.execute(
+            select(TradeCommandOutbox)
+            .where(
+              TradeCommandOutbox.account_id == account_id,
+              TradeCommandOutbox.payload["strategy_run_id"].as_string()
+              == runtime.run_id,
+              TradeCommandOutbox.payload["intent_id"].as_string() == intent_id,
+            )
+            .with_for_update()
+          )
+        )
+        .scalars()
+        .all()
+      )
+      runtime_events = list(
+        (
+          await db.execute(
+            select(StrategyRuntimeEvent)
+            .where(
+              StrategyRuntimeEvent.strategy_run_id == runtime.run_id,
+              StrategyRuntimeEvent.payload["metadata"]["intent_id"].as_string()
+              == intent_id,
+            )
+            .with_for_update()
+          )
+        )
+        .scalars()
+        .all()
+      )
+
+      order_id = str(intent.order_id or "").strip()
+      try:
+        executed_volume = int(intent.executed_volume or 0)
+        executed_volume_valid = executed_volume >= 0
+      except (TypeError, ValueError, OverflowError):
+        executed_volume = 0
+        executed_volume_valid = False
+      try:
+        executed_price = float(intent.executed_price or 0.0)
+        executed_price_valid = isfinite(executed_price)
+      except (TypeError, ValueError, OverflowError):
+        executed_price = 0.0
+        executed_price_valid = False
+      zero_execution_proof = bool(
+        executed_volume_valid
+        and executed_volume == 0
+        and executed_price_valid
+        and executed_price <= 0
+        and intent.executed_time is None
+      )
+      has_execution_fact = bool(
+        not zero_execution_proof
+        or executed_volume
+        or executed_price > 0
+        or intent.executed_time is not None
+      )
+      has_artifact = bool(
+        order_id
+        or has_execution_fact
+        or pending_orders
+        or correlations
+        or outboxes
+        or runtime_events
+      )
+      zero_order_crash_gap = bool(
+        (execution_mode == "MANUAL_CONFIRM" and durable_status == "APPROVED")
+        or (execution_mode == "AUTO" and durable_status == "PENDING")
+      )
+      if zero_order_crash_gap and zero_execution_proof and not has_artifact:
+        reason = (
+          "APPROVED_WITHOUT_DURABLE_ORDER_RECONCILED_ZERO_FILL"
+          if execution_mode == "MANUAL_CONFIRM"
+          else "AUTO_PENDING_WITHOUT_DURABLE_ORDER_RECONCILED_ZERO_FILL"
+        )
+        intent.status = "RECONCILED_ZERO_FILL"
+        intent.notes = reason
+        intent.intent_metadata = {
+          **metadata,
+          "managed_entry_restore": {
+            "reason": reason,
+            "reconciled_at": time_utils.now().isoformat(),
+            "zero_order_proof": {
+              "order_id_empty": True,
+              "executed_volume": 0,
+              "executed_price_non_positive": True,
+              "executed_time_empty": True,
+              "pending_order_count": 0,
+              "outbox_count": 0,
+              "correlation_count": 0,
+              "runtime_event_count": 0,
+            },
+          },
+        }
+        await db.commit()
+        return {
+          "kind": "RECONCILED_ZERO_FILL",
+          "durable_status": "RECONCILED_ZERO_FILL",
+          "reason": reason,
+          "metadata": dict(intent.intent_metadata or {}),
+        }
+
+      active_order_statuses = {
+        "PENDING",
+        "QUEUED",
+        "DELIVERED",
+        "SUBMITTED",
+        "ACCEPTED",
+        "PARTIAL_FILLED",
+        "PARTIALLY_FILLED",
+        "CANCEL_REQUESTED",
+      }
+      if len(pending_orders) == 1 and len(correlations) == 1:
+        pending = pending_orders[0]
+        pending_status = str(pending.status or "").strip().upper()
+        if pending_status in active_order_statuses:
+          return {
+            "kind": "ORDER_PENDING",
+            "durable_status": durable_status,
+            "order_status": pending_status,
+            "client_order_id": str(pending.client_order_id or ""),
+            "broker_order_id": str(pending.broker_order_id or ""),
+            "metadata": metadata,
+          }
+
+      reason = (
+        "MANAGED_ENTRY_DURABLE_ORDER_RECONCILIATION_REQUIRED:"
+        f"pending={len(pending_orders)},outbox={len(outboxes)},"
+        f"correlation={len(correlations)},runtime_event={len(runtime_events)},"
+        f"executed_volume={executed_volume},order_id={int(bool(order_id))}"
+      )
+      if durable_status != "RECONCILE_REQUIRED":
+        intent.status = "RECONCILE_REQUIRED"
+        intent.notes = reason
+        intent.intent_metadata = {
+          **metadata,
+          "managed_entry_restore": {
+            "reason": reason,
+            "reconciled_at": time_utils.now().isoformat(),
+          },
+        }
+        await db.commit()
+      return {
+        "kind": "RECONCILE_REQUIRED",
+        "durable_status": "RECONCILE_REQUIRED",
+        "reason": reason,
+        "metadata": dict(intent.intent_metadata or {}),
+      }
+
   async def _mark_restored_intent_reconcile_required(
     self,
     runtime: StrategyRuntime,
@@ -4626,9 +5120,25 @@ class StrategyExecutor:
 
     if not runtime.strategy or not runtime.state_manager:
       return
-    update_custom_state = getattr(runtime.state_manager, "update_custom_state", None)
+    snapshot = runtime.strategy.state.to_dict()
+    update_strategy_custom_state = getattr(
+      runtime.state_manager,
+      "update_strategy_custom_state",
+      None,
+    )
+    if callable(update_strategy_custom_state):
+      update_strategy_custom_state(
+        snapshot,
+        full_snapshot=True,
+      )
+      return
+    update_custom_state = getattr(
+      runtime.state_manager,
+      "update_custom_state",
+      None,
+    )
     if callable(update_custom_state):
-      update_custom_state(runtime.strategy.state.to_dict())
+      update_custom_state(snapshot)
 
   def _restore_t_trade_entry_reservations(self, runtime: StrategyRuntime) -> None:
     """Rebuild approved-but-unfinished T entry exposure after a restart."""
@@ -4694,58 +5204,75 @@ class StrategyExecutor:
       return {"success": True, "code": "REJECTED", "message": "信号已忽略"}
 
   async def cancel_open_buy_orders(self, run_id: str, reason: str) -> int:
-    """Cancel this runtime's unfinished buy orders while preserving sell exits."""
+    """Request durable cancellation while preserving late broker fills."""
 
+    async with AsyncSessionLocal() as db:
+      requests = await TradeCommandService(
+        db
+      ).request_strategy_buy_cancellations(
+        strategy_run_id=run_id,
+        reason=reason,
+      )
     runtime = self.runs.get(run_id)
-    broker = runtime.broker if runtime else None
-    orders = getattr(broker, "orders", {}) if broker else {}
-    if runtime is None or not isinstance(orders, dict):
-      return 0
-    cancelled_count = 0
+    if runtime is None:
+      return len(requests)
     async with runtime.approval_lock:
-      for order_id, order in list(orders.items()):
-        raw_status = getattr(order, "status", "")
-        status = str(getattr(raw_status, "value", raw_status)).upper()
-        request = getattr(order, "request", None)
-        raw_type = getattr(request, "order_type", "")
-        order_type = str(getattr(raw_type, "value", raw_type)).upper()
-        if status not in {
-          "PENDING",
-          "SUBMITTED",
-          "ACCEPTED",
-          "PARTIAL_FILLED",
-        } or order_type not in {"BUY", "BUY_TO_COVER"}:
+      for cancellation in requests:
+        if not cancellation.local_terminal:
           continue
-        if not await broker.cancel_order(str(order_id)):
-          continue
+        order_id = cancellation.strategy_order_id or cancellation.client_order_id
+        cancellation_metadata = dict(cancellation.request_metadata or {})
+        is_managed_entry = (
+          str(cancellation_metadata.get("entry_plan_id") or "") == run_id
+        )
         if runtime.state_manager:
-          runtime.state_manager.release_order_resources(str(order_id))
-          intent_id = str(
-            dict(getattr(request, "metadata", {}) or {}).get("intent_id") or ""
-          )
-          if intent_id:
-            await runtime.state_manager.update_trade_intent_status(
-              intent_id,
-              "CANCELLED",
-              order_id=str(order_id),
-              notes=reason,
-            )
+          runtime.state_manager.release_order_resources(order_id)
+          if cancellation.intent_id:
+            if is_managed_entry:
+              terminal_reason = str(
+                cancellation_metadata.get("execution_terminal_reason")
+                or "ENTRY_PLAN_CANCELLED_BEFORE_AGENT_DELIVERY"
+              )
+              await runtime.state_manager.update_trade_intent_status(
+                cancellation.intent_id,
+                "RECONCILED_ZERO_FILL",
+                metadata=cancellation_metadata,
+                notes=terminal_reason,
+              )
+            else:
+              await runtime.state_manager.update_trade_intent_status(
+                cancellation.intent_id,
+                "CANCELLED",
+                order_id=order_id,
+                notes=reason,
+              )
         await self._notify_strategy_order(
           runtime,
           OrderStateEvent(
-            order_id=str(order_id),
-            status=OrderStatus.CANCELLED.value,
-            request=request,
-            metadata=dict(getattr(request, "metadata", {}) or {}),
+            order_id=order_id,
+            status="RECONCILED_ZERO_FILL",
+            metadata={
+              **cancellation_metadata,
+              "intent_id": cancellation.intent_id,
+            },
           ),
         )
-        cancelled_count += 1
-    return cancelled_count
+      return len(requests)
 
   def _approval_failure(
     self, runtime: StrategyRuntime, intent: TradeIntent
   ) -> Optional[tuple[str, str]]:
     approval_at = self._runtime_now(runtime)
+    metadata = dict(intent.metadata or {})
+    if str(metadata.get("entry_plan_id") or "") == runtime.run_id:
+      parameters = dict(runtime.context.parameters or {})
+      if parameters.get("entry_plan_enabled") is not True:
+        return "ENTRY_PLAN_PAUSED", "买入计划已暂停或取消，不能确认旧意图"
+      managed_entry = dict(parameters.get("managed_entry_plan") or {})
+      if int(metadata.get("entry_config_version") or 0) != int(
+        managed_entry.get("config_version") or 0
+      ):
+        return "ENTRY_PLAN_CONFIG_CHANGED", "计划配置已变化，不能确认旧意图"
     expiry_policy = dict(intent.expiry_policy or {})
     try:
       expire_at_ms = int(expiry_policy.get("expire_at_ms", 0) or 0)
@@ -5228,6 +5755,210 @@ class StrategyExecutor:
       ),
     )
 
+  @staticmethod
+  def _is_live_auto_managed_entry(
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> bool:
+    metadata = dict(intent.metadata or {})
+    return bool(
+      runtime.context.mode == StrategyRunMode.LIVE
+      and intent.direction == TradeIntentDirection.BUY
+      and intent.execution_mode == TradeIntentExecutionMode.AUTO
+      and str(metadata.get("entry_plan_id") or "") == runtime.run_id
+      and str(metadata.get("owner_type") or "") == "STRATEGY_RUN"
+      and str(metadata.get("owner_id") or "") == runtime.run_id
+    )
+
+  @staticmethod
+  def _authorization_decimal(value: Any) -> Optional[Decimal]:
+    try:
+      normalized = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+      return None
+    return normalized if normalized.is_finite() else None
+
+  async def _authorize_live_auto_managed_entry(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    request: OrderRequest,
+    *,
+    account: Dict[str, Any],
+    position: Dict[str, Any],
+  ) -> Optional[tuple[str, str]]:
+    """Validate exact entry authority after final sizing and before routing.
+
+    The metadata written here is only an audited correlation handle.  The
+    durable command layer locks and validates the grant, plan, intent, account
+    snapshot, position and global gate again before it creates an outbox row.
+    """
+
+    if not self._is_live_auto_managed_entry(runtime, intent):
+      return None
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      return ("ENTRY_ACCOUNT_REQUIRED", "实盘自动买入缺少唯一账户绑定")
+    try:
+      scope = scope_from_managed_entry_config(
+        plan_id=runtime.run_id,
+        config=runtime.context.parameters,
+      )
+    except EntryPlanAuthorizationError as exc:
+      return (exc.code, exc.message)
+
+    price = self._authorization_decimal(request.price)
+    if price is None or price <= 0 or int(request.volume or 0) <= 0:
+      return ("INVALID_BUY_ORDER", "自动买入最终订单价格或数量无效")
+    amount = price * int(request.volume)
+    total_asset = self._authorization_decimal(
+      account.get("total_asset")
+      or account.get("total_asset_cny")
+      or account.get("total_equity_cny")
+      or account.get("cash_total")
+    )
+    if total_asset is None or total_asset <= 0:
+      return ("ACCOUNT_SNAPSHOT_UNAVAILABLE", "账户总资产快照不可用")
+    market_value = self._authorization_decimal(
+      position.get("market_value") or position.get("market_value_cny") or 0
+    )
+    if market_value is None or market_value < 0:
+      return ("POSITION_SNAPSHOT_UNAVAILABLE", "当前持仓市值快照不可用")
+    if market_value == 0:
+      position_volume = max(
+        0,
+        int(
+          position.get("long_volume")
+          or position.get("total_volume")
+          or position.get("volume")
+          or 0
+        ),
+      )
+      market_value = price * position_volume
+    resulting_position_pct = (market_value + amount) / total_asset
+
+    protected_price = self._authorization_decimal(
+      (intent.metadata or {}).get("protected_limit_price")
+      or intent.limit_price_hint
+    )
+    if protected_price is None or protected_price <= 0:
+      return ("PROTECTED_PRICE_REQUIRED", "自动买入缺少受保护的决策价格")
+    upward_slippage_bps = max(
+      Decimal("0"),
+      (price - protected_price) / protected_price * Decimal("10000"),
+    )
+    price_deviation_bps = (
+      abs(price - protected_price) / protected_price * Decimal("10000")
+    )
+    try:
+      async with AsyncSessionLocal() as db:
+        validation = await EntryPlanAuthorizationService(
+          db
+        ).validate_or_invalidate(
+          plan_id=runtime.run_id,
+          current_scope=scope,
+          account_id=account_id,
+          proposed_amount_cny=amount,
+          proposed_buy_price=price,
+          proposed_slippage_bps=int(
+            upward_slippage_bps.to_integral_value(rounding=ROUND_CEILING)
+          ),
+          proposed_price_deviation_bps=int(
+            price_deviation_bps.to_integral_value(rounding=ROUND_CEILING)
+          ),
+          resulting_position_pct=resulting_position_pct,
+        )
+    except EntryPlanAuthorizationError as exc:
+      return (exc.code, exc.message)
+    except Exception:
+      self.logger.exception(
+        "实盘自动买入授权校验失败: run_id=%s intent_id=%s",
+        runtime.run_id,
+        intent.intent_id,
+      )
+      return ("ENTRY_AUTHORIZATION_UNAVAILABLE", "自动买入授权服务暂不可用")
+    if not validation.valid or validation.balance is None:
+      return (validation.code, validation.message)
+
+    authorization_metadata = {
+      "exact_auto_entry_authorized": True,
+      "auto_entry_authorization_grant_id": validation.balance.grant_id,
+      "auto_entry_authorization_code": validation.code,
+      "auto_entry_plan_fingerprint": scope.plan_fingerprint,
+      "auto_entry_rule_fingerprint": scope.rule_fingerprint,
+      "auto_entry_account_snapshot_version": scope.account_snapshot_version,
+      "intent_execution_mode": intent.execution_mode.value,
+      # One business intent must never create two durable broker commands.
+      "idempotency_key": f"entry-plan:{runtime.run_id}:{intent.intent_id}",
+    }
+    intent.metadata.update(authorization_metadata)
+    request.metadata.update(authorization_metadata)
+    if runtime.state_manager:
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id,
+        "PENDING",
+        metadata=dict(intent.metadata or {}),
+        notes="ENTRY_EXACT_AUTO_AUTHORIZED",
+      )
+    return None
+
+  async def _reject_live_auto_managed_entry(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    request: OrderRequest,
+    *,
+    code: str,
+    message: str,
+    risk_decision_id: str,
+  ) -> None:
+    """Fail closed by requiring an explicit per-order confirmation.
+
+    An expired or narrowed AUTO grant must never create an outbox command, but
+    it also should not make the strategy emit and reject the same deterministic
+    intent on every tick.  Persisting the existing intent as manual approval
+    keeps the exact order subject to the normal TTL, quote-drift and full
+    re-risk path.
+    """
+
+    metadata = {
+      **dict(intent.metadata or {}),
+      **dict(request.metadata or {}),
+      "exact_auto_entry_authorized": False,
+      "auto_entry_authorization_code": str(code),
+      "execution_mode": TradeIntentExecutionMode.MANUAL_CONFIRM.value,
+    }
+    intent.execution_mode = TradeIntentExecutionMode.MANUAL_CONFIRM
+    intent.metadata.update(metadata)
+    request.metadata.update(metadata)
+    if runtime.state_manager:
+      await runtime.state_manager.update_trade_intent_status(
+        intent.intent_id,
+        "AWAITING_APPROVAL",
+        risk_decision_id=risk_decision_id,
+        metadata=metadata,
+        notes=str(code),
+      )
+    runtime.pending_approvals[intent.intent_id] = intent
+    if runtime.strategy is not None:
+      entry_state = dict(
+        runtime.strategy.state.get("managed_entry_plan", {}) or {}
+      )
+      entry_state["phase"] = "AWAITING_APPROVAL"
+      runtime.strategy.state.set(
+        "managed_entry_plan",
+        entry_state,
+        persist=False,
+        notify=False,
+      )
+      self._checkpoint_restored_strategy_state(runtime)
+    self._runtime_log(
+      runtime,
+      "WARNING",
+      "实盘自动买入授权失效，已降级为逐笔确认且未创建券商命令: "
+      f"intent_id={intent.intent_id} code={code} message={message}",
+    )
+
   async def _process_trade_intent(
     self, runtime: StrategyRuntime, intent: TradeIntent
   ) -> None:
@@ -5531,6 +6262,36 @@ class StrategyExecutor:
         return
       if decision.final_volume != request.volume:
         request.volume = decision.final_volume
+
+      authorization_failure = await self._authorize_live_auto_managed_entry(
+        runtime,
+        intent,
+        request,
+        account=account,
+        position=position,
+      )
+      if authorization_failure is not None:
+        await self._reject_live_auto_managed_entry(
+          runtime,
+          intent,
+          request,
+          code=authorization_failure[0],
+          message=authorization_failure[1],
+          risk_decision_id=decision.risk_decision_id,
+        )
+        self._record_decision_trace(
+          runtime,
+          intent=intent,
+          market_context=context_snapshot.market_context,
+          risk_caps=context_snapshot.risk_caps,
+          position_profile=context_snapshot.position_profile,
+          order_draft=draft,
+          order_request=request,
+          risk_decision=decision,
+          tags=["entry_auto_authorization_blocked", authorization_failure[0]],
+          reason=authorization_failure[0],
+        )
+        return
 
       if not self._accepts_non_durable_output(runtime):
         await self._reject_intent_during_runtime_transition(runtime, intent)

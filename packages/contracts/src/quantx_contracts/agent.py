@@ -273,6 +273,10 @@ class AccountSnapshotPayload(BaseModel):
   position_deltas: List[Dict[str, Any]] = Field(default_factory=list)
   orders: List[Dict[str, Any]] = Field(default_factory=list)
   trades: List[Dict[str, Any]] = Field(default_factory=list)
+  section_completeness_by_account: Dict[str, Dict[str, bool]] = Field(
+    default_factory=dict
+  )
+  unavailable_accounts: List[str] = Field(default_factory=list)
   order_errors: List[Dict[str, Any]] = Field(default_factory=list)
   cancel_errors: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -286,9 +290,64 @@ class AccountSnapshotPayload(BaseModel):
   @model_validator(mode="after")
   def require_complete_snapshot_identity(self):
     if self.is_complete and (
-      not self.snapshot_id or len(self.snapshot_hash) < 16
+      not self.snapshot_id
+      or len(self.snapshot_hash) != 64
+      or any(character not in "0123456789abcdefABCDEF" for character in self.snapshot_hash)
     ):
       raise ValueError("complete snapshot requires id and hash")
+    if self.is_complete:
+      if self.unavailable_accounts:
+        raise ValueError("complete snapshot cannot contain unavailable accounts")
+      covered_accounts = {
+        str(self.account_id or "").strip(),
+        *(
+          str(item.get("account_id") or "").strip()
+          for item in self.accounts
+        ),
+        *(str(account_id).strip() for account_id in self.positions_by_account),
+        *(
+          str(item.get("account_id") or "").strip()
+          for item in (*self.orders, *self.trades)
+        ),
+        *(
+          str(account_id).strip()
+          for account_id in self.section_completeness_by_account
+        ),
+      }
+      covered_accounts.discard("")
+      if not covered_accounts:
+        raise ValueError("complete snapshot requires a covered account")
+      account_record_ids = {
+        str(item.get("account_id") or "").strip()
+        for item in self.accounts
+        if str(item.get("account_id") or "").strip()
+      }
+      position_account_ids = {
+        str(account_id).strip()
+        for account_id in self.positions_by_account
+        if str(account_id).strip()
+      }
+      section_account_ids = {
+        str(account_id).strip()
+        for account_id in self.section_completeness_by_account
+        if str(account_id).strip()
+      }
+      if (
+        account_record_ids != covered_accounts
+        or position_account_ids != covered_accounts
+        or section_account_ids != covered_accounts
+      ):
+        raise ValueError("complete snapshot requires every account section")
+      required_sections = ("account", "positions", "orders", "trades")
+      if any(
+        not all(
+          self.section_completeness_by_account[account_id].get(section)
+          is True
+          for section in required_sections
+        )
+        for account_id in covered_accounts
+      ):
+        raise ValueError("complete snapshot contains an incomplete account section")
     return self
 
 

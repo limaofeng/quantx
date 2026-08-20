@@ -6,6 +6,11 @@ from .ai_assistant_schema import (
 )
 from .announcement_schema import AnnouncementMutation, AnnouncementQuery
 from .divid_factor_schema import DividFactorQuery
+from .entry_plan_schema import (
+  EntryPlanMutation,
+  EntryPlanQuery,
+  EntryPlanSubscription,
+)
 from .financial_schema import FinancialQuery
 from .holiday_schema import HolidayMutation, HolidayQuery
 from .instrument_schema import InstrumentQuery
@@ -43,6 +48,9 @@ __all__ = [
   "NotificationQuery",
   "NotificationMutation",
   "DividFactorQuery",
+  "EntryPlanQuery",
+  "EntryPlanMutation",
+  "EntryPlanSubscription",
   "FinancialQuery",
   "StockScreeningQuery",
   "WatchlistQuery",

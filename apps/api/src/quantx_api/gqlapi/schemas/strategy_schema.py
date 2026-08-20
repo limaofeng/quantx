@@ -622,6 +622,7 @@ class StrategyMutation:
         actor_id=principal.user_id,
         device_session_id=principal.device_session_id,
         approval_channel="IOS_BIOMETRIC",
+        challenge_id=challenge_id,
       )
       data = json.loads(result.data) if result.data else {}
       return TradeApprovalConfirmationResult(

@@ -109,8 +109,48 @@ def test_complete_snapshot_requires_durable_identity() -> None:
     snapshot_id="snapshot-1",
     snapshot_hash="a" * 64,
     is_complete=True,
+    accounts=[{"account_id": "account-1"}],
+    positions_by_account={"account-1": []},
+    section_completeness_by_account={
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
   )
   assert snapshot.snapshot_hash == "a" * 64
+
+
+def test_complete_snapshot_requires_explicit_section_completeness() -> None:
+  with pytest.raises(ValidationError, match="every account section"):
+    AccountSnapshotPayload(
+      account_id="account-1",
+      snapshot_id="snapshot-1",
+      snapshot_hash="a" * 64,
+      is_complete=True,
+      accounts=[{"account_id": "account-1"}],
+      positions_by_account={"account-1": []},
+    )
+
+
+def test_complete_snapshot_requires_sha256_hash() -> None:
+  with pytest.raises(ValidationError, match="requires id and hash"):
+    AccountSnapshotPayload(
+      snapshot_id="snapshot-1",
+      snapshot_hash="a" * 16,
+      is_complete=True,
+    )
+
+
+def test_complete_snapshot_requires_covered_account() -> None:
+  with pytest.raises(ValidationError, match="covered account"):
+    AccountSnapshotPayload(
+      snapshot_id="snapshot-1",
+      snapshot_hash="a" * 64,
+      is_complete=True,
+    )
 
 
 def test_reconciliation_result_requires_snapshot_proof() -> None:

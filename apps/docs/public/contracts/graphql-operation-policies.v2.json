@@ -146,6 +146,17 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "cancelEntryPlan": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "cancelExitPlan": {
         "audiences": [
           "web",
@@ -246,6 +257,30 @@
         ],
         "requiredPermissions": [
           "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmEntryIntent": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "confirmEntryPlanAuthorization": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
@@ -367,6 +402,17 @@
         "risk": "NON_TRADING_WRITE",
         "stability": "experimental"
       },
+      "createEntryPlan": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "createManualExitPlan": {
         "audiences": [
           "web",
@@ -469,6 +515,17 @@
         ],
         "requiredPermissions": [
           "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "evaluateEntryPlanNow": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
@@ -587,6 +644,29 @@
         ],
         "requiredPermissions": [
           "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewEntryIntent": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "previewEntryPlanAuthorization": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
         ],
         "risk": "TRADING_WRITE",
         "stability": "supported"
@@ -740,6 +820,17 @@
           "notification:manage"
         ],
         "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "rejectEntryIntent": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
         "stability": "supported"
       },
       "rejectExitIntent": {
@@ -1012,6 +1103,28 @@
         "risk": "ADMIN",
         "stability": "web-internal"
       },
+      "setEntryAutomationPaused": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "setEntryPlanEnabled": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "setExitPlanEnabled": {
         "audiences": [
           "web",
@@ -1141,6 +1254,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "triggerEntryPlanManualRule": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control",
+          "trade:approve"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "triggerTTradeKillSwitch": {
         "audiences": [
           "web",
@@ -1185,6 +1310,17 @@
         ],
         "risk": "ADMIN",
         "stability": "web-internal"
+      },
+      "updateEntryPlan": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
       },
       "updateManualExitPlan": {
         "audiences": [
@@ -1414,6 +1550,66 @@
         ],
         "requiredPermissions": [
           "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryAutomationStatus": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryPlan": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryPlanCapabilities": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryPlanEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryPlans": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
         ],
         "risk": "READ",
         "stability": "supported"
@@ -1905,6 +2101,18 @@
         ],
         "requiredPermissions": [
           "market:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "pendingEntryIntents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
         ],
         "risk": "READ",
         "stability": "supported"
@@ -2567,6 +2775,30 @@
         ],
         "risk": "READ",
         "stability": "web-internal"
+      },
+      "entryIntentUpdated": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "entryPlanUpdated": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
       },
       "firstBoardPromotionUpdates": {
         "audiences": [

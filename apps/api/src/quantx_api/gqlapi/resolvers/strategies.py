@@ -2333,6 +2333,7 @@ class StrategyResolver:
     actor_id: str = "",
     device_session_id: str = "",
     approval_channel: str = "WEB",
+    challenge_id: str = "",
   ) -> OperationResult:
     return await StrategyResolver._resolve_strategy_trade_intent(
       run_id=run_id,
@@ -2341,6 +2342,7 @@ class StrategyResolver:
       actor_id=actor_id,
       device_session_id=device_session_id,
       approval_channel=approval_channel,
+      challenge_id=challenge_id,
     )
 
   @staticmethod
@@ -2373,6 +2375,7 @@ class StrategyResolver:
     actor_id: str = "",
     device_session_id: str = "",
     approval_channel: str = "WEB",
+    challenge_id: str = "",
   ) -> OperationResult:
     from quantx_infrastructure.repositories.trade_intent_repository import (
       TradeIntentRepository,
@@ -2396,6 +2399,7 @@ class StrategyResolver:
       "approval_audit": {
         "actor_id": str(actor_id or "")[:64],
         "device_session_id": str(device_session_id or "")[:64],
+        "challenge_id": str(challenge_id or "")[:64],
         "channel": str(approval_channel or "WEB")[:32],
       },
     }

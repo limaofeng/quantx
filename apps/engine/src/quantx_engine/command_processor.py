@@ -22,6 +22,7 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.entry_plan_service import EntryPlanService
 from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
 from quantx_infrastructure.services.t_trade_service import TTradeService
 from sqlalchemy import select, update
@@ -161,7 +162,12 @@ async def _reload_strategy(payload: dict[str, Any]) -> dict[str, Any]:
   return {"success": True, "loaded": True}
 
 
-async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+async def _dispatch(
+  command_type: str,
+  payload: dict[str, Any],
+  *,
+  command_id: Optional[str] = None,
+) -> dict[str, Any]:
   run_id = str(payload.get("run_id") or "")
   if command_type == "STRATEGY_CREATE":
     return await _strategy_create(payload)
@@ -192,6 +198,7 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
       await strategy_manager.executor.approve_trade_intent(
         run_id,
         str(payload["intent_id"]),
+        approval_audit=dict(payload.get("approval_audit") or {}),
       )
     )
   if command_type == "STRATEGY_REJECT_TRADE_INTENT":
@@ -202,6 +209,76 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
         reason=str(payload.get("reason") or "USER_REJECTED"),
       )
     )
+  if command_type.startswith("ENTRY_PLAN_") or command_type == (
+    "ENTRY_AUTOMATION_SET_PAUSED"
+  ):
+    entry_plan_service = EntryPlanService(strategy_manager)
+    if command_type == "ENTRY_PLAN_CREATE":
+      return _json_value(
+        await entry_plan_service.create(
+          payload,
+          command_id=str(command_id or ""),
+        )
+      )
+    if command_type == "ENTRY_PLAN_UPDATE":
+      return _json_value(
+        await entry_plan_service.update(
+          payload,
+          command_id=str(command_id or ""),
+        )
+      )
+    if command_type == "ENTRY_PLAN_SET_ENABLED":
+      return _json_value(
+        await entry_plan_service.set_enabled(
+          str(payload["plan_id"]),
+          bool(payload["enabled"]),
+          account_id=str(payload["account_id"]),
+          config_version=int(payload["config_version"]),
+          actor_user_id=str(payload.get("actor_user_id") or ""),
+        )
+      )
+    if command_type == "ENTRY_PLAN_CANCEL":
+      return _json_value(
+        await entry_plan_service.cancel(
+          str(payload["plan_id"]),
+          account_id=str(payload["account_id"]),
+          config_version=int(payload["config_version"]),
+          actor_user_id=str(payload.get("actor_user_id") or ""),
+          cancel_working_order=bool(payload.get("cancel_working_order", False)),
+        )
+      )
+    if command_type == "ENTRY_PLAN_EVALUATE_NOW":
+      return _json_value(
+        await entry_plan_service.evaluate_now(
+          str(payload["plan_id"]),
+          account_id=str(payload["account_id"]),
+        )
+      )
+    if command_type == "ENTRY_PLAN_TRIGGER_MANUAL":
+      return _json_value(
+        await entry_plan_service.trigger_manual(
+          str(payload["plan_id"]),
+          str(payload["rule_id"]),
+          account_id=str(payload["account_id"]),
+        )
+      )
+    if command_type == "ENTRY_PLAN_PREVIEW_INTENT":
+      return _json_value(
+        await entry_plan_service.preview_intent(
+          str(payload["plan_id"]),
+          str(payload["intent_id"]),
+          account_id=str(payload["account_id"]),
+        )
+      )
+    if command_type == "ENTRY_AUTOMATION_SET_PAUSED":
+      return _json_value(
+        await entry_plan_service.set_automation_paused(
+          account_id=str(payload["account_id"]),
+          paused=bool(payload["paused"]),
+          reason=str(payload.get("reason") or "USER_REQUESTED"),
+          actor_user_id=str(payload.get("actor_user_id") or ""),
+        )
+      )
   if command_type == "LIQUIDATION_EVALUATE":
     return {
       "items": _json_value(
@@ -412,7 +489,7 @@ async def run_command_consumer(stopped: asyncio.Event) -> None:
       continue
     message_id, command_type, payload = claimed
     try:
-      result = await _dispatch(command_type, payload)
+      result = await _dispatch(command_type, payload, command_id=message_id)
     except Exception as exc:
       await _complete(message_id, error=str(exc))
     else:

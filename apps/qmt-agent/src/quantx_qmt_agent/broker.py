@@ -423,11 +423,24 @@ class SimulatorBroker:
     self.data_only = data_only
 
   def full_snapshot(self) -> dict[str, Any]:
+    section_completeness = {
+      account_id: {
+        "account": False,
+        "positions": True,
+        "orders": False,
+        "trades": False,
+      }
+      for account_id in self.allowed_accounts
+    }
     return {
       "accounts": [],
       "positions_by_account": {account_id: [] for account_id in self.allowed_accounts},
+      "orders": [],
+      "trades": [],
       "sequence": int(time.time() * 1_000_000),
-      "is_complete": True,
+      "is_complete": not self.allowed_accounts,
+      "unavailable_accounts": sorted(self.allowed_accounts),
+      "section_completeness_by_account": section_completeness,
       "mode": "data-only" if self.data_only else "paper",
     }
 
@@ -1279,10 +1292,15 @@ class LiveBroker:
     orders = []
     trades = []
     unavailable_accounts = []
+    section_completeness_by_account: dict[str, dict[str, bool]] = {}
+    required_sections = ("account", "positions", "orders", "trades")
     with self._trading_access_lock:
       for account_id, agent in self.agents.items():
         if not bool(getattr(agent.trading_manager, "is_connected", False)):
           unavailable_accounts.append(account_id)
+          section_completeness_by_account[account_id] = {
+            section: False for section in required_sections
+          }
           accounts.append(
             {
               "account_id": account_id,
@@ -1292,6 +1310,17 @@ class LiveBroker:
           positions[account_id] = []
           continue
         snapshot = agent.full_snapshot()
+        raw_section_completeness = snapshot.get("section_completeness")
+        if isinstance(raw_section_completeness, dict):
+          section_completeness = {
+            section: raw_section_completeness.get(section) is True
+            for section in required_sections
+          }
+        else:
+          section_completeness = {
+            section: False for section in required_sections
+          }
+        section_completeness_by_account[account_id] = section_completeness
         account = dict(snapshot.get("account") or {})
         if not snapshot.get("connected") or not account:
           agent.trading_manager.is_connected = False
@@ -1304,8 +1333,16 @@ class LiveBroker:
           )
           positions[account_id] = []
           continue
-        agent.mark_report_received()
+        snapshot_complete = bool(
+          snapshot.get("is_complete") is True
+          and all(section_completeness.values())
+        )
+        if not snapshot_complete:
+          unavailable_accounts.append(account_id)
+        else:
+          agent.mark_report_received()
         account["account_id"] = account_id
+        account["snapshot_is_complete"] = snapshot_complete
         accounts.append(account)
         positions[account_id] = list(snapshot.get("positions") or [])
         orders.extend(
@@ -1330,6 +1367,7 @@ class LiveBroker:
       "sequence": int(time.time() * 1_000_000),
       "is_complete": not unavailable_accounts,
       "unavailable_accounts": unavailable_accounts,
+      "section_completeness_by_account": section_completeness_by_account,
       "mode": "live",
     }
 

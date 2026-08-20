@@ -11,6 +11,9 @@ from .schemas import (
   AnnouncementMutation,
   AnnouncementQuery,
   DividFactorQuery,
+  EntryPlanMutation,
+  EntryPlanQuery,
+  EntryPlanSubscription,
   FinancialQuery,
   HolidayMutation,
   HolidayQuery,
@@ -81,6 +84,7 @@ class Query(
   AgentQuery,
   AnnouncementQuery,
   DividFactorQuery,
+  EntryPlanQuery,
   FinancialQuery,
   InstrumentQuery,
   MarketDataQuery,
@@ -127,6 +131,7 @@ class Mutation(
   AiAssistantMutation,
   AgentMutation,
   AnnouncementMutation,
+  EntryPlanMutation,
   TradingMutation,
   LiquidationMutation,
   LimitUpBoardAssistantMutation,
@@ -158,7 +163,11 @@ class Mutation(
 - 同时订阅多个金融工具的价格
 """
 )
-class Subscription(AiAssistantSubscription, RealtimeSubscription):
+class Subscription(
+  AiAssistantSubscription,
+  EntryPlanSubscription,
+  RealtimeSubscription,
+):
   pass
 
 

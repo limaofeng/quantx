@@ -222,6 +222,9 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
         stage="LIVE",
         enabled=True,
         reconcile_status="READY",
+        last_snapshot_id="snapshot-previous",
+        last_snapshot_hash="b" * 64,
+        last_snapshot_at=utcnow(),
         controlled_window_active=True,
         controlled_window_snapshot_id="baseline-snapshot",
         controlled_window_snapshot_hash="b" * 64,
@@ -247,6 +250,15 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     "source_event_at": utcnow().isoformat(),
     "accounts": [{"account_id": "account-1"}],
     "positions_by_account": {"account-1": []},
+    "section_completeness_by_account": {
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
+    "unavailable_accounts": [],
     "orders": [
       {
         "account_id": "account-1",
@@ -312,6 +324,186 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
     assert account_summary["newExternalOrderCount"] == 1
     assert account_summary["workingExternalOrderCount"] == 1
     assert account_summary["controlledWindowActive"] is False
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  (
+    "include_completeness",
+    "corrupt_hash",
+    "expected_kind",
+    "expected_reason",
+  ),
+  [
+    (
+      False,
+      False,
+      "SNAPSHOT_SECTION_INCOMPLETE",
+      "SECTION_PROOF_MISSING_OR_INCOMPLETE",
+    ),
+    (
+      True,
+      True,
+      "SNAPSHOT_IDENTITY_INVALID",
+      "SNAPSHOT_HASH_MISMATCH",
+    ),
+  ],
+)
+async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
+  monkeypatch: pytest.MonkeyPatch,
+  include_completeness: bool,
+  corrupt_hash: bool,
+  expected_kind: str,
+  expected_reason: str,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AccountTradingRollout.__table__,
+    AccountTradingRolloutEvent.__table__,
+    RuntimeComponentHeartbeat.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  position_service = SimpleNamespace(
+    apply_full_snapshot=AsyncMock(),
+    apply_position_delta=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "PositionService",
+    lambda: position_service,
+  )
+  monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
+  observed_gate_statuses: list[str] = []
+
+  async def observe_gate_before_order(_payload) -> None:
+    async with sessions() as db:
+      rollout = await db.get(AccountTradingRollout, "account-1")
+      observed_gate_statuses.append(str(rollout.reconcile_status))
+
+  monkeypatch.setattr(
+    report_processor,
+    "_process_order_report",
+    observe_gate_before_order,
+  )
+
+  async with sessions() as db:
+    db.add(
+      AccountTradingRollout(
+        account_id="account-1",
+        stage="LIVE",
+        enabled=True,
+        reconcile_status="READY",
+        last_snapshot_id="snapshot-previous",
+        last_snapshot_hash="b" * 64,
+        last_snapshot_at=utcnow(),
+        controlled_window_active=True,
+        controlled_window_snapshot_id="snapshot-previous",
+        controlled_window_snapshot_hash="b" * 64,
+      )
+    )
+    db.add(
+      RuntimeComponentHeartbeat(
+        component="qmt-agent:device-1",
+        instance_id="device-1",
+        status="READY",
+        details={},
+        updated_at=utcnow(),
+      )
+    )
+    await db.commit()
+
+  payload = {
+    "snapshot_id": "snapshot-incomplete",
+    "is_complete": True,
+    "source_sequence": 3,
+    "source_event_at": utcnow().isoformat(),
+    "accounts": [{"account_id": "account-1", "cash": 0}],
+    "positions_by_account": {"account-1": []},
+    "orders": [
+      {
+        "account_id": "account-1",
+        "order_id": "terminal-1",
+        "order_status": "CANCELLED",
+      }
+    ],
+    "trades": [],
+    # Deliberately omit the protocol-1.1 section-completeness proof.
+    "unavailable_accounts": [],
+  }
+  if include_completeness:
+    payload["section_completeness_by_account"] = {
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    }
+  payload["snapshot_hash"] = sha256(
+    json.dumps(
+      payload,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
+  if corrupt_hash:
+    payload["snapshot_hash"] = "0" * 64
+
+  if corrupt_hash:
+    with pytest.raises(ValueError, match="哈希校验失败"):
+      await report_processor._process_delta_report(
+        "device-1",
+        payload,
+        protocol_version="1.1",
+      )
+  else:
+    await report_processor._process_delta_report(
+      "device-1",
+      payload,
+      protocol_version="1.1",
+    )
+
+  assert observed_gate_statuses == (
+    [] if corrupt_hash else ["RECONCILE_REQUIRED"]
+  )
+  position_service.apply_full_snapshot.assert_not_awaited()
+  position_service.apply_position_delta.assert_not_awaited()
+  report_processor._upsert_account.assert_not_awaited()
+  async with sessions() as db:
+    rollout = await db.get(AccountTradingRollout, "account-1")
+    assert rollout is not None
+    assert rollout.reconcile_status == "RECONCILE_REQUIRED"
+    assert rollout.enabled is False
+    assert rollout.stage == "PAUSED"
+    assert rollout.controlled_window_active is False
+    assert rollout.last_snapshot_id == "snapshot-previous"
+    pause = json.loads(rollout.paused_reason)
+    assert pause[0]["kind"] == expected_kind
+    assert pause[0]["reason"] == expected_reason
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      "qmt-agent:device-1",
+    )
+    assert heartbeat.status == "RECONCILE_REQUIRED"
+    events = list(
+      (await db.execute(select(AccountTradingRolloutEvent))).scalars().all()
+    )
+    assert [event.event_type for event in events] == ["SNAPSHOT_INCOMPLETE"]
+    discrepancy = events[0].details["discrepancies"][0]
+    assert discrepancy["kind"] == expected_kind
+    assert discrepancy["reason"] == expected_reason
+    assert payload["snapshot_hash"] not in json.dumps(events[0].details)
 
   await engine.dispose()
 
@@ -388,6 +580,15 @@ async def test_new_authoritative_snapshot_supersedes_old_snapshot_dead_letter(
     common_payload = {
       "accounts": [{"account_id": "account-1"}],
       "positions_by_account": {"account-1": []},
+      "section_completeness_by_account": {
+        "account-1": {
+          "account": True,
+          "positions": True,
+          "orders": True,
+          "trades": True,
+        }
+      },
+      "unavailable_accounts": [],
       "orders": [],
       "trades": [],
       "is_complete": True,

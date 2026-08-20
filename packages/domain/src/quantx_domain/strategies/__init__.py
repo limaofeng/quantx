@@ -8,6 +8,7 @@ from .ashare_dynamic_balance_dual_bucket import AshareDynamicBalanceDualBucketSt
 from .ashare_intraday_t_assistant import AshareIntradayTAssistantStrategy
 from .ashare_limit_up_board import AshareLimitUpBoardStrategy
 from .ashare_limit_up_board_assistant import AshareLimitUpBoardAssistantStrategy
+from .ashare_managed_entry_plan import AshareManagedEntryPlanStrategy
 from .ashare_supermarket import AshareSupermarketStrategy
 from .base import (
   OrderStateEvent,
@@ -48,6 +49,7 @@ __all__ = [
   "AshareIntradayTAssistantStrategy",
   "AshareLimitUpBoardStrategy",
   "AshareLimitUpBoardAssistantStrategy",
+  "AshareManagedEntryPlanStrategy",
   "AshareSupermarketStrategy",
   "PullbackGridStrategy",
 ]

@@ -1,0 +1,383 @@
+query EntryPlanWorkspace {
+  currentAccount {
+    id
+    totalAsset
+    cash
+    updateTime
+  }
+  positions {
+    stockCode
+    instrumentName
+    volume
+    lastPrice
+    marketValue
+  }
+  entryPlans {
+    planId
+    configVersion
+    instrumentCode
+    instrumentName
+    bucket
+    planKind
+    phase
+    runStatus
+    environment
+    authorizationMode
+    authorizationState
+    targetMode
+    targetPositionPct
+    incrementalAmountCny
+    additionalVolume
+    maxTotalAmountCny
+    maxPositionPct
+    currentPositionVolume
+    currentMarketValueCny
+    filledVolume
+    filledAmountCny
+    remainingAmountCny
+    pendingReservedAmountCny
+    maxSingleIntentAmountCny
+    maxDailyFilledAmountCny
+    maxBuyPrice
+    ruleTypes
+    triggerRules {
+      ruleId
+      ruleType
+      priority
+      enabled
+      once
+      presetId
+      minPullbackPct
+      maxPullbackPct
+      reboundConfirmationPct
+      fastEmaPeriod
+      slowEmaPeriod
+      manualTriggerSequence
+      ladderLevels {
+        levelId
+        triggerPrice
+        trancheAmountCny
+        trancheVolume
+        priority
+      }
+    }
+    pacingPolicy {
+      trancheCount
+      maxSingleIntentAmountCny
+      maxDailyFilledAmountCny
+      maxOrdersPerDay
+      cashBufferPct
+      minIntervalSeconds
+      cooldownAfterRejectSeconds
+      trendAdjustmentEnabled
+    }
+    executionPolicy {
+      priceReference
+      maxSlippageBps
+      maxPriceDeviationBps
+      approvalTtlMs
+    }
+    completionPolicy {
+      expireAtMs
+      maxBuyPrice
+      stopWhenTargetReached
+      stopWhenBudgetExhausted
+      cancelUnsubmittedOnExpiry
+    }
+    exitProtection {
+      enabled
+      stopPrice
+      grossTakeProfitPct
+      trailingArmProfitPct
+      trailingDrawdownPct
+      maxHoldingDays
+    }
+    entryEnabled
+    note
+    lastReasonCode
+    pendingIntentId
+    hasWorkingOrder
+    nextEligibleAt
+    expireAt
+    hasExitProtection
+    blockedReasons
+    createdAt
+    updatedAt
+  }
+  pendingEntryIntents {
+    intentId
+    planId
+    instrumentCode
+    bucket
+    reasonCode
+    status
+    targetAmountCny
+    targetVolume
+    signalPrice
+    currentPrice
+    priceDeviationBps
+    expiresAtMs
+    riskAction
+    createdAt
+  }
+  entryAutomationStatus {
+    accountId
+    paused
+    reason
+    updatedAt
+  }
+  entryPlanCapabilities {
+    version
+    allowedBuckets
+    environments
+    authorizationModes
+    maxOpenOrders
+    targetModes {
+      value
+      label
+      description
+    }
+    ruleTypes {
+      ruleType
+      label
+      category
+      description
+      suitableFor
+      warning
+      fields {
+        key
+        label
+        type
+        unit
+        required
+        min
+        max
+        step
+        defaultValue
+        helpText
+        advanced
+      }
+      presets {
+        presetId
+        label
+        summary
+        parameters
+      }
+    }
+  }
+}
+
+query EntryPlanEvents($planId: ID!, $limit: Int!) {
+  entryPlanEvents(planId: $planId, limit: $limit) {
+    eventId
+    planId
+    eventType
+    occurredAt
+    reasonCode
+    message
+    details
+  }
+}
+
+query EntryPlanSecuritySearch($query: String!, $limit: Int!) {
+  codeMatches: instruments(
+    where: {
+      stockCode_contains: $query
+      type_in: [STOCK, ETF]
+    }
+    limit: $limit
+  ) {
+    id
+    name
+    quote {
+      lastPrice
+    }
+  }
+  nameMatches: instruments(
+    where: { name_contains: $query, type_in: [STOCK, ETF] }
+    limit: $limit
+  ) {
+    id
+    name
+    quote {
+      lastPrice
+    }
+  }
+}
+
+subscription EntryPlanUpdated($planId: ID!) {
+  entryPlanUpdated(planId: $planId) {
+    planId
+    configVersion
+    phase
+    runStatus
+    pendingIntentId
+    hasWorkingOrder
+    updatedAt
+  }
+}
+
+subscription EntryIntentUpdated($planId: ID!) {
+  entryIntentUpdated(planId: $planId) {
+    intentId
+    planId
+    status
+    expiresAtMs
+    createdAt
+  }
+}
+
+mutation CreateEntryPlan($input: CreateEntryPlanInput!) {
+  createEntryPlan(input: $input) {
+    success
+    code
+    message
+    plan {
+      planId
+      configVersion
+    }
+  }
+}
+
+mutation UpdateEntryPlan($input: UpdateEntryPlanInput!) {
+  updateEntryPlan(input: $input) {
+    success
+    code
+    message
+    plan {
+      planId
+      configVersion
+    }
+  }
+}
+
+mutation SetEntryPlanEnabled(
+  $planId: ID!
+  $enabled: Boolean!
+  $configVersion: Int!
+) {
+  setEntryPlanEnabled(
+    planId: $planId
+    enabled: $enabled
+    configVersion: $configVersion
+  ) {
+    success
+    code
+    message
+  }
+}
+
+mutation CancelEntryPlan(
+  $planId: ID!
+  $configVersion: Int!
+  $cancelWorkingOrder: Boolean!
+) {
+  cancelEntryPlan(
+    planId: $planId
+    configVersion: $configVersion
+    cancelWorkingOrder: $cancelWorkingOrder
+  ) {
+    success
+    code
+    message
+  }
+}
+
+mutation EvaluateEntryPlanNow($planId: ID!) {
+  evaluateEntryPlanNow(planId: $planId) {
+    success
+    code
+    message
+  }
+}
+
+mutation TriggerEntryPlanManualRule($planId: ID!, $ruleId: ID!) {
+  triggerEntryPlanManualRule(planId: $planId, ruleId: $ruleId) {
+    success
+    code
+    message
+  }
+}
+
+mutation SetEntryAutomationPaused($paused: Boolean!, $reason: String!) {
+  setEntryAutomationPaused(paused: $paused, reason: $reason) {
+    accountId
+    paused
+    reason
+    updatedAt
+  }
+}
+
+mutation PreviewEntryPlanAuthorization(
+  $input: EntryPlanAuthorizationPreviewInput!
+) {
+  previewEntryPlanAuthorization(input: $input) {
+    challengeId
+    confirmationToken
+    authorizationFingerprint
+    challengeExpiresAt
+    authorizationExpiresAt
+    summary
+    riskEnvelope
+  }
+}
+
+mutation ConfirmEntryPlanAuthorization(
+  $input: EntryPlanAuthorizationConfirmationInput!
+) {
+  confirmEntryPlanAuthorization(input: $input) {
+    success
+    code
+    message
+    authorizationState
+    grantId
+    expiresAt
+  }
+}
+
+mutation PreviewEntryIntent($planId: ID!, $intentId: ID!) {
+  previewEntryIntent(planId: $planId, intentId: $intentId) {
+    intentId
+    planId
+    instrumentCode
+    valid
+    code
+    message
+    signalPrice
+    latestPrice
+    priceDeviationBps
+    requestedAmountCny
+    sizedVolume
+    finalVolume
+    riskAction
+    expiresAtMs
+    challengeId
+    confirmationToken
+    challengeExpiresAt
+    warnings
+  }
+}
+
+mutation ConfirmEntryIntent(
+  $planId: ID!
+  $intentId: ID!
+  $confirmationToken: String!
+) {
+  confirmEntryIntent(
+    planId: $planId
+    intentId: $intentId
+    confirmationToken: $confirmationToken
+  ) {
+    success
+    code
+    message
+  }
+}
+
+mutation RejectEntryIntent($planId: ID!, $intentId: ID!) {
+  rejectEntryIntent(planId: $planId, intentId: $intentId) {
+    success
+    code
+    message
+  }
+}

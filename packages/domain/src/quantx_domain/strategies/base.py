@@ -222,7 +222,10 @@ class OrderStateEvent:
   status: str
   request: Any = None
   error_message: Optional[str] = None
-  filled_volume: int = 0
+  # Cumulative broker-reported fill at this order state. ``None`` means the
+  # event did not carry an authoritative terminal fill projection; it is not
+  # interchangeable with an explicit zero-fill report.
+  filled_volume: Optional[int] = None
   metadata: Dict[str, Any] = field(default_factory=dict)
   timestamp: Optional[datetime] = None
 
@@ -230,12 +233,15 @@ class OrderStateEvent:
   def from_raw(cls, source: Any) -> "OrderStateEvent":
     request = _extract(source, "request")
     metadata = _extract(request, "metadata", {}) or {}
+    filled_volume = _extract(source, "filled_volume")
+    if filled_volume is None:
+      filled_volume = _extract(source, "traded_volume")
     return cls(
       order_id=_extract(source, "order_id"),
       status=str(_extract(source, "status", "") or "").split(".")[-1].upper(),
       request=request,
       error_message=_extract(source, "error_message"),
-      filled_volume=int(_extract(source, "filled_volume", 0) or 0),
+      filled_volume=(int(filled_volume) if filled_volume is not None else None),
       metadata=dict(metadata),
       timestamp=_extract(source, "last_update_time") or _extract(source, "submit_time"),
     )

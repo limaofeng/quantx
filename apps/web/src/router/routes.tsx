@@ -2,6 +2,7 @@ import {
   BarChart3,
   Bot,
   Briefcase,
+  CircleDollarSign,
   Filter,
   FlaskConical,
   Hand,
@@ -127,6 +128,21 @@ export const appRoutes: AppRouteConfig[] = [
       'AccountPage'
     ),
     skeleton: 'dashboard',
+  }),
+  route({
+    path: '/entry-plans',
+    title: '买入管理',
+    importer: toDefaultExport(
+      () => import('@/features/entry-plans'),
+      'ConnectedEntryPlansPage'
+    ),
+    skeleton: 'dashboard',
+    nav: {
+      label: '买入管理',
+      icon: CircleDollarSign,
+      group: MAIN_GROUP,
+      order: 25,
+    },
   }),
   route({
     path: '/t-trade',

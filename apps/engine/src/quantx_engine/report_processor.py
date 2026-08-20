@@ -7,10 +7,12 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 from hashlib import md5, sha256
 from typing import Any, Optional
 
 from quantx_contracts import (
+  TERMINAL_ORDER_STATUSES,
   can_transition_order_status,
   normalize_order_status,
 )
@@ -43,9 +45,13 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.enums import AccountType
+from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.account_repository import AccountRepository
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.entry_plan_authorization_service import (
+  EntryPlanAuthorizationService,
+)
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
 )
@@ -54,6 +60,7 @@ from quantx_infrastructure.services.position_service import PositionService
 from quantx_infrastructure.services.runtime_subscription_bridge import (
   TRADING_EVENT_CHANNEL,
 )
+from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -85,9 +92,18 @@ _SNAPSHOT_PROMOTABLE_HEARTBEAT_STATUSES = {"RECONCILING"}
 _AUTOMATIC_RECONCILIATION_KINDS = {
   "MISSING_WORKING_ORDER",
   "PROTOCOL_1_1_REQUIRED",
+  "SNAPSHOT_COMPLETENESS_REQUIRED",
+  "SNAPSHOT_IDENTITY_INVALID",
+  "SNAPSHOT_PROTOCOL_INVALID",
+  "SNAPSHOT_SECTION_INCOMPLETE",
   "UNKNOWN_BROKER_ORDER",
   "UNKNOWN_BROKER_TRADE",
 }
+_SPECIAL_RUNTIME_ORDER_STATUSES = {
+  "RECONCILE_REQUIRED",
+  "RECONCILED_ZERO_FILL",
+}
+_ZERO_FILL_RECONCILABLE_ORDER_STATUSES = {"CANCELLED", "EXPIRED"}
 
 
 class RetryableReportError(RuntimeError):
@@ -141,7 +157,81 @@ def _report_account_ids(payload: dict[str, Any]) -> set[str]:
   if isinstance(positions_by_account, dict):
     for account_id in positions_by_account:
       add(account_id)
+  section_completeness = payload.get("section_completeness_by_account")
+  if isinstance(section_completeness, dict):
+    for account_id in section_completeness:
+      add(account_id)
+  for account_id in payload.get("unavailable_accounts") or []:
+    add(account_id)
   return account_ids
+
+
+_REQUIRED_SNAPSHOT_SECTIONS = ("account", "positions", "orders", "trades")
+
+
+def _complete_snapshot_account_ids(
+  payload: dict[str, Any],
+) -> Optional[set[str]]:
+  """Validate the unique protocol-1.1 full-snapshot completeness contract."""
+
+  unavailable_accounts = payload.get("unavailable_accounts")
+  section_completeness = payload.get("section_completeness_by_account")
+  accounts = payload.get("accounts")
+  positions_by_account = payload.get("positions_by_account")
+  if (
+    not isinstance(unavailable_accounts, list)
+    or unavailable_accounts
+    or not isinstance(section_completeness, dict)
+    or not isinstance(accounts, list)
+    or not isinstance(positions_by_account, dict)
+  ):
+    return None
+  account_record_ids = {
+    str(item.get("account_id") or "").strip()
+    for item in accounts
+    if isinstance(item, dict) and str(item.get("account_id") or "").strip()
+  }
+  position_account_ids = {
+    str(account_id).strip()
+    for account_id in positions_by_account
+    if str(account_id).strip()
+  }
+  section_account_ids = {
+    str(account_id).strip()
+    for account_id in section_completeness
+    if str(account_id).strip()
+  }
+  covered_accounts = _report_account_ids(payload)
+  if (
+    not covered_accounts
+    or account_record_ids != covered_accounts
+    or position_account_ids != covered_accounts
+    or section_account_ids != covered_accounts
+  ):
+    return None
+  for account_id in covered_accounts:
+    sections = section_completeness.get(account_id)
+    if not isinstance(sections, dict) or not all(
+      sections.get(section) is True
+      for section in _REQUIRED_SNAPSHOT_SECTIONS
+    ):
+      return None
+  return covered_accounts
+
+
+def _snapshot_section_is_complete(
+  payload: dict[str, Any],
+  account_id: str,
+  section: str,
+) -> bool:
+  values = payload.get("section_completeness_by_account")
+  if not isinstance(values, dict):
+    return False
+  account_values = values.get(account_id)
+  return bool(
+    isinstance(account_values, dict)
+    and account_values.get(section) is True
+  )
 
 
 def _was_automatic_reconciliation_pause(reason: Any) -> bool:
@@ -179,20 +269,26 @@ async def _update_pending(
     if pending is None:
       return
     cancel_rejected = str(status or "").upper() == "CANCEL_REJECTED"
+    cancel_requested = str(pending.status or "").upper() == "CANCEL_REQUESTED"
     proposed_status = (
       str(pending.status or "PENDING")
       if cancel_rejected
       else _normalized_order_status(status)
     )
+    proposed_terminal = proposed_status in TERMINAL_ORDER_STATUSES
     stored_sequence = int(pending.last_source_sequence or 0)
     sequence = max(0, int(source_sequence or 0))
     stale_sequence = bool(sequence and stored_sequence and sequence < stored_sequence)
-    transition_allowed = (
-      not stale_sequence
-      and can_transition_order_status(pending.status, proposed_status)
+    transition_allowed = not stale_sequence and (
+      (cancel_requested and not proposed_terminal)
+      or can_transition_order_status(pending.status, proposed_status)
     )
     if transition_allowed:
-      pending.status = proposed_status[:24]
+      pending.status = (
+        "CANCEL_REQUESTED"
+        if cancel_requested and not proposed_terminal
+        else proposed_status[:24]
+      )
       if sequence:
         pending.last_source_sequence = sequence
       if source_event_at is not None:
@@ -202,6 +298,10 @@ async def _update_pending(
       pending.status_reason = "ignored stale broker report"
     elif cancel_rejected:
       pending.status_reason = (reason or "cancel rejected")[:256]
+    elif cancel_requested and not proposed_terminal:
+      pending.status_reason = (
+        str(pending.status_reason or "cancellation requested")[:256]
+      )
     elif not transition_allowed:
       pending.status_reason = (
         f"ignored non-monotonic status {proposed_status}"
@@ -217,6 +317,17 @@ async def _update_pending(
     ).scalar_one_or_none()
     if correlation is not None and broker_order_id:
       correlation.broker_order_id = broker_order_id
+    if cancel_requested and not proposed_terminal and broker_order_id:
+      await TradeCommandService(db).enqueue_cancel(
+        user_id=str(pending.user_id),
+        account_id=str(pending.account_id),
+        broker_order_id=str(broker_order_id),
+        idempotency_key=(
+          f"entry-plan-cancel:{client_order_id}:{broker_order_id}"
+        ),
+        execution_mode=str(pending.execution_mode or "paper").lower(),
+        commit_transaction=False,
+      )
     await db.commit()
 
 
@@ -241,18 +352,42 @@ async def _update_pending_by_broker(
     if pending is None:
       return
     proposed_status = _normalized_order_status(status)
+    cancel_requested = str(pending.status or "").upper() == "CANCEL_REQUESTED"
+    proposed_terminal = proposed_status in TERMINAL_ORDER_STATUSES
     sequence = max(0, int(source_sequence or 0))
     stored_sequence = int(pending.last_source_sequence or 0)
     if (
       (not sequence or not stored_sequence or sequence >= stored_sequence)
-      and can_transition_order_status(pending.status, proposed_status)
+      and (
+        (cancel_requested and not proposed_terminal)
+        or can_transition_order_status(pending.status, proposed_status)
+      )
     ):
-      pending.status = proposed_status[:24]
+      pending.status = (
+        "CANCEL_REQUESTED"
+        if cancel_requested and not proposed_terminal
+        else proposed_status[:24]
+      )
       if sequence:
         pending.last_source_sequence = sequence
       if source_event_at is not None:
         pending.last_source_event_at = to_naive_utc(source_event_at)
-    pending.status_reason = reason[:256] or None
+    pending.status_reason = (
+      str(pending.status_reason or "cancellation requested")[:256]
+      if cancel_requested and not proposed_terminal
+      else reason[:256] or None
+    )
+    if cancel_requested and not proposed_terminal:
+      await TradeCommandService(db).enqueue_cancel(
+        user_id=str(pending.user_id),
+        account_id=str(pending.account_id),
+        broker_order_id=str(broker_order_id),
+        idempotency_key=(
+          f"entry-plan-cancel:{pending.client_order_id}:{broker_order_id}"
+        ),
+        execution_mode=str(pending.execution_mode or "paper").lower(),
+        commit_transaction=False,
+      )
     await db.commit()
 
 
@@ -316,6 +451,7 @@ async def _process_execution_report(payload: dict[str, Any]) -> None:
   if not trade.get("traded_id"):
     raise ValueError("execution_report 缺少 execution id")
   await TradeService(str(trade.get("account_id", ""))).upsert_report(trade)
+  await _consume_exact_auto_entry_fill(payload, trade)
   await _update_pending(
     str(payload.get("client_order_id") or "") or None,
     status=str(payload.get("order_status") or "PARTIAL_FILLED"),
@@ -336,6 +472,96 @@ async def _process_execution_report(payload: dict[str, Any]) -> None:
     volume=int(trade.get("traded_volume") or 0),
     price=float(trade.get("traded_price") or 0.0),
   )
+
+
+async def _consume_exact_auto_entry_fill(
+  payload: dict[str, Any],
+  trade: dict[str, Any],
+) -> None:
+  """Debit an exact managed-entry grant only for a durable LIVE BUY trade.
+
+  Command acknowledgements and order reports never call this function.  The
+  QMT execution id is the idempotency key, so inbox retries and full-snapshot
+  replay cannot consume authorization twice.
+  """
+
+  client_order_id = str(
+    payload.get("client_order_id") or trade.get("client_order_id") or ""
+  )
+  broker_order_id = str(
+    trade.get("order_id") or trade.get("broker_order_id") or ""
+  )
+  async with AsyncSessionLocal() as db:
+    pending = (
+      await db.get(PendingTradeOrder, client_order_id)
+      if client_order_id
+      else None
+    )
+    if pending is None and broker_order_id:
+      pending = (
+        await db.execute(
+          select(PendingTradeOrder).where(
+            PendingTradeOrder.broker_order_id == broker_order_id
+          )
+        )
+      ).scalar_one_or_none()
+    if (
+      pending is None
+      or str(pending.execution_mode or "").lower() != "live"
+      or str(pending.side or "").upper() != "BUY"
+    ):
+      return
+    reported_account_id = str(trade.get("account_id") or "")
+    reported_instrument = str(
+      trade.get("stock_code") or trade.get("instrument_code") or ""
+    )
+    if (
+      (reported_account_id and reported_account_id != str(pending.account_id))
+      or (
+        reported_instrument
+        and reported_instrument != str(pending.instrument_code)
+      )
+    ):
+      raise ValueError("LIVE 自动买入成交账户或标的与权威命令不匹配")
+    metadata = dict(pending.request_metadata or {})
+    plan_id = str(metadata.get("entry_plan_id") or "")
+    grant_id = str(metadata.get("auto_entry_authorization_grant_id") or "")
+    if not plan_id or not grant_id:
+      return
+    if (
+      str(pending.strategy_run_id or "") != plan_id
+      or not bool(metadata.get("exact_auto_entry_authorized"))
+    ):
+      raise ValueError("LIVE 自动买入成交缺少已验证的计划授权关联")
+    intent = await db.get(TradeIntentRecord, str(pending.intent_id or ""))
+    intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
+    if (
+      intent is None
+      or str(intent.strategy_run_id or "") != plan_id
+      or str(intent.direction or "").upper() != "BUY"
+      or str(intent_metadata.get("execution_mode") or "").upper() != "AUTO"
+      or str(intent_metadata.get("auto_entry_authorization_grant_id") or "")
+      != grant_id
+    ):
+      raise ValueError("LIVE 自动买入成交与权威意图授权不匹配")
+    execution_id = str(
+      trade.get("execution_id") or trade.get("traded_id") or ""
+    ).strip()
+    price = Decimal(str(trade.get("traded_price") or trade.get("price") or 0))
+    volume = int(trade.get("traded_volume") or trade.get("volume") or 0)
+    if not execution_id or not price.is_finite() or price <= 0 or volume <= 0:
+      raise ValueError("LIVE 自动买入成交事实无效")
+    filled_at = _parse_report_time(
+      trade.get("traded_time") or trade.get("trade_time")
+    )
+    await EntryPlanAuthorizationService(db).consume_real_fill(
+      grant_id=grant_id,
+      trade_business_key=f"qmt-entry:{pending.account_id}:{execution_id}"[:160],
+      filled_amount_cny=price * volume,
+      filled_volume=volume,
+      fill_price=price,
+      filled_at=filled_at,
+    )
 
 
 async def _upsert_account(value: dict[str, Any]) -> None:
@@ -363,32 +589,184 @@ async def _upsert_account(value: dict[str, Any]) -> None:
     await AccountRepository(db).save(account)
 
 
+async def _fail_closed_incomplete_snapshot(
+  device_id: str,
+  payload: dict[str, Any],
+  *,
+  reported_at: datetime,
+  failure_kind: str,
+  failure_reason: str,
+) -> None:
+  """Invalidate live authority after an attempted incomplete full snapshot."""
+
+  account_ids = _report_account_ids(payload)
+  if not account_ids:
+    return
+  snapshot_id = str(payload.get("snapshot_id") or "").strip() or None
+  section_values = payload.get("section_completeness_by_account")
+  unavailable_accounts = {
+    str(value).strip()
+    for value in payload.get("unavailable_accounts") or []
+    if str(value).strip()
+  }
+  blocked_accounts: list[str] = []
+  async with AsyncSessionLocal() as db:
+    for account_id in sorted(account_ids):
+      raw_sections = (
+        section_values.get(account_id)
+        if isinstance(section_values, dict)
+        else None
+      )
+      incomplete_sections = [
+        section
+        for section in _REQUIRED_SNAPSHOT_SECTIONS
+        if not isinstance(raw_sections, dict)
+        or raw_sections.get(section) is not True
+      ]
+      discrepancy = {
+        "kind": failure_kind,
+        "reason": failure_reason,
+        "business_id": account_id,
+      }
+      if failure_kind == "SNAPSHOT_SECTION_INCOMPLETE":
+        discrepancy.update(
+          {
+            "sections": incomplete_sections,
+            "unavailable": account_id in unavailable_accounts,
+          }
+        )
+      discrepancies = [discrepancy]
+      rollout = await db.get(
+        AccountTradingRollout,
+        account_id,
+        with_for_update=True,
+      )
+      if rollout is None:
+        rollout = AccountTradingRollout(account_id=account_id)
+        db.add(rollout)
+      previous_stage = str(rollout.stage)
+      window_was_active = bool(rollout.controlled_window_active)
+      rollout.reconcile_status = "RECONCILE_REQUIRED"
+      rollout.enabled = False
+      if not rollout.kill_switch:
+        rollout.stage = "PAUSED"
+      rollout.paused_reason = json.dumps(
+        discrepancies,
+        ensure_ascii=False,
+        default=str,
+      )[:2000]
+      if window_was_active:
+        rollout.controlled_window_active = False
+        rollout.controlled_window_snapshot_id = None
+        rollout.controlled_window_snapshot_hash = None
+        rollout.controlled_window_started_at = None
+        rollout.controlled_window_started_by_user_id = None
+        rollout.controlled_window_external_order_ids = []
+        rollout.controlled_window_external_trade_ids = []
+      db.add(
+        AccountTradingRolloutEvent(
+          event_id=str(uuid.uuid4()),
+          account_id=account_id,
+          event_type="SNAPSHOT_INCOMPLETE",
+          previous_stage=previous_stage,
+          next_stage=str(rollout.stage),
+          snapshot_id=snapshot_id,
+          details={
+            "deviceId": device_id,
+            "reportedAt": reported_at.isoformat(),
+            "discrepancies": discrepancies,
+            "controlledWindowInvalidated": window_was_active,
+          },
+          created_at=utcnow(),
+        )
+      )
+      blocked_accounts.append(account_id)
+
+    heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      f"qmt-agent:{device_id}",
+    )
+    if heartbeat is not None:
+      details = dict(heartbeat.details or {})
+      details["incompleteSnapshotAccounts"] = blocked_accounts
+      details["incompleteSnapshotAt"] = reported_at.isoformat()
+      heartbeat.details = details
+      if str(heartbeat.status or "").upper() in {"READY", "RECONCILING"}:
+        heartbeat.status = "RECONCILE_REQUIRED"
+      heartbeat.updated_at = utcnow()
+    await db.commit()
+
+
 async def _process_delta_report(
   device_id: str,
   payload: dict[str, Any],
   *,
   protocol_version: str = "1.0",
 ) -> None:
-  is_complete = bool(payload.get("is_complete", True))
-  authoritative = is_complete and protocol_version == "1.1"
+  declared_complete = payload.get("is_complete") is True
+  complete_account_ids = (
+    _complete_snapshot_account_ids(payload) if declared_complete else None
+  )
+  full_snapshot_attempt = bool(
+    declared_complete
+    or "section_completeness_by_account" in payload
+    or "unavailable_accounts" in payload
+  )
   snapshot_id = str(payload.get("snapshot_id") or "")
   snapshot_hash = str(payload.get("snapshot_hash") or "")
-  if authoritative:
+  snapshot_identity_error = ""
+  identity_valid = False
+  if declared_complete:
     if not snapshot_id or len(snapshot_hash) != 64:
-      raise ValueError("完整账户快照缺少协议 1.1 身份")
-    hash_input = {
-      key: value for key, value in payload.items() if key != "snapshot_hash"
-    }
-    expected_hash = sha256(
-      json.dumps(
-        hash_input,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-      ).encode("utf-8")
-    ).hexdigest()
-    if expected_hash != snapshot_hash:
-      raise ValueError("完整账户快照哈希校验失败")
+      snapshot_identity_error = "完整账户快照缺少协议 1.1 身份"
+    else:
+      hash_input = {
+        key: value for key, value in payload.items() if key != "snapshot_hash"
+      }
+      expected_hash = sha256(
+        json.dumps(
+          hash_input,
+          sort_keys=True,
+          separators=(",", ":"),
+          default=str,
+        ).encode("utf-8")
+      ).hexdigest()
+      if expected_hash != snapshot_hash:
+        snapshot_identity_error = "完整账户快照哈希校验失败"
+      else:
+        identity_valid = True
+  authoritative = bool(
+    declared_complete
+    and protocol_version == "1.1"
+    and complete_account_ids is not None
+    and identity_valid
+  )
+  reported_at = _parse_report_time(payload.get("source_event_at"))
+  if full_snapshot_attempt and not authoritative:
+    if protocol_version != "1.1":
+      failure_kind = "SNAPSHOT_PROTOCOL_INVALID"
+      failure_reason = "PROTOCOL_1_1_REQUIRED"
+    elif snapshot_identity_error:
+      failure_kind = "SNAPSHOT_IDENTITY_INVALID"
+      failure_reason = (
+        "SNAPSHOT_HASH_MISMATCH"
+        if "哈希" in snapshot_identity_error
+        else "SNAPSHOT_IDENTITY_MISSING"
+      )
+    else:
+      failure_kind = "SNAPSHOT_SECTION_INCOMPLETE"
+      failure_reason = "SECTION_PROOF_MISSING_OR_INCOMPLETE"
+    # Close the durable trading gate before processing any partial section.
+    # A concurrent order enqueue must never observe the prior READY rollout.
+    await _fail_closed_incomplete_snapshot(
+      device_id,
+      payload,
+      reported_at=reported_at,
+      failure_kind=failure_kind,
+      failure_reason=failure_reason,
+    )
+  if snapshot_identity_error:
+    raise ValueError(snapshot_identity_error)
 
   for order in payload.get("orders") or []:
     await _process_order_report(
@@ -416,7 +794,15 @@ async def _process_delta_report(
       }
     )
   for account in payload.get("accounts") or []:
-    await _upsert_account(dict(account))
+    account_value = dict(account)
+    account_id = str(account_value.get("account_id") or "").strip()
+    if full_snapshot_attempt and not _snapshot_section_is_complete(
+      payload,
+      account_id,
+      "account",
+    ):
+      continue
+    await _upsert_account(account_value)
   for error in payload.get("order_errors") or []:
     reason = str(error.get("error_msg") or error.get("reason") or "")
     terminal_status = (
@@ -472,8 +858,7 @@ async def _process_delta_report(
     or payload.get("sequence")
     or time_utils.now().timestamp() * 1_000_000
   )
-  reported_at = _parse_report_time(payload.get("source_event_at"))
-  if is_complete:
+  if authoritative:
     groups_value = payload.get("positions_by_account")
     if isinstance(groups_value, dict):
       groups = groups_value.items()
@@ -493,7 +878,7 @@ async def _process_delta_report(
         source="QMT_AGENT",
         is_complete=True,
       )
-  else:
+  elif not full_snapshot_attempt:
     default_account_id = str(payload.get("account_id") or "")
     deltas = payload.get("position_deltas")
     if deltas is None:
@@ -505,7 +890,7 @@ async def _process_delta_report(
         raise ValueError("持仓增量缺少 account_id")
       await PositionService().apply_position_delta(value, account_id)
 
-  if is_complete and protocol_version == "1.1":
+  if authoritative:
     ready_accounts: list[str] = []
     blocked_accounts: list[str] = []
     reconciliation_accounts: dict[str, dict[str, Any]] = {}
@@ -806,8 +1191,9 @@ async def _process(report: AgentReportInbox) -> None:
 def _normalized_order_status(value: Any) -> str:
   if hasattr(value, "name"):
     value = value.name
-  if str(value or "").strip().upper() == "RECONCILE_REQUIRED":
-    return "RECONCILE_REQUIRED"
+  special_status = str(value or "").strip().upper()
+  if special_status in _SPECIAL_RUNTIME_ORDER_STATUSES:
+    return special_status
   try:
     return _ORDER_STATUS_NAMES[int(value)]
   except (TypeError, ValueError, KeyError):
@@ -832,6 +1218,23 @@ def _parse_report_time(value: Any) -> datetime:
 _FILL_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
 
 
+def _reported_cumulative_fill(report: dict[str, Any]) -> Optional[int]:
+  """Read every supplied cumulative-fill field without truthy short-circuiting."""
+
+  values: list[int] = []
+  for key in ("traded_volume", "filled_volume"):
+    if key not in report:
+      continue
+    try:
+      value = int(report.get(key))
+    except (TypeError, ValueError, OverflowError):
+      return None
+    if value < 0:
+      return None
+    values.append(value)
+  return max(values) if values else None
+
+
 async def _terminal_order_fill_projection(
   db,
   correlation: StrategyOrderCorrelation,
@@ -841,12 +1244,7 @@ async def _terminal_order_fill_projection(
 ) -> Optional[dict[str, Any]]:
   """Return the terminal order target and execution-report progress for one intent."""
   pending = await db.get(PendingTradeOrder, correlation.client_order_id)
-  report = dict(current_order or {})
-  status = _normalized_order_status(
-    report.get("effective_order_status")
-    or report.get("status")
-    or report.get("order_status")
-  )
+  terminal_reports: list[tuple[dict[str, Any], str]] = []
   if current_order is None:
     candidates = (
       await db.execute(
@@ -862,8 +1260,6 @@ async def _terminal_order_fill_projection(
         .limit(20)
       )
     ).scalars()
-    report = {}
-    status = ""
     for candidate in candidates:
       candidate_report = dict(dict(candidate.payload or {}).get("report") or {})
       candidate_status = _normalized_order_status(
@@ -872,47 +1268,64 @@ async def _terminal_order_fill_projection(
         or candidate_report.get("order_status")
       )
       if candidate_status in _FILL_TERMINAL_ORDER_STATUSES:
-        report = candidate_report
-        status = candidate_status
-        break
-    if not status and pending is not None:
+        terminal_reports.append((candidate_report, candidate_status))
+    if not terminal_reports and pending is not None:
       pending_status = _normalized_order_status(pending.status)
       if pending_status in _FILL_TERMINAL_ORDER_STATUSES:
-        status = pending_status
+        terminal_reports.append(({}, pending_status))
+  else:
+    report = dict(current_order)
+    status = _normalized_order_status(
+      report.get("effective_order_status")
+      or report.get("status")
+      or report.get("order_status")
+    )
+    if status in _FILL_TERMINAL_ORDER_STATUSES:
+      terminal_reports.append((report, status))
 
-  if status not in _FILL_TERMINAL_ORDER_STATUSES:
+  if not terminal_reports:
     return None
   received = max(0, int(intent.executed_volume or 0))
-  reported = max(
-    0,
-    int(report.get("traded_volume") or report.get("filled_volume") or 0),
-  )
-  requested = max(
-    0,
-    int(
-      (pending.volume if pending is not None else None)
-      or intent.target_volume
-      or report.get("order_volume")
-      or report.get("volume")
-      or 0
-    ),
-  )
-  expected = (
-    reported
-    if reported > 0
-    else (max(1, requested) if status == "FILLED" else 0)
-  )
   role = str(correlation.t_trade_role or "").strip().upper()
-  reason = str(
-    report.get("effective_status_reason") or report.get("status_msg") or ""
-  )
-  return {
-    "status": status,
-    "expected": expected,
-    "received": received,
-    "role": role,
-    "reason": reason,
-  }
+  selected: Optional[dict[str, Any]] = None
+  for report, status in terminal_reports:
+    requested = max(
+      0,
+      int(
+        (pending.volume if pending is not None else None)
+        or intent.target_volume
+        or report.get("order_volume")
+        or report.get("volume")
+        or 0
+      ),
+    )
+    reported = _reported_cumulative_fill(report)
+    reported_field_present = any(
+      key in report for key in ("traded_volume", "filled_volume")
+    )
+    expected = (
+      max(1, requested)
+      if reported is None and reported_field_present
+      else (
+        int(reported or 0)
+        if int(reported or 0) > 0
+        else (max(1, requested) if status == "FILLED" else 0)
+      )
+    )
+    projection = {
+      "status": status,
+      "expected": expected,
+      "received": received,
+      "role": role,
+      "reason": str(
+        report.get("effective_status_reason")
+        or report.get("status_msg")
+        or ""
+      ),
+    }
+    if selected is None or expected > int(selected["expected"]):
+      selected = projection
+  return selected
 
 
 def _fill_projection_note(projection: dict[str, Any]) -> str:
@@ -957,6 +1370,337 @@ def _report_items(report: AgentReportInbox) -> list[tuple[str, dict[str, Any]]]:
   return []
 
 
+def _authoritative_snapshot_identity(
+  report: AgentReportInbox,
+) -> Optional[tuple[str, str]]:
+  """Return a verified protocol 1.1 full-snapshot identity.
+
+  ``_process_delta_report`` performs the same validation before updating the
+  account rollout.  Repeating it here prevents a direct or replayed staging
+  call from manufacturing a zero-fill proof from an unverified payload.
+  """
+
+  payload = dict(report.payload or {})
+  if (
+    report.message_type != "delta_report"
+    or str(report.protocol_version or "") != "1.1"
+    or payload.get("is_complete") is not True
+    or _complete_snapshot_account_ids(payload) is None
+  ):
+    return None
+  snapshot_id = str(payload.get("snapshot_id") or "").strip()
+  snapshot_hash = str(payload.get("snapshot_hash") or "").strip().lower()
+  if not snapshot_id or len(snapshot_hash) != 64:
+    return None
+  hash_input = {
+    key: value for key, value in payload.items() if key != "snapshot_hash"
+  }
+  expected_hash = sha256(
+    json.dumps(
+      hash_input,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
+  if expected_hash != snapshot_hash:
+    return None
+  return snapshot_id, snapshot_hash
+
+
+def _snapshot_fully_covers_account(
+  payload: dict[str, Any],
+  account_id: str,
+) -> bool:
+  """Require explicit completeness for every authoritative account section."""
+
+  account_ids = _complete_snapshot_account_ids(payload)
+  return bool(account_ids is not None and account_id in account_ids)
+
+
+def _snapshot_has_order_execution_detail(
+  payload: dict[str, Any],
+  *,
+  account_id: str,
+  instrument_code: str,
+  client_order_id: str,
+  broker_order_id: str,
+) -> bool:
+  """Conservatively detect a current-snapshot execution for one order."""
+
+  for raw_trade in payload.get("trades") or []:
+    if not isinstance(raw_trade, dict):
+      continue
+    trade = dict(raw_trade)
+    if str(trade.get("account_id") or "") != account_id:
+      continue
+    trade_client_id = str(trade.get("client_order_id") or "")
+    trade_broker_id = str(
+      trade.get("order_id") or trade.get("broker_order_id") or ""
+    )
+    if trade_client_id == client_order_id or trade_broker_id == broker_order_id:
+      return True
+    trade_instrument = str(
+      trade.get("stock_code") or trade.get("instrument_code") or ""
+    ).upper()
+    if (
+      trade_instrument == instrument_code
+      and not trade_client_id
+      and not trade_broker_id
+    ):
+      # An execution for the same account/instrument without an order identity
+      # cannot safely be distinguished from this managed entry.
+      return True
+  return False
+
+
+async def _full_snapshot_zero_fill_items(
+  db,
+  report: AgentReportInbox,
+) -> list[tuple[str, dict[str, Any]]]:
+  """Prove broker-terminal managed BUY orders had no execution.
+
+  A terminal order report alone is deliberately insufficient: QMT execution
+  reports may arrive after it.  The proof is emitted only after a verified
+  protocol 1.1 full snapshot has become the account's READY reconciliation
+  checkpoint and both snapshot and durable execution stores are empty for the
+  order.  The resulting synthetic ORDER event is replayable and auditable.
+  """
+
+  identity = _authoritative_snapshot_identity(report)
+  if identity is None:
+    return []
+  snapshot_id, snapshot_hash = identity
+  payload = dict(report.payload or {})
+  snapshot_sequence = max(
+    0,
+    int(payload.get("source_sequence") or payload.get("sequence") or 0),
+  )
+  if snapshot_sequence <= 0:
+    return []
+
+  results: list[tuple[str, dict[str, Any]]] = []
+  seen_orders: set[tuple[str, str]] = set()
+  for raw_order in payload.get("orders") or []:
+    if not isinstance(raw_order, dict):
+      continue
+    order = dict(raw_order)
+    terminal_status = _normalized_order_status(
+      order.get("effective_order_status")
+      or order.get("status")
+      or order.get("order_status")
+    )
+    if terminal_status not in _ZERO_FILL_RECONCILABLE_ORDER_STATUSES:
+      continue
+    reported_fill = _reported_cumulative_fill(order)
+    if reported_fill is None:
+      continue
+    if reported_fill != 0:
+      continue
+
+    client_order_id = str(order.get("client_order_id") or "").strip()
+    broker_order_id = str(
+      order.get("order_id") or order.get("broker_order_id") or ""
+    ).strip()
+    account_id = str(order.get("account_id") or "").strip()
+    instrument_code = str(
+      order.get("stock_code") or order.get("instrument_code") or ""
+    ).strip().upper()
+    if (
+      not client_order_id
+      or not broker_order_id
+      or not account_id
+      or not instrument_code
+      or (client_order_id, broker_order_id) in seen_orders
+      or not _snapshot_fully_covers_account(payload, account_id)
+    ):
+      continue
+    seen_orders.add((client_order_id, broker_order_id))
+
+    rollout = await db.get(
+      AccountTradingRollout,
+      account_id,
+      with_for_update=True,
+    )
+    if (
+      rollout is None
+      or str(rollout.reconcile_status or "").upper() != "READY"
+      or str(rollout.last_snapshot_id or "") != snapshot_id
+      or str(rollout.last_snapshot_hash or "").lower() != snapshot_hash
+      or rollout.last_snapshot_at is None
+    ):
+      continue
+
+    correlation = await _correlation_for_report(
+      db,
+      client_order_id=client_order_id,
+      broker_order_id=broker_order_id,
+    )
+    if correlation is None:
+      continue
+    correlation = await db.get(
+      StrategyOrderCorrelation,
+      correlation.id,
+      with_for_update=True,
+    )
+    pending = await db.get(
+      PendingTradeOrder,
+      client_order_id,
+      with_for_update=True,
+    )
+    if correlation is None or pending is None:
+      continue
+    request_metadata = {
+      **dict(pending.request_metadata or {}),
+      **dict(correlation.request_metadata or {}),
+    }
+    plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
+    if (
+      not plan_id
+      or plan_id != str(correlation.strategy_run_id or "")
+      or plan_id != str(pending.strategy_run_id or "")
+      or str(correlation.account_id or "") != account_id
+      or str(pending.account_id or "") != account_id
+      or str(pending.instrument_code or "").upper() != instrument_code
+      or str(pending.side or "").upper() != "BUY"
+      or str(pending.broker_order_id or "") != broker_order_id
+      or _normalized_order_status(pending.status) != terminal_status
+      or snapshot_sequence < max(0, int(pending.last_source_sequence or 0))
+    ):
+      continue
+    if (
+      pending.last_source_event_at is not None
+      and to_naive_utc(pending.last_source_event_at) > rollout.last_snapshot_at
+    ):
+      continue
+
+    intent = await db.get(
+      TradeIntentRecord,
+      correlation.intent_id,
+      with_for_update=True,
+    )
+    intent_metadata = (
+      dict(intent.intent_metadata or {}) if intent is not None else {}
+    )
+    try:
+      executed_volume = int(intent.executed_volume or 0) if intent else -1
+      executed_price = Decimal(str(intent.executed_price or 0)) if intent else None
+    except (TypeError, ValueError, ArithmeticError):
+      continue
+    if (
+      intent is None
+      or str(intent.strategy_run_id or "") != plan_id
+      or str(intent.direction or "").upper() != "BUY"
+      or str(intent.instrument_code or "").upper() != instrument_code
+      or (intent.account_id and str(intent.account_id) != account_id)
+      or str(intent_metadata.get("entry_plan_id") or "") != plan_id
+      or executed_volume != 0
+      or executed_price is None
+      or not executed_price.is_finite()
+      or executed_price > 0
+      or intent.executed_time is not None
+    ):
+      continue
+    if _snapshot_has_order_execution_detail(
+      payload,
+      account_id=account_id,
+      instrument_code=instrument_code,
+      client_order_id=client_order_id,
+      broker_order_id=broker_order_id,
+    ):
+      continue
+
+    durable_runtime_events = list(
+      (
+        await db.execute(
+          select(StrategyRuntimeEvent)
+          .where(
+            StrategyRuntimeEvent.event_type.in_({"ORDER", "TRADE"}),
+            or_(
+              StrategyRuntimeEvent.client_order_id == client_order_id,
+              StrategyRuntimeEvent.broker_order_id == broker_order_id,
+            ),
+          )
+          .with_for_update()
+        )
+      )
+      .scalars()
+      .all()
+    )
+    execution_announced = False
+    for runtime_event in durable_runtime_events:
+      if runtime_event.event_type == "TRADE":
+        execution_announced = True
+        break
+      historical_order = dict(
+        dict(runtime_event.payload or {}).get("report") or {}
+      )
+      historical_fill = _reported_cumulative_fill(historical_order)
+      if historical_fill is None and any(
+        key in historical_order for key in ("traded_volume", "filled_volume")
+      ):
+        execution_announced = True
+        break
+      if int(historical_fill or 0) > 0:
+        execution_announced = True
+        break
+      historical_projection = await _terminal_order_fill_projection(
+        db,
+        correlation,
+        intent,
+        current_order=historical_order,
+      )
+      if historical_projection and int(historical_projection["expected"]) > 0:
+        execution_announced = True
+        break
+    if execution_announced:
+      continue
+    try:
+      numeric_broker_order_id = int(broker_order_id)
+    except (TypeError, ValueError, OverflowError):
+      continue
+    durable_trade = (
+      await db.execute(
+        select(Trade.id)
+        .where(
+          Trade.account_id == account_id,
+          Trade.order_id == numeric_broker_order_id,
+        )
+        .limit(1)
+      )
+    ).scalar_one_or_none()
+    if durable_trade is not None:
+      continue
+
+    audit = {
+      "source": "QMT_PROTOCOL_1_1_FULL_SNAPSHOT",
+      "snapshot_id": snapshot_id,
+      "snapshot_hash": snapshot_hash,
+      "snapshot_at": rollout.last_snapshot_at.isoformat(),
+      "source_sequence": snapshot_sequence,
+      "broker_terminal_status": terminal_status,
+      "expected_filled_volume": 0,
+      "received_execution_volume": 0,
+      "reconciled_at": utcnow().isoformat(),
+    }
+    results.append(
+      (
+        "ORDER",
+        {
+          **order,
+          "effective_order_status": "RECONCILED_ZERO_FILL",
+          "effective_status_reason": (
+            "QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"
+          ),
+          "traded_volume": 0,
+          "filled_volume": 0,
+          "zero_fill_reconciliation": audit,
+        },
+      )
+    )
+  return results
+
+
 async def _correlation_for_report(
   db,
   *,
@@ -975,6 +1719,120 @@ async def _correlation_for_report(
   ).scalar_one_or_none()
 
 
+async def _command_expired_entry_zero_fill_reconciliation(
+  db,
+  correlation: StrategyOrderCorrelation,
+  item: dict[str, Any],
+) -> Optional[dict[str, Any]]:
+  """Prove an Agent command-expiry error happened before Broker.execute()."""
+
+  status = _normalized_order_status(
+    item.get("effective_order_status")
+    or item.get("status")
+    or item.get("order_status")
+  )
+  reason = str(
+    item.get("reason")
+    or item.get("effective_status_reason")
+    or item.get("status_msg")
+    or ""
+  ).strip()
+  broker_order_id = str(
+    item.get("order_id") or item.get("broker_order_id") or ""
+  ).strip()
+  if status != "EXPIRED" or reason.lower() != "command_expired" or broker_order_id:
+    return None
+
+  pending = await db.get(
+    PendingTradeOrder,
+    correlation.client_order_id,
+    with_for_update=True,
+  )
+  intent = await db.get(
+    TradeIntentRecord,
+    correlation.intent_id,
+    with_for_update=True,
+  )
+  if pending is None or intent is None:
+    return None
+  request_metadata = {
+    **dict(pending.request_metadata or {}),
+    **dict(correlation.request_metadata or {}),
+  }
+  intent_metadata = dict(intent.intent_metadata or {})
+  plan_id = str(
+    request_metadata.get("entry_plan_id")
+    or intent_metadata.get("entry_plan_id")
+    or ""
+  ).strip()
+  try:
+    executed_volume = int(intent.executed_volume or 0)
+    executed_price = Decimal(str(intent.executed_price or 0))
+  except (TypeError, ValueError, ArithmeticError):
+    return None
+  if (
+    not plan_id
+    or plan_id != str(pending.strategy_run_id or "")
+    or plan_id != str(correlation.strategy_run_id or "")
+    or plan_id != str(intent.strategy_run_id or "")
+    or str(pending.side or "").upper() != "BUY"
+    or str(intent.direction or "").upper() != "BUY"
+    or str(intent_metadata.get("entry_plan_id") or "") != plan_id
+    or pending.broker_order_id
+    or correlation.broker_order_id
+    or str(pending.status or "").upper()
+    not in {
+      "QUEUED",
+      "EXPIRED",
+      "RECONCILE_REQUIRED",
+      "RECONCILED_ZERO_FILL",
+    }
+    or executed_volume != 0
+    or not executed_price.is_finite()
+    or executed_price > 0
+    or intent.executed_time is not None
+  ):
+    return None
+
+  prior_events = list(
+    (
+      await db.execute(
+        select(StrategyRuntimeEvent)
+        .where(
+          StrategyRuntimeEvent.client_order_id == correlation.client_order_id,
+          StrategyRuntimeEvent.event_type.in_({"ORDER", "TRADE"}),
+        )
+        .with_for_update()
+      )
+    )
+    .scalars()
+    .all()
+  )
+  for prior_event in prior_events:
+    if prior_event.event_type == "TRADE":
+      return None
+    prior_report = dict(dict(prior_event.payload or {}).get("report") or {})
+    prior_fill = _reported_cumulative_fill(prior_report)
+    if (
+      prior_fill is None
+      and any(
+        key in prior_report for key in ("traded_volume", "filled_volume")
+      )
+    ) or int(prior_fill or 0) > 0:
+      return None
+
+  return {
+    "source": "QMT_AGENT_COMMAND_EXPIRED_PRE_EXECUTION",
+    "command_reason": reason,
+    "command_message_id": str(
+      dict(correlation.request_metadata or {}).get("command_message_id") or ""
+    ),
+    "expected_filled_volume": 0,
+    "received_execution_volume": 0,
+    "reconciled_at": utcnow().isoformat(),
+  }
+
+
 def _runtime_business_key(
   event_type: str,
   correlation: StrategyOrderCorrelation,
@@ -991,10 +1849,19 @@ def _runtime_business_key(
         f"{item.get('traded_price')}:{item.get('traded_volume')}"
       )
     return f"trade:{correlation.account_id}:{execution_id}"[:192]
+  cumulative_fill = _reported_cumulative_fill(item)
+  fill_field_present = any(
+    key in item for key in ("traded_volume", "filled_volume")
+  )
+  fill_component = (
+    "INVALID"
+    if cumulative_fill is None and fill_field_present
+    else str(int(cumulative_fill or 0))
+  )
   return (
     f"order:{correlation.client_order_id}:{broker_order_id}:"
     f"{_normalized_order_status(item.get('effective_order_status') or item.get('status') or item.get('order_status'))}:"
-    f"{int(item.get('traded_volume') or 0)}"
+    f"{fill_component}"
   )[:192]
 
 
@@ -1018,6 +1885,11 @@ def _event_payload(
     "execution_mode": correlation.execution_mode,
     "runtime_event_key": business_key,
   }
+  zero_fill_reconciliation = item.get("zero_fill_reconciliation")
+  if isinstance(zero_fill_reconciliation, dict):
+    metadata["qmt_zero_fill_reconciliation"] = dict(
+      zero_fill_reconciliation
+    )
   return {"report": item, "metadata": metadata}
 
 
@@ -1047,7 +1919,32 @@ async def _project_trade_intent_event(
       intent,
       current_order=item,
     )
-    if projection and int(projection["expected"]) > int(projection["received"]):
+    historical_projection = await _terminal_order_fill_projection(
+      db,
+      correlation,
+      intent,
+    )
+    if historical_projection and (
+      projection is None
+      or int(historical_projection["expected"])
+      > int(projection["expected"])
+    ):
+      projection = historical_projection
+    if order_status == "RECONCILED_ZERO_FILL":
+      reconciliation = item.get("zero_fill_reconciliation")
+      if isinstance(reconciliation, dict):
+        intent.intent_metadata = {
+          **dict(intent.intent_metadata or {}),
+          "qmt_zero_fill_reconciliation": dict(reconciliation),
+        }
+      intent.status = order_status
+      intent.notes = str(
+        item.get("effective_status_reason")
+        or "QMT_FULL_SNAPSHOT_ZERO_FILL_RECONCILIATION"
+      )
+    elif projection and int(projection["expected"]) > int(
+      projection["received"]
+    ):
       intent.status = "RECONCILE_REQUIRED"
       intent.notes = _fill_projection_note(projection)
     else:
@@ -1355,7 +2252,10 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
       # SQLite can release the first nested savepoint as a standalone commit,
       # breaking the event+projection atomicity exercised by local tests.
       await db.begin()
-      for event_type, raw_item in _report_items(report):
+      runtime_items = _report_items(report)
+      runtime_items.extend(await _full_snapshot_zero_fill_items(db, report))
+      last_staged_at: Optional[datetime] = None
+      for event_type, raw_item in runtime_items:
         item = dict(raw_item)
         broker_order_id = str(
           item.get("order_id") or item.get("broker_order_id") or ""
@@ -1373,6 +2273,23 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
         )
         if correlation is None:
           continue
+        command_expiry_reconciliation = (
+          await _command_expired_entry_zero_fill_reconciliation(
+            db,
+            correlation,
+            item,
+          )
+        )
+        if command_expiry_reconciliation is not None:
+          item.update(
+            {
+              "effective_order_status": "RECONCILED_ZERO_FILL",
+              "effective_status_reason": "command_expired",
+              "traded_volume": 0,
+              "filled_volume": 0,
+              "zero_fill_reconciliation": command_expiry_reconciliation,
+            }
+          )
         run_id = correlation.strategy_run_id
         affected_run_ids.add(run_id)
         if arm_barrier is not None and run_id not in barrier_checked_runs:
@@ -1400,7 +2317,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
             or item.get("status")
             or item.get("order_status")
           )
-          if proposed_status != "RECONCILE_REQUIRED":
+          if proposed_status not in _SPECIAL_RUNTIME_ORDER_STATUSES:
             pending = await db.get(
               PendingTradeOrder,
               correlation.client_order_id,
@@ -1442,6 +2359,10 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           if existing.application_status != "APPLIED" and arm_barrier is not None:
             arm_barrier(existing.strategy_run_id, existing.business_key)
           continue
+        created_at = utcnow()
+        if last_staged_at is not None and created_at <= last_staged_at:
+          created_at = last_staged_at + timedelta(microseconds=1)
+        last_staged_at = created_at
         runtime_event = StrategyRuntimeEvent(
           event_id=str(uuid.uuid4()),
           business_key=business_key,
@@ -1456,7 +2377,7 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
           ),
           application_status="PENDING",
           application_attempts=0,
-          created_at=utcnow(),
+          created_at=created_at,
         )
         if arm_barrier is not None:
           arm_barrier(run_id, business_key)
@@ -1547,7 +2468,7 @@ async def _apply_runtime_event(event: StrategyRuntimeEvent) -> None:
     )
     order_status: OrderStatus | str = (
       status_name
-      if status_name == "RECONCILE_REQUIRED"
+      if status_name in _SPECIAL_RUNTIME_ORDER_STATUSES
       else OrderStatus[status_name]
     )
     order = OrderResponse(

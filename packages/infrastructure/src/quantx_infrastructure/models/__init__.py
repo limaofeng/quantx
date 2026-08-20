@@ -46,6 +46,12 @@ from .closed_position_cycle import ClosedPositionCycle
 from .daily_asset_snapshot import DailyAssetPositionSnapshot, DailyAssetSnapshot
 from .daily_signal_definition import DailySignalDefinition
 from .daily_signal_run import DailySignalRun
+from .entry_plan_authorization import (
+  EntryAutomationGate,
+  EntryPlanAuthorizationConsumption,
+  EntryPlanAuthorizationEvent,
+  EntryPlanAuthorizationGrant,
+)
 from .enums import (
   AccountType,
   InstrumentType,
@@ -175,6 +181,10 @@ __all__ = [
   "Account",
   "AutoExitPlanRecord",
   "AutoExitPlanEvent",
+  "EntryAutomationGate",
+  "EntryPlanAuthorizationConsumption",
+  "EntryPlanAuthorizationEvent",
+  "EntryPlanAuthorizationGrant",
   "AuthUser",
   "AuthUserAccountAccess",
   "AuthDeviceSession",

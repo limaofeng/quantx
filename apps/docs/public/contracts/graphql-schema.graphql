@@ -615,6 +615,21 @@ input CreateAiAssistantThreadInput {
   title: String = null
 }
 
+"""创建建仓/加仓托管计划"""
+input CreateEntryPlanInput {
+  instrumentCode: String!
+  bucket: String!
+  targetPolicy: EntryPlanTargetInput!
+  triggerRules: [EntryPlanRuleInput!]!
+  pacingPolicy: EntryPlanPacingInput!
+  executionPolicy: EntryPlanExecutionInput!
+  completionPolicy: EntryPlanCompletionInput!
+  exitProtection: EntryExitProtectionInput = null
+  note: String! = ""
+  startImmediately: Boolean! = false
+  idempotencyKey: String! = ""
+}
+
 """创建人工计划"""
 input CreateManualExitPlanInput {
   instrumentCode: String!
@@ -803,6 +818,354 @@ enum DividendType {
   BACK
   FRONT_RATIO
   BACK_RATIO
+}
+
+"""账户级自动买入安全门"""
+type EntryAutomationStatus {
+  accountId: String!
+  paused: Boolean!
+  reason: String!
+  updatedAt: String
+}
+
+"""真实成交后按批次创建的卖出保护设置"""
+type EntryExitProtection {
+  enabled: Boolean!
+  stopPrice: Float
+  grossTakeProfitPct: Float
+  trailingArmProfitPct: Float
+  trailingDrawdownPct: Float
+  maxHoldingDays: Int
+}
+
+"""真实买入成交后创建的卖出保护模板"""
+input EntryExitProtectionInput {
+  enabled: Boolean! = false
+  stopPrice: Float = null
+  grossTakeProfitPct: Float = null
+  trailingArmProfitPct: Float = null
+  trailingDrawdownPct: Float = null
+  maxHoldingDays: Int = null
+}
+
+"""等待逐笔确认的买入意图"""
+type EntryIntent {
+  intentId: ID!
+  planId: ID!
+  instrumentCode: String!
+  bucket: String!
+  reasonCode: String!
+  status: String!
+  targetAmountCny: Float!
+  targetVolume: Int!
+  signalPrice: Float!
+  currentPrice: Float!
+  priceDeviationBps: Float!
+  expiresAtMs: Int!
+  riskAction: String!
+  createdAt: String
+}
+
+"""逐笔确认前重新计算的最新买单预览"""
+type EntryIntentPreview {
+  intentId: ID!
+  planId: ID!
+  instrumentCode: String!
+  valid: Boolean!
+  code: String!
+  message: String!
+  signalPrice: Float!
+  latestPrice: Float!
+  priceDeviationBps: Float!
+  requestedAmountCny: Float!
+  sizedVolume: Int!
+  finalVolume: Int!
+  riskAction: String!
+  expiresAtMs: Int!
+  challengeId: ID!
+  confirmationToken: String!
+  challengeExpiresAt: String!
+  warnings: [String!]!
+}
+
+"""建仓/加仓托管计划投影"""
+type EntryPlan {
+  planId: ID!
+  configVersion: Int!
+  accountId: String!
+  instrumentCode: String!
+  instrumentName: String!
+  bucket: String!
+  planKind: String!
+  phase: String!
+  runStatus: String!
+  environment: String!
+  authorizationMode: String!
+  authorizationState: String!
+  targetMode: String!
+  targetPositionPct: Float!
+  incrementalAmountCny: Float!
+  additionalVolume: Int!
+  maxTotalAmountCny: Float!
+  maxPositionPct: Float!
+  currentPositionVolume: Int!
+  baselinePositionVolume: Int!
+  currentMarketValueCny: Float!
+  filledVolume: Int!
+  filledAmountCny: Float!
+  remainingAmountCny: Float!
+  pendingReservedAmountCny: Float!
+  maxSingleIntentAmountCny: Float!
+  maxDailyFilledAmountCny: Float!
+  maxBuyPrice: Float!
+  ruleTypes: [String!]!
+  triggerRules: [EntryPlanRule!]!
+  pacingPolicy: EntryPlanPacing!
+  executionPolicy: EntryPlanExecution!
+  completionPolicy: EntryPlanCompletion!
+  exitProtection: EntryExitProtection!
+  entryEnabled: Boolean!
+  note: String!
+  lastReasonCode: String!
+  pendingIntentId: String!
+  hasWorkingOrder: Boolean!
+  nextEligibleAt: Int
+  expireAt: Int
+  hasExitProtection: Boolean!
+  blockedReasons: [String!]!
+  createdAt: String
+  updatedAt: String
+}
+
+"""确认设备绑定的自动建仓授权挑战"""
+input EntryPlanAuthorizationConfirmationInput {
+  planId: ID!
+  configVersion: Int!
+  challengeId: ID!
+  confirmationToken: String!
+}
+
+"""自动建仓精确授权预览"""
+type EntryPlanAuthorizationPreview {
+  challengeId: ID!
+  confirmationToken: String!
+  authorizationFingerprint: String!
+  challengeExpiresAt: String!
+  authorizationExpiresAt: String!
+  summary: String!
+  riskEnvelope: JSON!
+}
+
+"""自动建仓授权预览"""
+input EntryPlanAuthorizationPreviewInput {
+  planId: ID!
+  configVersion: Int!
+  idempotencyKey: String!
+}
+
+"""自动建仓授权操作结果"""
+type EntryPlanAuthorizationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  authorizationState: String!
+  grantId: String
+  expiresAt: String
+  plan: EntryPlan
+}
+
+"""建仓/加仓计划前端能力契约"""
+type EntryPlanCapabilities {
+  version: String!
+  targetModes: [EntryTargetModeCapability!]!
+  ruleTypes: [EntryRuleCapability!]!
+  allowedBuckets: [String!]!
+  environments: [String!]!
+  authorizationModes: [String!]!
+  maxOpenOrders: Int!
+}
+
+"""已保存的计划完成条件"""
+type EntryPlanCompletion {
+  expireAtMs: Int
+  maxBuyPrice: Float!
+  stopWhenTargetReached: Boolean!
+  stopWhenBudgetExhausted: Boolean!
+  cancelUnsubmittedOnExpiry: Boolean!
+}
+
+"""计划完成条件"""
+input EntryPlanCompletionInput {
+  expireAtMs: Int = null
+  maxBuyPrice: Float! = 0
+  stopWhenTargetReached: Boolean! = true
+  stopWhenBudgetExhausted: Boolean! = true
+  cancelUnsubmittedOnExpiry: Boolean! = true
+}
+
+"""可读的建仓计划审计事件"""
+type EntryPlanEvent {
+  eventId: ID!
+  planId: ID!
+  eventType: String!
+  occurredAt: String
+  reasonCode: String!
+  message: String!
+  details: JSON!
+}
+
+"""已保存的执行和价格保护策略"""
+type EntryPlanExecution {
+  priceReference: String!
+  maxSlippageBps: Float!
+  maxPriceDeviationBps: Float!
+  approvalTtlMs: Int!
+}
+
+"""执行环境、确认方式和保护限价参数"""
+input EntryPlanExecutionInput {
+  environment: String! = "PAPER"
+  authorizationMode: String! = "MANUAL_CONFIRM"
+  priceReference: String! = "ASK1_PROTECTED_LIMIT"
+  maxSlippageBps: Float! = 20
+  maxPriceDeviationBps: Float! = 20
+  approvalTtlMs: Int! = 15000
+}
+
+"""建仓/加仓计划操作结果"""
+type EntryPlanMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  plan: EntryPlan
+}
+
+"""已保存的分批节奏与容量"""
+type EntryPlanPacing {
+  trancheCount: Int!
+  maxSingleIntentAmountCny: Float!
+  maxDailyFilledAmountCny: Float!
+  maxOrdersPerDay: Int!
+  cashBufferPct: Float!
+  minIntervalSeconds: Int!
+  cooldownAfterRejectSeconds: Int!
+  trendAdjustmentEnabled: Boolean!
+}
+
+"""分批节奏与计划级容量"""
+input EntryPlanPacingInput {
+  trancheCount: Int! = 4
+  maxSingleIntentAmountCny: Float! = 0
+  maxDailyFilledAmountCny: Float! = 0
+  maxOrdersPerDay: Int! = 1
+  cashBufferPct: Float! = 0.2
+  minIntervalSeconds: Int! = 300
+  cooldownAfterRejectSeconds: Int! = 60
+  trendAdjustmentEnabled: Boolean! = true
+}
+
+"""已保存的买入触发规则"""
+type EntryPlanRule {
+  ruleId: String!
+  ruleType: String!
+  priority: Int!
+  enabled: Boolean!
+  once: Boolean!
+  presetId: String!
+  minPullbackPct: Float
+  maxPullbackPct: Float
+  reboundConfirmationPct: Float
+  fastEmaPeriod: Int
+  slowEmaPeriod: Int
+  manualTriggerSequence: Int
+  ladderLevels: [EntryPriceLadderLevel!]!
+}
+
+"""买入触发规则；字段按 ruleType 受 capabilities 约束"""
+input EntryPlanRuleInput {
+  ruleId: String!
+  ruleType: String!
+  priority: Int! = 0
+  enabled: Boolean! = true
+  once: Boolean! = false
+  presetId: String = null
+  minPullbackPct: Float = null
+  maxPullbackPct: Float = null
+  reboundConfirmationPct: Float = null
+  fastEmaPeriod: Int = null
+  slowEmaPeriod: Int = null
+  manualTriggerSequence: Int = null
+  ladderLevels: [EntryPriceLadderLevelInput!]!
+}
+
+"""建仓/加仓目标与绝对风险上限"""
+input EntryPlanTargetInput {
+  mode: String!
+  targetPositionPct: Float = null
+  incrementalAmountCny: Float = null
+  additionalVolume: Int = null
+  maxTotalAmountCny: Float! = 0
+  maxPositionPct: Float! = 0
+}
+
+"""价格阶梯中的一个可编辑档位"""
+type EntryPriceLadderLevel {
+  levelId: String!
+  triggerPrice: Float!
+  trancheAmountCny: Float
+  trancheVolume: Int
+  priority: Int!
+}
+
+"""价格阶梯中的一个一次性档位"""
+input EntryPriceLadderLevelInput {
+  levelId: String!
+  triggerPrice: Float!
+  trancheAmountCny: Float = null
+  trancheVolume: Int = null
+  priority: Int! = 0
+}
+
+"""买入规则卡能力"""
+type EntryRuleCapability {
+  ruleType: String!
+  label: String!
+  category: String!
+  description: String!
+  suitableFor: String!
+  warning: String!
+  fields: [EntryRuleFieldCapability!]!
+  presets: [EntryRulePreset!]!
+}
+
+"""买入规则的强类型前端字段定义"""
+type EntryRuleFieldCapability {
+  key: String!
+  label: String!
+  type: String!
+  unit: String!
+  required: Boolean!
+  min: Float
+  max: Float
+  step: Float
+  defaultValue: JSON!
+  helpText: String!
+  advanced: Boolean!
+}
+
+"""规则预设"""
+type EntryRulePreset {
+  presetId: String!
+  label: String!
+  summary: String!
+  parameters: JSON!
+}
+
+"""目标模式能力"""
+type EntryTargetModeCapability {
+  value: String!
+  label: String!
+  description: String!
 }
 
 """策略意图到成交的执行跟踪视图"""
@@ -2865,6 +3228,42 @@ type Mutation {
   """刷新单票公告与回购数据"""
   refreshStockDisclosures(stockCode: String!, force: Boolean! = false): AnnouncementSyncStatus!
 
+  """创建固定单标的建仓/加仓托管计划"""
+  createEntryPlan(input: CreateEntryPlanInput!): EntryPlanMutationResult!
+
+  """原子更新不存在待收敛订单的托管计划"""
+  updateEntryPlan(input: UpdateEntryPlanInput!): EntryPlanMutationResult!
+
+  """启动或暂停计划的新触发"""
+  setEntryPlanEnabled(planId: ID!, enabled: Boolean!, configVersion: Int!): EntryPlanMutationResult!
+
+  """取消计划；可选择请求撤销工作中买单"""
+  cancelEntryPlan(planId: ID!, configVersion: Int!, cancelWorkingOrder: Boolean! = false): EntryPlanMutationResult!
+
+  """用最新权威快照立即重新检查计划"""
+  evaluateEntryPlanNow(planId: ID!): EntryPlanMutationResult!
+
+  """触发计划中指定的人工买入规则并重新执行全部风控"""
+  triggerEntryPlanManualRule(planId: ID!, ruleId: ID!): EntryPlanMutationResult!
+
+  """暂停或恢复账户级自动买入；不会补发历史触发"""
+  setEntryAutomationPaused(paused: Boolean!, reason: String!): EntryAutomationStatus!
+
+  """预览设备绑定的限时自动建仓授权"""
+  previewEntryPlanAuthorization(input: EntryPlanAuthorizationPreviewInput!): EntryPlanAuthorizationPreview!
+
+  """确认设备绑定的限时自动建仓授权"""
+  confirmEntryPlanAuthorization(input: EntryPlanAuthorizationConfirmationInput!): EntryPlanAuthorizationResult!
+
+  """逐笔确认前按最新行情和风控重新预览"""
+  previewEntryIntent(planId: ID!, intentId: ID!): EntryIntentPreview!
+
+  """确认一条买入意图并重新执行全部下单风控"""
+  confirmEntryIntent(planId: ID!, intentId: ID!, confirmationToken: String!): EntryPlanMutationResult!
+
+  """拒绝本次买入意图，不取消整个计划"""
+  rejectEntryIntent(planId: ID!, intentId: ID!): EntryPlanMutationResult!
+
   """预览移动端手动委托并签发一次性确认挑战"""
   previewManualOrder(input: ManualOrderPreviewInput!): ManualOrderPreviewResult!
 
@@ -3740,6 +4139,24 @@ type Query {
 
   """获取除权因子数据"""
   dividFactors(stockCode: String!, startTime: DateTime = null, endTime: DateTime = null, limit: Int = null): [DividFactorData!]!
+
+  """查询当前唯一账户的建仓/加仓托管计划"""
+  entryPlans(instrumentCode: String! = "", statuses: [String!] = null): [EntryPlan!]!
+
+  """查询单个建仓/加仓托管计划"""
+  entryPlan(planId: ID!): EntryPlan
+
+  """查询卡片编辑器的唯一规则与字段能力契约"""
+  entryPlanCapabilities: EntryPlanCapabilities!
+
+  """查询计划的可读审计事件"""
+  entryPlanEvents(planId: ID!, limit: Int! = 100): [EntryPlanEvent!]!
+
+  """查询仍等待逐笔确认的买入意图"""
+  pendingEntryIntents(instrumentCode: String! = ""): [EntryIntent!]!
+
+  """查询账户级自动买入安全门"""
+  entryAutomationStatus: EntryAutomationStatus!
 
   """获取财务数据页整体统计"""
   financialOverview: FinancialOverview!
@@ -5587,6 +6004,12 @@ type Subscription {
   """按持久化序号订阅单个 AI 对话的可恢复事件流"""
   aiAssistantEvents(threadId: ID!, afterSequence: Int! = 0): AiAssistantEvent!
 
+  """订阅单个建仓/加仓计划的权威投影更新"""
+  entryPlanUpdated(planId: ID!): EntryPlan!
+
+  """订阅单个建仓/加仓计划的待确认买入意图更新"""
+  entryIntentUpdated(planId: ID!): [EntryIntent!]!
+
   """订阅首板晋级工作台版本通知"""
   firstBoardPromotionUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
 
@@ -6641,6 +7064,20 @@ input UpdateAiRuntimeSettingsInput {
   maxTurns: Int!
   maxToolCalls: Int!
   runTimeoutSeconds: Int!
+}
+
+"""更新不存在待收敛订单的建仓/加仓计划"""
+input UpdateEntryPlanInput {
+  planId: ID!
+  configVersion: Int!
+  targetPolicy: EntryPlanTargetInput!
+  triggerRules: [EntryPlanRuleInput!]!
+  pacingPolicy: EntryPlanPacingInput!
+  executionPolicy: EntryPlanExecutionInput!
+  completionPolicy: EntryPlanCompletionInput!
+  exitProtection: EntryExitProtectionInput = null
+  note: String! = ""
+  idempotencyKey: String! = ""
 }
 
 """更新人工计划"""

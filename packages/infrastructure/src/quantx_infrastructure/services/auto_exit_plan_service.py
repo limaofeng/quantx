@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
+from math import isfinite
 from typing import Any, Callable, Mapping, Optional
 
 from quantx_domain.trading.exit_plan import (
@@ -214,7 +215,7 @@ class AutoExitPlanService:
     synced = 0
     async with AsyncSessionLocal() as db:
       repo = AutoExitPlanRepository(db)
-      for plan in book.plans.values():
+      for plan in sorted(book.plans.values(), key=lambda item: item.plan_id):
         template = ExitPlanTemplate.from_dict(
           {
             **plan.template.to_dict(),
@@ -223,22 +224,86 @@ class AutoExitPlanService:
             "auto_exit_authorized": False,
           }
         )
-        if not template.account_id or plan.status in {
-          ExitPlanStatus.CANCELLED,
-          ExitPlanStatus.COMPLETED,
-        }:
+        if not template.account_id:
           continue
         record = await repo.find_by_id(plan.plan_id, for_update=True)
         if record is not None:
-          if int(record.config_version or 0) >= int(template.config_version or 0):
-            continue
+          record_version = int(record.config_version or 0)
+          template_version = int(template.config_version or 0)
           persistent_plan = ExitPlan.from_dict(dict(record.plan_state or {}))
-          persistent_plan.apply_template(template)
-          record.config_version = int(template.config_version)
-          clear_exact_auto_exit_authorization(record)
+          self._require_strategy_entry_sync_binding(
+            record=record,
+            persistent_plan=persistent_plan,
+            incoming_plan=plan,
+            strategy_run_id=strategy_run_id,
+          )
+          expansion = self._merge_strategy_entry_snapshot(
+            persistent_plan=persistent_plan,
+            incoming_plan=plan,
+          )
+          if (
+            expansion is None
+            and plan.status
+            in {ExitPlanStatus.CANCELLED, ExitPlanStatus.COMPLETED}
+          ):
+            continue
+          if record_version >= template_version:
+            if expansion is None:
+              continue
+            persistent_plan.template = ExitPlanTemplate.from_dict(
+              {
+                **persistent_plan.template.to_dict(),
+                "auto_exit_authorized": False,
+              }
+            )
+            clear_exact_auto_exit_authorization(record)
+            event_type = "STRATEGY_PLAN_ENTRY_EXPANDED"
+            business_key = (
+              f"strategy-plan-entry-expanded:{plan.plan_id}:"
+              f"{record_version}:{expansion['entry_filled_volume']}"
+            )
+            event_payload = {
+              "strategy_run_id": strategy_run_id,
+              "source_type": persistent_plan.template.source_type,
+              "config_version": record_version,
+              "incoming_template_version": template_version,
+              **expansion,
+            }
+          else:
+            persistent_plan.apply_template(template)
+            record.config_version = template_version
+            clear_exact_auto_exit_authorization(record)
+            event_type = "STRATEGY_PLAN_POLICY_UPDATED"
+            business_key = (
+              f"strategy-plan-sync:{plan.plan_id}:{template_version}"
+            )
+            event_payload = {
+              "strategy_run_id": strategy_run_id,
+              "source_type": template.source_type,
+              "config_version": template_version,
+            }
+            if expansion is not None:
+              event_payload.update(expansion)
+          if expansion is not None and bool(
+            expansion["reactivated_from_completed"]
+          ):
+            record.enabled = True
           self._sync_record(record, persistent_plan)
-          event_type = "STRATEGY_PLAN_POLICY_UPDATED"
+          if expansion is not None:
+            record.protected_volume = int(persistent_plan.entry_filled_volume)
+            record.entry_avg_price = float(persistent_plan.entry_avg_price)
+            event_payload.update(
+              {
+                "status": persistent_plan.status.value,
+                "monitor_enabled": bool(record.enabled),
+                "unprotected_terminal": (
+                  persistent_plan.status == ExitPlanStatus.CANCELLED
+                ),
+              }
+            )
         else:
+          if plan.status in {ExitPlanStatus.CANCELLED, ExitPlanStatus.COMPLETED}:
+            continue
           persistent_plan = ExitPlan.from_dict(plan.to_dict())
           persistent_plan.apply_template(template)
           record = AutoExitPlanRecord(
@@ -263,22 +328,129 @@ class AutoExitPlanService:
           self._sync_record(record, persistent_plan)
           db.add(record)
           event_type = "STRATEGY_PLAN_PERSISTED"
-        await self._append_event(
-          db,
-          business_key=(
+          business_key = (
             f"strategy-plan-sync:{plan.plan_id}:{template.config_version}"
-          ),
-          plan_id=plan.plan_id,
-          event_type=event_type,
-          payload={
+          )
+          event_payload = {
             "strategy_run_id": strategy_run_id,
             "source_type": template.source_type,
             "config_version": template.config_version,
-          },
+          }
+        await self._append_event(
+          db,
+          business_key=business_key,
+          plan_id=plan.plan_id,
+          event_type=event_type,
+          payload=event_payload,
         )
         synced += 1
       await db.commit()
     return synced
+
+  @staticmethod
+  def _require_strategy_entry_sync_binding(
+    *,
+    record: AutoExitPlanRecord,
+    persistent_plan: ExitPlan,
+    incoming_plan: ExitPlan,
+    strategy_run_id: str,
+  ) -> None:
+    persistent = persistent_plan.template
+    incoming = incoming_plan.template
+    bindings = {
+      "plan_id": (record.plan_id, persistent.plan_id, incoming.plan_id),
+      "account_id": (
+        record.account_id,
+        persistent.account_id,
+        incoming.account_id,
+      ),
+      "instrument_code": (
+        record.instrument_code,
+        persistent.instrument_code,
+        incoming.instrument_code,
+      ),
+      "bucket": (record.bucket, persistent.bucket, incoming.bucket),
+      "source_type": (
+        record.source_type,
+        persistent.source_type,
+        incoming.source_type,
+      ),
+      "source_id": (
+        record.source_id,
+        persistent.source_id,
+        incoming.source_id,
+      ),
+      "strategy_run_id": (
+        record.strategy_run_id,
+        persistent.run_id,
+        incoming.run_id,
+        strategy_run_id,
+      ),
+    }
+    for field, values in bindings.items():
+      normalized = [str(value or "").strip() for value in values]
+      if not normalized[0] or any(value != normalized[0] for value in normalized):
+        raise ValueError(f"strategy exit-plan {field} binding mismatch")
+
+  @staticmethod
+  def _merge_strategy_entry_snapshot(
+    *,
+    persistent_plan: ExitPlan,
+    incoming_plan: ExitPlan,
+  ) -> Optional[dict[str, Any]]:
+    """Monotonically merge cumulative entry fills without replacing runtime facts."""
+
+    previous_volume = max(0, int(persistent_plan.entry_filled_volume or 0))
+    incoming_volume = max(0, int(incoming_plan.entry_filled_volume or 0))
+    if incoming_volume <= previous_volume:
+      return None
+
+    incoming_avg_price = float(incoming_plan.entry_avg_price or 0.0)
+    if not isfinite(incoming_avg_price) or incoming_avg_price <= 0:
+      raise ValueError(
+        "strategy exit-plan entry snapshot grew without a valid average price"
+      )
+    previous_avg_price = float(persistent_plan.entry_avg_price or 0.0)
+    if not isfinite(previous_avg_price) or previous_avg_price < 0:
+      raise ValueError(
+        "persistent strategy exit-plan has an invalid average entry price"
+      )
+    previous_notional = previous_avg_price * previous_volume
+    incoming_notional = incoming_avg_price * incoming_volume
+    incremental_volume = incoming_volume - previous_volume
+    incremental_notional = incoming_notional - previous_notional
+    if previous_volume > 0 and incremental_notional <= 0:
+      raise ValueError(
+        "strategy exit-plan cumulative entry snapshot regressed its notional"
+      )
+    incremental_avg_price = incremental_notional / incremental_volume
+    if not isfinite(incremental_avg_price) or incremental_avg_price <= 0:
+      raise ValueError(
+        "strategy exit-plan incremental entry snapshot has an invalid price"
+      )
+    merged_avg_price = (
+      previous_notional + incremental_avg_price * incremental_volume
+    ) / incoming_volume
+
+    reactivated_from_completed = persistent_plan.status == ExitPlanStatus.COMPLETED
+    persistent_plan.entry_filled_volume = incoming_volume
+    persistent_plan.entry_avg_price = merged_avg_price
+    if not persistent_plan.entry_trade_date and incoming_plan.entry_trade_date:
+      persistent_plan.entry_trade_date = incoming_plan.entry_trade_date
+    if persistent_plan.status == ExitPlanStatus.COMPLETED:
+      persistent_plan.status = (
+        ExitPlanStatus.PARTIALLY_EXITED
+        if int(persistent_plan.exited_volume or 0) > 0
+        else ExitPlanStatus.ACTIVE
+      )
+
+    return {
+      "previous_entry_filled_volume": previous_volume,
+      "entry_filled_volume": incoming_volume,
+      "previous_entry_avg_price": previous_avg_price,
+      "entry_avg_price": merged_avg_price,
+      "reactivated_from_completed": reactivated_from_completed,
+    }
 
   @staticmethod
   def _legacy_condition_volume(
