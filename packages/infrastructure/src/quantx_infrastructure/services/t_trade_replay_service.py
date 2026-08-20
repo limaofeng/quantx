@@ -25,11 +25,17 @@ from quantx_infrastructure.repositories.daily_asset_snapshot_repository import (
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
+from quantx_infrastructure.services.t_trade_replay_projection_service import (
+  TERMINAL_REPLAY_STATUSES,
+  TTradeReplayUpdateKind,
+  t_trade_replay_projection_service,
+)
 from quantx_infrastructure.services.t_trade_service import (
-  ACTIVE_RUN_STATUSES,
   TTradeService,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+
+_CANCELLABLE_REPLAY_STATUSES = frozenset({"PENDING", "RUNNING", "PAUSED"})
 
 
 class TTradeReplayService:
@@ -179,17 +185,32 @@ class TTradeReplayService:
       backtest_end_time=end_time,
       auto_start=False,
     )
+    await t_trade_replay_projection_service.create(
+      run_id=run_id,
+      account_id=account_id,
+    )
     if not await strategy_manager.start_strategy(run_id):
       replay = await self.get(run_id)
       raise ValueError(
         replay.get("error_message") if replay else "做 T 历史回放启动失败"
       )
-    return await self.get(run_id)
+    replay = await self.get(run_id)
+    if replay is None:
+      raise ValueError("做 T 历史回放启动后无法读取")
+    return replay
 
   async def cancel(self, run_id: str) -> Dict[str, Any]:
     run, backtest = await self._load_run_and_backtest(run_id)
     if run is None or not self._mapping(run.parameters).get("t_trade_replay"):
       raise ValueError("做 T 历史回放不存在")
+    projection = await t_trade_replay_projection_service.get(run_id)
+    replay_status = str((projection or {}).get("status") or "").upper()
+    if replay_status not in _CANCELLABLE_REPLAY_STATUSES:
+      if replay_status in TERMINAL_REPLAY_STATUSES:
+        raise ValueError(f"做 T 历史回放已处于终态 {replay_status}，不能取消")
+      if not replay_status:
+        raise ValueError("做 T 历史回放缺少状态投影，不能安全取消")
+      raise ValueError(f"做 T 历史回放当前状态 {replay_status} 不允许取消")
     strategy_manager = self._require_runtime_manager()
     runtime = strategy_manager.get_run(run_id)
     metrics = self._mapping(run.metrics)
@@ -208,31 +229,50 @@ class TTradeReplayService:
           end_time=time_utils.now(),
         )
         break
+    params = self._mapping(run.parameters)
+    await t_trade_replay_projection_service.update(
+      run_id=run_id,
+      account_id=str(params.get("account_id") or ""),
+      status="CANCELLED",
+      progress_pct=(await t_trade_replay_projection_service.get(run_id) or {}).get(
+        "progress_pct"
+      ),
+      processed_until=(
+        self._naive(runtime.context.current_time)
+        if runtime and runtime.context.current_time
+        else None
+      ),
+      kind=TTradeReplayUpdateKind.RESULT_READY,
+    )
     return await self.get(run_id)
 
   async def get(self, run_id: str) -> Optional[Dict[str, Any]]:
     run, backtest = await self._load_run_and_backtest(run_id)
     if run is None or not self._mapping(run.parameters).get("t_trade_replay"):
       return None
-    return self._project(run, backtest)
+    projection = await t_trade_replay_projection_service.get(run_id)
+    if projection is None:
+      return None
+    return self._project(run, backtest, projection)
 
   async def history(self, account_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     limit = max(1, min(int(limit or 20), 100))
+    projections = await t_trade_replay_projection_service.list_by_account(
+      account_id,
+      limit,
+    )
+    run_ids = [str(item["run_id"]) for item in projections]
+    if not run_ids:
+      return []
     async for db in get_async_db():
-      runs = await StrategyRunRepository(db).find_all_strategy_runs()
-      backtest_repo = BacktestRepository(db)
-      selected = [
-        run
-        for run in runs
-        if self._mapping(run.parameters).get("t_trade_replay")
-        and str(self._mapping(run.parameters).get("account_id", "")) == account_id
+      runs = await StrategyRunRepository(db).find_runs_by_ids(run_ids)
+      runs_by_id = {run.id: run for run in runs}
+      backtests = await BacktestRepository(db).get_latest_backtests_by_runs(run_ids)
+      return [
+        self._project(runs_by_id[run_id], backtests.get(run_id), projection)
+        for run_id, projection in zip(run_ids, projections)
+        if run_id in runs_by_id
       ]
-      selected.sort(key=lambda run: run.created_at or datetime.min, reverse=True)
-      result = []
-      for run in selected[:limit]:
-        backtests = await backtest_repo.get_backtests_by_run(run.id)
-        result.append(self._project(run, backtests[0] if backtests else None))
-      return result
     return []
 
   async def cycles(
@@ -256,15 +296,7 @@ class TTradeReplayService:
     }
 
   async def _has_active_replay(self, account_id: str) -> bool:
-    async for db in get_async_db():
-      runs = await StrategyRunRepository(db).find_all_strategy_runs()
-      return any(
-        self._mapping(run.parameters).get("t_trade_replay")
-        and str(self._mapping(run.parameters).get("account_id", "")) == account_id
-        and str(getattr(run.status, "value", run.status) or "") in ACTIVE_RUN_STATUSES
-        for run in runs
-      )
-    return False
+    return await t_trade_replay_projection_service.has_active(account_id)
 
   async def _load_snapshot_portfolio(
     self, account_id: str, start_time: datetime
@@ -354,50 +386,37 @@ class TTradeReplayService:
     )
     return self._mapping(metrics.get("t_trade_replay"))
 
-  def _project(self, run: Any, backtest: Any) -> Dict[str, Any]:
+  def _project(
+    self,
+    run: Any,
+    backtest: Any,
+    projection: Dict[str, Any],
+  ) -> Dict[str, Any]:
     params = self._mapping(run.parameters)
-    runtime_status = str(getattr(run.status, "value", run.status) or "").upper()
-    backtest_status = str(getattr(backtest, "status", "") or "").upper()
-    raw_status = (
-      backtest_status
-      if backtest_status in {"CANCELLED", "COMPLETED", "ERROR"}
-      and runtime_status in {"", "COMPLETED", "ERROR", "STOPPED"}
-      else runtime_status
-      or backtest_status
-      or str(getattr(run.status, "value", run.status) or "PENDING").upper()
-    )
+    raw_status = str(projection["status"]).upper()
     start_time = self._naive(params.get("replay_start_time"))
     end_time = self._naive(params.get("replay_end_time"))
-    current_time = None
+    current_time = projection.get("processed_until")
+    progress = float(projection.get("progress_pct") or 0.0)
     if raw_status == "COMPLETED":
       progress = 100.0
-    elif current_time and end_time > start_time:
-      progress = max(
-        0.0,
-        min(
-          99.9,
-          (current_time - start_time).total_seconds()
-          / (end_time - start_time).total_seconds()
-          * 100.0,
-        ),
-      )
-    else:
-      progress = 0.0
     replay_metrics = self._replay_metrics(run, backtest)
     skipped = list(params.get("replay_skipped_instruments") or [])
     error_message = getattr(backtest, "error_message", None) or run.error_message
     return {
       "run_id": run.id,
       "backtest_id": backtest.id if backtest else None,
-      "account_id": str(params.get("account_id", "") or ""),
+      "account_id": str(projection["account_id"]),
       "status": raw_status,
       "progress_pct": progress,
+      "processed_until": current_time,
+      "revision": str(projection["revision"]),
       "start_time": start_time,
       "end_time": end_time,
       "snapshot_id": params.get("replay_snapshot_id"),
       "snapshot_date": params.get("replay_snapshot_date"),
       "created_at": run.created_at,
-      "updated_at": run.updated_at,
+      "updated_at": projection["updated_at"],
       "error_message": error_message,
       "data_quality": str(
         replay_metrics.get("data_quality") or ("ERROR" if error_message else "RUNNING")

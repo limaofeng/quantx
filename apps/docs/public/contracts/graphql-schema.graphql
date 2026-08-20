@@ -5599,6 +5599,9 @@ type Subscription {
   """订阅账户做 T 监控投影更新"""
   tTradeUpdates(accountId: String!): TTradeUpdateNotice!
 
+  """订阅账户做 T 历史回放更新"""
+  tTradeReplayUpdates(accountId: String!): TTradeReplayUpdateNotice!
+
   """订阅股票实时报价流"""
   marketQuotes(stockList: [String!]!): RealTimePrice!
 
@@ -6066,6 +6069,8 @@ type TTradeReplay {
   accountId: String!
   status: String!
   progressPct: Float!
+  revision: String!
+  processedUntil: DateTime
   startTime: DateTime!
   endTime: DateTime!
   snapshotId: String
@@ -6285,6 +6290,23 @@ type TTradeReplaySummary {
   averageHoldingHours: Float!
   maxHoldingHours: Float!
   capitalProfitPerOccupiedDayPct: Float!
+}
+
+"""做 T 历史回放更新类型"""
+enum TTradeReplayUpdateKind {
+  CREATED
+  STATUS_CHANGED
+  PROGRESS
+  RESULT_READY
+}
+
+"""做 T 历史回放更新通知"""
+type TTradeReplayUpdateNotice {
+  accountId: String!
+  runId: String!
+  revision: String!
+  kind: TTradeReplayUpdateKind!
+  occurredAt: DateTime!
 }
 
 """账户自动交易目标灰度阶段"""

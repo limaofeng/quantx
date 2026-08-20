@@ -99,6 +99,7 @@ TABLE_COMMENTS: dict[str, str] = {
   "t_trade_global_configs": "账户级全局做 T 配置",
   "t_trade_global_monitor_projections": "账户级全局做 T 监控投影",
   "t_trade_imported_entries": "全局做 T 导入成交记录",
+  "t_trade_replay_projections": "做 T 历史回放生命周期投影",
   "trade_command_outbox": "QMT Agent 交易命令持久化发件箱",
   "trades": "券商成交记录",
   "watchlist_items": "账户自选证券",

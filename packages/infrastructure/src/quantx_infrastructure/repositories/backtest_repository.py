@@ -105,6 +105,26 @@ class BacktestRepository:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_latest_backtests_by_runs(
+        self, strategy_run_ids: List[str]
+    ) -> dict[str, StrategyBacktest]:
+        """Batch-load the newest backtest for each requested strategy run."""
+        if not strategy_run_ids:
+            return {}
+        stmt = (
+            select(StrategyBacktest)
+            .where(StrategyBacktest.strategy_run_id.in_(strategy_run_ids))
+            .order_by(
+                StrategyBacktest.strategy_run_id.asc(),
+                StrategyBacktest.version.desc(),
+            )
+        )
+        result = await self.db.execute(stmt)
+        latest: dict[str, StrategyBacktest] = {}
+        for backtest in result.scalars().all():
+            latest.setdefault(backtest.strategy_run_id, backtest)
+        return latest
+
     async def update_backtest_status(
         self,
         backtest_id: str,

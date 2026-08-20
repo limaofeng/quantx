@@ -728,6 +728,8 @@ export const TTradeReplayHistoryQuery = gql(`
       backtestId
       status
       progressPct
+      revision
+      processedUntil
       startTime
       endTime
       snapshotDate
@@ -752,6 +754,8 @@ export const TTradeReplayQuery = gql(`
       accountId
       status
       progressPct
+      revision
+      processedUntil
       startTime
       endTime
       snapshotId
@@ -861,6 +865,18 @@ export const TTradeReplayCyclesQuery = gql(`
         holdingHours
         capitalUtilizationPct
       }
+    }
+  }
+`);
+
+export const TTradeReplayUpdatesSubscription = gql(`
+  subscription Portfolio_TTradeReplayUpdates($accountId: String!) {
+    tTradeReplayUpdates(accountId: $accountId) {
+      accountId
+      runId
+      revision
+      kind
+      occurredAt
     }
   }
 `);

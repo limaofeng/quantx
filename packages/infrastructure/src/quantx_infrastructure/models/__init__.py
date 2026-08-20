@@ -135,6 +135,7 @@ from .strategy_run_state import (
 from .t_trade_global_config import TTradeGlobalConfig
 from .t_trade_global_monitor_projection import TTradeGlobalMonitorProjection
 from .t_trade_imported_entry import TTradeImportedEntry
+from .t_trade_replay_projection import TTradeReplayProjection
 from .table_comments import apply_table_comments
 from .tick import Tick
 from .trade import Trade
@@ -169,6 +170,7 @@ __all__ = [
   "TTradeGlobalConfig",
   "TTradeGlobalMonitorProjection",
   "TTradeImportedEntry",
+  "TTradeReplayProjection",
   "WatchlistItem",
   "Account",
   "AutoExitPlanRecord",

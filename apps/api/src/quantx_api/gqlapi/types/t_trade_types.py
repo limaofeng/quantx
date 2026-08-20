@@ -559,6 +559,23 @@ class TTradeUpdateNotice:
   occurred_at: datetime
 
 
+@strawberry.enum(description="做 T 历史回放更新类型")
+class TTradeReplayUpdateKind(Enum):
+  CREATED = "CREATED"
+  STATUS_CHANGED = "STATUS_CHANGED"
+  PROGRESS = "PROGRESS"
+  RESULT_READY = "RESULT_READY"
+
+
+@strawberry.type(description="做 T 历史回放更新通知")
+class TTradeReplayUpdateNotice:
+  account_id: str
+  run_id: str
+  revision: str
+  kind: TTradeReplayUpdateKind
+  occurred_at: datetime
+
+
 @strawberry.type(description="全局做 T 监控操作结果")
 class TTradeGlobalMutationResult:
   success: bool
@@ -761,6 +778,8 @@ class TTradeReplay:
   account_id: str
   status: str
   progress_pct: float
+  revision: str
+  processed_until: Optional[datetime]
   start_time: datetime
   end_time: datetime
   snapshot_id: Optional[str]

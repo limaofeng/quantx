@@ -85,6 +85,10 @@ from quantx_infrastructure.core.strategy_performance import (
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models import ExecutionMetrics, KLine
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.t_trade_replay_projection_service import (
+  TTradeReplayUpdateKind,
+  t_trade_replay_projection_service,
+)
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
 from .replay_clock import ReplayClock
@@ -2125,6 +2129,12 @@ class StrategyExecutor:
           "INFO",
           f"多标的回测窗口完成: {window_start} -> {window_end}, events={len(events)}",
         )
+        if runtime.status == ExecutionStatus.RUNNING:
+          await self._report_t_trade_replay_progress(
+            runtime,
+            processed_until=window_end,
+            force=True,
+          )
     self._runtime_log(
       runtime,
       "SUCCESS",
@@ -2698,6 +2708,11 @@ class StrategyExecutor:
           self._runtime_log(
             runtime, "INFO", f"回测窗口无数据: {instrument_code}, {window_start.date()}"
           )
+          await self._report_t_trade_replay_progress(
+            runtime,
+            processed_until=window_end,
+            force=True,
+          )
           continue
 
         tick_idx = 0
@@ -2803,6 +2818,12 @@ class StrategyExecutor:
           f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
           f"tick={tick_idx}, kline={per_period_summary}",
         )
+        if runtime.status == ExecutionStatus.RUNNING:
+          await self._report_t_trade_replay_progress(
+            runtime,
+            processed_until=window_end,
+            force=True,
+          )
 
     total_klines = sum(total_klines_by_period.values())
     self._runtime_log(
@@ -2899,6 +2920,11 @@ class StrategyExecutor:
             "INFO",
             f"回测窗口无数据: {instrument_code}, {window_start} -> {window_end}",
           )
+          await self._report_t_trade_replay_progress(
+            runtime,
+            processed_until=window_end,
+            force=True,
+          )
           continue
 
         kline_indices = {period: 0 for period in periods}
@@ -2951,6 +2977,12 @@ class StrategyExecutor:
           f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
           f"kline={per_period_summary}",
         )
+        if runtime.status == ExecutionStatus.RUNNING:
+          await self._report_t_trade_replay_progress(
+            runtime,
+            processed_until=window_end,
+            force=True,
+          )
 
     total_klines = sum(total_klines_by_period.values())
     self._runtime_log(
@@ -3424,6 +3456,7 @@ class StrategyExecutor:
       await self._board_replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "tick", tick)
+      await self._report_t_trade_replay_progress(runtime)
 
     except Exception as e:
       if metrics:
@@ -3493,6 +3526,7 @@ class StrategyExecutor:
       await self._board_replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "bar", kline)
+      await self._report_t_trade_replay_progress(runtime)
 
     except Exception as e:
       if metrics:
@@ -3500,6 +3534,65 @@ class StrategyExecutor:
       self.logger.error(f"处理K线数据失败: {e}")
       if self._uses_strict_board_replay(runtime):
         raise
+
+  async def _report_t_trade_replay_progress(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    processed_until: Optional[datetime] = None,
+    force: bool = False,
+  ) -> None:
+    """Persist monotonic replay progress at wall-time or window boundaries."""
+    parameters = dict(runtime.context.parameters or {})
+    current_time = processed_until or runtime.context.current_time
+    start_time = runtime.context.backtest_start_time
+    end_time = runtime.context.backtest_end_time
+    if (
+      not parameters.get("t_trade_replay")
+      or current_time is None
+      or start_time is None
+      or end_time is None
+      or end_time <= start_time
+    ):
+      return
+    current_time = (
+      time_utils.to_shanghai(current_time) if current_time.tzinfo else current_time
+    )
+    start_time = time_utils.to_shanghai(start_time) if start_time.tzinfo else start_time
+    end_time = time_utils.to_shanghai(end_time) if end_time.tzinfo else end_time
+    now = monotonic()
+    if not force and now - runtime._last_replay_projection_at < 1.0:
+      return
+    progress_pct = max(
+      0.0,
+      min(
+        99.9,
+        (current_time - start_time).total_seconds()
+        / (end_time - start_time).total_seconds()
+        * 100.0,
+      ),
+    )
+    if not force and progress_pct <= runtime._last_replay_progress_pct:
+      return
+    account_id = str(parameters.get("account_id") or "").strip()
+    if not account_id:
+      return
+    try:
+      await t_trade_replay_projection_service.update(
+        run_id=runtime.run_id,
+        account_id=account_id,
+        status="RUNNING",
+        progress_pct=progress_pct,
+        processed_until=current_time,
+        kind=TTradeReplayUpdateKind.PROGRESS,
+      )
+      runtime._last_replay_projection_at = now
+      runtime._last_replay_progress_pct = max(
+        runtime._last_replay_progress_pct,
+        progress_pct,
+      )
+    except Exception:
+      self.logger.exception("更新做 T 回放进度投影失败: %s", runtime.run_id)
 
   def _build_execution_context_snapshot(
     self,

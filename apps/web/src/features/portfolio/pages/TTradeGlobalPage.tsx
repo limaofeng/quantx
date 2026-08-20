@@ -95,6 +95,7 @@ import {
   TTradeReplayHistoryQuery,
   TTradeReplayPreparationQuery,
   TTradeReplayQuery,
+  TTradeReplayUpdatesSubscription,
   TTradeSignalHistoryPageQuery,
   TTradeUpdatesSubscription,
   TTradeSourceOrdersQuery,
@@ -102,6 +103,12 @@ import {
 } from '../hooks/useTTradeGlobal';
 
 import { readinessStageLabel } from './t-trade-global/readiness';
+import {
+  isNewerReplayRevision,
+  replayFallbackPollInterval,
+  replayNoticeRefreshTargets,
+  stableValueByKey,
+} from './t-trade-global/replaySync';
 import {
   TTradeHealthConsole,
   TTradeLiveBoard,
@@ -280,6 +287,15 @@ function NumericField({
   );
 }
 
+function useStableValueByKey<T>(
+  key: string,
+  value: T | undefined,
+  valueKey: string | undefined
+) {
+  const cache = React.useRef(new Map<string, T>());
+  return stableValueByKey(cache.current, key, value, valueKey);
+}
+
 function TTradeReplayPanel({
   accountId,
   form,
@@ -334,14 +350,37 @@ function TTradeReplayPanel({
   });
   const [startResult, startReplay] = useMutation(StartTTradeReplayMutation);
   const [cancelResult, cancelReplay] = useMutation(CancelTTradeReplayMutation);
+  const graphqlWsStatus = useGraphqlWsStatus();
+  const [replayUpdateResult] = useSubscription({
+    query: TTradeReplayUpdatesSubscription,
+    variables: { accountId },
+    pause: !accountId,
+  });
 
-  const history = React.useMemo(
-    () => historyResult.data?.tTradeReplayHistory || [],
-    [historyResult.data?.tTradeReplayHistory]
+  const stableHistory = useStableValueByKey(
+    accountId,
+    historyResult.data?.tTradeReplayHistory,
+    String(historyResult.operation?.variables.accountId || '')
   );
-  const replay = replayResult.data?.tTradeReplay;
-  const preparation = preparationResult.data?.tTradeReplayPreparation;
-  const cycles = cyclesResult.data?.tTradeReplayCycles.items || [];
+  const history = React.useMemo(() => stableHistory || [], [stableHistory]);
+  const replayValue = replayResult.data?.tTradeReplay;
+  const replay = useStableValueByKey(
+    activeRunId,
+    replayValue,
+    replayValue?.runId
+  );
+  const preparationValue = preparationResult.data?.tTradeReplayPreparation;
+  const preparation = useStableValueByKey(
+    startTime,
+    preparationValue,
+    preparationValue?.startTime
+  );
+  const cyclesPage = useStableValueByKey(
+    activeRunId,
+    cyclesResult.data?.tTradeReplayCycles,
+    String(cyclesResult.operation?.variables.runId || '')
+  );
+  const cycles = cyclesPage?.items || [];
   const currentPortfolioSummary = portfolioSummaryResult.data?.portfolioSummary;
   const currentPortfolioPositions = React.useMemo(
     () =>
@@ -366,6 +405,22 @@ function TTradeReplayPanel({
   const isRunning = ['PENDING', 'RUNNING', 'STARTING'].includes(
     String(replay?.status || '').toUpperCase()
   );
+  const hasActiveReplay =
+    isRunning ||
+    history.some(item =>
+      ['PENDING', 'RUNNING', 'STARTING'].includes(item.status.toUpperCase())
+    );
+  const fallbackPollInterval = replayFallbackPollInterval(
+    graphqlWsStatus,
+    hasActiveReplay
+  );
+  const pendingRefreshRef = React.useRef({
+    history: false,
+    replay: false,
+    cycles: false,
+  });
+  const refreshTimerRef = React.useRef<number | undefined>(undefined);
+  const latestRevisionRef = React.useRef(new Map<string, string>());
 
   React.useEffect(() => {
     setUseCurrentPortfolio(false);
@@ -375,17 +430,103 @@ function TTradeReplayPanel({
     if (!activeRunId && history.length > 0) setActiveRunId(history[0].runId);
   }, [activeRunId, history]);
 
-  React.useEffect(() => {
-    if (!accountId) return;
-    const timer = window.setInterval(() => {
-      refreshHistory({ requestPolicy: 'network-only' });
-      if (activeRunId) {
-        refreshReplay({ requestPolicy: 'network-only' });
-        refreshCycles({ requestPolicy: 'network-only' });
+  const scheduleRefresh = React.useCallback(
+    (targets: { history: boolean; replay: boolean; cycles: boolean }) => {
+      pendingRefreshRef.current.history ||= targets.history;
+      pendingRefreshRef.current.replay ||= targets.replay;
+      pendingRefreshRef.current.cycles ||= targets.cycles;
+      if (refreshTimerRef.current !== undefined) return;
+      refreshTimerRef.current = window.setTimeout(() => {
+        const pending = pendingRefreshRef.current;
+        pendingRefreshRef.current = {
+          history: false,
+          replay: false,
+          cycles: false,
+        };
+        refreshTimerRef.current = undefined;
+        if (pending.history) {
+          refreshHistory({ requestPolicy: 'network-only' });
+        }
+        if (pending.replay && activeRunId) {
+          refreshReplay({ requestPolicy: 'network-only' });
+        }
+        if (pending.cycles && activeRunId) {
+          refreshCycles({ requestPolicy: 'network-only' });
+        }
+      }, 100);
+    },
+    [activeRunId, refreshCycles, refreshHistory, refreshReplay]
+  );
+
+  React.useEffect(
+    () => () => {
+      if (refreshTimerRef.current !== undefined) {
+        window.clearTimeout(refreshTimerRef.current);
       }
-    }, 2_500);
+    },
+    []
+  );
+
+  React.useEffect(() => {
+    const notice = replayUpdateResult.data?.tTradeReplayUpdates;
+    if (!notice) return;
+    const previousRevision = latestRevisionRef.current.get(notice.runId);
+    if (!isNewerReplayRevision(previousRevision, notice.revision)) return;
+    latestRevisionRef.current.set(notice.runId, notice.revision);
+    scheduleRefresh(
+      replayNoticeRefreshTargets(String(notice.kind), notice.runId, activeRunId)
+    );
+  }, [activeRunId, replayUpdateResult.data, scheduleRefresh]);
+
+  React.useEffect(() => {
+    if (!accountId || fallbackPollInterval === null) return;
+    const poll = () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshHistory({ requestPolicy: 'network-only' });
+      if (hasActiveReplay && activeRunId) {
+        refreshReplay({ requestPolicy: 'network-only' });
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, fallbackPollInterval);
     return () => window.clearInterval(timer);
-  }, [accountId, activeRunId, refreshCycles, refreshHistory, refreshReplay]);
+  }, [
+    accountId,
+    activeRunId,
+    fallbackPollInterval,
+    hasActiveReplay,
+    refreshHistory,
+    refreshReplay,
+  ]);
+
+  const previousWsStatusRef = React.useRef(graphqlWsStatus);
+  React.useEffect(() => {
+    const reconnected =
+      graphqlWsStatus === 'connected' &&
+      previousWsStatusRef.current !== 'connected';
+    previousWsStatusRef.current = graphqlWsStatus;
+    if (reconnected) {
+      scheduleRefresh({
+        history: true,
+        replay: Boolean(activeRunId),
+        cycles: Boolean(activeRunId),
+      });
+    }
+  }, [activeRunId, graphqlWsStatus, scheduleRefresh]);
+
+  React.useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      scheduleRefresh({
+        history: true,
+        replay: Boolean(activeRunId),
+        cycles: Boolean(activeRunId && !hasActiveReplay),
+      });
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () =>
+      document.removeEventListener('visibilitychange', handleVisibility);
+  }, [activeRunId, hasActiveReplay, scheduleRefresh]);
 
   const setPreset = (days: 1 | 5 | 20) => {
     const range = replayDatePreset(days);
@@ -559,6 +700,17 @@ function TTradeReplayPanel({
               <div className="flex items-center gap-2 text-sm font-black text-slate-100">
                 <FlaskConical className="h-4 w-4 text-cyan-300" />
                 历史回放测试
+                <span
+                  aria-live="polite"
+                  className={cn(
+                    'border px-1.5 py-0.5 text-[9px] font-bold',
+                    graphqlWsStatus === 'connected'
+                      ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
+                      : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
+                  )}
+                >
+                  {graphqlWsStatus === 'connected' ? '实时推送' : '轮询恢复'}
+                </span>
               </div>
               <p className="mt-1 text-[11px] text-slate-500">
                 使用同一做 T
@@ -726,6 +878,11 @@ function TTradeReplayPanel({
                     {replay.runId.slice(0, 8)} ·{' '}
                     {formatNumber(replay.progressPct, 1)}%
                   </span>
+                  {replay.processedUntil && (
+                    <span className="font-mono text-[10px] text-slate-600">
+                      已处理 {formatTime(replay.processedUntil)}
+                    </span>
+                  )}
                   <span className="text-[10px] text-slate-600">
                     {replay.dataQualityMessage}
                   </span>
@@ -972,7 +1129,7 @@ function TTradeReplayPanel({
                   T 批次明细
                 </h3>
                 <span className="font-mono text-[10px] text-slate-600">
-                  {cyclesResult.data?.tTradeReplayCycles.total || 0} 批
+                  {cyclesPage?.total || 0} 批
                 </span>
               </div>
               <div className="overflow-x-auto border border-white/[0.06]">
@@ -1043,13 +1200,15 @@ function TTradeReplayPanel({
                         </td>
                       </tr>
                     ))}
-                    {!cyclesResult.fetching && cycles.length === 0 && (
+                    {cycles.length === 0 && (
                       <tr>
                         <td
-                          colSpan={7}
+                          colSpan={8}
                           className="px-3 py-8 text-center text-slate-600"
                         >
-                          暂无成交批次
+                          {cyclesResult.fetching
+                            ? '正在读取成交批次…'
+                            : '暂无成交批次'}
                         </td>
                       </tr>
                     )}
@@ -1072,7 +1231,10 @@ function TTradeReplayPanel({
         )}
       </div>
 
-      <aside className="min-h-0 overflow-y-auto border-l border-white/[0.06] bg-[#091523] custom-scrollbar">
+      <aside
+        aria-busy={historyResult.fetching}
+        className="min-h-0 overflow-y-auto border-l border-white/[0.06] bg-[#091523] custom-scrollbar"
+      >
         <div className="flex h-11 items-center justify-between border-b border-white/[0.06] px-3">
           <span className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
             回放记录
@@ -1128,9 +1290,9 @@ function TTradeReplayPanel({
             </div>
           </button>
         ))}
-        {!historyResult.fetching && history.length === 0 && (
+        {history.length === 0 && (
           <div className="px-4 py-12 text-center text-[11px] text-slate-600">
-            暂无历史回放
+            {historyResult.fetching ? '正在读取历史回放…' : '暂无历史回放'}
           </div>
         )}
       </aside>

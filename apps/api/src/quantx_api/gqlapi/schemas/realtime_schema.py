@@ -24,6 +24,9 @@ from quantx_infrastructure.services.runtime_subscription_bridge import (
 from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   t_trade_monitor_projection_service,
 )
+from quantx_infrastructure.services.t_trade_replay_projection_service import (
+  t_trade_replay_projection_service,
+)
 from sqlalchemy import select
 
 from quantx_api.gqlapi.security import authorized_account_id
@@ -42,7 +45,11 @@ from quantx_api.gqlapi.types.strategy_subscription_types import (
   StrategyTickData,
 )
 from quantx_api.gqlapi.types.strategy_types import StrategyInstanceEvent
-from quantx_api.gqlapi.types.t_trade_types import TTradeUpdateNotice
+from quantx_api.gqlapi.types.t_trade_types import (
+  TTradeReplayUpdateKind,
+  TTradeReplayUpdateNotice,
+  TTradeUpdateNotice,
+)
 from quantx_api.runtime_status import component_status, required_components
 
 from ..security import principal_from_context
@@ -239,6 +246,24 @@ class RealtimeSubscription:
       yield TTradeUpdateNotice(
         account_id=authorized,
         version=str(message.get("version") or "0"),
+        occurred_at=datetime.fromisoformat(
+          str(message.get("occurred_at")).replace("Z", "+00:00")
+        ),
+      )
+
+  @strawberry.subscription(description="订阅账户做 T 历史回放更新")
+  async def t_trade_replay_updates(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> AsyncIterator[TTradeReplayUpdateNotice]:
+    authorized = authorized_account_id(info, account_id)
+    async for message in t_trade_replay_projection_service.subscribe(authorized):
+      yield TTradeReplayUpdateNotice(
+        account_id=authorized,
+        run_id=str(message.get("run_id") or ""),
+        revision=str(message.get("revision") or "0"),
+        kind=TTradeReplayUpdateKind(str(message.get("kind") or "PROGRESS")),
         occurred_at=datetime.fromisoformat(
           str(message.get("occurred_at")).replace("Z", "+00:00")
         ),

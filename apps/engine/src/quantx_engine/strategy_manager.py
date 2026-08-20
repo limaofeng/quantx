@@ -48,6 +48,10 @@ from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
   request_market_data_sync,
 )
+from quantx_infrastructure.services.t_trade_replay_projection_service import (
+  TTradeReplayUpdateKind,
+  t_trade_replay_projection_service,
+)
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
 from .strategy_executor import ExecutionStatus, StrategyExecutor, StrategyRuntime
@@ -1882,6 +1886,31 @@ class StrategyManager:
         update_data["stop_time"] = time_utils.now()
 
       await repo.update_run(run_id, update_data)
+
+    runtime = self.executor.get(run_id)
+    parameters = dict(runtime.context.parameters or {}) if runtime else {}
+    if parameters.get("t_trade_replay"):
+      account_id = str(parameters.get("account_id") or "").strip()
+      if account_id:
+        normalized_status = str(
+          getattr(status_to_store, "value", status_to_store) or status_key
+        ).upper()
+        terminal = normalized_status in {"COMPLETED", "ERROR", "STOPPED"}
+        try:
+          await t_trade_replay_projection_service.update(
+            run_id=run_id,
+            account_id=account_id,
+            status=normalized_status,
+            progress_pct=100.0 if normalized_status == "COMPLETED" else None,
+            processed_until=runtime.context.current_time,
+            kind=(
+              TTradeReplayUpdateKind.RESULT_READY
+              if terminal
+              else TTradeReplayUpdateKind.STATUS_CHANGED
+            ),
+          )
+        except Exception:
+          self.logger.exception("更新做 T 回放生命周期投影失败: %s", run_id)
 
   async def _update_runtime_metrics(self, run_id: str, metrics: ExecutionMetrics):
     """

@@ -454,6 +454,7 @@ _register(
     "strategyKlines",
     "strategyLogs",
     "strategyTicks",
+    "tTradeReplayUpdates",
     "tTradeUpdates",
   },
 )

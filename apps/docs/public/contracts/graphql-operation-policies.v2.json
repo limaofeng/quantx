@@ -2730,6 +2730,18 @@
         "risk": "READ",
         "stability": "web-internal"
       },
+      "tTradeReplayUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "tTradeUpdates": {
         "audiences": [
           "web",

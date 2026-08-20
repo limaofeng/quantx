@@ -56,6 +56,17 @@ class StrategyRunRepository(BaseRepository[StrategyRun]):
     )
     return result.scalar_one_or_none()
 
+  async def find_runs_by_ids(self, run_ids: List[str]) -> List[StrategyRun]:
+    """Batch-load strategy runs while preserving repository loading rules."""
+    if not run_ids:
+      return []
+    result = await self.db.execute(
+      select(StrategyRun)
+      .options(selectinload(StrategyRun.strategy))
+      .filter(StrategyRun.id.in_(run_ids))
+    )
+    return list(result.scalars().all())
+
   async def find_all_runs_by_strategy(self, strategy_id: int) -> List[StrategyRun]:
     """获取策略的所有运行"""
     result = await self.db.execute(
