@@ -95,6 +95,9 @@ class StrategyManager:
 
       # 核心组件：策略执行器
       self.executor = StrategyExecutor(max_workers=10)
+      self._executor_retired = False
+      self._shutdown_in_progress = False
+      self._executor_shutdown_task: Optional[asyncio.Task[None]] = None
       self._deferred_start_tasks: Dict[str, asyncio.Task] = {}
 
       # 策略注册和协调组件
@@ -172,6 +175,22 @@ class StrategyManager:
     if self.running:
       return
 
+    if self._executor_retired:
+      # StrategyExecutor.shutdown() is terminal: it sets a permanent shutdown
+      # event and closes its ThreadPoolExecutor.  The Engine supervisor restarts
+      # run_engine() inside the same Python process, so reusing that executor
+      # would make every restored realtime loop exit immediately.
+      await self._await_retired_executor_shutdown()
+      previous_executor = self.executor
+      self.executor = StrategyExecutor(
+        max_workers=previous_executor.max_workers,
+        exit_strategy_registry=previous_executor.exit_strategy_registry,
+      )
+      self._executor_retired = False
+      self._executor_shutdown_task = None
+      self.logger.info("监督重启已创建新的策略执行器")
+
+    self._shutdown_in_progress = False
     self.running = True
     self.logger.info("策略管理器服务启动中...")
     # 1. 自动发现并同步策略
@@ -185,13 +204,65 @@ class StrategyManager:
   async def stop(self):
     """停止策略管理器服务"""
     self.running = False
+    if not self._executor_retired:
+      # Retire the generation and create its shutdown task before the first
+      # await. main._stop_component uses wait_for(), whose timeout cancels this
+      # stop coroutine; shield below keeps the actual teardown alive.
+      self._shutdown_in_progress = True
+      self._executor_retired = True
+      retiring_executor = self.executor
+      self._executor_shutdown_task = asyncio.create_task(
+        self._shutdown_executor_generation(retiring_executor),
+        name=f"strategy-executor-shutdown:{id(retiring_executor)}",
+      )
+
+    await self._await_retired_executor_shutdown()
+
+  async def _shutdown_executor_generation(
+    self,
+    executor: StrategyExecutor,
+  ) -> None:
+    """Finish one executor teardown even if the outer stop waiter is cancelled."""
 
     await self._cancel_deferred_starts_for_shutdown()
-
-    # 停止所有运行中的策略并关闭执行器（释放线程池，避免进程无法退出）
-    await self.executor.shutdown()
-
+    await executor.shutdown()
+    self._verify_executor_shutdown(executor)
     self.logger.info("策略管理器服务已停止")
+
+  async def _await_retired_executor_shutdown(self) -> None:
+    """Join the single shutdown task and fail closed when teardown is unsafe."""
+
+    task = self._executor_shutdown_task
+    if task is None:
+      raise RuntimeError("策略执行器已退役但缺少停机任务，拒绝启动")
+    try:
+      await asyncio.shield(task)
+    except asyncio.CancelledError as exc:
+      if task.cancelled():
+        raise RuntimeError("策略执行器停机任务被取消，拒绝启动") from exc
+      raise
+    except Exception as exc:
+      raise RuntimeError("旧策略执行器未安全关闭，拒绝启动") from exc
+
+  @staticmethod
+  def _verify_executor_shutdown(executor: StrategyExecutor) -> None:
+    """Prove a retired generation cannot keep strategy work alive."""
+
+    if not executor._shutdown_event.is_set():
+      raise RuntimeError("旧策略执行器未进入停机状态")
+    if not bool(getattr(executor.thread_pool, "_shutdown", False)):
+      raise RuntimeError("旧策略执行器线程池未关闭")
+
+    active_tasks: List[str] = []
+    for runtime in executor.get_all():
+      for task_name in ("task", "event_task"):
+        runtime_task = getattr(runtime, task_name, None)
+        if runtime_task is not None and not runtime_task.done():
+          active_tasks.append(f"{runtime.run_id}:{task_name}")
+    if active_tasks:
+      raise RuntimeError(
+        "旧策略执行器仍有未结束任务: " + ", ".join(active_tasks)
+      )
 
   async def _sync_strategies(self):
     """协调策略到数据库"""
@@ -764,8 +835,11 @@ class StrategyManager:
       if runtime and runtime.task:
         # 注意: add_done_callback 是同步调用的，且不能直接 await
         # 我们在这里调度一个异步任务来处理 DB 更新
+        callback_executor = self.executor
         runtime.task.add_done_callback(
-          lambda t: asyncio.create_task(self._on_run_task_done(run_id, t))
+          lambda t, executor=callback_executor: asyncio.create_task(
+            self._on_run_task_done(run_id, t, executor=executor)
+          )
         )
 
       # 更新数据库状态
@@ -1791,9 +1865,28 @@ class StrategyManager:
     """
     return [runtime for runtime in self.executor.get_all() if runtime.status == status]
 
-  async def _on_run_task_done(self, run_id: str, task: asyncio.Task) -> None:
+  async def _on_run_task_done(
+    self,
+    run_id: str,
+    task: asyncio.Task,
+    *,
+    executor: Optional[StrategyExecutor] = None,
+  ) -> None:
     """策略运行任务结束回调"""
     try:
+      if self._shutdown_in_progress or (
+        executor is not None and executor is not self.executor
+      ):
+        # A process-level Engine stop only tears down in-memory resources.  The
+        # persisted RUNNING/PAUSED/PENDING status is the recovery intent for the
+        # next supervised attempt.  Late callbacks from a retired executor must
+        # never overwrite that intent with STOPPED/COMPLETED.
+        self.logger.info(
+          "Engine 停机或旧执行器回调，保留策略运行持久化状态: %s",
+          run_id,
+        )
+        return
+
       # task.exception() 会在取消任务上抛 CancelledError，必须先判断。
       if task.cancelled():
         self.logger.warning(f"策略运行任务被取消: {run_id}")
