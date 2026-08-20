@@ -7,6 +7,7 @@ const {
   buildCallAuctionTickBars,
   buildTickMinuteBar,
   getFallbackTradingDateRange,
+  getIntradayQueryDateRange,
   getMinuteMs,
   isKLineBaseReadyForTick,
   mergeKLines,
@@ -181,6 +182,36 @@ describe('intraday query date range', () => {
     ).toEqual({
       startTime: undefined,
       endTime: undefined,
+    });
+  });
+
+  it('uses an authoritative target date without waiting for another calendar query', () => {
+    expect(
+      getIntradayQueryDateRange(
+        [],
+        '1d',
+        new Date('2026-08-19T07:00:00.000Z'),
+        '2026-08-19'
+      )
+    ).toEqual({
+      startTime: '2026-08-19 00:00:00',
+      endTime: '2026-08-19 23:59:59',
+      usesAuthoritativeTarget: true,
+    });
+  });
+
+  it('keeps calendar-based date selection for multi-day mode', () => {
+    expect(
+      getIntradayQueryDateRange(
+        tradingDays,
+        '5d',
+        new Date('2026-06-02T07:00:00.000Z'),
+        '2026-06-02'
+      )
+    ).toEqual({
+      startTime: '2026-05-29 00:00:00',
+      endTime: '2026-06-02 23:59:59',
+      usesAuthoritativeTarget: false,
     });
   });
 

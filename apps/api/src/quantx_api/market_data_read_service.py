@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Optional
@@ -74,7 +75,7 @@ class ApiMarketDataReadService:
     dividend_type: str = "none",
     order: str = "desc",
   ) -> list[KLine]:
-    historical = await self.historical.get_kline_data(
+    historical_read = self.historical.get_kline_data(
       stock_code=stock_code,
       period=period,
       start_time=start_time,
@@ -83,17 +84,22 @@ class ApiMarketDataReadService:
       dividend_type=dividend_type,
       order="asc",
     )
-    warm: list[KLine] = []
     if period == "1m" and dividend_type == "none":
-      rows = await self._runtime_items(
-        "warm_klines",
-        {
-          "stock_code": stock_code,
-          "start_time": start_time.isoformat() if start_time else None,
-          "end_time": end_time.isoformat() if end_time else None,
-        },
+      historical, rows = await asyncio.gather(
+        historical_read,
+        self._runtime_items(
+          "warm_klines",
+          {
+            "stock_code": stock_code,
+            "start_time": start_time.isoformat() if start_time else None,
+            "end_time": end_time.isoformat() if end_time else None,
+          },
+        ),
       )
       warm = [_model(KLine, row) for row in rows]
+    else:
+      historical = await historical_read
+      warm = []
     merged = {
       _time_key(item.time): item
       for item in [*historical, *warm]
@@ -114,7 +120,7 @@ class ApiMarketDataReadService:
     dividend_type: str = "none",
     order: str = "desc",
   ) -> list[Tick]:
-    historical = await self.historical.get_tick_data(
+    historical_read = self.historical.get_tick_data(
       stock_code=stock_code,
       start_time=start_time,
       end_time=end_time,
@@ -122,17 +128,22 @@ class ApiMarketDataReadService:
       dividend_type=dividend_type,
       order="asc",
     )
-    warm: list[Tick] = []
     if dividend_type == "none":
-      rows = await self._runtime_items(
-        "warm_ticks",
-        {
-          "stock_code": stock_code,
-          "start_time": start_time.isoformat() if start_time else None,
-          "end_time": end_time.isoformat() if end_time else None,
-        },
+      historical, rows = await asyncio.gather(
+        historical_read,
+        self._runtime_items(
+          "warm_ticks",
+          {
+            "stock_code": stock_code,
+            "start_time": start_time.isoformat() if start_time else None,
+            "end_time": end_time.isoformat() if end_time else None,
+          },
+        ),
       )
       warm = [_model(Tick, row) for row in rows]
+    else:
+      historical = await historical_read
+      warm = []
     values = merge_ticks_losslessly(historical, warm)
     if (order or "desc").lower() == "desc":
       values.reverse()

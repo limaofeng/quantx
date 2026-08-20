@@ -3,6 +3,7 @@
 处理K线数据和历史价格数据的业务逻辑
 """
 
+import asyncio
 import logging
 import re
 from datetime import datetime
@@ -423,7 +424,8 @@ class HistoricalMarketDataService:
     order_by = "time DESC" if order == "desc" else "time ASC"
 
     if period in self._BASE_PERIODS:
-      klines = self.kline_repo.find_all(
+      klines = await asyncio.to_thread(
+        self.kline_repo.find_all,
         measurement=f"kline_{period}",
         filters={"stock_code": stock_code},
         start_time=start_time,
@@ -438,7 +440,8 @@ class HistoricalMarketDataService:
       )
 
     if period in self._INTRADAY_AGG_MAP:
-      base_klines = self.kline_repo.find_all(
+      base_klines = await asyncio.to_thread(
+        self.kline_repo.find_all,
         measurement="kline_1m",
         filters={"stock_code": stock_code},
         start_time=start_time,
@@ -463,7 +466,8 @@ class HistoricalMarketDataService:
       return aggregated
 
     if period in self._DAILY_AGG_MAP:
-      base_klines = self.kline_repo.find_all(
+      base_klines = await asyncio.to_thread(
+        self.kline_repo.find_all,
         measurement="kline_1d",
         filters={"stock_code": stock_code},
         start_time=start_time,
@@ -513,7 +517,8 @@ class HistoricalMarketDataService:
 
     order = (order or "asc").lower()
     order_by = "time DESC" if order == "desc" else "time ASC"
-    ticks = self.tick_repo.find_all(
+    ticks = await asyncio.to_thread(
+      self.tick_repo.find_all,
       filters={"stock_code": stock_code},
       start_time=start_time,
       end_time=tick_query_end_time(end_time),

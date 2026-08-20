@@ -93,6 +93,7 @@ def is_fatal_wal_error(error: object) -> bool:
 _InfluxDBClient3: Optional[Type[Any]] = None
 _INFLUXDB_IMPORT_ERROR = None
 _INFLUXDB_IMPORT_ATTEMPTED = False
+_INFLUXDB_IMPORT_LOCK = threading.Lock()
 
 
 class ConnectionPool:
@@ -122,8 +123,7 @@ class ConnectionPool:
 
   def _create_client(self):
     """创建新的客户端连接"""
-    if not _INFLUXDB_IMPORT_ATTEMPTED:
-      self._load_influx_client()
+    self._load_influx_client()
     if _InfluxDBClient3 is None:
       raise ConnectionError(f"InfluxDB 客户端依赖导入失败: {_INFLUXDB_IMPORT_ERROR}")
 
@@ -143,21 +143,22 @@ class ConnectionPool:
     """惰性导入 influxdb_client_3"""
     global _InfluxDBClient3, _INFLUXDB_IMPORT_ERROR, _INFLUXDB_IMPORT_ATTEMPTED
 
-    if _INFLUXDB_IMPORT_ATTEMPTED:
-      return
+    with _INFLUXDB_IMPORT_LOCK:
+      if _INFLUXDB_IMPORT_ATTEMPTED:
+        return
 
-    _INFLUXDB_IMPORT_ATTEMPTED = True
-    try:
-      module = importlib.import_module("influxdb_client_3")
-      _InfluxDBClient3 = getattr(module, "InfluxDBClient3", None)
-      if _InfluxDBClient3 is None:
-        raise ImportError("influxdb_client_3 未导出 InfluxDBClient3 类")
-    except Exception as exc:  # pragma: no cover
-      _INFLUXDB_IMPORT_ERROR = exc
-      _InfluxDBClient3 = None
+      _INFLUXDB_IMPORT_ATTEMPTED = True
+      try:
+        module = importlib.import_module("influxdb_client_3")
+        _InfluxDBClient3 = getattr(module, "InfluxDBClient3", None)
+        if _InfluxDBClient3 is None:
+          raise ImportError("influxdb_client_3 未导出 InfluxDBClient3 类")
+      except Exception as exc:  # pragma: no cover
+        _INFLUXDB_IMPORT_ERROR = exc
+        _InfluxDBClient3 = None
 
-    if _INFLUXDB_IMPORT_ERROR is None and _InfluxDBClient3 is not None:
-      _INFLUXDB_IMPORT_ERROR = None
+      if _INFLUXDB_IMPORT_ERROR is None and _InfluxDBClient3 is not None:
+        _INFLUXDB_IMPORT_ERROR = None
 
   def get_client(self):
     """从连接池获取客户端"""
@@ -262,6 +263,7 @@ class TimeSeriesConnection:
     )
 
     # 缓存
+    self._cache_lock = threading.RLock()
     if enable_cache:
       self._query_cache = {}
       self._cache_timestamps = {}

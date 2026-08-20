@@ -380,10 +380,11 @@ export function useTicks(
     () => ({
       data: result.data?.ticks || [],
       loading: result.fetching,
+      stale: result.stale,
       error: result.error,
       refresh,
     }),
-    [result.data, result.fetching, result.error, refresh]
+    [result.data, result.fetching, result.stale, result.error, refresh]
   );
 }
 
@@ -448,10 +449,11 @@ export function useKLines(
     () => ({
       data: result.data?.klines || [],
       loading: result.fetching,
+      stale: result.stale,
       error: result.error,
       refresh,
     }),
-    [result.data, result.fetching, result.error, refresh]
+    [result.data, result.fetching, result.stale, result.error, refresh]
   );
 }
 

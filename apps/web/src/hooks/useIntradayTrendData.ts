@@ -176,9 +176,14 @@ export function buildIntradayTrendSeries(
 
 export function useIntradayTrendData(
   stockCode: string,
-  mode: '1d' | '5d' = '1d'
+  mode: '1d' | '5d' = '1d',
+  options: { targetTradingDate?: string | null } = {}
 ) {
-  const { data: bars, loading, error } = useIntradayKLines(stockCode, mode);
+  const {
+    data: bars,
+    loading,
+    error,
+  } = useIntradayKLines(stockCode, mode, options);
   const { lineData, visibleRange } = useMemo(
     () => buildIntradayTrendSeries(bars),
     [bars]

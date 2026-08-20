@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -61,6 +62,107 @@ def _tick(
   if tick_ordinal is not None:
     values["tick_ordinal"] = tick_ordinal
   return Tick(**values)
+
+
+@pytest.mark.asyncio
+async def test_api_market_read_starts_historical_and_warm_kline_reads_concurrently(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  historical_started = asyncio.Event()
+  warm_started = asyncio.Event()
+
+  class FakeHistorical:
+    async def get_kline_data(self, **_):
+      historical_started.set()
+      await asyncio.wait_for(warm_started.wait(), timeout=1)
+      return []
+
+  async def query(operation, _payload):
+    assert operation == "warm_klines"
+    warm_started.set()
+    await asyncio.wait_for(historical_started.wait(), timeout=1)
+    return {"items": []}
+
+  service = module.ApiMarketDataReadService()
+  service.historical = FakeHistorical()
+  monkeypatch.setattr(module.runtime_market_query_bridge, "query", query)
+
+  assert await service.get_klines(stock_code="600000.SH", period="1m") == []
+
+
+@pytest.mark.asyncio
+async def test_api_market_read_starts_historical_and_warm_tick_reads_concurrently(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  historical_started = asyncio.Event()
+  warm_started = asyncio.Event()
+
+  class FakeHistorical:
+    async def get_tick_data(self, **_):
+      historical_started.set()
+      await asyncio.wait_for(warm_started.wait(), timeout=1)
+      return []
+
+  async def query(operation, _payload):
+    assert operation == "warm_ticks"
+    warm_started.set()
+    await asyncio.wait_for(historical_started.wait(), timeout=1)
+    return {"items": []}
+
+  service = module.ApiMarketDataReadService()
+  service.historical = FakeHistorical()
+  monkeypatch.setattr(module.runtime_market_query_bridge, "query", query)
+
+  assert await service.get_ticks(stock_code="600000.SH") == []
+
+
+@pytest.mark.asyncio
+async def test_api_market_read_keeps_historical_data_when_warm_query_fails(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  timestamp = datetime(2026, 8, 20, 1, 30, tzinfo=timezone.utc)
+
+  class FakeHistorical:
+    async def get_kline_data(self, **_):
+      return [_kline(timestamp, 10.1)]
+
+  async def query(_operation, _payload):
+    raise RuntimeError("engine unavailable")
+
+  service = module.ApiMarketDataReadService()
+  service.historical = FakeHistorical()
+  monkeypatch.setattr(module.runtime_market_query_bridge, "query", query)
+
+  values = await service.get_klines(
+    stock_code="600000.SH",
+    period="1m",
+    order="asc",
+  )
+
+  assert [item.close for item in values] == [10.1]
+
+
+@pytest.mark.asyncio
+async def test_api_market_read_still_propagates_historical_query_failure(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  failure = RuntimeError("influx unavailable")
+
+  class FakeHistorical:
+    async def get_kline_data(self, **_):
+      raise failure
+
+  async def query(_operation, _payload):
+    return {"items": []}
+
+  service = module.ApiMarketDataReadService()
+  service.historical = FakeHistorical()
+  monkeypatch.setattr(module.runtime_market_query_bridge, "query", query)
+
+  with pytest.raises(RuntimeError) as exc_info:
+    await service.get_klines(stock_code="600000.SH", period="1m")
+
+  assert exc_info.value is failure
 
 
 @pytest.mark.asyncio

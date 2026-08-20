@@ -56,7 +56,8 @@ export function MarketIntradayChart({
 }: MarketIntradayChartProps) {
   const { anchorDate, bars, loading, error } = useIntradayTrendData(
     stockCode,
-    '1d'
+    '1d',
+    { targetTradingDate }
   );
   const resolvedBars = useMemo(
     () => selectShanghaiMarketBarsForTradingDate(bars, targetTradingDate),

@@ -78,27 +78,29 @@ class TimeSeriesOperations:
     if not self.connection.enable_cache:
       return None
 
-    if cache_key not in self.connection._query_cache:
-      self.connection._stats["cache_misses"] += 1
-      return None
+    with self.connection._cache_lock:
+      if cache_key not in self.connection._query_cache:
+        self.connection._stats["cache_misses"] += 1
+        return None
 
-    timestamp = self.connection._cache_timestamps.get(cache_key, 0)
-    if time.time() - timestamp > self.connection.cache_ttl:
-      del self.connection._query_cache[cache_key]
-      del self.connection._cache_timestamps[cache_key]
-      self.connection._stats["cache_misses"] += 1
-      return None
+      timestamp = self.connection._cache_timestamps.get(cache_key, 0)
+      if time.time() - timestamp > self.connection.cache_ttl:
+        self.connection._query_cache.pop(cache_key, None)
+        self.connection._cache_timestamps.pop(cache_key, None)
+        self.connection._stats["cache_misses"] += 1
+        return None
 
-    self.connection._stats["cache_hits"] += 1
-    return self.connection._query_cache[cache_key]
+      self.connection._stats["cache_hits"] += 1
+      return self.connection._query_cache[cache_key]
 
   def _set_cache(self, cache_key: str, data: Any):
     """设置缓存数据"""
     if not self.connection.enable_cache:
       return
 
-    self.connection._query_cache[cache_key] = data
-    self.connection._cache_timestamps[cache_key] = time.time()
+    with self.connection._cache_lock:
+      self.connection._query_cache[cache_key] = data
+      self.connection._cache_timestamps[cache_key] = time.time()
 
   def build_point(
     self,
@@ -425,26 +427,24 @@ class TimeSeriesOperations:
 
   def get_statistics(self) -> Dict[str, Any]:
     """获取统计信息"""
-    return {
-      **self.connection._stats,
-      "cache_hit_rate": (
-        self.connection._stats["cache_hits"]
-        / (
-          self.connection._stats["cache_hits"] + self.connection._stats["cache_misses"]
-        )
-        if (
-          self.connection._stats["cache_hits"] + self.connection._stats["cache_misses"]
-        )
-        > 0
-        else 0
-      ),
-      "cache_size": len(self.connection._query_cache)
-      if self.connection.enable_cache
-      else 0,
-    }
+    with self.connection._cache_lock:
+      stats = dict(self.connection._stats)
+      cache_lookups = stats["cache_hits"] + stats["cache_misses"]
+      return {
+        **stats,
+        "cache_hit_rate": (
+          stats["cache_hits"] / cache_lookups if cache_lookups > 0 else 0
+        ),
+        "cache_size": (
+          len(self.connection._query_cache)
+          if self.connection.enable_cache
+          else 0
+        ),
+      }
 
   def clear_cache(self):
     """清空缓存"""
     if self.connection.enable_cache:
-      self.connection._query_cache.clear()
-      self.connection._cache_timestamps.clear()
+      with self.connection._cache_lock:
+        self.connection._query_cache.clear()
+        self.connection._cache_timestamps.clear()

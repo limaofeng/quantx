@@ -26,7 +26,7 @@ export function useTradingDays(market: string = 'SH', daysBefore: number = 30) {
     };
   }, [daysBefore]);
 
-  const [{ data, fetching, error }] = useQuery({
+  const [{ data, fetching, stale, error }] = useQuery({
     query: GET_TRADING_CALENDAR,
     variables: { startDate, endDate, market },
     requestPolicy: 'cache-and-network',
@@ -38,7 +38,8 @@ export function useTradingDays(market: string = 'SH', daysBefore: number = 30) {
 
   return {
     tradingDays,
-    loading: fetching,
+    loading: (fetching || stale) && tradingDays.length === 0,
+    refreshing: (fetching || stale) && tradingDays.length > 0,
     error,
   };
 }

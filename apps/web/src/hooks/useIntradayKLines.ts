@@ -13,6 +13,11 @@ import { gql } from '@/generated/gql';
 import { useTradingDays } from '@/hooks/useTradingDays';
 
 const CALL_AUCTION_TICK_LIMIT = 1200;
+const TRADING_DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+interface IntradayKLineOptions {
+  targetTradingDate?: string | null;
+}
 
 interface IntradayPoint {
   stockCode?: string | null;
@@ -382,8 +387,59 @@ const getFallbackTradingDateRange = (
   };
 };
 
-export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
-  const { tradingDays, loading: tradingDaysLoading } = useTradingDays();
+const getIntradayQueryDateRange = (
+  tradingDays: string[],
+  mode: '1d' | '5d',
+  now: Date,
+  targetTradingDate?: string | null
+) => {
+  if (
+    mode === '1d' &&
+    targetTradingDate &&
+    TRADING_DATE_KEY_PATTERN.test(targetTradingDate)
+  ) {
+    return {
+      startTime: `${targetTradingDate} 00:00:00`,
+      endTime: `${targetTradingDate} 23:59:59`,
+      usesAuthoritativeTarget: true,
+    };
+  }
+
+  return {
+    ...getTickDateRange(tradingDays, mode, now),
+    usesAuthoritativeTarget: false,
+  };
+};
+
+const filterIntradayPointsForRange = (
+  points: IntradayPoint[],
+  stockCode: string,
+  startTime: string | undefined,
+  endTime: string | undefined
+) => {
+  const startDate = startTime?.slice(0, 10);
+  const endDate = endTime?.slice(0, 10);
+  if (!stockCode || !startDate || !endDate) return [];
+
+  return points.filter(point => {
+    if (point.stockCode && point.stockCode !== stockCode) return false;
+    const parsed = parseMarketDate(point.sourceTime ?? point.time);
+    if (!parsed) return false;
+    const dateKey = getShanghaiDateKey(parsed);
+    return dateKey >= startDate && dateKey <= endDate;
+  });
+};
+
+export function useIntradayKLines(
+  stockCode: string,
+  mode: '1d' | '5d' = '1d',
+  options: IntradayKLineOptions = {}
+) {
+  const {
+    tradingDays,
+    loading: tradingDaysLoading,
+    error: tradingDaysError,
+  } = useTradingDays();
   const [rangeNow, setRangeNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -394,10 +450,21 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     return () => window.clearInterval(timer);
   }, []);
 
-  const { startTime, endTime } = useMemo(() => {
-    if (!stockCode) return { startTime: undefined, endTime: undefined };
-    return getTickDateRange(tradingDays, mode, rangeNow);
-  }, [mode, rangeNow, stockCode, tradingDays]);
+  const { startTime, endTime, usesAuthoritativeTarget } = useMemo(() => {
+    if (!stockCode) {
+      return {
+        startTime: undefined,
+        endTime: undefined,
+        usesAuthoritativeTarget: false,
+      };
+    }
+    return getIntradayQueryDateRange(
+      tradingDays,
+      mode,
+      rangeNow,
+      options.targetTradingDate
+    );
+  }, [mode, options.targetTradingDate, rangeNow, stockCode, tradingDays]);
 
   const isRealtimeRange = useMemo(() => {
     const anchorDate = endTime?.slice(0, 10);
@@ -407,13 +474,25 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   const {
     data: initialKLines,
     loading: initialLoading,
+    stale: initialStale,
     error: initialError,
     refresh,
   } = useKLines(stockCode, 'MIN_1', startTime, endTime, {
     order: 'asc',
     pause: !startTime || !endTime,
-    requestPolicy: 'network-only',
+    requestPolicy: 'cache-and-network',
   });
+
+  const scopedInitialKLines = useMemo(
+    () =>
+      filterIntradayPointsForRange(
+        initialKLines,
+        stockCode,
+        startTime,
+        endTime
+      ),
+    [endTime, initialKLines, startTime, stockCode]
+  );
 
   const fallbackRange = useMemo(
     () => getFallbackTradingDateRange(tradingDays, startTime),
@@ -421,12 +500,15 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   );
   const shouldLoadFallback =
     mode === '1d' &&
+    !usesAuthoritativeTarget &&
     !initialLoading &&
-    initialKLines.length === 0 &&
+    !initialStale &&
+    scopedInitialKLines.length === 0 &&
     Boolean(fallbackRange.startTime && fallbackRange.endTime);
   const {
     data: fallbackKLines,
     loading: fallbackLoading,
+    stale: fallbackStale,
     error: fallbackError,
   } = useKLines(
     stockCode,
@@ -436,8 +518,19 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     {
       order: 'asc',
       pause: !shouldLoadFallback,
-      requestPolicy: 'network-only',
+      requestPolicy: 'cache-and-network',
     }
+  );
+
+  const scopedFallbackKLines = useMemo(
+    () =>
+      filterIntradayPointsForRange(
+        fallbackKLines,
+        stockCode,
+        fallbackRange.startTime,
+        fallbackRange.endTime
+      ),
+    [fallbackKLines, fallbackRange.endTime, fallbackRange.startTime, stockCode]
   );
 
   const { startTime: auctionStartTime, endTime: auctionEndTime } =
@@ -451,6 +544,7 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
   const {
     data: initialAuctionTicks,
     loading: auctionTicksLoading,
+    stale: auctionTicksStale,
     error: auctionTicksError,
     refresh: refreshAuctionTicks,
   } = useTicks(stockCode, auctionStartTime, auctionEndTime, {
@@ -460,6 +554,19 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     requestPolicy: 'network-only',
   });
 
+  const scopedInitialAuctionTicks = useMemo(
+    () =>
+      filterIntradayPointsForRange(
+        initialAuctionTicks,
+        stockCode,
+        auctionStartTime,
+        auctionEndTime
+      ),
+    [auctionEndTime, auctionStartTime, initialAuctionTicks, stockCode]
+  );
+
+  const dataScopeKey = `${stockCode}|${mode}|${usesAuthoritativeTarget ? 'target' : 'calendar'}|${startTime || ''}|${endTime || ''}`;
+
   const [klineMap, setKlineMap] = useState<Map<number, IntradayPoint>>(
     new Map()
   );
@@ -467,6 +574,7 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     Map<number, IntradayPoint>
   >(new Map());
   const [latestTick, setLatestTick] = useState<IntradayPoint | null>(null);
+  const [activeDataScopeKey, setActiveDataScopeKey] = useState(dataScopeKey);
 
   const [klineSubResult] = useSubscription({
     query: MarketKLineSubscription,
@@ -484,33 +592,8 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     setKlineMap(new Map());
     setAuctionTickMap(new Map());
     setLatestTick(null);
-  }, [stockCode, mode, startTime, endTime]);
-
-  useEffect(() => {
-    if (!Array.isArray(initialKLines) || initialKLines.length === 0) return;
-    setKlineMap(prev => mergeKLines(prev, initialKLines));
-  }, [initialKLines]);
-
-  useEffect(() => {
-    if (
-      initialKLines.length > 0 ||
-      !Array.isArray(fallbackKLines) ||
-      fallbackKLines.length === 0
-    ) {
-      return;
-    }
-    setKlineMap(prev => mergeKLines(prev, fallbackKLines));
-  }, [fallbackKLines, initialKLines.length]);
-
-  useEffect(() => {
-    if (
-      !Array.isArray(initialAuctionTicks) ||
-      initialAuctionTicks.length === 0
-    ) {
-      return;
-    }
-    setAuctionTickMap(prev => mergeTicks(prev, initialAuctionTicks));
-  }, [initialAuctionTicks]);
+    setActiveDataScopeKey(dataScopeKey);
+  }, [dataScopeKey]);
 
   useEffect(() => {
     const kline = klineSubResult.data?.marketKlines;
@@ -529,13 +612,25 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     }
   }, [tickSubResult.data, stockCode]);
 
-  const baseBars = useMemo(
-    () =>
-      Array.from(klineMap.values()).sort(
-        (a, b) => (getMinuteMs(a?.time) || 0) - (getMinuteMs(b?.time) || 0)
-      ),
-    [klineMap]
-  );
+  const baseBars = useMemo(() => {
+    let merged = mergeKLines(new Map(), scopedInitialKLines);
+    if (shouldLoadFallback && scopedInitialKLines.length === 0) {
+      merged = mergeKLines(merged, scopedFallbackKLines);
+    }
+    if (activeDataScopeKey === dataScopeKey) {
+      merged = mergeKLines(merged, Array.from(klineMap.values()));
+    }
+    return Array.from(merged.values()).sort(
+      (a, b) => (getMinuteMs(a?.time) || 0) - (getMinuteMs(b?.time) || 0)
+    );
+  }, [
+    activeDataScopeKey,
+    dataScopeKey,
+    klineMap,
+    scopedFallbackKLines,
+    scopedInitialKLines,
+    shouldLoadFallback,
+  ]);
 
   const baseReadyForLatestTick = useMemo(
     () => isKLineBaseReadyForTick(baseBars, latestTick),
@@ -558,14 +653,23 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     [latestTick]
   );
 
-  const auctionBars = useMemo(
-    () => buildCallAuctionTickBars(Array.from(auctionTickMap.values())),
-    [auctionTickMap]
-  );
+  const auctionBars = useMemo(() => {
+    let merged = mergeTicks(new Map(), scopedInitialAuctionTicks);
+    if (activeDataScopeKey === dataScopeKey) {
+      merged = mergeTicks(merged, Array.from(auctionTickMap.values()));
+    }
+    return buildCallAuctionTickBars(Array.from(merged.values()));
+  }, [
+    activeDataScopeKey,
+    auctionTickMap,
+    dataScopeKey,
+    scopedInitialAuctionTicks,
+  ]);
 
   useEffect(() => {
     if (!stockCode || !startTime || !endTime) return;
     if (
+      !tickSubResult.error &&
       baseHasCurrentRangeBars &&
       (!latestTick || latestTickIsCallAuction || baseReadyForLatestTick)
     ) {
@@ -590,6 +694,7 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     refresh,
     startTime,
     stockCode,
+    tickSubResult.error,
   ]);
 
   useEffect(() => {
@@ -652,20 +757,30 @@ export function useIntradayKLines(stockCode: string, mode: '1d' | '5d' = '1d') {
     latestTickIsCallAuction,
   ]);
 
+  const callAuctionDataIsPrimary =
+    mode === '1d' &&
+    isRealtimeRange &&
+    isCallAuctionTimestamp(rangeNow) &&
+    baseBars.length === 0 &&
+    auctionBars.length === 0;
+
   return {
     data,
     loading:
-      (tradingDaysLoading ||
+      ((!usesAuthoritativeTarget && tradingDaysLoading) ||
         initialLoading ||
-        auctionTicksLoading ||
-        (shouldLoadFallback && fallbackLoading)) &&
+        initialStale ||
+        (shouldLoadFallback && (fallbackLoading || fallbackStale)) ||
+        (callAuctionDataIsPrimary &&
+          (auctionTicksLoading || auctionTicksStale))) &&
       data.length === 0,
     error:
+      (!usesAuthoritativeTarget ? tradingDaysError : undefined) ||
       initialError ||
-      fallbackError ||
-      auctionTicksError ||
+      (shouldLoadFallback ? fallbackError : undefined) ||
       klineSubResult.error ||
-      tickSubResult.error,
+      tickSubResult.error ||
+      (callAuctionDataIsPrimary ? auctionTicksError : undefined),
   };
 }
 
@@ -674,6 +789,7 @@ export const __intradayKLineTestUtils = {
   buildTickMinuteBar,
   getMinuteMs,
   getFallbackTradingDateRange,
+  getIntradayQueryDateRange,
   isKLineBaseReadyForTick,
   mergeKLines,
   mergeTicks,

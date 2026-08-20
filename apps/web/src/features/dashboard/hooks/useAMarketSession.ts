@@ -11,7 +11,7 @@ import {
 const SESSION_CLOCK_INTERVAL_MS = 15_000;
 
 export function useAMarketSession() {
-  const { error, loading, tradingDays } = useTradingDays('SH', 7);
+  const { error, loading, tradingDays } = useTradingDays();
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
