@@ -101,6 +101,7 @@ import {
   TriggerTTradeKillSwitchMutation,
 } from '../hooks/useTTradeGlobal';
 
+import { readinessStageLabel } from './t-trade-global/readiness';
 import {
   TTradeHealthConsole,
   TTradeLiveBoard,
@@ -2093,9 +2094,7 @@ export function TTradeGlobalPage() {
             )}
             <div>
               <div className="text-xs font-black text-slate-100">
-                {readiness.status === 'PREPARING'
-                  ? '准备阶段（SHADOW）'
-                  : readiness.stage}{' '}
+                {readinessStageLabel(readiness.status, readiness.stage)}{' '}
                 · Engine {readiness.engineStatus} · Agent{' '}
                 {readiness.agentStatus}
               </div>

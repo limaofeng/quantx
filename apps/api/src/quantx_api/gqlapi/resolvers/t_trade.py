@@ -2,7 +2,7 @@
 
 import uuid
 from dataclasses import fields as dataclass_fields
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -92,6 +92,15 @@ class TTradeResolver:
     if isinstance(value, datetime) or value is None:
       return value
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+  @classmethod
+  def _with_utc_datetimes(cls, data: dict, *fields: str) -> dict:
+    payload = cls._with_datetimes(data, *fields)
+    for field in fields:
+      value = payload.get(field)
+      if value is not None and value.tzinfo is None:
+        payload[field] = value.replace(tzinfo=timezone.utc)
+    return payload
 
   @classmethod
   def _with_datetimes(cls, data: dict, *fields: str) -> dict:
@@ -231,7 +240,7 @@ class TTradeResolver:
 
   @classmethod
   def _readiness_type(cls, data: dict) -> TTradeLiveReadiness:
-    payload = cls._with_datetimes(
+    payload = cls._with_utc_datetimes(
       data,
       "snapshot_at",
       "controlled_window_started_at",
