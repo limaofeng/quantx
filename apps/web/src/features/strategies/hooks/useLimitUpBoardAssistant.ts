@@ -13,36 +13,34 @@ import {
   type LimitUpBoardAssistantSettingsInput,
 } from '@/generated/gql/graphql';
 
-const DEFAULT_SETTINGS: Omit<
-  LimitUpBoardAssistantSettingsInput,
-  'accountId'
-> = {
-  approvalTtlMs: 15_000,
-  autoExitAcknowledged: false,
-  enabled: false,
-  entryDistanceTicks: 1,
-  entryEndTime: '14:50',
-  entryOrderTtlMs: 15_000,
-  entryStartTime: '09:30',
-  executionQuoteMaxAgeSeconds: 3,
-  exitLimitBreakTicks: 1,
-  exitMaxSlippageBps: 50,
-  exitMinSealSeconds: 3,
-  exitTrailingArmProfitPct: 2,
-  exitTrailingDrawdownPct: 3,
-  exitTrailingPercent: 50,
-  maxEntryAttemptsPerDay: 1,
-  maxHoldingExitTime: '14:50',
-  maxHoldingTradingDays: 2,
-  maxPriceDeviationBps: 20,
-  maxDailyExposurePct: 0.06,
-  maxOpenPositions: 2,
-  maxRankedCandidates: 5,
-  maxSinglePositionPct: 0.02,
-  mode: 'paper',
-  plannedTailLossPct: 0.0015,
-  promotionModelMode: 'SHADOW',
-};
+const DEFAULT_SETTINGS: Omit<LimitUpBoardAssistantSettingsInput, 'accountId'> =
+  {
+    approvalTtlMs: 15_000,
+    autoExitAcknowledged: false,
+    enabled: false,
+    entryDistanceTicks: 1,
+    entryEndTime: '14:50',
+    entryOrderTtlMs: 15_000,
+    entryStartTime: '09:30',
+    executionQuoteMaxAgeSeconds: 3,
+    exitLimitBreakTicks: 1,
+    exitMaxSlippageBps: 50,
+    exitMinSealSeconds: 3,
+    exitTrailingArmProfitPct: 2,
+    exitTrailingDrawdownPct: 3,
+    exitTrailingPercent: 50,
+    maxEntryAttemptsPerDay: 1,
+    maxHoldingExitTime: '14:50',
+    maxHoldingTradingDays: 2,
+    maxPriceDeviationBps: 20,
+    maxDailyExposurePct: 0.06,
+    maxOpenPositions: 2,
+    maxRankedCandidates: 5,
+    maxSinglePositionPct: 0.02,
+    mode: 'paper',
+    plannedTailLossPct: 0.0015,
+    promotionModelMode: 'SHADOW',
+  };
 
 function idempotencyKey(action: string, accountId: string, code: string) {
   const suffix =
@@ -52,11 +50,11 @@ function idempotencyKey(action: string, accountId: string, code: string) {
   return `${action}:${accountId}:${code}:${suffix}`;
 }
 
-export function useLimitUpBoardAssistant(accountId?: string) {
+export function useLimitUpBoardAssistant(accountId?: string, active = true) {
   const [assistantResult, refreshAssistant] = useQuery({
     query: LimitUpBoardAssistantDeskDocument,
     variables: { accountId: accountId || '' },
-    pause: !accountId,
+    pause: !active || !accountId,
     requestPolicy: 'cache-and-network',
   });
   const assistant = assistantResult.data?.limitUpBoardAssistant;
@@ -64,13 +62,13 @@ export function useLimitUpBoardAssistant(accountId?: string) {
   const [runtimeResult, refreshRuntime] = useQuery({
     query: LimitUpBoardAssistantRuntimeDocument,
     variables: { runId },
-    pause: !runId,
+    pause: !active || !runId,
     requestPolicy: 'cache-and-network',
   });
   const [updatesResult] = useSubscription({
     query: FirstBoardPromotionUpdatesDocument,
     variables: { accountId: accountId || '' },
-    pause: !accountId,
+    pause: !active || !accountId,
   });
   const [, saveMutation] = useMutation(SaveFirstBoardAssistantDocument);
   const [, reconcileMutation] = useMutation(
@@ -79,29 +77,29 @@ export function useLimitUpBoardAssistant(accountId?: string) {
   const [, preferenceMutation] = useMutation(
     SetFirstBoardCandidatePreferenceDocument
   );
-  const [, approveMutation] = useMutation(
-    ApproveStrategyTradeIntentDocument
-  );
+  const [, approveMutation] = useMutation(ApproveStrategyTradeIntentDocument);
   const [, rejectMutation] = useMutation(RejectStrategyTradeIntentDocument);
 
   const refresh = useCallback(() => {
+    if (!active) return;
     refreshAssistant({ requestPolicy: 'network-only' });
     if (runId) refreshRuntime({ requestPolicy: 'network-only' });
-  }, [refreshAssistant, refreshRuntime, runId]);
+  }, [active, refreshAssistant, refreshRuntime, runId]);
 
   useEffect(() => {
-    if (!updatesResult.data?.firstBoardPromotionUpdates.version) return;
+    if (!active || !updatesResult.data?.firstBoardPromotionUpdates.version)
+      return;
     refresh();
-  }, [refresh, updatesResult.data?.firstBoardPromotionUpdates.version]);
+  }, [active, refresh, updatesResult.data?.firstBoardPromotionUpdates.version]);
 
   useEffect(() => {
-    if (!accountId) return;
+    if (!active || !accountId) return;
     const poll = () => {
       if (document.visibilityState === 'visible') refresh();
     };
     const timer = window.setInterval(poll, 3_000);
     return () => window.clearInterval(timer);
-  }, [accountId, refresh]);
+  }, [accountId, active, refresh]);
 
   const currentSettings = useMemo<LimitUpBoardAssistantSettingsInput>(
     () => ({
@@ -150,8 +148,7 @@ export function useLimitUpBoardAssistant(accountId?: string) {
         assistant?.maxSinglePositionPct ??
         DEFAULT_SETTINGS.maxSinglePositionPct,
       maxDailyExposurePct:
-        assistant?.maxDailyExposurePct ??
-        DEFAULT_SETTINGS.maxDailyExposurePct,
+        assistant?.maxDailyExposurePct ?? DEFAULT_SETTINGS.maxDailyExposurePct,
       plannedTailLossPct:
         assistant?.plannedTailLossPct ?? DEFAULT_SETTINGS.plannedTailLossPct,
       maxOpenPositions:
@@ -173,7 +170,9 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       });
       const payload = result.data?.saveFirstBoardAssistant;
       if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '保存失败');
+        throw new Error(
+          result.error?.message || payload?.message || '保存失败'
+        );
       }
       refresh();
       return payload;
@@ -209,7 +208,9 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       });
       const payload = result.data?.setFirstBoardCandidatePreference;
       if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '偏好保存失败');
+        throw new Error(
+          result.error?.message || payload?.message || '偏好保存失败'
+        );
       }
       refresh();
       return payload;
@@ -233,7 +234,9 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       const result = await approveMutation({ runId, intentId });
       const payload = result.data?.approveStrategyTradeIntent;
       if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '确认失败');
+        throw new Error(
+          result.error?.message || payload?.message || '确认失败'
+        );
       }
       refresh();
       return payload;
@@ -251,7 +254,9 @@ export function useLimitUpBoardAssistant(accountId?: string) {
       });
       const payload = result.data?.rejectStrategyTradeIntent;
       if (result.error || !payload?.success) {
-        throw new Error(result.error?.message || payload?.message || '忽略失败');
+        throw new Error(
+          result.error?.message || payload?.message || '忽略失败'
+        );
       }
       refresh();
       return payload;

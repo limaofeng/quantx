@@ -92,6 +92,7 @@ const mocks = vi.hoisted(() => {
     runId: 'run-1',
     save,
   };
+  const useAssistant = vi.fn(() => assistantState);
 
   return {
     approve,
@@ -107,6 +108,7 @@ const mocks = vi.hoisted(() => {
     setLocation: vi.fn(),
     setWorkspaceSidebar,
     toast: vi.fn(),
+    useAssistant,
   };
 });
 
@@ -261,7 +263,7 @@ vi.mock('@/features/strategies/hooks/useLimitUpRadar', () => ({
 }));
 
 vi.mock('@/features/strategies/hooks/useLimitUpBoardAssistant', () => ({
-  useLimitUpBoardAssistant: () => mocks.assistantState,
+  useLimitUpBoardAssistant: mocks.useAssistant,
 }));
 
 describe('LimitUpBoardPage', () => {
@@ -272,15 +274,27 @@ describe('LimitUpBoardPage', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it('uses the full workbench width and exposes four accessible views', () => {
+  it('separates workspace modes from the three realtime views', () => {
     render(<HostedLimitUpBoardPage />);
 
     const root = screen.getByTestId('limit-up-board-page');
     expect(root).toHaveClass('w-full');
     expect(root).not.toHaveClass('max-w-[1540px]');
 
+    const workspaceNavigation = screen.getByRole('navigation', {
+      name: '打板工作区',
+    });
+    const realtimeMode = within(workspaceNavigation).getByRole('button', {
+      name: '实时监控',
+    });
+    const replayMode = within(workspaceNavigation).getByRole('button', {
+      name: '回放测试',
+    });
+    expect(realtimeMode).toHaveAttribute('aria-pressed', 'true');
+    expect(replayMode).toHaveAttribute('aria-pressed', 'false');
+
     const navigation = screen.getByRole('tablist', {
-      name: '首板工作区',
+      name: '首板实时监控视图',
     });
     const radarTab = within(navigation).getByRole('tab', {
       name: /候选雷达/,
@@ -291,36 +305,90 @@ describe('LimitUpBoardPage', () => {
     const positionsTab = within(navigation).getByRole('tab', {
       name: /T\+1 持仓/,
     });
-    const replayTab = within(navigation).getByRole('tab', {
-      name: /历史回放/,
-    });
 
-    expect(within(navigation).getAllByRole('tab')).toHaveLength(4);
+    expect(within(navigation).getAllByRole('tab')).toHaveLength(3);
     expect(radarTab).toHaveAttribute('aria-selected', 'true');
     expect(signalsTab).toHaveAttribute(
       'aria-controls',
-      'limit-up-workbench-view'
+      'limit-up-realtime-view'
     );
     expect(positionsTab).toHaveAttribute(
       'aria-controls',
-      'limit-up-workbench-view'
+      'limit-up-realtime-view'
     );
-    expect(replayTab).toHaveAttribute(
-      'aria-controls',
-      'limit-up-workbench-view'
-    );
+    expect(within(navigation).queryByText('历史回放')).not.toBeInTheDocument();
     expect(screen.getByRole('tabpanel', { name: '候选雷达' })).toBeVisible();
   });
 
-  it('opens the account-level historical replay as an independent view', async () => {
+  it('opens replay as an isolated workspace with its own sidebar and status', async () => {
     const user = userEvent.setup();
     render(<HostedLimitUpBoardPage />);
 
-    await user.click(screen.getByRole('tab', { name: /历史回放/ }));
+    const replayMode = screen.getByRole('button', { name: '回放测试' });
+    await user.click(replayMode);
 
-    expect(screen.getByRole('tabpanel', { name: '历史回放' })).toBeVisible();
+    expect(replayMode).toHaveAttribute('aria-pressed', 'true');
+    expect(mocks.useAssistant).toHaveBeenLastCalledWith('account-1', false);
+    expect(
+      screen.queryByRole('tablist', { name: '首板实时监控视图' })
+    ).not.toBeInTheDocument();
     expect(await screen.findByTestId('board-replay-panel')).toHaveTextContent(
       '历史回放 · account-1'
+    );
+    expect(screen.getByText('隔离回测 · 自动确认测试信号')).toBeVisible();
+    expect(screen.queryByLabelText('同步首板业务链')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('打开首板风险设置')).not.toBeInTheDocument();
+    expect(screen.queryByText('晋级助手运行中')).not.toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(mocks.setWorkspaceSidebar.mock.lastCall?.[0]).toMatchObject({
+        showSidebar: true,
+        themeName: 'cyan',
+        title: '打板回放测试',
+      })
+    );
+    const sidebar = mocks.setWorkspaceSidebar.mock.lastCall?.[0];
+    if (!sidebar?.content) throw new Error('replay sidebar was not registered');
+    const sidebarView = render(sidebar.content);
+    expect(within(sidebarView.container).getByText('打板回放')).toBeVisible();
+    expect(
+      within(sidebarView.container).getByText('隔离回测环境')
+    ).toBeVisible();
+    expect(
+      within(sidebarView.container).queryByRole('button', {
+        name: '停止助手',
+      })
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps replay active when live data changes and restores the selected realtime view', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<HostedLimitUpBoardPage />);
+
+    const positionsTab = screen.getByRole('tab', { name: /T\+1 持仓/ });
+    await user.click(positionsTab);
+    expect(positionsTab).toHaveAttribute('aria-selected', 'true');
+
+    await user.click(screen.getByRole('button', { name: '回放测试' }));
+    mocks.assistantState.pendingIntents = [
+      { ...mocks.firstIntent },
+      {
+        ...mocks.firstIntent,
+        id: 'intent-2',
+        instrumentCode: '600001.SH',
+      },
+    ];
+    rerender(<HostedLimitUpBoardPage />);
+
+    expect(await screen.findByTestId('board-replay-panel')).toBeVisible();
+    expect(
+      screen.queryByRole('tablist', { name: '首板实时监控视图' })
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '实时监控' }));
+    expect(screen.getByRole('tab', { name: /T\+1 持仓/ })).toHaveAttribute(
+      'aria-selected',
+      'true'
     );
   });
 
