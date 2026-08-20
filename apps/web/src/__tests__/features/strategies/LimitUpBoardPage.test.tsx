@@ -139,6 +139,15 @@ vi.mock('@/features/strategies/components/LimitUpRadarMiniChart', () => ({
   LimitUpRadarMiniChart: () => <div data-testid="radar-mini-chart" />,
 }));
 
+vi.mock(
+  '@/features/strategies/components/limit-up-board-replay/LimitUpBoardReplayPanel',
+  () => ({
+    LimitUpBoardReplayPanel: ({ accountId }: { accountId?: string }) => (
+      <div data-testid="board-replay-panel">历史回放 · {accountId}</div>
+    ),
+  })
+);
+
 vi.mock('@/features/dashboard/hooks/useAMarketSession', () => ({
   useAMarketSession: () => ({
     calendarError: null,
@@ -263,7 +272,7 @@ describe('LimitUpBoardPage', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it('uses the full workbench width and exposes three accessible views', () => {
+  it('uses the full workbench width and exposes four accessible views', () => {
     render(<HostedLimitUpBoardPage />);
 
     const root = screen.getByTestId('limit-up-board-page');
@@ -282,8 +291,11 @@ describe('LimitUpBoardPage', () => {
     const positionsTab = within(navigation).getByRole('tab', {
       name: /T\+1 持仓/,
     });
+    const replayTab = within(navigation).getByRole('tab', {
+      name: /历史回放/,
+    });
 
-    expect(within(navigation).getAllByRole('tab')).toHaveLength(3);
+    expect(within(navigation).getAllByRole('tab')).toHaveLength(4);
     expect(radarTab).toHaveAttribute('aria-selected', 'true');
     expect(signalsTab).toHaveAttribute(
       'aria-controls',
@@ -293,7 +305,23 @@ describe('LimitUpBoardPage', () => {
       'aria-controls',
       'limit-up-workbench-view'
     );
+    expect(replayTab).toHaveAttribute(
+      'aria-controls',
+      'limit-up-workbench-view'
+    );
     expect(screen.getByRole('tabpanel', { name: '候选雷达' })).toBeVisible();
+  });
+
+  it('opens the account-level historical replay as an independent view', async () => {
+    const user = userEvent.setup();
+    render(<HostedLimitUpBoardPage />);
+
+    await user.click(screen.getByRole('tab', { name: /历史回放/ }));
+
+    expect(screen.getByRole('tabpanel', { name: '历史回放' })).toBeVisible();
+    expect(await screen.findByTestId('board-replay-panel')).toHaveTextContent(
+      '历史回放 · account-1'
+    );
   });
 
   it('registers the same resizable workspace sidebar pattern as the T assistant', async () => {

@@ -16,6 +16,7 @@ from quantx_domain.strategies.base import (
   TradeIntentExecutionMode,
 )
 from quantx_domain.trading.market_rules import MarketDataSnapshot
+from quantx_engine.replay_clock import ReplayClock
 from quantx_engine.strategy_executor import (
   StrategyExecutor,
   StrategyRuntime,
@@ -39,6 +40,55 @@ class FakeStateManager:
 
   def get_account_quota(self):
     return {"total_asset": 100_000.0}
+
+
+def test_backtest_approval_uses_replay_clock_for_ttl_and_quote_age():
+  executor = StrategyExecutor()
+  signal_at = time_utils.now().replace(year=2024, month=1, day=2, hour=10)
+  context = StrategyContext(
+    run_id="run-historical-approval-clock",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["600000.SH"],
+    parameters={"execution_quote_max_age_seconds": 3.0},
+    current_time=signal_at + timedelta(seconds=2),
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="historical-approval-clock",
+    strategy_id=1,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+    replay_clock=ReplayClock(context.current_time),
+  )
+  runtime.latest_market_data["600000.SH"] = MarketDataSnapshot(
+    instrument_code="600000.SH",
+    timestamp=signal_at,
+    price=10.0,
+    ask_price=[10.0],
+  )
+  intent = TradeIntent(
+    strategy_id="1",
+    run_id=runtime.run_id,
+    instrument_code="600000.SH",
+    direction=TradeIntentDirection.BUY,
+    bucket="swing",
+    reason="historical_clock",
+    target_volume=100,
+    execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
+    approval_ttl_ms=15_000,
+    expiry_policy={
+      "type": "TTL_MS",
+      "expire_at_ms": int((signal_at + timedelta(seconds=15)).timestamp() * 1000),
+    },
+  )
+
+  assert executor._approval_failure(runtime, intent) is None
+
+  runtime.replay_clock.advance_to(signal_at + timedelta(seconds=4))
+  assert executor._approval_failure(runtime, intent)[0] == "APPROVAL_QUOTE_STALE"
+
+  runtime.replay_clock.advance_to(signal_at + timedelta(seconds=15))
+  assert executor._approval_failure(runtime, intent)[0] == "APPROVAL_TTL_EXPIRED"
 
 
 def test_manual_approval_fails_closed_for_missing_or_stale_execution_quote():

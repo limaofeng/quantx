@@ -96,6 +96,11 @@ from .limit_up_board_assistant import (
   LimitUpBoardAssistantProjection,
   LimitUpBoardCandidateArm,
 )
+from .limit_up_board_replay import (
+  LimitUpBoardReplayJob,
+  LimitUpBoardReplayScenario,
+  LimitUpBoardUniverseSnapshot,
+)
 from .limit_up_radar_event import LimitUpRadarEvent
 from .liquidation import (
   ConditionalLiquidationOrder,
@@ -250,6 +255,9 @@ __all__ = [
   "LimitUpBoardCandidateArm",
   # 策略运行时状态
   "StrategyRunPosition",
+  "LimitUpBoardReplayJob",
+  "LimitUpBoardReplayScenario",
+  "LimitUpBoardUniverseSnapshot",
   "StrategyRunState",
   # 回测历史
   "StrategyBacktest",

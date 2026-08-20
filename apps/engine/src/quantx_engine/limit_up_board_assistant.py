@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from quantx_domain.strategies import AshareLimitUpBoardAssistantStrategy
 from quantx_domain.trading.first_board_promotion import FIRST_BOARD_MODEL_VERSION
+from quantx_domain.trading.limit_up_board_universe import (
+  liquidity_cap_amount,
+  select_limit_up_board_universe,
+  target_position_pct,
+)
 from quantx_infrastructure.core.assistant_strategy_policy import (
   LIMIT_UP_BOARD_ASSISTANT_STRATEGY_CLASS_NAME,
   LIMIT_UP_BOARD_STRATEGY_CLASS_NAME,
@@ -374,96 +379,23 @@ class LimitUpBoardAssistantService:
     preferences: Optional[Dict[str, Any]] = None,
   ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     preferences = preferences or {}
-    items = {
-      str(item.get("code") or "").upper(): dict(item)
-      for item in list(radar.get("items") or [])
-      if item.get("code")
-    }
     manual = {arm.instrument_code: arm for arm in arms if arm.armed}
-    desired: set[str] = set()
-    source_by_code: Dict[str, str] = {}
-    if config.enabled:
-      qualified = []
-      for code, item in items.items():
-        preference = str(
-          getattr(preferences.get(code), "preference", "") or ""
-        ).upper()
-        if (
-          str(item.get("stage") or "") == "NEAR_LIMIT"
-          and bool(item.get("promotion_eligible"))
-          and not bool(item.get("is_stale"))
-          and not list(item.get("blocked_reasons") or [])
-          and preference != "IGNORE"
-        ):
-          qualified.append((code, item, preference))
-      ranked = sorted(
-        qualified,
-        key=lambda entry: (
-          entry[2] == "PREFER",
-          float(entry[1].get("promotion_score", 0.0) or 0.0),
-        ),
-        reverse=True,
-      )
-      max_candidates = int(
-        dict(config.settings or {}).get("max_ranked_candidates", 5) or 5
-      )
-      for code, _item, preference in ranked[:max_candidates]:
-        desired.add(code)
-        source_by_code[code] = "PREFERRED" if preference == "PREFER" else "AUTO"
-      for code in manual:
-        # Legacy manual arms are interpreted as attention preferences only;
-        # they can no longer bypass a V2 hard veto.
-        item = items.get(code, {})
-        if bool(item.get("promotion_eligible")) and not list(
-          item.get("blocked_reasons") or []
-        ):
-          desired.add(code)
-          source_by_code[code] = "PREFERRED"
-
     sticky = self._runtime_open_codes(runtime)
-    desired.update(sticky)
-    metadata: Dict[str, Dict[str, Any]] = {}
-    for code in sorted(desired):
-      item = items.get(code, {})
-      arm = manual.get(code)
-      blocked = list(item.get("blocked_reasons") or [])
-      source = source_by_code.get(code, "DRAINING")
-      eligible = bool(
-        config.enabled
-        and source in {"AUTO", "PREFERRED"}
-        and item
-        and not bool(item.get("is_stale"))
-        and not blocked
-      )
-      metadata[code] = {
-        "eligible": eligible,
-        "reason": "ELIGIBLE" if eligible else "DRAINING_EXISTING_WORK",
-        "source": source,
-        "draining": not eligible and code in sticky,
-        "arm_version": int(arm.arm_version or 0) if arm else 0,
-        "radar_score": float(item.get("radar_score", 0.0) or 0.0),
-        "radar_stage": str(item.get("stage", "") or ""),
-        "radar_updated_at": str(item.get("updated_at", "") or ""),
-        "radar_is_stale": bool(item.get("is_stale", False)),
-        "promotion_eligible": bool(item.get("promotion_eligible", False)),
-        "promotion_score": float(item.get("promotion_score", 0.0) or 0.0),
-        "promotion_snapshot_version": str(
-          item.get("promotion_snapshot_version", "") or ""
-        ),
-        "promotion_model_version": str(
-          item.get("promotion_model_version", "") or ""
-        ),
-        "exit_policy_version": str(item.get("exit_policy_version", "") or ""),
-        "board_segment": str(item.get("board_segment", "") or ""),
-        "cvar95_loss_pct": float(item.get("cvar95_loss_pct", 0.0) or 0.0),
-        "expected_net_return_pct": float(
-          item.get("expected_net_return_pct", 0.0) or 0.0
-        ),
-        "target_position_pct": self._target_position_pct(config, item),
-        "liquidity_cap_amount": self._liquidity_cap_amount(config, item),
-        "high_position_type": str(item.get("high_position_type", "") or ""),
-      }
-    return metadata, sorted(desired)
+    selection = select_limit_up_board_universe(
+      list(radar.get("items") or []),
+      settings={**ASSISTANT_DEFAULTS, **dict(config.settings or {})},
+      enabled=bool(config.enabled),
+      preferences={
+        str(code).upper(): str(getattr(value, "preference", "") or "")
+        for code, value in preferences.items()
+      },
+      sticky_codes=sorted(sticky),
+      force_preferred_codes=sorted(manual),
+      arm_versions={
+        code: int(arm.arm_version or 0) for code, arm in manual.items()
+      },
+    )
+    return selection.metadata, list(selection.instruments)
 
   async def _start_runtime(
     self, config: LimitUpBoardAssistantConfig, account_id: str
@@ -676,26 +608,17 @@ class LimitUpBoardAssistantService:
   def _target_position_pct(
     config: LimitUpBoardAssistantConfig, item: Dict[str, Any]
   ) -> float:
-    settings = {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}
-    single_cap = float(settings.get("max_single_position_pct", 0.02) or 0.02)
-    tail_budget = float(settings.get("planned_tail_loss_pct", 0.0015) or 0.0015)
-    cvar_ratio = float(item.get("cvar95_loss_pct", 0.0) or 0.0) / 100.0
-    if cvar_ratio <= 0:
-      return 0.0
-    return max(0.0, min(single_cap, tail_budget / cvar_ratio))
+    return target_position_pct(
+      {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}, item
+    )
 
   @staticmethod
   def _liquidity_cap_amount(
     config: LimitUpBoardAssistantConfig, item: Dict[str, Any]
   ) -> float:
-    settings = {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}
-    participation = float(
-      settings.get("liquidity_participation_pct", 0.005) or 0.0
+    return liquidity_cap_amount(
+      {**ASSISTANT_DEFAULTS, **dict(config.settings or {})}, item
     )
-    traded_amount = float(item.get("amount", 0.0) or 0.0)
-    if participation <= 0 or traded_amount <= 0:
-      return 0.0
-    return max(0.0, traded_amount * participation)
 
   async def _radar_item(self, code: str) -> Optional[Dict[str, Any]]:
     radar = await limit_up_radar_store.read_radar() or {}

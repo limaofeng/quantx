@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from enum import Enum
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type
 
 from quantx_domain.brokers.backtest import BacktestBroker
@@ -86,6 +87,8 @@ from quantx_infrastructure.models import ExecutionMetrics, KLine
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
+from .replay_clock import ReplayClock
+
 if TYPE_CHECKING:
   from quantx_infrastructure.core.market_data_manager import MarketDataManager
   from quantx_infrastructure.core.runtime_log_manager import RuntimeLogManager
@@ -136,8 +139,12 @@ class StrategyRuntime:
   error_message: Optional[str] = None
   #: 运行主任务
   task: Optional[asyncio.Task] = None
+  #: 串行事件处理任务；回测撮合后用它完成订单/成交回报 barrier。
+  event_task: Optional[asyncio.Task] = field(default=None, repr=False)
   #: 串行事件队列
   event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+  #: 仅 BACKTEST 使用的运行实例局部历史时钟。
+  replay_clock: Optional[ReplayClock] = field(default=None, repr=False)
   #: 运行进程ID
   pid: int = field(default_factory=os.getpid)
   #: 运行主机名
@@ -186,6 +193,8 @@ class StrategyRuntime:
   )
   #: Engine-owned automatic exit plans, persisted outside strategy-owned state.
   exit_plan_book: ExitPlanBook = field(default_factory=ExitPlanBook, repr=False)
+  _last_replay_projection_at: float = field(default=0.0, repr=False)
+  _last_replay_progress_pct: float = field(default=0.0, repr=False)
 
   @property
   def mode(self) -> StrategyRunMode:
@@ -494,6 +503,14 @@ class StrategyExecutor:
     try:
       # 更新状态
       runtime.status = ExecutionStatus.STARTING
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        replay_start = (
+          runtime.context.backtest_start_time
+          or runtime.context.current_time
+          or time_utils.now()
+        )
+        runtime.replay_clock = ReplayClock(replay_start)
+        runtime.context.current_time = replay_start
 
       # 创建策略对象
       runtime.strategy = runtime.strategy_class(runtime.context)
@@ -603,7 +620,7 @@ class StrategyExecutor:
       runtime.task = asyncio.create_task(self._run_strategy_loop(runtime))
 
       # 启动事件处理循环
-      asyncio.create_task(self._process_event_queue(runtime))
+      runtime.event_task = asyncio.create_task(self._process_event_queue(runtime))
 
       # 更新状态
       runtime.status = ExecutionStatus.RUNNING
@@ -705,8 +722,6 @@ class StrategyExecutor:
       return
 
     positions = runtime.state_manager.get_all_positions()
-    if not positions:
-      return
 
     seeded = 0
     for instrument_code, pos in positions.items():
@@ -872,6 +887,7 @@ class StrategyExecutor:
       return False
 
     runtime = self.runs[run_id]
+    previous_status = runtime.status
 
     if runtime.status in [ExecutionStatus.STOPPED, ExecutionStatus.STOPPING]:
       return True
@@ -915,6 +931,12 @@ class StrategyExecutor:
           await asyncio.wait_for(runtime.task, timeout=5.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
           self.logger.warning(f"策略任务 {run_id} 停止超时,强制跳过")
+      if runtime.event_task and not runtime.event_task.done():
+        runtime.event_task.cancel()
+        try:
+          await asyncio.wait_for(runtime.event_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+          self.logger.warning(f"策略事件任务 {run_id} 停止超时,强制跳过")
 
       # 更新指标
       if runtime.metrics and runtime.broker:
@@ -943,6 +965,17 @@ class StrategyExecutor:
         await runtime.performance_recorder.flush()
       if runtime.state_manager:
         await runtime.state_manager.stop()
+
+      if (
+        runtime.context.parameters.get("limit_up_board_replay")
+        and previous_status
+        not in {ExecutionStatus.COMPLETED, ExecutionStatus.ERROR}
+      ):
+        await self._persist_limit_up_board_replay_terminal(
+          runtime,
+          status="CANCELLED",
+          error_message="REPLAY_CANCELLED",
+        )
 
       runtime.status = ExecutionStatus.STOPPED
 
@@ -1041,8 +1074,11 @@ class StrategyExecutor:
     runtime = self.runs.get(run_id)
     if runtime is None:
       raise ValueError(f"策略运行不存在: {run_id}")
-    if runtime.context.mode == StrategyRunMode.BACKTEST:
-      raise ValueError("回测运行不支持动态修改标的池")
+    if (
+      runtime.context.mode == StrategyRunMode.BACKTEST
+      and not runtime.context.parameters.get("limit_up_board_replay")
+    ):
+      raise ValueError("仅账户级打板历史回放支持动态修改标的池")
 
     normalized = []
     for raw in instruments or []:
@@ -1050,7 +1086,10 @@ class StrategyExecutor:
       if code and code not in normalized:
         normalized.append(code)
 
-    if runtime.status in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}:
+    if (
+      runtime.context.mode != StrategyRunMode.BACKTEST
+      and runtime.status in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}
+    ):
       future = asyncio.get_running_loop().create_future()
       await runtime.event_queue.put(
         (
@@ -1063,6 +1102,13 @@ class StrategyExecutor:
         )
       )
       return await future
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return await self._apply_backtest_instrument_reconcile(
+        runtime,
+        normalized,
+        instrument_metadata=dict(instrument_metadata or {}),
+      )
 
     current = list(runtime.context.instruments or [])
     runtime.context.instruments = normalized
@@ -1111,6 +1157,9 @@ class StrategyExecutor:
 
     # 创建 Broker
     if mode == StrategyRunMode.BACKTEST:
+      is_board_replay = bool(
+        runtime.context.parameters.get("limit_up_board_replay")
+      )
       runtime.broker = BacktestBroker(
         account_id=runtime.run_id,
         initial_capital=runtime.context.initial_capital,
@@ -1139,6 +1188,9 @@ class StrategyExecutor:
           )
           or 0.25
         ),
+        strict_book_depth=is_board_replay,
+        no_queue_credit=is_board_replay,
+        defer_new_orders_until_next_quote=is_board_replay,
       )
     elif mode == StrategyRunMode.PAPER:
       runtime.broker = SimulatorBroker(
@@ -1295,6 +1347,14 @@ class StrategyExecutor:
                   "json_artifact": "",
                 }
               metrics["t_trade_replay"] = replay_metrics
+            if runtime.context.parameters.get("limit_up_board_replay"):
+              from quantx_infrastructure.core.limit_up_board_replay_metrics import (
+                build_limit_up_board_replay_metrics,
+              )
+
+              metrics["limit_up_board_replay"] = (
+                build_limit_up_board_replay_metrics(runtime)
+              )
             if runtime.performance_recorder:
               try:
                 await runtime.performance_recorder.flush()
@@ -1347,6 +1407,13 @@ class StrategyExecutor:
               "SUCCESS",
               f"回测记录已更新: {runtime.context.backtest_id}",
             )
+            if runtime.context.parameters.get("limit_up_board_replay"):
+              await self._update_limit_up_board_replay_projection(
+                runtime,
+                status="COMPLETED",
+                progress_pct=100.0,
+                result_ready=True,
+              )
 
     except Exception as e:
       runtime.status = ExecutionStatus.ERROR
@@ -1356,6 +1423,12 @@ class StrategyExecutor:
         "ERROR",
         f"策略运行循环异常: {runtime.run_id}, 错误: {e}",
       )
+      if runtime.context.parameters.get("limit_up_board_replay"):
+        await self._persist_limit_up_board_replay_terminal(
+          runtime,
+          status="ERROR",
+          error_message=str(e),
+        )
     finally:
       if runtime.performance_recorder:
         try:
@@ -1377,6 +1450,10 @@ class StrategyExecutor:
     # 使用运行时上下文的回测时间范围（来自 StrategyManager.run_strategy）
     end_time = runtime.context.backtest_end_time or time_utils.now()
     start_time = runtime.context.backtest_start_time or (end_time - timedelta(days=30))
+
+    if runtime.context.parameters.get("limit_up_board_replay"):
+      await self._run_limit_up_board_replay(runtime, start_time, end_time)
+      return
 
     # 读取策略声明的数据需求
     requirements = runtime.strategy_class.get_data_requirements()
@@ -1446,6 +1523,185 @@ class StrategyExecutor:
             lambda kline: runtime.event_queue.put_nowait(("kline", kline)),
           )
 
+  async def _run_limit_up_board_replay(
+    self,
+    runtime: StrategyRuntime,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> None:
+    """Load the verified immutable inputs and run one account scenario."""
+
+    from .limit_up_board_replay import (
+      LimitUpBoardReplayRunner,
+      ReplayDelayScenario,
+      load_limit_up_board_replay_dataset,
+    )
+
+    parameters = runtime.context.parameters
+    await self._update_limit_up_board_replay_projection(
+      runtime,
+      status="RUNNING",
+      progress_pct=0.0,
+      result_ready=False,
+    )
+    manifest_path = str(parameters.get("replay_input_manifest_path") or "").strip()
+    if not manifest_path:
+      raise ValueError("打板历史回放缺少 replay_input_manifest_path")
+    payload = load_limit_up_board_replay_dataset(manifest_path)
+    expected_fingerprint = str(
+      parameters.get("limit_up_board_replay_dataset_fingerprint") or ""
+    )
+    actual_fingerprint = str(payload.get("dataset_fingerprint") or "")
+    if expected_fingerprint and expected_fingerprint != actual_fingerprint:
+      raise ValueError("打板历史回放输入指纹与创建任务时不一致")
+    expected_config_fingerprint = str(
+      parameters.get("limit_up_board_replay_config_fingerprint") or ""
+    )
+    actual_config_fingerprint = str(payload.get("config_fingerprint") or "")
+    if (
+      expected_config_fingerprint
+      and expected_config_fingerprint != actual_config_fingerprint
+    ):
+      raise ValueError("打板历史回放配置指纹与创建任务时不一致")
+    data_quality = dict(payload.get("data_quality") or {})
+    blockers = list(data_quality.get("blockers") or [])
+    if blockers or data_quality.get("executable") is False:
+      raise ValueError("打板历史回放输入数据质量不允许执行")
+    events = list(payload.get("events") or [])
+    ticks = list(payload.get("ticks") or [])
+    if not events:
+      raise ValueError("打板历史回放候选事件为空")
+    if not ticks:
+      raise ValueError("打板历史回放 Tick 事件为空")
+
+    scenario = ReplayDelayScenario.from_runtime_parameters(parameters)
+    runner = LimitUpBoardReplayRunner(
+      self,
+      scenario,
+      selection_settings=dict(payload.get("settings") or {}),
+    )
+    result = await runner.run(
+      runtime,
+      universe_events=events,
+      ticks=ticks,
+      start_time=start_time,
+      end_time=end_time,
+    )
+    self._runtime_log(
+      runtime,
+      "SUCCESS",
+      "打板历史回放场景完成: "
+      f"scenario={scenario.scenario_id}, ticks={result.processed_ticks}, "
+      f"frames={result.processed_universe_snapshots}, "
+      f"open_positions={len(result.open_positions)}",
+    )
+
+  async def _update_limit_up_board_replay_projection(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    status: str,
+    progress_pct: Optional[float] = None,
+    result_ready: bool,
+    progress_update: bool = False,
+    error_message: Optional[str] = None,
+  ) -> None:
+    backtest_id = str(runtime.context.backtest_id or "")
+    if not backtest_id:
+      return
+    from quantx_infrastructure.services.limit_up_board_replay_projection_service import (
+      LimitUpBoardReplayUpdateKind,
+      limit_up_board_replay_projection_service,
+    )
+
+    try:
+      await limit_up_board_replay_projection_service.update_scenario(
+        backtest_id=backtest_id,
+        status=status,
+        progress_pct=progress_pct,
+        processed_until=runtime.context.current_time,
+        error_message=error_message,
+        kind=(
+          LimitUpBoardReplayUpdateKind.RESULT_READY
+          if result_ready
+          else (
+            LimitUpBoardReplayUpdateKind.PROGRESS
+            if progress_update
+            else LimitUpBoardReplayUpdateKind.STATUS_CHANGED
+          )
+        ),
+      )
+    except Exception:
+      self.logger.exception(
+        "更新打板历史回放场景投影失败: backtest_id=%s status=%s",
+        backtest_id,
+        status,
+      )
+
+  async def _persist_limit_up_board_replay_terminal(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    status: str,
+    error_message: Optional[str] = None,
+  ) -> None:
+    """Persist partial results for cancellation/error without liquidating."""
+
+    from quantx_infrastructure.core.limit_up_board_replay_metrics import (
+      build_limit_up_board_replay_metrics,
+    )
+
+    normalized_status = str(status or "ERROR").upper()
+    replay_metrics = build_limit_up_board_replay_metrics(runtime)
+    metrics = runtime.get_metrics()
+    metrics["limit_up_board_replay"] = replay_metrics
+    if runtime.context.backtest_id:
+      try:
+        from quantx_infrastructure.database.connection import get_async_db
+        from quantx_infrastructure.models.enums import StrategyRunStatus
+        from quantx_infrastructure.repositories.backtest_repository import (
+          BacktestRepository,
+        )
+        from quantx_infrastructure.repositories.strategy_run_repository import (
+          StrategyRunRepository,
+        )
+
+        async for db in get_async_db():
+          await BacktestRepository(db).update_backtest_status(
+            runtime.context.backtest_id,
+            normalized_status,
+            metrics=metrics,
+            error_message=error_message,
+            end_time=time_utils.now(),
+          )
+          await StrategyRunRepository(db).update_run(
+            runtime.run_id,
+            {
+              "status": (
+                StrategyRunStatus.ERROR
+                if normalized_status == "ERROR"
+                else StrategyRunStatus.STOPPED
+              ),
+              "metrics": metrics,
+              "error_message": error_message,
+              "stop_time": time_utils.now(),
+            },
+          )
+          break
+      except Exception:
+        self.logger.exception(
+          "持久化打板历史回放终态失败: run_id=%s status=%s",
+          runtime.run_id,
+          normalized_status,
+        )
+    await self._update_limit_up_board_replay_projection(
+      runtime,
+      status=normalized_status,
+      progress_pct=(100.0 if normalized_status == "COMPLETED" else None),
+      result_ready=True,
+      error_message=error_message,
+    )
+
   async def _wait_for_backtest_reports(
     self,
     runtime: StrategyRuntime,
@@ -1461,6 +1717,148 @@ class StrategyExecutor:
       )
     except asyncio.TimeoutError as exc:
       raise RuntimeError("回测 Broker 回报未在结束前完成收敛") from exc
+
+  @staticmethod
+  def _runtime_now(runtime: StrategyRuntime) -> datetime:
+    """Return this runtime's execution time without changing global clocks."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      if runtime.replay_clock is not None:
+        return runtime.replay_clock.now()
+      if runtime.context.current_time is not None:
+        return runtime.context.current_time
+    return time_utils.now()
+
+  @staticmethod
+  def _advance_runtime_replay_clock(
+    runtime: StrategyRuntime,
+    timestamp: datetime,
+  ) -> datetime:
+    if runtime.context.mode != StrategyRunMode.BACKTEST:
+      raise ValueError("Replay clock is only available in BACKTEST mode")
+    if runtime.replay_clock is None:
+      runtime.replay_clock = ReplayClock(timestamp)
+    else:
+      runtime.replay_clock.advance_to(timestamp)
+    runtime.context.current_time = timestamp
+    return timestamp
+
+  async def advance_replay_time(
+    self,
+    runtime: StrategyRuntime,
+    timestamp: datetime,
+  ) -> None:
+    """Advance a historical runtime between quotes without granting a fill."""
+
+    self._advance_runtime_replay_clock(runtime, timestamp)
+    if isinstance(runtime.data_adapter, HistoricalDataAdapter):
+      runtime.data_adapter.current_time = timestamp
+    if isinstance(runtime.broker, BacktestBroker):
+      await runtime.broker.advance_time(timestamp)
+    if runtime.state_manager:
+      runtime.state_manager.settle_trading_day(timestamp.date())
+    await self._expire_pending_approvals(runtime)
+
+  async def process_replay_tick(self, runtime: StrategyRuntime, tick: Any) -> None:
+    if not self._uses_strict_board_replay(runtime):
+      raise ValueError("Tick replay port is only available to board replay runs")
+    await self._process_tick(runtime, tick)
+
+  async def reconcile_replay_universe(
+    self,
+    runtime: StrategyRuntime,
+    instruments: List[str],
+    instrument_metadata: Dict[str, Dict[str, Any]],
+  ) -> Dict[str, List[str]]:
+    return await self._apply_backtest_instrument_reconcile(
+      runtime,
+      instruments,
+      instrument_metadata=instrument_metadata,
+    )
+
+  async def approve_replay_intent(
+    self,
+    runtime: StrategyRuntime,
+    intent_id: str,
+  ) -> Dict[str, Any]:
+    if self.runs.get(runtime.run_id) is not runtime:
+      raise ValueError("Replay runtime is not registered in this executor")
+    return await self.approve_trade_intent(runtime.run_id, intent_id)
+
+  async def reject_replay_intent(
+    self,
+    runtime: StrategyRuntime,
+    intent_id: str,
+    reason: str,
+  ) -> Dict[str, Any]:
+    if self.runs.get(runtime.run_id) is not runtime:
+      raise ValueError("Replay runtime is not registered in this executor")
+    return await self.reject_trade_intent(runtime.run_id, intent_id, reason)
+
+  async def cancel_replay_open_buy_orders(
+    self,
+    runtime: StrategyRuntime,
+    reason: str,
+  ) -> int:
+    if self.runs.get(runtime.run_id) is not runtime:
+      raise ValueError("Replay runtime is not registered in this executor")
+    return await self.cancel_open_buy_orders(runtime.run_id, reason)
+
+  async def wait_replay_reports(self, runtime: StrategyRuntime) -> None:
+    await self._board_replay_report_barrier(runtime)
+
+  def replay_sticky_instruments(self, runtime: StrategyRuntime) -> set[str]:
+    return self._board_replay_sticky_instruments(runtime)
+
+  async def report_replay_progress(
+    self,
+    runtime: StrategyRuntime,
+    processed_until: datetime,
+  ) -> None:
+    start_time = runtime.context.backtest_start_time
+    end_time = runtime.context.backtest_end_time
+    if start_time is None or end_time is None or end_time <= start_time:
+      return
+    now = monotonic()
+    if now - runtime._last_replay_projection_at < 1.0:
+      return
+    progress_pct = max(
+      0.0,
+      min(
+        99.9,
+        (processed_until - start_time).total_seconds()
+        / (end_time - start_time).total_seconds()
+        * 100.0,
+      ),
+    )
+    if progress_pct <= runtime._last_replay_progress_pct:
+      return
+    await self._update_limit_up_board_replay_projection(
+      runtime,
+      status="RUNNING",
+      progress_pct=progress_pct,
+      result_ready=False,
+      progress_update=True,
+    )
+    runtime._last_replay_projection_at = now
+    runtime._last_replay_progress_pct = progress_pct
+
+  @staticmethod
+  def _uses_strict_board_replay(runtime: StrategyRuntime) -> bool:
+    return bool(
+      runtime.context.mode == StrategyRunMode.BACKTEST
+      and runtime.context.parameters.get("limit_up_board_replay")
+    )
+
+  async def _board_replay_report_barrier(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    if not self._uses_strict_board_replay(runtime):
+      return
+    if runtime.event_task is asyncio.current_task():
+      raise RuntimeError("回放撮合不能在 Broker 回报事件任务内等待自身")
+    await self._wait_for_backtest_reports(runtime)
 
   async def _cancel_backtest_pending_orders(self, runtime: StrategyRuntime) -> None:
     broker = runtime.broker
@@ -2909,11 +3307,18 @@ class StrategyExecutor:
         elif event_type == "universe":
           future = data.get("future")
           try:
-            result = await self._apply_realtime_instrument_reconcile(
-              runtime,
-              list(data.get("instruments") or []),
-              instrument_metadata=dict(data.get("instrument_metadata") or {}),
-            )
+            if runtime.context.mode == StrategyRunMode.BACKTEST:
+              result = await self._apply_backtest_instrument_reconcile(
+                runtime,
+                list(data.get("instruments") or []),
+                instrument_metadata=dict(data.get("instrument_metadata") or {}),
+              )
+            else:
+              result = await self._apply_realtime_instrument_reconcile(
+                runtime,
+                list(data.get("instruments") or []),
+                instrument_metadata=dict(data.get("instrument_metadata") or {}),
+              )
             if future and not future.done():
               future.set_result(result)
           except Exception as exc:
@@ -2969,7 +3374,10 @@ class StrategyExecutor:
         self.logger.debug("忽略已移出标的池的迟到 Tick: %s", tick.stock_code)
         return
       # 更新策略上下文时间
-      runtime.context.current_time = tick.time
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        self._advance_runtime_replay_clock(runtime, tick.time)
+      else:
+        runtime.context.current_time = tick.time
       if isinstance(runtime.data_adapter, HistoricalDataAdapter):
         runtime.data_adapter.current_time = tick.time
       market_snapshot = MarketDataSnapshot.from_tick(
@@ -2990,6 +3398,7 @@ class StrategyExecutor:
           tick.time,
           market_data=market_snapshot,
         )
+        await self._board_replay_report_barrier(runtime)
 
       # 广播 Tick 数据到订阅者
       runtime.broadcast_tick(tick)
@@ -3000,6 +3409,7 @@ class StrategyExecutor:
         timestamp=tick.time,
         market_data=market_snapshot,
       )
+      await self._board_replay_report_barrier(runtime)
 
       strategy_input = self._build_strategy_input(
         runtime,
@@ -3011,12 +3421,16 @@ class StrategyExecutor:
       )
       output = await strategy.step(strategy_input)
       await self._process_strategy_output(runtime, output, strategy_input)
+      await self._board_replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "tick", tick)
 
     except Exception as e:
-      metrics.error_count += 1
+      if metrics:
+        metrics.error_count += 1
       self.logger.error(f"处理Tick数据失败: {e}")
+      if self._uses_strict_board_replay(runtime):
+        raise
 
   async def _process_kline(self, runtime: StrategyRuntime, kline: KLine) -> None:
     """处理K线数据"""
@@ -3029,7 +3443,10 @@ class StrategyExecutor:
         self.logger.debug("忽略已移出标的池的迟到 K 线: %s", kline.stock_code)
         return
       # 更新策略上下文时间
-      runtime.context.current_time = kline.time
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        self._advance_runtime_replay_clock(runtime, kline.time)
+      else:
+        runtime.context.current_time = kline.time
       if isinstance(runtime.data_adapter, HistoricalDataAdapter):
         runtime.data_adapter.current_time = kline.time
       market_snapshot = MarketDataSnapshot.from_kline(
@@ -3050,6 +3467,7 @@ class StrategyExecutor:
           kline.time,
           market_data=market_snapshot,
         )
+        await self._board_replay_report_barrier(runtime)
 
       # 广播 K线 数据到订阅者
       runtime.broadcast_kline(kline)
@@ -3060,6 +3478,7 @@ class StrategyExecutor:
         timestamp=kline.time,
         market_data=market_snapshot,
       )
+      await self._board_replay_report_barrier(runtime)
 
       strategy_input = self._build_strategy_input(
         runtime,
@@ -3071,12 +3490,16 @@ class StrategyExecutor:
       )
       output = await strategy.step(strategy_input)
       await self._process_strategy_output(runtime, output, strategy_input)
+      await self._board_replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "bar", kline)
 
     except Exception as e:
-      metrics.error_count += 1
+      if metrics:
+        metrics.error_count += 1
       self.logger.error(f"处理K线数据失败: {e}")
+      if self._uses_strict_board_replay(runtime):
+        raise
 
   def _build_execution_context_snapshot(
     self,
@@ -3340,6 +3763,10 @@ class StrategyExecutor:
         runtime.exit_plan_book.apply_command(command)
       self._persist_exit_plan_book(runtime)
     intents = output.trade_intents or []
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      created_at = self._runtime_now(runtime)
+      for intent in intents:
+        intent.created_at = created_at
     if runtime.metrics:
       runtime.metrics.trade_intents_generated += len(intents)
     if runtime.state_manager:
@@ -3360,6 +3787,7 @@ class StrategyExecutor:
         if (
           runtime.context.mode == StrategyRunMode.BACKTEST
           and runtime.context.parameters.get("auto_approve_manual_intents")
+          and not runtime.context.parameters.get("limit_up_board_replay")
         ):
           result = await self.approve_trade_intent(runtime.run_id, intent.intent_id)
           self._runtime_log(
@@ -3579,10 +4007,27 @@ class StrategyExecutor:
   def _approval_failure(
     self, runtime: StrategyRuntime, intent: TradeIntent
   ) -> Optional[tuple[str, str]]:
+    approval_at = self._runtime_now(runtime)
+    expiry_policy = dict(intent.expiry_policy or {})
+    try:
+      expire_at_ms = int(expiry_policy.get("expire_at_ms", 0) or 0)
+    except (TypeError, ValueError):
+      expire_at_ms = 0
+    if expire_at_ms > 0 and int(approval_at.timestamp() * 1000) >= expire_at_ms:
+      return "APPROVAL_TTL_EXPIRED", "信号已超过确认有效期，请等待新信号"
+
     ttl_ms = int(intent.approval_ttl_ms or 0)
-    if ttl_ms > 0:
-      elapsed_ms = (time_utils.now() - intent.created_at).total_seconds() * 1000
-      if elapsed_ms > ttl_ms:
+    if ttl_ms > 0 and expire_at_ms <= 0:
+      created_at = intent.created_at
+      if created_at.tzinfo is None and approval_at.tzinfo is not None:
+        created_at = created_at.replace(tzinfo=approval_at.tzinfo)
+      if created_at.tzinfo is not None and approval_at.tzinfo is None:
+        approval_at = approval_at.replace(tzinfo=created_at.tzinfo)
+      elapsed_ms = max(
+        0.0,
+        (approval_at - created_at).total_seconds() * 1000,
+      )
+      if elapsed_ms >= ttl_ms:
         return "APPROVAL_TTL_EXPIRED", "信号已超过确认有效期，请等待新信号"
 
     market_data = runtime.latest_market_data.get(intent.instrument_code)
@@ -3602,7 +4047,6 @@ class StrategyExecutor:
           quote_at = datetime.fromisoformat(str(quote_at).replace("Z", "+00:00"))
         except (TypeError, ValueError):
           return "APPROVAL_QUOTE_STALE", "确认时执行行情时间无效，请等待新信号"
-      approval_at = time_utils.now()
       if quote_at.tzinfo is None and approval_at.tzinfo is not None:
         quote_at = quote_at.replace(tzinfo=approval_at.tzinfo)
       if quote_at.tzinfo is not None and approval_at.tzinfo is None:
@@ -4744,6 +5188,149 @@ class StrategyExecutor:
       "added": membership_added,
       "removed": membership_removed,
       "instruments": desired,
+    }
+
+  async def _apply_backtest_instrument_reconcile(
+    self,
+    runtime: StrategyRuntime,
+    instruments: List[str],
+    *,
+    instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+  ) -> Dict[str, List[str]]:
+    """Apply one point-in-time universe snapshot without live subscriptions."""
+
+    if not self._uses_strict_board_replay(runtime):
+      raise ValueError("动态历史标的池仅供账户级打板回放使用")
+    metadata = {
+      str(code or "").strip().upper(): dict(value or {})
+      for code, value in dict(instrument_metadata or {}).items()
+      if str(code or "").strip()
+    }
+    desired: List[str] = []
+    for raw in instruments or []:
+      code = str(raw or "").strip().upper()
+      if code and code not in desired:
+        desired.append(code)
+    for code in sorted(self._board_replay_sticky_instruments(runtime)):
+      if code not in desired:
+        desired.append(code)
+      if code not in metadata or str(metadata[code].get("source") or "").upper() == "DRAINING":
+        metadata[code] = self._board_replay_draining_metadata(runtime, code)
+    previous = list(runtime.context.instruments or [])
+    membership_added = [code for code in desired if code not in previous]
+    membership_removed = [code for code in previous if code not in desired]
+    runtime.context.instruments = desired
+    for code in membership_removed:
+      runtime.latest_market_data.pop(code, None)
+
+    if runtime.strategy:
+      self._sync_dynamic_holding_inventory(runtime, metadata)
+      state = runtime.strategy.state.to_dict()
+      account = (
+        runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+      )
+      positions = (
+        runtime.state_manager.get_all_positions() if runtime.state_manager else {}
+      )
+      reconcile_input = StrategyInput(
+        run_id=runtime.run_id,
+        strategy_id=str(runtime.strategy_id),
+        timestamp=self._runtime_now(runtime),
+        cadence=StrategyCadence.RECONCILE,
+        instrument_code="",
+        event={
+          "added": membership_added,
+          "removed": membership_removed,
+          "instruments": desired,
+          "instrument_metadata": metadata,
+        },
+        portfolio_state={"account": account, "positions": positions},
+        strategy_state=state,
+        parameters=dict(runtime.context.parameters or {}),
+      )
+      output = await runtime.strategy.step(reconcile_input)
+      await self._process_strategy_output(runtime, output, reconcile_input)
+      await self._board_replay_report_barrier(runtime)
+
+    return {
+      "added": membership_added,
+      "removed": membership_removed,
+      "instruments": desired,
+    }
+
+  @staticmethod
+  def _board_replay_sticky_instruments(runtime: StrategyRuntime) -> set[str]:
+    """Keep every symbol with unfinished account work on the replay feed."""
+
+    sticky = {
+      str(intent.instrument_code or "").strip().upper()
+      for intent in runtime.pending_approvals.values()
+      if str(intent.instrument_code or "").strip()
+    }
+    broker = runtime.broker
+    active_order_statuses = {
+      "PENDING",
+      "SUBMITTED",
+      "ACCEPTED",
+      "PARTIAL_FILLED",
+    }
+    for order in dict(getattr(broker, "orders", {}) or {}).values():
+      status = str(
+        getattr(getattr(order, "status", ""), "value", getattr(order, "status", ""))
+      ).upper()
+      request = getattr(order, "request", None)
+      code = str(getattr(request, "instrument_code", "") or "").strip().upper()
+      if code and status in active_order_statuses:
+        sticky.add(code)
+    for code, position in dict(getattr(broker, "positions", {}) or {}).items():
+      if int(getattr(position, "long_volume", 0) or 0) > 0:
+        sticky.add(str(code).strip().upper())
+    if runtime.state_manager:
+      for code, position in runtime.state_manager.get_all_positions().items():
+        if int(dict(position or {}).get("long_volume", 0) or 0) > 0:
+          sticky.add(str(code).strip().upper())
+    for plan in runtime.exit_plan_book.active_plans():
+      code = str(plan.template.instrument_code or "").strip().upper()
+      if code:
+        sticky.add(code)
+    return sticky
+
+  @staticmethod
+  def _board_replay_draining_metadata(
+    runtime: StrategyRuntime,
+    instrument_code: str,
+  ) -> Dict[str, Any]:
+    states = (
+      dict(runtime.strategy.state.get("instrument_states", {}) or {})
+      if runtime.strategy
+      else {}
+    )
+    state = dict(states.get(instrument_code) or {})
+    return {
+      "eligible": False,
+      "reason": "DRAINING_EXISTING_WORK",
+      "source": str(state.get("candidate_source") or "DRAINING"),
+      "draining": True,
+      "arm_version": int(state.get("last_arm_version", 0) or 0),
+      "radar_score": float(state.get("radar_score", 0.0) or 0.0),
+      "radar_stage": str(state.get("radar_stage") or ""),
+      "radar_updated_at": str(state.get("radar_updated_at") or ""),
+      "radar_is_stale": bool(state.get("radar_is_stale", False)),
+      "promotion_eligible": bool(state.get("promotion_eligible", False)),
+      "promotion_score": float(state.get("promotion_score", 0.0) or 0.0),
+      "promotion_snapshot_version": str(
+        state.get("promotion_snapshot_version") or ""
+      ),
+      "promotion_model_version": str(state.get("promotion_model_version") or ""),
+      "exit_policy_version": str(state.get("exit_policy_version") or ""),
+      "board_segment": str(state.get("board_segment") or ""),
+      "cvar95_loss_pct": float(state.get("cvar95_loss_pct", 0.0) or 0.0),
+      "expected_net_return_pct": float(
+        state.get("expected_net_return_pct", 0.0) or 0.0
+      ),
+      "target_position_pct": 0.0,
+      "liquidity_cap_amount": 0.0,
+      "high_position_type": str(state.get("high_position_type") or ""),
     }
 
   async def _clear_realtime_subscriptions(self, runtime: StrategyRuntime) -> None:

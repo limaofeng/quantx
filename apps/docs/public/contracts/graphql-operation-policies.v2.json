@@ -168,6 +168,18 @@
         "risk": "ADMIN",
         "stability": "web-internal"
       },
+      "cancelLimitUpBoardReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "cancelLiquidationOrder": {
         "audiences": [
           "web",
@@ -1023,6 +1035,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "startLimitUpBoardReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "startStrategy": {
         "audiences": [
           "web",
@@ -1685,6 +1709,66 @@
         "stability": "supported"
       },
       "limitUpBoardAssistant": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplayCurve": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplayHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplayPreparation": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplayTrades": {
         "audiences": [
           "web",
           "native",
@@ -2507,6 +2591,18 @@
         "stability": "web-internal"
       },
       "limitUpBoardAssistantUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "limitUpBoardReplayUpdates": {
         "audiences": [
           "web",
           "native",

@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Check,
   Clock3,
+  History,
   LayoutList,
   Radar,
   RadioTower,
@@ -13,7 +14,15 @@ import {
   WalletCards,
   X,
 } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useLocation } from 'wouter';
 
 import {
@@ -50,6 +59,12 @@ import { LimitUpRadarPanel } from '../components/LimitUpRadarPanel';
 import { deriveLimitUpBoardHealth } from '../domain/limitUpBoardHealth';
 import { useLimitUpBoardAssistant } from '../hooks/useLimitUpBoardAssistant';
 import { useLimitUpRadar } from '../hooks/useLimitUpRadar';
+
+const LimitUpBoardReplayPanel = lazy(async () => {
+  const module =
+    await import('../components/limit-up-board-replay/LimitUpBoardReplayPanel');
+  return { default: module.LimitUpBoardReplayPanel };
+});
 
 function formatMoney(value?: number | null) {
   if (!value || !Number.isFinite(value)) return '--';
@@ -290,7 +305,7 @@ function ExitPlanCard({
   );
 }
 
-type LimitUpWorkbenchView = 'RADAR' | 'SIGNALS' | 'POSITIONS';
+type LimitUpWorkbenchView = 'RADAR' | 'SIGNALS' | 'POSITIONS' | 'REPLAY';
 
 export default function LimitUpBoardPage() {
   const [, setLocation] = useLocation();
@@ -513,6 +528,12 @@ export default function LimitUpBoardPage() {
       icon: WalletCards,
       id: 'POSITIONS',
       label: 'T+1 持仓',
+    },
+    {
+      count: 0,
+      icon: History,
+      id: 'REPLAY',
+      label: '历史回放',
     },
   ];
 
@@ -744,7 +765,7 @@ export default function LimitUpBoardPage() {
                 )}
               </div>
             </div>
-          ) : (
+          ) : activeView === 'POSITIONS' ? (
             <div className="flex h-full min-h-0 flex-col overflow-hidden border border-emerald-400/15 bg-[#0d1626]/90">
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
                 <div>
@@ -809,6 +830,20 @@ export default function LimitUpBoardPage() {
                 )}
               </div>
             </div>
+          ) : (
+            <Suspense
+              fallback={
+                <div
+                  aria-label="正在加载历史回放"
+                  className="flex h-full items-center justify-center text-[10px] text-slate-500"
+                  role="status"
+                >
+                  正在加载历史回放…
+                </div>
+              }
+            >
+              <LimitUpBoardReplayPanel accountId={accountId} />
+            </Suspense>
           )}
         </section>
       </main>

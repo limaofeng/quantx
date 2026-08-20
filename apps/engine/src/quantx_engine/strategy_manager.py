@@ -41,6 +41,9 @@ from quantx_infrastructure.repositories import StrategyRunRepository
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
+from quantx_infrastructure.services.limit_up_board_replay_projection_service import (
+  limit_up_board_replay_projection_service,
+)
 from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
   request_market_data_sync,
@@ -88,6 +91,7 @@ class StrategyManager:
 
       # 核心组件：策略执行器
       self.executor = StrategyExecutor(max_workers=10)
+      self._deferred_start_tasks: Dict[str, asyncio.Task] = {}
 
       # 策略注册和协调组件
       self._registry = strategy_registry
@@ -177,6 +181,8 @@ class StrategyManager:
   async def stop(self):
     """停止策略管理器服务"""
     self.running = False
+
+    await self._cancel_deferred_starts_for_shutdown()
 
     # 停止所有运行中的策略并关闭执行器（释放线程池，避免进程无法退出）
     await self.executor.shutdown()
@@ -284,6 +290,10 @@ class StrategyManager:
                 )
                 backtest_version = int(backtest.version or 0) or None
 
+            is_limit_up_board_replay = bool(
+              mode_value == StrategyRunMode.BACKTEST.value
+              and parameters.get("limit_up_board_replay")
+            )
             should_start = status_value == StrategyRunStatus.RUNNING.value
             if (
               mode_value == StrategyRunMode.BACKTEST.value
@@ -296,6 +306,27 @@ class StrategyManager:
                 f"run_id={run.id}, backtest_id={backtest.id}, v{backtest_version}"
               )
               should_start = True
+            if (
+              is_limit_up_board_replay
+              and status_value == StrategyRunStatus.PENDING.value
+            ):
+              replay_job_id = str(
+                parameters.get("limit_up_board_replay_job_id") or ""
+              ).strip()
+              projection = (
+                await limit_up_board_replay_projection_service.get(replay_job_id)
+                if replay_job_id
+                else None
+              )
+              projection_status = str(
+                (projection or {}).get("status") or ""
+              ).upper()
+              if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
+                self.logger.warning(
+                  "检测到中断的打板回放启动，恢复后台准备: run_id=%s",
+                  run.id,
+                )
+                should_start = True
 
             # 创建策略上下文
             context = StrategyContext(
@@ -325,9 +356,13 @@ class StrategyManager:
 
             # 根据状态决定是否自动启动
             if should_start:
-              # 只有 RUNNING 状态的实例需要自动启动
-              await self.start_strategy(run.id)
-              self.logger.info(f"策略运行 {run.id} 恢复并启动成功")
+              if is_limit_up_board_replay:
+                await self.defer_start_strategy(run.id)
+                self.logger.info(f"打板回放 {run.id} 已恢复后台启动")
+              else:
+                # 普通运行维持原有同步恢复语义。
+                await self.start_strategy(run.id)
+                self.logger.info(f"策略运行 {run.id} 恢复并启动成功")
             else:
               # PAUSED 和 PENDING 状态只加载到 executor，等待用户操作
               self.logger.info(f"策略运行 {run.id} 已加载到 executor (状态: {status_name})")
@@ -737,6 +772,126 @@ class StrategyManager:
         await self._update_runtime_status(run_id, "ERROR", runtime.error_message)
 
     return success
+
+  async def defer_start_strategy(self, run_id: str) -> bool:
+    """Track slow backtest preparation without blocking the command consumer."""
+
+    runtime = self.executor.get(run_id)
+    if runtime is None:
+      self.logger.error("无法后台启动不存在的策略运行: %s", run_id)
+      return False
+    if runtime.task is not None and not runtime.task.done():
+      return True
+    existing = self._deferred_start_tasks.get(run_id)
+    if existing is not None and not existing.done():
+      return True
+
+    task = asyncio.create_task(
+      self._run_deferred_start(run_id),
+      name=f"strategy-deferred-start:{run_id}",
+    )
+    self._deferred_start_tasks[run_id] = task
+
+    def _discard(completed: asyncio.Task) -> None:
+      if self._deferred_start_tasks.get(run_id) is completed:
+        self._deferred_start_tasks.pop(run_id, None)
+
+    task.add_done_callback(_discard)
+    return True
+
+  async def cancel_deferred_start(self, run_id: str) -> bool:
+    """Cancel and join one tracked preparation task before stopping its runtime."""
+
+    task = self._deferred_start_tasks.get(run_id)
+    if task is None:
+      return False
+    if not task.done():
+      task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    if self._deferred_start_tasks.get(run_id) is task:
+      self._deferred_start_tasks.pop(run_id, None)
+    return True
+
+  async def _run_deferred_start(self, run_id: str) -> None:
+    try:
+      success = await self.start_strategy(run_id)
+    except asyncio.CancelledError:
+      raise
+    except Exception as exc:
+      self.logger.exception("后台启动策略失败: %s", run_id)
+      await self.converge_deferred_start_error(run_id, str(exc))
+      return
+    if success:
+      return
+    runtime = self.executor.get(run_id)
+    message = (
+      str(runtime.error_message or "") if runtime is not None else ""
+    ) or "后台启动策略失败"
+    await self.converge_deferred_start_error(run_id, message)
+
+  async def converge_deferred_start_error(
+    self,
+    run_id: str,
+    error_message: str,
+  ) -> None:
+    """Best-effort convergence of run, backtest, and replay projection to ERROR."""
+
+    runtime = self.executor.get(run_id)
+    backtest_id = runtime.context.backtest_id if runtime is not None else None
+    parameters = dict(runtime.context.parameters or {}) if runtime is not None else {}
+    board_replay_job_id = str(
+      parameters.get("limit_up_board_replay_job_id") or ""
+    ).strip()
+    if runtime is None or not backtest_id or not board_replay_job_id:
+      try:
+        from quantx_infrastructure.repositories.backtest_repository import (
+          BacktestRepository,
+        )
+
+        async for db in get_async_db():
+          run = await StrategyRunRepository(db).find_run_by_id(run_id)
+          if run is not None:
+            persisted_parameters = run.parameters or {}
+            if isinstance(persisted_parameters, str):
+              persisted_parameters = json.loads(persisted_parameters)
+            board_replay_job_id = board_replay_job_id or str(
+              dict(persisted_parameters or {}).get(
+                "limit_up_board_replay_job_id"
+              )
+              or ""
+            ).strip()
+          if not backtest_id:
+            history = await BacktestRepository(db).get_backtests_by_run(run_id)
+            backtest_id = history[0].id if history else None
+          break
+      except Exception:
+        self.logger.exception("读取后台启动持久化上下文失败: %s", run_id)
+    try:
+      await self._update_runtime_status(run_id, "ERROR", error_message)
+    except Exception:
+      self.logger.exception("收敛后台启动运行状态失败: %s", run_id)
+    if backtest_id:
+      await self._mark_backtest_error_safely(backtest_id, error_message)
+    if board_replay_job_id:
+      try:
+        await limit_up_board_replay_projection_service.update_job_error(
+          job_id=board_replay_job_id,
+          error_message=error_message,
+        )
+      except Exception:
+        self.logger.exception(
+          "收敛打板回放后台启动失败状态失败: %s",
+          board_replay_job_id,
+        )
+
+  async def _cancel_deferred_starts_for_shutdown(self) -> None:
+    tasks = list(self._deferred_start_tasks.values())
+    for task in tasks:
+      if not task.done():
+        task.cancel()
+    if tasks:
+      await asyncio.gather(*tasks, return_exceptions=True)
+    self._deferred_start_tasks.clear()
 
   async def _ensure_backtest_data_available(self, runtime: StrategyRuntime) -> None:
     """确保回测模式所需的历史数据已经准备就绪"""

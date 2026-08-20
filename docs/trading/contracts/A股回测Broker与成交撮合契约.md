@@ -501,6 +501,28 @@ expected_edge_pct
 
 否则不应输出或不应执行该网格意图。
 
+### 12.5 初始总资产对账
+
+账户级回测使用日结快照初始化时，初始总权益按以下口径组成：
+
+```text
+position_market_value = sum(initial_position.market_value)
+non_trading_asset = max(
+  0,
+  reported_total_asset - available_cash - position_market_value,
+)
+effective_initial_equity = available_cash + position_market_value + non_trading_asset
+```
+
+`non_trading_asset` 表示未在本次回放持仓明细中展开的资产（包括不可交易或未归属
+资产）。它在回放窗口内保持恒定，同时计入主动权益和被动持有基准，但不得进入可用
+现金、可卖持仓、订单数量或撮合。
+
+若现金与持仓分项合计高于快照总资产，负残差必须钳制为 `0`，并以已知分项合计作为
+有效初始权益，避免制造首个行情时点的虚假回撤。报告必须保留原始残差、有效初始权益、
+钳制策略，以及 `ASSET_COMPONENT_MISMATCH`、
+`INITIAL_COMPONENTS_EXCEED_REPORTED_TOTAL` 等数据质量标记。
+
 ---
 
 ## 13. 滑点模型

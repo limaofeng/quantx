@@ -4,6 +4,7 @@
 
 import logging
 from datetime import date, datetime
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -38,6 +39,9 @@ class BacktestBroker(BrokerBase):
     transfer_fee_rate: float = 0.00001,
     participation_cap_pct: float = 0.05,
     book_depth_participation_pct: float = 0.25,
+    strict_book_depth: bool = False,
+    no_queue_credit: bool = False,
+    defer_new_orders_until_next_quote: bool = False,
   ):
     super().__init__(account_id, initial_capital)
 
@@ -52,6 +56,11 @@ class BacktestBroker(BrokerBase):
     )
     self.book_depth_participation_pct = max(
       0.001, min(1.0, float(book_depth_participation_pct or 0.25))
+    )
+    self.strict_book_depth = bool(strict_book_depth)
+    self.no_queue_credit = bool(no_queue_credit)
+    self.defer_new_orders_until_next_quote = bool(
+      defer_new_orders_until_next_quote
     )
 
     # 账户状态
@@ -84,6 +93,9 @@ class BacktestBroker(BrokerBase):
       "full_fills": 0,
       "liquidity_capped_orders": 0,
       "book_depth_capped_orders": 0,
+      "missing_book_depth_blocked": 0,
+      "no_queue_credit_blocked": 0,
+      "cash_capped_orders": 0,
       "expired_orders": 0,
       "unfilled_volume": 0,
       "fake_fill_penalty": 0.0,
@@ -94,6 +106,19 @@ class BacktestBroker(BrokerBase):
     self.passive_cash = initial_capital
     self.passive_volumes: Dict[str, int] = {}
     self.passive_prices: Dict[str, float] = {}
+    self.non_trading_asset_value = 0.0
+    self.initial_asset_reconciliation: Dict[str, Any] = {
+      "schema_version": 1,
+      "reported_total_asset": float(initial_capital),
+      "available_cash": float(initial_capital),
+      "position_market_value": 0.0,
+      "raw_residual": 0.0,
+      "non_trading_asset": 0.0,
+      "effective_initial_equity": float(initial_capital),
+      "negative_residual_clamped": False,
+      "policy": "PRESERVE_POSITIVE_RESIDUAL_CLAMP_NEGATIVE_TO_ZERO",
+      "quality_flags": [],
+    }
     self.replay_curve: List[Dict[str, Any]] = []
 
     self.logger = logging.getLogger("BacktestBroker")
@@ -110,10 +135,46 @@ class BacktestBroker(BrokerBase):
     total_asset: float,
     positions: Dict[str, Position],
   ) -> None:
-    """Configure cash and the passive no-T baseline without double counting holdings."""
+    """Configure the tradable portfolio and a constant non-trading asset residual.
 
-    self.cash = max(0.0, float(cash or 0.0))
-    self.initial_capital = max(float(total_asset or 0.0), self.cash)
+    The residual reconciles reported total assets with available cash and the
+    position rows supplied to the backtest.  It is deliberately excluded from
+    order cash and positions, but included in both active and passive equity.
+    """
+
+    raw_cash = float(cash or 0.0)
+    raw_total_asset = float(total_asset or 0.0)
+    position_values = [
+      float(position.market_value or 0.0) for position in positions.values()
+    ]
+    if not all(
+      isfinite(value) for value in (raw_cash, raw_total_asset, *position_values)
+    ):
+      raise ValueError("Initial portfolio assets must be finite numbers")
+    self.cash = max(0.0, raw_cash)
+    reported_total_asset = max(0.0, raw_total_asset)
+    position_market_value = sum(max(0.0, value) for value in position_values)
+    component_total = self.cash + position_market_value
+    raw_residual = reported_total_asset - component_total
+    self.non_trading_asset_value = max(0.0, raw_residual)
+    self.initial_capital = component_total + self.non_trading_asset_value
+    quality_flags = []
+    if raw_residual > 0.01:
+      quality_flags.append("NON_TRADING_ASSET_RESIDUAL_PRESERVED")
+    elif raw_residual < -0.01:
+      quality_flags.append("INITIAL_COMPONENTS_EXCEED_REPORTED_TOTAL")
+    self.initial_asset_reconciliation = {
+      "schema_version": 1,
+      "reported_total_asset": reported_total_asset,
+      "available_cash": self.cash,
+      "position_market_value": position_market_value,
+      "raw_residual": raw_residual,
+      "non_trading_asset": self.non_trading_asset_value,
+      "effective_initial_equity": self.initial_capital,
+      "negative_residual_clamped": raw_residual < 0.0,
+      "policy": "PRESERVE_POSITIVE_RESIDUAL_CLAMP_NEGATIVE_TO_ZERO",
+      "quality_flags": quality_flags,
+    }
     self.equity_curve = [self.initial_capital]
     self.peak_equity = self.initial_capital
     self.passive_cash = self.cash
@@ -156,8 +217,12 @@ class BacktestBroker(BrokerBase):
       self.orders[order_id] = order
       return order
 
-    # 市价单立即执行
-    if request.price_type == PriceType.MARKET:
+    # 普通回测维持原有市价单语义；严格 Tick 回放必须等下一笔行情，
+    # 防止策略读取当前 Tick 后生成的订单反过来成交在同一 Tick。
+    if (
+      request.price_type == PriceType.MARKET
+      and not self.defer_new_orders_until_next_quote
+    ):
       await self._execute_market_order(order)
     else:
       # 限价单加入待处理队列
@@ -207,7 +272,7 @@ class BacktestBroker(BrokerBase):
     """查询账户信息"""
     # 计算总资产
     market_value = sum(pos.market_value for pos in self.positions.values())
-    total_asset = self.cash + market_value
+    total_asset = self.cash + market_value + self.non_trading_asset_value
 
     # 计算总盈亏
     total_pnl = total_asset - self.initial_capital
@@ -290,6 +355,29 @@ class BacktestBroker(BrokerBase):
     await self._update_equity_curve()
     self._record_replay_curve()
 
+  async def advance_time(self, timestamp: datetime) -> None:
+    """Advance replay time without inventing a quote or a fill.
+
+    Approval-delay and end-of-window events can occur between market ticks.
+    They still need deterministic T+1 settlement and order expiry, but must not
+    receive liquidity credit from the last observed order book.
+    """
+
+    if not isinstance(timestamp, datetime):
+      raise TypeError("BacktestBroker timestamp must be a datetime")
+    if self.current_time is not None:
+      try:
+        moved_backwards = timestamp < self.current_time
+      except TypeError as exc:
+        raise ValueError(
+          "BacktestBroker cannot mix timezone-aware and timezone-naive timestamps"
+        ) from exc
+      if moved_backwards:
+        raise ValueError("BacktestBroker time cannot move backwards")
+    self.current_time = timestamp
+    self._settle_if_new_day(timestamp.date())
+    await self._expire_pending_orders()
+
   async def refresh_performance_snapshot(self) -> None:
     """Record account performance after an order placed on the final quote.
 
@@ -308,14 +396,23 @@ class BacktestBroker(BrokerBase):
       amount = request.volume * request.price
       costs = self._calculate_costs(amount, request.order_type)
       required_cash = amount + costs["total"]
-      if required_cash > self.cash:
-        self.logger.warning(f"资金不足: 需要 {required_cash}, 可用 {self.cash}")
+      available_cash = self.cash
+      if self.defer_new_orders_until_next_quote:
+        available_cash -= self._reserved_pending_buy_cash()
+      if required_cash > available_cash:
+        self.logger.warning(
+          f"资金不足: 需要 {required_cash}, 可用 {max(0.0, available_cash)}"
+        )
         return False
 
     else:
       # 卖出验证
       position = self.positions.get(request.instrument_code)
       available_volume = position.available_volume if position else 0
+      if self.defer_new_orders_until_next_quote:
+        available_volume -= self._reserved_pending_sell_volume(
+          request.instrument_code
+        )
       if not position or available_volume < request.volume:
         self.logger.warning(
           f"持仓不足: {request.instrument_code} 需要 {request.volume}, "
@@ -324,6 +421,26 @@ class BacktestBroker(BrokerBase):
         return False
 
     return True
+
+  def _reserved_pending_buy_cash(self) -> float:
+    reserved = 0.0
+    for order in self.pending_orders:
+      request = order.request
+      if request.order_type not in [OrderType.BUY, OrderType.BUY_TO_COVER]:
+        continue
+      remaining = max(0, int(request.volume) - int(order.filled_volume or 0))
+      amount = remaining * max(0.0, float(request.price or 0.0))
+      reserved += amount + self._calculate_costs(amount, request.order_type)["total"]
+    return reserved
+
+  def _reserved_pending_sell_volume(self, instrument_code: str) -> int:
+    return sum(
+      max(0, int(order.request.volume) - int(order.filled_volume or 0))
+      for order in self.pending_orders
+      if order.request.instrument_code == instrument_code
+      and order.request.order_type
+      not in [OrderType.BUY, OrderType.BUY_TO_COVER]
+    )
 
   async def _execute_market_order(self, order: OrderResponse) -> None:
     """执行市价单"""
@@ -502,6 +619,9 @@ class BacktestBroker(BrokerBase):
     """处理待成交的限价单"""
     market_data = self.market_snapshots.get(instrument_code)
     orders_to_remove = []
+    strict_book = (
+      self._build_strict_book(market_data) if self.strict_book_depth else None
+    )
 
     for order in self.pending_orders:
       if order.request.instrument_code != instrument_code:
@@ -521,14 +641,24 @@ class BacktestBroker(BrokerBase):
 
       if should_execute:
         remaining = order.request.volume - order.filled_volume
-        fill_volume = self._determine_fill_volume(remaining, market_data, request)
+        if self.strict_book_depth:
+          fill_volume, execution_price = self._consume_strict_book(
+            remaining,
+            market_data,
+            request,
+            strict_book,
+            order=order,
+          )
+        else:
+          fill_volume = self._determine_fill_volume(remaining, market_data, request)
+          execution_price = order.request.price
         if fill_volume <= 0:
           self.constraint_statistics["unfilled_volume"] += remaining
           continue
         if fill_volume < remaining:
           self.constraint_statistics["liquidity_capped_orders"] += 1
           self.constraint_statistics["unfilled_volume"] += remaining - fill_volume
-        await self._execute_trade(order, order.request.price, fill_volume)
+        await self._execute_trade(order, execution_price, fill_volume)
         if order.filled_volume >= order.request.volume:
           orders_to_remove.append(order)
 
@@ -576,16 +706,26 @@ class BacktestBroker(BrokerBase):
       request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]
       and market_data.limit_up is not None
       and market_data.price >= market_data.limit_up
-      and request.price >= market_data.limit_up
+      and (
+        request.price_type == PriceType.MARKET
+        or request.price >= market_data.limit_up
+      )
     ):
-      return True
+      if not self.no_queue_credit:
+        return True
+      return self._visible_executable_volume(request, market_data) <= 0
     if (
       request.order_type == OrderType.SELL
       and market_data.limit_down is not None
       and market_data.price <= market_data.limit_down
-      and request.price <= market_data.limit_down
+      and (
+        request.price_type == PriceType.MARKET
+        or request.price <= market_data.limit_down
+      )
     ):
-      return True
+      if not self.no_queue_credit:
+        return True
+      return self._visible_executable_volume(request, market_data) <= 0
     return False
 
   def _record_limit_block(
@@ -603,6 +743,166 @@ class BacktestBroker(BrokerBase):
       self.constraint_statistics["limit_up_buy_blocked"] += 1
     elif request.order_type == OrderType.SELL:
       self.constraint_statistics["limit_down_sell_blocked"] += 1
+    if self.no_queue_credit and self._visible_executable_volume(
+      request, market_data
+    ) <= 0:
+      self.constraint_statistics["no_queue_credit_blocked"] += 1
+
+  def _visible_executable_volume(
+    self,
+    request: OrderRequest,
+    market_data: MarketDataSnapshot,
+  ) -> int:
+    is_buy = request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]
+    prices = list((market_data.ask_price if is_buy else market_data.bid_price) or [])
+    volumes = list((market_data.ask_vol if is_buy else market_data.bid_vol) or [])
+    total = 0.0
+    for raw_price, raw_volume in zip(prices[:5], volumes[:5]):
+      level_price = float(raw_price or 0.0)
+      level_volume = max(0.0, float(raw_volume or 0.0))
+      if level_price <= 0 or level_volume <= 0:
+        continue
+      if request.price_type == PriceType.MARKET:
+        executable = True
+      elif is_buy:
+        executable = level_price <= float(request.price or 0.0)
+      else:
+        executable = level_price >= float(request.price or 0.0)
+      if executable:
+        total += level_volume
+    return max(0, int(total))
+
+  def _build_strict_book(
+    self,
+    market_data: Optional[MarketDataSnapshot],
+  ) -> Optional[Dict[str, List[List[float]]]]:
+    if market_data is None:
+      return None
+    book: Dict[str, List[List[float]]] = {}
+    for side, raw_prices, raw_volumes in (
+      ("ask", market_data.ask_price, market_data.ask_vol),
+      ("bid", market_data.bid_price, market_data.bid_vol),
+    ):
+      prices = list(raw_prices or [])
+      volumes = list(raw_volumes or [])
+      if len(prices) < 5 or len(volumes) < 5:
+        book[side] = []
+        continue
+      book[side] = [
+        [
+          float(level_price or 0.0),
+          float(
+            max(0, int(float(level_volume or 0.0) * self.book_depth_participation_pct))
+          ),
+        ]
+        for level_price, level_volume in zip(prices[:5], volumes[:5])
+      ]
+    return book
+
+  def _consume_strict_book(
+    self,
+    remaining_volume: int,
+    market_data: Optional[MarketDataSnapshot],
+    request: OrderRequest,
+    book: Optional[Dict[str, List[List[float]]]],
+    *,
+    order: OrderResponse,
+  ) -> tuple[int, float]:
+    """Consume this quote's shared visible five-level liquidity."""
+
+    remaining = max(0, int(remaining_volume or 0))
+    if remaining <= 0 or market_data is None or book is None:
+      self.constraint_statistics["missing_book_depth_blocked"] += 1
+      return 0, 0.0
+    is_buy = request.order_type in [OrderType.BUY, OrderType.BUY_TO_COVER]
+    side = "ask" if is_buy else "bid"
+    levels = book.get(side) or []
+    if len(levels) != 5:
+      self.constraint_statistics["missing_book_depth_blocked"] += 1
+      return 0, 0.0
+
+    requested = remaining
+    filled = 0
+    fill_amount = 0.0
+    cash_before = float(self.cash)
+    available_sell = 0
+    if not is_buy:
+      position = self.positions.get(request.instrument_code)
+      available_sell = max(0, int(position.available_volume if position else 0))
+
+    for level in levels:
+      if filled >= requested:
+        break
+      level_price = float(level[0] or 0.0)
+      available = max(0, int(level[1] or 0))
+      if level_price <= 0 or available <= 0:
+        continue
+      if request.price_type == PriceType.MARKET:
+        executable = True
+      elif is_buy:
+        executable = level_price <= float(request.price or 0.0)
+      else:
+        executable = level_price >= float(request.price or 0.0)
+      if not executable:
+        continue
+
+      take = min(requested - filled, available)
+      if not is_buy:
+        take = min(take, max(0, available_sell - filled))
+      else:
+        take = self._affordable_level_volume(
+          order,
+          level_price=level_price,
+          requested_volume=take,
+          prior_fill_amount=fill_amount,
+          available_cash=cash_before,
+        )
+        if take <= 0:
+          self.constraint_statistics["cash_capped_orders"] += 1
+          break
+      level[1] = float(available - take)
+      filled += take
+      fill_amount += take * level_price
+
+    if filled < requested:
+      self.constraint_statistics["book_depth_capped_orders"] += 1
+    if filled <= 0:
+      if self._visible_executable_volume(request, market_data) <= 0:
+        self.constraint_statistics["no_queue_credit_blocked"] += 1
+      return 0, 0.0
+    return filled, fill_amount / filled
+
+  def _affordable_level_volume(
+    self,
+    order: OrderResponse,
+    *,
+    level_price: float,
+    requested_volume: int,
+    prior_fill_amount: float,
+    available_cash: float,
+  ) -> int:
+    """Return the largest volume that cannot drive shared cash negative."""
+
+    previous_costs = self._calculate_costs(
+      order.filled_amount, order.request.order_type
+    )["total"]
+
+    def required(volume: int) -> float:
+      additional = prior_fill_amount + volume * level_price
+      cumulative_costs = self._calculate_costs(
+        order.filled_amount + additional,
+        order.request.order_type,
+      )["total"]
+      return additional + max(0.0, cumulative_costs - previous_costs)
+
+    low, high = 0, max(0, int(requested_volume))
+    while low < high:
+      middle = (low + high + 1) // 2
+      if required(middle) <= available_cash + 1e-9:
+        low = middle
+      else:
+        high = middle - 1
+    return low
 
   def _determine_fill_volume(
     self,
@@ -697,8 +997,8 @@ class BacktestBroker(BrokerBase):
         self.passive_prices[code] = self.current_prices[code]
     equity = self.cash + sum(
       position.market_value for position in self.positions.values()
-    )
-    passive_equity = self.passive_cash + sum(
+    ) + self.non_trading_asset_value
+    passive_equity = self.passive_cash + self.non_trading_asset_value + sum(
       volume * self.passive_prices.get(code, 0.0)
       for code, volume in self.passive_volumes.items()
     )

@@ -1823,6 +1823,336 @@ input LimitUpBoardCandidateActionInput {
   idempotencyKey: String! = ""
 }
 
+"""账户级打板助手历史回放任务"""
+type LimitUpBoardReplay {
+  jobId: String!
+  accountId: String!
+  status: String!
+  progressPct: Float!
+  processedUntil: DateTime
+  revision: String!
+  scenarioProfile: String!
+  request: LimitUpBoardReplayRequest!
+  datasetFingerprint: String!
+  configFingerprint: String!
+  inputManifest: LimitUpBoardReplayInputManifest!
+  dataQuality: LimitUpBoardReplayDataQuality!
+  errorMessage: String
+  startedAt: DateTime
+  completedAt: DateTime
+  createdAt: DateTime
+  updatedAt: DateTime
+  scenarios: [LimitUpBoardReplayScenario!]!
+}
+
+"""打板回放不可变输入文件摘要"""
+type LimitUpBoardReplayArtifact {
+  contentSha256: String!
+  rowCount: Int!
+  format: String!
+  compression: String!
+}
+
+"""打板回放不可变输入文件集合"""
+type LimitUpBoardReplayArtifacts {
+  candidateUniverse: LimitUpBoardReplayArtifact!
+  rawTicks: LimitUpBoardReplayArtifact!
+}
+
+"""打板回放命名约束指标"""
+type LimitUpBoardReplayConstraintMetric {
+  key: String!
+  value: Float!
+}
+
+"""打板回放候选快照与原始 Tick 覆盖率"""
+type LimitUpBoardReplayCoverage {
+  frameCount: Int!
+  candidateObservations: Int!
+  promotionEligibleObservations: Int!
+  candidateInstrumentCount: Int!
+  coveredTradingDates: [String!]!
+  expectedTradingDates: [String!]!
+  missingTradingDates: [String!]!
+  firstObservedAt: DateTime
+  lastObservedAt: DateTime
+  maxFrameGapSeconds: Float!
+  frameGapsOver15Seconds: Int!
+  missingContinuousSessions: [String!]!
+  sessionBoundaryGapsOver15Seconds: Int!
+  scannerStoppedFrames: Int!
+  rawTickCount: Int!
+  rawTickInstrumentCount: Int!
+  missingTickInstruments: [String!]!
+  candidateFreshTickCoveragePct: Float!
+  candidateObservationsWithoutFreshTick: Int!
+  maxCandidateTickAgeSeconds: Float!
+}
+
+"""打板回放权益曲线分页"""
+type LimitUpBoardReplayCurvePage {
+  jobId: String!
+  scenarioId: String!
+  total: Int!
+  offset: Int!
+  limit: Int!
+  hasMore: Boolean!
+  items: [LimitUpBoardReplayCurvePoint!]!
+}
+
+"""打板回放权益曲线点"""
+type LimitUpBoardReplayCurvePoint {
+  timestamp: DateTime!
+  equity: Float!
+  returnPct: Float!
+}
+
+"""打板回放数据质量"""
+type LimitUpBoardReplayDataQuality {
+  status: String!
+  executable: Boolean!
+  source: String!
+  rawTickCount: Int!
+  fiveLevelMissing: Int!
+  nativeLimitMissing: Int!
+  freshCoverage: Float!
+  coverage: LimitUpBoardReplayCoverage!
+  tickFieldQuality: LimitUpBoardReplayTickFieldQuality!
+  tickLoadErrors: [LimitUpBoardReplayTickLoadError!]!
+  futureDataViolations: Int!
+  candidateFrameCountMismatches: Int!
+  scoreVersions: [String!]!
+  featureVersions: [String!]!
+  modelVersions: [String!]!
+  exitPolicyVersions: [String!]!
+  blockers: [String!]!
+  warnings: [String!]!
+}
+
+"""打板回放候选至退出漏斗"""
+type LimitUpBoardReplayFunnel {
+  candidateFrames: Int!
+  candidateObservations: Int!
+  qualifiedObservations: Int!
+  entryIntents: Int!
+  approvalDue: Int!
+  approvalRejected: Int!
+  orders: Int!
+  filledOrders: Int!
+  partialOrders: Int!
+  expiredOrders: Int!
+  trades: Int!
+  completedExits: Int!
+}
+
+"""打板回放候选数据集清单"""
+type LimitUpBoardReplayInputManifest {
+  schemaVersion: Int!
+  source: String!
+  requestedRange: LimitUpBoardReplayRequestedRange!
+  configFingerprint: String!
+  snapshotRefsFingerprint: String!
+  versions: LimitUpBoardReplayVersions!
+  coverage: LimitUpBoardReplayCoverage!
+  artifacts: LimitUpBoardReplayArtifacts!
+  dataQuality: LimitUpBoardReplayDataQuality!
+  datasetFingerprint: String!
+  manifestSha256: String!
+}
+
+"""打板助手历史回放操作结果"""
+type LimitUpBoardReplayMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+  replay: LimitUpBoardReplay
+}
+
+"""打板回放窗口末未平仓"""
+type LimitUpBoardReplayOpenPosition {
+  instrumentCode: String!
+  volume: Int!
+  availableVolume: Int!
+  averagePrice: Float!
+  lastPrice: Float!
+  marketValue: Float!
+  status: String!
+}
+
+"""打板助手历史回放启动准备信息"""
+type LimitUpBoardReplayPreparation {
+  accountId: String!
+  startTime: DateTime!
+  endTime: DateTime!
+  scenarioProfile: String!
+  ready: Boolean!
+  assistantConfigVersion: Int!
+  assistantProjectionVersion: String!
+  hasActiveJob: Boolean!
+  activeJobId: String
+  message: String!
+  blockers: [String!]!
+  warnings: [String!]!
+  scenarios: [LimitUpBoardReplayScenarioAssumption!]!
+}
+
+"""打板回放拒绝原因计数"""
+type LimitUpBoardReplayRejectionReason {
+  reason: String!
+  count: Int!
+}
+
+"""打板回放请求快照"""
+type LimitUpBoardReplayRequest {
+  startTime: DateTime!
+  endTime: DateTime!
+  scenarioProfile: String!
+  initialCash: Float
+  initialTotalAsset: Float
+}
+
+"""打板回放数据集请求区间"""
+type LimitUpBoardReplayRequestedRange {
+  startTime: DateTime
+  endTime: DateTime
+  timezone: String!
+}
+
+"""打板回放单一成交情景"""
+type LimitUpBoardReplayScenario {
+  scenarioId: String!
+  label: String!
+  backtestId: String
+  status: String!
+  progressPct: Float!
+  processedUntil: DateTime
+  revision: String!
+  errorMessage: String
+  confirmationDelayMs: Int!
+  participationCapPct: Float!
+  bookDepthParticipationPct: Float!
+  theoreticalUpperBound: Boolean!
+  resultAvailable: Boolean!
+  resultSchemaVersion: Int!
+  noQueueCredit: Boolean!
+  summary: LimitUpBoardReplaySummary
+  funnel: LimitUpBoardReplayFunnel
+  constraintStatistics: [LimitUpBoardReplayConstraintMetric!]!
+  rejectionReasons: [LimitUpBoardReplayRejectionReason!]!
+  openPositions: [LimitUpBoardReplayOpenPosition!]!
+}
+
+"""打板回放成交情景假设"""
+type LimitUpBoardReplayScenarioAssumption {
+  scenarioId: String!
+  label: String!
+  confirmationDelayMs: Int!
+  participationCapPct: Float!
+  bookDepthParticipationPct: Float!
+  theoreticalUpperBound: Boolean!
+}
+
+"""打板助手历史回放成交情景档案"""
+enum LimitUpBoardReplayScenarioProfile {
+  STANDARD_V1
+}
+
+"""启动账户级打板助手历史回放"""
+input LimitUpBoardReplayStartInput {
+  accountId: String!
+  idempotencyKey: String!
+  startTime: DateTime!
+  endTime: DateTime!
+  scenarioProfile: LimitUpBoardReplayScenarioProfile! = STANDARD_V1
+  initialCash: Float = null
+  initialTotalAsset: Float = null
+}
+
+"""打板回放场景收益与尾部风险摘要"""
+type LimitUpBoardReplaySummary {
+  initialEquity: Float!
+  finalEquity: Float!
+  totalReturnPct: Float!
+  maxDrawdownPct: Float!
+  cvar95LossPct: Float!
+  fees: Float!
+  fillRatePct: Float!
+  openPositionCount: Int!
+  openOrderCount: Int!
+  unsellablePositionCount: Int!
+}
+
+"""打板回放原始 Tick 必需字段质量"""
+type LimitUpBoardReplayTickFieldQuality {
+  tickCount: Int!
+  invalidIdentityCount: Int!
+  derivedSourceTimeCount: Int!
+  missingNativePriceLimitsCount: Int!
+  missingStockStatusCount: Int!
+  missingPriceTickCount: Int!
+  missingFiveLevelBookCount: Int!
+  missingPriceFieldsCount: Int!
+  duplicateIdentityCount: Int!
+  conflictingIdentityCount: Int!
+  blockers: [String!]!
+  warnings: [String!]!
+}
+
+"""打板回放 Tick 载入错误"""
+type LimitUpBoardReplayTickLoadError {
+  instrumentCode: String!
+  message: String!
+}
+
+"""打板回放成交明细"""
+type LimitUpBoardReplayTrade {
+  tradeId: String!
+  orderId: String!
+  instrumentCode: String!
+  side: String!
+  price: Float!
+  volume: Int!
+  amount: Float!
+  fees: Float!
+  tradeTime: DateTime
+}
+
+"""打板回放成交分页"""
+type LimitUpBoardReplayTradePage {
+  jobId: String!
+  scenarioId: String!
+  total: Int!
+  offset: Int!
+  limit: Int!
+  hasMore: Boolean!
+  items: [LimitUpBoardReplayTrade!]!
+}
+
+"""打板助手历史回放更新类型"""
+enum LimitUpBoardReplayUpdateKind {
+  CREATED
+  STATUS_CHANGED
+  PROGRESS
+  RESULT_READY
+}
+
+"""打板助手历史回放更新通知"""
+type LimitUpBoardReplayUpdateNotice {
+  accountId: String!
+  jobId: String!
+  revision: String!
+  kind: LimitUpBoardReplayUpdateKind!
+  occurredAt: DateTime!
+}
+
+"""打板回放输入所绑定的规则版本"""
+type LimitUpBoardReplayVersions {
+  score: [String!]!
+  feature: [String!]!
+  promotionModel: [String!]!
+  exitPolicy: [String!]!
+}
+
 """连板梯队市场快照"""
 type LimitUpChainSummary {
   snapshotVersion: String!
@@ -2609,6 +2939,12 @@ type Mutation {
 
   """取消清仓订单"""
   cancelLiquidationOrder(orderId: String!, accountId: String!): MessageResponse!
+
+  """启动隔离的账户级打板助手历史回放"""
+  startLimitUpBoardReplay(input: LimitUpBoardReplayStartInput!): LimitUpBoardReplayMutationResult!
+
+  """取消执行中的账户级打板助手历史回放"""
+  cancelLimitUpBoardReplay(jobId: String!): LimitUpBoardReplayMutationResult!
 
   """保存并协调账户级打板助手"""
   saveLimitUpBoardAssistant(input: LimitUpBoardAssistantSettingsInput!): LimitUpBoardAssistantMutationResult!
@@ -3524,6 +3860,21 @@ type Query {
 
   """查询账户级打板助手"""
   limitUpBoardAssistant(accountId: String!): LimitUpBoardAssistant!
+
+  """检查账户级打板助手历史回放启动条件"""
+  limitUpBoardReplayPreparation(accountId: String!, startTime: DateTime!, endTime: DateTime!, scenarioProfile: LimitUpBoardReplayScenarioProfile! = STANDARD_V1): LimitUpBoardReplayPreparation!
+
+  """查询单个账户级打板助手历史回放"""
+  limitUpBoardReplay(jobId: String!): LimitUpBoardReplay
+
+  """查询账户级打板助手历史回放记录"""
+  limitUpBoardReplayHistory(accountId: String!, limit: Int! = 20): [LimitUpBoardReplay!]!
+
+  """分页查询打板助手历史回放成交明细"""
+  limitUpBoardReplayTrades(jobId: String!, scenarioId: String!, offset: Int! = 0, limit: Int! = 100): LimitUpBoardReplayTradePage!
+
+  """分页查询打板助手历史回放权益曲线"""
+  limitUpBoardReplayCurve(jobId: String!, scenarioId: String!, offset: Int! = 0, limit: Int! = 2000): LimitUpBoardReplayCurvePage!
 
   """获取策略模板列表"""
   strategies(includeAssistantManaged: Boolean! = false): [Strategy!]!
@@ -5241,6 +5592,9 @@ type Subscription {
 
   """订阅账户级打板助手投影更新"""
   limitUpBoardAssistantUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!
+
+  """订阅账户级打板助手历史回放更新"""
+  limitUpBoardReplayUpdates(accountId: String!): LimitUpBoardReplayUpdateNotice!
 
   """订阅账户做 T 监控投影更新"""
   tTradeUpdates(accountId: String!): TTradeUpdateNotice!

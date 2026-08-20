@@ -1,0 +1,327 @@
+fragment LimitUpBoardReplayCoverageFields on LimitUpBoardReplayCoverage {
+  frameCount
+  candidateObservations
+  promotionEligibleObservations
+  candidateInstrumentCount
+  coveredTradingDates
+  expectedTradingDates
+  missingTradingDates
+  firstObservedAt
+  lastObservedAt
+  maxFrameGapSeconds
+  frameGapsOver15Seconds
+  missingContinuousSessions
+  sessionBoundaryGapsOver15Seconds
+  scannerStoppedFrames
+  rawTickCount
+  rawTickInstrumentCount
+  missingTickInstruments
+  candidateFreshTickCoveragePct
+  candidateObservationsWithoutFreshTick
+  maxCandidateTickAgeSeconds
+}
+
+fragment LimitUpBoardReplayDataQualityFields on LimitUpBoardReplayDataQuality {
+  status
+  executable
+  source
+  rawTickCount
+  fiveLevelMissing
+  nativeLimitMissing
+  freshCoverage
+  coverage {
+    ...LimitUpBoardReplayCoverageFields
+  }
+  tickFieldQuality {
+    tickCount
+    invalidIdentityCount
+    derivedSourceTimeCount
+    missingNativePriceLimitsCount
+    missingStockStatusCount
+    missingPriceTickCount
+    missingFiveLevelBookCount
+    missingPriceFieldsCount
+    duplicateIdentityCount
+    conflictingIdentityCount
+    blockers
+    warnings
+  }
+  tickLoadErrors {
+    instrumentCode
+    message
+  }
+  futureDataViolations
+  candidateFrameCountMismatches
+  scoreVersions
+  featureVersions
+  modelVersions
+  exitPolicyVersions
+  blockers
+  warnings
+}
+
+fragment LimitUpBoardReplayScenarioFields on LimitUpBoardReplayScenario {
+  scenarioId
+  label
+  backtestId
+  status
+  progressPct
+  processedUntil
+  revision
+  errorMessage
+  confirmationDelayMs
+  participationCapPct
+  bookDepthParticipationPct
+  theoreticalUpperBound
+  resultAvailable
+  resultSchemaVersion
+  noQueueCredit
+  summary {
+    initialEquity
+    finalEquity
+    totalReturnPct
+    maxDrawdownPct
+    cvar95LossPct
+    fees
+    fillRatePct
+    openPositionCount
+    openOrderCount
+    unsellablePositionCount
+  }
+  funnel {
+    candidateFrames
+    candidateObservations
+    qualifiedObservations
+    entryIntents
+    approvalDue
+    approvalRejected
+    orders
+    filledOrders
+    partialOrders
+    expiredOrders
+    trades
+    completedExits
+  }
+  constraintStatistics {
+    key
+    value
+  }
+  rejectionReasons {
+    reason
+    count
+  }
+  openPositions {
+    instrumentCode
+    volume
+    availableVolume
+    averagePrice
+    lastPrice
+    marketValue
+    status
+  }
+}
+
+fragment LimitUpBoardReplayFields on LimitUpBoardReplay {
+  jobId
+  accountId
+  status
+  progressPct
+  processedUntil
+  revision
+  scenarioProfile
+  request {
+    startTime
+    endTime
+    scenarioProfile
+    initialCash
+    initialTotalAsset
+  }
+  datasetFingerprint
+  configFingerprint
+  inputManifest {
+    schemaVersion
+    source
+    requestedRange {
+      startTime
+      endTime
+      timezone
+    }
+    configFingerprint
+    snapshotRefsFingerprint
+    versions {
+      score
+      feature
+      promotionModel
+      exitPolicy
+    }
+    coverage {
+      ...LimitUpBoardReplayCoverageFields
+    }
+    artifacts {
+      candidateUniverse {
+        contentSha256
+        rowCount
+        format
+        compression
+      }
+      rawTicks {
+        contentSha256
+        rowCount
+        format
+        compression
+      }
+    }
+    dataQuality {
+      ...LimitUpBoardReplayDataQualityFields
+    }
+    datasetFingerprint
+    manifestSha256
+  }
+  dataQuality {
+    ...LimitUpBoardReplayDataQualityFields
+  }
+  errorMessage
+  startedAt
+  completedAt
+  createdAt
+  updatedAt
+  scenarios {
+    ...LimitUpBoardReplayScenarioFields
+  }
+}
+
+query LimitUpBoardReplayPreparation(
+  $accountId: String!
+  $startTime: DateTime!
+  $endTime: DateTime!
+) {
+  limitUpBoardReplayPreparation(
+    accountId: $accountId
+    startTime: $startTime
+    endTime: $endTime
+    scenarioProfile: STANDARD_V1
+  ) {
+    accountId
+    startTime
+    endTime
+    scenarioProfile
+    ready
+    assistantConfigVersion
+    assistantProjectionVersion
+    hasActiveJob
+    activeJobId
+    message
+    blockers
+    warnings
+    scenarios {
+      scenarioId
+      label
+      confirmationDelayMs
+      participationCapPct
+      bookDepthParticipationPct
+      theoreticalUpperBound
+    }
+  }
+}
+
+query LimitUpBoardReplayHistory($accountId: String!, $limit: Int! = 20) {
+  limitUpBoardReplayHistory(accountId: $accountId, limit: $limit) {
+    ...LimitUpBoardReplayFields
+  }
+}
+
+query LimitUpBoardReplayDetail($jobId: String!) {
+  limitUpBoardReplay(jobId: $jobId) {
+    ...LimitUpBoardReplayFields
+  }
+}
+
+query LimitUpBoardReplayTrades(
+  $jobId: String!
+  $scenarioId: String!
+  $offset: Int! = 0
+  $limit: Int! = 100
+) {
+  limitUpBoardReplayTrades(
+    jobId: $jobId
+    scenarioId: $scenarioId
+    offset: $offset
+    limit: $limit
+  ) {
+    jobId
+    scenarioId
+    total
+    offset
+    limit
+    hasMore
+    items {
+      tradeId
+      orderId
+      instrumentCode
+      side
+      price
+      volume
+      amount
+      fees
+      tradeTime
+    }
+  }
+}
+
+query LimitUpBoardReplayCurve(
+  $jobId: String!
+  $scenarioId: String!
+  $offset: Int! = 0
+  $limit: Int! = 2000
+) {
+  limitUpBoardReplayCurve(
+    jobId: $jobId
+    scenarioId: $scenarioId
+    offset: $offset
+    limit: $limit
+  ) {
+    jobId
+    scenarioId
+    total
+    offset
+    limit
+    hasMore
+    items {
+      timestamp
+      equity
+      returnPct
+    }
+  }
+}
+
+mutation StartLimitUpBoardReplay($input: LimitUpBoardReplayStartInput!) {
+  startLimitUpBoardReplay(input: $input) {
+    success
+    code
+    message
+    replay {
+      ...LimitUpBoardReplayFields
+    }
+  }
+}
+
+mutation CancelLimitUpBoardReplay($jobId: String!) {
+  cancelLimitUpBoardReplay(jobId: $jobId) {
+    success
+    code
+    message
+    replay {
+      ...LimitUpBoardReplayFields
+    }
+  }
+}
+
+subscription LimitUpBoardReplayUpdates($accountId: String!) {
+  limitUpBoardReplayUpdates(accountId: $accountId) {
+    accountId
+    jobId
+    revision
+    kind
+    occurredAt
+  }
+}

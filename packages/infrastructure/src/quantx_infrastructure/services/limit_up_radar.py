@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from quantx_domain.trading.first_board_promotion import (
+  FIRST_BOARD_EXIT_POLICY_VERSION,
   FIRST_BOARD_MODEL_VERSION,
   FirstBoardPromotionEvaluator,
   FirstBoardPromotionFeatures,
@@ -34,6 +35,9 @@ from quantx_infrastructure.repositories.first_board_promotion_repository import 
 from quantx_infrastructure.repositories.indicator_snapshot_repository import (
   IndicatorSnapshotRepository,
 )
+from quantx_infrastructure.repositories.limit_up_board_replay_repository import (
+  LimitUpBoardReplayRepository,
+)
 from quantx_infrastructure.repositories.limit_up_radar_event_repository import (
   LimitUpRadarEventRepository,
 )
@@ -50,6 +54,7 @@ FIRST_BOARD_FEATURE_VERSION = "first-board-features-v2-1"
 RADAR_CACHE_KEY = "limit-up-radar:latest:v1"
 INTRADAY_CACHE_KEY = "whole-market-intraday:latest:v1"
 RADAR_CACHE_TTL_SECONDS = 36 * 60 * 60
+REPLAY_UNIVERSE_SNAPSHOT_INTERVAL_SECONDS = 5
 RADAR_STAGE_LABELS = {
   "MOMENTUM": "异动",
   "SURGING": "冲板",
@@ -921,6 +926,7 @@ class LimitUpRadarMonitor:
     self._task: Optional[asyncio.Task] = None
     self._persisted_snapshot_versions: set[str] = set()
     self._persisted_chain_versions: set[str] = set()
+    self._last_replay_universe_persisted_at: Optional[datetime] = None
 
   async def start(self) -> None:
     if self._task is not None and not self._task.done():
@@ -1099,6 +1105,7 @@ class LimitUpRadarMonitor:
     }
     await self.store.write(radar, intraday_projection)
     await self._persist_market_facts(radar)
+    await self._persist_replay_universe(radar)
     pending = self.builder.pop_pending_events()
     if pending:
       async with AsyncSessionLocal() as db:
@@ -1190,6 +1197,102 @@ class LimitUpRadarMonitor:
           self._persisted_chain_versions.add(chain_version)
     except Exception as exc:
       logger.warning("首板晋级市场事实持久化失败: %s", exc.__class__.__name__)
+
+  async def _persist_replay_universe(self, radar: Dict[str, Any]) -> None:
+    """Persist every coexisting radar candidate on a five-second clock."""
+
+    observed_at = time_utils.now()
+    source_max_at = _projection_datetime(radar.get("updated_at"))
+    previous = self._last_replay_universe_persisted_at
+    if previous is not None:
+      comparable_as_of = observed_at
+      comparable_previous = previous
+      if comparable_as_of.tzinfo is None and comparable_previous.tzinfo is not None:
+        comparable_as_of = comparable_as_of.replace(tzinfo=comparable_previous.tzinfo)
+      if comparable_as_of.tzinfo is not None and comparable_previous.tzinfo is None:
+        comparable_previous = comparable_previous.replace(tzinfo=comparable_as_of.tzinfo)
+      if (
+        comparable_as_of - comparable_previous
+      ).total_seconds() < REPLAY_UNIVERSE_SNAPSHOT_INTERVAL_SECONDS:
+        return
+
+    fields = (
+      "code",
+      "name",
+      "industry",
+      "stage",
+      "updated_at",
+      "is_stale",
+      "blocked_reasons",
+      "radar_score",
+      "score_version",
+      "promotion_eligible",
+      "promotion_observed",
+      "promotion_score",
+      "promotion_snapshot_version",
+      "promotion_model_version",
+      "exit_policy_version",
+      "board_segment",
+      "cvar95_loss_pct",
+      "expected_net_return_pct",
+      "high_position_type",
+      "current_price",
+      "limit_up_price",
+      "distance_to_limit_pct",
+      "amount",
+      "amount_pace_ratio",
+      "depth_imbalance_5",
+      "break_count",
+      "first_touch_at",
+      "first_sealed_at",
+      "last_stage_at",
+    )
+    candidates = [
+      {"rank_ordinal": index, **{key: item.get(key) for key in fields}}
+      for index, item in enumerate(list(radar.get("items") or []), start=1)
+      if item.get("code")
+    ]
+    payload = {
+      "schema_version": 1,
+      "observed_at": observed_at.isoformat(),
+      "source_max_at": source_max_at.isoformat() if source_max_at else None,
+      "scanner_running": bool(radar.get("is_scanner_running")),
+      "summary": dict(radar.get("summary") or {}),
+      "chain_snapshot_version": str(
+        dict(radar.get("chain") or {}).get("snapshot_version") or ""
+      ),
+      "warnings": list(radar.get("warnings") or []),
+      "candidates": candidates,
+    }
+    snapshot_version = _stable_version(payload)
+    snapshot_key = _stable_version(
+      {
+        "observed_at": observed_at.isoformat(),
+        "snapshot_version": snapshot_version,
+      }
+    )
+    try:
+      async with AsyncSessionLocal() as db:
+        await LimitUpBoardReplayRepository(db).save_universe_snapshot(
+          snapshot_key=snapshot_key,
+          trade_date=time_utils.to_shanghai(observed_at).date(),
+          observed_at=observed_at,
+          source_max_at=source_max_at,
+          snapshot_version=snapshot_version,
+          score_version=RADAR_SCORE_VERSION,
+          feature_version=FIRST_BOARD_FEATURE_VERSION,
+          model_version=FIRST_BOARD_MODEL_VERSION,
+          exit_policy_version=FIRST_BOARD_EXIT_POLICY_VERSION,
+          candidate_count=len(candidates),
+          eligible_count=sum(
+            bool(item.get("promotion_eligible")) for item in candidates
+          ),
+          payload=payload,
+        )
+      self._last_replay_universe_persisted_at = observed_at
+    except Exception as exc:
+      # Replay capture is secondary and must not stop the live radar loop.
+      logger.warning("打板回放候选池快照持久化失败: %s", exc.__class__.__name__)
 
 
 limit_up_radar_store = LimitUpRadarProjectionStore()

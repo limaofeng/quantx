@@ -63,6 +63,14 @@ from .first_board_promotion import (
   first_board_segment,
 )
 from .instrument_master import InstrumentMaster, InstrumentMasterSnapshot
+from .limit_up_board_replay import (
+  LIMIT_UP_BOARD_REPLAY_SCENARIO_PROFILE,
+  LIMIT_UP_BOARD_REPLAY_SCHEMA_VERSION,
+  LIMIT_UP_BOARD_REPLAY_TERMINAL_STATUSES,
+  STANDARD_V1_SCENARIOS,
+  LimitUpBoardReplayScenarioSpec,
+  get_limit_up_board_replay_scenarios,
+)
 from .market_rules import AShareMarketRules, MarketDataSnapshot, OrderCheckResult
 from .orchestration import PortfolioExecutionProfile, PortfolioOrchestrationLayer
 from .order_sizer import OrderDraft, OrderSizer
@@ -115,6 +123,11 @@ __all__ = [
   "ExitT1Policy",
   "FIRST_BOARD_EXIT_POLICY_VERSION",
   "FIRST_BOARD_MODEL_VERSION",
+  "LIMIT_UP_BOARD_REPLAY_SCHEMA_VERSION",
+  "LIMIT_UP_BOARD_REPLAY_SCENARIO_PROFILE",
+  "LIMIT_UP_BOARD_REPLAY_TERMINAL_STATUSES",
+  "STANDARD_V1_SCENARIOS",
+  "LimitUpBoardReplayScenarioSpec",
   "FirstBoardHighPositionType",
   "FirstBoardPromotionAssessment",
   "FirstBoardPromotionEvaluator",
@@ -149,4 +162,5 @@ __all__ = [
   "build_first_board_exit_plan",
   "evaluate_first_board_market_signal",
   "first_board_segment",
+  "get_limit_up_board_replay_scenarios",
 ]

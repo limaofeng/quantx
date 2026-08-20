@@ -1,7 +1,12 @@
 import pytest
+from quantx_domain.brokers.backtest import BacktestBroker
+from quantx_domain.brokers.base import Position
 from quantx_domain.brokers.simulator import SimulatorBroker
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
+)
+from quantx_domain.strategies.ashare_limit_up_board_assistant import (
+  AshareLimitUpBoardAssistantStrategy,
 )
 from quantx_domain.strategies.base import StrategyContext, StrategyRunMode
 from quantx_engine.strategy_executor import (
@@ -22,6 +27,47 @@ class FakeRealtimeAdapter:
 
   async def unsubscribe(self, subscription_id):
     self.unsubscribed.append(subscription_id)
+
+
+@pytest.mark.asyncio
+async def test_board_replay_keeps_open_position_in_dynamic_universe_as_draining():
+  executor = StrategyExecutor()
+  context = StrategyContext(
+    run_id="run-board-replay-sticky",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"limit_up_board_replay": True},
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="board-replay-sticky",
+    strategy_id=1,
+    strategy_class=AshareLimitUpBoardAssistantStrategy,
+    context=context,
+  )
+  runtime.strategy = AshareLimitUpBoardAssistantStrategy(context)
+  await runtime.strategy.initialize()
+  runtime.broker = BacktestBroker()
+  runtime.broker.positions["000001.SZ"] = Position(
+    instrument_code="000001.SZ",
+    long_volume=100,
+    available_volume=0,
+    today_buy_volume=100,
+    long_avg_price=10.0,
+    last_price=10.0,
+    market_value=1_000.0,
+  )
+
+  result = await executor._apply_backtest_instrument_reconcile(
+    runtime,
+    [],
+    instrument_metadata={},
+  )
+
+  assert result["instruments"] == ["000001.SZ"]
+  state = runtime.strategy.state["instrument_states"]["000001.SZ"]
+  assert state["draining"] is True
+  assert state["entry_eligible"] is False
 
 
 @pytest.mark.asyncio

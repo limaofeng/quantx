@@ -33,6 +33,7 @@ from quantx_engine.warm_cache import (
 
 from .conditional_liquidation import conditional_liquidation_monitor
 from .exit_plan_monitor import exit_plan_monitor
+from .limit_up_board_replay_service import LimitUpBoardReplayService
 from .limit_up_board_runtime import limit_up_board_assistant
 from .t_trade_runtime import t_trade_global_monitor
 
@@ -296,6 +297,14 @@ async def _dispatch(command_type: str, payload: dict[str, Any]) -> dict[str, Any
     return _json_value(
       await limit_up_board_assistant.set_candidate_preference(payload)
     )
+
+  board_replay_service = LimitUpBoardReplayService(strategy_manager)
+  if command_type == "LIMIT_UP_BOARD_REPLAY_START":
+    return _json_value(
+      await board_replay_service.start(payload["input"], defer_start=True)
+    )
+  if command_type == "LIMIT_UP_BOARD_REPLAY_CANCEL":
+    return _json_value(await board_replay_service.cancel(payload["job_id"]))
 
   t_trade_service = TTradeService(strategy_manager)
   if command_type == "T_TRADE_START_SESSION":

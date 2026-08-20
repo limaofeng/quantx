@@ -67,6 +67,19 @@ class BacktestRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_backtests_by_ids(
+        self,
+        backtest_ids: List[str],
+    ) -> dict[str, StrategyBacktest]:
+        """Batch-load backtests by their durable ids."""
+        normalized = list(dict.fromkeys(str(item) for item in backtest_ids if item))
+        if not normalized:
+            return {}
+        result = await self.db.execute(
+            select(StrategyBacktest).where(StrategyBacktest.id.in_(normalized))
+        )
+        return {str(item.id): item for item in result.scalars().all()}
+
     async def get_backtest_by_run_version(
         self,
         strategy_run_id: str,

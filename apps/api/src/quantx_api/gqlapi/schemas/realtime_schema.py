@@ -14,6 +14,9 @@ from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.services.limit_up_board_assistant_projection_service import (
   limit_up_board_assistant_projection_service,
 )
+from quantx_infrastructure.services.limit_up_board_replay_projection_service import (
+  limit_up_board_replay_projection_service,
+)
 from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.runtime_subscription_bridge import (
   runtime_subscription_bridge,
@@ -26,6 +29,10 @@ from sqlalchemy import select
 from quantx_api.gqlapi.security import authorized_account_id
 from quantx_api.gqlapi.types.limit_up_board_assistant_types import (
   LimitUpBoardAssistantUpdateNotice,
+)
+from quantx_api.gqlapi.types.limit_up_board_replay_types import (
+  LimitUpBoardReplayUpdateKind,
+  LimitUpBoardReplayUpdateNotice,
 )
 from quantx_api.gqlapi.types.strategy_subscription_types import (
   LogLevel,
@@ -194,6 +201,28 @@ class RealtimeSubscription:
       yield LimitUpBoardAssistantUpdateNotice(
         account_id=authorized,
         version=str(message.get("version") or "0"),
+        occurred_at=datetime.fromisoformat(
+          str(message.get("occurred_at")).replace("Z", "+00:00")
+        ),
+      )
+
+  @strawberry.subscription(description="订阅账户级打板助手历史回放更新")
+  async def limit_up_board_replay_updates(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+  ) -> AsyncIterator[LimitUpBoardReplayUpdateNotice]:
+    authorized = authorized_account_id(info, account_id)
+    async for message in limit_up_board_replay_projection_service.subscribe(
+      authorized
+    ):
+      yield LimitUpBoardReplayUpdateNotice(
+        account_id=authorized,
+        job_id=str(message.get("job_id") or ""),
+        revision=str(message.get("revision") or "0"),
+        kind=LimitUpBoardReplayUpdateKind(
+          str(message.get("kind") or "PROGRESS")
+        ),
         occurred_at=datetime.fromisoformat(
           str(message.get("occurred_at")).replace("Z", "+00:00")
         ),

@@ -160,6 +160,34 @@ class FirstBoardPromotionRepository:
     )
     return list(result.scalars().all())
 
+  async def list_replay_facts(
+    self,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> list[tuple[LimitUpLifecycleSnapshot, FirstBoardPromotionAssessmentRecord]]:
+    """Return legacy sparse facts for degraded replay compatibility."""
+
+    result = await self.db.execute(
+      select(
+        LimitUpLifecycleSnapshot,
+        FirstBoardPromotionAssessmentRecord,
+      )
+      .join(
+        FirstBoardPromotionAssessmentRecord,
+        FirstBoardPromotionAssessmentRecord.lifecycle_snapshot_id
+        == LimitUpLifecycleSnapshot.id,
+      )
+      .where(
+        LimitUpLifecycleSnapshot.as_of >= start_time,
+        LimitUpLifecycleSnapshot.as_of <= end_time,
+      )
+      .order_by(
+        LimitUpLifecycleSnapshot.as_of.asc(),
+        LimitUpLifecycleSnapshot.instrument_code.asc(),
+      )
+    )
+    return [(lifecycle, assessment) for lifecycle, assessment in result.all()]
+
   async def list_lifecycle(
     self,
     trade_date: date,
