@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   BarChart3,
   ClipboardList,
   Hand,
@@ -12,7 +13,7 @@ import {
 } from 'lucide-react';
 import * as React from 'react';
 import { useMutation, useQuery } from 'urql';
-import { useSearch } from 'wouter';
+import { useLocation, useSearch } from 'wouter';
 
 import {
   StudioWorkbench,
@@ -671,6 +672,7 @@ function SingleStockLiquidationPanel({
 
 export function LiquidationPage() {
   const search = useSearch();
+  const [, setLocation] = useLocation();
   const selectedStockCode = React.useMemo(() => getUrlSymbol(search), [search]);
   const manualWorkspaceTabId = React.useMemo(
     () => getManualWorkspaceTabId(search),
@@ -912,6 +914,11 @@ export function LiquidationPage() {
     setActiveMode(nextMode);
   }, []);
 
+  const handleShowAllExitPlans = React.useCallback(() => {
+    setActiveMode('EXIT_PLANS');
+    setLocation('/liquidation');
+  }, [setLocation]);
+
   const sidebar = (
     <TradingHoldingsSidebar
       accountName={accountName}
@@ -949,12 +956,25 @@ export function LiquidationPage() {
 
   const toolbar = (
     <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-[#0b1120]/70 px-4">
-      <div className="min-w-0">
-        <div className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-200">
-          卖出管理
-        </div>
-        <div className="truncate text-[10px] font-medium text-slate-600">
-          卖出计划、持仓清仓与真实卖出记录
+      <div className="flex min-w-0 items-center gap-3">
+        {selectedStockCode ? (
+          <button
+            type="button"
+            aria-label="返回全部卖出计划"
+            onClick={handleShowAllExitPlans}
+            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-red-400/35 bg-red-500/10 px-3 text-xs font-black text-red-200 transition-colors duration-200 hover:border-red-400/60 hover:bg-red-500/15 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1120]"
+          >
+            <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+            全部卖出计划
+          </button>
+        ) : null}
+        <div className="min-w-0">
+          <div className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-200">
+            卖出管理
+          </div>
+          <div className="truncate text-[10px] font-medium text-slate-600">
+            卖出计划、持仓清仓与真实卖出记录
+          </div>
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
