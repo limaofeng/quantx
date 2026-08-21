@@ -2454,21 +2454,27 @@ class StrategyExecutor:
     )
     for task in pending:
       task.cancel()
+    if pending:
+      # Let cancellation handlers install their runtime-owned cleanup tasks
+      # before taking the task snapshot below.
+      await asyncio.gather(*pending, return_exceptions=True)
 
-    failures: List[str] = []
+    stop_outcomes: Dict[str, str] = {}
     for run_id, task in stop_tasks.items():
       if task not in done:
-        failures.append(f"{run_id}: stop timeout")
+        stop_outcomes[run_id] = "stop timeout"
         continue
       try:
         stopped = bool(task.result())
       except BaseException as exc:
-        failures.append(f"{run_id}: stop raised {type(exc).__name__}: {exc}")
+        stop_outcomes[run_id] = (
+          f"stop raised {type(exc).__name__}: {exc}"
+        )
         continue
       if not stopped:
-        failures.append(f"{run_id}: stop returned false")
+        stop_outcomes[run_id] = "stop returned false"
 
-    owned_cleanup_tasks = set(pending) | {
+    owned_cleanup_tasks = {
       task
       for runtime in self.runs.values()
       for task in (
@@ -2478,6 +2484,7 @@ class StrategyExecutor:
       )
       if task is not None and not task.done()
     }
+    failures: List[str] = []
     if owned_cleanup_tasks:
       cleanup_done, cleanup_pending = await asyncio.wait(
         owned_cleanup_tasks,
@@ -2492,11 +2499,18 @@ class StrategyExecutor:
         )
 
     for run_id, runtime in self.runs.items():
-      if runtime.status != ExecutionStatus.STOPPED:
-        failures.append(f"{run_id}: status={runtime.status.value}")
+      cleanup_complete = bool(
+        runtime.status == ExecutionStatus.STOPPED
+        or runtime._startup_abort_complete
+        or runtime._terminal_cleanup_complete
+      )
+      if self._runtime_cleanup_converged(runtime, cleanup_complete):
         continue
-      if not self._runtime_cleanup_converged(runtime, True):
-        failures.append(f"{run_id}: resources not converged")
+      outcome = stop_outcomes.get(run_id)
+      details = [f"status={runtime.status.value}", "resources not converged"]
+      if outcome:
+        details.insert(0, outcome)
+      failures.append(f"{run_id}: " + "; ".join(details))
 
     if failures:
       raise RuntimeError("策略执行器关闭失败: " + "; ".join(failures))

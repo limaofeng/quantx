@@ -2,6 +2,7 @@
 卖出管理与统一退出计划 GraphQL 解析器
 """
 
+import hashlib
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
@@ -172,13 +173,15 @@ class LiquidationResolver:
     payload: dict,
     *,
     aggregate_id: str,
+    idempotency_key: Optional[str] = None,
   ) -> dict:
     receipt = await engine_command_service.request(
       command_type,
       payload,
       aggregate_id=aggregate_id,
       idempotency_key=(
-        f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
+        idempotency_key
+        or f"{command_type.lower()}:{aggregate_id}:{uuid.uuid4()}"
       ),
     )
     if receipt.status == "FAILED":
@@ -428,6 +431,12 @@ class LiquidationResolver:
         "创建计划不能通过布尔字段开启自动实盘，请使用预览—确认授权",
         status_code=400,
       )
+    request_key = str(input.idempotency_key or "").strip()
+    if not request_key or len(request_key) > 128:
+      raise ValueError("创建计划幂等键不能为空且不能超过 128 个字符")
+    command_key = hashlib.sha256(
+      f"{account_id}:{request_key}".encode("utf-8")
+    ).hexdigest()
     result = await LiquidationResolver._request_engine(
       "EXIT_PLAN_CREATE_MANUAL",
       {
@@ -442,6 +451,7 @@ class LiquidationResolver:
         "remark": input.remark,
       },
       aggregate_id=f"{account_id}:{input.instrument_code.upper()}",
+      idempotency_key=f"exit-plan-create:{command_key}",
     )
     record = await LiquidationResolver._load_exit_plan(
       str(result.get("plan_id") or ""), account_id=account_id

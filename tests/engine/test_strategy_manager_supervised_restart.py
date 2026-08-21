@@ -262,6 +262,60 @@ async def test_cancelled_stop_keeps_shutdown_alive_and_start_waits_for_it(
 
 
 @pytest.mark.asyncio
+async def test_shutdown_accepts_timed_out_stop_after_owned_cleanup_converges(
+  isolated_manager: StrategyManager,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  manager = isolated_manager
+  executor = manager.executor
+  runtime = executor.create(
+    run_id="terminal-cleanup-after-timeout",
+    name="Timed out runtime",
+    strategy_id=1,
+    strategy_class=RecoveryStrategy,
+    context=StrategyContext(
+      run_id="terminal-cleanup-after-timeout",
+      mode=StrategyRunMode.PAPER,
+      instruments=[],
+      parameters={},
+    ),
+  )
+  runtime.status = ExecutionStatus.RUNNING
+  stop_entered = asyncio.Event()
+
+  async def stop_then_finish_owned_cleanup(
+    _run_id: str,
+    *,
+    force: bool = False,
+  ) -> bool:
+    assert force
+    stop_entered.set()
+    try:
+      await asyncio.Event().wait()
+    except asyncio.CancelledError:
+      runtime.status = ExecutionStatus.ERROR
+
+      async def cleanup() -> None:
+        await asyncio.sleep(0)
+        runtime._terminal_cleanup_complete = True
+
+      runtime._terminal_cleanup_task = asyncio.create_task(
+        cleanup(),
+        name="owned-terminal-cleanup",
+      )
+      raise
+
+  monkeypatch.setattr(executor, "stop", stop_then_finish_owned_cleanup)
+
+  await executor.stop_all_runs(timeout=0.01)
+
+  assert stop_entered.is_set()
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime._terminal_cleanup_complete
+
+
+
+@pytest.mark.asyncio
 async def test_incomplete_retired_generation_fails_closed(
   isolated_manager: StrategyManager,
   monkeypatch: pytest.MonkeyPatch,

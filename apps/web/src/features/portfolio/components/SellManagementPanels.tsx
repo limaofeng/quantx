@@ -416,6 +416,10 @@ export function ManualPlanEditor({
   const [authorizationError, setAuthorizationError] = React.useState<
     string | null
   >(null);
+  const createRequestRef = React.useRef<{
+    fingerprint: string;
+    idempotencyKey: string;
+  } | null>(null);
   const [rules, setRules] = React.useState<ManualExitRuleDraft[]>(() => [
     {
       id: createClientId('exit-rule'),
@@ -488,6 +492,7 @@ export function ManualPlanEditor({
   }, [editingPlan, initialInstrumentCode]);
 
   const close = () => {
+    createRequestRef.current = null;
     setAuthorizationChallenge(null);
     setAuthorizationError(null);
     setOpen(false);
@@ -572,23 +577,35 @@ export function ManualPlanEditor({
         if (result.error) throw result.error;
         savedPlan = result.data?.updateManualExitPlan;
       } else {
+        const createInput = {
+          accountId,
+          autoExitAuthorized: false,
+          bucket: 'manual',
+          enabled: true,
+          executionMode,
+          instrumentCode: normalizedCode,
+          protectedVolume: Number(protectedVolume),
+          remark,
+          rules: serializedRules,
+        };
+        const fingerprint = JSON.stringify(createInput);
+        if (createRequestRef.current?.fingerprint !== fingerprint) {
+          createRequestRef.current = {
+            fingerprint,
+            idempotencyKey: createClientId('exit-plan-create'),
+          };
+        }
         const result = await createPlan({
           input: {
-            accountId,
-            autoExitAuthorized: false,
-            bucket: 'manual',
-            enabled: true,
-            executionMode,
-            instrumentCode: normalizedCode,
-            protectedVolume: Number(protectedVolume),
-            remark,
-            rules: serializedRules,
+            ...createInput,
+            idempotencyKey: createRequestRef.current.idempotencyKey,
           },
         });
         if (result.error) throw result.error;
         savedPlan = result.data?.createManualExitPlan;
       }
       if (!savedPlan) throw new Error('服务端未返回已保存的计划');
+      if (!editingPlan) createRequestRef.current = null;
       toast({
         description: `${normalizedCode} · ${protectedVolume} 股`,
         title: editingPlan ? '人工计划已更新' : '人工计划已创建',

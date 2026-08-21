@@ -606,6 +606,7 @@ class CreateManualExitPlanInput:
   instrument_code: str
   protected_volume: int
   rules: JSON
+  idempotency_key: str = strawberry.field(description="调用方生成的创建请求幂等键")
   account_id: Optional[str] = None
   bucket: str = "manual"
   enabled: bool = True

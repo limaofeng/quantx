@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_api.auth.errors import AuthError
@@ -62,6 +63,7 @@ from quantx_infrastructure.services import (
   trade_intent_processor as trade_intent_processor_module,
 )
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
+from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   AutoExitAuthorizationGuard,
 )
@@ -350,6 +352,7 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
     instrument_code="600000.SH",
     protected_volume=100,
     rules=[],
+    idempotency_key="legacy-create-1",
     account_id="ACCOUNT-1",
     execution_mode="live",
     auto_exit_authorized=True,
@@ -402,6 +405,68 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
       target_price=12,
       execution_mode="live",
       auto_exit_authorized=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_plan_create_uses_caller_idempotency_key(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  request = AsyncMock(
+    return_value=EngineCommandReceipt(
+      message_id="command-1",
+      command_type="EXIT_PLAN_CREATE_MANUAL",
+      aggregate_id="ACCOUNT-1:600000.SH",
+      status="SUCCEEDED",
+      result={"plan_id": "plan-1", "config_version": 1},
+    )
+  )
+  monkeypatch.setattr(
+    "quantx_api.gqlapi.resolvers.liquidation.engine_command_service.request",
+    request,
+  )
+  monkeypatch.setattr(
+    LiquidationResolver,
+    "_load_exit_plan",
+    AsyncMock(return_value=SimpleNamespace()),
+  )
+  monkeypatch.setattr(
+    "quantx_api.gqlapi.resolvers.liquidation.ExitPlanView.from_model",
+    lambda _record: "plan-view",
+  )
+  create_input = CreateManualExitPlanInput(
+    instrument_code="600000.SH",
+    protected_volume=100,
+    rules=[],
+    idempotency_key="ios-create-1",
+    account_id="ACCOUNT-1",
+  )
+
+  result = await LiquidationResolver.create_manual_exit_plan(
+    create_input,
+    "ACCOUNT-1",
+  )
+
+  assert result == "plan-view"
+  command_key = request.await_args.kwargs["idempotency_key"]
+  assert command_key.startswith("exit-plan-create:")
+  assert len(command_key) == len("exit-plan-create:") + 64
+
+
+@pytest.mark.asyncio
+async def test_manual_plan_create_rejects_blank_idempotency_key() -> None:
+  create_input = CreateManualExitPlanInput(
+    instrument_code="600000.SH",
+    protected_volume=100,
+    rules=[],
+    idempotency_key="   ",
+    account_id="ACCOUNT-1",
+  )
+
+  with pytest.raises(ValueError, match="幂等键不能为空"):
+    await LiquidationResolver.create_manual_exit_plan(
+      create_input,
+      "ACCOUNT-1",
     )
 
 

@@ -249,6 +249,7 @@ describe('ManualPlanEditor', () => {
       input: expect.objectContaining({
         autoExitAuthorized: false,
         executionMode: 'paper',
+        idempotencyKey: expect.any(String),
         instrumentCode: '605499.SH',
         protectedVolume: 100,
         rules: [
@@ -263,6 +264,48 @@ describe('ManualPlanEditor', () => {
         ],
       }),
     });
+  });
+
+  it('reuses the create idempotency key when the same draft is retried', async () => {
+    const user = userEvent.setup();
+    mocks.createPlan
+      .mockResolvedValueOnce({
+        data: undefined,
+        error: new Error('Engine 尚未确认操作'),
+      })
+      .mockResolvedValueOnce({
+        data: {
+          createManualExitPlan: {
+            configVersion: 1,
+            instrumentCode: '601318.SH',
+            planId: 'plan-retried-1',
+            protectedVolume: 300,
+            status: 'ACTIVE',
+          },
+        },
+        error: undefined,
+      });
+
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        initialInstrumentCode="601318.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+    await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
+    await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
+
+    await waitFor(() => expect(mocks.createPlan).toHaveBeenCalledTimes(2));
+    const firstKey = mocks.createPlan.mock.calls[0][0].input.idempotencyKey;
+    const secondKey = mocks.createPlan.mock.calls[1][0].input.idempotencyKey;
+    expect(firstKey).toEqual(expect.any(String));
+    expect(firstKey).not.toHaveLength(0);
+    expect(secondKey).toBe(firstKey);
   });
 
   it('saves a live plan without boolean authorization, then previews and confirms the exact plan version', async () => {
@@ -357,6 +400,7 @@ describe('ManualPlanEditor', () => {
       input: expect.objectContaining({
         autoExitAuthorized: false,
         executionMode: 'live',
+        idempotencyKey: expect.any(String),
         instrumentCode: '601318.SH',
         protectedVolume: 300,
       }),
