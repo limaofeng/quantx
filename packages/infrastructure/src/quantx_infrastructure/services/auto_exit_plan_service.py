@@ -80,6 +80,14 @@ from quantx_infrastructure.services.trade_intent_processor import (
 install_exit_plan_notification_hooks()
 
 MARKET_DATA_CONTEXT_STALE_SECONDS = 10.0
+MARKET_SESSION_CLOSED = "MARKET_CLOSED"
+MARKET_GATE_ERROR_CODES = frozenset(
+  {
+    MARKET_SESSION_CLOSED,
+    "MARKET_DATA_STALE",
+    MARKET_DATA_STREAM_NOT_READY,
+  }
+)
 
 ADAPTIVE_RULE_ID_SUFFIX = "adaptive-volume-price"
 ACTIVE_ORDER_STATUSES = {
@@ -1426,6 +1434,7 @@ class AutoExitPlanService:
     plan_id: str,
     context: ExitEvaluationContext,
     position: Optional[Position],
+    market_session_open: bool,
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> Optional[dict[str, Any]]:
     async with AsyncSessionLocal() as db:
@@ -1434,6 +1443,14 @@ class AutoExitPlanService:
       if record is None or not record.enabled:
         return None
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
+      if not market_session_open:
+        await self._persist_market_session_closed(
+          db,
+          record,
+          plan,
+          evaluated_at=context.timestamp,
+        )
+        return None
       market_error = self._market_context_error(context, market_ready)
       if market_error:
         await self._persist_market_data_stale(
@@ -1454,6 +1471,7 @@ class AutoExitPlanService:
         await db.commit()
         return None
       record.data_quality = "GOOD"
+      self._clear_market_gate_error(record)
       if plan.pending_intent_id and not plan.pending_order_id:
         recovered = await self._recover_pending_submission(db, record, plan)
         self._sync_record(record, plan, evaluated_at=context.timestamp)
@@ -1593,6 +1611,7 @@ class AutoExitPlanService:
     intent_id: str,
     context: ExitEvaluationContext,
     position: Optional[Position],
+    market_session_open: bool,
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     async with AsyncSessionLocal() as db:
@@ -1604,6 +1623,18 @@ class AutoExitPlanService:
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       if plan.pending_intent_id != intent_id:
         raise ValueError("卖出意图已变化，请刷新后重试")
+      if not market_session_open:
+        await self._persist_market_session_closed(
+          db,
+          record,
+          plan,
+          evaluated_at=context.timestamp,
+        )
+        return {
+          "success": False,
+          "code": MARKET_SESSION_CLOSED,
+          "error": MARKET_SESSION_CLOSED,
+        }
       market_error = self._market_context_error(context, market_ready)
       if market_error:
         intent.status = "REJECTED"
@@ -1729,6 +1760,30 @@ class AutoExitPlanService:
       checked_at=evaluated_at,
     )
     await db.commit()
+
+  async def _persist_market_session_closed(
+    self,
+    db,
+    record: AutoExitPlanRecord,
+    plan: ExitPlan,
+    *,
+    evaluated_at: datetime,
+  ) -> None:
+    self._sync_record(record, plan, evaluated_at=evaluated_at)
+    record.data_quality = MARKET_SESSION_CLOSED
+    self._clear_market_gate_error(record)
+    await self._sync_source_order(
+      db,
+      record,
+      plan,
+      checked_at=evaluated_at,
+    )
+    await db.commit()
+
+  @staticmethod
+  def _clear_market_gate_error(record: AutoExitPlanRecord) -> None:
+    if str(record.last_error or "").strip().upper() in MARKET_GATE_ERROR_CODES:
+      record.last_error = None
 
   async def reject_exit_intent(
     self,

@@ -811,11 +811,65 @@ async def test_stale_market_context_is_persisted_without_exit_submit(
       source="WHOLE_QUOTE_UNAVAILABLE",
     ),
     position=liquidation_position(),
+    market_session_open=True,
   )
 
   assert result is None
   assert record.data_quality == "MARKET_DATA_STALE"
   assert record.last_error == "market_data_stale"
+  assert session.committed
+  submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_market_waits_without_persisting_stale_error(
+  monkeypatch,
+):
+  record = active_record(plan_id="closed-evaluate")
+  record.data_quality = "MARKET_DATA_STALE"
+  record.last_error = "market_data_stale"
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _model, _key):
+      return None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+  submit = AsyncMock()
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=record.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime(2026, 8, 21, 15, 0),
+      current_price=26.33,
+      market_data_age_seconds=8 * 60 * 60,
+      source="QMT_WHOLE_QUOTE",
+    ),
+    position=liquidation_position(),
+    market_session_open=False,
+    market_ready=lambda: True,
+  )
+
+  assert result is None
+  assert record.data_quality == service_module.MARKET_SESSION_CLOSED
+  assert record.last_error is None
   assert session.committed
   submit.assert_not_awaited()
 
@@ -864,6 +918,7 @@ async def test_capacity_shortfall_blocks_evaluation_before_submission(
       source="QMT_WHOLE_QUOTE",
     ),
     position=scope.position,
+    market_session_open=True,
     market_ready=lambda: True,
   )
 
@@ -958,6 +1013,7 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
       source="QMT_WHOLE_QUOTE",
     ),
     position=liquidation_position(),
+    market_session_open=True,
     market_ready=lambda: False,
   )
 
@@ -972,6 +1028,76 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
   assert intent.notes == "MARKET_DATA_STREAM_NOT_READY"
   assert intent.intent_metadata["market_data_gate"] == ("MARKET_DATA_STREAM_NOT_READY")
   assert record.plan_state["pending_intent_id"] == ""
+  assert session.committed
+  processor.process_approved_exit_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirm_intent_waits_outside_session_without_rejecting_it(
+  monkeypatch,
+):
+  plan = pending_plan()
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  record.data_quality = "MARKET_DATA_STALE"
+  record.last_error = "market_data_stale"
+  intent = SimpleNamespace(
+    id="intent-1",
+    status="AWAITING_APPROVAL",
+    notes=None,
+    intent_metadata={},
+  )
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _model, key):
+      return intent if key == intent.id else None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+  processor = SimpleNamespace(process_approved_exit_intent=AsyncMock())
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(service_module, "TradeIntentProcessor", lambda: processor)
+
+  result = await AutoExitPlanService().confirm_exit_intent(
+    plan_id=record.plan_id,
+    intent_id=intent.id,
+    context=ExitEvaluationContext(
+      timestamp=datetime(2026, 8, 21, 15, 0),
+      current_price=26.33,
+      market_data_age_seconds=8 * 60 * 60,
+      source="QMT_WHOLE_QUOTE",
+    ),
+    position=liquidation_position(),
+    market_session_open=False,
+    market_ready=lambda: True,
+  )
+
+  assert result == {
+    "success": False,
+    "code": service_module.MARKET_SESSION_CLOSED,
+    "error": service_module.MARKET_SESSION_CLOSED,
+  }
+  assert record.data_quality == service_module.MARKET_SESSION_CLOSED
+  assert record.last_error is None
+  assert intent.status == "AWAITING_APPROVAL"
+  assert intent.notes is None
+  assert record.plan_state["pending_intent_id"] == intent.id
   assert session.committed
   processor.process_approved_exit_intent.assert_not_awaited()
 
@@ -1034,6 +1160,7 @@ async def test_capacity_shortfall_blocks_manual_confirmation_before_processor(
         source="QMT_WHOLE_QUOTE",
       ),
       position=scope.position,
+      market_session_open=True,
       market_ready=lambda: True,
     )
 

@@ -102,6 +102,7 @@ class ExitPlanMonitor:
     if not self.scanner.is_running:
       await self.scanner.start()
     self.scanner.touch()
+    market_session_open = await self.scanner.hub.is_trading_session()
     states = self._ready_states()
     results: list[dict] = []
     service = AutoExitPlanService()
@@ -123,6 +124,7 @@ class ExitPlanMonitor:
         plan_id=record.plan_id,
         context=context,
         position=position,
+        market_session_open=market_session_open,
         market_ready=self._market_data_ready,
       )
       results.append(
@@ -151,6 +153,7 @@ class ExitPlanMonitor:
     if not self.scanner.is_running:
       await self.scanner.start()
     self.scanner.touch()
+    market_session_open = await self.scanner.hub.is_trading_session()
     states = self._ready_states()
     context = self.context_from_state(
       (
@@ -165,6 +168,7 @@ class ExitPlanMonitor:
       intent_id=intent_id,
       context=context,
       position=position,
+      market_session_open=market_session_open,
       market_ready=self._market_data_ready,
     )
 

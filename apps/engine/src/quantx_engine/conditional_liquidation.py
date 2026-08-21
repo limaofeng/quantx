@@ -100,6 +100,9 @@ class ConditionalLiquidationMonitor:
         await self.scanner.start()
       self.scanner.touch()
     states = self._ready_states() if orders else {}
+    market_session_open = (
+      await self.scanner.hub.is_trading_session() if orders else False
+    )
     for order in orders:
       account_type = getattr(order, "account_type", None) or AccountType.STOCK
       if isinstance(account_type, str):
@@ -134,6 +137,7 @@ class ConditionalLiquidationMonitor:
         result = await self._evaluate_adaptive_order(
           order,
           service=service,
+          market_session_open=market_session_open,
           state=(
             states.get(order.stock_code)
             if self._market_data_ready()
@@ -172,7 +176,14 @@ class ConditionalLiquidationMonitor:
       self._market_gate_blocked = True
     return {}
 
-  async def _evaluate_adaptive_order(self, order, *, service, state):
+  async def _evaluate_adaptive_order(
+    self,
+    order,
+    *,
+    service,
+    state,
+    market_session_open: bool,
+  ):
     now = time_utils.now()
     position = await service._get_position_for_condition(order.stock_code)
     if not order.exit_plan_id:
@@ -192,6 +203,7 @@ class ConditionalLiquidationMonitor:
       plan_id=order.exit_plan_id,
       context=context,
       position=position,
+      market_session_open=market_session_open,
       market_ready=self._market_data_ready,
     )
     async for db in get_async_db():

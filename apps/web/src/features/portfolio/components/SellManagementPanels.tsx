@@ -1,5 +1,4 @@
 import {
-  AlertTriangle,
   CheckCircle2,
   CirclePause,
   Clock3,
@@ -66,6 +65,7 @@ import {
   summarizeSelectedCostBasis,
   type ManualCostBasisMode,
 } from './exitPlanCostBasisUtils';
+import { ExitPlanNotices } from './ExitPlanNotices';
 import {
   ManualExitRuleEditor,
   type ManualExitRuleDraft,
@@ -207,35 +207,6 @@ function statusTone(status: string) {
   return 'border-blue-400/25 text-blue-200';
 }
 
-function PlanWarnings({ plan }: { plan: ExitPlan }) {
-  const warnings = [
-    plan.capacityStatus === 'RECONCILE_REQUIRED'
-      ? plan.capacityError || '持仓认领数量需要重新对账'
-      : '',
-    plan.dataQuality !== 'GOOD' && plan.dataQuality !== 'OK'
-      ? `行情：${plan.dataQuality}`
-      : '',
-    plan.pendingIntentId ? '卖出意图待处理' : '',
-    plan.pendingClientOrderId ? `待成交：${plan.pendingClientOrderId}` : '',
-    plan.lastError || '',
-    plan.completionNote || '',
-  ].filter(Boolean);
-  if (warnings.length === 0) return null;
-  return (
-    <div className="mt-2 grid gap-1">
-      {warnings.map(item => (
-        <div
-          className="flex items-start gap-1.5 text-[11px] font-bold text-amber-200"
-          key={item}
-        >
-          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-          <span className="break-all">{item}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function PlanCard({
   busy,
   instrumentName,
@@ -341,7 +312,7 @@ function PlanCard({
               );
             })}
           </div>
-          <PlanWarnings plan={plan} />
+          <ExitPlanNotices plan={plan} />
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
           {plan.pendingIntentId && !plan.pendingClientOrderId && (

@@ -638,7 +638,7 @@ class WholeQuoteHub:
         await self._publish_watermark(reason="API market stream is not ready")
       return
 
-    trading_session = await self._is_trading_session()
+    trading_session = await self.is_trading_session()
     if trading_session and not self._freshness_matches_state(
       api_state,
       freshness,
@@ -824,7 +824,7 @@ class WholeQuoteHub:
       self._set_status(WholeQuoteStatus.SYNCING)
       await self._publish_watermark(reason="API market stream id changed")
       return False
-    trading_session = await self._is_trading_session()
+    trading_session = await self.is_trading_session()
     if trading_session and not self._freshness_matches_state(
       api_state,
       freshness,
@@ -974,7 +974,8 @@ class WholeQuoteHub:
       reason=reason,
     )
 
-  async def _is_trading_session(self) -> bool:
+  async def is_trading_session(self) -> bool:
+    """Return whether realtime freshness is required for the current session."""
     now = datetime.now(ZoneInfo(settings.trading_timezone))
     try:
       return await self.trading_time_service.is_trading_hours("SH", now)
