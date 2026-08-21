@@ -101,6 +101,44 @@ describe('ManualPlanEditor', () => {
     expect(screen.getByLabelText('股票')).toHaveValue('302132.SZ');
   });
 
+  it('explains the planned sell quantity in user-facing terms', async () => {
+    const user = userEvent.setup();
+    mocks.useQuery.mockReturnValue([
+      {
+        data: {
+          ...capabilitiesData,
+          exitPlanHoldingCapacity: {
+            protectedVolume: 0,
+            totalVolume: 1100,
+            unallocatedVolume: 1100,
+          },
+        },
+        error: undefined,
+        fetching: false,
+      },
+      mocks.refetch,
+    ]);
+
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        initialInstrumentCode="600887.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+
+    expect(screen.getByLabelText('计划卖出数量')).toHaveAccessibleDescription(
+      '触发条件满足后，最多卖出该数量；创建计划不会立即下单。'
+    );
+    expect(screen.getByText(/持仓 1100/)).toHaveTextContent(
+      '持仓 1100 · 已纳入计划 0 · 可加入计划 1100 股'
+    );
+    expect(screen.queryByText(/保护数量/)).not.toBeInTheDocument();
+  });
+
   it('explains strategies and configures parameters without exposing a native select', async () => {
     const user = userEvent.setup();
     mocks.useQuery.mockReturnValue([
@@ -149,7 +187,7 @@ describe('ManualPlanEditor', () => {
     expect(advancedJson.value).toContain('"arm_target_profit_pct":2');
     expect(advancedJson.value).not.toContain('target_price');
 
-    await user.type(screen.getByLabelText('保护数量'), '100');
+    await user.type(screen.getByLabelText('计划卖出数量'), '100');
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
 
     expect(mocks.mutate).toHaveBeenCalledWith({

@@ -210,7 +210,7 @@ function PlanCard({
             </span>
           </div>
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold text-slate-500">
-            <span>保护 {plan.protectedVolume.toLocaleString()} 股</span>
+            <span>计划卖出 {plan.protectedVolume.toLocaleString()} 股</span>
             <span>已卖 {plan.exitedVolume.toLocaleString()} 股</span>
             <span>剩余 {plan.remainingVolume.toLocaleString()} 股</span>
             <span>版本 v{plan.configVersion}</span>
@@ -504,16 +504,29 @@ export function ManualPlanEditor({
             value={instrumentCode}
           />
         </label>
-        <label className="grid gap-1 text-xs font-bold text-slate-400">
-          保护数量
+        <div className="grid gap-1">
+          <label
+            className="text-xs font-bold text-slate-400"
+            htmlFor="manual-plan-sell-volume"
+          >
+            计划卖出数量
+          </label>
           <input
+            aria-describedby="manual-plan-sell-volume-help"
             className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
+            id="manual-plan-sell-volume"
             min={1}
             onChange={event => setProtectedVolume(event.target.value)}
             type="number"
             value={protectedVolume}
           />
-        </label>
+          <p
+            className="text-[10px] font-medium leading-4 text-slate-500"
+            id="manual-plan-sell-volume-help"
+          >
+            触发条件满足后，最多卖出该数量；创建计划不会立即下单。
+          </p>
+        </div>
         <label className="grid gap-1 text-xs font-bold text-slate-400">
           模式
           <select
@@ -547,8 +560,8 @@ export function ManualPlanEditor({
       </label>
       {capacity.data?.exitPlanHoldingCapacity && (
         <div className="mt-3 rounded border border-white/8 bg-black/10 px-3 py-2 text-[11px] font-bold text-slate-400">
-          持仓 {capacity.data.exitPlanHoldingCapacity.totalVolume} · 已保护{' '}
-          {capacity.data.exitPlanHoldingCapacity.protectedVolume} · 可认领{' '}
+          持仓 {capacity.data.exitPlanHoldingCapacity.totalVolume} · 已纳入计划{' '}
+          {capacity.data.exitPlanHoldingCapacity.protectedVolume} · 可加入计划{' '}
           {capacity.data.exitPlanHoldingCapacity.unallocatedVolume} 股
         </div>
       )}

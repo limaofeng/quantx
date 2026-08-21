@@ -893,7 +893,7 @@ export function ManualExitRuleEditor({
           <div>
             <h4 className="text-[11px] font-black text-slate-200">触发规则</h4>
             <p className="text-[9px] font-medium text-slate-600">
-              满足本规则时申请卖出计划剩余保护数量
+              满足本规则时，申请卖出计划中的剩余数量
             </p>
           </div>
         </div>
