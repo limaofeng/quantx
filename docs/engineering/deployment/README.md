@@ -121,6 +121,20 @@ fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
 倒序停止本次 QuantX 运行记录中的进程。旧的或由其他方式启动的 QuantX
 实例必须由其原启动方式停止。
 
+## 非交易时段行情压测
+
+全市场链路压力测试不得连接或替换已登记的 QMT Agent。统一工具会启动独立动态
+端口网关，使用随机 Redis keyspace，并在确认 `tradingSession=false` 后执行：
+
+```powershell
+uv run python ops/market-stream-load-test.py run `
+  --profile standard --duration 30m --allow-shared-redis
+```
+
+`--allow-shared-redis` 只允许共享 Redis 进程资源，不允许共享生产行情键；工具
+禁止全库扫描和 `FLUSHDB`，中断或失败也必须停止测试 supervisor 并精准清理本次
+keyspace。报告位于 `.runtime/reports/market-stream-load-test/`。
+
 ## 验收命令
 
 ```powershell

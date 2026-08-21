@@ -23,13 +23,70 @@ from quantx_infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-MARKET_STREAM_BATCH_CHANNEL = "market-data:whole:v2:batches"
-MARKET_STREAM_LATEST_KEY = "market-data:whole:v2:latest"
-MARKET_STREAM_STATE_KEY = "market-data:whole:v2:state"
-MARKET_STREAM_ENGINE_STATE_KEY = "market-data:whole:v2:engine-state"
-MARKET_STREAM_GENERATION_KEY = "market-data:whole:v2:generation"
-MARKET_STREAM_FRESHNESS_KEY = "market-data:whole:v2:freshness"
-MARKET_STREAM_STAGING_PREFIX = "market-data:whole:v2:staging"
+
+@dataclass(frozen=True, slots=True)
+class MarketStreamKeyspace:
+  """Complete Redis namespace for one isolated whole-market stream."""
+
+  prefix: str
+
+  def __post_init__(self) -> None:
+    normalized = self.prefix.strip().rstrip(":")
+    if not normalized or any(char.isspace() for char in normalized):
+      raise ValueError("market stream keyspace prefix must be non-empty and whitespace-free")
+    object.__setattr__(self, "prefix", normalized)
+
+  @property
+  def batch_channel(self) -> str:
+    return f"{self.prefix}:batches"
+
+  @property
+  def latest_key(self) -> str:
+    return f"{self.prefix}:latest"
+
+  @property
+  def state_key(self) -> str:
+    return f"{self.prefix}:state"
+
+  @property
+  def engine_state_key(self) -> str:
+    return f"{self.prefix}:engine-state"
+
+  @property
+  def generation_key(self) -> str:
+    return f"{self.prefix}:generation"
+
+  @property
+  def freshness_key(self) -> str:
+    return f"{self.prefix}:freshness"
+
+  @property
+  def staging_prefix(self) -> str:
+    return f"{self.prefix}:staging"
+
+  def staging_key(self, stream_id: str) -> str:
+    return f"{self.staging_prefix}:{stream_id}"
+
+  def data_keys(self, *, stream_ids: tuple[str, ...] = ()) -> tuple[str, ...]:
+    fixed = (
+      self.latest_key,
+      self.state_key,
+      self.engine_state_key,
+      self.generation_key,
+      self.freshness_key,
+    )
+    staging = tuple(self.staging_key(stream_id) for stream_id in stream_ids)
+    return fixed + staging
+
+
+PRODUCTION_MARKET_STREAM_KEYSPACE = MarketStreamKeyspace("market-data:whole:v2")
+MARKET_STREAM_BATCH_CHANNEL = PRODUCTION_MARKET_STREAM_KEYSPACE.batch_channel
+MARKET_STREAM_LATEST_KEY = PRODUCTION_MARKET_STREAM_KEYSPACE.latest_key
+MARKET_STREAM_STATE_KEY = PRODUCTION_MARKET_STREAM_KEYSPACE.state_key
+MARKET_STREAM_ENGINE_STATE_KEY = PRODUCTION_MARKET_STREAM_KEYSPACE.engine_state_key
+MARKET_STREAM_GENERATION_KEY = PRODUCTION_MARKET_STREAM_KEYSPACE.generation_key
+MARKET_STREAM_FRESHNESS_KEY = PRODUCTION_MARKET_STREAM_KEYSPACE.freshness_key
+MARKET_STREAM_STAGING_PREFIX = PRODUCTION_MARKET_STREAM_KEYSPACE.staging_prefix
 MARKET_STREAM_SNAPSHOT_CHUNK_SIZE = 512
 MARKET_STREAM_DELTA_CHUNK_SIZE = 256
 MARKET_STREAM_STAGING_TTL_SECONDS = 60
@@ -208,10 +265,6 @@ def _utcnow() -> datetime:
   return datetime.now(timezone.utc)
 
 
-def _staging_key(stream_id: str) -> str:
-  return f"{MARKET_STREAM_STAGING_PREFIX}:{stream_id}"
-
-
 def _tick_source_time(
   tick: dict,
   *,
@@ -355,9 +408,10 @@ class MarketStreamFreshnessLease:
 
 
 class BinaryMarketSubscription:
-  def __init__(self, redis: aioredis.Redis, pubsub) -> None:
+  def __init__(self, redis: aioredis.Redis, pubsub, *, channel: str) -> None:
     self._redis = redis
     self._pubsub = pubsub
+    self._channel = channel
 
   async def messages(self) -> AsyncIterator[bytes]:
     async for message in self._pubsub.listen():
@@ -374,7 +428,7 @@ class BinaryMarketSubscription:
     return message["data"]
 
   async def close(self) -> None:
-    await self._pubsub.unsubscribe(MARKET_STREAM_BATCH_CHANNEL)
+    await self._pubsub.unsubscribe(self._channel)
     await self._pubsub.aclose()
     await self._redis.aclose()
 
@@ -382,8 +436,14 @@ class BinaryMarketSubscription:
 class MarketStreamStore:
   """Atomic latest-state cache plus lossy notification transport."""
 
-  def __init__(self, redis_client: aioredis.Redis | None = None) -> None:
+  def __init__(
+    self,
+    redis_client: aioredis.Redis | None = None,
+    *,
+    keyspace: MarketStreamKeyspace = PRODUCTION_MARKET_STREAM_KEYSPACE,
+  ) -> None:
     self._redis = redis_client
+    self.keyspace = keyspace
     self._active_stream_id = ""
     self._active_generation = 0
     self._active_codes: frozenset[str] = frozenset()
@@ -413,17 +473,21 @@ class MarketStreamStore:
       max_connections=settings.redis_max_connections,
     )
     pubsub = subscriber.pubsub()
-    await pubsub.subscribe(MARKET_STREAM_BATCH_CHANNEL)
-    return BinaryMarketSubscription(subscriber, pubsub)
+    await pubsub.subscribe(self.keyspace.batch_channel)
+    return BinaryMarketSubscription(
+      subscriber,
+      pubsub,
+      channel=self.keyspace.batch_channel,
+    )
 
   async def state(self) -> MarketStreamState | None:
     redis = await self.redis()
-    return MarketStreamState.from_bytes(await redis.get(MARKET_STREAM_STATE_KEY))
+    return MarketStreamState.from_bytes(await redis.get(self.keyspace.state_key))
 
   async def engine_state(self) -> MarketStreamState | None:
     redis = await self.redis()
     return MarketStreamState.from_bytes(
-      await redis.get(MARKET_STREAM_ENGINE_STATE_KEY)
+      await redis.get(self.keyspace.engine_state_key)
     )
 
   async def write_engine_state(
@@ -450,7 +514,7 @@ class MarketStreamStore:
       reason=reason,
     )
     redis = await self.redis()
-    await redis.set(MARKET_STREAM_ENGINE_STATE_KEY, state.to_bytes())
+    await redis.set(self.keyspace.engine_state_key, state.to_bytes())
 
   async def allocate_generation(self) -> int:
     redis = await self.redis()
@@ -458,8 +522,8 @@ class MarketStreamStore:
       await redis.eval(
         _MARKET_STREAM_ALLOCATE_GENERATION_SCRIPT,
         2,
-        MARKET_STREAM_GENERATION_KEY,
-        MARKET_STREAM_STATE_KEY,
+        self.keyspace.generation_key,
+        self.keyspace.state_key,
       )
     )
 
@@ -486,13 +550,13 @@ class MarketStreamStore:
     result = await redis.eval(
       _MARKET_STREAM_MARK_SYNCING_SCRIPT,
       3,
-      MARKET_STREAM_STATE_KEY,
-      _staging_key(stream_id),
-      MARKET_STREAM_FRESHNESS_KEY,
+      self.keyspace.state_key,
+      self.keyspace.staging_key(stream_id),
+      self.keyspace.freshness_key,
       stream_id,
       str(incoming_generation),
       state.to_bytes(),
-      f"{MARKET_STREAM_STAGING_PREFIX}:",
+      f"{self.keyspace.staging_prefix}:",
     )
     decoded = _result_text(result)
     if decoded != "OK":
@@ -610,7 +674,7 @@ class MarketStreamStore:
       received_at=observed_at,
     )
     if batch.kind is MarketBatchKind.SNAPSHOT:
-      staging_key = _staging_key(batch.stream_id)
+      staging_key = self.keyspace.staging_key(batch.stream_id)
       entries = iter(batch.data.items())
       while chunk := list(islice(entries, MARKET_STREAM_SNAPSHOT_CHUNK_SIZE)):
         encoded_ticks = {
@@ -626,11 +690,11 @@ class MarketStreamStore:
       result = await redis.eval(
         _MARKET_STREAM_COMMIT_SNAPSHOT_SCRIPT,
         5,
-        MARKET_STREAM_STATE_KEY,
+        self.keyspace.state_key,
         staging_key,
-        MARKET_STREAM_LATEST_KEY,
-        MARKET_STREAM_BATCH_CHANNEL,
-        MARKET_STREAM_FRESHNESS_KEY,
+        self.keyspace.latest_key,
+        self.keyspace.batch_channel,
+        self.keyspace.freshness_key,
         batch.stream_id,
         str(batch.sequence - 1),
         state_payload,
@@ -688,7 +752,7 @@ class MarketStreamStore:
       begin_result = await redis.eval(
         _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
         1,
-        MARKET_STREAM_STATE_KEY,
+        self.keyspace.state_key,
         batch.stream_id,
         str(batch.sequence - 1),
         applying_state.to_bytes(),
@@ -696,13 +760,13 @@ class MarketStreamStore:
       _require_commit_success(begin_result, kind=batch.kind)
       entries = iter(encoded_ticks.items())
       while chunk := list(islice(entries, MARKET_STREAM_DELTA_CHUNK_SIZE)):
-        await redis.hset(MARKET_STREAM_LATEST_KEY, mapping=dict(chunk))
+        await redis.hset(self.keyspace.latest_key, mapping=dict(chunk))
       result = await redis.eval(
         _MARKET_STREAM_COMMIT_DELTA_SCRIPT,
         3,
-        MARKET_STREAM_STATE_KEY,
-        MARKET_STREAM_BATCH_CHANNEL,
-        MARKET_STREAM_FRESHNESS_KEY,
+        self.keyspace.state_key,
+        self.keyspace.batch_channel,
+        self.keyspace.freshness_key,
         batch.stream_id,
         str(batch.sequence - 1),
         state_payload,
@@ -725,9 +789,9 @@ class MarketStreamStore:
       await redis.eval(
         _MARKET_STREAM_MARK_OFFLINE_SCRIPT,
         3,
-        MARKET_STREAM_STATE_KEY,
-        _staging_key(stream_id),
-        MARKET_STREAM_FRESHNESS_KEY,
+        self.keyspace.state_key,
+        self.keyspace.staging_key(stream_id),
+        self.keyspace.freshness_key,
         stream_id,
         _utcnow().isoformat(),
         reason,
@@ -753,8 +817,8 @@ class MarketStreamStore:
     result = await redis.eval(
       _MARKET_STREAM_READ_STATE_FRESHNESS_SCRIPT,
       2,
-      MARKET_STREAM_STATE_KEY,
-      MARKET_STREAM_FRESHNESS_KEY,
+      self.keyspace.state_key,
+      self.keyspace.freshness_key,
     )
     if not isinstance(result, (list, tuple)) or len(result) != 2:
       raise ValueError("invalid market stream state/freshness Redis result")
@@ -777,7 +841,7 @@ class MarketStreamStore:
         or before.commit_phase != "IDLE"
       ):
         return None
-      raw_ticks = await redis.hgetall(MARKET_STREAM_LATEST_KEY)
+      raw_ticks = await redis.hgetall(self.keyspace.latest_key)
       after = await self.state()
       if (
         after is None
@@ -830,7 +894,9 @@ __all__ = [
   "MARKET_STREAM_STAGING_PREFIX",
   "BinaryMarketSubscription",
   "MarketStreamFreshnessLease",
+  "MarketStreamKeyspace",
   "MarketStreamState",
   "MarketStreamStore",
+  "PRODUCTION_MARKET_STREAM_KEYSPACE",
   "market_stream_store",
 ]

@@ -11,6 +11,7 @@ import os
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -41,6 +42,7 @@ from quantx_contracts import (
   ReportAckPayload,
 )
 from quantx_infrastructure.core.data.market_stream_transport import (
+  MarketStreamStore,
   market_stream_store,
 )
 from quantx_infrastructure.database.redis_pubsub import (
@@ -1339,7 +1341,9 @@ async def _receive_market_batches(
   device_id: str,
   session_expires_at: datetime,
   buffer: _MarketCommitBuffer,
+  validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
+  device_validator = validate_device or _ensure_device_active
   expected_sequence = 1
   next_device_check = 0.0
   while True:
@@ -1347,7 +1351,7 @@ async def _receive_market_batches(
       raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
     now = time.monotonic()
     if now >= next_device_check:
-      await _ensure_device_active(device_id)
+      await device_validator(device_id)
       next_device_check = now + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
 
     await buffer.reserve()
@@ -1368,7 +1372,7 @@ async def _receive_market_batches(
         raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
       now = time.monotonic()
       if now >= next_device_check:
-        await _ensure_device_active(device_id)
+        await device_validator(device_id)
         next_device_check = (
           time.monotonic() + MARKET_STREAM_DEVICE_REVALIDATE_SECONDS
         )
@@ -1438,7 +1442,9 @@ async def _commit_market_batches(
   stream_id: str,
   buffer: _MarketCommitBuffer,
   commit_state: _MarketCommitState,
+  store: MarketStreamStore | None = None,
 ) -> None:
+  active_store = store or market_stream_store
   while True:
     queued = await buffer.get()
     if isinstance(queued, _MarketCommitQueueClosed):
@@ -1453,7 +1459,7 @@ async def _commit_market_batches(
           f"age={queue_age:.3f}s"
         )
       state = await asyncio.wait_for(
-        market_stream_store.write_batch(
+        active_store.write_batch(
           queued.batch,
           queued.payload,
           received_at=queued.received_at,
@@ -1491,6 +1497,8 @@ async def _run_market_commit_pipeline(
   device_id: str,
   session_expires_at: datetime,
   commit_state: _MarketCommitState,
+  store: MarketStreamStore | None = None,
+  validate_device: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
   buffer = _MarketCommitBuffer()
   receiver = asyncio.create_task(
@@ -1500,6 +1508,7 @@ async def _run_market_commit_pipeline(
       device_id=device_id,
       session_expires_at=session_expires_at,
       buffer=buffer,
+      validate_device=validate_device,
     ),
     name=f"market-receiver:{stream_id}",
   )
@@ -1509,6 +1518,7 @@ async def _run_market_commit_pipeline(
       stream_id=stream_id,
       buffer=buffer,
       commit_state=commit_state,
+      store=store,
     ),
     name=f"market-redis-committer:{stream_id}",
   )

@@ -97,10 +97,24 @@ Store 与 Engine Hub 共用 contracts 中的唯一解析器。个人单账户部
 5xx 不调用服务端 `/fail`，而是保留同一份 immutable gzip spool，断开控制连接后
 重投；只有确定性的请求、编码或非瞬时 4xx 契约错误才进入 `FAILED`。
 
-性能回归使用固定 5,000 标的、30 个批次运行
-`python ops/benchmark-market-stream.py`，记录 orjson 编解码 p50/p95/p99、帧大小、
-CPU 时间和峰值内存；实机验收再结合各阶段日志比较 WebSocket ACK、Redis 应用
-和 Engine 水位延迟，不设置脱离设备负载的固定 SLA。
+协议编解码回归使用 5,822 标的、30 个批次运行：
+
+```powershell
+uv run python ops/market-stream-load-test.py codec
+```
+
+非交易时段的完整数据面压力测试使用独立回环网关和随机 Redis keyspace，复用
+生产 WebSocket 解码、双帧背压、分块提交与 ACK 管线，但不连接 XTData、交易
+Agent 或订单接口：
+
+```powershell
+uv run python ops/market-stream-load-test.py run `
+  --profile standard --duration 30m --allow-shared-redis
+```
+
+工具从 `/health/components` fail-closed 确认当前不是交易时段，测试网关由
+`supervise_process.py` 管理，并只清理本次 `quantx-loadtest:<run-id>:*` 数据。
+JSON 报告保存在 `.runtime/reports/market-stream-load-test/`，不提交仓库。
 
 首次运行必须由 Web 创建一次性登记码，再执行：
 
