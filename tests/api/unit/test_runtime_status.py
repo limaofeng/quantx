@@ -172,7 +172,7 @@ async def test_component_status_overrides_stale_ready_agent_when_launch_is_block
       "market-data": {
         "status": "ready",
         "connectedDevices": 1,
-        "protocol": "quantx.market.v1",
+        "protocol": "quantx.market.v2",
       },
     }
 
@@ -215,7 +215,7 @@ async def test_component_status_overrides_stale_ready_agent_when_launch_is_block
     "reasonCode": "QMT_ENROLLMENT_REQUIRED",
     "liveTradingEnabled": False,
     "connectedDevices": 0,
-    "protocol": "quantx.market.v1",
+    "protocol": "quantx.market.v2",
   }
 
   ready, payload = await runtime_status.readiness_status()

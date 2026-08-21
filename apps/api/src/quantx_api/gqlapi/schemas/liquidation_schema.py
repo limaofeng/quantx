@@ -3,9 +3,14 @@
 """
 
 import logging
-from typing import List, Optional
+from datetime import datetime
+from typing import AsyncIterator, List, Optional
 
 import strawberry
+from quantx_infrastructure.database.redis_pubsub import redis_pubsub
+from quantx_infrastructure.services.exit_plan_notifications import (
+  EXIT_PLAN_UPDATE_CHANNEL,
+)
 
 from quantx_api.auth.errors import AuthError, forbidden
 
@@ -41,6 +46,7 @@ from ..types.liquidation_types import (
   ExitPlanCostBasisCandidates,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
+  ExitPlanUpdate,
   ExitPlanView,
   LiquidateAllPositionsInput,
   LiquidatePositionInput,
@@ -74,6 +80,37 @@ from ..types.trade_approval_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@strawberry.type(description="卖出管理与统一退出计划订阅")
+class LiquidationSubscription:
+  @strawberry.subscription(description="订阅退出计划权威投影变更通知")
+  async def exit_plan_updates(
+    self,
+    info: strawberry.types.Info,
+    account_id: Optional[str] = None,
+    instrument_code: Optional[str] = None,
+  ) -> AsyncIterator[ExitPlanUpdate]:
+    authorized = authorized_account_id(info, account_id)
+    normalized_code = str(instrument_code or "").strip().upper()
+    subscription = await redis_pubsub.open_subscription(
+      EXIT_PLAN_UPDATE_CHANNEL
+    )
+    try:
+      async for message in subscription.messages():
+        if str(message.get("account_id") or "") != authorized:
+          continue
+        message_code = str(message.get("instrument_code") or "").upper()
+        if normalized_code and message_code != normalized_code:
+          continue
+        yield ExitPlanUpdate(
+          plan_id=str(message.get("plan_id") or ""),
+          account_id=authorized,
+          instrument_code=message_code,
+          occurred_at=datetime.fromisoformat(str(message["occurred_at"])),
+        )
+    finally:
+      await subscription.close()
 
 
 def _require_legacy_web_liquidation_session(

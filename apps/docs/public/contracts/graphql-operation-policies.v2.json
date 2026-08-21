@@ -2824,6 +2824,18 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "exitPlanUpdates": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "firstBoardPromotionUpdates": {
         "audiences": [
           "web",

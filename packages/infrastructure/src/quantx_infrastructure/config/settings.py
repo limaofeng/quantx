@@ -33,6 +33,10 @@ class Settings(BaseSettings):
   # 服务器配置
   host: str = Field(default="127.0.0.1", description="服务器监听地址")
   port: int = Field(default=18081, description="服务器端口")
+  market_gateway_url: str = Field(
+    default="http://127.0.0.1:18082",
+    description="独立行情接入进程内部地址",
+  )
   runtime_profile: str = Field(
     default="web",
     description="运行就绪检查配置：web 或 full",

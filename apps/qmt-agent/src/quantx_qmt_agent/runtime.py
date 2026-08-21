@@ -23,11 +23,11 @@ from typing import Any, AsyncIterator, BinaryIO, Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 import httpx
+import orjson
 import websockets
 from pydantic import ValidationError
 from quantx_contracts import (
   MARKET_STREAM_MARKETS,
-  MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   MARKET_STREAM_SUBPROTOCOL,
   MAX_MARKET_STREAM_FRAME_BYTES,
   AgentEnvelope,
@@ -44,7 +44,6 @@ from quantx_contracts import (
 
 from .broker import (
   MAX_MARKET_DATA_RECORDS,
-  WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE,
   enrich_report_payload,
 )
 from .credentials import DeviceConfiguration, state_directory
@@ -77,7 +76,7 @@ XTTRADING_RECONNECT_TIMEOUT_SECONDS = 30
 WEBSOCKET_PING_INTERVAL_SECONDS = 20
 WEBSOCKET_PING_TIMEOUT_SECONDS = 16 * 60
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 30
-MARKET_STREAM_ACK_TIMEOUT_SECONDS = MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS
+MARKET_STREAM_ACK_TIMEOUT_SECONDS = 15.0
 MARKET_STREAM_HANDSHAKE_TIMEOUT_SECONDS = 10
 MARKET_STREAM_READY_INGRESS_BYTES = 64 * 1024 * 1024
 # Every retained callback is charged at least this many estimated bytes.  Set
@@ -95,6 +94,10 @@ MARKET_STREAM_OUTBOUND_BATCHES = 8
 MARKET_STREAM_OUTBOUND_BYTES = 64 * 1024 * 1024
 MARKET_STREAM_MAX_UNACKNOWLEDGED_BATCHES = 2
 MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS = 5.0
+MARKET_STREAM_MIN_INITIAL_COVERAGE = 0.99
+MARKET_STREAM_REQUIRED_INDEX_CODES = frozenset(
+  {"000001.SH", "399001.SZ", "399006.SZ"}
+)
 MARKET_STREAM_MICROBATCH_SECONDS = 0.010
 # A native whole-quote callback normally contains the entire Shanghai/Shenzhen
 # universe.  Splitting that callback into fixed 512-instrument fragments can
@@ -1446,7 +1449,7 @@ class AgentRuntime:
         access_token=market_access_token,
       )
       stream_trading_date = datetime.now(SHANGHAI_ZONE).date()
-      snapshot_raw, snapshot_watermark = (
+      snapshot_raw, snapshot_watermark, universe_codes = (
         await self._build_whole_market_snapshot(stream_trading_date)
       )
       self._require_native_whole_market_sync("snapshot-build")
@@ -1456,7 +1459,11 @@ class AgentRuntime:
         kind=MarketBatchKind.SNAPSHOT,
         captured_at=datetime.now(timezone.utc),
         raw_data=snapshot_raw,
+        universe_codes=universe_codes,
       )
+      sent_tick_fingerprints = {
+        code: orjson.dumps(tick) for code, tick in snapshot.batch.data.items()
+      }
       self._require_native_whole_market_sync("snapshot-encode")
       self._require_native_whole_market_sync("snapshot-send")
       await self._send_encoded_market_batch_and_wait_ack(socket, snapshot)
@@ -1480,6 +1487,7 @@ class AgentRuntime:
         kind=MarketBatchKind.DELTA,
         captured_at=ready_barrier_delta.captured_at,
         raw_data=ready_barrier_delta.data,
+        dedupe_fingerprints=sent_tick_fingerprints,
       )
       self._require_native_whole_market_sync("ready-barrier-encode")
       self._whole_market_capture.raise_if_invalidated()
@@ -1541,6 +1549,7 @@ class AgentRuntime:
         kind=MarketBatchKind.DELTA,
         captured_at=ready_confirmation_event.captured_at,
         raw_data=ready_confirmation_event.data,
+        dedupe_fingerprints=sent_tick_fingerprints,
       )
       self._require_native_whole_market_sync("ready-confirmation-encode")
       self._whole_market_capture.raise_if_invalidated()
@@ -1577,6 +1586,7 @@ class AgentRuntime:
             starting_sequence=3,
             trading_date=stream_trading_date,
             first_event=None,
+            dedupe_fingerprints=sent_tick_fingerprints,
           ),
           name="whole-market-batch-producer",
         )
@@ -1670,57 +1680,10 @@ class AgentRuntime:
     except ValueError:
       return 0.0
 
-  @classmethod
-  def _merge_whole_market_snapshot(
-    cls,
-    fallback: dict[str, Any],
-    callback_latest: dict[str, Any],
-    *,
-    callback_capture_sequences: dict[str, int] | None = None,
-    callback_captured_monotonic: dict[str, float] | None = None,
-    fallback_completion_sequences: dict[str, int] | None = None,
-    fallback_completed_monotonic: dict[str, float] | None = None,
-  ) -> dict[str, Any]:
-    callback_sequences = callback_capture_sequences or {}
-    callback_monotonic = callback_captured_monotonic or {}
-    fallback_sequences = fallback_completion_sequences or {}
-    fallback_monotonic = fallback_completed_monotonic or {}
-    merged = dict(fallback)
-    for code, latest_tick in callback_latest.items():
-      fallback_tick = merged.get(code)
-      if fallback_tick is None:
-        merged[code] = latest_tick
-        continue
-      latest_time = cls._whole_market_tick_source_time(latest_tick)
-      fallback_time = cls._whole_market_tick_source_time(fallback_tick)
-      if latest_time > 0 and (
-        fallback_time <= 0 or latest_time >= fallback_time
-      ):
-        merged[code] = latest_tick
-        continue
-      if latest_time > 0 or fallback_time > 0:
-        continue
-      callback_sequence = callback_sequences.get(code, 0)
-      fallback_sequence = fallback_sequences.get(code, 0)
-      callback_completed_at = callback_monotonic.get(code, 0.0)
-      fallback_completed_at = fallback_monotonic.get(code, 0.0)
-      if (
-        callback_sequence > fallback_sequence > 0
-        or (
-          fallback_sequence <= 0
-          and callback_completed_at > fallback_completed_at > 0
-        )
-      ):
-        # Neither side exposes a source timestamp. A callback captured only
-        # after this code's native fragment completed is strictly newer than
-        # the fallback and must be included before the global watermark cut.
-        merged[code] = latest_tick
-    return merged
-
   async def _build_whole_market_snapshot(
     self,
     trading_date: date,
-  ) -> tuple[dict[str, Any], int]:
+  ) -> tuple[dict[str, Any], int, tuple[str, ...]]:
     codes_reader = getattr(self.broker, "whole_market_codes", None)
     expected_values = (
       await self._run_xtdata_control(
@@ -1731,11 +1694,22 @@ class AgentRuntime:
       else ()
     )
     expected_codes = frozenset(expected_values or ())
+    if not expected_codes:
+      raise RuntimeError("XTData returned an empty SH/SZ universe")
+
+    def snapshot_ready(data: dict[str, Any]) -> bool:
+      coverage = len(expected_codes.intersection(data)) / len(expected_codes)
+      required = MARKET_STREAM_REQUIRED_INDEX_CODES.intersection(expected_codes)
+      return (
+        coverage >= MARKET_STREAM_MIN_INITIAL_COVERAGE
+        and required <= data.keys()
+      )
+
     deadline = time.monotonic() + MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS
     latest = self._whole_market_capture.latest_snapshot(
       trading_date=trading_date
     )
-    while expected_codes and not expected_codes.issubset(latest.data):
+    while not snapshot_ready(latest.data):
       remaining = deadline - time.monotonic()
       if remaining <= 0:
         break
@@ -1749,90 +1723,23 @@ class AgentRuntime:
       latest = self._whole_market_capture.latest_snapshot(
         trading_date=trading_date
       )
-    if expected_codes and expected_codes.issubset(latest.data):
-      logger.info(
-        "QMT initial whole-quote push covers the full universe: instruments=%s",
-        len(latest.data),
+    if not snapshot_ready(latest.data):
+      available = len(expected_codes.intersection(latest.data))
+      coverage = available / len(expected_codes)
+      missing_required = sorted(
+        MARKET_STREAM_REQUIRED_INDEX_CODES.intersection(expected_codes)
+        .difference(latest.data)
       )
-      return latest.data, latest.capture_watermark
-
-    chunk_reader = getattr(
-      self.broker,
-      "whole_market_snapshot_chunk",
-      None,
-    )
-    fallback_completion_sequences: dict[str, int] = {}
-    fallback_completed_monotonic: dict[str, float] = {}
-    if callable(chunk_reader) and expected_codes:
-      fallback: dict[str, Any] = {}
-      ordered_codes = tuple(
-        code for code in expected_values if code in expected_codes
+      raise RuntimeError(
+        "QMT initial whole-quote callback coverage is insufficient: "
+        f"available={available} expected={len(expected_codes)} "
+        f"coverage={coverage:.4f} missing_required={missing_required}"
       )
-      for start in range(
-        0,
-        len(ordered_codes),
-        WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE,
-      ):
-        batch = list(
-          ordered_codes[start : start + WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE]
-        )
 
-        def read_fragment():
-          fragment = chunk_reader(batch)
-          return (
-            fragment,
-            self._whole_market_capture.capture_sequence,
-            time.monotonic(),
-          )
-
-        fragment, completion_sequence, completed_monotonic = (
-          await self._run_xtdata_control(
-            "whole-market-snapshot:"
-            f"{start // WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE}",
-            read_fragment,
-          )
-        )
-        if not isinstance(fragment, dict):
-          raise RuntimeError("XTData returned an invalid snapshot fragment")
-        fallback.update(fragment)
-        for code in batch:
-          fallback_completion_sequences[code] = completion_sequence
-          fallback_completed_monotonic[code] = completed_monotonic
-        # Each fragment has its own native timeout. Yield explicitly between
-        # calls so heartbeats and WebSocket control tasks remain schedulable.
-        await asyncio.sleep(0)
-    else:
-      def read_snapshot():
-        snapshot = self.broker.whole_market_snapshot()
-        return (
-          snapshot,
-          self._whole_market_capture.capture_sequence,
-          time.monotonic(),
-        )
-
-      fallback, completion_sequence, completed_monotonic = (
-        await self._run_xtdata_control(
-          "whole-market-snapshot",
-          read_snapshot,
-        )
-      )
-      for code in expected_codes:
-        fallback_completion_sequences[code] = completion_sequence
-        fallback_completed_monotonic[code] = completed_monotonic
-    if not isinstance(fallback, dict) or not fallback:
-      raise RuntimeError("XTData returned an empty SH/SZ snapshot")
-    latest = self._whole_market_capture.latest_snapshot(
-      trading_date=trading_date
-    )
-    merged = self._merge_whole_market_snapshot(
-      fallback,
-      latest.data,
-      callback_capture_sequences=latest.capture_sequences,
-      callback_captured_monotonic=latest.captured_monotonic,
-      fallback_completion_sequences=fallback_completion_sequences,
-      fallback_completed_monotonic=fallback_completed_monotonic,
-    )
-    missing_codes = expected_codes.difference(merged)
+    snapshot = {
+      code: tick for code, tick in latest.data.items() if code in expected_codes
+    }
+    missing_codes = expected_codes.difference(snapshot)
     if missing_codes:
       missing_samples = sorted(missing_codes)[:5]
       logger.warning(
@@ -1843,13 +1750,13 @@ class AgentRuntime:
         missing_samples,
       )
     logger.info(
-      "QMT whole-market snapshot used get_full_tick fallback: "
-      "expected=%s callback_coverage=%s merged=%s",
+      "QMT whole-market snapshot built from native callback state: "
+      "expected=%s available=%s missing=%s",
       len(expected_codes),
-      len(latest.data),
-      len(merged),
+      len(snapshot),
+      len(missing_codes),
     )
-    return merged, latest.capture_watermark
+    return snapshot, latest.capture_watermark, tuple(sorted(expected_codes))
 
   async def _prepare_encoded_market_batch(
     self,
@@ -1859,6 +1766,8 @@ class AgentRuntime:
     kind: MarketBatchKind,
     captured_at: datetime,
     raw_data: dict[str, Any],
+    universe_codes: tuple[str, ...] = (),
+    dedupe_fingerprints: dict[str, bytes] | None = None,
   ) -> _EncodedMarketBatch:
     def prepare() -> _EncodedMarketBatch:
       validation_reference_at = datetime.now(timezone.utc)
@@ -1884,12 +1793,21 @@ class AgentRuntime:
           f"kind={kind.value} invalid={len(missing_source_time)} "
           f"samples={samples}"
         )
+      if dedupe_fingerprints is not None:
+        fingerprints = {code: orjson.dumps(tick) for code, tick in data.items()}
+        data = {
+          code: tick
+          for code, tick in data.items()
+          if dedupe_fingerprints.get(code) != fingerprints[code]
+        }
+        dedupe_fingerprints.update(fingerprints)
       batch = MarketStreamBatch(
         stream_id=stream_id,
         sequence=sequence,
         kind=kind,
         captured_at=captured_at,
         instrument_count=len(data),
+        universe_codes=universe_codes,
         data=data,
       )
       try:
@@ -1916,6 +1834,7 @@ class AgentRuntime:
     starting_sequence: int,
     trading_date: date,
     first_event: CapturedMarketEvent | None,
+    dedupe_fingerprints: dict[str, bytes],
   ) -> None:
     source_events: deque[CapturedMarketEvent] = deque()
     fragments: deque[CapturedMarketEvent] = deque()
@@ -2016,6 +1935,7 @@ class AgentRuntime:
         kind=MarketBatchKind.DELTA,
         captured_at=captured_at,
         raw_data=raw_data,
+        dedupe_fingerprints=dedupe_fingerprints,
       )
       await outbound.put(encoded)
       self._market_stream_outbound_depth = outbound.depth

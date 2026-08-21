@@ -157,13 +157,13 @@ class AlwaysClosed:
 
 class PipelineWebSocket:
   def __init__(self, batches) -> None:
-    self.scope = {"subprotocols": ["quantx.market.v1"]}
+    self.scope = {"subprotocols": ["quantx.market.v2"]}
     self.batches = batches
     self.sent_controls = []
     self.index = 0
 
   async def accept(self, *, subprotocol):
-    assert subprotocol == "quantx.market.v1"
+    assert subprotocol == "quantx.market.v2"
 
   async def receive_text(self):
     return AgentEnvelope(
@@ -237,12 +237,12 @@ class _AgentSocketContext:
 class _ApiMarketSocket:
   def __init__(self, duplex: _MarketDuplex) -> None:
     self.duplex = duplex
-    self.scope = {"subprotocols": ["quantx.market.v1"]}
+    self.scope = {"subprotocols": ["quantx.market.v2"]}
     self.client_state = WebSocketState.CONNECTING
     self.application_state = WebSocketState.CONNECTING
 
   async def accept(self, *, subprotocol):
-    assert subprotocol == "quantx.market.v1"
+    assert subprotocol == "quantx.market.v2"
     self.client_state = WebSocketState.CONNECTED
     self.application_state = WebSocketState.CONNECTED
 
@@ -345,6 +345,7 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
       kind=MarketBatchKind.SNAPSHOT,
       captured_at=datetime.now(timezone.utc),
       instrument_count=len(snapshot),
+      universe_codes=tuple(sorted(snapshot)),
       data=snapshot,
     ),
     MarketStreamBatch(
@@ -464,9 +465,11 @@ async def test_delayed_sequence_two_ack_keeps_engine_closed_until_sequence_three
   runtime._market_stream_ready_since_monotonic = 0.0
 
   async def build_snapshot(_trading_date):
-    return {
-      "600000.SH": {"lastPrice": 10.0, "time": 1_000}
-    }, runtime._whole_market_capture.capture_sequence
+    return (
+      {"600000.SH": {"lastPrice": 10.0, "time": 1_000}},
+      runtime._whole_market_capture.capture_sequence,
+      ("600000.SH",),
+    )
 
   runtime._build_whole_market_snapshot = build_snapshot
 
@@ -572,6 +575,7 @@ async def test_sequence_three_commit_failure_never_makes_store_ready(
       kind=MarketBatchKind.SNAPSHOT,
       captured_at=datetime.now(timezone.utc),
       instrument_count=1,
+      universe_codes=("600000.SH",),
       data={"600000.SH": {"lastPrice": 10.0, "time": 1_000}},
     ),
     MarketStreamBatch(
@@ -644,6 +648,7 @@ async def test_untrusted_websocket_tick_without_source_time_fails_closed(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0}},
   )
   store = InMemoryMarketStore()
@@ -701,6 +706,7 @@ async def test_disconnect_before_sequence_three_never_makes_store_ready(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0, "time": 1_000}},
   )
   batches = [snapshot]

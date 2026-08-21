@@ -22,6 +22,7 @@ from .schemas import (
   LimitUpBoardAssistantQuery,
   LiquidationMutation,
   LiquidationQuery,
+  LiquidationSubscription,
   MarketDataQuery,
   NotificationMutation,
   NotificationQuery,
@@ -166,6 +167,7 @@ class Mutation(
 class Subscription(
   AiAssistantSubscription,
   EntryPlanSubscription,
+  LiquidationSubscription,
   RealtimeSubscription,
 ):
   pass

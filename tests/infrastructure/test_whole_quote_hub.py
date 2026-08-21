@@ -98,6 +98,7 @@ def batch(
     kind=kind,
     captured_at=captured_at or datetime.now(timezone.utc),
     instrument_count=len(data),
+    universe_codes=tuple(sorted(data)) if kind is MarketBatchKind.SNAPSHOT else (),
     data=data,
   )
 

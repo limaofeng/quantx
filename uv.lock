@@ -15,8 +15,8 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "quantx-api",
     "quantx-ai-runtime",
+    "quantx-api",
     "quantx-application",
     "quantx-contracts",
     "quantx-domain",
@@ -1902,8 +1902,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/57/18/1204bde976436ad85498b759d5297843ebd2e0a214f729eb2dc4423cdfc7/openai_agents-0.20.0.tar.gz", hash = "sha256:a6b37954877868ac233876a27dab1e2a461c53ecbd5fcf6e19e2d276d3e848cd", size = 6146452, upload-time = "2026-08-11T03:12:49.556Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9f/8b/18528f00cb1a5d0b8e00f457f7dc88e7b17439bc520861aae2b638b88710/openai_agents-0.20.0-py3-none-any.whl", hash = "sha256:aaff662b802fa90762ad539e131b9ea387e12e3664b87bc75157ad1b3fc88850", size = 1064338 },
+    { url = "https://files.pythonhosted.org/packages/9f/8b/18528f00cb1a5d0b8e00f457f7dc88e7b17439bc520861aae2b638b88710/openai_agents-0.20.0-py3-none-any.whl", hash = "sha256:aaff662b802fa90762ad539e131b9ea387e12e3664b87bc75157ad1b3fc88850", size = 1064338, upload-time = "2026-08-11T03:12:47.615Z" },
 ]
 
 [[package]]
@@ -2829,6 +2830,27 @@ wheels = [
 ]
 
 [[package]]
+name = "quantx-ai-runtime"
+version = "0.1.0"
+source = { editable = "apps/ai-runtime" }
+dependencies = [
+    { name = "openai-agents" },
+    { name = "pydantic" },
+    { name = "quantx-application" },
+    { name = "quantx-domain" },
+    { name = "quantx-infrastructure" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "openai-agents", specifier = ">=0.20.0,<0.21.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "quantx-application", editable = "packages/application" },
+    { name = "quantx-domain", editable = "packages/domain" },
+    { name = "quantx-infrastructure", editable = "packages/infrastructure" },
+]
+
+[[package]]
 name = "quantx-api"
 version = "0.1.0"
 source = { editable = "apps/api" }
@@ -2931,27 +2953,6 @@ requires-dist = [
     { name = "websockets", specifier = ">=11.0.0" },
 ]
 provides-extras = ["dev"]
-
-[[package]]
-name = "quantx-ai-runtime"
-version = "0.1.0"
-source = { editable = "apps/ai-runtime" }
-dependencies = [
-    { name = "openai-agents" },
-    { name = "pydantic" },
-    { name = "quantx-application" },
-    { name = "quantx-domain" },
-    { name = "quantx-infrastructure" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "openai-agents", specifier = ">=0.20.0,<0.21.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "quantx-application", editable = "packages/application" },
-    { name = "quantx-domain", editable = "packages/domain" },
-    { name = "quantx-infrastructure", editable = "packages/infrastructure" },
-]
 
 [[package]]
 name = "quantx-application"
@@ -3099,6 +3100,7 @@ source = { editable = "apps/qmt-agent" }
 dependencies = [
     { name = "httpx" },
     { name = "keyring" },
+    { name = "orjson" },
     { name = "quantx-contracts" },
     { name = "websockets" },
 ]
@@ -3107,6 +3109,7 @@ dependencies = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "keyring", specifier = ">=25.0" },
+    { name = "orjson", specifier = ">=3.10.0" },
     { name = "quantx-contracts", editable = "packages/contracts" },
     { name = "websockets", specifier = ">=11.0" },
 ]

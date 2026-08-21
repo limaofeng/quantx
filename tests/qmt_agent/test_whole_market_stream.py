@@ -205,6 +205,7 @@ async def test_whole_market_ack_timeout_requires_resync(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0}},
   )
 
@@ -443,7 +444,11 @@ async def test_ready_barrier_carries_sync_delta_before_ready_and_does_not_repeat
     runtime._whole_market_capture.capture(
       {"600000.SH": {"lastPrice": 11.0}}
     )
-    return {"600000.SH": {"lastPrice": 10.0}}, watermark
+    return (
+      {"600000.SH": {"lastPrice": 10.0}},
+      watermark,
+      ("600000.SH",),
+    )
 
   runtime._build_whole_market_snapshot = build_snapshot
   monkeypatch.setattr(
@@ -501,7 +506,7 @@ async def test_empty_sequence_three_is_mandatory_readiness_confirmation(
   socket = DelayedReadyBarrierSocket()
 
   async def build_snapshot(_trading_date):
-    return {"600000.SH": {"lastPrice": 10.0}}, 0
+    return {"600000.SH": {"lastPrice": 10.0}}, 0, ("600000.SH",)
 
   runtime._build_whole_market_snapshot = build_snapshot
   monkeypatch.setattr(
@@ -544,7 +549,7 @@ async def test_slow_ready_ack_converges_full_market_callbacks_without_resync(
   socket = DelayedReadyBarrierSocket()
 
   async def build_snapshot(_trading_date):
-    return {"600000.SH": {"lastPrice": 10.0}}, 0
+    return {"600000.SH": {"lastPrice": 10.0}}, 0, ("600000.SH",)
 
   runtime._build_whole_market_snapshot = build_snapshot
   monkeypatch.setattr(
@@ -635,7 +640,7 @@ async def test_ready_barrier_overflow_propagates_exact_reason_and_stays_closed(
   socket = DelayedReadyBarrierSocket()
 
   async def build_snapshot(_trading_date):
-    return {"600000.SH": {"lastPrice": 10.0}}, 0
+    return {"600000.SH": {"lastPrice": 10.0}}, 0, ("600000.SH",)
 
   runtime._build_whole_market_snapshot = build_snapshot
   monkeypatch.setattr(
@@ -818,16 +823,16 @@ async def test_native_source_reset_cannot_publish_old_complete_snapshot(
     return function(*args)
 
   runtime._run_xtdata_control = direct_control
-  snapshot, _ = await runtime._build_whole_market_snapshot(
-    datetime.now().astimezone().date()
-  )
+  with pytest.raises(RuntimeError, match="callback coverage is insufficient"):
+    await runtime._build_whole_market_snapshot(
+      datetime.now().astimezone().date()
+    )
 
-  assert runtime.broker.fallbacks == 1
-  assert snapshot["600000.SH"]["lastPrice"] == 11.0
+  assert runtime.broker.fallbacks == 0
 
 
 @pytest.mark.asyncio
-async def test_snapshot_fallback_uses_independent_bounded_native_calls(
+async def test_snapshot_is_built_only_from_whole_quote_callbacks(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   codes = (
@@ -857,16 +862,14 @@ async def test_snapshot_fallback_uses_independent_bounded_native_calls(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_capture.capture(
+    {code: {"lastPrice": 1.0} for code in codes}
+  )
   operations: list[str] = []
   monkeypatch.setattr(
     runtime_module,
     "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
     0.0,
-  )
-  monkeypatch.setattr(
-    runtime_module,
-    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
-    2,
   )
 
   async def direct_control(operation, function, *args):
@@ -874,26 +877,18 @@ async def test_snapshot_fallback_uses_independent_bounded_native_calls(
     return function(*args)
 
   runtime._run_xtdata_control = direct_control
-  snapshot, _ = await runtime._build_whole_market_snapshot(
+  snapshot, _, universe = await runtime._build_whole_market_snapshot(
     datetime.now().astimezone().date()
   )
 
-  assert runtime.broker.fragments == [
-    ["000001.SH", "000002.SZ"],
-    ["300001.SZ", "399001.SZ"],
-    ["600000.SH"],
-  ]
-  assert operations == [
-    "whole-market-codes",
-    "whole-market-snapshot:0",
-    "whole-market-snapshot:1",
-    "whole-market-snapshot:2",
-  ]
+  assert runtime.broker.fragments == []
+  assert operations == ["whole-market-codes"]
   assert set(snapshot) == set(codes)
+  assert universe == tuple(sorted(codes))
 
 
 @pytest.mark.asyncio
-async def test_timestamp_less_callback_only_wins_after_its_fragment_watermark(
+async def test_snapshot_returns_callback_capture_watermark(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   codes = ("000001.SH", "000002.SZ")
@@ -915,41 +910,31 @@ async def test_timestamp_less_callback_only_wins_after_its_fragment_watermark(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_capture.capture(
+    {
+      "000001.SH": {"lastPrice": 11.0},
+      "000002.SZ": {"lastPrice": 21.0},
+    }
+  )
   monkeypatch.setattr(
     runtime_module,
     "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
     0.0,
   )
-  monkeypatch.setattr(
-    runtime_module,
-    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
-    1,
-  )
 
   async def direct_control(operation, function, *args):
-    if operation == "whole-market-snapshot:1":
-      # Captured before code 2's fragment completes: fallback wins when the
-      # callback source time is unavailable.
-      runtime._whole_market_capture.capture(
-        {"000002.SZ": {"lastPrice": 21.0}}
-      )
-    result = function(*args)
-    if operation == "whole-market-snapshot:0":
-      # Captured after code 1's fragment completion watermark: callback wins
-      # and will not be skipped by the final global snapshot watermark.
-      runtime._whole_market_capture.capture(
-        {"000001.SH": {"lastPrice": 11.0}}
-      )
-    return result
+    del operation
+    return function(*args)
 
   runtime._run_xtdata_control = direct_control
-  snapshot, watermark = await runtime._build_whole_market_snapshot(
+  snapshot, watermark, universe = await runtime._build_whole_market_snapshot(
     datetime.now().astimezone().date()
   )
 
-  assert watermark == 2
+  assert watermark == 1
   assert snapshot["000001.SH"]["lastPrice"] == 11.0
-  assert snapshot["000002.SZ"]["lastPrice"] == 20.0
+  assert snapshot["000002.SZ"]["lastPrice"] == 21.0
+  assert universe == tuple(sorted(codes))
 
 
 @pytest.mark.asyncio
@@ -957,15 +942,7 @@ async def test_snapshot_allows_missing_qmt_ticks_and_logs_bounded_samples(
   monkeypatch: pytest.MonkeyPatch,
   caplog: pytest.LogCaptureFixture,
 ) -> None:
-  codes = (
-    "000001.SH",
-    "000002.SH",
-    "000003.SH",
-    "000004.SH",
-    "000005.SH",
-    "000006.SH",
-    "600000.SH",
-  )
+  codes = tuple(f"{index:06d}.SH" for index in range(1, 101))
 
   class Broker:
     def __init__(self) -> None:
@@ -988,15 +965,13 @@ async def test_snapshot_allows_missing_qmt_ticks_and_logs_bounded_samples(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_capture.capture(
+    {code: {"lastPrice": 1.0} for code in codes[:-1]}
+  )
   monkeypatch.setattr(
     runtime_module,
     "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
     0.0,
-  )
-  monkeypatch.setattr(
-    runtime_module,
-    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
-    3,
   )
 
   async def direct_control(operation, function, *args):
@@ -1005,29 +980,24 @@ async def test_snapshot_allows_missing_qmt_ticks_and_logs_bounded_samples(
 
   runtime._run_xtdata_control = direct_control
   with caplog.at_level("WARNING"):
-    snapshot, _ = await runtime._build_whole_market_snapshot(
+    snapshot, _, universe = await runtime._build_whole_market_snapshot(
       datetime.now().astimezone().date()
     )
 
-  assert snapshot == {"000001.SH": {"lastPrice": 1.0}}
+  assert len(snapshot) == 99
+  assert universe == codes
   missing_record = next(
     record
     for record in caplog.records
     if "omits instruments without an available tick" in record.getMessage()
   )
-  assert missing_record.args[0] == 6
-  assert missing_record.args[1] == 7
-  assert missing_record.args[2] == [
-    "000002.SH",
-    "000003.SH",
-    "000004.SH",
-    "000005.SH",
-    "000006.SH",
-  ]
+  assert missing_record.args[0] == 1
+  assert missing_record.args[1] == 100
+  assert missing_record.args[2] == ["000100.SH"]
 
 
 @pytest.mark.asyncio
-async def test_snapshot_fragment_failure_cannot_escape_as_partial_snapshot(
+async def test_snapshot_never_calls_point_query_fallback(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   codes = ("000001.SH", "000002.SZ", "300001.SZ")
@@ -1053,15 +1023,13 @@ async def test_snapshot_fragment_failure_cannot_escape_as_partial_snapshot(
     max_ready_estimated_bytes=1024 * 1024,
   )
   runtime._whole_market_capture.bind_loop(asyncio.get_running_loop())
+  runtime._whole_market_capture.capture(
+    {code: {"lastPrice": 1.0} for code in codes}
+  )
   monkeypatch.setattr(
     runtime_module,
     "MARKET_STREAM_INITIAL_PUSH_WAIT_SECONDS",
     0.0,
-  )
-  monkeypatch.setattr(
-    runtime_module,
-    "WHOLE_QUOTE_SNAPSHOT_BATCH_SIZE",
-    2,
   )
 
   async def direct_control(operation, function, *args):
@@ -1070,12 +1038,12 @@ async def test_snapshot_fragment_failure_cannot_escape_as_partial_snapshot(
 
   runtime._run_xtdata_control = direct_control
 
-  with pytest.raises(RuntimeError, match="second native fragment failed"):
-    await runtime._build_whole_market_snapshot(
-      datetime.now().astimezone().date()
-    )
+  snapshot, _, _ = await runtime._build_whole_market_snapshot(
+    datetime.now().astimezone().date()
+  )
 
-  assert runtime.broker.calls == 2
+  assert set(snapshot) == set(codes)
+  assert runtime.broker.calls == 0
 
 
 @pytest.mark.asyncio
@@ -1098,45 +1066,6 @@ async def test_market_stream_waits_for_first_control_hub_registration() -> None:
     runtime._wait_for_initial_control_hub_registration(),
     timeout=0.1,
   )
-
-
-def test_snapshot_merge_keeps_newest_source_tick() -> None:
-  fallback = {
-    "600000.SH": {"time": 2_000, "lastPrice": 11.0},
-    "000001.SZ": {"time": 1_000, "lastPrice": 10.0},
-  }
-  callback = {
-    "600000.SH": {"time": 1_000, "lastPrice": 9.0},
-    "000001.SZ": {"time": 3_000, "lastPrice": 12.0},
-  }
-
-  merged = AgentRuntime._merge_whole_market_snapshot(fallback, callback)
-
-  assert merged["600000.SH"]["lastPrice"] == 11.0
-  assert merged["000001.SZ"]["lastPrice"] == 12.0
-
-
-def test_snapshot_merge_keeps_timed_fallback_over_untimed_callback() -> None:
-  fallback = {
-    "600000.SH": {"time": 2_000, "lastPrice": 11.0},
-  }
-  callback = {
-    "600000.SH": {"lastPrice": 12.0},
-  }
-
-  merged = AgentRuntime._merge_whole_market_snapshot(
-    fallback,
-    callback,
-    callback_capture_sequences={"600000.SH": 2},
-    callback_captured_monotonic={"600000.SH": 20.0},
-    fallback_completion_sequences={"600000.SH": 1},
-    fallback_completed_monotonic={"600000.SH": 10.0},
-  )
-
-  assert merged["600000.SH"] == {
-    "time": 2_000,
-    "lastPrice": 11.0,
-  }
 
 
 @pytest.mark.asyncio
@@ -1260,6 +1189,7 @@ async def test_burst_over_eight_callbacks_drains_through_bounded_ack_pipeline() 
       starting_sequence=3,
       trading_date=datetime.now(runtime_module.SHANGHAI_ZONE).date(),
       first_event=None,
+      dedupe_fingerprints={},
     )
   )
   transport = asyncio.create_task(
@@ -1471,6 +1401,7 @@ async def test_microbatch_seals_before_duplicate_instrument() -> None:
       starting_sequence=1,
       trading_date=datetime.now().astimezone().date(),
       first_event=None,
+      dedupe_fingerprints={},
     )
   )
   try:

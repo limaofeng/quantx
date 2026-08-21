@@ -487,6 +487,23 @@ export const ExitPlansQuery = gql(`
   }
 `);
 
+export const ExitPlanUpdatesSubscription = gql(`
+  subscription Portfolio_ExitPlanUpdates(
+    $accountId: String
+    $instrumentCode: String
+  ) {
+    exitPlanUpdates(
+      accountId: $accountId
+      instrumentCode: $instrumentCode
+    ) {
+      planId
+      accountId
+      instrumentCode
+      occurredAt
+    }
+  }
+`);
+
 export const ExitPlanCapabilitiesQuery = gql(`
   query ExitPlanCapabilities {
     exitPlanCapabilities {

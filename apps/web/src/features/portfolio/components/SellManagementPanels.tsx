@@ -12,7 +12,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import * as React from 'react';
-import { useMutation, useQuery } from 'urql';
+import { useMutation, useQuery, useSubscription } from 'urql';
 
 import {
   AlertDialog,
@@ -46,6 +46,7 @@ import {
   ExitPlanCostBasisCandidatesQuery,
   ExitPlanEventsQuery,
   ExitPlanHoldingCapacityQuery,
+  ExitPlanUpdatesSubscription,
   ExitPlansQuery,
   PreviewExitPlanAuthorizationMutation,
   PreviewExitIntentMutation,
@@ -153,6 +154,14 @@ function useExitPlans(accountId: string, instrumentCode?: string) {
     pause: !accountId,
     requestPolicy: 'cache-and-network',
   });
+  const [update] = useSubscription({
+    query: ExitPlanUpdatesSubscription,
+    variables: {
+      accountId: accountId || undefined,
+      instrumentCode: instrumentCode || undefined,
+    },
+    pause: !accountId,
+  });
 
   React.useEffect(() => {
     if (!accountId) return undefined;
@@ -161,13 +170,23 @@ function useExitPlans(accountId: string, instrumentCode?: string) {
         refetch({ requestPolicy: 'network-only' });
       }
     };
-    const timer = window.setInterval(refresh, 2_000);
+    const timer = window.setInterval(refresh, 60_000);
     document.addEventListener('visibilitychange', refresh);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', refresh);
     };
   }, [accountId, refetch]);
+
+  React.useEffect(() => {
+    if (!update.data?.exitPlanUpdates) return undefined;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        refetch({ requestPolicy: 'network-only' });
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [refetch, update.data?.exitPlanUpdates]);
 
   return { ...result, refetch };
 }
@@ -455,7 +474,7 @@ export function ManualPlanEditor({
   const [capacity, refetchCapacity] = useQuery({
     query: ExitPlanHoldingCapacityQuery,
     variables: { accountId, instrumentCode: normalizedCode },
-    pause: !accountId || !normalizedCode,
+    pause: (!open && !editingPlan) || !accountId || !normalizedCode,
     requestPolicy: 'cache-and-network',
   });
   const [costBasisCandidates] = useQuery({
@@ -465,7 +484,8 @@ export function ManualPlanEditor({
       instrumentCode: normalizedCode,
       limit: 100,
     },
-    pause: Boolean(editingPlan) || !accountId || !normalizedCode,
+    pause:
+      !open || Boolean(editingPlan) || !accountId || !normalizedCode,
     requestPolicy: 'cache-and-network',
   });
   const [createResult, createPlan] = useMutation(CreateManualExitPlanMutation);

@@ -470,7 +470,7 @@ _register(
   "market:read",
   {"marketDepth", "marketKlines", "marketQuotes", "marketTicks"},
 )
-_register("Subscription", "orders:read", {"tradingEvents"})
+_register("Subscription", "orders:read", {"exitPlanUpdates", "tradingEvents"})
 _register(
   "Subscription",
   "strategy:read",

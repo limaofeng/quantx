@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from sqlalchemy import Column, DateTime, Enum, Float, Integer, String
+from sqlalchemy import Column, DateTime, Enum, Float, Index, Integer, String, and_
 from sqlalchemy.orm import relationship
 
 from quantx_infrastructure.core.utils import time_utils
@@ -177,3 +177,14 @@ class Order(Base, TimestampMixin):
       instrument_name=data.get("instrument_name"),
       account_type=account_type,
     )
+
+
+Index(
+  "ix_orders_exit_plan_cost_basis",
+  Order.account_id,
+  Order.stock_code,
+  Order.type,
+  Order.time.desc(),
+  Order.id.desc(),
+  postgresql_where=and_(Order.traded_volume > 0, Order.traded_price > 0),
+)

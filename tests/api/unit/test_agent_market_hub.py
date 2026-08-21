@@ -8,12 +8,22 @@ from quantx_contracts import AgentMessageType
 class FakeRedis:
   def __init__(self, active=None):
     self.active = active or {}
+    self.values = {}
 
   async def hgetall(self, _key):
     return {
       key: json.dumps(value)
       for key, value in self.active.items()
     }
+
+  async def set(self, key, value, **_kwargs):
+    self.values[key] = value
+
+  async def get(self, key):
+    return self.values.get(key)
+
+  async def delete(self, key):
+    self.values.pop(key, None)
 
 
 @pytest.mark.asyncio

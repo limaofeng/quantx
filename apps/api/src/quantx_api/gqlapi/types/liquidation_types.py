@@ -39,6 +39,14 @@ class LiquidationExecutionMode(str, Enum):
   LIVE = "LIVE"
 
 
+@strawberry.type(description="退出计划权威投影已变更通知")
+class ExitPlanUpdate:
+  plan_id: str
+  account_id: str
+  instrument_code: str
+  occurred_at: datetime
+
+
 @strawberry.type(description="清仓结果")
 class LiquidationResult:
   success: bool = strawberry.field(description="是否成功")

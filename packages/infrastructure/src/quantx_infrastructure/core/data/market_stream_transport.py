@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,14 +23,15 @@ from quantx_infrastructure.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-MARKET_STREAM_BATCH_CHANNEL = "market-data:whole:v1:batches"
-MARKET_STREAM_LATEST_KEY = "market-data:whole:v1:latest"
-MARKET_STREAM_STATE_KEY = "market-data:whole:v1:state"
-MARKET_STREAM_ENGINE_STATE_KEY = "market-data:whole:v1:engine-state"
-MARKET_STREAM_GENERATION_KEY = "market-data:whole:v1:generation"
-MARKET_STREAM_FRESHNESS_KEY = "market-data:whole:v1:freshness"
-MARKET_STREAM_STAGING_PREFIX = "market-data:whole:v1:staging"
+MARKET_STREAM_BATCH_CHANNEL = "market-data:whole:v2:batches"
+MARKET_STREAM_LATEST_KEY = "market-data:whole:v2:latest"
+MARKET_STREAM_STATE_KEY = "market-data:whole:v2:state"
+MARKET_STREAM_ENGINE_STATE_KEY = "market-data:whole:v2:engine-state"
+MARKET_STREAM_GENERATION_KEY = "market-data:whole:v2:generation"
+MARKET_STREAM_FRESHNESS_KEY = "market-data:whole:v2:freshness"
+MARKET_STREAM_STAGING_PREFIX = "market-data:whole:v2:staging"
 MARKET_STREAM_SNAPSHOT_CHUNK_SIZE = 512
+MARKET_STREAM_DELTA_CHUNK_SIZE = 256
 MARKET_STREAM_STAGING_TTL_SECONDS = 60
 MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS = int(
   MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS * 1000
@@ -37,7 +39,7 @@ MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS = int(
 LEGACY_ACTIVE_SUBSCRIPTIONS_KEY = "market-data:active-subscriptions"
 
 _MARKET_STREAM_MARK_OFFLINE_SCRIPT = """
--- quantx_market_mark_offline_v1
+-- quantx_market_mark_offline_v2
 local raw = redis.call('GET', KEYS[1])
 if not raw then
   return 0
@@ -49,6 +51,8 @@ end
 state['status'] = 'OFFLINE'
 state['updated_at'] = ARGV[2]
 state['reason'] = ARGV[3]
+state['commit_phase'] = 'IDLE'
+state['pending_sequence'] = 0
 redis.call('DEL', KEYS[2])
 redis.call('DEL', KEYS[3])
 redis.call('SET', KEYS[1], cjson.encode(state))
@@ -56,7 +60,7 @@ return 1
 """
 
 _MARKET_STREAM_ALLOCATE_GENERATION_SCRIPT = """
--- quantx_market_allocate_generation_v1
+-- quantx_market_allocate_generation_v2
 local counter = tonumber(redis.call('GET', KEYS[1]) or 0)
 local raw = redis.call('GET', KEYS[2])
 local current_generation = 0
@@ -70,7 +74,7 @@ return next_generation
 """
 
 _MARKET_STREAM_MARK_SYNCING_SCRIPT = """
--- quantx_market_mark_syncing_v1
+-- quantx_market_mark_syncing_v2
 local raw = redis.call('GET', KEYS[1])
 local current_generation = 0
 local current_stream_id = ''
@@ -93,7 +97,7 @@ return 'OK'
 """
 
 _MARKET_STREAM_COMMIT_SNAPSHOT_SCRIPT = """
--- quantx_market_commit_snapshot_v1
+-- quantx_market_commit_snapshot_v2
 local function reject(reason)
   redis.call('DEL', KEYS[2])
   return reason
@@ -123,8 +127,8 @@ redis.call('SET', KEYS[5], ARGV[5], 'PX', ARGV[6])
 return 'OK'
 """
 
-_MARKET_STREAM_COMMIT_DELTA_SCRIPT = """
--- quantx_market_commit_delta_v1
+_MARKET_STREAM_BEGIN_DELTA_SCRIPT = """
+-- quantx_market_begin_delta_v2
 local raw = redis.call('GET', KEYS[1])
 if not raw then
   return 'MISSING_STATE'
@@ -135,18 +139,41 @@ if tostring(current['stream_id'] or '') ~= ARGV[1] then
 end
 local current_status = tostring(current['status'] or '')
 local previous_sequence = tonumber(ARGV[2])
-local incoming = cjson.decode(ARGV[3])
-local incoming_status = tostring(incoming['status'] or '')
-if current_status == 'SYNCING'
-  and previous_sequence ~= 1
-  and previous_sequence ~= 2 then
-  return 'BARRIER_MISMATCH'
-end
 if current_status ~= 'SYNCING' and current_status ~= 'READY' then
   return 'STATUS_MISMATCH'
 end
 if tonumber(current['sequence'] or 0) ~= previous_sequence then
   return 'SEQUENCE_MISMATCH'
+end
+if tostring(current['commit_phase'] or 'IDLE') ~= 'IDLE' then
+  return 'COMMIT_IN_PROGRESS'
+end
+redis.call('SET', KEYS[1], ARGV[3])
+return 'OK'
+"""
+
+_MARKET_STREAM_COMMIT_DELTA_SCRIPT = """
+-- quantx_market_commit_delta_v2
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return 'MISSING_STATE'
+end
+local current = cjson.decode(raw)
+if tostring(current['stream_id'] or '') ~= ARGV[1] then
+  return 'STREAM_MISMATCH'
+end
+local previous_sequence = tonumber(ARGV[2])
+local incoming = cjson.decode(ARGV[3])
+local incoming_status = tostring(incoming['status'] or '')
+local current_status = tostring(current['status'] or '')
+if tonumber(current['sequence'] or 0) ~= previous_sequence then
+  return 'SEQUENCE_MISMATCH'
+end
+if tostring(current['commit_phase'] or '') ~= 'APPLYING' then
+  return 'COMMIT_NOT_STARTED'
+end
+if tonumber(current['pending_sequence'] or 0) ~= tonumber(incoming['sequence'] or 0) then
+  return 'PENDING_SEQUENCE_MISMATCH'
 end
 if current_status == 'SYNCING'
   and previous_sequence == 1
@@ -161,17 +188,14 @@ end
 if current_status == 'READY' and incoming_status ~= 'READY' then
   return 'PHASE_MISMATCH'
 end
-for index = 7, #ARGV, 2 do
-  redis.call('HSET', KEYS[2], ARGV[index], ARGV[index + 1])
-end
 redis.call('SET', KEYS[1], ARGV[3])
-redis.call('PUBLISH', KEYS[3], ARGV[4])
-redis.call('SET', KEYS[4], ARGV[5], 'PX', ARGV[6])
+redis.call('PUBLISH', KEYS[2], ARGV[4])
+redis.call('SET', KEYS[3], ARGV[5], 'PX', ARGV[6])
 return 'OK'
 """
 
 _MARKET_STREAM_READ_STATE_FRESHNESS_SCRIPT = """
--- quantx_market_read_state_freshness_v1
+-- quantx_market_read_state_freshness_v2
 local state = redis.call('GET', KEYS[1])
 local freshness = redis.call('GET', KEYS[2])
 if not state then state = false end
@@ -254,6 +278,10 @@ class MarketStreamState:
   captured_at: datetime | None = None
   updated_at: datetime | None = None
   instrument_count: int = 0
+  universe_count: int = 0
+  universe_hash: str = ""
+  commit_phase: str = "IDLE"
+  pending_sequence: int = 0
   reason: str = ""
 
   def to_bytes(self) -> bytes:
@@ -266,6 +294,10 @@ class MarketStreamState:
         "captured_at": self.captured_at,
         "updated_at": self.updated_at,
         "instrument_count": self.instrument_count,
+        "universe_count": self.universe_count,
+        "universe_hash": self.universe_hash,
+        "commit_phase": self.commit_phase,
+        "pending_sequence": self.pending_sequence,
         "reason": self.reason,
       }
     )
@@ -290,6 +322,10 @@ class MarketStreamState:
       captured_at=parse_time(raw.get("captured_at")),
       updated_at=parse_time(raw.get("updated_at")),
       instrument_count=int(raw.get("instrument_count") or 0),
+      universe_count=int(raw.get("universe_count") or 0),
+      universe_hash=str(raw.get("universe_hash") or ""),
+      commit_phase=str(raw.get("commit_phase") or "IDLE").upper(),
+      pending_sequence=int(raw.get("pending_sequence") or 0),
       reason=str(raw.get("reason") or ""),
     )
 
@@ -351,7 +387,9 @@ class MarketStreamStore:
     self._active_stream_id = ""
     self._active_generation = 0
     self._active_codes: frozenset[str] = frozenset()
+    self._materialized_codes: set[str] = set()
     self._source_times: dict[str, float] = {}
+    self._encoded_ticks: dict[str, bytes] = {}
 
   async def redis(self) -> aioredis.Redis:
     if self._redis is None:
@@ -396,6 +434,8 @@ class MarketStreamStore:
     sequence: int,
     captured_at: datetime | None,
     instrument_count: int,
+    universe_count: int = 0,
+    universe_hash: str = "",
     reason: str = "",
   ) -> None:
     state = MarketStreamState(
@@ -405,6 +445,8 @@ class MarketStreamStore:
       captured_at=captured_at,
       updated_at=_utcnow(),
       instrument_count=instrument_count,
+      universe_count=universe_count,
+      universe_hash=universe_hash,
       reason=reason,
     )
     redis = await self.redis()
@@ -459,7 +501,9 @@ class MarketStreamStore:
       self._active_stream_id = stream_id
       self._active_generation = incoming_generation
       self._active_codes = frozenset()
+      self._materialized_codes = set()
       self._source_times = {}
+      self._encoded_ticks = {}
 
   async def write_batch(
     self,
@@ -489,6 +533,8 @@ class MarketStreamStore:
       or current.status not in {"SYNCING", "READY"}
     ):
       raise ValueError("market stream is not active")
+    if current.commit_phase != "IDLE":
+      raise ValueError("market stream commit is already in progress")
     expected = 1 if current.sequence == 0 else current.sequence + 1
     if batch.sequence != expected:
       raise ValueError(
@@ -507,6 +553,17 @@ class MarketStreamStore:
         "market stream DELTA contains instruments outside SNAPSHOT: "
         + ",".join(unknown[:5])
       )
+
+    if batch.kind is MarketBatchKind.SNAPSHOT:
+      universe_count = len(batch.universe_codes)
+      universe_hash = hashlib.sha256(
+        "\n".join(batch.universe_codes).encode("utf-8")
+      ).hexdigest()
+      materialized_codes = set(batch.data)
+    else:
+      universe_count = current.universe_count
+      universe_hash = current.universe_hash
+      materialized_codes = self._materialized_codes.union(batch.data)
 
     if batch.kind is MarketBatchKind.SNAPSHOT:
       next_status = "SYNCING"
@@ -535,10 +592,12 @@ class MarketStreamStore:
       captured_at=batch.captured_at,
       updated_at=_utcnow(),
       instrument_count=(
-        batch.instrument_count
-        if batch.kind is MarketBatchKind.SNAPSHOT
-        else current.instrument_count
+        len(materialized_codes)
       ),
+      universe_count=universe_count,
+      universe_hash=universe_hash,
+      commit_phase="IDLE",
+      pending_sequence=0,
     )
     state_payload = state.to_bytes()
     freshness_payload = MarketStreamFreshnessLease(
@@ -581,8 +640,12 @@ class MarketStreamStore:
       )
       _require_commit_success(result, kind=batch.kind)
       if self._active_stream_id == batch.stream_id:
-        self._active_codes = frozenset(batch.data)
+        self._active_codes = frozenset(batch.universe_codes)
+        self._materialized_codes = set(batch.data)
         self._source_times = batch_source_times
+        self._encoded_ticks = {
+          code: orjson.dumps(tick) for code, tick in batch.data.items()
+        }
     else:
       accepted: dict[str, dict] = {}
       accepted_source_times: dict[str, float] = {}
@@ -593,31 +656,67 @@ class MarketStreamStore:
           continue
         accepted[code] = tick
         accepted_source_times[code] = source_time
-      encoded_ticks = {
-        code.encode("utf-8"): orjson.dumps(tick)
-        for code, tick in accepted.items()
+      encoded_accepted = {
+        code: orjson.dumps(tick) for code, tick in accepted.items()
       }
-      tick_arguments: list[bytes] = []
-      for code, tick in encoded_ticks.items():
-        tick_arguments.extend((code, tick))
+      changed = {
+        code: accepted[code]
+        for code, encoded in encoded_accepted.items()
+        if self._encoded_ticks.get(code) != encoded
+      }
+      encoded_ticks = {
+        code.encode("utf-8"): encoded_accepted[code] for code in changed
+      }
+      committed_batch = batch.model_copy(
+        update={"instrument_count": len(changed), "data": changed}
+      )
+      committed_payload = committed_batch.to_bytes()
+      applying_state = MarketStreamState(
+        status=current.status,
+        stream_id=current.stream_id,
+        generation=current.generation,
+        sequence=current.sequence,
+        captured_at=current.captured_at,
+        updated_at=_utcnow(),
+        instrument_count=current.instrument_count,
+        universe_count=current.universe_count,
+        universe_hash=current.universe_hash,
+        commit_phase="APPLYING",
+        pending_sequence=batch.sequence,
+        reason=current.reason,
+      )
+      begin_result = await redis.eval(
+        _MARKET_STREAM_BEGIN_DELTA_SCRIPT,
+        1,
+        MARKET_STREAM_STATE_KEY,
+        batch.stream_id,
+        str(batch.sequence - 1),
+        applying_state.to_bytes(),
+      )
+      _require_commit_success(begin_result, kind=batch.kind)
+      entries = iter(encoded_ticks.items())
+      while chunk := list(islice(entries, MARKET_STREAM_DELTA_CHUNK_SIZE)):
+        await redis.hset(MARKET_STREAM_LATEST_KEY, mapping=dict(chunk))
       result = await redis.eval(
         _MARKET_STREAM_COMMIT_DELTA_SCRIPT,
-        4,
+        3,
         MARKET_STREAM_STATE_KEY,
-        MARKET_STREAM_LATEST_KEY,
         MARKET_STREAM_BATCH_CHANNEL,
         MARKET_STREAM_FRESHNESS_KEY,
         batch.stream_id,
         str(batch.sequence - 1),
         state_payload,
-        payload,
+        committed_payload,
         freshness_payload,
         str(MARKET_STREAM_FRESHNESS_TTL_MILLISECONDS),
-        *tick_arguments,
       )
       _require_commit_success(result, kind=batch.kind)
       if self._active_stream_id == batch.stream_id:
         self._source_times.update(accepted_source_times)
+        self._materialized_codes.update(changed)
+        self._encoded_ticks.update(
+          {code.decode("utf-8"): tick for code, tick in encoded_ticks.items()}
+        )
     return state
 
   async def mark_offline(self, stream_id: str, *, reason: str) -> bool:
@@ -642,7 +741,9 @@ class MarketStreamStore:
       self._active_stream_id = ""
       self._active_generation = 0
       self._active_codes = frozenset()
+      self._materialized_codes = set()
       self._source_times = {}
+      self._encoded_ticks = {}
     return changed
 
   async def state_with_freshness(
@@ -670,13 +771,18 @@ class MarketStreamStore:
     redis = await self.redis()
     for _ in range(max(1, attempts)):
       before = await self.state()
-      if before is None or before.status != "READY":
+      if (
+        before is None
+        or before.status != "READY"
+        or before.commit_phase != "IDLE"
+      ):
         return None
       raw_ticks = await redis.hgetall(MARKET_STREAM_LATEST_KEY)
       after = await self.state()
       if (
         after is None
         or after.status != "READY"
+        or after.commit_phase != "IDLE"
         or before.stream_id != after.stream_id
         or before.sequence != after.sequence
       ):

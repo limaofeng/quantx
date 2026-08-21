@@ -17,6 +17,7 @@ def test_market_stream_batch_binary_round_trip() -> None:
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime(2026, 8, 18, tzinfo=timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.5, "time": 1_777_000_000_000}},
   )
 
@@ -33,6 +34,7 @@ def test_market_stream_batch_rejects_count_mismatch_and_naive_time() -> None:
       kind=MarketBatchKind.SNAPSHOT,
       captured_at=datetime.now(timezone.utc),
       instrument_count=2,
+      universe_codes=("600000.SH",),
       data={"600000.SH": {}},
     )
 
@@ -69,6 +71,20 @@ def test_market_stream_snapshot_cannot_be_empty() -> None:
       instrument_count=0,
       data={},
     )
+
+
+def test_market_stream_snapshot_can_materialize_part_of_universe() -> None:
+  batch = MarketStreamBatch(
+    stream_id="stream-1",
+    sequence=1,
+    kind=MarketBatchKind.SNAPSHOT,
+    captured_at=datetime.now(timezone.utc),
+    instrument_count=1,
+    universe_codes=("000001.SH", "600000.SH"),
+    data={"000001.SH": {"lastPrice": 3500.0}},
+  )
+
+  assert batch.universe_codes == ("000001.SH", "600000.SH")
 
 
 def test_market_tick_source_time_preserves_timetag_subseconds() -> None:

@@ -67,7 +67,7 @@ def _apply_qmt_launch_override(
   overridden["market-data"] = {
     "status": "blocked",
     "connectedDevices": 0,
-    "protocol": "quantx.market.v1",
+    "protocol": "quantx.market.v2",
     "launchState": "BLOCKED",
     "reasonCode": reason,
     "liveTradingEnabled": False,
@@ -296,6 +296,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       ready_market_stream_agents
       and stream_state is not None
       and stream_state.status == "READY"
+      and stream_state.commit_phase == "IDLE"
       and engine_state is not None
       and engine_state.status == "READY"
       and watermarks_match
@@ -322,12 +323,23 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
         if stream_state is not None and stream_state.status != "OFFLINE"
         else 0
       ),
-      "protocol": "quantx.market.v1",
+      "protocol": "quantx.market.v2",
       "streamId": stream_state.stream_id if stream_state is not None else "",
       "sequence": stream_state.sequence if stream_state is not None else 0,
       "engineSequence": engine_state.sequence if engine_state is not None else 0,
       "instrumentCount": (
         engine_state.instrument_count if engine_state is not None else 0
+      ),
+      "universeCount": (
+        stream_state.universe_count if stream_state is not None else 0
+      ),
+      "missingCount": (
+        max(0, stream_state.universe_count - stream_state.instrument_count)
+        if stream_state is not None
+        else 0
+      ),
+      "commitPhase": (
+        stream_state.commit_phase if stream_state is not None else "IDLE"
       ),
       "streamAgeSeconds": round(stream_age, 3) if stream_age is not None else None,
       "engineAgeSeconds": round(engine_age, 3) if engine_age is not None else None,
@@ -337,7 +349,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     components["market-data"] = {
       "status": "unavailable",
       "connectedDevices": 0,
-      "protocol": "quantx.market.v1",
+      "protocol": "quantx.market.v2",
       "error": exc.__class__.__name__,
     }
   return components
@@ -388,11 +400,26 @@ async def _prefect_status() -> dict[str, Any]:
     return {"status": "unavailable", "error": exc.__class__.__name__}
 
 
+async def _market_gateway_status() -> dict[str, Any]:
+  try:
+    async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
+      response = await client.get(
+        f"{settings.market_gateway_url.rstrip('/')}/health/live"
+      )
+    return {
+      "status": "ready" if response.is_success else "unavailable",
+      "statusCode": response.status_code,
+    }
+  except Exception as exc:
+    return {"status": "unavailable", "error": exc.__class__.__name__}
+
+
 async def component_status() -> dict[str, dict[str, Any]]:
-  database, heartbeats, prefect = await asyncio.gather(
+  database, heartbeats, prefect, market_gateway = await asyncio.gather(
     _database_status(),
     _component_heartbeats(),
     _prefect_status(),
+    _market_gateway_status(),
   )
   heartbeats = _apply_qmt_launch_override(heartbeats)
   raw_ai_runtime = heartbeats.get("ai-runtime", {"status": "offline"})
@@ -417,6 +444,7 @@ async def component_status() -> dict[str, dict[str, Any]]:
     "qmtAgent": heartbeats["qmt-agent"],
     "aiRuntime": ai_runtime,
     "marketData": heartbeats.get("market-data", {"status": "offline"}),
+    "marketGateway": market_gateway,
     "prefect": prefect,
   }
 
@@ -431,6 +459,7 @@ def required_components() -> tuple[str, ...]:
       "prefect",
       "worker",
       "qmtAgent",
+      "marketGateway",
       "marketData",
     )
   return ("api", "database", "engine")

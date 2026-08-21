@@ -183,6 +183,7 @@ def test_windows_services_are_independently_supervised() -> None:
     "quantx-api.xml",
     "quantx-caddy.xml",
     "quantx-engine.xml",
+    "quantx-market-gateway.xml",
     "quantx-qmt-agent.xml",
     "quantx-worker.xml",
   }

@@ -107,6 +107,7 @@ $AgentModeFile = Join-Path $StateDirectory "qmt-agent-mode.json"
 $DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $ApiPort = 18081
+$MarketGatewayPort = 18082
 $AgentWebSocketPingTimeoutSeconds = 960
 $script:RuntimeProfile = ""
 $script:RuntimeAgentMode = ""
@@ -1214,6 +1215,7 @@ function Invoke-CaddyRecovery {
   $qmtLaunchBlocked = $runtimeConfiguration.qmtLaunchState -eq "BLOCKED"
   $requiredNames = @(
     "api",
+    "market-gateway",
     "ai-runtime",
     "engine",
     "web",
@@ -1561,7 +1563,7 @@ function Invoke-Up {
     throw "QuantX already has managed development processes. Run status or down."
   }
   Write-State -Processes @()
-  Assert-PortsAvailable -Ports @(8080, $ApiPort, 5250, 5251)
+  Assert-PortsAvailable -Ports @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)
   $python = Resolve-Python
   $aiRuntimePython = Resolve-AiRuntimePython
   Show-ExternalDependencies -Python $python
@@ -1654,11 +1656,33 @@ function Invoke-Up {
   $env:RUNTIME_PROFILE = $Profile
   $env:PREFECT_ENABLED = if ($Profile -eq "full") { "true" } else { "false" }
   $env:PYTHONPATH = Get-WorkspacePythonPath
+  $processSupervisor = Join-Path $Root "ops\supervise_process.py"
   $script:ManagedProcesses = @()
   $liveRuntimeReady = $true
   $qmtProcessEntry = $null
   $qmtProcessLaunchStartedAt = $null
   try {
+    Start-ManagedProcess `
+      -Name "market-gateway" `
+      -Executable $python `
+      -Arguments @(
+        $processSupervisor,
+        "--name", "market-gateway",
+        "--state-dir", $StateDirectory,
+        "--",
+        $python,
+        "-m", "uvicorn", "quantx_api.market_gateway:app",
+        "--host", "127.0.0.1",
+        "--port", [string]$MarketGatewayPort,
+        "--ws-max-size", "67108864",
+        "--ws-ping-interval", "20",
+        "--ws-ping-timeout", [string]$AgentWebSocketPingTimeoutSeconds
+      ) `
+      -WorkingDirectory $Root
+    Wait-HttpReady `
+      -Name "Market Gateway" `
+      -Url "http://127.0.0.1:$MarketGatewayPort/health/live"
+
     Start-ManagedProcess `
       -Name "api" `
       -Executable $python `
@@ -1742,6 +1766,11 @@ function Invoke-Up {
             -Name "qmt-agent" `
             -Executable $qmtPython `
             -Arguments @(
+              $processSupervisor,
+              "--name", "qmt-agent",
+              "--state-dir", $StateDirectory,
+              "--",
+              $qmtPython,
               "-m", "quantx_qmt_agent.main", "run",
               "--mode", $agentMode
             ) `
@@ -1883,7 +1912,7 @@ function Invoke-Status {
       )
     }
   }
-  foreach ($port in @(8080, $ApiPort, 5250, 5251)) {
+  foreach ($port in @(8080, $ApiPort, $MarketGatewayPort, 5250, 5251)) {
     $owner = Get-PortOwner -Port $port
     if ($owner) {
       Write-Host (
@@ -2183,6 +2212,7 @@ function New-ServiceConfigurations {
 function Get-ServiceConfigurationNames {
   return @(
     "quantx-api.xml",
+    "quantx-market-gateway.xml",
     "quantx-engine.xml",
     "quantx-ai-runtime.xml",
     "quantx-worker.xml",
@@ -2778,6 +2808,7 @@ function Invoke-Uninstall {
   $configs = @(
     "quantx-qmt-agent.xml",
     "quantx-caddy.xml",
+    "quantx-market-gateway.xml",
     "quantx-worker.xml",
     "quantx-prefect-server.xml",
     "quantx-ai-runtime.xml",

@@ -53,7 +53,8 @@ Engine、Worker、QMT Agent 与 Caddy 也会统一使用同一个真实根路径
 
 公开端口只有开发 Caddy 的 `8080`，它监听所有本机 IPv4 接口；本机使用
 `http://127.0.0.1:8080`，局域网设备使用
-`http://<开发机局域网 IP>:8080`。API 使用 `18081`、Vite 使用 `5250`、
+`http://<开发机局域网 IP>:8080`。API 使用 `18081`、Market Gateway 使用
+`18082`、Vite 使用 `5250`、
 VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Prefect API
 通过 `PREFECT_API_URL` 连接外部服务，默认
 `http://192.168.101.4:30420/api`，Worker 使用 `quantx-pool`。在线客户端文档
@@ -73,8 +74,10 @@ Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker �
 不删除会话或审计记录；发布前必须按运行手册预告用户重新登录。
 
 WinSW 2.12 使用 bundled mode：每个服务目录内都放置同名的 XML 与 wrapper，
-例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Engine、Worker 和
-QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper 进程。
+例如 `quantx-api.xml` 对应 `quantx-api.exe`。Caddy、API、Market Gateway、
+Engine、Worker 和 QMT Agent 因而可以独立安装、重启和滚动日志，不共享 wrapper
+进程。Market Gateway 与 QMT Agent 的 WinSW 入口均通过统一监督器启动，异常退出
+按 1/2/5/10/30 秒退避重启，并使用 Windows Job Object 回收残留子进程。
 
 ## QMT Agent 登记前置条件
 

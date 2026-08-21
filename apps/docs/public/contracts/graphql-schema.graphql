@@ -1265,7 +1265,7 @@ type ExitPlanAuthorizationPreview {
 
 """预览既有 LIVE 退出计划的精确自动实盘授权"""
 input ExitPlanAuthorizationPreviewInput {
-  """当前原生设备会话的唯一主账户"""
+  """当前会话的唯一授权账户"""
   accountId: String!
 
   """既有退出计划 ID"""
@@ -1375,6 +1375,14 @@ type ExitPlanRuleCapability {
   label: String!
   category: String!
   parameters: JSON!
+}
+
+"""退出计划权威投影已变更通知"""
+type ExitPlanUpdate {
+  planId: String!
+  accountId: String!
+  instrumentCode: String!
+  occurredAt: DateTime!
 }
 
 """统一退出计划"""
@@ -6066,6 +6074,9 @@ type Subscription {
 
   """订阅单个建仓/加仓计划的待确认买入意图更新"""
   entryIntentUpdated(planId: ID!): [EntryIntent!]!
+
+  """订阅退出计划权威投影变更通知"""
+  exitPlanUpdates(accountId: String = null, instrumentCode: String = null): ExitPlanUpdate!
 
   """订阅首板晋级工作台版本通知"""
   firstBoardPromotionUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!

@@ -112,6 +112,9 @@ POST_BASELINE_COLUMNS = {
     "source_authority",
   },
 }
+POST_BASELINE_INDEXES = {
+  "orders": {"ix_orders_exit_plan_cost_basis"},
+}
 
 
 def _baseline_metadata() -> MetaData:
@@ -137,6 +140,11 @@ def _baseline_metadata() -> MetaData:
         table.constraints.remove(constraint)
     for column_name in column_names:
       table._columns.remove(table.c[column_name])
+  for table_key, index_names in POST_BASELINE_INDEXES.items():
+    table = metadata.tables[table_key]
+    for index in list(table.indexes):
+      if index.name in index_names:
+        table.indexes.remove(index)
   # Revision 20260813_0010 makes strategy ownership optional for plan-owned
   # intents; the immutable baseline still required a strategy run.
   metadata.tables["strategy_trade_intents"].c.strategy_run_id.nullable = False

@@ -18,7 +18,11 @@ from .limit_up_board_assistant_schema import (
   LimitUpBoardAssistantMutation,
   LimitUpBoardAssistantQuery,
 )
-from .liquidation_schema import LiquidationMutation, LiquidationQuery
+from .liquidation_schema import (
+  LiquidationMutation,
+  LiquidationQuery,
+  LiquidationSubscription,
+)
 from .market_data_schema import MarketDataQuery
 from .notification_schema import NotificationMutation, NotificationQuery
 from .portfolio_schema import PortfolioQuery
@@ -59,6 +63,7 @@ __all__ = [
   "TradingMutation",
   "LiquidationQuery",
   "LiquidationMutation",
+  "LiquidationSubscription",
   "LimitUpBoardAssistantQuery",
   "LimitUpBoardAssistantMutation",
   "StrategyQuery",

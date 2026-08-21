@@ -18,7 +18,7 @@ from starlette.websockets import WebSocketState
 
 class FakeWebSocket:
   def __init__(self, batch: MarketStreamBatch) -> None:
-    self.scope = {"subprotocols": ["quantx.market.v1"]}
+    self.scope = {"subprotocols": ["quantx.market.v2"]}
     self.batch = batch
     self.sent_text = []
     self.closed = []
@@ -181,6 +181,7 @@ async def test_redis_failure_sends_resync_without_ack(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0}},
   )
   websocket = FakeWebSocket(batch)
@@ -249,6 +250,7 @@ async def test_redis_black_hole_times_out_and_releases_single_connection(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0}},
   )
   websocket = FakeWebSocket(batch)
@@ -316,6 +318,7 @@ async def test_hanging_ack_send_times_out_and_releases_connection(
     kind=MarketBatchKind.SNAPSHOT,
     captured_at=datetime.now(timezone.utc),
     instrument_count=1,
+    universe_codes=("600000.SH",),
     data={"600000.SH": {"lastPrice": 10.0}},
   )
   websocket = HangingAckWebSocket(batch)
@@ -386,11 +389,12 @@ def _commit_item(sequence: int, payload: bytes) -> agent_api._MarketCommitItem:
       ),
       captured_at=datetime.now(timezone.utc),
       instrument_count=1,
+      universe_codes=("600000.SH",) if sequence == 1 else (),
       data={"600000.SH": {"lastPrice": 10.0}},
     ),
     payload=payload,
     received_at=datetime.now(timezone.utc),
-    received_monotonic=0.0,
+    received_monotonic=agent_api.time.monotonic(),
   )
 
 

@@ -28,7 +28,8 @@ PID 与进程启动时间持续匹配；上一轮残留的 90 秒新鲜心跳不
 确认和独立配置的实盘开关。
 
 交易控制、心跳与订单回报走协议 `1.1` 的 `/ws/agent`；沪深实时行情独占
-`/ws/agent/market`，子协议固定为 `quantx.market.v1`。Agent 只建立一个
+`/ws/agent/market`，子协议固定为 `quantx.market.v2`。该端点由独立的 Market
+Gateway 进程承载，控制面 API 重启不会中断行情提交。Agent 只建立一个
 原生 `subscribe_whole_quote(a股代码列表 + 沪深指数代码列表)`。显式代码表来自
 “沪深A股”和“沪深指数”的去重并集，约 5,800 个代码仍是一次 whole-quote
 调用的一个参数；ETF、债券等其他 SH/SZ 合约不会进入 SDK 解码与下游链路。
@@ -50,12 +51,16 @@ sequence 3 通过普通有界发送管线并被 API 原子提交后服务端进�
 旧 source，再激活 pending universe、建立一次新订阅并从全量快照恢复。取消失败
 时 fail-stop，禁止重叠两路，也不回退到 `["SH", "SZ"]`。相同代码集合只更新
 metadata，不重订。
-收盘后初推不足时，完整快照按最多 256 个标的分块读取 `get_full_tick`；每块独立
-受 60 秒 native-call timeout 约束，全部分块齐全后才允许发送 `SNAPSHOT`，不会
-暴露部分结果。独立 Python 子进程每 5 秒检查 Agent 心跳；即使原生 SDK 持有 GIL
-令进程内超时无法运行，连续 90 秒无心跳也会强制终止父进程。不可恢复的 XTData
+初始 `SNAPSHOT` 只允许来自同一条 whole-quote 回调状态，协议同时携带完整
+`universe_codes` 和当前已物化 tick；覆盖率至少 99% 且上证、深证、创业板关键
+指数齐全才开始同步。覆盖不足时失败重连，禁止调用 `get_full_tick` 回补，因为
+点查询与全推回调混合会放大 XTData GIL 阻塞并破坏一致水位。后续 DELTA 可补齐
+快照时尚未物化、但已在 universe 中的代码。独立 Python 子进程每 5 秒检查 Agent
+心跳；即使原生 SDK 持有 GIL 令进程内超时无法运行，连续 90 秒无心跳也会强制
+终止父进程。不可恢复的 XTData
 超时或原生取消失败使用专用退出码 fail-stop，确保残留 SDK 线程不能留下“PID
-在线、心跳停止”的僵尸 Agent，并交由统一监督器重启。
+在线、心跳停止”的僵尸 Agent，并交由带 1/2/5/10/30 秒退避、Windows Job Object
+子进程回收和状态文件的统一监督器重启。
 
 QMT 回调只做快速捕获；READY 捕获入口以 64 MiB 保守估算字节预算为主约束，
 结构上限由每批至少 1 KiB 的计费下限推导为 65,536 个回调，因此不会在字节预算

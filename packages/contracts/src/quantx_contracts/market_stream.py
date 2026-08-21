@@ -11,8 +11,8 @@ from zoneinfo import ZoneInfo
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-MARKET_STREAM_SUBPROTOCOL = "quantx.market.v1"
-MARKET_STREAM_VERSION = 1
+MARKET_STREAM_SUBPROTOCOL = "quantx.market.v2"
+MARKET_STREAM_VERSION = 2
 MARKET_STREAM_MARKETS = ("SH", "SZ")
 MAX_MARKET_STREAM_FRAME_BYTES = 64 * 1024 * 1024
 MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS = 10.0
@@ -176,6 +176,7 @@ class MarketStreamBatch(BaseModel):
   kind: MarketBatchKind
   captured_at: datetime = Field(default_factory=utcnow)
   instrument_count: int = Field(ge=0)
+  universe_codes: tuple[str, ...] = ()
   data: dict[str, dict[str, Any]]
 
   @field_validator("version")
@@ -192,12 +193,28 @@ class MarketStreamBatch(BaseModel):
       raise ValueError("captured_at must be timezone-aware")
     return value
 
+  @field_validator("universe_codes")
+  @classmethod
+  def normalize_universe(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(sorted({str(code).strip().upper() for code in value if str(code).strip()}))
+    if len(normalized) != len(value):
+      raise ValueError("universe_codes must be normalized and unique")
+    return normalized
+
   @model_validator(mode="after")
   def require_matching_count(self):
     if self.instrument_count != len(self.data):
       raise ValueError("instrument_count does not match data")
     if self.kind is MarketBatchKind.SNAPSHOT and not self.data:
       raise ValueError("market stream SNAPSHOT cannot be empty")
+    if self.kind is MarketBatchKind.SNAPSHOT:
+      if not self.universe_codes:
+        raise ValueError("market stream SNAPSHOT requires universe_codes")
+      unknown = set(self.data).difference(self.universe_codes)
+      if unknown:
+        raise ValueError("market stream SNAPSHOT data is outside universe_codes")
+    elif self.universe_codes:
+      raise ValueError("market stream DELTA cannot redefine universe_codes")
     return self
 
   def to_bytes(self) -> bytes:
@@ -212,6 +229,7 @@ class MarketStreamBatch(BaseModel):
         "kind": self.kind.value,
         "captured_at": self.captured_at,
         "instrument_count": self.instrument_count,
+        "universe_codes": self.universe_codes,
         "data": self.data,
       }
     )

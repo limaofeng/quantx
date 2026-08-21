@@ -66,7 +66,10 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.websockets import WebSocketState
 
-from quantx_api.agent_hub import agent_connection_hub
+from quantx_api.agent_hub import (
+  MARKET_DEVICE_LEASE_REFRESH_SECONDS,
+  agent_connection_hub,
+)
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.tokens import utcnow
@@ -82,6 +85,7 @@ from quantx_api.monitoring.metrics import (
 
 logger = logging.getLogger(__name__)
 agent_router = APIRouter(tags=["qmt-agent"])
+market_agent_router = APIRouter(tags=["qmt-market-agent"])
 MARKET_DATA_ROOT = _market_data_staging.market_data_staging_root()
 _is_reparse_point = _market_data_staging.is_reparse_point
 _market_data_request_staging_usage_bytes = (
@@ -111,7 +115,8 @@ MARKET_STREAM_COMMIT_QUEUE_CAPACITY = 2
 MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
 MARKET_STREAM_DECODE_OFFLOAD_BYTES = 256 * 1024
 MARKET_STREAM_DEVICE_REVALIDATE_SECONDS = 5.0
-MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS = 8.0
+MARKET_STREAM_REDIS_COMMIT_TIMEOUT_SECONDS = 5.0
+MARKET_STREAM_MAX_QUEUE_AGE_SECONDS = 2.0
 MARKET_STREAM_REDIS_CLEANUP_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_SEND_TIMEOUT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
@@ -1441,6 +1446,12 @@ async def _commit_market_batches(
       raise queued.disconnect
 
     try:
+      queue_age = time.monotonic() - queued.received_monotonic
+      if queue_age > MARKET_STREAM_MAX_QUEUE_AGE_SECONDS:
+        raise TimeoutError(
+          "market stream commit queue exceeded maximum age: "
+          f"age={queue_age:.3f}s"
+        )
       state = await asyncio.wait_for(
         market_stream_store.write_batch(
           queued.batch,
@@ -1510,7 +1521,7 @@ async def _run_market_commit_pipeline(
     await asyncio.gather(receiver, committer, return_exceptions=True)
 
 
-@agent_router.websocket("/ws/agent/market")
+@market_agent_router.websocket("/ws/agent/market")
 async def agent_market_websocket(websocket: WebSocket) -> None:
   """Receive the only SH/SZ whole-quote stream and converge it in Redis."""
   offered = set(websocket.scope.get("subprotocols") or [])
@@ -1677,10 +1688,19 @@ async def agent_websocket(websocket: WebSocket) -> None:
       device.id,
       set(first.payload.get("capabilities") or []),
     )
+    next_market_lease_refresh = time.monotonic()
     while True:
       if utcnow() >= session.expires_at:
         raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
       await _ensure_device_active(device.id)
+      if time.monotonic() >= next_market_lease_refresh:
+        await agent_connection_hub.refresh_market_device(
+          device.id,
+          control_queue,
+        )
+        next_market_lease_refresh = (
+          time.monotonic() + MARKET_DEVICE_LEASE_REFRESH_SECONDS
+        )
       command = await _next_command(
         device.id,
         protocol_version=connection_protocol,

@@ -63,6 +63,9 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   grant_exact_auto_exit_authorization,
   validate_exact_auto_exit_authorization,
 )
+from quantx_infrastructure.services.exit_plan_notifications import (
+  install_exit_plan_notification_hooks,
+)
 from quantx_infrastructure.services.exit_plan_scope_lock import (
   LockedExitPlanScope,
   lock_exit_plan_scope,
@@ -73,6 +76,8 @@ from quantx_infrastructure.services.trade_intent_processor import (
   MARKET_DATA_STREAM_NOT_READY,
   TradeIntentProcessor,
 )
+
+install_exit_plan_notification_hooks()
 
 MARKET_DATA_CONTEXT_STALE_SECONDS = 10.0
 

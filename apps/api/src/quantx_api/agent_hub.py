@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,9 @@ from quantx_infrastructure.core.data.remote_market_data import (
 from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 
 logger = logging.getLogger(__name__)
+MARKET_DEVICE_LEASE_KEY = "agent:market-device:v2"
+MARKET_DEVICE_LEASE_TTL_SECONDS = 30
+MARKET_DEVICE_LEASE_REFRESH_SECONDS = 10
 
 
 @dataclass
@@ -23,6 +27,7 @@ class _Session:
   device_id: str
   capabilities: set[str]
   queue: asyncio.Queue[AgentEnvelope]
+  lease_id: str
 
 
 class AgentConnectionHub:
@@ -31,6 +36,20 @@ class AgentConnectionHub:
     self._active_controls: dict[str, dict[str, Any]] = {}
     self._market_device_id: str | None = None
     self._lock = asyncio.Lock()
+
+  async def _publish_market_lease(self, session: _Session | None) -> None:
+    redis = await redis_pubsub.get_redis()
+    if session is None:
+      await redis.delete(MARKET_DEVICE_LEASE_KEY)
+      return
+    await redis.set(
+      MARKET_DEVICE_LEASE_KEY,
+      json.dumps(
+        {"device_id": session.device_id, "lease_id": session.lease_id},
+        separators=(",", ":"),
+      ),
+      ex=MARKET_DEVICE_LEASE_TTL_SECONDS,
+    )
 
   async def _load_active_controls(self) -> None:
     redis = await redis_pubsub.get_redis()
@@ -81,7 +100,7 @@ class AgentConnectionHub:
     capabilities: set[str],
   ) -> asyncio.Queue[AgentEnvelope]:
     queue: asyncio.Queue[AgentEnvelope] = asyncio.Queue()
-    session = _Session(device_id, set(capabilities), queue)
+    session = _Session(device_id, set(capabilities), queue, str(uuid.uuid4()))
     async with self._lock:
       self._sessions[device_id] = session
       await self._load_active_controls()
@@ -99,6 +118,8 @@ class AgentConnectionHub:
             payload={"reason": "standby_agent"},
           )
         )
+      selected = self._sessions.get(self._market_device_id or "")
+      await self._publish_market_lease(selected)
     return queue
 
   async def unregister(
@@ -117,10 +138,33 @@ class AgentConnectionHub:
       self._market_device_id = selected.device_id if selected else None
       if selected is not None:
         self._queue_snapshot(selected)
+      await self._publish_market_lease(selected)
 
   async def is_market_device(self, device_id: str) -> bool:
+    redis = await redis_pubsub.get_redis()
+    raw = await redis.get(MARKET_DEVICE_LEASE_KEY)
+    if not raw:
+      return False
+    try:
+      lease = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+      return False
+    return str(lease.get("device_id") or "") == device_id
+
+  async def refresh_market_device(
+    self,
+    device_id: str,
+    queue: asyncio.Queue[AgentEnvelope],
+  ) -> None:
     async with self._lock:
-      return self._market_device_id == device_id
+      session = self._sessions.get(device_id)
+      if (
+        session is None
+        or session.queue is not queue
+        or self._market_device_id != device_id
+      ):
+        return
+      await self._publish_market_lease(session)
 
   async def _dispatch(self, control: dict[str, Any]) -> None:
     if control.get("kind") != "quote":

@@ -3,7 +3,7 @@
   <name>QuantX QMT Agent</name>
   <description>Outbound-only XTData and XTTrading Agent for QuantX.</description>
   <executable>{{QMT_PYTHON}}</executable>
-  <arguments>-m quantx_qmt_agent.main run --mode {{QMT_AGENT_MODE}}</arguments>
+  <arguments>"{{ROOT}}\ops\supervise_process.py" --name qmt-agent --state-dir "{{RUNTIME}}\state" -- "{{QMT_PYTHON}}" -m quantx_qmt_agent.main run --mode {{QMT_AGENT_MODE}}</arguments>
   <workingdirectory>{{ROOT}}</workingdirectory>
   <env name="PYTHONUTF8" value="1" />
   <env name="PYTHONIOENCODING" value="utf-8" />

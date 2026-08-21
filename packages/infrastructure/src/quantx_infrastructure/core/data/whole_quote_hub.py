@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import time
@@ -88,6 +89,8 @@ class WholeQuoteHub:
     self.status = WholeQuoteStatus.OFFLINE
     self.stream_id = ""
     self.sequence = 0
+    self.universe_count = 0
+    self.universe_hash = ""
     self.last_captured_at: datetime | None = None
     self._latest: dict[str, dict[str, Any]] = {}
     self._source_times: dict[str, float] = {}
@@ -178,6 +181,8 @@ class WholeQuoteHub:
     state, latest = hydrated
     self.stream_id = state.stream_id
     self.sequence = state.sequence
+    self.universe_count = state.universe_count
+    self.universe_hash = state.universe_hash
     self._last_sequence_progress_monotonic = time.monotonic()
     self.last_captured_at = state.captured_at
     self._latest, self._source_times = await self._prepare_snapshot(
@@ -265,6 +270,8 @@ class WholeQuoteHub:
         return
       self.stream_id = batch.stream_id
       self.sequence = 0
+      self.universe_count = 0
+      self.universe_hash = ""
       self._latest = {}
       self._source_times = {}
 
@@ -288,6 +295,10 @@ class WholeQuoteHub:
         return
 
     if batch.kind is MarketBatchKind.SNAPSHOT:
+      self.universe_count = len(batch.universe_codes)
+      self.universe_hash = hashlib.sha256(
+        "\n".join(batch.universe_codes).encode("utf-8")
+      ).hexdigest()
       self._latest, self._source_times = await self._prepare_snapshot(
         batch.data,
         batch.captured_at,
@@ -958,6 +969,8 @@ class WholeQuoteHub:
       sequence=self.sequence,
       captured_at=self.last_captured_at,
       instrument_count=len(self._latest),
+      universe_count=self.universe_count,
+      universe_hash=self.universe_hash,
       reason=reason,
     )
 
