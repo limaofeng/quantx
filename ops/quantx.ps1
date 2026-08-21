@@ -1681,7 +1681,7 @@ function Invoke-Up {
       -WorkingDirectory $Root
     Wait-HttpReady `
       -Name "Market Gateway" `
-      -Url "http://127.0.0.1:$MarketGatewayPort/health/live"
+      -Url "http://127.0.0.1:$MarketGatewayPort/health/ready"
 
     Start-ManagedProcess `
       -Name "api" `

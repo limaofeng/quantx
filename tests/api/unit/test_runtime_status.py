@@ -15,6 +15,91 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @pytest.mark.asyncio
+async def test_market_gateway_status_uses_readiness_endpoint(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls: dict[str, object] = {}
+
+  class FakeResponse:
+    status_code = 200
+    is_success = True
+
+    @staticmethod
+    def json():
+      return {"status": "ready", "dependencies": {"redis": "ready"}}
+
+  class FakeClient:
+    def __init__(self, **kwargs):
+      calls["client_kwargs"] = kwargs
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url):
+      calls["url"] = url
+      return FakeResponse()
+
+  monkeypatch.setattr(
+    runtime_status.settings,
+    "market_gateway_url",
+    "http://127.0.0.1:18082",
+  )
+  monkeypatch.setattr(runtime_status.httpx, "AsyncClient", FakeClient)
+
+  status = await runtime_status._market_gateway_status()
+
+  assert calls["client_kwargs"] == {"timeout": 1.0, "trust_env": False}
+  assert calls["url"] == "http://127.0.0.1:18082/health/ready"
+  assert status == {
+    "status": "ready",
+    "statusCode": 200,
+    "dependencies": {"redis": "ready"},
+  }
+
+
+@pytest.mark.asyncio
+async def test_market_gateway_status_rejects_non_ready_payload(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class FakeResponse:
+    status_code = 503
+    is_success = False
+
+    @staticmethod
+    def json():
+      return {
+        "status": "not_ready",
+        "dependencies": {"redis": "unavailable"},
+      }
+
+  class FakeClient:
+    def __init__(self, **_kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _url):
+      return FakeResponse()
+
+  monkeypatch.setattr(runtime_status.httpx, "AsyncClient", FakeClient)
+
+  status = await runtime_status._market_gateway_status()
+
+  assert status == {
+    "status": "unavailable",
+    "statusCode": 503,
+    "dependencies": {"redis": "unavailable"},
+  }
+
+
+@pytest.mark.asyncio
 async def test_prefect_worker_health_uses_canonical_api_and_ignores_proxies(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:

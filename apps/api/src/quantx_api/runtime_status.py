@@ -404,11 +404,17 @@ async def _market_gateway_status() -> dict[str, Any]:
   try:
     async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
       response = await client.get(
-        f"{settings.market_gateway_url.rstrip('/')}/health/live"
+        f"{settings.market_gateway_url.rstrip('/')}/health/ready"
       )
+    payload = response.json()
     return {
-      "status": "ready" if response.is_success else "unavailable",
+      "status": (
+        "ready"
+        if response.is_success and payload.get("status") == "ready"
+        else "unavailable"
+      ),
       "statusCode": response.status_code,
+      "dependencies": dict(payload.get("dependencies") or {}),
     }
   except Exception as exc:
     return {"status": "unavailable", "error": exc.__class__.__name__}

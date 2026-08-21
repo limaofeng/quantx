@@ -63,6 +63,10 @@ VitePress 使用 `5251`，这些后端端口仍只绑定 `127.0.0.1`。Prefect A
 Prefect Server 只检查，不由 QuantX 安装或启停。首次从其他设备访问时，需在 Windows
 防火墙提示中允许 Caddy 通过专用网络。
 
+Market Gateway 的 `/health/live` 只表示进程与事件循环存活；
+`/health/ready` 会实际执行 Redis `PING`。统一启动器和 API 组件状态均以后者
+作为网关就绪依据，因此 Redis 断开时不会把网关误报为 `ready`。
+
 Prefect Worker 的本机 CLI 状态位于 `.runtime/prefect`，CLI 和 Worker 固定
 使用 UTF-8。不要把该运行时目录提交到仓库。
 
