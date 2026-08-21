@@ -480,6 +480,57 @@ function Import-QuantXEnvironment {
       [Environment]::SetEnvironmentVariable($name, $setting, "Process")
     }
   }
+  Set-DevExternalDependencyHost
+}
+
+function Set-DevExternalDependencyHost {
+  if ($Environment -ne "dev") {
+    return
+  }
+  $hostName = [string]$env:QUANTX_DEV_EXTERNAL_DEPENDENCY_HOST
+  $hostName = $hostName.Trim()
+  if (-not $hostName) {
+    return
+  }
+  if ($hostName -ieq "wsl") {
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wsl) {
+      throw "WSL dependency routing requires wsl.exe."
+    }
+    $eth0 = (& $wsl.Source -e sh -lc "ip -4 -o addr show dev eth0" 2>$null) `
+      -join " "
+    $addressMatch = [regex]::Match(
+      $eth0,
+      "\binet\s+(?<address>\d{1,3}(?:\.\d{1,3}){3})/"
+    )
+    if (-not $addressMatch.Success) {
+      throw "Could not resolve the WSL eth0 address."
+    }
+    $hostName = $addressMatch.Groups["address"].Value
+  }
+  foreach ($name in @(
+    "DATABASE_URL",
+    "REDIS_URL",
+    "INFLUXDB_HOST",
+    "PREFECT_API_URL"
+  )) {
+    $value = [Environment]::GetEnvironmentVariable($name, "Process")
+    if (-not $value) {
+      continue
+    }
+    try {
+      $builder = [UriBuilder]::new($value)
+      $builder.Host = $hostName
+      [Environment]::SetEnvironmentVariable(
+        $name,
+        $builder.Uri.AbsoluteUri,
+        "Process"
+      )
+    } catch {
+      throw "$name cannot use the dev dependency host '$hostName'."
+    }
+  }
+  $env:REDIS_HOST = $hostName
 }
 
 function Read-State {
