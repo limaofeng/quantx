@@ -2,6 +2,9 @@ from datetime import datetime
 
 import pytest
 from quantx_domain.trading.exit_plan import (
+  ExitBuyFeeTreatment,
+  ExitCostBasisMode,
+  ExitCostBasisSnapshot,
   ExitEvaluationContext,
   ExitPlanBook,
   ExitPlanCommand,
@@ -16,6 +19,8 @@ from quantx_domain.trading.exit_plan import (
   ExitSizingPolicy,
   ExitStrategyRegistry,
   ExitT1Policy,
+  TradingCostPolicy,
+  estimate_net_profit_pct,
 )
 
 
@@ -43,6 +48,78 @@ def context(price, timestamp=None):
     bid_price=price - 0.01,
     ask_price=price + 0.01,
   )
+
+
+def test_frozen_manual_cost_basis_does_not_double_count_buy_fees():
+  costs = TradingCostPolicy()
+  basis = ExitCostBasisSnapshot(
+    mode=ExitCostBasisMode.MANUAL_UNIT_COST,
+    unit_cost_cny=10.05,
+    basis_volume=1000,
+    buy_fee_treatment=ExitBuyFeeTreatment.INCLUDED,
+    cost_policy=costs,
+    frozen_at="2026-08-21T10:00:00+08:00",
+  )
+  plan_template = template(
+    ExitRuleSpec(
+      rule_id="trailing",
+      strategy=ExitRuleType.TRAILING_NET_PROFIT,
+      parameters={"target_profit_pct": 20.0},
+    )
+  )
+  plan_template = ExitPlanTemplate.from_dict(
+    {
+      **plan_template.to_dict(),
+      "metadata": {"cost_basis": basis.to_dict()},
+    }
+  )
+  book = ExitPlanBook()
+  plan = book.register_entry_fill(plan_template, volume=1000, price=10.05)
+
+  assert book.evaluate("600000.SH", context(10.50)) == []
+  assert plan.last_net_profit_pct == pytest.approx(
+    estimate_net_profit_pct(
+      entry_price=10.05,
+      exit_price=10.49,
+      volume=1000,
+      costs=costs,
+      entry_cost_includes_buy_fees=True,
+    )
+  )
+
+
+def test_cost_basis_stays_frozen_when_later_entry_fill_changes_average():
+  basis = ExitCostBasisSnapshot(
+    mode=ExitCostBasisMode.BROKER_BUY_ORDERS,
+    unit_cost_cny=10.01,
+    basis_volume=1000,
+    buy_fee_treatment=ExitBuyFeeTreatment.ESTIMATED,
+    frozen_at="2026-08-21T10:00:00+08:00",
+  )
+  plan_template = template(
+    ExitRuleSpec(
+      rule_id="target",
+      strategy=ExitRuleType.NET_TAKE_PROFIT,
+      parameters={"target_net_profit_pct": 50.0},
+    )
+  )
+  plan_template = ExitPlanTemplate.from_dict(
+    {
+      **plan_template.to_dict(),
+      "metadata": {"cost_basis": basis.to_dict()},
+    }
+  )
+  plan = ExitPlanBook().register_entry_fill(
+    plan_template,
+    volume=1000,
+    price=10.01,
+  )
+
+  plan.register_entry_fill(volume=100, price=20.0)
+
+  assert plan.entry_avg_price > 10.01
+  assert plan.cost_basis.unit_cost_cny == pytest.approx(10.01)
+  assert plan.cost_basis.basis_volume == 1000
 
 
 def adaptive_context(

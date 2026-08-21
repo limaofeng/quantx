@@ -10,6 +10,10 @@ from typing import Any, Callable, Mapping, Optional
 
 from quantx_domain.trading.exit_plan import (
   EXIT_PLAN_BOOK_STATE_KEY,
+  ExitBuyFeeTreatment,
+  ExitCostBasisMode,
+  ExitCostBasisOrderSnapshot,
+  ExitCostBasisSnapshot,
   ExitDecision,
   ExitEvaluationContext,
   ExitExecutionPolicy,
@@ -23,6 +27,8 @@ from quantx_domain.trading.exit_plan import (
   ExitSizingMode,
   ExitSizingPolicy,
   ExitT1Policy,
+  TradingCostPolicy,
+  estimate_buy_fee_cny,
 )
 from sqlalchemy import select
 
@@ -33,11 +39,13 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
 )
+from quantx_infrastructure.models.enums import OrderType
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
   ConditionalLiquidationStatus,
 )
+from quantx_infrastructure.models.order import Order
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.strategy_run_state import StrategyRunState
@@ -78,6 +86,8 @@ UNTIL_SNAPSHOT_CLEARED = "UNTIL_SNAPSHOT_CLEARED"
 UNALLOCATED_ONLY = "UNALLOCATED_ONLY"
 REPLACE_CANCELLABLE = "REPLACE_CANCELLABLE"
 TERMINAL_PLAN_STATUSES = {"COMPLETED", "CANCELLED"}
+CAPACITY_READY = "READY"
+CAPACITY_RECONCILE_REQUIRED = "RECONCILE_REQUIRED"
 
 BALANCED_DYNAMIC_POLICY: dict[str, Any] = {
   "base_floor_pct": 0.5,
@@ -108,6 +118,67 @@ def normalize_dynamic_policy(value: Optional[Mapping[str, Any]]) -> dict[str, An
 
 
 class AutoExitPlanService:
+  async def list_cost_basis_candidates(
+    self,
+    *,
+    account_id: str,
+    instrument_code: str,
+    limit: int = 100,
+  ) -> list[dict[str, Any]]:
+    """Return persisted completed BUY orders eligible as cost evidence."""
+
+    code = str(instrument_code or "").strip().upper()
+    async with AsyncSessionLocal() as db:
+      orders = list(
+        (
+          await db.execute(
+            select(Order)
+            .where(Order.account_id == account_id)
+            .where(Order.stock_code == code)
+            .where(Order.type == OrderType.BUY)
+            .where(Order.traded_volume > 0)
+            .where(Order.traded_price > 0)
+            .order_by(Order.time.desc(), Order.id.desc())
+            .limit(max(1, min(int(limit or 100), 200)))
+          )
+        ).scalars().all()
+      )
+      costs = TradingCostPolicy()
+      return [
+        {
+          "order_id": str(order.id),
+          "traded_volume": int(order.traded_volume or 0),
+          "traded_price": float(order.traded_price or 0.0),
+          "estimated_buy_fee_cny": estimate_buy_fee_cny(
+            price=float(order.traded_price or 0.0),
+            volume=int(order.traded_volume or 0),
+            costs=costs,
+          ),
+          "order_time": order.time,
+          "strategy_name": order.strategy_name,
+          "remark": order.remark,
+        }
+        for order in orders
+      ]
+
+  async def reconcile_holding_capacity(
+    self,
+    *,
+    account_id: str,
+    instrument_code: str,
+  ) -> dict[str, Any]:
+    """Recheck logical plan claims against the latest position snapshot."""
+
+    async with AsyncSessionLocal() as db:
+      result = await self._reconcile_capacity_locked(
+        db,
+        account_id=account_id,
+        instrument_code=str(instrument_code or "").strip().upper(),
+        allow_restore=True,
+      )
+      await db.commit()
+      return result
+
   async def migrate_legacy_plan_state(self) -> dict[str, int]:
     """Idempotently import persisted runtime books and active legacy conditions."""
 
@@ -516,6 +587,13 @@ class AutoExitPlanService:
         raise ValueError(
           f"可认领数量不足：未分配 {unallocated} 股，申请 {requested} 股"
         )
+      cost_basis = await self._resolve_manual_cost_basis(
+        db,
+        payload=payload,
+        account_id=account_id,
+        instrument_code=instrument_code,
+        requested_volume=requested,
+      )
       plan_id = str(payload.get("plan_id") or f"manual-position:{uuid.uuid4()}")
       rules = self._rules_from_payload(plan_id, payload.get("rules"))
       template = self._template(
@@ -532,13 +610,14 @@ class AutoExitPlanService:
           "position_volume_snapshot": int(position.volume or 0),
           "available_volume_snapshot": int(position.can_use_volume or 0),
           "remark": str(payload.get("remark") or ""),
+          "cost_basis": cost_basis.to_dict(),
         },
         auto_exit_authorized=False,
       )
       plan = ExitPlanBook().register_entry_fill(
         template,
         volume=requested,
-        price=float(position.avg_price or 0.0),
+        price=cost_basis.unit_cost_cny,
         trade_time=getattr(position, "created_at", None),
       )
       record = AutoExitPlanRecord(
@@ -555,7 +634,10 @@ class AutoExitPlanService:
         protected_volume=requested,
         exited_volume=0,
         remaining_volume=requested,
-        entry_avg_price=float(position.avg_price or 0.0),
+        entry_avg_price=cost_basis.unit_cost_cny,
+        cost_basis_mode=cost_basis.mode.value,
+        cost_basis_snapshot=cost_basis.to_dict(),
+        capacity_status=CAPACITY_READY,
         plan_state={},
       )
       if not record.enabled:
@@ -567,7 +649,18 @@ class AutoExitPlanService:
         business_key=f"plan-created:{plan_id}:1",
         plan_id=plan_id,
         event_type="PLAN_CREATED",
-        payload={"source_type": MANUAL_PLAN_SOURCE, "protected_volume": requested},
+        payload={
+          "source_type": MANUAL_PLAN_SOURCE,
+          "protected_volume": requested,
+          "cost_basis": cost_basis.to_dict(),
+        },
+      )
+      await self._append_event(
+        db,
+        business_key=f"cost-basis-frozen:{plan_id}:1",
+        plan_id=plan_id,
+        event_type="COST_BASIS_FROZEN",
+        payload=cost_basis.to_dict(),
       )
       await db.commit()
       await db.refresh(record)
@@ -639,6 +732,15 @@ class AutoExitPlanService:
           "可认领数量不足："
           f"当前计划最多可保护 {available_to_plan + int(plan.exited_volume or 0)} 股，"
           f"申请 {protected_volume} 股"
+        )
+      cost_basis = plan.cost_basis
+      if (
+        cost_basis.mode == ExitCostBasisMode.BROKER_BUY_ORDERS
+        and protected_volume > cost_basis.basis_volume
+      ):
+        raise ValueError(
+          "计划卖出数量不能超过已选成交委托数量 "
+          f"{cost_basis.basis_volume} 股"
         )
       rules = self._rules_from_payload(plan_id, payload.get("rules"))
       next_version = int(record.config_version) + 1
@@ -1362,6 +1464,14 @@ class AutoExitPlanService:
           error=market_error,
         )
         return None
+      capacity = await self._reconcile_capacity_locked(
+        db,
+        account_id=record.account_id,
+        instrument_code=record.instrument_code,
+      )
+      if not capacity["ready"]:
+        await db.commit()
+        return None
       record.data_quality = "GOOD"
       if plan.pending_intent_id and not plan.pending_order_id:
         recovered = await self._recover_pending_submission(db, record, plan)
@@ -1533,6 +1643,14 @@ class AutoExitPlanService:
           ),
           "error": market_error,
         }
+      capacity = await self._reconcile_capacity_locked(
+        db,
+        account_id=record.account_id,
+        instrument_code=record.instrument_code,
+      )
+      if not capacity["ready"]:
+        await db.commit()
+        raise ValueError("持仓少于计划认领数量，请先完成持仓对账")
       limit_price = self._protected_sell_price(context, record)
     result = await TradeIntentProcessor().process_approved_exit_intent(
       plan=record,
@@ -1687,6 +1805,14 @@ class AutoExitPlanService:
     async with AsyncSessionLocal() as db:
       record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
       if record is None:
+        return None
+      capacity = await self._reconcile_capacity_locked(
+        db,
+        account_id=record.account_id,
+        instrument_code=record.instrument_code,
+      )
+      if not capacity["ready"]:
+        await db.commit()
         return None
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       intent_id = str(uuid.uuid4())
@@ -2047,6 +2173,9 @@ class AutoExitPlanService:
       {},
     )
     record.plan_state = plan.to_dict()
+    cost_basis = plan.cost_basis
+    record.cost_basis_mode = cost_basis.mode.value
+    record.cost_basis_snapshot = cost_basis.to_dict()
     record.status = plan.status.value
     record.exited_volume = int(plan.exited_volume)
     record.remaining_volume = int(plan.remaining_volume)
@@ -2065,6 +2194,172 @@ class AutoExitPlanService:
     record.pending_client_order_id = plan.pending_order_id or None
     if evaluated_at is not None:
       record.last_evaluated_at = evaluated_at.replace(tzinfo=None)
+
+  @staticmethod
+  async def _resolve_manual_cost_basis(
+    db,
+    *,
+    payload: Mapping[str, Any],
+    account_id: str,
+    instrument_code: str,
+    requested_volume: int,
+  ) -> ExitCostBasisSnapshot:
+    raw = dict(payload.get("cost_basis") or {})
+    try:
+      mode = ExitCostBasisMode(str(raw.get("mode") or "").upper())
+    except ValueError as exc:
+      raise ValueError("请选择成交委托或手工成本价作为成本依据") from exc
+    costs = TradingCostPolicy()
+    frozen_at = time_utils.now().isoformat()
+    if mode == ExitCostBasisMode.MANUAL_UNIT_COST:
+      unit_cost = float(raw.get("unit_cost_cny") or 0.0)
+      if not isfinite(unit_cost) or unit_cost <= 0:
+        raise ValueError("手工成本价必须大于 0")
+      if list(raw.get("order_ids") or []):
+        raise ValueError("手工成本价不能同时选择成交委托")
+      return ExitCostBasisSnapshot(
+        mode=mode,
+        unit_cost_cny=unit_cost,
+        basis_volume=requested_volume,
+        buy_fee_treatment=ExitBuyFeeTreatment.INCLUDED,
+        cost_policy=costs,
+        frozen_at=frozen_at,
+      )
+    if mode != ExitCostBasisMode.BROKER_BUY_ORDERS:
+      raise ValueError("新建人工计划只支持成交委托或手工成本价")
+    try:
+      order_ids = {int(item) for item in list(raw.get("order_ids") or [])}
+    except (TypeError, ValueError) as exc:
+      raise ValueError("成交委托编号无效") from exc
+    if not order_ids:
+      raise ValueError("请至少选择一笔已成交买入委托")
+    orders = list(
+      (
+        await db.execute(
+          select(Order)
+          .where(Order.id.in_(order_ids))
+          .where(Order.account_id == account_id)
+          .where(Order.stock_code == instrument_code)
+          .where(Order.type == OrderType.BUY)
+          .where(Order.traded_volume > 0)
+          .where(Order.traded_price > 0)
+          .with_for_update()
+        )
+      ).scalars().all()
+    )
+    if len(orders) != len(order_ids):
+      raise ValueError("所选委托包含不存在、非买入或未成交记录，请刷新后重选")
+    snapshots: list[ExitCostBasisOrderSnapshot] = []
+    total_volume = 0
+    total_cost = 0.0
+    for order in sorted(orders, key=lambda item: (item.time, item.id)):
+      volume = int(order.traded_volume or 0)
+      price = float(order.traded_price or 0.0)
+      fee = estimate_buy_fee_cny(price=price, volume=volume, costs=costs)
+      total_volume += volume
+      total_cost += price * volume + fee
+      snapshots.append(
+        ExitCostBasisOrderSnapshot(
+          order_id=str(order.id),
+          traded_volume=volume,
+          traded_price=price,
+          estimated_buy_fee_cny=fee,
+          order_time=order.time.isoformat() if order.time else "",
+        )
+      )
+    if total_volume < requested_volume:
+      raise ValueError(
+        f"所选买入成交共 {total_volume} 股，少于计划卖出 {requested_volume} 股"
+      )
+    return ExitCostBasisSnapshot(
+      mode=mode,
+      unit_cost_cny=total_cost / total_volume,
+      basis_volume=total_volume,
+      buy_fee_treatment=ExitBuyFeeTreatment.ESTIMATED,
+      selected_orders=snapshots,
+      cost_policy=costs,
+      frozen_at=frozen_at,
+    )
+
+  async def _reconcile_capacity_locked(
+    self,
+    db,
+    *,
+    account_id: str,
+    instrument_code: str,
+    allow_restore: bool = False,
+  ) -> dict[str, Any]:
+    position = await db.scalar(
+      select(Position)
+      .where(Position.account_id == account_id)
+      .where(Position.stock_code == instrument_code)
+      .with_for_update()
+    )
+    plans = await AutoExitPlanRepository(db).find_reserving(
+      account_id=account_id,
+      instrument_code=instrument_code,
+      for_update=True,
+    )
+    total_volume = max(0, int(getattr(position, "volume", 0) or 0))
+    protected_volume = sum(
+      max(0, int(item.remaining_volume or 0)) for item in plans
+    )
+    capacity_sufficient = protected_volume <= total_volume
+    reconciliation_pending = any(
+      str(item.capacity_status or CAPACITY_READY)
+      == CAPACITY_RECONCILE_REQUIRED
+      for item in plans
+    )
+    ready = capacity_sufficient and (
+      allow_restore or not reconciliation_pending
+    )
+    next_status = CAPACITY_READY if ready else CAPACITY_RECONCILE_REQUIRED
+    error = None
+    if not capacity_sufficient:
+      error = (
+        f"持仓 {total_volume} 股少于计划合计认领 {protected_volume} 股；"
+        "已阻止新的卖出并撤销自动实盘授权"
+      )
+    elif reconciliation_pending and not allow_restore:
+      error = "持仓容量已恢复，仍需显式重新对账后才能继续卖出"
+    snapshot_token = (
+      getattr(position, "updated_at", None).isoformat()
+      if position is not None and getattr(position, "updated_at", None)
+      else "missing"
+    )
+    for item in plans:
+      previous = str(item.capacity_status or CAPACITY_READY)
+      item.capacity_status = next_status
+      item.capacity_error = error
+      if not capacity_sufficient:
+        clear_exact_auto_exit_authorization(item)
+      if previous != next_status:
+        await self._append_event(
+          db,
+          business_key=(
+            f"capacity:{item.plan_id}:{next_status}:{snapshot_token}:"
+            f"{total_volume}:{protected_volume}"
+          ),
+          plan_id=item.plan_id,
+          event_type=(
+            "HOLDING_CAPACITY_RECONCILIATION_REQUIRED"
+            if not ready
+            else "HOLDING_CAPACITY_RECONCILED"
+          ),
+          payload={
+            "total_volume": total_volume,
+            "protected_volume": protected_volume,
+            "capacity_status": next_status,
+          },
+        )
+    return {
+      "ready": ready,
+      "capacity_status": next_status,
+      "capacity_error": error,
+      "total_volume": total_volume,
+      "protected_volume": protected_volume,
+      "plan_ids": [item.plan_id for item in plans],
+    }
 
   @staticmethod
   async def _sync_source_order(

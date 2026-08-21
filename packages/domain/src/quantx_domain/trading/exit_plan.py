@@ -77,6 +77,20 @@ class ExitPlanCommandType(str, Enum):
   CANCEL = "CANCEL"
 
 
+class ExitCostBasisMode(str, Enum):
+  """Immutable source used to judge an exit plan's profit."""
+
+  BROKER_BUY_ORDERS = "BROKER_BUY_ORDERS"
+  MANUAL_UNIT_COST = "MANUAL_UNIT_COST"
+  ENTRY_FILLS = "ENTRY_FILLS"
+  POSITION_AVERAGE_SNAPSHOT = "POSITION_AVERAGE_SNAPSHOT"
+
+
+class ExitBuyFeeTreatment(str, Enum):
+  INCLUDED = "INCLUDED"
+  ESTIMATED = "ESTIMATED"
+
+
 @dataclass(frozen=True)
 class TradingCostPolicy:
   """Conservative A-share round-trip transaction cost policy."""
@@ -105,6 +119,127 @@ class TradingCostPolicy:
     )
 
 
+def estimate_buy_fee_cny(
+  *,
+  price: float,
+  volume: int,
+  costs: Optional[TradingCostPolicy] = None,
+) -> float:
+  """Estimate the A-share buy-side fee for one completed order."""
+
+  if price <= 0 or volume <= 0:
+    return 0.0
+  policy = costs or TradingCostPolicy()
+  amount = float(price) * int(volume)
+  return max(policy.minimum_commission, amount * policy.commission_rate) + (
+    amount * policy.transfer_fee_rate
+  )
+
+
+@dataclass(frozen=True)
+class ExitCostBasisOrderSnapshot:
+  order_id: str
+  traded_volume: int
+  traded_price: float
+  estimated_buy_fee_cny: float
+  order_time: str = ""
+
+  def to_dict(self) -> Dict[str, Any]:
+    return {
+      "order_id": self.order_id,
+      "traded_volume": int(self.traded_volume),
+      "traded_price": float(self.traded_price),
+      "estimated_buy_fee_cny": float(self.estimated_buy_fee_cny),
+      "order_time": self.order_time,
+    }
+
+  @classmethod
+  def from_dict(cls, value: Mapping[str, Any]) -> "ExitCostBasisOrderSnapshot":
+    raw = dict(value or {})
+    return cls(
+      order_id=str(raw.get("order_id") or ""),
+      traded_volume=int(raw.get("traded_volume") or 0),
+      traded_price=float(raw.get("traded_price") or 0.0),
+      estimated_buy_fee_cny=float(raw.get("estimated_buy_fee_cny") or 0.0),
+      order_time=str(raw.get("order_time") or ""),
+    )
+
+
+@dataclass(frozen=True)
+class ExitCostBasisSnapshot:
+  """Frozen, auditable cost basis for one exit plan."""
+
+  mode: ExitCostBasisMode
+  unit_cost_cny: float
+  basis_volume: int
+  buy_fee_treatment: ExitBuyFeeTreatment
+  selected_orders: list[ExitCostBasisOrderSnapshot] = field(default_factory=list)
+  cost_policy: TradingCostPolicy = field(default_factory=TradingCostPolicy)
+  frozen_at: str = ""
+
+  def __post_init__(self) -> None:
+    object.__setattr__(self, "mode", ExitCostBasisMode(self.mode))
+    object.__setattr__(
+      self,
+      "buy_fee_treatment",
+      ExitBuyFeeTreatment(self.buy_fee_treatment),
+    )
+    if self.unit_cost_cny <= 0 or self.basis_volume <= 0:
+      raise ValueError("exit cost basis requires positive unit cost and volume")
+    if isinstance(self.cost_policy, Mapping):
+      object.__setattr__(
+        self,
+        "cost_policy",
+        TradingCostPolicy.from_dict(self.cost_policy),
+      )
+    object.__setattr__(
+      self,
+      "selected_orders",
+      [
+        item
+        if isinstance(item, ExitCostBasisOrderSnapshot)
+        else ExitCostBasisOrderSnapshot.from_dict(item)
+        for item in list(self.selected_orders or [])
+      ],
+    )
+
+  @property
+  def includes_buy_fees(self) -> bool:
+    return self.mode in {
+      ExitCostBasisMode.BROKER_BUY_ORDERS,
+      ExitCostBasisMode.MANUAL_UNIT_COST,
+    }
+
+  def to_dict(self) -> Dict[str, Any]:
+    return {
+      "mode": self.mode.value,
+      "unit_cost_cny": float(self.unit_cost_cny),
+      "basis_volume": int(self.basis_volume),
+      "buy_fee_treatment": self.buy_fee_treatment.value,
+      "selected_orders": [item.to_dict() for item in self.selected_orders],
+      "cost_policy": self.cost_policy.to_dict(),
+      "frozen_at": self.frozen_at,
+    }
+
+  @classmethod
+  def from_dict(cls, value: Mapping[str, Any]) -> "ExitCostBasisSnapshot":
+    raw = dict(value or {})
+    return cls(
+      mode=ExitCostBasisMode(raw["mode"]),
+      unit_cost_cny=float(raw.get("unit_cost_cny") or 0.0),
+      basis_volume=int(raw.get("basis_volume") or 0),
+      buy_fee_treatment=ExitBuyFeeTreatment(
+        raw.get("buy_fee_treatment", ExitBuyFeeTreatment.ESTIMATED.value)
+      ),
+      selected_orders=[
+        ExitCostBasisOrderSnapshot.from_dict(item)
+        for item in list(raw.get("selected_orders") or [])
+      ],
+      cost_policy=TradingCostPolicy.from_dict(raw.get("cost_policy")),
+      frozen_at=str(raw.get("frozen_at") or ""),
+    )
+
+
 @dataclass(frozen=True)
 class TrailingProfitPolicy:
   target_profit_pct: float = 2.0
@@ -122,6 +257,7 @@ def estimate_net_profit_pct(
   exit_price: float,
   volume: int,
   costs: Optional[TradingCostPolicy] = None,
+  entry_cost_includes_buy_fees: bool = False,
 ) -> float:
   """Estimate round-trip net return against the filled entry lot."""
 
@@ -130,8 +266,13 @@ def estimate_net_profit_pct(
   policy = costs or TradingCostPolicy()
   buy_amount = entry_price * volume
   sell_amount = exit_price * volume
-  buy_fee = max(policy.minimum_commission, buy_amount * policy.commission_rate)
-  buy_fee += buy_amount * policy.transfer_fee_rate
+  buy_fee = 0.0
+  if not entry_cost_includes_buy_fees:
+    buy_fee = estimate_buy_fee_cny(
+      price=entry_price,
+      volume=volume,
+      costs=policy,
+    )
   sell_fee = max(policy.minimum_commission, sell_amount * policy.commission_rate)
   sell_fee += sell_amount * (policy.stamp_tax_rate + policy.transfer_fee_rate)
   entry_cost = buy_amount + buy_fee
@@ -428,6 +569,22 @@ class ExitPlan:
   @property
   def remaining_volume(self) -> int:
     return max(0, int(self.entry_filled_volume) - int(self.exited_volume))
+
+  @property
+  def cost_basis(self) -> ExitCostBasisSnapshot:
+    raw = dict(self.template.metadata or {}).get("cost_basis")
+    if isinstance(raw, Mapping) and raw.get("mode"):
+      return ExitCostBasisSnapshot.from_dict(raw)
+    return ExitCostBasisSnapshot(
+      mode=ExitCostBasisMode.POSITION_AVERAGE_SNAPSHOT,
+      unit_cost_cny=max(float(self.entry_avg_price or 0.0), 0.000001),
+      basis_volume=max(int(self.entry_filled_volume or 0), 1),
+      buy_fee_treatment=ExitBuyFeeTreatment.ESTIMATED,
+      cost_policy=self.template.costs,
+      frozen_at=str(
+        dict(self.template.metadata or {}).get("created_at") or ""
+      ),
+    )
 
   def register_entry_fill(
     self,
@@ -730,10 +887,11 @@ class ExitPlanEvaluator:
       plan.last_holding_trade_date = context.trade_date
       plan.holding_trading_days = int(plan.holding_trading_days or 0) + 1
     plan.last_net_profit_pct = estimate_net_profit_pct(
-      entry_price=plan.entry_avg_price,
+      entry_price=plan.cost_basis.unit_cost_cny,
       exit_price=reference_price,
       volume=plan.remaining_volume,
-      costs=plan.template.costs,
+      costs=plan.cost_basis.cost_policy,
+      entry_cost_includes_buy_fees=plan.cost_basis.includes_buy_fees,
     )
     plan.peak_net_profit_pct = max(
       float(plan.peak_net_profit_pct or 0.0),

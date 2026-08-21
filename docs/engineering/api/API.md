@@ -150,9 +150,17 @@ ReDoc、GraphiQL 和 GraphQL 内省。
 ## 卖出管理 GraphQL
 
 统一读取入口为 `exitPlans`、`exitPlan`、`exitPlanEvents`、
-`exitPlanCapabilities` 和 `exitPlanHoldingCapacity`。写入入口为
+`exitPlanCapabilities`、`exitPlanHoldingCapacity` 和
+`exitPlanCostBasisCandidates`。写入入口为
 `createManualExitPlan`、`updateManualExitPlan`、`setExitPlanEnabled`、
-`cancelExitPlan`、`evaluateExitPlanNow` 和 `liquidatePositions`。
+`cancelExitPlan`、`evaluateExitPlanNow`、`reconcileExitPlanCapacity` 和
+`liquidatePositions`。
+
+`createManualExitPlan.costBasis` 必填。成交委托模式只提交委托 ID，Engine 会
+重新读取账户、股票、方向、成交数量与成交均价并冻结成本快照；手工模式提交的
+`unitCostCny` 表示已包含买入费的每股全成本。`ExitPlanView.costBasis`、授权预览
+和授权指纹使用同一快照。若 `capacityStatus=RECONCILE_REQUIRED`，新的 SELL 与
+自动实盘授权均被阻止，客户端应展示原因并引导用户显式重新对账。
 
 实盘人工计划或清仓计划产生待确认 SELL 后，客户端使用 `previewExitIntent`、
 `confirmExitIntent` 或 `rejectExitIntent`。确认挑战只授权该意图再次进入统一

@@ -765,6 +765,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "reconcileExitPlanCapacity": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:write"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "reconcileLimitUpBoardAssistant": {
         "audiences": [
           "web",
@@ -1627,6 +1639,18 @@
         "stability": "supported"
       },
       "exitPlanCapabilities": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanCostBasisCandidates": {
         "audiences": [
           "web",
           "native",

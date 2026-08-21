@@ -279,6 +279,9 @@ class ExitPlanView:
   exited_volume: int
   remaining_volume: int
   entry_avg_price: float
+  cost_basis: JSON
+  capacity_status: str
+  capacity_error: Optional[str]
   rules: JSON
   metadata: JSON
   can_edit_rules: bool
@@ -300,6 +303,21 @@ class ExitPlanView:
   def from_model(model: AutoExitPlanRecord) -> "ExitPlanView":
     state = dict(model.plan_state or {})
     template = dict(state.get("template") or {})
+    metadata = dict(template.get("metadata") or {})
+    cost_basis = dict(
+      getattr(model, "cost_basis_snapshot", None)
+      or metadata.get("cost_basis")
+      or {}
+    )
+    if not cost_basis:
+      cost_basis = {
+        "mode": "POSITION_AVERAGE_SNAPSHOT",
+        "unit_cost_cny": float(model.entry_avg_price or 0.0),
+        "basis_volume": int(model.protected_volume or 0),
+        "buy_fee_treatment": "ESTIMATED",
+        "selected_orders": [],
+        "frozen_at": model.created_at.isoformat() if model.created_at else "",
+      }
     source_routes = {
       "LIMIT_UP_BOARD": "/strategies/limit-up-board",
       "T_TRADE_BATCH": "/t-trade",
@@ -336,8 +354,11 @@ class ExitPlanView:
       exited_volume=int(model.exited_volume or 0),
       remaining_volume=int(model.remaining_volume or 0),
       entry_avg_price=float(model.entry_avg_price or 0.0),
+      cost_basis=cost_basis,
+      capacity_status=str(getattr(model, "capacity_status", "READY") or "READY"),
+      capacity_error=getattr(model, "capacity_error", None),
       rules=list(template.get("rules") or []),
-      metadata=dict(template.get("metadata") or {}),
+      metadata=metadata,
       can_edit_rules=model.source_type == "MANUAL_POSITION",
       edit_route=source_routes.get(model.source_type),
       phase=str(model.phase or "WAITING_ARM"),
@@ -404,7 +425,38 @@ class ExitPlanHoldingCapacity:
   protected_volume: int
   pending_volume: int
   unallocated_volume: int
+  capacity_status: str
+  capacity_error: Optional[str]
   conflicts: List[ExitPlanCapacityConflict]
+
+
+@strawberry.type(description="可作为退出计划成本依据的已成交买入委托")
+class ExitPlanCostBasisCandidate:
+  order_id: str
+  traded_volume: int
+  traded_price: float
+  estimated_buy_fee_cny: float
+  order_time: datetime
+  strategy_name: Optional[str]
+  remark: Optional[str]
+
+
+@strawberry.type(description="退出计划成本依据候选结果")
+class ExitPlanCostBasisCandidates:
+  account_id: str
+  instrument_code: str
+  items: List[ExitPlanCostBasisCandidate]
+  history_warning: str
+
+
+@strawberry.type(description="退出计划持仓认领对账结果")
+class ExitPlanCapacityReconciliationResult:
+  ready: bool
+  capacity_status: str
+  capacity_error: Optional[str]
+  total_volume: int
+  protected_volume: int
+  plan_ids: List[str]
 
 
 @strawberry.type(description="单只股票清仓计划创建结果")
@@ -522,6 +574,7 @@ class ExitPlanAuthorizationPreview:
   protected_volume: int
   exited_volume: int
   remaining_volume: int
+  cost_basis: JSON
   rules: JSON
   t1_policy: str
   execution_policy: JSON
@@ -601,12 +654,26 @@ class ExitPlanAuthorizationConfirmationInput:
 
 
 # 输入类型
+@strawberry.input(description="人工计划不可变成本依据")
+class ExitPlanCostBasisInput:
+  mode: str = strawberry.field(description="BROKER_BUY_ORDERS 或 MANUAL_UNIT_COST")
+  order_ids: Optional[List[str]] = strawberry.field(
+    default=None,
+    description="成交委托模式下必填的买入委托编号",
+  )
+  unit_cost_cny: Optional[float] = strawberry.field(
+    default=None,
+    description="手工模式下每股全成本，已包含买入费用",
+  )
+
+
 @strawberry.input(description="创建人工计划")
 class CreateManualExitPlanInput:
   instrument_code: str
   protected_volume: int
   rules: JSON
   idempotency_key: str = strawberry.field(description="调用方生成的创建请求幂等键")
+  cost_basis: ExitPlanCostBasisInput
   account_id: Optional[str] = None
   bucket: str = "manual"
   enabled: bool = True

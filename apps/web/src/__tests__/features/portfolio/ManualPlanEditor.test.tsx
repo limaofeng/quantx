@@ -128,13 +128,10 @@ describe('ManualPlanEditor', () => {
       screen.getByLabelText('保存后预览并授权自动实盘卖出');
     expect(liveAuthorization.closest('label')).toHaveClass(
       'h-9',
-      'items-center',
-      'self-start'
+      'items-center'
     );
-    expect(liveAuthorization.closest('div')).toHaveClass(
-      'content-start',
-      'md:mt-5'
-    );
+    expect(liveAuthorization.closest('div')).toHaveClass('content-start');
+    expect(liveAuthorization.closest('div')).not.toHaveClass('md:mt-5');
   });
 
   it('synchronizes a new-plan draft with the selected holding', async () => {
@@ -243,6 +240,8 @@ describe('ManualPlanEditor', () => {
     expect(advancedJson.value).not.toContain('target_price');
 
     await user.type(screen.getByLabelText('计划卖出数量'), '100');
+    await user.click(screen.getByRole('radio', { name: /手工填写每股全成本/ }));
+    await user.type(screen.getByLabelText('每股全成本（元）'), '10.25');
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
 
     expect(mocks.createPlan).toHaveBeenCalledWith({
@@ -252,6 +251,11 @@ describe('ManualPlanEditor', () => {
         idempotencyKey: expect.any(String),
         instrumentCode: '605499.SH',
         protectedVolume: 100,
+        costBasis: {
+          mode: 'MANUAL_UNIT_COST',
+          orderIds: undefined,
+          unitCostCny: 10.25,
+        },
         rules: [
           expect.objectContaining({
             parameters: expect.objectContaining({
@@ -262,6 +266,85 @@ describe('ManualPlanEditor', () => {
             strategy: 'ADAPTIVE_VOLUME_PRICE_TRAILING',
           }),
         ],
+      }),
+    });
+  });
+
+  it('uses selected completed buy orders as the frozen cost basis', async () => {
+    const user = userEvent.setup();
+    mocks.useQuery.mockImplementation(options => {
+      const variables = options.variables as { limit?: number } | undefined;
+      if (variables?.limit === 100) {
+        return [
+          {
+            data: {
+              exitPlanCostBasisCandidates: {
+                accountId: '300000013250',
+                historyWarning: '仅展示 QuantX 已持久化的成交委托',
+                instrumentCode: '601318.SH',
+                items: [
+                  {
+                    estimatedBuyFeeCny: 5.12,
+                    orderId: '9001',
+                    orderTime: '2026-08-20T10:00:00+08:00',
+                    remark: null,
+                    strategyName: null,
+                    tradedPrice: 12.5,
+                    tradedVolume: 300,
+                  },
+                ],
+              },
+            },
+            error: undefined,
+            fetching: false,
+          },
+          mocks.refetch,
+        ];
+      }
+      return [
+        {
+          data: variables ? undefined : capabilitiesData,
+          error: undefined,
+          fetching: false,
+        },
+        mocks.refetch,
+      ];
+    });
+    mocks.createPlan.mockResolvedValue({
+      data: {
+        createManualExitPlan: {
+          configVersion: 1,
+          instrumentCode: '601318.SH',
+          planId: 'plan-order-basis',
+          protectedVolume: 300,
+          status: 'ACTIVE',
+        },
+      },
+      error: undefined,
+    });
+
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        initialInstrumentCode="601318.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+    await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    await user.click(screen.getByRole('checkbox', { name: /委托 #9001/ }));
+    await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
+
+    expect(mocks.createPlan).toHaveBeenCalledWith({
+      input: expect.objectContaining({
+        costBasis: {
+          mode: 'BROKER_BUY_ORDERS',
+          orderIds: ['9001'],
+          unitCostCny: undefined,
+        },
+        protectedVolume: 300,
       }),
     });
   });
@@ -297,6 +380,8 @@ describe('ManualPlanEditor', () => {
 
     await user.click(screen.getByRole('button', { name: '手动添加计划' }));
     await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    await user.click(screen.getByRole('radio', { name: /手工填写每股全成本/ }));
+    await user.type(screen.getByLabelText('每股全成本（元）'), '12.5');
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
 
@@ -336,6 +421,12 @@ describe('ManualPlanEditor', () => {
             challengeExpiresAt: '2099-08-21T10:05:00+08:00',
             challengeId: 'challenge-live-1',
             configVersion: 3,
+            costBasis: {
+              basis_volume: 300,
+              frozen_at: '2026-08-21T10:00:00+08:00',
+              mode: 'MANUAL_UNIT_COST',
+              unit_cost_cny: 12.5,
+            },
             confirmationToken: 'confirmation-token-live-1',
             executionMode: 'live',
             executionPolicy: { order_type: 'LIMIT' },
@@ -392,6 +483,8 @@ describe('ManualPlanEditor', () => {
 
     await user.click(screen.getByRole('button', { name: '手动添加计划' }));
     await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    await user.click(screen.getByRole('radio', { name: /手工填写每股全成本/ }));
+    await user.type(screen.getByLabelText('每股全成本（元）'), '12.5');
     await user.selectOptions(screen.getByLabelText('模式'), 'live');
     await user.click(screen.getByLabelText('保存后预览并授权自动实盘卖出'));
     await user.click(screen.getByRole('button', { name: '保存并预览授权' }));

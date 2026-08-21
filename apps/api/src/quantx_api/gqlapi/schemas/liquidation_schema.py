@@ -37,6 +37,8 @@ from ..types.liquidation_types import (
   ExitPlanAuthorizationPreviewInput,
   ExitPlanAuthorizationPreviewResult,
   ExitPlanCapabilities,
+  ExitPlanCapacityReconciliationResult,
+  ExitPlanCostBasisCandidates,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
   ExitPlanView,
@@ -170,6 +172,9 @@ def _exit_plan_authorization_preview(data) -> ExitPlanAuthorizationPreview:
     protected_volume=int(plan.get("protected_volume") or 0),
     exited_volume=int(plan.get("exited_volume") or 0),
     remaining_volume=int(plan.get("remaining_volume") or 0),
+    cost_basis=dict(
+      dict(template.get("metadata") or {}).get("cost_basis") or {}
+    ),
     rules=list(template.get("rules") or []),
     t1_policy=str(template.get("t1_policy") or ""),
     execution_policy=dict(template.get("execution") or {}),
@@ -237,6 +242,20 @@ class LiquidationQuery:
   ) -> ExitPlanHoldingCapacity:
     return await LiquidationResolver.get_exit_plan_holding_capacity(
       authorized_account_id(info, account_id), instrument_code
+    )
+
+  @strawberry.field(description="可作为人工计划成本依据的已成交买入委托")
+  async def exit_plan_cost_basis_candidates(
+    self,
+    info: strawberry.types.Info,
+    instrument_code: str,
+    account_id: Optional[str] = None,
+    limit: int = 100,
+  ) -> ExitPlanCostBasisCandidates:
+    return await LiquidationResolver.get_exit_plan_cost_basis_candidates(
+      authorized_account_id(info, account_id),
+      instrument_code,
+      limit=limit,
     )
 
   @strawberry.field(description="退出计划、规则、委托和成交时间线")
@@ -641,6 +660,18 @@ class LiquidationMutation:
     owner = await LiquidationResolver.exit_plan_account_id(input.plan_id)
     return await LiquidationResolver.update_manual_exit_plan(
       input, authorized_account_id(info, owner or input.account_id)
+    )
+
+  @strawberry.mutation(description="按最新持仓重新核对退出计划认领数量")
+  async def reconcile_exit_plan_capacity(
+    self,
+    info: strawberry.types.Info,
+    instrument_code: str,
+    account_id: Optional[str] = None,
+  ) -> ExitPlanCapacityReconciliationResult:
+    return await LiquidationResolver.reconcile_exit_plan_capacity(
+      authorized_account_id(info, account_id),
+      instrument_code,
     )
 
   @strawberry.mutation(description="启用或暂停退出计划")

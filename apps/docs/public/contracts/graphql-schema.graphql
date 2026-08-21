@@ -638,6 +638,7 @@ input CreateManualExitPlanInput {
 
   """调用方生成的创建请求幂等键"""
   idempotencyKey: String!
+  costBasis: ExitPlanCostBasisInput!
   accountId: String = null
   bucket: String! = "manual"
   enabled: Boolean! = true
@@ -1249,6 +1250,7 @@ type ExitPlanAuthorizationPreview {
   protectedVolume: Int!
   exitedVolume: Int!
   remainingVolume: Int!
+  costBasis: JSON!
   rules: JSON!
   t1Policy: String!
   executionPolicy: JSON!
@@ -1302,6 +1304,47 @@ type ExitPlanCapacityConflict {
   pending: Boolean!
 }
 
+"""退出计划持仓认领对账结果"""
+type ExitPlanCapacityReconciliationResult {
+  ready: Boolean!
+  capacityStatus: String!
+  capacityError: String
+  totalVolume: Int!
+  protectedVolume: Int!
+  planIds: [String!]!
+}
+
+"""可作为退出计划成本依据的已成交买入委托"""
+type ExitPlanCostBasisCandidate {
+  orderId: String!
+  tradedVolume: Int!
+  tradedPrice: Float!
+  estimatedBuyFeeCny: Float!
+  orderTime: DateTime!
+  strategyName: String
+  remark: String
+}
+
+"""退出计划成本依据候选结果"""
+type ExitPlanCostBasisCandidates {
+  accountId: String!
+  instrumentCode: String!
+  items: [ExitPlanCostBasisCandidate!]!
+  historyWarning: String!
+}
+
+"""人工计划不可变成本依据"""
+input ExitPlanCostBasisInput {
+  """BROKER_BUY_ORDERS 或 MANUAL_UNIT_COST"""
+  mode: String!
+
+  """成交委托模式下必填的买入委托编号"""
+  orderIds: [String!] = null
+
+  """手工模式下每股全成本，已包含买入费用"""
+  unitCostCny: Float = null
+}
+
 """退出计划审计事件"""
 type ExitPlanEventView {
   eventId: String!
@@ -1321,6 +1364,8 @@ type ExitPlanHoldingCapacity {
   protectedVolume: Int!
   pendingVolume: Int!
   unallocatedVolume: Int!
+  capacityStatus: String!
+  capacityError: String
   conflicts: [ExitPlanCapacityConflict!]!
 }
 
@@ -1355,6 +1400,9 @@ type ExitPlanView {
   exitedVolume: Int!
   remainingVolume: Int!
   entryAvgPrice: Float!
+  costBasis: JSON!
+  capacityStatus: String!
+  capacityError: String
   rules: JSON!
   metadata: JSON!
   canEditRules: Boolean!
@@ -3306,6 +3354,9 @@ type Mutation {
   """更新人工计划规则"""
   updateManualExitPlan(input: UpdateManualExitPlanInput!): ExitPlanView!
 
+  """按最新持仓重新核对退出计划认领数量"""
+  reconcileExitPlanCapacity(instrumentCode: String!, accountId: String = null): ExitPlanCapacityReconciliationResult!
+
   """启用或暂停退出计划"""
   setExitPlanEnabled(planId: String!, enabled: Boolean!, configVersion: Int!): ExitPlanView!
 
@@ -4259,6 +4310,9 @@ type Query {
 
   """股票可供退出计划认领的持仓容量"""
   exitPlanHoldingCapacity(instrumentCode: String!, accountId: String = null): ExitPlanHoldingCapacity!
+
+  """可作为人工计划成本依据的已成交买入委托"""
+  exitPlanCostBasisCandidates(instrumentCode: String!, accountId: String = null, limit: Int! = 100): ExitPlanCostBasisCandidates!
 
   """退出计划、规则、委托和成交时间线"""
   exitPlanEvents(planId: String!, limit: Int! = 200): [ExitPlanEventView!]!

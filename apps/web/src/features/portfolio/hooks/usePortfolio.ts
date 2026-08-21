@@ -464,6 +464,9 @@ export const ExitPlansQuery = gql(`
       exitedVolume
       remainingVolume
       entryAvgPrice
+      costBasis
+      capacityStatus
+      capacityError
       rules
       metadata
       canEditRules
@@ -527,12 +530,41 @@ export const ExitPlanHoldingCapacityQuery = gql(`
       protectedVolume
       pendingVolume
       unallocatedVolume
+      capacityStatus
+      capacityError
       conflicts {
         planId
         sourceType
         status
         remainingVolume
         pending
+      }
+    }
+  }
+`);
+
+export const ExitPlanCostBasisCandidatesQuery = gql(`
+  query ExitPlanCostBasisCandidates(
+    $accountId: String
+    $instrumentCode: String!
+    $limit: Int! = 100
+  ) {
+    exitPlanCostBasisCandidates(
+      accountId: $accountId
+      instrumentCode: $instrumentCode
+      limit: $limit
+    ) {
+      accountId
+      instrumentCode
+      historyWarning
+      items {
+        orderId
+        tradedVolume
+        tradedPrice
+        estimatedBuyFeeCny
+        orderTime
+        strategyName
+        remark
       }
     }
   }
@@ -587,6 +619,7 @@ export const PreviewExitPlanAuthorizationMutation = gql(`
         protectedVolume
         exitedVolume
         remainingVolume
+        costBasis
         rules
         t1Policy
         executionPolicy
@@ -612,6 +645,25 @@ export const PreviewExitPlanAuthorizationMutation = gql(`
         challengeExpiresAt
         warnings
       }
+    }
+  }
+`);
+
+export const ReconcileExitPlanCapacityMutation = gql(`
+  mutation ReconcileExitPlanCapacity(
+    $accountId: String
+    $instrumentCode: String!
+  ) {
+    reconcileExitPlanCapacity(
+      accountId: $accountId
+      instrumentCode: $instrumentCode
+    ) {
+      ready
+      capacityStatus
+      capacityError
+      totalVolume
+      protectedVolume
+      planIds
     }
   }
 `);

@@ -136,6 +136,8 @@ def require_authorizable_live_plan(
     raise ValueError("EXIT_PLAN_NOT_ACTIVE")
   if int(record.protected_volume or 0) <= 0 or int(record.remaining_volume or 0) <= 0:
     raise ValueError("EXIT_PLAN_HAS_NO_REMAINING_VOLUME")
+  if str(getattr(record, "capacity_status", "READY") or "READY") != "READY":
+    raise ValueError("EXIT_PLAN_CAPACITY_RECONCILIATION_REQUIRED")
   state = dict(record.plan_state or {})
   template = dict(state.get("template") or {})
   rules = list(template.get("rules") or [])
@@ -175,6 +177,11 @@ async def build_exit_plan_authorization_snapshot(
   if lock_mutable_rows:
     conflict_stmt = conflict_stmt.with_for_update()
   conflicts = list((await db.execute(conflict_stmt)).scalars().all())
+  protected_volume = max(0, int(record.remaining_volume or 0)) + sum(
+    max(0, int(item.remaining_volume or 0)) for item in conflicts
+  )
+  if protected_volume > max(0, int(position.volume or 0)):
+    raise ValueError("EXIT_PLAN_CAPACITY_RECONCILIATION_REQUIRED")
 
   pending_stmt = (
     select(PendingTradeOrder)

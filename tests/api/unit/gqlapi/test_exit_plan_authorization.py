@@ -17,6 +17,7 @@ from quantx_api.gqlapi.trade_approval import TradeApprovalChallengeError
 from quantx_api.gqlapi.types.liquidation_types import (
   ConditionalLiquidationOrderInput,
   CreateManualExitPlanInput,
+  ExitPlanCostBasisInput,
   UpdateManualExitPlanInput,
 )
 from quantx_domain.clock import utcnow
@@ -353,6 +354,9 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
     protected_volume=100,
     rules=[],
     idempotency_key="legacy-create-1",
+    cost_basis=ExitPlanCostBasisInput(
+      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
+    ),
     account_id="ACCOUNT-1",
     execution_mode="live",
     auto_exit_authorized=True,
@@ -439,6 +443,9 @@ async def test_manual_plan_create_uses_caller_idempotency_key(
     protected_volume=100,
     rules=[],
     idempotency_key="ios-create-1",
+    cost_basis=ExitPlanCostBasisInput(
+      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
+    ),
     account_id="ACCOUNT-1",
   )
 
@@ -460,6 +467,9 @@ async def test_manual_plan_create_rejects_blank_idempotency_key() -> None:
     protected_volume=100,
     rules=[],
     idempotency_key="   ",
+    cost_basis=ExitPlanCostBasisInput(
+      mode="MANUAL_UNIT_COST", unit_cost_cny=10.0
+    ),
     account_id="ACCOUNT-1",
   )
 

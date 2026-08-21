@@ -85,6 +85,12 @@ class AutoExitPlanRecord(Base, TimestampMixin):
   exited_volume = Column(Integer, nullable=False, default=0)
   remaining_volume = Column(Integer, nullable=False)
   entry_avg_price = Column(Float, nullable=False)
+  cost_basis_mode = Column(
+    String(32), nullable=False, default="POSITION_AVERAGE_SNAPSHOT"
+  )
+  cost_basis_snapshot = Column(JSON, nullable=False, default=dict)
+  capacity_status = Column(String(32), nullable=False, default="READY")
+  capacity_error = Column(Text, nullable=True)
   plan_state = Column(JSON, nullable=False, default=dict)
 
   phase = Column(String(32), nullable=False, default="WAITING_ARM")

@@ -294,6 +294,11 @@ async def _dispatch(
   if command_type == "EXIT_PLAN_UPDATE_MANUAL":
     record = await AutoExitPlanService().update_manual_exit_plan(payload)
     return {"plan_id": record.plan_id, "config_version": record.config_version}
+  if command_type == "EXIT_PLAN_RECONCILE_CAPACITY":
+    return await AutoExitPlanService().reconcile_holding_capacity(
+      account_id=str(payload["account_id"]),
+      instrument_code=str(payload["instrument_code"]),
+    )
   if command_type == "EXIT_PLAN_SET_ENABLED":
     record = await AutoExitPlanService().set_enabled(
       str(payload["plan_id"]),

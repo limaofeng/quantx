@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_domain.trading.exit_plan import (
+  ExitCostBasisMode,
   ExitDecision,
   ExitEvaluationContext,
   ExitPlan,
@@ -45,6 +46,14 @@ class FakeDb:
 
   async def execute(self, _statement):
     return ScalarResult(self.value)
+
+
+class CapacityDb:
+  def __init__(self, position):
+    self.position = position
+
+  async def scalar(self, _statement):
+    return self.position
 
 
 class FakeSession:
@@ -159,6 +168,120 @@ def liquidation_payload(completion, conflict=UNALLOCATED_ONLY):
     "instrument_codes": ["600000.SH"],
     "execution_mode": "paper",
   }
+
+
+@pytest.mark.asyncio
+async def test_manual_cost_basis_uses_all_in_unit_cost():
+  result = await AutoExitPlanService._resolve_manual_cost_basis(
+    FakeDb([]),
+    payload={
+      "cost_basis": {
+        "mode": "MANUAL_UNIT_COST",
+        "unit_cost_cny": 12.3456,
+      }
+    },
+    account_id="account-a",
+    instrument_code="600000.SH",
+    requested_volume=300,
+  )
+
+  assert result.mode == ExitCostBasisMode.MANUAL_UNIT_COST
+  assert result.unit_cost_cny == pytest.approx(12.3456)
+  assert result.basis_volume == 300
+  assert result.includes_buy_fees
+
+
+@pytest.mark.asyncio
+async def test_capacity_restore_requires_explicit_reconciliation(monkeypatch):
+  record = active_record(volume=200)
+  record.capacity_status = service_module.CAPACITY_RECONCILE_REQUIRED
+  db = CapacityDb(liquidation_position(volume=500))
+  monkeypatch.setattr(
+    service_module,
+    "AutoExitPlanRepository",
+    lambda _db: FakePlanRepository(_db, [record]),
+  )
+
+  async def ignore_event(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(AutoExitPlanService, "_append_event", ignore_event)
+
+  guarded = await AutoExitPlanService()._reconcile_capacity_locked(
+    db,
+    account_id="account-a",
+    instrument_code="600000.SH",
+  )
+
+  assert guarded["ready"] is False
+  assert record.capacity_status == service_module.CAPACITY_RECONCILE_REQUIRED
+  assert "显式重新对账" in guarded["capacity_error"]
+
+  reconciled = await AutoExitPlanService()._reconcile_capacity_locked(
+    db,
+    account_id="account-a",
+    instrument_code="600000.SH",
+    allow_restore=True,
+  )
+
+  assert reconciled["ready"] is True
+  assert record.capacity_status == service_module.CAPACITY_READY
+  assert reconciled["capacity_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_buy_order_cost_basis_is_weighted_and_requires_coverage():
+  orders = [
+    SimpleNamespace(
+      id=1,
+      time=datetime(2026, 8, 20, 10, 0),
+      traded_volume=100,
+      traded_price=10.0,
+    ),
+    SimpleNamespace(
+      id=2,
+      time=datetime(2026, 8, 21, 10, 0),
+      traded_volume=200,
+      traded_price=11.0,
+    ),
+  ]
+  result = await AutoExitPlanService._resolve_manual_cost_basis(
+    FakeDb(orders),
+    payload={
+      "cost_basis": {
+        "mode": "BROKER_BUY_ORDERS",
+        "order_ids": ["1", "2"],
+      }
+    },
+    account_id="account-a",
+    instrument_code="600000.SH",
+    requested_volume=300,
+  )
+
+  assert result.mode == ExitCostBasisMode.BROKER_BUY_ORDERS
+  assert result.basis_volume == 300
+  assert result.unit_cost_cny == pytest.approx(
+    sum(
+      item.traded_price * item.traded_volume + item.estimated_buy_fee_cny
+      for item in result.selected_orders
+    )
+    / 300
+  )
+  assert [item.order_id for item in result.selected_orders] == ["1", "2"]
+
+  with pytest.raises(ValueError, match="少于计划卖出"):
+    await AutoExitPlanService._resolve_manual_cost_basis(
+      FakeDb(orders),
+      payload={
+        "cost_basis": {
+          "mode": "BROKER_BUY_ORDERS",
+          "order_ids": ["1", "2"],
+        }
+      },
+      account_id="account-a",
+      instrument_code="600000.SH",
+      requested_volume=400,
+    )
 
 
 def pending_plan():

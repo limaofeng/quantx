@@ -26,6 +26,7 @@ from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
+from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.engine_command_service import engine_command_service
 from quantx_infrastructure.services.liquidation_service import LiquidationService
 from sqlalchemy import desc, select
@@ -40,6 +41,9 @@ from ..types.liquidation_types import (
   CreateManualExitPlanInput,
   ExitPlanCapabilities,
   ExitPlanCapacityConflict,
+  ExitPlanCapacityReconciliationResult,
+  ExitPlanCostBasisCandidate,
+  ExitPlanCostBasisCandidates,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
   ExitPlanRuleCapability,
@@ -336,6 +340,24 @@ class LiquidationResolver:
         for item in plans
         if item.status == "EXIT_PENDING" or item.pending_client_order_id
       )
+      pending_reconciliation = next(
+        (
+          item
+          for item in plans
+          if str(getattr(item, "capacity_status", "READY") or "READY")
+          != "READY"
+        ),
+        None,
+      )
+      capacity_ready = protected <= total and pending_reconciliation is None
+      capacity_error = None
+      if protected > total:
+        capacity_error = f"持仓 {total} 股少于计划合计认领 {protected} 股"
+      elif pending_reconciliation is not None:
+        capacity_error = str(
+          getattr(pending_reconciliation, "capacity_error", None)
+          or "持仓容量需显式重新对账后才能继续卖出"
+        )
       return ExitPlanHoldingCapacity(
         account_id=account_id,
         instrument_code=code,
@@ -345,6 +367,8 @@ class LiquidationResolver:
         protected_volume=protected,
         pending_volume=pending,
         unallocated_volume=max(0, total - protected),
+        capacity_status="READY" if capacity_ready else "RECONCILE_REQUIRED",
+        capacity_error=capacity_error,
         conflicts=[
           ExitPlanCapacityConflict(
             plan_id=item.plan_id,
@@ -367,7 +391,32 @@ class LiquidationResolver:
       protected_volume=0,
       pending_volume=0,
       unallocated_volume=0,
+      capacity_status="READY",
+      capacity_error=None,
       conflicts=[],
+    )
+
+  @staticmethod
+  async def get_exit_plan_cost_basis_candidates(
+    account_id: str,
+    instrument_code: str,
+    *,
+    limit: int = 100,
+  ) -> ExitPlanCostBasisCandidates:
+    code = str(instrument_code or "").strip().upper()
+    items = await AutoExitPlanService().list_cost_basis_candidates(
+      account_id=account_id,
+      instrument_code=code,
+      limit=limit,
+    )
+    return ExitPlanCostBasisCandidates(
+      account_id=account_id,
+      instrument_code=code,
+      items=[ExitPlanCostBasisCandidate(**item) for item in items],
+      history_warning=(
+        "仅展示 QuantX 已持久化且成交数量大于 0 的买入委托；"
+        "若历史委托不完整，请改用手工每股全成本。"
+      ),
     )
 
   @staticmethod
@@ -449,6 +498,11 @@ class LiquidationResolver:
         "execution_mode": input.execution_mode,
         "auto_exit_authorized": False,
         "remark": input.remark,
+        "cost_basis": {
+          "mode": input.cost_basis.mode,
+          "order_ids": list(input.cost_basis.order_ids or []),
+          "unit_cost_cny": input.cost_basis.unit_cost_cny,
+        },
       },
       aggregate_id=f"{account_id}:{input.instrument_code.upper()}",
       idempotency_key=f"exit-plan-create:{command_key}",
@@ -459,6 +513,26 @@ class LiquidationResolver:
     if record is None:
       raise RuntimeError("Engine 已创建计划，但读取持久化结果失败")
     return ExitPlanView.from_model(record)
+
+  @staticmethod
+  async def reconcile_exit_plan_capacity(
+    account_id: str,
+    instrument_code: str,
+  ) -> ExitPlanCapacityReconciliationResult:
+    code = str(instrument_code or "").strip().upper()
+    result = await LiquidationResolver._request_engine(
+      "EXIT_PLAN_RECONCILE_CAPACITY",
+      {"account_id": account_id, "instrument_code": code},
+      aggregate_id=f"{account_id}:{code}",
+    )
+    return ExitPlanCapacityReconciliationResult(
+      ready=bool(result.get("ready")),
+      capacity_status=str(result.get("capacity_status") or ""),
+      capacity_error=str(result.get("capacity_error") or "") or None,
+      total_volume=int(result.get("total_volume") or 0),
+      protected_volume=int(result.get("protected_volume") or 0),
+      plan_ids=[str(item) for item in list(result.get("plan_ids") or [])],
+    )
 
   @staticmethod
   async def update_manual_exit_plan(
