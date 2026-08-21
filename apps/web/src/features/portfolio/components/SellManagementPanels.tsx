@@ -38,6 +38,7 @@ import type {
 } from '../hooks/useLiquidationActions';
 import {
   CancelExitPlanMutation,
+  ConfirmExitPlanAuthorizationMutation,
   ConfirmExitIntentMutation,
   CreateManualExitPlanMutation,
   EvaluateExitPlanNowMutation,
@@ -45,6 +46,7 @@ import {
   ExitPlanEventsQuery,
   ExitPlanHoldingCapacityQuery,
   ExitPlansQuery,
+  PreviewExitPlanAuthorizationMutation,
   PreviewExitIntentMutation,
   RejectExitIntentMutation,
   SetExitPlanEnabledMutation,
@@ -60,6 +62,42 @@ import {
 type ExitPlan = NonNullable<
   NonNullable<ReturnType<typeof useExitPlans>['data']>['exitPlans']
 >[number];
+
+interface ExitPlanAuthorizationChallenge {
+  accountId: string;
+  authorizationExpiresAt: string;
+  authorizationFingerprint: string;
+  challengeExpiresAt: string;
+  challengeId: string;
+  configVersion: number;
+  confirmationToken: string;
+  executionPolicy: unknown;
+  exitedVolume: number;
+  idempotencyKey: string;
+  instrumentCode: string;
+  otherProtections: Array<{
+    pending: boolean;
+    planId: string;
+    remainingVolume: number;
+    sourceType: string;
+    status: string;
+  }>;
+  planId: string;
+  position: {
+    availableVolume: number;
+    frozenVolume: number;
+    positionUpdatedAt?: string | null;
+    t1UnavailableVolume: number;
+    totalVolume: number;
+    yesterdayVolume: number;
+  };
+  protectedVolume: number;
+  readiness: unknown;
+  remainingVolume: number;
+  rules: unknown;
+  t1Policy: string;
+  warnings: string[];
+}
 
 const activeStatuses = new Set([
   'ACTIVE',
@@ -189,6 +227,14 @@ function PlanCard({
   const pending =
     plan.status === 'EXIT_PENDING' || Boolean(plan.pendingClientOrderId);
   const rules = Array.isArray(plan.rules) ? plan.rules : [];
+  const authorizationExpiresAt = plan.autoExitAuthorizationExpiresAt
+    ? new Date(plan.autoExitAuthorizationExpiresAt).getTime()
+    : 0;
+  const liveAuthorizationActive =
+    plan.executionMode === 'live' &&
+    plan.autoExitAuthorized &&
+    plan.autoExitAuthorizationConfigVersion === plan.configVersion &&
+    authorizationExpiresAt > Date.now();
   return (
     <article className="rounded-md border border-white/8 bg-[#0b1120]/80 p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -208,6 +254,24 @@ function PlanCard({
             >
               {statusLabels[plan.status] || plan.status}
             </span>
+            {plan.executionMode === 'live' ? (
+              <span
+                className={cn(
+                  'rounded border px-2 py-0.5 text-[10px] font-black',
+                  liveAuthorizationActive
+                    ? 'border-emerald-400/30 text-emerald-200'
+                    : 'border-amber-400/30 text-amber-200'
+                )}
+              >
+                {liveAuthorizationActive
+                  ? '实盘自动卖出已授权'
+                  : '实盘卖出需逐次确认'}
+              </span>
+            ) : (
+              <span className="rounded border border-slate-500/30 px-2 py-0.5 text-[10px] font-black text-slate-400">
+                模拟执行
+              </span>
+            )}
           </div>
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold text-slate-500">
             <span>计划卖出 {plan.protectedVolume.toLocaleString()} 股</span>
@@ -344,8 +408,14 @@ export function ManualPlanEditor({
   const [executionMode, setExecutionMode] = React.useState<'paper' | 'live'>(
     'paper'
   );
-  const [authorized, setAuthorized] = React.useState(false);
+  const [requestLiveAuthorization, setRequestLiveAuthorization] =
+    React.useState(false);
   const [remark, setRemark] = React.useState('');
+  const [authorizationChallenge, setAuthorizationChallenge] =
+    React.useState<ExitPlanAuthorizationChallenge | null>(null);
+  const [authorizationError, setAuthorizationError] = React.useState<
+    string | null
+  >(null);
   const [rules, setRules] = React.useState<ManualExitRuleDraft[]>(() => [
     {
       id: createClientId('exit-rule'),
@@ -364,6 +434,12 @@ export function ManualPlanEditor({
   });
   const [createResult, createPlan] = useMutation(CreateManualExitPlanMutation);
   const [updateResult, updatePlan] = useMutation(UpdateManualExitPlanMutation);
+  const [authorizationPreviewResult, previewAuthorization] = useMutation(
+    PreviewExitPlanAuthorizationMutation
+  );
+  const [authorizationConfirmResult, confirmAuthorization] = useMutation(
+    ConfirmExitPlanAuthorizationMutation
+  );
   const ruleTypes = capabilities.data?.exitPlanCapabilities.ruleTypes ?? [];
 
   React.useEffect(() => {
@@ -378,7 +454,7 @@ export function ManualPlanEditor({
     setInstrumentCode(editingPlan.instrumentCode);
     setProtectedVolume(String(editingPlan.protectedVolume));
     setExecutionMode(editingPlan.executionMode === 'live' ? 'live' : 'paper');
-    setAuthorized(editingPlan.autoExitAuthorized);
+    setRequestLiveAuthorization(editingPlan.autoExitAuthorized);
     setRemark(typeof metadata.remark === 'string' ? metadata.remark : '');
     setRules(
       sourceRules.length > 0
@@ -412,11 +488,64 @@ export function ManualPlanEditor({
   }, [editingPlan, initialInstrumentCode]);
 
   const close = () => {
+    setAuthorizationChallenge(null);
+    setAuthorizationError(null);
     setOpen(false);
     if (editingPlan) onFinishedEditing();
   };
 
+  const requestAuthorizationPreview = async ({
+    configVersion,
+    planId,
+  }: {
+    configVersion: number;
+    planId: string;
+  }) => {
+    const idempotencyKey = createClientId('exit-plan-authorization');
+    const operation = await previewAuthorization({
+      input: {
+        accountId,
+        expectedConfigVersion: configVersion,
+        idempotencyKey,
+        planId,
+      },
+    });
+    const response = operation.data?.previewExitPlanAuthorization;
+    if (operation.error || !response?.success || !response.preview) {
+      throw new Error(
+        operation.error?.message ||
+          response?.message ||
+          '未收到自动实盘卖出授权预览'
+      );
+    }
+    const preview = response.preview;
+    setAuthorizationError(null);
+    setAuthorizationChallenge({
+      accountId: preview.accountId,
+      authorizationExpiresAt: preview.authorizationExpiresAt,
+      authorizationFingerprint: preview.authorizationFingerprint,
+      challengeExpiresAt: preview.challengeExpiresAt,
+      challengeId: preview.challengeId,
+      configVersion: preview.configVersion,
+      confirmationToken: preview.confirmationToken,
+      executionPolicy: preview.executionPolicy,
+      exitedVolume: preview.exitedVolume,
+      idempotencyKey,
+      instrumentCode: preview.instrumentCode,
+      otherProtections: preview.otherProtections,
+      planId: preview.planId,
+      position: preview.position,
+      protectedVolume: preview.protectedVolume,
+      readiness: preview.readiness,
+      remainingVolume: preview.remainingVolume,
+      rules: preview.rules,
+      t1Policy: preview.t1Policy,
+      warnings: preview.warnings,
+    });
+  };
+
   const submit = async () => {
+    let savedPlan: { configVersion: number; planId: string } | undefined;
     try {
       const serializedRules = rules.map(rule => ({
         enabled: true,
@@ -427,38 +556,43 @@ export function ManualPlanEditor({
         sizing: { mode: 'ALL_REMAINING' },
         strategy: rule.ruleType,
       }));
-      const result = editingPlan
-        ? await updatePlan({
-            input: {
-              accountId,
-              autoExitAuthorized: authorized,
-              configVersion: editingPlan.configVersion,
-              executionMode,
-              planId: editingPlan.planId,
-              protectedVolume: Number(protectedVolume),
-              remark,
-              rules: serializedRules,
-            },
-          })
-        : await createPlan({
-            input: {
-              accountId,
-              autoExitAuthorized: authorized,
-              bucket: 'manual',
-              enabled: true,
-              executionMode,
-              instrumentCode: normalizedCode,
-              protectedVolume: Number(protectedVolume),
-              remark,
-              rules: serializedRules,
-            },
-          });
-      if (result.error) throw result.error;
+      if (editingPlan) {
+        const result = await updatePlan({
+          input: {
+            accountId,
+            autoExitAuthorized: false,
+            configVersion: editingPlan.configVersion,
+            executionMode,
+            planId: editingPlan.planId,
+            protectedVolume: Number(protectedVolume),
+            remark,
+            rules: serializedRules,
+          },
+        });
+        if (result.error) throw result.error;
+        savedPlan = result.data?.updateManualExitPlan;
+      } else {
+        const result = await createPlan({
+          input: {
+            accountId,
+            autoExitAuthorized: false,
+            bucket: 'manual',
+            enabled: true,
+            executionMode,
+            instrumentCode: normalizedCode,
+            protectedVolume: Number(protectedVolume),
+            remark,
+            rules: serializedRules,
+          },
+        });
+        if (result.error) throw result.error;
+        savedPlan = result.data?.createManualExitPlan;
+      }
+      if (!savedPlan) throw new Error('服务端未返回已保存的计划');
       toast({
         description: `${normalizedCode} · ${protectedVolume} 股`,
         title: editingPlan ? '人工计划已更新' : '人工计划已创建',
       });
-      close();
       onSaved();
     } catch (error) {
       toast({
@@ -466,8 +600,73 @@ export function ManualPlanEditor({
         title: editingPlan ? '计划更新失败' : '计划创建失败',
         variant: 'destructive',
       });
+      return;
+    }
+
+    if (executionMode === 'live' && requestLiveAuthorization && savedPlan) {
+      try {
+        await requestAuthorizationPreview(savedPlan);
+        return;
+      } catch (error) {
+        toast({
+          description: error instanceof Error ? error.message : String(error),
+          title: '计划已保存，但授权预览失败',
+          variant: 'destructive',
+        });
+      }
+    }
+    close();
+  };
+
+  const cancelLiveAuthorization = () => {
+    toast({
+      description: '计划仍会监控；触发实盘卖出时需要你逐次确认。',
+      title: '实盘计划已保存，自动卖出未授权',
+    });
+    close();
+  };
+
+  const confirmLiveAuthorization = async () => {
+    if (!authorizationChallenge) return;
+    setAuthorizationError(null);
+    try {
+      const operation = await confirmAuthorization({
+        input: {
+          accountId: authorizationChallenge.accountId,
+          challengeId: authorizationChallenge.challengeId,
+          confirmationToken: authorizationChallenge.confirmationToken,
+          expectedConfigVersion: authorizationChallenge.configVersion,
+          idempotencyKey: authorizationChallenge.idempotencyKey,
+          planId: authorizationChallenge.planId,
+        },
+      });
+      const response = operation.data?.confirmExitPlanAuthorization;
+      if (operation.error || !response?.success || !response.authorized) {
+        throw new Error(
+          operation.error?.message ||
+            response?.message ||
+            '自动实盘卖出授权未生效'
+        );
+      }
+      toast({
+        description: `仅绑定当前计划版本，有效至 ${formatDateTime(
+          response.authorizationExpiresAt
+        )}；本次确认没有创建委托。`,
+        title: '自动实盘卖出已授权',
+      });
+      close();
+      onSaved();
+    } catch (error) {
+      setAuthorizationError(
+        error instanceof Error ? error.message : String(error)
+      );
     }
   };
+
+  const authorizationChallengeExpired = authorizationChallenge
+    ? new Date(authorizationChallenge.challengeExpiresAt).getTime() <=
+      Date.now()
+    : false;
 
   if (!open) {
     return (
@@ -531,23 +730,42 @@ export function ManualPlanEditor({
           模式
           <select
             className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
-            onChange={event =>
-              setExecutionMode(event.target.value as 'paper' | 'live')
-            }
+            onChange={event => {
+              const mode = event.target.value as 'paper' | 'live';
+              setExecutionMode(mode);
+              if (mode === 'paper') setRequestLiveAuthorization(false);
+            }}
             value={executionMode}
           >
             <option value="paper">模拟</option>
             <option value="live">实盘</option>
           </select>
         </label>
-        <label className="flex h-9 items-center gap-2 self-start text-xs font-bold text-slate-400 md:mt-5">
-          <input
-            checked={authorized}
-            onChange={event => setAuthorized(event.target.checked)}
-            type="checkbox"
-          />
-          授权触发后自动进入卖出风控
-        </label>
+        {executionMode === 'live' ? (
+          <div className="grid content-start gap-1 md:mt-5">
+            <label className="flex h-9 items-center gap-2 self-start text-xs font-bold text-slate-300">
+              <input
+                aria-describedby="manual-plan-live-authorization-help"
+                checked={requestLiveAuthorization}
+                onChange={event =>
+                  setRequestLiveAuthorization(event.target.checked)
+                }
+                type="checkbox"
+              />
+              保存后预览并授权自动实盘卖出
+            </label>
+            <p
+              className="text-[10px] font-medium leading-4 text-amber-200/70"
+              id="manual-plan-live-authorization-help"
+            >
+              未授权时，触发 SELL 仍需逐次人工确认。
+            </p>
+          </div>
+        ) : (
+          <p className="flex h-9 items-center self-start text-[11px] font-bold text-slate-500 md:mt-5">
+            模拟模式不会提交实盘委托
+          </p>
+        )}
       </div>
       <label className="mt-3 grid gap-1 text-xs font-bold text-slate-400">
         备注
@@ -607,6 +825,8 @@ export function ManualPlanEditor({
           disabled={
             createResult.fetching ||
             updateResult.fetching ||
+            authorizationPreviewResult.fetching ||
+            authorizationConfirmResult.fetching ||
             !normalizedCode ||
             Number(protectedVolume) <= 0 ||
             rules.length === 0
@@ -614,12 +834,191 @@ export function ManualPlanEditor({
           onClick={submit}
           type="button"
         >
-          {(createResult.fetching || updateResult.fetching) && (
+          {(createResult.fetching ||
+            updateResult.fetching ||
+            authorizationPreviewResult.fetching) && (
             <Loader2 className="animate-spin" />
           )}
-          {editingPlan ? '保存计划修改' : '创建卖出计划'}
+          {executionMode === 'live' && requestLiveAuthorization
+            ? '保存并预览授权'
+            : editingPlan
+              ? '保存计划修改'
+              : '创建卖出计划'}
         </Button>
       </div>
+      <AlertDialog
+        open={Boolean(authorizationChallenge)}
+        onOpenChange={nextOpen => {
+          if (
+            !nextOpen &&
+            authorizationChallenge &&
+            !authorizationConfirmResult.fetching
+          ) {
+            cancelLiveAuthorization();
+          }
+        }}
+      >
+        <AlertDialogContent className="max-h-[90vh] overflow-y-auto border-amber-400/25 bg-[#0b1120] text-slate-100 sm:max-w-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2 text-base">
+              <ShieldAlert className="h-5 w-5 text-amber-300" />
+              确认自动实盘卖出授权
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-3 text-left text-sm leading-6 text-slate-400">
+                <p className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] p-3 text-amber-50">
+                  授权后，当任一卖出规则触发，系统可不再逐次询问，直接进入实时风控并可能提交
+                  SELL。本次确认只授权当前计划版本，不会立即创建委托。
+                </p>
+                {authorizationChallenge ? (
+                  <>
+                    <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                      {[
+                        ['股票', authorizationChallenge.instrumentCode],
+                        [
+                          '计划版本',
+                          `v${authorizationChallenge.configVersion}`,
+                        ],
+                        [
+                          '计划卖出',
+                          `${authorizationChallenge.protectedVolume.toLocaleString()} 股`,
+                        ],
+                        [
+                          '待卖数量',
+                          `${authorizationChallenge.remainingVolume.toLocaleString()} 股`,
+                        ],
+                        [
+                          '已卖数量',
+                          `${authorizationChallenge.exitedVolume.toLocaleString()} 股`,
+                        ],
+                        [
+                          '当前可卖',
+                          `${authorizationChallenge.position.availableVolume.toLocaleString()} 股`,
+                        ],
+                        [
+                          'T+1 暂不可卖',
+                          `${authorizationChallenge.position.t1UnavailableVolume.toLocaleString()} 股`,
+                        ],
+                      ].map(([label, value]) => (
+                        <div
+                          className="rounded-md border border-white/10 bg-white/[0.025] p-2.5"
+                          key={label}
+                        >
+                          <dt className="text-slate-500">{label}</dt>
+                          <dd className="mt-1 font-mono font-black text-slate-200">
+                            {value}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <div className="rounded-md border border-white/10 p-3 text-xs leading-5 text-slate-400">
+                      <p>T+1 策略：{authorizationChallenge.t1Policy}</p>
+                      <p>
+                        持仓快照：总持仓{' '}
+                        {authorizationChallenge.position.totalVolume.toLocaleString()}
+                        股 · 冻结{' '}
+                        {authorizationChallenge.position.frozenVolume.toLocaleString()}
+                        股 · 昨仓{' '}
+                        {authorizationChallenge.position.yesterdayVolume.toLocaleString()}
+                        股
+                      </p>
+                      <p>
+                        授权有效至：
+                        {formatDateTime(
+                          authorizationChallenge.authorizationExpiresAt
+                        )}
+                      </p>
+                      <p>
+                        本次确认有效至：
+                        {formatDateTime(
+                          authorizationChallenge.challengeExpiresAt
+                        )}
+                      </p>
+                      <p>
+                        持仓快照时间：
+                        {formatDateTime(
+                          authorizationChallenge.position.positionUpdatedAt
+                        )}
+                      </p>
+                      <p className="break-all font-mono text-[10px] text-slate-600">
+                        授权指纹：
+                        {authorizationChallenge.authorizationFingerprint}
+                      </p>
+                    </div>
+                    <details className="rounded-md border border-white/10 p-3 text-xs">
+                      <summary className="cursor-pointer font-bold text-slate-300">
+                        查看完整卖出规则与执行策略
+                      </summary>
+                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-all rounded bg-black/20 p-2 font-mono text-[10px] leading-4 text-slate-500">
+                        {JSON.stringify(
+                          {
+                            executionPolicy:
+                              authorizationChallenge.executionPolicy,
+                            readiness: authorizationChallenge.readiness,
+                            rules: authorizationChallenge.rules,
+                          },
+                          null,
+                          2
+                        )}
+                      </pre>
+                    </details>
+                    {authorizationChallenge.otherProtections.length > 0 ? (
+                      <p className="text-xs text-amber-200">
+                        当前另有{' '}
+                        {authorizationChallenge.otherProtections.length}{' '}
+                        个退出计划占用该持仓；授权范围已按服务端快照固定。
+                      </p>
+                    ) : null}
+                    <ul className="list-disc space-y-1 pl-5 text-xs text-slate-500">
+                      {authorizationChallenge.warnings.map(warning => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+                {authorizationChallengeExpired ? (
+                  <p className="text-rose-300" role="alert">
+                    本次授权确认已过期。请取消后重新保存并获取预览。
+                  </p>
+                ) : null}
+                {authorizationError ? (
+                  <p className="text-rose-300" role="alert">
+                    {authorizationError}
+                  </p>
+                ) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={authorizationConfirmResult.fetching}
+              type="button"
+            >
+              仅保存，不授权
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                authorizationConfirmResult.fetching ||
+                authorizationChallengeExpired
+              }
+              onClick={event => {
+                event.preventDefault();
+                void confirmLiveAuthorization();
+              }}
+              type="button"
+            >
+              {authorizationConfirmResult.fetching ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <CheckCircle2 />
+              )}
+              {authorizationConfirmResult.fetching
+                ? '正在授权…'
+                : '确认授权自动实盘卖出'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

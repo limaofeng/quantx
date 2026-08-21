@@ -455,6 +455,8 @@ export const ExitPlansQuery = gql(`
       status
       executionMode
       autoExitAuthorized
+      autoExitAuthorizationConfigVersion
+      autoExitAuthorizationExpiresAt
       configVersion
       completionStrategy
       completionNote
@@ -560,6 +562,74 @@ export const UpdateManualExitPlanMutation = gql(`
       autoExitAuthorized
       rules
       metadata
+    }
+  }
+`);
+
+export const PreviewExitPlanAuthorizationMutation = gql(`
+  mutation PreviewExitPlanAuthorization(
+    $input: ExitPlanAuthorizationPreviewInput!
+  ) {
+    previewExitPlanAuthorization(input: $input) {
+      success
+      code
+      message
+      preview {
+        challengeId
+        confirmationToken
+        accountId
+        planId
+        instrumentCode
+        bucket
+        sourceType
+        executionMode
+        configVersion
+        protectedVolume
+        exitedVolume
+        remainingVolume
+        rules
+        t1Policy
+        executionPolicy
+        position {
+          totalVolume
+          availableVolume
+          frozenVolume
+          yesterdayVolume
+          t1UnavailableVolume
+          positionUpdatedAt
+        }
+        otherProtections {
+          planId
+          sourceType
+          status
+          remainingVolume
+          configVersion
+          pending
+        }
+        readiness
+        authorizationFingerprint
+        authorizationExpiresAt
+        challengeExpiresAt
+        warnings
+      }
+    }
+  }
+`);
+
+export const ConfirmExitPlanAuthorizationMutation = gql(`
+  mutation ConfirmExitPlanAuthorization(
+    $input: ExitPlanAuthorizationConfirmationInput!
+  ) {
+    confirmExitPlanAuthorization(input: $input) {
+      success
+      code
+      message
+      challengeId
+      planId
+      configVersion
+      authorized
+      authorizationExpiresAt
+      auditEventId
     }
   }
 `);

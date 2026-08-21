@@ -1,13 +1,23 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ManualPlanEditor } from '@/features/portfolio/components/SellManagementPanels';
+import {
+  ConfirmExitPlanAuthorizationMutation,
+  CreateManualExitPlanMutation,
+  PreviewExitPlanAuthorizationMutation,
+  UpdateManualExitPlanMutation,
+} from '@/features/portfolio/hooks/usePortfolio';
 
 const mocks = vi.hoisted(() => ({
+  confirmAuthorization: vi.fn(),
+  createPlan: vi.fn(),
   mutate: vi.fn(),
+  previewAuthorization: vi.fn(),
   refetch: vi.fn(),
   toast: vi.fn(),
+  updatePlan: vi.fn(),
   useMutation: vi.fn(),
   useQuery: vi.fn(),
 }));
@@ -57,10 +67,19 @@ describe('ManualPlanEditor', () => {
       { data: undefined, error: undefined, fetching: false },
       mocks.refetch,
     ]);
-    mocks.useMutation.mockReturnValue([
-      { data: undefined, error: undefined, fetching: false },
-      mocks.mutate,
-    ]);
+    mocks.useMutation.mockImplementation(document => {
+      const mutation =
+        document === CreateManualExitPlanMutation
+          ? mocks.createPlan
+          : document === UpdateManualExitPlanMutation
+            ? mocks.updatePlan
+            : document === PreviewExitPlanAuthorizationMutation
+              ? mocks.previewAuthorization
+              : document === ConfirmExitPlanAuthorizationMutation
+                ? mocks.confirmAuthorization
+                : mocks.mutate;
+      return [{ data: undefined, error: undefined, fetching: false }, mutation];
+    });
   });
 
   it('uses the full row when expanded', async () => {
@@ -104,9 +123,18 @@ describe('ManualPlanEditor', () => {
     expect(screen.getByLabelText('模式').closest('label')).toHaveClass(
       'content-start'
     );
-    expect(
-      screen.getByLabelText('授权触发后自动进入卖出风控').closest('label')
-    ).toHaveClass('h-9', 'items-center', 'self-start', 'md:mt-5');
+    await user.selectOptions(screen.getByLabelText('模式'), 'live');
+    const liveAuthorization =
+      screen.getByLabelText('保存后预览并授权自动实盘卖出');
+    expect(liveAuthorization.closest('label')).toHaveClass(
+      'h-9',
+      'items-center',
+      'self-start'
+    );
+    expect(liveAuthorization.closest('div')).toHaveClass(
+      'content-start',
+      'md:mt-5'
+    );
   });
 
   it('synchronizes a new-plan draft with the selected holding', async () => {
@@ -172,7 +200,7 @@ describe('ManualPlanEditor', () => {
       { data: capabilitiesData, error: undefined, fetching: false },
       mocks.refetch,
     ]);
-    mocks.mutate.mockResolvedValue({ data: {}, error: undefined });
+    mocks.createPlan.mockResolvedValue({ data: {}, error: undefined });
     render(
       <ManualPlanEditor
         accountId="300000013250"
@@ -217,8 +245,9 @@ describe('ManualPlanEditor', () => {
     await user.type(screen.getByLabelText('计划卖出数量'), '100');
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
 
-    expect(mocks.mutate).toHaveBeenCalledWith({
+    expect(mocks.createPlan).toHaveBeenCalledWith({
       input: expect.objectContaining({
+        autoExitAuthorized: false,
         executionMode: 'paper',
         instrumentCode: '605499.SH',
         protectedVolume: 100,
@@ -234,5 +263,144 @@ describe('ManualPlanEditor', () => {
         ],
       }),
     });
+  });
+
+  it('saves a live plan without boolean authorization, then previews and confirms the exact plan version', async () => {
+    const user = userEvent.setup();
+    const onSaved = vi.fn();
+    mocks.createPlan.mockResolvedValue({
+      data: {
+        createManualExitPlan: {
+          configVersion: 3,
+          instrumentCode: '601318.SH',
+          planId: 'plan-live-1',
+          protectedVolume: 300,
+          status: 'ACTIVE',
+        },
+      },
+      error: undefined,
+    });
+    mocks.previewAuthorization.mockResolvedValue({
+      data: {
+        previewExitPlanAuthorization: {
+          code: 'PREVIEW_READY',
+          message: '请核对后确认',
+          preview: {
+            accountId: '300000013250',
+            authorizationExpiresAt: '2026-08-28T10:00:00+08:00',
+            authorizationFingerprint: 'fingerprint-live-1',
+            bucket: 'manual',
+            challengeExpiresAt: '2099-08-21T10:05:00+08:00',
+            challengeId: 'challenge-live-1',
+            configVersion: 3,
+            confirmationToken: 'confirmation-token-live-1',
+            executionMode: 'live',
+            executionPolicy: { order_type: 'LIMIT' },
+            exitedVolume: 0,
+            instrumentCode: '601318.SH',
+            otherProtections: [],
+            planId: 'plan-live-1',
+            position: {
+              availableVolume: 800,
+              frozenVolume: 0,
+              positionUpdatedAt: '2026-08-21T10:00:00+08:00',
+              t1UnavailableVolume: 0,
+              totalVolume: 800,
+              yesterdayVolume: 800,
+            },
+            protectedVolume: 300,
+            readiness: { live_trading_enabled: true },
+            remainingVolume: 300,
+            rules: [{ strategy: 'TARGET_PRICE' }],
+            sourceType: 'MANUAL_POSITION',
+            t1Policy: 'AVAILABLE_ONLY',
+            warnings: ['确认不创建委托'],
+          },
+          success: true,
+        },
+      },
+      error: undefined,
+    });
+    mocks.confirmAuthorization.mockResolvedValue({
+      data: {
+        confirmExitPlanAuthorization: {
+          auditEventId: 'audit-live-1',
+          authorizationExpiresAt: '2026-08-28T10:00:00+08:00',
+          authorized: true,
+          challengeId: 'challenge-live-1',
+          code: 'AUTHORIZED',
+          configVersion: 3,
+          message: '授权成功',
+          planId: 'plan-live-1',
+          success: true,
+        },
+      },
+      error: undefined,
+    });
+
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        initialInstrumentCode="601318.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={onSaved}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+    await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    await user.selectOptions(screen.getByLabelText('模式'), 'live');
+    await user.click(screen.getByLabelText('保存后预览并授权自动实盘卖出'));
+    await user.click(screen.getByRole('button', { name: '保存并预览授权' }));
+
+    expect(mocks.createPlan).toHaveBeenCalledWith({
+      input: expect.objectContaining({
+        autoExitAuthorized: false,
+        executionMode: 'live',
+        instrumentCode: '601318.SH',
+        protectedVolume: 300,
+      }),
+    });
+    expect(mocks.previewAuthorization).toHaveBeenCalledWith({
+      input: {
+        accountId: '300000013250',
+        expectedConfigVersion: 3,
+        idempotencyKey: expect.any(String),
+        planId: 'plan-live-1',
+      },
+    });
+    expect(
+      screen.getByRole('heading', { name: '确认自动实盘卖出授权' })
+    ).toBeVisible();
+    expect(screen.getByText('当前可卖').nextElementSibling).toHaveTextContent(
+      '800 股'
+    );
+    expect(
+      screen.getByText('T+1 暂不可卖').nextElementSibling
+    ).toHaveTextContent('0 股');
+    expect(screen.getByText('确认不创建委托')).toBeVisible();
+    expect(mocks.confirmAuthorization).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole('button', { name: '确认授权自动实盘卖出' })
+    );
+
+    await waitFor(() => {
+      expect(mocks.confirmAuthorization).toHaveBeenCalledWith({
+        input: {
+          accountId: '300000013250',
+          challengeId: 'challenge-live-1',
+          confirmationToken: 'confirmation-token-live-1',
+          expectedConfigVersion: 3,
+          idempotencyKey:
+            mocks.previewAuthorization.mock.calls[0][0].input.idempotencyKey,
+          planId: 'plan-live-1',
+        },
+      });
+    });
+    expect(onSaved).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).toHaveBeenCalledWith(
+      expect.objectContaining({ title: '自动实盘卖出已授权' })
+    );
   });
 });
