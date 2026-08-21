@@ -13,6 +13,7 @@ import { useLocation } from 'wouter';
 
 import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { useStudioNavigate } from '@/components/studio-workspace';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { logger } from '@/core/errors/logger';
 import { SparklineChart } from '@/shared/components/charts/SparklineChart';
@@ -56,6 +57,7 @@ function isInteractiveTarget(target: EventTarget | null) {
 export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
   const [, setLocation] = useLocation();
   const openStudioTab = useStudioNavigate();
+  const { confirm: confirmDialog } = useAppDialog();
   const { closeMenu, menu, openAtPointer } = useStudioMenu<Position>();
 
   const stockName = holding.instrumentName || holding.stockCode;
@@ -73,9 +75,15 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
 
   const handleLiquidate = async () => {
     try {
-      if (window.confirm(`确定要清仓 ${stockName} 吗？`)) {
-        await onLiquidate(holding.stockCode);
-      }
+      const confirmed = await confirmDialog({
+        title: `确认清仓 ${stockName}`,
+        description: `将为 ${holding.stockCode} 创建清仓操作，请确认已检查当前持仓和卖出计划。`,
+        confirmText: '确认清仓',
+        cancelText: '返回检查',
+        variant: 'destructive',
+      });
+      if (!confirmed) return;
+      await onLiquidate(holding.stockCode);
     } catch (error) {
       logger.error('Liquidation failed:', { error });
     }
@@ -170,10 +178,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             <span
               className={cn(
                 'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-black',
-                financialToneBadgeClass(
-                  holding.changePercent ?? 0,
-                  'holding'
-                )
+                financialToneBadgeClass(holding.changePercent ?? 0, 'holding')
               )}
             >
               {isDayUp ? <TrendingUp size={11} /> : <TrendingDown size={11} />}

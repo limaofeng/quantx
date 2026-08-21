@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { AiRuntimeSettingsPanel } from '@/features/settings/components/AiRuntimeSettingsPanel';
 
 const mocks = vi.hoisted(() => ({
@@ -70,6 +71,14 @@ function arrange(overrides: Record<string, unknown> = {}) {
   ]);
 }
 
+function renderPanel() {
+  return render(
+    <AppDialogProvider>
+      <AiRuntimeSettingsPanel />
+    </AppDialogProvider>
+  );
+}
+
 describe('AiRuntimeSettingsPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -82,7 +91,7 @@ describe('AiRuntimeSettingsPanel', () => {
   });
 
   it('makes every editable control read-only without system-config:write', () => {
-    render(<AiRuntimeSettingsPanel />);
+    renderPanel();
 
     expect(screen.getByText('缺少 system-config:write')).toBeInTheDocument();
     expect(screen.getByLabelText('OpenAI 模型')).toBeDisabled();
@@ -100,7 +109,7 @@ describe('AiRuntimeSettingsPanel', () => {
       runtimeStatus: 'OFFLINE',
     });
 
-    render(<AiRuntimeSettingsPanel />);
+    renderPanel();
 
     expect(screen.getByText('Runtime 离线')).toBeInTheDocument();
     expect(screen.getByText('等待 Runtime 上线')).toBeInTheDocument();
@@ -110,7 +119,7 @@ describe('AiRuntimeSettingsPanel', () => {
   it('validates bounds before submitting', async () => {
     mocks.permissions = ['system-config:write'];
     const user = userEvent.setup();
-    render(<AiRuntimeSettingsPanel />);
+    renderPanel();
 
     const concurrency = screen.getByLabelText('最大并发');
     await user.clear(concurrency);
@@ -123,14 +132,19 @@ describe('AiRuntimeSettingsPanel', () => {
 
   it('confirms disable and submits the expected version', async () => {
     mocks.permissions = ['system-config:write'];
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const user = userEvent.setup();
-    render(<AiRuntimeSettingsPanel />);
+    renderPanel();
 
     await user.click(screen.getByRole('switch', { name: '接受新的 AI 任务' }));
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
-    expect(confirm).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole('alertdialog', { name: '停用 AI Assistant' })
+    ).toBeInTheDocument();
+    expect(mocks.update).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: '确认停用' }));
+
     expect(mocks.update).toHaveBeenCalledWith({
       input: {
         expectedVersion: 4,
@@ -147,6 +161,5 @@ describe('AiRuntimeSettingsPanel', () => {
         expect.objectContaining({ title: 'AI Runtime 配置已保存' })
       );
     });
-    confirm.mockRestore();
   });
 });

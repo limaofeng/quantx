@@ -7,6 +7,7 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import NotFound from '@/components/NotFound';
 import { StudioWorkspace } from '@/components/studio-workspace';
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { Button } from '@/components/ui/button';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -189,10 +190,12 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider>
         <TooltipProvider>
-          <AuthProvider>
-            <Toaster />
-            <AuthenticatedApp />
-          </AuthProvider>
+          <AppDialogProvider>
+            <AuthProvider>
+              <Toaster />
+              <AuthenticatedApp />
+            </AuthProvider>
+          </AppDialogProvider>
         </TooltipProvider>
       </ThemeProvider>
     </ErrorBoundary>

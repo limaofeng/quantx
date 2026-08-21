@@ -45,6 +45,7 @@ import {
 } from '@/components/studio-workbench';
 import { useStudioNavigate } from '@/components/studio-workspace';
 import { getShanghaiDateKey } from '@/components/trading-chart/utils/time-utils';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -1302,6 +1303,7 @@ function TTradeReplayPanel({
 
 export function TTradeGlobalPage() {
   const { toast } = useToast();
+  const { confirm: confirmDialog, prompt: promptDialog } = useAppDialog();
   const openStudioTab = useStudioNavigate();
   const accountId = tradingAccountConfig.defaultAccountId;
   const [workspaceMode, setWorkspaceMode] = React.useState<
@@ -1898,9 +1900,13 @@ export function TTradeGlobalPage() {
 
   const handleBeginControlledWindow = async () => {
     if (!accountId || !readiness?.snapshotId) return;
-    const confirmed = window.confirm(
-      `确认以快照 ${readiness.snapshotId} 建立受控交易窗口？历史已终结的手工记录会保留审计；窗口建立后新增 QMT 手工委托或成交会自动暂停 QuantX。`
-    );
+    const confirmed = await confirmDialog({
+      title: '建立受控交易窗口',
+      description: `将以快照 ${readiness.snapshotId} 建立窗口。历史已终结的手工记录会保留审计；之后新增 QMT 手工委托或成交会自动暂停 QuantX。`,
+      confirmText: '建立窗口',
+      cancelText: '暂不建立',
+      variant: 'warning',
+    });
     if (!confirmed) return;
     const result = await beginControlledWindow({
       accountId,
@@ -1920,22 +1926,29 @@ export function TTradeGlobalPage() {
     let confirmation = '';
     if (targetStage === TTradeRolloutTarget.Live) {
       const expected = `LIVE:${accountId}`;
-      confirmation =
-        window.prompt(
-          `正式 LIVE 将授权该账户执行实盘命令。请输入 ${expected} 完成精确确认。`
-        ) || '';
-      if (confirmation !== expected) {
-        toast({
-          title: '精确确认不匹配',
-          description: `必须完整输入 ${expected}`,
-          variant: 'destructive',
-        });
-        return;
-      }
+      const input = await promptDialog({
+        title: '启用正式 LIVE 实盘',
+        description:
+          '此操作将授权当前账户执行正式实盘命令。请输入下方确认短语完成精确确认。',
+        inputLabel: `确认短语：${expected}`,
+        placeholder: expected,
+        confirmText: '启用正式 LIVE',
+        cancelText: '取消',
+        variant: 'destructive',
+        validate: value =>
+          value === expected ? null : `必须完整输入 ${expected}`,
+      });
+      if (input === null) return;
+      confirmation = input;
     } else {
-      const confirmed = window.confirm(
-        '确认进入严格 Canary 实盘？买入仍需人工确认；买入真实成交后，止盈、止损和时间退出会自动提交卖单。'
-      );
+      const confirmed = await confirmDialog({
+        title: '进入严格 Canary 实盘',
+        description:
+          '买入仍需人工确认；买入真实成交后，止盈、止损和时间退出会自动提交卖单。',
+        confirmText: '启用 Canary',
+        cancelText: '取消',
+        variant: 'warning',
+      });
       if (!confirmed) return;
     }
     const result = await activateLive({
@@ -1974,9 +1987,14 @@ export function TTradeGlobalPage() {
 
   const handleKillSwitch = async () => {
     if (!accountId) return;
-    const confirmed = window.confirm(
-      '确认触发紧急停止？系统会阻止新订单，并把未完成批次标记为需要人工券商处置。'
-    );
+    const confirmed = await confirmDialog({
+      title: '触发紧急停止',
+      description:
+        '系统会立即阻止新订单，并把未完成批次标记为需要人工券商处置。',
+      confirmText: '确认紧急停止',
+      cancelText: '返回',
+      variant: 'destructive',
+    });
     if (!confirmed) return;
     const result = await triggerKillSwitch({
       accountId,

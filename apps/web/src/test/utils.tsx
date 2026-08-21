@@ -9,6 +9,7 @@ import {
 } from 'urql';
 
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
 // Create test-specific URQL client
@@ -30,7 +31,9 @@ const AllTheProviders = ({ children }: AllTheProvidersProps) => {
   return (
     <ThemeProvider>
       <UrqlProvider value={urqlClient}>
-        <TooltipProvider>{children}</TooltipProvider>
+        <TooltipProvider>
+          <AppDialogProvider>{children}</AppDialogProvider>
+        </TooltipProvider>
       </UrqlProvider>
     </ThemeProvider>
   );

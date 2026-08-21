@@ -11,6 +11,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from 'urql';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -101,6 +102,7 @@ function formatLastSeen(value?: string | null) {
 
 export function AgentManagementPanel() {
   const { user } = useAuth();
+  const { confirm: confirmDialog } = useAppDialog();
   const [name, setName] = useState('本机 QMT Agent');
   const [enrollment, setEnrollment] = useState<{
     code: string;
@@ -138,7 +140,14 @@ export function AgentManagementPanel() {
   };
 
   const handleRevoke = async (device: AgentDevice) => {
-    if (!window.confirm(`确认撤销设备“${device.name}”？`)) return;
+    const confirmed = await confirmDialog({
+      title: '撤销 QMT Agent 设备',
+      description: `设备“${device.name}”撤销后将立即失去连接和交易授权。`,
+      confirmText: '撤销设备',
+      cancelText: '保留设备',
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
     const result = await revokeDevice({ deviceId: device.id });
     if (result.data?.revokeAgentDevice.success) {
       refresh({ requestPolicy: 'network-only' });

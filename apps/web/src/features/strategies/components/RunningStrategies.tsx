@@ -9,6 +9,7 @@ import { useState, useMemo } from 'react';
 import { useQuery, useMutation } from 'urql';
 import { useLocation } from 'wouter';
 
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -41,6 +42,7 @@ export default function RunningStrategies({
   compact = false,
 }: RunningStrategiesProps) {
   const [, setLocation] = useLocation();
+  const { alert: alertDialog } = useAppDialog();
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [showDemo, setShowDemo] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<{
@@ -83,7 +85,11 @@ export default function RunningStrategies({
 
   const handleDeleteRequest = (runId: string) => {
     if (runId.startsWith('mock-')) {
-      alert('演示数据不支持实际操作');
+      void alertDialog({
+        title: '演示数据不可操作',
+        description: '演示策略仅用于预览界面，不支持删除等实际操作。',
+        confirmText: '知道了',
+      });
       return;
     }
     const target = runs.find(run => run.id === runId);

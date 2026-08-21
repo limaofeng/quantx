@@ -25,6 +25,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { createClientId } from '@/utils/clientId';
@@ -620,6 +621,7 @@ export function ExitPlansPanel({
   onNavigate: (path: string) => void;
 }) {
   const { toast } = useToast();
+  const { confirm: confirmDialog } = useAppDialog();
   const [editingPlan, setEditingPlan] = React.useState<ExitPlan | null>(null);
   const plans = useExitPlans(accountId, instrumentCode);
   const [toggleResult, togglePlan] = useMutation(SetExitPlanEnabledMutation);
@@ -669,14 +671,37 @@ export function ExitPlansPanel({
       });
       return;
     }
-    const accepted = window.confirm(
-      [
-        `${preview.instrumentCode} ${preview.side}`,
-        `数量：${preview.targetVolume ?? '--'} 股`,
-        `参考价：${preview.referencePrice ?? '--'}`,
-        ...(preview.warnings ?? []),
-      ].join('\n')
-    );
+    const accepted = await confirmDialog({
+      title: '确认卖出意图',
+      description: (
+        <div className="space-y-3">
+          <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-white/10 dark:bg-slate-900">
+            <dt className="text-slate-500 dark:text-slate-400">标的 / 方向</dt>
+            <dd className="font-mono text-slate-900 dark:text-slate-100">
+              {preview.instrumentCode} {preview.side}
+            </dd>
+            <dt className="text-slate-500 dark:text-slate-400">数量</dt>
+            <dd className="font-mono text-slate-900 dark:text-slate-100">
+              {preview.targetVolume ?? '--'} 股
+            </dd>
+            <dt className="text-slate-500 dark:text-slate-400">参考价</dt>
+            <dd className="font-mono text-slate-900 dark:text-slate-100">
+              {preview.referencePrice ?? '--'}
+            </dd>
+          </dl>
+          {(preview.warnings ?? []).length > 0 && (
+            <ul className="space-y-1 text-amber-700 dark:text-amber-300">
+              {(preview.warnings ?? []).map(warning => (
+                <li key={warning}>• {warning}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ),
+      confirmText: '确认卖出',
+      cancelText: '返回检查',
+      variant: 'warning',
+    });
     if (!accepted) return;
     const confirmation = await confirmIntent({
       confirmationToken: preview.confirmationToken,

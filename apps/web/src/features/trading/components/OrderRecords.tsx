@@ -7,6 +7,7 @@ import {
   addShanghaiDays,
   getShanghaiDateKey,
 } from '@/components/trading-chart/utils/time-utils';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { OrderType } from '@/generated/gql/graphql';
@@ -53,6 +54,7 @@ export function OrderRecords({
   filterType = 'active',
 }: OrderRecordsProps) {
   const [, setLocation] = useLocation();
+  const { confirm: confirmDialog } = useAppDialog();
   const { closeMenu, menu, openAtPointer } = useStudioMenu<DisplayOrder>();
   const actualAccountId = accountId || '';
 
@@ -150,10 +152,17 @@ export function OrderRecords({
     }
   };
 
-  const handleCancelWithConfirm = (order: DisplayOrder) => {
+  const handleCancelWithConfirm = async (order: DisplayOrder) => {
     const label = `${order.stockName || order.stockCode || order.id}`;
-    if (!window.confirm(`确认撤销 ${label} 的委托吗？`)) return;
-    void handleCancel(order.id);
+    const confirmed = await confirmDialog({
+      title: '撤销委托',
+      description: `确认撤销 ${label} 的委托吗？已成交部分不会受影响。`,
+      confirmText: '确认撤单',
+      cancelText: '保留委托',
+      variant: 'warning',
+    });
+    if (!confirmed) return;
+    await handleCancel(order.id);
   };
 
   const orderMenu = (

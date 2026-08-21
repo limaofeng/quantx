@@ -5,6 +5,7 @@ import React, { type ReactElement } from 'react';
 import { Provider as UrqlProvider } from 'urql';
 
 import { ThemeProvider } from '@/components/ThemeProvider';
+import { AppDialogProvider } from '@/components/ui/app-dialog-provider';
 import { urqlClient } from '@/core/graphql';
 
 // 测试提供者组件
@@ -15,7 +16,9 @@ interface TestProvidersProps {
 function TestProviders({ children }: TestProvidersProps) {
   return (
     <UrqlProvider value={urqlClient}>
-      <ThemeProvider>{children}</ThemeProvider>
+      <ThemeProvider>
+        <AppDialogProvider>{children}</AppDialogProvider>
+      </ThemeProvider>
     </UrqlProvider>
   );
 }

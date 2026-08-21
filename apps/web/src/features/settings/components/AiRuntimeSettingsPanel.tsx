@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from 'urql';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -171,6 +172,7 @@ function NumberSetting({
 export function AiRuntimeSettingsPanel() {
   const { user } = useAuth();
   const { toast } = useToast();
+  const { confirm: confirmDialog } = useAppDialog();
   const canEdit = Boolean(user?.permissions.includes('system-config:write'));
   const [dirty, setDirty] = useState(false);
   const [draft, setDraft] = useState<RuntimeDraft | null>(null);
@@ -217,14 +219,16 @@ export function AiRuntimeSettingsPanel() {
 
   const handleSave = async () => {
     if (!runtime || !draft || validationError || !canEdit) return;
-    if (
-      runtime.enabled &&
-      !draft.enabled &&
-      !window.confirm(
-        '停用后将停止接收和领取新的 AI 任务；正在运行的任务会继续完成。确认停用？'
-      )
-    ) {
-      return;
+    if (runtime.enabled && !draft.enabled) {
+      const confirmed = await confirmDialog({
+        title: '停用 AI Assistant',
+        description:
+          '停用后将停止接收和领取新的 AI 任务；正在运行的任务会继续完成。',
+        confirmText: '确认停用',
+        cancelText: '保持开启',
+        variant: 'warning',
+      });
+      if (!confirmed) return;
     }
     const result = await updateSettings({
       input: {

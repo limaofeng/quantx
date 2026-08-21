@@ -170,6 +170,29 @@ export default [
       // General code quality
       'no-console': 'warn',
       'no-debugger': 'warn',
+      'no-restricted-globals': [
+        'error',
+        {
+          name: 'alert',
+          message: 'Use useAppDialog().alert() for an accessible in-app dialog.',
+        },
+        {
+          name: 'confirm',
+          message: 'Use useAppDialog().confirm() for an accessible in-app dialog.',
+        },
+        {
+          name: 'prompt',
+          message: 'Use useAppDialog().prompt() for an accessible in-app dialog.',
+        },
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['alert', 'confirm', 'prompt'].map(property => ({
+          object: 'window',
+          property,
+          message: `Use useAppDialog().${property}() instead of a browser-native dialog.`,
+        })),
+      ],
       'prefer-const': 'error',
       'no-var': 'error',
 

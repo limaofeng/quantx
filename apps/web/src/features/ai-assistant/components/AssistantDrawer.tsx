@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
+import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
@@ -41,6 +42,7 @@ export function AssistantDrawer({
   onClose: () => void;
 }) {
   const { toast } = useToast();
+  const { confirm: confirmDialog } = useAppDialog();
   const [draft, setDraft] = useState('');
   const [attachAccount, setAttachAccount] = useState(false);
   const assistant = useAiAssistant(currentPath);
@@ -84,9 +86,14 @@ export function AssistantDrawer({
   };
 
   const handleDelete = async () => {
-    if (!window.confirm('永久删除当前 AI 对话及其全部消息？此操作不可恢复。')) {
-      return;
-    }
+    const confirmed = await confirmDialog({
+      title: '永久删除当前对话',
+      description: '当前 AI 对话及其全部消息将被永久删除，此操作不可恢复。',
+      confirmText: '永久删除',
+      cancelText: '保留对话',
+      variant: 'destructive',
+    });
+    if (!confirmed) return;
     await runAction(assistant.deleteThread);
   };
 
