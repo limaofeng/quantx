@@ -11,6 +11,7 @@ from quantx_api.client_contracts import (
 )
 from quantx_api.gqlapi.operation_policy import (
   normalize_field_name,
+  operation_policy,
   operation_policy_keys,
 )
 from quantx_api.gqlapi.schema import schema
@@ -109,6 +110,13 @@ def test_every_graphql_root_field_has_policy_and_description():
       schema_keys.add((operation_name, normalize_field_name(field_name)))
       assert field.description, f"missing description: {operation_name}.{field_name}"
   assert schema_keys == policy_keys
+
+
+def test_t_trade_replay_mutations_are_non_trading_writes():
+  for field_name in ("startTTradeReplay", "cancelTTradeReplay"):
+    policy = operation_policy("Mutation", field_name)
+    assert policy.required_permissions == ("strategy:write",)
+    assert policy.risk == "NON_TRADING_WRITE"
 
 
 def test_client_contract_contains_session_bound_push_fields():

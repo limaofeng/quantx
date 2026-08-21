@@ -265,7 +265,6 @@ _register(
     "archiveStrategyInstance",
     "beginTTradeControlledWindow",
     "cancelLimitUpBoardReplay",
-    "cancelTTradeReplay",
     "cloneStrategy",
     "cloneStrategyInstance",
     "createStrategyInstance",
@@ -283,7 +282,6 @@ _register(
     "startStrategy",
     "startStrategyRun",
     "startLimitUpBoardReplay",
-    "startTTradeReplay",
     "stopStrategy",
     "stopStrategyRun",
     "syncTTradeSourceOrders",
@@ -292,6 +290,12 @@ _register(
     "updateStrategyRun",
   },
   risk="TRADING_WRITE",
+)
+_register(
+  "Mutation",
+  "strategy:write",
+  {"cancelTTradeReplay", "startTTradeReplay"},
+  risk="NON_TRADING_WRITE",
 )
 _register(
   "Mutation",

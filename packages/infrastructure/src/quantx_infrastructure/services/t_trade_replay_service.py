@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections import defaultdict
 from datetime import datetime
+from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
@@ -21,6 +23,9 @@ from quantx_infrastructure.repositories.backtest_repository import BacktestRepos
 from quantx_infrastructure.repositories.daily_asset_snapshot_repository import (
   DailyAssetPositionSnapshotRepository,
   DailyAssetSnapshotRepository,
+)
+from quantx_infrastructure.repositories.instrument_repository import (
+  InstrumentRepository,
 )
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
@@ -57,6 +62,28 @@ class TTradeReplayService:
     start_time = self._naive(start_time)
     snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
     requires_manual = snapshot is None or not positions
+    reconciliation = (
+      self._build_initial_asset_reconciliation(
+        cash=float(snapshot.cash_available_cny or 0.0),
+        total_asset=float(snapshot.total_asset_cny or 0.0),
+        positions=positions,
+        snapshot=snapshot,
+      )
+      if snapshot is not None and positions
+      else None
+    )
+    message = (
+      "已采用回放开始日前最近一个账户日结快照"
+      if not requires_manual
+      else "开始日前没有完整账户快照，无法启动正式历史回放；请先导入开始日前的账户快照"
+    )
+    if reconciliation is not None:
+      residual = float(reconciliation["non_trading_asset"])
+      raw_residual = float(reconciliation["raw_residual"])
+      if raw_residual < -0.01:
+        message += "；快照分项超过总资产，回放将按已知分项计初始权益并标注数据质量"
+      elif residual > 0.01:
+        message += f"；其中 {residual:.2f} 元将作为恒定非交易资产计入权益"
     return {
       "account_id": account_id,
       "start_time": start_time,
@@ -68,18 +95,69 @@ class TTradeReplayService:
       if snapshot
       else 0.0,
       "requires_manual_portfolio": requires_manual,
-      "message": (
-        "已采用回放开始日前最近一个账户日结快照"
-        if not requires_manual
-        else "开始日前没有完整账户快照，请提供手工初始资产与持仓"
-      ),
+      "message": message,
       "positions": positions,
     }
 
-  async def start(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+  async def start(
+    self,
+    payload: Dict[str, Any],
+    *,
+    defer_start: bool = False,
+    request_id: Optional[str] = None,
+  ) -> Dict[str, Any]:
     account_id = str(payload.get("account_id", "") or "").strip()
     if not account_id:
       raise ValueError("账户不能为空")
+    normalized_request_id = str(request_id or "").strip()
+    if normalized_request_id:
+      existing_run, existing_backtest = await self._load_run_and_backtest(
+        normalized_request_id
+      )
+      if existing_run is not None:
+        existing_parameters = self._mapping(existing_run.parameters)
+        if not existing_parameters.get("t_trade_replay"):
+          raise ValueError("回放请求幂等键已被其他策略运行占用")
+        if str(existing_parameters.get("account_id") or "") != account_id:
+          raise ValueError("回放请求幂等键不属于指定账户")
+        if existing_backtest is None:
+          async for db in get_async_db():
+            existing_backtest = await BacktestRepository(db).create_backtest(
+              backtest_id=self._request_backtest_id(normalized_request_id),
+              strategy_run_id=normalized_request_id,
+              parameters=existing_parameters,
+              instruments=list(existing_run.instruments or []),
+              backtest_start_time=self._naive(
+                existing_parameters.get("replay_start_time")
+              ),
+              backtest_end_time=self._naive(
+                existing_parameters.get("replay_end_time")
+              ),
+            )
+            break
+          strategy_manager = self._require_runtime_manager()
+          runtime = strategy_manager.get_run(normalized_request_id)
+          if runtime is not None and existing_backtest is not None:
+            runtime.context.backtest_id = existing_backtest.id
+            runtime.context.backtest_version = int(existing_backtest.version or 0) or None
+        projection = await t_trade_replay_projection_service.get(
+          normalized_request_id
+        )
+        if projection is None:
+          projection = await t_trade_replay_projection_service.create(
+            run_id=normalized_request_id,
+            account_id=account_id,
+          )
+        replay = self._project(existing_run, existing_backtest, projection)
+        if defer_start and replay["status"] in {"PENDING", "RUNNING", "PAUSED"}:
+          strategy_manager = self._require_runtime_manager()
+          if not await strategy_manager.defer_start_strategy(normalized_request_id):
+            await strategy_manager.converge_deferred_start_error(
+              normalized_request_id,
+              "做 T 历史回放恢复后台启动失败",
+            )
+            raise ValueError("做 T 历史回放恢复后台启动失败")
+        return replay
     start_time = self._naive(payload.get("start_time"))
     end_time = self._naive(payload.get("end_time"))
     if end_time <= start_time:
@@ -99,12 +177,20 @@ class TTradeReplayService:
     manual_positions = self._normalize_input_positions(
       payload.get("initial_positions") or []
     )
+    manual_as_of = None
+    if manual_positions:
+      raw_manual_as_of = payload.get("initial_portfolio_as_of")
+      if raw_manual_as_of is None:
+        raise ValueError("手工历史组合必须提供可审计的组合时点")
+      manual_as_of = self._naive(raw_manual_as_of)
+      if manual_as_of >= start_time:
+        raise ValueError("手工历史组合时点必须早于回放开始时间，禁止使用未来账户数据")
     snapshot = None
     positions = manual_positions
     if not positions:
       snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
       if snapshot is None or not positions:
-        raise ValueError("开始日前没有完整账户快照，请提供手工初始资产与持仓")
+        raise ValueError("开始日前没有完整账户快照，无法启动正式历史回放")
 
     initial_cash = self._optional_number(payload.get("initial_cash"))
     initial_total_asset = self._optional_number(payload.get("initial_total_asset"))
@@ -113,22 +199,67 @@ class TTradeReplayService:
       initial_total_asset = float(snapshot.total_asset_cny or 0.0)
     if initial_cash is None or initial_total_asset is None:
       raise ValueError("手工初始组合必须同时提供可用资金与总资产")
+    if not isfinite(initial_cash) or not isfinite(initial_total_asset):
+      raise ValueError("初始资产必须是有限数字")
     if initial_cash < 0 or initial_total_asset <= 0:
       raise ValueError("初始可用资金不能为负且总资产必须大于 0")
+    initial_asset_reconciliation = self._build_initial_asset_reconciliation(
+      cash=initial_cash,
+      total_asset=initial_total_asset,
+      positions=positions,
+      snapshot=snapshot,
+      manual_as_of=manual_as_of,
+    )
 
     settings = self.t_trade_service.build_parameters(payload)
     self.t_trade_service._validate_parameters(payload, StrategyRunMode.BACKTEST)
+    instrument_references = await self._load_instrument_references(
+      [str(position["stock_code"]) for position in positions]
+    )
     metadata: Dict[str, Dict[str, Any]] = {}
     skipped: List[Dict[str, str]] = []
     instruments: List[str] = []
     for position in positions:
       code = position["stock_code"]
+      reference = instrument_references.get(code)
+      instrument_name = str(
+        position.get("instrument_name")
+        or getattr(reference, "name", "")
+        or ""
+      )
       volume = int(position["volume"])
       available = min(volume, int(position["available_volume"]))
-      eligible = volume >= 100 and available >= 100
-      reason = "" if eligible else "昨日可用库存不足一手（100 股）"
+      lifecycle_complete = bool(
+        reference is not None
+        and reference.open_date is not None
+        and reference.expire_date is not None
+        and instrument_name
+      )
+      eligible = volume >= 100 and available >= 100 and lifecycle_complete
+      if volume < 100 or available < 100:
+        reason = "昨日可用库存不足一手（100 股）"
+      elif not lifecycle_complete:
+        reason = "证券主数据不完整，无法确认历史涨跌停规则"
+      else:
+        reason = ""
       metadata[code] = {
-        "instrument_name": position["instrument_name"],
+        "instrument_name": instrument_name,
+        "instrument_status_as_of": (
+          snapshot.trade_date.isoformat() if snapshot is not None else None
+        ),
+        "listing_date": (
+          reference.open_date.isoformat()
+          if reference is not None and reference.open_date is not None
+          else None
+        ),
+        "expiry_date": (
+          reference.expire_date.isoformat()
+          if reference is not None and reference.expire_date is not None
+          else None
+        ),
+        "price_limit_reference_source": (
+          "INSTRUMENT_MASTER" if reference is not None else "MISSING"
+        ),
         "eligible": eligible,
         "reason": reason,
         "position_shares": volume,
@@ -143,7 +274,7 @@ class TTradeReplayService:
         skipped.append(
           {
             "stock_code": code,
-            "instrument_name": position["instrument_name"],
+            "instrument_name": instrument_name,
             "reason": reason,
           }
         )
@@ -155,13 +286,25 @@ class TTradeReplayService:
       "t_trade_replay": True,
       "auto_approve_manual_intents": True,
       "account_id": account_id,
-      "initial_capital": initial_total_asset,
+      "initial_capital": initial_asset_reconciliation["effective_initial_equity"],
       "initial_cash": initial_cash,
       "initial_total_asset": initial_total_asset,
       "initial_positions": positions,
+      "initial_portfolio_as_of": manual_as_of.isoformat() if manual_as_of else None,
+      "initial_asset_reconciliation": initial_asset_reconciliation,
       "initial_portfolio_metadata": metadata,
       "initial_instrument_metadata": {code: metadata[code] for code in instruments},
       "replay_skipped_instruments": skipped,
+      "replay_price_limit_policy": {
+        "schema_version": 1,
+        "source_priority": [
+          "HISTORICAL_TICK_NATIVE_LIMITS",
+          "PREVIOUS_CLOSE_EXCHANGE_RULES",
+        ],
+        "instrument_reference": "INSTRUMENT_MASTER_AT_REPLAY_CREATION",
+        "ambiguous_action": "STRICT_RISK_REJECT",
+      },
+      "replay_price_limit_source_counts": {},
       "replay_snapshot_id": snapshot.id if snapshot else None,
       "replay_snapshot_date": (snapshot.trade_date.isoformat() if snapshot else None),
       "replay_start_time": start_time.isoformat(),
@@ -184,11 +327,33 @@ class TTradeReplayService:
       backtest_start_time=start_time,
       backtest_end_time=end_time,
       auto_start=False,
+      run_id=normalized_request_id or None,
+      backtest_id=(
+        self._request_backtest_id(normalized_request_id)
+        if normalized_request_id
+        else None
+      ),
     )
     await t_trade_replay_projection_service.create(
       run_id=run_id,
       account_id=account_id,
     )
+    if defer_start:
+      if not await strategy_manager.defer_start_strategy(run_id):
+        await strategy_manager.converge_deferred_start_error(
+          run_id,
+          "做 T 历史回放后台启动调度失败",
+        )
+        raise ValueError("做 T 历史回放后台启动调度失败")
+      replay = await self.get(run_id)
+      if replay is None:
+        raise ValueError("做 T 历史回放创建后无法读取")
+      return replay
+
+    return await self._start_prepared_replay(run_id)
+
+  async def _start_prepared_replay(self, run_id: str) -> Dict[str, Any]:
+    strategy_manager = self._require_runtime_manager()
     if not await strategy_manager.start_strategy(run_id):
       replay = await self.get(run_id)
       raise ValueError(
@@ -213,11 +378,14 @@ class TTradeReplayService:
       raise ValueError(f"做 T 历史回放当前状态 {replay_status} 不允许取消")
     strategy_manager = self._require_runtime_manager()
     runtime = strategy_manager.get_run(run_id)
+    await strategy_manager.cancel_deferred_start(run_id)
     metrics = self._mapping(run.metrics)
     if runtime:
       metrics = runtime.get_metrics()
       metrics["t_trade_replay"] = build_t_trade_replay_metrics(runtime)
-    success = await strategy_manager.stop_strategy(run_id)
+    # This is an isolated BACKTEST runtime. User cancellation must be able to
+    # discard replay-only exit plans instead of leaving the simulation running.
+    success = await strategy_manager.stop_strategy(run_id, force=True)
     if not success:
       raise ValueError("取消做 T 历史回放失败")
     if backtest:
@@ -312,6 +480,18 @@ class TTradeReplayService:
       return snapshot, self._aggregate_snapshot_positions(rows)
     return None, []
 
+  async def _load_instrument_references(
+    self,
+    instrument_codes: List[str],
+  ) -> Dict[str, Any]:
+    codes = sorted({str(code or "").strip().upper() for code in instrument_codes})
+    if not codes:
+      return {}
+    async for db in get_async_db():
+      rows = await InstrumentRepository(db).find_by_ids(codes)
+      return {str(row.id or "").upper(): row for row in rows}
+    return {}
+
   @staticmethod
   def _aggregate_snapshot_positions(rows: List[Any]) -> List[Dict[str, Any]]:
     grouped: Dict[str, List[Any]] = defaultdict(list)
@@ -343,6 +523,71 @@ class TTradeReplayService:
         }
       )
     return result
+
+  @staticmethod
+  def _build_initial_asset_reconciliation(
+    *,
+    cash: float,
+    total_asset: float,
+    positions: List[Dict[str, Any]],
+    snapshot: Any = None,
+    manual_as_of: Optional[datetime] = None,
+  ) -> Dict[str, Any]:
+    available_cash = float(cash)
+    reported_total_asset = float(total_asset)
+    position_market_value = sum(
+      max(0.0, float(position.get("market_value", 0.0) or 0.0))
+      for position in positions
+    )
+    if not all(
+      isfinite(value)
+      for value in (available_cash, reported_total_asset, position_market_value)
+    ):
+      raise ValueError("初始资产与持仓市值必须是有限数字")
+
+    component_total = available_cash + position_market_value
+    raw_residual = reported_total_asset - component_total
+    non_trading_asset = max(0.0, raw_residual)
+    effective_initial_equity = component_total + non_trading_asset
+
+    snapshot_metadata = dict(
+      getattr(snapshot, "snapshot_metadata", {}) or {}
+    )
+    quality_flags = {
+      str(flag)
+      for flag in list(snapshot_metadata.get("quality_flags") or [])
+      if str(flag)
+    }
+    snapshot_data_quality = str(
+      getattr(snapshot, "data_quality", "") or ""
+    ).upper()
+    if snapshot_data_quality and snapshot_data_quality != "OK":
+      quality_flags.add(snapshot_data_quality)
+    if snapshot is None and manual_as_of is not None:
+      quality_flags.add("MANUAL_HISTORICAL_PORTFOLIO")
+    if raw_residual > 0.01:
+      quality_flags.add("NON_TRADING_ASSET_RESIDUAL_PRESERVED")
+    elif raw_residual < -0.01:
+      quality_flags.add("INITIAL_COMPONENTS_EXCEED_REPORTED_TOTAL")
+
+    snapshot_market_value = getattr(snapshot, "market_value_cny", None)
+    return {
+      "schema_version": 1,
+      "reported_total_asset": reported_total_asset,
+      "available_cash": available_cash,
+      "position_market_value": position_market_value,
+      "snapshot_market_value": (
+        float(snapshot_market_value) if snapshot_market_value is not None else None
+      ),
+      "raw_residual": raw_residual,
+      "non_trading_asset": non_trading_asset,
+      "effective_initial_equity": effective_initial_equity,
+      "negative_residual_clamped": raw_residual < 0.0,
+      "policy": "PRESERVE_POSITIVE_RESIDUAL_CLAMP_NEGATIVE_TO_ZERO",
+      "snapshot_data_quality": snapshot_data_quality or None,
+      "portfolio_as_of": manual_as_of.isoformat() if manual_as_of else None,
+      "quality_flags": sorted(quality_flags),
+    }
 
   @staticmethod
   def _normalize_input_positions(items: List[Any]) -> List[Dict[str, Any]]:
@@ -442,6 +687,14 @@ class TTradeReplayService:
       parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
       return time_utils.to_shanghai(parsed) if parsed.tzinfo else parsed
     raise ValueError("回放时间格式无效")
+
+  @staticmethod
+  def _request_backtest_id(request_id: str) -> str:
+    try:
+      namespace = uuid.UUID(str(request_id))
+    except ValueError:
+      namespace = uuid.uuid5(uuid.NAMESPACE_URL, str(request_id))
+    return str(uuid.uuid5(namespace, "t-trade-replay-backtest-v1"))
 
   @staticmethod
   def _optional_number(value: Any) -> Optional[float]:

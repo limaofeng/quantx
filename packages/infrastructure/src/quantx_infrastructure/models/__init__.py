@@ -265,11 +265,11 @@ __all__ = [
   "LimitUpBoardAssistantConfig",
   "LimitUpBoardAssistantProjection",
   "LimitUpBoardCandidateArm",
-  # 策略运行时状态
-  "StrategyRunPosition",
   "LimitUpBoardReplayJob",
   "LimitUpBoardReplayScenario",
   "LimitUpBoardUniverseSnapshot",
+  # 策略运行时状态
+  "StrategyRunPosition",
   "StrategyRunState",
   # 回测历史
   "StrategyBacktest",

@@ -234,7 +234,7 @@
         "requiredPermissions": [
           "strategy:write"
         ],
-        "risk": "TRADING_WRITE",
+        "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
       "cloneStrategy": {
@@ -1193,7 +1193,7 @@
         "requiredPermissions": [
           "strategy:write"
         ],
-        "risk": "TRADING_WRITE",
+        "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
       "startTTradeSession": {

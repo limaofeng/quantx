@@ -6,6 +6,7 @@ import {
   numberValue,
   quoteTone,
   replayDatePreset,
+  replayIdempotencyKey,
   resolveInstrumentName,
   signalHistoryCategory,
   signalReasonLabel,
@@ -48,13 +49,73 @@ describe('TTradeGlobal utilities', () => {
     );
   });
 
-  it('builds trading-day presets without counting weekends', () => {
+  it('builds presets from completed weekdays without counting weekends', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 6, 29, 12, 0, 0));
 
     expect(replayDatePreset(5)).toEqual({
-      start: '2026-07-23',
-      end: '2026-07-29',
+      start: '2026-07-22',
+      end: '2026-07-28',
     });
+  });
+
+  it('uses the server calendar and excludes an unfinished trading day', () => {
+    const tradingCalendar = [
+      '2026-07-23',
+      '2026-07-24',
+      '2026-07-27',
+      '2026-07-28',
+      '2026-07-29',
+      '2026-07-30',
+      '2026-07-31',
+      '2026-08-03',
+      '2026-08-04',
+      '2026-08-05',
+      '2026-08-06',
+      '2026-08-07',
+      '2026-08-10',
+      '2026-08-11',
+      '2026-08-12',
+      '2026-08-13',
+      '2026-08-14',
+      '2026-08-17',
+      '2026-08-18',
+      '2026-08-19',
+      '2026-08-20',
+    ];
+
+    expect(
+      replayDatePreset(
+        20,
+        tradingCalendar,
+        new Date('2026-08-19T23:00:00Z')
+      )
+    ).toEqual({ start: '2026-07-23', end: '2026-08-19' });
+    expect(
+      replayDatePreset(
+        20,
+        tradingCalendar,
+        new Date('2026-08-20T07:01:00Z')
+      )
+    ).toEqual({ start: '2026-07-24', end: '2026-08-20' });
+  });
+
+  it('excludes an unfinished weekday when the server calendar is unavailable', () => {
+    expect(
+      replayDatePreset(5, [], new Date('2026-08-19T23:00:00Z'))
+    ).toEqual({ start: '2026-08-13', end: '2026-08-19' });
+  });
+
+  it('generates a UUID when randomUUID is unavailable on an HTTP LAN origin', () => {
+    const getRandomValues = <T extends ArrayBufferView | null>(array: T): T => {
+      if (array instanceof Uint8Array) {
+        array.set(Array.from({ length: 16 }, (_, index) => index));
+      }
+      return array;
+    };
+
+    expect(replayIdempotencyKey({ getRandomValues })).toBe(
+      '00010203-0405-4607-8809-0a0b0c0d0e0f'
+    );
   });
 });

@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -317,3 +318,66 @@ def test_limit_price_derivation_is_backtest_only_and_explicit():
 
   runtime.context.parameters["backtest_limit_rate"] = 0
   assert StrategyExecutor._backtest_limit_rate(runtime) is None
+
+
+def test_t_trade_replay_derives_strict_limits_from_event_date_and_master_facts():
+  runtime = make_runtime()
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.context.parameters.update(
+    {
+      "t_trade_replay": True,
+      "initial_instrument_metadata": {
+        "600000.SH": {
+          "instrument_name": "浦发银行",
+          "listing_date": "1999-11-10",
+          "expiry_date": "2038-01-19",
+        }
+      },
+    }
+  )
+  timestamp = datetime(2026, 8, 19, 10, 0)
+
+  rate = StrategyExecutor._backtest_limit_rate(
+    runtime,
+    instrument_code="600000.SH",
+    timestamp=timestamp,
+  )
+  snapshot = MarketDataSnapshot.from_tick(
+    SimpleNamespace(
+      stock_code="600000.SH",
+      time=timestamp,
+      last_price=11.0,
+      last_close=10.0,
+      stock_status=0,
+    ),
+    limit_rate=rate,
+  )
+
+  assert rate == pytest.approx(0.10)
+  assert snapshot.limit_up == pytest.approx(11.0)
+  assert snapshot.limit_down == pytest.approx(9.0)
+  assert snapshot.source == "tick_derived_limits"
+  StrategyExecutor._record_t_trade_replay_price_limit_source(runtime, snapshot)
+  assert runtime.context.parameters["replay_price_limit_source_counts"] == {
+    "DERIVED_TICK": 1
+  }
+
+
+def test_t_trade_replay_keeps_strict_rejection_without_lifecycle_evidence():
+  runtime = make_runtime()
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.context.parameters.update(
+    {
+      "t_trade_replay": True,
+      "initial_instrument_metadata": {"600000.SH": {}},
+    }
+  )
+
+  assert (
+    StrategyExecutor._backtest_limit_rate(
+      runtime,
+      instrument_code="600000.SH",
+      timestamp=datetime(2026, 8, 19, 10, 0),
+    )
+    is None
+  )

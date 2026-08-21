@@ -8,9 +8,12 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 .\ops\quantx.ps1 down
 ```
 
-普通开发命令会统一提升为 `full/live`，同时启动 Prefect Worker 和 QMT Agent；
+普通开发命令会统一提升为 `full/live`，启动 Prefect Worker，并在本机预检通过时
+启动 QMT Agent；
 Prefect Server、数据库、InfluxDB 和 Redis 由外部管理。只有操作者明确要求纯行情
-运行时才传 `-Mode data-only`，不得把 live 启动失败自动降级为 data-only。
+运行时才传 `-Mode data-only`，不得把 live 启动失败自动降级为 data-only。QMT
+登记预检失败时，模式仍为 `full/live`，但全部实盘能力门会在 API/Engine 启动前
+关闭，QMT 子进程标记为 `BLOCKED`；非 QMT API 与已持久化历史行情回测继续可用。
 
 ## 策略域导入
 

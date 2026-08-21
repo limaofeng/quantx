@@ -17,12 +17,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from quantx_domain.strategies.base import (
   StrategyBase,
+  StrategyContext,
   StrategyInput,
   StrategyOutput,
   StrategyRunMode,
 )
 from quantx_engine.strategy_executor import (
   ExecutionStatus,
+  StrategyRuntime,
 )
 from quantx_engine.strategy_manager import StrategyManager
 from quantx_infrastructure.models.enums import StrategyRunStatus
@@ -62,6 +64,32 @@ class MockStrategy(StrategyBase):
 
   async def on_stop(self):
     self.stopped = True
+
+
+def _t_trade_replay_runtime(instruments: list[str]) -> StrategyRuntime:
+  metadata = {
+    code: {"instrument_name": code, "position_shares": 100}
+    for code in instruments
+  }
+  context = StrategyContext(
+    run_id="replay-run",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=list(instruments),
+    parameters={
+      "t_trade_replay": True,
+      "initial_instrument_metadata": metadata,
+      "replay_skipped_instruments": [],
+    },
+    backtest_start_time=datetime(2026, 8, 3, 9, 30),
+    backtest_end_time=datetime(2026, 8, 4, 15, 0),
+  )
+  return StrategyRuntime(
+    run_id=context.run_id,
+    name="isolated replay",
+    strategy_id=1,
+    strategy_class=MockStrategy,
+    context=context,
+  )
 
 
 async def keep_running_loop(runtime):
@@ -295,6 +323,200 @@ class TestStrategyManager:
 
     assert success is False
     repository.update_run.assert_not_awaited()
+
+  @pytest.mark.asyncio
+  async def test_deferred_start_is_tracked_deduplicated_and_cancellable(
+    self,
+    strategy_manager: StrategyManager,
+  ) -> None:
+    run_id = "deferred-replay"
+    strategy_manager.executor.create(
+      run_id=run_id,
+      strategy_id=1,
+      strategy_class=MockStrategy,
+      context=StrategyContext(
+        run_id=run_id,
+        mode=StrategyRunMode.BACKTEST,
+        instruments=["600887.SH"],
+        parameters={"t_trade_replay": True, "account_id": "account-1"},
+        backtest_id="backtest-1",
+      ),
+    )
+    entered = asyncio.Event()
+
+    async def slow_start(_run_id: str) -> bool:
+      entered.set()
+      await asyncio.Event().wait()
+      return True
+
+    with patch.object(strategy_manager, "start_strategy", new=slow_start):
+      assert await strategy_manager.defer_start_strategy(run_id) is True
+      task = strategy_manager._deferred_start_tasks[run_id]
+      await asyncio.wait_for(entered.wait(), timeout=1.0)
+      assert await strategy_manager.defer_start_strategy(run_id) is True
+      assert strategy_manager._deferred_start_tasks[run_id] is task
+
+      assert await strategy_manager.cancel_deferred_start(run_id) is True
+
+    assert task.cancelled()
+    assert run_id not in strategy_manager._deferred_start_tasks
+
+  @pytest.mark.asyncio
+  async def test_deferred_start_exception_converges_all_durable_states(
+    self,
+    strategy_manager: StrategyManager,
+  ) -> None:
+    run_id = "failed-replay"
+    strategy_manager.executor.create(
+      run_id=run_id,
+      strategy_id=1,
+      strategy_class=MockStrategy,
+      context=StrategyContext(
+        run_id=run_id,
+        mode=StrategyRunMode.BACKTEST,
+        instruments=["600887.SH"],
+        parameters={"t_trade_replay": True, "account_id": "account-1"},
+        backtest_id="backtest-2",
+      ),
+    )
+
+    async def failed_start(_run_id: str) -> bool:
+      raise RuntimeError("tick sync failed")
+
+    with (
+      patch.object(strategy_manager, "start_strategy", new=failed_start),
+      patch.object(
+        strategy_manager,
+        "_mark_backtest_error_safely",
+        new_callable=AsyncMock,
+      ) as mark_backtest_error,
+      patch(
+        "quantx_engine.strategy_manager.t_trade_replay_projection_service.update",
+        new_callable=AsyncMock,
+      ) as update_projection,
+    ):
+      assert await strategy_manager.defer_start_strategy(run_id) is True
+      task = strategy_manager._deferred_start_tasks[run_id]
+      await task
+
+    strategy_manager._update_runtime_status.assert_awaited_once_with(
+      run_id,
+      "ERROR",
+      "tick sync failed",
+    )
+    mark_backtest_error.assert_awaited_once_with(
+      "backtest-2",
+      "tick sync failed",
+    )
+    update_projection.assert_awaited_once()
+    assert update_projection.await_args.kwargs["status"] == "ERROR"
+
+  @pytest.mark.asyncio
+  async def test_shutdown_cancels_preparation_without_terminalizing_replay(
+    self,
+    strategy_manager: StrategyManager,
+  ) -> None:
+    run_id = "shutdown-replay"
+    strategy_manager.executor.create(
+      run_id=run_id,
+      strategy_id=1,
+      strategy_class=MockStrategy,
+      context=StrategyContext(
+        run_id=run_id,
+        mode=StrategyRunMode.BACKTEST,
+        instruments=["600887.SH"],
+        parameters={"t_trade_replay": True, "account_id": "account-1"},
+        backtest_id="backtest-shutdown",
+      ),
+    )
+    entered = asyncio.Event()
+
+    async def slow_start(_run_id: str) -> bool:
+      entered.set()
+      await asyncio.Event().wait()
+      return True
+
+    with patch.object(strategy_manager, "start_strategy", new=slow_start):
+      assert await strategy_manager.defer_start_strategy(run_id) is True
+      task = strategy_manager._deferred_start_tasks[run_id]
+      await asyncio.wait_for(entered.wait(), timeout=1.0)
+      await strategy_manager._cancel_deferred_starts_for_shutdown()
+
+    assert task.cancelled()
+    assert strategy_manager._deferred_start_tasks == {}
+    strategy_manager._update_runtime_status.assert_not_awaited()
+
+  @pytest.mark.asyncio
+  async def test_restore_pending_replay_after_shutdown_resumes_preparation(
+    self,
+  ) -> None:
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    run = SimpleNamespace(
+      id="restored-replay",
+      name="Restored replay",
+      strategy_id=1,
+      strategy=SimpleNamespace(class_name="MockStrategy", file_path=""),
+      parameters={"t_trade_replay": True, "account_id": "account-1"},
+      mode=StrategyRunMode.BACKTEST,
+      status=StrategyRunStatus.PENDING,
+      instruments=["600887.SH"],
+      initial_capital=100_000.0,
+      metrics=None,
+    )
+    backtest = SimpleNamespace(
+      id="restored-backtest",
+      status="PENDING",
+      version=1,
+      backtest_start_time=datetime(2026, 7, 23, 9, 30),
+      backtest_end_time=datetime(2026, 8, 19, 15, 0),
+    )
+    run_repo = AsyncMock()
+    run_repo.find_all_active_runs.return_value = [run]
+    backtest_repo = AsyncMock()
+    backtest_repo.get_backtests_by_run.return_value = [backtest]
+
+    async def fake_get_async_db():
+      yield AsyncMock()
+
+    with (
+      patch("quantx_engine.strategy_manager.get_async_db", fake_get_async_db),
+      patch(
+        "quantx_engine.strategy_manager.StrategyRunRepository",
+        return_value=run_repo,
+      ),
+      patch(
+        "quantx_infrastructure.repositories.backtest_repository.BacktestRepository",
+        return_value=backtest_repo,
+      ),
+      patch(
+        "quantx_engine.strategy_manager.strategy_registry.get_strategy_class",
+        return_value=MockStrategy,
+      ),
+      patch(
+        "quantx_engine.strategy_manager.t_trade_replay_projection_service.get",
+        new_callable=AsyncMock,
+        return_value={"status": "RUNNING"},
+      ),
+      patch.object(
+        manager,
+        "defer_start_strategy",
+        new_callable=AsyncMock,
+        return_value=True,
+      ) as defer_start,
+      patch.object(
+        manager,
+        "start_strategy",
+        new_callable=AsyncMock,
+      ) as start_strategy,
+    ):
+      await manager._restore_runs()
+
+    defer_start.assert_awaited_once_with("restored-replay")
+    start_strategy.assert_not_awaited()
+    assert manager.get_run("restored-replay") is not None
+    manager.executor.runs.clear()
+    StrategyManager._instance = None
 
   @pytest.mark.asyncio
   async def test_pause_and_resume_strategy(self, strategy_manager):
@@ -636,4 +858,436 @@ class TestStrategyManager:
         "periods": ["tick"],
       },
     ]
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_partial_tick_day_is_not_treated_as_complete(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_date = date(2026, 8, 3)
+    partial_times = [
+      datetime(2026, 8, 3, 10, 0) + timedelta(minutes=index)
+      for index in range(10)
+    ]
+    tick_repo = SimpleNamespace(
+      find_all=lambda **_kwargs: [
+        SimpleNamespace(time=value) for value in partial_times
+      ]
+    )
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=[trading_date])
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper", lambda: calendar
+    )
+
+    missing = await manager._find_missing_backtest_data(
+      service=SimpleNamespace(tick_repo=tick_repo),
+      instruments=["600887.SH"],
+      start_time=datetime(2026, 8, 3, 9, 30),
+      end_time=datetime(2026, 8, 3, 15, 0),
+      required_kline_periods=set(),
+      require_tick=True,
+      strict_tick_quality=True,
+    )
+
+    issue = missing["600887.SH"]["quality_issues"][0]
+    assert issue["classification"] == "PARTIAL"
+    assert issue["statistics"]["continuous_session_record_count"] == 10
+    assert "TICK_COUNT_TOO_LOW" in issue["reason_codes"]
+    assert "SESSION_OPEN_NOT_COVERED" in issue["reason_codes"]
+    assert "SESSION_CLOSE_NOT_COVERED" in issue["reason_codes"]
+    assert "TICK_COUNT_TOO_LOW" in manager._format_missing_data(missing)
+    assert manager._contains_partial_market_data(missing) is True
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_complete_tick_day_passes_strict_quality_check(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_date = date(2026, 8, 3)
+    morning = [
+      datetime(2026, 8, 3, 9, 30) + timedelta(minutes=index)
+      for index in range(121)
+    ]
+    afternoon = [
+      datetime(2026, 8, 3, 13, 0) + timedelta(minutes=index)
+      for index in range(121)
+    ]
+    tick_repo = SimpleNamespace(
+      find_all=lambda **_kwargs: [
+        SimpleNamespace(time=value) for value in morning + afternoon
+      ]
+    )
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=[trading_date])
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper", lambda: calendar
+    )
+
+    missing = await manager._find_missing_backtest_data(
+      service=SimpleNamespace(tick_repo=tick_repo),
+      instruments=["600887.SH"],
+      start_time=datetime(2026, 8, 3, 9, 30),
+      end_time=datetime(2026, 8, 3, 15, 0),
+      required_kline_periods=set(),
+      require_tick=True,
+      strict_tick_quality=True,
+    )
+
+    assert missing == {}
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_with_complete_local_data_never_calls_agent(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["600887.SH"])
+    monkeypatch.setattr(
+      manager,
+      "_find_missing_backtest_data",
+      AsyncMock(return_value={}),
+    )
+    queued = AsyncMock()
+    waited = AsyncMock()
+    monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
+    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.HistoricalMarketDataService",
+      lambda: SimpleNamespace(),
+    )
+
+    await manager._ensure_backtest_data_available(runtime)
+
+    queued.assert_not_awaited()
+    waited.assert_not_awaited()
+    assert runtime.context.instruments == ["600887.SH"]
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_skips_only_missing_local_symbol_when_agent_offline(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["600887.SH", "688552.SH"])
+    missing = {
+      "688552.SH": {
+        "dates": {date(2026, 8, 3)},
+        "klines": set(),
+        "tick": True,
+      }
+    }
+    monkeypatch.setattr(
+      manager,
+      "_find_missing_backtest_data",
+      AsyncMock(side_effect=[missing, missing]),
+    )
+    queued = AsyncMock(
+      return_value={
+        "status": "skipped",
+        "reason": "market_data_agent_unavailable",
+      }
+    )
+    waited = AsyncMock()
+    monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
+    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.HistoricalMarketDataService",
+      lambda: SimpleNamespace(),
+    )
+    repo = SimpleNamespace(update_run=AsyncMock())
+
+    async def fake_get_async_db():
+      yield object()
+
+    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.StrategyRunRepository",
+      lambda _db: repo,
+    )
+
+    await manager._ensure_backtest_data_available(runtime)
+
+    queued.assert_awaited_once_with(
+      stock_list=["688552.SH"],
+      start_time="20260803",
+      end_time="20260803",
+      periods=["tick"],
+    )
+    waited.assert_not_awaited()
+    assert runtime.context.instruments == ["600887.SH"]
+    assert runtime.context.parameters["replay_data_preparation"] == {
+      "schema_version": 1,
+      "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SUPPLEMENT_NON_BLOCKING",
+      "local_authority": "INFLUXDB",
+      "missing_before": ["688552.SH"],
+      "missing_after": ["688552.SH"],
+      "available_instruments": ["600887.SH"],
+      "unsupported_periods": [],
+      "supplement": {
+        "mode": "ASYNC_OPTIONAL",
+        "status": "AGENT_UNAVAILABLE",
+        "queued_request_ids": [],
+        "completed_request_ids": [],
+        "failed_requests": [],
+        "reason": "market_data_agent_unavailable",
+      },
+    }
+    skipped = runtime.context.parameters["replay_skipped_instruments"]
+    assert [item["stock_code"] for item in skipped] == ["688552.SH"]
+    assert "当前无在线行情 Agent" in skipped[0]["reason"]
+    repo.update_run.assert_awaited_once()
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_t_trade_replay_all_partial_local_data_fails_closed_and_audits(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["688552.SH"])
+    missing = {
+      "688552.SH": {
+        "dates": {date(2026, 8, 3)},
+        "klines": set(),
+        "tick": True,
+        "quality_issues": [
+          {
+            "data_type": "tick",
+            "date": "2026-08-03",
+            "instrument_code": "688552.SH",
+            "complete": False,
+            "classification": "PARTIAL",
+            "reason_codes": ["SESSION_CLOSE_NOT_COVERED"],
+            "message": "收盘时段缺失",
+            "statistics": {"continuous_session_record_count": 80},
+          }
+        ],
+      }
+    }
+    monkeypatch.setattr(
+      manager,
+      "_find_missing_backtest_data",
+      AsyncMock(side_effect=[missing, missing]),
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.queue_market_data_sync",
+      AsyncMock(
+        return_value={
+          "status": "skipped",
+          "reason": "market_data_agent_unavailable",
+        }
+      ),
+    )
+    waited = AsyncMock()
+    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.HistoricalMarketDataService",
+      lambda: SimpleNamespace(),
+    )
+    repo = SimpleNamespace(update_run=AsyncMock())
+
+    async def fake_get_async_db():
+      yield object()
+
+    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.StrategyRunRepository",
+      lambda _db: repo,
+    )
+
+    with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+      await manager._ensure_backtest_data_available(runtime)
+
+    waited.assert_not_awaited()
+    assert runtime.context.instruments == []
+    assert runtime.context.parameters["replay_data_preparation"]["missing_after"] == [
+      "688552.SH"
+    ]
+    preparation = runtime.context.parameters["replay_data_preparation"]
+    assert preparation["schema_version"] == 2
+    assert preparation["quality_policy"] == "STRICT_DAILY_SESSION_COVERAGE"
+    assert preparation["quality_issues_after"]["688552.SH"][0][
+      "reason_codes"
+    ] == ["SESSION_CLOSE_NOT_COVERED"]
+    assert runtime.context.parameters["replay_skipped_instruments"][0][
+      "stock_code"
+    ] == "688552.SH"
+    assert runtime.context.parameters["replay_skipped_instruments"][0][
+      "data_status"
+    ] == "DATA_PARTIAL"
+    assert "SESSION_CLOSE_NOT_COVERED" in runtime.context.parameters[
+      "replay_skipped_instruments"
+    ][0]["reason"]
+    repo.update_run.assert_awaited_once()
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_deferred_all_missing_replay_preserves_data_insufficient_error(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["688552.SH"])
+    runtime.context.parameters["account_id"] = "account-1"
+    runtime.context.backtest_id = "backtest-1"
+    manager.executor.runs[runtime.run_id] = runtime
+    missing = {
+      "688552.SH": {
+        "dates": {date(2026, 8, 3)},
+        "klines": set(),
+        "tick": True,
+      }
+    }
+    monkeypatch.setattr(
+      manager,
+      "_find_missing_backtest_data",
+      AsyncMock(side_effect=[missing, missing]),
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.queue_market_data_sync",
+      AsyncMock(
+        return_value={
+          "status": "skipped",
+          "reason": "market_data_agent_unavailable",
+        }
+      ),
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.HistoricalMarketDataService",
+      lambda: SimpleNamespace(),
+    )
+    repo = SimpleNamespace(update_run=AsyncMock())
+
+    async def fake_get_async_db():
+      yield object()
+
+    monkeypatch.setattr("quantx_engine.strategy_manager.get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.StrategyRunRepository",
+      lambda _db: repo,
+    )
+    update_status = AsyncMock()
+    mark_backtest = AsyncMock()
+    update_projection = AsyncMock()
+    broker_start = AsyncMock()
+    monkeypatch.setattr(manager, "_update_runtime_status", update_status)
+    monkeypatch.setattr(manager, "_mark_backtest_error_safely", mark_backtest)
+    monkeypatch.setattr(manager.executor, "start", broker_start)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.t_trade_replay_projection_service.update",
+      update_projection,
+    )
+
+    assert await manager.defer_start_strategy(runtime.run_id) is True
+    deferred = manager._deferred_start_tasks[runtime.run_id]
+    await deferred
+    await asyncio.sleep(0)
+
+    assert runtime.status == ExecutionStatus.ERROR
+    assert runtime.error_message.startswith("DATA_INSUFFICIENT:")
+    assert runtime.context.instruments == []
+    broker_start.assert_not_awaited()
+    assert len(update_status.await_args_list) == 2
+    assert all(
+      call.args == (runtime.run_id, "ERROR", runtime.error_message)
+      for call in update_status.await_args_list
+    )
+    assert len(mark_backtest.await_args_list) == 2
+    assert all(
+      call.args == ("backtest-1", runtime.error_message)
+      for call in mark_backtest.await_args_list
+    )
+    update_projection.assert_awaited_once()
+    assert update_projection.await_args.kwargs["status"] == "ERROR"
+    assert runtime.context.parameters["replay_data_preparation"]["missing_after"] == [
+      "688552.SH"
+    ]
+    assert runtime.context.parameters["replay_skipped_instruments"][0][
+      "stock_code"
+    ] == "688552.SH"
+    assert runtime.run_id not in manager._deferred_start_tasks
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_generic_backtest_keeps_blocking_sync_semantics(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["600887.SH"])
+    runtime.context.parameters.pop("t_trade_replay")
+    missing = {
+      "600887.SH": {
+        "dates": {date(2026, 8, 3)},
+        "klines": set(),
+        "tick": True,
+      }
+    }
+    monkeypatch.setattr(
+      manager,
+      "_find_missing_backtest_data",
+      AsyncMock(side_effect=[missing, {}]),
+    )
+    sync = AsyncMock()
+    monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
+    queued = AsyncMock()
+    monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.HistoricalMarketDataService",
+      lambda: SimpleNamespace(),
+    )
+
+    await manager._ensure_backtest_data_available(runtime)
+
+    sync.assert_awaited_once_with(
+      runtime=runtime,
+      missing=missing,
+      sync_periods={"tick"},
+    )
+    queued.assert_not_awaited()
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_failed_run_task_persists_runtime_error_message(self):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    runtime = _t_trade_replay_runtime(["002594.SZ"])
+    runtime.context.backtest_id = "backtest-clock-error"
+    runtime.status = ExecutionStatus.ERROR
+    runtime.error_message = "ReplayClock cannot move backwards"
+    manager.executor.runs[runtime.run_id] = runtime
+    update_status = AsyncMock()
+    mark_backtest = AsyncMock()
+    manager._update_runtime_status = update_status
+    manager._mark_backtest_error_safely = mark_backtest
+
+    task = asyncio.create_task(asyncio.sleep(0))
+    await task
+    await manager._on_run_task_done(runtime.run_id, task)
+
+    mark_backtest.assert_awaited_once_with(
+      "backtest-clock-error",
+      runtime.error_message,
+    )
+    update_status.assert_awaited_once_with(
+      runtime.run_id,
+      "ERROR",
+      runtime.error_message,
+    )
     StrategyManager._instance = None

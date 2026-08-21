@@ -119,6 +119,7 @@ def _report_html(payload: Dict[str, Any]) -> str:
   <h2>统计口径</h2>
   <p>{html.escape(str(methodology.get("forced_liquidation", "")))}</p>
   <p>{html.escape(str(methodology.get("capital_utilization", "")))}</p>
+  <p>{html.escape(str(methodology.get("price_limits", "")))}</p>
   <h2>批次明细</h2>
   <table><thead><tr><th>标的</th><th>状态</th><th>买 / 卖均价</th><th>持有</th><th>资金利用率</th><th>净收益</th><th>退出原因</th></tr></thead>
   <tbody>{cycle_rows}</tbody></table>

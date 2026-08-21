@@ -1215,12 +1215,14 @@ class RuntimeStateManager:
         cash: float,
         frozen_cash: float = 0.0,
         total_asset: float = 0.0,
+        non_trading_asset: float = 0.0,
     ) -> None:
         """更新账户信息"""
         self._state["account"] = {
             "cash": cash,
             "frozen_cash": frozen_cash,
             "total_asset": total_asset,
+            "non_trading_asset": max(0.0, float(non_trading_asset or 0.0)),
         }
         self._mark_dirty()
 
@@ -1239,7 +1241,12 @@ class RuntimeStateManager:
         account = self._state.get("account", {})
         cash = float(account.get("cash", 0.0))
         frozen_cash = float(account.get("frozen_cash", 0.0))
-        account["total_asset"] = cash + frozen_cash + self._sum_market_value()
+        non_trading_asset = max(
+            0.0, float(account.get("non_trading_asset", 0.0) or 0.0)
+        )
+        account["total_asset"] = (
+            cash + frozen_cash + self._sum_market_value() + non_trading_asset
+        )
         self._state["account"] = account
 
     def get_account_quota(self) -> Dict[str, float]:
@@ -1247,7 +1254,10 @@ class RuntimeStateManager:
         cash = float(account.get("cash", 0.0))
         frozen_cash = float(account.get("frozen_cash", 0.0))
         cash_total = cash + frozen_cash
-        total_asset = cash_total + self._sum_market_value()
+        non_trading_asset = max(
+            0.0, float(account.get("non_trading_asset", 0.0) or 0.0)
+        )
+        total_asset = cash_total + self._sum_market_value() + non_trading_asset
         return {
             "available_cash": cash,
             "frozen_cash": frozen_cash,

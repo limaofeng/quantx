@@ -332,7 +332,7 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
       {
         "stock_code": code,
         "instrument_name": str(item.get("instrument_name", "") or names.get(code, "")),
-        "status": "DATA_INSUFFICIENT",
+        "status": str(item.get("data_status") or "DATA_INSUFFICIENT"),
         "reason": str(item.get("reason", "历史 Tick 数据不足") or "历史 Tick 数据不足"),
         "t_net_profit": 0.0,
         "total_fees": 0.0,
@@ -366,9 +366,31 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
       result["status"] = "OK"
       result["reason"] = ""
 
+  reported_initial_equity = _number(params.get("initial_total_asset"))
   initial_equity = _number(
-    params.get("initial_total_asset"), getattr(broker, "initial_capital", 0.0)
+    getattr(broker, "initial_capital", None), reported_initial_equity
   )
+  configured_reconciliation = dict(
+    params.get("initial_asset_reconciliation") or {}
+  )
+  broker_reconciliation = dict(
+    getattr(broker, "initial_asset_reconciliation", {}) or {}
+  )
+  reconciliation_flags = sorted(
+    {
+      str(flag)
+      for flag in [
+        *list(configured_reconciliation.get("quality_flags") or []),
+        *list(broker_reconciliation.get("quality_flags") or []),
+      ]
+      if str(flag)
+    }
+  )
+  asset_reconciliation = {
+    **configured_reconciliation,
+    **broker_reconciliation,
+    "quality_flags": reconciliation_flags,
+  }
   curve = []
   trading_dates = set()
   for point in list(getattr(broker, "replay_curve", []) or []):
@@ -446,11 +468,72 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
     _integer(liquidation.get("failed_cycles")),
   )
   broker_metrics = broker.get_performance_metrics() if broker else {}
+  price_limit_policy = dict(params.get("replay_price_limit_policy") or {})
+  price_limit_source_counts = {
+    str(key): max(0, _integer(value))
+    for key, value in dict(params.get("replay_price_limit_source_counts") or {}).items()
+  }
+  native_limit_events = sum(
+    count
+    for source, count in price_limit_source_counts.items()
+    if source.startswith("NATIVE_")
+  )
+  derived_limit_events = sum(
+    count
+    for source, count in price_limit_source_counts.items()
+    if source.startswith("DERIVED_")
+  )
+  missing_limit_events = sum(
+    count
+    for source, count in price_limit_source_counts.items()
+    if source.startswith("MISSING_")
+  )
+  tick_read_audit = dict(params.get("replay_tick_read_audit") or {})
+  tick_read_issues = list(tick_read_audit.get("issues") or [])
   quality_messages = []
   if skipped:
     quality_messages.append(f"{len(skipped)} 只持仓因历史数据不足未参与回放")
   if liquidation_failed_cycles:
     quality_messages.append(f"{liquidation_failed_cycles} 个批次期末未完成合法清算")
+  if derived_limit_events:
+    quality_messages.append(
+      f"{derived_limit_events} 个行情事件的涨跌停价由前收盘价和交易所规则派生"
+    )
+  if missing_limit_events:
+    quality_messages.append(
+      f"{missing_limit_events} 个行情事件缺少可确认的涨跌停价，严格风控保持拒绝"
+    )
+  if tick_read_issues:
+    quality_messages.append(
+      f"{len(tick_read_issues)} 个 Tick 读取窗口未通过完整性校验"
+    )
+  non_trading_asset = max(
+    0.0, _number(asset_reconciliation.get("non_trading_asset"))
+  )
+  raw_asset_residual = _number(asset_reconciliation.get("raw_residual"))
+  if non_trading_asset > 0.01:
+    quality_messages.append(
+      f"初始组合有 {non_trading_asset:.2f} 元未归属于可用资金或回放持仓，"
+      "已作为恒定非交易资产计入主动与被动权益"
+    )
+  if raw_asset_residual < -0.01:
+    quality_messages.append(
+      f"初始现金与持仓市值比快照总资产高 {-raw_asset_residual:.2f} 元，"
+      "负残差已按 0 处理并以已知分项作为初始权益"
+    )
+  source_quality_flags = [
+    flag
+    for flag in reconciliation_flags
+    if flag
+    not in {
+      "NON_TRADING_ASSET_RESIDUAL_PRESERVED",
+      "INITIAL_COMPONENTS_EXCEED_REPORTED_TOTAL",
+    }
+  ]
+  if source_quality_flags:
+    quality_messages.append(
+      "初始资产快照质量标记：" + "、".join(source_quality_flags)
+    )
   data_quality = "PARTIAL" if quality_messages else "OK"
   return {
     "data_quality": data_quality,
@@ -465,9 +548,26 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
         "卖出等待越长，资金利用率越低"
       ),
       "capital_utilization_reference_hours": CAPITAL_UTILIZATION_REFERENCE_HOURS,
+      "initial_assets": (
+        "初始总权益按可用资金、回放持仓市值和恒定非交易资产残差构成；"
+        "非交易资产不进入可用现金、持仓或成交撮合。负残差不作为负资产伪造，"
+        "而是钳制为 0 并保留质量标记。"
+      ),
+      "initial_asset_reconciliation": asset_reconciliation,
+      "price_limits": (
+        "历史行情中的原生涨跌停价优先；缺失时，仅在证券主数据和交易日规则可确认时，"
+        "按前收盘价派生，否则保持严格风控拒绝。"
+        f"来源统计：原生 {native_limit_events}、派生 {derived_limit_events}、"
+        f"缺失 {missing_limit_events} 个行情事件。"
+      ),
+      "price_limit_policy": price_limit_policy,
+      "price_limit_source_counts": price_limit_source_counts,
+      "tick_read_audit": tick_read_audit,
     },
     "summary": {
       "initial_equity": initial_equity,
+      "reported_initial_equity": reported_initial_equity,
+      "non_trading_asset": non_trading_asset,
       "final_equity": final_equity,
       "t_net_profit": t_net_profit,
       "total_return_pct": total_return_pct,

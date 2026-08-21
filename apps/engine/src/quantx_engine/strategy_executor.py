@@ -73,6 +73,7 @@ from quantx_domain.trading import (
   PositionAdjustmentLayer,
   RiskAction,
   TradingRiskChecker,
+  resolve_ashare_daily_limit_rate,
 )
 from quantx_domain.trading.decision_trace import (
   summarize_intent,
@@ -123,6 +124,8 @@ if TYPE_CHECKING:
   from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 
 
+_T_TRADE_REPLAY_TICK_PAGE_SIZE = 6_000
+_T_TRADE_REPLAY_MAX_TICK_PAGES_PER_WINDOW = 100
 _DURABLE_EVENT_APPLY_TIMEOUT_SECONDS = 10.0
 _RUNTIME_MARKET_EVENT_QUEUE_CAPACITY = 256
 _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS = 3.0
@@ -867,12 +870,17 @@ class StrategyExecutor:
       if runtime.state_manager:
         account = runtime.state_manager.get_account()
         positions = runtime.state_manager.get_all_positions()
-        if (
+        initialize_account = (
           account.get("cash", 0.0) <= 0
           and account.get("frozen_cash", 0.0) <= 0
           and account.get("total_asset", 0.0) <= 0
           and not positions
-        ):
+        )
+        is_t_trade_replay = bool(
+          runtime.context.mode == StrategyRunMode.BACKTEST
+          and runtime.context.parameters.get("t_trade_replay")
+        )
+        if initialize_account and not is_t_trade_replay:
           runtime.state_manager.update_account(
             cash=runtime.context.initial_capital,
             frozen_cash=0.0,
@@ -888,6 +896,28 @@ class StrategyExecutor:
             self._sync_dynamic_holding_inventory(runtime, initial_metadata)
           else:
             self._seed_bucket_ledger_from_parameters(runtime)
+        if initialize_account and is_t_trade_replay:
+          initial_cash_value = runtime.context.parameters.get("initial_cash")
+          initial_cash = (
+            runtime.context.initial_capital
+            if initial_cash_value is None
+            else float(initial_cash_value)
+          )
+          seeded_market_value = sum(
+            max(0.0, float(position.get("market_value", 0.0) or 0.0))
+            for position in runtime.state_manager.get_all_positions().values()
+          )
+          non_trading_asset = max(
+            0.0,
+            runtime.context.initial_capital - initial_cash - seeded_market_value,
+          )
+          runtime.state_manager.update_account(
+            cash=initial_cash,
+            frozen_cash=0.0,
+            total_asset=runtime.context.initial_capital,
+            non_trading_asset=non_trading_asset,
+          )
+
       # Strategy initialization is part of the foreground startup contract.
       # Returning success before it completes would let StrategyManager persist
       # RUNNING while a background task can still fail and leak broker/state
@@ -1089,7 +1119,14 @@ class StrategyExecutor:
       self.logger.info(
         f"{runtime.context.mode.value} Broker 初始持仓已注入: {seeded} 个标的"
       )
-    if isinstance(runtime.broker, BacktestBroker):
+    configure_initial_portfolio = getattr(
+      type(runtime.broker),
+      "configure_initial_portfolio",
+      None,
+    )
+    if runtime.context.mode == StrategyRunMode.BACKTEST and callable(
+      configure_initial_portfolio
+    ):
       params = dict(runtime.context.parameters or {})
       runtime.broker.configure_initial_portfolio(
         cash=float(params.get("initial_cash", runtime.context.initial_capital) or 0.0),
@@ -2528,8 +2565,9 @@ class StrategyExecutor:
 
     # 创建 Broker
     if mode == StrategyRunMode.BACKTEST:
-      is_board_replay = bool(
+      is_strict_tick_replay = bool(
         runtime.context.parameters.get("limit_up_board_replay")
+        or runtime.context.parameters.get("t_trade_replay")
       )
       runtime.broker = BacktestBroker(
         account_id=runtime.run_id,
@@ -2559,9 +2597,9 @@ class StrategyExecutor:
           )
           or 0.25
         ),
-        strict_book_depth=is_board_replay,
-        no_queue_credit=is_board_replay,
-        defer_new_orders_until_next_quote=is_board_replay,
+        strict_book_depth=is_strict_tick_replay,
+        no_queue_credit=is_strict_tick_replay,
+        defer_new_orders_until_next_quote=is_strict_tick_replay,
       )
     elif mode == StrategyRunMode.PAPER:
       runtime.broker = SimulatorBroker(
@@ -2814,11 +2852,18 @@ class StrategyExecutor:
         f"策略运行循环异常: {runtime.run_id}, 错误: {e}",
       )
       if runtime.context.parameters.get("limit_up_board_replay"):
-        await self._persist_limit_up_board_replay_terminal(
-          runtime,
-          status="ERROR",
-          error_message=str(e),
-        )
+        try:
+          await self._persist_limit_up_board_replay_terminal(
+            runtime,
+            status="ERROR",
+            error_message=str(e),
+          )
+        except Exception as persist_exc:
+          self.logger.error(
+            "异常回放终态持久化失败: %s, %s",
+            runtime.run_id,
+            persist_exc,
+          )
     finally:
       if runtime.status == ExecutionStatus.ERROR:
         try:
@@ -3254,6 +3299,17 @@ class StrategyExecutor:
       and runtime.context.parameters.get("limit_up_board_replay")
     )
 
+  @staticmethod
+  def _requires_replay_event_integrity(runtime: StrategyRuntime) -> bool:
+    """Return whether one failed market event must fail the whole replay."""
+
+    if runtime.context.mode != StrategyRunMode.BACKTEST:
+      return False
+    parameters = runtime.context.parameters
+    return bool(
+      parameters.get("limit_up_board_replay") or parameters.get("t_trade_replay")
+    )
+
   async def _board_replay_report_barrier(
     self,
     runtime: StrategyRuntime,
@@ -3472,12 +3528,12 @@ class StrategyExecutor:
         events: List[tuple[datetime, int, str, str, Any]] = []
         for code in instrument_codes:
           if use_tick_data:
-            ticks = await data_adapter.get_ticks(
+            ticks = await self._load_backtest_ticks(
+              runtime,
+              data_adapter,
               instrument_code=code,
               start_time=window_start,
               end_time=window_end,
-              dividend_type="front",
-              limit=6000,
             )
             previous_tick = last_tick_time.get(code)
             filtered_ticks = [
@@ -3540,6 +3596,290 @@ class StrategyExecutor:
       "SUCCESS",
       f"多标的全局时间线回测完成: instruments={len(instrument_codes)}, "
       f"tick={totals['tick']}, kline={totals['kline']}",
+    )
+
+  async def _load_backtest_ticks(
+    self,
+    runtime: StrategyRuntime,
+    data_adapter: HistoricalDataAdapter,
+    *,
+    instrument_code: str,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> List[Any]:
+    """Load a replay window without silently accepting a backend row limit."""
+
+    if not runtime.context.parameters.get("t_trade_replay"):
+      return await data_adapter.get_ticks(
+        instrument_code=instrument_code,
+        start_time=start_time,
+        end_time=end_time,
+        dividend_type="front",
+        limit=6_000,
+      )
+    return await self._load_t_trade_replay_ticks_paginated(
+      runtime,
+      data_adapter,
+      instrument_code=instrument_code,
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  async def _load_t_trade_replay_ticks_paginated(
+    self,
+    runtime: StrategyRuntime,
+    data_adapter: HistoricalDataAdapter,
+    *,
+    instrument_code: str,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> List[Any]:
+    page_size = max(1, int(_T_TRADE_REPLAY_TICK_PAGE_SIZE))
+    max_pages = max(1, int(_T_TRADE_REPLAY_MAX_TICK_PAGES_PER_WINDOW))
+    ticks: List[Any] = []
+    offset = 0
+    queries = 0
+    nonempty_pages = 0
+    previous_page_signature: Optional[tuple[Any, ...]] = None
+    previous_last_time: Optional[datetime] = None
+
+    while True:
+      queries += 1
+      try:
+        market_data_service = getattr(data_adapter, "market_data_service", None)
+        if market_data_service is not None:
+          page = await market_data_service.get_tick_data(
+            stock_code=instrument_code,
+            start_time=start_time,
+            end_time=end_time,
+            dividend_type="front",
+            as_frame=False,
+            limit=page_size,
+            offset=offset,
+            order="asc",
+          )
+        else:
+          page = await data_adapter.get_ticks(
+            instrument_code=instrument_code,
+            start_time=start_time,
+            end_time=end_time,
+            dividend_type="front",
+            limit=page_size,
+            order="asc",
+            offset=offset,
+          )
+      except Exception as exc:
+        self._record_t_trade_replay_tick_read_issue(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGE_QUERY_FAILED",
+          message="历史 Tick 分页查询失败，拒绝生成不完整绩效",
+          details={
+            "offset": offset,
+            "query_error_type": type(exc).__name__,
+          },
+        )
+        raise RuntimeError(
+          "DATA_PARTIAL: 历史 Tick 分页查询失败，无法证明回放输入完整 "
+          f"({instrument_code}, {start_time.isoformat()}~{end_time.isoformat()}, "
+          f"offset={offset})"
+        ) from exc
+
+      page_items = list(page or [])
+      if len(page_items) > page_size:
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGE_SIZE_EXCEEDED",
+          message="历史 Tick 查询返回条数超过请求页大小",
+          details={"offset": offset, "returned": len(page_items), "limit": page_size},
+        )
+      if not page_items:
+        break
+
+      page_times: List[datetime] = []
+      for item in page_items:
+        item_time = getattr(item, "time", None)
+        if hasattr(item_time, "to_pydatetime"):
+          item_time = item_time.to_pydatetime()
+        if not isinstance(item_time, datetime):
+          self._raise_t_trade_replay_tick_data_partial(
+            runtime,
+            instrument_code=instrument_code,
+            start_time=start_time,
+            end_time=end_time,
+            reason_code="INVALID_TICK_PAGE_TIMESTAMP",
+            message="历史 Tick 分页结果包含无效时间戳",
+            details={"offset": offset},
+          )
+        page_times.append(time_utils.to_shanghai(item_time))
+
+      if any(current < previous for previous, current in zip(page_times, page_times[1:])):
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGE_NOT_ORDERED",
+          message="历史 Tick 分页结果未按时间升序返回",
+          details={"offset": offset},
+        )
+      page_signature = (
+        len(page_items),
+        page_times[0].isoformat(),
+        page_times[-1].isoformat(),
+      )
+      if previous_page_signature == page_signature:
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGINATION_DID_NOT_ADVANCE",
+          message="历史 Tick 数据源未执行分页偏移",
+          details={"offset": offset, "page_signature": list(page_signature)},
+        )
+      if previous_last_time is not None and page_times[0] < previous_last_time:
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGE_ORDER_REGRESSION",
+          message="历史 Tick 跨页时间顺序倒退",
+          details={"offset": offset},
+        )
+
+      ticks.extend(page_items)
+      nonempty_pages += 1
+      previous_page_signature = page_signature
+      previous_last_time = page_times[-1]
+      offset += len(page_items)
+      if len(page_items) < page_size:
+        break
+      if nonempty_pages >= max_pages:
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGINATION_SAFETY_LIMIT",
+          message="历史 Tick 分页达到安全上限，拒绝静默截断",
+          details={
+            "offset": offset,
+            "page_size": page_size,
+            "maximum_pages": max_pages,
+          },
+        )
+
+    self._record_t_trade_replay_tick_read_success(
+      runtime,
+      record_count=len(ticks),
+      nonempty_pages=nonempty_pages,
+      query_count=queries,
+      hit_page_boundary=bool(nonempty_pages and len(ticks) % page_size == 0),
+    )
+    if nonempty_pages > 1 or (nonempty_pages and len(ticks) % page_size == 0):
+      self._runtime_log(
+        runtime,
+        "INFO",
+        "做 T 回放 Tick 分页读取完成: "
+        f"instrument={instrument_code}, window={start_time}~{end_time}, "
+        f"records={len(ticks)}, pages={nonempty_pages}, queries={queries}",
+      )
+    return ticks
+
+  def _record_t_trade_replay_tick_read_success(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    record_count: int,
+    nonempty_pages: int,
+    query_count: int,
+    hit_page_boundary: bool,
+  ) -> None:
+    params = runtime.context.parameters
+    audit = dict(params.get("replay_tick_read_audit") or {})
+    audit.setdefault("schema_version", 1)
+    audit["policy"] = "OFFSET_PAGINATION_FAIL_CLOSED"
+    audit["page_size"] = max(1, int(_T_TRADE_REPLAY_TICK_PAGE_SIZE))
+    audit["verified_windows"] = int(audit.get("verified_windows") or 0) + 1
+    audit["records_read"] = int(audit.get("records_read") or 0) + record_count
+    audit["pages_read"] = int(audit.get("pages_read") or 0) + nonempty_pages
+    audit["queries"] = int(audit.get("queries") or 0) + query_count
+    if nonempty_pages > 1:
+      audit["paginated_windows"] = int(audit.get("paginated_windows") or 0) + 1
+    if hit_page_boundary:
+      audit["boundary_probe_windows"] = (
+        int(audit.get("boundary_probe_windows") or 0) + 1
+      )
+    audit.setdefault("issues", [])
+    params["replay_tick_read_audit"] = audit
+
+  def _record_t_trade_replay_tick_read_issue(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    start_time: datetime,
+    end_time: datetime,
+    reason_code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+  ) -> None:
+    params = runtime.context.parameters
+    audit = dict(params.get("replay_tick_read_audit") or {})
+    audit.setdefault("schema_version", 1)
+    audit["policy"] = "OFFSET_PAGINATION_FAIL_CLOSED"
+    audit["page_size"] = max(1, int(_T_TRADE_REPLAY_TICK_PAGE_SIZE))
+    issues = list(audit.get("issues") or [])
+    issues.append(
+      {
+        "instrument_code": instrument_code,
+        "window_start": start_time.isoformat(),
+        "window_end": end_time.isoformat(),
+        "reason_code": reason_code,
+        "message": message,
+        "details": dict(details or {}),
+      }
+    )
+    audit["issues"] = issues[-20:]
+    params["replay_tick_read_audit"] = audit
+    self._runtime_log(
+      runtime,
+      "ERROR",
+      f"{message}: instrument={instrument_code}, window={start_time}~{end_time}, "
+      f"reason={reason_code}, details={details or {}}",
+    )
+
+  def _raise_t_trade_replay_tick_data_partial(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    start_time: datetime,
+    end_time: datetime,
+    reason_code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+  ) -> None:
+    self._record_t_trade_replay_tick_read_issue(
+      runtime,
+      instrument_code=instrument_code,
+      start_time=start_time,
+      end_time=end_time,
+      reason_code=reason_code,
+      message=message,
+      details=details,
+    )
+    raise RuntimeError(
+      f"DATA_PARTIAL: {message} "
+      f"({instrument_code}, {start_time.isoformat()}~{end_time.isoformat()}, "
+      f"reason={reason_code})"
     )
 
   def _get_backtest_window_hours(self) -> int:
@@ -3703,7 +4043,11 @@ class StrategyExecutor:
       runtime.data_adapter.current_time = kline.time
     market_snapshot = MarketDataSnapshot.from_kline(
       kline,
-      limit_rate=self._backtest_limit_rate(runtime),
+      limit_rate=self._backtest_limit_rate(
+        runtime,
+        instrument_code=kline.stock_code,
+        timestamp=kline.time,
+      ),
     )
     runtime.latest_market_data[kline.stock_code] = market_snapshot
     strategy_input = self._build_strategy_input(
@@ -4059,12 +4403,12 @@ class StrategyExecutor:
           time_utils.to_utc(window_end),
         )
 
-        ticks = await data_adapter.get_ticks(
+        ticks = await self._load_backtest_ticks(
+          runtime,
+          data_adapter,
           instrument_code=instrument_code,
           start_time=window_start,
           end_time=window_end,
-          dividend_type="front",
-          limit=6000,
         )
         if ticks:
           ticks = [
@@ -4625,16 +4969,71 @@ class StrategyExecutor:
     )
 
   @staticmethod
-  def _backtest_limit_rate(runtime: StrategyRuntime) -> Optional[float]:
-    """Return an explicit backtest-only limit rate; never derive live limits."""
+  def _backtest_limit_rate(
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str = "",
+    timestamp: Optional[datetime] = None,
+  ) -> Optional[float]:
+    """Resolve a strict backtest-only daily limit-rate fallback.
+
+    Explicit strategy configuration remains authoritative for generic
+    backtests. T-assistant replays may instead use stable instrument lifecycle
+    facts plus the event date. Ambiguous lifecycle/status inputs return no rate
+    and therefore remain rejected by strict order risk.
+    """
 
     if runtime.context.mode != StrategyRunMode.BACKTEST:
       return None
     try:
       rate = float(runtime.context.parameters.get("backtest_limit_rate", 0) or 0)
     except (TypeError, ValueError):
+      rate = 0.0
+    if 0 < rate < 1:
+      return rate
+
+    parameters = dict(runtime.context.parameters or {})
+    if not parameters.get("t_trade_replay"):
       return None
-    return rate if 0 < rate < 1 else None
+    code = str(instrument_code or "").strip().upper()
+    event_time = timestamp or runtime.context.current_time
+    if not code or event_time is None:
+      return None
+    metadata = dict(parameters.get("initial_instrument_metadata") or {})
+    instrument = dict(metadata.get(code) or {})
+    raw_is_st = instrument.get("is_st")
+    is_st = raw_is_st if isinstance(raw_is_st, bool) else None
+    return resolve_ashare_daily_limit_rate(
+      code,
+      event_time,
+      instrument_name=str(instrument.get("instrument_name") or ""),
+      status_as_of_date=instrument.get("instrument_status_as_of"),
+      listing_date=instrument.get("listing_date"),
+      expiry_date=instrument.get("expiry_date"),
+      is_st=is_st,
+    )
+
+  @staticmethod
+  def _record_t_trade_replay_price_limit_source(
+    runtime: StrategyRuntime,
+    market_snapshot: MarketDataSnapshot,
+  ) -> None:
+    parameters = runtime.context.parameters
+    if not parameters.get("t_trade_replay"):
+      return
+    source = str(market_snapshot.source or "").lower()
+    event_kind = "KLINE" if source.startswith("kline") else "TICK"
+    if source.endswith("_derived_limits"):
+      limit_kind = "DERIVED"
+    elif (
+      market_snapshot.limit_up is not None and market_snapshot.limit_down is not None
+    ):
+      limit_kind = "NATIVE"
+    else:
+      limit_kind = "MISSING"
+    counts = parameters.setdefault("replay_price_limit_source_counts", {})
+    key = f"{limit_kind}_{event_kind}"
+    counts[key] = int(counts.get(key, 0) or 0) + 1
 
   def _bool_parameter(
     self,
@@ -5265,9 +5664,14 @@ class StrategyExecutor:
         runtime.data_adapter.current_time = tick.time
       market_snapshot = MarketDataSnapshot.from_tick(
         tick,
-        limit_rate=self._backtest_limit_rate(runtime),
+        limit_rate=self._backtest_limit_rate(
+          runtime,
+          instrument_code=tick.stock_code,
+          timestamp=tick.time,
+        ),
       )
       runtime.latest_market_data[tick.stock_code] = market_snapshot
+      self._record_t_trade_replay_price_limit_source(runtime, market_snapshot)
       if runtime.state_manager:
         runtime.state_manager.settle_trading_day(tick.time.date())
       await self._expire_pending_approvals(runtime)
@@ -5313,7 +5717,7 @@ class StrategyExecutor:
       if metrics:
         metrics.error_count += 1
       self.logger.error(f"处理Tick数据失败: {e}")
-      if self._uses_strict_board_replay(runtime):
+      if self._requires_replay_event_integrity(runtime):
         raise
 
   async def _process_entry_plan_evaluate(
@@ -5364,9 +5768,14 @@ class StrategyExecutor:
         runtime.data_adapter.current_time = kline.time
       market_snapshot = MarketDataSnapshot.from_kline(
         kline,
-        limit_rate=self._backtest_limit_rate(runtime),
+        limit_rate=self._backtest_limit_rate(
+          runtime,
+          instrument_code=kline.stock_code,
+          timestamp=kline.time,
+        ),
       )
       runtime.latest_market_data[kline.stock_code] = market_snapshot
+      self._record_t_trade_replay_price_limit_source(runtime, market_snapshot)
       if runtime.state_manager:
         runtime.state_manager.settle_trading_day(kline.time.date())
       await self._expire_pending_approvals(runtime)
@@ -5412,7 +5821,7 @@ class StrategyExecutor:
       if metrics:
         metrics.error_count += 1
       self.logger.error(f"处理K线数据失败: {e}")
-      if self._uses_strict_board_replay(runtime):
+      if self._requires_replay_event_integrity(runtime):
         raise
 
   async def _report_t_trade_replay_progress(

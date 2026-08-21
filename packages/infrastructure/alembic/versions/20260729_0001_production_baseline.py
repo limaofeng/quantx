@@ -71,6 +71,7 @@ POST_BASELINE_TABLES = {
   "ios_push_category_preferences",
   "ios_push_registrations",
   "trade_confirmation_challenges",
+  "t_trade_replay_projections",
 }
 POST_BASELINE_COLUMNS = {
   "market_data_request": {

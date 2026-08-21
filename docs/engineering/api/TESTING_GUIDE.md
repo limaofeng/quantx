@@ -75,6 +75,10 @@ Invoke-RestMethod http://127.0.0.1:8080/health/components
 全部 deployment、Worker、QMT Agent；最终 `/health/ready` 返回 200。开发
 `full` 默认使用 `live` Agent 读取真实账户，但账户仍保持 `SHADOW` 准备阶段，
 不会因此取得自动下单权限；纯行情验收显式使用 `-Mode data-only`。
+未登记时可验收受支持的降级 `full/live`：启动命令成功，非 QMT 进程保持运行，
+`status` 与 `/health/components` 明确返回 QMT/行情 `BLOCKED`、实盘能力关闭，
+而 `/health/ready` 保持非就绪。该场景只验收非 QMT 功能及已持久化历史回放，
+不得当作完整实盘或纯行情验收。
 
 ## 真实交易硬门禁
 

@@ -93,7 +93,12 @@ from .limit_up_board_replay import (
   LimitUpBoardReplayScenarioSpec,
   get_limit_up_board_replay_scenarios,
 )
-from .market_rules import AShareMarketRules, MarketDataSnapshot, OrderCheckResult
+from .market_rules import (
+  AShareMarketRules,
+  MarketDataSnapshot,
+  OrderCheckResult,
+  resolve_ashare_daily_limit_rate,
+)
 from .orchestration import PortfolioExecutionProfile, PortfolioOrchestrationLayer
 from .order_sizer import OrderDraft, OrderSizer
 from .position_adjustment import (
@@ -185,6 +190,7 @@ __all__ = [
   "MarketContextSnapshot",
   "MarketDataSnapshot",
   "OrderCheckResult",
+  "resolve_ashare_daily_limit_rate",
   "OrderDraft",
   "OrderSizer",
   "PositionAdjustmentLayer",

@@ -46,6 +46,7 @@ from quantx_infrastructure.services.limit_up_board_replay_projection_service imp
 )
 from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
+  queue_market_data_sync,
   request_market_data_sync,
 )
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
@@ -61,6 +62,14 @@ _MARKET_DATA_SYNC_MAX_DATE_SPAN_DAYS = {
   "1m": 31,
   "1d": 3_700,
 }
+
+_T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY = 120
+_T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE = timedelta(minutes=5)
+_T_TRADE_REPLAY_MAX_CONTINUOUS_GAP = timedelta(minutes=15)
+_T_TRADE_REPLAY_CONTINUOUS_SESSIONS = (
+  (time(9, 30), time(11, 30)),
+  (time(13, 0), time(15, 0)),
+)
 
 
 class StrategyManager:
@@ -365,10 +374,15 @@ class StrategyManager:
                 )
                 backtest_version = int(backtest.version or 0) or None
 
+            is_t_trade_replay = bool(
+              mode_value == StrategyRunMode.BACKTEST.value
+              and parameters.get("t_trade_replay")
+            )
             is_limit_up_board_replay = bool(
               mode_value == StrategyRunMode.BACKTEST.value
               and parameters.get("limit_up_board_replay")
             )
+            is_deferred_replay = is_t_trade_replay or is_limit_up_board_replay
             should_start = status_value == StrategyRunStatus.RUNNING.value
             if (
               mode_value == StrategyRunMode.BACKTEST.value
@@ -381,6 +395,20 @@ class StrategyManager:
                 f"run_id={run.id}, backtest_id={backtest.id}, v{backtest_version}"
               )
               should_start = True
+            if (
+              is_t_trade_replay
+              and status_value == StrategyRunStatus.PENDING.value
+            ):
+              projection = await t_trade_replay_projection_service.get(run.id)
+              projection_status = str(
+                (projection or {}).get("status") or ""
+              ).upper()
+              if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
+                self.logger.warning(
+                  "检测到中断的做 T 回放启动，恢复后台准备: run_id=%s",
+                  run.id,
+                )
+                should_start = True
             if (
               is_limit_up_board_replay
               and status_value == StrategyRunStatus.PENDING.value
@@ -431,9 +459,9 @@ class StrategyManager:
 
             # 根据状态决定是否自动启动
             if should_start:
-              if is_limit_up_board_replay:
+              if is_deferred_replay:
                 await self.defer_start_strategy(run.id)
-                self.logger.info(f"打板回放 {run.id} 已恢复后台启动")
+                self.logger.info(f"历史回放 {run.id} 已恢复后台启动")
               else:
                 # 普通运行维持原有同步恢复语义。
                 started = await self.start_strategy(run.id)
@@ -831,6 +859,8 @@ class StrategyManager:
       try:
         await self._ensure_backtest_data_available(runtime)
       except RuntimeError as e:
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = str(e)
         self.logger.error(f"回测数据准备失败: {e}")
         await self._update_runtime_status(run_id, "ERROR", str(e))
         if runtime.context.backtest_id:
@@ -930,10 +960,12 @@ class StrategyManager:
     runtime = self.executor.get(run_id)
     backtest_id = runtime.context.backtest_id if runtime is not None else None
     parameters = dict(runtime.context.parameters or {}) if runtime is not None else {}
+    account_id = str(parameters.get("account_id") or "").strip()
+    is_t_trade_replay = bool(parameters.get("t_trade_replay"))
     board_replay_job_id = str(
       parameters.get("limit_up_board_replay_job_id") or ""
     ).strip()
-    if runtime is None or not backtest_id or not board_replay_job_id:
+    if runtime is None or not backtest_id or not account_id:
       try:
         from quantx_infrastructure.repositories.backtest_repository import (
           BacktestRepository,
@@ -945,11 +977,8 @@ class StrategyManager:
             persisted_parameters = run.parameters or {}
             if isinstance(persisted_parameters, str):
               persisted_parameters = json.loads(persisted_parameters)
-            board_replay_job_id = board_replay_job_id or str(
-              dict(persisted_parameters or {}).get(
-                "limit_up_board_replay_job_id"
-              )
-              or ""
+            account_id = account_id or str(
+              dict(persisted_parameters or {}).get("account_id") or ""
             ).strip()
           if not backtest_id:
             history = await BacktestRepository(db).get_backtests_by_run(run_id)
@@ -974,6 +1003,19 @@ class StrategyManager:
           "收敛打板回放后台启动失败状态失败: %s",
           board_replay_job_id,
         )
+    if account_id and is_t_trade_replay:
+      try:
+        await t_trade_replay_projection_service.update(
+          run_id=run_id,
+          account_id=account_id,
+          status="ERROR",
+          processed_until=(
+            runtime.context.current_time if runtime is not None else None
+          ),
+          kind=TTradeReplayUpdateKind.RESULT_READY,
+        )
+      except Exception:
+        self.logger.exception("收敛后台启动回放投影失败: %s", run_id)
 
   async def _cancel_deferred_starts_for_shutdown(self) -> None:
     tasks = list(self._deferred_start_tasks.values())
@@ -1020,6 +1062,7 @@ class StrategyManager:
       f"tick={require_tick}, periods={sorted(required_kline_periods)}"
     )
 
+    is_t_trade_replay = bool(runtime.context.parameters.get("t_trade_replay"))
     missing_before = await self._find_missing_backtest_data(
       service=service,
       instruments=runtime.instruments,
@@ -1027,6 +1070,7 @@ class StrategyManager:
       end_time=end_time,
       required_kline_periods=required_kline_periods,
       require_tick=require_tick,
+      strict_tick_quality=is_t_trade_replay,
     )
 
     self.logger.info(
@@ -1038,12 +1082,76 @@ class StrategyManager:
       return
 
     missing_desc = self._format_missing_data(missing_before)
+    sync_periods = self._extract_supported_sync_periods(missing_before)
+    unsupported_periods = self._collect_unsupported_periods(missing_before)
+    if is_t_trade_replay:
+      self.logger.warning(
+        "做 T 回放本地历史数据不完整，将按 InfluxDB 已落库数据执行隔离降级: %s",
+        missing_desc,
+      )
+      supplement = {
+        "mode": "ASYNC_OPTIONAL",
+        "status": "UNSUPPORTED_PERIODS" if not sync_periods else "NOT_REQUESTED",
+        "queued_request_ids": [],
+        "completed_request_ids": [],
+        "failed_requests": [],
+      }
+      if sync_periods and runtime.context.parameters.get(
+        "replay_queue_missing_data_supplement", True
+      ):
+        try:
+          supplement = await self._queue_missing_backtest_data_supplement(
+            runtime=runtime,
+            missing=missing_before,
+            sync_periods=sync_periods,
+          )
+        except Exception as exc:
+          supplement = {
+            **supplement,
+            "status": "QUEUE_FAILED",
+            "reason": str(exc),
+          }
+          self.logger.warning(
+            "做 T 回放可选历史数据补数排队失败；本次仍按本地数据降级: %s",
+            exc,
+            exc_info=True,
+          )
+      elif sync_periods:
+        supplement["status"] = "DISABLED"
+
+      # The current run never waits for the optional Agent transfer. Re-read
+      # once to pick up data that may have completed concurrently, then make a
+      # deterministic decision from persisted InfluxDB only.
+      missing_after = await self._find_missing_backtest_data(
+        service=service,
+        instruments=runtime.instruments,
+        start_time=start_time,
+        end_time=end_time,
+        required_kline_periods=required_kline_periods,
+        require_tick=require_tick,
+        strict_tick_quality=True,
+      )
+      await self._apply_t_trade_replay_data_availability(
+        runtime=runtime,
+        missing=missing_after,
+        missing_before=missing_before,
+        supplement=supplement,
+        unsupported_periods=unsupported_periods,
+      )
+      if missing_after and not runtime.context.instruments:
+        error_code = (
+          "DATA_PARTIAL"
+          if self._contains_partial_market_data(missing_after)
+          else "DATA_INSUFFICIENT"
+        )
+        raise RuntimeError(
+          f"{error_code}: 回放区间内全部可回放持仓标的均缺少可证明完整的已落库历史数据"
+        )
+      return
+
     self.logger.info(
       f"回测前历史数据缺失: {missing_desc}，即将调用 daily-market-data-sync 补全数据"
     )
-
-    sync_periods = self._extract_supported_sync_periods(missing_before)
-    unsupported_periods = self._collect_unsupported_periods(missing_before)
 
     if not sync_periods:
       raise RuntimeError(
@@ -1051,19 +1159,11 @@ class StrategyManager:
         + ", ".join(sorted(unsupported_periods))
       )
 
-    try:
-      await self._sync_missing_backtest_data(
-        runtime=runtime,
-        missing=missing_before,
-        sync_periods=sync_periods,
-      )
-    except RuntimeError:
-      if not runtime.context.parameters.get("t_trade_replay"):
-        raise
-      self.logger.warning(
-        "做 T 回放历史数据补全未全部成功，将按标的保守降级",
-        exc_info=True,
-      )
+    await self._sync_missing_backtest_data(
+      runtime=runtime,
+      missing=missing_before,
+      sync_periods=sync_periods,
+    )
 
     missing_after = await self._find_missing_backtest_data(
       service=service,
@@ -1075,49 +1175,179 @@ class StrategyManager:
     )
 
     if missing_after:
-      if runtime.context.parameters.get("t_trade_replay"):
-        missing_codes = set(missing_after)
-        available = [
-          code for code in runtime.context.instruments if code not in missing_codes
-        ]
-        if not available:
-          raise RuntimeError("回放区间内全部持仓标的均缺少历史 Tick 数据")
-        metadata = dict(
-          runtime.context.parameters.get("initial_instrument_metadata") or {}
-        )
-        existing_skipped = list(
-          runtime.context.parameters.get("replay_skipped_instruments") or []
-        )
-        for code in sorted(missing_codes):
-          item = dict(metadata.get(code) or {})
-          existing_skipped.append(
-            {
-              "stock_code": code,
-              "instrument_name": str(item.get("instrument_name", "") or ""),
-              "reason": "历史 Tick 数据同步后仍不完整",
-            }
-          )
-        runtime.context.instruments = available
-        runtime.context.parameters["initial_instrument_metadata"] = {
-          code: value for code, value in metadata.items() if code in available
-        }
-        runtime.context.parameters["replay_skipped_instruments"] = existing_skipped
-        async for db in get_async_db():
-          await StrategyRunRepository(db).update_run(
-            runtime.run_id,
-            {
-              "instruments": available,
-              "parameters": runtime.context.parameters,
-            },
-          )
-          break
-        self.logger.warning(
-          "做 T 回放已跳过历史数据不足标的: %s",
-          ", ".join(sorted(missing_codes)),
-        )
-        return
       remaining_desc = self._format_missing_data(missing_after)
       raise RuntimeError(f"历史数据同步后仍缺失: {remaining_desc}")
+
+  async def _queue_missing_backtest_data_supplement(
+    self,
+    *,
+    runtime: StrategyRuntime,
+    missing: Dict[str, Dict[str, Any]],
+    sync_periods: Set[str],
+  ) -> Dict[str, Any]:
+    """Queue optional Agent downloads without making this replay wait for them."""
+
+    summary: Dict[str, Any] = {
+      "mode": "ASYNC_OPTIONAL",
+      "status": "NOT_NEEDED",
+      "queued_request_ids": [],
+      "completed_request_ids": [],
+      "failed_requests": [],
+    }
+    for instrument, info in missing.items():
+      periods = self._sync_periods_for_missing_info(info, sync_periods)
+      dates = sorted(info.get("dates") or [])
+      if not periods or not dates:
+        continue
+      for chunk_start, chunk_end in self._market_data_sync_date_windows(
+        dates,
+        periods,
+      ):
+        chunk_start_day = chunk_start.strftime("%Y%m%d")
+        chunk_end_day = chunk_end.strftime("%Y%m%d")
+        result = await queue_market_data_sync(
+          stock_list=[instrument],
+          start_time=chunk_start_day,
+          end_time=chunk_end_day,
+          periods=sorted(periods),
+        )
+        status = str(result.get("status") or "failed").lower()
+        if status == "skipped":
+          summary["status"] = "AGENT_UNAVAILABLE"
+          summary["reason"] = str(result.get("reason") or "")
+          self.logger.info(
+            "做 T 回放未排队可选补数：当前没有在线 market-data Agent"
+          )
+          return summary
+        request_id = str(result.get("request_id") or "")
+        if status == "success":
+          if request_id:
+            summary["completed_request_ids"].append(request_id)
+          continue
+        if status == "queued":
+          if request_id:
+            summary["queued_request_ids"].append(request_id)
+          continue
+        summary["failed_requests"].append(
+          {
+            "request_id": request_id,
+            "instrument": instrument,
+            "reason": str(result.get("reason") or "unknown"),
+          }
+        )
+
+    if summary["failed_requests"]:
+      summary["status"] = "PARTIAL_QUEUE_FAILURE"
+    elif summary["queued_request_ids"]:
+      summary["status"] = "QUEUED_FOR_FUTURE_REPLAY"
+    elif summary["completed_request_ids"]:
+      summary["status"] = "ALREADY_COMPLETED"
+    return summary
+
+  async def _apply_t_trade_replay_data_availability(
+    self,
+    *,
+    runtime: StrategyRuntime,
+    missing: Dict[str, Dict[str, Any]],
+    missing_before: Dict[str, Dict[str, Any]],
+    supplement: Dict[str, Any],
+    unsupported_periods: Set[str],
+  ) -> None:
+    """Persist the local-data decision and remove only unavailable symbols."""
+
+    missing_codes = set(missing)
+    available = [
+      code for code in runtime.context.instruments if code not in missing_codes
+    ]
+    metadata = dict(
+      runtime.context.parameters.get("initial_instrument_metadata") or {}
+    )
+    skipped_by_code = {
+      str(item.get("stock_code") or ""): dict(item)
+      for item in list(
+        runtime.context.parameters.get("replay_skipped_instruments") or []
+      )
+      if str(item.get("stock_code") or "")
+    }
+    supplement_status = str(supplement.get("status") or "NOT_REQUESTED")
+    for code in sorted(missing_codes):
+      item = dict(metadata.get(code) or {})
+      local_detail = self._format_missing_data({code: missing[code]})
+      if supplement_status == "QUEUED_FOR_FUTURE_REPLAY":
+        suffix = "；在线 Agent 补数已异步排队，仅供后续回放使用"
+      elif supplement_status == "AGENT_UNAVAILABLE":
+        suffix = "；当前无在线行情 Agent，本次不等待外部链路"
+      elif supplement_status == "DISABLED":
+        suffix = "；可选 Agent 补数已禁用"
+      elif supplement_status == "UNSUPPORTED_PERIODS":
+        suffix = "；所需周期不支持 Agent 补数"
+      elif supplement_status in {"QUEUE_FAILED", "PARTIAL_QUEUE_FAILURE"}:
+        suffix = "；可选 Agent 补数排队失败，本次不等待外部链路"
+      else:
+        suffix = "；本次仅采用已落库 InfluxDB 数据"
+      skipped_by_code[code] = {
+        "stock_code": code,
+        "instrument_name": str(item.get("instrument_name", "") or ""),
+        "data_status": (
+          "DATA_PARTIAL"
+          if self._contains_partial_market_data({code: missing[code]})
+          else "DATA_INSUFFICIENT"
+        ),
+        "reason": f"本地历史数据不完整（{local_detail}）{suffix}",
+      }
+
+    runtime.context.instruments = available
+    runtime.context.parameters["initial_instrument_metadata"] = {
+      code: value for code, value in metadata.items() if code in available
+    }
+    runtime.context.parameters["replay_skipped_instruments"] = [
+      skipped_by_code[code] for code in sorted(skipped_by_code)
+    ]
+    replay_data_preparation = {
+      "schema_version": 1,
+      "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SUPPLEMENT_NON_BLOCKING",
+      "local_authority": "INFLUXDB",
+      "missing_before": sorted(missing_before),
+      "missing_after": sorted(missing),
+      "available_instruments": list(available),
+      "unsupported_periods": sorted(unsupported_periods),
+      "supplement": supplement,
+    }
+    quality_issues_before = {
+      code: list(info.get("quality_issues") or [])
+      for code, info in missing_before.items()
+      if info.get("quality_issues")
+    }
+    quality_issues_after = {
+      code: list(info.get("quality_issues") or [])
+      for code, info in missing.items()
+      if info.get("quality_issues")
+    }
+    if quality_issues_before or quality_issues_after:
+      replay_data_preparation.update(
+        {
+          "schema_version": 2,
+          "quality_policy": "STRICT_DAILY_SESSION_COVERAGE",
+          "quality_issues_before": quality_issues_before,
+          "quality_issues_after": quality_issues_after,
+        }
+      )
+    runtime.context.parameters["replay_data_preparation"] = replay_data_preparation
+    async for db in get_async_db():
+      await StrategyRunRepository(db).update_run(
+        runtime.run_id,
+        {
+          "instruments": available,
+          "parameters": runtime.context.parameters,
+        },
+      )
+      break
+    if missing_codes:
+      self.logger.warning(
+        "做 T 回放已按本地数据跳过历史数据不足标的: %s (supplement=%s)",
+        ", ".join(sorted(missing_codes)),
+        supplement_status,
+      )
 
   async def _sync_missing_backtest_data(
     self,
@@ -1247,8 +1477,14 @@ class StrategyManager:
     end_time: datetime,
     required_kline_periods: Optional[Set[str]] = None,
     require_tick: bool = True,
+    strict_tick_quality: bool = False,
   ) -> Dict[str, Dict[str, Any]]:
-    """逐日统计每个标的缺失的历史数据（按策略数据需求检查）"""
+    """逐日统计每个标的缺失的历史数据（按策略数据需求检查）。
+
+    普通回测继续使用既有存在性语义。做 T 历史回放显式启用
+    ``strict_tick_quality``，只有交易时段覆盖、记录数和连续性均达到最小严格
+    口径时才允许生成绩效。
+    """
     missing: Dict[str, Dict[str, Any]] = {}
     if not instruments:
       return missing
@@ -1287,17 +1523,30 @@ class StrategyManager:
       missing_dates: Set[date] = set()
       missing_periods: Set[str] = set()
       tick_missing_any = False
+      quality_issues: List[Dict[str, Any]] = []
 
       for trading_date in trading_dates:
         day_missing = False
         day_start = datetime.combine(trading_date, time(00, 00, 00))
         day_end = datetime.combine(trading_date, time(23, 59, 59))
 
-        if require_tick and not await asyncio.to_thread(
-          self._has_tick_data, service, instrument, day_start, day_end
-        ):
-          tick_missing_any = True
-          day_missing = True
+        if require_tick:
+          if strict_tick_quality:
+            inspection = await asyncio.to_thread(
+              self._inspect_t_trade_replay_tick_day,
+              service,
+              instrument,
+              trading_date,
+            )
+            if not inspection["complete"]:
+              tick_missing_any = True
+              day_missing = True
+              quality_issues.append(inspection)
+          elif not await asyncio.to_thread(
+            self._has_tick_data, service, instrument, day_start, day_end
+          ):
+            tick_missing_any = True
+            day_missing = True
 
         for period in sorted(required_kline_periods):
           period_start = day_start
@@ -1325,8 +1574,179 @@ class StrategyManager:
           "tick": tick_missing_any,
           "dates": missing_dates,
         }
+        if quality_issues:
+          missing[instrument]["quality_issues"] = quality_issues
 
     return missing
+
+  def _inspect_t_trade_replay_tick_day(
+    self,
+    service: HistoricalMarketDataService,
+    instrument: str,
+    trading_date: date,
+  ) -> Dict[str, Any]:
+    """Return an auditable, fail-closed quality decision for one Tick day."""
+
+    query_start = datetime.combine(trading_date, time(9, 25))
+    query_end = datetime.combine(trading_date, time(15, 5))
+    base = {
+      "data_type": "tick",
+      "date": trading_date.isoformat(),
+      "instrument_code": instrument,
+    }
+    try:
+      records = service.tick_repo.find_all(
+        filters={"stock_code": instrument},
+        start_time=query_start,
+        end_time=query_end,
+        fields=["time"],
+        limit=None,
+        order_by="time ASC",
+      )
+    except Exception as exc:
+      self.logger.warning(
+        "做 T 回放逐日 Tick 质量查询失败: instrument=%s, date=%s, error=%s",
+        instrument,
+        trading_date,
+        exc,
+      )
+      return {
+        **base,
+        "complete": False,
+        "classification": "UNAVAILABLE",
+        "reason_codes": ["TICK_QUERY_FAILED"],
+        "message": "逐日 Tick 质量查询失败，无法证明数据完整",
+        "query_error_type": type(exc).__name__,
+        "statistics": {
+          "record_count": 0,
+          "continuous_session_record_count": 0,
+        },
+      }
+
+    raw_times: List[Any]
+    if hasattr(records, "empty"):
+      if records.empty or "time" not in records.columns:
+        raw_times = []
+      else:
+        raw_times = list(records["time"])
+    else:
+      raw_times = []
+      for record in records or []:
+        if isinstance(record, dict):
+          raw_times.append(record.get("time"))
+        else:
+          raw_times.append(getattr(record, "time", None))
+
+    timestamps: List[datetime] = []
+    invalid_timestamp_count = 0
+    for value in raw_times:
+      if hasattr(value, "to_pydatetime"):
+        value = value.to_pydatetime()
+      if not isinstance(value, datetime):
+        invalid_timestamp_count += 1
+        continue
+      timestamps.append(time_utils.to_shanghai(value))
+    timestamps.sort()
+
+    session_times: List[List[datetime]] = []
+    for session_start, session_end in _T_TRADE_REPLAY_CONTINUOUS_SESSIONS:
+      lower = datetime.combine(trading_date, session_start)
+      upper = datetime.combine(trading_date, session_end)
+      session_times.append([value for value in timestamps if lower <= value <= upper])
+
+    continuous_times = [value for values in session_times for value in values]
+    morning_times, afternoon_times = session_times
+    max_gap_seconds = 0.0
+    max_gap_start: Optional[datetime] = None
+    max_gap_end: Optional[datetime] = None
+    for values in session_times:
+      for previous, current in zip(values, values[1:]):
+        gap_seconds = (current - previous).total_seconds()
+        if gap_seconds > max_gap_seconds:
+          max_gap_seconds = gap_seconds
+          max_gap_start = previous
+          max_gap_end = current
+
+    reason_codes: List[str] = []
+    if not raw_times:
+      reason_codes.append("NO_TICK_DATA")
+    if invalid_timestamp_count:
+      reason_codes.append("INVALID_TICK_TIMESTAMPS")
+    if (
+      len(continuous_times) < _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY
+    ):
+      reason_codes.append("TICK_COUNT_TOO_LOW")
+
+    tolerance = _T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE
+    morning_start = datetime.combine(trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][0])
+    morning_end = datetime.combine(trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][1])
+    afternoon_start = datetime.combine(
+      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[1][0]
+    )
+    afternoon_end = datetime.combine(
+      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[1][1]
+    )
+    if not morning_times or morning_times[0] > morning_start + tolerance:
+      reason_codes.append("SESSION_OPEN_NOT_COVERED")
+    if not morning_times or morning_times[-1] < morning_end - tolerance:
+      reason_codes.append("MORNING_CLOSE_NOT_COVERED")
+    if not afternoon_times or afternoon_times[0] > afternoon_start + tolerance:
+      reason_codes.append("AFTERNOON_OPEN_NOT_COVERED")
+    if not afternoon_times or afternoon_times[-1] < afternoon_end - tolerance:
+      reason_codes.append("SESSION_CLOSE_NOT_COVERED")
+    if max_gap_seconds > _T_TRADE_REPLAY_MAX_CONTINUOUS_GAP.total_seconds():
+      reason_codes.append("CONTINUOUS_SESSION_GAP_TOO_LARGE")
+
+    statistics = {
+      "record_count": len(raw_times),
+      "continuous_session_record_count": len(continuous_times),
+      "invalid_timestamp_count": invalid_timestamp_count,
+      "first_continuous_time": (
+        continuous_times[0].isoformat() if continuous_times else None
+      ),
+      "last_continuous_time": (
+        continuous_times[-1].isoformat() if continuous_times else None
+      ),
+      "morning_last_time": morning_times[-1].isoformat() if morning_times else None,
+      "afternoon_first_time": (
+        afternoon_times[0].isoformat() if afternoon_times else None
+      ),
+      "max_continuous_gap_seconds": max_gap_seconds,
+      "max_continuous_gap_start": (
+        max_gap_start.isoformat() if max_gap_start else None
+      ),
+      "max_continuous_gap_end": max_gap_end.isoformat() if max_gap_end else None,
+      "minimum_record_count": _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY,
+      "maximum_gap_seconds": _T_TRADE_REPLAY_MAX_CONTINUOUS_GAP.total_seconds(),
+      "session_edge_tolerance_seconds": tolerance.total_seconds(),
+    }
+    if not reason_codes:
+      return {
+        **base,
+        "complete": True,
+        "classification": "COMPLETE",
+        "reason_codes": [],
+        "message": "Tick 交易时段覆盖与连续性校验通过",
+        "statistics": statistics,
+      }
+
+    classification = "MISSING" if "NO_TICK_DATA" in reason_codes else "PARTIAL"
+    return {
+      **base,
+      "complete": False,
+      "classification": classification,
+      "reason_codes": reason_codes,
+      "message": "Tick 交易时段覆盖、记录数或连续性未达到回放最低完整性要求",
+      "statistics": statistics,
+    }
+
+  @staticmethod
+  def _contains_partial_market_data(missing: Dict[str, Dict[str, Any]]) -> bool:
+    return any(
+      str(issue.get("classification") or "") != "MISSING"
+      for info in missing.values()
+      for issue in list(info.get("quality_issues") or [])
+    )
 
   def _has_kline_data(
     self,
@@ -1456,6 +1876,15 @@ class StrategyManager:
             f"{dates[-1].strftime('%Y-%m-%d')}"
           )
         segments.append(f"日期[{preview}]")
+      issues = list(info.get("quality_issues") or [])
+      if issues:
+        issue_preview = []
+        for issue in issues[:3]:
+          reason_codes = "/".join(issue.get("reason_codes") or ["UNKNOWN"])
+          issue_preview.append(f"{issue.get('date', '?')}:{reason_codes}")
+        if len(issues) > 3:
+          issue_preview.append(f"另 {len(issues) - 3} 日")
+        segments.append("质量[" + ", ".join(issue_preview) + "]")
       parts.append(f"{instrument}: {', '.join(segments)}")
     return "; ".join(parts)
 
@@ -1674,12 +2103,13 @@ class StrategyManager:
           unsupported.add(period)
     return unsupported
 
-  async def stop_strategy(self, run_id: str) -> bool:
+  async def stop_strategy(self, run_id: str, *, force: bool = False) -> bool:
     """
     停止策略运行（委托给 Executor）
 
     Args:
         run_id: 运行实例ID
+        force: 仅允许做 T 历史回放跳过模拟退出计划保护
 
     Returns:
         bool: 是否停止成功
@@ -1688,8 +2118,15 @@ class StrategyManager:
     if runtime is None:
       return await self._stop_persisted_strategy(run_id)
 
+    if force and not (
+      runtime.context.mode == StrategyRunMode.BACKTEST
+      and runtime.context.parameters.get("t_trade_replay")
+    ):
+      self.logger.warning("拒绝强制停止非做 T 历史回放运行: %s", run_id)
+      return False
+
     # 委托给 Executor 停止
-    success = await self.executor.stop(run_id)
+    success = await self.executor.stop(run_id, force=force)
 
     if success:
       # 获取最终指标并更新到数据库
@@ -1920,15 +2357,19 @@ class StrategyManager:
         status = "COMPLETED"
       elif runtime and runtime.status == ExecutionStatus.ERROR:
         status = "ERROR"
+        error_message = runtime.error_message or "策略运行异常结束"
         if runtime.context.backtest_id:
           await self._mark_backtest_error_safely(
             runtime.context.backtest_id,
-            runtime.error_message or "策略运行异常结束",
+            error_message,
           )
       elif runtime and runtime.status == ExecutionStatus.STOPPED:
          status = "STOPPED"
       
-      await self._update_runtime_status(run_id, status)
+      if status == "ERROR":
+        await self._update_runtime_status(run_id, status, error_message)
+      else:
+        await self._update_runtime_status(run_id, status)
       self.logger.info(f"策略运行任务正常结束: {run_id}, 最终状态: {status}")
 
     except Exception as e:

@@ -3,13 +3,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import quantx_api.gqlapi.resolvers.t_trade as resolver_module
 from quantx_api.gqlapi.resolvers.t_trade import TTradeResolver
 from quantx_api.gqlapi.types.t_trade_types import (
   TTradeGlobalMonitor,
+  TTradeReplayStartInput,
   TTradeRolloutTarget,
   TTradeTimeExitMode,
 )
 from quantx_infrastructure.models.enums import StrategyRunMode
+from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
 from quantx_infrastructure.services.t_trade_service import TTradeService
 
 
@@ -121,6 +124,132 @@ def test_global_monitor_projects_graphql_scalar_types():
   assert monitor.rapid_reversal_confirm_ticks == 2
 
 
+def test_global_monitor_masks_stale_ready_projection_when_qmt_launch_is_blocked(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
+  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(
+    {
+      "agent_status": "READY",
+      "can_approve": True,
+      "can_activate_live": True,
+      "blocked_reasons": [],
+      "readiness": {
+        "ready": True,
+        "status": "READY",
+        "preparation_ready": True,
+        "automation_ready": True,
+        "agent_status": "READY",
+        "agent_device_id": "stale-device",
+        "agent_mode": "live",
+        "protocol_version": "1.1",
+        "can_approve": True,
+        "can_activate_live": True,
+        "blocked_reasons": [],
+        "preparation_blocked_reasons": [],
+        "checks": [
+          {
+            "code": "LIVE_AGENT_READY",
+            "passed": True,
+            "message": "",
+            "scope": "PREPARATION",
+          }
+        ],
+      },
+    }
+  )
+
+  assert projected["agent_status"] == "BLOCKED"
+  assert projected["can_approve"] is False
+  assert projected["can_activate_live"] is False
+  readiness = projected["readiness"]
+  assert readiness["status"] == "BLOCKED"
+  assert readiness["ready"] is False
+  assert readiness["preparation_ready"] is False
+  assert readiness["automation_ready"] is False
+  assert readiness["agent_status"] == "BLOCKED"
+  assert readiness["agent_device_id"] is None
+  assert readiness["agent_mode"] == "offline"
+  assert readiness["protocol_version"] == ""
+  assert readiness["can_approve"] is False
+  assert readiness["can_activate_live"] is False
+  assert "QMT_ENROLLMENT_REQUIRED" in readiness["blocked_reasons"][-1]
+  checks = {item["code"]: item for item in readiness["checks"]}
+  assert checks["LIVE_AGENT_READY"]["passed"] is False
+  assert checks["QMT_AGENT_LAUNCH_ALLOWED"]["passed"] is False
+
+
+def test_global_monitor_block_override_preserves_missing_nested_readiness(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_RUNTIME_UNAVAILABLE")
+
+  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(
+    {
+      "agent_status": "READY",
+      "can_approve": True,
+      "can_activate_live": True,
+    }
+  )
+
+  assert projected["agent_status"] == "BLOCKED"
+  assert projected["can_approve"] is False
+  assert projected["can_activate_live"] is False
+  assert "readiness" not in projected
+
+
+def test_global_monitor_masks_projection_from_before_current_qmt_launch(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    "2026-08-20T04:00:00Z",
+  )
+  stale = {
+    "agent_status": "READY",
+    "can_approve": True,
+    "can_activate_live": True,
+    "readiness": {
+      "checked_at": "2026-08-20T03:59:59Z",
+      "ready": True,
+      "status": "READY",
+      "agent_status": "READY",
+      "checks": [],
+    },
+  }
+
+  projected = TTradeResolver._apply_qmt_launch_block_to_monitor(stale)
+
+  assert projected["agent_status"] == "BLOCKED"
+  assert projected["readiness"]["status"] == "BLOCKED"
+  assert "QMT_LAUNCH_PENDING_CURRENT_HEARTBEAT" in projected["blocked_reasons"][-1]
+
+
+def test_global_monitor_accepts_projection_from_current_qmt_launch(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    "2026-08-20T04:00:00Z",
+  )
+  current = {
+    "agent_status": "READY",
+    "can_approve": True,
+    "can_activate_live": True,
+    "readiness": {
+      "checked_at": "2026-08-20T04:00:01Z",
+      "ready": True,
+      "status": "READY",
+    },
+  }
+
+  assert TTradeResolver._apply_qmt_launch_block_to_monitor(current) is current
+
+
 def test_graphql_projection_keeps_known_fields_and_drops_internal_fields():
   payload = TTradeResolver._graphql_kwargs(
     TTradeGlobalMonitor,
@@ -141,6 +270,8 @@ def test_replay_projection_exposes_generated_report_and_capital_metrics():
       "account_id": "account-1",
       "status": "COMPLETED",
       "progress_pct": 100.0,
+      "revision": "7",
+      "processed_until": "2026-08-02T15:00:00",
       "start_time": "2026-08-01T09:30:00",
       "end_time": "2026-08-02T15:00:00",
       "snapshot_id": None,
@@ -189,6 +320,174 @@ def test_replay_projection_exposes_generated_report_and_capital_metrics():
   assert replay.report is not None
   assert replay.report.generated_at == datetime(2026, 8, 2, 15, 1)
   assert replay.report.html_artifact == "t-trade-report.html"
+
+
+@pytest.mark.asyncio
+async def test_replay_start_processing_receipt_is_an_ack_not_validation_failure(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  receipt = EngineCommandReceipt(
+    message_id="00000000-0000-0000-0000-000000000123",
+    command_type="T_TRADE_REPLAY_START",
+    aggregate_id="account-1",
+    status="PROCESSING",
+  )
+  request = AsyncMock(return_value=receipt)
+  monkeypatch.setattr(resolver_module.engine_command_service, "request", request)
+  monkeypatch.setattr(
+    TTradeResolver.replay_service,
+    "get",
+    AsyncMock(return_value=None),
+  )
+
+  result = await TTradeResolver.start_replay(
+    TTradeReplayStartInput(
+      account_id="account-1",
+      idempotency_key="  replay-request-1  ",
+      start_time=datetime(2026, 7, 23, 9, 30),
+      end_time=datetime(2026, 8, 19, 15, 0),
+    )
+  )
+
+  assert result.success is True
+  assert result.code == "REPLAY_ACCEPTED"
+  assert result.replay is not None
+  assert result.replay.run_id == receipt.message_id
+  assert result.replay.status == "PENDING"
+  request.assert_awaited_once()
+  assert request.await_args.kwargs["idempotency_key"] == "replay-request-1"
+
+
+@pytest.mark.asyncio
+async def test_replay_start_failed_receipt_is_not_mislabeled_as_validation(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(
+    resolver_module.engine_command_service,
+    "request",
+    AsyncMock(
+      return_value=EngineCommandReceipt(
+        message_id="00000000-0000-0000-0000-000000000124",
+        command_type="T_TRADE_REPLAY_START",
+        aggregate_id="account-1",
+        status="FAILED",
+        error="历史数据服务不可用",
+      )
+    ),
+  )
+
+  result = await TTradeResolver.start_replay(
+    TTradeReplayStartInput(
+      account_id="account-1",
+      idempotency_key="replay-request-2",
+      start_time=datetime(2026, 7, 23, 9, 30),
+      end_time=datetime(2026, 8, 19, 15, 0),
+    )
+  )
+
+  assert result.success is False
+  assert result.code == "REPLAY_START_FAILED"
+  assert result.message == "历史数据服务不可用"
+
+
+@pytest.mark.asyncio
+async def test_replay_start_succeeded_command_with_pending_run_is_accepted(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(
+    resolver_module.engine_command_service,
+    "request",
+    AsyncMock(
+      return_value=EngineCommandReceipt(
+        message_id="00000000-0000-0000-0000-000000000127",
+        command_type="T_TRADE_REPLAY_START",
+        aggregate_id="account-1",
+        status="SUCCEEDED",
+        result={
+          "run_id": "00000000-0000-0000-0000-000000000127",
+          "backtest_id": "backtest-127",
+          "account_id": "account-1",
+          "status": "PENDING",
+          "progress_pct": 0.0,
+          "revision": "1",
+          "processed_until": None,
+          "start_time": "2026-07-23T09:30:00",
+          "end_time": "2026-08-19T15:00:00",
+          "snapshot_id": None,
+          "snapshot_date": None,
+          "created_at": None,
+          "updated_at": None,
+          "error_message": None,
+          "data_quality": "PENDING",
+          "data_quality_message": "正在准备历史数据",
+          "skipped_stock_codes": [],
+          "summary": None,
+          "instruments": [],
+          "curve": [],
+          "report": None,
+        },
+      )
+    ),
+  )
+
+  result = await TTradeResolver.start_replay(
+    TTradeReplayStartInput(
+      account_id="account-1",
+      idempotency_key="replay-request-4",
+      start_time=datetime(2026, 7, 23, 9, 30),
+      end_time=datetime(2026, 8, 19, 15, 0),
+    )
+  )
+
+  assert result.success is True
+  assert result.code == "REPLAY_ACCEPTED"
+  assert result.replay is not None
+  assert result.replay.status == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_replay_start_rejects_blank_idempotency_key(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  request = AsyncMock()
+  monkeypatch.setattr(resolver_module.engine_command_service, "request", request)
+
+  result = await TTradeResolver.start_replay(
+    TTradeReplayStartInput(
+      account_id="account-1",
+      idempotency_key="   ",
+      start_time=datetime(2026, 7, 23, 9, 30),
+      end_time=datetime(2026, 8, 19, 15, 0),
+    )
+  )
+
+  assert result.success is False
+  assert result.code == "INVALID_IDEMPOTENCY_KEY"
+  request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replay_start_submission_exception_is_structured(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(
+    resolver_module.engine_command_service,
+    "request",
+    AsyncMock(side_effect=RuntimeError("outbox unavailable")),
+  )
+
+  result = await TTradeResolver.start_replay(
+    TTradeReplayStartInput(
+      account_id="account-1",
+      idempotency_key="replay-request-3",
+      start_time=datetime(2026, 7, 23, 9, 30),
+      end_time=datetime(2026, 8, 19, 15, 0),
+    )
+  )
+
+  assert result.success is False
+  assert result.code == "REPLAY_START_FAILED"
+  assert result.message == "做 T 历史回放请求提交失败，请稍后重试"
 
 
 def test_session_graphql_projection_maps_latest_evaluation_and_legacy_null():

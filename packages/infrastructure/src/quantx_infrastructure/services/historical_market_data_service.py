@@ -503,6 +503,7 @@ class HistoricalMarketDataService:
     as_frame: bool = False,
     limit: int = None,
     order: str = "asc",
+    offset: int = 0,
   ) -> Union[List[Tick], pd.DataFrame]:
     """获取Tick数据（异步）"""
     from datetime import timedelta
@@ -525,6 +526,7 @@ class HistoricalMarketDataService:
       order_by=order_by,
       as_frame=as_frame,
       limit=limit,
+      offset=max(0, int(offset or 0)),
     )
     if dividend_type and dividend_type != "none":
       adjusted = await self._apply_tick_dividend_adjustment_async(

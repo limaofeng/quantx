@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, Optional, Sequence
 
 from quantx_domain.brokers.base import OrderRequest, OrderType, PriceType
+
+_MAIN_BOARD_ST_LIMIT_UNIFICATION_DATE = date(2026, 7, 6)
+_CHINEXT_TWENTY_PCT_LIMIT_DATE = date(2020, 8, 24)
+_BEIJING_STOCK_EXCHANGE_OPEN_DATE = date(2021, 11, 15)
+_CONSERVATIVE_SPECIAL_TRADING_WINDOW = timedelta(days=30)
 
 
 @dataclass
@@ -179,6 +184,129 @@ def _resolve_limit_prices(
   return resolved_up or derived_up, resolved_down or derived_down, True
 
 
+def resolve_ashare_daily_limit_rate(
+  instrument_code: str,
+  trading_date: date | datetime,
+  *,
+  instrument_name: str = "",
+  status_as_of_date: date | datetime | str | None = None,
+  listing_date: date | datetime | str | None = None,
+  expiry_date: date | datetime | str | None = None,
+  is_st: Optional[bool] = None,
+) -> Optional[float]:
+  """Resolve a historical A-share price-limit rate without future prices.
+
+  The raw daily upper/lower prices carried by a tick remain authoritative. This
+  policy is only a backtest fallback for old tick archives that contain a
+  previous close but no limit fields.  It deliberately requires lifecycle
+  evidence: a code alone cannot distinguish IPO no-limit days, delisting
+  transitions, or every historical risk-warning regime.
+
+  ``listing_date`` and ``expiry_date`` are stable instrument-master facts.  A
+  30-calendar-day guard is intentionally more conservative than the exchanges'
+  first-five-trading-day exception and the usual delisting window.  Ambiguous
+  cases return ``None`` so strict order risk continues to reject the order.
+  A security name can establish historical ST status only when
+  ``status_as_of_date`` is the event date; a current name never backfills the
+  past.
+  """
+
+  trade_date = _as_date(trading_date)
+  status_date = _as_date(status_as_of_date)
+  listed_on = _as_date(listing_date)
+  expires_on = _as_date(expiry_date)
+  if trade_date is None or listed_on is None or expires_on is None:
+    return None
+  if trade_date < listed_on:
+    return None
+  if trade_date - listed_on < _CONSERVATIVE_SPECIAL_TRADING_WINDOW:
+    return None
+  if expires_on - trade_date < _CONSERVATIVE_SPECIAL_TRADING_WINDOW:
+    return None
+
+  name = "".join(str(instrument_name or "").upper().split())
+  if name.startswith(("N", "C")) or "退" in name:
+    return None
+
+  code, exchange = _split_instrument_code(instrument_code)
+  if not code or not exchange:
+    return None
+
+  if exchange == "BJ":
+    if trade_date < _BEIJING_STOCK_EXCHANGE_OPEN_DATE:
+      return None
+    return 0.30
+
+  if exchange == "SH" and code.startswith(("688", "689")):
+    return 0.20
+
+  if exchange == "SZ" and code.startswith("30"):
+    if trade_date >= _CHINEXT_TWENTY_PCT_LIMIT_DATE:
+      return 0.20
+    resolved_st = _resolve_st_status(
+      name,
+      is_st,
+      status_as_of_date=status_date,
+      trading_date=trade_date,
+    )
+    if resolved_st is None:
+      return None
+    return 0.05 if resolved_st else 0.10
+
+  is_main_board = (exchange == "SH" and code.startswith("60")) or (
+    exchange == "SZ" and code.startswith("00")
+  )
+  if not is_main_board:
+    return None
+  if trade_date >= _MAIN_BOARD_ST_LIMIT_UNIFICATION_DATE:
+    return 0.10
+
+  resolved_st = _resolve_st_status(
+    name,
+    is_st,
+    status_as_of_date=status_date,
+    trading_date=trade_date,
+  )
+  if resolved_st is None:
+    return None
+  return 0.05 if resolved_st else 0.10
+
+
+def _as_date(value: date | datetime | str | None) -> Optional[date]:
+  if value is None:
+    return None
+  if isinstance(value, datetime):
+    return value.date()
+  if isinstance(value, date):
+    return value
+  try:
+    return date.fromisoformat(str(value).strip()[:10])
+  except (TypeError, ValueError):
+    return None
+
+
+def _split_instrument_code(instrument_code: str) -> tuple[str, str]:
+  value = str(instrument_code or "").strip().upper()
+  code, separator, exchange = value.partition(".")
+  if not separator or not code.isdigit():
+    return "", ""
+  return code, exchange
+
+
+def _resolve_st_status(
+  name: str,
+  is_st: Optional[bool],
+  *,
+  status_as_of_date: Optional[date],
+  trading_date: date,
+) -> Optional[bool]:
+  if isinstance(is_st, bool):
+    return is_st
+  if not name or status_as_of_date != trading_date:
+    return None
+  return name.startswith(("*ST", "ST", "S*ST", "SST"))
+
+
 def _stock_status_indicates_suspension(value: Any) -> bool:
   if value is None:
     return False
@@ -341,9 +469,7 @@ class AShareMarketRules:
           "insufficient_position", f"可用持仓不足: {available} < {volume}"
         )
       if volume != available and volume < self.lot_size:
-        return OrderCheckResult.failed(
-          "odd_lot_sell", "不足100股的零股必须一次性卖出"
-        )
+        return OrderCheckResult.failed("odd_lot_sell", "不足100股的零股必须一次性卖出")
 
     if min_volume is not None and volume < int(min_volume):
       return OrderCheckResult.failed(

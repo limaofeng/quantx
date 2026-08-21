@@ -598,8 +598,10 @@ class TTradeReplayPositionInput:
 @strawberry.input(description="启动做 T 历史回放")
 class TTradeReplayStartInput:
   account_id: str
+  idempotency_key: str
   start_time: datetime
   end_time: datetime
+  initial_portfolio_as_of: Optional[datetime] = None
   initial_cash: Optional[float] = None
   initial_total_asset: Optional[float] = None
   initial_positions: List[TTradeReplayPositionInput] = field(default_factory=list)

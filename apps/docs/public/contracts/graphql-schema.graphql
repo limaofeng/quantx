@@ -6632,8 +6632,10 @@ type TTradeReplayReport {
 """启动做 T 历史回放"""
 input TTradeReplayStartInput {
   accountId: String!
+  idempotencyKey: String!
   startTime: DateTime!
   endTime: DateTime!
+  initialPortfolioAsOf: DateTime = null
   initialCash: Float = null
   initialTotalAsset: Float = null
   initialPositions: [TTradeReplayPositionInput!]!

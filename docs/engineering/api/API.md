@@ -31,11 +31,19 @@ API 自身仅监听 `127.0.0.1:18081`，不得作为前端、codegen 或外部�
 `full` profile 中，Prefect Worker、QMT Agent 连接和行情 capability 也必须
 ready。QMT Agent 的组件健康表示进程与会话在线；账户对账、kill switch 和
 交易能力由交易就绪检查独立判定，不会把在线 Agent 误报为离线。
+开发启动若以 `QMT_AGENT_LAUNCH_STATE=BLOCKED` 明确跳过本地 Agent，组件聚合
+必须覆盖数据库中尚未超过 90 秒的旧心跳：`qmtAgent` 与 `marketData` 返回
+`blocked`、连接/在线/ready 设备数归零并附稳定原因码，`/health/ready` 保持
+非就绪；`/health/live` 与非 QMT API 仍可用。
 
 GraphQL `liveSafetyStatus` 进一步分成 `preparationReady`（账户观察、外部活动
 分类和完整快照对账链路）与 `automationReady`（可申请自动执行）两个结论。
 `PREPARING` 是健康的 `SHADOW` 准备阶段，`BLOCKED` 才表示准备链路本身
 未通过；`ready` 保留为 `automationReady` 的兼容别名。
+当本次进程收到 QMT 启动 `BLOCKED` 标记时，GraphQL 做 T readiness 同样覆盖
+旧心跳：`agentStatus=BLOCKED`、实际 `agentMode=offline`，准备与自动执行结论及
+`canActivateLive` 全部为 `false`；期望的全局启动模式仍保持 `live`，不会伪装成
+`data-only`。
 
 AI Runtime 在组件健康中仅返回脱敏状态、心跳年龄和已应用配置版本。它是可选
 组件，即使处于 `disabled`、`unconfigured`、`offline` 或 `unavailable`，也不会

@@ -1,5 +1,6 @@
 """GraphQL resolver facade for T-trade sessions."""
 
+import logging
 import uuid
 from dataclasses import fields as dataclass_fields
 from datetime import datetime, timezone
@@ -12,6 +13,11 @@ from quantx_infrastructure.models.agent_runtime import (
 from quantx_infrastructure.services.engine_command_service import engine_command_service
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
+)
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
+  qmt_agent_launch_started_at,
+  qmt_agent_launch_state,
 )
 from quantx_infrastructure.services.t_trade_monitor_projection_service import (
   t_trade_monitor_projection_service,
@@ -59,6 +65,8 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeTimeExitMode,
 )
 from quantx_api.gqlapi.utils.cursor import decode_datetime_cursor, encode_cursor
+
+logger = logging.getLogger(__name__)
 
 
 class TTradeResolver:
@@ -147,6 +155,7 @@ class TTradeResolver:
       data,
       "start_time",
       "end_time",
+      "processed_until",
       "created_at",
       "updated_at",
     )
@@ -239,6 +248,112 @@ class TTradeResolver:
     return TTradeGlobalMonitor(**cls._graphql_kwargs(TTradeGlobalMonitor, payload))
 
   @classmethod
+  def _apply_qmt_launch_block_to_monitor(cls, data: dict) -> dict:
+    """Mask stale live readiness in a persisted monitor projection."""
+
+    reason_code = qmt_agent_launch_block_reason()
+    if reason_code is None and qmt_agent_launch_state() == "LAUNCH_ALLOWED":
+      launch_started_at = qmt_agent_launch_started_at()
+      readiness = data.get("readiness")
+      try:
+        checked_at = (
+          cls._datetime(readiness.get("checked_at"))
+          if isinstance(readiness, dict) and readiness.get("checked_at")
+          else None
+        )
+      except (TypeError, ValueError):
+        checked_at = None
+      if checked_at is not None and checked_at.tzinfo is not None:
+        checked_at = checked_at.astimezone(timezone.utc).replace(tzinfo=None)
+      if (
+        launch_started_at is None
+        or checked_at is None
+        or checked_at < launch_started_at
+      ):
+        reason_code = "QMT_LAUNCH_PENDING_CURRENT_HEARTBEAT"
+    if reason_code is None:
+      return data
+
+    payload = dict(data)
+    message = (
+      "QMT Agent 本地启动被阻断，实盘能力已关闭"
+      f"（{reason_code}）"
+    )
+    payload.update(
+      {
+        "agent_status": "BLOCKED",
+        "can_approve": False,
+        "can_activate_live": False,
+      }
+    )
+    payload["blocked_reasons"] = list(
+      dict.fromkeys([*list(payload.get("blocked_reasons") or []), message])
+    )
+
+    raw_readiness = payload.get("readiness")
+    if not isinstance(raw_readiness, dict) or not raw_readiness:
+      # Old/cold projections may not contain the nested readiness object. The
+      # top-level monitor fields above are sufficient to close live controls;
+      # do not fabricate a partial GraphQL object with missing required fields.
+      return payload
+    readiness = dict(raw_readiness)
+    readiness.update(
+      {
+        "ready": False,
+        "status": "BLOCKED",
+        "preparation_ready": False,
+        "automation_ready": False,
+        "agent_status": "BLOCKED",
+        "agent_device_id": None,
+        "agent_mode": "offline",
+        "protocol_version": "",
+        "can_approve": False,
+        "can_activate_live": False,
+      }
+    )
+    readiness["blocked_reasons"] = list(
+      dict.fromkeys([*list(readiness.get("blocked_reasons") or []), message])
+    )
+    readiness["preparation_blocked_reasons"] = list(
+      dict.fromkeys(
+        [*list(readiness.get("preparation_blocked_reasons") or []), message]
+      )
+    )
+    checks = []
+    launch_check_seen = False
+    for raw_check in list(readiness.get("checks") or []):
+      check = dict(raw_check)
+      code = str(check.get("code") or "")
+      if code in {
+        "QMT_AGENT_LAUNCH_ALLOWED",
+        "LIVE_AGENT_READY",
+        "AGENT_MODE_LIVE",
+        "PROTOCOL_1_1",
+      }:
+        check.update(
+          {
+            "passed": False,
+            "message": message,
+            "scope": "PREPARATION",
+          }
+        )
+      if code == "QMT_AGENT_LAUNCH_ALLOWED":
+        launch_check_seen = True
+      checks.append(check)
+    if not launch_check_seen:
+      checks.append(
+        {
+          "code": "QMT_AGENT_LAUNCH_ALLOWED",
+          "passed": False,
+          "message": message,
+          "scope": "PREPARATION",
+        }
+      )
+    readiness["checks"] = checks
+    payload["readiness"] = readiness
+    return payload
+
+  @classmethod
   def _readiness_type(cls, data: dict) -> TTradeLiveReadiness:
     payload = cls._with_utc_datetimes(
       data,
@@ -325,6 +440,7 @@ class TTradeResolver:
         {"account_id": account_id},
         account_id,
       )
+    monitor = cls._apply_qmt_launch_block_to_monitor(monitor)
     return cls._global_monitor_type(monitor)
 
   @classmethod
@@ -1014,24 +1130,85 @@ class TTradeResolver:
   async def start_replay(
     cls, input: TTradeReplayStartInput
   ) -> TTradeReplayMutationResult:
+    idempotency_key = str(input.idempotency_key or "").strip()
+    if not idempotency_key:
+      return TTradeReplayMutationResult(
+        success=False,
+        code="INVALID_IDEMPOTENCY_KEY",
+        message="回放请求幂等键不能为空",
+      )
+
     try:
-      replay = await cls._engine_request(
+      receipt = await engine_command_service.request(
         "T_TRADE_REPLAY_START",
         {"input": vars(input)},
-        input.account_id,
+        aggregate_id=input.account_id,
+        idempotency_key=idempotency_key,
       )
+    except Exception:
+      logger.exception("提交做 T 历史回放命令失败: account_id=%s", input.account_id)
+      return TTradeReplayMutationResult(
+        success=False,
+        code="REPLAY_START_FAILED",
+        message="做 T 历史回放请求提交失败，请稍后重试",
+      )
+    if receipt.status == "FAILED":
+      return TTradeReplayMutationResult(
+        success=False,
+        code="REPLAY_START_FAILED",
+        message=receipt.error or "做 T 历史回放启动失败",
+      )
+
+    replay = dict(receipt.result or {})
+    if not replay:
+      try:
+        replay = await cls.replay_service.get(receipt.message_id) or {}
+      except Exception:
+        logger.exception("读取做 T 历史回放投影失败: run_id=%s", receipt.message_id)
+    has_durable_replay = bool(replay)
+    if not replay:
+      replay = {
+        "run_id": receipt.message_id,
+        "backtest_id": None,
+        "account_id": input.account_id,
+        "status": "PENDING",
+        "progress_pct": 0.0,
+        "revision": "0",
+        "processed_until": None,
+        "start_time": input.start_time,
+        "end_time": input.end_time,
+        "snapshot_id": None,
+        "snapshot_date": None,
+        "created_at": None,
+        "updated_at": None,
+        "error_message": None,
+        "data_quality": "PENDING",
+        "data_quality_message": "Engine 已接受请求，正在准备历史数据",
+        "skipped_stock_codes": [],
+        "summary": None,
+        "instruments": [],
+        "curve": [],
+        "report": None,
+      }
+
+    replay_status = str(replay.get("status") or "").upper()
+    if (
+      receipt.status == "SUCCEEDED"
+      and has_durable_replay
+      and replay_status in {"RUNNING", "COMPLETED"}
+    ):
       return TTradeReplayMutationResult(
         success=True,
         code="REPLAY_STARTED",
         message="做 T 历史回放已启动",
         replay=cls._replay_type(replay),
       )
-    except ValueError as exc:
-      return TTradeReplayMutationResult(
-        success=False,
-        code="VALIDATION_FAILED",
-        message=str(exc),
-      )
+    return TTradeReplayMutationResult(
+      success=True,
+      code="REPLAY_ACCEPTED",
+      message="做 T 历史回放请求已接受，正在后台准备",
+      replay=cls._replay_type(replay),
+    )
 
   @classmethod
   async def cancel_replay(cls, run_id: str) -> TTradeReplayMutationResult:

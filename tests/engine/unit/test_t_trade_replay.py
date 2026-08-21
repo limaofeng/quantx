@@ -1,10 +1,19 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+import quantx_engine.strategy_executor as strategy_executor_module
 from quantx_domain.brokers.backtest import BacktestBroker
-from quantx_domain.brokers.base import OrderType, Position, TradeRecord
+from quantx_domain.brokers.base import (
+  OrderRequest,
+  OrderStatus,
+  OrderType,
+  Position,
+  PriceType,
+  TradeRecord,
+)
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
@@ -15,6 +24,7 @@ from quantx_domain.strategies.base import (
   TradeIntentDirection,
   TradeIntentExecutionMode,
 )
+from quantx_domain.trading import MarketDataSnapshot
 from quantx_engine.strategy_executor import (
   ExecutionStatus,
   StrategyExecutor,
@@ -28,6 +38,547 @@ from quantx_infrastructure.core.t_trade_replay_report import (
 )
 from quantx_infrastructure.models import ExecutionMetrics
 from quantx_infrastructure.models.enums import StrategyRunMode
+
+
+def _tick_book(timestamp: datetime, *, price: float = 10.0) -> MarketDataSnapshot:
+  return MarketDataSnapshot(
+    instrument_code="000001.SZ",
+    timestamp=timestamp,
+    price=price,
+    high=price,
+    low=price,
+    volume=100_000,
+    limit_up=11.0,
+    limit_down=9.0,
+    ask_price=[10.01, 10.02, 10.03, 10.04, 10.05],
+    ask_vol=[100, 100, 100, 100, 100],
+    bid_price=[9.99, 9.98, 9.97, 9.96, 9.95],
+    bid_vol=[100, 100, 100, 100, 100],
+    source="tick",
+  )
+
+
+@pytest.mark.asyncio
+async def test_replay_initial_cash_reaches_order_sizer_and_risk_before_broker(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Replay holdings and asset residual must never become spendable cash."""
+
+  adapter = AsyncMock()
+  adapter.connect = AsyncMock(return_value=True)
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "get_adapter_for_mode",
+    AsyncMock(return_value=adapter),
+  )
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "ensure_adapter_connected_for_mode",
+    AsyncMock(return_value=True),
+  )
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "release_adapter_for_mode",
+    AsyncMock(),
+  )
+  executor = StrategyExecutor()
+
+  async def keep_running(_runtime: StrategyRuntime) -> None:
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr(executor, "_run_strategy_loop", keep_running)
+  observed_sizer_account = {}
+  original_draft_intent = strategy_executor_module.OrderSizer.draft_intent
+
+  def capture_sizer_account(self, intent, order_type, price, account, position=None):
+    observed_sizer_account.update(account)
+    return original_draft_intent(
+      self,
+      intent,
+      order_type,
+      price,
+      account,
+      position,
+    )
+
+  monkeypatch.setattr(
+    strategy_executor_module.OrderSizer,
+    "draft_intent",
+    capture_sizer_account,
+  )
+  current_time = datetime(2024, 1, 2, 10, 0)
+  metadata = {
+    "000001.SZ": {
+      "position_shares": 3_300,
+      "position_available_shares": 3_300,
+      "position_frozen_shares": 0,
+      "position_avg_price": 10.0,
+      "position_market_value": 33_000.0,
+    }
+  }
+  context = StrategyContext(
+    run_id="replay-initial-cash-risk",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={
+      "t_trade_replay": True,
+      "initial_cash": 2_383.96,
+      "initial_total_asset": 40_000.0,
+      "initial_portfolio_metadata": metadata,
+      "initial_instrument_metadata": metadata,
+      "max_total_t_exposure_pct": 1.0,
+    },
+    initial_capital=40_000.0,
+    current_time=current_time,
+    backtest_start_time=current_time,
+    backtest_end_time=datetime(2024, 1, 2, 15, 0),
+  )
+  runtime = executor.create(
+    run_id=context.run_id,
+    strategy_id=1,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+  )
+
+  try:
+    assert await executor.start(runtime.run_id) is True
+    account = runtime.state_manager.get_account()
+    quota = runtime.state_manager.get_account_quota()
+    assert account["cash"] == pytest.approx(2_383.96)
+    assert account["total_asset"] == pytest.approx(40_000.0)
+    assert account["non_trading_asset"] == pytest.approx(4_616.04)
+    assert quota["available_cash"] == pytest.approx(2_383.96)
+    assert quota["total_asset"] == pytest.approx(40_000.0)
+    assert runtime.broker.cash == pytest.approx(2_383.96)
+    assert runtime.state_manager.reserve_cash("residual-probe", 100.0) is True
+    reserved_quota = runtime.state_manager.get_account_quota()
+    assert reserved_quota["available_cash"] == pytest.approx(2_283.96)
+    assert reserved_quota["frozen_cash"] == pytest.approx(100.0)
+    assert reserved_quota["total_asset"] == pytest.approx(40_000.0)
+    assert runtime.state_manager.release_cash("residual-probe") is True
+
+    runtime.latest_market_data["000001.SZ"] = MarketDataSnapshot(
+      instrument_code="000001.SZ",
+      timestamp=current_time,
+      price=10.0,
+      close=10.0,
+      limit_up=11.0,
+      limit_down=9.0,
+      bid_price=[9.99],
+      ask_price=[10.0],
+      source="tick",
+    )
+    intent = TradeIntent(
+      strategy_id="1",
+      run_id=runtime.run_id,
+      instrument_code="000001.SZ",
+      direction=TradeIntentDirection.BUY,
+      bucket="swing",
+      reason="test_replay_cash_boundary",
+      target_amount=9_500.0,
+      limit_price_hint=10.0,
+    )
+    await runtime.state_manager.record_trade_intent(intent)
+    await executor._process_trade_intent(runtime, intent)
+
+    record = runtime.state_manager._state["trade_intents"][intent.intent_id]
+    assert observed_sizer_account["available_cash"] == pytest.approx(2_383.96)
+    assert observed_sizer_account["total_asset"] == pytest.approx(40_000.0)
+    assert record["status"] == "REJECTED"
+    assert record["metadata"]["risk_reason_code"] == "INSUFFICIENT_CASH"
+    assert "可用 2383.96" in record["notes"]
+    assert runtime.broker.orders == {}
+  finally:
+    await executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_t_trade_replay_market_exit_waits_for_next_tick_and_uses_bid_depth(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  adapter = AsyncMock()
+  adapter.connect = AsyncMock(return_value=True)
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "get_adapter_for_mode",
+    AsyncMock(return_value=adapter),
+  )
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "ensure_adapter_connected_for_mode",
+    AsyncMock(return_value=True),
+  )
+  executor = StrategyExecutor()
+  context = StrategyContext(
+    run_id="strict-t-replay",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={
+      "t_trade_replay": True,
+      "commission_rate": 0.0,
+      "minimum_commission": 0.0,
+      "stamp_tax_rate": 0.0,
+      "transfer_fee_rate": 0.0,
+      "slippage_rate": 0.0,
+      "book_depth_participation_pct": 0.5,
+    },
+    initial_capital=100_000.0,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="strict replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+
+  await executor._setup_broker_and_data(runtime)
+
+  broker = runtime.broker
+  assert isinstance(broker, BacktestBroker)
+  assert broker.strict_book_depth is True
+  assert broker.no_queue_credit is True
+  assert broker.defer_new_orders_until_next_quote is True
+  broker.positions["000001.SZ"] = Position(
+    instrument_code="000001.SZ",
+    long_volume=100,
+    available_volume=100,
+    long_avg_price=10.0,
+    last_price=10.0,
+    market_value=1_000.0,
+  )
+  signal_at = datetime(2024, 1, 2, 10, 0)
+  await broker.update_market_data(
+    "000001.SZ",
+    10.0,
+    signal_at,
+    market_data=_tick_book(signal_at),
+  )
+
+  order = await broker.place_order(
+    OrderRequest(
+      instrument_code="000001.SZ",
+      order_type=OrderType.SELL,
+      price_type=PriceType.MARKET,
+      volume=100,
+      price=9.99,
+    )
+  )
+
+  assert order.status is OrderStatus.SUBMITTED
+  assert broker.trades == []
+
+  next_tick = datetime(2024, 1, 2, 10, 0, 1)
+  await broker.update_market_data(
+    "000001.SZ",
+    10.0,
+    next_tick,
+    market_data=_tick_book(next_tick),
+  )
+
+  assert order.status is OrderStatus.FILLED
+  assert order.filled_volume == 100
+  assert order.avg_price == pytest.approx((50 * 9.99 + 50 * 9.98) / 100)
+  assert broker.trades[0].trade_time == next_tick
+
+
+@pytest.mark.asyncio
+async def test_ordinary_backtest_keeps_immediate_market_order_semantics(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  adapter = AsyncMock()
+  adapter.connect = AsyncMock(return_value=True)
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "get_adapter_for_mode",
+    AsyncMock(return_value=adapter),
+  )
+  monkeypatch.setattr(
+    strategy_executor_module.adapter_manager,
+    "ensure_adapter_connected_for_mode",
+    AsyncMock(return_value=True),
+  )
+  executor = StrategyExecutor()
+  context = StrategyContext(
+    run_id="ordinary-backtest",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={
+      "commission_rate": 0.0,
+      "minimum_commission": 0.0,
+      "stamp_tax_rate": 0.0,
+      "transfer_fee_rate": 0.0,
+      "slippage_rate": 0.0,
+    },
+    initial_capital=100_000.0,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="ordinary backtest",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+
+  await executor._setup_broker_and_data(runtime)
+
+  broker = runtime.broker
+  assert isinstance(broker, BacktestBroker)
+  assert broker.strict_book_depth is False
+  assert broker.no_queue_credit is False
+  assert broker.defer_new_orders_until_next_quote is False
+  broker.positions["000001.SZ"] = Position(
+    instrument_code="000001.SZ",
+    long_volume=100,
+    available_volume=100,
+    long_avg_price=10.0,
+    last_price=10.0,
+    market_value=1_000.0,
+  )
+  signal_at = datetime(2024, 1, 2, 10, 0)
+  await broker.update_market_data(
+    "000001.SZ",
+    10.0,
+    signal_at,
+    market_data=_tick_book(signal_at),
+  )
+
+  order = await broker.place_order(
+    OrderRequest(
+      instrument_code="000001.SZ",
+      order_type=OrderType.SELL,
+      price_type=PriceType.MARKET,
+      volume=100,
+      price=10.0,
+    )
+  )
+
+  assert order.status is OrderStatus.FILLED
+  assert broker.trades[0].trade_time == signal_at
+
+
+@pytest.mark.asyncio
+async def test_replay_progress_projection_is_throttled_but_forced_at_window_boundary(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  executor = StrategyExecutor()
+  context = StrategyContext(
+    run_id="replay-progress",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True, "account_id": "account-1"},
+    backtest_start_time=datetime(2024, 1, 2, 9, 30),
+    backtest_end_time=datetime(2024, 1, 2, 15, 0),
+    current_time=datetime(2024, 1, 2, 12, 15),
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+  update = AsyncMock()
+  clock = iter((100.0, 100.5, 100.6))
+  monkeypatch.setattr(strategy_executor_module, "monotonic", lambda: next(clock))
+  monkeypatch.setattr(
+    strategy_executor_module.t_trade_replay_projection_service,
+    "update",
+    update,
+  )
+
+  await executor._report_t_trade_replay_progress(runtime)
+  context.current_time = datetime(2024, 1, 2, 13, 0)
+  await executor._report_t_trade_replay_progress(runtime)
+  await executor._report_t_trade_replay_progress(
+    runtime,
+    processed_until=datetime(2024, 1, 2, 14, 0),
+    force=True,
+  )
+
+  assert update.await_count == 2
+  first_call = update.await_args_list[0].kwargs
+  second_call = update.await_args_list[1].kwargs
+  assert first_call["progress_pct"] == pytest.approx(50.0)
+  assert second_call["progress_pct"] > first_call["progress_pct"]
+  assert second_call["processed_until"] == datetime(2024, 1, 2, 14, 0)
+
+
+@pytest.mark.asyncio
+async def test_multi_instrument_replay_reports_empty_window_as_processed(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class FakeHistoricalDataAdapter:
+    async def get_ticks(self, **_kwargs):
+      return []
+
+  class FakeTradingDateHelper:
+    async def get_trading_calendar(self, **_kwargs):
+      return [datetime(2024, 1, 2).date()]
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "HistoricalDataAdapter",
+    FakeHistoricalDataAdapter,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "TradingDateHelper",
+    FakeTradingDateHelper,
+  )
+  executor = StrategyExecutor()
+  executor._run_backtest_warmup_klines = AsyncMock()
+  executor._report_t_trade_replay_progress = AsyncMock()
+  executor._runtime_log = lambda *_args, **_kwargs: None
+  end_time = datetime(2024, 1, 2, 15, 0)
+  context = StrategyContext(
+    run_id="replay-empty-window",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ", "600000.SH"],
+    parameters={"t_trade_replay": True, "account_id": "account-1"},
+    backtest_start_time=datetime(2024, 1, 2, 9, 30),
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+    data_adapter=FakeHistoricalDataAdapter(),
+    status=ExecutionStatus.RUNNING,
+  )
+
+  await executor._run_backtest_multi_instrument_timeline(
+    runtime,
+    context.instruments,
+    [],
+    context.backtest_start_time,
+    end_time,
+    use_tick_data=True,
+  )
+
+  executor._report_t_trade_replay_progress.assert_awaited_once_with(
+    runtime,
+    processed_until=end_time,
+    force=True,
+  )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("record_count", "expected_offsets", "expected_queries"),
+  [
+    (3, [0, 3], 2),
+    (4, [0, 3], 2),
+  ],
+)
+async def test_t_trade_tick_reader_probes_exact_limit_and_paginates_beyond_it(
+  monkeypatch: pytest.MonkeyPatch,
+  record_count: int,
+  expected_offsets: list[int],
+  expected_queries: int,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 3)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  source = [
+    SimpleNamespace(time=start_time + timedelta(seconds=index))
+    for index in range(record_count)
+  ]
+
+  class PagedAdapter:
+    def __init__(self) -> None:
+      self.offsets = []
+
+    async def get_ticks(self, **kwargs):
+      offset = kwargs["offset"]
+      limit = kwargs["limit"]
+      self.offsets.append(offset)
+      return source[offset : offset + limit]
+
+  context = StrategyContext(
+    run_id=f"replay-page-{record_count}",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+  adapter = PagedAdapter()
+
+  ticks = await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+    runtime,
+    adapter,
+    instrument_code="000001.SZ",
+    start_time=start_time,
+    end_time=end_time,
+  )
+
+  assert ticks == source
+  assert adapter.offsets == expected_offsets
+  audit = context.parameters["replay_tick_read_audit"]
+  assert audit["records_read"] == record_count
+  assert audit["queries"] == expected_queries
+  assert audit["issues"] == []
+  if record_count == 3:
+    assert audit["boundary_probe_windows"] == 1
+  else:
+    assert audit["paginated_windows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_rejects_non_advancing_pagination_before_metrics(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 3)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  repeated_page = [
+    SimpleNamespace(time=start_time + timedelta(seconds=index)) for index in range(3)
+  ]
+
+  class BrokenPagedAdapter:
+    async def get_ticks(self, **_kwargs):
+      return repeated_page
+
+  context = StrategyContext(
+    run_id="replay-page-stalled",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+
+  with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+    await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+      runtime,
+      BrokenPagedAdapter(),
+      instrument_code="000001.SZ",
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  audit = context.parameters["replay_tick_read_audit"]
+  assert audit["issues"][0]["reason_code"] == "TICK_PAGINATION_DID_NOT_ADVANCE"
+  metrics = build_t_trade_replay_metrics(runtime)
+  assert metrics["data_quality"] == "PARTIAL"
+  assert "Tick 读取窗口未通过完整性校验" in metrics["data_quality_message"]
 
 
 def _trade(
@@ -138,6 +689,7 @@ async def test_replay_auto_confirms_manual_intent_through_executor(
     strategy_class=object,
     context=context,
   )
+  runtime.status = ExecutionStatus.RUNNING
   intent = TradeIntent(
     strategy_id="1",
     run_id=context.run_id,
@@ -321,6 +873,35 @@ def test_capital_utilization_falls_when_exit_wait_is_longer() -> None:
   )
 
 
+def test_derived_price_limits_are_disclosed_as_partial_data_quality() -> None:
+  runtime = _metrics_runtime(datetime(2024, 1, 2, 14, 0))
+  runtime.context.parameters.update(
+    {
+      "replay_price_limit_policy": {
+        "schema_version": 1,
+        "ambiguous_action": "STRICT_RISK_REJECT",
+      },
+      "replay_price_limit_source_counts": {
+        "NATIVE_TICK": 10,
+        "DERIVED_TICK": 25,
+        "MISSING_TICK": 2,
+      },
+    }
+  )
+
+  metrics = build_t_trade_replay_metrics(runtime)
+
+  assert metrics["data_quality"] == "PARTIAL"
+  assert "25 个行情事件的涨跌停价" in metrics["data_quality_message"]
+  assert "2 个行情事件缺少可确认的涨跌停价" in metrics["data_quality_message"]
+  assert "原生 10、派生 25、缺失 2" in metrics["methodology"]["price_limits"]
+  assert metrics["methodology"]["price_limit_source_counts"] == {
+    "NATIVE_TICK": 10,
+    "DERIVED_TICK": 25,
+    "MISSING_TICK": 2,
+  }
+
+
 def test_completed_replay_writes_versioned_html_and_json_report(tmp_path) -> None:
   run_dir = tmp_path / "backtests" / "run-1" / "v1"
   run_dir.mkdir(parents=True)
@@ -400,7 +981,7 @@ def test_backtest_end_exit_intent_uses_market_and_keeps_batch_attribution() -> N
 
 
 @pytest.mark.asyncio
-async def test_replay_finalizer_closes_open_batch_through_broker_reports() -> None:
+async def test_replay_finalizer_discloses_unfilled_batch_without_a_next_tick() -> None:
   executor = StrategyExecutor()
   context = StrategyContext(
     run_id="replay-finalize",
@@ -415,7 +996,12 @@ async def test_replay_finalizer_closes_open_batch_through_broker_reports() -> No
     current_time=datetime(2024, 1, 2, 14, 55),
   )
   strategy = AshareIntradayTAssistantStrategy(context)
-  broker = BacktestBroker(initial_capital=100_000.0)
+  broker = BacktestBroker(
+    initial_capital=100_000.0,
+    strict_book_depth=True,
+    no_queue_credit=True,
+    defer_new_orders_until_next_quote=True,
+  )
   broker.positions["000001.SZ"] = Position(
     instrument_code="000001.SZ",
     long_volume=1_100,
@@ -430,6 +1016,7 @@ async def test_replay_finalizer_closes_open_batch_through_broker_reports() -> No
     "000001.SZ",
     10.0,
     context.current_time,
+    market_data=_tick_book(context.current_time),
   )
   runtime = StrategyRuntime(
     run_id=context.run_id,
@@ -472,10 +1059,25 @@ async def test_replay_finalizer_closes_open_batch_through_broker_reports() -> No
     event_task.cancel()
     await asyncio.gather(event_task, return_exceptions=True)
 
-  assert plan.remaining_volume == 0
-  assert broker.positions["000001.SZ"].long_volume == 1_000
-  forced_trade = broker.trades[-1]
-  assert forced_trade.trade_type is OrderType.SELL
-  assert forced_trade.metadata["backtest_forced_close"] is True
-  assert forced_trade.metadata["t_batch_id"] == "batch-finalize"
-  assert context.parameters["replay_forced_liquidation"]["failed_cycles"] == 0
+  assert plan.remaining_volume == 100
+  assert broker.positions["000001.SZ"].long_volume == 1_100
+  assert broker.trades == []
+  forced_order = next(iter(broker.orders.values()))
+  assert forced_order.status is OrderStatus.SUBMITTED
+  liquidation = context.parameters["replay_forced_liquidation"]
+  assert liquidation["closed_cycles"] == 0
+  assert liquidation["failed_cycles"] == 1
+  assert liquidation["attempts"] == [
+    {
+      "plan_id": "plan-finalize",
+      "batch_id": "batch-finalize",
+      "stock_code": "000001.SZ",
+      "requested_volume": 100,
+      "status": "FAILED_NOT_FULLY_LIQUIDATED",
+      "remaining_volume": 100,
+    }
+  ]
+  metrics = build_t_trade_replay_metrics(runtime)
+  assert metrics["data_quality"] == "PARTIAL"
+  assert "1 个批次期末未完成合法清算" in metrics["data_quality_message"]
+  assert metrics["summary"]["liquidation_failed_cycles"] == 1

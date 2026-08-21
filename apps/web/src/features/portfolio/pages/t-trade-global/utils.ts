@@ -197,22 +197,84 @@ export function resolveInstrumentName(
   return stockCode;
 }
 
-export function replayDatePreset(tradingDays: 1 | 5 | 20) {
-  const end = new Date();
-  const start = new Date(end);
-  let counted = 1;
-  while (counted < tradingDays) {
-    start.setDate(start.getDate() - 1);
-    const day = start.getDay();
-    if (day !== 0 && day !== 6) counted += 1;
+type ReplayCrypto = {
+  randomUUID?: () => string;
+  getRandomValues<T extends ArrayBufferView | null>(array: T): T;
+};
+
+export function replayIdempotencyKey(
+  cryptoApi: ReplayCrypto = globalThis.crypto
+) {
+  if (typeof cryptoApi.randomUUID === 'function') {
+    return cryptoApi.randomUUID();
   }
-  const format = (value: Date) => {
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, '0');
-    const day = String(value.getDate()).padStart(2, '0');
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0'));
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10).join(''),
+  ].join('-');
+}
+
+function shanghaiClock(value: Date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(value);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find(item => item.type === type)?.value || '';
+  const hour = Number(part('hour') === '24' ? '0' : part('hour'));
+  return {
+    date: `${part('year')}-${part('month')}-${part('day')}`,
+    minutes: hour * 60 + Number(part('minute')),
+  };
+}
+
+export function replayDatePreset(
+  tradingDayCount: 1 | 5 | 20,
+  tradingCalendar: string[] = [],
+  now: Date = new Date()
+) {
+  const current = shanghaiClock(now);
+  const completedTradingDays = Array.from(new Set(tradingCalendar))
+    .sort()
+    .filter(
+      day => day < current.date || (day === current.date && current.minutes >= 900)
+    );
+  if (completedTradingDays.length > 0) {
+    const selected = completedTradingDays.slice(-tradingDayCount);
+    return { start: selected[0], end: selected[selected.length - 1] };
+  }
+
+  const formatUtcDate = (value: Date) => {
+    const year = value.getUTCFullYear();
+    const month = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(value.getUTCDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   };
-  return { start: format(start), end: format(end) };
+  const end = new Date(`${current.date}T00:00:00Z`);
+  if (current.minutes < 900) end.setUTCDate(end.getUTCDate() - 1);
+  while ([0, 6].includes(end.getUTCDay())) {
+    end.setUTCDate(end.getUTCDate() - 1);
+  }
+  const start = new Date(end);
+  let counted = 1;
+  while (counted < tradingDayCount) {
+    start.setUTCDate(start.getUTCDate() - 1);
+    const day = start.getUTCDay();
+    if (day !== 0 && day !== 6) counted += 1;
+  }
+  return { start: formatUtcDate(start), end: formatUtcDate(end) };
 }
 
 export function replayStatusLabel(status?: string | null) {

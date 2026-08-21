@@ -419,7 +419,10 @@ async def _dispatch(
 
   replay_service = TTradeReplayService(strategy_manager)
   if command_type == "T_TRADE_REPLAY_START":
-    return _json_value(await replay_service.start(payload["input"]))
+    start_kwargs: dict[str, Any] = {"defer_start": True}
+    if command_id:
+      start_kwargs["request_id"] = command_id
+    return _json_value(await replay_service.start(payload["input"], **start_kwargs))
   if command_type == "T_TRADE_REPLAY_CANCEL":
     return _json_value(await replay_service.cancel(payload["run_id"]))
   raise ValueError(f"不支持的 Engine command_type: {command_type}")

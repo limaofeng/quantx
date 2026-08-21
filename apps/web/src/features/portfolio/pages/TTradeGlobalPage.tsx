@@ -72,8 +72,6 @@ import { cn } from '@/utils/cn';
 
 import {
   ApproveTTradeEntryMutation,
-  GetHoldingsQuery,
-  GetPortfolioSummaryQuery,
   RejectTTradeEntryMutation,
 } from '../hooks/usePortfolio';
 import { useLatestMarketQuotes } from '../hooks/useRealTimeHoldings';
@@ -132,6 +130,7 @@ import {
   numberValue,
   quoteTone,
   replayDatePreset,
+  replayIdempotencyKey,
   replayStatusLabel,
   resolveInstrumentName,
   signalHistoryCategory,
@@ -305,11 +304,12 @@ function TTradeReplayPanel({
   form: SettingsForm;
 }) {
   const { toast } = useToast();
+  const { tradingDays: replayTradingDays } = useTradingDays('SH', 60);
   const initialRange = React.useMemo(() => replayDatePreset(5), []);
   const [startDate, setStartDate] = React.useState(initialRange.start);
   const [endDate, setEndDate] = React.useState(initialRange.end);
+  const appliedTradingCalendarRef = React.useRef(false);
   const [activeRunId, setActiveRunId] = React.useState('');
-  const [useCurrentPortfolio, setUseCurrentPortfolio] = React.useState(false);
   const startTime = `${startDate}T09:30:00`;
   const endTime = `${endDate}T15:00:00`;
 
@@ -318,18 +318,6 @@ function TTradeReplayPanel({
     variables: { accountId, startTime },
     pause: !accountId || !startDate,
     requestPolicy: 'network-only',
-  });
-  const [manualHoldingsResult] = useQuery({
-    query: GetHoldingsQuery,
-    variables: { accountId },
-    pause: !accountId,
-    requestPolicy: 'cache-and-network',
-  });
-  const [portfolioSummaryResult] = useQuery({
-    query: GetPortfolioSummaryQuery,
-    variables: { accountId },
-    pause: !accountId,
-    requestPolicy: 'cache-and-network',
   });
   const [historyResult, refreshHistory] = useQuery({
     query: TTradeReplayHistoryQuery,
@@ -382,27 +370,6 @@ function TTradeReplayPanel({
     String(cyclesResult.operation?.variables.runId || '')
   );
   const cycles = cyclesPage?.items || [];
-  const currentPortfolioSummary = portfolioSummaryResult.data?.portfolioSummary;
-  const currentPortfolioPositions = React.useMemo(
-    () =>
-      (manualHoldingsResult.data?.positions || [])
-        .filter(
-          position => position.accountId === accountId && position.volume > 0
-        )
-        .map(position => ({
-          stockCode: position.stockCode,
-          instrumentName: position.instrumentName || '',
-          volume: Math.max(0, Math.trunc(position.volume)),
-          availableVolume: Math.max(0, Math.trunc(position.canUseVolume)),
-          avgPrice: Math.max(0, position.avgPrice || 0),
-          lastPrice: Math.max(0, position.lastPrice || 0),
-          marketValue: Math.max(0, position.marketValue || 0),
-        })),
-    [accountId, manualHoldingsResult.data?.positions]
-  );
-  const canUseCurrentPortfolio = Boolean(
-    currentPortfolioSummary && currentPortfolioPositions.length > 0
-  );
   const isRunning = ['PENDING', 'RUNNING', 'STARTING'].includes(
     String(replay?.status || '').toUpperCase()
   );
@@ -424,8 +391,14 @@ function TTradeReplayPanel({
   const latestRevisionRef = React.useRef(new Map<string, string>());
 
   React.useEffect(() => {
-    setUseCurrentPortfolio(false);
-  }, [accountId, startDate]);
+    if (appliedTradingCalendarRef.current || replayTradingDays.length === 0) {
+      return;
+    }
+    appliedTradingCalendarRef.current = true;
+    const range = replayDatePreset(5, replayTradingDays);
+    setStartDate(range.start);
+    setEndDate(range.end);
+  }, [replayTradingDays]);
 
   React.useEffect(() => {
     if (!activeRunId && history.length > 0) setActiveRunId(history[0].runId);
@@ -530,28 +503,20 @@ function TTradeReplayPanel({
   }, [activeRunId, hasActiveReplay, scheduleRefresh]);
 
   const setPreset = (days: 1 | 5 | 20) => {
-    const range = replayDatePreset(days);
+    const range = replayDatePreset(days, replayTradingDays);
     setStartDate(range.start);
     setEndDate(range.end);
   };
 
   const handleStart = async () => {
     try {
-      const useManualPortfolio = Boolean(
-        preparation?.requiresManualPortfolio && useCurrentPortfolio
-      );
       const result = await startReplay({
         input: {
           accountId,
+          idempotencyKey: replayIdempotencyKey(),
           startTime,
           endTime,
-          initialCash: useManualPortfolio
-            ? Math.max(0, currentPortfolioSummary?.cash || 0)
-            : undefined,
-          initialTotalAsset: useManualPortfolio
-            ? Math.max(0, currentPortfolioSummary?.totalAsset || 0)
-            : undefined,
-          initialPositions: useManualPortfolio ? currentPortfolioPositions : [],
+          initialPositions: [],
           targetTradeAmount: numberValue(form.targetTradeAmount, 10000),
           maxTradeAmount: numberValue(form.maxTradeAmount, 12000),
           maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
@@ -563,15 +528,9 @@ function TTradeReplayPanel({
           reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
           maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
           momentumEnabled: form.momentumEnabled,
-          momentumWindowSeconds: integerValue(
-            form.momentumWindowSeconds,
-            60
-          ),
+          momentumWindowSeconds: integerValue(form.momentumWindowSeconds, 60),
           momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
-          momentumMinMoveSeconds: integerValue(
-            form.momentumMinMoveSeconds,
-            15
-          ),
+          momentumMinMoveSeconds: integerValue(form.momentumMinMoveSeconds, 15),
           momentumBaselineSeconds: integerValue(
             form.momentumBaselineSeconds,
             300
@@ -592,14 +551,8 @@ function TTradeReplayPanel({
             form.momentumHighToleranceTicks,
             1
           ),
-          momentumMaxSpreadTicks: integerValue(
-            form.momentumMaxSpreadTicks,
-            10
-          ),
-          momentumMaxSpreadPct: numberValue(
-            form.momentumMaxSpreadPct,
-            0.3
-          ),
+          momentumMaxSpreadTicks: integerValue(form.momentumMaxSpreadTicks, 10),
+          momentumMaxSpreadPct: numberValue(form.momentumMaxSpreadPct, 0.3),
           approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
           maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
           targetProfitPct: numberValue(form.targetProfitPct, 2),
@@ -770,8 +723,7 @@ function TTradeReplayPanel({
                 disabled={
                   !accountId ||
                   !preparation ||
-                  (preparation.requiresManualPortfolio &&
-                    (!useCurrentPortfolio || !canUseCurrentPortfolio)) ||
+                  preparation.requiresManualPortfolio ||
                   startResult.fetching ||
                   history.some(item =>
                     ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
@@ -820,40 +772,15 @@ function TTradeReplayPanel({
           </div>
 
           {preparation?.requiresManualPortfolio && (
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-3 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
+            <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
               <div>
                 <p className="text-[11px] font-bold text-amber-100">
-                  可显式改用当前账户状态作为初始组合
+                  缺少可审计的历史初始组合
                 </p>
                 <p className="mt-0.5 text-[10px] text-amber-200/55">
-                  当前组合不是历史时点数据，可能产生持仓偏差；仅在你确认后才会用于回放。
+                  当前账户状态晚于回放起点，禁止用于正式历史回放。请先导入开始日前的账户日结快照。
                 </p>
               </div>
-              <button
-                type="button"
-                aria-pressed={useCurrentPortfolio}
-                disabled={
-                  manualHoldingsResult.fetching ||
-                  portfolioSummaryResult.fetching ||
-                  !canUseCurrentPortfolio
-                }
-                onClick={() => setUseCurrentPortfolio(value => !value)}
-                className={cn(
-                  'cursor-pointer border px-3 py-1.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60 disabled:cursor-not-allowed disabled:opacity-45',
-                  useCurrentPortfolio
-                    ? 'border-cyan-400/40 bg-cyan-400/15 text-cyan-100'
-                    : 'border-amber-300/25 bg-amber-300/[0.06] text-amber-100 hover:bg-amber-300/10'
-                )}
-              >
-                {manualHoldingsResult.fetching ||
-                portfolioSummaryResult.fetching
-                  ? '正在读取当前组合…'
-                  : useCurrentPortfolio
-                    ? `已确认当前组合 · ${currentPortfolioPositions.length} 只`
-                    : canUseCurrentPortfolio
-                      ? '确认使用当前组合'
-                      : '当前组合不可用'}
-              </button>
             </div>
           )}
         </section>
@@ -918,9 +845,7 @@ function TTradeReplayPanel({
               <MetricCard
                 icon={CircleDollarSign}
                 label="做 T 税费后增量"
-                tone={
-                  (replay.summary?.tNetProfit || 0) >= 0 ? 'red' : 'sky'
-                }
+                tone={(replay.summary?.tNetProfit || 0) >= 0 ? 'red' : 'sky'}
                 value={
                   replay.summary
                     ? `¥${formatNumber(replay.summary.tNetProfit)}`
@@ -931,9 +856,7 @@ function TTradeReplayPanel({
                 icon={TrendingUp}
                 label="相对不做 T 超额"
                 tone={
-                  (replay.summary?.excessReturnPct || 0) >= 0
-                    ? 'red'
-                    : 'sky'
+                  (replay.summary?.excessReturnPct || 0) >= 0 ? 'red' : 'sky'
                 }
                 value={
                   replay.summary
@@ -947,7 +870,11 @@ function TTradeReplayPanel({
                 tone="slate"
                 value={
                   replay.summary
-                    ? `${replay.summary.completedCycles} / ${formatNumber(replay.summary.winRatePct, 1)}%`
+                    ? `${replay.summary.completedCycles} / ${
+                        replay.summary.completedCycles > 0
+                          ? `${formatNumber(replay.summary.winRatePct, 1)}%`
+                          : '无样本'
+                      }`
                     : '--'
                 }
               />
@@ -972,7 +899,8 @@ function TTradeReplayPanel({
                       资金效率与期末清算
                     </h3>
                     <p className="mt-1 text-[10px] text-slate-600">
-                      资金利用率按 4 小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
+                      资金利用率按 4
+                      小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
                     </p>
                   </div>
                   <span
@@ -1142,7 +1070,9 @@ function TTradeReplayPanel({
                       <th className="px-3 py-2 text-right">买入</th>
                       <th className="px-3 py-2 text-right">卖出</th>
                       <th className="px-3 py-2 text-right">税费</th>
-                      <th className="px-3 py-2 text-right">等待 / 资金利用率</th>
+                      <th className="px-3 py-2 text-right">
+                        等待 / 资金利用率
+                      </th>
                       <th className="px-3 py-2 text-right">净增量</th>
                       <th className="px-3 py-2">退出原因</th>
                     </tr>
@@ -1645,19 +1575,11 @@ export function TTradeGlobalPage() {
       maxGapPct: String(monitor.maxGapPct),
       highProfitLockEnabled: monitor.highProfitLockEnabled,
       highProfitArmPct: String(monitor.highProfitArmPct),
-      highProfitMaxDrawdownPct: String(
-        monitor.highProfitMaxDrawdownPct
-      ),
+      highProfitMaxDrawdownPct: String(monitor.highProfitMaxDrawdownPct),
       rapidReversalEnabled: monitor.rapidReversalEnabled,
-      rapidReversalWindowSeconds: String(
-        monitor.rapidReversalWindowSeconds
-      ),
-      rapidReversalDrawdownPct: String(
-        monitor.rapidReversalDrawdownPct
-      ),
-      rapidReversalConfirmTicks: String(
-        monitor.rapidReversalConfirmTicks
-      ),
+      rapidReversalWindowSeconds: String(monitor.rapidReversalWindowSeconds),
+      rapidReversalDrawdownPct: String(monitor.rapidReversalDrawdownPct),
+      rapidReversalConfirmTicks: String(monitor.rapidReversalConfirmTicks),
       hardStopEnabled: monitor.hardStopEnabled,
       hardStopPct: String(monitor.hardStopPct),
       signalLookbackSeconds: String(monitor.signalLookbackSeconds),
@@ -1675,17 +1597,13 @@ export function TTradeGlobalPage() {
       ),
       momentumMinVwapPremiumPct: String(monitor.momentumMinVwapPremiumPct),
       momentumMaxVwapPremiumPct: String(monitor.momentumMaxVwapPremiumPct),
-      momentumHighToleranceTicks: String(
-        monitor.momentumHighToleranceTicks
-      ),
+      momentumHighToleranceTicks: String(monitor.momentumHighToleranceTicks),
       momentumMaxSpreadTicks: String(monitor.momentumMaxSpreadTicks),
       momentumMaxSpreadPct: String(monitor.momentumMaxSpreadPct),
       approvalTtlSeconds: String(monitor.approvalTtlSeconds),
       maxPriceDeviationPct: String(monitor.maxPriceDeviationPct),
       limitUpTouchExitEnabled: monitor.limitUpTouchExitEnabled,
-      limitUpTouchToleranceTicks: String(
-        monitor.limitUpTouchToleranceTicks
-      ),
+      limitUpTouchToleranceTicks: String(monitor.limitUpTouchToleranceTicks),
       timeExitMode: monitor.timeExitMode,
       timeExitTime: monitor.timeExitTime,
       maxHoldingTradingDays: String(monitor.maxHoldingTradingDays),
@@ -1723,15 +1641,9 @@ export function TTradeGlobalPage() {
           reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
           maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
           momentumEnabled: form.momentumEnabled,
-          momentumWindowSeconds: integerValue(
-            form.momentumWindowSeconds,
-            60
-          ),
+          momentumWindowSeconds: integerValue(form.momentumWindowSeconds, 60),
           momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
-          momentumMinMoveSeconds: integerValue(
-            form.momentumMinMoveSeconds,
-            15
-          ),
+          momentumMinMoveSeconds: integerValue(form.momentumMinMoveSeconds, 15),
           momentumBaselineSeconds: integerValue(
             form.momentumBaselineSeconds,
             300
@@ -1752,14 +1664,8 @@ export function TTradeGlobalPage() {
             form.momentumHighToleranceTicks,
             1
           ),
-          momentumMaxSpreadTicks: integerValue(
-            form.momentumMaxSpreadTicks,
-            10
-          ),
-          momentumMaxSpreadPct: numberValue(
-            form.momentumMaxSpreadPct,
-            0.3
-          ),
+          momentumMaxSpreadTicks: integerValue(form.momentumMaxSpreadTicks, 10),
+          momentumMaxSpreadPct: numberValue(form.momentumMaxSpreadPct, 0.3),
           approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
           maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
           targetProfitPct: numberValue(form.targetProfitPct, 2),
@@ -2203,8 +2109,7 @@ export function TTradeGlobalPage() {
             type="button"
             variant="outline"
           >
-            <WalletCards className="h-3.5 w-3.5" />
-            T 批次退出
+            <WalletCards className="h-3.5 w-3.5" />T 批次退出
           </Button>
         )}
         {workspaceMode === 'REPLAY' ? (
@@ -2274,9 +2179,8 @@ export function TTradeGlobalPage() {
             )}
             <div>
               <div className="text-xs font-black text-slate-100">
-                {readinessStageLabel(readiness.status, readiness.stage)}{' '}
-                · Engine {readiness.engineStatus} · Agent{' '}
-                {readiness.agentStatus}
+                {readinessStageLabel(readiness.status, readiness.stage)} ·
+                Engine {readiness.engineStatus} · Agent {readiness.agentStatus}
               </div>
               <div className="mt-1 text-[10px] leading-4 text-slate-400">
                 {readiness.preparationReady && !readiness.automationReady
@@ -2324,9 +2228,7 @@ export function TTradeGlobalPage() {
                   size="sm"
                   variant="outline"
                   disabled={!readiness.canActivateLive || actionLoading}
-                  onClick={() =>
-                    handleActivateLive(TTradeRolloutTarget.Canary)
-                  }
+                  onClick={() => handleActivateLive(TTradeRolloutTarget.Canary)}
                   className="h-8 rounded-sm border-emerald-400/20 text-[10px] text-emerald-200"
                 >
                   启用严格 Canary
@@ -2715,10 +2617,7 @@ export function TTradeGlobalPage() {
                   <td
                     className={cn(
                       'px-3 py-3 text-right font-mono tabular-nums',
-                      financialToneClass(
-                        batch.lastNetProfitPct,
-                        'holding'
-                      )
+                      financialToneClass(batch.lastNetProfitPct, 'holding')
                     )}
                   >
                     {formatSignedPercent(batch.lastNetProfitPct)}
@@ -3482,10 +3381,7 @@ export function TTradeGlobalPage() {
                     type="checkbox"
                     checked={form.highProfitLockEnabled}
                     onChange={event =>
-                      setField(
-                        'highProfitLockEnabled',
-                        event.target.checked
-                      )
+                      setField('highProfitLockEnabled', event.target.checked)
                     }
                     className="h-4 w-4 cursor-pointer accent-emerald-500 focus-visible:ring-2 focus-visible:ring-emerald-500/60"
                   />
@@ -3578,7 +3474,8 @@ export function TTradeGlobalPage() {
                       涨停触达退出
                     </Label>
                     <p className="mt-1 text-[10px] text-slate-600">
-                      活跃 T 批次的可执行买一达到涨停价时，用昨日老仓完成等量退出
+                      活跃 T
+                      批次的可执行买一达到涨停价时，用昨日老仓完成等量退出
                     </p>
                   </div>
                   <input
@@ -3586,10 +3483,7 @@ export function TTradeGlobalPage() {
                     type="checkbox"
                     checked={form.limitUpTouchExitEnabled}
                     onChange={event =>
-                      setField(
-                        'limitUpTouchExitEnabled',
-                        event.target.checked
-                      )
+                      setField('limitUpTouchExitEnabled', event.target.checked)
                     }
                     className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
                   />
@@ -3826,9 +3720,7 @@ export function TTradeGlobalPage() {
                     label="动量窗口"
                     suffix="秒"
                     value={form.momentumWindowSeconds}
-                    onChange={value =>
-                      setField('momentumWindowSeconds', value)
-                    }
+                    onChange={value => setField('momentumWindowSeconds', value)}
                   />
                   <NumericField
                     id="t-trade-momentum-rise"
@@ -3905,9 +3797,7 @@ export function TTradeGlobalPage() {
                     label="价差占比上限"
                     suffix="%"
                     value={form.momentumMaxSpreadPct}
-                    onChange={value =>
-                      setField('momentumMaxSpreadPct', value)
-                    }
+                    onChange={value => setField('momentumMaxSpreadPct', value)}
                   />
                 </div>
               )}

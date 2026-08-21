@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_engine import command_processor
@@ -141,3 +142,34 @@ async def test_engine_recovers_and_completes_claimed_command(
   assert completed is not None
   assert completed.status == "SUCCEEDED"
   assert completed.result == {"success": True}
+
+
+@pytest.mark.asyncio
+async def test_t_trade_replay_command_defers_slow_runtime_start(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  start = AsyncMock(
+    return_value={
+      "run_id": "replay-1",
+      "status": "PENDING",
+      "progress_pct": 0.0,
+    }
+  )
+  monkeypatch.setattr(command_processor.TTradeReplayService, "start", start)
+
+  result = await command_processor._dispatch(
+    "T_TRADE_REPLAY_START",
+    {"input": {"account_id": "account-1"}},
+    command_id="00000000-0000-0000-0000-000000000125",
+  )
+
+  assert result == {
+    "run_id": "replay-1",
+    "status": "PENDING",
+    "progress_pct": 0.0,
+  }
+  start.assert_awaited_once_with(
+    {"account_id": "account-1"},
+    defer_start=True,
+    request_id="00000000-0000-0000-0000-000000000125",
+  )

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
@@ -17,6 +20,25 @@ class ReplayClock:
 
   _current: datetime
 
+  def __post_init__(self) -> None:
+    self._current = self._normalize_timestamp(self._current)
+
+  @staticmethod
+  def _normalize_timestamp(timestamp: datetime) -> datetime:
+    """Return the replay timeline's exchange-local naive representation.
+
+    Persisted strategy windows use QuantX's naive Asia/Shanghai convention,
+    while InfluxDB market events are returned as timezone-aware timestamps.
+    Both describe the same exchange-local timeline and are normalized at this
+    runtime-local boundary before monotonic comparisons.
+    """
+
+    if not isinstance(timestamp, datetime):
+      raise TypeError("ReplayClock timestamp must be a datetime")
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+      return timestamp
+    return timestamp.astimezone(_SHANGHAI).replace(tzinfo=None)
+
   @property
   def current(self) -> datetime:
     return self._current
@@ -25,17 +47,11 @@ class ReplayClock:
     return self._current
 
   def now_ms(self) -> int:
-    return int(self._current.timestamp() * 1000)
+    return int(self._current.replace(tzinfo=_SHANGHAI).timestamp() * 1000)
 
   def advance_to(self, timestamp: datetime) -> datetime:
-    if not isinstance(timestamp, datetime):
-      raise TypeError("ReplayClock timestamp must be a datetime")
-    try:
-      moved_backwards = timestamp < self._current
-    except TypeError as exc:
-      raise ValueError(
-        "ReplayClock cannot mix timezone-aware and timezone-naive timestamps"
-      ) from exc
+    timestamp = self._normalize_timestamp(timestamp)
+    moved_backwards = timestamp < self._current
     if moved_backwards:
       raise ValueError(
         f"ReplayClock cannot move backwards: {timestamp!s} < {self._current!s}"
