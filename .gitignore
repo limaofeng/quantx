@@ -84,6 +84,8 @@ quantx_service_runner.bat
 .agents/
 .shared/
 .codex_screenshots/
+.codex_tmp/
+.codex_staged_verify_*/
 .codex/*
 !.codex/skills/
 !.codex/skills/**
