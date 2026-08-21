@@ -494,7 +494,7 @@ export function ManualPlanEditor({
         </Button>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <label className="grid gap-1 text-xs font-bold text-slate-400">
+        <label className="grid content-start gap-1 text-xs font-bold text-slate-400">
           股票
           <input
             className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
@@ -504,7 +504,7 @@ export function ManualPlanEditor({
             value={instrumentCode}
           />
         </label>
-        <div className="grid gap-1">
+        <div className="grid content-start gap-1">
           <label
             className="text-xs font-bold text-slate-400"
             htmlFor="manual-plan-sell-volume"
@@ -527,7 +527,7 @@ export function ManualPlanEditor({
             触发条件满足后，最多卖出该数量；创建计划不会立即下单。
           </p>
         </div>
-        <label className="grid gap-1 text-xs font-bold text-slate-400">
+        <label className="grid content-start gap-1 text-xs font-bold text-slate-400">
           模式
           <select
             className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
@@ -540,7 +540,7 @@ export function ManualPlanEditor({
             <option value="live">实盘</option>
           </select>
         </label>
-        <label className="flex items-end gap-2 pb-2 text-xs font-bold text-slate-400">
+        <label className="flex h-9 items-center gap-2 self-start text-xs font-bold text-slate-400 md:mt-5">
           <input
             checked={authorized}
             onChange={event => setAuthorized(event.target.checked)}

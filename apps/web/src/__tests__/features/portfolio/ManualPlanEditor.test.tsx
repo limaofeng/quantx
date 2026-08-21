@@ -82,6 +82,33 @@ describe('ManualPlanEditor', () => {
     );
   });
 
+  it('keeps the first-row controls aligned when helper text is present', async () => {
+    const user = userEvent.setup();
+    render(
+      <ManualPlanEditor
+        accountId="300000013250"
+        initialInstrumentCode="601318.SH"
+        onFinishedEditing={vi.fn()}
+        onSaved={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '手动添加计划' }));
+
+    expect(screen.getByLabelText('股票').closest('label')).toHaveClass(
+      'content-start'
+    );
+    expect(screen.getByLabelText('计划卖出数量').parentElement).toHaveClass(
+      'content-start'
+    );
+    expect(screen.getByLabelText('模式').closest('label')).toHaveClass(
+      'content-start'
+    );
+    expect(
+      screen.getByLabelText('授权触发后自动进入卖出风控').closest('label')
+    ).toHaveClass('h-9', 'items-center', 'self-start', 'md:mt-5');
+  });
+
   it('synchronizes a new-plan draft with the selected holding', async () => {
     const user = userEvent.setup();
     const props = {
