@@ -13,11 +13,42 @@ from quantx_contracts import (
   HistoricalBarSummary,
   historical_bar_key,
 )
+from quantx_infrastructure.services import (
+  market_data_persistence_verification as persistence_verification,
+)
 from quantx_infrastructure.services import market_data_staging as staging
 from quantx_infrastructure.services import market_data_transfer_ingestion as ingestion
 
 SHANGHAI_DAY_START_MS = 1_699_977_600_000
 SHANGHAI_DAY_END_EXCLUSIVE_MS = SHANGHAI_DAY_START_MS + 24 * 60 * 60 * 1000
+
+
+@pytest.fixture(autouse=True)
+def _stub_persistence_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+  async def verify(*, code_summaries, start_ms, end_exclusive_ms):
+    assert start_ms < end_exclusive_ms
+    actual = [
+      {
+        key: summary[key]
+        for key in (
+          "code",
+          "period",
+          "row_count",
+          "min_time",
+          "max_time",
+          "key_sha256",
+        )
+      }
+      for summary in code_summaries
+    ]
+    return {
+      "status": "verified",
+      "records_verified": sum(item["row_count"] for item in actual),
+      "groups_verified": len(actual),
+      "code_summaries": actual,
+    }
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_summaries", verify)
 
 
 def _payload(
@@ -424,6 +455,77 @@ async def test_uncompressed_empty_transfer_is_valid_and_performs_no_write(
 
 
 @pytest.mark.asyncio
+async def test_readback_failure_propagates_only_after_the_write(
+  tmp_path: Path,
+) -> None:
+  row = _tick_row()
+  manifest = [_write_chunk(tmp_path, [row, _summary([row])])]
+  store = ManifestStore(payload=_payload(), manifest=manifest)
+  save = AsyncMock(return_value={"status": "success", "saved_count": 1})
+  verify = AsyncMock(
+    side_effect=persistence_verification.MarketDataPersistenceQueryError(
+      "read-back unavailable"
+    )
+  )
+
+  with pytest.raises(
+    persistence_verification.MarketDataPersistenceQueryError,
+    match="read-back unavailable",
+  ):
+    await ingestion.ingest_uploaded_bar_request(
+      store,
+      "request-1",
+      save_period=save,
+      verify_persistence=verify,
+    )
+
+  save.assert_awaited_once()
+  verify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unproven_readback_audit_cannot_return_a_completed_result(
+  tmp_path: Path,
+) -> None:
+  row = _tick_row()
+  summary = _summary([row])
+  manifest = [_write_chunk(tmp_path, [row, summary])]
+  store = ManifestStore(payload=_payload(), manifest=manifest)
+  save = AsyncMock(return_value={"status": "success", "saved_count": 1})
+  persisted_summary = {
+    key: summary[key]
+    for key in (
+      "code",
+      "period",
+      "row_count",
+      "min_time",
+      "max_time",
+      "key_sha256",
+    )
+  }
+  persisted_summary["key_sha256"] = "0" * 64
+  verify = AsyncMock(
+    return_value={
+      "status": "verified",
+      "records_verified": 1,
+      "groups_verified": 1,
+      "code_summaries": [persisted_summary],
+    }
+  )
+
+  with pytest.raises(
+    persistence_verification.MarketDataPersistenceVerificationError,
+    match="did not prove",
+  ):
+    await ingestion.ingest_uploaded_bar_request(
+      store,
+      "request-1",
+      save_period=save,
+      verify_persistence=verify,
+    )
+
+
+@pytest.mark.asyncio
 async def test_pass_two_never_exceeds_2000_rows_per_write() -> None:
   rows = [
     _tick_row(time=SHANGHAI_DAY_START_MS + index, last_price=10 + index / 100_000)
@@ -550,6 +652,21 @@ def test_request_compressed_total_is_enforced_across_chunks(
     list(ingestion._iter_transfer_chunks(items))
 
 
+@pytest.mark.asyncio
+async def test_manifest_chunk_count_is_bounded_before_reading_tiny_chunks() -> None:
+  manifest = [
+    {"chunk_index": index}
+    for index in range(ingestion.MAX_TRANSFER_REQUEST_CHUNKS + 1)
+  ]
+  store = ManifestStore(payload=_payload(), manifest=manifest)
+
+  with pytest.raises(
+    ingestion.MarketDataValidationError,
+    match="invalid expected chunk count",
+  ):
+    await ingestion.load_uploaded_request_manifest(store, "request-1")
+
+
 def test_invalid_gzip_and_bad_checksum_are_permanent_validation_errors(
   tmp_path: Path,
 ) -> None:
@@ -645,6 +762,35 @@ async def test_validation_failure_is_terminal_but_influx_failure_is_retryable() 
   }
   assert retry_store.transitions == ["UPLOADED", "PROCESSING", "UPLOADED"]
   assert retry_store.release_count == 1
+
+
+@pytest.mark.parametrize(
+  "failure",
+  [
+    persistence_verification.MarketDataPersistenceQueryError("read query failed"),
+    persistence_verification.MarketDataPersistenceMismatchError(
+      "persisted keys mismatch"
+    ),
+  ],
+  ids=["query", "mismatch"],
+)
+@pytest.mark.asyncio
+async def test_readback_failures_release_the_claim_for_retry(failure: RuntimeError) -> None:
+  store = AtomicRequestStore()
+
+  async def fail_readback(_store, _request_id):
+    raise failure
+
+  result = await ingestion.claim_ingest_and_finish_market_data_request(
+    store,
+    "request-1",
+    ingest_request=fail_readback,
+  )
+
+  assert result is not None
+  assert result["status"] == "retryable"
+  assert store.transitions == ["UPLOADED", "PROCESSING", "UPLOADED"]
+  assert store.release_count == 1
 
 
 @pytest.mark.asyncio

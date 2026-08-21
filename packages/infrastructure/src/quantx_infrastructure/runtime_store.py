@@ -237,33 +237,54 @@ class DurableRuntimeStore:
           f"{requirement}"
         )
       request_id = str(uuid.uuid4())
-      await connection.execute(
-        text(
-          """
-          INSERT INTO market_data_request
-            (
-              request_id, device_id, idempotency_key, request_payload,
-              status, expected_chunks, received_chunks, completed_at,
-              created_at, updated_at
-            )
-          VALUES
-            (
-              :request_id, :device_id, :idempotency_key,
-              CAST(:request_payload AS JSON), 'QUEUED', NULL, 0, NULL,
-              :created_at, :updated_at
-            )
-          """
-        ),
-        {
-          "request_id": request_id,
-          "device_id": selected_device_id,
-          "idempotency_key": idempotency_key,
-          "request_payload": encoded,
-          "created_at": _utcnow(),
-          "updated_at": _utcnow(),
-        },
-      )
-      return request_id
+      inserted_request_id = (
+        await connection.execute(
+          text(
+            """
+            INSERT INTO market_data_request
+              (
+                request_id, device_id, idempotency_key, request_payload,
+                status, expected_chunks, received_chunks, completed_at,
+                created_at, updated_at
+              )
+            VALUES
+              (
+                :request_id, :device_id, :idempotency_key,
+                CAST(:request_payload AS JSON), 'QUEUED', NULL, 0, NULL,
+                :created_at, :updated_at
+              )
+            ON CONFLICT (idempotency_key)
+            DO NOTHING
+            RETURNING request_id
+            """
+          ),
+          {
+            "request_id": request_id,
+            "device_id": selected_device_id,
+            "idempotency_key": idempotency_key,
+            "request_payload": encoded,
+            "created_at": _utcnow(),
+            "updated_at": _utcnow(),
+          },
+        )
+      ).scalar_one_or_none()
+      if inserted_request_id is not None:
+        return str(inserted_request_id)
+      converged_request_id = (
+        await connection.execute(
+          text(
+            """
+            SELECT request_id
+            FROM market_data_request
+            WHERE idempotency_key = :idempotency_key
+            """
+          ),
+          {"idempotency_key": idempotency_key},
+        )
+      ).scalar_one_or_none()
+      if converged_request_id is None:  # pragma: no cover - conflict row is durable
+        raise RuntimeError("market-data idempotent request did not converge")
+      return str(converged_request_id)
 
   async def market_data_request_status(self, request_id: str) -> str:
     async with self.engine.connect() as connection:

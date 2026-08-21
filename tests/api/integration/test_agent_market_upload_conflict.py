@@ -193,6 +193,39 @@ async def test_duplicate_chunk_with_same_digest_is_idempotent(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_tiny_chunks_cannot_reserve_an_oversized_manifest(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  body = b"original chunk"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(body).hexdigest(),
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    with pytest.raises(HTTPException) as error:
+      await _upload(
+        b"",
+        record_count=0,
+        total_chunks=agent_api.MAX_MARKET_DATA_CHUNKS + 1,
+      )
+
+    assert error.value.status_code == 400
+    async with sessions() as db:
+      request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer_count = await db.scalar(
+        select(func.count()).select_from(MarketDataTransfer)
+      )
+    assert request is not None
+    assert request.status == "RECEIVING"
+    assert request.expected_chunks == 2
+    assert transfer_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_checksum_conflict_returns_409_and_atomically_fails_request(
   monkeypatch,
   tmp_path,

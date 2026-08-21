@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
@@ -146,6 +147,45 @@ class _BoundDeviceConnection:
           "capabilities": self.capabilities,
         }
       )
+    if "INSERT INTO market_data_request" in sql:
+      return _BoundDeviceResult(value=str(parameters["request_id"]))
+    return _BoundDeviceResult()
+
+
+class _ConcurrentBoundDeviceConnection(_BoundDeviceConnection):
+  def __init__(self) -> None:
+    super().__init__()
+    self.lookup_count = 0
+    self.lookups_ready = asyncio.Event()
+    self.upsert_lock = asyncio.Lock()
+    self.persisted_request_id: str | None = None
+    self.upsert_attempts = 0
+
+  async def execute(self, statement, parameters=None):
+    sql = str(statement)
+    self.calls.append((sql, parameters))
+    if "WHERE idempotency_key" in sql:
+      if self.persisted_request_id is not None:
+        return _BoundDeviceResult(value=self.persisted_request_id)
+      self.lookup_count += 1
+      if self.lookup_count == 2:
+        self.lookups_ready.set()
+      await self.lookups_ready.wait()
+      return _BoundDeviceResult()
+    if "FROM agent_devices" in sql:
+      return _BoundDeviceResult(
+        mapping={
+          "id": "device-data-only",
+          "capabilities": self.capabilities,
+        }
+      )
+    if "INSERT INTO market_data_request" in sql:
+      self.upsert_attempts += 1
+      async with self.upsert_lock:
+        if self.persisted_request_id is None:
+          self.persisted_request_id = str(parameters["request_id"])
+          return _BoundDeviceResult(value=self.persisted_request_id)
+        return _BoundDeviceResult()
     return _BoundDeviceResult()
 
 
@@ -171,6 +211,32 @@ async def test_market_data_request_binds_an_explicit_capable_device() -> None:
     call for call in connection.calls if "INSERT INTO market_data_request" in call[0]
   )
   assert insert[1]["device_id"] == "device-data-only"
+  assert "ON CONFLICT (idempotency_key)" in insert[0]
+  assert "DO NOTHING" in insert[0]
+  assert "RETURNING request_id" in insert[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_idempotent_market_data_requests_converge_atomically() -> None:
+  connection = _ConcurrentBoundDeviceConnection()
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = _Engine(connection)
+  payload = {"operation": "bars", "stock_list": ["600000.SH"]}
+
+  request_ids = await asyncio.gather(
+    store.create_market_data_request(payload, device_id="device-data-only"),
+    store.create_market_data_request(payload, device_id="device-data-only"),
+  )
+
+  assert request_ids == [connection.persisted_request_id] * 2
+  assert connection.lookup_count == 2
+  assert connection.upsert_attempts == 2
+  assert sum(
+    "ON CONFLICT (idempotency_key)" in statement
+    for statement, _ in connection.calls
+  ) == 2
 
 
 @pytest.mark.asyncio

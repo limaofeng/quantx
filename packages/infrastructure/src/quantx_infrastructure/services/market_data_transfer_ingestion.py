@@ -32,6 +32,10 @@ from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
+from quantx_infrastructure.services.market_data_persistence_verification import (
+  MarketDataPersistenceVerificationError,
+  verify_persisted_bar_summaries,
+)
 from quantx_infrastructure.services.market_data_staging import (
   is_reparse_point,
   market_data_staging_root,
@@ -46,7 +50,9 @@ MAX_TRANSFER_CHUNK_COMPRESSED_BYTES = 32 * 1024 * 1024
 MAX_TRANSFER_CHUNK_UNCOMPRESSED_BYTES = 24 * 1024 * 1024
 MAX_TRANSFER_RECORD_UNCOMPRESSED_BYTES = 1024 * 1024
 MAX_TRANSFER_CHUNK_RECORDS = 5000
-MAX_TRANSFER_REQUEST_CHUNKS = 100_000
+# Agent bounds allow at most 99 record-bound emissions, 22 byte-bound
+# emissions, and one final chunk; round the proven 122 ceiling up slightly.
+MAX_TRANSFER_REQUEST_CHUNKS = 128
 MAX_TRANSFER_REQUEST_COMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_TRANSFER_REQUEST_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_TRANSFER_REQUEST_RECORDS = 500_000
@@ -147,6 +153,7 @@ class MarketDataTransferStore(Protocol):
 
 
 SaveMarketData = Callable[..., Awaitable[dict[str, Any]]]
+VerifyPersistence = Callable[..., Awaitable[dict[str, Any]]]
 IngestRequest = Callable[
   [MarketDataTransferStore, str],
   Awaitable[dict[str, Any]],
@@ -1012,6 +1019,7 @@ async def ingest_uploaded_bar_request(
   request_id: str,
   *,
   save_period: SaveMarketData = save_market_data_period,
+  verify_persistence: VerifyPersistence | None = None,
 ) -> dict[str, Any]:
   _, payload, manifest = await load_uploaded_request_manifest(store, request_id)
   audit = await asyncio.to_thread(_validate_bar_manifest, manifest, payload)
@@ -1021,12 +1029,47 @@ async def ingest_uploaded_bar_request(
     for item in manifest:
       yield await asyncio.to_thread(_read_transfer_chunk, item, budget)
 
-  return await _persist_validated_records(
+  persisted = await _persist_validated_records(
     read_chunks(),
     payload=payload,
     expected_audit=audit,
     save_period=save_period,
   )
+  scope = _parse_bars_request(payload)
+  verifier = verify_persistence or verify_persisted_bar_summaries
+  verification = await verifier(
+    code_summaries=audit["code_summaries"],
+    start_ms=scope.start_ms,
+    end_exclusive_ms=scope.end_exclusive_ms,
+  )
+  records_verified = int(verification.get("records_verified", -1))
+  summary_fields = (
+    "code",
+    "period",
+    "row_count",
+    "min_time",
+    "max_time",
+    "key_sha256",
+  )
+  expected_verified_summaries = [
+    {field: summary.get(field) for field in summary_fields}
+    for summary in audit["code_summaries"]
+  ]
+  if (
+    verification.get("status") != "verified"
+    or records_verified != int(audit["records_received"])
+    or int(verification.get("groups_verified", -1))
+    != len(expected_verified_summaries)
+    or verification.get("code_summaries") != expected_verified_summaries
+  ):
+    raise MarketDataPersistenceVerificationError(
+      "Influx persistence verification did not prove every accepted row"
+    )
+  return {
+    **persisted,
+    "records_verified": records_verified,
+    "persistence_verification": verification,
+  }
 
 
 def _cleanup_completed_staging(

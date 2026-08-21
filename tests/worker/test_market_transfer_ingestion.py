@@ -13,7 +13,36 @@ from quantx_contracts import (
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
   historical_bar_key,
 )
+from quantx_infrastructure.services import market_data_transfer_ingestion as ingestion
 from quantx_worker.prefector.flows import durable_agent_flows
+
+
+@pytest.fixture(autouse=True)
+def _stub_persistence_readback(monkeypatch):
+  async def verify(*, code_summaries, start_ms, end_exclusive_ms):
+    assert start_ms < end_exclusive_ms
+    actual = [
+      {
+        key: summary[key]
+        for key in (
+          "code",
+          "period",
+          "row_count",
+          "min_time",
+          "max_time",
+          "key_sha256",
+        )
+      }
+      for summary in code_summaries
+    ]
+    return {
+      "status": "verified",
+      "records_verified": sum(item["row_count"] for item in actual),
+      "groups_verified": len(actual),
+      "code_summaries": actual,
+    }
+
+  monkeypatch.setattr(ingestion, "verify_persisted_bar_summaries", verify)
 
 
 class FakeStore:
@@ -166,6 +195,8 @@ async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
   assert result["operation"] == "bars"
   assert result["records_received"] == 1
   assert result["records_saved"] == 1
+  assert result["records_verified"] == 1
+  assert result["persistence_verification"]["status"] == "verified"
   assert result["requested_codes"] == ["600000.SH"]
   assert result["requested_periods"] == ["1d"]
   assert result["code_summaries"][0]["row_count"] == 1
@@ -216,6 +247,7 @@ async def test_explicit_empty_series_is_completed_and_auditable(
 
   assert result["records_received"] == 0
   assert result["records_saved"] == 0
+  assert result["records_verified"] == 0
   assert result["empty_codes"] == ["600000.SH"]
   assert result["code_summaries"][0]["no_data_reason"] == (
     HISTORICAL_BAR_NO_DATA_REASON
@@ -264,6 +296,7 @@ async def test_same_millisecond_ticks_are_preserved_across_chunks(
 
   assert result["records_received"] == 2
   assert result["records_saved"] == 2
+  assert result["records_verified"] == 2
   assert captured["period"] == "tick"
   assert captured["frame"]["time"].tolist() == [source_time, source_time]
   assert captured["frame"][HISTORICAL_TICK_ORDINAL_FIELD].tolist() == [0, 1]
