@@ -1,0 +1,7 @@
+interface:
+  display_name: "Grill Me"
+  short_description: "Explicit entry point for a grilling session"
+  default_prompt: "Use $grill-me to stress-test this plan before acting on it."
+
+policy:
+  allow_implicit_invocation: false

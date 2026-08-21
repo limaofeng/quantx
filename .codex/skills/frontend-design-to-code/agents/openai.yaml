@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Design to Code"
+  short_description: "Preview-first frontend design and delivery"
+  default_prompt: "Use $frontend-design-to-code to clarify, preview, approve, and implement this frontend experience."
