@@ -238,6 +238,7 @@ function PlanWarnings({ plan }: { plan: ExitPlan }) {
 
 function PlanCard({
   busy,
+  instrumentName,
   onCancel,
   onConfirmIntent,
   onEvaluate,
@@ -248,6 +249,7 @@ function PlanCard({
   plan,
 }: {
   busy: boolean;
+  instrumentName?: string | null;
   onCancel: (plan: ExitPlan) => void;
   onConfirmIntent: (plan: ExitPlan) => void;
   onEvaluate: (plan: ExitPlan) => void;
@@ -274,8 +276,18 @@ function PlanCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-mono text-sm font-black text-slate-100">
-              {plan.instrumentCode}
+            <h3 className="flex min-w-0 items-baseline gap-2 text-sm font-black text-slate-100">
+              {instrumentName ? (
+                <span className="truncate">{instrumentName}</span>
+              ) : null}
+              <span
+                className={cn(
+                  'shrink-0 font-mono',
+                  instrumentName && 'text-xs text-slate-400'
+                )}
+              >
+                {plan.instrumentCode}
+              </span>
             </h3>
             <span className="rounded border border-white/10 px-2 py-0.5 text-[10px] font-black text-slate-400">
               {sourceLabels[plan.sourceType] || plan.sourceType}
@@ -484,8 +496,7 @@ export function ManualPlanEditor({
       instrumentCode: normalizedCode,
       limit: 100,
     },
-    pause:
-      !open || Boolean(editingPlan) || !accountId || !normalizedCode,
+    pause: !open || Boolean(editingPlan) || !accountId || !normalizedCode,
     requestPolicy: 'cache-and-network',
   });
   const [createResult, createPlan] = useMutation(CreateManualExitPlanMutation);
@@ -1172,10 +1183,12 @@ export function ManualPlanEditor({
 
 export function ExitPlansPanel({
   accountId,
+  holdings = [],
   instrumentCode,
   onNavigate,
 }: {
   accountId: string;
+  holdings?: readonly Position[];
   instrumentCode?: string;
   onNavigate: (path: string) => void;
 }) {
@@ -1212,6 +1225,15 @@ export function ExitPlansPanel({
   };
   const visiblePlans = (plans.data?.exitPlans ?? []).filter(plan =>
     activeStatuses.has(plan.status)
+  );
+  const instrumentNames = React.useMemo(
+    () =>
+      new Map(
+        holdings
+          .filter(holding => Boolean(holding.instrumentName))
+          .map(holding => [holding.stockCode, holding.instrumentName] as const)
+      ),
+    [holdings]
   );
   const approvePendingIntent = async (plan: ExitPlan) => {
     if (!plan.pendingIntentId) return;
@@ -1317,6 +1339,7 @@ export function ExitPlansPanel({
           visiblePlans.map(plan => (
             <PlanCard
               busy={busy}
+              instrumentName={instrumentNames.get(plan.instrumentCode)}
               key={plan.planId}
               onCancel={item =>
                 void run(

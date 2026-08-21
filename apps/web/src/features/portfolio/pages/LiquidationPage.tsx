@@ -1080,6 +1080,7 @@ export function LiquidationPage() {
       {activeMode === 'EXIT_PLANS' ? (
         <ExitPlansPanel
           accountId={accountId || ''}
+          holdings={currentHoldings}
           instrumentCode={selectedStockCode || undefined}
           onNavigate={openStudioTab}
         />
