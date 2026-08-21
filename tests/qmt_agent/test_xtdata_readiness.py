@@ -289,3 +289,49 @@ def test_xtdata_manager_preserves_a_legitimate_empty_sdk_result(
 
   assert manager.get_market_data(["600000.SH"]) == {}
   assert manager.is_connected is True
+
+
+def test_xtdata_manager_non_object_sdk_result_reaches_broker_validation(
+  monkeypatch,
+) -> None:
+  pytest.importorskip(
+    "xtquant",
+    reason="miniQMT SDK is only available on the QMT host",
+  )
+  from quantx_qmt_agent.broker import _market_data_records
+  from quantx_qmt_agent.miniqmt.data import data_manager as module
+
+  class Client:
+    @staticmethod
+    def is_connected() -> bool:
+      return True
+
+  monkeypatch.setattr(
+    module,
+    "discover_xtdata_endpoint",
+    lambda: XTDataEndpoint("127.0.0.1", 58600, "verified"),
+  )
+  monkeypatch.setattr(
+    module,
+    "xtdata",
+    SimpleNamespace(
+      connect=lambda **_kwargs: Client(),
+      get_market_data_ex=lambda **_kwargs: [],
+    ),
+  )
+  manager = module.XTDataManager()
+
+  with pytest.raises(ValueError, match="non-object market-data result"):
+    _market_data_records(
+      manager,
+      {
+        "operation": "bars",
+        "stock_list": ["600000.SH"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+  assert manager.is_connected is True

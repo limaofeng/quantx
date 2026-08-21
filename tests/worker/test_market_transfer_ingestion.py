@@ -1,12 +1,17 @@
 import gzip
 import hashlib
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from quantx_contracts import (
+  HISTORICAL_BAR_NO_DATA_REASON,
+  HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
+  HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  historical_bar_key,
 )
 from quantx_worker.prefector.flows import durable_agent_flows
 
@@ -38,26 +43,104 @@ def _transfer(tmp_path, records, *, index=0):
   }
 
 
+def _bars_request(*, stock_list, periods, expected_chunks=1):
+  return {
+    "expected_chunks": expected_chunks,
+    "request_payload": {
+      "operation": "bars",
+      "stock_list": stock_list,
+      "periods": periods,
+      "start_time": "20231115",
+      "end_time": "20231115",
+    },
+  }
+
+
+def _kline_record(
+  *,
+  code="600000.SH",
+  period="1d",
+  time=1_699_977_600_000,
+  close=10.5,
+):
+  return {
+    "code": code,
+    "period": period,
+    "time": time,
+    "open": 10.0,
+    "high": 11.0,
+    "low": 9.0,
+    "close": close,
+    "preClose": 9.8,
+    "volume": 100.0,
+    "amount": 1050.0,
+    "settelementPrice": 0.0,
+    "openInterest": 0,
+    "suspendFlag": 0,
+  }
+
+
+def _tick_record(*, time, ordinal=0, code="601318.SH", last_price=50.1):
+  return {
+    "code": code,
+    "period": "tick",
+    "time": time,
+    HISTORICAL_TICK_ORDINAL_FIELD: ordinal,
+    "lastPrice": last_price,
+    "open": 49.8,
+    "high": 50.2,
+    "low": 49.7,
+    "lastClose": 49.5,
+    "amount": 1000.0,
+    "volume": 100.0,
+    "pvolume": 100.0,
+    "tickvol": 1.0,
+    "stockStatus": 0,
+    "openInt": 0,
+    "lastSettlementPrice": 0.0,
+    "settlementPrice": 0.0,
+    "transactionNum": 10,
+    "askPrice": [50.2, 0, 0, 0, 0],
+    "bidPrice": [50.0, 0, 0, 0, 0],
+    "askVol": [100, 0, 0, 0, 0],
+    "bidVol": [90, 0, 0, 0, 0],
+  }
+
+
+def _bar_summary(*, code, period, rows):
+  keys = [
+    historical_bar_key(
+      code=code,
+      period=period,
+      time_ms=int(row["time"]),
+      tick_ordinal=(
+        int(row[HISTORICAL_TICK_ORDINAL_FIELD]) if period == "tick" else None
+      ),
+    )
+    for row in rows
+  ]
+  return {
+    "record_type": HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
+    "schema_version": HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION,
+    "code": code,
+    "period": period,
+    "row_count": len(rows),
+    "min_time": int(rows[0]["time"]) if rows else None,
+    "max_time": int(rows[-1]["time"]) if rows else None,
+    "key_sha256": hashlib.sha256("\n".join(keys).encode()).hexdigest(),
+    "no_data_reason": None if rows else HISTORICAL_BAR_NO_DATA_REASON,
+  }
+
+
 @pytest.mark.asyncio
 async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
+  rows = [_kline_record()]
   records = [
-    {
-      "code": "600000.SH",
-      "period": "1d",
-      "time": 1_700_000_000_000,
-      "open": 10,
-      "high": 11,
-      "low": 9,
-      "close": 10.5,
-      "volume": 100,
-      "amount": 1050,
-    }
+    *rows,
+    _bar_summary(code="600000.SH", period="1d", rows=rows),
   ]
   store = FakeStore(
-    request={
-      "expected_chunks": 1,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(stock_list=["600000.SH"], periods=["1d"]),
     manifest=[_transfer(tmp_path, records)],
   )
   calls = []
@@ -80,13 +163,64 @@ async def test_uploaded_bars_are_validated_and_saved(tmp_path, monkeypatch):
     "request-1",
   )
 
-  assert result == {
-    "operation": "bars",
-    "records_received": 1,
-    "records_saved": 1,
-  }
+  assert result["operation"] == "bars"
+  assert result["records_received"] == 1
+  assert result["records_saved"] == 1
+  assert result["requested_codes"] == ["600000.SH"]
+  assert result["requested_periods"] == ["1d"]
+  assert result["code_summaries"][0]["row_count"] == 1
   assert calls[0][0] == "1d"
   assert calls[0][1]["600000.SH"].iloc[0]["close"] == 10.5
+
+
+@pytest.mark.asyncio
+async def test_missing_requested_code_summary_is_rejected_before_any_write(
+  tmp_path,
+  monkeypatch,
+):
+  rows = [_kline_record()]
+  records = [
+    *rows,
+    _bar_summary(code="600000.SH", period="1d", rows=rows),
+  ]
+  store = FakeStore(
+    request=_bars_request(
+      stock_list=["600000.SH", "601318.SH"],
+      periods=["1d"],
+    ),
+    manifest=[_transfer(tmp_path, records)],
+  )
+  save = AsyncMock()
+  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+
+  with pytest.raises(RuntimeError, match="missing required summaries"):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_empty_series_is_completed_and_auditable(
+  tmp_path,
+  monkeypatch,
+):
+  records = [_bar_summary(code="600000.SH", period="tick", rows=[])]
+  store = FakeStore(
+    request=_bars_request(stock_list=["600000.SH"], periods=["tick"]),
+    manifest=[_transfer(tmp_path, records)],
+  )
+  save = AsyncMock()
+  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+
+  result = await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  assert result["records_received"] == 0
+  assert result["records_saved"] == 0
+  assert result["empty_codes"] == ["600000.SH"]
+  assert result["code_summaries"][0]["no_data_reason"] == (
+    HISTORICAL_BAR_NO_DATA_REASON
+  )
+  save.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -95,31 +229,20 @@ async def test_same_millisecond_ticks_are_preserved_across_chunks(
   monkeypatch,
 ):
   source_time = 1_700_000_000_123
+  rows = [
+    _tick_record(time=source_time, ordinal=0, last_price=50.1),
+    _tick_record(time=source_time, ordinal=1, last_price=50.2),
+  ]
   chunks = [
-    [
-      {
-        "code": "601318.SH",
-        "period": "tick",
-        "time": source_time,
-        HISTORICAL_TICK_ORDINAL_FIELD: 0,
-        "lastPrice": 50.1,
-      }
-    ],
-    [
-      {
-        "code": "601318.SH",
-        "period": "tick",
-        "time": source_time,
-        HISTORICAL_TICK_ORDINAL_FIELD: 1,
-        "lastPrice": 50.2,
-      }
-    ],
+    [rows[0]],
+    [rows[1], _bar_summary(code="601318.SH", period="tick", rows=rows)],
   ]
   store = FakeStore(
-    request={
-      "expected_chunks": 2,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(
+      stock_list=["601318.SH"],
+      periods=["tick"],
+      expected_chunks=2,
+    ),
     manifest=[
       _transfer(tmp_path, chunk, index=index) for index, chunk in enumerate(chunks)
     ],
@@ -150,30 +273,28 @@ async def test_same_millisecond_ticks_are_preserved_across_chunks(
 async def test_duplicate_tick_composite_key_across_chunks_fails(tmp_path):
   source_time = 1_700_000_000_123
   duplicate = {
-    "code": "601318.SH",
-    "period": "tick",
-    "time": source_time,
-    HISTORICAL_TICK_ORDINAL_FIELD: 0,
+    **_tick_record(time=source_time, ordinal=0),
   }
   store = FakeStore(
-    request={
-      "expected_chunks": 2,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(
+      stock_list=["601318.SH"],
+      periods=["tick"],
+      expected_chunks=2,
+    ),
     manifest=[
       _transfer(tmp_path, [duplicate], index=0),
       _transfer(tmp_path, [duplicate], index=1),
     ],
   )
 
-  with pytest.raises(RuntimeError, match="duplicate historical tick key"):
+  with pytest.raises(RuntimeError, match="unordered or duplicated|not contiguous"):
     await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
 
 @pytest.mark.parametrize(
   ("ordinals", "match"),
   [
-    pytest.param([None], "must be an integer", id="missing"),
+    pytest.param([None], "missing fields.*tick_ordinal", id="missing"),
     pytest.param([-1], "out of range", id="negative"),
     pytest.param([True], "must be an integer", id="boolean"),
     pytest.param([0.5], "must be an integer", id="fractional"),
@@ -189,19 +310,14 @@ async def test_duplicate_tick_composite_key_across_chunks_fails(tmp_path):
 async def test_invalid_tick_ordinal_contract_fails(tmp_path, ordinals, match):
   records = []
   for ordinal in ordinals:
-    record = {
-      "code": "601318.SH",
-      "period": "tick",
-      "time": 1_700_000_000_123,
-    }
+    record = _tick_record(time=1_700_000_000_123)
     if ordinal is not None:
       record[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
+    else:
+      record.pop(HISTORICAL_TICK_ORDINAL_FIELD)
     records.append(record)
   store = FakeStore(
-    request={
-      "expected_chunks": 1,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(stock_list=["601318.SH"], periods=["tick"]),
     manifest=[_transfer(tmp_path, records)],
   )
 
@@ -211,20 +327,13 @@ async def test_invalid_tick_ordinal_contract_fails(tmp_path, ordinals, match):
 
 @pytest.mark.asyncio
 async def test_non_tick_duplicate_time_fails(tmp_path):
-  record = {
-    "code": "600000.SH",
-    "period": "1m",
-    "time": 1_700_000_000_000,
-  }
+  record = _kline_record(period="1m", time=1_700_000_000_000)
   store = FakeStore(
-    request={
-      "expected_chunks": 1,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(stock_list=["600000.SH"], periods=["1m"]),
     manifest=[_transfer(tmp_path, [record, record])],
   )
 
-  with pytest.raises(RuntimeError, match="duplicate historical bar key"):
+  with pytest.raises(RuntimeError, match="unordered or duplicated"):
     await durable_agent_flows._ingest_uploaded_request(store, "request-1")
 
 
@@ -235,16 +344,11 @@ async def test_non_tick_duplicate_time_fails(tmp_path):
 @pytest.mark.asyncio
 async def test_non_tick_internal_tick_field_fails(tmp_path, reserved_field):
   record = {
-    "code": "600000.SH",
-    "period": "1d",
-    "time": 1_700_000_000_000,
+    **_kline_record(),
     reserved_field: 0,
   }
   store = FakeStore(
-    request={
-      "expected_chunks": 1,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(stock_list=["600000.SH"], periods=["1d"]),
     manifest=[_transfer(tmp_path, [record])],
   )
 
@@ -257,15 +361,52 @@ async def test_uploaded_chunk_checksum_mismatch_fails(tmp_path):
   transfer = _transfer(tmp_path, [])
   transfer["checksum_sha256"] = "0" * 64
   store = FakeStore(
-    request={
-      "expected_chunks": 1,
-      "request_payload": {"operation": "bars"},
-    },
+    request=_bars_request(stock_list=["600000.SH"], periods=["1d"]),
     manifest=[transfer],
   )
 
   with pytest.raises(RuntimeError, match="checksum mismatch"):
     await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+
+@pytest.mark.parametrize(
+  ("record", "match"),
+  [
+    pytest.param(
+      {"code": "000001.SZ", "period": "1d", "time": 1_700_000_000_000},
+      "outside canonical transfer order",
+      id="wrong-code",
+    ),
+    pytest.param(
+      {"code": "600000.SH", "period": "1m", "time": 1_700_000_000_000},
+      "outside canonical transfer order",
+      id="wrong-period",
+    ),
+    pytest.param(
+      {"code": "600000.SH", "period": "1d", "time": 1_699_000_000_000},
+      "outside request window",
+      id="out-of-window",
+    ),
+  ],
+)
+@pytest.mark.asyncio
+async def test_uploaded_bars_outside_request_scope_are_not_saved(
+  tmp_path,
+  monkeypatch,
+  record,
+  match,
+):
+  store = FakeStore(
+    request=_bars_request(stock_list=["600000.SH"], periods=["1d"]),
+    manifest=[_transfer(tmp_path, [record])],
+  )
+  save = AsyncMock()
+  monkeypatch.setattr(durable_agent_flows, "save_market_data", save)
+
+  with pytest.raises(RuntimeError, match=match):
+    await durable_agent_flows._ingest_uploaded_request(store, "request-1")
+
+  save.assert_not_awaited()
 
 
 @pytest.mark.asyncio

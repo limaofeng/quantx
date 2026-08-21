@@ -1,21 +1,33 @@
 """Persist market-data batches uploaded by the QMT Agent."""
 
+import asyncio
 from typing import Any, Dict
 
 import pandas as pd
 from prefect import get_run_logger, task
-from quantx_contracts import (
-  HISTORICAL_TICK_ORDINAL_FIELD,
-  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
-  HISTORICAL_TICK_SOURCE_TIME_FIELD,
-)
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.timeseries_connection import is_fatal_wal_error
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  preprocess_market_data,
+)
 
 SAVE_RETRIES = 2
+
+
+def _save_market_data_sync(
+  period: str,
+  market_data: Dict[str, pd.DataFrame],
+) -> int:
+  market_data_service = HistoricalMarketDataService()
+  normalized = preprocess_market_data(period, market_data)
+  return (
+    market_data_service.bulk_save_ticks(normalized)
+    if period == "tick"
+    else market_data_service.bulk_save_klines(period, normalized)
+  )
 
 
 def _should_retry_market_data_save(_task: Any, _task_run: Any, state: Any) -> bool:
@@ -46,14 +58,11 @@ async def save_market_data(
   logger = get_run_logger()
 
   try:
-    market_data_service = HistoricalMarketDataService()
-
-    all_market_data = preprocess_market_data(period, market_data)
-
-    if period == "tick":
-      saved_count = market_data_service.bulk_save_ticks(all_market_data)
-    else:
-      saved_count = market_data_service.bulk_save_klines(period, all_market_data)
+    saved_count = await asyncio.to_thread(
+      _save_market_data_sync,
+      period,
+      market_data,
+    )
     logger.info(f"保存 {period} 数据完成，共保存 {saved_count} 条记录")
 
     return {
@@ -66,104 +75,3 @@ async def save_market_data(
   except Exception as e:
     logger.error(f"保存数据失败: {e}")
     raise e
-
-
-def preprocess_market_data(
-  period: str, market_data: Dict[str, pd.DataFrame]
-) -> pd.DataFrame:
-  logger = get_run_logger()
-  # 高效合并：一次性 concat，避免循环拷贝
-  dfs_with_code = [
-    df.assign(stock_code=stock_code)  # 使用 assign 添加列，无需拷贝
-    for stock_code, df in market_data.items()
-  ]
-  all_market_data = pd.concat(dfs_with_code, ignore_index=True)
-
-  logger.info(f"所有股票数据合并后总记录数: {len(all_market_data)}")
-
-  # 释放原始字典以节省内存
-  del market_data, dfs_with_code
-
-  logger.info(f"合并后数据预览: \n{all_market_data.head(3)}")
-
-  logger.info("对数据进行清洗和格式化...")
-
-  all_market_data["period"] = period
-
-  if period == "tick":
-    source_time_ms = all_market_data["time"]
-    ordinal = all_market_data[HISTORICAL_TICK_ORDINAL_FIELD]
-    if not pd.api.types.is_integer_dtype(source_time_ms.dtype):
-      raise ValueError("tick time must contain integer milliseconds")
-    if not pd.api.types.is_integer_dtype(ordinal.dtype):
-      raise ValueError(f"tick {HISTORICAL_TICK_ORDINAL_FIELD} must contain integers")
-    source_time_ms = source_time_ms.astype("int64")
-    ordinal = ordinal.astype("int64")
-    if (ordinal < 0).any() or (
-      ordinal >= HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
-    ).any():
-      raise ValueError(f"tick {HISTORICAL_TICK_ORDINAL_FIELD} is out of range")
-    all_market_data[HISTORICAL_TICK_SOURCE_TIME_FIELD] = source_time_ms
-    all_market_data[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
-    all_market_data["time"] = (
-      pd.to_datetime(source_time_ms, unit="ms", utc=True)
-      + pd.to_timedelta(ordinal, unit="us")
-    ).dt.tz_convert("Asia/Shanghai")
-    all_market_data.rename(
-      columns={
-        "lastPrice": "last_price",
-        "lastClose": "last_close",
-        "settlementPrice": "settlement_price",
-        "lastSettlementPrice": "last_settlement_price",
-        "stockStatus": "stock_status",
-        "openInt": "open_int",
-        "transactionNum": "transaction_num",
-        "askPrice": "ask_price",
-        "bidPrice": "bid_price",
-        "askVol": "ask_vol",
-        "bidVol": "bid_vol",
-      },
-      inplace=True,
-    )
-    price_columns = [
-      "last_price",
-      "open",
-      "high",
-      "low",
-      "last_close",
-      "last_settlement_price",
-    ]
-    all_market_data[price_columns] = all_market_data[price_columns].round(3)
-    all_market_data[["volume", "amount", "pvolume", "tickvol"]] = (
-      all_market_data[["volume", "amount", "pvolume", "tickvol"]].astype(float).round(2)
-    )
-    all_market_data[["stock_status", "open_int", "transaction_num"]] = (
-      all_market_data[["stock_status", "open_int", "transaction_num"]]
-      .fillna(0)
-      .astype(int)
-    )
-  else:
-    all_market_data["time"] = pd.to_datetime(
-      all_market_data["time"], unit="ms", utc=True
-    ).dt.tz_convert("Asia/Shanghai")
-    all_market_data.rename(
-      columns={
-        "settelementPrice": "settelement_price",
-        "openInterest": "open_interest",
-        "preClose": "pre_close",
-        "suspendFlag": "suspend_flag",
-      },
-      inplace=True,
-    )
-    price_columns = ["open", "high", "low", "close", "pre_close", "settelement_price"]
-    all_market_data[price_columns] = all_market_data[price_columns].round(3)
-    all_market_data[["volume", "amount"]] = (
-      all_market_data[["volume", "amount"]].astype(float).round(2)
-    )
-    all_market_data[["open_interest", "suspend_flag"]] = (
-      all_market_data[["open_interest", "suspend_flag"]].fillna(0).astype(int)
-    )
-
-  logger.info(f"清洗后数据预览: \n{all_market_data.head(3)}")
-
-  return all_market_data

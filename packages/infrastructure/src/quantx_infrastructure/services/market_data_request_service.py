@@ -12,6 +12,57 @@ from sqlalchemy import select
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import AgentDevice, MarketDataRequest
+from quantx_infrastructure.runtime_store import DurableRuntimeStore
+
+_MAX_FAILED_REQUEST_RETRY_HOPS = 32
+
+
+def _failed_request_retry_scope(request_id: str) -> str:
+  """Derive one stable retry generation from the poisoned request it replaces."""
+
+  return f"market-data-failed-retry:{request_id}"
+
+
+async def recover_failed_market_data_request(
+  store: DurableRuntimeStore,
+  *,
+  payload: dict[str, Any],
+  request_id: str,
+  reopen_attempted: set[str],
+  retry_hops: int,
+  device_id: str | None = None,
+) -> tuple[str, int, bool] | None:
+  """Reopen one failed transfer or derive one bounded retry generation.
+
+  The returned boolean says whether a replacement request was selected.
+  ``None`` means the retry chain reached its hard safety bound.
+  """
+  if request_id not in reopen_attempted:
+    reopen_attempted.add(request_id)
+    try:
+      await store.reopen_failed_market_data_request(request_id)
+    except RuntimeError:
+      # Another consumer may have reopened or completed it after our read.
+      # Re-read before deriving a replacement generation.
+      current = await store.market_data_request(request_id)
+      current_status = str((current or {}).get("status") or "MISSING").upper()
+      if current is not None and current_status != "FAILED":
+        return request_id, retry_hops, False
+    else:
+      return request_id, retry_hops, False
+
+  if retry_hops >= _MAX_FAILED_REQUEST_RETRY_HOPS:
+    return None
+  create_kwargs: dict[str, Any] = {
+    "idempotency_scope": _failed_request_retry_scope(request_id),
+  }
+  if device_id is not None:
+    create_kwargs["device_id"] = device_id
+  replacement_id = await store.create_market_data_request(
+    payload,
+    **create_kwargs,
+  )
+  return replacement_id, retry_hops + 1, True
 
 
 def build_sync_lock_key(complete_key: str) -> str:

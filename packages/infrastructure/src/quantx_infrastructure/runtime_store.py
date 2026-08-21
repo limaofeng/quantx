@@ -11,8 +11,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_state,
+  qmt_heartbeat_matches_current_launch,
+)
 
 
 def resolve_database_url() -> str:
@@ -75,6 +80,69 @@ class DurableRuntimeStore:
           "updated_at": _utcnow(),
         },
       )
+
+  async def available_market_data_device(
+    self,
+    *,
+    max_age_seconds: float = 90.0,
+  ) -> Optional[str]:
+    """Return one fresh connected Agent that can serve historical data.
+
+    Registered devices are not sufficient here: a durable request assigned to
+    an offline device would remain QUEUED until the caller times out.  Historical
+    replay uses this read-only probe before it optionally queues a supplement.
+    Trading readiness is deliberately not required; data-only and
+    trading-unavailable Agents may still provide XTData history.
+    """
+
+    if qmt_agent_launch_state() in {"BLOCKED", "NOT_REQUESTED"}:
+      return None
+    cutoff = _utcnow() - timedelta(seconds=max(1.0, float(max_age_seconds)))
+    connected_statuses = (
+      "READY",
+      "RECONCILING",
+      "RECONCILE_REQUIRED",
+      "TRADING_UNAVAILABLE",
+      "EMERGENCY_STOP",
+    )
+    async with self.engine.connect() as connection:
+      rows = (
+        await connection.execute(
+          text(
+            """
+            SELECT
+              device.id,
+              device.capabilities,
+              heartbeat.updated_at AS heartbeat_updated_at
+            FROM agent_devices AS device
+            JOIN runtime_component_heartbeats AS heartbeat
+              ON heartbeat.component = 'qmt-agent:' || device.id
+            WHERE device.revoked_at IS NULL
+              AND device.last_seen_at >= :cutoff
+              AND heartbeat.updated_at >= :cutoff
+              AND UPPER(heartbeat.status) IN :connected_statuses
+            ORDER BY heartbeat.updated_at DESC, device.last_seen_at DESC
+            """
+          ).bindparams(bindparam("connected_statuses", expanding=True)),
+          {
+            "cutoff": cutoff,
+            "connected_statuses": connected_statuses,
+          },
+        )
+      ).mappings()
+      for row in rows:
+        if not qmt_heartbeat_matches_current_launch(
+          row["heartbeat_updated_at"]
+        ):
+          continue
+        capabilities = row["capabilities"]
+        if isinstance(capabilities, str):
+          capabilities = json.loads(capabilities)
+        if "market-data" in {
+          str(value).strip().lower() for value in list(capabilities or [])
+        }:
+          return str(row["id"])
+    return None
 
   async def create_market_data_request(
     self,
@@ -223,7 +291,7 @@ class DurableRuntimeStore:
           text(
             """
             SELECT request_id, request_payload, status, expected_chunks,
-                   received_chunks, processing_error
+                   received_chunks, processing_error, ingestion_result
             FROM market_data_request
             WHERE request_id = :request_id
             """
@@ -243,7 +311,7 @@ class DurableRuntimeStore:
           text(
             """
             SELECT chunk_index, checksum_sha256, record_count,
-                   compressed, storage_reference
+                   compressed, compressed_bytes, storage_reference
             FROM market_data_transfer
             WHERE request_id = :request_id
             ORDER BY chunk_index
@@ -260,9 +328,26 @@ class DurableRuntimeStore:
     *,
     status: str,
     error: str = "",
+    ingestion_result: Optional[dict[str, Any]] = None,
+    claim_token: Optional[str] = None,
   ) -> None:
     if status not in {"COMPLETED", "FAILED"}:
       raise ValueError("market-data terminal status must be COMPLETED or FAILED")
+    if status == "COMPLETED" and not isinstance(ingestion_result, dict):
+      raise ValueError("COMPLETED market-data request requires an ingestion_result")
+    if status == "FAILED" and ingestion_result is not None:
+      raise ValueError("FAILED market-data request cannot have an ingestion_result")
+    normalized_claim_token = str(claim_token or "").strip() or None
+    encoded_result = (
+      json.dumps(
+        ingestion_result,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+      )
+      if ingestion_result is not None
+      else None
+    )
     async with self.engine.begin() as connection:
       updated_status = (
         await connection.execute(
@@ -271,10 +356,22 @@ class DurableRuntimeStore:
             UPDATE market_data_request
              SET status = :status,
                  processing_error = :error,
+                 ingestion_result = CAST(:ingestion_result AS JSON),
+                 processing_claim_token = NULL,
                  completed_at = :completed_at,
                  updated_at = :completed_at
              WHERE request_id = :request_id
                AND status NOT IN ('COMPLETED', 'FAILED')
+               AND (
+                 (
+                   CAST(:claim_token AS TEXT) IS NULL
+                   AND status <> 'PROCESSING'
+                 )
+                 OR (
+                   status = 'PROCESSING'
+                   AND processing_claim_token = CAST(:claim_token AS TEXT)
+                 )
+               )
              RETURNING status
              """
           ),
@@ -282,6 +379,8 @@ class DurableRuntimeStore:
             "request_id": request_id,
             "status": status,
             "error": error[:2000] or None,
+            "ingestion_result": encoded_result,
+            "claim_token": normalized_claim_token,
             "completed_at": _utcnow(),
           },
         )
@@ -292,19 +391,31 @@ class DurableRuntimeStore:
         await connection.execute(
           text(
             """
-            SELECT status
+            SELECT status, ingestion_result, processing_claim_token
             FROM market_data_request
             WHERE request_id = :request_id
             """
           ),
           {"request_id": request_id},
         )
-      ).scalar_one_or_none()
-      if existing_status is None or existing_status == status:
-        return
+      ).mappings().one_or_none()
+      if existing_status is None:
+        raise RuntimeError("market-data request disappeared before terminal transition")
+      if str(existing_status["status"]) == "PROCESSING" or (
+        normalized_claim_token is not None
+        and str(existing_status["status"]) not in {"COMPLETED", "FAILED"}
+      ):
+        raise RuntimeError("market-data processing claim was lost")
+      if str(existing_status["status"]) == status:
+        existing_result = existing_status["ingestion_result"]
+        if isinstance(existing_result, str):
+          existing_result = json.loads(existing_result)
+        if status == "FAILED" or existing_result == ingestion_result:
+          return
+        raise RuntimeError("market-data COMPLETED ingestion_result conflict")
       raise RuntimeError(
         "market-data terminal state conflict: "
-        f"existing={existing_status} requested={status}"
+        f"existing={existing_status['status']} requested={status}"
       )
 
   async def reopen_failed_market_data_request(
@@ -347,6 +458,8 @@ class DurableRuntimeStore:
               UPDATE market_data_request AS market_request
               SET status = 'UPLOADED',
                   processing_error = NULL,
+                  ingestion_result = NULL,
+                  processing_claim_token = NULL,
                   completed_at = NULL,
                   updated_at = :reopened_at
               FROM candidate
@@ -395,10 +508,11 @@ class DurableRuntimeStore:
         "manifest_records": int(evidence["manifest_records"]),
       }
 
-  async def claim_market_data_request(self, request_id: str) -> bool:
+  async def claim_market_data_request(self, request_id: str) -> str | None:
     """Claim an uploaded request, recovering a stale interrupted claim."""
     updated_at = _utcnow()
     stale_before = updated_at - timedelta(minutes=5)
+    claim_token = str(uuid.uuid4())
     async with self.engine.begin() as connection:
       value = (
         await connection.execute(
@@ -407,6 +521,7 @@ class DurableRuntimeStore:
             UPDATE market_data_request
             SET status = 'PROCESSING',
                 processing_error = NULL,
+                processing_claim_token = :claim_token,
                 updated_at = :updated_at
             WHERE request_id = :request_id
               AND (
@@ -416,13 +531,85 @@ class DurableRuntimeStore:
                   AND updated_at < :stale_before
                 )
               )
+            RETURNING processing_claim_token
+            """
+          ),
+          {
+            "request_id": request_id,
+            "claim_token": claim_token,
+            "updated_at": updated_at,
+            "stale_before": stale_before,
+          },
+        )
+      ).scalar_one_or_none()
+    return str(value) if value is not None else None
+
+  async def renew_market_data_request_claim(
+    self,
+    request_id: str,
+    *,
+    claim_token: str,
+  ) -> bool:
+    """Renew the lease of the sole live ingestion owner."""
+
+    normalized_claim_token = str(claim_token or "").strip()
+    if not normalized_claim_token:
+      raise ValueError("market-data claim_token is required")
+    async with self.engine.begin() as connection:
+      value = (
+        await connection.execute(
+          text(
+            """
+            UPDATE market_data_request
+            SET updated_at = :updated_at
+            WHERE request_id = :request_id
+              AND status = 'PROCESSING'
+              AND processing_claim_token = :claim_token
             RETURNING request_id
             """
           ),
           {
             "request_id": request_id,
-            "updated_at": updated_at,
-            "stale_before": stale_before,
+            "claim_token": normalized_claim_token,
+            "updated_at": _utcnow(),
+          },
+        )
+      ).scalar_one_or_none()
+    return value is not None
+
+  async def release_market_data_request_claim(
+    self,
+    request_id: str,
+    *,
+    claim_token: str,
+    error: str,
+  ) -> bool:
+    """Return a retryable persistence failure to immutable UPLOADED state."""
+
+    normalized_claim_token = str(claim_token or "").strip()
+    if not normalized_claim_token:
+      raise ValueError("market-data claim_token is required")
+    async with self.engine.begin() as connection:
+      value = (
+        await connection.execute(
+          text(
+            """
+            UPDATE market_data_request
+            SET status = 'UPLOADED',
+                processing_error = :error,
+                processing_claim_token = NULL,
+                updated_at = :updated_at
+            WHERE request_id = :request_id
+              AND status = 'PROCESSING'
+              AND processing_claim_token = :claim_token
+            RETURNING request_id
+            """
+          ),
+          {
+            "request_id": request_id,
+            "claim_token": normalized_claim_token,
+            "error": str(error or "")[:2000] or None,
+            "updated_at": _utcnow(),
           },
         )
       ).scalar_one_or_none()

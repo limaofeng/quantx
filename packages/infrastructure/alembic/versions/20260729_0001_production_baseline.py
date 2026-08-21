@@ -73,6 +73,13 @@ POST_BASELINE_TABLES = {
   "trade_confirmation_challenges",
 }
 POST_BASELINE_COLUMNS = {
+  "market_data_request": {
+    "ingestion_result",
+    "processing_claim_token",
+  },
+  "market_data_transfer": {
+    "compressed_bytes",
+  },
   "auth_device_sessions": {
     "granted_permissions",
   },

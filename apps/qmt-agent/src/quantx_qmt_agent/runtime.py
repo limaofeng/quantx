@@ -243,6 +243,38 @@ class _FatalMarketDataUploadConflict(_FatalMarketDataPreparationError):
   """A server-side chunk identity conflict forbids further mixed uploads."""
 
 
+_RETRYABLE_MARKET_DATA_HTTP_STATUSES = frozenset(
+  {
+    401,
+    403,
+    408,
+    425,
+    429,
+  }
+)
+
+
+def _is_deterministic_market_data_request_error(error: Exception) -> bool:
+  """Return whether retrying the same immutable request cannot help.
+
+  Transport failures, authentication/session expiry, throttling, redirects,
+  and server failures belong to the current connection rather than to the
+  durable request. They must leave the request and its prepared spool intact
+  so the API can redeliver it after the control socket reconnects.
+  """
+  if isinstance(error, httpx.HTTPStatusError):
+    status = int(error.response.status_code)
+    if status in _RETRYABLE_MARKET_DATA_HTTP_STATUSES or status >= 500:
+      return False
+    return 400 <= status < 500
+  if isinstance(error, httpx.TransportError):
+    return False
+  return isinstance(
+    error,
+    (AttributeError, ValueError, TypeError, OverflowError, UnicodeError),
+  )
+
+
 def _market_data_spool_owner_key(device_id: str) -> str:
   return hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:32]
 
@@ -3072,38 +3104,56 @@ class AgentRuntime:
       request_id = str(envelope.payload.get("request_id") or "")
       upload_task: asyncio.Task[None] | None = None
       try:
-        upload_task = self._market_upload_task(envelope)
-        await asyncio.shield(upload_task)
+        try:
+          upload_task = self._market_upload_task(envelope)
+          await asyncio.shield(upload_task)
+        except asyncio.CancelledError:
+          if upload_task is not None and not upload_task.done():
+            logger.info(
+              "QMT market-data session detached; upload continues: request_id=%s",
+              request_id,
+            )
+          raise
+        except _FatalMarketDataPreparationError:
+          await socket.close(code=1011, reason="market data request failed")
+          return
+        except Exception as exc:
+          if not _is_deterministic_market_data_request_error(exc):
+            logger.warning(
+              "QMT market-data upload will resume after session reconnect: "
+              "request_id=%s error=%s: %s",
+              request_id,
+              exc.__class__.__name__,
+              exc,
+            )
+            await socket.close(
+              code=1012,
+              reason="market data upload retry",
+            )
+            return
+          logger.warning(
+            "QMT market data request rejected: request_id=%s error=%s: %s",
+            request_id,
+            exc.__class__.__name__,
+            exc,
+          )
+          try:
+            await self._report_market_data_failure(request_id, exc)
+          except Exception as report_exc:
+            logger.warning(
+              "Could not report QMT market data failure: request_id=%s "
+              "error=%s: %s",
+              request_id,
+              report_exc.__class__.__name__,
+              report_exc,
+            )
+          continue
+
         # The 90-second server freshness window may expire while XTData holds
         # the GIL. Refresh it before this serial worker starts another request.
+        # Keep the checkpoint outside upload failure classification: a socket
+        # send failure must never terminally fail an already uploaded request.
         await self._heartbeat_checkpoint(socket, status="READY")
-      except asyncio.CancelledError:
-        if upload_task is not None and not upload_task.done():
-          logger.info(
-            "QMT market-data session detached; upload continues: request_id=%s",
-            request_id,
-          )
-        raise
-      except _FatalMarketDataPreparationError:
-        await socket.close(code=1011, reason="market data request failed")
-        return
-      except Exception as exc:
-        logger.warning(
-          "QMT market data request failed: request_id=%s error=%s: %s",
-          request_id,
-          exc.__class__.__name__,
-          exc,
-        )
-        try:
-          await self._report_market_data_failure(request_id, exc)
-        except Exception as report_exc:
-          logger.warning(
-            "Could not report QMT market data failure: request_id=%s "
-            "error=%s: %s",
-            request_id,
-            report_exc.__class__.__name__,
-            report_exc,
-          )
       finally:
         self._market_requests.task_done()
 

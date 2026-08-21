@@ -1,6 +1,9 @@
 """Versioned contracts shared by QuantX runtimes."""
 
 from .agent import (
+  HISTORICAL_BAR_NO_DATA_REASON,
+  HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
+  HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
@@ -15,10 +18,12 @@ from .agent import (
   CommandAckPayload,
   ExecutionReportPayload,
   HeartbeatPayload,
+  HistoricalBarSummary,
   OrderReportPayload,
   ReconciliationResultPayload,
   ReportAckPayload,
   TradeCommandPayload,
+  historical_bar_key,
 )
 from .market_stream import (
   MARKET_STREAM_MARKETS,
@@ -42,6 +47,9 @@ from .order_lifecycle import (
 )
 
 __all__ = [
+  "HISTORICAL_BAR_NO_DATA_REASON",
+  "HISTORICAL_BAR_SUMMARY_RECORD_TYPE",
+  "HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION",
   "HISTORICAL_TICK_ORDINAL_FIELD",
   "HISTORICAL_TICK_ORDINALS_PER_MILLISECOND",
   "HISTORICAL_TICK_SOURCE_TIME_FIELD",
@@ -56,10 +64,12 @@ __all__ = [
   "CommandAckPayload",
   "ExecutionReportPayload",
   "HeartbeatPayload",
+  "HistoricalBarSummary",
   "OrderReportPayload",
   "ReconciliationResultPayload",
   "ReportAckPayload",
   "TradeCommandPayload",
+  "historical_bar_key",
   "TERMINAL_ORDER_STATUSES",
   "OrderLifecycleStatus",
   "can_transition_order_status",

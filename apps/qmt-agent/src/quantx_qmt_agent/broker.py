@@ -18,11 +18,14 @@ from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 from quantx_contracts import (
+  HISTORICAL_BAR_NO_DATA_REASON,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
   AgentEnvelope,
   AgentMessageType,
+  HistoricalBarSummary,
+  historical_bar_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,7 @@ _RESERVED_HISTORICAL_BAR_COLUMNS = frozenset(
     _NORMALIZED_MARKET_TIME_COLUMN,
     HISTORICAL_TICK_ORDINAL_FIELD,
     HISTORICAL_TICK_SOURCE_TIME_FIELD,
+    *HistoricalBarSummary.model_fields,
   }
 )
 
@@ -1590,12 +1594,38 @@ def _iter_market_data_records_unbounded(
       end_time=request.end_text,
     )
     if not isinstance(values, dict):
-      continue
-    for code in sorted(values):
+      raise ValueError("XTData returned a non-object market-data result")
+    normalized_values: dict[str, Any] = {}
+    for code, frame in values.items():
       normalized_code = str(code).strip().upper()
       if normalized_code not in requested_codes:
         raise ValueError(f"XTData returned unrequested instrument: {normalized_code}")
-      frame = values[code]
+      if normalized_code in normalized_values:
+        raise ValueError(
+          f"XTData returned duplicate normalized instrument: {normalized_code}"
+        )
+      normalized_values[normalized_code] = frame
+
+    for normalized_code in sorted(request.codes):
+      frame = normalized_values.get(normalized_code)
+      if frame is None:
+        yield HistoricalBarSummary(
+          code=normalized_code,
+          period=period,
+          row_count=0,
+          min_time=None,
+          max_time=None,
+          key_sha256=hashlib.sha256(b"").hexdigest(),
+          no_data_reason=HISTORICAL_BAR_NO_DATA_REASON,
+        ).model_dump(mode="json")
+        continue
+      if not all(
+        hasattr(frame, attribute)
+        for attribute in ("columns", "itertuples", "sort_values")
+      ):
+        raise ValueError(
+          f"XTData returned a non-DataFrame result for {normalized_code}/{period}"
+        )
       if len(frame) > MAX_MARKET_DATA_FRAME_RECORDS:
         raise ValueError("single market data frame exceeds record limit")
       normalized = (
@@ -1604,14 +1634,16 @@ def _iter_market_data_records_unbounded(
       if "time" not in normalized.columns and len(normalized.columns) > 0:
         normalized = normalized.rename(columns={normalized.columns[0]: "time"})
       if "time" not in normalized.columns:
-        raise ValueError(f"market data frame for {code} has no time column")
+        raise ValueError(
+          f"market data frame for {normalized_code} has no time column"
+        )
       reserved_columns = _RESERVED_HISTORICAL_BAR_COLUMNS.intersection(
         str(column) for column in normalized.columns
       )
       if reserved_columns:
         names = ", ".join(sorted(reserved_columns))
         raise ValueError(
-          f"market data frame for {code} contains reserved columns: {names}"
+          f"market data frame for {normalized_code} contains reserved columns: {names}"
         )
       normalize_time = (
         _normalize_daily_market_timestamp
@@ -1658,30 +1690,63 @@ def _iter_market_data_records_unbounded(
             )
           if len(group) == 1:
             group[0][HISTORICAL_TICK_ORDINAL_FIELD] = 0
-            yield group[0]
+            records[group_start:group_end] = group
             group_start = group_end
             continue
-          for ordinal, record in enumerate(sorted(group, key=_tick_record_order_key)):
+          ordered_group = sorted(group, key=_tick_record_order_key)
+          for ordinal, record in enumerate(ordered_group):
             record[HISTORICAL_TICK_ORDINAL_FIELD] = ordinal
-            yield record
+          records[group_start:group_end] = ordered_group
           group_start = group_end
-        continue
+      else:
+        previous_time: int | None = None
+        for record in records:
+          current_time = int(record["time"])
+          if previous_time is not None and current_time <= previous_time:
+            raise ValueError(
+              "XTData returned duplicate or unordered normalized bar key: "
+              f"{normalized_code}/{period}/{current_time}"
+            )
+          previous_time = current_time
 
-      seen_timestamps: set[int] = set()
-      for record in records:
-        if record["time"] in seen_timestamps:
-          raise ValueError(
-            "XTData returned duplicate normalized bar key: "
-            f"{normalized_code}/{period}/{record['time']}"
-          )
-        seen_timestamps.add(record["time"])
+      key_digest = hashlib.sha256()
+      for index, record in enumerate(records):
+        if index:
+          key_digest.update(b"\n")
+        key_digest.update(
+          historical_bar_key(
+            code=normalized_code,
+            period=period,
+            time_ms=int(record["time"]),
+            tick_ordinal=(
+              int(record[HISTORICAL_TICK_ORDINAL_FIELD])
+              if period == "tick"
+              else None
+            ),
+          ).encode("utf-8")
+        )
         yield record
+      yield HistoricalBarSummary(
+        code=normalized_code,
+        period=period,
+        row_count=len(records),
+        min_time=int(records[0]["time"]) if records else None,
+        max_time=int(records[-1]["time"]) if records else None,
+        key_sha256=key_digest.hexdigest(),
+        no_data_reason=(None if records else HISTORICAL_BAR_NO_DATA_REASON),
+      ).model_dump(mode="json")
 
 
 def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
-  codes = tuple(str(code).strip().upper() for code in payload.get("stock_list") or [])
-  if not codes:
+  raw_codes = payload.get("stock_list")
+  if not isinstance(raw_codes, list) or not raw_codes:
     raise ValueError("bars request requires a non-empty stock_list")
+  if any(
+    not isinstance(code, str) or code != code.strip().upper()
+    for code in raw_codes
+  ):
+    raise ValueError("bars request stock_list must use canonical instrument codes")
+  codes = tuple(raw_codes)
   if len(codes) > MAX_MARKET_DATA_CODES:
     raise ValueError("bars request exceeds instrument count limit")
   if len(set(codes)) != len(codes):
@@ -1691,9 +1756,13 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
   if invalid_codes:
     raise ValueError(f"bars request contains invalid instruments: {invalid_codes}")
 
-  periods = tuple(
-    str(period).strip().lower() for period in payload.get("periods") or ["1d"]
-  )
+  raw_periods = payload.get("periods") or ["1d"]
+  if not isinstance(raw_periods, list) or any(
+    not isinstance(period, str) or period != period.strip().lower()
+    for period in raw_periods
+  ):
+    raise ValueError("bars request periods must use canonical values")
+  periods = tuple(raw_periods)
   if not periods or len(set(periods)) != len(periods):
     raise ValueError("bars request periods must be non-empty and unique")
   unsupported = [
@@ -1724,6 +1793,7 @@ def _validate_bars_request(payload: dict[str, Any]) -> _ValidatedBarsRequest:
     * span_days
     * sum(ESTIMATED_BAR_RECORDS_PER_DAY[period] for period in periods)
   )
+  estimated_records += len(codes) * len(periods)
   if estimated_records > MAX_MARKET_DATA_RECORDS:
     raise ValueError("bars request estimated record count exceeds safe limit")
   return _ValidatedBarsRequest(

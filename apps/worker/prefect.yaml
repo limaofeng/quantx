@@ -13,7 +13,7 @@ deployments:
   - name: position-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:agent_convergence_flow
     work_pool: *quantx_process_pool
-    description: 同步持仓，并可选同步持仓标的 tick 数据
+    description: 同步持仓，并在 15:35 归档当日仍持有标的的完整 tick
     schedules:
       - cron: "0 8 * * 1-5"
         timezone: Asia/Shanghai
@@ -23,7 +23,7 @@ deployments:
         timezone: Asia/Shanghai
         parameters:
           sync_market_data: true
-    version: "0.0.4"
+    version: "0.0.5"
   - name: instrument-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:instrument_request_flow
     work_pool: *quantx_process_pool

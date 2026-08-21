@@ -14,6 +14,77 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({"1.0", PROTOCOL_VERSION})
 HISTORICAL_TICK_ORDINAL_FIELD = "tick_ordinal"
 HISTORICAL_TICK_SOURCE_TIME_FIELD = "source_time_ms"
 HISTORICAL_TICK_ORDINALS_PER_MILLISECOND = 1000
+HISTORICAL_BAR_SUMMARY_RECORD_TYPE = "bar_summary"
+HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION = 1
+HISTORICAL_BAR_NO_DATA_REASON = "XT_DATA_NO_ROWS"
+
+
+def historical_bar_key(
+  *,
+  code: str,
+  period: str,
+  time_ms: int,
+  tick_ordinal: int | None,
+) -> str:
+  """Return the canonical archive key used by Agent and ingestion audits."""
+
+  prefix = f"{code}|{period}|{time_ms}"
+  return prefix if period != "tick" else f"{prefix}|{tick_ordinal}"
+
+
+class HistoricalBarSummary(BaseModel):
+  """Required terminal record for one requested historical bar series."""
+
+  model_config = ConfigDict(extra="forbid", strict=True)
+
+  record_type: Literal["bar_summary"] = HISTORICAL_BAR_SUMMARY_RECORD_TYPE
+  schema_version: Literal[1] = HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION
+  code: str
+  period: str
+  row_count: int = Field(ge=0)
+  min_time: Optional[int]
+  max_time: Optional[int]
+  key_sha256: str
+  no_data_reason: Optional[Literal["XT_DATA_NO_ROWS"]]
+
+  @field_validator("code")
+  @classmethod
+  def validate_code(cls, value: str) -> str:
+    normalized = value.strip().upper()
+    if value != normalized or not normalized:
+      raise ValueError("historical bar summary code must be canonical")
+    return normalized
+
+  @field_validator("period")
+  @classmethod
+  def validate_period(cls, value: str) -> str:
+    normalized = value.strip().lower()
+    if value != normalized or not normalized:
+      raise ValueError("historical bar summary period must be canonical")
+    return normalized
+
+  @field_validator("key_sha256")
+  @classmethod
+  def validate_key_sha256(cls, value: str) -> str:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+      raise ValueError("historical bar summary key_sha256 must be lowercase SHA256")
+    return value
+
+  @model_validator(mode="after")
+  def validate_empty_contract(self) -> "HistoricalBarSummary":
+    if self.row_count == 0:
+      if self.min_time is not None or self.max_time is not None:
+        raise ValueError("empty historical bar summary cannot contain time bounds")
+      if self.no_data_reason != HISTORICAL_BAR_NO_DATA_REASON:
+        raise ValueError("empty historical bar summary requires XT_DATA_NO_ROWS")
+    else:
+      if self.min_time is None or self.max_time is None:
+        raise ValueError("non-empty historical bar summary requires time bounds")
+      if self.min_time > self.max_time:
+        raise ValueError("historical bar summary min_time exceeds max_time")
+      if self.no_data_reason is not None:
+        raise ValueError("non-empty historical bar summary cannot have no_data_reason")
+    return self
 
 
 def utcnow() -> datetime:

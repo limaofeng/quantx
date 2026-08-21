@@ -3,26 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import gzip
-import hashlib
-import json
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
 from prefect import flow, get_run_logger
-from quantx_contracts import (
-  HISTORICAL_TICK_ORDINAL_FIELD,
-  HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
-  HISTORICAL_TICK_SOURCE_TIME_FIELD,
-)
+from prefect.runtime import flow_run as flow_run_runtime
 from quantx_infrastructure import DurableRuntimeStore
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
+from quantx_infrastructure.models.broker_position_snapshot import BrokerPositionSnapshot
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories.financial_sync_run_repository import (
   FinancialSyncRunRepository,
@@ -31,9 +24,18 @@ from quantx_infrastructure.services.divid_factor_service import (
   DividFactorService,
 )
 from quantx_infrastructure.services.financial_service import FinancialService
+from quantx_infrastructure.services.market_data_request_service import (
+  recover_failed_market_data_request,
+)
+from quantx_infrastructure.services.market_data_transfer_ingestion import (
+  claim_ingest_and_finish_market_data_request,
+  ingest_uploaded_bar_request,
+  load_uploaded_request_manifest,
+  load_uploaded_request_records,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
-from sqlalchemy import select
+from sqlalchemy import and_, select
 
 from quantx_worker.prefector.tasks.market_data_tasks import save_market_data
 
@@ -53,75 +55,9 @@ _FINANCIAL_TABLES = ("Balance", "Income", "CashFlow", "Capital")
 _FINANCIAL_RECORD_FORMAT = "financial-row-v1"
 _FINANCIAL_BATCH_SIZE = 100
 _FINANCIAL_LOOKBACK_DAYS = 1095
-
-
-def _validate_bar_record_keys(records: list[dict[str, Any]]) -> None:
-  """Validate the lossless historical-tick key contract before persistence."""
-  non_tick_keys: set[tuple[str, str, int]] = set()
-  tick_keys: set[tuple[str, str, int, int]] = set()
-  tick_ordinals: dict[tuple[str, str, int], set[int]] = {}
-
-  for index, record in enumerate(records):
-    code = record.get("code")
-    period = record.get("period")
-    source_time = record.get("time")
-    if not isinstance(code, str) or not code.strip():
-      raise RuntimeError(f"bar record has invalid code: index={index}")
-    if not isinstance(period, str) or not period.strip():
-      raise RuntimeError(f"bar record has invalid period: index={index}")
-    if isinstance(source_time, bool) or not isinstance(source_time, int):
-      raise RuntimeError(
-        f"bar record time must be integer milliseconds: "
-        f"index={index} code={code} period={period}"
-      )
-    if HISTORICAL_TICK_SOURCE_TIME_FIELD in record:
-      raise RuntimeError(
-        f"bar record contains storage-only field "
-        f"{HISTORICAL_TICK_SOURCE_TIME_FIELD}: "
-        f"index={index} code={code} period={period}"
-      )
-
-    base_key = (code, period, source_time)
-    if period != "tick":
-      if HISTORICAL_TICK_ORDINAL_FIELD in record:
-        raise RuntimeError(
-          f"non-tick bar contains {HISTORICAL_TICK_ORDINAL_FIELD}: "
-          f"index={index} code={code} period={period}"
-        )
-      if base_key in non_tick_keys:
-        raise RuntimeError(
-          f"duplicate historical bar key: {code}/{period}/{source_time}"
-        )
-      non_tick_keys.add(base_key)
-      continue
-
-    ordinal = record.get(HISTORICAL_TICK_ORDINAL_FIELD)
-    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
-      raise RuntimeError(
-        f"tick {HISTORICAL_TICK_ORDINAL_FIELD} must be an integer: "
-        f"index={index} code={code} time={source_time}"
-      )
-    if not 0 <= ordinal < HISTORICAL_TICK_ORDINALS_PER_MILLISECOND:
-      raise RuntimeError(
-        f"tick {HISTORICAL_TICK_ORDINAL_FIELD} is out of range: "
-        f"index={index} code={code} time={source_time} ordinal={ordinal}"
-      )
-    tick_key = (*base_key, ordinal)
-    if tick_key in tick_keys:
-      raise RuntimeError(
-        f"duplicate historical tick key: {code}/{period}/{source_time}/{ordinal}"
-      )
-    tick_keys.add(tick_key)
-    tick_ordinals.setdefault(base_key, set()).add(ordinal)
-
-  for (code, period, source_time), ordinals in tick_ordinals.items():
-    actual = sorted(ordinals)
-    expected = list(range(len(actual)))
-    if actual != expected:
-      raise RuntimeError(
-        f"historical tick ordinals are not contiguous: "
-        f"{code}/{period}/{source_time} expected={expected} actual={actual}"
-      )
+_ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS = 90.0
+_ARCHIVE_REQUEST_TIMEOUT_SECONDS = 30 * 60
+_ARCHIVE_FAILED_RETRY_HOPS = 3
 
 
 async def _persisted_instrument_codes() -> list[str]:
@@ -160,10 +96,84 @@ async def _persisted_position_codes() -> list[str]:
     )
 
 
+async def _fresh_position_archive_universe() -> dict[str, Any]:
+  """Freeze one fresh, complete single-account broker position universe."""
+
+  now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+  async with AsyncSessionLocal() as db:
+    rows = (
+      await db.execute(
+        select(BrokerPositionSnapshot, Position.stock_code)
+        .select_from(BrokerPositionSnapshot)
+        .outerjoin(
+          Position,
+          and_(
+            Position.account_id == BrokerPositionSnapshot.account_id,
+            Position.volume > 0,
+          ),
+        )
+        .where(BrokerPositionSnapshot.is_complete.is_(True))
+        .order_by(
+          BrokerPositionSnapshot.received_at.desc(),
+          BrokerPositionSnapshot.account_id,
+          Position.stock_code,
+        )
+      )
+    ).all()
+    universes: dict[str, tuple[Any, set[str]]] = {}
+    for snapshot, raw_code in rows:
+      account_id = str(snapshot.account_id)
+      _, codes = universes.setdefault(account_id, (snapshot, set()))
+      normalized_code = str(raw_code or "").strip().upper()
+      if normalized_code:
+        codes.add(normalized_code)
+    if len(universes) != 1:
+      raise RuntimeError(
+        "持仓 Tick 同步要求唯一完整券商持仓快照: "
+        f"actual={len(universes)}"
+      )
+    snapshot, frozen_codes = next(iter(universes.values()))
+    if int(snapshot.sequence or 0) <= 0 or str(snapshot.last_error or "").strip():
+      raise RuntimeError("持仓 Tick 同步要求无错误的完整券商持仓快照")
+    for field, observed in (
+      ("reported_at", snapshot.reported_at),
+      ("received_at", snapshot.received_at),
+    ):
+      if observed is None:
+        raise RuntimeError(f"持仓 Tick 同步缺少快照时间: {field}")
+      age = (now_utc - observed).total_seconds()
+      if age < -5 or age > _ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS:
+        raise RuntimeError(
+          "持仓 Tick 同步拒绝陈旧券商持仓快照: "
+          f"field={field} age_seconds={age:.1f}"
+        )
+    codes = sorted(frozen_codes)
+    if len(codes) != int(snapshot.position_count or 0):
+      raise RuntimeError(
+        "持仓 Tick 同步拒绝未闭合的持仓投影: "
+        f"snapshot_count={int(snapshot.position_count or 0)} "
+        f"positive_positions={len(codes)}"
+      )
+    return {
+      "account_id": str(snapshot.account_id),
+      "sequence": int(snapshot.sequence),
+      "reported_at": snapshot.reported_at.isoformat(),
+      "received_at": snapshot.received_at.isoformat(),
+      "stock_codes": codes,
+    }
+
+
+def _scheduled_start_time() -> Optional[datetime]:
+  try:
+    return flow_run_runtime.get_scheduled_start_time()
+  except Exception:
+    return None
+
+
 async def _request_and_wait(
   payload: dict[str, Any],
   *,
-  timeout_seconds: int = 900,
+  timeout_seconds: int = _ARCHIVE_REQUEST_TIMEOUT_SECONDS,
   agent_device_id: str = "",
   required_capabilities: Optional[list[str]] = None,
   idempotency_scope: str = "",
@@ -178,6 +188,8 @@ async def _request_and_wait(
     if idempotency_scope:
       request_kwargs["idempotency_scope"] = idempotency_scope
     request_id = await store.create_market_data_request(payload, **request_kwargs)
+    reopen_attempted: set[str] = set()
+    retry_hops = 0
     logger.info(
       "Created market-data request request_id=%s operation=%s codes=%s "
       "periods=%s range=%s..%s",
@@ -190,41 +202,75 @@ async def _request_and_wait(
     )
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
-      status = await store.market_data_request_status(request_id)
-      if status in {
-        "UPLOADED",
-        "PROCESSING",
-      } and await store.claim_market_data_request(request_id):
-        try:
-          ingestion = await _ingest_uploaded_request(store, request_id)
-          await store.finish_market_data_request(
-            request_id,
-            status="COMPLETED",
+      request = await store.market_data_request(request_id)
+      if request is None:
+        return {"status": "missing", "request_id": request_id}
+      status = str(request.get("status") or "MISSING").upper()
+      if status == "COMPLETED":
+        ingestion_result = request.get("ingestion_result")
+        if not isinstance(ingestion_result, dict):
+          raise RuntimeError(
+            "COMPLETED market-data request is missing its ingestion audit: "
+            f"request_id={request_id}"
           )
+        return {
+          "status": "completed",
+          "request_id": request_id,
+          **ingestion_result,
+        }
+      if status == "FAILED":
+        if retry_hops >= _ARCHIVE_FAILED_RETRY_HOPS:
           return {
-            "status": "completed",
+            "status": "failed",
             "request_id": request_id,
-            **ingestion,
+            "reason": request.get("processing_error"),
           }
-        except Exception as exc:
-          await store.finish_market_data_request(
-            request_id,
-            status="FAILED",
-            error=f"{exc.__class__.__name__}: {exc}",
-          )
-          raise
-      if status in {"COMPLETED", "FAILED", "MISSING"}:
-        return {"status": status.lower(), "request_id": request_id}
+        recovery = await recover_failed_market_data_request(
+          store,
+          payload=payload,
+          request_id=request_id,
+          reopen_attempted=reopen_attempted,
+          retry_hops=retry_hops,
+          device_id=agent_device_id or None,
+        )
+        if recovery is None:
+          return {
+            "status": "failed",
+            "request_id": request_id,
+            "reason": request.get("processing_error"),
+          }
+        request_id, retry_hops, _ = recovery
+        continue
+      if status in {"UPLOADED", "PROCESSING"}:
+        convergence = await claim_ingest_and_finish_market_data_request(
+          store,
+          request_id,
+          ingest_request=_ingest_uploaded_request,
+        )
+        if convergence is not None:
+          if convergence.get("status") == "completed":
+            return convergence
+          if convergence.get("status") == "failed":
+            continue
+          await asyncio.sleep(5)
+          continue
       await asyncio.sleep(2)
-    await store.finish_market_data_request(
-      request_id,
-      status="FAILED",
-      error="Agent transfer did not complete before the flow timeout",
-    )
+    # A caller deadline is not evidence that Agent preparation/upload failed.
+    # Leave the durable request open so the Prefect retry observes the same
+    # request_id and the Agent can reuse its immutable local spool.
+    final = await store.market_data_request(request_id)
+    if final is not None and str(final.get("status") or "").upper() == "COMPLETED":
+      ingestion_result = final.get("ingestion_result")
+      if isinstance(ingestion_result, dict):
+        return {
+          "status": "completed",
+          "request_id": request_id,
+          **ingestion_result,
+        }
     return {
       "status": "timeout",
       "request_id": request_id,
-      "reason": "Agent transfer did not complete before the flow timeout",
+      "reason": "wait attempt expired; durable request remains open",
     }
   finally:
     await store.close()
@@ -234,73 +280,18 @@ async def _ingest_uploaded_request(
   store: DurableRuntimeStore,
   request_id: str,
 ) -> dict[str, Any]:
-  request = await store.market_data_request(request_id)
-  if request is None:
-    raise RuntimeError("Market-data request disappeared before ingestion")
-  manifest = await store.market_data_transfers(request_id)
-  expected = int(request.get("expected_chunks") or 0)
-  if expected <= 0 or len(manifest) != expected:
-    raise RuntimeError(
-      f"Market-data transfer is incomplete: expected={expected} actual={len(manifest)}"
-    )
-  if [int(item["chunk_index"]) for item in manifest] != list(range(expected)):
-    raise RuntimeError("Market-data transfer has missing or unordered chunks")
-
-  records: list[dict[str, Any]] = []
-  for item in manifest:
-    path = Path(str(item["storage_reference"]))
-    compressed = path.read_bytes()
-    digest = hashlib.sha256(compressed).hexdigest()
-    if digest != str(item["checksum_sha256"]):
-      raise RuntimeError(f"Market-data chunk checksum mismatch: {path.name}")
-    raw = gzip.decompress(compressed) if item.get("compressed") else compressed
-    chunk = json.loads(raw.decode("utf-8"))
-    if not isinstance(chunk, list):
-      raise RuntimeError(f"Market-data chunk is not an array: {path.name}")
-    if len(chunk) != int(item["record_count"]):
-      raise RuntimeError(f"Market-data chunk record count mismatch: {path.name}")
-    if any(not isinstance(record, dict) for record in chunk):
-      raise RuntimeError(f"Market-data chunk contains a non-object record: {path.name}")
-    records.extend(chunk)
-
-  payload = request.get("request_payload") or {}
-  if isinstance(payload, str):
-    payload = json.loads(payload)
+  _, payload, _ = await load_uploaded_request_manifest(store, request_id)
   operation = str(payload.get("operation") or "bars")
   saved = 0
   replacement_audit: dict[str, Any] | None = None
-  if operation == "bars" and records:
-    _validate_bar_record_keys(records)
-    periods = sorted({str(item.get("period") or "1d") for item in records})
-    for period in periods:
-      frames = {}
-      codes = sorted(
-        {
-          str(item.get("code"))
-          for item in records
-          if str(item.get("period") or "1d") == period and item.get("code")
-        }
-      )
-      for code in codes:
-        rows = [
-          {key: value for key, value in item.items() if key not in {"code", "period"}}
-          for item in records
-          if item.get("code") == code and str(item.get("period") or "1d") == period
-        ]
-        if rows:
-          frames[code] = pd.DataFrame(rows)
-      if frames:
-        result = await save_market_data(period=period, market_data=frames)
-        saved_count = int(result.get("saved_count", 0))
-        if result.get("status") != "success":
-          raise RuntimeError(f"{period} K 线写入未成功")
-        expected_count = sum(len(frame) for frame in frames.values())
-        if saved_count < expected_count:
-          raise RuntimeError(
-            f"{period} K 线写入不完整: expected={expected_count} saved={saved_count}"
-          )
-        saved += saved_count
-  elif operation == "divid_factors":
+  if operation == "bars":
+    return await ingest_uploaded_bar_request(
+      store,
+      request_id,
+      save_period=save_market_data,
+    )
+  _, _, records = await load_uploaded_request_records(store, request_id)
+  if operation == "divid_factors":
     frames, stock_codes, start_ex_date, end_ex_date = _normalize_divid_factor_records(
       records, payload
     )
@@ -537,32 +528,23 @@ async def reprocess_uploaded_market_data_request(
         "market-data request is not explicitly reopened for reprocessing: "
         f"request_id={normalized_request_id} status={status}"
       )
-    if not await store.claim_market_data_request(normalized_request_id):
+    convergence = await claim_ingest_and_finish_market_data_request(
+      store,
+      normalized_request_id,
+      ingest_request=_ingest_uploaded_request,
+    )
+    if convergence is None:
       raise RuntimeError(
         "market-data request could not be claimed for reprocessing: "
         f"request_id={normalized_request_id}"
       )
-    try:
-      ingestion = await _ingest_uploaded_request(
-        store,
-        normalized_request_id,
+    if convergence.get("status") != "completed":
+      raise RuntimeError(
+        "market-data request reprocessing did not complete: "
+        f"request_id={normalized_request_id} "
+        f"status={convergence.get('status')} reason={convergence.get('reason')}"
       )
-      await store.finish_market_data_request(
-        normalized_request_id,
-        status="COMPLETED",
-      )
-    except Exception as exc:
-      await store.finish_market_data_request(
-        normalized_request_id,
-        status="FAILED",
-        error=f"{exc.__class__.__name__}: {exc}",
-      )
-      raise
-    return {
-      "status": "completed",
-      "request_id": normalized_request_id,
-      **ingestion,
-    }
+    return convergence
   finally:
     await store.close()
 
@@ -925,7 +907,11 @@ async def daily_market_data_request_flow(
   )
 
 
-@flow(name="Agent 状态收敛检查")
+@flow(
+  name="Agent 状态收敛检查",
+  retries=2,
+  retry_delay_seconds=60,
+)
 async def agent_convergence_flow(
   sync_market_data: bool = False,
   target_date: str = "",
@@ -933,7 +919,21 @@ async def agent_convergence_flow(
   store = DurableRuntimeStore()
   try:
     agents = await store.component_status("qmt-agent:")
-    ready = [item for item in agents if item.get("status") == "READY"]
+    market_data_device_id = (
+      await store.available_market_data_device()
+      if sync_market_data
+      else None
+    )
+    ready = [
+      item
+      for item in agents
+      if item.get("status") == "READY"
+      and (
+        not sync_market_data
+        or str(item.get("component") or "")
+        == f"qmt-agent:{market_data_device_id}"
+      )
+    ]
     result: dict[str, Any] = {
       "status": "ready" if ready else "degraded",
       "ready_agents": len(ready),
@@ -944,15 +944,24 @@ async def agent_convergence_flow(
 
   if not sync_market_data:
     return result
-  if not ready:
-    raise RuntimeError("持仓 Tick 同步无法启动: no READY QMT Agent")
+  if not market_data_device_id:
+    raise RuntimeError("持仓 Tick 同步无法启动: no fresh market-data QMT Agent")
 
   normalized_target = str(target_date or "").strip()
+  scheduled_start = _scheduled_start_time()
   trading_date = (
     datetime.strptime(normalized_target, "%Y%m%d").date()
     if normalized_target
+    else time_utils.to_shanghai(scheduled_start).date()
+    if scheduled_start is not None
     else time_utils.today()
   )
+  current_trading_date = time_utils.today()
+  if trading_date != current_trading_date:
+    raise RuntimeError(
+      "持仓 Tick 归档拒绝隔日补跑: 仅保存了最新券商持仓投影，"
+      "无法证明目标日收盘持仓集合；请使用已归档的目标日 universe 重建请求"
+    )
   if not await TradingDateHelper().is_trading_date("SH", trading_date):
     result["market_data_sync"] = {
       "status": "skipped",
@@ -961,7 +970,8 @@ async def agent_convergence_flow(
     }
     return result
 
-  stock_codes = await _persisted_position_codes()
+  position_universe = await _fresh_position_archive_universe()
+  stock_codes = list(position_universe["stock_codes"])
   if not stock_codes:
     result["market_data_sync"] = {
       "status": "skipped",
@@ -979,7 +989,9 @@ async def agent_convergence_flow(
       "periods": ["tick"],
       "start_time": compact_date,
       "end_time": compact_date,
-    }
+    },
+    agent_device_id=market_data_device_id,
+    idempotency_scope=f"position-tick-archive-v1:{compact_date}",
   )
   if transfer.get("status") != "completed":
     raise RuntimeError(
@@ -988,29 +1000,54 @@ async def agent_convergence_flow(
       f"status={transfer.get('status')}"
     )
 
-  # A newly ingested request always contains counts. An idempotently reused
-  # COMPLETED request may not, but its terminal state proves the original
-  # ingestion already passed the same manifest and persistence checks.
-  if "records_received" in transfer or "records_saved" in transfer:
-    records_received = int(transfer.get("records_received") or 0)
-    records_saved = int(transfer.get("records_saved") or 0)
-    if records_received <= 0:
-      raise RuntimeError(
-        "持仓 Tick 同步未返回数据: "
-        f"request_id={transfer.get('request_id')}"
-      )
-    if records_saved < records_received:
-      raise RuntimeError(
-        "持仓 Tick 数据未完整入库: "
-        f"request_id={transfer.get('request_id')} "
-        f"received={records_received} saved={records_saved}"
-      )
+  records_received = int(transfer.get("records_received") or 0)
+  records_saved = int(transfer.get("records_saved") or 0)
+  requested_codes = sorted(str(code) for code in transfer.get("requested_codes") or [])
+  requested_periods = list(transfer.get("requested_periods") or [])
+  summaries = list(transfer.get("code_summaries") or [])
+  summary_pairs = sorted(
+    (str(item.get("code") or ""), str(item.get("period") or ""))
+    for item in summaries
+  )
+  summary_row_count = sum(int(item.get("row_count") or 0) for item in summaries)
+  audited_empty_codes = sorted(
+    str(item.get("code") or "")
+    for item in summaries
+    if int(item.get("row_count") or 0) == 0
+  )
+  empty_codes = sorted(str(code) for code in transfer.get("empty_codes") or [])
+  expected_pairs = sorted((code, "tick") for code in stock_codes)
+  if (
+    requested_codes != stock_codes
+    or requested_periods != ["tick"]
+    or str(transfer.get("start_time") or "") != compact_date
+    or str(transfer.get("end_time") or "") != compact_date
+    or summary_pairs != expected_pairs
+    or summary_row_count != records_received
+    or empty_codes != audited_empty_codes
+  ):
+    raise RuntimeError(
+      "持仓 Tick 入库审计与冻结请求不一致: "
+      f"request_id={transfer.get('request_id')}"
+    )
+  if records_saved != records_received:
+    raise RuntimeError(
+      "持仓 Tick 数据未完整写入: "
+      f"request_id={transfer.get('request_id')} "
+      f"received={records_received} accepted={records_saved}"
+    )
+  if empty_codes:
+    logger.warning(
+      "Position Tick archive contains explicit no-data instruments: %s",
+      empty_codes,
+    )
 
   result["market_data_sync"] = {
     **transfer,
     "target_date": compact_date,
     "stock_count": len(stock_codes),
     "stock_codes": stock_codes,
+    "position_snapshot": position_universe,
   }
   return result
 

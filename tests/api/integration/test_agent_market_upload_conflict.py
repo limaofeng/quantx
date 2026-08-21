@@ -1,6 +1,6 @@
 import hashlib
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +64,8 @@ async def _market_data_database():
           received_chunks INTEGER NOT NULL,
           completed_at DATETIME,
           processing_error TEXT,
+          ingestion_result JSON,
+          processing_claim_token VARCHAR(36),
           created_at DATETIME NOT NULL,
           updated_at DATETIME NOT NULL
         )
@@ -79,6 +81,7 @@ async def _market_data_database():
           chunk_index INTEGER NOT NULL,
           checksum_sha256 VARCHAR(64) NOT NULL,
           record_count INTEGER NOT NULL,
+          compressed_bytes BIGINT NOT NULL,
           compressed BOOLEAN NOT NULL,
           storage_reference VARCHAR(512) NOT NULL,
           received_at DATETIME NOT NULL,
@@ -100,6 +103,9 @@ async def _seed_request(
   checksum: str,
   status: str = "RECEIVING",
   processing_error: str | None = None,
+  expected_chunks: int = 2,
+  received_chunks: int = 1,
+  compressed_bytes: int = 0,
 ) -> None:
   now = datetime.now(timezone.utc).replace(tzinfo=None)
   async with sessions() as db:
@@ -110,8 +116,8 @@ async def _seed_request(
         idempotency_key="market-upload-conflict-test",
         request_payload={"operation": "bars"},
         status=status,
-        expected_chunks=2,
-        received_chunks=1,
+        expected_chunks=expected_chunks,
+        received_chunks=received_chunks,
         completed_at=now if status in {"COMPLETED", "FAILED"} else None,
         processing_error=processing_error,
         created_at=now,
@@ -125,6 +131,7 @@ async def _seed_request(
         chunk_index=0,
         checksum_sha256=checksum,
         record_count=1,
+        compressed_bytes=compressed_bytes,
         compressed=True,
         storage_reference="retained-audit-chunk.json.gz",
         received_at=now,
@@ -155,6 +162,7 @@ def _configure_api(monkeypatch, sessions, market_data_root) -> None:
   monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(agent_api, "AgentAuthService", _AgentAuthService)
   monkeypatch.setattr(agent_api, "MARKET_DATA_ROOT", market_data_root)
+  monkeypatch.setattr(agent_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
 
 
 @pytest.mark.asyncio
@@ -240,6 +248,7 @@ async def test_total_chunks_conflict_fails_request_without_losing_audit_chunks(
       await store.finish_market_data_request(
         REQUEST_ID,
         status="COMPLETED",
+        ingestion_result={"records_received": 1, "records_saved": 1},
       )
     with pytest.raises(HTTPException) as retry_error:
       await _upload(b"new chunk", chunk_index=1)
@@ -427,6 +436,7 @@ async def test_failed_request_rejects_upload_and_cannot_be_completed(
       await store.finish_market_data_request(
         REQUEST_ID,
         status="COMPLETED",
+        ingestion_result={"records_received": 1, "records_saved": 1},
       )
     await store.finish_market_data_request(
       REQUEST_ID,
@@ -448,13 +458,15 @@ async def test_failed_request_rejects_upload_and_cannot_be_completed(
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+@pytest.mark.parametrize("status", ["QUEUED", "DELIVERED", "RECEIVING"])
 async def test_agent_can_fail_an_unexecutable_market_request(
   monkeypatch,
   tmp_path,
+  status: str,
 ) -> None:
   digest = hashlib.sha256(b"original chunk").hexdigest()
   async with _market_data_database() as (_, sessions):
-    await _seed_request(sessions, checksum=digest)
+    await _seed_request(sessions, checksum=digest, status=status)
     _configure_api(monkeypatch, sessions, tmp_path / "market-data")
     body = b'{"reason":"ValueError: instrument count limit"}'
 
@@ -474,3 +486,393 @@ async def test_agent_can_fail_an_unexecutable_market_request(
     )
     assert request.completed_at is not None
     assert transfer is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("status", ["UPLOADED", "PROCESSING", "COMPLETED"])
+async def test_late_agent_failure_cannot_revert_frozen_manifest(
+  monkeypatch,
+  tmp_path,
+  status: str,
+) -> None:
+  body = b"complete chunk"
+  digest = hashlib.sha256(body).hexdigest()
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=digest,
+      status=status,
+      expected_chunks=1,
+      received_chunks=1,
+      compressed_bytes=len(body),
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    result = await agent_api.fail_market_data_request(
+      request_id=REQUEST_ID,
+      request=_Request(b'{"reason":"ReadTimeout: response was lost"}'),
+    )
+
+    assert result == {"accepted": True}
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+    assert market_request is not None
+    assert market_request.status == status
+    assert market_request.processing_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_late_agent_failure_cannot_fail_complete_receiving_manifest(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  body = b"complete chunk"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(body).hexdigest(),
+      status="RECEIVING",
+      expected_chunks=1,
+      received_chunks=0,
+      compressed_bytes=len(body),
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    await agent_api.fail_market_data_request(
+      request_id=REQUEST_ID,
+      request=_Request(b'{"reason":"late failure"}'),
+    )
+
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+    assert market_request is not None
+    assert market_request.status == "RECEIVING"
+    assert market_request.processing_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("status", ["UPLOADED", "PROCESSING"])
+@pytest.mark.parametrize("conflict_kind", ["checksum", "total_chunks", "record_count"])
+async def test_late_chunk_conflict_preserves_frozen_manifest(
+  monkeypatch,
+  tmp_path,
+  status: str,
+  conflict_kind: str,
+) -> None:
+  original = b"complete chunk"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(original).hexdigest(),
+      status=status,
+      expected_chunks=1,
+      received_chunks=1,
+      compressed_bytes=len(original),
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    with pytest.raises(HTTPException) as error:
+      if conflict_kind == "checksum":
+        await _upload(b"conflicting retry", total_chunks=1)
+      elif conflict_kind == "total_chunks":
+        await _upload(original, total_chunks=2)
+      else:
+        await _upload(original, record_count=2, total_chunks=1)
+
+    assert error.value.status_code == 409
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer = await db.get(MarketDataTransfer, TRANSFER_ID)
+    assert market_request is not None
+    assert market_request.status == status
+    assert market_request.processing_error is None
+    assert transfer is not None
+    assert transfer.checksum_sha256 == hashlib.sha256(original).hexdigest()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_new_chunk_persists_compressed_bytes_and_freezes_complete_manifest(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  first = b"first chunk"
+  second = b"second chunk"
+  market_data_root = tmp_path / "market-data"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(first).hexdigest(),
+      compressed_bytes=len(first),
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+
+    result = await _upload(second, chunk_index=1)
+
+    assert result == {"accepted": True, "duplicate": False}
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer = await db.scalar(
+        select(MarketDataTransfer).where(MarketDataTransfer.chunk_index == 1)
+      )
+    assert market_request is not None
+    assert market_request.status == "UPLOADED"
+    assert market_request.received_chunks == 2
+    assert transfer is not None
+    assert transfer.compressed_bytes == len(second)
+    assert (market_data_root / REQUEST_ID / "00000001.json.gz").read_bytes() == second
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_request_compressed_quota_is_terminal_contract_failure(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  first = b"first chunk"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(first).hexdigest(),
+      compressed_bytes=agent_api.MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES - 1,
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    with pytest.raises(HTTPException) as error:
+      await _upload(b"too large", chunk_index=1)
+
+    assert error.value.status_code == 413
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer_count = await db.scalar(
+        select(func.count()).select_from(MarketDataTransfer)
+      )
+    assert market_request is not None
+    assert market_request.status == "FAILED"
+    assert "compressed byte limit" in str(market_request.processing_error)
+    assert transfer_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_request_quota_counts_legacy_files_when_compressed_bytes_is_zero(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  first = b"12345678"
+  market_data_root = tmp_path / "market-data"
+  request_directory = market_data_root / REQUEST_ID
+  request_directory.mkdir(parents=True)
+  retained = request_directory / "00000000.json.gz"
+  retained.write_bytes(first)
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(first).hexdigest(),
+      compressed_bytes=0,
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+    monkeypatch.setattr(agent_api, "MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES", 10)
+
+    with pytest.raises(HTTPException) as error:
+      await _upload(b"four", chunk_index=1)
+
+    assert error.value.status_code == 413
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer_count = await db.scalar(
+        select(func.count()).select_from(MarketDataTransfer)
+      )
+    assert market_request is not None
+    assert market_request.status == "FAILED"
+    assert transfer_count == 1
+    assert retained.read_bytes() == first
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_global_staging_quota_is_retryable_and_preserves_request(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  first = b"first chunk"
+  market_data_root = tmp_path / "market-data"
+  other = market_data_root / "44444444-4444-4444-8444-444444444444"
+  other.mkdir(parents=True)
+  (other / "retained.json.gz").write_bytes(b"x" * 8)
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(first).hexdigest(),
+      compressed_bytes=len(first),
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+    monkeypatch.setattr(agent_api, "MAX_MARKET_DATA_STAGING_BYTES", 10)
+
+    with pytest.raises(HTTPException) as error:
+      await _upload(b"four", chunk_index=1)
+
+    assert error.value.status_code == 507
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer_count = await db.scalar(
+        select(func.count()).select_from(MarketDataTransfer)
+      )
+    assert market_request is not None
+    assert market_request.status == "RECEIVING"
+    assert market_request.processing_error is None
+    assert transfer_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_disk_reserve_rejection_is_retryable_and_preserves_request(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  first = b"first chunk"
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(first).hexdigest(),
+      compressed_bytes=len(first),
+    )
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+    monkeypatch.setattr(agent_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 1)
+    monkeypatch.setattr(agent_api, "_market_data_staging_free_bytes", lambda _root: 0)
+
+    with pytest.raises(HTTPException) as error:
+      await _upload(b"second", chunk_index=1)
+
+    assert error.value.status_code == 507
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+    assert market_request is not None
+    assert market_request.status == "RECEIVING"
+    assert market_request.processing_error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_staging_sweep_removes_completed_and_old_orphan_directories(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  body = b"complete chunk"
+  market_data_root = tmp_path / "market-data"
+  completed = market_data_root / REQUEST_ID
+  orphan = market_data_root / "55555555-5555-4555-8555-555555555555"
+  completed.mkdir(parents=True)
+  orphan.mkdir()
+  (completed / "00000000.json.gz").write_bytes(body)
+  (orphan / "orphan.json.gz").write_bytes(body)
+  started = datetime.now(timezone.utc)
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(body).hexdigest(),
+      status="COMPLETED",
+      expected_chunks=1,
+      received_chunks=1,
+      compressed_bytes=len(body),
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+    sweep_now = started.replace(microsecond=0) + timedelta(
+      seconds=agent_api.MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS + 1
+    )
+    monkeypatch.setattr(
+      agent_api,
+      "utcnow",
+      lambda: sweep_now.replace(tzinfo=None),
+    )
+
+    removed = await agent_api.sweep_market_data_staging_once()
+
+    assert removed["directories"] == 2
+    assert not completed.exists()
+    assert not orphan.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_staging_sweep_retains_active_and_recent_failed_data(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  body = b"complete chunk"
+  market_data_root = tmp_path / "market-data"
+  failed = market_data_root / REQUEST_ID
+  failed.mkdir(parents=True)
+  (failed / "00000000.json.gz").write_bytes(body)
+  started = datetime.now(timezone.utc)
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(body).hexdigest(),
+      status="FAILED",
+      expected_chunks=1,
+      received_chunks=1,
+      compressed_bytes=len(body),
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+
+    recent = await agent_api.sweep_market_data_staging_once(now=started)
+    expired = await agent_api.sweep_market_data_staging_once(
+      now=started
+      + timedelta(
+        seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS + 1
+      )
+    )
+
+    assert recent["directories"] == 0
+    assert expired["directories"] == 1
+    assert not failed.exists()
+    async with sessions() as db:
+      market_request = await db.get(MarketDataRequest, REQUEST_ID)
+      transfer_count = await db.scalar(
+        select(func.count()).select_from(MarketDataTransfer)
+      )
+    assert market_request is not None
+    assert market_request.expected_chunks is None
+    assert market_request.received_chunks == 0
+    assert transfer_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize("status", ["RECEIVING", "UPLOADED", "PROCESSING"])
+async def test_staging_sweep_never_removes_nonterminal_request_data(
+  monkeypatch,
+  tmp_path,
+  status: str,
+) -> None:
+  body = b"active chunk"
+  market_data_root = tmp_path / "market-data"
+  active = market_data_root / REQUEST_ID
+  active.mkdir(parents=True)
+  retained = active / "00000000.json.gz"
+  retained.write_bytes(body)
+  started = datetime.now(timezone.utc)
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(
+      sessions,
+      checksum=hashlib.sha256(body).hexdigest(),
+      status=status,
+      expected_chunks=1 if status != "RECEIVING" else 2,
+      received_chunks=1,
+      compressed_bytes=len(body),
+    )
+    _configure_api(monkeypatch, sessions, market_data_root)
+
+    removed = await agent_api.sweep_market_data_staging_once(
+      now=started
+      + timedelta(
+        seconds=agent_api.MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS * 2
+      )
+    )
+
+    assert removed["directories"] == 0
+    assert retained.read_bytes() == body

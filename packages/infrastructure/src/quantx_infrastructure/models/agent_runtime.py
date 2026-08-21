@@ -400,6 +400,8 @@ class MarketDataRequest(Base, TimestampMixin):
   received_chunks = Column(Integer, nullable=False, default=0)
   completed_at = Column(DateTime, nullable=True)
   processing_error = Column(Text, nullable=True)
+  processing_claim_token = Column(String(36), nullable=True)
+  ingestion_result = Column(JSON, nullable=True)
 
 
 class MarketDataTransfer(Base):
@@ -422,6 +424,7 @@ class MarketDataTransfer(Base):
   chunk_index = Column(Integer, nullable=False)
   checksum_sha256 = Column(String(64), nullable=False)
   record_count = Column(Integer, nullable=False)
+  compressed_bytes = Column(BigInteger, nullable=False, default=0)
   compressed = Column(Boolean, nullable=False, default=True)
   storage_reference = Column(String(512), nullable=False)
   received_at = Column(DateTime, nullable=False)

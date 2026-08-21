@@ -85,6 +85,12 @@ Store 与 Engine Hub 共用 contracts 中的唯一解析器。个人单账户部
 仍要求 `(code, period, time)` 唯一。`tick_ordinal` 是根据稳定快照字段生成的
 确定性代理顺序，用于重拉、分片和存储的一致性；它不声称代表交易所未提供的
 同毫秒内部先后顺序。
+每个历史行情请求按 `period`、规范化代码、时间和同毫秒序号生成确定性记录流，
+并在每个请求 `code × period` 数据之后强制追加一条 `bar_summary`。XTData 未返回
+某个请求代码时也必须发送行数为 0、原因 `XT_DATA_NO_ROWS` 的摘要，不能静默略过；
+非空摘要携带行数、时间范围以及规范键 SHA-256。上传瞬时网络错误、408/429 和
+5xx 不调用服务端 `/fail`，而是保留同一份 immutable gzip spool，断开控制连接后
+重投；只有确定性的请求、编码或非瞬时 4xx 契约错误才进入 `FAILED`。
 
 性能回归使用固定 5,000 标的、30 个批次运行
 `python ops/benchmark-market-stream.py`，记录 orjson 编解码 p50/p95/p99、帧大小、

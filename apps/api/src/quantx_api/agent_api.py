@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import os
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -60,7 +61,8 @@ from quantx_infrastructure.models.agent_runtime import (
   TTradeBatch,
 )
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
-from sqlalchemy import func, select, update
+from quantx_infrastructure.services import market_data_staging as _market_data_staging
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.websockets import WebSocketState
 
@@ -80,20 +82,13 @@ from quantx_api.monitoring.metrics import (
 
 logger = logging.getLogger(__name__)
 agent_router = APIRouter(tags=["qmt-agent"])
-MARKET_DATA_ROOT = (
-  (
-    Path(os.environ["QUANTX_RUNTIME_DIR"]).expanduser().resolve()
-    if os.environ.get("QUANTX_RUNTIME_DIR")
-    else (
-      (
-        Path(os.environ["QUANTX_ROOT"]).expanduser().resolve()
-        if os.environ.get("QUANTX_ROOT")
-        else Path(__file__).resolve().parents[4]
-      )
-      / ".runtime"
-    )
-  )
-  / "market-data"
+MARKET_DATA_ROOT = _market_data_staging.market_data_staging_root()
+_is_reparse_point = _market_data_staging.is_reparse_point
+_market_data_request_staging_usage_bytes = (
+  _market_data_staging.market_data_request_staging_usage_bytes
+)
+_safe_market_data_request_directory = (
+  _market_data_staging.safe_market_data_request_directory
 )
 REPORT_TYPES = {
   AgentMessageType.ORDER_REPORT,
@@ -103,6 +98,13 @@ REPORT_TYPES = {
 MAX_MARKET_DATA_CHUNK_BYTES = 32 * 1024 * 1024
 MAX_MARKET_DATA_CHUNK_RECORDS = 5000
 MAX_MARKET_DATA_CHUNKS = 100_000
+MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_MARKET_DATA_STAGING_BYTES = 1024 * 1024 * 1024
+MIN_MARKET_DATA_STAGING_FREE_BYTES = 512 * 1024 * 1024
+MARKET_DATA_STAGING_SWEEP_SECONDS = 5 * 60
+MARKET_DATA_STAGING_TEMP_GRACE_SECONDS = 60 * 60
+MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS = 60 * 60
+MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS = 24 * 60 * 60
 MARKET_STREAM_COMMIT_QUEUE_CAPACITY = 2
 MARKET_STREAM_COMMIT_QUEUE_MAX_BYTES = MAX_MARKET_STREAM_FRAME_BYTES
 MARKET_STREAM_DECODE_OFFLOAD_BYTES = 256 * 1024
@@ -114,6 +116,15 @@ MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
 TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS = 1.0
 TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE = 100
+
+_MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset(
+  {"QUEUED", "DELIVERED", "RECEIVING"}
+)
+_MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
+  {"UPLOADED", "PROCESSING", "COMPLETED"}
+)
+_market_data_staging_lock = asyncio.Lock()
+_market_data_staging_sweep_lock = asyncio.Lock()
 
 
 class _MarketConnectionRegistry:
@@ -1755,6 +1766,244 @@ async def _read_limited_body(
   return bytes(body)
 
 
+def _market_data_staging_usage_bytes(root: Path) -> int:
+  """Return actual retained bytes, failing closed on linked staging content."""
+  if not root.exists():
+    return 0
+  if root.is_symlink() or _is_reparse_point(root):
+    raise RuntimeError("unsafe market-data staging root")
+  resolved_root = root.resolve()
+  total = 0
+  for path in root.rglob("*"):
+    if path.is_symlink() or _is_reparse_point(path):
+      raise RuntimeError("market-data staging contains a reparse point")
+    if not path.is_file():
+      continue
+    resolved = path.resolve()
+    if resolved_root not in resolved.parents:
+      raise RuntimeError("market-data staging file escaped its root")
+    total += path.stat().st_size
+  return total
+
+
+def _market_data_staging_free_bytes(root: Path) -> int:
+  return int(shutil.disk_usage(root).free)
+
+
+async def _market_data_manifest_is_complete(db, market_request) -> bool:
+  expected = int(market_request.expected_chunks or 0)
+  if expected <= 0:
+    return False
+  persisted = int(
+    await db.scalar(
+      select(func.count())
+      .select_from(MarketDataTransfer)
+      .where(MarketDataTransfer.request_id == market_request.request_id)
+    )
+    or 0
+  )
+  return persisted == expected
+
+
+async def _fail_mutable_market_data_request(
+  db,
+  market_request,
+  *,
+  reason: str,
+) -> bool:
+  status = str(market_request.status or "").upper()
+  if status not in _MARKET_DATA_MUTABLE_UPLOAD_STATUSES:
+    return False
+  if await _market_data_manifest_is_complete(db, market_request):
+    return False
+  market_request.status = "FAILED"
+  market_request.processing_error = reason[:1000]
+  market_request.completed_at = utcnow()
+  await db.commit()
+  return True
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+  if value is None:
+    return None
+  if value.tzinfo is None:
+    return value.replace(tzinfo=timezone.utc)
+  return value.astimezone(timezone.utc)
+
+
+def _remove_safe_market_data_request_directory(root: Path, candidate: Path) -> None:
+  try:
+    resolved = _safe_market_data_request_directory(root, candidate)
+  except FileNotFoundError:
+    return
+  for descendant in resolved.rglob("*"):
+    if descendant.is_symlink() or _is_reparse_point(descendant):
+      raise RuntimeError("refusing to remove linked market-data staging content")
+    resolved_descendant = descendant.resolve()
+    if resolved not in resolved_descendant.parents:
+      raise RuntimeError("market-data staging content escaped request directory")
+  shutil.rmtree(resolved)
+
+
+async def sweep_market_data_staging_once(
+  *,
+  now: datetime | None = None,
+) -> dict[str, int]:
+  """Remove stale temporary, terminal, and orphan Agent upload staging safely."""
+  current = _as_aware_utc(now if now is not None else utcnow())
+  if current is None:  # pragma: no cover - the expression above is never None
+    raise RuntimeError("market-data staging sweep requires a clock value")
+  removed_directories = 0
+  removed_temporary_files = 0
+  root = MARKET_DATA_ROOT
+  if not root.exists():
+    return {"directories": 0, "temporary_files": 0}
+
+  # Uploads acquire a request row lock before the staging lock. The sweeper uses
+  # a distinct process lock and relies on the same request row lock, avoiding a
+  # staging-lock/row-lock inversion while still serializing sweep runs.
+  async with _market_data_staging_sweep_lock:
+    if root.is_symlink() or _is_reparse_point(root):
+      raise RuntimeError("unsafe market-data staging root")
+    candidates: dict[str, Path] = {}
+    for child in list(root.iterdir()):
+      if not child.is_dir():
+        continue
+      try:
+        resolved = _safe_market_data_request_directory(root, child)
+      except RuntimeError:
+        logger.warning("Skipped unsafe market-data staging entry: %s", child)
+        continue
+      candidates[child.name] = resolved
+      temporary_cutoff = current - timedelta(
+        seconds=MARKET_DATA_STAGING_TEMP_GRACE_SECONDS
+      )
+      for temporary in resolved.glob("*.tmp"):
+        if temporary.is_symlink() or _is_reparse_point(temporary):
+          logger.warning("Skipped unsafe market-data staging temp: %s", temporary)
+          continue
+        modified = datetime.fromtimestamp(
+          temporary.stat().st_mtime,
+          tz=timezone.utc,
+        )
+        if modified <= temporary_cutoff:
+          temporary.unlink(missing_ok=True)
+          removed_temporary_files += 1
+
+    if not candidates:
+      return {
+        "directories": removed_directories,
+        "temporary_files": removed_temporary_files,
+      }
+
+    async with AsyncSessionLocal() as db:
+      rows = (
+        await db.execute(
+          select(
+            MarketDataRequest.request_id,
+            MarketDataRequest.status,
+            MarketDataRequest.completed_at,
+            MarketDataRequest.updated_at,
+          ).where(MarketDataRequest.request_id.in_(tuple(candidates)))
+        )
+      ).all()
+    requests = {
+      str(row.request_id): row
+      for row in rows
+    }
+    orphan_cutoff = current - timedelta(
+      seconds=MARKET_DATA_STAGING_ORPHAN_GRACE_SECONDS
+    )
+    failed_cutoff = current - timedelta(
+      seconds=MARKET_DATA_STAGING_FAILED_RETENTION_SECONDS
+    )
+    for request_id, directory in candidates.items():
+      request_row = requests.get(request_id)
+      remove = False
+      if request_row is None:
+        modified = datetime.fromtimestamp(
+          directory.stat().st_mtime,
+          tz=timezone.utc,
+        )
+        remove = modified <= orphan_cutoff
+      else:
+        status = str(request_row.status or "").upper()
+        if status in {"COMPLETED", "FAILED"}:
+          # Recheck under the request row lock. A FAILED request may be reopened
+          # for ingestion by another process between the initial scan and delete.
+          async with AsyncSessionLocal() as db:
+            locked = await db.scalar(
+              select(MarketDataRequest)
+              .where(MarketDataRequest.request_id == request_id)
+              .with_for_update()
+            )
+            retired_failed_manifest = False
+            if locked is not None:
+              locked_status = str(locked.status or "").upper()
+              if locked_status == "COMPLETED":
+                remove = True
+              elif locked_status == "FAILED":
+                terminal_at = _as_aware_utc(
+                  locked.completed_at or locked.updated_at
+                )
+                remove = terminal_at is not None and terminal_at <= failed_cutoff
+                if remove:
+                  # Retiring the durable manifest before deleting its files
+                  # prevents a later FAILED recovery from reopening paths that
+                  # no longer exist. It will derive a fresh request instead.
+                  await db.execute(
+                    delete(MarketDataTransfer).where(
+                      MarketDataTransfer.request_id == request_id
+                    )
+                  )
+                  locked.expected_chunks = None
+                  locked.received_chunks = 0
+                  await db.commit()
+                  retired_failed_manifest = True
+              if remove:
+                await asyncio.to_thread(
+                  _remove_safe_market_data_request_directory,
+                  root,
+                  directory,
+                )
+                removed_directories += 1
+            if not retired_failed_manifest:
+              await db.rollback()
+          continue
+      if not remove:
+        continue
+      await asyncio.to_thread(
+        _remove_safe_market_data_request_directory,
+        root,
+        directory,
+      )
+      removed_directories += 1
+
+  return {
+    "directories": removed_directories,
+    "temporary_files": removed_temporary_files,
+  }
+
+
+async def run_market_data_staging_sweeper(stopped: asyncio.Event) -> None:
+  while not stopped.is_set():
+    try:
+      removed = await sweep_market_data_staging_once()
+      if removed["directories"] or removed["temporary_files"]:
+        logger.info("Cleaned market-data staging: %s", removed)
+    except asyncio.CancelledError:
+      raise
+    except Exception:
+      logger.exception("Could not sweep market-data staging")
+    try:
+      await asyncio.wait_for(
+        stopped.wait(),
+        timeout=MARKET_DATA_STAGING_SWEEP_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      pass
+
+
 async def _fail_market_data_upload(
   *,
   request_id: str,
@@ -1771,12 +2020,18 @@ async def _fail_market_data_upload(
       )
       .with_for_update()
     )
-    if market_request is None or market_request.status in {"COMPLETED", "FAILED"}:
+    if market_request is None:
       return
-    market_request.status = "FAILED"
-    market_request.processing_error = reason[:1000]
-    market_request.completed_at = utcnow()
-    await db.commit()
+    status = str(market_request.status or "").upper()
+    if status in _MARKET_DATA_FROZEN_MANIFEST_STATUSES or status == "FAILED":
+      return
+    if status not in _MARKET_DATA_MUTABLE_UPLOAD_STATUSES:
+      return
+    await _fail_mutable_market_data_request(
+      db,
+      market_request,
+      reason=reason,
+    )
 
 
 @agent_router.post(
@@ -1897,19 +2152,18 @@ async def upload_market_data_chunk(
       or market_request.device_id != authenticated_device_id
     ):
       raise HTTPException(status_code=404, detail="行情数据请求不存在")
-    if market_request.status == "FAILED":
+    status = str(market_request.status or "").upper()
+    if status == "FAILED":
       raise HTTPException(status_code=409, detail="行情数据请求已经结束")
     if (
       market_request.expected_chunks is not None
       and int(market_request.expected_chunks) != x_total_chunks
     ):
-      if market_request.status != "COMPLETED":
-        market_request.status = "FAILED"
-        market_request.processing_error = (
-          f"chunk {chunk_index} total_chunks mismatch"
-        )
-        market_request.completed_at = utcnow()
-        await db.commit()
+      await _fail_mutable_market_data_request(
+        db,
+        market_request,
+        reason=f"chunk {chunk_index} total_chunks mismatch",
+      )
       raise HTTPException(status_code=409, detail="行情批次总数与首次上传不一致")
     existing = (
       await db.execute(
@@ -1921,65 +2175,143 @@ async def upload_market_data_chunk(
     ).scalar_one_or_none()
     if existing is not None:
       if existing.checksum_sha256 != digest:
-        if market_request.status != "COMPLETED":
-          market_request.status = "FAILED"
-          market_request.processing_error = (
-            f"chunk {chunk_index} checksum mismatch"
-          )
-          market_request.completed_at = utcnow()
-          await db.commit()
+        await _fail_mutable_market_data_request(
+          db,
+          market_request,
+          reason=f"chunk {chunk_index} checksum mismatch",
+        )
         raise HTTPException(status_code=409, detail="重复批次内容不一致")
       if int(existing.record_count) != x_record_count:
-        if market_request.status != "COMPLETED":
-          market_request.status = "FAILED"
-          market_request.processing_error = (
-            f"chunk {chunk_index} record_count mismatch"
-          )
-          market_request.completed_at = utcnow()
-          await db.commit()
+        await _fail_mutable_market_data_request(
+          db,
+          market_request,
+          reason=f"chunk {chunk_index} record_count mismatch",
+        )
         raise HTTPException(status_code=409, detail="重复批次记录数不一致")
       return {"accepted": True, "duplicate": True}
-    if market_request.status == "COMPLETED":
+    if status in _MARKET_DATA_FROZEN_MANIFEST_STATUSES:
+      raise HTTPException(status_code=409, detail="行情数据 manifest 已冻结")
+    if status not in _MARKET_DATA_MUTABLE_UPLOAD_STATUSES:
       raise HTTPException(status_code=409, detail="行情数据请求已经结束")
 
-    destination_directory = MARKET_DATA_ROOT / normalized_request_id
-    destination_directory.mkdir(parents=True, exist_ok=True)
-    destination = destination_directory / f"{chunk_index:08d}.json.gz"
-    temporary = destination.with_suffix(
-      f"{destination.suffix}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-      async with aiofiles.open(temporary, "wb") as output:
-        await output.write(raw)
-      os.replace(temporary, destination)
-    finally:
-      temporary.unlink(missing_ok=True)
-    db.add(
-      MarketDataTransfer(
-        transfer_id=str(uuid.uuid4()),
-        request_id=normalized_request_id,
-        chunk_index=chunk_index,
-        checksum_sha256=digest,
-        record_count=x_record_count,
-        compressed=True,
-        storage_reference=str(destination),
-        received_at=utcnow(),
+    async with _market_data_staging_lock:
+      MARKET_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+      if MARKET_DATA_ROOT.is_symlink() or _is_reparse_point(MARKET_DATA_ROOT):
+        raise HTTPException(status_code=507, detail="行情 staging 根目录不安全")
+      destination_directory = MARKET_DATA_ROOT / normalized_request_id
+      destination_directory.mkdir(parents=False, exist_ok=True)
+      try:
+        destination_directory = _safe_market_data_request_directory(
+          MARKET_DATA_ROOT,
+          destination_directory,
+        )
+      except RuntimeError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+      destination = destination_directory / f"{chunk_index:08d}.json.gz"
+      if destination.is_symlink() or _is_reparse_point(destination):
+        raise HTTPException(status_code=507, detail="行情 staging 文件不安全")
+
+      request_compressed_bytes = int(
+        await db.scalar(
+          select(func.coalesce(func.sum(MarketDataTransfer.compressed_bytes), 0))
+          .where(MarketDataTransfer.request_id == normalized_request_id)
+        )
+        or 0
       )
-    )
-    market_request.expected_chunks = x_total_chunks
-    await db.flush()
-    market_request.received_chunks = int(
-      await db.scalar(
-        select(func.count())
-        .select_from(MarketDataTransfer)
-        .where(MarketDataTransfer.request_id == normalized_request_id)
+      try:
+        actual_request_bytes = await asyncio.to_thread(
+          _market_data_request_staging_usage_bytes,
+          root=MARKET_DATA_ROOT,
+          request_id=normalized_request_id,
+        )
+        existing_file_bytes = (
+          destination.stat().st_size
+          if destination.exists() and destination.is_file()
+          else 0
+        )
+      except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+          status_code=507,
+          detail="无法验证行情 request staging 容量",
+        ) from exc
+      additional_bytes = max(0, len(raw) - existing_file_bytes)
+      if (
+        max(request_compressed_bytes, actual_request_bytes) + additional_bytes
+        > MAX_MARKET_DATA_REQUEST_COMPRESSED_BYTES
+      ):
+        await _fail_mutable_market_data_request(
+          db,
+          market_request,
+          reason="market-data request exceeds compressed byte limit",
+        )
+        raise HTTPException(status_code=413, detail="行情请求压缩数据超过大小限制")
+
+      try:
+        retained_bytes = await asyncio.to_thread(
+          _market_data_staging_usage_bytes,
+          MARKET_DATA_ROOT,
+        )
+        free_bytes = await asyncio.to_thread(
+          _market_data_staging_free_bytes,
+          MARKET_DATA_ROOT,
+        )
+      except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+          status_code=507,
+          detail="无法验证行情 staging 容量",
+        ) from exc
+      if retained_bytes + additional_bytes > MAX_MARKET_DATA_STAGING_BYTES:
+        raise HTTPException(status_code=507, detail="行情 staging 总容量不足")
+      if free_bytes - additional_bytes < MIN_MARKET_DATA_STAGING_FREE_BYTES:
+        raise HTTPException(status_code=507, detail="行情 staging 磁盘余量不足")
+
+      temporary = destination.with_suffix(
+        f"{destination.suffix}.{uuid.uuid4().hex}.tmp"
       )
-      or 0
-    )
-    market_request.status = (
-      "UPLOADED"
-      if market_request.received_chunks == x_total_chunks
-      else "RECEIVING"
-    )
-    await db.commit()
+      destination_written = False
+      commit_started = False
+      committed = False
+      try:
+        async with aiofiles.open(temporary, "wb") as output:
+          await output.write(raw)
+        os.replace(temporary, destination)
+        destination_written = True
+        db.add(
+          MarketDataTransfer(
+            transfer_id=str(uuid.uuid4()),
+            request_id=normalized_request_id,
+            chunk_index=chunk_index,
+            checksum_sha256=digest,
+            record_count=x_record_count,
+            compressed_bytes=len(raw),
+            compressed=True,
+            storage_reference=str(destination),
+            received_at=utcnow(),
+          )
+        )
+        market_request.expected_chunks = x_total_chunks
+        await db.flush()
+        market_request.received_chunks = int(
+          await db.scalar(
+            select(func.count())
+            .select_from(MarketDataTransfer)
+            .where(MarketDataTransfer.request_id == normalized_request_id)
+          )
+          or 0
+        )
+        market_request.status = (
+          "UPLOADED"
+          if market_request.received_chunks == x_total_chunks
+          else "RECEIVING"
+        )
+        commit_started = True
+        await db.commit()
+        committed = True
+      finally:
+        temporary.unlink(missing_ok=True)
+        # Once COMMIT starts its outcome may be unknown after cancellation or a
+        # connection loss. Retain the immutable file for retry/reconciliation;
+        # the orphan sweeper removes it only when no durable request references it.
+        if destination_written and not committed and not commit_started:
+          destination.unlink(missing_ok=True)
   return {"accepted": True, "duplicate": False}

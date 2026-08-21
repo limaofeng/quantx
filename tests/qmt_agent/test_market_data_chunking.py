@@ -13,6 +13,8 @@ import pytest
 import quantx_qmt_agent.broker as broker_module
 import quantx_qmt_agent.runtime as runtime_module
 from quantx_contracts import (
+  HISTORICAL_BAR_NO_DATA_REASON,
+  HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
@@ -44,6 +46,22 @@ def _records(count: int):
       "time": 1_735_776_000_000 + index,
       "close": 10.0,
     }
+
+
+def _bar_rows(records):
+  return [
+    record
+    for record in records
+    if record.get("record_type") != HISTORICAL_BAR_SUMMARY_RECORD_TYPE
+  ]
+
+
+def _bar_summaries(records):
+  return [
+    record
+    for record in records
+    if record.get("record_type") == HISTORICAL_BAR_SUMMARY_RECORD_TYPE
+  ]
 
 
 def _prepare_spool(
@@ -82,6 +100,21 @@ async def _read_http_content(content) -> bytes:
   async for block in content:
     blocks.append(block)
   return b"".join(blocks)
+
+
+def _retryable_upload_error(kind: str) -> Exception:
+  request = httpx.Request("PUT", "http://127.0.0.1/upload")
+  if kind == "connect":
+    return httpx.ConnectError("connection reset", request=request)
+  if kind == "timeout":
+    return httpx.ReadTimeout("upload timed out", request=request)
+  status = int(kind)
+  response = httpx.Response(status, request=request)
+  try:
+    response.raise_for_status()
+  except httpx.HTTPStatusError as exc:
+    return exc
+  raise AssertionError(f"status did not fail: {status}")
 
 
 def test_chunk_encoder_streams_and_respects_limits() -> None:
@@ -871,6 +904,245 @@ async def test_invalid_market_request_is_failed_without_closing_session(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "failure_kind",
+  ["connect", "timeout", "401", "403", "408", "429", "500", "503"],
+)
+async def test_retryable_upload_failure_reconnects_without_failing_request(
+  monkeypatch,
+  failure_kind: str,
+) -> None:
+  handled: list[str] = []
+  failures: list[str] = []
+  checkpoints: list[str] = []
+
+  async def handle(envelope) -> None:
+    handled.append(str(envelope.payload["request_id"]))
+    raise _retryable_upload_error(failure_kind)
+
+  async def report_failure(request_id: str, _error: Exception) -> None:
+    failures.append(request_id)
+
+  async def checkpoint(_socket, *, status: str) -> None:
+    checkpoints.append(status)
+
+  class Socket:
+    def __init__(self) -> None:
+      self.closed: list[tuple[int, str]] = []
+
+    async def close(self, *, code: int, reason: str) -> None:
+      self.closed.append((code, reason))
+
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  monkeypatch.setattr(runtime, "_handle_market_data_request", handle)
+  monkeypatch.setattr(runtime, "_report_market_data_failure", report_failure)
+  monkeypatch.setattr(runtime, "_heartbeat_checkpoint", checkpoint)
+  runtime._market_requests = asyncio.Queue()
+  await runtime._market_requests.put(
+    SimpleNamespace(payload={"request_id": "request-retry"})
+  )
+  await runtime._market_requests.put(
+    SimpleNamespace(payload={"request_id": "request-after-retry"})
+  )
+  socket = Socket()
+
+  await runtime._market_request_loop(socket)
+  await asyncio.sleep(0)
+
+  assert handled == ["request-retry"]
+  assert failures == []
+  assert checkpoints == []
+  assert socket.closed == [(1012, "market data upload retry")]
+  assert runtime._market_requests.qsize() == 1
+  queued = runtime._market_requests.get_nowait()
+  assert queued.payload["request_id"] == "request-after-retry"
+  runtime._market_requests.task_done()
+  assert runtime._market_upload_tasks == {}
+  runtime._clear_market_upload_state()
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_loop_transport_failure_preserves_immutable_spool(
+  monkeypatch,
+) -> None:
+  class Broker:
+    def __init__(self) -> None:
+      self.calls = 0
+
+    def iter_market_data(self, _payload):
+      self.calls += 1
+      return _records(2)
+
+  uploaded: list[tuple[bytes, str]] = []
+
+  class Client:
+    def __init__(self, **_kwargs) -> None:
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args) -> None:
+      return None
+
+    async def put(self, url, *, content, headers):
+      body = await _read_http_content(content)
+      uploaded.append((body, headers["X-Content-SHA256"]))
+      raise httpx.ConnectError(
+        "connection reset",
+        request=httpx.Request("PUT", url),
+      )
+
+  failures: list[str] = []
+
+  async def report_failure(request_id: str, _error: Exception) -> None:
+    failures.append(request_id)
+
+  class Socket:
+    def __init__(self) -> None:
+      self.closed: list[tuple[int, str]] = []
+
+    async def close(self, *, code: int, reason: str) -> None:
+      self.closed.append((code, reason))
+
+  monkeypatch.setattr(runtime_module.httpx, "AsyncClient", Client)
+  runtime = object.__new__(AgentRuntime)
+  runtime.broker = Broker()
+  runtime.configuration = SimpleNamespace(api_url="http://127.0.0.1:8080")
+  runtime._access_token = "token"
+  runtime._ensure_market_upload_state()
+  monkeypatch.setattr(runtime, "_report_market_data_failure", report_failure)
+  runtime._market_requests = asyncio.Queue()
+  await runtime._market_requests.put(
+    SimpleNamespace(
+      payload={"request_id": "request-spooled-retry", "operation": "bars"}
+    )
+  )
+  socket = Socket()
+
+  await runtime._market_request_loop(socket)
+  await runtime._market_requests.join()
+  await asyncio.sleep(0)
+
+  assert runtime.broker.calls == 1
+  assert failures == []
+  assert socket.closed == [(1012, "market data upload retry")]
+  assert len(uploaded) == 1
+  assert hashlib.sha256(uploaded[0][0]).hexdigest() == uploaded[0][1]
+  cached = runtime._market_upload_cache["request-spooled-retry"]
+  assert cached.task is not None and cached.task.done()
+  prepared = cached.task.result()
+  assert prepared.spool_directory.exists()
+  assert prepared.chunks[0].path.read_bytes() == uploaded[0][0]
+  assert runtime._market_upload_cache_bytes == prepared.compressed_bytes
+  assert runtime._market_upload_tasks == {}
+  runtime._clear_market_upload_state()
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_upload_contract_response_is_failed_without_reconnect(
+  monkeypatch,
+) -> None:
+  handled: list[str] = []
+  failures: list[tuple[str, int]] = []
+  second_handled = asyncio.Event()
+
+  async def handle(envelope) -> None:
+    request_id = str(envelope.payload["request_id"])
+    handled.append(request_id)
+    if request_id == "request-invalid-upload":
+      error = _retryable_upload_error("422")
+      assert isinstance(error, httpx.HTTPStatusError)
+      raise error
+    second_handled.set()
+
+  async def report_failure(request_id: str, error: Exception) -> None:
+    assert isinstance(error, httpx.HTTPStatusError)
+    failures.append((request_id, error.response.status_code))
+
+  async def checkpoint(_socket, *, status: str) -> None:
+    assert status == "READY"
+
+  class Socket:
+    def __init__(self) -> None:
+      self.closed: list[tuple[int, str]] = []
+
+    async def close(self, *, code: int, reason: str) -> None:
+      self.closed.append((code, reason))
+
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  monkeypatch.setattr(runtime, "_handle_market_data_request", handle)
+  monkeypatch.setattr(runtime, "_report_market_data_failure", report_failure)
+  monkeypatch.setattr(runtime, "_heartbeat_checkpoint", checkpoint)
+  runtime._market_requests = asyncio.Queue()
+  await runtime._market_requests.put(
+    SimpleNamespace(payload={"request_id": "request-invalid-upload"})
+  )
+  await runtime._market_requests.put(
+    SimpleNamespace(payload={"request_id": "request-valid-upload"})
+  )
+  socket = Socket()
+
+  worker = asyncio.create_task(runtime._market_request_loop(socket))
+  await asyncio.wait_for(second_handled.wait(), timeout=1)
+  await asyncio.wait_for(runtime._market_requests.join(), timeout=1)
+
+  assert handled == ["request-invalid-upload", "request-valid-upload"]
+  assert failures == [("request-invalid-upload", 422)]
+  assert socket.closed == []
+  worker.cancel()
+  await asyncio.gather(worker, return_exceptions=True)
+  runtime._clear_market_upload_state()
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_post_upload_checkpoint_failure_never_fails_durable_request(
+  monkeypatch,
+) -> None:
+  failures: list[str] = []
+
+  async def handle(_envelope) -> None:
+    return None
+
+  async def report_failure(request_id: str, _error: Exception) -> None:
+    failures.append(request_id)
+
+  async def checkpoint(_socket, *, status: str) -> None:
+    assert status == "READY"
+    raise httpx.ConnectError(
+      "control session disconnected",
+      request=httpx.Request("POST", "http://127.0.0.1/heartbeat"),
+    )
+
+  class Socket:
+    async def close(self, *, code: int, reason: str) -> None:
+      raise AssertionError(f"request loop unexpectedly closed socket: {code} {reason}")
+
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  monkeypatch.setattr(runtime, "_handle_market_data_request", handle)
+  monkeypatch.setattr(runtime, "_report_market_data_failure", report_failure)
+  monkeypatch.setattr(runtime, "_heartbeat_checkpoint", checkpoint)
+  runtime._market_requests = asyncio.Queue()
+  await runtime._market_requests.put(
+    SimpleNamespace(payload={"request_id": "request-uploaded"})
+  )
+
+  with pytest.raises(httpx.ConnectError, match="control session disconnected"):
+    await runtime._market_request_loop(Socket())
+  await runtime._market_requests.join()
+
+  assert failures == []
+  runtime._clear_market_upload_state()
+  runtime.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("requested_status", ["RECONCILING", "READY"])
 async def test_heartbeat_never_reports_ready_state_when_xtdata_is_unavailable(
   requested_status: str,
@@ -1314,6 +1586,25 @@ def test_bars_request_preflight_accepts_campaign_and_rejects_oom_shapes() -> Non
   )
   assert len(validated.codes) == 200
 
+  with pytest.raises(ValueError, match="canonical instrument codes"):
+    _validate_bars_request(
+      {
+        "stock_list": ["000001.sz"],
+        "periods": ["1d"],
+        "start_time": "20250101",
+        "end_time": "20250101",
+      }
+    )
+  with pytest.raises(ValueError, match="canonical values"):
+    _validate_bars_request(
+      {
+        "stock_list": ["000001.SZ"],
+        "periods": ["TICK"],
+        "start_time": "20250101",
+        "end_time": "20250101",
+      }
+    )
+
   with pytest.raises(ValueError, match="instrument count limit"):
     _validate_bars_request(
       {
@@ -1469,7 +1760,7 @@ def test_broker_streams_rows_without_dataframe_to_dict(monkeypatch) -> None:
       },
     )
   )
-  assert [record["time"] for record in records] == [
+  assert [record["time"] for record in _bar_rows(records)] == [
     _normalize_market_timestamp(datetime(2025, 1, 1)),
     _normalize_market_timestamp(datetime(2025, 1, 2)),
     _normalize_market_timestamp(datetime(2025, 1, 3)),
@@ -1552,7 +1843,7 @@ def test_market_data_records_are_sorted_by_code_and_time() -> None:
       "download": False,
     },
   )
-  assert [(record["code"], record["time"]) for record in records] == [
+  assert [(record["code"], record["time"]) for record in _bar_rows(records)] == [
     (
       "000001.SZ",
       _normalize_market_timestamp(datetime(2025, 1, 2)),
@@ -1566,6 +1857,78 @@ def test_market_data_records_are_sorted_by_code_and_time() -> None:
       _normalize_market_timestamp(datetime(2025, 1, 3)),
     ),
   ]
+
+
+def test_missing_requested_code_emits_explicit_empty_summary() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "600000.SH": pd.DataFrame([{"time": 20250102, "close": 10.1}]),
+      }
+
+  records = _market_data_records(
+    Manager(),
+    {
+      "operation": "bars",
+      "stock_list": ["600000.SH", "000001.SZ"],
+      "periods": ["1d"],
+      "start_time": "20250102",
+      "end_time": "20250102",
+      "download": False,
+    },
+  )
+
+  assert [record["code"] for record in _bar_rows(records)] == ["600000.SH"]
+  summaries = {
+    (summary["code"], summary["period"]): summary
+    for summary in _bar_summaries(records)
+  }
+  assert set(summaries) == {("000001.SZ", "1d"), ("600000.SH", "1d")}
+  empty = summaries[("000001.SZ", "1d")]
+  assert empty["row_count"] == 0
+  assert empty["min_time"] is None
+  assert empty["max_time"] is None
+  assert empty["key_sha256"] == hashlib.sha256(b"").hexdigest()
+  assert empty["no_data_reason"] == HISTORICAL_BAR_NO_DATA_REASON
+  assert summaries[("600000.SH", "1d")]["row_count"] == 1
+
+
+def test_bars_request_rejects_non_object_xtdata_result() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return []
+
+  with pytest.raises(ValueError, match="non-object market-data result"):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["600000.SH"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
+
+
+def test_bars_request_rejects_non_dataframe_instrument_result() -> None:
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {"600000.SH": []}
+
+  with pytest.raises(ValueError, match="non-DataFrame result"):
+    _market_data_records(
+      Manager(),
+      {
+        "operation": "bars",
+        "stock_list": ["600000.SH"],
+        "periods": ["1d"],
+        "start_time": "20250102",
+        "end_time": "20250102",
+        "download": False,
+      },
+    )
 
 
 def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
@@ -1615,8 +1978,10 @@ def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
     def get_market_data(self, **_kwargs):
       return {"601318.SH": pd.DataFrame(self.values)}
 
-  forward = _market_data_records(Manager(rows), payload)
+  forward_records = _market_data_records(Manager(rows), payload)
   reversed_records = _market_data_records(Manager(list(reversed(rows))), payload)
+  forward = _bar_rows(forward_records)
+  reversed_rows = _bar_rows(reversed_records)
 
   def ordinal_by_snapshot(records):
     return {
@@ -1633,7 +1998,9 @@ def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
     source_time + 1,
   ]
   assert [record[HISTORICAL_TICK_ORDINAL_FIELD] for record in forward] == [0, 1, 0]
-  assert ordinal_by_snapshot(forward) == ordinal_by_snapshot(reversed_records)
+  assert ordinal_by_snapshot(forward) == ordinal_by_snapshot(reversed_rows)
+  assert _bar_summaries(forward_records) == _bar_summaries(reversed_records)
+  assert _bar_summaries(forward_records)[0]["row_count"] == len(rows)
 
 
 def test_tick_same_millisecond_spool_is_cold_restart_stable(tmp_path) -> None:
@@ -1721,7 +2088,7 @@ def test_non_tick_records_still_reject_duplicate_normalized_time(
         )
       }
 
-  with pytest.raises(ValueError, match="duplicate normalized bar key"):
+  with pytest.raises(ValueError, match="duplicate or unordered normalized bar key"):
     _market_data_records(
       Manager(),
       {

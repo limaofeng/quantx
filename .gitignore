@@ -15,6 +15,9 @@ data/
 # Infrastructure market-data adapters are source code, not runtime payloads.
 !packages/infrastructure/src/quantx_infrastructure/core/data/
 !packages/infrastructure/src/quantx_infrastructure/core/data/**
+# The QMT Agent XTData adapter is source code as well.
+!apps/qmt-agent/src/quantx_qmt_agent/miniqmt/data/
+!apps/qmt-agent/src/quantx_qmt_agent/miniqmt/data/**
 logs/
 *.log
 *.pid
