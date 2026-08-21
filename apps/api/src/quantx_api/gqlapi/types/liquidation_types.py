@@ -637,7 +637,7 @@ class LiquidationConfirmationInput:
 
 @strawberry.input(description="预览既有 LIVE 退出计划的精确自动实盘授权")
 class ExitPlanAuthorizationPreviewInput:
-  account_id: str = strawberry.field(description="当前原生设备会话的唯一主账户")
+  account_id: str = strawberry.field(description="当前会话的唯一授权账户")
   plan_id: str = strawberry.field(description="既有退出计划 ID")
   expected_config_version: int = strawberry.field(description="预期配置版本")
   idempotency_key: str = strawberry.field(description="调用方生成的业务幂等键")

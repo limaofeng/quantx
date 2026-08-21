@@ -90,6 +90,8 @@ def _principal(
   user_id: str = "user-1",
   session_id: str = "session-1",
   account_id: str = "ACCOUNT-1",
+  account_ids: tuple[str, ...] | None = None,
+  native_session: bool = True,
 ) -> Principal:
   return Principal(
     user_id=user_id,
@@ -98,8 +100,8 @@ def _principal(
     device_session_id=session_id,
     access_token_expires_at=utcnow() + timedelta(minutes=5),
     permissions=frozenset(permissions),
-    authorized_account_ids=(account_id,),
-    is_native_session=True,
+    authorized_account_ids=(account_id,) if account_ids is None else account_ids,
+    is_native_session=native_session,
   )
 
 
@@ -608,6 +610,51 @@ async def test_exact_authorization_is_device_bound_audited_and_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_browser_session_can_grant_exact_authorization(
+  authorization_database,
+):
+  async with authorization_database() as db:
+    session = await db.get(AuthDeviceSession, "session-1")
+    session.device_name = "QuantX Web"
+    session.granted_permissions = None
+    await db.commit()
+
+  principal = _principal(native_session=False)
+  preview = await ExitPlanAuthorizationChallengeService.issue(
+    principal=principal,
+    request=_request(key="browser-session"),
+  )
+  confirmed = await ExitPlanAuthorizationChallengeService.confirm(
+    principal=principal,
+    request=_request(key="browser-session"),
+    challenge_id=preview.challenge_id,
+    confirmation_token=preview.confirmation_token,
+  )
+
+  assert confirmed.plan_id == "plan-1"
+  async with authorization_database() as db:
+    record = await db.get(AutoExitPlanRecord, "plan-1")
+    assert record.auto_exit_authorized
+    assert record.auto_exit_authorization_device_session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_authorization_rejects_a_session_with_multiple_accounts(
+  authorization_database,
+):
+  with pytest.raises(TradeApprovalChallengeError) as error:
+    await ExitPlanAuthorizationChallengeService.issue(
+      principal=_principal(
+        account_ids=("ACCOUNT-1", "ACCOUNT-2"),
+        native_session=False,
+      ),
+      request=_request(key="multiple-accounts"),
+    )
+
+  assert error.value.code == "SINGLE_ACCOUNT_SESSION_REQUIRED"
+
+
+@pytest.mark.asyncio
 async def test_confirmation_rejects_cross_session_tampering_and_expiry(
   authorization_database,
 ):
@@ -631,7 +678,7 @@ async def test_confirmation_rejects_cross_session_tampering_and_expiry(
       challenge_id=preview.challenge_id,
       confirmation_token=preview.confirmation_token,
     )
-  assert cross_account.value.code == "NATIVE_PRIMARY_ACCOUNT_REQUIRED"
+  assert cross_account.value.code == "SINGLE_ACCOUNT_SESSION_REQUIRED"
 
   with pytest.raises(TradeApprovalChallengeError) as altered_request:
     await ExitPlanAuthorizationChallengeService.confirm(
