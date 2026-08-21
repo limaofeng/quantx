@@ -12,8 +12,9 @@
 ```
 
 普通开发 `up`（包括未显式指定模式的 `-Profile web`）会提升为 `full/live`，
-启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和 QMT Agent。
-成功启动 `dev/full/live` 后会幂等注册当前用户的
+启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker，并在登记与运行时
+预检通过后启动 QMT Agent。
+QMT 预检通过、实盘能力门已开启且完整启动 `dev/full/live` 后，会幂等注册当前用户的
 `QuantX-Dev-Daily-Backup` 任务，每天（含周末）16:30 备份 PostgreSQL 与
 QMT Agent journal；错过触发时间时会在主机恢复可用后补跑。该任务不会提升权限，
 注册失败时实盘备份门禁继续失败关闭。
@@ -24,11 +25,25 @@ Prefect Server 由外部管理。开发实盘优先使用 `-AccountId`，未传�
 子进程在 `live` 时使用受支持的 `ENV=testing` 运行门。数据库、Redis 和 InfluxDB
 始终复用开发配置，不额外安装。
 除非操作者明确要求纯行情模式，否则启动、恢复和验收不得把 `full/live` 的凭据、
-权限或安全审批失败自动降级为 `data-only`；失败时应停止并请求明确授权。
-默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REAL_TRADING` 与
-`T_TRADE_LIVE_ENABLED` 能力门，并注入同一账户白名单；这不会
+权限或安全审批失败自动降级为 `data-only`。QMT 登记或本地 Python 运行时预检
+失败时，开发启动保留 `profile=full` 与 `agentMode=live`，但在创建 API/Engine
+进程前把 `ENABLE_REAL_TRADING`、`QMT_REAL_TRADING_ENABLED`、
+`T_TRADE_LIVE_ENABLED` 全部设为 `false`，并把
+`REAL_TRADING_ACCOUNT_ALLOWLIST` 清空；QMT 子进程不启动，状态记录为
+`DEGRADED / BLOCKED`，并向服务进程注入非敏感的
+`QMT_AGENT_LAUNCH_STATE=BLOCKED` 与稳定原因码。API、Engine、Web、Worker 和
+Caddy 仍正常启动；使用已持久化历史行情的回测不依赖这个本地执行端。该路径
+成功返回，但
+`/health/ready` 可以继续因 QMT 不可用返回非就绪，`status` 必须明确显示
+`liveTrading=DISABLED`，不得报告 QMT `READY`。
+QMT 预检成功的默认 `full/live` 会为 API/Engine 显式开启 `ENABLE_REAL_TRADING` 与
+`T_TRADE_LIVE_ENABLED` 能力门，并注入同一账户白名单。启动器同时在第一个服务
+进程创建前固定 `QMT_AGENT_LAUNCH_STARTED_AT`；命令路由、做 T 就绪、历史补数
+设备选择和组件健康只接受不早于该边界的 QMT 心跳，CLI 还要求本次记录的 QMT
+进程 PID/启动时间仍匹配，避免上一次启动遗留的 90 秒新鲜心跳冒充本次就绪。这不会
 绕过账户白名单、live Agent、快照、对账或 `SHADOW / CANARY / LIVE` 灰度门禁。
-显式使用 `-Mode data-only` 时，两道服务端交易能力门会关闭。
+显式使用 `-Mode data-only` 时，实盘能力门同样关闭；它不是 QMT 预检失败时的
+隐式兜底模式。
 `down` 仅停止状态文件记录且启动时间匹配的进程。
 
 启动器会在读取 `.runtime` 状态或创建子进程前，将仓库根目录的 Junction / 符号
@@ -73,8 +88,10 @@ python -m quantx_qmt_agent.main enroll `
 python -m quantx_qmt_agent.main status
 ```
 
-设备密钥写入 Windows Credential Manager。未登记时 `full` 会明确失败，
-而不会退化成未认证连接。`paper` 和 `live` 还要求设置
+设备密钥写入 Windows Credential Manager。开发 `full/live` 未登记时不会尝试
+未认证连接，也不会改写为 `data-only`；统一启动器会跳过 QMT 子进程并进入上述
+fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
+`paper` 和 `live` 还要求设置
 `QMT_ACCOUNT_WHITELIST`；`live` 额外要求 QMT Agent 子进程使用 `ENV=testing` 或
 `ENV=production`、`ENABLE_REAL_TRADING=true` 和
 `QMT_REAL_TRADING_ENABLED=true`。production 还要求

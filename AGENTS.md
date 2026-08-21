@@ -56,15 +56,17 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 ```
 
 - 普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
-  `full/live`，启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和
-  QMT Agent；Prefect Server 使用外部服务。
+  `full/live`，启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker；
+  QMT Agent 在本机登记与运行时预检通过后启动。Prefect Server 使用外部服务。
 - `live` 优先使用 `-AccountId`，未传时从本机环境中的唯一账户配置自动解析。
   `-Mode data-only` 是唯一的显式非实盘入口，并同时关闭服务端实盘能力门。
   数据库、Redis 和 InfluxDB 继续复用开发配置，不为实盘另装一套。
 - 除非用户明确要求纯行情模式，否则 Codex、自动化脚本和人工运维不得把普通
-  dev 启动、恢复或验收静默降级为 `-Mode data-only`。若 `full/live` 因凭据、
-  权限或安全审批无法启动，应保留失败状态并请求明确授权，不得用
-  `data-only` 冒充正常开发运行。
+  dev 启动、恢复或验收静默降级为 `-Mode data-only`。若 QMT 登记或本地运行时
+  预检失败，启动器必须保持 `profile=full`、`agentMode=live`，在 API/Engine
+  启动前关闭全部服务端与 Agent 实盘能力门并清空实盘账户允许列表，跳过 QMT
+  子进程，以显式 `DEGRADED / BLOCKED` 状态继续启动非 QMT 服务。该状态允许使用
+  已持久化历史行情做回测，但不得伪装成 QMT `ready`；恢复 QMT 后必须整体重启。
 - 开发 Caddy 是唯一公开入口，监听所有本机 IPv4 接口的 `8080`；局域网设备
   使用 `http://<开发机局域网 IP>:8080`。
 - API 只监听 `127.0.0.1:18081`，Vite 使用 `5250`，VitePress 使用
@@ -73,9 +75,10 @@ Python 命名空间分别为 `quantx_contracts`、`quantx_domain`、
 - PostgreSQL、InfluxDB、Redis、Prefect Server 是外部服务，只检查，
   不自动启停。
 - 不得绕过统一入口单独手工启动 QMT Agent，否则同一设备的重复 Agent 会争用
-  会话并可能触发行情分片冲突。标准 Dev 实盘的 `status` 必须显示
-  `Runtime profile=full`、`agentMode=live`、唯一账户、QMT Agent `ready`、
-  协议 `1.1` 和小于 90 秒的新鲜快照。
+  会话并可能触发行情分片冲突。完整 Dev 实盘验收的 `status` 必须显示
+  `Runtime profile=full`、`agentMode=live`、唯一账户、`liveTrading=ENABLED`、
+  QMT Agent `ready`、协议 `1.1` 和小于 90 秒的新鲜快照；降级启动则必须显示
+  `DEGRADED`、QMT `BLOCKED` 与 `liveTrading=DISABLED`。
 - 不得恢复根目录旧启动脚本或 API 内的子进程管理。
 - 不运行 `ops/quantx.ps1 install` 做普通验证。
 

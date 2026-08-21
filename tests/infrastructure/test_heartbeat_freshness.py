@@ -13,8 +13,23 @@ from quantx_infrastructure.services.trade_command_service import TradeCommandSer
 
 FRESHNESS_CHECKS: tuple[Callable[[object], bool], ...] = (
   TTradeOperationsService._fresh,
+  TTradeOperationsService._agent_fresh,
   TradeCommandService._heartbeat_fresh,
 )
+CURRENT_LAUNCH_FRESHNESS_CHECKS: tuple[Callable[[object], bool], ...] = (
+  TTradeOperationsService._agent_fresh,
+  TradeCommandService._heartbeat_fresh,
+)
+
+
+@pytest.fixture(autouse=True)
+def clear_qmt_launch_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+  for name in (
+    "QMT_AGENT_LAUNCH_STATE",
+    "QMT_AGENT_LAUNCH_REASON",
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+  ):
+    monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -72,6 +87,51 @@ def test_heartbeat_freshness_rejects_stale_timestamp(
   assert not freshness_check(heartbeat)
 
 
+@pytest.mark.parametrize(
+  "freshness_check",
+  CURRENT_LAUNCH_FRESHNESS_CHECKS,
+)
+def test_heartbeat_freshness_requires_current_managed_launch(
+  freshness_check: Callable[[object], bool],
+  fixed_utcnow: datetime,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  launch_started_at = fixed_utcnow - timedelta(seconds=20)
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    launch_started_at.replace(tzinfo=timezone.utc).isoformat(),
+  )
+
+  prior_heartbeat = SimpleNamespace(
+    status="READY",
+    updated_at=launch_started_at - timedelta(seconds=1),
+  )
+  current_heartbeat = SimpleNamespace(
+    status="READY",
+    updated_at=launch_started_at + timedelta(seconds=1),
+  )
+
+  assert not freshness_check(prior_heartbeat)
+  assert freshness_check(current_heartbeat)
+
+
+@pytest.mark.parametrize(
+  "freshness_check",
+  CURRENT_LAUNCH_FRESHNESS_CHECKS,
+)
+def test_current_launch_freshness_fails_closed_for_invalid_boundary(
+  freshness_check: Callable[[object], bool],
+  fixed_utcnow: datetime,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STARTED_AT", "not-a-timestamp")
+  heartbeat = SimpleNamespace(status="READY", updated_at=fixed_utcnow)
+
+  assert not freshness_check(heartbeat)
+
+
 def test_operations_freshness_requires_ready_status(
   fixed_utcnow: datetime,
 ) -> None:
@@ -81,6 +141,18 @@ def test_operations_freshness_requires_ready_status(
   )
 
   assert not TTradeOperationsService._fresh(heartbeat)
+
+
+def test_blocked_qmt_launch_reason_is_stable_and_sanitized(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "do-not-expose-this")
+
+  assert (
+    operations_module.qmt_agent_launch_block_reason()
+    == "QMT_LAUNCH_BLOCKED"
+  )
 
 
 @pytest.mark.asyncio
@@ -190,6 +262,14 @@ async def test_readiness_distinguishes_preparation_from_automation(
   assert "尚未基于最新完整快照建立受控交易窗口" in result["blocked_reasons"]
   assert any("QMT 手工/外部交易" in item for item in result["blocked_reasons"])
 
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
+  blocked = await TTradeOperationsService().readiness("TEST-ACCOUNT")
+  checks = {item["code"]: item for item in blocked["checks"]}
+
+  assert checks["ENGINE_READY"]["passed"] is True
+  assert checks["LIVE_AGENT_READY"]["passed"] is False
+
 
 @pytest.mark.asyncio
 async def test_readiness_prefers_fresh_ready_agent_for_the_account(
@@ -273,6 +353,57 @@ async def test_readiness_prefers_fresh_ready_agent_for_the_account(
   assert next(
     item for item in result["checks"] if item["code"] == "LIVE_AGENT_READY"
   )["passed"] is True
+
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    (fixed_utcnow + timedelta(seconds=1))
+    .replace(tzinfo=timezone.utc)
+    .isoformat(),
+  )
+
+  prior_launch = await TTradeOperationsService().readiness("TEST-ACCOUNT")
+
+  assert prior_launch["agent_status"] == "OFFLINE"
+  assert prior_launch["ready_live_agent_count"] == 0
+  assert prior_launch["can_activate_live"] is False
+  assert next(
+    item
+    for item in prior_launch["checks"]
+    if item["code"] == "LIVE_AGENT_READY"
+  )["passed"] is False
+
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
+  monkeypatch.setenv("QMT_AGENT_MODE", "live")
+
+  blocked = await TTradeOperationsService().readiness("TEST-ACCOUNT")
+
+  assert blocked["status"] == "BLOCKED"
+  assert blocked["ready"] is False
+  assert blocked["preparation_ready"] is False
+  assert blocked["automation_ready"] is False
+  assert blocked["can_activate_live"] is False
+  assert blocked["can_approve"] is False
+  assert blocked["agent_status"] == "BLOCKED"
+  assert blocked["agent_mode"] == "offline"
+  assert blocked["requested_agent_mode"] == "live"
+  assert blocked["ready_live_agent_count"] == 0
+  assert blocked["protocol_version"] == ""
+  assert blocked["qmt_launch_state"] == "BLOCKED"
+  assert (
+    blocked["qmt_launch_reason_code"] == "QMT_ENROLLMENT_REQUIRED"
+  )
+  live_agent_check = next(
+    item
+    for item in blocked["checks"]
+    if item["code"] == "LIVE_AGENT_READY"
+  )
+  assert live_agent_check["passed"] is False
+  assert "QMT_ENROLLMENT_REQUIRED" in live_agent_check["message"]
+  assert next(
+    item for item in blocked["checks"] if item["code"] == "AGENT_MODE_LIVE"
+  )["passed"] is False
 
 
 @pytest.mark.asyncio

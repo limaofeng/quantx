@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -27,6 +28,10 @@ from quantx_infrastructure.models.agent_runtime import (
 )
 from quantx_infrastructure.services.operational_alert_service import (
   OperationalAlertService,
+)
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
+  qmt_heartbeat_matches_current_launch,
 )
 from quantx_infrastructure.services.trading_service import TradingService
 
@@ -227,6 +232,17 @@ class TTradeOperationsService:
     )
 
   @classmethod
+  def _agent_fresh(
+    cls,
+    heartbeat: RuntimeComponentHeartbeat | None,
+  ) -> bool:
+    return bool(
+      cls._fresh(heartbeat)
+      and heartbeat is not None
+      and qmt_heartbeat_matches_current_launch(heartbeat.updated_at)
+    )
+
+  @classmethod
   def _agent_candidate_rank(
     cls,
     heartbeat: RuntimeComponentHeartbeat | None,
@@ -237,7 +253,7 @@ class TTradeOperationsService:
       if heartbeat is not None
       else datetime.min
     )
-    return cls._fresh(heartbeat), updated_at
+    return cls._agent_fresh(heartbeat), updated_at
 
   async def _readiness_snapshot(self, db, account_id: str):
     """Load rollout, heartbeats, devices, and counters in one round trip."""
@@ -458,7 +474,7 @@ class TTradeOperationsService:
       ready_live_agents = [
         (candidate_device, candidate_agent)
         for candidate_device, candidate_agent in live_agent_candidates
-        if self._fresh(candidate_agent)
+        if self._agent_fresh(candidate_agent)
       ]
       multiple_ready_live_agents = len(ready_live_agents) > 1
       if len(ready_live_agents) == 1:
@@ -483,6 +499,7 @@ class TTradeOperationsService:
         agent
         and to_naive_utc(agent.updated_at)
         >= now - timedelta(seconds=90)
+        and qmt_heartbeat_matches_current_launch(agent.updated_at)
       )
       live_agent_ready = bool(
         not multiple_ready_live_agents
@@ -515,6 +532,27 @@ class TTradeOperationsService:
       agent_status = (
         str(agent.status) if agent_heartbeat_fresh and agent else "OFFLINE"
       )
+      qmt_launch_reason_code = qmt_agent_launch_block_reason()
+      requested_agent_mode = (
+        os.environ.get("QMT_AGENT_MODE", "").strip().lower() or "unknown"
+      )
+      if qmt_launch_reason_code is not None:
+        # The launcher state is authoritative for this process lifetime. Do
+        # not let a <=90s database heartbeat from the previous Agent process
+        # make live controls look ready after a fail-closed restart.
+        ready_live_agents = []
+        multiple_ready_live_agents = False
+        live_agent_ready = False
+        agent_heartbeat_fresh = False
+        reported_agent_mode = "offline"
+        reported_protocol_version = ""
+        agent_mode = "offline"
+        protocol_version = ""
+        agent_status = "BLOCKED"
+        live_agent_blocked_reason = (
+          "QMT Agent 本地启动被阻断，实盘能力已关闭"
+          f"（{qmt_launch_reason_code}）"
+        )
       snapshot_age = (
         max(0.0, (now - snapshot_at).total_seconds())
         if snapshot_at
@@ -686,6 +724,11 @@ class TTradeOperationsService:
         "agent_device_id": str(device.id) if device else None,
         "ready_live_agent_count": len(ready_live_agents),
         "agent_mode": agent_mode,
+        "requested_agent_mode": requested_agent_mode,
+        "qmt_launch_state": (
+          "BLOCKED" if qmt_launch_reason_code is not None else ""
+        ),
+        "qmt_launch_reason_code": qmt_launch_reason_code or "",
         "protocol_version": protocol_version,
         "reconcile_status": str(
           rollout.reconcile_status if rollout else "UNKNOWN"

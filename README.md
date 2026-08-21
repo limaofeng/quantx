@@ -36,10 +36,12 @@ Windows 本机从仓库根目录使用唯一入口：
 ```
 
 普通开发 `up`（包括未显式指定模式的 `-Profile web`）统一提升为
-`full/live`：启动 Caddy、API、Engine、Vite、VitePress、Prefect Worker 和
-QMT Agent；Prefect Server 由外部管理。只有操作者明确要求纯行情运行时才使用
-`-Mode data-only`，启动失败、权限不足和自动化验收都不得把 live 静默降级为
-data-only。
+`full/live`：启动 Caddy、API、Engine、Vite、VitePress 和 Prefect Worker，并在
+本机登记预检通过时启动 QMT Agent；Prefect Server 由外部管理。只有操作者明确
+要求纯行情运行时才使用 `-Mode data-only`，任何失败都不得把 live 静默改写为
+data-only。QMT 登记或运行时不可用时，统一入口保持 `full/live`，先关闭全部实盘
+能力门并清空实盘账户允许列表，再以显式 `DEGRADED / BLOCKED` 状态启动非 QMT
+服务；已持久化历史行情的回测继续可用，但该状态绝不代表 QMT `ready`。
 开发 Caddy 在所有本机 IPv4 接口的 `8080` 端口提供统一入口。本机可访问
 `http://127.0.0.1:8080`，局域网设备使用 `http://<开发机局域网 IP>:8080`；
 API 自身仍只监听 `127.0.0.1:18081`。

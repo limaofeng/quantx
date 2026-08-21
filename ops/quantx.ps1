@@ -108,6 +108,13 @@ $DefaultPrefectApiUrl = "http://192.168.101.4:30420/api"
 $DefaultPrefectWorkerPool = "quantx-pool"
 $ApiPort = 18081
 $AgentWebSocketPingTimeoutSeconds = 960
+$script:RuntimeProfile = ""
+$script:RuntimeAgentMode = ""
+$script:RuntimeConfiguredAccount = ""
+$script:RuntimeQmtLaunchState = "NOT_REQUESTED"
+$script:RuntimeQmtReasonCode = ""
+$script:RuntimeQmtLaunchStartedAt = ""
+$script:RuntimeLiveTradingEnabled = $false
 
 function Ensure-RuntimeDirectories {
   foreach ($path in @(
@@ -390,7 +397,7 @@ function ConvertFrom-ListSetting {
   )
 }
 
-function Assert-QmtAgentEnrollment {
+function Test-QmtAgentEnrollment {
   param(
     [string]$Python,
     [string]$ServiceRoot = ""
@@ -399,16 +406,27 @@ function Assert-QmtAgentEnrollment {
   $workspacePythonPath = $env:PYTHONPATH
   try {
     $env:PYTHONPATH = Get-QmtAgentPythonPath -ServiceRoot $ServiceRoot
-    & $Python -m quantx_qmt_agent.main status
-    if ($LASTEXITCODE -ne 0) {
-      throw (
-        "QMT Agent is not enrolled. Create a one-time code in the UI, then run " +
-        "'python -m quantx_qmt_agent.main enroll --code <code>' with the QMT " +
-        "Agent PYTHONPATH before starting the full profile."
-      )
-    }
+    & $Python -m quantx_qmt_agent.main status *> $null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
   } finally {
     $env:PYTHONPATH = $workspacePythonPath
+  }
+}
+
+function Assert-QmtAgentEnrollment {
+  param(
+    [string]$Python,
+    [string]$ServiceRoot = ""
+  )
+
+  if (-not (Test-QmtAgentEnrollment -Python $Python -ServiceRoot $ServiceRoot)) {
+    throw (
+      "QMT Agent is not enrolled. Create a one-time code in the UI, then run " +
+      "'python -m quantx_qmt_agent.main enroll --code <code>' with the QMT " +
+      "Agent PYTHONPATH before starting the full profile."
+    )
   }
 }
 
@@ -517,6 +535,69 @@ function Write-State {
     }
     if (Test-Path -LiteralPath $replacementBackupFile -PathType Leaf) {
       Remove-Item -LiteralPath $replacementBackupFile -Force
+    }
+  }
+}
+
+function Get-DevRuntimeConfiguration {
+  param([object[]]$Entries)
+
+  $runtimeEntry = @(
+    $Entries | Where-Object {
+      $null -ne $_.PSObject.Properties["runtimeProfile"]
+    }
+  ) | Select-Object -First 1
+  $agentEntry = @(
+    $Entries | Where-Object { [string]$_.name -eq "qmt-agent" }
+  ) | Select-Object -First 1
+
+  $profile = if ($runtimeEntry) {
+    [string]$runtimeEntry.runtimeProfile
+  } elseif (@($Entries | Where-Object { [string]$_.name -eq "worker" }).Count -gt 0) {
+    "full"
+  } else {
+    "web"
+  }
+  $agentMode = if ($runtimeEntry) {
+    [string]$runtimeEntry.agentMode
+  } elseif ($agentEntry) {
+    $arguments = @($agentEntry.arguments | ForEach-Object { [string]$_ })
+    $modeIndex = [array]::IndexOf($arguments, "--mode")
+    if ($modeIndex -ge 0 -and $modeIndex + 1 -lt $arguments.Count) {
+      $arguments[$modeIndex + 1]
+    } else {
+      "unknown"
+    }
+  } else {
+    "unknown"
+  }
+  return [pscustomobject]@{
+    profile = $profile
+    agentMode = $agentMode
+    configuredAccount = if ($runtimeEntry) {
+      [string]$runtimeEntry.configuredAccount
+    } else {
+      ""
+    }
+    qmtLaunchState = if ($runtimeEntry) {
+      [string]$runtimeEntry.qmtLaunchState
+    } else {
+      "UNKNOWN"
+    }
+    qmtReasonCode = if ($runtimeEntry) {
+      [string]$runtimeEntry.qmtReasonCode
+    } else {
+      ""
+    }
+    qmtLaunchStartedAt = if ($runtimeEntry) {
+      [string]$runtimeEntry.qmtLaunchStartedAt
+    } else {
+      ""
+    }
+    liveTradingEnabled = if ($runtimeEntry) {
+      [bool]$runtimeEntry.liveTradingEnabled
+    } else {
+      $false
     }
   }
 }
@@ -748,6 +829,13 @@ function Start-ManagedProcess {
     workingDirectory = $WorkingDirectory
     stdout = $stdout
     stderr = $stderr
+    runtimeProfile = $script:RuntimeProfile
+    agentMode = $script:RuntimeAgentMode
+    configuredAccount = $script:RuntimeConfiguredAccount
+    qmtLaunchState = $script:RuntimeQmtLaunchState
+    qmtReasonCode = $script:RuntimeQmtReasonCode
+    qmtLaunchStartedAt = $script:RuntimeQmtLaunchStartedAt
+    liveTradingEnabled = $script:RuntimeLiveTradingEnabled
   }
   $script:ManagedProcesses += $entry
   Write-State -Processes $script:ManagedProcesses
@@ -993,11 +1081,21 @@ function Show-QmtAgentRuntimeHealth {
 function Wait-QmtAgentRuntimeReady {
   param(
     [Parameter(Mandatory = $true)][string]$AccountId,
+    [Parameter(Mandatory = $true)][object]$ProcessEntry,
+    [Parameter(Mandatory = $true)][datetime]$LaunchStartedAt,
     [int]$TimeoutSeconds = 60
   )
 
+  $launchBoundary = $LaunchStartedAt.ToUniversalTime()
   $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
   do {
+    if (-not (Get-TrackedProcess -Entry $ProcessEntry)) {
+      Write-Warning (
+        "The QMT Agent process for this launch is no longer alive; a prior " +
+        "database heartbeat cannot make the runtime READY."
+      )
+      return $false
+    }
     try {
       $runtime = Invoke-RestMethod `
         -Uri "http://127.0.0.1:8080/health/components" `
@@ -1013,13 +1111,28 @@ function Wait-QmtAgentRuntimeReady {
       } else {
         [double]$qmt.latestSnapshotAgeSeconds
       }
+      $latestReadyHeartbeatAt = $null
+      if ($qmt.latestReadyHeartbeatAt) {
+        try {
+          $latestReadyHeartbeatAt = [datetimeoffset]::Parse(
+            [string]$qmt.latestReadyHeartbeatAt,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal
+          ).UtcDateTime
+        } catch {
+          $latestReadyHeartbeatAt = $null
+        }
+      }
       if (
         [string]$qmt.status -eq "ready" -and
         [int]$qmt.readyDevices -ge 1 -and
         $modes -contains "live" -and
         $protocols -contains "1.1" -and
         $accounts -contains $AccountId -and
-        $snapshotAge -le 90
+        $snapshotAge -le 90 -and
+        $null -ne $latestReadyHeartbeatAt -and
+        $latestReadyHeartbeatAt -ge $launchBoundary -and
+        (Get-TrackedProcess -Entry $ProcessEntry)
       ) {
         Show-QmtAgentRuntimeHealth
         return $true
@@ -1030,7 +1143,11 @@ function Wait-QmtAgentRuntimeReady {
     Start-Sleep -Seconds 2
   } while ([datetime]::UtcNow -lt $deadline)
 
-  Show-QmtAgentRuntimeHealth
+  Write-Warning (
+    "The tracked QMT Agent did not publish a READY heartbeat for this launch " +
+    "at or after $($launchBoundary.ToString('o')) within $TimeoutSeconds " +
+    "seconds; prior database heartbeats were ignored."
+  )
   return $false
 }
 
@@ -1042,15 +1159,19 @@ function Invoke-CaddyRecovery {
   Import-QuantXEnvironment
   Initialize-PythonEnvironment
   $existing = @(Read-State)
+  $runtimeConfiguration = Get-DevRuntimeConfiguration -Entries $existing
+  $qmtLaunchBlocked = $runtimeConfiguration.qmtLaunchState -eq "BLOCKED"
   $requiredNames = @(
     "api",
     "ai-runtime",
     "engine",
     "web",
     "docs",
-    "worker",
-    "qmt-agent"
+    "worker"
   )
+  if (-not $qmtLaunchBlocked) {
+    $requiredNames += "qmt-agent"
+  }
   $allowedNames = @($requiredNames) + @("caddy")
   $unexpected = @(
     $existing | Where-Object { [string]$_.name -notin $allowedNames }
@@ -1101,10 +1222,24 @@ function Invoke-CaddyRecovery {
   $env:RUNTIME_PROFILE = $Profile
   $env:PREFECT_ENABLED = "true"
   $env:PYTHONPATH = Get-WorkspacePythonPath
+  $script:RuntimeProfile = $runtimeConfiguration.profile
+  $script:RuntimeAgentMode = $runtimeConfiguration.agentMode
+  $script:RuntimeConfiguredAccount = $runtimeConfiguration.configuredAccount
+  $script:RuntimeQmtLaunchState = $runtimeConfiguration.qmtLaunchState
+  $script:RuntimeQmtReasonCode = $runtimeConfiguration.qmtReasonCode
+  $script:RuntimeQmtLaunchStartedAt = (
+    $runtimeConfiguration.qmtLaunchStartedAt
+  )
+  $script:RuntimeLiveTradingEnabled = (
+    $runtimeConfiguration.liveTradingEnabled
+  )
+  $env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState
+  $env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode
+  $env:QMT_AGENT_LAUNCH_STARTED_AT = $script:RuntimeQmtLaunchStartedAt
   $script:ManagedProcesses = @($preserved)
   try {
     Start-DevCaddy -Executable $caddy
-    Wait-DevCaddyReady
+    Wait-DevCaddyReady -RequireRuntimeReadiness (-not $qmtLaunchBlocked)
     Write-State -Processes $script:ManagedProcesses
     Write-Host (
       "Recovered managed Caddy for QuantX dev/$Profile at " +
@@ -1295,6 +1430,15 @@ function Set-DevTradingModeEnvironment {
   return $agentMode
 }
 
+function Disable-DevLiveTradingCapability {
+  # Keep QMT_AGENT_MODE and the selected account as requested runtime intent,
+  # but make every server- and Agent-side execution gate fail closed.
+  $env:ENABLE_REAL_TRADING = "false"
+  $env:QMT_REAL_TRADING_ENABLED = "false"
+  $env:T_TRADE_LIVE_ENABLED = "false"
+  $env:REAL_TRADING_ACCOUNT_ALLOWLIST = "[]"
+}
+
 function Resolve-DevTradingAccountId {
   param([AllowEmptyString()][string]$RequestedAccountId)
 
@@ -1373,6 +1517,8 @@ function Invoke-Up {
   $node = Resolve-Node
   $qmtPython = $null
   $agentMode = Set-DevTradingModeEnvironment
+  $qmtAgentLaunchAllowed = $false
+  $qmtReasonCode = ""
   $liveAccount = ""
   if ($agentMode -eq "live") {
     $liveAccounts = @(ConvertFrom-ListSetting -Value $env:QMT_ACCOUNT_WHITELIST)
@@ -1384,10 +1530,56 @@ function Invoke-Up {
   if ($Profile -eq "full") {
     # API health aggregation and Prefect CLI/Worker must share the same
     # canonical API base from the moment each process is spawned.
-    $qmtPython = Resolve-Python -Qmt
-    Assert-QmtAgentEnrollment -Python $qmtPython
     Initialize-PrefectEnvironment
+    try {
+      $qmtPython = Resolve-Python -Qmt
+    } catch {
+      $qmtReasonCode = "QMT_RUNTIME_UNAVAILABLE"
+      Write-Verbose "QMT runtime preflight failed: $($_.Exception.Message)"
+    }
+    if ($qmtPython) {
+      if (Test-QmtAgentEnrollment -Python $qmtPython) {
+        $qmtAgentLaunchAllowed = $true
+      } else {
+        $qmtReasonCode = "QMT_ENROLLMENT_REQUIRED"
+      }
+    }
+    if (-not $qmtAgentLaunchAllowed) {
+      Disable-DevLiveTradingCapability
+      Write-Warning (
+        "QMT Agent launch is BLOCKED (reason=$qmtReasonCode). The requested " +
+        "profile=$Profile and agentMode=$agentMode are preserved, but all " +
+        "live-trading capability gates are disabled and no QMT process will " +
+        "be started. API, Engine, Web, Worker, Caddy, and backtests over " +
+        "persisted history will continue to start. Enroll/fix the Agent and " +
+        "restart the managed runtime to restore QMT capability."
+      )
+    }
   }
+  $script:RuntimeProfile = $Profile
+  $script:RuntimeAgentMode = $agentMode
+  $script:RuntimeConfiguredAccount = $liveAccount
+  $script:RuntimeQmtLaunchState = if ($Profile -ne "full") {
+    "NOT_REQUESTED"
+  } elseif ($qmtAgentLaunchAllowed) {
+    "LAUNCH_ALLOWED"
+  } else {
+    "BLOCKED"
+  }
+  $script:RuntimeQmtReasonCode = $qmtReasonCode
+  $script:RuntimeQmtLaunchStartedAt = if ($qmtAgentLaunchAllowed) {
+    [datetime]::UtcNow.ToString("o")
+  } else {
+    ""
+  }
+  $script:RuntimeLiveTradingEnabled = (
+    $env:ENABLE_REAL_TRADING -eq "true" -and
+    $env:QMT_REAL_TRADING_ENABLED -eq "true" -and
+    $env:T_TRADE_LIVE_ENABLED -eq "true"
+  )
+  $env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState
+  $env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode
+  $env:QMT_AGENT_LAUNCH_STARTED_AT = $script:RuntimeQmtLaunchStartedAt
   $caddy = Join-Path $ToolsDirectory "caddy\caddy.exe"
   if (-not (Test-Path -LiteralPath $caddy -PathType Leaf)) {
     throw "Caddy is missing. Run: .\ops\quantx.ps1 bootstrap"
@@ -1413,6 +1605,8 @@ function Invoke-Up {
   $env:PYTHONPATH = Get-WorkspacePythonPath
   $script:ManagedProcesses = @()
   $liveRuntimeReady = $true
+  $qmtProcessEntry = $null
+  $qmtProcessLaunchStartedAt = $null
   try {
     Start-ManagedProcess `
       -Name "api" `
@@ -1482,35 +1676,48 @@ function Invoke-Up {
         ) `
         -WorkingDirectory $Root
 
-      $workspacePythonPath = $env:PYTHONPATH
-      $serverEnvironment = $env:ENV
-      try {
-        $env:PYTHONPATH = Get-QmtAgentPythonPath
-        if ($agentMode -eq "live") {
-          # Keep API/Engine in development while satisfying the QMT Agent's
-          # explicit real-trading environment gate for this child process.
-          $env:ENV = "testing"
+      if ($qmtAgentLaunchAllowed) {
+        $workspacePythonPath = $env:PYTHONPATH
+        $serverEnvironment = $env:ENV
+        try {
+          $env:PYTHONPATH = Get-QmtAgentPythonPath
+          if ($agentMode -eq "live") {
+            # Keep API/Engine in development while satisfying the QMT Agent's
+            # explicit real-trading environment gate for this child process.
+            $env:ENV = "testing"
+          }
+          $qmtProcessLaunchStartedAt = [datetime]::UtcNow
+          Start-ManagedProcess `
+            -Name "qmt-agent" `
+            -Executable $qmtPython `
+            -Arguments @(
+              "-m", "quantx_qmt_agent.main", "run",
+              "--mode", $agentMode
+            ) `
+            -WorkingDirectory $Root
+          $qmtProcessEntry = @(
+            $script:ManagedProcesses |
+              Where-Object { [string]$_.name -eq "qmt-agent" }
+          ) | Select-Object -Last 1
+          if (-not $qmtProcessEntry) {
+            throw "QMT Agent process state was not recorded after launch."
+          }
+        } finally {
+          $env:ENV = $serverEnvironment
+          $env:PYTHONPATH = $workspacePythonPath
         }
-        Start-ManagedProcess `
-          -Name "qmt-agent" `
-          -Executable $qmtPython `
-          -Arguments @(
-            "-m", "quantx_qmt_agent.main", "run",
-            "--mode", $agentMode
-          ) `
-          -WorkingDirectory $Root
-      } finally {
-        $env:ENV = $serverEnvironment
-        $env:PYTHONPATH = $workspacePythonPath
       }
     }
 
     Start-DevCaddy -Executable $caddy
     Wait-DevCaddyReady -RequireRuntimeReadiness ($Profile -ne "full")
     if ($Profile -eq "full") {
-      if ($agentMode -eq "live") {
-        $liveRuntimeReady = Wait-QmtAgentRuntimeReady -AccountId $liveAccount
-      } else {
+      if ($qmtAgentLaunchAllowed -and $agentMode -eq "live") {
+        $liveRuntimeReady = Wait-QmtAgentRuntimeReady `
+          -AccountId $liveAccount `
+          -ProcessEntry $qmtProcessEntry `
+          -LaunchStartedAt $qmtProcessLaunchStartedAt
+      } elseif ($qmtAgentLaunchAllowed) {
         Show-QmtAgentRuntimeHealth
       }
     }
@@ -1583,6 +1790,7 @@ function ConvertTo-LocalStatusTimestamp {
 function Invoke-Status {
   Import-QuantXEnvironment
   $entries = @(Read-State)
+  $qmtHealthQueryAllowed = $true
   if ($entries.Count -eq 0) {
     Write-Host "No managed development processes."
   } else {
@@ -1596,35 +1804,33 @@ function Invoke-Status {
       }
     }
     $rows | Format-Table -AutoSize
-    $runningNames = @(
-      $entries |
-        Where-Object { Get-TrackedProcess -Entry $_ } |
-        ForEach-Object { [string]$_.name }
-    )
-    $actualProfile = if (
-      $runningNames -contains "worker" -and
-      $runningNames -contains "qmt-agent"
-    ) { "full" } else { "web" }
-    $agentEntry = @(
-      $entries | Where-Object { [string]$_.name -eq "qmt-agent" }
-    ) | Select-Object -First 1
-    $actualMode = "data-only"
-    if ($agentEntry) {
-      $arguments = @($agentEntry.arguments | ForEach-Object { [string]$_ })
-      $modeIndex = [array]::IndexOf($arguments, "--mode")
-      if ($modeIndex -ge 0 -and $modeIndex + 1 -lt $arguments.Count) {
-        $actualMode = $arguments[$modeIndex + 1]
-      }
+    $runtimeConfiguration = Get-DevRuntimeConfiguration -Entries $entries
+    $liveTradingLabel = if ($runtimeConfiguration.liveTradingEnabled) {
+      "ENABLED"
+    } else {
+      "DISABLED"
     }
-    $configuredAccounts = @(ConvertFrom-ListSetting -Value (
-      [string][Environment]::GetEnvironmentVariable("QMT_ACCOUNT_WHITELIST")
-    ))
     Write-Host (
-      "Runtime profile={0}, agentMode={1}, configuredAccounts={2}" -f
-        $actualProfile,
-        $actualMode,
-        ($configuredAccounts -join ",")
+      (
+        "Runtime profile={0}, agentMode={1}, configuredAccounts={2}, " +
+        "liveTrading={3}"
+      ) -f @(
+        $runtimeConfiguration.profile,
+        $runtimeConfiguration.agentMode,
+        $runtimeConfiguration.configuredAccount,
+        $liveTradingLabel
+      )
     )
+    if ($runtimeConfiguration.qmtLaunchState -eq "BLOCKED") {
+      $qmtHealthQueryAllowed = $false
+      Write-Warning (
+        "Runtime state=DEGRADED: QMT Agent launch is BLOCKED " +
+        "(reason=$($runtimeConfiguration.qmtReasonCode)); the Agent was not " +
+        "started and must not be reported as READY. Broker/order execution " +
+        "is fail-closed. Non-QMT services and backtests over persisted " +
+        "history remain available."
+      )
+    }
   }
   foreach ($port in @(8080, $ApiPort, 5250, 5251)) {
     $owner = Get-PortOwner -Port $port
@@ -1644,7 +1850,14 @@ function Invoke-Status {
     Write-Verbose "Python unavailable for dependency version checks."
   }
   Show-ExternalDependencies -Python $python
-  Show-QmtAgentRuntimeHealth
+  if ($qmtHealthQueryAllowed) {
+    Show-QmtAgentRuntimeHealth
+  } else {
+    Write-Host (
+      "QMT runtime: agent=blocked/offline, liveTrading=DISABLED, " +
+      "ready=false (local preflight blocked launch)"
+    ) -ForegroundColor Yellow
+  }
 }
 
 function Invoke-Logs {

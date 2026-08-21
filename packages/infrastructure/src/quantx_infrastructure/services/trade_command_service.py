@@ -61,6 +61,9 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   validate_exact_auto_exit_authorization,
 )
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_heartbeat_matches_current_launch,
+)
 
 
 class AgentUnavailableError(RuntimeError):
@@ -122,7 +125,10 @@ class TradeCommandService:
   @staticmethod
   def _heartbeat_fresh(heartbeat: RuntimeComponentHeartbeat) -> bool:
     updated_at = to_naive_utc(heartbeat.updated_at)
-    return (utcnow() - updated_at).total_seconds() <= 90
+    return bool(
+      (utcnow() - updated_at).total_seconds() <= 90
+      and qmt_heartbeat_matches_current_launch(updated_at)
+    )
 
   async def _require_live_authorization(
     self,

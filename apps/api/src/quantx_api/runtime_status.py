@@ -17,6 +17,10 @@ from quantx_infrastructure.models.agent_runtime import (
   AgentDevice,
   RuntimeComponentHeartbeat,
 )
+from quantx_infrastructure.services.qmt_launch_guard import (
+  qmt_agent_launch_block_reason,
+  qmt_heartbeat_matches_current_launch,
+)
 from quantx_infrastructure.services.trading_time_service import TradingTimeService
 from sqlalchemy import select, text
 
@@ -35,6 +39,40 @@ CONNECTED_AGENT_STATUSES = frozenset(
     "EMERGENCY_STOP",
   }
 )
+def _apply_qmt_launch_override(
+  components: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+  reason = qmt_agent_launch_block_reason()
+  if reason is None:
+    return components
+  overridden = dict(components)
+  previous_qmt = dict(components.get("qmt-agent") or {})
+  overridden["qmt-agent"] = {
+    "status": "blocked",
+    "connectedDevices": 0,
+    "readyDevices": 0,
+    "onlineDevices": 0,
+    "reconcilingDevices": 0,
+    "degradedDevices": 0,
+    "registeredDevices": int(previous_qmt.get("registeredDevices") or 0),
+    "modes": [],
+    "protocolVersions": [],
+    "accountIds": [],
+    "latestSnapshotAgeSeconds": None,
+    "latestReadyHeartbeatAt": None,
+    "launchState": "BLOCKED",
+    "reasonCode": reason,
+    "liveTradingEnabled": False,
+  }
+  overridden["market-data"] = {
+    "status": "blocked",
+    "connectedDevices": 0,
+    "protocol": "quantx.market.v1",
+    "launchState": "BLOCKED",
+    "reasonCode": reason,
+    "liveTradingEnabled": False,
+  }
+  return overridden
 
 
 def _snapshot_age_seconds(value: Any, now: datetime) -> float | None:
@@ -54,6 +92,17 @@ def _aware_state_age(value: datetime | None, now: datetime) -> float | None:
     return None
   normalized = value.astimezone(timezone.utc).replace(tzinfo=None)
   return max(0.0, (now - normalized).total_seconds())
+
+
+def _iso_utc_timestamp(value: datetime | None) -> str | None:
+  if value is None:
+    return None
+  normalized = (
+    value.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None
+    else value.astimezone(timezone.utc)
+  )
+  return normalized.isoformat().replace("+00:00", "Z")
 
 
 async def _database_status() -> dict[str, Any]:
@@ -82,10 +131,10 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "status": "unavailable",
       "error": exc.__class__.__name__,
     }
-    return {
+    return _apply_qmt_launch_override({
       "qmt-agent": {**unavailable, "connectedDevices": 0},
       "market-data": {**unavailable, "connectedDevices": 0},
-    }
+    })
 
   components: dict[str, dict[str, Any]] = {}
   heartbeat_by_component = {
@@ -104,10 +153,16 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
       "details": heartbeat.details or {},
     }
 
+  if qmt_agent_launch_block_reason() is not None:
+    components["qmt-agent"] = {"registeredDevices": len(agents)}
+    return _apply_qmt_launch_override(components)
+
   online_agents = [
     agent
     for agent in agents
-    if agent.last_seen_at is not None and now - agent.last_seen_at <= HEARTBEAT_TTL
+    if agent.last_seen_at is not None
+    and now - agent.last_seen_at <= HEARTBEAT_TTL
+    and qmt_heartbeat_matches_current_launch(agent.last_seen_at)
   ]
   connected_agents: list[tuple[AgentDevice, str]] = []
   for agent in online_agents:
@@ -119,11 +174,20 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     if (
       heartbeat_age <= HEARTBEAT_TTL.total_seconds()
       and heartbeat_status in CONNECTED_AGENT_STATUSES
+      and qmt_heartbeat_matches_current_launch(heartbeat.updated_at)
     ):
       connected_agents.append((agent, heartbeat_status))
   ready_agents = [
     agent for agent, status in connected_agents if status == "READY"
   ]
+  latest_ready_heartbeat_at = max(
+    (
+      heartbeat_by_component[f"qmt-agent:{agent.id}"].updated_at
+      for agent, status in connected_agents
+      if status == "READY"
+    ),
+    default=None,
+  )
   agent_modes: set[str] = set()
   protocol_versions: set[str] = set()
   account_ids: set[str] = set()
@@ -175,6 +239,7 @@ async def _component_heartbeats() -> dict[str, dict[str, Any]]:
     "latestSnapshotAgeSeconds": (
       round(min(snapshot_ages), 3) if snapshot_ages else None
     ),
+    "latestReadyHeartbeatAt": _iso_utc_timestamp(latest_ready_heartbeat_at),
   }
   market_data_agents = [
     agent
@@ -329,6 +394,7 @@ async def component_status() -> dict[str, dict[str, Any]]:
     _component_heartbeats(),
     _prefect_status(),
   )
+  heartbeats = _apply_qmt_launch_override(heartbeats)
   raw_ai_runtime = heartbeats.get("ai-runtime", {"status": "offline"})
   ai_runtime = {
     "status": raw_ai_runtime.get("status", "offline"),

@@ -151,6 +151,81 @@ async def test_component_status_exposes_worker_registration_counts(
 
 
 @pytest.mark.asyncio
+async def test_component_status_overrides_stale_ready_agent_when_launch_is_blocked(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  async def fake_database_status():
+    return {"status": "ready"}
+
+  async def fake_component_heartbeats():
+    return {
+      "qmt-agent": {
+        "status": "ready",
+        "connectedDevices": 1,
+        "readyDevices": 1,
+        "onlineDevices": 1,
+        "registeredDevices": 1,
+        "modes": ["live"],
+        "accountIds": ["ACCOUNT-1"],
+      },
+      "engine": {"status": "ready"},
+      "market-data": {
+        "status": "ready",
+        "connectedDevices": 1,
+        "protocol": "quantx.market.v1",
+      },
+    }
+
+  async def fake_prefect_status():
+    return {"status": "ready", "workerStatus": "ready"}
+
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_REASON", "QMT_ENROLLMENT_REQUIRED")
+  monkeypatch.setattr(runtime_status.settings, "runtime_profile", "full")
+  monkeypatch.setattr(runtime_status, "_database_status", fake_database_status)
+  monkeypatch.setattr(
+    runtime_status,
+    "_component_heartbeats",
+    fake_component_heartbeats,
+  )
+  monkeypatch.setattr(runtime_status, "_prefect_status", fake_prefect_status)
+
+  components = await runtime_status.component_status()
+
+  assert components["qmtAgent"] == {
+    "status": "blocked",
+    "launchState": "BLOCKED",
+    "reasonCode": "QMT_ENROLLMENT_REQUIRED",
+    "liveTradingEnabled": False,
+    "connectedDevices": 0,
+    "readyDevices": 0,
+    "onlineDevices": 0,
+    "reconcilingDevices": 0,
+    "degradedDevices": 0,
+    "registeredDevices": 1,
+    "modes": [],
+    "protocolVersions": [],
+    "accountIds": [],
+    "latestSnapshotAgeSeconds": None,
+    "latestReadyHeartbeatAt": None,
+  }
+  assert components["marketData"] == {
+    "status": "blocked",
+    "launchState": "BLOCKED",
+    "reasonCode": "QMT_ENROLLMENT_REQUIRED",
+    "liveTradingEnabled": False,
+    "connectedDevices": 0,
+    "protocol": "quantx.market.v1",
+  }
+
+  ready, payload = await runtime_status.readiness_status()
+
+  assert ready is False
+  assert payload["status"] == "not_ready"
+  assert payload["components"]["qmtAgent"]["status"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,6 +319,7 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
     "protocolVersions": ["1.1"],
     "accountIds": ["account-1"],
     "latestSnapshotAgeSeconds": None,
+    "latestReadyHeartbeatAt": None,
   }
   assert components["market-data"]["status"] == "ready"
   assert components["market-data"]["streamAgeSeconds"] >= 25
@@ -259,7 +335,40 @@ async def test_qmt_agent_component_stays_ready_during_trade_reconciliation(
   assert components["qmt-agent"]["connectedDevices"] == 1
   assert components["qmt-agent"]["readyDevices"] == 1
   assert components["qmt-agent"]["reconcilingDevices"] == 0
+  assert components["qmt-agent"]["latestReadyHeartbeatAt"] == (
+    now.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+  )
   assert components["market-data"]["status"] == "ready"
+
+  launch_started_at = now + timedelta(seconds=1)
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    launch_started_at.replace(tzinfo=timezone.utc).isoformat(),
+  )
+
+  components = await runtime_status._component_heartbeats()
+  assert components["qmt-agent"]["status"] == "offline"
+  assert components["qmt-agent"]["connectedDevices"] == 0
+  assert components["qmt-agent"]["readyDevices"] == 0
+  assert components["qmt-agent"]["latestReadyHeartbeatAt"] is None
+
+  current_heartbeat_at = launch_started_at + timedelta(seconds=1)
+  async with session_factory() as db:
+    heartbeat = await db.get(RuntimeComponentHeartbeat, "qmt-agent:device-1")
+    heartbeat.updated_at = current_heartbeat_at
+    device = await db.get(AgentDevice, "device-1")
+    device.last_seen_at = current_heartbeat_at
+    await db.commit()
+
+  components = await runtime_status._component_heartbeats()
+  assert components["qmt-agent"]["status"] == "ready"
+  assert components["qmt-agent"]["readyDevices"] == 1
+  assert components["qmt-agent"]["latestReadyHeartbeatAt"] == (
+    current_heartbeat_at.replace(tzinfo=timezone.utc)
+    .isoformat()
+    .replace("+00:00", "Z")
+  )
 
   async def state_without_freshness():
     return stream_state, None

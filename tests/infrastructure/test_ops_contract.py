@@ -344,6 +344,19 @@ $uniqueAccount = [ordered]@{{
   allowlist = $env:REAL_TRADING_ACCOUNT_ALLOWLIST
 }}
 
+$env:ENABLE_REAL_TRADING = "true"
+$env:QMT_REAL_TRADING_ENABLED = "true"
+$env:T_TRADE_LIVE_ENABLED = "true"
+Disable-DevLiveTradingCapability
+$degradedLive = [ordered]@{{
+  mode = $env:QMT_AGENT_MODE
+  account = $env:QMT_ACCOUNT_WHITELIST
+  allowlist = $env:REAL_TRADING_ACCOUNT_ALLOWLIST
+  server = $env:ENABLE_REAL_TRADING
+  qmt = $env:QMT_REAL_TRADING_ENABLED
+  tTrade = $env:T_TRADE_LIVE_ENABLED
+}}
+
 Reset-TestAccountEnvironment
 $Profile = "full"
 $script:ModeWasExplicitlySpecified = $true
@@ -376,6 +389,7 @@ try {{
   explicitDataOnly = $explicitDataOnly
   webDataOnlyMode = $webDataOnlyMode
   uniqueAccount = $uniqueAccount
+  degradedLive = $degradedLive
   paperModeError = $paperModeError
   multipleAccountError = $multipleAccountError
 }} | ConvertTo-Json -Depth 6 -Compress
@@ -420,10 +434,297 @@ try {{
     "account": "ACCOUNT-2",
     "allowlist": '["ACCOUNT-2"]',
   }
+  assert payload["degradedLive"] == {
+    "mode": "live",
+    "account": "ACCOUNT-2",
+    "allowlist": "[]",
+    "server": "false",
+    "qmt": "false",
+    "tTrade": "false",
+  }
   assert "only non-live entry" in payload["paperModeError"]
   assert "Multiple development trading accounts" in payload[
     "multipleAccountError"
   ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell runtime metadata")
+def test_degraded_full_state_preserves_requested_live_mode() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+
+  runtime_configuration = "function Get-DevRuntimeConfiguration" + script.split(
+    "function Get-DevRuntimeConfiguration",
+    1,
+  )[1].split("function Get-TrackedProcess", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+{runtime_configuration}
+$entries = @(
+  [pscustomobject]@{{
+    name = "api"
+    runtimeProfile = "full"
+    agentMode = "live"
+    configuredAccount = "ACCOUNT-1"
+    qmtLaunchState = "BLOCKED"
+    qmtReasonCode = "QMT_ENROLLMENT_REQUIRED"
+    qmtLaunchStartedAt = ""
+    liveTradingEnabled = $false
+  }},
+  [pscustomobject]@{{ name = "worker" }}
+)
+Get-DevRuntimeConfiguration -Entries $entries |
+  ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert json.loads(result.stdout.strip()) == {
+    "profile": "full",
+    "agentMode": "live",
+    "configuredAccount": "ACCOUNT-1",
+    "qmtLaunchState": "BLOCKED",
+    "qmtReasonCode": "QMT_ENROLLMENT_REQUIRED",
+    "qmtLaunchStartedAt": "",
+    "liveTradingEnabled": False,
+  }
+
+
+def test_degraded_full_status_is_explicit_and_never_reports_data_only() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  status = script.split("function Invoke-Status", 1)[1].split(
+    "function Invoke-Logs",
+    1,
+  )[0]
+  process_start = script.split("function Start-ManagedProcess", 1)[1].split(
+    "function Wait-HttpReady",
+    1,
+  )[0]
+
+  assert "Get-DevRuntimeConfiguration -Entries $entries" in status
+  assert "Runtime state=DEGRADED" in status
+  assert "liveTrading={3}" in status
+  assert "must not be reported as READY" in status
+  assert "$qmtHealthQueryAllowed = $false" in status
+  assert "if ($qmtHealthQueryAllowed)" in status
+  assert "agent=blocked/offline" in status
+  assert 'agentMode = "data-only"' not in status
+  for field in (
+    "runtimeProfile",
+    "agentMode",
+    "configuredAccount",
+    "qmtLaunchState",
+    "qmtReasonCode",
+    "qmtLaunchStartedAt",
+    "liveTradingEnabled",
+  ):
+    assert field in process_start
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell status timestamp formatting")
+def test_status_formats_managed_process_start_time_in_local_timezone() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+  formatter = "function ConvertTo-LocalStatusTimestamp" + script.split(
+    "function ConvertTo-LocalStatusTimestamp",
+    1,
+  )[1].split("function Invoke-Status", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+{formatter}
+$source = "2026-08-20T05:33:53Z"
+[ordered]@{{
+  actual = ConvertTo-LocalStatusTimestamp -Value $source
+  expected = ([datetimeoffset]::Parse($source)).ToLocalTime().ToString(
+    "yyyy-MM-dd HH:mm:ss zzz",
+    [Globalization.CultureInfo]::InvariantCulture
+  )
+}} | ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  payload = json.loads(result.stdout.strip())
+  assert payload["actual"] == payload["expected"]
+  status = script.split("function Invoke-Status", 1)[1].split(
+    "function Invoke-Logs",
+    1,
+  )[0]
+  assert "ConvertTo-LocalStatusTimestamp -Value $entry.startedAt" in status
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell degraded status branch")
+def test_degraded_status_does_not_query_stale_qmt_health() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+  formatter_function = "function ConvertTo-LocalStatusTimestamp" + script.split(
+    "function ConvertTo-LocalStatusTimestamp",
+    1,
+  )[1].split("function Invoke-Status", 1)[0]
+  status_function = "function Invoke-Status" + script.split(
+    "function Invoke-Status",
+    1,
+  )[1].split("function Invoke-Logs", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+$ApiPort = 18081
+function Import-QuantXEnvironment {{}}
+function Read-State {{
+  [pscustomobject]@{{ name = "api"; pid = 1; startedAt = "now" }}
+}}
+function Get-TrackedProcess {{ $null }}
+function Get-DevRuntimeConfiguration {{
+  [pscustomobject]@{{
+    profile = "full"
+    agentMode = "live"
+    configuredAccount = "ACCOUNT-1"
+    qmtLaunchState = "BLOCKED"
+    qmtReasonCode = "QMT_ENROLLMENT_REQUIRED"
+    liveTradingEnabled = $false
+  }}
+}}
+function Get-PortOwner {{ $null }}
+function Resolve-Python {{ $null }}
+function Show-ExternalDependencies {{}}
+$script:qmtHealthCalls = 0
+function Show-QmtAgentRuntimeHealth {{ $script:qmtHealthCalls++ }}
+{formatter_function}
+{status_function}
+$rendered = (& {{ Invoke-Status }} *>&1 | Out-String)
+[ordered]@{{
+  qmtHealthCalls = $script:qmtHealthCalls
+  output = $rendered
+}} | ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  payload = json.loads(result.stdout.strip())
+  assert payload["qmtHealthCalls"] == 0
+  assert "agent=blocked/offline" in payload["output"]
+  assert "liveTrading=DISABLED" in payload["output"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell QMT launch identity")
+def test_qmt_ready_wait_requires_live_process_and_current_launch_heartbeat() -> None:
+  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
+  powershell = shutil.which("pwsh") or shutil.which("powershell")
+  assert powershell is not None
+  wait_function = "function Wait-QmtAgentRuntimeReady" + script.split(
+    "function Wait-QmtAgentRuntimeReady",
+    1,
+  )[1].split("function Invoke-CaddyRecovery", 1)[0]
+  command = f"""
+$ErrorActionPreference = "Stop"
+$WarningPreference = "SilentlyContinue"
+$script:processAlive = $false
+$script:healthCalls = 0
+$script:healthPayload = $null
+function Get-TrackedProcess {{
+  param([object]$Entry)
+  if ($script:processAlive) {{
+    return [pscustomobject]@{{ Id = [int]$Entry.pid }}
+  }}
+  return $null
+}}
+function Invoke-RestMethod {{
+  param([string]$Uri, [int]$TimeoutSec)
+  $script:healthCalls++
+  return $script:healthPayload
+}}
+function Show-QmtAgentRuntimeHealth {{}}
+function Start-Sleep {{ param([int]$Seconds) }}
+{wait_function}
+$launchStartedAt = [datetime]::Parse(
+  "2026-08-20T04:00:00Z"
+).ToUniversalTime()
+$entry = [pscustomobject]@{{
+  name = "qmt-agent"
+  pid = 4242
+  startedAt = "2026-08-20T04:00:00Z"
+}}
+function Set-TestHealth {{
+  param([string]$HeartbeatAt)
+  $script:healthPayload = [pscustomobject]@{{
+    components = [pscustomobject]@{{
+      qmtAgent = [pscustomobject]@{{
+        status = "ready"
+        readyDevices = 1
+        modes = @("live")
+        protocolVersions = @("1.1")
+        accountIds = @("ACCOUNT-1")
+        latestSnapshotAgeSeconds = 1
+        latestReadyHeartbeatAt = $HeartbeatAt
+      }}
+    }}
+  }}
+}}
+Set-TestHealth -HeartbeatAt "2026-08-20T04:00:01Z"
+$dead = Wait-QmtAgentRuntimeReady `
+  -AccountId "ACCOUNT-1" `
+  -ProcessEntry $entry `
+  -LaunchStartedAt $launchStartedAt `
+  -TimeoutSeconds 0
+$script:processAlive = $true
+Set-TestHealth -HeartbeatAt "2026-08-20T03:59:59Z"
+$prior = Wait-QmtAgentRuntimeReady `
+  -AccountId "ACCOUNT-1" `
+  -ProcessEntry $entry `
+  -LaunchStartedAt $launchStartedAt `
+  -TimeoutSeconds 0
+Set-TestHealth -HeartbeatAt "2026-08-20T04:00:01Z"
+$current = Wait-QmtAgentRuntimeReady `
+  -AccountId "ACCOUNT-1" `
+  -ProcessEntry $entry `
+  -LaunchStartedAt $launchStartedAt `
+  -TimeoutSeconds 0
+[ordered]@{{
+  dead = $dead
+  prior = $prior
+  current = $current
+  healthCalls = $script:healthCalls
+}} | ConvertTo-Json -Compress
+"""
+  result = subprocess.run(
+    [powershell, "-NoProfile", "-Command", command],
+    capture_output=True,
+    text=True,
+    encoding="utf-8",
+    timeout=30,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert json.loads(result.stdout.strip()) == {
+    "dead": False,
+    "prior": False,
+    "current": True,
+    "healthCalls": 2,
+  }
 
 
 def test_agent_websocket_timeout_exceeds_native_watchdog() -> None:
@@ -532,7 +833,7 @@ def test_dev_caddy_start_and_readiness_are_shared_and_state_is_atomic() -> None:
     1,
   )[0]
   writer = script.split("function Write-State", 1)[1].split(
-    "function Get-TrackedProcess",
+    "function Get-DevRuntimeConfiguration",
     1,
   )[0]
   ordinary_up = script.split("function Invoke-Up", 1)[1].split(
@@ -570,9 +871,11 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
     "function Set-DevTradingModeEnvironment", 1
   )[1].split("function Invoke-Up", 1)[0]
 
+  assert "function Test-QmtAgentEnrollment" in script
   assert "function Assert-QmtAgentEnrollment" in script
-  assert "Assert-QmtAgentEnrollment -Python $qmtPython" in script
+  assert "Test-QmtAgentEnrollment -Python $qmtPython" in script
   assert "function Set-DevTradingModeEnvironment" in script
+  assert "function Disable-DevLiveTradingCapability" in script
   assert '$agentMode = Set-DevTradingModeEnvironment' in script
   assert (
     '$script:ModeWasExplicitlySpecified = $PSBoundParameters.ContainsKey("Mode")'
@@ -610,6 +913,41 @@ def test_full_profile_preflights_agent_and_uses_external_prefect() -> None:
   assert "-RequestedMode $Mode" in invoke_up
   assert "$Profile = $resolvedProfile" in invoke_up
   assert "Wait-QmtAgentRuntimeReady" in invoke_up
+  assert "if ($qmtAgentLaunchAllowed)" in invoke_up
+  assert "Disable-DevLiveTradingCapability" in invoke_up
+  assert '"QMT_ENROLLMENT_REQUIRED"' in invoke_up
+  assert '"QMT_RUNTIME_UNAVAILABLE"' in invoke_up
+  assert '"persisted history will continue to start.' in invoke_up
+  assert '$script:RuntimeAgentMode = $agentMode' in invoke_up
+  assert '$script:RuntimeQmtLaunchState = if' in invoke_up
+  assert (
+    '$env:QMT_AGENT_LAUNCH_STATE = $script:RuntimeQmtLaunchState'
+    in invoke_up
+  )
+  assert (
+    '$env:QMT_AGENT_LAUNCH_REASON = $script:RuntimeQmtReasonCode'
+    in invoke_up
+  )
+  assert (
+    "$env:QMT_AGENT_LAUNCH_STARTED_AT = "
+    "$script:RuntimeQmtLaunchStartedAt"
+    in invoke_up
+  )
+  assert invoke_up.index("$env:QMT_AGENT_LAUNCH_STATE") < invoke_up.index(
+    "Start-ManagedProcess"
+  )
+  assert invoke_up.index("$env:QMT_AGENT_LAUNCH_REASON") < invoke_up.index(
+    "Start-ManagedProcess"
+  )
+  assert invoke_up.index(
+    "$env:QMT_AGENT_LAUNCH_STARTED_AT"
+  ) < invoke_up.index("Start-ManagedProcess")
+  qmt_launch = invoke_up.index('$qmtProcessLaunchStartedAt = [datetime]::UtcNow')
+  qmt_process = invoke_up.index('-Name "qmt-agent"')
+  assert qmt_launch < qmt_process
+  assert "-ProcessEntry $qmtProcessEntry" in invoke_up
+  assert "-LaunchStartedAt $qmtProcessLaunchStartedAt" in invoke_up
+  assert '$env:QMT_AGENT_MODE = "data-only"' not in invoke_up
   assert '$protocols -contains "1.1"' in script
   assert "[int]$qmt.readyDevices -ge 1" in script
 
@@ -883,43 +1221,3 @@ def test_release_bundle_is_versioned_offline_and_checksum_verified() -> None:
   assert "--ignore-installed" in install
   assert "New-Item -ItemType Junction" in install
   assert "automatic database downgrade is forbidden" in install
-
-
-@pytest.mark.skipif(os.name != "nt", reason="PowerShell status timestamp formatting")
-def test_status_formats_managed_process_start_time_in_local_timezone() -> None:
-  script = (OPS / "quantx.ps1").read_text(encoding="utf-8")
-  powershell = shutil.which("pwsh") or shutil.which("powershell")
-  assert powershell is not None
-  formatter = "function ConvertTo-LocalStatusTimestamp" + script.split(
-    "function ConvertTo-LocalStatusTimestamp",
-    1,
-  )[1].split("function Invoke-Status", 1)[0]
-  command = f"""
-$ErrorActionPreference = "Stop"
-{formatter}
-$source = "2026-08-20T05:33:53Z"
-[ordered]@{{
-  actual = ConvertTo-LocalStatusTimestamp -Value $source
-  expected = ([datetimeoffset]::Parse($source)).ToLocalTime().ToString(
-    "yyyy-MM-dd HH:mm:ss zzz",
-    [Globalization.CultureInfo]::InvariantCulture
-  )
-}} | ConvertTo-Json -Compress
-"""
-  result = subprocess.run(
-    [powershell, "-NoProfile", "-Command", command],
-    capture_output=True,
-    text=True,
-    encoding="utf-8",
-    timeout=30,
-    check=False,
-  )
-
-  assert result.returncode == 0, result.stderr
-  payload = json.loads(result.stdout.strip())
-  assert payload["actual"] == payload["expected"]
-  status = script.split("function Invoke-Status", 1)[1].split(
-    "function Invoke-Logs",
-    1,
-  )[0]
-  assert "ConvertTo-LocalStatusTimestamp -Value $entry.startedAt" in status

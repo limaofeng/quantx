@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -278,6 +278,60 @@ async def test_multiple_ready_live_agents_fail_closed() -> None:
     call.args[0] is RuntimeComponentHeartbeat
     for call in db.get.await_args_list
   )
+
+
+@pytest.mark.asyncio
+async def test_live_device_requires_heartbeat_from_current_managed_launch(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  device = SimpleNamespace(
+    id="device-1",
+    authorized_account_ids=["account-1"],
+    capabilities=["live"],
+  )
+
+  class Scalars:
+    @staticmethod
+    def all():
+      return [device]
+
+  class Result:
+    @staticmethod
+    def scalars():
+      return Scalars()
+
+  launch_started_at = utcnow() - timedelta(seconds=10)
+  heartbeat = SimpleNamespace(
+    status="READY",
+    updated_at=launch_started_at - timedelta(seconds=1),
+  )
+  db = SimpleNamespace(
+    execute=AsyncMock(return_value=Result()),
+    get=AsyncMock(return_value=heartbeat),
+  )
+  monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "LAUNCH_ALLOWED")
+  monkeypatch.setenv(
+    "QMT_AGENT_LAUNCH_STARTED_AT",
+    launch_started_at.replace(tzinfo=timezone.utc).isoformat(),
+  )
+  service = TradeCommandService(db)
+
+  with pytest.raises(AgentUnavailableError, match="具备交易能力"):
+    await service._device_for(
+      user_id="user-1",
+      account_id="account-1",
+      execution_mode="live",
+    )
+
+  heartbeat.updated_at = launch_started_at + timedelta(seconds=1)
+
+  assert (
+    await service._device_for(
+      user_id="user-1",
+      account_id="account-1",
+      execution_mode="live",
+    )
+  ) is device
 
 
 @pytest.mark.asyncio

@@ -9,8 +9,15 @@
 `QMT_REAL_TRADING_ENABLED=true` 和 `QMT_ACCOUNT_WHITELIST` 时启动。
 production 还必须设置 `T_TRADE_LIVE_ENABLED=true`；服务端账户白名单、
 灰度阶段、快照、对账与策略授权仍会独立阻断不合规命令。普通开发 `up`
-默认提升为 `full/live` 并启动 QMT Agent；启动器保持服务端为 `development`，只为
-QMT Agent 子进程注入 `ENV=testing`、账户白名单和实盘开关。账户可显式传入，
+默认提升为 `full/live`；登记与运行时预检通过时才启动 QMT Agent。启动器保持
+服务端为 `development`，只为 QMT Agent 子进程注入 `ENV=testing`、账户白名单
+和实盘开关。预检失败时仍保持期望模式为 `live`，但会在 API/Engine 启动前关闭
+全部实盘能力门、清空实盘账户允许列表并把 QMT 标记为 `BLOCKED`，让非 QMT
+服务和基于已持久化历史行情的回测独立运行；这不是 `data-only`，也不代表 Agent
+已经 `READY`。预检通过时，API/Engine 只消费不早于本次
+`QMT_AGENT_LAUNCH_STARTED_AT` 的 Agent 心跳，启动验收还要求受管 QMT 进程的
+PID 与进程启动时间持续匹配；上一轮残留的 90 秒新鲜心跳不能恢复实盘能力。
+账户可显式传入，
 也可由本机环境中的唯一账户配置自动解析：
 
 ```powershell
