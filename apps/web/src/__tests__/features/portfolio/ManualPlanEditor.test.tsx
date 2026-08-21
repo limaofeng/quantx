@@ -334,6 +334,9 @@ describe('ManualPlanEditor', () => {
 
     await user.click(screen.getByRole('button', { name: '手动添加计划' }));
     await user.type(screen.getByLabelText('计划卖出数量'), '300');
+    expect(
+      screen.getByText(/整笔买入委托只能作为一个有效卖出计划的成本依据/)
+    ).toBeVisible();
     await user.click(screen.getByRole('checkbox', { name: /委托 #9001/ }));
     await user.click(screen.getByRole('button', { name: '创建卖出计划' }));
 

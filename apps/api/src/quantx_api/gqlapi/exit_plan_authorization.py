@@ -25,6 +25,7 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   authorization_expiry_for_challenge,
   build_exit_plan_authorization_snapshot,
   grant_exact_auto_exit_authorization,
+  lock_exit_plan_scope_for_plan,
   require_authorizable_live_plan,
 )
 from quantx_infrastructure.services.trade_command_service import (
@@ -146,17 +147,14 @@ def _request_from_payload(payload: dict[str, Any]) -> ExitPlanAuthorizationReque
   )
 
 
-def _require_current_native_account(
+def _require_current_session_account(
   principal: Principal,
   account_id: str,
 ) -> None:
-  if (
-    not principal.is_native_session
-    or principal.authorized_account_ids != (account_id,)
-  ):
+  if principal.authorized_account_ids != (account_id,):
     raise TradeApprovalChallengeError(
-      "NATIVE_PRIMARY_ACCOUNT_REQUIRED",
-      "退出计划自动授权仅允许当前原生设备会话的唯一主账户",
+      "SINGLE_ACCOUNT_SESSION_REQUIRED",
+      "退出计划自动授权要求当前会话只授权该资金账户",
     )
   principal.require_account(account_id)
 
@@ -323,7 +321,7 @@ class ExitPlanAuthorizationChallengeService:
     request: ExitPlanAuthorizationRequestData,
   ) -> ExitPlanAuthorizationPreviewData:
     principal.require_permission("liquidation:control")
-    _require_current_native_account(principal, request.account_id)
+    _require_current_session_account(principal, request.account_id)
     challenge_id = str(uuid.uuid4())
     now = time_utils.now()
     challenge_expires_at = now + _CHALLENGE_LIFETIME
@@ -420,7 +418,7 @@ class ExitPlanAuthorizationChallengeService:
         "INVALID_CONFIRMATION_TOKEN",
         "确认凭据无效，请重新获取授权预览",
       )
-    _require_current_native_account(principal, request.account_id)
+    _require_current_session_account(principal, request.account_id)
 
     async with AsyncSessionLocal() as db:
       try:
@@ -453,9 +451,18 @@ class ExitPlanAuthorizationChallengeService:
             "账户、计划、版本或幂等键与授权预览不一致",
           )
         if challenge.consumed_at is not None:
-          return ExitPlanAuthorizationChallengeService._existing_result(
-            challenge
+          return ExitPlanAuthorizationChallengeService._existing_result(challenge)
+
+        scope = await lock_exit_plan_scope_for_plan(db, request.plan_id)
+        record = scope.plan(request.plan_id)
+        try:
+          require_authorizable_live_plan(
+            record,
+            account_id=request.account_id,
+            expected_config_version=request.expected_config_version,
           )
+        except ValueError as exc:
+          raise _plan_error(exc) from exc
 
         try:
           current = await AuthService(db).lock_and_validate_session(
@@ -464,7 +471,7 @@ class ExitPlanAuthorizationChallengeService:
             account_id=request.account_id,
           )
           current.require_permission("trade:approve")
-          _require_current_native_account(current, request.account_id)
+          _require_current_session_account(current, request.account_id)
         except AuthError as exc:
           raise TradeApprovalChallengeError(exc.code, exc.message) from exc
         access = await db.scalar(
@@ -481,23 +488,12 @@ class ExitPlanAuthorizationChallengeService:
             "当前用户已无权使用该退出计划账户",
           )
 
-        record = (
-          await db.execute(
-            select(AutoExitPlanRecord)
-            .where(AutoExitPlanRecord.plan_id == request.plan_id)
-            .with_for_update()
-          )
-        ).scalar_one_or_none()
         try:
-          require_authorizable_live_plan(
-            record,
-            account_id=request.account_id,
-            expected_config_version=request.expected_config_version,
-          )
           snapshot = await build_exit_plan_authorization_snapshot(
             db,
             record,
             lock_mutable_rows=True,
+            locked_scope=scope,
           )
         except ValueError as exc:
           raise _plan_error(exc) from exc

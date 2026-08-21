@@ -24,6 +24,7 @@ from quantx_infrastructure.services.auto_exit_plan_service import (
   UNTIL_SNAPSHOT_CLEARED,
   AutoExitPlanService,
 )
+from quantx_infrastructure.services.exit_plan_scope_lock import LockedExitPlanScope
 
 
 class ScalarResult:
@@ -130,6 +131,20 @@ def active_record(*, plan_id="existing-plan", volume=200, pending=False):
   )
 
 
+def locked_scope_for(
+  record,
+  *,
+  position=None,
+  plans=None,
+):
+  scope_plans = list(plans or [record])
+  return LockedExitPlanScope(
+    position=position or liquidation_position(volume=1000, available=1000),
+    plans=scope_plans,
+    target_plan=record,
+  )
+
+
 def liquidation_position(*, volume=500, available=300):
   return SimpleNamespace(
     account_id="account-a",
@@ -211,6 +226,10 @@ async def test_capacity_restore_requires_explicit_reconciliation(monkeypatch):
     db,
     account_id="account-a",
     instrument_code="600000.SH",
+    locked_scope=LockedExitPlanScope(
+      position=db.position,
+      plans=[record],
+    ),
   )
 
   assert guarded["ready"] is False
@@ -222,11 +241,77 @@ async def test_capacity_restore_requires_explicit_reconciliation(monkeypatch):
     account_id="account-a",
     instrument_code="600000.SH",
     allow_restore=True,
+    locked_scope=LockedExitPlanScope(
+      position=db.position,
+      plans=[record],
+    ),
   )
 
   assert reconciled["ready"] is True
   assert record.capacity_status == service_module.CAPACITY_READY
   assert reconciled["capacity_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_capacity_shortfall_revokes_authority_and_emits_audit_events(
+  monkeypatch,
+):
+  first = active_record(plan_id="capacity-plan-a", volume=300)
+  second = active_record(plan_id="capacity-plan-b", volume=300)
+  for record in (first, second):
+    record.execution_mode = "live"
+    record.auto_exit_authorized = True
+    record.auto_exit_authorization_fingerprint = "f" * 64
+    record.auto_exit_authorization_config_version = 1
+    record.auto_exit_authorized_at = datetime.now()
+    record.auto_exit_authorization_expires_at = datetime.now() + timedelta(days=1)
+    record.auto_exit_authorization_challenge_id = "challenge-1"
+    record.auto_exit_authorization_user_id = "user-1"
+    record.auto_exit_authorization_device_session_id = "session-1"
+    state = dict(record.plan_state)
+    template = dict(state["template"])
+    template["auto_exit_authorized"] = True
+    state["template"] = template
+    record.plan_state = state
+  events = []
+
+  async def append_event(_db, **kwargs):
+    events.append(kwargs)
+
+  monkeypatch.setattr(
+    AutoExitPlanService,
+    "_append_event",
+    staticmethod(append_event),
+  )
+  scope = LockedExitPlanScope(
+    position=liquidation_position(volume=500, available=500),
+    plans=[first, second],
+    target_plan=first,
+  )
+
+  result = await AutoExitPlanService()._reconcile_capacity_locked(
+    SimpleNamespace(),
+    account_id="account-a",
+    instrument_code="600000.SH",
+    locked_scope=scope,
+  )
+
+  assert result["ready"] is False
+  assert result["protected_volume"] == 600
+  assert [item.capacity_status for item in (first, second)] == [
+    service_module.CAPACITY_RECONCILE_REQUIRED,
+    service_module.CAPACITY_RECONCILE_REQUIRED,
+  ]
+  for record in (first, second):
+    assert record.auto_exit_authorized is False
+    assert record.auto_exit_authorization_fingerprint is None
+    assert record.auto_exit_authorization_config_version is None
+    assert record.auto_exit_authorization_challenge_id is None
+    assert record.plan_state["template"]["auto_exit_authorized"] is False
+  assert [item["event_type"] for item in events] == [
+    "HOLDING_CAPACITY_RECONCILIATION_REQUIRED",
+    "HOLDING_CAPACITY_RECONCILIATION_REQUIRED",
+  ]
 
 
 @pytest.mark.asyncio
@@ -282,6 +367,79 @@ async def test_buy_order_cost_basis_is_weighted_and_requires_coverage():
       instrument_code="600000.SH",
       requested_volume=400,
     )
+
+
+@pytest.mark.asyncio
+async def test_buy_order_cost_basis_cannot_be_claimed_by_two_active_plans():
+  claimed = active_record(plan_id="claimed-plan", volume=100)
+  claimed.cost_basis_snapshot = {
+    "mode": "BROKER_BUY_ORDERS",
+    "selected_orders": [{"order_id": "1"}],
+  }
+  order = SimpleNamespace(
+    id=1,
+    time=datetime(2026, 8, 20, 10, 0),
+    traded_volume=100,
+    traded_price=10.0,
+  )
+
+  with pytest.raises(ValueError, match="已被其他有效卖出计划"):
+    await AutoExitPlanService._resolve_manual_cost_basis(
+      FakeDb([order]),
+      payload={
+        "cost_basis": {
+          "mode": "BROKER_BUY_ORDERS",
+          "order_ids": ["1"],
+        }
+      },
+      account_id="account-a",
+      instrument_code="600000.SH",
+      requested_volume=100,
+      reserving_plans=[claimed],
+    )
+
+
+@pytest.mark.asyncio
+async def test_cost_basis_candidates_hide_orders_claimed_by_active_plans(
+  monkeypatch,
+):
+  claimed = active_record(plan_id="claimed-plan", volume=100)
+  claimed.cost_basis_snapshot = {
+    "mode": "BROKER_BUY_ORDERS",
+    "selected_orders": [{"order_id": "1"}],
+  }
+  orders = [
+    SimpleNamespace(
+      id=1,
+      time=datetime(2026, 8, 20, 10, 0),
+      traded_volume=100,
+      traded_price=10.0,
+      strategy_name="first",
+      remark=None,
+    ),
+    SimpleNamespace(
+      id=2,
+      time=datetime(2026, 8, 21, 10, 0),
+      traded_volume=100,
+      traded_price=11.0,
+      strategy_name="second",
+      remark=None,
+    ),
+  ]
+  session = FakeSession(orders)
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(
+    service_module,
+    "AutoExitPlanRepository",
+    lambda db: FakePlanRepository(db, [claimed]),
+  )
+
+  result = await AutoExitPlanService().list_cost_basis_candidates(
+    account_id="account-a",
+    instrument_code="600000.SH",
+  )
+
+  assert [item["order_id"] for item in result] == ["2"]
 
 
 def pending_plan():
@@ -383,16 +541,12 @@ def strategy_exit_record(
     execution_mode="live",
     auto_exit_authorized=authorized,
     auto_exit_authorization_fingerprint="fingerprint" if authorized else None,
-    auto_exit_authorization_config_version=(
-      config_version if authorized else None
-    ),
+    auto_exit_authorization_config_version=(config_version if authorized else None),
     auto_exit_authorized_at=now if authorized else None,
     auto_exit_authorization_expires_at=(
       now + timedelta(minutes=5) if authorized else None
     ),
-    auto_exit_authorization_challenge_id=(
-      "challenge-1" if authorized else None
-    ),
+    auto_exit_authorization_challenge_id=("challenge-1" if authorized else None),
     auto_exit_authorization_user_id="user-1" if authorized else None,
     auto_exit_authorization_device_session_id=(
       "device-session-1" if authorized else None
@@ -641,6 +795,11 @@ async def test_stale_market_context_is_persisted_without_exit_submit(
   submit = AsyncMock()
   monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
   monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
   monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
 
   result = await AutoExitPlanService().evaluate_and_submit(
@@ -658,6 +817,59 @@ async def test_stale_market_context_is_persisted_without_exit_submit(
   assert record.data_quality == "MARKET_DATA_STALE"
   assert record.last_error == "market_data_stale"
   assert session.committed
+  submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capacity_shortfall_blocks_evaluation_before_submission(
+  monkeypatch,
+):
+  record = active_record(plan_id="capacity-evaluate", volume=300)
+  other = active_record(plan_id="capacity-other", volume=300)
+  scope = locked_scope_for(
+    record,
+    position=liquidation_position(volume=500, available=500),
+    plans=[record, other],
+  )
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+  submit = AsyncMock()
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=scope),
+  )
+  monkeypatch.setattr(AutoExitPlanService, "_submit_decision", submit)
+  monkeypatch.setattr(AutoExitPlanService, "_append_event", AsyncMock())
+
+  result = await AutoExitPlanService().evaluate_and_submit(
+    plan_id=record.plan_id,
+    context=ExitEvaluationContext(
+      timestamp=datetime.now(),
+      current_price=21.0,
+      market_data_age_seconds=0.0,
+      source="QMT_WHOLE_QUOTE",
+    ),
+    position=scope.position,
+    market_ready=lambda: True,
+  )
+
+  assert result is None
+  assert session.committed
+  assert record.capacity_status == service_module.CAPACITY_RECONCILE_REQUIRED
   submit.assert_not_awaited()
 
 
@@ -727,6 +939,11 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
   monkeypatch.setattr(service_module, "AutoExitPlanRepository", Repository)
   monkeypatch.setattr(
     service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=locked_scope_for(record)),
+  )
+  monkeypatch.setattr(
+    service_module,
     "TradeIntentProcessor",
     lambda: processor,
   )
@@ -753,11 +970,75 @@ async def test_confirm_intent_rejects_nonready_stream_without_processor_submit(
   assert record.last_error == "MARKET_DATA_STREAM_NOT_READY"
   assert intent.status == "REJECTED"
   assert intent.notes == "MARKET_DATA_STREAM_NOT_READY"
-  assert intent.intent_metadata["market_data_gate"] == (
-    "MARKET_DATA_STREAM_NOT_READY"
-  )
+  assert intent.intent_metadata["market_data_gate"] == ("MARKET_DATA_STREAM_NOT_READY")
   assert record.plan_state["pending_intent_id"] == ""
   assert session.committed
+  processor.process_approved_exit_intent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capacity_shortfall_blocks_manual_confirmation_before_processor(
+  monkeypatch,
+):
+  plan = pending_plan()
+  record = active_record(plan_id=plan.plan_id, volume=300)
+  record.plan_state = plan.to_dict()
+  record.status = plan.status.value
+  other = active_record(plan_id="capacity-confirm-other", volume=300)
+  intent = SimpleNamespace(
+    id="intent-1",
+    status="AWAITING_APPROVAL",
+    notes=None,
+    intent_metadata={},
+  )
+  scope = locked_scope_for(
+    record,
+    position=liquidation_position(volume=500, available=500),
+    plans=[record, other],
+  )
+
+  class Session:
+    committed = False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, _model, key):
+      return intent if key == intent.id else None
+
+    async def commit(self):
+      self.committed = True
+
+  session = Session()
+  processor = SimpleNamespace(process_approved_exit_intent=AsyncMock())
+  monkeypatch.setattr(service_module, "AsyncSessionLocal", lambda: session)
+  monkeypatch.setattr(
+    service_module,
+    "lock_exit_plan_scope_for_plan",
+    AsyncMock(return_value=scope),
+  )
+  monkeypatch.setattr(service_module, "TradeIntentProcessor", lambda: processor)
+  monkeypatch.setattr(AutoExitPlanService, "_append_event", AsyncMock())
+
+  with pytest.raises(ValueError, match="持仓少于计划认领数量"):
+    await AutoExitPlanService().confirm_exit_intent(
+      plan_id=record.plan_id,
+      intent_id=intent.id,
+      context=ExitEvaluationContext(
+        timestamp=datetime.now(),
+        current_price=10.0,
+        market_data_age_seconds=0.0,
+        source="QMT_WHOLE_QUOTE",
+      ),
+      position=scope.position,
+      market_ready=lambda: True,
+    )
+
+  assert session.committed
+  assert record.capacity_status == service_module.CAPACITY_RECONCILE_REQUIRED
   processor.process_approved_exit_intent.assert_not_awaited()
 
 
@@ -795,9 +1076,7 @@ async def test_strategy_plan_sync_expands_same_version_cumulative_fill(
   assert record.auto_exit_authorization_challenge_id is None
   assert events == [
     {
-      "business_key": (
-        f"strategy-plan-entry-expanded:{record.plan_id}:1:200"
-      ),
+      "business_key": (f"strategy-plan-entry-expanded:{record.plan_id}:1:200"),
       "plan_id": record.plan_id,
       "event_type": "STRATEGY_PLAN_ENTRY_EXPANDED",
       "payload": {

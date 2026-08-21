@@ -57,6 +57,15 @@ import {
 import type { Position } from '../types';
 
 import {
+  ExitPlanCapacityBanner,
+  ExitPlanCostBasisEditor,
+  ExitPlanCostBasisSummary,
+} from './ExitPlanCostBasis';
+import {
+  summarizeSelectedCostBasis,
+  type ManualCostBasisMode,
+} from './exitPlanCostBasisUtils';
+import {
   ManualExitRuleEditor,
   type ManualExitRuleDraft,
 } from './ManualExitRuleEditor';
@@ -208,28 +217,6 @@ function PlanWarnings({ plan }: { plan: ExitPlan }) {
   );
 }
 
-function readCostBasis(value: unknown) {
-  const basis =
-    value && typeof value === 'object'
-      ? (value as Record<string, unknown>)
-      : {};
-  return {
-    basisVolume:
-      typeof basis.basis_volume === 'number' ? basis.basis_volume : 0,
-    frozenAt: typeof basis.frozen_at === 'string' ? basis.frozen_at : '',
-    mode:
-      typeof basis.mode === 'string' ? basis.mode : 'POSITION_AVERAGE_SNAPSHOT',
-    unitCost: typeof basis.unit_cost_cny === 'number' ? basis.unit_cost_cny : 0,
-  };
-}
-
-function costBasisModeLabel(mode: string) {
-  if (mode === 'BROKER_BUY_ORDERS') return '成交委托';
-  if (mode === 'MANUAL_UNIT_COST') return '手工全成本';
-  if (mode === 'ENTRY_FILLS') return '策略入场成交';
-  return '历史持仓均价';
-}
-
 function PlanCard({
   busy,
   onCancel,
@@ -263,7 +250,6 @@ function PlanCard({
     plan.autoExitAuthorized &&
     plan.autoExitAuthorizationConfigVersion === plan.configVersion &&
     authorizationExpiresAt > Date.now();
-  const costBasis = readCostBasis(plan.costBasis);
   return (
     <article className="rounded-md border border-white/8 bg-[#0b1120]/80 p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -308,15 +294,8 @@ function PlanCard({
             <span>剩余 {plan.remainingVolume.toLocaleString()} 股</span>
             <span>版本 v{plan.configVersion}</span>
           </div>
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold text-slate-400">
-            <span>成本依据：{costBasisModeLabel(costBasis.mode)}</span>
-            <span>冻结成本 ¥{costBasis.unitCost.toFixed(4)}/股</span>
-            {costBasis.basisVolume > 0 && (
-              <span>依据数量 {costBasis.basisVolume.toLocaleString()} 股</span>
-            )}
-            {costBasis.frozenAt && (
-              <span>冻结于 {formatDateTime(costBasis.frozenAt)}</span>
-            )}
+          <div className="mt-2">
+            <ExitPlanCostBasisSummary showFrozenAt value={plan.costBasis} />
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {rules.map((rule, index) => {
@@ -444,9 +423,8 @@ export function ManualPlanEditor({
     initialInstrumentCode || ''
   );
   const [protectedVolume, setProtectedVolume] = React.useState('');
-  const [costBasisMode, setCostBasisMode] = React.useState<
-    'BROKER_BUY_ORDERS' | 'MANUAL_UNIT_COST'
-  >('BROKER_BUY_ORDERS');
+  const [costBasisMode, setCostBasisMode] =
+    React.useState<ManualCostBasisMode>('BROKER_BUY_ORDERS');
   const [selectedOrderIds, setSelectedOrderIds] = React.useState<string[]>([]);
   const [manualUnitCost, setManualUnitCost] = React.useState('');
   const [executionMode, setExecutionMode] = React.useState<'paper' | 'live'>(
@@ -504,25 +482,16 @@ export function ManualPlanEditor({
   const ruleTypes = capabilities.data?.exitPlanCapabilities.ruleTypes ?? [];
   const candidateItems =
     costBasisCandidates.data?.exitPlanCostBasisCandidates?.items ?? [];
-  const selectedCandidates = candidateItems.filter(item =>
-    selectedOrderIds.includes(item.orderId)
+  const selectedCostBasis = summarizeSelectedCostBasis(
+    candidateItems,
+    selectedOrderIds
   );
-  const selectedBasisVolume = selectedCandidates.reduce(
-    (total, item) => total + item.tradedVolume,
-    0
-  );
-  const selectedBasisCost = selectedCandidates.reduce(
-    (total, item) =>
-      total + item.tradedPrice * item.tradedVolume + item.estimatedBuyFeeCny,
-    0
-  );
-  const selectedUnitCost =
-    selectedBasisVolume > 0 ? selectedBasisCost / selectedBasisVolume : 0;
   const requestedVolume = Number(protectedVolume);
   const costBasisInvalid = editingPlan
     ? false
     : costBasisMode === 'BROKER_BUY_ORDERS'
-      ? selectedBasisVolume < requestedVolume || selectedBasisVolume <= 0
+      ? selectedCostBasis.volume < requestedVolume ||
+        selectedCostBasis.volume <= 0
       : !Number.isFinite(Number(manualUnitCost)) || Number(manualUnitCost) <= 0;
 
   React.useEffect(() => {
@@ -917,220 +886,26 @@ export function ManualPlanEditor({
           value={remark}
         />
       </label>
-      {capacity.data?.exitPlanHoldingCapacity && (
-        <div
-          className={cn(
-            'mt-3 flex flex-wrap items-center justify-between gap-2 rounded border px-3 py-2 text-[11px] font-bold',
-            capacity.data.exitPlanHoldingCapacity.capacityStatus ===
-              'RECONCILE_REQUIRED'
-              ? 'border-amber-400/30 bg-amber-500/10 text-amber-100'
-              : 'border-white/8 bg-black/10 text-slate-400'
-          )}
-          role={
-            capacity.data.exitPlanHoldingCapacity.capacityStatus ===
-            'RECONCILE_REQUIRED'
-              ? 'alert'
-              : undefined
-          }
-        >
-          <span>
-            持仓 {capacity.data.exitPlanHoldingCapacity.totalVolume} ·
-            已纳入计划 {capacity.data.exitPlanHoldingCapacity.protectedVolume} ·
-            可加入计划 {capacity.data.exitPlanHoldingCapacity.unallocatedVolume}{' '}
-            股
-            {capacity.data.exitPlanHoldingCapacity.capacityError
-              ? ` · ${capacity.data.exitPlanHoldingCapacity.capacityError}`
-              : ''}
-          </span>
-          {capacity.data.exitPlanHoldingCapacity.capacityStatus ===
-            'RECONCILE_REQUIRED' && (
-            <Button
-              disabled={reconcileResult.fetching}
-              onClick={recheckCapacity}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              {reconcileResult.fetching ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <RefreshCw />
-              )}
-              按最新持仓重新对账
-            </Button>
-          )}
-        </div>
-      )}
-      <fieldset className="mt-3 rounded-md border border-white/8 bg-black/10 p-3">
-        <legend className="px-1 text-xs font-black text-slate-200">
-          成本依据
-        </legend>
-        {editingPlan ? (
-          <div className="text-[11px] font-bold leading-5 text-slate-400">
-            {(() => {
-              const basis = readCostBasis(editingPlan.costBasis);
-              return (
-                <>
-                  {costBasisModeLabel(basis.mode)} · ¥
-                  {basis.unitCost.toFixed(4)}/股 · 依据数量{' '}
-                  {basis.basisVolume.toLocaleString()} 股
-                  <span className="ml-2 text-slate-500">
-                    成本依据创建后冻结；如需更换，请取消并重建计划。
-                  </span>
-                </>
-              );
-            })()}
-          </div>
-        ) : (
-          <div className="grid gap-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <label
-                className={cn(
-                  'cursor-pointer rounded-md border p-3 transition-colors',
-                  costBasisMode === 'BROKER_BUY_ORDERS'
-                    ? 'border-blue-400/50 bg-blue-500/10'
-                    : 'border-white/8 hover:border-white/20'
-                )}
-              >
-                <span className="flex items-center gap-2 text-xs font-black text-slate-200">
-                  <input
-                    checked={costBasisMode === 'BROKER_BUY_ORDERS'}
-                    name="manual-plan-cost-basis"
-                    onChange={() => setCostBasisMode('BROKER_BUY_ORDERS')}
-                    type="radio"
-                  />
-                  使用已成交买入委托
-                </span>
-                <span className="mt-1 block text-[10px] font-medium leading-4 text-slate-500">
-                  服务端按所选成交额和估算买入费用计算，并在创建时冻结。
-                </span>
-              </label>
-              <label
-                className={cn(
-                  'cursor-pointer rounded-md border p-3 transition-colors',
-                  costBasisMode === 'MANUAL_UNIT_COST'
-                    ? 'border-blue-400/50 bg-blue-500/10'
-                    : 'border-white/8 hover:border-white/20'
-                )}
-              >
-                <span className="flex items-center gap-2 text-xs font-black text-slate-200">
-                  <input
-                    checked={costBasisMode === 'MANUAL_UNIT_COST'}
-                    name="manual-plan-cost-basis"
-                    onChange={() => setCostBasisMode('MANUAL_UNIT_COST')}
-                    type="radio"
-                  />
-                  手工填写每股全成本
-                </span>
-                <span className="mt-1 block text-[10px] font-medium leading-4 text-slate-500">
-                  适合历史委托不完整；输入值需已包含买入手续费。
-                </span>
-              </label>
-            </div>
-            {costBasisMode === 'BROKER_BUY_ORDERS' ? (
-              <div className="grid gap-2">
-                <div className="max-h-48 overflow-y-auto rounded-md border border-white/8">
-                  {costBasisCandidates.fetching &&
-                  candidateItems.length === 0 ? (
-                    <div className="flex items-center gap-2 p-3 text-xs text-slate-500">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      正在读取已成交买入委托
-                    </div>
-                  ) : candidateItems.length === 0 ? (
-                    <div className="p-3 text-xs font-bold text-slate-500">
-                      没有可用的买入成交记录，请改用手工每股全成本。
-                    </div>
-                  ) : (
-                    candidateItems.map(item => (
-                      <label
-                        className="flex cursor-pointer items-start gap-3 border-b border-white/5 p-3 last:border-b-0 hover:bg-white/[0.03]"
-                        key={item.orderId}
-                      >
-                        <input
-                          checked={selectedOrderIds.includes(item.orderId)}
-                          className="mt-0.5"
-                          onChange={event =>
-                            setSelectedOrderIds(current =>
-                              event.target.checked
-                                ? [...current, item.orderId]
-                                : current.filter(id => id !== item.orderId)
-                            )
-                          }
-                          type="checkbox"
-                        />
-                        <span className="min-w-0 flex-1">
-                          <span className="flex flex-wrap justify-between gap-2 text-xs font-black text-slate-200">
-                            <span>委托 #{item.orderId}</span>
-                            <span>
-                              {item.tradedVolume.toLocaleString()} 股 × ¥
-                              {item.tradedPrice.toFixed(3)}
-                            </span>
-                          </span>
-                          <span className="mt-1 block text-[10px] font-medium text-slate-500">
-                            {formatDateTime(item.orderTime)} · 估算买入费 ¥
-                            {item.estimatedBuyFeeCny.toFixed(2)}
-                          </span>
-                        </span>
-                      </label>
-                    ))
-                  )}
-                </div>
-                <div
-                  className={cn(
-                    'rounded border px-3 py-2 text-[11px] font-bold',
-                    selectedBasisVolume >= requestedVolume &&
-                      selectedBasisVolume > 0
-                      ? 'border-emerald-400/20 text-emerald-200'
-                      : 'border-amber-400/25 text-amber-200'
-                  )}
-                  role="status"
-                >
-                  已选 {selectedCandidates.length} 笔 · 成交{' '}
-                  {selectedBasisVolume.toLocaleString()} 股 · 冻结成本约 ¥
-                  {selectedUnitCost.toFixed(4)}/股
-                  {selectedBasisVolume < requestedVolume && (
-                    <span>
-                      {' '}
-                      · 尚差{' '}
-                      {Math.max(
-                        0,
-                        requestedVolume - selectedBasisVolume
-                      ).toLocaleString()}{' '}
-                      股
-                    </span>
-                  )}
-                </div>
-                <p className="text-[10px] font-medium leading-4 text-slate-500">
-                  {costBasisCandidates.data?.exitPlanCostBasisCandidates
-                    ?.historyWarning ||
-                    '计划创建后成本依据冻结，后续买入不会改变该计划。'}
-                </p>
-              </div>
-            ) : (
-              <div className="grid gap-1 text-xs font-bold text-slate-400">
-                <label htmlFor="manual-plan-unit-cost">每股全成本（元）</label>
-                <input
-                  aria-describedby="manual-plan-unit-cost-help"
-                  className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
-                  id="manual-plan-unit-cost"
-                  min="0.0001"
-                  onChange={event => setManualUnitCost(event.target.value)}
-                  placeholder="例如 42.8365"
-                  step="0.0001"
-                  type="number"
-                  value={manualUnitCost}
-                />
-                <span
-                  className="text-[10px] font-medium leading-4 text-slate-500"
-                  id="manual-plan-unit-cost-help"
-                >
-                  必须包含买入手续费；系统只会另外估算卖出费用。
-                </span>
-              </div>
-            )}
-          </div>
-        )}
-      </fieldset>
+      <ExitPlanCapacityBanner
+        busy={reconcileResult.fetching}
+        capacity={capacity.data?.exitPlanHoldingCapacity}
+        onReconcile={recheckCapacity}
+      />
+      <ExitPlanCostBasisEditor
+        candidates={candidateItems}
+        candidatesFetching={costBasisCandidates.fetching}
+        editingCostBasis={editingPlan?.costBasis}
+        historyWarning={
+          costBasisCandidates.data?.exitPlanCostBasisCandidates?.historyWarning
+        }
+        manualUnitCost={manualUnitCost}
+        mode={costBasisMode}
+        onManualUnitCostChange={setManualUnitCost}
+        onModeChange={setCostBasisMode}
+        onSelectedOrderIdsChange={setSelectedOrderIds}
+        requestedVolume={requestedVolume}
+        selectedOrderIds={selectedOrderIds}
+      />
       <div className="mt-3 grid gap-3">
         {rules.map((rule, index) => (
           <ManualExitRuleEditor

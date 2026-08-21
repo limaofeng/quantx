@@ -34,11 +34,14 @@ from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   RESERVING_EXIT_PLAN_STATUSES,
 )
+from quantx_infrastructure.services.exit_plan_scope_lock import (
+  LockedExitPlanScope,
+  lock_exit_plan_scope,
+  lock_exit_plan_scope_for_plan,
+)
 
 AUTO_EXIT_AUTHORIZATION_LIFETIME = timedelta(days=7)
-REQUIRED_AUTO_EXIT_SCOPES = frozenset(
-  {"liquidation:control", "trade:approve"}
-)
+REQUIRED_AUTO_EXIT_SCOPES = frozenset({"liquidation:control", "trade:approve"})
 ACTIVE_PENDING_SELL_STATUSES = frozenset(
   {"QUEUED", "PENDING", "SUBMITTED", "REPORTED", "PARTIAL_FILLED"}
 )
@@ -141,7 +144,9 @@ def require_authorizable_live_plan(
   state = dict(record.plan_state or {})
   template = dict(state.get("template") or {})
   rules = list(template.get("rules") or [])
-  if not rules or not any(bool(dict(rule or {}).get("enabled", True)) for rule in rules):
+  if not rules or not any(
+    bool(dict(rule or {}).get("enabled", True)) for rule in rules
+  ):
     raise ValueError("EXIT_PLAN_RULES_UNAVAILABLE")
   return record
 
@@ -151,32 +156,49 @@ async def build_exit_plan_authorization_snapshot(
   record: AutoExitPlanRecord,
   *,
   lock_mutable_rows: bool,
+  locked_scope: Optional[LockedExitPlanScope] = None,
 ) -> ExitPlanAuthorizationSnapshot:
   """Build the stable plan/position/T+1/protection subject to be signed."""
 
-  position_stmt = select(Position).where(
-    Position.account_id == record.account_id,
-    Position.stock_code == record.instrument_code,
-  )
+  scope = locked_scope
   if lock_mutable_rows:
-    position_stmt = position_stmt.with_for_update()
-  position = (await db.execute(position_stmt)).scalar_one_or_none()
+    scope = scope or await lock_exit_plan_scope(
+      db,
+      account_id=str(record.account_id),
+      instrument_code=str(record.instrument_code),
+      target_plan_id=str(record.plan_id),
+    )
+    record = scope.plan(str(record.plan_id)) or record
+    position = scope.position
+    conflicts = sorted(
+      (item for item in scope.plans if item.plan_id != record.plan_id),
+      key=lambda item: item.plan_id,
+    )
+  else:
+    position = await db.scalar(
+      select(Position).where(
+        Position.account_id == record.account_id,
+        Position.stock_code == record.instrument_code,
+      )
+    )
+    conflicts = list(
+      (
+        await db.execute(
+          select(AutoExitPlanRecord)
+          .where(
+            AutoExitPlanRecord.account_id == record.account_id,
+            AutoExitPlanRecord.instrument_code == record.instrument_code,
+            AutoExitPlanRecord.plan_id != record.plan_id,
+            AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES),
+          )
+          .order_by(AutoExitPlanRecord.plan_id)
+        )
+      )
+      .scalars()
+      .all()
+    )
   if position is None or int(position.volume or 0) <= 0:
     raise ValueError("POSITION_SNAPSHOT_UNAVAILABLE")
-
-  conflict_stmt = (
-    select(AutoExitPlanRecord)
-    .where(
-      AutoExitPlanRecord.account_id == record.account_id,
-      AutoExitPlanRecord.instrument_code == record.instrument_code,
-      AutoExitPlanRecord.plan_id != record.plan_id,
-      AutoExitPlanRecord.status.in_(RESERVING_EXIT_PLAN_STATUSES),
-    )
-    .order_by(AutoExitPlanRecord.plan_id)
-  )
-  if lock_mutable_rows:
-    conflict_stmt = conflict_stmt.with_for_update()
-  conflicts = list((await db.execute(conflict_stmt)).scalars().all())
   protected_volume = max(0, int(record.remaining_volume or 0)) + sum(
     max(0, int(item.remaining_volume or 0)) for item in conflicts
   )
@@ -348,8 +370,8 @@ async def _authorization_session_valid(
   if not REQUIRED_AUTO_EXIT_SCOPES <= (session_scopes & user_scopes):
     return False
   access_stmt = select(AuthUserAccountAccess).where(
-      AuthUserAccountAccess.user_id == user_id,
-      AuthUserAccountAccess.account_id == record.account_id,
+    AuthUserAccountAccess.user_id == user_id,
+    AuthUserAccountAccess.account_id == record.account_id,
   )
   if lock_mutable_rows:
     access_stmt = access_stmt.with_for_update()
@@ -363,7 +385,17 @@ async def validate_exact_auto_exit_authorization(
   *,
   now: Optional[datetime] = None,
   lock_mutable_rows: bool = False,
+  locked_scope: Optional[LockedExitPlanScope] = None,
 ) -> ExitPlanAuthorizationValidation:
+  scope = locked_scope
+  if lock_mutable_rows:
+    scope = scope or await lock_exit_plan_scope(
+      db,
+      account_id=str(record.account_id),
+      instrument_code=str(record.instrument_code),
+      target_plan_id=str(record.plan_id),
+    )
+    record = scope.plan(str(record.plan_id)) or record
   checked_at = now or time_utils.now()
   if not bool(record.auto_exit_authorized):
     return ExitPlanAuthorizationValidation(
@@ -430,6 +462,7 @@ async def validate_exact_auto_exit_authorization(
       db,
       record,
       lock_mutable_rows=lock_mutable_rows,
+      locked_scope=scope,
     )
   except ValueError:
     return ExitPlanAuthorizationValidation(
@@ -452,13 +485,8 @@ class AutoExitAuthorizationGuard:
   @staticmethod
   async def validate_or_invalidate(plan_id: str) -> ExitPlanAuthorizationValidation:
     async with AsyncSessionLocal() as db:
-      record = (
-        await db.execute(
-          select(AutoExitPlanRecord)
-          .where(AutoExitPlanRecord.plan_id == plan_id)
-          .with_for_update()
-        )
-      ).scalar_one_or_none()
+      scope = await lock_exit_plan_scope_for_plan(db, plan_id)
+      record = scope.plan(plan_id)
       if record is None:
         return ExitPlanAuthorizationValidation(
           False,
@@ -469,6 +497,7 @@ class AutoExitAuthorizationGuard:
         db,
         record,
         lock_mutable_rows=True,
+        locked_scope=scope,
       )
       if result.valid:
         return result
@@ -514,6 +543,8 @@ __all__ = [
   "build_exit_plan_authorization_snapshot",
   "clear_exact_auto_exit_authorization",
   "grant_exact_auto_exit_authorization",
+  "lock_exit_plan_scope",
+  "lock_exit_plan_scope_for_plan",
   "require_authorizable_live_plan",
   "validate_exact_auto_exit_authorization",
 ]

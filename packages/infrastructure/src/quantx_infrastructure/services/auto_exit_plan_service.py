@@ -63,6 +63,11 @@ from quantx_infrastructure.services.exit_plan_authorization_service import (
   grant_exact_auto_exit_authorization,
   validate_exact_auto_exit_authorization,
 )
+from quantx_infrastructure.services.exit_plan_scope_lock import (
+  LockedExitPlanScope,
+  lock_exit_plan_scope,
+  lock_exit_plan_scope_for_plan,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trade_intent_processor import (
   MARKET_DATA_STREAM_NOT_READY,
@@ -129,6 +134,11 @@ class AutoExitPlanService:
 
     code = str(instrument_code or "").strip().upper()
     async with AsyncSessionLocal() as db:
+      reserving = await AutoExitPlanRepository(db).find_reserving(
+        account_id=account_id,
+        instrument_code=code,
+      )
+      claimed_order_ids = self._claimed_cost_basis_order_ids(reserving)
       orders = list(
         (
           await db.execute(
@@ -141,7 +151,9 @@ class AutoExitPlanService:
             .order_by(Order.time.desc(), Order.id.desc())
             .limit(max(1, min(int(limit or 100), 200)))
           )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
       )
       costs = TradingCostPolicy()
       return [
@@ -159,6 +171,7 @@ class AutoExitPlanService:
           "remark": order.remark,
         }
         for order in orders
+        if str(order.id) not in claimed_order_ids
       ]
 
   async def reconcile_holding_capacity(
@@ -312,11 +325,10 @@ class AutoExitPlanService:
             persistent_plan=persistent_plan,
             incoming_plan=plan,
           )
-          if (
-            expansion is None
-            and plan.status
-            in {ExitPlanStatus.CANCELLED, ExitPlanStatus.COMPLETED}
-          ):
+          if expansion is None and plan.status in {
+            ExitPlanStatus.CANCELLED,
+            ExitPlanStatus.COMPLETED,
+          }:
             continue
           if record_version >= template_version:
             if expansion is None:
@@ -345,9 +357,7 @@ class AutoExitPlanService:
             record.config_version = template_version
             clear_exact_auto_exit_authorization(record)
             event_type = "STRATEGY_PLAN_POLICY_UPDATED"
-            business_key = (
-              f"strategy-plan-sync:{plan.plan_id}:{template_version}"
-            )
+            business_key = f"strategy-plan-sync:{plan.plan_id}:{template_version}"
             event_payload = {
               "strategy_run_id": strategy_run_id,
               "source_type": template.source_type,
@@ -355,9 +365,7 @@ class AutoExitPlanService:
             }
             if expansion is not None:
               event_payload.update(expansion)
-          if expansion is not None and bool(
-            expansion["reactivated_from_completed"]
-          ):
+          if expansion is not None and bool(expansion["reactivated_from_completed"]):
             record.enabled = True
           self._sync_record(record, persistent_plan)
           if expansion is not None:
@@ -399,9 +407,7 @@ class AutoExitPlanService:
           self._sync_record(record, persistent_plan)
           db.add(record)
           event_type = "STRATEGY_PLAN_PERSISTED"
-          business_key = (
-            f"strategy-plan-sync:{plan.plan_id}:{template.config_version}"
-          )
+          business_key = f"strategy-plan-sync:{plan.plan_id}:{template.config_version}"
           event_payload = {
             "strategy_run_id": strategy_run_id,
             "source_type": template.source_type,
@@ -558,28 +564,22 @@ class AutoExitPlanService:
 
     if bool(payload.get("auto_exit_authorized", False)):
       raise ValueError(
-        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: "
-        "布尔字段不能开启自动实盘退出"
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: 布尔字段不能开启自动实盘退出"
       )
     account_id = str(payload.get("account_id") or "").strip()
     instrument_code = str(payload.get("instrument_code") or "").strip().upper()
     if not account_id or not instrument_code:
       raise ValueError("人工计划必须指定账户和股票")
     async with AsyncSessionLocal() as db:
-      position = await db.scalar(
-        select(Position)
-        .where(Position.account_id == account_id)
-        .where(Position.stock_code == instrument_code)
-        .with_for_update()
-      )
-      if position is None or int(position.volume or 0) <= 0:
-        raise ValueError(f"未找到 {instrument_code} 的有效持仓")
-      repo = AutoExitPlanRepository(db)
-      reserving = await repo.find_reserving(
+      scope = await lock_exit_plan_scope(
+        db,
         account_id=account_id,
         instrument_code=instrument_code,
-        for_update=True,
       )
+      position = scope.position
+      if position is None or int(position.volume or 0) <= 0:
+        raise ValueError(f"未找到 {instrument_code} 的有效持仓")
+      reserving = scope.plans
       reserved = sum(max(0, int(item.remaining_volume or 0)) for item in reserving)
       unallocated = max(0, int(position.volume or 0) - reserved)
       requested = int(payload.get("protected_volume") or unallocated)
@@ -593,6 +593,7 @@ class AutoExitPlanService:
         account_id=account_id,
         instrument_code=instrument_code,
         requested_volume=requested,
+        reserving_plans=reserving,
       )
       plan_id = str(payload.get("plan_id") or f"manual-position:{uuid.uuid4()}")
       rules = self._rules_from_payload(plan_id, payload.get("rules"))
@@ -672,8 +673,7 @@ class AutoExitPlanService:
   ) -> AutoExitPlanRecord:
     if bool(payload.get("auto_exit_authorized", False)):
       raise ValueError(
-        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: "
-        "布尔字段不能开启自动实盘退出"
+        "AUTO_EXIT_AUTHORIZATION_REQUIRES_CHALLENGE: 布尔字段不能开启自动实盘退出"
       )
     plan_id = str(payload.get("plan_id") or "")
     expected_version = int(payload.get("config_version") or 0)
@@ -688,22 +688,17 @@ class AutoExitPlanService:
       if record.source_type != MANUAL_PLAN_SOURCE:
         raise ValueError("业务来源计划请返回原业务页面修改规则")
 
-      position = await db.scalar(
-        select(Position)
-        .where(Position.account_id == record.account_id)
-        .where(Position.stock_code == record.instrument_code)
-        .with_for_update()
-      )
-      reserving = await repo.find_reserving(
+      scope = await lock_exit_plan_scope(
+        db,
         account_id=record.account_id,
         instrument_code=record.instrument_code,
-        for_update=True,
+        target_plan_id=plan_id,
       )
-      record = next((item for item in reserving if item.plan_id == plan_id), record)
+      position = scope.position
+      reserving = scope.plans
+      record = scope.plan(plan_id) or record
       if expected_version <= 0 or int(record.config_version) != expected_version:
-        raise ValueError(
-          f"CONFIG_VERSION_CONFLICT: current={record.config_version}"
-        )
+        raise ValueError(f"CONFIG_VERSION_CONFLICT: current={record.config_version}")
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       if plan.status == ExitPlanStatus.EXIT_PENDING or plan.pending_order_id:
         raise ValueError("已有卖出委托待成交，暂不能修改计划")
@@ -716,9 +711,7 @@ class AutoExitPlanService:
         or 0
       )
       if protected_volume < int(plan.exited_volume or 0):
-        raise ValueError(
-          f"保护数量不能小于已卖数量 {int(plan.exited_volume or 0)} 股"
-        )
+        raise ValueError(f"保护数量不能小于已卖数量 {int(plan.exited_volume or 0)} 股")
       desired_remaining = protected_volume - int(plan.exited_volume or 0)
       other_reserved = sum(
         max(0, int(item.remaining_volume or 0))
@@ -739,8 +732,7 @@ class AutoExitPlanService:
         and protected_volume > cost_basis.basis_volume
       ):
         raise ValueError(
-          "计划卖出数量不能超过已选成交委托数量 "
-          f"{cost_basis.basis_volume} 股"
+          f"计划卖出数量不能超过已选成交委托数量 {cost_basis.basis_volume} 股"
         )
       rules = self._rules_from_payload(plan_id, payload.get("rules"))
       next_version = int(record.config_version) + 1
@@ -799,9 +791,7 @@ class AutoExitPlanService:
     if not bool(payload.get("confirm")):
       raise ValueError("必须确认卖出风险")
     execution_mode = self._execution_mode(payload.get("execution_mode"))
-    auto_exit_authorization_requested = bool(
-      payload.get("auto_exit_authorized", False)
-    )
+    auto_exit_authorization_requested = bool(payload.get("auto_exit_authorized", False))
     auto_exit_authorized = bool(
       execution_mode == "live" and auto_exit_authorization_requested
     )
@@ -824,12 +814,9 @@ class AutoExitPlanService:
     expected_items = {
       str(item.get("instrument_code") or "").strip().upper(): dict(item)
       for item in list(payload.get("expected_items") or [])
-      if isinstance(item, Mapping)
-      and str(item.get("instrument_code") or "").strip()
+      if isinstance(item, Mapping) and str(item.get("instrument_code") or "").strip()
     }
-    snapshot_version = str(
-      payload.get("authorization_snapshot_version") or ""
-    ).strip()
+    snapshot_version = str(payload.get("authorization_snapshot_version") or "").strip()
     authorization_challenge_id = str(
       payload.get("authorization_challenge_id") or ""
     ).strip()
@@ -882,8 +869,7 @@ class AutoExitPlanService:
                   "instrument_code": code,
                   "success": False,
                   "error": str(
-                    expected.get("reason_detail")
-                    or "首次处理未创建该证券的清仓计划"
+                    expected.get("reason_detail") or "首次处理未创建该证券的清仓计划"
                   ),
                   "conflict_plan_ids": [
                     str(item.get("plan_id") or "")
@@ -1001,9 +987,7 @@ class AutoExitPlanService:
               "plan_id": str(item.get("plan_id") or ""),
               "source_type": str(item.get("source_type") or ""),
               "status": str(item.get("status") or ""),
-              "remaining_volume": max(
-                0, int(item.get("remaining_volume") or 0)
-              ),
+              "remaining_volume": max(0, int(item.get("remaining_volume") or 0)),
               "config_version": max(0, int(item.get("config_version") or 0)),
               "pending": bool(item.get("pending")),
             }
@@ -1206,9 +1190,7 @@ class AutoExitPlanService:
       record,
       lock_mutable_rows=True,
     )
-    authorization_expires_at = authorization_expiry_for_challenge(
-      challenge.expires_at
-    )
+    authorization_expires_at = authorization_expiry_for_challenge(challenge.expires_at)
     grant_exact_auto_exit_authorization(
       record,
       fingerprint=authorization_snapshot.fingerprint,
@@ -1224,9 +1206,7 @@ class AutoExitPlanService:
       lock_mutable_rows=True,
     )
     if not validation.valid:
-      raise ValueError(
-        f"清仓计划自动退出授权已失效：{validation.code}"
-      )
+      raise ValueError(f"清仓计划自动退出授权已失效：{validation.code}")
     await self._append_event(
       db,
       business_key=f"auto-exit-authorized:{record.plan_id}:{challenge.id}",
@@ -1258,33 +1238,27 @@ class AutoExitPlanService:
     plan_id = str(order.exit_plan_id or f"manual-position:{order.id}")
     async with AsyncSessionLocal() as db:
       repo = AutoExitPlanRepository(db)
-      await db.scalar(
-        select(Position)
-        .where(Position.account_id == order.account_id)
-        .where(Position.stock_code == order.stock_code)
-        .with_for_update()
-      )
-      record = await repo.find_by_source("MANUAL_POSITION", str(order.id))
-      reserving = await repo.find_reserving(
+      scope = await lock_exit_plan_scope(
+        db,
         account_id=order.account_id,
         instrument_code=order.stock_code,
-        for_update=True,
+        target_plan_id=plan_id,
       )
+      position = scope.position or position
+      record = scope.plan(plan_id)
+      if record is None:
+        record = await repo.find_by_source("MANUAL_POSITION", str(order.id))
+      reserving = scope.plans
       others = [item for item in reserving if item.plan_id != plan_id]
       if any(
-        item.status == ExitPlanStatus.EXIT_PENDING.value
-        or item.pending_client_order_id
+        item.status == ExitPlanStatus.EXIT_PENDING.value or item.pending_client_order_id
         for item in others
       ):
         raise ValueError("该持仓存在待成交卖单，不能重复认领数量")
-      other_reserved = sum(
-        max(0, int(item.remaining_volume or 0)) for item in others
-      )
+      other_reserved = sum(max(0, int(item.remaining_volume or 0)) for item in others)
       unallocated = max(0, int(getattr(position, "volume", 0) or 0) - other_reserved)
       if volume > unallocated:
-        raise ValueError(
-          f"可认领数量不足：未分配 {unallocated} 股，申请 {volume} 股"
-        )
+        raise ValueError(f"可认领数量不足：未分配 {unallocated} 股，申请 {volume} 股")
       config_version = int(record.config_version or 0) + 1 if record else 1
       template = self._manual_template(
         order,
@@ -1357,10 +1331,10 @@ class AutoExitPlanService:
         return None
       if account_id and record.account_id != account_id:
         raise ValueError("退出计划不属于当前账户")
-      if config_version is not None and int(record.config_version) != int(config_version):
-        raise ValueError(
-          f"CONFIG_VERSION_CONFLICT: current={record.config_version}"
-        )
+      if config_version is not None and int(record.config_version) != int(
+        config_version
+      ):
+        raise ValueError(f"CONFIG_VERSION_CONFLICT: current={record.config_version}")
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       if plan.status in {ExitPlanStatus.COMPLETED, ExitPlanStatus.CANCELLED}:
         raise ValueError("终态退出计划不能启停")
@@ -1410,10 +1384,10 @@ class AutoExitPlanService:
         return None
       if account_id and record.account_id != account_id:
         raise ValueError("退出计划不属于当前账户")
-      if config_version is not None and int(record.config_version) != int(config_version):
-        raise ValueError(
-          f"CONFIG_VERSION_CONFLICT: current={record.config_version}"
-        )
+      if config_version is not None and int(record.config_version) != int(
+        config_version
+      ):
+        raise ValueError(f"CONFIG_VERSION_CONFLICT: current={record.config_version}")
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
       if plan.status == ExitPlanStatus.EXIT_PENDING or plan.pending_order_id:
         raise ValueError("存在待成交卖单，必须先等待回报或撤单")
@@ -1450,7 +1424,8 @@ class AutoExitPlanService:
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> Optional[dict[str, Any]]:
     async with AsyncSessionLocal() as db:
-      record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
+      scope = await lock_exit_plan_scope_for_plan(db, plan_id)
+      record = scope.plan(plan_id)
       if record is None or not record.enabled:
         return None
       plan = ExitPlan.from_dict(dict(record.plan_state or {}))
@@ -1468,6 +1443,7 @@ class AutoExitPlanService:
         db,
         account_id=record.account_id,
         instrument_code=record.instrument_code,
+        locked_scope=scope,
       )
       if not capacity["ready"]:
         await db.commit()
@@ -1513,7 +1489,11 @@ class AutoExitPlanService:
         client_order_id=client_order_id,
         broker_order_id=broker_order_id,
       )
-      plan_id = str((pending.request_metadata or {}).get("exit_plan_id") or "") if pending else ""
+      plan_id = (
+        str((pending.request_metadata or {}).get("exit_plan_id") or "")
+        if pending
+        else ""
+      )
       if not plan_id:
         return
       record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
@@ -1559,7 +1539,11 @@ class AutoExitPlanService:
         client_order_id=client_order_id,
         broker_order_id=broker_order_id,
       )
-      plan_id = str((pending.request_metadata or {}).get("exit_plan_id") or "") if pending else ""
+      plan_id = (
+        str((pending.request_metadata or {}).get("exit_plan_id") or "")
+        if pending
+        else ""
+      )
       if not plan_id:
         return
       business_key = f"execution:{plan_id}:{execution_id}"
@@ -1607,7 +1591,8 @@ class AutoExitPlanService:
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
     async with AsyncSessionLocal() as db:
-      record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
+      scope = await lock_exit_plan_scope_for_plan(db, plan_id)
+      record = scope.plan(plan_id)
       intent = await db.get(TradeIntentRecord, intent_id)
       if record is None or intent is None:
         raise ValueError("退出计划或卖出意图不存在")
@@ -1647,6 +1632,7 @@ class AutoExitPlanService:
         db,
         account_id=record.account_id,
         instrument_code=record.instrument_code,
+        locked_scope=scope,
       )
       if not capacity["ready"]:
         await db.commit()
@@ -1667,9 +1653,7 @@ class AutoExitPlanService:
         str(result.get("error") or "exit_intent_rejected"),
       )
       return result
-    client_order_id = str(
-      result.get("client_order_id") or result.get("order_id") or ""
-    )
+    client_order_id = str(result.get("client_order_id") or result.get("order_id") or "")
     async with AsyncSessionLocal() as db:
       stored = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
       if stored is None:
@@ -1715,8 +1699,7 @@ class AutoExitPlanService:
     # ordinary scheduling jitter; keep this aligned with the authoritative
     # WholeQuoteHub trading-session freshness window.
     if (
-      float(context.market_data_age_seconds or 0.0)
-      > MARKET_DATA_CONTEXT_STALE_SECONDS
+      float(context.market_data_age_seconds or 0.0) > MARKET_DATA_CONTEXT_STALE_SECONDS
     ):
       return "market_data_stale"
     return ""
@@ -1803,13 +1786,15 @@ class AutoExitPlanService:
       return None
 
     async with AsyncSessionLocal() as db:
-      record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
+      scope = await lock_exit_plan_scope_for_plan(db, plan_id)
+      record = scope.plan(plan_id)
       if record is None:
         return None
       capacity = await self._reconcile_capacity_locked(
         db,
         account_id=record.account_id,
         instrument_code=record.instrument_code,
+        locked_scope=scope,
       )
       if not capacity["ready"]:
         await db.commit()
@@ -1849,9 +1834,7 @@ class AutoExitPlanService:
 
     if result.get("awaiting_approval"):
       async with AsyncSessionLocal() as db:
-        stored = await AutoExitPlanRepository(db).find_by_id(
-          plan_id, for_update=True
-        )
+        stored = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
         if stored is not None:
           stored.last_error = "exit_intent_awaiting_approval"
           await self._append_event(
@@ -1872,9 +1855,7 @@ class AutoExitPlanService:
       )
       return result
 
-    client_order_id = str(
-      result.get("client_order_id") or result.get("order_id") or ""
-    )
+    client_order_id = str(result.get("client_order_id") or result.get("order_id") or "")
     async with AsyncSessionLocal() as db:
       stored = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
       if stored is None:
@@ -2116,9 +2097,7 @@ class AutoExitPlanService:
             strategy=ExitRuleType.GROSS_TAKE_PROFIT,
             priority=590,
             sizing=ExitSizingPolicy(mode=ExitSizingMode.ALL_REMAINING),
-            parameters={
-              "target_profit_pct": float(order.target_profit_pct)
-            },
+            parameters={"target_profit_pct": float(order.target_profit_pct)},
           )
         )
     return ExitPlanTemplate(
@@ -2203,6 +2182,7 @@ class AutoExitPlanService:
     account_id: str,
     instrument_code: str,
     requested_volume: int,
+    reserving_plans: Optional[list[AutoExitPlanRecord]] = None,
   ) -> ExitCostBasisSnapshot:
     raw = dict(payload.get("cost_basis") or {})
     try:
@@ -2233,6 +2213,16 @@ class AutoExitPlanService:
       raise ValueError("成交委托编号无效") from exc
     if not order_ids:
       raise ValueError("请至少选择一笔已成交买入委托")
+    claimed_order_ids = AutoExitPlanService._claimed_cost_basis_order_ids(
+      reserving_plans or []
+    )
+    overlapping = sorted(
+      str(item) for item in order_ids if str(item) in claimed_order_ids
+    )
+    if overlapping:
+      raise ValueError(
+        "所选买入委托已被其他有效卖出计划作为成本依据：" + "、".join(overlapping)
+      )
     orders = list(
       (
         await db.execute(
@@ -2245,7 +2235,9 @@ class AutoExitPlanService:
           .where(Order.traded_price > 0)
           .with_for_update()
         )
-      ).scalars().all()
+      )
+      .scalars()
+      .all()
     )
     if len(orders) != len(order_ids):
       raise ValueError("所选委托包含不存在、非买入或未成交记录，请刷新后重选")
@@ -2281,6 +2273,26 @@ class AutoExitPlanService:
       frozen_at=frozen_at,
     )
 
+  @staticmethod
+  def _claimed_cost_basis_order_ids(
+    plans: list[AutoExitPlanRecord],
+  ) -> set[str]:
+    claimed: set[str] = set()
+    for item in plans:
+      snapshot = dict(item.cost_basis_snapshot or {})
+      if not snapshot:
+        state = dict(item.plan_state or {})
+        template = dict(state.get("template") or {})
+        metadata = dict(template.get("metadata") or {})
+        snapshot = dict(metadata.get("cost_basis") or {})
+      if str(snapshot.get("mode") or "").upper() != "BROKER_BUY_ORDERS":
+        continue
+      for order in list(snapshot.get("selected_orders") or []):
+        order_id = str(dict(order or {}).get("order_id") or "").strip()
+        if order_id:
+          claimed.add(order_id)
+    return claimed
+
   async def _reconcile_capacity_locked(
     self,
     db,
@@ -2288,31 +2300,23 @@ class AutoExitPlanService:
     account_id: str,
     instrument_code: str,
     allow_restore: bool = False,
+    locked_scope: Optional[LockedExitPlanScope] = None,
   ) -> dict[str, Any]:
-    position = await db.scalar(
-      select(Position)
-      .where(Position.account_id == account_id)
-      .where(Position.stock_code == instrument_code)
-      .with_for_update()
-    )
-    plans = await AutoExitPlanRepository(db).find_reserving(
+    scope = locked_scope or await lock_exit_plan_scope(
+      db,
       account_id=account_id,
       instrument_code=instrument_code,
-      for_update=True,
     )
+    position = scope.position
+    plans = scope.plans
     total_volume = max(0, int(getattr(position, "volume", 0) or 0))
-    protected_volume = sum(
-      max(0, int(item.remaining_volume or 0)) for item in plans
-    )
+    protected_volume = sum(max(0, int(item.remaining_volume or 0)) for item in plans)
     capacity_sufficient = protected_volume <= total_volume
     reconciliation_pending = any(
-      str(item.capacity_status or CAPACITY_READY)
-      == CAPACITY_RECONCILE_REQUIRED
+      str(item.capacity_status or CAPACITY_READY) == CAPACITY_RECONCILE_REQUIRED
       for item in plans
     )
-    ready = capacity_sufficient and (
-      allow_restore or not reconciliation_pending
-    )
+    ready = capacity_sufficient and (allow_restore or not reconciliation_pending)
     next_status = CAPACITY_READY if ready else CAPACITY_RECONCILE_REQUIRED
     error = None
     if not capacity_sufficient:
@@ -2424,9 +2428,7 @@ class AutoExitPlanService:
   ) -> None:
     existing = (
       await db.execute(
-        select(AutoExitPlanEvent).where(
-          AutoExitPlanEvent.business_key == business_key
-        )
+        select(AutoExitPlanEvent).where(AutoExitPlanEvent.business_key == business_key)
       )
     ).scalar_one_or_none()
     if existing is None:
@@ -2472,9 +2474,7 @@ def _optional_datetime(value: Any) -> Optional[datetime]:
     return value.replace(tzinfo=None)
   if isinstance(value, str) and value:
     try:
-      return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(
-        tzinfo=None
-      )
+      return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
       return None
   return None
