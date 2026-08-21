@@ -66,6 +66,7 @@ import {
   type ManualCostBasisMode,
 } from './exitPlanCostBasisUtils';
 import { ExitPlanNotices } from './ExitPlanNotices';
+import { getExitRuleLabel } from './exitRuleLabels';
 import {
   ManualExitRuleEditor,
   type ManualExitRuleDraft,
@@ -307,7 +308,7 @@ function PlanCard({
                   className="rounded bg-white/[0.04] px-2 py-1 text-[10px] font-bold text-slate-400"
                   key={value.rule_id || `${plan.planId}-${index}`}
                 >
-                  {value.strategy || '退出规则'}
+                  {getExitRuleLabel(value.strategy)}
                 </span>
               );
             })}

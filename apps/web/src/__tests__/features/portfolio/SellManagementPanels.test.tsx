@@ -115,4 +115,25 @@ describe('ExitPlansPanel', () => {
 
     expect(screen.getByRole('heading', { name: '300917.SZ' })).toBeVisible();
   });
+
+  it('shows a meaningful label instead of the internal rule code', () => {
+    mocks.exitPlans = [
+      {
+        ...makePlan('300917.SZ'),
+        rules: [
+          {
+            rule_id: 'adaptive-volume-price',
+            strategy: 'ADAPTIVE_VOLUME_PRICE_TRAILING',
+          },
+        ],
+      },
+    ];
+
+    render(<ExitPlansPanel accountId="300000013250" onNavigate={vi.fn()} />);
+
+    expect(screen.getByText('量价动态止盈')).toBeVisible();
+    expect(
+      screen.queryByText('ADAPTIVE_VOLUME_PRICE_TRAILING')
+    ).not.toBeInTheDocument();
+  });
 });
