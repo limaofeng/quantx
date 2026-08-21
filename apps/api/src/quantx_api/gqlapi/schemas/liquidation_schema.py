@@ -357,15 +357,23 @@ class LiquidationMutation:
         preview=_exit_plan_authorization_preview(preview),
       )
     except TradeApprovalChallengeError as exc:
-      return ExitPlanAuthorizationPreviewResult(False, exc.code, exc.message)
+      return ExitPlanAuthorizationPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
     except AuthError as exc:
-      return ExitPlanAuthorizationPreviewResult(False, exc.code, exc.message)
+      return ExitPlanAuthorizationPreviewResult(
+        success=False,
+        code=exc.code,
+        message=exc.message,
+      )
     except Exception:
       logger.exception("退出计划自动实盘授权预览失败")
       return ExitPlanAuthorizationPreviewResult(
-        False,
-        "EXIT_PLAN_AUTHORIZATION_UNAVAILABLE",
-        "授权预览暂不可用，请刷新退出计划和账户快照后重试",
+        success=False,
+        code="EXIT_PLAN_AUTHORIZATION_UNAVAILABLE",
+        message="授权预览暂不可用，请刷新退出计划和账户快照后重试",
       )
 
   @strawberry.mutation(description="确认精确计划版本的自动实盘退出授权")
@@ -402,22 +410,22 @@ class LiquidationMutation:
       )
     except TradeApprovalChallengeError as exc:
       return ExitPlanAuthorizationConfirmationResult(
-        False,
-        exc.code,
-        exc.message,
+        success=False,
+        code=exc.code,
+        message=exc.message,
       )
     except AuthError as exc:
       return ExitPlanAuthorizationConfirmationResult(
-        False,
-        exc.code,
-        exc.message,
+        success=False,
+        code=exc.code,
+        message=exc.message,
       )
     except Exception:
       logger.exception("退出计划自动实盘授权确认失败")
       return ExitPlanAuthorizationConfirmationResult(
-        False,
-        "EXIT_PLAN_AUTHORIZATION_REJECTED",
-        "授权确认未能安全提交，请刷新退出计划后重试",
+        success=False,
+        code="EXIT_PLAN_AUTHORIZATION_REJECTED",
+        message="授权确认未能安全提交，请刷新退出计划后重试",
       )
 
   @strawberry.mutation(description="预览固定持仓快照并签发组级清仓确认挑战")

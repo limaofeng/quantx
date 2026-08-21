@@ -13,6 +13,7 @@ from quantx_api.gqlapi.exit_plan_authorization import (
   normalize_exit_plan_authorization_request,
 )
 from quantx_api.gqlapi.resolvers.liquidation import LiquidationResolver
+from quantx_api.gqlapi.schema import schema
 from quantx_api.gqlapi.trade_approval import TradeApprovalChallengeError
 from quantx_api.gqlapi.types.liquidation_types import (
   ConditionalLiquidationOrderInput,
@@ -410,6 +411,74 @@ async def test_legacy_boolean_cannot_mint_automatic_exit_authority() -> None:
       execution_mode="live",
       auto_exit_authorized=True,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("field_name", "input_value"),
+  [
+    (
+      "previewExitPlanAuthorization",
+      {
+        "accountId": "ACCOUNT-1",
+        "planId": "plan-1",
+        "expectedConfigVersion": 1,
+        "idempotencyKey": "preview-error-result",
+      },
+    ),
+    (
+      "confirmExitPlanAuthorization",
+      {
+        "accountId": "ACCOUNT-1",
+        "planId": "plan-1",
+        "expectedConfigVersion": 1,
+        "idempotencyKey": "confirm-error-result",
+        "challengeId": "challenge-1",
+        "confirmationToken": "token-1",
+      },
+    ),
+  ],
+)
+async def test_exit_plan_authorization_errors_return_typed_results(
+  monkeypatch: pytest.MonkeyPatch,
+  field_name: str,
+  input_value: dict,
+) -> None:
+  method_name = "issue" if field_name.startswith("preview") else "confirm"
+  monkeypatch.setattr(
+    ExitPlanAuthorizationChallengeService,
+    method_name,
+    AsyncMock(
+      side_effect=TradeApprovalChallengeError(
+        "AUTHORIZATION_NOT_READY",
+        "退出计划授权条件尚未满足",
+      )
+    ),
+  )
+  input_type = (
+    "ExitPlanAuthorizationPreviewInput!"
+    if method_name == "issue"
+    else "ExitPlanAuthorizationConfirmationInput!"
+  )
+
+  result = await schema.execute(
+    f"""
+    mutation Authorization($input: {input_type}) {{
+      {field_name}(input: $input) {{ success code message }}
+    }}
+    """,
+    variable_values={"input": input_value},
+    context_value={"principal": _principal(), "request_id": "authorization-error"},
+  )
+
+  assert result.errors is None
+  assert result.data == {
+    field_name: {
+      "success": False,
+      "code": "AUTHORIZATION_NOT_READY",
+      "message": "退出计划授权条件尚未满足",
+    }
+  }
 
 
 @pytest.mark.asyncio
