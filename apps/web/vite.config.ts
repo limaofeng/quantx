@@ -63,10 +63,12 @@ export default defineConfig(({ mode }) => {
             'lightweight-charts-vendor': ['lightweight-charts'],
             // GraphQL 相关
             'graphql-vendor': ['urql', 'graphql'],
-            // Codegen 会生成包含全部操作文档的静态映射。单独分块，避免任一
-            // 新增业务契约把应用主入口推过包体预算。
-            'generated-graphql': [
+            // Codegen 的静态查询映射与操作 AST 独立缓存。两者增长节奏不同，
+            // 分块后新增业务契约不会把单一生成物推过包体预算。
+            'generated-graphql-map': [
               path.resolve(import.meta.dirname, 'src/generated/gql/gql.ts'),
+            ],
+            'generated-graphql-documents': [
               path.resolve(import.meta.dirname, 'src/generated/gql/graphql.ts'),
             ],
             // 工具库

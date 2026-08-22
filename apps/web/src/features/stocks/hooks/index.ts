@@ -4,4 +4,5 @@
 
 export * from './useStockDetail';
 export * from './useStockDisclosures';
+export * from './useStockWorkspaceFinancials';
 export { useStockDetail as useStockInfo } from './useStockDetail';
