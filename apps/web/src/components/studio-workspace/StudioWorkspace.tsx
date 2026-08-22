@@ -5,9 +5,9 @@ import {
   Bot,
   Database,
   Grid2X2,
-  Settings,
   TrendingUp,
   UserRound,
+  Wallet,
 } from 'lucide-react';
 import {
   lazy,
@@ -127,7 +127,6 @@ function StudioWorkspaceHeader({
   onAccount,
   onHome,
   onNotifications,
-  onSettings,
   tabBar,
 }: {
   currentUserLabel: string;
@@ -136,7 +135,6 @@ function StudioWorkspaceHeader({
   onAccount?: () => void;
   onHome?: () => void;
   onNotifications?: () => void;
-  onSettings?: () => void;
   tabBar: ReactNode;
 }) {
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
@@ -261,9 +259,9 @@ function StudioWorkspaceHeader({
           onSelect={onNotifications}
         />
         <StudioChromeAction
-          icon={Settings}
-          label="打开系统设置"
-          onSelect={onSettings}
+          icon={Wallet}
+          label="打开账户概览"
+          onSelect={onAccount}
         />
         <span aria-hidden="true" className="mx-1 h-6 w-px bg-white/10" />
         <button
@@ -872,6 +870,7 @@ export function StudioWorkspace({
     onSelect: () => openStudioTab('/settings/data'),
     shortLabel: '数据',
   });
+  const railUtilityActions = settingsAction ? [settingsAction] : [];
   const launcherActions = [
     {
       icon: Bot,
@@ -908,7 +907,6 @@ export function StudioWorkspace({
           onAccount={accountAction?.onSelect}
           onHome={() => openStudioTab('/')}
           onNotifications={notificationAction?.onSelect}
-          onSettings={settingsAction?.onSelect}
           tabBar={workspaceTabBar}
         />
 
@@ -920,6 +918,7 @@ export function StudioWorkspace({
             modes={studioWorkspaceModes}
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
+            utilityActions={railUtilityActions}
             variant="studio"
           />
 

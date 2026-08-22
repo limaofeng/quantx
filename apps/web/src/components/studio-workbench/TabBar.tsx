@@ -238,14 +238,26 @@ export function TabBar<T extends StudioTab>({
             <div
               key={tab.id}
               onContextMenu={event => {
-                if (!isTabClosable) return;
+                if (!closable) return;
                 event.preventDefault();
                 event.stopPropagation();
+                const tabIndex = tabs.findIndex(item => item.id === tab.id);
+                const closableTabCount = tabs.filter(
+                  item => closable && (canCloseTab?.(item) ?? true)
+                ).length;
+                const closableTabsRight = tabs
+                  .slice(tabIndex + 1)
+                  .filter(
+                    item => closable && (canCloseTab?.(item) ?? true)
+                  ).length;
                 setContextMenu({
+                  canClose: isTabClosable,
+                  closableTabCount,
+                  closableTabsRight,
                   isPreview: Boolean(tab.isPreview),
                   isPreviewable: Boolean(tab.isPreviewable),
                   tabId: tab.id,
-                  tabIndex: tabs.findIndex(item => item.id === tab.id),
+                  tabIndex,
                   x: event.clientX,
                   y: event.clientY,
                 });
@@ -474,7 +486,6 @@ export function TabBar<T extends StudioTab>({
         menu={closable ? contextMenu : null}
         onAction={handleContextMenuAction}
         onClose={() => setContextMenu(null)}
-        tabCount={tabs.length}
       />
     </div>
   );

@@ -67,7 +67,7 @@ describe('TabBar', () => {
     expect(onTabCreate).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a fixed tab in the tab sequence without exposing close actions', () => {
+  it('keeps a fixed tab non-closable while exposing cleanup actions', () => {
     const onTabChange = vi.fn();
     const onTabClose = vi.fn();
 
@@ -96,8 +96,13 @@ describe('TabBar', () => {
     fireEvent.keyDown(fixedTab, { key: 'ArrowRight' });
     expect(onTabChange).toHaveBeenCalledWith('tab-2');
 
-    fireEvent.contextMenu(screen.getByRole('tab', { name: '标签 2' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: '关闭全部' }));
+    fireEvent.contextMenu(fixedTab);
+    expect(screen.getByRole('menuitem', { name: '关闭' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: '关闭其他' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: '关闭右侧' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: '关闭全部' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('menuitem', { name: '关闭右侧' }));
     expect(onTabClose).toHaveBeenCalledTimes(1);
     expect(onTabClose).toHaveBeenCalledWith('tab-2');
   });

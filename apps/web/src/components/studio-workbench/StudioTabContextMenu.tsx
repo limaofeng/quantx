@@ -7,6 +7,9 @@ export type StudioTabContextMenuAction =
   'close' | 'closeAll' | 'closeOthers' | 'closeRight' | 'pin' | 'unpin';
 
 export interface StudioTabContextMenuState {
+  canClose: boolean;
+  closableTabCount: number;
+  closableTabsRight: number;
   isPreview: boolean;
   isPreviewable: boolean;
   tabId: string;
@@ -19,7 +22,6 @@ interface StudioTabContextMenuProps {
   menu: StudioTabContextMenuState | null;
   onAction: (action: StudioTabContextMenuAction, tabId: string) => void;
   onClose: () => void;
-  tabCount: number;
 }
 
 const menuItems = [
@@ -31,19 +33,21 @@ const menuItems = [
 
 function isActionDisabled(
   action: StudioTabContextMenuAction,
-  tabIndex: number,
-  tabCount: number
+  menu: StudioTabContextMenuState
 ) {
-  if (action === 'closeOthers') return tabCount <= 1;
-  if (action === 'closeRight') return tabIndex >= tabCount - 1;
-  return tabCount === 0;
+  if (action === 'close') return !menu.canClose;
+  if (action === 'closeOthers') {
+    return menu.closableTabCount - Number(menu.canClose) === 0;
+  }
+  if (action === 'closeRight') return menu.closableTabsRight === 0;
+  if (action === 'closeAll') return menu.closableTabCount === 0;
+  return false;
 }
 
 export function StudioTabContextMenu({
   menu,
   onAction,
   onClose,
-  tabCount,
 }: StudioTabContextMenuProps) {
   const studioMenu: StudioMenuState<StudioTabContextMenuState> | null = menu
     ? {
@@ -70,7 +74,7 @@ export function StudioTabContextMenu({
       ].flatMap((item, index, allItems) => {
         const Icon = item.icon;
         const menuItem: StudioMenuItem = {
-          disabled: isActionDisabled(item.action, menu.tabIndex, tabCount),
+          disabled: isActionDisabled(item.action, menu),
           icon: <Icon size={14} />,
           id: item.action,
           label: item.label,

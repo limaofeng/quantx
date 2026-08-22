@@ -223,13 +223,19 @@ describe('StudioWorkspace', () => {
         button => button.getAttribute('aria-pressed') === 'true'
       )
     ).toEqual([railButtons[2]]);
-    ['回测与研究运行', '账户', '通知', '系统设置'].forEach(label =>
+    ['回测与研究运行', '账户', '通知'].forEach(label =>
       expect(
         within(activityBar).queryByRole('button', { name: label })
       ).not.toBeInTheDocument()
     );
+    expect(
+      within(activityBar).getByRole('button', { name: '系统设置' })
+    ).toBeVisible();
     expect(screen.getByRole('button', { name: '查看通知' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '打开系统设置' })).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: '打开系统设置' })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '打开账户概览' })).toBeVisible();
     expect(
       screen.getByRole('button', {
         name: '打开账户：QuantX 开发用户',
