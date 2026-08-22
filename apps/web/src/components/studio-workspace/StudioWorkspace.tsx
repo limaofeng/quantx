@@ -5,11 +5,9 @@ import {
   Bot,
   Database,
   Grid2X2,
-  History,
   Settings,
   TrendingUp,
   UserRound,
-  Wrench,
 } from 'lucide-react';
 import {
   lazy,
@@ -87,6 +85,14 @@ const studioWorkspaceTheme: StudioTheme = {
   name: 'blue',
   title: 'QuantX Studio',
 };
+const studioRailNavigation = [
+  { id: 'rail:/holdings', path: '/holdings', shortLabel: '持仓' },
+  { id: 'rail:/entry-plans', path: '/entry-plans', shortLabel: '买入' },
+  { id: 'rail:/t-trade', path: '/t-trade', shortLabel: '做 T' },
+  { id: 'rail:/liquidation', path: '/liquidation', shortLabel: '卖出' },
+  { id: 'rail:/strategies', path: '/strategies', shortLabel: '策略' },
+  { id: 'rail:/research', path: '/research', shortLabel: '研究' },
+] as const;
 
 function StudioChromeAction({
   badge = false,
@@ -885,67 +891,20 @@ export function StudioWorkspace({
   );
   const findNavigationAction = (path: string) =>
     globalActions.find(action => action.id === `nav:${path}`);
-  const researchAction = findNavigationAction('/research');
-  const strategiesAction = findNavigationAction('/strategies');
-  const holdingsAction = findNavigationAction('/holdings');
-  const toolsAction = findNavigationAction('/t-trade');
-  const railActions: StudioAction[] = [];
-  if (researchAction) {
-    railActions.push({
-      ...researchAction,
-      id: 'rail:research',
-      shortLabel: '研究',
-    });
-  }
-  if (strategiesAction) {
-    railActions.push({
-      ...strategiesAction,
-      id: 'rail:strategies',
-      shortLabel: '策略',
-    });
-  }
-  railActions.push({
-    active: false,
-    icon: History,
-    id: 'rail:backtest',
-    label: '回测与研究运行',
-    onSelect: () => openStudioTab('/research'),
-    shortLabel: '回测',
+  const railActions: StudioAction[] = studioRailNavigation.flatMap(item => {
+    const action = findNavigationAction(item.path);
+    return action
+      ? [{ ...action, id: item.id, shortLabel: item.shortLabel }]
+      : [];
   });
-  if (holdingsAction) {
-    railActions.push({
-      ...holdingsAction,
-      id: 'rail:trading',
-      shortLabel: '交易',
-    });
-  }
-  if (accountAction) {
-    railActions.push({
-      ...accountAction,
-      active: currentPath.startsWith('/account'),
-      id: 'rail:portfolio',
-      shortLabel: '组合',
-    });
-  }
   railActions.push({
     active: currentPath.startsWith('/settings/data'),
     icon: Database,
-    id: 'rail:data',
+    id: 'rail:/settings/data',
     label: '数据管理',
     onSelect: () => openStudioTab('/settings/data'),
     shortLabel: '数据',
   });
-  if (toolsAction) {
-    railActions.push({
-      ...toolsAction,
-      icon: Wrench,
-      id: 'rail:tools',
-      shortLabel: '工具',
-    });
-  }
-  const railUtilityActions = utilityActions.filter(action =>
-    ['utility:notifications', 'nav:/settings'].includes(action.id)
-  );
   const launcherActions = [
     {
       icon: Bot,
@@ -995,7 +954,6 @@ export function StudioWorkspace({
             modes={studioWorkspaceModes}
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
-            utilityActions={railUtilityActions}
             variant="studio"
           />
 

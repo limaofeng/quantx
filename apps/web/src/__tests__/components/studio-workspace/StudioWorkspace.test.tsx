@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect } from 'react';
 import { vi } from 'vitest';
@@ -8,6 +8,10 @@ import {
   StudioWorkspace,
   useStudioWorkspaceContext,
 } from '@/components/studio-workspace';
+
+const studioWorkbenchMocks = vi.hoisted(() => ({
+  onSelect: vi.fn(),
+}));
 
 vi.mock('@/components/studio-workbench', async () => {
   const actual = await vi.importActual<typeof StudioWorkbenchModule>(
@@ -19,18 +23,24 @@ vi.mock('@/components/studio-workbench', async () => {
     useStudioGlobalActions: () => {
       const Icon = () => null;
       const action = (id: string, label: string) => ({
+        active: id === 'nav:/t-trade',
         icon: Icon,
         id,
         label,
-        onSelect: vi.fn(),
+        onSelect: () => studioWorkbenchMocks.onSelect(id),
       });
       return {
         currentUserLabel: 'QuantX 开发用户',
         globalActions: [
-          action('nav:/research', '研究中心'),
-          action('nav:/strategies', '策略管理'),
+          action('nav:/', '行情'),
           action('nav:/holdings', '持仓'),
+          action('nav:/entry-plans', '买入管理'),
           action('nav:/t-trade', '做T助手'),
+          action('nav:/limit-up-board', '打板助手'),
+          action('nav:/liquidation', '卖出管理'),
+          action('nav:/strategies', '策略管理'),
+          action('nav:/research', '研究中心'),
+          action('nav:/screening', '股票筛选'),
         ],
         utilityActions: [
           action('utility:assets', '账户'),
@@ -81,6 +91,7 @@ function RegisteredSidebarPage() {
 
 describe('StudioWorkspace', () => {
   beforeEach(() => {
+    studioWorkbenchMocks.onSelect.mockClear();
     vi.mocked(window.localStorage.getItem).mockImplementation(key => {
       if (key === 'quantx-studio-workbench') {
         return JSON.stringify({
@@ -179,9 +190,47 @@ describe('StudioWorkspace', () => {
     });
     expect(main.style.boxShadow).toBe('');
     expect(main).toHaveStyle({ background: '#07111f' });
-    ['研究', '策略', '回测', '交易', '组合', '数据', '工具'].forEach(label =>
-      expect(screen.getByText(label)).toBeVisible()
+    const primaryNavigation = screen.getByTestId('studio-primary-navigation');
+    const railButtons = within(primaryNavigation).getAllByTestId(
+      'studio-action-button'
     );
+    expect(
+      railButtons.map(button => button.getAttribute('data-studio-action-id'))
+    ).toEqual([
+      'rail:/holdings',
+      'rail:/entry-plans',
+      'rail:/t-trade',
+      'rail:/liquidation',
+      'rail:/strategies',
+      'rail:/research',
+      'rail:/settings/data',
+    ]);
+    expect(railButtons.map(button => button.textContent)).toEqual([
+      '持仓',
+      '买入',
+      '做 T',
+      '卖出',
+      '策略',
+      '研究',
+      '数据',
+    ]);
+    expect(
+      railButtons.filter(
+        button => button.getAttribute('aria-pressed') === 'true'
+      )
+    ).toEqual([railButtons[2]]);
+    ['回测与研究运行', '账户', '通知', '系统设置'].forEach(label =>
+      expect(
+        within(activityBar).queryByRole('button', { name: label })
+      ).not.toBeInTheDocument()
+    );
+    expect(screen.getByRole('button', { name: '查看通知' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '打开系统设置' })).toBeVisible();
+    expect(
+      screen.getByRole('button', {
+        name: '打开账户：QuantX 开发用户',
+      })
+    ).toBeVisible();
     expect(content).toContainElement(dock);
     expect(content).toContainElement(pageContent);
     expect(
@@ -198,6 +247,49 @@ describe('StudioWorkspace', () => {
     expect(
       screen.queryByRole('button', { name: '关闭Test Studio侧边栏' })
     ).not.toBeInTheDocument();
+  });
+
+  it('opens each high-frequency destination and keeps low-frequency tools in the launcher', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <StudioWorkspace>
+        <main>Workspace page content</main>
+      </StudioWorkspace>
+    );
+
+    const primaryNavigation = screen.getByTestId('studio-primary-navigation');
+    for (const label of [
+      '持仓',
+      '买入管理',
+      '做T助手',
+      '卖出管理',
+      '策略管理',
+      '研究中心',
+    ]) {
+      await user.click(
+        within(primaryNavigation).getByRole('button', { name: label })
+      );
+    }
+    expect(studioWorkbenchMocks.onSelect.mock.calls).toEqual([
+      ['nav:/holdings'],
+      ['nav:/entry-plans'],
+      ['nav:/t-trade'],
+      ['nav:/liquidation'],
+      ['nav:/strategies'],
+      ['nav:/research'],
+    ]);
+
+    await user.click(
+      within(primaryNavigation).getByRole('button', { name: '数据管理' })
+    );
+    expect(
+      await screen.findByRole('tab', { name: '数据管理门户' })
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: '打开功能启动器' }));
+    expect(screen.getByRole('menuitem', { name: '打板助手' })).toBeVisible();
+    expect(screen.getByRole('menuitem', { name: '股票筛选' })).toBeVisible();
   });
 
   it('renders a supplied global status bar in the workspace bottom slot', () => {
