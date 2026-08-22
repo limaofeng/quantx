@@ -17,4 +17,18 @@ describe('StatusBar', () => {
       'READY'
     );
   });
+
+  it('renders the stronger workspace footer treatment only when requested', () => {
+    render(
+      <StatusBar
+        left={<span>行情已连接</span>}
+        right={<span>READY</span>}
+        variant="workspace"
+      />
+    );
+
+    const statusBar = screen.getByTestId('studio-status-bar');
+    expect(statusBar).toHaveAttribute('data-variant', 'workspace');
+    expect(statusBar).toHaveClass('studio-shell-status-bar', 'px-5');
+  });
 });

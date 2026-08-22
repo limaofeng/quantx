@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
 
 import { TabBar, type StudioTab } from '@/components/studio-workbench';
@@ -56,6 +56,26 @@ describe('TabBar', () => {
     expect(onTabCreate).toHaveBeenCalledTimes(1);
   });
 
+  it('uses the desktop-shell tab geometry without changing default tabs', () => {
+    render(
+      <TabBar
+        activeTabId="tab-1"
+        onTabChange={vi.fn()}
+        onTabClose={vi.fn()}
+        tabs={buildTabs(1)}
+        themeColor="red"
+        variant="workspace"
+      />
+    );
+
+    const tabBar = screen.getByTestId('studio-tab-bar');
+    const tab = screen.getByRole('tab', { name: '标签 1' });
+    expect(tabBar).toHaveAttribute('data-variant', 'workspace');
+    expect(tabBar).toHaveClass('studio-shell-tabbar', 'bg-transparent');
+    expect(tab.parentElement).toHaveClass('h-[44px]', 'rounded-t-[8px]');
+    expect(tab.parentElement).toHaveStyle({ width: 'min(13rem, 100%)' });
+  });
+
   it('keeps every tab in a horizontally scrollable strip', () => {
     const tabs = buildTabs(10);
 
@@ -81,6 +101,42 @@ describe('TabBar', () => {
     expect(
       screen.queryByTestId('studio-tab-overflow-trigger')
     ).not.toBeInTheDocument();
+  });
+
+  it('reveals the active tab again after the workspace is resized', async () => {
+    render(
+      <TabBar
+        activeTabId="tab-3"
+        onTabChange={vi.fn()}
+        onTabClose={vi.fn()}
+        tabs={buildTabs(3)}
+        themeColor="red"
+        variant="workspace"
+      />
+    );
+
+    const tabList = screen.getByRole('tablist', { name: '工作区标签' });
+    const activeTab = screen.getByRole('tab', {
+      name: '标签 3',
+    }).parentElement!;
+    Object.defineProperty(tabList, 'clientWidth', {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(activeTab, 'offsetLeft', {
+      configurable: true,
+      value: 450,
+    });
+    Object.defineProperty(activeTab, 'offsetWidth', {
+      configurable: true,
+      value: 208,
+    });
+
+    fireEvent(window, new Event('resize'));
+
+    await waitFor(() => {
+      expect(tabList.scrollLeft).toBe(466);
+    });
   });
 
   it('pins a preview tab on double click', () => {

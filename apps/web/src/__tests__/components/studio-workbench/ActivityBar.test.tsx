@@ -81,6 +81,10 @@ describe('ActivityBar', () => {
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
     expect(activityBar).toHaveClass('w-[84px]');
+    expect(screen.getByTestId('studio-primary-navigation')).toHaveClass(
+      'flex-1',
+      'overflow-y-auto'
+    );
     expect(screen.getByText('行情')).toBeVisible();
     expect(screen.getByText('设置')).toBeVisible();
     expect(screen.getByTestId('studio-environment-status')).toHaveTextContent(

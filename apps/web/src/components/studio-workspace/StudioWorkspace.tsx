@@ -97,12 +97,12 @@ function StudioChromeAction({
     <button
       type="button"
       aria-label={label}
-      className="group relative flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 disabled:cursor-not-allowed disabled:opacity-40"
+      className="group relative flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 disabled:cursor-not-allowed disabled:opacity-40"
       disabled={!onSelect}
       onClick={onSelect}
       title={label}
     >
-      <Icon className="h-4 w-4" strokeWidth={1.8} />
+      <Icon className="h-[18px] w-[18px]" strokeWidth={2} />
       {badge && (
         <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-rose-400 ring-2 ring-[#0b1120]" />
       )}
@@ -167,52 +167,90 @@ function StudioWorkspaceHeader({
   return (
     <header
       aria-label="QuantX Studio 工作区栏"
-      className="flex h-[52px] shrink-0 items-stretch border-b border-white/10 bg-[#07111f]"
+      className="studio-shell-header flex h-[52px] shrink-0 items-stretch border-b border-white/10 bg-[#07111f]"
       data-testid="studio-chrome-header"
+      style={{
+        background: 'linear-gradient(180deg, #06101d 0%, #040b15 100%)',
+        borderColor: 'rgba(111, 151, 194, 0.2)',
+        boxShadow:
+          'inset 0 -1px 0 rgba(126, 169, 212, 0.08), 0 8px 24px rgba(0, 0, 0, 0.16)',
+      }}
     >
       <button
         type="button"
         onClick={onHome}
-        className="flex w-[172px] shrink-0 items-center gap-2 border-r border-white/10 px-3.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
+        className="studio-shell-brand flex w-[52px] shrink-0 items-center gap-2.5 border-r border-white/10 px-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 md:w-[172px] md:px-3.5"
         aria-label="QuantX Studio · 打开行情工作台"
+        style={{
+          background: 'rgba(2, 8, 17, 0.28)',
+          borderColor: 'rgba(111, 151, 194, 0.2)',
+        }}
       >
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-400/20 bg-slate-700/30 font-mono text-[10px] font-bold tracking-tight text-slate-100">
+        <span
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full border border-slate-400/20 bg-slate-700/30 font-mono text-[10px] font-bold tracking-tight text-slate-100"
+          style={{
+            background: '#142338',
+            borderColor: 'rgba(203, 213, 225, 0.3)',
+            boxShadow:
+              'inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(2, 6, 23, 0.45)',
+          }}
+        >
           QX
         </span>
-        <span className="truncate text-[14px] font-semibold tracking-wide text-slate-100">
+        <span className="hidden truncate text-[14px] font-semibold tracking-wide text-slate-100 md:block">
           QuantX Studio
         </span>
       </button>
 
       <nav
         aria-label="固定工作区"
-        className="flex shrink-0 items-stretch border-r border-white/10"
+        className="studio-shell-fixed-nav flex shrink-0 items-stretch border-r border-white/10"
+        style={{
+          background: 'rgba(2, 8, 17, 0.28)',
+          borderColor: 'rgba(111, 151, 194, 0.2)',
+        }}
       >
         <button
           type="button"
           onClick={onHome}
           className={cn(
-            'flex w-[108px] items-center justify-center gap-2 border-r border-white/5 px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70',
+            'flex w-12 items-center justify-center gap-2 border-r border-white/5 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[108px] lg:px-3',
             isHomeActive
-              ? 'bg-white/5 text-slate-100'
+              ? 'text-slate-100'
               : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
           )}
+          style={
+            isHomeActive
+              ? {
+                  background: '#0b1a2b',
+                  boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.07)',
+                }
+              : undefined
+          }
         >
-          <BookOpen className="h-4 w-4" strokeWidth={1.7} />
-          工作台
+          <BookOpen className="h-[18px] w-[18px]" strokeWidth={2} />
+          <span className="hidden lg:inline">工作台</span>
         </button>
         <button
           type="button"
           onClick={onWatchlist}
           className={cn(
-            'flex w-[120px] items-center justify-center gap-2 px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70',
+            'flex w-12 items-center justify-center gap-2 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[120px] lg:px-3',
             isWatchlistActive
-              ? 'bg-white/5 text-slate-100'
+              ? 'text-slate-100'
               : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
           )}
+          style={
+            isWatchlistActive
+              ? {
+                  background: '#0b1a2b',
+                  boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.07)',
+                }
+              : undefined
+          }
         >
-          <ClipboardList className="h-4 w-4" strokeWidth={1.7} />
-          自选股
+          <ClipboardList className="h-[18px] w-[18px]" strokeWidth={2} />
+          <span className="hidden lg:inline">自选股</span>
         </button>
       </nav>
 
@@ -220,8 +258,12 @@ function StudioWorkspaceHeader({
 
       <div
         aria-label="工作区快捷操作"
-        className="flex shrink-0 items-center gap-1 border-l border-white/10 px-2.5"
+        className="studio-shell-toolbar flex shrink-0 items-center gap-0.5 border-l border-white/10 px-1.5 md:gap-1 md:px-2.5"
         role="toolbar"
+        style={{
+          background: 'rgba(2, 8, 17, 0.28)',
+          borderColor: 'rgba(111, 151, 194, 0.2)',
+        }}
       >
         <div className="relative" ref={launcherRef}>
           <button
@@ -231,12 +273,12 @@ function StudioWorkspaceHeader({
             aria-haspopup="menu"
             aria-label="打开功能启动器"
             className={cn(
-              'flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70',
-              isLauncherOpen && 'bg-white/5 text-slate-200'
+              'flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70',
+              isLauncherOpen && 'bg-white/5 text-slate-100'
             )}
             onClick={() => setIsLauncherOpen(value => !value)}
           >
-            <Grid2X2 className="h-4 w-4" strokeWidth={1.8} />
+            <Grid2X2 className="h-[18px] w-[18px]" strokeWidth={2} />
           </button>
           {isLauncherOpen && (
             <div
@@ -278,27 +320,33 @@ function StudioWorkspaceHeader({
           label="打开系统设置"
           onSelect={onSettings}
         />
-        <span aria-hidden="true" className="mx-1 h-5 w-px bg-white/[0.07]" />
+        <span aria-hidden="true" className="mx-1 h-6 w-px bg-white/10" />
         <button
           type="button"
           onClick={onAccount}
-          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-300 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-200 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
           aria-label={`打开账户：${currentUserLabel}`}
           title={`当前用户：${currentUserLabel}`}
+          style={{
+            background: '#0d1a2b',
+            borderColor: '#263b53',
+            boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.07)',
+          }}
         >
           {userMonogram}
         </button>
         <div
           aria-hidden="true"
           className="ml-1 hidden h-full items-center border-l border-white/10 pl-1 xl:flex"
+          style={{ borderColor: 'rgba(111, 151, 194, 0.2)' }}
         >
-          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
             <Minus className="h-3.5 w-3.5" />
           </span>
-          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
             <Square className="h-3 w-3" />
           </span>
-          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
             <X className="h-3.5 w-3.5" />
           </span>
         </div>
@@ -314,6 +362,7 @@ function StudioWorkspaceStatusBar({
 }) {
   return (
     <StatusBar
+      variant="workspace"
       left={
         <>
           <span className="inline-flex items-center gap-2">
@@ -376,6 +425,7 @@ function StudioWorkspaceSidebarDock({
       )}
       style={{
         width: sidebarWidth,
+        borderColor: 'rgba(111, 151, 194, 0.14)',
       }}
     >
       <div
@@ -825,6 +875,7 @@ export function StudioWorkspace({
         }}
         tabs={displayTabs}
         themeColor="red"
+        variant="workspace"
       />
     );
   }, [
@@ -950,7 +1001,11 @@ export function StudioWorkspace({
     <StudioWorkspaceContext.Provider value={contextValue}>
       <div
         data-studio-workbench
-        className="studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden bg-[#0b1120] text-slate-200 font-sans"
+        className="studio-shell studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden bg-[#050b16] text-slate-200 font-sans"
+        style={{
+          background:
+            'radial-gradient(circle at 66% -18%, rgba(24, 67, 108, 0.12), transparent 38%), #050b16',
+        }}
       >
         <StudioWorkspaceHeader
           currentUserLabel={currentUserLabel}
@@ -966,7 +1021,7 @@ export function StudioWorkspace({
           tabBar={workspaceTabBar}
         />
 
-        <div className="flex min-h-0 flex-1">
+        <div className="studio-shell-body flex min-h-0 flex-1">
           <ActivityBar
             activeMode="WORKSPACE"
             environmentStatus={activityStatus}
@@ -979,8 +1034,12 @@ export function StudioWorkspace({
           />
 
           <div
-            className="flex min-w-0 flex-1 flex-col bg-[#07111f]"
+            className="studio-shell-main flex min-w-0 flex-1 flex-col bg-[#07111f]"
             data-testid="studio-workspace-main"
+            style={{
+              background:
+                'linear-gradient(180deg, rgba(13, 30, 50, 0.28), transparent 72px), #07111f',
+            }}
           >
             <div
               className="relative flex min-h-0 min-w-0 flex-1"

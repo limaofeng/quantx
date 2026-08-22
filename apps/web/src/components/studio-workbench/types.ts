@@ -86,4 +86,5 @@ export interface ActivityBarProps {
 export interface StatusBarProps {
   left?: React.ReactNode;
   right?: React.ReactNode;
+  variant?: 'default' | 'workspace';
 }

@@ -129,6 +129,8 @@ describe('StudioWorkspace', () => {
     );
     expect(main).toContainElement(dock);
     expect(chrome).toContainElement(tabBar);
+    expect(chrome).toHaveClass('studio-shell-header');
+    expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     expect(
       screen.getByRole('navigation', { name: '固定工作区' })
     ).toHaveTextContent('工作台自选股');

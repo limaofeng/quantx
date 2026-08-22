@@ -90,6 +90,7 @@ export function TradingSafetyBar({
       data-testid="trading-safety-status-bar"
     >
       <StatusBar
+        variant="workspace"
         left={
           <>
             {canIncreaseRisk ? (

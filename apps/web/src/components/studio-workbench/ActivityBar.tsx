@@ -41,7 +41,7 @@ export function ActivityBar({
                 'w-16 flex-col items-center justify-center gap-1 rounded-md border border-transparent px-1',
                 'h-[72px]',
                 isActive
-                  ? 'border-red-400/15 bg-red-500/10 text-red-200'
+                  ? 'text-slate-100'
                   : 'text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
               )
             : cn(
@@ -57,8 +57,22 @@ export function ActivityBar({
         data-studio-action-id={action.id}
         data-studio-action-section={section}
         data-testid="studio-action-button"
+        style={
+          isStudioVariant
+            ? {
+                height: 'clamp(3.5rem, 7.6vh, 4.5rem)',
+                ...(isActive
+                  ? {
+                      background: '#0c1a2b',
+                      borderColor: '#21364e',
+                      boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.06)',
+                    }
+                  : {}),
+              }
+            : undefined
+        }
       >
-        <Icon size={isStudioVariant ? 20 : 18} strokeWidth={1.7} />
+        <Icon size={isStudioVariant ? 21 : 18} strokeWidth={2} />
         {action.badge && (
           <span
             className={cn(
@@ -109,7 +123,7 @@ export function ActivityBar({
             ? cn(
                 'h-[72px] w-16 flex-col items-center justify-center gap-1.5 rounded-md border border-transparent px-1',
                 isActive
-                  ? 'border-red-400/15 bg-red-500/10 text-red-200'
+                  ? 'text-slate-100'
                   : isDisabled
                     ? 'cursor-not-allowed text-slate-700'
                     : 'text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
@@ -128,8 +142,22 @@ export function ActivityBar({
         aria-pressed={isActive}
         data-studio-mode-id={mode.id}
         data-testid="studio-mode-button"
+        style={
+          isStudioVariant
+            ? {
+                height: 'clamp(3.5rem, 7.6vh, 4.5rem)',
+                ...(isActive
+                  ? {
+                      background: '#0c1a2b',
+                      borderColor: '#21364e',
+                      boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.06)',
+                    }
+                  : {}),
+              }
+            : undefined
+        }
       >
-        <Icon size={isStudioVariant ? 20 : 18} strokeWidth={1.7} />
+        <Icon size={isStudioVariant ? 21 : 18} strokeWidth={2} />
         {isActive && (
           <span
             className={cn(
@@ -153,15 +181,25 @@ export function ActivityBar({
   };
 
   return (
-    <div
+    <aside
+      aria-label={isStudioVariant ? 'Studio 主导航' : `${theme.title} 导航`}
       className={cn(
         'flex shrink-0 flex-col items-center border-r',
         isStudioVariant
-          ? 'w-[84px] gap-1 border-white/5 bg-[#07111f] py-2'
+          ? 'studio-shell-activity-bar w-[84px] gap-1 border-white/10 bg-[#07111f] py-2'
           : 'w-12 gap-2.5 border-white/5 bg-[#0b1120] py-4'
       )}
       data-testid="studio-activity-bar"
       data-variant={variant}
+      style={
+        isStudioVariant
+          ? {
+              background: 'linear-gradient(180deg, #06101d 0%, #040b15 100%)',
+              borderColor: 'rgba(111, 151, 194, 0.2)',
+              boxShadow: 'inset -1px 0 0 rgba(126, 169, 212, 0.05)',
+            }
+          : undefined
+      }
     >
       {onExit && (
         <button
@@ -204,8 +242,9 @@ export function ActivityBar({
       <div
         className={cn(
           'no-scrollbar flex min-h-0 flex-col items-center overflow-y-auto',
-          isStudioVariant ? 'shrink-0 gap-1' : 'flex-1 gap-2.5'
+          isStudioVariant ? 'flex-1 gap-1' : 'flex-1 gap-2.5'
         )}
+        data-testid="studio-primary-navigation"
       >
         {globalActions.length > 0 ? (
           <div
@@ -244,6 +283,11 @@ export function ActivityBar({
         <div
           className="mx-2 mb-1 mt-auto w-[68px] shrink-0 rounded-md border border-white/10 bg-[#0b1120] px-2 py-2"
           data-testid="studio-environment-status"
+          style={{
+            background: '#091524',
+            borderColor: '#23364b',
+            boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.05)',
+          }}
           title={`${environmentStatus.label} · ${environmentStatus.detail}`}
         >
           <div
@@ -277,6 +321,6 @@ export function ActivityBar({
           </div>
         </div>
       )}
-    </div>
+    </aside>
   );
 }
