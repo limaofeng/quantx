@@ -325,9 +325,7 @@ class ExitPlanAuthorizationChallengeService:
     challenge_id = str(uuid.uuid4())
     now = time_utils.now()
     challenge_expires_at = now + _CHALLENGE_LIFETIME
-    authorization_expires_at = authorization_expiry_for_challenge(
-      challenge_expires_at
-    )
+    authorization_expires_at = authorization_expiry_for_challenge(challenge_expires_at)
     async with AsyncSessionLocal() as db:
       try:
         record = await db.scalar(
@@ -504,10 +502,8 @@ class ExitPlanAuthorizationChallengeService:
           )
         if (
           snapshot.subject != dict(payload.get("safety_subject") or {})
-          or snapshot.fingerprint
-          != str(payload.get("authorization_fingerprint") or "")
-          or dict(snapshot.subject["plan"])
-          != dict(payload.get("plan_binding") or {})
+          or snapshot.fingerprint != str(payload.get("authorization_fingerprint") or "")
+          or dict(snapshot.subject["plan"]) != dict(payload.get("plan_binding") or {})
         ):
           raise TradeApprovalChallengeError(
             "EXIT_PLAN_AUTHORIZATION_SCOPE_CHANGED",
@@ -593,9 +589,7 @@ class ExitPlanAuthorizationChallengeService:
         "授权确认已消费，但结果暂不可用，请刷新退出计划",
       )
     try:
-      expires_at = datetime.fromisoformat(
-        str(reference["authorization_expires_at"])
-      )
+      expires_at = datetime.fromisoformat(str(reference["authorization_expires_at"]))
       config_version = int(reference["config_version"])
     except (KeyError, TypeError, ValueError) as exc:
       raise TradeApprovalChallengeError(
