@@ -315,6 +315,39 @@ describe('StudioWorkspace', () => {
     expect(screen.getByRole('menuitem', { name: '股票筛选' })).toBeVisible();
   });
 
+  it('marks the current and already-open workspace tabs in the launcher', async () => {
+    const user = userEvent.setup();
+    vi.mocked(window.localStorage.getItem).mockImplementation(key => {
+      if (key === 'quantx-studio-workspace-tabs') {
+        return JSON.stringify([
+          { id: 'page:/screening', isPreview: false, path: '/screening' },
+        ]);
+      }
+
+      return null;
+    });
+
+    render(
+      <StudioWorkspace>
+        <main>Workspace page content</main>
+      </StudioWorkspace>
+    );
+
+    await user.click(screen.getByRole('button', { name: '打开功能启动器' }));
+
+    const marketAction = screen.getByRole('menuitem', { name: '行情' });
+    const screeningAction = screen.getByRole('menuitem', { name: '股票筛选' });
+    const holdingsAction = screen.getByRole('menuitem', { name: '持仓' });
+
+    expect(marketAction).toHaveAttribute('aria-current', 'page');
+    expect(marketAction).toHaveAttribute('data-launcher-state', 'current');
+    expect(marketAction).toHaveAccessibleDescription('当前标签');
+    expect(screeningAction).toHaveAttribute('data-launcher-state', 'open');
+    expect(screeningAction).toHaveAccessibleDescription('已打开标签');
+    expect(holdingsAction).toHaveAttribute('data-launcher-state', 'closed');
+    expect(holdingsAction).not.toHaveAttribute('aria-current');
+  });
+
   it('renders a supplied global status bar in the workspace bottom slot', () => {
     render(
       <StudioWorkspace

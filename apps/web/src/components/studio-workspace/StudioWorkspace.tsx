@@ -52,6 +52,7 @@ import { MarketDataIcon, MarketWorkbenchIcon } from './StudioNavigationIcons';
 import {
   buildStudioWorkspaceTab,
   getStudioWorkspacePath,
+  getStudioWorkspaceTabId,
   mergeStudioWorkspaceTab,
   normalizeStudioWorkspaceTabs,
   normalizeStudioWorkspaceTabTitles,
@@ -120,16 +121,20 @@ function StudioChromeAction({
 }
 
 function StudioWorkspaceHeader({
+  activeLauncherActionId,
   currentUserLabel,
   launcherActions,
+  openLauncherActionIds,
   launcherTriggerRef,
   onAccount,
   onHome,
   onNotifications,
   tabBar,
 }: {
+  activeLauncherActionId: string | null;
   currentUserLabel: string;
   launcherActions: StudioAction[];
+  openLauncherActionIds: ReadonlySet<string>;
   launcherTriggerRef: React.RefObject<HTMLButtonElement>;
   onAccount?: () => void;
   onHome?: () => void;
@@ -227,27 +232,67 @@ function StudioWorkspaceHeader({
                 zIndex: 80,
               }}
             >
-              {launcherActions.map(action => {
+              {launcherActions.map((action, index) => {
                 const Icon = action.icon;
+                const isCurrent = action.id === activeLauncherActionId;
+                const isOpen = openLauncherActionIds.has(action.id);
+                const displayLabel = action.shortLabel || action.label;
+                const statusDescriptionId = isOpen
+                  ? `studio-launcher-status-${index}`
+                  : undefined;
                 return (
                   <button
                     key={action.id}
                     type="button"
-                    className="flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                    aria-current={isCurrent ? 'page' : undefined}
+                    aria-describedby={statusDescriptionId}
+                    aria-label={displayLabel}
+                    className={cn(
+                      'flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                      isCurrent
+                        ? 'bg-blue-500/15 text-blue-100 ring-1 ring-inset ring-blue-400/35 hover:bg-blue-500/20'
+                        : isOpen
+                          ? 'bg-blue-500/[0.07] text-slate-200 hover:bg-blue-500/[0.12] hover:text-slate-100'
+                          : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+                    )}
+                    data-launcher-state={
+                      isCurrent ? 'current' : isOpen ? 'open' : 'closed'
+                    }
                     onClick={() => {
                       setIsLauncherOpen(false);
                       action.onSelect();
                     }}
                     role="menuitem"
-                    title={action.label}
+                    title={`${action.label}${isOpen ? ` · ${isCurrent ? '当前标签' : '已打开标签'}` : ''}`}
                   >
                     <Icon
-                      className="h-4 w-4 shrink-0 text-slate-500"
+                      className={cn(
+                        'h-4 w-4 shrink-0',
+                        isOpen ? 'text-blue-400' : 'text-slate-500'
+                      )}
                       strokeWidth={STUDIO_NAVIGATION_ICON_STROKE_WIDTH}
                     />
-                    <span className="truncate">
-                      {action.shortLabel || action.label}
+                    <span className="min-w-0 flex-1 truncate">
+                      {displayLabel}
                     </span>
+                    {isOpen && (
+                      <>
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            'shrink-0 rounded-sm px-1 py-0.5 text-[9px] font-semibold leading-none',
+                            isCurrent
+                              ? 'bg-blue-400/20 text-blue-200'
+                              : 'border border-blue-400/30 text-blue-300'
+                          )}
+                        >
+                          {isCurrent ? '当前' : '已开'}
+                        </span>
+                        <span className="sr-only" id={statusDescriptionId}>
+                          {isCurrent ? '当前标签' : '已打开标签'}
+                        </span>
+                      </>
+                    )}
                   </button>
                 );
               })}
@@ -894,6 +939,34 @@ export function StudioWorkspace({
       ].includes(action.id)
     ),
   ];
+  const openWorkspaceTabIds = new Set([
+    getStudioWorkspaceTabId(DEFAULT_WORKSPACE_PATH),
+    ...tabs.map(tab => tab.id),
+  ]);
+  const openLauncherActionIds = new Set<string>();
+  let activeLauncherActionId: string | null = null;
+  const currentWorkspaceTabId = getStudioWorkspaceTabId(currentPath);
+
+  for (const action of launcherActions) {
+    const actionPath = action.id.startsWith('nav:')
+      ? action.id.slice('nav:'.length)
+      : action.id === 'utility:assets'
+        ? '/account'
+        : null;
+    if (!actionPath) continue;
+
+    const actionTabId = getStudioWorkspaceTabId(actionPath);
+    if (openWorkspaceTabIds.has(actionTabId)) {
+      openLauncherActionIds.add(action.id);
+    }
+    if (actionTabId === currentWorkspaceTabId) {
+      activeLauncherActionId = action.id;
+    }
+  }
+
+  if (isAssistantOpen) {
+    openLauncherActionIds.add('workspace:assistant');
+  }
 
   return (
     <StudioWorkspaceContext.Provider value={contextValue}>
@@ -906,8 +979,10 @@ export function StudioWorkspace({
         }}
       >
         <StudioWorkspaceHeader
+          activeLauncherActionId={activeLauncherActionId}
           currentUserLabel={currentUserLabel}
           launcherActions={launcherActions}
+          openLauncherActionIds={openLauncherActionIds}
           launcherTriggerRef={assistantTriggerRef}
           onAccount={accountAction?.onSelect}
           onHome={() => openStudioTab('/')}
