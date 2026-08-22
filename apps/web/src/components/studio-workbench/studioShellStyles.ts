@@ -4,11 +4,12 @@ export const STUDIO_CHROME_BACKGROUND = '#040b15';
 export const STUDIO_HEADER_HEIGHT = 52;
 export const STUDIO_WORKSPACE_SURFACE = '#07111f';
 export const STUDIO_WORKSPACE_SURFACE_RADIUS = 12;
+export const STUDIO_WORKSPACE_TAB_RADIUS = 8;
 export const STUDIO_WORKSPACE_WEAK_BORDER = '#22364d';
 
 export const STUDIO_WORKSPACE_TAB_STYLE = {
-  borderTopLeftRadius: 8,
-  borderTopRightRadius: 8,
+  borderTopLeftRadius: STUDIO_WORKSPACE_TAB_RADIUS,
+  borderTopRightRadius: STUDIO_WORKSPACE_TAB_RADIUS,
   height: 44,
 } satisfies CSSProperties;
 
