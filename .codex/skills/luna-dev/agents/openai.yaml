@@ -1,0 +1,4 @@
+interface:
+  display_name: "Luna Dev"
+  short_description: "Delegate implementation, then review and test"
+  default_prompt: "Use $luna-dev to implement this feature through delegated development and final verification."
