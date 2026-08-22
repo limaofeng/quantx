@@ -67,6 +67,41 @@ describe('TabBar', () => {
     expect(onTabCreate).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a fixed tab in the tab sequence without exposing close actions', () => {
+    const onTabChange = vi.fn();
+    const onTabClose = vi.fn();
+
+    render(
+      <TabBar
+        activeTabId="tab-1"
+        canCloseTab={tab => tab.id !== 'tab-1'}
+        onTabChange={onTabChange}
+        onTabClose={onTabClose}
+        tabs={buildTabs(2)}
+        themeColor="red"
+        variant="workspace"
+      />
+    );
+
+    const fixedTab = screen.getByRole('tab', { name: '标签 1' });
+    expect(screen.getAllByRole('tab')[0]).toBe(fixedTab);
+    expect(
+      screen.queryByRole('button', { name: '关闭 标签 1' })
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '关闭 标签 2' })).toBeVisible();
+
+    fireEvent.keyDown(fixedTab, { key: 'Delete' });
+    expect(onTabClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(fixedTab, { key: 'ArrowRight' });
+    expect(onTabChange).toHaveBeenCalledWith('tab-2');
+
+    fireEvent.contextMenu(screen.getByRole('tab', { name: '标签 2' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: '关闭全部' }));
+    expect(onTabClose).toHaveBeenCalledTimes(1);
+    expect(onTabClose).toHaveBeenCalledWith('tab-2');
+  });
+
   it('uses the desktop-shell tab geometry without changing default tabs', () => {
     render(
       <TabBar

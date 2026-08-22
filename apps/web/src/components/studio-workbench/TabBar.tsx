@@ -20,6 +20,7 @@ import type { StudioTab, StudioThemeName } from './types';
 
 export interface TabBarProps<T extends StudioTab> {
   activeTabId: string | null;
+  canCloseTab?: (tab: T) => boolean;
   closable?: boolean;
   createTooltip?: string;
   onTabChange: (tabId: string) => void;
@@ -34,6 +35,7 @@ export interface TabBarProps<T extends StudioTab> {
 
 export function TabBar<T extends StudioTab>({
   activeTabId,
+  canCloseTab,
   closable = true,
   createTooltip = 'New Tab',
   onTabChange,
@@ -102,33 +104,48 @@ export function TabBar<T extends StudioTab>({
       }
 
       if (action === 'close') {
-        onTabClose(tabId);
+        const tab = tabs[tabIndex];
+        if (closable && (canCloseTab?.(tab) ?? true)) onTabClose(tabId);
         return;
       }
 
       if (action === 'closeOthers') {
         onTabChange(tabId);
-        tabs.filter(tab => tab.id !== tabId).forEach(tab => onTabClose(tab.id));
+        tabs
+          .filter(
+            tab => tab.id !== tabId && closable && (canCloseTab?.(tab) ?? true)
+          )
+          .forEach(tab => onTabClose(tab.id));
         return;
       }
 
       if (action === 'closeRight') {
         onTabChange(tabId);
-        tabs.slice(tabIndex + 1).forEach(tab => onTabClose(tab.id));
+        tabs
+          .slice(tabIndex + 1)
+          .filter(tab => closable && (canCloseTab?.(tab) ?? true))
+          .forEach(tab => onTabClose(tab.id));
         return;
       }
 
-      tabs.forEach(tab => onTabClose(tab.id));
+      tabs
+        .filter(tab => closable && (canCloseTab?.(tab) ?? true))
+        .forEach(tab => onTabClose(tab.id));
     },
-    [onTabChange, onTabClose, onTabPin, tabs]
+    [canCloseTab, closable, onTabChange, onTabClose, onTabPin, tabs]
   );
 
   const handleTabKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLButtonElement>, tabId: string) => {
       const currentIndex = tabs.findIndex(tab => tab.id === tabId);
       if (currentIndex === -1) return;
+      const currentTab = tabs[currentIndex];
 
-      if (event.key === 'Delete' && closable) {
+      if (
+        event.key === 'Delete' &&
+        closable &&
+        (canCloseTab?.(currentTab) ?? true)
+      ) {
         event.preventDefault();
         onTabClose(tabId);
         return;
@@ -154,7 +171,7 @@ export function TabBar<T extends StudioTab>({
         tabButtonRefs.current.get(nextTab.id)?.focus();
       });
     },
-    [closable, onTabChange, onTabClose, tabs]
+    [canCloseTab, closable, onTabChange, onTabClose, tabs]
   );
 
   return (
@@ -197,12 +214,13 @@ export function TabBar<T extends StudioTab>({
       >
         {tabs.map(tab => {
           const isActive = activeTabId === tab.id;
+          const isTabClosable = closable && (canCloseTab?.(tab) ?? true);
 
           return (
             <div
               key={tab.id}
               onContextMenu={event => {
-                if (!closable) return;
+                if (!isTabClosable) return;
                 event.preventDefault();
                 event.stopPropagation();
                 setContextMenu({
@@ -303,7 +321,7 @@ export function TabBar<T extends StudioTab>({
                 )}
               </button>
 
-              {closable && (
+              {isTabClosable && (
                 <div className="relative mr-1 flex h-6 w-6 shrink-0 items-center justify-center">
                   {tab.isDirty && (
                     <span className="pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">

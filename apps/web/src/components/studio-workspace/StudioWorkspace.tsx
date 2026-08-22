@@ -39,10 +39,8 @@ import {
 import {
   STUDIO_CHROME_BACKGROUND,
   STUDIO_HEADER_HEIGHT,
-  STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
   STUDIO_WORKSPACE_SURFACE_RADIUS,
-  STUDIO_WORKSPACE_TAB_STYLE,
   STUDIO_WORKSPACE_WEAK_BORDER,
 } from '@/components/studio-workbench/studioShellStyles';
 import { getStudioThemeStyles } from '@/components/studio-workbench/themeStyles';
@@ -124,7 +122,6 @@ function StudioChromeAction({
 
 function StudioWorkspaceHeader({
   currentUserLabel,
-  isHomeActive,
   launcherActions,
   launcherTriggerRef,
   onAccount,
@@ -134,7 +131,6 @@ function StudioWorkspaceHeader({
   tabBar,
 }: {
   currentUserLabel: string;
-  isHomeActive: boolean;
   launcherActions: StudioAction[];
   launcherTriggerRef: React.RefObject<HTMLButtonElement>;
   onAccount?: () => void;
@@ -197,46 +193,6 @@ function StudioWorkspaceHeader({
           QuantX Studio
         </span>
       </button>
-
-      <nav
-        aria-label="固定工作区"
-        className="studio-shell-fixed-nav flex shrink-0 items-end"
-      >
-        <button
-          type="button"
-          onClick={onHome}
-          className={cn(
-            'relative flex w-12 items-center justify-center gap-2 border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 lg:px-3',
-            isHomeActive
-              ? 'text-slate-100'
-              : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
-          )}
-          style={{
-            ...STUDIO_WORKSPACE_TAB_STYLE,
-            width: 'clamp(48px, calc(100vw - 916px), 108px)',
-            ...(isHomeActive ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE : {}),
-          }}
-          data-testid="studio-fixed-home-tab"
-        >
-          <BookOpen className="h-[18px] w-[18px]" strokeWidth={2} />
-          <span className="hidden lg:inline">工作台</span>
-          {isHomeActive && (
-            <span
-              aria-hidden="true"
-              data-testid="studio-fixed-home-tab-connector"
-              style={{
-                background: STUDIO_WORKSPACE_SURFACE,
-                bottom: -1,
-                height: 1,
-                left: 0,
-                pointerEvents: 'none',
-                position: 'absolute',
-                right: 0,
-              }}
-            />
-          )}
-        </button>
-      </nav>
 
       <div className="min-w-0 flex-1">{tabBar}</div>
 
@@ -739,12 +695,16 @@ export function StudioWorkspace({
   const handleTabChange = useCallback(
     (tabId: string) => {
       const tab = tabs.find(item => item.id === tabId);
-      if (!tab) return;
+      if (!tab) {
+        const homeTab = buildStudioWorkspaceTab(DEFAULT_WORKSPACE_PATH);
+        if (tabId === homeTab.id) openStudioTab(DEFAULT_WORKSPACE_PATH);
+        return;
+      }
 
       setActiveTabId(tab.id);
       if (tab.path !== currentPath) setLocation(tab.path);
     },
-    [currentPath, setLocation, tabs]
+    [currentPath, openStudioTab, setLocation, tabs]
   );
 
   const handleTabClose = useCallback(
@@ -756,6 +716,9 @@ export function StudioWorkspace({
       setTabs(currentTabs => {
         const tabIndex = currentTabs.findIndex(tab => tab.id === tabId);
         if (tabIndex === -1) return currentTabs;
+        if (currentTabs[tabIndex].path === DEFAULT_WORKSPACE_PATH) {
+          return currentTabs;
+        }
 
         const nextTabs = currentTabs.filter(tab => tab.id !== tabId);
 
@@ -812,22 +775,26 @@ export function StudioWorkspace({
   );
 
   const workspaceTabBar = useMemo(() => {
-    const displayTabs = normalizeStudioWorkspaceTabTitles(tabs).filter(
-      tab => tab.path !== '/'
-    );
+    const homeTab = buildStudioWorkspaceTab(DEFAULT_WORKSPACE_PATH);
+    const displayTabs = [
+      homeTab,
+      ...normalizeStudioWorkspaceTabTitles(tabs).filter(
+        tab => tab.path !== DEFAULT_WORKSPACE_PATH
+      ),
+    ];
 
     return (
       <TabBar
-        activeTabId={
-          displayTabs.some(tab => tab.id === activeTabId) ? activeTabId : null
-        }
+        activeTabId={activeTabId}
+        canCloseTab={tab => tab.path !== DEFAULT_WORKSPACE_PATH}
         createTooltip="打开行情工作台"
         onTabChange={handleTabChange}
         onTabClose={handleTabClose}
         onTabCreate={() => openStudioTab(DEFAULT_WORKSPACE_PATH)}
         onTabPin={handleTabPin}
         renderTabContent={(tab: StudioWorkspaceTab, isActive) => {
-          const Icon = tab.icon || BarChart3;
+          const isHomeTab = tab.path === DEFAULT_WORKSPACE_PATH;
+          const Icon = isHomeTab ? BookOpen : tab.icon || BarChart3;
           return (
             <>
               <Icon
@@ -842,7 +809,7 @@ export function StudioWorkspace({
                   tab.isPreview && 'italic'
                 )}
               >
-                {tab.name}
+                {isHomeTab ? '工作台' : tab.name}
               </span>
             </>
           );
@@ -936,7 +903,6 @@ export function StudioWorkspace({
       >
         <StudioWorkspaceHeader
           currentUserLabel={currentUserLabel}
-          isHomeActive={currentPath === '/'}
           launcherActions={launcherActions}
           launcherTriggerRef={assistantTriggerRef}
           onAccount={accountAction?.onSelect}

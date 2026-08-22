@@ -145,8 +145,8 @@ describe('StudioWorkspace', () => {
     expect(chrome).toHaveStyle({ background: '#040b15' });
     expect(chrome.style.boxShadow).toBe('');
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
-    const fixedWorkspace = screen.getByRole('navigation', {
-      name: '固定工作区',
+    const workspaceTabList = screen.getByRole('tablist', {
+      name: '工作区标签',
     });
     expect(
       screen.getByRole('button', {
@@ -157,15 +157,19 @@ describe('StudioWorkspace', () => {
       'viewBox',
       '0 0 32 32'
     );
-    expect(fixedWorkspace).not.toHaveClass('border-r');
-    expect(fixedWorkspace).toHaveTextContent('工作台');
-    expect(fixedWorkspace).not.toHaveTextContent('自选股');
+    expect(
+      screen.queryByRole('navigation', { name: '固定工作区' })
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '打开功能启动器' })).toHaveClass(
       'focus-visible:ring-blue-400/70'
     );
-    const fixedHomeTab = screen.getByTestId('studio-fixed-home-tab');
-    expect(fixedHomeTab).toHaveClass('border-b-0');
-    expect(fixedHomeTab).toHaveStyle({
+    const fixedHomeTab = within(workspaceTabList).getByRole('tab', {
+      name: '工作台',
+    });
+    expect(within(workspaceTabList).getAllByRole('tab')[0]).toBe(fixedHomeTab);
+    expect(fixedHomeTab).toHaveAttribute('aria-selected', 'true');
+    expect(fixedHomeTab.parentElement).toHaveClass('border-b-0');
+    expect(fixedHomeTab.parentElement).toHaveStyle({
       background: '#07111f',
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
@@ -173,9 +177,9 @@ describe('StudioWorkspace', () => {
       height: '44px',
       zIndex: 10,
     });
-    expect(screen.getByTestId('studio-fixed-home-tab-connector')).toHaveStyle({
-      background: '#07111f',
-    });
+    expect(
+      screen.queryByRole('button', { name: '关闭 行情工作台' })
+    ).not.toBeInTheDocument();
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
     expect(activityBar).toHaveStyle({ background: '#040b15' });
@@ -309,7 +313,7 @@ describe('StudioWorkspace', () => {
     expect(screen.queryByTestId('studio-status-bar')).not.toBeInTheDocument();
   });
 
-  it('keeps only the home entry fixed and restores watchlist as a regular tab', () => {
+  it('keeps the home tab first and non-closable while restoring regular tabs', () => {
     vi.mocked(window.localStorage.getItem).mockImplementation(key => {
       if (key === 'quantx-studio-workspace-tabs') {
         return JSON.stringify([
@@ -326,11 +330,17 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    const fixedWorkspace = screen.getByRole('navigation', {
-      name: '固定工作区',
+    const workspaceTabList = screen.getByRole('tablist', {
+      name: '工作区标签',
     });
-    expect(fixedWorkspace).toHaveTextContent('工作台');
-    expect(fixedWorkspace).not.toHaveTextContent('自选股');
+    expect(
+      within(workspaceTabList)
+        .getAllByRole('tab')
+        .map(tab => tab.textContent)
+    ).toEqual(['工作台', '自选股']);
+    expect(
+      screen.queryByRole('button', { name: '关闭 行情工作台' })
+    ).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '自选股' })).toBeVisible();
     expect(screen.getByRole('button', { name: '关闭 自选股' })).toBeVisible();
   });
