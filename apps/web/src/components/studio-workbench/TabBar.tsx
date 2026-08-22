@@ -329,12 +329,13 @@ export function TabBar<T extends StudioTab>({
 
               {isActive && isWorkspaceVariant && (
                 <>
-                  <span
+                  <svg
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-left"
+                    viewBox="0 0 7 7"
                     style={{
-                      background: `radial-gradient(circle at 0 0, transparent 0 5px, ${STUDIO_WORKSPACE_WEAK_BORDER} 5px 6px, ${STUDIO_WORKSPACE_SURFACE} 6px 100%)`,
                       bottom: -1,
+                      display: 'block',
                       height: 7,
                       left: -6,
                       pointerEvents: 'none',
@@ -342,13 +343,26 @@ export function TabBar<T extends StudioTab>({
                       width: 7,
                       zIndex: 11,
                     }}
-                  />
-                  <span
+                  >
+                    <path
+                      d="M7 0 C7 3.87 3.87 7 0 7 H7 Z"
+                      fill={STUDIO_WORKSPACE_SURFACE}
+                    />
+                    <path
+                      d="M6.5 0 C6.5 3.59 3.59 6.5 0 6.5"
+                      fill="none"
+                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                      strokeWidth="1"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                  <svg
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-right"
+                    viewBox="0 0 7 7"
                     style={{
-                      background: `radial-gradient(circle at 100% 0, transparent 0 5px, ${STUDIO_WORKSPACE_WEAK_BORDER} 5px 6px, ${STUDIO_WORKSPACE_SURFACE} 6px 100%)`,
                       bottom: -1,
+                      display: 'block',
                       height: 7,
                       pointerEvents: 'none',
                       position: 'absolute',
@@ -356,7 +370,19 @@ export function TabBar<T extends StudioTab>({
                       width: 7,
                       zIndex: 11,
                     }}
-                  />
+                  >
+                    <path
+                      d="M0 0 C0 3.87 3.13 7 7 7 H0 Z"
+                      fill={STUDIO_WORKSPACE_SURFACE}
+                    />
+                    <path
+                      d="M0.5 0 C0.5 3.59 3.41 6.5 7 6.5"
+                      fill="none"
+                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                      strokeWidth="1"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
                 </>
               )}
 

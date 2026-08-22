@@ -109,28 +109,44 @@ describe('TabBar', () => {
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
       background: '#07111f',
     });
-    expect(
-      screen.getByTestId('studio-workspace-tab-shoulder-left')
-    ).toHaveStyle({
-      background:
-        'radial-gradient(circle at 0 0, transparent 0 5px, #22364d 5px 6px, #07111f 6px 100%)',
+    const leftShoulder = screen.getByTestId(
+      'studio-workspace-tab-shoulder-left'
+    );
+    const rightShoulder = screen.getByTestId(
+      'studio-workspace-tab-shoulder-right'
+    );
+    expect(leftShoulder).toHaveAttribute('viewBox', '0 0 7 7');
+    expect(leftShoulder).toHaveStyle({
       bottom: '-1px',
       height: '7px',
       left: '-6px',
       width: '7px',
       zIndex: 11,
     });
-    expect(
-      screen.getByTestId('studio-workspace-tab-shoulder-right')
-    ).toHaveStyle({
-      background:
-        'radial-gradient(circle at 100% 0, transparent 0 5px, #22364d 5px 6px, #07111f 6px 100%)',
+    expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
+      'fill',
+      '#07111f'
+    );
+    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'd',
+      'M6.5 0 C6.5 3.59 3.59 6.5 0 6.5'
+    );
+    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'stroke',
+      '#22364d'
+    );
+    expect(rightShoulder).toHaveAttribute('viewBox', '0 0 7 7');
+    expect(rightShoulder).toHaveStyle({
       bottom: '-1px',
       height: '7px',
       right: '-6px',
       width: '7px',
       zIndex: 11,
     });
+    expect(rightShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'd',
+      'M0.5 0 C0.5 3.59 3.41 6.5 7 6.5'
+    );
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {
