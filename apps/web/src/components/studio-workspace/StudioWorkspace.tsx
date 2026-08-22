@@ -3,7 +3,6 @@ import {
   Bell,
   BookOpen,
   Bot,
-  ClipboardList,
   Database,
   Grid2X2,
   History,
@@ -113,26 +112,22 @@ function StudioChromeAction({
 function StudioWorkspaceHeader({
   currentUserLabel,
   isHomeActive,
-  isWatchlistActive,
   launcherActions,
   launcherTriggerRef,
   onAccount,
   onHome,
   onNotifications,
   onSettings,
-  onWatchlist,
   tabBar,
 }: {
   currentUserLabel: string;
   isHomeActive: boolean;
-  isWatchlistActive: boolean;
   launcherActions: StudioAction[];
   launcherTriggerRef: React.RefObject<HTMLButtonElement>;
   onAccount?: () => void;
   onHome?: () => void;
   onNotifications?: () => void;
   onSettings?: () => void;
-  onWatchlist?: () => void;
   tabBar: ReactNode;
 }) {
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
@@ -179,11 +174,10 @@ function StudioWorkspaceHeader({
       <button
         type="button"
         onClick={onHome}
-        className="studio-shell-brand flex w-[52px] shrink-0 items-center gap-2.5 border-r border-white/10 px-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 md:w-[172px] md:px-3.5"
+        className="studio-shell-brand flex w-[52px] shrink-0 items-center gap-2.5 px-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 md:w-[172px] md:px-3.5"
         aria-label="QuantX Studio · 打开行情工作台"
         style={{
           background: 'rgba(2, 8, 17, 0.28)',
-          borderColor: 'rgba(111, 151, 194, 0.2)',
         }}
       >
         <span
@@ -204,53 +198,34 @@ function StudioWorkspaceHeader({
 
       <nav
         aria-label="固定工作区"
-        className="studio-shell-fixed-nav flex shrink-0 items-stretch border-r border-white/10"
+        className="studio-shell-fixed-nav flex shrink-0 items-end"
         style={{
           background: 'rgba(2, 8, 17, 0.28)',
-          borderColor: 'rgba(111, 151, 194, 0.2)',
         }}
       >
         <button
           type="button"
           onClick={onHome}
           className={cn(
-            'flex w-12 items-center justify-center gap-2 border-r border-white/5 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[108px] lg:px-3',
+            'flex h-[44px] w-12 items-center justify-center gap-2 rounded-t-[8px] border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[108px] lg:px-3',
             isHomeActive
               ? 'text-slate-100'
-              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+              : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
           )}
           style={
             isHomeActive
               ? {
                   background: '#0b1a2b',
-                  boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.07)',
+                  borderColor: '#22364d',
+                  boxShadow:
+                    'inset 0 1px 0 rgba(148, 190, 230, 0.09), 0 -8px 24px rgba(0, 0, 0, 0.12)',
                 }
               : undefined
           }
+          data-testid="studio-fixed-home-tab"
         >
           <BookOpen className="h-[18px] w-[18px]" strokeWidth={2} />
           <span className="hidden lg:inline">工作台</span>
-        </button>
-        <button
-          type="button"
-          onClick={onWatchlist}
-          className={cn(
-            'flex w-12 items-center justify-center gap-2 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[120px] lg:px-3',
-            isWatchlistActive
-              ? 'text-slate-100'
-              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
-          )}
-          style={
-            isWatchlistActive
-              ? {
-                  background: '#0b1a2b',
-                  boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.07)',
-                }
-              : undefined
-          }
-        >
-          <ClipboardList className="h-[18px] w-[18px]" strokeWidth={2} />
-          <span className="hidden lg:inline">自选股</span>
         </button>
       </nav>
 
@@ -839,7 +814,7 @@ export function StudioWorkspace({
 
   const workspaceTabBar = useMemo(() => {
     const displayTabs = normalizeStudioWorkspaceTabTitles(tabs).filter(
-      tab => tab.path !== '/' && tab.path !== '/screening'
+      tab => tab.path !== '/'
     );
 
     return (
@@ -1010,14 +985,12 @@ export function StudioWorkspace({
         <StudioWorkspaceHeader
           currentUserLabel={currentUserLabel}
           isHomeActive={currentPath === '/'}
-          isWatchlistActive={currentPath === '/screening'}
           launcherActions={launcherActions}
           launcherTriggerRef={assistantTriggerRef}
           onAccount={accountAction?.onSelect}
           onHome={() => openStudioTab('/')}
           onNotifications={notificationAction?.onSelect}
           onSettings={settingsAction?.onSelect}
-          onWatchlist={() => openStudioTab('/screening')}
           tabBar={workspaceTabBar}
         />
 

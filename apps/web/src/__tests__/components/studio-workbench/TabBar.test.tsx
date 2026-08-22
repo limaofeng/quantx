@@ -72,8 +72,13 @@ describe('TabBar', () => {
     const tab = screen.getByRole('tab', { name: '标签 1' });
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     expect(tabBar).toHaveClass('studio-shell-tabbar', 'bg-transparent');
+    expect(tabBar).toHaveStyle({ height: '100%' });
     expect(tab.parentElement).toHaveClass('h-[44px]', 'rounded-t-[8px]');
-    expect(tab.parentElement).toHaveStyle({ width: 'min(13rem, 100%)' });
+    expect(tab.parentElement).toHaveStyle({
+      maxWidth: 'min(13rem, 100%)',
+      minWidth: '6.5rem',
+      width: 'fit-content',
+    });
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {

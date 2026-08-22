@@ -154,6 +154,7 @@ function getTabIcon(pathname: string): LucideIcon {
 }
 
 function getTabTitle(pathname: string, search = '') {
+  if (pathname === '/screening') return '自选股';
   if (pathname === '/holdings') return '持仓';
   if (pathname === '/account') return '账户概览';
   if (

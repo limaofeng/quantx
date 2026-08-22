@@ -164,6 +164,7 @@ export function TabBar<T extends StudioTab>({
           ? {
               background:
                 'linear-gradient(180deg, rgba(4, 12, 23, 0.1), rgba(4, 11, 21, 0.54))',
+              height: '100%',
             }
           : undefined
       }
@@ -214,7 +215,9 @@ export function TabBar<T extends StudioTab>({
               style={
                 isWorkspaceVariant
                   ? {
-                      width: 'min(13rem, 100%)',
+                      maxWidth: 'min(13rem, 100%)',
+                      minWidth: '6.5rem',
+                      width: 'fit-content',
                       ...(isActive
                         ? {
                             background: '#0b1a2b',

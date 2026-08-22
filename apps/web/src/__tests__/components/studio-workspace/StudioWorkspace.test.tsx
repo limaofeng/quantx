@@ -131,9 +131,21 @@ describe('StudioWorkspace', () => {
     expect(chrome).toContainElement(tabBar);
     expect(chrome).toHaveClass('studio-shell-header');
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
+    const fixedWorkspace = screen.getByRole('navigation', {
+      name: '固定工作区',
+    });
     expect(
-      screen.getByRole('navigation', { name: '固定工作区' })
-    ).toHaveTextContent('工作台自选股');
+      screen.getByRole('button', {
+        name: 'QuantX Studio · 打开行情工作台',
+      })
+    ).not.toHaveClass('border-r');
+    expect(fixedWorkspace).not.toHaveClass('border-r');
+    expect(fixedWorkspace).toHaveTextContent('工作台');
+    expect(fixedWorkspace).not.toHaveTextContent('自选股');
+    expect(screen.getByTestId('studio-fixed-home-tab')).toHaveClass(
+      'h-[44px]',
+      'rounded-t-[8px]'
+    );
     expect(screen.getByTestId('studio-activity-bar')).toHaveAttribute(
       'data-variant',
       'studio'
@@ -174,6 +186,32 @@ describe('StudioWorkspace', () => {
       'QuantX 开发用户'
     );
     expect(screen.queryByTestId('studio-status-bar')).not.toBeInTheDocument();
+  });
+
+  it('keeps only the home entry fixed and restores watchlist as a regular tab', () => {
+    vi.mocked(window.localStorage.getItem).mockImplementation(key => {
+      if (key === 'quantx-studio-workspace-tabs') {
+        return JSON.stringify([
+          { id: 'page:/screening', isPreview: false, path: '/screening' },
+        ]);
+      }
+
+      return null;
+    });
+
+    render(
+      <StudioWorkspace>
+        <main>Workspace page content</main>
+      </StudioWorkspace>
+    );
+
+    const fixedWorkspace = screen.getByRole('navigation', {
+      name: '固定工作区',
+    });
+    expect(fixedWorkspace).toHaveTextContent('工作台');
+    expect(fixedWorkspace).not.toHaveTextContent('自选股');
+    expect(screen.getByRole('tab', { name: '自选股' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '关闭 自选股' })).toBeVisible();
   });
 
   it('opens the AI assistant from the launcher and restores focus on close', async () => {

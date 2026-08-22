@@ -8,6 +8,13 @@ import {
 } from '@/components/studio-workspace';
 
 describe('studio workspace tabs', () => {
+  it('keeps the watchlist label when it joins the regular tab strip', () => {
+    expect(buildStudioWorkspaceTab('/screening')).toMatchObject({
+      name: '自选股',
+      path: '/screening',
+    });
+  });
+
   it('builds one holdings tab id regardless of selected symbol', () => {
     expect(getStudioWorkspaceTabId('/holdings?symbol=562500.SH')).toBe(
       'holdings'
