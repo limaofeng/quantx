@@ -6,13 +6,10 @@ import {
   Database,
   Grid2X2,
   History,
-  Minus,
   Settings,
-  Square,
   TrendingUp,
   UserRound,
   Wrench,
-  X,
 } from 'lucide-react';
 import {
   lazy,
@@ -321,21 +318,6 @@ function StudioWorkspaceHeader({
         >
           {userMonogram}
         </button>
-        <div
-          aria-hidden="true"
-          className="ml-1 hidden h-full items-center border-l border-white/10 pl-1 xl:flex"
-          style={{ borderColor: 'rgba(111, 151, 194, 0.2)' }}
-        >
-          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
-            <Minus className="h-3.5 w-3.5" />
-          </span>
-          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
-            <Square className="h-3 w-3" />
-          </span>
-          <span className="flex h-8 w-8 items-center justify-center text-slate-400">
-            <X className="h-3.5 w-3.5" />
-          </span>
-        </div>
       </div>
     </header>
   );
