@@ -41,7 +41,12 @@ def test_client_contract_snapshots_are_current():
       )
     )
   schema_sdl = generated["graphql-schema.graphql"].decode("utf-8")
-  assert "authorizedAccountIds: [String!]! = []" in schema_sdl
+  enrollment_mutation = schema_sdl.split("createAgentEnrollment(", 1)[1].split(
+    ")", 1
+  )[0]
+  assert "name: String!" in enrollment_mutation
+  assert "authorizedAccountIds" not in enrollment_mutation
+  assert "qmtAgentConnection: QmtAgentConnection!" in schema_sdl
   manual_input = schema_sdl.split("input ManualOrderPreviewInput {", 1)[1].split(
     "}", 1
   )[0]

@@ -221,6 +221,10 @@ class HeartbeatPayload(BaseModel):
   protocol_version: str = PROTOCOL_VERSION
   capabilities: List[str] = Field(default_factory=list)
   status: str = "READY"
+  xtdata_status: str = "UNKNOWN"
+  xtdata_reason: str = ""
+  xttrading_status: str = "UNKNOWN"
+  xttrading_reason: str = ""
   journal_integrity: str = ""
   journal_size_bytes: int = Field(default=0, ge=0)
   journal_pending_reports: int = Field(default=0, ge=0)

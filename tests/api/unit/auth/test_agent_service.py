@@ -1,9 +1,14 @@
 import pytest
 from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
+from quantx_api.auth.tokens import utcnow
 from quantx_infrastructure.config.settings import Settings
 from quantx_infrastructure.database.relational_base import Base
-from quantx_infrastructure.models.agent_runtime import AgentDevice, AgentEnrollmentCode
+from quantx_infrastructure.models.agent_runtime import (
+  AgentDevice,
+  AgentEnrollmentCode,
+  RuntimeComponentHeartbeat,
+)
 from quantx_infrastructure.models.auth import AuthUser
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -11,6 +16,7 @@ AGENT_AUTH_TABLES = [
   AuthUser.__table__,
   AgentEnrollmentCode.__table__,
   AgentDevice.__table__,
+  RuntimeComponentHeartbeat.__table__,
 ]
 
 
@@ -83,3 +89,68 @@ async def test_agent_access_session_tracks_expiry_and_revoke_is_immediate(db):
 
   with pytest.raises(AuthError):
     await service.authenticate_agent(token=grant.access_token)
+
+
+@pytest.mark.asyncio
+async def test_new_ready_agent_atomically_replaces_previous_device(db):
+  service = AgentAuthService(db, _settings())
+  first_enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="current",
+    authorized_account_ids=["account-1"],
+  )
+  first_credential = await service.exchange_enrollment(first_enrollment.code)
+  first = await db.get(AgentDevice, first_credential.device_id)
+  first.last_seen_at = service_module_now = utcnow()
+  db.add(
+    RuntimeComponentHeartbeat(
+      component=f"qmt-agent:{first.id}",
+      instance_id=first.id,
+      status="READY",
+      details={},
+      updated_at=service_module_now,
+    )
+  )
+  await db.commit()
+
+  replacement_enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="replacement",
+    authorized_account_ids=["account-1"],
+  )
+  replacement_credential = await service.exchange_enrollment(
+    replacement_enrollment.code
+  )
+  replacement = await db.get(AgentDevice, replacement_credential.device_id)
+
+  assert replacement.replaces_device_id == first.id
+  assert await service.converge_ready_device(
+    device=first,
+    observed_at=utcnow(),
+  ) == []
+  assert first.revoked_at is None
+
+  revoked = await service.converge_ready_device(
+    device=replacement,
+    observed_at=utcnow(),
+  )
+  await db.commit()
+
+  assert revoked == [first.id]
+  assert first.revoked_at is not None
+  heartbeat = await db.get(RuntimeComponentHeartbeat, f"qmt-agent:{first.id}")
+  assert heartbeat.status == "REVOKED"
+
+
+@pytest.mark.asyncio
+async def test_cancel_handover_invalidates_pending_code(db):
+  service = AgentAuthService(db, _settings())
+  enrollment = await service.create_enrollment(
+    user_id="user-1",
+    name="pending",
+    authorized_account_ids=["account-1"],
+  )
+
+  assert await service.cancel_handover(user_id="user-1") == 1
+  with pytest.raises(AuthError):
+    await service.exchange_enrollment(enrollment.code)

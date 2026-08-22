@@ -75,8 +75,21 @@ def _native_principal(*, permissions) -> Principal:
   )
 
 
-def test_agent_device_query_requires_system_status_permission():
-  assert required_permission("Query", "agentDevices") == "system-status:read"
+def test_qmt_agent_connection_query_requires_system_status_permission():
+  assert (
+    required_permission("Query", "qmtAgentConnection")
+    == "system-status:read"
+  )
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  ["createAgentEnrollment", "cancelAgentHandover", "revokeAgentDevice"],
+)
+def test_qmt_agent_mutations_require_agent_manage_permission(
+  field_name: str,
+):
+  assert required_permission("Mutation", field_name) == "agent:manage"
 
 
 def test_ai_runtime_settings_use_dedicated_system_permissions():

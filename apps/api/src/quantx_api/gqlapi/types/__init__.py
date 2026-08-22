@@ -1,4 +1,13 @@
-from .agent_types import AgentDevice, AgentDeviceMutationResult, AgentEnrollment
+from .agent_types import (
+  AgentDeviceMutationResult,
+  AgentEnrollment,
+  AgentHandoverMutationResult,
+  QmtAgentConnection,
+  QmtAgentDiagnostics,
+  QmtAgentHistoryEntry,
+  QmtCurrentConnection,
+  QmtMarketStreamMetrics,
+)
 from .ai_runtime_settings_types import (
   AiRuntimeApplyState,
   AiRuntimeSettings,
@@ -478,7 +487,12 @@ __all__ = [
   "StrategyMarketDataEvent",
   "StrategyLogEntry",
   "StrategyLogPage",
-  "AgentDevice",
   "AgentDeviceMutationResult",
   "AgentEnrollment",
+  "AgentHandoverMutationResult",
+  "QmtAgentConnection",
+  "QmtAgentDiagnostics",
+  "QmtAgentHistoryEntry",
+  "QmtCurrentConnection",
+  "QmtMarketStreamMetrics",
 ]

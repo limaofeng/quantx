@@ -30,8 +30,9 @@ Windows QMT Agent
 - 日志和异常堆栈；
 - Web 存储、原生偏好存储或客户端诊断包。
 
-设备密钥只保存在 Windows Credential Manager。Web 只能创建一次性登记码和撤销
-设备；原生与第三方客户端不参与 Agent 凭据交换或券商连接。
+设备密钥只保存在 Windows Credential Manager。Web 只能读取非敏感连接诊断、
+创建或取消一次性安全交接，以及撤销设备；不允许远程启动、重连或控制
+MiniQMT。原生与第三方客户端不参与 Agent 凭据交换或券商连接。
 
 ## 状态真源
 

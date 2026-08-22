@@ -329,6 +329,154 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
 
 
 @pytest.mark.asyncio
+async def test_ready_reconciliation_atomically_completes_agent_handover(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  tables = [
+    AuthUser.__table__,
+    AgentDevice.__table__,
+    AccountTradingRollout.__table__,
+    AccountTradingRolloutEvent.__table__,
+    RuntimeComponentHeartbeat.__table__,
+  ]
+  async with engine.begin() as connection:
+    await connection.run_sync(
+      lambda sync_connection: Base.metadata.create_all(
+        sync_connection,
+        tables=tables,
+      )
+    )
+  sessions = async_sessionmaker(engine, expire_on_commit=False)
+  monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(report_processor, "_process_order_report", AsyncMock())
+  monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
+  monkeypatch.setattr(
+    report_processor,
+    "_snapshot_discrepancies",
+    AsyncMock(
+      return_value={
+        "blocking_discrepancies": [],
+        "external_orders": [],
+        "external_trades": [],
+      }
+    ),
+  )
+  position_service = SimpleNamespace(
+    apply_full_snapshot=AsyncMock(),
+    apply_position_delta=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
+    "PositionService",
+    lambda: position_service,
+  )
+  now = utcnow()
+  async with sessions() as db:
+    db.add(
+      AuthUser(
+        id="user-handover",
+        username="user-handover",
+        display_name="Handover User",
+        password_hash="unused",
+        permissions=[],
+      )
+    )
+    db.add_all(
+      [
+        AgentDevice(
+          id="device-old",
+          user_id="user-handover",
+          name="current",
+          secret_hash="a" * 64,
+          authorized_account_ids=["account-1"],
+          capabilities=["live"],
+          last_seen_at=now,
+        ),
+        AgentDevice(
+          id="device-new",
+          user_id="user-handover",
+          name="replacement",
+          secret_hash="b" * 64,
+          authorized_account_ids=["account-1"],
+          capabilities=["live"],
+          last_seen_at=now,
+          replaces_device_id="device-old",
+        ),
+        RuntimeComponentHeartbeat(
+          component="qmt-agent:device-old",
+          instance_id="device-old",
+          status="READY",
+          details={},
+          updated_at=now,
+        ),
+        RuntimeComponentHeartbeat(
+          component="qmt-agent:device-new",
+          instance_id="device-new",
+          status="RECONCILING",
+          details={},
+          updated_at=now,
+        ),
+      ]
+    )
+    await db.commit()
+
+  payload = {
+    "snapshot_id": "handover-snapshot",
+    "is_complete": True,
+    "source_sequence": 1,
+    "source_event_at": now.isoformat(),
+    "accounts": [{"account_id": "account-1", "cash": 0}],
+    "positions_by_account": {"account-1": []},
+    "section_completeness_by_account": {
+      "account-1": {
+        "account": True,
+        "positions": True,
+        "orders": True,
+        "trades": True,
+      }
+    },
+    "unavailable_accounts": [],
+    "orders": [],
+    "trades": [],
+  }
+  payload["snapshot_hash"] = sha256(
+    json.dumps(
+      payload,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
+
+  await report_processor._process_delta_report(
+    "device-new",
+    payload,
+    protocol_version="1.1",
+  )
+
+  async with sessions() as db:
+    old = await db.get(AgentDevice, "device-old")
+    replacement_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      "qmt-agent:device-new",
+    )
+    old_heartbeat = await db.get(
+      RuntimeComponentHeartbeat,
+      "qmt-agent:device-old",
+    )
+    assert old is not None and old.revoked_at is not None
+    assert replacement_heartbeat is not None
+    assert replacement_heartbeat.status == "READY"
+    assert replacement_heartbeat.details["completedHandoverDeviceIds"] == [
+      "device-old"
+    ]
+    assert old_heartbeat is not None and old_heartbeat.status == "REVOKED"
+
+  await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
   (
     "include_completeness",

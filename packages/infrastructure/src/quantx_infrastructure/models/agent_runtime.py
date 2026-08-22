@@ -37,6 +37,12 @@ class AgentDevice(Base, TimestampMixin):
   capabilities = Column(JSON, nullable=False, default=list)
   last_seen_at = Column(DateTime, nullable=True)
   revoked_at = Column(DateTime, nullable=True)
+  replaces_device_id = Column(
+    String(36),
+    ForeignKey("agent_devices.id", ondelete="RESTRICT"),
+    nullable=True,
+    index=True,
+  )
 
 
 class AgentEnrollmentCode(Base):
@@ -57,6 +63,11 @@ class AgentEnrollmentCode(Base):
   created_at = Column(DateTime, nullable=False)
   expires_at = Column(DateTime, nullable=False)
   consumed_at = Column(DateTime, nullable=True)
+  replaces_device_id = Column(
+    String(36),
+    ForeignKey("agent_devices.id", ondelete="RESTRICT"),
+    nullable=True,
+  )
 
 
 class RuntimeComponentHeartbeat(Base):

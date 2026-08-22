@@ -182,7 +182,7 @@ _register(
   "Query",
   "system-status:read",
   {
-    "agentDevices",
+    "qmtAgentConnection",
     "aiRuntimeSettings",
     "flowRun",
     "flowRuns",
@@ -404,7 +404,11 @@ _register(
 _register(
   "Mutation",
   "agent:manage",
-  {"createAgentEnrollment", "revokeAgentDevice"},
+  {
+    "cancelAgentHandover",
+    "createAgentEnrollment",
+    "revokeAgentDevice",
+  },
   audiences=WEB_ONLY,
   stability="web-internal",
   risk="ADMIN",

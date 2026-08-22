@@ -5,11 +5,18 @@ from __future__ import annotations
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
 from quantx_infrastructure.config.settings import Settings, settings
-from quantx_infrastructure.models.agent_runtime import AgentDevice, AgentEnrollmentCode
+from quantx_infrastructure.models.agent_runtime import (
+  AgentDevice,
+  AgentEnrollmentCode,
+  RuntimeComponentHeartbeat,
+)
+from quantx_infrastructure.services.agent_handover import (
+  converge_ready_agent,
+)
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +74,25 @@ class AgentAuthService:
     await self.db.execute(
       delete(AgentEnrollmentCode).where(AgentEnrollmentCode.expires_at <= now)
     )
+    await self.db.execute(
+      delete(AgentEnrollmentCode).where(
+        AgentEnrollmentCode.user_id == user_id,
+        AgentEnrollmentCode.consumed_at.is_(None),
+      )
+    )
+    current = await self.current_device(user_id=user_id)
+    if current is not None:
+      candidates = (
+        await self.db.execute(
+          select(AgentDevice).where(
+            AgentDevice.user_id == user_id,
+            AgentDevice.revoked_at.is_(None),
+            AgentDevice.replaces_device_id == current.id,
+          )
+        )
+      ).scalars()
+      for candidate in candidates:
+        candidate.revoked_at = now
     code = secrets.token_urlsafe(32)
     expires_at = now + timedelta(minutes=10)
     self.db.add(
@@ -78,6 +104,7 @@ class AgentAuthService:
         created_at=now,
         expires_at=expires_at,
         consumed_at=None,
+        replaces_device_id=current.id if current is not None else None,
       )
     )
     await self.db.commit()
@@ -108,11 +135,92 @@ class AgentAuthService:
       capabilities=[],
       last_seen_at=None,
       revoked_at=None,
+      replaces_device_id=enrollment.replaces_device_id,
     )
     enrollment.consumed_at = now
     self.db.add(device)
     await self.db.commit()
     return AgentCredential(device_id=device.id, device_secret=device_secret)
+
+  async def current_device(self, *, user_id: str) -> AgentDevice | None:
+    devices = list(
+      (
+        await self.db.execute(
+          select(AgentDevice).where(
+            AgentDevice.user_id == user_id,
+            AgentDevice.revoked_at.is_(None),
+          )
+        )
+      ).scalars()
+    )
+    if not devices:
+      return None
+    heartbeat_rows = (
+      await self.db.execute(
+        select(RuntimeComponentHeartbeat).where(
+          RuntimeComponentHeartbeat.component.in_(
+            [f"qmt-agent:{device.id}" for device in devices]
+          )
+        )
+      )
+    ).scalars()
+    heartbeat_status = {
+      str(row.instance_id): str(row.status or "").upper()
+      for row in heartbeat_rows
+    }
+
+    def timestamp(value: datetime | None) -> float:
+      if value is None:
+        return 0.0
+      if value.tzinfo is None:
+        value = value.replace(tzinfo=utcnow().tzinfo)
+      return value.timestamp()
+
+    def key(device: AgentDevice) -> tuple[int, float, float]:
+      return (
+        int(heartbeat_status.get(str(device.id)) == "READY"),
+        timestamp(device.last_seen_at),
+        timestamp(device.created_at),
+      )
+
+    return max(devices, key=key)
+
+  async def cancel_handover(self, *, user_id: str) -> int:
+    now = utcnow()
+    deleted = await self.db.execute(
+      delete(AgentEnrollmentCode).where(
+        AgentEnrollmentCode.user_id == user_id,
+        AgentEnrollmentCode.consumed_at.is_(None),
+      )
+    )
+    current = await self.current_device(user_id=user_id)
+    if current is not None:
+      candidates = (
+        await self.db.execute(
+          select(AgentDevice).where(
+            AgentDevice.user_id == user_id,
+            AgentDevice.revoked_at.is_(None),
+            AgentDevice.replaces_device_id == current.id,
+          )
+        )
+      ).scalars()
+      for candidate in candidates:
+        candidate.revoked_at = now
+    await self.db.commit()
+    return int(deleted.rowcount or 0)
+
+  async def converge_ready_device(
+    self,
+    *,
+    device: AgentDevice,
+    observed_at: datetime,
+  ) -> list[str]:
+    """Revoke superseded credentials only after this device is truly READY."""
+    return await converge_ready_agent(
+      self.db,
+      device=device,
+      observed_at=observed_at,
+    )
 
   async def issue_agent_token(
     self,

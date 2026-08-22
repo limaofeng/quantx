@@ -1175,6 +1175,9 @@ async def test_heartbeat_never_reports_ready_state_when_xtdata_is_unavailable(
   envelope = AgentEnvelope.model_validate_json(socket.sent[0])
   assert envelope.message_type is AgentMessageType.HEARTBEAT
   assert envelope.payload["status"] == "XTDATA_UNAVAILABLE"
+  assert envelope.payload["xtdata_status"] == "DISCONNECTED"
+  assert envelope.payload["xtdata_reason"] == "XTDATA_UNAVAILABLE"
+  assert envelope.payload["xttrading_status"] == "DISABLED"
 
 
 @pytest.mark.asyncio
@@ -1209,6 +1212,9 @@ async def test_live_heartbeat_reports_trading_unavailable() -> None:
 
   envelope = AgentEnvelope.model_validate_json(socket.sent[0])
   assert envelope.payload["status"] == "TRADING_UNAVAILABLE"
+  assert envelope.payload["xtdata_status"] == "CONNECTED"
+  assert envelope.payload["xttrading_status"] == "DISCONNECTED"
+  assert envelope.payload["xttrading_reason"] == "XTTRADING_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ QuantX 对 GraphQL 根字段采用默认拒绝。每个字段必须在服务端 
 | `notification:manage` | 当前设备 APNs 注册、偏好与通知路由 |
 | `system-status:read` | 服务、Agent、任务和运维状态 |
 | `operations:write` | 操作部署、流程与运营告警 |
-| `agent:manage` | 创建设备登记码与撤销 Agent |
+| `agent:manage` | 创建/取消安全交接与撤销 Agent |
 | `system-config:write` | 修改 AI Runtime 等全局非敏感系统配置 |
 | `assistant:read` / `assistant:write` | AI 对话、运行和非交易工具审批 |
 | `trade:approve` | 高风险交易确认和实盘灰度操作的附加授权 |

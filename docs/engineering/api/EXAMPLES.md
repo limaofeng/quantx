@@ -62,9 +62,14 @@ import { gql } from "@/generated/gql";
 
 const HealthQuery = gql(`
   query HealthExample {
-    agentDevices {
-      id
-      status
+    qmtAgentConnection {
+      current {
+        id
+        status
+        xtdataStatus
+        xttradingStatus
+        reconciliationStatus
+      }
     }
   }
 `);

@@ -36,6 +36,7 @@ from quantx_infrastructure.models.account import Account
 from quantx_infrastructure.models.agent_runtime import (
   AccountTradingRollout,
   AccountTradingRolloutEvent,
+  AgentDevice,
   AgentReportInbox,
   OperationalAlert,
   PendingTradeOrder,
@@ -48,6 +49,7 @@ from quantx_infrastructure.models.enums import AccountType
 from quantx_infrastructure.models.trade import Trade
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.account_repository import AccountRepository
+from quantx_infrastructure.services.agent_handover import converge_ready_agent
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
@@ -1051,12 +1053,29 @@ async def _process_delta_report(
             "accountReconciliation": account_details,
           }
         )
+        observed_at = utcnow()
         heartbeat.details = details
         if _snapshot_can_promote_heartbeat(heartbeat.status):
-          heartbeat.status = (
+          next_status = (
             "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
           )
-        heartbeat.updated_at = utcnow()
+          heartbeat.status = next_status
+          if next_status == "READY":
+            device = await db.get(AgentDevice, device_id)
+            if device is not None and device.revoked_at is None:
+              revoked_ids = await converge_ready_agent(
+                db,
+                device=device,
+                observed_at=observed_at,
+              )
+              if revoked_ids:
+                details = {
+                  **details,
+                  "completedHandoverDeviceIds": revoked_ids,
+                  "completedHandoverAt": observed_at.isoformat(),
+                }
+                heartbeat.details = details
+        heartbeat.updated_at = observed_at
         await db.commit()
 
 

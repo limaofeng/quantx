@@ -125,6 +125,12 @@ python -m quantx_qmt_agent.main enroll `
 python -m quantx_qmt_agent.main status
 ```
 
+更换本机 Agent 时使用同一页面发起“安全交接”：旧 Agent 在新 Agent 建立
+WebSocket、上传完整账户快照并由 Engine 确认 `READY` 前继续保持有效；完成后
+服务端原子撤销旧凭据。取消交接只撤销候选 Agent 和未使用登记码，不影响当前
+Agent。页面可查看 XTData、XTTrading、行情序列/队列/ACK/重同步和 journal
+摘要，但不会接收 QMT 路径、端口或原始异常详情。
+
 本地 SQLite journal 持久化命令幂等记录和待确认回报。相同消息 ID 与不同
 载荷会被拒绝；已完成命令在重连后只重放原确认与未确认回报，不重复调用
 broker。过期、账户不在白名单和协议版本不兼容的命令都会在本地拒绝。

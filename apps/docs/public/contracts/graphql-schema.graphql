@@ -55,18 +55,6 @@ input AddWatchlistItemInput {
   note: String = null
 }
 
-"""已登记的 QMT Agent 设备"""
-type AgentDevice {
-  id: String!
-  name: String!
-  status: String!
-  authorizedAccountIds: [String!]!
-  capabilities: [String!]!
-  lastSeenAt: DateTime
-  revokedAt: DateTime
-  requiresReconciliation: Boolean!
-}
-
 """QMT Agent 设备操作结果"""
 type AgentDeviceMutationResult {
   success: Boolean!
@@ -78,6 +66,12 @@ type AgentDeviceMutationResult {
 type AgentEnrollment {
   enrollmentCode: String!
   expiresAt: DateTime!
+}
+
+"""QMT Agent 安全交接取消结果"""
+type AgentHandoverMutationResult {
+  success: Boolean!
+  message: String!
 }
 
 enum AiAssistantApprovalDecision {
@@ -3278,10 +3272,13 @@ type Mutation {
   """删除当前用户拥有且没有活动运行的 AI 对话及其消息"""
   deleteAiAssistantThread(threadId: ID!): Boolean!
 
-  """创建十分钟内有效的一次性设备登记码"""
-  createAgentEnrollment(name: String! = "QuantX QMT Agent", authorizedAccountIds: [String!]! = []): AgentEnrollment!
+  """创建十分钟内有效的安全交接登记码"""
+  createAgentEnrollment(name: String! = "本机 QMT Agent"): AgentEnrollment!
 
-  """撤销 Agent 设备"""
+  """取消尚未完成的 QMT Agent 安全交接"""
+  cancelAgentHandover: AgentHandoverMutationResult!
+
+  """撤销当前 QMT Agent"""
   revokeAgentDevice(deviceId: String!): AgentDeviceMutationResult!
 
   """刷新单票公告与回购数据"""
@@ -4176,6 +4173,66 @@ enum PushEnvironment {
   PRODUCTION
 }
 
+"""个人单账户 QMT 本机连接视图"""
+type QmtAgentConnection {
+  current: QmtCurrentConnection
+  handoverStatus: String!
+  handoverDeviceStatus: String
+  pendingEnrollmentExpiresAt: DateTime
+  history: [QmtAgentHistoryEntry!]!
+}
+
+"""QMT Agent 本地可靠性诊断"""
+type QmtAgentDiagnostics {
+  agentVersion: String!
+  protocolVersion: String!
+  journalIntegrity: String!
+  journalSizeBytes: Int!
+  journalPendingReports: Int!
+  journalProcessingCommands: Int!
+}
+
+"""历史 QMT Agent 登记"""
+type QmtAgentHistoryEntry {
+  id: String!
+  name: String!
+  status: String!
+  lastSeenAt: DateTime
+  revokedAt: DateTime
+}
+
+"""当前唯一 QMT 本机连接"""
+type QmtCurrentConnection {
+  id: String!
+  name: String!
+  status: String!
+  accountId: String!
+  mode: String!
+  websocketStatus: String!
+  xtdataStatus: String!
+  xtdataReason: String!
+  xttradingStatus: String!
+  xttradingReason: String!
+  reconciliationStatus: String!
+  lastSeenAt: DateTime
+  heartbeatAgeSeconds: Float
+  marketStream: QmtMarketStreamMetrics!
+  diagnostics: QmtAgentDiagnostics!
+}
+
+"""QMT Agent 行情流运行指标"""
+type QmtMarketStreamMetrics {
+  status: String!
+  sequence: Int!
+  queueDepth: Int!
+  resyncs: Int!
+  ackLatencyMs: Float!
+  instrumentCount: Int!
+  universeCount: Int!
+  snapshotAgeSeconds: Float
+  commitPhase: String!
+}
+
 "QuantX 量化交易系统 GraphQL API\n\n## 主要功能模块\n\n### 金融工具查询\n- 获取金融工具基本信息和实时行情\n- 支持单个金融工具和批量查询\n\n### 持仓管理\n- 查看当前持仓情况\n- 获取持仓盈亏信息\n\n### 卖出管理\n- 一键清仓所有持仓\n- 个股清仓操作\n- 已清仓股票资金赎回\n\n### 订单管理\n- 查询历史订单记录\n- 查看订单执行状态\n\n### 策略管理\n- 获取策略模板和实例信息\n- 监控策略运行状态\n\n### 历史数据\n- 获取金融工具价格历史数据\n- 支持不同时间周期\n\n### 账户信息\n- 查看账户资产状况\n- 获取账户盈亏统计\n"
 type Query {
   """AI Runtime 全局非敏感配置与应用状态"""
@@ -4193,8 +4250,8 @@ type Query {
   """按序号增量读取单个 AI 对话的消息"""
   aiAssistantMessages(threadId: ID!, afterSequence: Int! = 0, limit: Int! = 100): AiAssistantMessagePage!
 
-  """当前用户登记的 Agent 设备"""
-  agentDevices(includeRevoked: Boolean! = false): [AgentDevice!]!
+  """当前用户唯一的 QMT 本机连接"""
+  qmtAgentConnection: QmtAgentConnection!
 
   """获取单票公告与回购摘要"""
   stockDisclosureSummary(stockCode: String!, limit: Int! = 20): StockDisclosureSummary!

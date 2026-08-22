@@ -76,7 +76,7 @@ GraphQL 写权限按领域拆分为 `portfolio:write`、`market:write`、
 `orders:write`、`strategy:write`、`operations:write` 和 `agent:manage`。
 高风险交易确认额外要求 `trade:approve`；旧 `mutation:write` 已停用。
 
-## QMT Agent 设备接口
+## QMT Agent 本机连接接口
 
 ```text
 POST   /auth/agent/enrollments
@@ -91,8 +91,15 @@ PUT    /agent/market-data/{request_id}/chunks/{chunk_index}
 由 Agent 写入 Windows Credential Manager，换取短期 JWT 后主动建立
 WebSocket。
 
-GraphQL 同时提供 `agentDevices`、`createAgentEnrollment` 和
-`revokeAgentDevice`，供 Web 管理设备状态。
+GraphQL 使用单一 `qmtAgentConnection` 视图返回当前 Agent、五段连接链路、
+行情流与本地 journal 的非敏感指标，以及折叠的历史登记。Web 通过
+`createAgentEnrollment` 发起安全交接，使用 `cancelAgentHandover` 取消；
+新 Agent 只有在连接并完成账户对账、达到 `READY` 后，服务端才原子撤销旧
+Agent 凭据。`revokeAgentDevice` 仍用于显式撤销当前连接。
+
+XTData/XTTrading 心跳只上传 `CONNECTED / DISCONNECTED / DISABLED` 和受控
+原因码，不上传 QMT 路径、端口、设备密钥或原始异常堆栈。该 Web 页面不提供
+远程启动、重连或 MiniQMT 控制能力。
 
 ## 系统设置 GraphQL
 

@@ -123,6 +123,16 @@
         "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
+      "cancelAgentHandover": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "agent:manage"
+        ],
+        "risk": "ADMIN",
+        "stability": "web-internal"
+      },
       "cancelAiAssistantRun": {
         "audiences": [
           "web",
@@ -1418,16 +1428,6 @@
         "risk": "READ",
         "stability": "supported"
       },
-      "agentDevices": {
-        "audiences": [
-          "web"
-        ],
-        "requiredPermissions": [
-          "system-status:read"
-        ],
-        "risk": "READ",
-        "stability": "web-internal"
-      },
       "aiAssistantCapabilities": {
         "audiences": [
           "web",
@@ -2188,6 +2188,16 @@
         ],
         "risk": "READ",
         "stability": "supported"
+      },
+      "qmtAgentConnection": {
+        "audiences": [
+          "web"
+        ],
+        "requiredPermissions": [
+          "system-status:read"
+        ],
+        "risk": "READ",
+        "stability": "web-internal"
       },
       "redemptionRecords": {
         "audiences": [

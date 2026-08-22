@@ -11,7 +11,7 @@
 | 策略 | `strategy:read` | `strategy:write` | 策略、回测、做 T、打板助手 |
 | AI Assistant | `assistant:read` | `assistant:write` | 对话、运行、审批与事件 |
 | 系统运维 | `system-status:read` | `operations:write` | 健康、Prefect、运营告警 |
-| Agent 管理 | `system-status:read` | `agent:manage` | 登记码、设备列表与撤销 |
+| QMT 本机连接 | `system-status:read` | `agent:manage` | 连接诊断、安全交接与撤销 |
 | 系统配置 | `system-status:read` | `system-config:write` | 非敏感 AI Runtime 配置 |
 
 `trade:approve` 是附加权限，不替代 `orders:write` 或 `strategy:write`。高风险确认与

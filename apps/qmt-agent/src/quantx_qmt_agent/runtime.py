@@ -2152,9 +2152,11 @@ class AgentRuntime:
 
   async def _send_heartbeat(self, socket, *, status: str) -> None:
     self._ensure_market_upload_state()
-    if not self._is_market_data_ready():
+    market_data_ready = self._is_market_data_ready()
+    trading_ready = self._is_trading_ready()
+    if not market_data_ready:
       status = "XTDATA_UNAVAILABLE"
-    if not self._is_trading_ready():
+    if not trading_ready:
       status = "TRADING_UNAVAILABLE"
     if self.emergency_stop and self.emergency_stop.status()["active"]:
       status = "EMERGENCY_STOP"
@@ -2169,6 +2171,22 @@ class AgentRuntime:
         self.mode,
       ],
       status=status,
+      xtdata_status="CONNECTED" if market_data_ready else "DISCONNECTED",
+      xtdata_reason="" if market_data_ready else "XTDATA_UNAVAILABLE",
+      xttrading_status=(
+        "CONNECTED"
+        if self.mode == "live" and trading_ready
+        else "DISCONNECTED"
+        if self.mode == "live"
+        else "DISABLED"
+      ),
+      xttrading_reason=(
+        ""
+        if self.mode == "live" and trading_ready
+        else "XTTRADING_UNAVAILABLE"
+        if self.mode == "live"
+        else "TRADING_DISABLED_BY_MODE"
+      ),
       journal_integrity=str(journal_stats["integrity"]),
       journal_size_bytes=int(journal_stats["size_bytes"]),
       journal_pending_reports=int(journal_stats["pending_reports"]),

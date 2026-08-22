@@ -34,8 +34,8 @@ const navigation: Array<{
   },
   {
     id: 'qmt',
-    label: 'QMT Agent',
-    description: '本地执行网关与设备',
+    label: 'QMT 连接',
+    description: '本机执行链路与诊断',
     href: '/settings/qmt',
     icon: Cable,
   },
@@ -61,8 +61,8 @@ function SettingsOverview({
 }) {
   const cards = [
     {
-      title: 'QMT Agent',
-      description: '登记、查看和撤销本机执行网关，检查账户授权与对账状态。',
+      title: 'QMT 本机连接',
+      description: '查看 MiniQMT 连接链路、行情指标与安全交接状态。',
       href: '/settings/qmt',
       icon: Cable,
       accent: 'text-cyan-300 bg-cyan-500/10 border-cyan-500/20',

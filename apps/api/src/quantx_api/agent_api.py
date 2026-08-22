@@ -345,6 +345,16 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
         "agentVersion": str(payload.get("agent_version", ""))[:64],
         "protocolVersion": str(payload.get("protocol_version", ""))[:16],
         "capabilities": agent.capabilities,
+        "xtdataStatus": str(
+          payload.get("xtdata_status") or "UNKNOWN"
+        )[:32],
+        "xtdataReason": str(payload.get("xtdata_reason") or "")[:64],
+        "xttradingStatus": str(
+          payload.get("xttrading_status") or "UNKNOWN"
+        )[:32],
+        "xttradingReason": str(
+          payload.get("xttrading_reason") or ""
+        )[:64],
         "journalIntegrity": str(
           payload.get("journal_integrity", "")
         )[:32],
@@ -373,19 +383,30 @@ async def _record_heartbeat(device_id: str, payload: dict[str, Any]) -> None:
       }
     )
     if heartbeat is None:
-      db.add(
-        RuntimeComponentHeartbeat(
-          component=f"qmt-agent:{device_id}",
-          instance_id=device_id,
-          status=status,
-          details=details,
-          updated_at=now,
-        )
+      heartbeat = RuntimeComponentHeartbeat(
+        component=f"qmt-agent:{device_id}",
+        instance_id=device_id,
+        status=status,
+        details=details,
+        updated_at=now,
       )
+      db.add(heartbeat)
     else:
       heartbeat.status = status
       heartbeat.details = details
       heartbeat.updated_at = now
+    if status == "READY":
+      revoked_ids = await AgentAuthService(db).converge_ready_device(
+        device=agent,
+        observed_at=now,
+      )
+      if revoked_ids:
+        details = {
+          **details,
+          "completedHandoverDeviceIds": revoked_ids,
+          "completedHandoverAt": now.isoformat(),
+        }
+        heartbeat.details = details
     await db.commit()
 
 
