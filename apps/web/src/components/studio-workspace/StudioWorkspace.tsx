@@ -1,4 +1,12 @@
-import { BarChart3, Bot, TrendingUp, UserRound } from 'lucide-react';
+import {
+  BarChart3,
+  Bell,
+  Bot,
+  Grid2X2,
+  Settings,
+  TrendingUp,
+  UserRound,
+} from 'lucide-react';
 import {
   lazy,
   Suspense,
@@ -65,6 +73,113 @@ const studioWorkspaceTheme: StudioTheme = {
   title: 'QuantX Studio',
 };
 
+function StudioChromeAction({
+  badge = false,
+  icon: Icon,
+  label,
+  onSelect,
+}: {
+  badge?: boolean;
+  icon: React.ElementType;
+  label: string;
+  onSelect?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      className="group relative flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 disabled:cursor-not-allowed disabled:opacity-40"
+      disabled={!onSelect}
+      onClick={onSelect}
+      title={label}
+    >
+      <Icon className="h-4 w-4" strokeWidth={1.8} />
+      {badge && (
+        <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-rose-400 ring-2 ring-[#0b1120]" />
+      )}
+    </button>
+  );
+}
+
+function StudioWorkspaceHeader({
+  currentUserLabel,
+  onAccount,
+  onHome,
+  onNotifications,
+  onSettings,
+  tabBar,
+}: {
+  currentUserLabel: string;
+  onAccount?: () => void;
+  onHome?: () => void;
+  onNotifications?: () => void;
+  onSettings?: () => void;
+  tabBar: ReactNode;
+}) {
+  return (
+    <header
+      aria-label="QuantX Studio 工作区栏"
+      className="flex h-12 shrink-0 items-stretch border-b border-white/10 bg-[#0b1120]"
+      data-testid="studio-chrome-header"
+    >
+      <button
+        type="button"
+        onClick={onHome}
+        className="flex w-52 shrink-0 items-center gap-2.5 border-r border-white/5 px-3 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
+        aria-label="QuantX Studio · 打开行情工作台"
+      >
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-red-400/30 bg-red-500/10 font-mono text-[9px] font-black tracking-tight text-red-300">
+          QX
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-[12px] font-bold tracking-wide text-slate-100">
+            QuantX Studio
+          </span>
+          <span className="block text-[9px] font-medium uppercase tracking-widest text-slate-600">
+            A-Share Terminal
+          </span>
+        </span>
+      </button>
+
+      <div className="min-w-0 flex-1">{tabBar}</div>
+
+      <div
+        aria-label="工作区快捷操作"
+        className="flex shrink-0 items-center gap-0.5 border-l border-white/5 px-2"
+        role="toolbar"
+      >
+        <StudioChromeAction
+          icon={Grid2X2}
+          label="打开行情工作台"
+          onSelect={onHome}
+        />
+        <StudioChromeAction
+          badge
+          icon={Bell}
+          label="查看通知"
+          onSelect={onNotifications}
+        />
+        <StudioChromeAction
+          icon={Settings}
+          label="打开系统设置"
+          onSelect={onSettings}
+        />
+        <span aria-hidden="true" className="mx-1 h-5 w-px bg-white/[0.07]" />
+        <button
+          type="button"
+          onClick={onAccount}
+          className="flex h-8 max-w-40 items-center gap-2 rounded-md border border-white/5 bg-white/5 px-2.5 text-[10px] font-medium text-slate-400 transition-colors hover:border-white/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+          aria-label={`打开账户：${currentUserLabel}`}
+          title={`当前用户：${currentUserLabel}`}
+        >
+          <UserRound className="h-3.5 w-3.5 shrink-0 text-red-300" />
+          <span className="max-w-24 truncate">{currentUserLabel}</span>
+        </button>
+      </div>
+    </header>
+  );
+}
+
 function StudioWorkspaceStatusBar({
   currentUserLabel,
 }: {
@@ -129,7 +244,7 @@ function StudioWorkspaceSidebarDock({
     <aside
       data-testid="studio-sidebar-dock"
       className={cn(
-        'relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/5 bg-[#0b1120]/70',
+        'relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/5 bg-[#0b1120]',
         !isResizingSidebar && 'transition-[width] duration-150'
       )}
       style={{
@@ -600,8 +715,10 @@ export function StudioWorkspace({
     return (
       <TabBar
         activeTabId={activeTabId}
+        createTooltip="打开行情工作台"
         onTabChange={handleTabChange}
         onTabClose={handleTabClose}
+        onTabCreate={() => openStudioTab(DEFAULT_WORKSPACE_PATH)}
         onTabPin={handleTabPin}
         renderTabContent={(tab: StudioWorkspaceTab, isActive) => {
           const Icon = tab.icon || BarChart3;
@@ -628,7 +745,14 @@ export function StudioWorkspace({
         themeColor="red"
       />
     );
-  }, [activeTabId, handleTabChange, handleTabClose, handleTabPin, tabs]);
+  }, [
+    activeTabId,
+    handleTabChange,
+    handleTabClose,
+    handleTabPin,
+    openStudioTab,
+    tabs,
+  ]);
 
   const contextValue = useMemo(
     () => ({
@@ -649,13 +773,32 @@ export function StudioWorkspace({
       workspaceTabBar,
     ]
   );
+  const homeAction = globalActions.find(action => action.id === 'nav:/');
+  const accountAction = utilityActions.find(
+    action => action.id === 'utility:assets'
+  );
+  const notificationAction = utilityActions.find(
+    action => action.id === 'utility:notifications'
+  );
+  const settingsAction = utilityActions.find(
+    action => action.id === 'nav:/settings'
+  );
 
   return (
     <StudioWorkspaceContext.Provider value={contextValue}>
       <div
         data-studio-workbench
-        className="studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden bg-[var(--studio-bg)] text-slate-200 font-sans"
+        className="studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden bg-[#0b1120] text-slate-200 font-sans"
       >
+        <StudioWorkspaceHeader
+          currentUserLabel={currentUserLabel}
+          onAccount={accountAction?.onSelect}
+          onHome={homeAction?.onSelect}
+          onNotifications={notificationAction?.onSelect}
+          onSettings={settingsAction?.onSelect}
+          tabBar={workspaceTabBar}
+        />
+
         <div className="flex min-h-0 flex-1">
           <ActivityBar
             activeMode="WORKSPACE"
@@ -664,16 +807,13 @@ export function StudioWorkspace({
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
             utilityActions={utilityActions}
+            variant="studio"
           />
 
           <div
-            className="flex min-w-0 flex-1 flex-col bg-[#0b1120]/20"
+            className="flex min-w-0 flex-1 flex-col bg-[#07111f]"
             data-testid="studio-workspace-main"
           >
-            <div className="flex h-10 shrink-0">
-              <div className="min-w-0 flex-1">{workspaceTabBar}</div>
-            </div>
-
             <div
               className="relative flex min-h-0 min-w-0 flex-1 pr-10"
               data-testid="studio-workspace-content"

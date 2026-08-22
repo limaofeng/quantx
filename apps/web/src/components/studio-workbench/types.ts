@@ -21,6 +21,7 @@ export interface StudioAction {
   id: string;
   icon: React.ElementType;
   label: string;
+  shortLabel?: string;
   active?: boolean;
   badge?: boolean;
   onHover?: () => void;
@@ -74,6 +75,7 @@ export interface ActivityBarProps {
   globalActions?: StudioAction[];
   onExit?: () => void;
   utilityActions?: StudioAction[];
+  variant?: 'compact' | 'studio';
 }
 
 export interface StatusBarProps {

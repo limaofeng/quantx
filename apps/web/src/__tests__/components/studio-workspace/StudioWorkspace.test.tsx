@@ -88,6 +88,7 @@ describe('StudioWorkspace', () => {
 
     const main = screen.getByTestId('studio-workspace-main');
     const content = screen.getByTestId('studio-workspace-content');
+    const chrome = screen.getByTestId('studio-chrome-header');
     const dock = screen.getByTestId('studio-sidebar-dock');
     const resizer = screen.getByTestId('studio-sidebar-resizer');
     const tabBar = screen.getByTestId('studio-tab-bar');
@@ -109,6 +110,11 @@ describe('StudioWorkspace', () => {
       'overflow-hidden'
     );
     expect(main).toContainElement(dock);
+    expect(chrome).toContainElement(tabBar);
+    expect(screen.getByTestId('studio-activity-bar')).toHaveAttribute(
+      'data-variant',
+      'studio'
+    );
     expect(content).toContainElement(dock);
     expect(content).toContainElement(pageContent);
     expect(

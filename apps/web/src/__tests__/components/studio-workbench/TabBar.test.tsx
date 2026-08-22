@@ -27,11 +27,33 @@ describe('TabBar', () => {
     );
 
     const firstTab = screen.getByRole('tab', { name: '标签 1' });
+    const tabBar = screen.getByTestId('studio-tab-bar');
     expect(screen.getByRole('tablist', { name: '工作区标签' })).toBeVisible();
+    expect(tabBar).toHaveClass('h-12', 'bg-[#0b1120]');
+    expect(firstTab.parentElement).toHaveClass('rounded-t-md');
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.keyDown(firstTab, { key: 'ArrowRight' });
     expect(onTabChange).toHaveBeenCalledWith('tab-2');
+  });
+
+  it('exposes a functional workspace create action', () => {
+    const onTabCreate = vi.fn();
+
+    render(
+      <TabBar
+        activeTabId="tab-1"
+        createTooltip="打开行情工作台"
+        onTabChange={vi.fn()}
+        onTabClose={vi.fn()}
+        onTabCreate={onTabCreate}
+        tabs={buildTabs(1)}
+        themeColor="red"
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '打开行情工作台' }));
+    expect(onTabCreate).toHaveBeenCalledTimes(1);
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {

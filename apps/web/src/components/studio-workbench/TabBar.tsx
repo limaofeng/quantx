@@ -116,12 +116,12 @@ export function TabBar<T extends StudioTab>({
 
   return (
     <div
-      className="relative h-10 shrink-0 overflow-hidden border-b border-white/5 bg-[#0b1120]/70"
+      className="relative h-12 shrink-0 overflow-hidden border-b border-white/5 bg-[#0b1120]"
       data-testid="studio-tab-bar"
     >
       <div
         aria-label="工作区标签"
-        className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain scroll-smooth px-2"
+        className="no-scrollbar flex h-full min-w-0 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-smooth px-1.5"
         role="tablist"
       >
         {tabs.map(tab => {
@@ -144,10 +144,10 @@ export function TabBar<T extends StudioTab>({
                 });
               }}
               className={cn(
-                'group relative flex h-full w-[148px] shrink-0 items-center border-b-2 transition-colors',
+                'group relative flex h-11 w-40 shrink-0 items-center border border-b-0 transition-colors duration-150',
                 isActive
-                  ? themeStyles.activeTab
-                  : 'border-transparent bg-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'
+                  ? `${themeStyles.activeTab} z-10 rounded-t-md after:absolute after:-bottom-px after:inset-x-0 after:h-px after:bg-slate-900`
+                  : 'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
               )}
             >
               <button
@@ -212,7 +212,7 @@ export function TabBar<T extends StudioTab>({
                     type="button"
                     onClick={event => onTabClose(tab.id, event)}
                     className={cn(
-                      'rounded-md p-1 text-slate-400 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/80 group-hover:opacity-100 group-focus-within:opacity-100',
+                      'rounded p-1 text-slate-500 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/80 group-hover:opacity-100 group-focus-within:opacity-100',
                       isActive && 'opacity-100'
                     )}
                     aria-label={`关闭 ${tab.name}`}
@@ -229,8 +229,9 @@ export function TabBar<T extends StudioTab>({
           <button
             type="button"
             onClick={onTabCreate}
-            className="flex h-full shrink-0 cursor-pointer items-center justify-center px-3 text-slate-400 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80"
+            className="mb-1 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80"
             title={createTooltip}
+            aria-label={createTooltip}
           >
             <Plus size={16} strokeWidth={2} />
           </button>

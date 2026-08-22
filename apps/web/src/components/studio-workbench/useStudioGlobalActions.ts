@@ -28,6 +28,17 @@ function formatAssetLabel(totalAsset?: number | null) {
   return `总资产 ¥${totalAsset.toLocaleString()}`;
 }
 
+const compactNavigationLabels: Record<string, string> = {
+  买入管理: '买入',
+  做T助手: '做 T',
+  卖出管理: '卖出',
+  打板助手: '打板',
+  研究中心: '研究',
+  策略管理: '策略',
+  股票筛选: '选股',
+  系统设置: '设置',
+};
+
 export function useStudioGlobalActions() {
   const [location, setLocation] = useLocation();
   const { logout, user } = useAuth();
@@ -61,6 +72,7 @@ export function useStudioGlobalActions() {
         icon: item.icon,
         id: `nav:${item.href}`,
         label: item.label,
+        shortLabel: compactNavigationLabels[item.label] || item.label,
         onHover: () => void preloadRoute(item.href),
         onSelect: () => setLocation(item.href),
       })),
@@ -73,6 +85,7 @@ export function useStudioGlobalActions() {
         icon: Wallet,
         id: 'utility:assets',
         label: formatAssetLabel(totalAsset),
+        shortLabel: '账户',
         onHover: () => void preloadRoute('/account'),
         onSelect: () => setLocation('/account'),
       },
@@ -81,18 +94,25 @@ export function useStudioGlobalActions() {
         icon: Bell,
         id: 'utility:notifications',
         label: '通知',
-        onSelect: () => undefined,
+        shortLabel: '消息',
+        onSelect: () =>
+          toast({
+            title: '暂无新通知',
+            description: '交易、风控与系统事件会集中显示在这里。',
+          }),
       },
       {
         icon: BookOpen,
         id: 'utility:developer-docs',
         label: '开发者文档（在新标签页打开）',
+        shortLabel: '文档',
         onSelect: openDeveloperDocs,
       },
       {
         icon: LogOut,
         id: 'utility:logout',
         label: '退出登录',
+        shortLabel: '退出',
         onSelect: () => void handleLogout(),
       },
       ...settingsNavigationItems.map(item => ({
@@ -100,11 +120,12 @@ export function useStudioGlobalActions() {
         icon: item.icon,
         id: `nav:${item.href}`,
         label: item.label,
+        shortLabel: compactNavigationLabels[item.label] || item.label,
         onHover: () => void preloadRoute(item.href),
         onSelect: () => setLocation(item.href),
       })),
     ],
-    [handleLogout, location, openDeveloperDocs, setLocation, totalAsset]
+    [handleLogout, location, openDeveloperDocs, setLocation, toast, totalAsset]
   );
 
   return {
