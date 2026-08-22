@@ -102,7 +102,9 @@ describe('TabBar', () => {
     expect(scrollableRegion).toHaveStyle({
       height: 'calc(100% + 1px)',
       marginBottom: '-1px',
+      marginLeft: '-9px',
       paddingBottom: '1px',
+      paddingLeft: '9px',
     });
     expect(
       screen.queryByRole('button', { name: '关闭 标签 1' })

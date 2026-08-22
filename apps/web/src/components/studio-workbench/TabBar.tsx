@@ -268,6 +268,12 @@ export function TabBar<T extends StudioTab>({
                     height: 'calc(100% + 1px)',
                     marginBottom: -1,
                     paddingBottom: 1,
+                    ...(fixedWorkspaceTabs.length > 0
+                      ? {
+                          marginLeft: -WORKSPACE_TAB_SHOULDER_SIZE,
+                          paddingLeft: WORKSPACE_TAB_SHOULDER_SIZE,
+                        }
+                      : {}),
                   }
                 : undefined
             }
