@@ -752,39 +752,35 @@ export function StudioWorkspace({
   const handleTabClose = useCallback(
     (tabId: string, event?: React.MouseEvent) => {
       event?.stopPropagation();
-      let nextActivePath: string | null = null;
-      let nextActiveId: string | null = null;
+      const tabIndex = tabs.findIndex(tab => tab.id === tabId);
+      if (tabIndex === -1) return;
+      if (tabs[tabIndex].path === DEFAULT_WORKSPACE_PATH) return;
+
+      const remainingTabs = tabs.filter(tab => tab.id !== tabId);
+      const nextActiveTab =
+        activeTabId === tabId
+          ? remainingTabs[Math.max(0, tabIndex - 1)] ||
+            remainingTabs[0] ||
+            getFallbackTab()
+          : null;
 
       setTabs(currentTabs => {
-        const tabIndex = currentTabs.findIndex(tab => tab.id === tabId);
-        if (tabIndex === -1) return currentTabs;
-        if (currentTabs[tabIndex].path === DEFAULT_WORKSPACE_PATH) {
+        const currentTab = currentTabs.find(tab => tab.id === tabId);
+        if (!currentTab) return currentTabs;
+        if (currentTab.path === DEFAULT_WORKSPACE_PATH) {
           return currentTabs;
         }
 
         const nextTabs = currentTabs.filter(tab => tab.id !== tabId);
-
-        if (nextTabs.length === 0) {
-          const fallbackTab = getFallbackTab();
-          nextActiveId = fallbackTab.id;
-          nextActivePath = fallbackTab.path;
-          return [fallbackTab];
-        }
-
-        if (activeTabId === tabId) {
-          const nextTab =
-            nextTabs[Math.max(0, tabIndex - 1)] || nextTabs[0] || null;
-          nextActiveId = nextTab?.id || null;
-          nextActivePath = nextTab?.path || null;
-        }
-
-        return nextTabs;
+        return nextTabs.length > 0 ? nextTabs : [getFallbackTab()];
       });
 
-      if (nextActiveId) setActiveTabId(nextActiveId);
-      if (nextActivePath) setLocation(nextActivePath);
+      if (nextActiveTab) {
+        setActiveTabId(nextActiveTab.id);
+        setLocation(nextActiveTab.path);
+      }
     },
-    [activeTabId, setLocation]
+    [activeTabId, setLocation, tabs]
   );
 
   const handleTabPin = useCallback((tabId: string, pinned: boolean) => {

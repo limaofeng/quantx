@@ -89,6 +89,32 @@ function RegisteredSidebarPage() {
   return <main>Workspace page content</main>;
 }
 
+function WorkspaceTabLauncher() {
+  const workspace = useStudioWorkspaceContext();
+
+  useEffect(() => {
+    // Keep a tab update pending when close runs, matching the production race.
+    const queueTabUpdate = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (!target.closest('button[aria-label="关闭 持仓"]')) return;
+      workspace?.updateActiveTab({ name: '持仓' });
+    };
+
+    document.addEventListener('click', queueTabUpdate, true);
+    return () => document.removeEventListener('click', queueTabUpdate, true);
+  }, [workspace]);
+
+  return (
+    <button
+      type="button"
+      onClick={() => workspace?.openStudioTab('/holdings')}
+    >
+      打开持仓标签
+    </button>
+  );
+}
+
 describe('StudioWorkspace', () => {
   beforeEach(() => {
     studioWorkbenchMocks.onSelect.mockClear();
@@ -398,6 +424,30 @@ describe('StudioWorkspace', () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '自选股' })).toBeVisible();
     expect(screen.getByRole('button', { name: '关闭 自选股' })).toBeVisible();
+  });
+
+  it('selects the home tab after closing the last closable tab', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <StudioWorkspace>
+        <WorkspaceTabLauncher />
+      </StudioWorkspace>
+    );
+
+    await user.click(screen.getByRole('button', { name: '打开持仓标签' }));
+    expect(screen.getByRole('tab', { name: '持仓' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+
+    await user.click(screen.getByRole('button', { name: '关闭 持仓' }));
+
+    expect(screen.queryByRole('tab', { name: '持仓' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '工作台' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
   });
 
   it('opens the AI assistant from the launcher and restores focus on close', async () => {
