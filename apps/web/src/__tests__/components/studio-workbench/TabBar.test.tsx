@@ -29,8 +29,15 @@ describe('TabBar', () => {
     const firstTab = screen.getByRole('tab', { name: '标签 1' });
     const tabBar = screen.getByTestId('studio-tab-bar');
     expect(screen.getByRole('tablist', { name: '工作区标签' })).toBeVisible();
-    expect(tabBar).toHaveClass('h-[52px]', 'bg-[#07111f]');
-    expect(firstTab.parentElement).toHaveClass('rounded-t-md');
+    expect(tabBar).toHaveClass('bg-[#07111f]');
+    expect(tabBar).toHaveStyle({ height: '52px' });
+    expect(firstTab.parentElement).toHaveStyle({
+      borderTopLeftRadius: 'calc(var(--radius) - 2px)',
+      borderTopRightRadius: 'calc(var(--radius) - 2px)',
+    });
+    expect(
+      screen.queryByTestId('studio-workspace-tab-connector')
+    ).not.toBeInTheDocument();
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.keyDown(firstTab, { key: 'ArrowRight' });
@@ -73,11 +80,20 @@ describe('TabBar', () => {
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     expect(tabBar).toHaveClass('studio-shell-tabbar', 'bg-transparent');
     expect(tabBar).toHaveStyle({ height: '100%' });
-    expect(tab.parentElement).toHaveClass('h-[44px]', 'rounded-t-[8px]');
+    expect(tab.parentElement).toHaveClass('border-b-0');
     expect(tab.parentElement).toHaveStyle({
+      background: '#0b1a2b',
+      borderColor: '#22364d',
+      borderTopLeftRadius: '8px',
+      borderTopRightRadius: '8px',
+      height: '44px',
       maxWidth: 'min(13rem, 100%)',
       minWidth: '6.5rem',
       width: 'fit-content',
+      zIndex: 10,
+    });
+    expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
+      background: '#0b1a2b',
     });
   });
 

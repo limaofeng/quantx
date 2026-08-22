@@ -5,6 +5,12 @@ import type React from 'react';
 import { cn } from '@/utils/cn';
 
 import {
+  STUDIO_HEADER_HEIGHT,
+  STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
+  STUDIO_WORKSPACE_SURFACE_TOP,
+  STUDIO_WORKSPACE_TAB_STYLE,
+} from './studioShellStyles';
+import {
   StudioTabContextMenu,
   type StudioTabContextMenuAction,
   type StudioTabContextMenuState,
@@ -154,7 +160,7 @@ export function TabBar<T extends StudioTab>({
   return (
     <div
       className={cn(
-        'relative h-[52px] shrink-0 overflow-hidden bg-[#07111f]',
+        'relative shrink-0 overflow-hidden bg-[#07111f]',
         isWorkspaceVariant && 'studio-shell-tabbar bg-transparent'
       )}
       data-variant={variant}
@@ -166,7 +172,7 @@ export function TabBar<T extends StudioTab>({
                 'linear-gradient(180deg, rgba(4, 12, 23, 0.1), rgba(4, 11, 21, 0.54))',
               height: '100%',
             }
-          : undefined
+          : { height: STUDIO_HEADER_HEIGHT }
       }
     >
       <div
@@ -198,37 +204,39 @@ export function TabBar<T extends StudioTab>({
                 });
               }}
               className={cn(
-                'group relative flex h-12 w-52 shrink-0 items-center border border-b-0 transition-colors duration-150',
-                isWorkspaceVariant && 'h-[44px]',
+                'group relative flex h-12 shrink-0 items-center border border-b-0 transition-colors duration-150',
                 isActive
                   ? cn(
                       themeStyles.activeTab,
-                      'z-10 rounded-t-md after:absolute after:-bottom-px after:inset-x-0 after:h-px after:bg-[#0d1b2c]',
                       isWorkspaceVariant && 'text-slate-100'
                     )
                   : cn(
                       'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200',
                       isWorkspaceVariant && 'hover:border-white/10'
-                    ),
-                isWorkspaceVariant && 'rounded-t-[8px]'
+                    )
               )}
-              style={
-                isWorkspaceVariant
+              style={{
+                ...(isWorkspaceVariant
                   ? {
+                      ...STUDIO_WORKSPACE_TAB_STYLE,
                       maxWidth: 'min(13rem, 100%)',
                       minWidth: '6.5rem',
                       width: 'fit-content',
+                    }
+                  : {
+                      width: 208,
                       ...(isActive
                         ? {
-                            background: '#0b1a2b',
-                            borderColor: '#22364d',
-                            boxShadow:
-                              'inset 0 1px 0 rgba(148, 190, 230, 0.09), 0 -8px 24px rgba(0, 0, 0, 0.12)',
+                            borderTopLeftRadius: 'calc(var(--radius) - 2px)',
+                            borderTopRightRadius: 'calc(var(--radius) - 2px)',
+                            zIndex: 10,
                           }
                         : {}),
-                    }
-                  : undefined
-              }
+                    }),
+                ...(isActive && isWorkspaceVariant
+                  ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE
+                  : {}),
+              }}
             >
               <button
                 ref={node => {
@@ -303,6 +311,28 @@ export function TabBar<T extends StudioTab>({
                     <X size={13} />
                   </button>
                 </div>
+              )}
+
+              {isActive && (
+                <span
+                  aria-hidden="true"
+                  data-testid={
+                    isWorkspaceVariant
+                      ? 'studio-workspace-tab-connector'
+                      : undefined
+                  }
+                  style={{
+                    background: isWorkspaceVariant
+                      ? STUDIO_WORKSPACE_SURFACE_TOP
+                      : '#0d1b2c',
+                    bottom: -1,
+                    height: 1,
+                    left: 0,
+                    pointerEvents: 'none',
+                    position: 'absolute',
+                    right: 0,
+                  }}
+                />
               )}
             </div>
           );

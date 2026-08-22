@@ -41,6 +41,15 @@ import {
   STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
   useStudioSidebarSizing,
 } from '@/components/studio-workbench/sidebarSizing';
+import {
+  STUDIO_CHROME_BACKGROUND,
+  STUDIO_HEADER_HEIGHT,
+  STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
+  STUDIO_WORKSPACE_SURFACE_BACKGROUND,
+  STUDIO_WORKSPACE_SURFACE_TOP,
+  STUDIO_WORKSPACE_TAB_STYLE,
+  STUDIO_WORKSPACE_WEAK_BORDER,
+} from '@/components/studio-workbench/studioShellStyles';
 import { getStudioThemeStyles } from '@/components/studio-workbench/themeStyles';
 import { cn } from '@/utils/cn';
 
@@ -163,13 +172,11 @@ function StudioWorkspaceHeader({
   return (
     <header
       aria-label="QuantX Studio 工作区栏"
-      className="studio-shell-header flex h-[52px] shrink-0 items-stretch border-b border-white/10 bg-[#07111f]"
+      className="studio-shell-header flex shrink-0 items-stretch"
       data-testid="studio-chrome-header"
       style={{
-        background: 'linear-gradient(180deg, #06101d 0%, #040b15 100%)',
-        borderColor: 'rgba(111, 151, 194, 0.2)',
-        boxShadow:
-          'inset 0 -1px 0 rgba(126, 169, 212, 0.08), 0 8px 24px rgba(0, 0, 0, 0.16)',
+        background: STUDIO_CHROME_BACKGROUND,
+        height: STUDIO_HEADER_HEIGHT,
       }}
     >
       <button
@@ -178,7 +185,6 @@ function StudioWorkspaceHeader({
         className="studio-shell-brand flex shrink-0 items-center gap-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
         aria-label="QuantX Studio · 打开行情工作台"
         style={{
-          background: 'rgba(2, 8, 17, 0.28)',
           paddingInline: 'clamp(10px, calc(100vw - 758px), 14px)',
           width: 'clamp(52px, calc(100vw - 716px), 172px)',
         }}
@@ -192,34 +198,40 @@ function StudioWorkspaceHeader({
       <nav
         aria-label="固定工作区"
         className="studio-shell-fixed-nav flex shrink-0 items-end"
-        style={{
-          background: 'rgba(2, 8, 17, 0.28)',
-        }}
       >
         <button
           type="button"
           onClick={onHome}
           className={cn(
-            'flex h-[44px] w-12 items-center justify-center gap-2 rounded-t-[8px] border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:px-3',
+            'relative flex w-12 items-center justify-center gap-2 border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:px-3',
             isHomeActive
               ? 'text-slate-100'
               : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
           )}
           style={{
+            ...STUDIO_WORKSPACE_TAB_STYLE,
             width: 'clamp(48px, calc(100vw - 916px), 108px)',
-            ...(isHomeActive
-              ? {
-                  background: '#0b1a2b',
-                  borderColor: '#22364d',
-                  boxShadow:
-                    'inset 0 1px 0 rgba(148, 190, 230, 0.09), 0 -8px 24px rgba(0, 0, 0, 0.12)',
-                }
-              : {}),
+            ...(isHomeActive ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE : {}),
           }}
           data-testid="studio-fixed-home-tab"
         >
           <BookOpen className="h-[18px] w-[18px]" strokeWidth={2} />
           <span className="hidden lg:inline">工作台</span>
+          {isHomeActive && (
+            <span
+              aria-hidden="true"
+              data-testid="studio-fixed-home-tab-connector"
+              style={{
+                background: STUDIO_WORKSPACE_SURFACE_TOP,
+                bottom: -1,
+                height: 1,
+                left: 0,
+                pointerEvents: 'none',
+                position: 'absolute',
+                right: 0,
+              }}
+            />
+          )}
         </button>
       </nav>
 
@@ -230,7 +242,6 @@ function StudioWorkspaceHeader({
         className="studio-shell-toolbar flex shrink-0 items-center gap-0.5 border-l border-white/10 px-1.5 md:gap-1 md:px-2.5"
         role="toolbar"
         style={{
-          background: 'rgba(2, 8, 17, 0.28)',
           borderColor: 'rgba(111, 151, 194, 0.2)',
         }}
       >
@@ -251,8 +262,14 @@ function StudioWorkspaceHeader({
           </button>
           {isLauncherOpen && (
             <div
-              className="absolute right-0 top-10 z-[80] grid w-[360px] grid-cols-3 gap-1 rounded-lg border border-white/10 bg-[#0b1627] p-2 shadow-2xl shadow-black/50"
+              className="absolute right-0 grid grid-cols-3 gap-1 rounded-lg border border-white/10 p-2 shadow-2xl shadow-black/50"
               role="menu"
+              style={{
+                background: '#0b1627',
+                top: 40,
+                width: 360,
+                zIndex: 80,
+              }}
             >
               {launcherActions.map(action => {
                 const Icon = action.icon;
@@ -970,7 +987,7 @@ export function StudioWorkspace({
     <StudioWorkspaceContext.Provider value={contextValue}>
       <div
         data-studio-workbench
-        className="studio-shell studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden bg-[#050b16] text-slate-200 font-sans"
+        className="studio-shell studio-workbench flex h-screen h-dvh min-h-0 w-full flex-col overflow-hidden text-slate-200 font-sans"
         style={{
           background:
             'radial-gradient(circle at 66% -18%, rgba(24, 67, 108, 0.12), transparent 38%), #050b16',
@@ -1001,11 +1018,12 @@ export function StudioWorkspace({
           />
 
           <div
-            className="studio-shell-main flex min-w-0 flex-1 flex-col bg-[#07111f]"
+            className="studio-shell-main flex min-w-0 flex-1 flex-col overflow-hidden"
             data-testid="studio-workspace-main"
             style={{
-              background:
-                'linear-gradient(180deg, rgba(13, 30, 50, 0.28), transparent 72px), #07111f',
+              background: STUDIO_WORKSPACE_SURFACE_BACKGROUND,
+              borderTopLeftRadius: 12,
+              boxShadow: `inset 0 1px 0 ${STUDIO_WORKSPACE_WEAK_BORDER}`,
             }}
           >
             <div

@@ -2,6 +2,7 @@ import { ChevronLeft } from 'lucide-react';
 
 import { cn } from '@/utils/cn';
 
+import { STUDIO_CHROME_BACKGROUND } from './studioShellStyles';
 import { getStudioThemeStyles } from './themeStyles';
 import type { ActivityBarProps, StudioAction, StudioMode } from './types';
 
@@ -193,10 +194,8 @@ export function ActivityBar({
       style={
         isStudioVariant
           ? {
-              background: '#040b15',
+              background: STUDIO_CHROME_BACKGROUND,
               borderColor: 'rgba(111, 151, 194, 0.2)',
-              boxShadow:
-                '0 -1px 0 #040b15, inset -1px 0 0 rgba(126, 169, 212, 0.05)',
               position: 'relative',
               width: 84,
               zIndex: 20,

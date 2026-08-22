@@ -82,12 +82,12 @@ describe('ActivityBar', () => {
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
     expect(activityBar).toHaveStyle({
       background: '#040b15',
-      boxShadow:
-        '0 -1px 0 #040b15, inset -1px 0 0 rgba(126, 169, 212, 0.05)',
       position: 'relative',
       width: '84px',
       zIndex: 20,
     });
+    expect(activityBar).not.toHaveClass('border-t');
+    expect(activityBar.style.boxShadow).toBe('');
     expect(screen.getByTestId('studio-primary-navigation')).toHaveClass(
       'flex-1',
       'overflow-y-auto'
