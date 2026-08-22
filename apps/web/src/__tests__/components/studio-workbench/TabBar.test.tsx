@@ -78,8 +78,19 @@ describe('TabBar', () => {
     const tabBar = screen.getByTestId('studio-tab-bar');
     const tab = screen.getByRole('tab', { name: '标签 1' });
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
-    expect(tabBar).toHaveClass('studio-shell-tabbar', 'bg-transparent');
+    expect(tabBar).toHaveClass(
+      'studio-shell-tabbar',
+      'overflow-visible',
+      'bg-transparent'
+    );
     expect(tabBar).toHaveStyle({ height: '100%' });
+    expect(
+      screen.getByRole('tablist', { name: '工作区标签' })
+    ).toHaveStyle({
+      height: 'calc(100% + 1px)',
+      marginBottom: '-1px',
+      paddingBottom: '1px',
+    });
     expect(tab.parentElement).toHaveClass('border-b-0');
     expect(tab.parentElement).toHaveStyle({
       background: '#07111f',

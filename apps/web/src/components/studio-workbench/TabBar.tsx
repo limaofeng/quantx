@@ -160,8 +160,10 @@ export function TabBar<T extends StudioTab>({
   return (
     <div
       className={cn(
-        'relative shrink-0 overflow-hidden bg-[#07111f]',
-        isWorkspaceVariant && 'studio-shell-tabbar bg-transparent'
+        'relative shrink-0 bg-[#07111f]',
+        isWorkspaceVariant
+          ? 'studio-shell-tabbar overflow-visible bg-transparent'
+          : 'overflow-hidden'
       )}
       data-variant={variant}
       data-testid="studio-tab-bar"
@@ -183,6 +185,15 @@ export function TabBar<T extends StudioTab>({
           isWorkspaceVariant && 'scroll-auto px-1'
         )}
         role="tablist"
+        style={
+          isWorkspaceVariant
+            ? {
+                height: 'calc(100% + 1px)',
+                marginBottom: -1,
+                paddingBottom: 1,
+              }
+            : undefined
+        }
       >
         {tabs.map(tab => {
           const isActive = activeTabId === tab.id;
