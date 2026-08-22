@@ -168,6 +168,10 @@ describe('StudioWorkspace', () => {
     });
     expect(within(workspaceTabList).getAllByRole('tab')[0]).toBe(fixedHomeTab);
     expect(fixedHomeTab).toHaveAttribute('aria-selected', 'true');
+    expect(fixedHomeTab.parentElement).toHaveAttribute(
+      'data-studio-fixed-tab',
+      'true'
+    );
     expect(fixedHomeTab.parentElement).toHaveClass('border-b-0');
     expect(fixedHomeTab.parentElement).toHaveStyle({
       background: '#07111f',
@@ -175,7 +179,9 @@ describe('StudioWorkspace', () => {
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
       height: '44px',
-      zIndex: 10,
+      left: '16px',
+      position: 'sticky',
+      zIndex: 20,
     });
     expect(
       screen.queryByRole('button', { name: '关闭 行情工作台' })

@@ -79,15 +79,23 @@ export function TabBar<T extends StudioTab>({
       const tabList = tabListRef.current;
       const activeTab = tabButtonRefs.current.get(activeTabId)?.parentElement;
       if (!tabList || !activeTab) return;
+      if (activeTab.dataset.studioFixedTab === 'true') return;
 
       const padding = isWorkspaceVariant ? STUDIO_WORKSPACE_TAB_RADIUS + 4 : 8;
-      const visibleStart = tabList.scrollLeft;
-      const visibleEnd = visibleStart + tabList.clientWidth;
+      const fixedTab = tabList.querySelector<HTMLElement>(
+        '[data-studio-fixed-tab="true"]'
+      );
+      const fixedTabRight = fixedTab
+        ? fixedTab.offsetLeft + fixedTab.offsetWidth + 2
+        : 0;
+      const visibleStart =
+        tabList.scrollLeft + (tabList.scrollLeft > 0 ? fixedTabRight : 0);
+      const visibleEnd = tabList.scrollLeft + tabList.clientWidth;
       const tabStart = activeTab.offsetLeft;
       const tabEnd = tabStart + activeTab.offsetWidth;
 
       if (tabStart < visibleStart) {
-        tabList.scrollLeft = Math.max(0, tabStart - padding);
+        tabList.scrollLeft = Math.max(0, tabStart - fixedTabRight - padding);
       } else if (tabEnd > visibleEnd) {
         tabList.scrollLeft = Math.max(
           0,
@@ -233,10 +241,13 @@ export function TabBar<T extends StudioTab>({
         {tabs.map(tab => {
           const isActive = activeTabId === tab.id;
           const isTabClosable = closable && (canCloseTab?.(tab) ?? true);
+          const isFixedWorkspaceTab =
+            isWorkspaceVariant && closable && !isTabClosable;
 
           return (
             <div
               key={tab.id}
+              data-studio-fixed-tab={isFixedWorkspaceTab ? 'true' : undefined}
               onContextMenu={event => {
                 if (!closable) return;
                 event.preventDefault();
@@ -293,6 +304,16 @@ export function TabBar<T extends StudioTab>({
                     }),
                 ...(isActive && isWorkspaceVariant
                   ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE
+                  : {}),
+                ...(isFixedWorkspaceTab
+                  ? {
+                      background: isActive
+                        ? STUDIO_WORKSPACE_SURFACE
+                        : '#07111f',
+                      left: 16,
+                      position: 'sticky',
+                      zIndex: 20,
+                    }
                   : {}),
               }}
             >

@@ -85,6 +85,15 @@ describe('TabBar', () => {
 
     const fixedTab = screen.getByRole('tab', { name: '标签 1' });
     expect(screen.getAllByRole('tab')[0]).toBe(fixedTab);
+    expect(fixedTab.parentElement).toHaveAttribute(
+      'data-studio-fixed-tab',
+      'true'
+    );
+    expect(fixedTab.parentElement).toHaveStyle({
+      left: '16px',
+      position: 'sticky',
+      zIndex: 20,
+    });
     expect(
       screen.queryByRole('button', { name: '关闭 标签 1' })
     ).not.toBeInTheDocument();
@@ -276,6 +285,35 @@ describe('TabBar', () => {
 
     await waitFor(() => {
       expect(tabList.scrollLeft).toBe(470);
+    });
+  });
+
+  it('does not move the fixed workspace tab when the strip is scrolled', async () => {
+    render(
+      <TabBar
+        activeTabId="tab-1"
+        canCloseTab={tab => tab.id !== 'tab-1'}
+        onTabChange={vi.fn()}
+        onTabClose={vi.fn()}
+        tabs={buildTabs(10)}
+        themeColor="red"
+        variant="workspace"
+      />
+    );
+
+    const tabList = screen.getByRole('tablist', { name: '工作区标签' });
+    const fixedTab = screen.getByRole('tab', { name: '标签 1' });
+    tabList.scrollLeft = 360;
+
+    fireEvent(window, new Event('resize'));
+
+    await waitFor(() => {
+      expect(tabList.scrollLeft).toBe(360);
+    });
+    expect(fixedTab.parentElement).toHaveStyle({
+      left: '16px',
+      position: 'sticky',
+      zIndex: 20,
     });
   });
 
