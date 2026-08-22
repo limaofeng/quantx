@@ -5,11 +5,11 @@ import type React from 'react';
 import { cn } from '@/utils/cn';
 
 import {
+  STUDIO_CHROME_BACKGROUND,
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
-  STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
-  STUDIO_WORKSPACE_TAB_SHOULDER_Y_RADIUS,
+  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
   STUDIO_WORKSPACE_TAB_STYLE,
   STUDIO_WORKSPACE_WEAK_BORDER,
 } from './studioShellStyles';
@@ -21,41 +21,10 @@ import {
 import { getStudioThemeStyles } from './themeStyles';
 import type { StudioTab, StudioThemeName } from './types';
 
-const WORKSPACE_TAB_SHOULDER_WIDTH =
-  STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS + 1;
-const WORKSPACE_TAB_SHOULDER_HEIGHT =
-  STUDIO_WORKSPACE_TAB_SHOULDER_Y_RADIUS + 1;
-const WORKSPACE_TAB_SHOULDER_KAPPA = 0.55228475;
-const workspaceTabShoulderFillControlX = Number(
-  (WORKSPACE_TAB_SHOULDER_WIDTH * WORKSPACE_TAB_SHOULDER_KAPPA).toFixed(
-    2
-  )
-);
-const workspaceTabShoulderFillControlY = Number(
-  (
-    WORKSPACE_TAB_SHOULDER_HEIGHT * WORKSPACE_TAB_SHOULDER_KAPPA
-  ).toFixed(2)
-);
-const workspaceTabShoulderStrokeRadiusX =
-  WORKSPACE_TAB_SHOULDER_WIDTH - 0.5;
-const workspaceTabShoulderStrokeRadiusY =
-  WORKSPACE_TAB_SHOULDER_HEIGHT - 0.5;
-const workspaceTabShoulderStrokeControlX = Number(
-  (
-    workspaceTabShoulderStrokeRadiusX * WORKSPACE_TAB_SHOULDER_KAPPA
-  ).toFixed(2)
-);
-const workspaceTabShoulderStrokeControlY = Number(
-  (
-    workspaceTabShoulderStrokeRadiusY * WORKSPACE_TAB_SHOULDER_KAPPA
-  ).toFixed(2)
-);
-const WORKSPACE_TAB_SHOULDER_PATHS = {
-  leftFill: `M${WORKSPACE_TAB_SHOULDER_WIDTH} 0 C${WORKSPACE_TAB_SHOULDER_WIDTH} ${workspaceTabShoulderFillControlY} ${workspaceTabShoulderFillControlX} ${WORKSPACE_TAB_SHOULDER_HEIGHT} 0 ${WORKSPACE_TAB_SHOULDER_HEIGHT} H${WORKSPACE_TAB_SHOULDER_WIDTH} Z`,
-  leftStroke: `M${workspaceTabShoulderStrokeRadiusX} 0 C${workspaceTabShoulderStrokeRadiusX} ${workspaceTabShoulderStrokeControlY} ${workspaceTabShoulderStrokeControlX} ${workspaceTabShoulderStrokeRadiusY} 0 ${workspaceTabShoulderStrokeRadiusY}`,
-  rightFill: `M0 0 C0 ${workspaceTabShoulderFillControlY} ${WORKSPACE_TAB_SHOULDER_WIDTH - workspaceTabShoulderFillControlX} ${WORKSPACE_TAB_SHOULDER_HEIGHT} ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT} H0 Z`,
-  rightStroke: `M0.5 0 C0.5 ${workspaceTabShoulderStrokeControlY} ${WORKSPACE_TAB_SHOULDER_WIDTH - workspaceTabShoulderStrokeControlX} ${workspaceTabShoulderStrokeRadiusY} ${WORKSPACE_TAB_SHOULDER_WIDTH} ${workspaceTabShoulderStrokeRadiusY}`,
-} as const;
+const WORKSPACE_TAB_SHOULDER_SIZE =
+  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS + 1;
+const WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET =
+  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS / 2;
 
 export interface TabBarProps<T extends StudioTab> {
   activeTabId: string | null;
@@ -221,7 +190,7 @@ export function TabBar<T extends StudioTab>({
         aria-label="工作区标签"
         className={cn(
           'no-scrollbar flex h-full min-w-0 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-smooth px-1.5',
-          isWorkspaceVariant && 'scroll-auto px-3'
+          isWorkspaceVariant && 'scroll-auto px-4'
         )}
         role="tablist"
         style={
@@ -260,10 +229,9 @@ export function TabBar<T extends StudioTab>({
                       themeStyles.activeTab,
                       isWorkspaceVariant && 'text-slate-100'
                     )
-                  : cn(
-                      'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200',
-                      isWorkspaceVariant && 'hover:border-white/10'
-                    )
+                  : isWorkspaceVariant
+                    ? 'border-transparent bg-transparent text-slate-500 hover:bg-white/5 hover:text-slate-200'
+                    : 'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
               )}
               style={{
                 ...(isWorkspaceVariant
@@ -304,7 +272,11 @@ export function TabBar<T extends StudioTab>({
                 }}
                 onKeyDown={event => handleTabKeyDown(event, tab.id)}
                 title={
-                  tab.isPreview ? `${tab.name}（预览标签，双击固定）` : tab.name
+                  isWorkspaceVariant
+                    ? undefined
+                    : tab.isPreview
+                      ? `${tab.name}（预览标签，双击固定）`
+                      : tab.name
                 }
                 className={cn(
                   'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
@@ -367,60 +339,44 @@ export function TabBar<T extends StudioTab>({
 
               {isActive && isWorkspaceVariant && (
                 <>
-                  <svg
+                  <span
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-left"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT}`}
                     style={{
+                      background: STUDIO_CHROME_BACKGROUND,
+                      borderBottom: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
+                      borderBottomRightRadius:
+                        STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
+                      borderRight: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
                       bottom: -1,
-                      display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_HEIGHT,
-                      left: -STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
+                      boxShadow: `${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px 0 ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${STUDIO_WORKSPACE_SURFACE}`,
+                      height: WORKSPACE_TAB_SHOULDER_SIZE,
+                      left: -STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
                       pointerEvents: 'none',
                       position: 'absolute',
-                      width: WORKSPACE_TAB_SHOULDER_WIDTH,
+                      width: WORKSPACE_TAB_SHOULDER_SIZE,
                       zIndex: 11,
                     }}
-                  >
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftFill}
-                      fill={STUDIO_WORKSPACE_SURFACE}
-                    />
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftStroke}
-                      fill="none"
-                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
-                      strokeWidth="1"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </svg>
-                  <svg
+                  />
+                  <span
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-right"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT}`}
                     style={{
+                      background: STUDIO_CHROME_BACKGROUND,
+                      borderBottom: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
+                      borderBottomLeftRadius:
+                        STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
+                      borderLeft: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
                       bottom: -1,
-                      display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_HEIGHT,
+                      boxShadow: `${-WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px 0 ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${STUDIO_WORKSPACE_SURFACE}`,
+                      height: WORKSPACE_TAB_SHOULDER_SIZE,
                       pointerEvents: 'none',
                       position: 'absolute',
-                      right: -STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
-                      width: WORKSPACE_TAB_SHOULDER_WIDTH,
+                      right: -STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
+                      width: WORKSPACE_TAB_SHOULDER_SIZE,
                       zIndex: 11,
                     }}
-                  >
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightFill}
-                      fill={STUDIO_WORKSPACE_SURFACE}
-                    />
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightStroke}
-                      fill="none"
-                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
-                      strokeWidth="1"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </svg>
+                  />
                 </>
               )}
 

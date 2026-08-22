@@ -38,6 +38,10 @@ describe('TabBar', () => {
     expect(
       screen.queryByTestId('studio-workspace-tab-connector')
     ).not.toBeInTheDocument();
+    expect(firstTab).toHaveAttribute('title', '标签 1');
+    expect(screen.getByRole('tab', { name: '标签 2' }).parentElement).toHaveClass(
+      'hover:border-white/5'
+    );
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.keyDown(firstTab, { key: 'ArrowRight' });
@@ -69,7 +73,7 @@ describe('TabBar', () => {
         activeTabId="tab-1"
         onTabChange={vi.fn()}
         onTabClose={vi.fn()}
-        tabs={buildTabs(1)}
+        tabs={buildTabs(2)}
         themeColor="red"
         variant="workspace"
       />
@@ -77,6 +81,7 @@ describe('TabBar', () => {
 
     const tabBar = screen.getByTestId('studio-tab-bar');
     const tab = screen.getByRole('tab', { name: '标签 1' });
+    const inactiveTab = screen.getByRole('tab', { name: '标签 2' });
     expect(tabBar).toHaveAttribute('data-variant', 'workspace');
     expect(tabBar).toHaveClass(
       'studio-shell-tabbar',
@@ -86,7 +91,7 @@ describe('TabBar', () => {
     expect(tabBar).toHaveStyle({ height: '100%' });
     expect(
       screen.getByRole('tablist', { name: '工作区标签' })
-    ).toHaveClass('px-3');
+    ).toHaveClass('px-4');
     expect(
       screen.getByRole('tablist', { name: '工作区标签' })
     ).toHaveStyle({
@@ -95,6 +100,16 @@ describe('TabBar', () => {
       paddingBottom: '1px',
     });
     expect(tab.parentElement).toHaveClass('border-b-0');
+    expect(inactiveTab).not.toHaveAttribute('title');
+    expect(inactiveTab.parentElement).toHaveClass(
+      'border-transparent',
+      'hover:bg-white/5',
+      'hover:text-slate-200'
+    );
+    expect(inactiveTab.parentElement).not.toHaveClass(
+      'hover:border-white/5',
+      'hover:border-white/10'
+    );
     expect(tab.parentElement).toHaveStyle({
       background: '#07111f',
       borderColor: '#22364d',
@@ -115,38 +130,30 @@ describe('TabBar', () => {
     const rightShoulder = screen.getByTestId(
       'studio-workspace-tab-shoulder-right'
     );
-    expect(leftShoulder).toHaveAttribute('viewBox', '0 0 10 17');
     expect(leftShoulder).toHaveStyle({
+      background: '#040b15',
+      borderBottom: '1px solid #22364d',
+      borderBottomRightRadius: '12px',
+      borderRight: '1px solid #22364d',
       bottom: '-1px',
-      height: '17px',
-      left: '-9px',
-      width: '10px',
+      boxShadow: '6px 6px 0 6px #07111f',
+      height: '13px',
+      left: '-12px',
+      width: '13px',
       zIndex: 11,
     });
-    expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
-      'fill',
-      '#07111f'
-    );
-    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
-      'd',
-      'M9.5 0 C9.5 9.11 5.25 16.5 0 16.5'
-    );
-    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
-      'stroke',
-      '#22364d'
-    );
-    expect(rightShoulder).toHaveAttribute('viewBox', '0 0 10 17');
     expect(rightShoulder).toHaveStyle({
+      background: '#040b15',
+      borderBottom: '1px solid #22364d',
+      borderBottomLeftRadius: '12px',
+      borderLeft: '1px solid #22364d',
       bottom: '-1px',
-      height: '17px',
-      right: '-9px',
-      width: '10px',
+      boxShadow: '-6px 6px 0 6px #07111f',
+      height: '13px',
+      right: '-12px',
+      width: '13px',
       zIndex: 11,
     });
-    expect(rightShoulder.querySelectorAll('path')[1]).toHaveAttribute(
-      'd',
-      'M0.5 0 C0.5 9.11 4.75 16.5 10 16.5'
-    );
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {
