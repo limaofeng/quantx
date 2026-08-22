@@ -86,7 +86,7 @@ describe('TabBar', () => {
     expect(tabBar).toHaveStyle({ height: '100%' });
     expect(
       screen.getByRole('tablist', { name: '工作区标签' })
-    ).toHaveClass('px-2.5');
+    ).toHaveClass('px-3');
     expect(
       screen.getByRole('tablist', { name: '工作区标签' })
     ).toHaveStyle({
@@ -115,12 +115,12 @@ describe('TabBar', () => {
     const rightShoulder = screen.getByTestId(
       'studio-workspace-tab-shoulder-right'
     );
-    expect(leftShoulder).toHaveAttribute('viewBox', '0 0 9 9');
+    expect(leftShoulder).toHaveAttribute('viewBox', '0 0 10 17');
     expect(leftShoulder).toHaveStyle({
       bottom: '-1px',
-      height: '9px',
-      left: '-8px',
-      width: '9px',
+      height: '17px',
+      left: '-9px',
+      width: '10px',
       zIndex: 11,
     });
     expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
@@ -129,23 +129,23 @@ describe('TabBar', () => {
     );
     expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
       'd',
-      'M8.5 0 C8.5 4.69 4.69 8.5 0 8.5'
+      'M9.5 0 C9.5 9.11 5.25 16.5 0 16.5'
     );
     expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
       'stroke',
       '#22364d'
     );
-    expect(rightShoulder).toHaveAttribute('viewBox', '0 0 9 9');
+    expect(rightShoulder).toHaveAttribute('viewBox', '0 0 10 17');
     expect(rightShoulder).toHaveStyle({
       bottom: '-1px',
-      height: '9px',
-      right: '-8px',
-      width: '9px',
+      height: '17px',
+      right: '-9px',
+      width: '10px',
       zIndex: 11,
     });
     expect(rightShoulder.querySelectorAll('path')[1]).toHaveAttribute(
       'd',
-      'M0.5 0 C0.5 4.69 4.31 8.5 9 8.5'
+      'M0.5 0 C0.5 9.11 4.75 16.5 10 16.5'
     );
   });
 

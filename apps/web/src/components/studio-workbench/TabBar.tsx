@@ -8,7 +8,8 @@ import {
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
-  STUDIO_WORKSPACE_TAB_RADIUS,
+  STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
+  STUDIO_WORKSPACE_TAB_SHOULDER_Y_RADIUS,
   STUDIO_WORKSPACE_TAB_STYLE,
   STUDIO_WORKSPACE_WEAK_BORDER,
 } from './studioShellStyles';
@@ -20,23 +21,40 @@ import {
 import { getStudioThemeStyles } from './themeStyles';
 import type { StudioTab, StudioThemeName } from './types';
 
-const WORKSPACE_TAB_SHOULDER_SIZE = STUDIO_WORKSPACE_TAB_RADIUS + 1;
+const WORKSPACE_TAB_SHOULDER_WIDTH =
+  STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS + 1;
+const WORKSPACE_TAB_SHOULDER_HEIGHT =
+  STUDIO_WORKSPACE_TAB_SHOULDER_Y_RADIUS + 1;
 const WORKSPACE_TAB_SHOULDER_KAPPA = 0.55228475;
-const workspaceTabShoulderFillControl = Number(
-  (WORKSPACE_TAB_SHOULDER_SIZE * WORKSPACE_TAB_SHOULDER_KAPPA).toFixed(2)
+const workspaceTabShoulderFillControlX = Number(
+  (WORKSPACE_TAB_SHOULDER_WIDTH * WORKSPACE_TAB_SHOULDER_KAPPA).toFixed(
+    2
+  )
 );
-const workspaceTabShoulderStrokeRadius =
-  WORKSPACE_TAB_SHOULDER_SIZE - 0.5;
-const workspaceTabShoulderStrokeControl = Number(
+const workspaceTabShoulderFillControlY = Number(
   (
-    workspaceTabShoulderStrokeRadius * WORKSPACE_TAB_SHOULDER_KAPPA
+    WORKSPACE_TAB_SHOULDER_HEIGHT * WORKSPACE_TAB_SHOULDER_KAPPA
+  ).toFixed(2)
+);
+const workspaceTabShoulderStrokeRadiusX =
+  WORKSPACE_TAB_SHOULDER_WIDTH - 0.5;
+const workspaceTabShoulderStrokeRadiusY =
+  WORKSPACE_TAB_SHOULDER_HEIGHT - 0.5;
+const workspaceTabShoulderStrokeControlX = Number(
+  (
+    workspaceTabShoulderStrokeRadiusX * WORKSPACE_TAB_SHOULDER_KAPPA
+  ).toFixed(2)
+);
+const workspaceTabShoulderStrokeControlY = Number(
+  (
+    workspaceTabShoulderStrokeRadiusY * WORKSPACE_TAB_SHOULDER_KAPPA
   ).toFixed(2)
 );
 const WORKSPACE_TAB_SHOULDER_PATHS = {
-  leftFill: `M${WORKSPACE_TAB_SHOULDER_SIZE} 0 C${WORKSPACE_TAB_SHOULDER_SIZE} ${workspaceTabShoulderFillControl} ${workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE} 0 ${WORKSPACE_TAB_SHOULDER_SIZE} H${WORKSPACE_TAB_SHOULDER_SIZE} Z`,
-  leftStroke: `M${workspaceTabShoulderStrokeRadius} 0 C${workspaceTabShoulderStrokeRadius} ${workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeRadius} 0 ${workspaceTabShoulderStrokeRadius}`,
-  rightFill: `M0 0 C0 ${workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE - workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE} H0 Z`,
-  rightStroke: `M0.5 0 C0.5 ${workspaceTabShoulderStrokeControl} ${WORKSPACE_TAB_SHOULDER_SIZE - workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeRadius} ${WORKSPACE_TAB_SHOULDER_SIZE} ${workspaceTabShoulderStrokeRadius}`,
+  leftFill: `M${WORKSPACE_TAB_SHOULDER_WIDTH} 0 C${WORKSPACE_TAB_SHOULDER_WIDTH} ${workspaceTabShoulderFillControlY} ${workspaceTabShoulderFillControlX} ${WORKSPACE_TAB_SHOULDER_HEIGHT} 0 ${WORKSPACE_TAB_SHOULDER_HEIGHT} H${WORKSPACE_TAB_SHOULDER_WIDTH} Z`,
+  leftStroke: `M${workspaceTabShoulderStrokeRadiusX} 0 C${workspaceTabShoulderStrokeRadiusX} ${workspaceTabShoulderStrokeControlY} ${workspaceTabShoulderStrokeControlX} ${workspaceTabShoulderStrokeRadiusY} 0 ${workspaceTabShoulderStrokeRadiusY}`,
+  rightFill: `M0 0 C0 ${workspaceTabShoulderFillControlY} ${WORKSPACE_TAB_SHOULDER_WIDTH - workspaceTabShoulderFillControlX} ${WORKSPACE_TAB_SHOULDER_HEIGHT} ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT} H0 Z`,
+  rightStroke: `M0.5 0 C0.5 ${workspaceTabShoulderStrokeControlY} ${WORKSPACE_TAB_SHOULDER_WIDTH - workspaceTabShoulderStrokeControlX} ${workspaceTabShoulderStrokeRadiusY} ${WORKSPACE_TAB_SHOULDER_WIDTH} ${workspaceTabShoulderStrokeRadiusY}`,
 } as const;
 
 export interface TabBarProps<T extends StudioTab> {
@@ -203,7 +221,7 @@ export function TabBar<T extends StudioTab>({
         aria-label="工作区标签"
         className={cn(
           'no-scrollbar flex h-full min-w-0 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-smooth px-1.5',
-          isWorkspaceVariant && 'scroll-auto px-2.5'
+          isWorkspaceVariant && 'scroll-auto px-3'
         )}
         role="tablist"
         style={
@@ -352,15 +370,15 @@ export function TabBar<T extends StudioTab>({
                   <svg
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-left"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT}`}
                     style={{
                       bottom: -1,
                       display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
-                      left: -STUDIO_WORKSPACE_TAB_RADIUS,
+                      height: WORKSPACE_TAB_SHOULDER_HEIGHT,
+                      left: -STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
                       pointerEvents: 'none',
                       position: 'absolute',
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
+                      width: WORKSPACE_TAB_SHOULDER_WIDTH,
                       zIndex: 11,
                     }}
                   >
@@ -379,15 +397,15 @@ export function TabBar<T extends StudioTab>({
                   <svg
                     aria-hidden="true"
                     data-testid="studio-workspace-tab-shoulder-right"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_WIDTH} ${WORKSPACE_TAB_SHOULDER_HEIGHT}`}
                     style={{
                       bottom: -1,
                       display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
+                      height: WORKSPACE_TAB_SHOULDER_HEIGHT,
                       pointerEvents: 'none',
                       position: 'absolute',
-                      right: -STUDIO_WORKSPACE_TAB_RADIUS,
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
+                      right: -STUDIO_WORKSPACE_TAB_SHOULDER_X_RADIUS,
+                      width: WORKSPACE_TAB_SHOULDER_WIDTH,
                       zIndex: 11,
                     }}
                   >
