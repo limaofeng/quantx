@@ -258,7 +258,7 @@ export function TabBar<T extends StudioTab>({
             className={cn(
               isWorkspaceVariant
                 ? group.isFixed
-                  ? 'relative z-20 flex h-full shrink-0 items-end bg-[#07111f]'
+                  ? 'relative z-20 flex h-full shrink-0 items-end'
                   : 'no-scrollbar flex h-full min-w-0 flex-1 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-auto'
                 : 'contents'
             )}

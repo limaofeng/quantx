@@ -178,7 +178,8 @@ describe('StudioWorkspace', () => {
     );
     expect(fixedTabRegion).toContainElement(fixedHomeTab);
     expect(scrollableTabRegion).not.toContainElement(fixedHomeTab);
-    expect(fixedTabRegion).toHaveClass('shrink-0', 'bg-[#07111f]');
+    expect(fixedTabRegion).toHaveClass('shrink-0');
+    expect(fixedTabRegion).not.toHaveClass('bg-[#07111f]');
     expect(scrollableTabRegion).toHaveClass('min-w-0', 'overflow-x-auto');
     expect(fixedHomeTab.parentElement).toHaveClass('border-b-0');
     expect(fixedHomeTab.parentElement).toHaveStyle({

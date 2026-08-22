@@ -96,7 +96,8 @@ describe('TabBar', () => {
     expect(scrollableRegion).toContainElement(
       screen.getByRole('tab', { name: '标签 2' })
     );
-    expect(fixedRegion).toHaveClass('shrink-0', 'bg-[#07111f]');
+    expect(fixedRegion).toHaveClass('shrink-0');
+    expect(fixedRegion).not.toHaveClass('bg-[#07111f]');
     expect(scrollableRegion).toHaveClass('min-w-0', 'overflow-x-auto');
     expect(
       screen.queryByRole('button', { name: '关闭 标签 1' })
@@ -319,6 +320,33 @@ describe('TabBar', () => {
     expect(fixedRegion).toContainElement(fixedTab);
     expect(tabList).not.toContainElement(fixedTab);
     expect(tabList).toContainElement(scrollingTab);
+  });
+
+  it('uses the same visual treatment for fixed and regular workspace tabs', () => {
+    render(
+      <TabBar
+        activeTabId="tab-2"
+        canCloseTab={tab => tab.id !== 'tab-1'}
+        onTabChange={vi.fn()}
+        onTabClose={vi.fn()}
+        tabs={buildTabs(3)}
+        themeColor="red"
+        variant="workspace"
+      />
+    );
+
+    const fixedTabElement = screen.getByRole('tab', {
+      name: '标签 1',
+    }).parentElement!;
+    const regularTabElement = screen.getByRole('tab', {
+      name: '标签 3',
+    }).parentElement!;
+
+    expect(fixedTabElement.className).toBe(regularTabElement.className);
+    expect(fixedTabElement.style.cssText).toBe(regularTabElement.style.cssText);
+    expect(screen.getByTestId('studio-fixed-tab-region')).not.toHaveClass(
+      'bg-[#07111f]'
+    );
   });
 
   it('pins a preview tab on double click', () => {
