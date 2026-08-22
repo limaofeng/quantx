@@ -29,7 +29,7 @@ describe('TabBar', () => {
     const firstTab = screen.getByRole('tab', { name: '标签 1' });
     const tabBar = screen.getByTestId('studio-tab-bar');
     expect(screen.getByRole('tablist', { name: '工作区标签' })).toBeVisible();
-    expect(tabBar).toHaveClass('h-12', 'bg-[#0b1120]');
+    expect(tabBar).toHaveClass('h-[52px]', 'bg-[#07111f]');
     expect(firstTab.parentElement).toHaveClass('rounded-t-md');
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 

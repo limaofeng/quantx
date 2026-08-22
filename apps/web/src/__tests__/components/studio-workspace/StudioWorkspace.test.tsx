@@ -16,11 +16,29 @@ vi.mock('@/components/studio-workbench', async () => {
 
   return {
     ...actual,
-    useStudioGlobalActions: () => ({
-      currentUserLabel: 'QuantX 开发用户',
-      globalActions: [],
-      utilityActions: [],
-    }),
+    useStudioGlobalActions: () => {
+      const Icon = () => null;
+      const action = (id: string, label: string) => ({
+        icon: Icon,
+        id,
+        label,
+        onSelect: vi.fn(),
+      });
+      return {
+        currentUserLabel: 'QuantX 开发用户',
+        globalActions: [
+          action('nav:/research', '研究中心'),
+          action('nav:/strategies', '策略管理'),
+          action('nav:/holdings', '持仓'),
+          action('nav:/t-trade', '做T助手'),
+        ],
+        utilityActions: [
+          action('utility:assets', '账户'),
+          action('utility:notifications', '通知'),
+          action('nav:/settings', '系统设置'),
+        ],
+      };
+    },
   };
 });
 
@@ -111,9 +129,15 @@ describe('StudioWorkspace', () => {
     );
     expect(main).toContainElement(dock);
     expect(chrome).toContainElement(tabBar);
+    expect(
+      screen.getByRole('navigation', { name: '固定工作区' })
+    ).toHaveTextContent('工作台自选股');
     expect(screen.getByTestId('studio-activity-bar')).toHaveAttribute(
       'data-variant',
       'studio'
+    );
+    ['研究', '策略', '回测', '交易', '组合', '数据', '工具'].forEach(label =>
+      expect(screen.getByText(label)).toBeVisible()
     );
     expect(content).toContainElement(dock);
     expect(content).toContainElement(pageContent);
@@ -150,7 +174,7 @@ describe('StudioWorkspace', () => {
     expect(screen.queryByTestId('studio-status-bar')).not.toBeInTheDocument();
   });
 
-  it('opens the AI assistant from the right tool rail and restores focus on close', async () => {
+  it('opens the AI assistant from the launcher and restores focus on close', async () => {
     const user = userEvent.setup();
 
     render(
@@ -159,34 +183,24 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    const activityBar = screen.getByTestId('studio-activity-bar');
-    const toolRail = screen.getByTestId('studio-assistant-tool-rail');
-    const trigger = screen.getByRole('button', { name: 'AI 助手' });
-
-    expect(activityBar).not.toContainElement(trigger);
-    expect(toolRail).toContainElement(trigger);
-    expect(trigger).toHaveAttribute(
-      'aria-controls',
-      'studio-ai-assistant-panel'
-    );
-    expect(trigger).toHaveAttribute('aria-expanded', 'false');
-    expect(trigger).toHaveAttribute('aria-pressed', 'false');
+    const launcherTrigger = screen.getByRole('button', {
+      name: '打开功能启动器',
+    });
+    expect(
+      screen.queryByTestId('studio-assistant-tool-rail')
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByTestId('studio-assistant-panel')
     ).not.toBeInTheDocument();
 
-    await user.click(trigger);
+    await user.click(launcherTrigger);
+    await user.click(screen.getByRole('menuitem', { name: 'AI 助手' }));
 
     const panel = await screen.findByTestId('studio-assistant-panel');
     expect(
       await screen.findByTestId('mock-assistant-drawer')
     ).toBeInTheDocument();
-    expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    expect(trigger).toHaveAttribute('aria-pressed', 'true');
-    expect(panel).toHaveClass('right-10', '2xl:relative');
-    expect(
-      panel.compareDocumentPosition(toolRail) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+    expect(panel).toHaveClass('right-0', '2xl:relative');
 
     await user.click(screen.getByRole('textbox', { name: 'AI 助手输入框' }));
     await user.keyboard('{Escape}');
@@ -194,10 +208,10 @@ describe('StudioWorkspace', () => {
     expect(
       screen.queryByTestId('studio-assistant-panel')
     ).not.toBeInTheDocument();
-    expect(trigger).toHaveAttribute('aria-expanded', 'false');
-    expect(trigger).toHaveFocus();
+    expect(launcherTrigger).toHaveFocus();
 
-    await user.click(trigger);
+    await user.click(launcherTrigger);
+    await user.click(screen.getByRole('menuitem', { name: 'AI 助手' }));
     await user.click(
       await screen.findByRole('button', { name: '关闭 AI 助手' })
     );
@@ -205,7 +219,7 @@ describe('StudioWorkspace', () => {
     expect(
       screen.queryByTestId('studio-assistant-panel')
     ).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    expect(launcherTrigger).toHaveFocus();
   });
 
   it('resizes and persists the AI assistant panel from its left edge', async () => {
@@ -217,7 +231,8 @@ describe('StudioWorkspace', () => {
       </StudioWorkspace>
     );
 
-    await user.click(screen.getByRole('button', { name: 'AI 助手' }));
+    await user.click(screen.getByRole('button', { name: '打开功能启动器' }));
+    await user.click(screen.getByRole('menuitem', { name: 'AI 助手' }));
 
     const panel = await screen.findByTestId('studio-assistant-panel');
     const resizer = screen.getByRole('separator', {

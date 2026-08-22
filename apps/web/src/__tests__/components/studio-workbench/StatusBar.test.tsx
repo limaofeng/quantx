@@ -9,7 +9,7 @@ describe('StatusBar', () => {
     );
 
     const statusBar = screen.getByTestId('studio-status-bar');
-    expect(statusBar).toHaveClass('h-10', 'bg-[#0b1120]');
+    expect(statusBar).toHaveClass('h-[38px]', 'bg-[#07111f]');
     expect(screen.getByTestId('studio-status-left')).toHaveTextContent(
       '行情已连接'
     );

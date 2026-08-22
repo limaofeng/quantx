@@ -116,7 +116,7 @@ export function TabBar<T extends StudioTab>({
 
   return (
     <div
-      className="relative h-12 shrink-0 overflow-hidden border-b border-white/5 bg-[#0b1120]"
+      className="relative h-[52px] shrink-0 overflow-hidden bg-[#07111f]"
       data-testid="studio-tab-bar"
     >
       <div
@@ -144,9 +144,9 @@ export function TabBar<T extends StudioTab>({
                 });
               }}
               className={cn(
-                'group relative flex h-11 w-40 shrink-0 items-center border border-b-0 transition-colors duration-150',
+                'group relative flex h-12 w-52 shrink-0 items-center border border-b-0 transition-colors duration-150',
                 isActive
-                  ? `${themeStyles.activeTab} z-10 rounded-t-md after:absolute after:-bottom-px after:inset-x-0 after:h-px after:bg-slate-900`
+                  ? `${themeStyles.activeTab} z-10 rounded-t-md after:absolute after:-bottom-px after:inset-x-0 after:h-px after:bg-[#0d1b2c]`
                   : 'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
               )}
             >
@@ -229,7 +229,7 @@ export function TabBar<T extends StudioTab>({
           <button
             type="button"
             onClick={onTabCreate}
-            className="mb-1 flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80"
+            className="mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80"
             title={createTooltip}
             aria-label={createTooltip}
           >

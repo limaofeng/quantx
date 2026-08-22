@@ -17,6 +17,7 @@ import { LoginPage, safeInternalPath } from '@/features/auth';
 import {
   TradingSafetyBar,
   TradingSafetyProvider,
+  useTradingSafety,
 } from '@/features/trading-safety';
 import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars';
 import { useWatchlist } from '@/hooks/useWatchlist';
@@ -32,6 +33,53 @@ function renderTradingSafetyStatusBar(currentUserLabel: string) {
   return <TradingSafetyBar currentUserLabel={currentUserLabel} />;
 }
 
+function TradingStudioRouter() {
+  const { canIncreaseRisk, canReduceRisk, executionMode, fetching } =
+    useTradingSafety();
+  const activityTone = fetching
+    ? 'checking'
+    : canIncreaseRisk
+      ? 'ready'
+      : canReduceRisk
+        ? 'reduce-only'
+        : 'blocked';
+  const activityLabel = fetching
+    ? 'CHECK'
+    : canIncreaseRisk
+      ? 'READY'
+      : canReduceRisk
+        ? 'REDUCE'
+        : 'BLOCK';
+  const activityDetail =
+    executionMode === 'TRADING'
+      ? '实盘'
+      : executionMode === 'REDUCE_ONLY'
+        ? '仅减'
+        : '观察';
+
+  return (
+    <StudioWorkspace
+      activityStatus={{
+        detail: activityDetail,
+        label: activityLabel,
+        tone: activityTone,
+      }}
+      renderStatusBar={renderTradingSafetyStatusBar}
+    >
+      <Switch>
+        {appRoutes.map(route => (
+          <Route
+            key={route.path}
+            path={route.path}
+            component={route.component}
+          />
+        ))}
+        <Route component={NotFound} />
+      </Switch>
+    </StudioWorkspace>
+  );
+}
+
 function Router({ accountId }: { accountId: string }) {
   useEffect(() => {
     preloadImportantRoutes();
@@ -39,18 +87,7 @@ function Router({ accountId }: { accountId: string }) {
 
   return (
     <TradingSafetyProvider accountId={accountId}>
-      <StudioWorkspace renderStatusBar={renderTradingSafetyStatusBar}>
-        <Switch>
-          {appRoutes.map(route => (
-            <Route
-              key={route.path}
-              path={route.path}
-              component={route.component}
-            />
-          ))}
-          <Route component={NotFound} />
-        </Switch>
-      </StudioWorkspace>
+      <TradingStudioRouter />
     </TradingSafetyProvider>
   );
 }

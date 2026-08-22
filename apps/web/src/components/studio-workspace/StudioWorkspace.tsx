@@ -1,11 +1,19 @@
 import {
   BarChart3,
   Bell,
+  BookOpen,
   Bot,
+  ClipboardList,
+  Database,
   Grid2X2,
+  History,
+  Minus,
   Settings,
+  Square,
   TrendingUp,
   UserRound,
+  Wrench,
+  X,
 } from 'lucide-react';
 import {
   lazy,
@@ -24,6 +32,7 @@ import {
   ActivityBar,
   StatusBar,
   TabBar,
+  type StudioAction,
   type StudioMode,
   type StudioTheme,
   useStudioGlobalActions,
@@ -103,56 +112,161 @@ function StudioChromeAction({
 
 function StudioWorkspaceHeader({
   currentUserLabel,
+  isHomeActive,
+  isWatchlistActive,
+  launcherActions,
+  launcherTriggerRef,
   onAccount,
   onHome,
   onNotifications,
   onSettings,
+  onWatchlist,
   tabBar,
 }: {
   currentUserLabel: string;
+  isHomeActive: boolean;
+  isWatchlistActive: boolean;
+  launcherActions: StudioAction[];
+  launcherTriggerRef: React.RefObject<HTMLButtonElement>;
   onAccount?: () => void;
   onHome?: () => void;
   onNotifications?: () => void;
   onSettings?: () => void;
+  onWatchlist?: () => void;
   tabBar: ReactNode;
 }) {
+  const [isLauncherOpen, setIsLauncherOpen] = useState(false);
+  const launcherRef = useRef<HTMLDivElement>(null);
+  const userMonogram = currentUserLabel.includes('管理')
+    ? 'QA'
+    : currentUserLabel
+        .replace(/[^a-zA-Z]/g, '')
+        .slice(0, 2)
+        .toUpperCase() || 'QX';
+
+  useEffect(() => {
+    if (!isLauncherOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!launcherRef.current?.contains(event.target as Node)) {
+        setIsLauncherOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsLauncherOpen(false);
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isLauncherOpen]);
+
   return (
     <header
       aria-label="QuantX Studio 工作区栏"
-      className="flex h-12 shrink-0 items-stretch border-b border-white/10 bg-[#0b1120]"
+      className="flex h-[52px] shrink-0 items-stretch border-b border-white/10 bg-[#07111f]"
       data-testid="studio-chrome-header"
     >
       <button
         type="button"
         onClick={onHome}
-        className="flex w-52 shrink-0 items-center gap-2.5 border-r border-white/5 px-3 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
+        className="flex w-[172px] shrink-0 items-center gap-2 border-r border-white/10 px-3.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
         aria-label="QuantX Studio · 打开行情工作台"
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-red-400/30 bg-red-500/10 font-mono text-[9px] font-black tracking-tight text-red-300">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-400/20 bg-slate-700/30 font-mono text-[10px] font-bold tracking-tight text-slate-100">
           QX
         </span>
-        <span className="min-w-0">
-          <span className="block truncate text-[12px] font-bold tracking-wide text-slate-100">
-            QuantX Studio
-          </span>
-          <span className="block text-[9px] font-medium uppercase tracking-widest text-slate-600">
-            A-Share Terminal
-          </span>
+        <span className="truncate text-[14px] font-semibold tracking-wide text-slate-100">
+          QuantX Studio
         </span>
       </button>
+
+      <nav
+        aria-label="固定工作区"
+        className="flex shrink-0 items-stretch border-r border-white/10"
+      >
+        <button
+          type="button"
+          onClick={onHome}
+          className={cn(
+            'flex w-[108px] items-center justify-center gap-2 border-r border-white/5 px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70',
+            isHomeActive
+              ? 'bg-white/5 text-slate-100'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          )}
+        >
+          <BookOpen className="h-4 w-4" strokeWidth={1.7} />
+          工作台
+        </button>
+        <button
+          type="button"
+          onClick={onWatchlist}
+          className={cn(
+            'flex w-[120px] items-center justify-center gap-2 px-3 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70',
+            isWatchlistActive
+              ? 'bg-white/5 text-slate-100'
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
+          )}
+        >
+          <ClipboardList className="h-4 w-4" strokeWidth={1.7} />
+          自选股
+        </button>
+      </nav>
 
       <div className="min-w-0 flex-1">{tabBar}</div>
 
       <div
         aria-label="工作区快捷操作"
-        className="flex shrink-0 items-center gap-0.5 border-l border-white/5 px-2"
+        className="flex shrink-0 items-center gap-1 border-l border-white/10 px-2.5"
         role="toolbar"
       >
-        <StudioChromeAction
-          icon={Grid2X2}
-          label="打开行情工作台"
-          onSelect={onHome}
-        />
+        <div className="relative" ref={launcherRef}>
+          <button
+            ref={launcherTriggerRef}
+            type="button"
+            aria-expanded={isLauncherOpen}
+            aria-haspopup="menu"
+            aria-label="打开功能启动器"
+            className={cn(
+              'flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70',
+              isLauncherOpen && 'bg-white/5 text-slate-200'
+            )}
+            onClick={() => setIsLauncherOpen(value => !value)}
+          >
+            <Grid2X2 className="h-4 w-4" strokeWidth={1.8} />
+          </button>
+          {isLauncherOpen && (
+            <div
+              className="absolute right-0 top-10 z-[80] grid w-[360px] grid-cols-3 gap-1 rounded-lg border border-white/10 bg-[#0b1627] p-2 shadow-2xl shadow-black/50"
+              role="menu"
+            >
+              {launcherActions.map(action => {
+                const Icon = action.icon;
+                return (
+                  <button
+                    key={action.id}
+                    type="button"
+                    className="flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+                    onClick={() => {
+                      setIsLauncherOpen(false);
+                      action.onSelect();
+                    }}
+                    role="menuitem"
+                    title={action.label}
+                  >
+                    <Icon className="h-4 w-4 shrink-0 text-slate-500" />
+                    <span className="truncate">
+                      {action.shortLabel || action.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
         <StudioChromeAction
           badge
           icon={Bell}
@@ -168,13 +282,26 @@ function StudioWorkspaceHeader({
         <button
           type="button"
           onClick={onAccount}
-          className="flex h-8 max-w-40 items-center gap-2 rounded-md border border-white/5 bg-white/5 px-2.5 text-[10px] font-medium text-slate-400 transition-colors hover:border-white/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-300 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
           aria-label={`打开账户：${currentUserLabel}`}
           title={`当前用户：${currentUserLabel}`}
         >
-          <UserRound className="h-3.5 w-3.5 shrink-0 text-red-300" />
-          <span className="max-w-24 truncate">{currentUserLabel}</span>
+          {userMonogram}
         </button>
+        <div
+          aria-hidden="true"
+          className="ml-1 hidden h-full items-center border-l border-white/10 pl-1 xl:flex"
+        >
+          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+            <Minus className="h-3.5 w-3.5" />
+          </span>
+          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+            <Square className="h-3 w-3" />
+          </span>
+          <span className="flex h-8 w-8 items-center justify-center text-slate-600">
+            <X className="h-3.5 w-3.5" />
+          </span>
+        </div>
       </div>
     </header>
   );
@@ -294,61 +421,6 @@ function StudioWorkspaceSidebarDock({
   );
 }
 
-function StudioAssistantToolRail({
-  isOpen,
-  onKeyDown,
-  onToggle,
-  triggerRef,
-}: {
-  isOpen: boolean;
-  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
-  onToggle: () => void;
-  triggerRef: React.RefObject<HTMLButtonElement>;
-}) {
-  return (
-    <aside
-      aria-label="工作区工具"
-      className="absolute inset-y-0 right-0 z-30 flex h-full w-10 flex-col items-center border-l border-white/5 bg-[#0b1120]"
-      data-testid="studio-assistant-tool-rail"
-    >
-      <div
-        aria-label="工作区工具"
-        className="flex w-full flex-col items-center"
-        role="toolbar"
-      >
-        <button
-          ref={triggerRef}
-          type="button"
-          aria-controls={ASSISTANT_PANEL_ID}
-          aria-expanded={isOpen}
-          aria-label="AI 助手"
-          aria-pressed={isOpen}
-          className={cn(
-            'group relative flex h-10 w-10 cursor-pointer items-center justify-center text-slate-500 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/80 motion-reduce:transition-none',
-            isOpen
-              ? 'bg-cyan-400/10 text-cyan-300'
-              : 'hover:bg-white/5 hover:text-slate-200'
-          )}
-          data-testid="studio-assistant-trigger"
-          onClick={onToggle}
-          onKeyDown={onKeyDown}
-          title={isOpen ? '关闭 AI 助手' : '打开 AI 助手'}
-        >
-          {isOpen && (
-            <span className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-cyan-400" />
-          )}
-          <Bot aria-hidden="true" className="h-[18px] w-[18px]" />
-          {!isOpen && (
-            <span className="pointer-events-none absolute right-full z-50 mr-2 whitespace-nowrap rounded-md border border-white/10 bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-white opacity-0 shadow-xl transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100 motion-reduce:transition-none">
-              AI 助手
-            </span>
-          )}
-        </button>
-      </div>
-    </aside>
-  );
-}
-
 function StudioAssistantDock({
   currentPath,
   isOpen,
@@ -379,7 +451,7 @@ function StudioAssistantDock({
     <div
       id={ASSISTANT_PANEL_ID}
       className={cn(
-        'absolute inset-y-0 right-10 z-40 flex h-full min-w-0 max-w-[calc(100vw-2.5rem)] shrink-0 flex-col shadow-2xl shadow-black/40 2xl:relative 2xl:inset-y-auto 2xl:right-auto 2xl:z-auto 2xl:max-w-none',
+        'absolute inset-y-0 right-0 z-40 flex h-full min-w-0 max-w-full shrink-0 flex-col shadow-2xl shadow-black/40 2xl:relative 2xl:inset-y-auto 2xl:right-auto 2xl:z-auto 2xl:max-w-none',
         !isResizingSidebar &&
           'transition-[width] duration-150 motion-reduce:transition-none'
       )}
@@ -545,9 +617,15 @@ function getFallbackTab() {
 }
 
 export function StudioWorkspace({
+  activityStatus,
   children,
   renderStatusBar,
 }: {
+  activityStatus?: {
+    detail: string;
+    label: string;
+    tone: 'blocked' | 'checking' | 'ready' | 'reduce-only';
+  };
   children: ReactNode;
   renderStatusBar?: (currentUserLabel: string) => ReactNode;
 }) {
@@ -710,11 +788,15 @@ export function StudioWorkspace({
   );
 
   const workspaceTabBar = useMemo(() => {
-    const displayTabs = normalizeStudioWorkspaceTabTitles(tabs);
+    const displayTabs = normalizeStudioWorkspaceTabTitles(tabs).filter(
+      tab => tab.path !== '/' && tab.path !== '/screening'
+    );
 
     return (
       <TabBar
-        activeTabId={activeTabId}
+        activeTabId={
+          displayTabs.some(tab => tab.id === activeTabId) ? activeTabId : null
+        }
         createTooltip="打开行情工作台"
         onTabChange={handleTabChange}
         onTabClose={handleTabClose}
@@ -773,7 +855,6 @@ export function StudioWorkspace({
       workspaceTabBar,
     ]
   );
-  const homeAction = globalActions.find(action => action.id === 'nav:/');
   const accountAction = utilityActions.find(
     action => action.id === 'utility:assets'
   );
@@ -783,6 +864,87 @@ export function StudioWorkspace({
   const settingsAction = utilityActions.find(
     action => action.id === 'nav:/settings'
   );
+  const findNavigationAction = (path: string) =>
+    globalActions.find(action => action.id === `nav:${path}`);
+  const researchAction = findNavigationAction('/research');
+  const strategiesAction = findNavigationAction('/strategies');
+  const holdingsAction = findNavigationAction('/holdings');
+  const toolsAction = findNavigationAction('/t-trade');
+  const railActions: StudioAction[] = [];
+  if (researchAction) {
+    railActions.push({
+      ...researchAction,
+      id: 'rail:research',
+      shortLabel: '研究',
+    });
+  }
+  if (strategiesAction) {
+    railActions.push({
+      ...strategiesAction,
+      id: 'rail:strategies',
+      shortLabel: '策略',
+    });
+  }
+  railActions.push({
+    active: false,
+    icon: History,
+    id: 'rail:backtest',
+    label: '回测与研究运行',
+    onSelect: () => openStudioTab('/research'),
+    shortLabel: '回测',
+  });
+  if (holdingsAction) {
+    railActions.push({
+      ...holdingsAction,
+      id: 'rail:trading',
+      shortLabel: '交易',
+    });
+  }
+  if (accountAction) {
+    railActions.push({
+      ...accountAction,
+      active: currentPath.startsWith('/account'),
+      id: 'rail:portfolio',
+      shortLabel: '组合',
+    });
+  }
+  railActions.push({
+    active: currentPath.startsWith('/settings/data'),
+    icon: Database,
+    id: 'rail:data',
+    label: '数据管理',
+    onSelect: () => openStudioTab('/settings/data'),
+    shortLabel: '数据',
+  });
+  if (toolsAction) {
+    railActions.push({
+      ...toolsAction,
+      icon: Wrench,
+      id: 'rail:tools',
+      shortLabel: '工具',
+    });
+  }
+  const railUtilityActions = utilityActions.filter(action =>
+    ['utility:notifications', 'nav:/settings'].includes(action.id)
+  );
+  const launcherActions = [
+    {
+      icon: Bot,
+      id: 'workspace:assistant',
+      label: 'AI 助手',
+      onSelect: toggleAssistant,
+      shortLabel: 'AI 助手',
+    },
+    ...globalActions,
+    ...utilityActions.filter(action =>
+      [
+        'utility:assets',
+        'utility:developer-docs',
+        'utility:logout',
+        'nav:/settings',
+      ].includes(action.id)
+    ),
+  ];
 
   return (
     <StudioWorkspaceContext.Provider value={contextValue}>
@@ -792,21 +954,27 @@ export function StudioWorkspace({
       >
         <StudioWorkspaceHeader
           currentUserLabel={currentUserLabel}
+          isHomeActive={currentPath === '/'}
+          isWatchlistActive={currentPath === '/screening'}
+          launcherActions={launcherActions}
+          launcherTriggerRef={assistantTriggerRef}
           onAccount={accountAction?.onSelect}
-          onHome={homeAction?.onSelect}
+          onHome={() => openStudioTab('/')}
           onNotifications={notificationAction?.onSelect}
           onSettings={settingsAction?.onSelect}
+          onWatchlist={() => openStudioTab('/screening')}
           tabBar={workspaceTabBar}
         />
 
         <div className="flex min-h-0 flex-1">
           <ActivityBar
             activeMode="WORKSPACE"
-            globalActions={globalActions}
+            environmentStatus={activityStatus}
+            globalActions={railActions}
             modes={studioWorkspaceModes}
             onModeChange={() => undefined}
             theme={studioWorkspaceTheme}
-            utilityActions={utilityActions}
+            utilityActions={railUtilityActions}
             variant="studio"
           />
 
@@ -815,7 +983,7 @@ export function StudioWorkspace({
             data-testid="studio-workspace-main"
           >
             <div
-              className="relative flex min-h-0 min-w-0 flex-1 pr-10"
+              className="relative flex min-h-0 min-w-0 flex-1"
               data-testid="studio-workspace-content"
             >
               <StudioWorkspaceSidebarDock sidebar={workspaceSidebar} />
@@ -827,12 +995,6 @@ export function StudioWorkspace({
                 isOpen={isAssistantOpen}
                 onClose={closeAssistant}
                 onKeyDown={handleAssistantKeyDown}
-              />
-              <StudioAssistantToolRail
-                isOpen={isAssistantOpen}
-                onKeyDown={handleAssistantKeyDown}
-                onToggle={toggleAssistant}
-                triggerRef={assistantTriggerRef}
               />
             </div>
           </div>

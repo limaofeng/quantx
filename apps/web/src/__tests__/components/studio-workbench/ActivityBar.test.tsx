@@ -51,6 +51,7 @@ describe('ActivityBar', () => {
     render(
       <ActivityBar
         activeMode="WORKSPACE"
+        environmentStatus={{ detail: '实盘', label: 'READY', tone: 'ready' }}
         globalActions={[
           {
             active: true,
@@ -79,9 +80,12 @@ describe('ActivityBar', () => {
 
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
-    expect(activityBar).toHaveClass('w-20');
+    expect(activityBar).toHaveClass('w-[84px]');
     expect(screen.getByText('行情')).toBeVisible();
     expect(screen.getByText('设置')).toBeVisible();
+    expect(screen.getByTestId('studio-environment-status')).toHaveTextContent(
+      'READY实盘'
+    );
     expect(screen.queryByTestId('studio-service-logo')).not.toBeInTheDocument();
   });
 });

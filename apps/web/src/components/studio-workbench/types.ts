@@ -71,6 +71,11 @@ export interface ActivityBarProps {
   theme: StudioTheme;
   modes: StudioMode[];
   activeMode: string;
+  environmentStatus?: {
+    detail: string;
+    label: string;
+    tone: 'blocked' | 'checking' | 'ready' | 'reduce-only';
+  };
   onModeChange: (mode: string) => void;
   globalActions?: StudioAction[];
   onExit?: () => void;
