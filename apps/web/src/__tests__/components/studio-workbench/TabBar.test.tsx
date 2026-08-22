@@ -86,6 +86,9 @@ describe('TabBar', () => {
     expect(tabBar).toHaveStyle({ height: '100%' });
     expect(
       screen.getByRole('tablist', { name: '工作区标签' })
+    ).toHaveClass('px-2');
+    expect(
+      screen.getByRole('tablist', { name: '工作区标签' })
     ).toHaveStyle({
       height: 'calc(100% + 1px)',
       marginBottom: '-1px',
@@ -105,6 +108,28 @@ describe('TabBar', () => {
     });
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
       background: '#07111f',
+    });
+    expect(
+      screen.getByTestId('studio-workspace-tab-shoulder-left')
+    ).toHaveStyle({
+      background:
+        'radial-gradient(circle at 0 0, transparent 0 5px, #22364d 5px 6px, #07111f 6px 100%)',
+      bottom: '-1px',
+      height: '7px',
+      left: '-6px',
+      width: '7px',
+      zIndex: 11,
+    });
+    expect(
+      screen.getByTestId('studio-workspace-tab-shoulder-right')
+    ).toHaveStyle({
+      background:
+        'radial-gradient(circle at 100% 0, transparent 0 5px, #22364d 5px 6px, #07111f 6px 100%)',
+      bottom: '-1px',
+      height: '7px',
+      right: '-6px',
+      width: '7px',
+      zIndex: 11,
     });
   });
 

@@ -9,6 +9,7 @@ import {
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
   STUDIO_WORKSPACE_TAB_STYLE,
+  STUDIO_WORKSPACE_WEAK_BORDER,
 } from './studioShellStyles';
 import {
   StudioTabContextMenu,
@@ -182,7 +183,7 @@ export function TabBar<T extends StudioTab>({
         aria-label="工作区标签"
         className={cn(
           'no-scrollbar flex h-full min-w-0 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-smooth px-1.5',
-          isWorkspaceVariant && 'scroll-auto px-1'
+          isWorkspaceVariant && 'scroll-auto px-2'
         )}
         role="tablist"
         style={
@@ -324,6 +325,39 @@ export function TabBar<T extends StudioTab>({
                     <X size={13} />
                   </button>
                 </div>
+              )}
+
+              {isActive && isWorkspaceVariant && (
+                <>
+                  <span
+                    aria-hidden="true"
+                    data-testid="studio-workspace-tab-shoulder-left"
+                    style={{
+                      background: `radial-gradient(circle at 0 0, transparent 0 5px, ${STUDIO_WORKSPACE_WEAK_BORDER} 5px 6px, ${STUDIO_WORKSPACE_SURFACE} 6px 100%)`,
+                      bottom: -1,
+                      height: 7,
+                      left: -6,
+                      pointerEvents: 'none',
+                      position: 'absolute',
+                      width: 7,
+                      zIndex: 11,
+                    }}
+                  />
+                  <span
+                    aria-hidden="true"
+                    data-testid="studio-workspace-tab-shoulder-right"
+                    style={{
+                      background: `radial-gradient(circle at 100% 0, transparent 0 5px, ${STUDIO_WORKSPACE_WEAK_BORDER} 5px 6px, ${STUDIO_WORKSPACE_SURFACE} 6px 100%)`,
+                      bottom: -1,
+                      height: 7,
+                      pointerEvents: 'none',
+                      position: 'absolute',
+                      right: -6,
+                      width: 7,
+                      zIndex: 11,
+                    }}
+                  />
+                </>
               )}
 
               {isActive && (
