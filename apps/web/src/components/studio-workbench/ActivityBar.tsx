@@ -39,7 +39,6 @@ export function ActivityBar({
           isStudioVariant
             ? cn(
                 'w-16 flex-col items-center justify-center gap-1 rounded-md border border-transparent px-1',
-                'h-[72px]',
                 isActive
                   ? 'text-slate-100'
                   : 'text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
@@ -121,7 +120,7 @@ export function ActivityBar({
           themeStyles.focusRing,
           isStudioVariant
             ? cn(
-                'h-[72px] w-16 flex-col items-center justify-center gap-1.5 rounded-md border border-transparent px-1',
+                'w-16 flex-col items-center justify-center gap-1.5 rounded-md border border-transparent px-1',
                 isActive
                   ? 'text-slate-100'
                   : isDisabled
@@ -186,7 +185,7 @@ export function ActivityBar({
       className={cn(
         'flex shrink-0 flex-col items-center border-r',
         isStudioVariant
-          ? 'studio-shell-activity-bar w-[84px] gap-1 border-white/10 bg-[#07111f] py-2'
+          ? 'studio-shell-activity-bar gap-1 border-white/10 py-2'
           : 'w-12 gap-2.5 border-white/5 bg-[#0b1120] py-4'
       )}
       data-testid="studio-activity-bar"
@@ -194,9 +193,13 @@ export function ActivityBar({
       style={
         isStudioVariant
           ? {
-              background: 'linear-gradient(180deg, #06101d 0%, #040b15 100%)',
+              background: '#040b15',
               borderColor: 'rgba(111, 151, 194, 0.2)',
-              boxShadow: 'inset -1px 0 0 rgba(126, 169, 212, 0.05)',
+              boxShadow:
+                '0 -1px 0 #040b15, inset -1px 0 0 rgba(126, 169, 212, 0.05)',
+              position: 'relative',
+              width: 84,
+              zIndex: 20,
             }
           : undefined
       }
@@ -281,12 +284,13 @@ export function ActivityBar({
 
       {isStudioVariant && environmentStatus && (
         <div
-          className="mx-2 mb-1 mt-auto w-[68px] shrink-0 rounded-md border border-white/10 bg-[#0b1120] px-2 py-2"
+          className="mx-2 mb-1 mt-auto shrink-0 rounded-md border border-white/10 bg-[#0b1120] px-2 py-2"
           data-testid="studio-environment-status"
           style={{
             background: '#091524',
             borderColor: '#23364b',
             boxShadow: 'inset 0 1px 0 rgba(148, 190, 230, 0.05)',
+            width: 68,
           }}
           title={`${environmentStatus.label} · ${environmentStatus.detail}`}
         >

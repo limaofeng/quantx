@@ -139,6 +139,10 @@ describe('StudioWorkspace', () => {
         name: 'QuantX Studio · 打开行情工作台',
       })
     ).not.toHaveClass('border-r');
+    expect(screen.getByTestId('studio-brand-logo')).toHaveAttribute(
+      'viewBox',
+      '0 0 32 32'
+    );
     expect(fixedWorkspace).not.toHaveClass('border-r');
     expect(fixedWorkspace).toHaveTextContent('工作台');
     expect(fixedWorkspace).not.toHaveTextContent('自选股');

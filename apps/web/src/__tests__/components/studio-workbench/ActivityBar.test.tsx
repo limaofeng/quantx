@@ -80,7 +80,14 @@ describe('ActivityBar', () => {
 
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
-    expect(activityBar).toHaveClass('w-[84px]');
+    expect(activityBar).toHaveStyle({
+      background: '#040b15',
+      boxShadow:
+        '0 -1px 0 #040b15, inset -1px 0 0 rgba(126, 169, 212, 0.05)',
+      position: 'relative',
+      width: '84px',
+      zIndex: 20,
+    });
     expect(screen.getByTestId('studio-primary-navigation')).toHaveClass(
       'flex-1',
       'overflow-y-auto'

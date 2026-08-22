@@ -48,6 +48,7 @@ import {
   StudioWorkspaceContext,
   type StudioWorkspaceSidebarConfig,
 } from './context';
+import { QuantXLogo } from './QuantXLogo';
 import {
   buildStudioWorkspaceTab,
   getStudioWorkspacePath,
@@ -174,23 +175,15 @@ function StudioWorkspaceHeader({
       <button
         type="button"
         onClick={onHome}
-        className="studio-shell-brand flex w-[52px] shrink-0 items-center gap-2.5 px-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 md:w-[172px] md:px-3.5"
+        className="studio-shell-brand flex shrink-0 items-center gap-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
         aria-label="QuantX Studio · 打开行情工作台"
         style={{
           background: 'rgba(2, 8, 17, 0.28)',
+          paddingInline: 'clamp(10px, calc(100vw - 758px), 14px)',
+          width: 'clamp(52px, calc(100vw - 716px), 172px)',
         }}
       >
-        <span
-          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full border border-slate-400/20 bg-slate-700/30 font-mono text-[10px] font-bold tracking-tight text-slate-100"
-          style={{
-            background: '#142338',
-            borderColor: 'rgba(203, 213, 225, 0.3)',
-            boxShadow:
-              'inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(2, 6, 23, 0.45)',
-          }}
-        >
-          QX
-        </span>
+        <QuantXLogo />
         <span className="hidden truncate text-[14px] font-semibold tracking-wide text-slate-100 md:block">
           QuantX Studio
         </span>
@@ -207,21 +200,22 @@ function StudioWorkspaceHeader({
           type="button"
           onClick={onHome}
           className={cn(
-            'flex h-[44px] w-12 items-center justify-center gap-2 rounded-t-[8px] border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:w-[108px] lg:px-3',
+            'flex h-[44px] w-12 items-center justify-center gap-2 rounded-t-[8px] border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:px-3',
             isHomeActive
               ? 'text-slate-100'
               : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
           )}
-          style={
-            isHomeActive
+          style={{
+            width: 'clamp(48px, calc(100vw - 916px), 108px)',
+            ...(isHomeActive
               ? {
                   background: '#0b1a2b',
                   borderColor: '#22364d',
                   boxShadow:
                     'inset 0 1px 0 rgba(148, 190, 230, 0.09), 0 -8px 24px rgba(0, 0, 0, 0.12)',
                 }
-              : undefined
-          }
+              : {}),
+          }}
           data-testid="studio-fixed-home-tab"
         >
           <BookOpen className="h-[18px] w-[18px]" strokeWidth={2} />
