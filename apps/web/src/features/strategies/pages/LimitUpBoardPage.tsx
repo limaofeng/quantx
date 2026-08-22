@@ -519,7 +519,7 @@ export default function LimitUpBoardPage() {
   };
 
   const replaySidebar = (
-    <aside className="flex h-full min-h-0 flex-col bg-[#0b1628]">
+    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-4">
         <div>
           <div className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">
@@ -605,7 +605,7 @@ export default function LimitUpBoardPage() {
     : '--';
 
   const toolbar = (
-    <header className="flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] bg-[#07111f]/95 px-4">
+    <header className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] px-4">
       <nav
         aria-label="打板工作区"
         className="flex h-full min-w-0 items-stretch overflow-x-auto custom-scrollbar"
@@ -740,7 +740,7 @@ export default function LimitUpBoardPage() {
 
   const content = (
     <div
-      className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-[#07101d] text-slate-100"
+      className="studio-workspace-surface flex h-full min-h-0 w-full flex-col overflow-hidden text-slate-100"
       data-testid="limit-up-board-page"
     >
       {toolbar}
@@ -760,7 +760,7 @@ export default function LimitUpBoardPage() {
 
       <main
         id="limit-up-workbench-content"
-        className="min-h-0 flex-1 overflow-hidden bg-[#0a1424]"
+        className="studio-workspace-surface min-h-0 flex-1 overflow-hidden"
       >
         {workspaceMode === 'REALTIME' ? (
           <section

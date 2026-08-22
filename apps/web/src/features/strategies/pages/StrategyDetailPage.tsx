@@ -1463,7 +1463,7 @@ export default function StrategyDetailPage() {
       activeMode="MONITOR"
       className="h-full min-h-0"
       content={
-        <div className="flex h-full items-center justify-center bg-[#08101d] p-6">
+        <div className="studio-workspace-surface flex h-full items-center justify-center p-6">
           <div
             className={cn(
               'rounded-lg border px-5 py-4 text-center text-[11px] font-black uppercase tracking-widest',
@@ -1683,7 +1683,7 @@ export default function StrategyDetailPage() {
   const detailContent = (
     <div
       className={cn(
-        'h-full min-h-0 bg-[#08101d] p-3',
+        'studio-workspace-surface h-full min-h-0 p-3',
         activeTab === 'logs'
           ? 'flex flex-col gap-3 overflow-hidden'
           : 'overflow-y-auto custom-scrollbar'

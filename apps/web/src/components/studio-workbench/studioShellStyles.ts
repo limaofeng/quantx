@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 
 export const STUDIO_CHROME_BACKGROUND = '#040b15';
 export const STUDIO_HEADER_HEIGHT = 52;
-export const STUDIO_WORKSPACE_SURFACE = '#07111f';
+export const STUDIO_WORKSPACE_SURFACE = 'var(--studio-workspace-surface)';
 export const STUDIO_WORKSPACE_SURFACE_RADIUS = 12;
 export const STUDIO_WORKSPACE_TAB_RADIUS = 8;
 export const STUDIO_WORKSPACE_WEAK_BORDER = '#22364d';

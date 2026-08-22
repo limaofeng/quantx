@@ -222,8 +222,8 @@ export default function ResearchCenterPage() {
   const { error, fetching, refresh, runs, total } = useResearchRuns(status);
 
   return (
-    <main className="flex h-full min-h-0 flex-col overflow-hidden bg-[#08101d]">
-      <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.06] bg-[#0b1423]/90 px-4 py-3">
+    <main className="studio-workspace-surface flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="studio-workspace-surface flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.06] px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <FlaskConical className="h-4 w-4 text-blue-400" />

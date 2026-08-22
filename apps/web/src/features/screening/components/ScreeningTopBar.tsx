@@ -544,7 +544,7 @@ export function ScreeningTopBar({
   }
 
   return (
-    <div className="flex flex-col gap-4 p-4 shrink-0 bg-[#0F1729]/80 backdrop-blur-md border-b border-white/5 z-20 shadow-xl">
+    <div className="studio-workspace-surface z-20 flex shrink-0 flex-col gap-4 border-b border-white/5 p-4 shadow-xl backdrop-blur-md">
       <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
         {/* Left Side: Filter Buttons */}
         <div className="flex flex-wrap items-center gap-2">

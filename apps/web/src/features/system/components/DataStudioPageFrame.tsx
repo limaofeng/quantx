@@ -27,7 +27,7 @@ export function DataStudioPageFrame({
     <DataStudioShell
       activeMode={activeMode}
       content={
-        <div className="h-full overflow-y-auto bg-[#08101d] p-3 custom-scrollbar">
+        <div className="studio-workspace-surface h-full overflow-y-auto p-3 custom-scrollbar">
           <div className={cn('h-full min-h-0', className)}>{children}</div>
         </div>
       }

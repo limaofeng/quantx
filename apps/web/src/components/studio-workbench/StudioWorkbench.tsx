@@ -219,7 +219,10 @@ export function StudioWorkbench({
         </div>
       )}
 
-      <div className="flex min-w-0 flex-1 flex-col bg-[#0b1120]/20">
+      <div
+        className="studio-workspace-surface flex min-w-0 flex-1 flex-col"
+        data-testid="studio-workbench-content-surface"
+      >
         {effectiveTabBar && !isEmpty && effectiveTabBar}
         {isEmpty && emptyState ? (
           emptyState

@@ -275,7 +275,7 @@ export function TTradeHealthConsole({
   );
 
   return (
-    <aside className="flex h-full min-h-0 flex-col bg-[#081423] text-slate-200">
+    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-200">
       <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">
         <div className="flex items-start justify-between gap-3">
           <div>

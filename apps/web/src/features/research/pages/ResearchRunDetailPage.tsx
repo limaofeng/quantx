@@ -72,7 +72,7 @@ export default function ResearchRunDetailPage() {
 
   if (!key) {
     return (
-      <main className="h-full overflow-y-auto bg-[#08101d]">
+      <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchErrorState
           message="链接缺少服务端签发的研究结果标识，请从研究中心重新打开。"
           onRetry={() => {
@@ -85,7 +85,7 @@ export default function ResearchRunDetailPage() {
 
   if (fetching && !detail) {
     return (
-      <main className="h-full overflow-y-auto bg-[#08101d]">
+      <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchLoadingState label="正在读取研究结果与统计产物" />
       </main>
     );
@@ -93,7 +93,7 @@ export default function ResearchRunDetailPage() {
 
   if (error) {
     return (
-      <main className="h-full overflow-y-auto bg-[#08101d]">
+      <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchErrorState message={error.message} onRetry={refresh} />
       </main>
     );
@@ -101,7 +101,7 @@ export default function ResearchRunDetailPage() {
 
   if (!detail || !parsed) {
     return (
-      <main className="h-full overflow-y-auto bg-[#08101d]">
+      <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchEmptyState
           title="研究运行不存在"
           description="结果可能已被归档、尚未完成，或当前账户没有读取权限。"
@@ -113,7 +113,7 @@ export default function ResearchRunDetailPage() {
   const summary = detail.summary;
   if (!identityMatches({ runId, studyId, version }, summary)) {
     return (
-      <main className="h-full overflow-y-auto bg-[#08101d]">
+      <main className="studio-workspace-surface h-full overflow-y-auto">
         <ResearchErrorState
           message="链接中的研究身份与服务端返回结果不一致，请从研究中心重新打开。"
           onRetry={() => {
@@ -142,8 +142,8 @@ export default function ResearchRunDetailPage() {
       : formatInteger(loadedCodes);
 
   return (
-    <main className="h-full overflow-y-auto bg-[#08101d] text-slate-200">
-      <header className="sticky top-0 z-20 border-b border-white/[0.06] bg-[#0b1423]/95 px-4 py-3 backdrop-blur">
+    <main className="studio-workspace-surface h-full overflow-y-auto text-slate-200">
+      <header className="studio-workspace-surface sticky top-0 z-20 border-b border-white/[0.06] px-4 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-[1500px] flex-wrap items-center gap-3">
           <Link
             href="/research"

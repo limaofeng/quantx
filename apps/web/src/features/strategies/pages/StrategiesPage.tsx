@@ -180,7 +180,7 @@ function ModePlaceholder({
   const Icon = meta.icon;
 
   return (
-    <div className="flex h-full min-h-0 items-center justify-center bg-[#08101d] p-6">
+    <div className="studio-workspace-surface flex h-full min-h-0 items-center justify-center p-6">
       <div className="w-full max-w-md rounded-lg border border-dashed border-white/10 bg-white/[0.03] p-6 text-center">
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-300">
           <Icon className="h-5 w-5" />
@@ -523,7 +523,7 @@ function StrategyDashboardHome({
   ];
 
   return (
-    <div className="h-full overflow-y-auto bg-[#08101d] p-4 custom-scrollbar">
+    <div className="studio-workspace-surface h-full overflow-y-auto p-4 custom-scrollbar">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <section className="rounded-lg border border-white/5 bg-[#0b1120]/70 px-4 py-4">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -822,7 +822,7 @@ export default function StrategiesPage() {
 
     if (activeMode === 'CATALOG') {
       return (
-        <div className="h-full overflow-y-auto bg-[#08101d] p-4 custom-scrollbar">
+        <div className="studio-workspace-surface h-full overflow-y-auto p-4 custom-scrollbar">
           <AvailableStrategies compact />
         </div>
       );

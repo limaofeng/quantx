@@ -647,7 +647,7 @@ function TTradeReplayPanel({
   }));
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 bg-[#081321] xl:grid-cols-[minmax(0,1fr)_300px]">
+    <div className="studio-workspace-surface grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
       <div className="min-h-0 overflow-y-auto custom-scrollbar">
         <section className="border-b border-white/[0.06] bg-[#0a1728] p-4">
           <div className="flex flex-wrap items-end justify-between gap-4">
@@ -1998,7 +1998,7 @@ export function TTradeGlobalPage() {
   );
 
   const replaySidebar = (
-    <aside className="flex h-full min-h-0 flex-col bg-[#0b1628]">
+    <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-4">
         <div>
           <div className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">
@@ -2043,7 +2043,7 @@ export function TTradeGlobalPage() {
   );
 
   const toolbar = (
-    <div className="flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] bg-[#07111f]/95 px-4">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] px-4">
       <nav
         className="flex h-full min-w-0 items-stretch"
         aria-label="做 T 工作区"
@@ -2149,7 +2149,7 @@ export function TTradeGlobalPage() {
   );
 
   const monitorView = (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a1424]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       {!accountId && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-4 py-2.5 text-xs font-bold text-amber-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
@@ -2676,7 +2676,7 @@ export function TTradeGlobalPage() {
   );
 
   const positionsView = (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a1424]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="grid shrink-0 grid-cols-2 border-b border-white/[0.05]">
         <div className="border-r border-white/[0.05] px-4 py-3">
           <div className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-600">
@@ -2729,7 +2729,7 @@ export function TTradeGlobalPage() {
   );
 
   const eventsView = (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a1424]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="shrink-0 border-b border-white/[0.05] px-4 py-3">
         <h2 className="text-sm font-black text-slate-100">
           真实委托与成交事件
@@ -2825,7 +2825,7 @@ export function TTradeGlobalPage() {
   );
 
   const signalsView = (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a1424]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-3">
         <div>
           <h2 className="text-sm font-black text-slate-100">买入信号</h2>
@@ -3248,7 +3248,7 @@ export function TTradeGlobalPage() {
   );
 
   const settingsView = (
-    <div className="flex h-full min-h-0 flex-col bg-[#0a1424]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3">
         <div>
           <h2 className="text-sm font-black text-slate-100">全局策略参数</h2>

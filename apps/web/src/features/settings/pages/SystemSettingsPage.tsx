@@ -139,7 +139,7 @@ export function SystemSettingsPage() {
   const section = activeSection(location);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d] text-slate-100 md:flex-row">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-100 md:flex-row">
       <aside className="hidden w-60 shrink-0 border-r border-white/5 bg-[#0b1120] p-4 md:block">
         <div className="mb-6 flex items-center gap-3 px-2">
           <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-sky-500/20 bg-sky-500/10 text-sky-300">

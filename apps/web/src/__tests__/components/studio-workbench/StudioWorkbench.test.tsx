@@ -69,7 +69,15 @@ describe('StudioWorkbench', () => {
       </StudioWorkspaceContext.Provider>
     );
 
-    expect(screen.getByTestId('studio-local-frame')).toBeInTheDocument();
+    const localFrame = screen.getByTestId('studio-local-frame');
+    const contentSurface = screen.getByTestId(
+      'studio-workbench-content-surface'
+    );
+
+    expect(localFrame).toBeInTheDocument();
+    expect(contentSurface).toHaveClass('studio-workspace-surface');
+    expect(localFrame).toContainElement(contentSurface);
+    expect(contentSurface).toContainElement(screen.getByText('Hosted content'));
     expect(screen.queryByText('Local sidebar')).not.toBeInTheDocument();
     expect(screen.getByText('Hosted content')).toBeInTheDocument();
     expect(screen.queryByTestId('studio-activity-bar')).not.toBeInTheDocument();

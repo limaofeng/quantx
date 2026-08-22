@@ -59,6 +59,7 @@
   --skeleton-highlight: rgba(255, 255, 255, 0.42);
 
   /* Studio Workbench tokens */
+  --studio-workspace-surface: #08101d;
   --studio-bg: #0b1120;
   --studio-panel: #0f172a;
   --studio-panel-muted: #09111f;
@@ -203,6 +204,10 @@
     @apply font-sans antialiased bg-background text-foreground;
     font-family: 'Inter', system-ui, sans-serif;
   }
+}
+
+.studio-workspace-surface {
+  background-color: var(--studio-workspace-surface);
 }
 
 /* Keep horizontal tab strips scrollable without reserving scrollbar space. */

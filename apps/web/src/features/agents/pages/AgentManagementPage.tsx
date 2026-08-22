@@ -1157,7 +1157,7 @@ export function AgentManagementPanel() {
 
 export function AgentManagementPage() {
   return (
-    <div className="custom-scrollbar h-full overflow-y-auto bg-[#08101d] p-3 sm:p-5 lg:p-6">
+    <div className="studio-workspace-surface custom-scrollbar h-full overflow-y-auto p-3 sm:p-5 lg:p-6">
       <AgentManagementPanel />
     </div>
   );

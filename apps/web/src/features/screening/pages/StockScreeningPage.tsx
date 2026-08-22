@@ -241,7 +241,7 @@ export default function StockScreeningPage() {
       className="h-full min-h-0"
       showSidebar={false}
       content={
-        <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#08101d]">
+        <div className="studio-workspace-surface flex h-full min-h-0 flex-col overflow-hidden">
           <ScreeningTopBar
             screeningCriteria={localCriteria}
             setScreeningCriteria={setLocalCriteria}

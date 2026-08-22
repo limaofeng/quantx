@@ -121,10 +121,10 @@ export function EntryPlansPage({ controller, view }: EntryPlansPageProps) {
 
   return (
     <main
-      className="min-h-full min-w-0 overflow-x-hidden bg-[#080d18] text-slate-100"
+      className="studio-workspace-surface min-h-full min-w-0 overflow-x-hidden text-slate-100"
       data-testid="entry-plans-page"
     >
-      <header className="border-b border-white/10 bg-[#07111f]/95 px-3 py-3 sm:px-4 lg:px-5">
+      <header className="studio-workspace-surface border-b border-white/10 px-3 py-3 sm:px-4 lg:px-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-base font-black tracking-tight sm:text-lg">

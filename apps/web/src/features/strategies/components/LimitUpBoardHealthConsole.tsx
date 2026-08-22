@@ -115,7 +115,7 @@ export function LimitUpBoardHealthConsole({
   return (
     <aside
       aria-labelledby="limit-up-health-console-title"
-      className="flex h-full min-h-0 w-full flex-col bg-[#081423] text-slate-200"
+      className="studio-workspace-surface flex h-full min-h-0 w-full flex-col text-slate-200"
       data-testid="limit-up-health-console"
     >
       <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">

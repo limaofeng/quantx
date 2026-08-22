@@ -25,7 +25,7 @@ function SkeletonPanel({
 
 function ContentHeaderSkeleton() {
   return (
-    <div className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] bg-[#0b1120]/90 px-4">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-4 border-b border-white/[0.06] px-4">
       <div className="min-w-0 space-y-1.5">
         <Skeleton className="h-3 w-32 max-w-[42vw]" />
         <Skeleton className="h-2 w-56 max-w-[58vw]" />
@@ -112,7 +112,7 @@ function TablePanelSkeleton({ rows = 8 }: { rows?: number }) {
 
 function DashboardSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="min-h-0 flex-1 overflow-hidden p-3">
         <div className="space-y-3">
@@ -152,7 +152,7 @@ function DashboardSkeleton() {
 
 function StudioSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="min-h-0 flex-1 overflow-hidden p-3">
         <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
@@ -188,7 +188,7 @@ function StudioSkeleton() {
 
 function TableSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="flex min-h-0 flex-1 p-3">
         <TablePanelSkeleton />
@@ -199,7 +199,7 @@ function TableSkeleton() {
 
 function DetailSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="min-h-0 flex-1 overflow-hidden p-3">
         <div className="grid h-full min-h-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.75fr)]">
@@ -255,7 +255,7 @@ function FormFieldsSkeleton({ rows = 5 }: { rows?: number }) {
 
 function FormSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="min-h-0 flex-1 overflow-hidden p-3">
         <div className="mx-auto grid h-full min-h-0 max-w-6xl grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_20rem]">
@@ -284,7 +284,7 @@ function FormSkeleton() {
 
 function DefaultSkeleton() {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <ContentHeaderSkeleton />
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
         <MetricSkeletonGrid />
@@ -299,7 +299,7 @@ export function RouteSkeleton({ variant = 'default' }: RouteSkeletonProps) {
     <div
       aria-busy="true"
       aria-live="polite"
-      className="h-full min-h-0 w-full overflow-hidden"
+      className="studio-workspace-surface h-full min-h-0 w-full overflow-hidden"
       data-testid={`route-skeleton-${variant}`}
       role="status"
     >

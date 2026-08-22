@@ -175,7 +175,7 @@ describe('TabBar', () => {
       'hover:border-white/10'
     );
     expect(tab.parentElement).toHaveStyle({
-      background: '#07111f',
+      background: 'var(--studio-workspace-surface)',
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
@@ -186,7 +186,7 @@ describe('TabBar', () => {
       zIndex: 10,
     });
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
-      background: '#07111f',
+      background: 'var(--studio-workspace-surface)',
     });
     const leftShoulder = screen.getByTestId(
       'studio-workspace-tab-shoulder-left'
@@ -213,7 +213,7 @@ describe('TabBar', () => {
     );
     expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
       'fill',
-      '#07111f'
+      'var(--studio-workspace-surface)'
     );
     expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
       'd',
@@ -235,6 +235,10 @@ describe('TabBar', () => {
     expect(rightShoulder.querySelectorAll('path')[0]).toHaveAttribute(
       'd',
       'M0 0 C0 4.97 4.03 9 9 9 H0 Z'
+    );
+    expect(rightShoulder.querySelectorAll('path')[0]).toHaveAttribute(
+      'fill',
+      'var(--studio-workspace-surface)'
     );
     expect(rightShoulder.querySelectorAll('path')[1]).toHaveAttribute(
       'd',

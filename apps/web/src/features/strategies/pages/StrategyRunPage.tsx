@@ -370,7 +370,7 @@ export default function StrategyRunPage() {
       activeMode="CONFIG"
       className="h-full min-h-0"
       content={
-        <div className="flex h-full items-center justify-center bg-[#08101d] p-6">
+        <div className="studio-workspace-surface flex h-full items-center justify-center p-6">
           <div
             className={cn(
               'rounded-lg border px-5 py-4 text-center text-[11px] font-black uppercase tracking-widest',
@@ -515,7 +515,7 @@ export default function StrategyRunPage() {
   );
 
   const createContent = (
-    <div className="h-full overflow-y-auto bg-[#08101d] p-3 custom-scrollbar">
+    <div className="studio-workspace-surface h-full overflow-y-auto p-3 custom-scrollbar">
       <div className="mx-auto max-w-6xl space-y-6 pb-12">
         {/* Premium Back & Header */}
         <div className="flex flex-col gap-6">

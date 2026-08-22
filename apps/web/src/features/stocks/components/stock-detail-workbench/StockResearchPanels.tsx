@@ -306,7 +306,7 @@ export function StockOverviewPanel({
   holding?: Position | null;
 }) {
   return (
-    <div className="grid h-full min-h-[720px] grid-cols-1 gap-2 overflow-y-auto bg-[#08101d] p-2 custom-scrollbar xl:grid-cols-[minmax(0,1fr)_340px] xl:grid-rows-[minmax(470px,1fr)_180px]">
+    <div className="studio-workspace-surface grid h-full min-h-[720px] grid-cols-1 gap-2 overflow-y-auto p-2 custom-scrollbar xl:grid-cols-[minmax(0,1fr)_340px] xl:grid-rows-[minmax(470px,1fr)_180px]">
       <section className="min-h-[470px] min-w-0 overflow-hidden border border-white/5 bg-[#0b1120]/65">
         <TradingChart stockCode={stockCode} />
       </section>
@@ -409,7 +409,7 @@ export function StockAnnouncementsPanel({
   onRefresh: () => void;
 }) {
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto bg-[#08101d] p-2 custom-scrollbar">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col gap-2 overflow-y-auto p-2 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-2 border border-white/5 bg-[#0b1120]/80 px-3 py-2">
         <div>
           <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">

@@ -618,8 +618,8 @@ export default function MarketShortcutsPage() {
   return (
     <MarketStudioShell
       content={
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#080d18]">
-          <header className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-[#0b1120]/95 px-4 py-2 xl:min-h-11 xl:py-1">
+        <div className="studio-workspace-surface flex min-h-0 flex-1 flex-col overflow-hidden">
+          <header className="studio-workspace-surface flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-white/5 px-4 py-2 xl:min-h-11 xl:py-1">
             <div className="flex min-w-0 items-center">
               <div className="min-w-0">
                 <div className="truncate text-xs font-black uppercase tracking-[0.18em] text-slate-100">

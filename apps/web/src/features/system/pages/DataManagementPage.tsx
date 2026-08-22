@@ -33,7 +33,7 @@ export function DataManagementPage() {
       className="h-full min-h-0"
       showSidebar={false}
       content={
-        <div className="h-full overflow-y-auto bg-[#08101d] p-3 custom-scrollbar">
+        <div className="studio-workspace-surface h-full overflow-y-auto p-3 custom-scrollbar">
           <div className="grid min-h-full grid-cols-12 gap-3">
             <div className="col-span-12 flex flex-col gap-3 xl:col-span-9">
               <SystemInsightCard />

@@ -392,7 +392,7 @@ function StudioWorkspaceSidebarDock({
     <aside
       data-testid="studio-sidebar-dock"
       className={cn(
-        'relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/5 bg-[#0b1120]',
+        'studio-workspace-surface relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/5',
         !isResizingSidebar && 'transition-[width] duration-150'
       )}
       style={{

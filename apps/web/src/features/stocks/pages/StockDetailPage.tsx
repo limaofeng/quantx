@@ -63,7 +63,7 @@ function PageState({
   title: string;
 }) {
   return (
-    <div className="flex h-full items-center justify-center bg-[#08101d] p-8">
+    <div className="studio-workspace-surface flex h-full items-center justify-center p-8">
       <div className="max-w-md border border-white/5 bg-[#0b1120]/80 p-5 text-center">
         <Building2 className="mx-auto h-6 w-6 text-red-300" />
         <h1 className="mt-3 text-sm font-black text-slate-100">{title}</h1>

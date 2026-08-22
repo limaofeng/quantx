@@ -184,7 +184,7 @@ describe('StudioWorkspace', () => {
     expect(scrollableTabRegion).toHaveClass('min-w-0', 'overflow-x-auto');
     expect(fixedHomeTab.parentElement).toHaveClass('border-b-0');
     expect(fixedHomeTab.parentElement).toHaveStyle({
-      background: '#07111f',
+      background: 'var(--studio-workspace-surface)',
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
@@ -207,7 +207,9 @@ describe('StudioWorkspace', () => {
       borderTopLeftRadius: '12px',
     });
     expect(main.style.boxShadow).toBe('');
-    expect(main).toHaveStyle({ background: '#07111f' });
+    expect(main).toHaveStyle({
+      background: 'var(--studio-workspace-surface)',
+    });
     const primaryNavigation = screen.getByTestId('studio-primary-navigation');
     const railButtons = within(primaryNavigation).getAllByTestId(
       'studio-action-button'

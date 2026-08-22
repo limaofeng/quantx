@@ -479,7 +479,7 @@ export function AccountPage() {
   const error = accountError || overview.error;
   if (!loading && !account) {
     return (
-      <div className="h-full overflow-y-auto bg-[#080d18] p-4 text-slate-200 md:p-8">
+      <div className="studio-workspace-surface h-full overflow-y-auto p-4 text-slate-200 md:p-8">
         <EmptyState
           title="当前未连接资金账户"
           detail={
@@ -500,7 +500,7 @@ export function AccountPage() {
   const recentTrades = todayTrades.trades.slice(0, 5);
 
   return (
-    <div className="h-full overflow-y-auto bg-[#080d18] text-slate-100 custom-scrollbar">
+    <div className="studio-workspace-surface h-full overflow-y-auto text-slate-100 custom-scrollbar">
       <div className="mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-3 sm:px-4 lg:px-5 xl:px-3 xl:pt-2">
         <header className="flex min-h-14 flex-col justify-center gap-3 rounded-lg border border-white/[0.06] bg-[#0b1120]/95 px-4 py-2 sm:flex-row sm:items-center sm:justify-between xl:min-h-11 xl:py-1">
           <div className="min-w-0">

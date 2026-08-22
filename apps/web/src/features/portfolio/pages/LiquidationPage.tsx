@@ -955,7 +955,7 @@ export function LiquidationPage() {
   );
 
   const toolbar = (
-    <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-white/5 bg-[#0b1120]/70 px-4">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 border-b border-white/5 px-4">
       <div className="flex min-w-0 items-center gap-3">
         {selectedStockCode ? (
           <button

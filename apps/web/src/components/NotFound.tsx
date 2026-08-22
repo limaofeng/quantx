@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 
 export default function NotFound() {
   return (
-    <div className="flex h-full w-full items-center justify-center bg-[#08101d] p-4">
+    <div className="studio-workspace-surface flex h-full w-full items-center justify-center p-4">
       <Card className="w-full max-w-md border-white/10 bg-slate-950/60 text-slate-100">
         <CardContent className="pt-6">
           <div className="flex mb-4 gap-2">

@@ -185,7 +185,7 @@ function WorkspaceToolbar({
 
 function OrdersPanel({ accountId }: { accountId?: string }) {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#0b1120] p-3">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col p-3">
       <Tabs defaultValue="today" className="flex min-h-0 flex-1 flex-col">
         <TabsList className="mb-3 flex h-8 w-fit gap-1 rounded-md border border-white/10 bg-white/[0.04] p-0.5">
           <TabsTrigger value="today" className={compactTabTriggerClass}>
@@ -222,7 +222,7 @@ function OrdersPanel({ accountId }: { accountId?: string }) {
 
 function TradesPanel({ accountId }: { accountId?: string }) {
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#0b1120] p-3">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col p-3">
       <Tabs defaultValue="today" className="flex min-h-0 flex-1 flex-col">
         <TabsList className="mb-3 flex h-8 w-fit gap-1 rounded-md border border-white/10 bg-white/[0.04] p-0.5">
           <TabsTrigger value="today" className={compactTabTriggerClass}>
@@ -265,7 +265,7 @@ function AccountPanel({
   accountSummary?: AccountSummary | null;
 }) {
   return (
-    <div className="h-full min-h-0 overflow-y-auto bg-[#0b1120] p-4 custom-scrollbar">
+    <div className="studio-workspace-surface h-full min-h-0 overflow-y-auto p-4 custom-scrollbar">
       <div className="mx-auto max-w-5xl">
         <div className="mb-4 border-b border-white/5 pb-3">
           <div className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">
@@ -487,7 +487,7 @@ export function StockDetailWorkspace({
     );
   } else if (activeView === 'FINANCIAL') {
     content = (
-      <div className="grid h-full min-h-0 gap-2 overflow-y-auto bg-[#08101d] p-2 custom-scrollbar 2xl:grid-cols-[minmax(0,1fr)_330px]">
+      <div className="studio-workspace-surface grid h-full min-h-0 gap-2 overflow-y-auto p-2 custom-scrollbar 2xl:grid-cols-[minmax(0,1fr)_330px]">
         <StockFinancialPanel
           error={financials.error}
           isLoading={financials.isLoading}
@@ -516,7 +516,7 @@ export function StockDetailWorkspace({
     );
   } else {
     content = (
-      <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-[#08101d] custom-scrollbar">
+      <div className="studio-workspace-surface flex h-full min-h-0 flex-col overflow-y-auto custom-scrollbar">
         <div
           className={cn(
             'min-h-[560px] flex-1',
@@ -556,7 +556,7 @@ export function StockDetailWorkspace({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#08101d]">
+    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <TradingInstrumentHeader
         accountCash={accountSummary?.cash}
         holdings={holdings}
