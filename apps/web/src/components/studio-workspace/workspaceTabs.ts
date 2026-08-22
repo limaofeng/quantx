@@ -1,18 +1,20 @@
 import {
-  Bot,
-  Briefcase,
-  Database,
-  Filter,
-  FlaskConical,
-  Hand,
   LayoutDashboard,
   LineChart,
-  Settings,
   Wallet,
   type LucideIcon,
 } from 'lucide-react';
 
 import type { StudioTab } from '@/components/studio-workbench';
+import {
+  ControlSettingsIcon,
+  MarketDataIcon,
+  MarketResearchIcon,
+  PortfolioHoldingsIcon,
+  SellManagementIcon,
+  StockScreeningIcon,
+  StrategyGraphIcon,
+} from '@/components/studio-workspace/StudioNavigationIcons';
 import {
   findRoute,
   getPageTitle,
@@ -127,13 +129,13 @@ export function getStudioWorkspaceTabId(rawPath: string) {
 function getTabIcon(pathname: string): LucideIcon {
   const route = findRoute(pathname);
   if (route?.nav?.icon) return route.nav.icon;
-  if (pathname === '/holdings') return Briefcase;
+  if (pathname === '/holdings') return PortfolioHoldingsIcon;
   if (pathname === '/account') return Wallet;
-  if (pathname === '/liquidation') return Hand;
-  if (pathname === '/screening') return Filter;
-  if (pathname.startsWith('/research')) return FlaskConical;
+  if (pathname === '/liquidation') return SellManagementIcon;
+  if (pathname === '/screening') return StockScreeningIcon;
+  if (pathname.startsWith('/research')) return MarketResearchIcon;
   if (pathname.startsWith('/stock/')) return LineChart;
-  if (pathname.startsWith('/strategies')) return Bot;
+  if (pathname.startsWith('/strategies')) return StrategyGraphIcon;
   if (
     [
       '/settings',
@@ -142,13 +144,13 @@ function getTabIcon(pathname: string): LucideIcon {
       '/settings/agents',
     ].includes(pathname)
   ) {
-    return Settings;
+    return ControlSettingsIcon;
   }
   if (
     pathname.startsWith('/settings/data') ||
     pathname.startsWith('/system/flow-runs')
   ) {
-    return Database;
+    return MarketDataIcon;
   }
   return LayoutDashboard;
 }

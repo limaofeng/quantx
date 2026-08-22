@@ -1,9 +1,6 @@
 import {
-  BarChart3,
   Bell,
-  BookOpen,
   Bot,
-  Database,
   Grid2X2,
   TrendingUp,
   UserRound,
@@ -51,6 +48,7 @@ import {
   type StudioWorkspaceSidebarConfig,
 } from './context';
 import { QuantXLogo } from './QuantXLogo';
+import { MarketDataIcon, MarketWorkbenchIcon } from './StudioNavigationIcons';
 import {
   buildStudioWorkspaceTab,
   getStudioWorkspacePath,
@@ -792,7 +790,9 @@ export function StudioWorkspace({
         onTabPin={handleTabPin}
         renderTabContent={(tab: StudioWorkspaceTab, isActive) => {
           const isHomeTab = tab.path === DEFAULT_WORKSPACE_PATH;
-          const Icon = isHomeTab ? BookOpen : tab.icon || BarChart3;
+          const Icon = isHomeTab
+            ? MarketWorkbenchIcon
+            : tab.icon || MarketWorkbenchIcon;
           return (
             <>
               <Icon
@@ -864,7 +864,7 @@ export function StudioWorkspace({
   });
   railActions.push({
     active: currentPath.startsWith('/settings/data'),
-    icon: Database,
+    icon: MarketDataIcon,
     id: 'rail:/settings/data',
     label: '数据管理',
     onSelect: () => openStudioTab('/settings/data'),

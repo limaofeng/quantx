@@ -1,16 +1,17 @@
+import { type LucideIcon } from 'lucide-react';
+
 import {
-  BarChart3,
-  Bot,
-  Briefcase,
-  CircleDollarSign,
-  Filter,
-  FlaskConical,
-  Hand,
-  Radar,
-  Settings,
-  Target,
-  type LucideIcon,
-} from 'lucide-react';
+  BuyManagementIcon,
+  ControlSettingsIcon,
+  LimitUpBoardIcon,
+  MarketResearchIcon,
+  MarketWorkbenchIcon,
+  PortfolioHoldingsIcon,
+  SellManagementIcon,
+  StockScreeningIcon,
+  StrategyGraphIcon,
+  TTradeCycleIcon,
+} from '@/components/studio-workspace/StudioNavigationIcons';
 
 import {
   createLazyRoute,
@@ -90,7 +91,7 @@ export const appRoutes: AppRouteConfig[] = [
     preload: true,
     nav: {
       label: '行情',
-      icon: BarChart3,
+      icon: MarketWorkbenchIcon,
       group: MAIN_GROUP,
       order: 10,
     },
@@ -115,7 +116,7 @@ export const appRoutes: AppRouteConfig[] = [
     preload: true,
     nav: {
       label: '持仓',
-      icon: Briefcase,
+      icon: PortfolioHoldingsIcon,
       group: MAIN_GROUP,
       order: 20,
     },
@@ -139,7 +140,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
     nav: {
       label: '买入管理',
-      icon: CircleDollarSign,
+      icon: BuyManagementIcon,
       group: MAIN_GROUP,
       order: 25,
     },
@@ -154,7 +155,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
     nav: {
       label: '做T助手',
-      icon: Radar,
+      icon: TTradeCycleIcon,
       group: MAIN_GROUP,
       order: 30,
     },
@@ -170,7 +171,7 @@ export const appRoutes: AppRouteConfig[] = [
     preload: true,
     nav: {
       label: '打板助手',
-      icon: Target,
+      icon: LimitUpBoardIcon,
       group: MAIN_GROUP,
       order: 35,
     },
@@ -185,7 +186,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'table',
     nav: {
       label: '卖出管理',
-      icon: Hand,
+      icon: SellManagementIcon,
       group: MAIN_GROUP,
       order: 40,
     },
@@ -201,7 +202,7 @@ export const appRoutes: AppRouteConfig[] = [
     preload: true,
     nav: {
       label: '策略管理',
-      icon: Bot,
+      icon: StrategyGraphIcon,
       group: MAIN_GROUP,
       order: 50,
     },
@@ -267,7 +268,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'table',
     nav: {
       label: '研究中心',
-      icon: FlaskConical,
+      icon: MarketResearchIcon,
       group: MAIN_GROUP,
       order: 55,
     },
@@ -282,7 +283,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'table',
     nav: {
       label: '股票筛选',
-      icon: Filter,
+      icon: StockScreeningIcon,
       group: MAIN_GROUP,
       order: 60,
     },
@@ -306,7 +307,7 @@ export const appRoutes: AppRouteConfig[] = [
     skeleton: 'dashboard',
     nav: {
       label: '系统设置',
-      icon: Settings,
+      icon: ControlSettingsIcon,
       group: SETTINGS_GROUP,
       order: 10,
     },
