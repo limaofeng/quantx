@@ -26,12 +26,16 @@ jobs:
               - 'packages/**'
               - 'ops/**'
               - 'tests/**'
+              - '.prettierrc'
+              - '.editorconfig'
               - 'pyproject.toml'
               - 'uv.lock'
               - '.github/workflows/ci.yml'
             web:
               - 'apps/web/**'
               - 'apps/docs/**'
+              - '.prettierrc'
+              - '.editorconfig'
               - 'package.json'
               - 'package-lock.json'
               - '.github/workflows/ci.yml'
@@ -66,6 +70,8 @@ jobs:
           tests/infrastructure/test_dependency_boundaries.py
       - name: Lint Python workspace
         run: uv run ruff check apps packages tests
+      - name: Check Python formatting
+        run: uv run ruff format --check apps packages tests
       - name: Run safe Python test suite
         env:
           ENV: testing
@@ -165,6 +171,7 @@ jobs:
           cache-dependency-path: package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: npm run format:check
       - run: npm run lint:strict
       - run: npm run test:run
       - run: npm run build
