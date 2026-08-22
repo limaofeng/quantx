@@ -57,6 +57,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useGraphqlWsStatus } from '@/core/graphql/ws-status';
+import { useTradingSafety } from '@/features/trading-safety';
 import {
   TTradeRolloutTarget,
   TTradeTimeExitMode,
@@ -1236,6 +1237,7 @@ export function TTradeGlobalPage() {
   const { confirm: confirmDialog, prompt: promptDialog } = useAppDialog();
   const openStudioTab = useStudioNavigate();
   const accountId = tradingAccountConfig.defaultAccountId;
+  const { refreshSafety } = useTradingSafety();
   const [workspaceMode, setWorkspaceMode] = React.useState<
     'REALTIME' | 'REPLAY'
   >('REALTIME');
@@ -1802,14 +1804,15 @@ export function TTradeGlobalPage() {
 
   const refreshOperationalState = React.useCallback(() => {
     refreshVisibleData();
-  }, [refreshVisibleData]);
+    refreshSafety();
+  }, [refreshSafety, refreshVisibleData]);
 
-  const handleBeginControlledWindow = async () => {
+  const handleBeginAccountExecutionWindow = async () => {
     if (!accountId || !readiness?.snapshotId) return;
     const confirmed = await confirmDialog({
-      title: '建立受控交易窗口',
-      description: `将以快照 ${readiness.snapshotId} 建立窗口。历史已终结的手工记录会保留审计；之后新增 QMT 手工委托或成交会自动暂停 QuantX。`,
-      confirmText: '建立窗口',
+      title: '建立账户实盘窗口',
+      description: `将以快照 ${readiness.snapshotId} 建立账户级实盘窗口。历史已终结的手工记录会保留审计；之后新增 QMT 手工委托或成交会关闭新增风险能力。`,
+      confirmText: '建立账户窗口',
       cancelText: '暂不建立',
       variant: 'warning',
     });
@@ -1820,7 +1823,7 @@ export function TTradeGlobalPage() {
     });
     const payload = result.data?.beginTTradeControlledWindow;
     toast({
-      title: payload?.success ? '受控窗口已建立' : '受控窗口未建立',
+      title: payload?.success ? '账户实盘窗口已建立' : '账户实盘窗口未建立',
       description: payload?.message || result.error?.message || '请求失败',
       variant: payload?.success ? 'default' : 'destructive',
     });
@@ -2164,7 +2167,7 @@ export function TTradeGlobalPage() {
           aria-live="polite"
           className={cn(
             'flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3',
-            readiness.automationReady
+            readiness.canApprove
               ? 'border-emerald-400/15 bg-emerald-400/[0.05]'
               : readiness.preparationReady
                 ? 'border-sky-400/15 bg-sky-400/[0.05]'
@@ -2173,7 +2176,12 @@ export function TTradeGlobalPage() {
         >
           <div className="flex min-w-0 items-start gap-2">
             {readiness.preparationReady ? (
-              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+              <ShieldCheck
+                className={cn(
+                  'mt-0.5 h-4 w-4 shrink-0',
+                  readiness.canApprove ? 'text-emerald-400' : 'text-sky-300'
+                )}
+              />
             ) : (
               <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
             )}
@@ -2184,10 +2192,12 @@ export function TTradeGlobalPage() {
               </div>
               <div className="mt-1 text-[10px] leading-4 text-slate-400">
                 {readiness.preparationReady && !readiness.automationReady
-                  ? `账户事实已收敛；自动交易仍关闭。受控窗口${readiness.controlledWindowActive ? '已建立' : '未建立'}，当前快照识别手工委托 ${readiness.externalOrderCount} 笔、成交 ${readiness.externalTradeCount} 笔，窗口后新增 ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} 笔，活动委托 ${readiness.workingExternalOrderCount} 笔。${readiness.blockedReasons[0] || ''}`
-                  : readiness.blockedReasons.length
-                    ? readiness.blockedReasons.join('；')
-                    : '生产门禁检查已通过，可按当前灰度阶段处理交易。'}
+                  ? `账户事实已收敛；做 T 自动执行仍关闭。账户实盘窗口${readiness.controlledWindowActive ? '已建立' : '未建立'}，当前快照识别手工委托 ${readiness.externalOrderCount} 笔、成交 ${readiness.externalTradeCount} 笔，窗口后新增 ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} 笔，活动委托 ${readiness.workingExternalOrderCount} 笔。${readiness.blockedReasons[0] || ''}`
+                  : readiness.automationReady && !readiness.canApprove
+                    ? `账户实盘门禁已通过；做 T 当前处于 ${readiness.stage}，启用 Canary 或 LIVE 后才允许确认新买入。`
+                    : readiness.blockedReasons.length
+                      ? readiness.blockedReasons.join('；')
+                      : '做 T 自动执行已启用，可按当前灰度阶段处理交易。'}
               </div>
             </div>
           </div>
@@ -2216,12 +2226,12 @@ export function TTradeGlobalPage() {
                     !readiness.snapshotId ||
                     readiness.workingExternalOrderCount > 0
                   }
-                  onClick={handleBeginControlledWindow}
+                  onClick={handleBeginAccountExecutionWindow}
                   className="h-8 rounded-sm border-sky-400/20 text-[10px] text-sky-200"
                 >
                   {readiness.controlledWindowActive
-                    ? '受控窗口已建立'
-                    : '开始受控窗口'}
+                    ? '账户实盘窗口已建立'
+                    : '建立账户实盘窗口'}
                 </Button>
                 <Button
                   type="button"

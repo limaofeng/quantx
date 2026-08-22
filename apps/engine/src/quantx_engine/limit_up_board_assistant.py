@@ -36,13 +36,13 @@ from quantx_infrastructure.repositories.strategy_repository import StrategyRepos
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
+)
 from quantx_infrastructure.services.limit_up_board_assistant_projection_service import (
   limit_up_board_assistant_projection_service,
 )
 from quantx_infrastructure.services.limit_up_radar import limit_up_radar_store
-from quantx_infrastructure.services.t_trade_operations_service import (
-  TTradeOperationsService,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +115,8 @@ class LimitUpBoardAssistantService:
     if enabled and mode == StrategyRunMode.LIVE and not acknowledged:
       raise ValueError("启动实盘打板助手前必须确认自动卖出授权")
     if enabled and mode == StrategyRunMode.LIVE:
-      readiness = await TTradeOperationsService().readiness(account_id)
-      if not readiness.get("can_activate_live", False):
+      readiness = await AccountExecutionSafetyService().status(account_id)
+      if not readiness.get("can_activate_automation", False):
         reasons = "；".join(readiness.get("blocked_reasons") or [])
         raise ValueError(reasons or "账户尚未通过实盘就绪检查")
     settings = {
@@ -244,15 +244,15 @@ class LimitUpBoardAssistantService:
       }
     )
     try:
-      readiness = await TTradeOperationsService().readiness(normalized)
+      readiness = await AccountExecutionSafetyService().status(normalized)
       data.update(
         {
           "engine_status": readiness["engine_status"],
           "agent_status": readiness["agent_status"],
           "reconcile_status": readiness["reconcile_status"],
           "kill_switch": readiness["kill_switch"],
-          "can_approve": readiness["can_approve"],
-          "can_activate_live": readiness["can_activate_live"],
+          "can_approve": readiness["can_increase_risk"],
+          "can_activate_live": readiness["can_activate_automation"],
           "blocked_reasons": readiness["blocked_reasons"],
         }
       )

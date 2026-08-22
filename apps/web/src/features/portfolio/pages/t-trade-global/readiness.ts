@@ -2,8 +2,9 @@ export function readinessStageLabel(
   status?: string | null,
   stage?: string | null
 ) {
+  const normalizedStatus = String(status || '').toUpperCase();
   const normalizedStage = String(stage || 'UNKNOWN').toUpperCase();
-  return String(status || '').toUpperCase() === 'PREPARING'
-    ? `门禁准备中（灰度 ${normalizedStage}）`
-    : normalizedStage;
+  if (normalizedStatus === 'HARD_KILL') return '做 T 自动化：紧急停止';
+  if (normalizedStatus === 'BLOCKED') return '做 T 自动化：准备受阻';
+  return `做 T 自动化：${normalizedStage}`;
 }

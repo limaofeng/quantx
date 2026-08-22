@@ -313,9 +313,9 @@ export function TTradeHealthConsole({
         />
         <StatusCell
           icon={ShieldCheck}
-          label="自动交易"
-          tone={automaticReady ? 'emerald' : 'amber'}
-          value={automaticReady ? '已就绪' : '关闭 / 门禁中'}
+          label="做 T 自动化"
+          tone={automaticReady ? 'emerald' : 'sky'}
+          value={automaticReady ? '账户门禁已通过' : '安全关闭'}
         />
         <StatusCell
           icon={Gauge}
@@ -497,7 +497,7 @@ export function TTradeHealthConsole({
             ) : (
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
             )}
-            首要门禁
+            做 T 首要门禁
           </div>
           <p
             className={cn(

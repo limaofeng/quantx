@@ -6,6 +6,7 @@ from typing import List, Optional
 import strawberry
 
 from ..resolvers.t_trade import TTradeResolver
+from ..resolvers.trading_safety import AccountExecutionSafetyResolver
 from ..security import authorized_account_id, principal_from_context
 from ..t_trade_control import (
   TTradeControlChallengeService,
@@ -52,6 +53,7 @@ from ..types.trade_approval_types import (
   TradeApprovalPreview,
   TradeApprovalPreviewResult,
 )
+from ..types.trading_safety_types import AccountExecutionSafety
 
 
 @strawberry.type(description="持仓做 T 查询")
@@ -110,13 +112,15 @@ class TTradeQuery:
   ) -> TTradeLiveReadiness:
     return await TTradeResolver.readiness(authorized_account_id(info, account_id))
 
-  @strawberry.field(description="账户级实盘安全状态")
-  async def live_safety_status(
+  @strawberry.field(description="账户级实盘执行安全状态")
+  async def account_execution_safety(
     self,
     info: strawberry.types.Info,
     account_id: str,
-  ) -> TTradeLiveReadiness:
-    return await TTradeResolver.readiness(authorized_account_id(info, account_id))
+  ) -> AccountExecutionSafety:
+    return await AccountExecutionSafetyResolver.status(
+      authorized_account_id(info, account_id)
+    )
 
   @strawberry.field(description="查询持久化运行告警")
   async def operational_alerts(
@@ -533,7 +537,7 @@ class TTradeMutation:
         operation_status="NOT_CONSUMED",
       )
 
-  @strawberry.mutation(description="基于最新完整快照建立受控交易窗口")
+  @strawberry.mutation(description="基于最新完整快照建立账户实盘窗口")
   async def begin_t_trade_controlled_window(
     self,
     info: strawberry.types.Info,

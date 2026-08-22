@@ -1,7 +1,6 @@
 import type React from 'react';
 import { useCallback, useMemo } from 'react';
 
-import { useTradingSafety } from '@/features/trading-safety';
 import { useToast } from '@/hooks/use-toast';
 import type { Stock } from '@/shared/types';
 
@@ -30,7 +29,6 @@ export function useTradingSubmit(
   const { toast } = useToast();
   const { loading: isSubmitting, createOrder } = useCreateOrder();
   const { data: accountData } = useCurrentAccount();
-  const { canTrade, blockedReasons } = useTradingSafety();
   const accountId = accountData?.currentAccount?.id;
 
   const handleSubmit = useCallback(
@@ -44,15 +42,6 @@ export function useTradingSubmit(
       resetForm: () => void
     ) => {
       e.preventDefault();
-
-      if (!canTrade) {
-        toast({
-          title: '交易安全门禁已阻断',
-          description: blockedReasons[0] || '请先恢复账户安全状态',
-          variant: 'destructive',
-        });
-        return;
-      }
 
       if (!accountId) {
         toast({
@@ -129,7 +118,7 @@ export function useTradingSubmit(
         });
       }
     },
-    [accountId, blockedReasons, canTrade, createOrder, toast, onSuccess]
+    [accountId, createOrder, toast, onSuccess]
   );
 
   return useMemo(

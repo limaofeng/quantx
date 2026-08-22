@@ -106,14 +106,15 @@ fail-closed 降级状态。生产安装与 QMT 服务启用仍保持硬失败。
 `REAL_TRADING_ACCOUNT_ALLOWLIST`、账户灰度阶段、Agent READY、快照新鲜度、
 对账状态和自动退出策略授权。
 
-实盘安全状态分层展示：`PREPARING` 表示 `SHADOW` 下账户观察、QMT 手工交易
-分类和完整快照对账已经就绪，但自动交易仍因备份、外部活动或灰度授权保持
-关闭；`READY` 才表示可申请进入受控 Canary；`BLOCKED` 表示观察/对账链路
-本身不安全。QMT 手工活动在准备阶段不会单独制造 `BLOCKED`。
+账户级实盘安全状态独立展示健康与能力：账户事实链路正常时为 `HEALTHY`，执行
+权限按 `OBSERVE_ONLY / REDUCE_ONLY / TRADING / KILLED` 展示；具体助手未启用
+不得把账户健康误报为故障。做 T 自己继续使用 `SHADOW / CANARY / LIVE` 与
+`PREPARING / READY / BLOCKED` 表达助手灰度和自动确认能力。QMT 手工活动在观察
+阶段不会单独制造账户级 `BLOCKED`。
 
-受控窗口建立后，以当时完整快照中的历史外部委托/成交作为审计基线；只有
+账户实盘窗口建立后，以当时完整快照中的历史外部委托/成交作为审计基线；只有
 基线之后新增的外部活动才使窗口失效并暂停自动执行。开发环境允许账户从
-`SHADOW` 直接进入 `LIVE`，但必须同时满足新鲜受控窗口、24 小时内成功备份、
+`SHADOW` 直接进入 `LIVE`，但必须同时满足新鲜账户实盘窗口、24 小时内成功备份、
 全部 readiness 门禁、`trade:approve` 权限，并精确确认
 `LIVE:<账户>`。生产环境仍禁止 `SHADOW` 直升 `LIVE`，继续使用既有 Canary
 流程。建立窗口、启用、暂停和失败尝试均写入追加式审计事件。

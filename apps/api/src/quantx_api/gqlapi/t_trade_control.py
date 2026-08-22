@@ -567,7 +567,7 @@ def _validate_action_readiness(
     ):
       raise TradeApprovalChallengeError(
         "ROLLOUT_STATE_CONFLICT",
-        "当前灰度状态不允许建立新的受控交易窗口",
+        "当前灰度状态不允许建立新的账户实盘窗口",
       )
     return
   if (
@@ -577,7 +577,7 @@ def _validate_action_readiness(
   ):
     raise TradeApprovalChallengeError(
       "ROLLOUT_STATE_CONFLICT",
-      "当前灰度状态或受控交易窗口不允许启用目标阶段",
+      "当前灰度状态或账户实盘窗口不允许启用目标阶段",
     )
 
 

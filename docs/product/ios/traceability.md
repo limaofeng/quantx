@@ -65,7 +65,7 @@
 | `IOS-NAV-003` | 通知采用强类型 route enum，先解锁、服务端解析再导航；目前主要落到工作区，尚未覆盖每个业务对象详情路由。 | `notificationEventRoute`；对象读权限 | `T-NAV,T-PUSH,T-AUTHZ` / 部分 `E-AUTO` | `PARTIAL` |
 | `IOS-TDY-001` | 今日账户摘要、数据时间和风险状态已有真实查询投影，无固定模拟账户。 | `currentAccount`、`portfolioSummary`；`portfolio:read` | `T-TODAY,T-ASSET` / `E-AUTO` | `IMPLEMENTED_AUTO` |
 | `IOS-TDY-002` | 行动收件箱按风险排序并区分非权威同步态，但当前由已授权业务快照汇总，缺独立、可分页的服务端 action inbox 投影。 | 策略/助手/订单/安全快照；多读权限 | `T-TODAY,T-AUTHZ` / 局部 `E-AUTO` | `PARTIAL` |
-| `IOS-TDY-003` | 已展示策略、助手与安全摘要，并区分准备/阻断语义；全链路 Agent、行情、对账摘要仍需真机验证。 | 策略、助手、`liveSafetyStatus`；`strategy:read`,`system-status:read` | `T-TODAY,T-STRATEGY` / 局部 `E-AUTO` | `PARTIAL` |
+| `IOS-TDY-003` | 已展示策略、助手与安全摘要，并区分账户执行能力与助手灰度；全链路 Agent、行情、对账摘要仍需真机验证。 | 策略、助手、`accountExecutionSafety`；`strategy:read`,`system-status:read` | `T-TODAY,T-STRATEGY` / 局部 `E-AUTO` | `PARTIAL` |
 
 ## 3. 行情
 
@@ -128,7 +128,7 @@
 | `IOS-SEC-004` | 已实现的 LIVE 下单、清仓、自动退出授权、策略/助手与做 T 高风险控制均逐次生物确认；真实设备生物矩阵未验收。 | LocalAuthentication + confirm APIs；专用控制 scope | `T-SECURITY,T-ORDER,T-STRATEGY` / `E-AUTO`；`E-UI,E-LIVE` 缺 | `IMPLEMENTED_AUTO` |
 | `IOS-SEC-005` | 架构保持 iOS/服务端与 miniQMT、券商凭证隔离；改动文件有敏感扫描证据，但完整二进制/崩溃链路扫描未签署。 | 依赖边界；无 iOS QMT 权限 | `T-SECURITY,T-RELEASE` / 局部 `E-AUTO,E-SEC` | `PARTIAL` |
 | `IOS-SEC-006` | 多个预览/确认结果保留 request/operation/event ID；客户端—API—Engine—Agent—QMT 的统一时间线仍缺。 | request/trace/business event IDs；对应 scope | `T-SECURITY,T-RECOVERY` / 局部 `E-AUTO` | `PARTIAL` |
-| `IOS-SEC-007` | capability、readiness、snapshot freshness、受控窗口和 Kill Switch 已进入关键新增风险路径；所有助手/策略的完整端到端验证仍缺。 | live safety/readiness/Kill；多只读 + 控制 scope | `T-ORDER,T-STRATEGY,T-RECOVERY` / 局部 `E-AUTO` | `PARTIAL` |
+| `IOS-SEC-007` | capability、readiness、snapshot freshness、账户实盘窗口和 Kill Switch 已进入关键新增风险路径；所有助手/策略的完整端到端验证仍缺。 | live safety/readiness/Kill；多只读 + 控制 scope | `T-ORDER,T-STRATEGY,T-RECOVERY` / 局部 `E-AUTO` | `PARTIAL` |
 | `IOS-UX-001` | 设计 token、深浅色、Dynamic Type、VoiceOver 语义、44pt 和 Reduce Motion 已覆盖关键壳层/卡片；完整真实设备与 Accessibility Audit 未完成。iOS 26 系统浮动 TabBar 仍有对比警告。 | Design System；本地 | `T-A11Y` / 局部 `E-AUTO`；`E-UI` 缺 | `PARTIAL` |
 | `IOS-UX-002` | 红涨绿跌、等宽数字、单位与未知值保守格式化已建立。 | Design System/formatters；本地 | `T-A11Y,T-ASSET,T-MARKET` / `E-AUTO` | `IMPLEMENTED_AUTO` |
 | `IOS-UX-003` | 核心页面已有加载、空、错、旧、权限和部分成功状态；千条列表、全部未知枚举和所有写流程组合矩阵未验收。 | Feature state models；对应权限 | 各功能套件 / 局部 `E-AUTO` | `PARTIAL` |

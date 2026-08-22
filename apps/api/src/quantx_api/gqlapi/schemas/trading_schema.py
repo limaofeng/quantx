@@ -7,10 +7,10 @@ from quantx_infrastructure.database.relational_connection import AsyncSessionLoc
 from quantx_infrastructure.models import Instrument, PendingTradeOrder
 from quantx_infrastructure.models.enums import OrderStatus, OrderType, PriceType
 from quantx_infrastructure.models.order import Order as OrderModel
-from quantx_infrastructure.services.order_service import OrderService
-from quantx_infrastructure.services.t_trade_operations_service import (
-  TTradeOperationsService,
+from quantx_infrastructure.services.account_execution_safety_service import (
+  AccountExecutionSafetyService,
 )
+from quantx_infrastructure.services.order_service import OrderService
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from sqlalchemy import select
 
@@ -152,22 +152,9 @@ class TradingQuery:
     live_blocked_reasons: List[str] = []
     if can_manual_trade:
       try:
-        readiness = await TTradeOperationsService().readiness(
-          resolved_account_id
-        )
-        relevant_checks = [
-          item
-          for item in list(readiness.get("checks") or [])
-          if str(item.get("code") or "") != "T_TRADE_LIVE_ENABLED"
-        ]
-        live_blocked_reasons = [
-          str(item.get("message") or item.get("code") or "实盘未就绪")
-          for item in relevant_checks
-          if not bool(item.get("passed"))
-        ]
-        if int(readiness.get("ready_live_agent_count") or 0) != 1:
-          live_blocked_reasons.append("实盘要求当前账户恰好一个 READY live Agent")
-        live_ready = not live_blocked_reasons
+        safety = await AccountExecutionSafetyService().status(resolved_account_id)
+        live_blocked_reasons = list(safety.get("blocked_reasons") or [])
+        live_ready = bool(safety.get("can_increase_risk"))
       except Exception:
         live_blocked_reasons = ["实盘安全状态暂不可用"]
       if live_ready:

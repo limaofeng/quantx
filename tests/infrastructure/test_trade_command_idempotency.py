@@ -128,7 +128,7 @@ async def test_manual_live_kill_switch_blocks_buy_but_keeps_sell_risk_reducing(
       _ready_rollout(last_snapshot_at=utcnow() - timedelta(minutes=3)),
       "超过 90 秒",
     ),
-    (_ready_rollout(controlled_window_active=False), "受控交易窗口"),
+    (_ready_rollout(controlled_window_active=False), "账户实盘窗口"),
     (
       _ready_rollout(controlled_window_snapshot_hash="different"),
       "与最新完整快照不一致",

@@ -54,13 +54,13 @@ PAPER/LIVE 做 T 策略把有界的因果 tick 观察窗作为策略 RuntimeStat
 新协议 1.1 完整快照会把同设备、同账户范围内较旧的完整快照死信标记为
 `SUPERSEDED`，并闭环对应告警，但保留原始失败审计记录。
 
-对账和受控窗口以 Agent 派生的 `effective_order_status` 判断委托是否仍可成交，
+对账和账户实盘窗口以 Agent 派生的 `effective_order_status` 判断委托是否仍可成交，
 同时保留 QMT 原始状态用于审计。未成交的 A 股日内委托在收盘后按
 `EXPIRED / MARKET_SESSION_CLOSED` 收敛，不再被计入活动外部委托；
 历史委托本身仍保留在外部活动基线中。
 
 账户灰度 mutation 与 Engine 的快照对账会串行锁定同一条
-`account_trading_rollouts` 记录。建立受控窗口和启用自动交易时，服务会在锁内
+`account_trading_rollouts` 记录。建立账户实盘窗口和启用自动交易时，服务会在锁内
 重新读取并校验灰度阶段、kill switch、对账状态、完整快照及外部活动计数，
 避免读取 readiness 后到实际提交前发生状态竞争。新增外部活动、手工暂停或
 无法解释的对账异常会立即使窗口失效；断线重连后也必须重新满足新鲜快照门禁。

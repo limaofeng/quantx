@@ -115,11 +115,11 @@ struct TTradeControlView: View {
 
         Label {
           VStack(alignment: .leading, spacing: 3) {
-            Text(snapshot.controlledWindowActive ? "受控窗口已建立" : "受控窗口未建立")
+            Text(snapshot.controlledWindowActive ? "账户实盘窗口已建立" : "账户实盘窗口未建立")
               .font(.subheadline.weight(.semibold))
             Text(
               snapshot.controlledWindowSnapshotID.map { "绑定快照 \($0)" }
-                ?? "Canary / LIVE 激活前必须由服务端建立受控窗口"
+                ?? "Canary / LIVE 激活前必须由服务端建立账户实盘窗口"
             )
             .font(.caption.monospaced())
             .foregroundStyle(QuantXTheme.secondaryText)

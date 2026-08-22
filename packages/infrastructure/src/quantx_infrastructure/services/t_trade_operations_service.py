@@ -665,7 +665,7 @@ class TTradeOperationsService:
         (
           "CONTROLLED_WINDOW_ACTIVE",
           controlled_window_active,
-          "尚未基于最新完整快照建立受控交易窗口",
+          "尚未基于最新完整快照建立账户实盘窗口",
           "AUTOMATION",
         ),
         (
@@ -673,7 +673,7 @@ class TTradeOperationsService:
           new_external_order_count == 0
           and new_external_trade_count == 0
           and working_external_order_count == 0,
-          "受控窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
+          "账户实盘窗口后出现新的 QMT 手工/外部交易或仍有活动委托",
           "AUTOMATION",
         ),
         (
@@ -718,6 +718,7 @@ class TTradeOperationsService:
         "status": status,
         "preparation_ready": preparation_ready,
         "automation_ready": automation_ready,
+        "rollout_enabled": bool(rollout and rollout.enabled),
         "stage": str(rollout.stage if rollout else "SHADOW"),
         "engine_status": str(engine.status if engine else "OFFLINE"),
         "agent_status": agent_status,
@@ -839,7 +840,7 @@ class TTradeOperationsService:
     if failures:
       raise ValueError("；".join(failures))
     if str(readiness.get("snapshot_id") or "") != snapshot_id:
-      raise ValueError("完整快照已经更新，请刷新页面后重新确认受控窗口")
+      raise ValueError("完整快照已经更新，请刷新页面后重新确认账户实盘窗口")
 
     async with AsyncSessionLocal() as db:
       rollout = await db.get(
@@ -863,15 +864,15 @@ class TTradeOperationsService:
           await db.rollback()
           return await self.readiness(account_id)
       if str(rollout.stage).upper() not in {"SHADOW", "PAUSED"}:
-        raise ValueError("只能在 SHADOW 或 PAUSED 阶段建立受控交易窗口")
+        raise ValueError("只能在 SHADOW 或 PAUSED 阶段建立账户实盘窗口")
       if rollout.enabled:
-        raise ValueError("自动执行已启用，必须先暂停后再建立受控交易窗口")
+        raise ValueError("自动执行已启用，必须先暂停后再建立账户实盘窗口")
       if rollout.kill_switch:
         raise ValueError("账户 kill switch 已触发")
       if str(rollout.reconcile_status).upper() != "READY":
         raise ValueError("资金、持仓、委托和成交快照尚未完成对账")
       if str(rollout.last_snapshot_id or "") != snapshot_id:
-        raise ValueError("完整快照已经更新，请刷新页面后重新确认受控窗口")
+        raise ValueError("完整快照已经更新，请刷新页面后重新确认账户实盘窗口")
       payload = await self._latest_full_snapshot(
         db,
         account_id=account_id,
@@ -950,7 +951,7 @@ class TTradeOperationsService:
       if confirmation != f"LIVE:{account_id}":
         raise ValueError(f"正式 LIVE 需要精确确认 LIVE:{account_id}")
       if not readiness.get("controlled_window_active"):
-        raise ValueError("正式 LIVE 需要先建立受控交易窗口")
+        raise ValueError("正式 LIVE 需要先建立账户实盘窗口")
     async with AsyncSessionLocal() as db:
       rollout = await db.get(
         AccountTradingRollout,
@@ -982,7 +983,7 @@ class TTradeOperationsService:
       if str(rollout.reconcile_status).upper() != "READY":
         raise ValueError("资金、持仓、委托和成交快照尚未完成对账")
       if not rollout.controlled_window_active:
-        raise ValueError("实盘启用需要先建立受控交易窗口")
+        raise ValueError("实盘启用需要先建立账户实盘窗口")
       if (
         str(readiness.get("snapshot_id") or "")
         and str(rollout.last_snapshot_id or "")

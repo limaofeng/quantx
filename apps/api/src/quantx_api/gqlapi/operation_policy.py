@@ -107,7 +107,7 @@ _register(
     "limitUpBoardReplayHistory",
     "limitUpBoardReplayPreparation",
     "limitUpBoardReplayTrades",
-    "liveSafetyStatus",
+    "accountExecutionSafety",
     "operationalAlerts",
     "strategies",
     "strategy",

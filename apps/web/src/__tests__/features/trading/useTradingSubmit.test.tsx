@@ -8,10 +8,6 @@ const mocks = vi.hoisted(() => ({
   createOrder: vi.fn(),
   onSuccess: vi.fn(),
   resetForm: vi.fn(),
-  safety: {
-    blockedReasons: [] as string[],
-    canTrade: true,
-  },
   toast: vi.fn(),
 }));
 
@@ -32,10 +28,6 @@ vi.mock('@/features/trading/hooks', () => ({
     createOrder: mocks.createOrder,
     loading: false,
   }),
-}));
-
-vi.mock('@/features/trading-safety', () => ({
-  useTradingSafety: () => mocks.safety,
 }));
 
 vi.mock('@/hooks/use-toast', () => ({
@@ -82,8 +74,6 @@ function SubmitHarness() {
 describe('useTradingSubmit', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.safety.blockedReasons = [];
-    mocks.safety.canTrade = true;
     mocks.createOrder.mockResolvedValue({
       data: {
         placeOrder: {
@@ -139,23 +129,11 @@ describe('useTradingSubmit', () => {
     expect(mocks.resetForm).not.toHaveBeenCalled();
   });
 
-  it('fails closed without calling the order API when safety is blocked', async () => {
-    mocks.safety.blockedReasons = ['账户对账状态为 BLOCKED'];
-    mocks.safety.canTrade = false;
-
+  it('does not apply the live execution gate to the PAPER order card', async () => {
     render(<SubmitHarness />);
 
     fireEvent.click(screen.getByRole('button', { name: 'submit' }));
 
-    await waitFor(() =>
-      expect(mocks.toast).toHaveBeenCalledWith({
-        description: '账户对账状态为 BLOCKED',
-        title: '交易安全门禁已阻断',
-        variant: 'destructive',
-      })
-    );
-    expect(mocks.createOrder).not.toHaveBeenCalled();
-    expect(mocks.onSuccess).not.toHaveBeenCalled();
-    expect(mocks.resetForm).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.createOrder).toHaveBeenCalledTimes(1));
   });
 });

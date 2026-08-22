@@ -1,46 +1,33 @@
 import { gql } from '@/generated/gql';
 
-export const LiveSafetyStatusQuery = gql(`
-  query TradingSafety_LiveSafetyStatus($accountId: String!) {
-    liveSafetyStatus(accountId: $accountId) {
+export const AccountExecutionSafetyQuery = gql(`
+  query TradingSafety_AccountExecutionSafety($accountId: String!) {
+    accountExecutionSafety(accountId: $accountId) {
       accountId
-      ready
-      status
-      preparationReady
-      automationReady
-      stage
+      healthStatus
+      executionMode
+      canIncreaseRisk
+      canReduceRisk
+      summary
       engineStatus
       agentStatus
-      agentDeviceId
       agentMode
       protocolVersion
       reconcileStatus
       killSwitch
-      policyVersion
-      canApprove
-      canActivateLive
       blockedReasons
-      preparationBlockedReasons
-      snapshotId
-      snapshotHash
+      executionWindowActive
       snapshotAt
       reconciliationAgeSeconds
       queuedCommandCount
       queueDelaySeconds
       deadLetterCount
       unresolvedCriticalAlertCount
-      manualCoexistence
       externalOrderCount
       externalTradeCount
-      controlledWindowActive
-      controlledWindowSnapshotId
-      controlledWindowStartedAt
       newExternalOrderCount
       newExternalTradeCount
       workingExternalOrderCount
-      journalIntegrity
-      journalSizeBytes
-      journalPendingReports
       lastBackupAt
       checkedAt
       checks {

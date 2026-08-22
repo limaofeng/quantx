@@ -359,7 +359,7 @@ async def test_direct_live_requires_all_readiness_and_controlled_window(
   service.readiness = AsyncMock(
     return_value=_window_readiness(controlled_window_active=False)
   )
-  with pytest.raises(ValueError, match="受控交易窗口"):
+  with pytest.raises(ValueError, match="账户实盘窗口"):
     await service.activate_rollout(
       "account-1",
       user_id="user-1",
@@ -394,7 +394,7 @@ async def test_direct_live_rechecks_locked_rollout_after_readiness(
   service.ensure_rollout = AsyncMock(return_value=rollout)
   service.readiness = AsyncMock(return_value=_window_readiness())
 
-  with pytest.raises(ValueError, match="受控交易窗口"):
+  with pytest.raises(ValueError, match="账户实盘窗口"):
     await service.activate_rollout(
       "account-1",
       user_id="user-1",

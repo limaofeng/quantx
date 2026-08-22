@@ -45,16 +45,8 @@ class _SessionContext:
 
 def _ready():
   return {
-    "ready_live_agent_count": 1,
-    "checks": [
-      {"code": "SERVER_REAL_TRADING_ENABLED", "passed": True, "message": ""},
-      {"code": "LIVE_AGENT_READY", "passed": True, "message": ""},
-      {
-        "code": "T_TRADE_LIVE_ENABLED",
-        "passed": False,
-        "message": "unrelated product gate",
-      },
-    ],
+    "can_increase_risk": True,
+    "blocked_reasons": [],
   }
 
 
@@ -64,8 +56,8 @@ async def test_order_entry_capabilities_are_server_driven_and_paper_first(
 ) -> None:
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
   with patch.object(
-    trading_schema.TTradeOperationsService,
-    "readiness",
+    trading_schema.AccountExecutionSafetyService,
+    "status",
     new=AsyncMock(return_value=_ready()),
   ):
     result = await TradingQuery().order_entry_capabilities(
@@ -90,8 +82,8 @@ async def test_beijing_market_never_advertises_best_quote(
 ) -> None:
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
   with patch.object(
-    trading_schema.TTradeOperationsService,
-    "readiness",
+    trading_schema.AccountExecutionSafetyService,
+    "status",
     new=AsyncMock(return_value=_ready()),
   ):
     result = await TradingQuery().order_entry_capabilities(
@@ -106,11 +98,11 @@ async def test_missing_manual_scope_keeps_market_query_read_only(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   monkeypatch.setattr(trading_schema, "AsyncSessionLocal", _SessionContext)
-  readiness = AsyncMock()
+  safety_status = AsyncMock()
   with patch.object(
-    trading_schema.TTradeOperationsService,
-    "readiness",
-    new=readiness,
+    trading_schema.AccountExecutionSafetyService,
+    "status",
+    new=safety_status,
   ):
     result = await TradingQuery().order_entry_capabilities(
       _info(manual=False), "600000.SH"
@@ -120,4 +112,4 @@ async def test_missing_manual_scope_keeps_market_query_read_only(
   assert result.execution_modes == []
   assert result.live_ready is False
   assert "trade:manual" in result.live_blocked_reasons[0]
-  readiness.assert_not_awaited()
+  safety_status.assert_not_awaited()

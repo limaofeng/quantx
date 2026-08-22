@@ -16,7 +16,7 @@ enum TTradeSafetyAction: String, CaseIterable, Equatable, Hashable, Identifiable
 
   var title: String {
     switch self {
-    case .beginControlledWindow: "建立受控窗口"
+    case .beginControlledWindow: "建立账户实盘窗口"
     case .activateCanary: "启用 Canary"
     case .activateLive: "启用正式 LIVE"
     case .killSwitch: "触发紧急熔断"
@@ -28,7 +28,7 @@ enum TTradeSafetyAction: String, CaseIterable, Equatable, Hashable, Identifiable
     case .beginControlledWindow:
       "绑定当前完整快照，观察窗口内是否出现券商外部活动。"
     case .activateCanary:
-      "仅在受控窗口和全部生产门禁保持一致时进入严格灰度。"
+      "仅在账户实盘窗口和全部生产门禁保持一致时进入严格灰度。"
     case .activateLive:
       "仅在服务端预览再次通过后开放正式实盘自动化。"
     case .killSwitch:

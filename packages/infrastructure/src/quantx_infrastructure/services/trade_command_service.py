@@ -222,14 +222,14 @@ class TradeCommandService:
       return rollout
 
     if not bool(rollout.controlled_window_active):
-      raise AgentUnavailableError("手动买入需要基于最新快照建立受控交易窗口")
+      raise AgentUnavailableError("手动买入需要基于最新快照建立账户实盘窗口")
     controlled_snapshot_id = str(rollout.controlled_window_snapshot_id or "")
     controlled_snapshot_hash = str(rollout.controlled_window_snapshot_hash or "")
     if (
       controlled_snapshot_id != snapshot_id
       or controlled_snapshot_hash != snapshot_hash
     ):
-      raise AgentUnavailableError("受控窗口快照与最新完整快照不一致")
+      raise AgentUnavailableError("账户实盘窗口快照与最新完整快照不一致")
     if not bool(rollout.enabled) or str(rollout.stage or "").upper() not in {
       "CANARY",
       "LIVE",

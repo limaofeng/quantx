@@ -133,7 +133,7 @@ async def test_monitor_embeds_full_readiness_for_live_controls(
     "kill_switch": False,
     "can_approve": False,
     "can_activate_live": False,
-    "blocked_reasons": ["尚未基于最新完整快照建立受控交易窗口"],
+    "blocked_reasons": ["尚未基于最新完整快照建立账户实盘窗口"],
     "controlled_window_active": False,
   }
   operations = SimpleNamespace(readiness=AsyncMock(return_value=readiness))

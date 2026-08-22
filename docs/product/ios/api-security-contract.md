@@ -152,7 +152,7 @@ codegen；Generated GraphQL Model 必须先映射为校验过的 App Domain Mode
 | `strategyInstanceMobileParameters` | Query | `strategy:read` | 返回 allowlist 参数描述和配置版本 |
 | `previewStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 进入实盘/实盘启动前返回 readiness 挑战 |
 | `confirmStrategyControl` | Mutation | `trade:approve` + `strategy:control` | 消费实盘控制挑战 |
-| `previewTTradeControl` | Mutation | `trade:approve` + `t-trade:control` | 预览受控窗口、Canary、LIVE 或 Kill Switch 的精确安全上下文 |
+| `previewTTradeControl` | Mutation | `trade:approve` + `t-trade:control` | 预览账户实盘窗口、Canary、LIVE 或 Kill Switch 的精确安全上下文 |
 | `confirmTTradeControl` | Mutation | `trade:approve` + `t-trade:control` | 消费设备绑定挑战、重校验门禁并幂等应用账户级控制 |
 | `pauseTTradeEntries` | Mutation（收紧） | `t-trade:control` | 风险降低操作，只停止新入场并保留现有退出保护 |
 | `registerPushDevice` / `updatePushPreferences` / `unregisterPushDevice` | Mutation | `notification:manage` | 管理当前设备 APNs Token 与类别偏好 |
@@ -215,7 +215,7 @@ input ManualOrderConfirmationInput {
 
 iOS 只在内存持有 Token。用户点击确认后先执行 LocalAuthentication；成功后发送
 确认。客户端不传 `biometricPassed: true` 之类可伪造字段。确认时服务端重新校验
-挑战、会话、行情、资金、可卖量、T+1、停牌、涨跌停、受控窗口、Agent、对账和
+挑战、会话、行情、资金、可卖量、T+1、停牌、涨跌停、账户实盘窗口、Agent、对账和
 Kill Switch；任一事实改变到超出服务端策略时使挑战失效并要求新预览。
 
 `idempotencyKey` 在预览时绑定进挑战和后续 TradeCommand；确认不允许重新提交

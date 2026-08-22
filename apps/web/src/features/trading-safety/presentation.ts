@@ -1,0 +1,37 @@
+export function accountHealthLabel(status?: string | null) {
+  switch (String(status || '').toUpperCase()) {
+    case 'HEALTHY':
+      return '正常';
+    case 'KILLED':
+      return '紧急停止';
+    case 'BLOCKED':
+      return '阻断';
+    default:
+      return '检查中';
+  }
+}
+
+export function accountExecutionModeLabel(mode?: string | null) {
+  switch (String(mode || '').toUpperCase()) {
+    case 'TRADING':
+      return '可交易';
+    case 'REDUCE_ONLY':
+      return '仅减仓';
+    case 'KILLED':
+      return '紧急停止';
+    default:
+      return '仅观察';
+  }
+}
+
+export function accountSafetySummary(input: {
+  blockedReasons?: readonly string[] | null;
+  reconcileStatus?: string | null;
+}) {
+  const facts =
+    String(input.reconcileStatus || '').toUpperCase() === 'READY'
+      ? '账户已对账'
+      : '账户待对账';
+  const reason = input.blockedReasons?.[0];
+  return [facts, reason].filter(Boolean).join(' · ');
+}

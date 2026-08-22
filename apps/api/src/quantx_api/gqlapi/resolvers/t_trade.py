@@ -997,7 +997,7 @@ class TTradeResolver:
       return TTradeOperationsMutationResult(
         success=True,
         code="CONTROLLED_WINDOW_STARTED",
-        message="已基于当前完整快照建立受控交易窗口",
+        message="已基于当前完整快照建立账户实盘窗口",
         readiness=cls._readiness_type(readiness),
       )
     except ValueError as exc:

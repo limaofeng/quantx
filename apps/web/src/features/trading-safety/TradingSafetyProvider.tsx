@@ -1,7 +1,7 @@
-import { useEffect, useMemo, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useQuery } from 'urql';
 
-import { LiveSafetyStatusQuery } from './operations';
+import { AccountExecutionSafetyQuery } from './operations';
 import {
   TradingSafetyContext,
   type TradingSafetyContextValue,
@@ -15,7 +15,7 @@ export function TradingSafetyProvider({
   children: ReactNode;
 }) {
   const [{ data, fetching, error }, refresh] = useQuery({
-    query: LiveSafetyStatusQuery,
+    query: AccountExecutionSafetyQuery,
     variables: { accountId },
     pause: !accountId,
     requestPolicy: 'network-only',
@@ -30,27 +30,37 @@ export function TradingSafetyProvider({
     return () => window.clearInterval(timer);
   }, [accountId, refresh]);
 
-  const readiness = data?.liveSafetyStatus;
+  const safety = data?.accountExecutionSafety;
   const blockedReasons = useMemo(() => {
     if (!accountId) return ['当前用户没有可用资金账户'];
     if (error) return [`安全状态查询失败：${error.message}`];
-    if (!readiness) return ['实盘安全状态尚未加载'];
-    return Array.from(new Set(readiness.blockedReasons ?? []));
-  }, [accountId, error, readiness]);
+    if (!safety) return ['实盘安全状态尚未加载'];
+    return Array.from(new Set(safety.blockedReasons ?? []));
+  }, [accountId, error, safety]);
+
+  const refreshSafety = useCallback(() => {
+    refresh({ requestPolicy: 'network-only' });
+  }, [refresh]);
 
   const value = useMemo<TradingSafetyContextValue>(
     () => ({
       accountId,
-      canTrade: Boolean(readiness?.canApprove) && !error,
+      canIncreaseRisk: Boolean(safety?.canIncreaseRisk) && !error,
+      canReduceRisk: Boolean(safety?.canReduceRisk) && !error,
       blockedReasons,
+      executionMode: safety?.executionMode || 'OBSERVE_ONLY',
       fetching,
+      refreshSafety,
     }),
     [
       accountId,
       blockedReasons,
       error,
       fetching,
-      readiness?.canApprove,
+      refreshSafety,
+      safety?.canIncreaseRisk,
+      safety?.canReduceRisk,
+      safety?.executionMode,
     ]
   );
 

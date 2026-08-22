@@ -259,7 +259,7 @@ async def test_readiness_distinguishes_preparation_from_automation(
   assert result["external_trade_count"] == 1
   assert result["preparation_blocked_reasons"] == []
   assert "最近成功备份缺失或已超过 24 小时" in result["blocked_reasons"]
-  assert "尚未基于最新完整快照建立受控交易窗口" in result["blocked_reasons"]
+  assert "尚未基于最新完整快照建立账户实盘窗口" in result["blocked_reasons"]
   assert any("QMT 手工/外部交易" in item for item in result["blocked_reasons"])
 
   monkeypatch.setenv("QMT_AGENT_LAUNCH_STATE", "BLOCKED")

@@ -36,10 +36,13 @@ ready。QMT Agent 的组件健康表示进程与会话在线；账户对账、ki
 `blocked`、连接/在线/ready 设备数归零并附稳定原因码，`/health/ready` 保持
 非就绪；`/health/live` 与非 QMT API 仍可用。
 
-GraphQL `liveSafetyStatus` 进一步分成 `preparationReady`（账户观察、外部活动
-分类和完整快照对账链路）与 `automationReady`（可申请自动执行）两个结论。
-`PREPARING` 是健康的 `SHADOW` 准备阶段，`BLOCKED` 才表示准备链路本身
-未通过；`ready` 保留为 `automationReady` 的兼容别名。
+GraphQL `accountExecutionSafety` 是账户级实盘执行能力真源，以
+`healthStatus=HEALTHY/BLOCKED/KILLED` 表示账户事实链路，以
+`executionMode=OBSERVE_ONLY/REDUCE_ONLY/TRADING/KILLED` 表示当前可执行动作，
+并分别返回 `canIncreaseRisk` 与 `canReduceRisk`。该状态不消费
+`T_TRADE_LIVE_ENABLED`，不得因某个助手未启用而把账户健康误报为故障。
+`validateTTradeLiveReadiness` 只负责做 T 的 `SHADOW/CANARY/LIVE` 灰度、助手开关
+和自动确认能力；其 `PREPARING` 不再作为全局状态栏文案。
 当本次进程收到 QMT 启动 `BLOCKED` 标记时，GraphQL 做 T readiness 同样覆盖
 旧心跳：`agentStatus=BLOCKED`、实际 `agentMode=offline`，准备与自动执行结论及
 `canActivateLive` 全部为 `false`；期望的全局启动模式仍保持 `live`，不会伪装成

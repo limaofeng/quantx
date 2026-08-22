@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   DatabaseBackup,
   RadioTower,
+  ShieldCheck,
   ShieldAlert,
   TimerReset,
   UserRound,
@@ -14,7 +15,12 @@ import { useQuery } from 'urql';
 import { StatusBar } from '@/components/studio-workbench';
 import { cn } from '@/utils/cn';
 
-import { LiveSafetyStatusQuery } from './operations';
+import { AccountExecutionSafetyQuery } from './operations';
+import {
+  accountExecutionModeLabel,
+  accountHealthLabel,
+  accountSafetySummary,
+} from './presentation';
 import { ageSecondsLabel } from './time';
 import { useTradingSafety } from './trading-safety-context';
 
@@ -56,25 +62,25 @@ export function TradingSafetyBar({
 }: {
   currentUserLabel: string;
 }) {
-  const { accountId, canTrade, blockedReasons } = useTradingSafety();
+  const { accountId, blockedReasons } = useTradingSafety();
   const [{ data, fetching }] = useQuery({
-    query: LiveSafetyStatusQuery,
+    query: AccountExecutionSafetyQuery,
     variables: { accountId },
     pause: !accountId,
     requestPolicy: 'cache-only',
   });
-  const status = data?.liveSafetyStatus;
-  const stateLabel = fetching
-    ? '检查中'
-    : status?.status || (canTrade ? 'READY' : 'BLOCKED');
-  const isPreparing = stateLabel === 'PREPARING';
-  const summary = isPreparing
-    ? `账户观察与对账已就绪；自动交易保持关闭${blockedReasons[0] ? `：${blockedReasons[0]}` : ''}`
-    : stateLabel === 'READY'
-      ? '账户事实与自动交易门禁均已通过'
-      : status?.preparationBlockedReasons?.[0] ||
-        blockedReasons[0] ||
-        '实盘安全状态尚未就绪';
+  const safety = data?.accountExecutionSafety;
+  const healthStatus = fetching
+    ? 'CHECKING'
+    : safety?.healthStatus || 'BLOCKED';
+  const healthLabel = accountHealthLabel(healthStatus);
+  const executionLabel = accountExecutionModeLabel(safety?.executionMode);
+  const summary = safety
+    ? accountSafetySummary(safety)
+    : blockedReasons[0] || '账户安全状态尚未加载';
+  const isHealthy = healthStatus === 'HEALTHY';
+  const isKilled = healthStatus === 'KILLED';
+  const canIncreaseRisk = Boolean(safety?.canIncreaseRisk);
 
   return (
     <section
@@ -86,25 +92,33 @@ export function TradingSafetyBar({
       <StatusBar
         left={
           <>
-            {canTrade ? (
+            {canIncreaseRisk ? (
               <CheckCircle2 className="h-3 w-3 shrink-0 text-emerald-400" />
-            ) : status?.killSwitch ? (
+            ) : isKilled ? (
               <ShieldAlert className="h-3 w-3 shrink-0 text-red-400" />
+            ) : isHealthy ? (
+              <ShieldCheck className="h-3 w-3 shrink-0 text-sky-300" />
             ) : (
               <AlertTriangle className="h-3 w-3 shrink-0 text-amber-400" />
             )}
             <span
               className={cn(
                 'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider',
-                canTrade
+                canIncreaseRisk
                   ? 'bg-emerald-400/15 text-emerald-300'
-                  : isPreparing
-                    ? 'bg-amber-400/15 text-amber-200'
-                    : 'bg-red-400/15 text-red-300'
+                  : isKilled
+                    ? 'bg-red-400/15 text-red-300'
+                    : isHealthy
+                      ? 'bg-sky-400/15 text-sky-200'
+                      : 'bg-amber-400/15 text-amber-200'
               )}
             >
-              {stateLabel}
+              {healthLabel}
             </span>
+            <span className="shrink-0 font-medium text-slate-200">
+              交易权限：{executionLabel}
+            </span>
+            <span className="text-slate-700">|</span>
             <span
               className="min-w-0 truncate normal-case tracking-normal text-slate-300"
               title={summary}
@@ -118,31 +132,31 @@ export function TradingSafetyBar({
             <SafetyMetric
               icon={<RadioTower className="h-2.5 w-2.5" />}
               label="Agent"
-              value={`${status?.agentMode ?? 'offline'} · ${status?.protocolVersion || '—'}`}
+              value={`${safety?.agentMode ?? 'offline'} · ${safety?.protocolVersion || '—'}`}
             />
             <SafetyMetric
               className="hidden md:inline-flex"
               icon={<TimerReset className="h-2.5 w-2.5" />}
               label="快照"
-              value={ageSecondsLabel(status?.reconciliationAgeSeconds)}
+              value={ageSecondsLabel(safety?.reconciliationAgeSeconds)}
             />
             <SafetyMetric
               className="hidden xl:inline-flex"
               icon={<DatabaseBackup className="h-2.5 w-2.5" />}
               label="备份"
-              value={ageLabel(status?.lastBackupAt)}
+              value={ageLabel(safety?.lastBackupAt)}
             />
             <SafetyMetric
               className="hidden lg:inline-flex"
               icon={<ArrowLeftRight className="h-2.5 w-2.5" />}
               label="手工委托/成交"
-              value={`${status?.externalOrderCount ?? 0}/${status?.externalTradeCount ?? 0}`}
+              value={`${safety?.externalOrderCount ?? 0}/${safety?.externalTradeCount ?? 0}`}
             />
             <SafetyMetric
               className="hidden 2xl:inline-flex"
               icon={<ShieldAlert className="h-2.5 w-2.5" />}
               label="死信/告警"
-              value={`${status?.deadLetterCount ?? 0}/${status?.unresolvedCriticalAlertCount ?? 0}`}
+              value={`${safety?.deadLetterCount ?? 0}/${safety?.unresolvedCriticalAlertCount ?? 0}`}
             />
             <span className="hidden font-mono text-[10px] text-slate-400 2xl:inline">
               {accountId || 'NO ACCOUNT'}

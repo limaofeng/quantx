@@ -34,6 +34,46 @@ type Account {
   updateTime: DateTime!
 }
 
+"""账户级实盘执行能力，不包含具体助手的灰度策略"""
+type AccountExecutionSafety {
+  accountId: String!
+  healthStatus: String!
+  executionMode: String!
+  canIncreaseRisk: Boolean!
+  canReduceRisk: Boolean!
+  summary: String!
+  blockedReasons: [String!]!
+  checks: [AccountExecutionSafetyCheck!]!
+  engineStatus: String!
+  agentStatus: String!
+  agentMode: String!
+  protocolVersion: String!
+  reconcileStatus: String!
+  killSwitch: Boolean!
+  executionWindowActive: Boolean!
+  snapshotAt: DateTime
+  reconciliationAgeSeconds: Float
+  queuedCommandCount: Int!
+  queueDelaySeconds: Float!
+  deadLetterCount: Int!
+  unresolvedCriticalAlertCount: Int!
+  externalOrderCount: Int!
+  externalTradeCount: Int!
+  newExternalOrderCount: Int!
+  newExternalTradeCount: Int!
+  workingExternalOrderCount: Int!
+  lastBackupAt: DateTime
+  checkedAt: DateTime
+}
+
+"""账户执行安全检查项"""
+type AccountExecutionSafetyCheck {
+  code: String!
+  passed: Boolean!
+  message: String!
+  scope: String!
+}
+
 """添加自选股输入"""
 input AddWatchlistItemInput {
   """证券代码"""
@@ -3572,7 +3612,7 @@ type Mutation {
   """消费一次性凭据并重新校验门禁后应用做 T 控制"""
   confirmTTradeControl(input: TTradeControlConfirmationInput!): TTradeControlConfirmationResult!
 
-  """基于最新完整快照建立受控交易窗口"""
+  """基于最新完整快照建立账户实盘窗口"""
   beginTTradeControlledWindow(accountId: String!, snapshotId: String!): TTradeOperationsMutationResult!
 
   """完成门禁检查并启用 Canary 或开发环境正式 LIVE"""
@@ -4535,8 +4575,8 @@ type Query {
   """查询做 T 生产就绪和灰度状态"""
   validateTTradeLiveReadiness(accountId: String!): TTradeLiveReadiness!
 
-  """账户级实盘安全状态"""
-  liveSafetyStatus(accountId: String!): TTradeLiveReadiness!
+  """账户级实盘执行安全状态"""
+  accountExecutionSafety(accountId: String!): AccountExecutionSafety!
 
   """查询持久化运行告警"""
   operationalAlerts(accountId: String!, status: String = null, severity: String = null, limit: Int! = 100): [OperationalAlert!]!
