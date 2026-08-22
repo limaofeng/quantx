@@ -23,6 +23,7 @@ import { useAutoHideScrollbars } from '@/hooks/useAutoHideScrollbars';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { appRoutes, preloadImportantRoutes } from '@/router';
 import { tradingAccountConfig } from '@/shared/utils/env';
+import { cn } from '@/utils/cn';
 
 function WatchlistBootstrap() {
   useWatchlist();
@@ -108,7 +109,14 @@ function SessionStatusPage({
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#050914] px-4 text-slate-100">
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-[#0a1020] p-8 text-center shadow-2xl shadow-black/40">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 text-red-400">
+        <div
+          className={cn(
+            'mx-auto flex h-12 w-12 items-center justify-center rounded-xl border',
+            isLoading
+              ? 'border-blue-500/20 bg-blue-500/10 text-blue-400'
+              : 'border-red-500/20 bg-red-500/10 text-red-400'
+          )}
+        >
           {isLoading ? (
             <LoaderCircle className="h-5 w-5 animate-spin" />
           ) : (
@@ -121,7 +129,7 @@ function SessionStatusPage({
           <Button
             type="button"
             onClick={onAction}
-            className="mt-6 cursor-pointer bg-red-600 hover:bg-red-500"
+            className="mt-6 cursor-pointer bg-blue-600 hover:bg-blue-500"
           >
             <RefreshCw className="h-4 w-4" />
             {actionLabel}

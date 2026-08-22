@@ -397,7 +397,7 @@ export function StockFinancialPanel({
     <div className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto bg-[#08101d] p-2 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-2 border border-white/5 bg-[#0b1120]/80 px-3 py-2">
         <div className="min-w-0">
-          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
+          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">
             Financials
           </div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
@@ -417,9 +417,9 @@ export function StockFinancialPanel({
               type="button"
               onClick={() => setBasis(item)}
               className={cn(
-                'h-7 border px-3 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                'h-7 border px-3 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 basis === item
-                  ? 'border-red-500/30 bg-red-500/15 text-red-100'
+                  ? 'border-blue-500/30 bg-blue-500/15 text-blue-100'
                   : 'border-white/5 text-slate-500 hover:bg-white/[0.04] hover:text-slate-200'
               )}
             >
@@ -608,7 +608,7 @@ export function StockFinancialPanel({
                 className={cn(
                   'relative h-10 shrink-0 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5',
                   activeTab === tab.id
-                    ? 'text-red-100 after:bg-red-400'
+                    ? 'text-blue-100 after:bg-blue-400'
                     : 'text-slate-500 after:bg-transparent hover:text-slate-200'
                 )}
               >

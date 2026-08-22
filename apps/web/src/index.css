@@ -67,8 +67,8 @@
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #dc2626;
-  --studio-primary-soft: rgba(220, 38, 38, 0.14);
+  --studio-primary: #2563eb;
+  --studio-primary-soft: rgba(37, 99, 235, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
   --studio-warning: #f59e0b;
@@ -126,8 +126,8 @@
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #dc2626;
-  --studio-primary-soft: rgba(220, 38, 38, 0.14);
+  --studio-primary: #2563eb;
+  --studio-primary-soft: rgba(37, 99, 235, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
   --studio-warning: #f59e0b;
@@ -290,8 +290,8 @@
   --primary-foreground: #ffffff;
   --ring: var(--studio-primary);
   --button-primary: var(--studio-primary);
-  --button-primary-hover: #ef4444;
-  --button-primary-shadow: rgba(220, 38, 38, 0.18);
+  --button-primary-hover: #3b82f6;
+  --button-primary-shadow: rgba(37, 99, 235, 0.18);
 }
 
 [data-studio-workbench] .rounded-2xl,

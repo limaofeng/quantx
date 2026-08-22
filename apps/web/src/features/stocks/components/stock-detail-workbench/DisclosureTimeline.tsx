@@ -68,7 +68,7 @@ export function DisclosureTimeline({
     <section className="min-w-0 border border-white/5 bg-[#0b1120]/70">
       <div className="flex min-h-10 flex-col gap-2 border-b border-white/5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-2">
-          <FileText className="h-3.5 w-3.5 text-red-300" />
+          <FileText className="h-3.5 w-3.5 text-blue-300" />
           <h3 className="truncate text-xs font-black text-slate-200">
             公告动态
           </h3>
@@ -83,9 +83,9 @@ export function DisclosureTimeline({
               type="button"
               onClick={() => setActiveFilter(filter.id)}
               className={cn(
-                'h-7 shrink-0 rounded-md px-2.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                'h-7 shrink-0 rounded-md px-2.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 activeFilter === filter.id
-                  ? 'bg-red-500/15 text-red-100'
+                  ? 'bg-blue-500/15 text-blue-100'
                   : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
               )}
             >
@@ -145,7 +145,7 @@ export function DisclosureTimeline({
                     href={item.sourceUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-red-500/10 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-blue-500/10 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                     aria-label="打开公告原文"
                     title="打开公告原文"
                   >

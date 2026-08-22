@@ -72,9 +72,9 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
                 type="button"
                 aria-pressed={returnKind === value}
                 onClick={() => setReturnKind(value)}
-                className={`h-7 cursor-pointer rounded px-2.5 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
+                className={`h-7 cursor-pointer rounded px-2.5 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                   returnKind === value
-                    ? 'bg-red-500/15 text-red-200'
+                    ? 'bg-blue-500/15 text-blue-200'
                     : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
                 }`}
               >
@@ -90,7 +90,7 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
             onChange={event =>
               setBenchmark(event.target.value as EventCurvePoint['benchmark'])
             }
-            className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+            className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {(
               Object.keys(BENCHMARK_LABELS) as EventCurvePoint['benchmark'][]

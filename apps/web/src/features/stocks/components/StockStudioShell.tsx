@@ -133,14 +133,14 @@ export function StockStudioShell({
       sidebar={
         <aside className="flex h-full min-h-0 flex-col">
           <div className="border-b border-white/5 px-4 py-3">
-            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
               Stock Studio
             </div>
-            <div className="mt-2 rounded-md border border-red-500/20 bg-red-500/10 p-3">
-              <div className="truncate text-sm font-black text-red-100">
+            <div className="mt-2 rounded-md border border-blue-500/20 bg-blue-500/10 p-3">
+              <div className="truncate text-sm font-black text-blue-100">
                 {stockName || stockCode || '未选择标的'}
               </div>
-              <div className="mt-1 font-mono text-xs font-bold text-red-400/80">
+              <div className="mt-1 font-mono text-xs font-bold text-blue-400/80">
                 {stockCode || 'N/A'}
               </div>
             </div>
@@ -148,7 +148,7 @@ export function StockStudioShell({
               <Link href="/holdings">
                 <button
                   type="button"
-                  className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-100"
+                  className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-100"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   持仓
@@ -157,7 +157,7 @@ export function StockStudioShell({
               <button
                 type="button"
                 onClick={() => openStudioTab(`/holdings?symbol=${stockCode}`)}
-                className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 text-[10px] font-black text-red-100 transition-colors hover:bg-red-500/15"
+                className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 text-[10px] font-black text-blue-100 transition-colors hover:bg-blue-500/15"
               >
                 <DollarSign className="h-3.5 w-3.5" />
                 交易
@@ -181,9 +181,9 @@ export function StockStudioShell({
                     onClick={() => onModeChange(resource.id)}
                     onContextMenu={event => openAtPointer(event, resource)}
                     className={cn(
-                      'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                      'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                       isActive
-                        ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                        ? 'border-blue-500/30 bg-blue-500/10 text-blue-100'
                         : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
                     )}
                   >
@@ -206,7 +206,7 @@ export function StockStudioShell({
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
+              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-300"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               刷新个股
@@ -278,12 +278,12 @@ export function StockStudioShell({
           onTabChange={tabId => onModeChange(tabId as StockStudioMode)}
           onTabClose={() => undefined}
           tabs={tabs}
-          themeColor="red"
+          themeColor="blue"
         />
       }
       theme={{
         icon: CandlestickChart,
-        name: 'red',
+        name: 'blue',
         title: 'QuantX Stock Studio',
       }}
     />

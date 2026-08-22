@@ -55,7 +55,7 @@ export function StrategyStudioShell({
       tabBar={tabBar}
       theme={{
         icon: Activity,
-        name: 'red',
+        name: 'blue',
         title: 'QuantX Strategy Studio',
       }}
     />

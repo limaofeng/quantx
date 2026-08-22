@@ -182,7 +182,7 @@ function ModePlaceholder({
   return (
     <div className="flex h-full min-h-0 items-center justify-center bg-[#08101d] p-6">
       <div className="w-full max-w-md rounded-lg border border-dashed border-white/10 bg-white/[0.03] p-6 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 text-red-300">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-300">
           <Icon className="h-5 w-5" />
         </div>
         <h2 className="mt-4 text-sm font-black uppercase tracking-[0.2em] text-slate-100">
@@ -195,14 +195,14 @@ function ModePlaceholder({
           <button
             type="button"
             onClick={onOpenRuns}
-            className="h-8 rounded-md border border-white/10 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-colors hover:border-red-500/40 hover:text-red-300"
+            className="h-8 rounded-md border border-white/10 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300"
           >
             查看实例
           </button>
           <button
             type="button"
             onClick={onCreate}
-            className="h-8 rounded-md bg-red-500 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-red-400"
+            className="h-8 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500"
           >
             新建实例
           </button>
@@ -231,7 +231,7 @@ function StrategyInstanceNavItem({
       onClick={() => onOpen(instance)}
       title={detailUrl ? instance.displayName : '缺少策略模板 ID，无法打开'}
       className={cn(
-        'group flex w-full items-start gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+        'group flex w-full items-start gap-2.5 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
         detailUrl
           ? 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
           : 'cursor-not-allowed border-transparent text-slate-600 opacity-70'
@@ -308,7 +308,7 @@ function StrategySidebar({
   return (
     <aside className="flex h-full min-h-0 flex-col">
       <div className="border-b border-white/5 px-4 py-3">
-        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
           Strategy Studio
         </div>
         <div className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
@@ -331,9 +331,9 @@ function StrategySidebar({
                 type="button"
                 onClick={() => onModeChange(item.id)}
                 className={cn(
-                  'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                  'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                   isActive
-                    ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                    ? 'border-blue-500/30 bg-blue-500/10 text-blue-100'
                     : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
                 )}
               >
@@ -365,7 +365,7 @@ function StrategySidebar({
           <button
             type="button"
             onClick={onRefresh}
-            className="flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-red-500/40 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
             title="刷新策略实例"
           >
             <RefreshCw
@@ -416,7 +416,7 @@ function StrategySidebar({
         <button
           type="button"
           onClick={onCreate}
-          className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-red-500 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+          className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-blue-600 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Plus className="h-3.5 w-3.5" />
           新建策略实例
@@ -529,8 +529,8 @@ function StrategyDashboardHome({
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-                <span className="text-[10px] font-black uppercase tracking-[0.24em] text-red-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
+                <span className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-300">
                   Strategy Dashboard
                 </span>
               </div>
@@ -545,7 +545,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onRefresh}
-                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-red-500/40 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
               >
                 <RefreshCw
                   className={cn('h-3.5 w-3.5', fetching && 'animate-spin')}
@@ -555,7 +555,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onOpenCatalog}
-                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-red-500/40 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
               >
                 <BookOpen className="h-3.5 w-3.5" />
                 策略库
@@ -563,7 +563,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onCreate}
-                className="flex h-8 items-center gap-2 rounded-md bg-red-500 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                className="flex h-8 items-center gap-2 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
               >
                 <Plus className="h-3.5 w-3.5" />
                 新建实例
@@ -652,7 +652,7 @@ function StrategyDashboardHome({
                   <button
                     type="button"
                     onClick={onCreate}
-                    className="mt-4 h-8 rounded-md bg-red-500 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                    className="mt-4 h-8 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
                   >
                     新建策略实例
                   </button>
@@ -673,7 +673,7 @@ function StrategyDashboardHome({
                       key={instance.id}
                       type="button"
                       onClick={() => onOpenInstance(instance)}
-                      className="group flex w-full items-center gap-3 bg-[#08101d]/50 px-3 py-3 text-left transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                      className="group flex w-full items-center gap-3 bg-[#08101d]/50 px-3 py-3 text-left transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                     >
                       <span
                         className={cn(
@@ -705,7 +705,7 @@ function StrategyDashboardHome({
                           )}
                         </span>
                       </span>
-                      <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-600 transition-colors group-hover:text-red-300" />
+                      <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-600 transition-colors group-hover:text-blue-300" />
                     </button>
                   );
                 })}
@@ -876,7 +876,7 @@ export default function StrategiesPage() {
       statusBarRight={
         <>
           <span className="inline-flex items-center gap-2">
-            <ActiveIcon className="h-3 w-3 text-red-400" />
+            <ActiveIcon className="h-3 w-3 text-blue-400" />
             {activeMeta.description}
           </span>
         </>
@@ -892,7 +892,7 @@ export default function StrategiesPage() {
               }
               onTabClose={() => undefined}
               tabs={strategyTabs}
-              themeColor="red"
+              themeColor="blue"
             />
           </div>
         </div>

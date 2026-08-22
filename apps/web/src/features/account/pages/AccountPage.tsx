@@ -133,9 +133,9 @@ function ScopeSwitch({
           type="button"
           onClick={() => onChange(scope)}
           className={cn(
-            'min-h-8 cursor-pointer rounded-md px-3 text-xs transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50',
+            'min-h-8 cursor-pointer rounded-md px-3 text-xs transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
             value === scope
-              ? 'bg-red-500/15 text-red-300'
+              ? 'bg-blue-500/15 text-blue-300'
               : 'text-slate-500 hover:text-slate-300'
           )}
         >
@@ -505,7 +505,7 @@ export function AccountPage() {
         <header className="flex min-h-14 flex-col justify-center gap-3 rounded-lg border border-white/[0.06] bg-[#0b1120]/95 px-4 py-2 sm:flex-row sm:items-center sm:justify-between xl:min-h-11 xl:py-1">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <Landmark className="h-5 w-5 text-red-400" />
+              <Landmark className="h-5 w-5 text-blue-400" />
               <h1 className="truncate text-xs font-black uppercase tracking-[0.18em] text-slate-100">
                 账户概览
               </h1>
@@ -590,9 +590,9 @@ export function AccountPage() {
                 type="button"
                 onClick={() => setLocation(`/account?view=${item.id}`)}
                 className={cn(
-                  'min-h-12 cursor-pointer border-b-2 px-5 text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/50',
+                  'min-h-12 cursor-pointer border-b-2 px-5 text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                   view === item.id
-                    ? 'border-red-400 text-red-300'
+                    ? 'border-blue-400 text-blue-300'
                     : 'border-transparent text-slate-500 hover:text-slate-200'
                 )}
               >
@@ -614,7 +614,7 @@ export function AccountPage() {
               <h2 className="text-sm font-medium">资产构成</h2>
               <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/5">
                 <div
-                  className="h-full bg-red-400"
+                  className="h-full bg-blue-400"
                   style={{
                     width: `${Math.min(100, Math.max(0, marketRatio || 0))}%`,
                   }}
@@ -647,9 +647,9 @@ export function AccountPage() {
                     key={String(label)}
                     type="button"
                     onClick={() => setLocation(String(href))}
-                    className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-xs text-slate-300 transition-colors duration-200 hover:border-red-400/30 hover:bg-red-400/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                    className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-xs text-slate-300 transition-colors duration-200 hover:border-blue-500/40 hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   >
-                    <Icon className="h-5 w-5 text-red-300" />
+                    <Icon className="h-5 w-5 text-blue-300" />
                     {String(label)}
                   </button>
                 ))}
@@ -662,7 +662,7 @@ export function AccountPage() {
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">待处理委托</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/account?view=orders')}
                 >
                   查看全部
@@ -710,7 +710,7 @@ export function AccountPage() {
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">最近成交</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/account?view=trades')}
                 >
                   查看全部
@@ -758,7 +758,7 @@ export function AccountPage() {
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-sm font-medium">主要持仓</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-red-300 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50"
+                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/holdings')}
                 >
                   打开持仓工作台

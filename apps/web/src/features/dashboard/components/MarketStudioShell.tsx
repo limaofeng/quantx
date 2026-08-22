@@ -71,12 +71,12 @@ export function MarketStudioShell({
           onTabChange={() => undefined}
           onTabClose={() => undefined}
           tabs={tabs}
-          themeColor="red"
+          themeColor="blue"
         />
       }
       theme={{
         icon: BarChart3,
-        name: 'red',
+        name: 'blue',
         title: 'QuantX Market Studio',
       }}
     />

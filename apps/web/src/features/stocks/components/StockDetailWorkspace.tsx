@@ -78,7 +78,7 @@ interface StockDetailWorkspaceProps {
 }
 
 const compactTabTriggerClass =
-  'h-7 rounded-md px-3 text-[11px] font-bold text-slate-500 transition-colors data-[state=active]:bg-red-500 data-[state=active]:text-white dark:text-slate-400 dark:data-[state=active]:text-white';
+  'h-7 rounded-md px-3 text-[11px] font-bold text-slate-500 transition-colors data-[state=active]:bg-blue-600 data-[state=active]:text-white dark:text-slate-400 dark:data-[state=active]:text-white';
 
 function isTerminalView(view: StockWorkspaceView) {
   return ['CHART', 'ORDER', 'TRADING'].includes(view);
@@ -125,7 +125,7 @@ function WorkspaceToolbar({
                 <TabsTrigger
                   key={mode.id}
                   value={mode.id}
-                  className="relative h-full shrink-0 rounded-none bg-transparent px-0 text-[12px] font-bold text-slate-500 shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-transparent hover:text-slate-200 focus-visible:ring-red-500/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-red-200 data-[state=active]:shadow-none data-[state=active]:after:bg-red-400"
+                  className="relative h-full shrink-0 rounded-none bg-transparent px-0 text-[12px] font-bold text-slate-500 shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-transparent hover:text-slate-200 focus-visible:ring-blue-400/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-200 data-[state=active]:shadow-none data-[state=active]:after:bg-blue-500"
                 >
                   {mode.label}
                 </TabsTrigger>
@@ -162,7 +162,7 @@ function WorkspaceToolbar({
                 <button
                   type="button"
                   onClick={() => onLayoutModeChange(nextLayoutMode)}
-                  className="hidden h-7 w-7 items-center justify-center text-slate-500 transition-colors hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 sm:flex"
+                  className="hidden h-7 w-7 items-center justify-center text-slate-500 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 sm:flex"
                   aria-label={`切换为${nextLayoutMode === 'wide' ? '三栏' : '两栏'}布局`}
                 >
                   <LayoutIcon className="h-4 w-4" />
@@ -336,7 +336,7 @@ function TradingTerminal({
       >
         <TradingChart stockCode={stockCode} />
       </ResizablePanel>
-      <ResizableHandle className="w-px bg-white/5 hover:bg-red-500/40" />
+      <ResizableHandle className="w-px bg-white/5 hover:bg-blue-500/40" />
 
       {layoutMode === 'wide' ? (
         <>
@@ -349,7 +349,7 @@ function TradingTerminal({
           >
             {depth}
           </ResizablePanel>
-          <ResizableHandle className="w-px bg-white/5 hover:bg-red-500/40" />
+          <ResizableHandle className="w-px bg-white/5 hover:bg-blue-500/40" />
           <ResizablePanel
             id="stock-workspace-ticket"
             order={3}
@@ -368,7 +368,7 @@ function TradingTerminal({
               </ResizablePanel>
               {showActiveOrders && (
                 <>
-                  <ResizableHandle className="h-px bg-white/5 hover:bg-red-500/40" />
+                  <ResizableHandle className="h-px bg-white/5 hover:bg-blue-500/40" />
                   <ResizablePanel
                     id="stock-workspace-active-orders"
                     order={2}
@@ -400,7 +400,7 @@ function TradingTerminal({
             >
               {depth}
             </ResizablePanel>
-            <ResizableHandle className="h-px bg-white/5 hover:bg-red-500/40" />
+            <ResizableHandle className="h-px bg-white/5 hover:bg-blue-500/40" />
             <ResizablePanel
               id="stock-workspace-combined-ticket"
               order={2}
@@ -411,7 +411,7 @@ function TradingTerminal({
             </ResizablePanel>
             {showActiveOrders && (
               <>
-                <ResizableHandle className="h-px bg-white/5 hover:bg-red-500/40" />
+                <ResizableHandle className="h-px bg-white/5 hover:bg-blue-500/40" />
                 <ResizablePanel
                   id="stock-workspace-combined-orders"
                   order={3}
@@ -534,7 +534,7 @@ export function StockDetailWorkspace({
         {context === 'holdings' && (
           <button
             type="button"
-            className="block w-full p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/70"
+            className="block w-full p-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
             onClick={onOpenDetail}
             disabled={!onOpenDetail}
             aria-label="打开个股研究详情"

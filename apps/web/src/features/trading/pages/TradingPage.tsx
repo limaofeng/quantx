@@ -231,7 +231,7 @@ export default function TradingPage() {
           <span>活跃委托 {activeOrderCount}</span>
         </>
       }
-      theme={{ icon: ArrowLeftRight, name: 'red', title: '持仓' }}
+      theme={{ icon: ArrowLeftRight, name: 'blue', title: '持仓' }}
     />
   );
 }

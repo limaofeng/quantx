@@ -4010,7 +4010,7 @@ export function TTradeGlobalPage() {
       }
       theme={{
         icon: workspaceMode === 'REPLAY' ? FlaskConical : Radar,
-        name: 'red',
+        name: 'blue',
         title: workspaceMode === 'REPLAY' ? '做T回放测试' : '做T助手',
       }}
     />

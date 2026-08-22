@@ -226,13 +226,13 @@ export function DataStudioShell({
       sidebar={
         <aside className="flex h-full min-h-0 flex-col">
           <div className="border-b border-white/5 px-4 py-3">
-            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
               Data Studio
             </div>
             <div className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
               市场数据、同步任务、筛选结果统一入口。
             </div>
-            <label className="mt-3 flex h-8 items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-2 text-slate-500 focus-within:border-red-500/40">
+            <label className="mt-3 flex h-8 items-center gap-2 rounded-md border border-white/10 bg-white/[0.03] px-2 text-slate-500 focus-within:border-blue-500/40">
               <Search className="h-3.5 w-3.5 shrink-0" />
               <input
                 value={resourceSearch}
@@ -259,9 +259,9 @@ export function DataStudioShell({
                     onClick={() => changeMode(resource.id)}
                     onContextMenu={event => openAtPointer(event, resource)}
                     className={cn(
-                      'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+                      'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                       isActive
-                        ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                        ? 'border-blue-500/30 bg-blue-500/10 text-blue-100'
                         : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
                     )}
                   >
@@ -290,7 +290,7 @@ export function DataStudioShell({
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
+              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-300"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               刷新当前资源
@@ -373,7 +373,7 @@ export function DataStudioShell({
                       <Icon
                         className={cn(
                           'h-3.5 w-3.5 shrink-0',
-                          isActive ? 'text-red-400' : 'text-slate-500'
+                          isActive ? 'text-blue-400' : 'text-slate-500'
                         )}
                       />
                       <span className="max-w-[120px] truncate text-[11px] font-black">
@@ -383,7 +383,7 @@ export function DataStudioShell({
                   );
                 }}
                 tabs={tabs}
-                themeColor="red"
+                themeColor="blue"
               />
             </div>
             {tabBarTrailing && (
@@ -396,7 +396,7 @@ export function DataStudioShell({
       }
       theme={{
         icon: Database,
-        name: 'red',
+        name: 'blue',
         title: 'QuantX Data Studio',
       }}
     />

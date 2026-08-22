@@ -186,13 +186,13 @@ export default function StockDetailPage() {
       }
       statusBarRight={
         <>
-          <Activity className="h-3 w-3 text-red-400" />
+          <Activity className="h-3 w-3 text-blue-400" />
           <span className="font-mono">{stockCode || '--'}</span>
           <span className="text-slate-700">|</span>
           <span>{holding ? '已持仓' : '未持仓'}</span>
         </>
       }
-      theme={{ icon: Building2, name: 'red', title: '个股详情' }}
+      theme={{ icon: Building2, name: 'blue', title: '个股详情' }}
     />
   );
 }

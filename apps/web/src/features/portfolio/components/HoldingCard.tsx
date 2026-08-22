@@ -106,7 +106,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
   return (
     <>
       <div
-        className="group grid min-h-[96px] cursor-pointer grid-cols-[minmax(240px,1.2fr)_minmax(180px,0.95fr)_minmax(160px,0.85fr)_minmax(220px,1fr)_112px] items-stretch overflow-hidden rounded-lg border border-white/5 bg-[#0b1120]/70 text-slate-200 transition-colors hover:border-red-500/25 hover:bg-white/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/45"
+        className="group grid min-h-[96px] cursor-pointer grid-cols-[minmax(240px,1.2fr)_minmax(180px,0.95fr)_minmax(160px,0.85fr)_minmax(220px,1fr)_112px] items-stretch overflow-hidden rounded-lg border border-white/5 bg-[#0b1120]/70 text-slate-200 transition-colors hover:border-blue-500/40 hover:bg-white/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
         data-testid={`holding-card-${holding.stockCode}`}
         role="link"
         tabIndex={0}
@@ -116,7 +116,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
         onContextMenu={event => openAtPointer(event, holding)}
       >
         <div className="flex min-w-0 items-center gap-3 border-r border-white/5 px-3 py-2">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-red-500/15 bg-red-500/10 text-xs font-black text-red-300">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-blue-500/15 bg-blue-500/10 text-xs font-black text-blue-300">
             {getStockIconText(stockName)}
           </div>
           <div className="min-w-0">

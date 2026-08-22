@@ -87,7 +87,7 @@ const ASSISTANT_PANEL_SIZING = {
 const studioWorkspaceModes: StudioMode[] = [];
 const studioWorkspaceTheme: StudioTheme = {
   icon: TrendingUp,
-  name: 'red',
+  name: 'blue',
   title: 'QuantX Studio',
 };
 
@@ -106,7 +106,7 @@ function StudioChromeAction({
     <button
       type="button"
       aria-label={label}
-      className="group relative flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70 disabled:cursor-not-allowed disabled:opacity-40"
+      className="group relative flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-40"
       disabled={!onSelect}
       onClick={onSelect}
       title={label}
@@ -182,7 +182,7 @@ function StudioWorkspaceHeader({
       <button
         type="button"
         onClick={onHome}
-        className="studio-shell-brand flex shrink-0 items-center gap-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70"
+        className="studio-shell-brand flex shrink-0 items-center gap-2.5 text-left transition-colors hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
         aria-label="QuantX Studio · 打开行情工作台"
         style={{
           paddingInline: 'clamp(10px, calc(100vw - 758px), 14px)',
@@ -203,7 +203,7 @@ function StudioWorkspaceHeader({
           type="button"
           onClick={onHome}
           className={cn(
-            'relative flex w-12 items-center justify-center gap-2 border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/70 lg:px-3',
+            'relative flex w-12 items-center justify-center gap-2 border border-b-0 px-2 text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 lg:px-3',
             isHomeActive
               ? 'text-slate-100'
               : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-100'
@@ -253,7 +253,7 @@ function StudioWorkspaceHeader({
             aria-haspopup="menu"
             aria-label="打开功能启动器"
             className={cn(
-              'flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70',
+              'flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
               isLauncherOpen && 'bg-white/5 text-slate-100'
             )}
             onClick={() => setIsLauncherOpen(value => !value)}
@@ -277,7 +277,7 @@ function StudioWorkspaceHeader({
                   <button
                     key={action.id}
                     type="button"
-                    className="flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+                    className="flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                     onClick={() => {
                       setIsLauncherOpen(false);
                       action.onSelect();
@@ -310,7 +310,7 @@ function StudioWorkspaceHeader({
         <button
           type="button"
           onClick={onAccount}
-          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-200 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/70"
+          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-200 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
           aria-label={`打开账户：${currentUserLabel}`}
           title={`当前用户：${currentUserLabel}`}
           style={{
@@ -398,7 +398,7 @@ function StudioWorkspaceSidebarDock({
       ? sidebar.title
       : STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
   });
-  const themeStyles = getStudioThemeStyles(sidebar?.themeName ?? 'red');
+  const themeStyles = getStudioThemeStyles(sidebar?.themeName ?? 'blue');
 
   if (!sidebar?.showSidebar || !sidebar.content) return null;
 
@@ -845,7 +845,7 @@ export function StudioWorkspace({
               <Icon
                 className={cn(
                   'h-3.5 w-3.5 shrink-0',
-                  isActive ? 'text-red-400' : 'text-slate-400'
+                  isActive ? 'text-blue-400' : 'text-slate-400'
                 )}
               />
               <span
@@ -860,7 +860,7 @@ export function StudioWorkspace({
           );
         }}
         tabs={displayTabs}
-        themeColor="red"
+        themeColor="blue"
         variant="workspace"
       />
     );

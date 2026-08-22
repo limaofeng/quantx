@@ -257,7 +257,8 @@ export function TabBar<T extends StudioTab>({
                   tab.isPreview ? `${tab.name}（预览标签，双击固定）` : tab.name
                 }
                 className={cn(
-                  'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80',
+                  'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                  themeStyles.focusRing,
                   isWorkspaceVariant && 'pl-3.5'
                 )}
               >
@@ -303,7 +304,8 @@ export function TabBar<T extends StudioTab>({
                     type="button"
                     onClick={event => onTabClose(tab.id, event)}
                     className={cn(
-                      'rounded p-1 text-slate-500 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/80 group-hover:opacity-100 group-focus-within:opacity-100',
+                      'rounded p-1 text-slate-500 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 group-hover:opacity-100 group-focus-within:opacity-100',
+                      themeStyles.focusRing,
                       isActive && 'opacity-100'
                     )}
                     aria-label={`关闭 ${tab.name}`}
@@ -343,7 +345,8 @@ export function TabBar<T extends StudioTab>({
             type="button"
             onClick={onTabCreate}
             className={cn(
-              'mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-400/80',
+              'mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+              themeStyles.focusRing,
               isWorkspaceVariant && 'mb-1.5 h-9 w-9'
             )}
             title={createTooltip}

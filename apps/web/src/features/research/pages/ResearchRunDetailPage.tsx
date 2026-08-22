@@ -148,13 +148,13 @@ export default function ResearchRunDetailPage() {
           <Link
             href="/research"
             aria-label="返回研究中心"
-            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-red-500/35 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
           </Link>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <FlaskConical className="h-4 w-4 text-red-400" />
+              <FlaskConical className="h-4 w-4 text-blue-400" />
               <h1 className="truncate text-sm font-black text-slate-100">
                 {STUDY_LABELS[summary.studyId] || summary.studyId}
               </h1>
@@ -171,7 +171,7 @@ export default function ResearchRunDetailPage() {
             type="button"
             onClick={refresh}
             disabled={fetching}
-            className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-red-500/35 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-60"
+            className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${fetching ? 'animate-spin motion-reduce:animate-none' : ''}`}
@@ -251,7 +251,7 @@ export default function ResearchRunDetailPage() {
                 className="rounded-lg border border-white/[0.07] bg-[#0d1728]/80 p-3"
               >
                 <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
-                  <Icon className="h-3 w-3 text-red-400" />
+                  <Icon className="h-3 w-3 text-blue-400" />
                   {item.label}
                 </div>
                 <div className="mt-2 font-mono text-lg font-black tabular-nums text-slate-100">

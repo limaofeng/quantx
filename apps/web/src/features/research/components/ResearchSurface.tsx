@@ -48,7 +48,7 @@ export function ResearchLoadingState({ label }: { label: string }) {
       className="flex min-h-[20rem] flex-col items-center justify-center gap-3 text-slate-500"
       role="status"
     >
-      <LoaderCircle className="h-5 w-5 animate-spin text-red-400 motion-reduce:animate-none" />
+      <LoaderCircle className="h-5 w-5 animate-spin text-blue-400 motion-reduce:animate-none" />
       <span className="text-xs font-semibold">{label}</span>
     </div>
   );
@@ -78,7 +78,7 @@ export function ResearchErrorState({
       <button
         type="button"
         onClick={onRetry}
-        className="mt-4 inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-xs font-bold text-slate-300 transition-colors hover:border-red-500/40 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+        className="mt-4 inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 bg-white/[0.04] px-3 text-xs font-bold text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
         <RefreshCw className="h-3.5 w-3.5" />
         重试

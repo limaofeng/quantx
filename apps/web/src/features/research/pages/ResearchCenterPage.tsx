@@ -129,7 +129,7 @@ export function ResearchRunsView({
               className="rounded-md border border-white/[0.05] bg-white/[0.02] px-3 py-2.5"
             >
               <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
-                <Icon className="h-3 w-3 text-red-400" />
+                <Icon className="h-3 w-3 text-blue-400" />
                 {item.label}
               </div>
               <div className="mt-1.5 font-mono text-lg font-black tabular-nums text-slate-100">
@@ -175,7 +175,7 @@ export function ResearchRunsView({
                   <td className="px-4 py-3">
                     <Link
                       href={href}
-                      className="cursor-pointer font-bold text-slate-200 outline-none transition-colors hover:text-red-300 focus-visible:rounded focus-visible:ring-2 focus-visible:ring-red-500"
+                      className="cursor-pointer font-bold text-slate-200 outline-none transition-colors hover:text-blue-300 focus-visible:rounded focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       {STUDY_LABELS[run.studyId] || run.studyId}
                     </Link>
@@ -199,7 +199,7 @@ export function ResearchRunsView({
                     <Link
                       href={href}
                       aria-label={`查看 ${run.runId} 的研究结果`}
-                      className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-slate-600 transition-colors hover:bg-red-500/10 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                      className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-slate-600 transition-colors hover:bg-blue-500/10 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       <ArrowRight className="h-3.5 w-3.5" />
                     </Link>
@@ -226,7 +226,7 @@ export default function ResearchCenterPage() {
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.06] bg-[#0b1423]/90 px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <FlaskConical className="h-4 w-4 text-red-400" />
+            <FlaskConical className="h-4 w-4 text-blue-400" />
             <h1 className="text-sm font-black text-slate-100">研究中心</h1>
           </div>
           <p className="mt-1 text-[10px] text-slate-500">
@@ -244,9 +244,9 @@ export default function ResearchCenterPage() {
               type="button"
               aria-pressed={status === filter.value}
               onClick={() => setStatus(filter.value)}
-              className={`h-8 cursor-pointer rounded px-3 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
+              className={`h-8 cursor-pointer rounded px-3 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 status === filter.value
-                  ? 'bg-red-500/15 text-red-200'
+                  ? 'bg-blue-500/15 text-blue-200'
                   : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
               }`}
             >
@@ -258,7 +258,7 @@ export default function ResearchCenterPage() {
           type="button"
           onClick={refresh}
           disabled={fetching}
-          className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-red-500/35 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-wait disabled:opacity-60"
+          className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
         >
           <RefreshCw
             className={`h-3.5 w-3.5 ${fetching ? 'animate-spin motion-reduce:animate-none' : ''}`}

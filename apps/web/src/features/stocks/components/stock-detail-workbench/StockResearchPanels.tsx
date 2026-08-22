@@ -86,7 +86,7 @@ function WorkspacePanel({
       className={cn('min-w-0 border border-white/5 bg-[#0b1120]/75', className)}
     >
       <div className="flex h-9 items-center gap-2 border-b border-white/5 px-3">
-        <Icon className="h-3.5 w-3.5 text-red-300" />
+        <Icon className="h-3.5 w-3.5 text-blue-300" />
         <h3 className="truncate text-[11px] font-black text-slate-200">
           {title}
         </h3>
@@ -191,7 +191,7 @@ function AnnouncementPreview({
                 className={cn(
                   'grid min-w-0 grid-cols-[76px_minmax(0,1fr)] items-center gap-2 border border-white/5 bg-[#08101d]/70 px-2.5 py-2 transition-colors',
                   item.sourceUrl || item.pdfUrl
-                    ? 'hover:border-red-500/25 hover:bg-red-500/[0.04]'
+                    ? 'hover:border-blue-500/40 hover:bg-blue-500/10'
                     : 'cursor-default'
                 )}
               >
@@ -412,7 +412,7 @@ export function StockAnnouncementsPanel({
     <div className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto bg-[#08101d] p-2 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-2 border border-white/5 bg-[#0b1120]/80 px-3 py-2">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-red-300">
+          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">
             Disclosures
           </div>
           <div className="mt-1 flex items-center gap-2">

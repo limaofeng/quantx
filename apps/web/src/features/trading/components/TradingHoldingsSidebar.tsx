@@ -415,7 +415,7 @@ function SortableHoldingItem({
         type="button"
         aria-label={`拖拽持仓 ${holdingName}`}
         title="拖拽排序"
-        className="flex w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-md border border-white/5 bg-white/[0.02] text-slate-600 transition-colors hover:border-red-500/25 hover:bg-red-500/10 hover:text-red-200 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+        className="flex w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-md border border-white/5 bg-white/[0.02] text-slate-600 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-200 active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
         {...attributes}
         {...(listeners || {})}
       >
@@ -622,10 +622,10 @@ export function TradingHoldingsSidebar({
         onClick={() => onHoldingSelect(holding)}
         onContextMenu={event => openAtPointer(event, holding)}
         className={cn(
-          'group w-full rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70',
+          'group w-full rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
           isSelected
-            ? 'border-red-500/35 bg-red-500/10 text-red-100'
-            : 'border-white/5 bg-white/[0.025] text-slate-300 hover:border-red-500/25 hover:bg-white/[0.055] hover:text-slate-100'
+            ? 'border-blue-500/30 bg-blue-500/10 text-blue-100'
+            : 'border-white/5 bg-white/[0.025] text-slate-300 hover:border-blue-500/40 hover:bg-white/[0.055] hover:text-slate-100'
         )}
         aria-current={isSelected ? 'true' : undefined}
       >
@@ -634,8 +634,8 @@ export function TradingHoldingsSidebar({
             className={cn(
               'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-[10px] font-black',
               isSelected
-                ? 'border-red-500/30 bg-red-500/15 text-red-200'
-                : 'border-white/10 bg-[#08101d] text-slate-400 group-hover:border-red-500/25 group-hover:text-red-200'
+                ? 'border-blue-500/30 bg-blue-500/15 text-blue-200'
+                : 'border-white/10 bg-[#08101d] text-slate-400 group-hover:text-slate-200'
             )}
           >
             {getStockIconText(stockName)}
@@ -730,7 +730,7 @@ export function TradingHoldingsSidebar({
         <div className="shrink-0 border-b border-white/5 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+              <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
                 Holdings
               </div>
               <div className="mt-1 truncate text-sm font-black text-slate-100">
@@ -742,7 +742,7 @@ export function TradingHoldingsSidebar({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
-              className="h-8 w-8 shrink-0 rounded-md border border-white/10 text-slate-500 transition-colors hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-200"
+              className="h-8 w-8 shrink-0 rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-200"
               aria-label="刷新持仓"
               title="刷新持仓"
             >
@@ -789,8 +789,8 @@ export function TradingHoldingsSidebar({
                     className={cn(
                       'h-6 rounded-md border px-1.5 text-[10px] font-black transition-colors',
                       isManualSortMode
-                        ? 'border-red-500/35 bg-red-500/10 text-red-200 hover:bg-red-500/15'
-                        : 'border-white/5 bg-white/[0.025] text-slate-500 hover:border-red-500/25 hover:bg-red-500/10 hover:text-red-200'
+                        ? 'border-blue-500/30 bg-blue-500/10 text-blue-200 hover:bg-blue-500/10'
+                        : 'border-white/5 bg-white/[0.025] text-slate-500 hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-200'
                     )}
                   >
                     {isManualSortMode ? (
@@ -821,7 +821,7 @@ export function TradingHoldingsSidebar({
                       <DropdownMenuRadioItem
                         key={option.id}
                         value={option.id}
-                        className="text-[11px] focus:bg-red-500/15 focus:text-red-100"
+                        className="text-[11px]"
                       >
                         {option.label}
                       </DropdownMenuRadioItem>
@@ -835,7 +835,7 @@ export function TradingHoldingsSidebar({
                       </DropdownMenuLabel>
                       <DropdownMenuItem
                         onSelect={() => setIsManualSortDialogOpen(true)}
-                        className="text-[11px] focus:bg-red-500/15 focus:text-red-100"
+                        className="text-[11px]"
                       >
                         <Settings className="h-3.5 w-3.5" />
                         编辑手动顺序
@@ -852,13 +852,13 @@ export function TradingHoldingsSidebar({
                       >
                         <DropdownMenuRadioItem
                           value="DESC"
-                          className="text-[11px] focus:bg-red-500/15 focus:text-red-100"
+                          className="text-[11px]"
                         >
                           降序优先
                         </DropdownMenuRadioItem>
                         <DropdownMenuRadioItem
                           value="ASC"
-                          className="text-[11px] focus:bg-red-500/15 focus:text-red-100"
+                          className="text-[11px]"
                         >
                           升序优先
                         </DropdownMenuRadioItem>
@@ -896,7 +896,7 @@ export function TradingHoldingsSidebar({
           <button
             type="button"
             onClick={onAccountOpen}
-            className="flex w-full items-center gap-3 rounded-md border border-white/10 px-2.5 py-2 text-left text-slate-400 transition-colors hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+            className="flex w-full items-center gap-3 rounded-md border border-white/10 px-2.5 py-2 text-left text-slate-400 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
           >
             <Wallet className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1">

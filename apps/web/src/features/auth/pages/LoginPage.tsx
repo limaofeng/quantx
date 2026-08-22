@@ -75,7 +75,7 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
         className="pointer-events-none absolute inset-0 opacity-60"
         aria-hidden="true"
       >
-        <div className="absolute left-[-12rem] top-[-12rem] h-[28rem] w-[28rem] rounded-full bg-red-600/10 blur-[120px]" />
+        <div className="absolute left-[-12rem] top-[-12rem] h-[28rem] w-[28rem] rounded-full bg-blue-600/10 blur-[120px]" />
         <div className="absolute bottom-[-14rem] right-[-10rem] h-[32rem] w-[32rem] rounded-full bg-blue-600/10 blur-[140px]" />
         <div className="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.035)_1px,transparent_1px)] bg-[size:48px_48px]" />
       </div>
@@ -84,11 +84,11 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
         <div className="flex min-h-[620px] flex-col justify-between border-r border-white/10 bg-[#080e1b] p-10">
           <div>
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-red-500/20 bg-red-500/10 text-red-400">
+              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-blue-500/20 bg-blue-500/10 text-blue-400">
                 <ShieldCheck className="h-5 w-5" />
               </div>
               <div>
-                <p className="font-mono text-[11px] font-semibold tracking-[0.28em] text-red-400">
+                <p className="font-mono text-[11px] font-semibold tracking-[0.28em] text-blue-400">
                   QUANTX SECURE
                 </p>
                 <h1 className="mt-1 text-xl font-semibold text-white">
@@ -150,7 +150,7 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
                     autoComplete="username"
                     spellCheck={false}
                     disabled={isSubmitting}
-                    className="h-11 border-white/10 bg-black/20 pl-10 text-slate-100 placeholder:text-slate-600 focus-visible:border-red-500/70 focus-visible:ring-red-500/10"
+                    className="h-11 border-white/10 bg-black/20 pl-10 text-slate-100 placeholder:text-slate-600 focus-visible:border-primary/40 focus-visible:ring-primary/20"
                     placeholder="输入用户名"
                   />
                 </div>
@@ -170,13 +170,13 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
                     onChange={event => setPassword(event.target.value)}
                     autoComplete="current-password"
                     disabled={isSubmitting}
-                    className="h-11 border-white/10 bg-black/20 pl-10 pr-11 text-slate-100 placeholder:text-slate-600 focus-visible:border-red-500/70 focus-visible:ring-red-500/10"
+                    className="h-11 border-white/10 bg-black/20 pl-10 pr-11 text-slate-100 placeholder:text-slate-600 focus-visible:border-primary/40 focus-visible:ring-primary/20"
                     placeholder="输入密码"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(value => !value)}
-                    className="absolute right-2.5 top-1/2 flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors duration-200 hover:bg-white/5 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60"
+                    className="absolute right-2.5 top-1/2 flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors duration-200 hover:bg-white/5 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60"
                     aria-label={showPassword ? '隐藏密码' : '显示密码'}
                   >
                     {showPassword ? (
@@ -200,7 +200,7 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
               <Button
                 type="submit"
                 disabled={isSubmitting}
-                className="h-11 w-full cursor-pointer rounded-lg bg-red-600 text-white shadow-lg shadow-red-600/15 hover:bg-red-500 focus-visible:ring-red-500"
+                className="h-11 w-full cursor-pointer rounded-lg bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500"
               >
                 {isSubmitting ? (
                   <>

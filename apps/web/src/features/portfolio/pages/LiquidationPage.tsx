@@ -1141,7 +1141,7 @@ export function LiquidationPage() {
       }
       theme={{
         icon: Hand,
-        name: 'red',
+        name: 'blue',
         title: '卖出管理',
       }}
     />

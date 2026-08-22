@@ -459,7 +459,7 @@ export function VolumeComparisonPanel({
                 onChange={event =>
                   setRequestedBenchmark(event.target.value as Benchmark)
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {benchmarks.map(value => (
                   <option key={value} value={value}>
@@ -475,7 +475,7 @@ export function VolumeComparisonPanel({
                 onChange={event =>
                   setRequestedReturnKind(event.target.value as ReturnKind)
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {returnKinds.map(value => (
                   <option key={value} value={value}>
@@ -491,7 +491,7 @@ export function VolumeComparisonPanel({
                 onChange={event =>
                   setRequestedHorizon(Number(event.target.value))
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 font-mono text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-red-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 font-mono text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {horizons.map(value => (
                   <option key={value} value={value}>
