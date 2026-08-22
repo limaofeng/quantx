@@ -1022,8 +1022,9 @@ export function StudioWorkspace({
             data-testid="studio-workspace-main"
             style={{
               background: STUDIO_WORKSPACE_SURFACE,
+              borderLeft: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
+              borderTop: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
               borderTopLeftRadius: STUDIO_WORKSPACE_SURFACE_RADIUS,
-              boxShadow: `inset 0 1px 0 ${STUDIO_WORKSPACE_WEAK_BORDER}`,
             }}
           >
             <div

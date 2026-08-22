@@ -169,12 +169,15 @@ describe('StudioWorkspace', () => {
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
     expect(activityBar).toHaveStyle({ background: '#040b15' });
     expect(activityBar).not.toHaveClass('border-t');
+    expect(activityBar).not.toHaveClass('border-r');
     expect(activityBar.style.boxShadow).toBe('');
     expect(main).toHaveClass('overflow-hidden');
     expect(main).toHaveStyle({
+      borderLeft: '1px solid #22364d',
+      borderTop: '1px solid #22364d',
       borderTopLeftRadius: '12px',
-      boxShadow: 'inset 0 1px 0 #22364d',
     });
+    expect(main.style.boxShadow).toBe('');
     expect(main).toHaveStyle({ background: '#07111f' });
     ['研究', '策略', '回测', '交易', '组合', '数据', '工具'].forEach(label =>
       expect(screen.getByText(label)).toBeVisible()

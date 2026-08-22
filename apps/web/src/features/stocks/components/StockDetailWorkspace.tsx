@@ -1,6 +1,7 @@
 import { Activity, Columns, PanelLeft } from 'lucide-react';
 import * as React from 'react';
 
+import { STUDIO_WORKSPACE_WEAK_BORDER } from '@/components/studio-workbench/studioShellStyles';
 import { TradingChart } from '@/components/trading-chart';
 import {
   ResizableHandle,
@@ -110,7 +111,10 @@ function WorkspaceToolbar({
 
   return (
     <TooltipProvider delayDuration={120}>
-      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-y border-white/5 bg-[#07111f]/95 px-3">
+      <div
+        className="flex h-11 shrink-0 items-center justify-between gap-2 border-y bg-[#07111f]/95 px-3"
+        style={{ borderColor: STUDIO_WORKSPACE_WEAK_BORDER }}
+      >
         <nav
           className="flex h-full min-w-0 flex-1 items-stretch"
           aria-label="个股工作区"

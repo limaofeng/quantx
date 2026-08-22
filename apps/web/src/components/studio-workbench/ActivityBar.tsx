@@ -184,10 +184,10 @@ export function ActivityBar({
     <aside
       aria-label={isStudioVariant ? 'Studio 主导航' : `${theme.title} 导航`}
       className={cn(
-        'flex shrink-0 flex-col items-center border-r',
+        'flex shrink-0 flex-col items-center',
         isStudioVariant
-          ? 'studio-shell-activity-bar gap-1 border-white/10 py-2'
-          : 'w-12 gap-2.5 border-white/5 bg-[#0b1120] py-4'
+          ? 'studio-shell-activity-bar gap-1 py-2'
+          : 'w-12 gap-2.5 border-r border-white/5 bg-[#0b1120] py-4'
       )}
       data-testid="studio-activity-bar"
       data-variant={variant}
@@ -195,7 +195,6 @@ export function ActivityBar({
         isStudioVariant
           ? {
               background: STUDIO_CHROME_BACKGROUND,
-              borderColor: 'rgba(111, 151, 194, 0.2)',
               position: 'relative',
               width: 84,
               zIndex: 20,

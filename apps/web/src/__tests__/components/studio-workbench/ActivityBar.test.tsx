@@ -87,7 +87,9 @@ describe('ActivityBar', () => {
       zIndex: 20,
     });
     expect(activityBar).not.toHaveClass('border-t');
+    expect(activityBar).not.toHaveClass('border-r');
     expect(activityBar.style.boxShadow).toBe('');
+    expect(activityBar.style.borderColor).toBe('');
     expect(screen.getByTestId('studio-primary-navigation')).toHaveClass(
       'flex-1',
       'overflow-y-auto'
