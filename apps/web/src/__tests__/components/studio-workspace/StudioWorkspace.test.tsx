@@ -172,6 +172,14 @@ describe('StudioWorkspace', () => {
       'data-studio-fixed-tab',
       'true'
     );
+    const fixedTabRegion = screen.getByTestId('studio-fixed-tab-region');
+    const scrollableTabRegion = screen.getByTestId(
+      'studio-scrollable-tab-region'
+    );
+    expect(fixedTabRegion).toContainElement(fixedHomeTab);
+    expect(scrollableTabRegion).not.toContainElement(fixedHomeTab);
+    expect(fixedTabRegion).toHaveClass('shrink-0', 'bg-[#07111f]');
+    expect(scrollableTabRegion).toHaveClass('min-w-0', 'overflow-x-auto');
     expect(fixedHomeTab.parentElement).toHaveClass('border-b-0');
     expect(fixedHomeTab.parentElement).toHaveStyle({
       background: '#07111f',
@@ -179,9 +187,7 @@ describe('StudioWorkspace', () => {
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
       height: '44px',
-      left: '16px',
-      position: 'sticky',
-      zIndex: 20,
+      zIndex: 10,
     });
     expect(
       screen.queryByRole('button', { name: '关闭 行情工作台' })

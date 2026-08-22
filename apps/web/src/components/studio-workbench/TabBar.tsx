@@ -82,20 +82,13 @@ export function TabBar<T extends StudioTab>({
       if (activeTab.dataset.studioFixedTab === 'true') return;
 
       const padding = isWorkspaceVariant ? STUDIO_WORKSPACE_TAB_RADIUS + 4 : 8;
-      const fixedTab = tabList.querySelector<HTMLElement>(
-        '[data-studio-fixed-tab="true"]'
-      );
-      const fixedTabRight = fixedTab
-        ? fixedTab.offsetLeft + fixedTab.offsetWidth + 2
-        : 0;
-      const visibleStart =
-        tabList.scrollLeft + (tabList.scrollLeft > 0 ? fixedTabRight : 0);
+      const visibleStart = tabList.scrollLeft;
       const visibleEnd = tabList.scrollLeft + tabList.clientWidth;
       const tabStart = activeTab.offsetLeft;
       const tabEnd = tabStart + activeTab.offsetWidth;
 
       if (tabStart < visibleStart) {
-        tabList.scrollLeft = Math.max(0, tabStart - fixedTabRight - padding);
+        tabList.scrollLeft = Math.max(0, tabStart - padding);
       } else if (tabEnd > visibleEnd) {
         tabList.scrollLeft = Math.max(
           0,
@@ -200,6 +193,24 @@ export function TabBar<T extends StudioTab>({
     [canCloseTab, closable, onTabChange, onTabClose, tabs]
   );
 
+  const isWorkspaceTabFixed = (tab: T) =>
+    isWorkspaceVariant &&
+    closable &&
+    Boolean(canCloseTab) &&
+    !(canCloseTab?.(tab) ?? true);
+  const fixedWorkspaceTabs = tabs.filter(isWorkspaceTabFixed);
+  const tabGroups =
+    isWorkspaceVariant && fixedWorkspaceTabs.length > 0
+      ? [
+          { id: 'fixed', isFixed: true, tabs: fixedWorkspaceTabs },
+          {
+            id: 'scrolling',
+            isFixed: false,
+            tabs: tabs.filter(tab => !isWorkspaceTabFixed(tab)),
+          },
+        ]
+      : [{ id: 'scrolling', isFixed: false, tabs }];
+
   return (
     <div
       className={cn(
@@ -221,11 +232,13 @@ export function TabBar<T extends StudioTab>({
       }
     >
       <div
-        ref={tabListRef}
+        ref={isWorkspaceVariant ? undefined : tabListRef}
         aria-label="工作区标签"
         className={cn(
-          'no-scrollbar flex h-full min-w-0 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-smooth px-1.5',
-          isWorkspaceVariant && 'scroll-auto px-4'
+          'flex h-full min-w-0 items-end gap-0.5',
+          isWorkspaceVariant
+            ? 'overflow-hidden px-4'
+            : 'no-scrollbar overflow-x-auto overscroll-x-contain scroll-smooth px-1.5'
         )}
         role="tablist"
         style={
@@ -238,269 +251,286 @@ export function TabBar<T extends StudioTab>({
             : undefined
         }
       >
-        {tabs.map(tab => {
-          const isActive = activeTabId === tab.id;
-          const isTabClosable = closable && (canCloseTab?.(tab) ?? true);
-          const isFixedWorkspaceTab =
-            isWorkspaceVariant && closable && !isTabClosable;
+        {tabGroups.map(group => (
+          <div
+            key={group.id}
+            ref={isWorkspaceVariant && !group.isFixed ? tabListRef : undefined}
+            className={cn(
+              isWorkspaceVariant
+                ? group.isFixed
+                  ? 'relative z-20 flex h-full shrink-0 items-end bg-[#07111f]'
+                  : 'no-scrollbar flex h-full min-w-0 flex-1 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-auto'
+                : 'contents'
+            )}
+            data-testid={
+              isWorkspaceVariant
+                ? group.isFixed
+                  ? 'studio-fixed-tab-region'
+                  : 'studio-scrollable-tab-region'
+                : undefined
+            }
+          >
+            {group.tabs.map(tab => {
+              const isActive = activeTabId === tab.id;
+              const isTabClosable = closable && (canCloseTab?.(tab) ?? true);
+              const isFixedWorkspaceTab = group.isFixed;
 
-          return (
-            <div
-              key={tab.id}
-              data-studio-fixed-tab={isFixedWorkspaceTab ? 'true' : undefined}
-              onContextMenu={event => {
-                if (!closable) return;
-                event.preventDefault();
-                event.stopPropagation();
-                const tabIndex = tabs.findIndex(item => item.id === tab.id);
-                const closableTabCount = tabs.filter(
-                  item => closable && (canCloseTab?.(item) ?? true)
-                ).length;
-                const closableTabsRight = tabs
-                  .slice(tabIndex + 1)
-                  .filter(
-                    item => closable && (canCloseTab?.(item) ?? true)
-                  ).length;
-                setContextMenu({
-                  canClose: isTabClosable,
-                  closableTabCount,
-                  closableTabsRight,
-                  isPreview: Boolean(tab.isPreview),
-                  isPreviewable: Boolean(tab.isPreviewable),
-                  tabId: tab.id,
-                  tabIndex,
-                  x: event.clientX,
-                  y: event.clientY,
-                });
-              }}
-              className={cn(
-                'group relative flex h-12 shrink-0 items-center border border-b-0 transition-colors duration-150',
-                isActive
-                  ? cn(
-                      themeStyles.activeTab,
-                      isWorkspaceVariant && 'text-slate-100'
-                    )
-                  : isWorkspaceVariant
-                    ? 'border-transparent bg-transparent text-slate-500 hover:bg-white/5 hover:text-slate-200'
-                    : 'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
-              )}
-              style={{
-                ...(isWorkspaceVariant
-                  ? {
-                      ...STUDIO_WORKSPACE_TAB_STYLE,
-                      maxWidth: 'min(13rem, 100%)',
-                      minWidth: '6.5rem',
-                      width: 'fit-content',
+              return (
+                <div
+                  key={tab.id}
+                  data-studio-fixed-tab={
+                    isFixedWorkspaceTab ? 'true' : undefined
+                  }
+                  onContextMenu={event => {
+                    if (!closable) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const tabIndex = tabs.findIndex(item => item.id === tab.id);
+                    const closableTabCount = tabs.filter(
+                      item => closable && (canCloseTab?.(item) ?? true)
+                    ).length;
+                    const closableTabsRight = tabs
+                      .slice(tabIndex + 1)
+                      .filter(
+                        item => closable && (canCloseTab?.(item) ?? true)
+                      ).length;
+                    setContextMenu({
+                      canClose: isTabClosable,
+                      closableTabCount,
+                      closableTabsRight,
+                      isPreview: Boolean(tab.isPreview),
+                      isPreviewable: Boolean(tab.isPreviewable),
+                      tabId: tab.id,
+                      tabIndex,
+                      x: event.clientX,
+                      y: event.clientY,
+                    });
+                  }}
+                  className={cn(
+                    'group relative flex h-12 shrink-0 items-center border border-b-0 transition-colors duration-150',
+                    isActive
+                      ? cn(
+                          themeStyles.activeTab,
+                          isWorkspaceVariant && 'text-slate-100'
+                        )
+                      : isWorkspaceVariant
+                        ? 'border-transparent bg-transparent text-slate-500 hover:bg-white/5 hover:text-slate-200'
+                        : 'border-transparent bg-transparent text-slate-500 hover:border-white/5 hover:bg-white/5 hover:text-slate-200'
+                  )}
+                  style={{
+                    ...(isWorkspaceVariant
+                      ? {
+                          ...STUDIO_WORKSPACE_TAB_STYLE,
+                          maxWidth: 'min(13rem, 100%)',
+                          minWidth: '6.5rem',
+                          width: 'fit-content',
+                        }
+                      : {
+                          width: 208,
+                          ...(isActive
+                            ? {
+                                borderTopLeftRadius:
+                                  'calc(var(--radius) - 2px)',
+                                borderTopRightRadius:
+                                  'calc(var(--radius) - 2px)',
+                                zIndex: 10,
+                              }
+                            : {}),
+                        }),
+                    ...(isActive && isWorkspaceVariant
+                      ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE
+                      : {}),
+                  }}
+                >
+                  <button
+                    ref={node => {
+                      if (node) tabButtonRefs.current.set(tab.id, node);
+                      else tabButtonRefs.current.delete(tab.id);
+                    }}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    tabIndex={isActive ? 0 : -1}
+                    data-studio-tab-id={tab.id}
+                    onClick={() => onTabChange(tab.id)}
+                    onDoubleClick={() => {
+                      if (tab.isPreview) onTabPin?.(tab.id, true);
+                    }}
+                    onKeyDown={event => handleTabKeyDown(event, tab.id)}
+                    title={
+                      isWorkspaceVariant
+                        ? undefined
+                        : tab.isPreview
+                          ? `${tab.name}（预览标签，双击固定）`
+                          : tab.name
                     }
-                  : {
-                      width: 208,
-                      ...(isActive
-                        ? {
-                            borderTopLeftRadius: 'calc(var(--radius) - 2px)',
-                            borderTopRightRadius: 'calc(var(--radius) - 2px)',
-                            zIndex: 10,
-                          }
-                        : {}),
-                    }),
-                ...(isActive && isWorkspaceVariant
-                  ? STUDIO_WORKSPACE_ACTIVE_TAB_STYLE
-                  : {}),
-                ...(isFixedWorkspaceTab
-                  ? {
-                      background: isActive
-                        ? STUDIO_WORKSPACE_SURFACE
-                        : '#07111f',
-                      left: 16,
-                      position: 'sticky',
-                      zIndex: 20,
-                    }
-                  : {}),
-              }}
-            >
-              <button
-                ref={node => {
-                  if (node) tabButtonRefs.current.set(tab.id, node);
-                  else tabButtonRefs.current.delete(tab.id);
-                }}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                tabIndex={isActive ? 0 : -1}
-                data-studio-tab-id={tab.id}
-                onClick={() => onTabChange(tab.id)}
-                onDoubleClick={() => {
-                  if (tab.isPreview) onTabPin?.(tab.id, true);
-                }}
-                onKeyDown={event => handleTabKeyDown(event, tab.id)}
-                title={
-                  isWorkspaceVariant
-                    ? undefined
-                    : tab.isPreview
-                      ? `${tab.name}（预览标签，双击固定）`
-                      : tab.name
-                }
-                className={cn(
-                  'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
-                  themeStyles.focusRing,
-                  isWorkspaceVariant && 'pl-3.5'
-                )}
-              >
-                <span className="flex min-w-0 flex-1 items-center gap-2">
-                  {renderTabContent ? (
-                    renderTabContent(tab, isActive)
-                  ) : (
-                    <>
-                      {tab.icon && (
-                        <tab.icon size={13} className={themeStyles.tabIcon} />
+                    className={cn(
+                      'flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 pl-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                      themeStyles.focusRing,
+                      isWorkspaceVariant && 'pl-3.5'
+                    )}
+                  >
+                    <span className="flex min-w-0 flex-1 items-center gap-2">
+                      {renderTabContent ? (
+                        renderTabContent(tab, isActive)
+                      ) : (
+                        <>
+                          {tab.icon && (
+                            <tab.icon
+                              size={13}
+                              className={themeStyles.tabIcon}
+                            />
+                          )}
+                          <span
+                            className={cn(
+                              'truncate text-xs font-bold',
+                              tab.isPreview && 'italic'
+                            )}
+                          >
+                            {tab.name}
+                          </span>
+                        </>
                       )}
-                      <span
+                    </span>
+                    {tab.isPreviewable && !tab.isPreview && (
+                      <Pin
+                        aria-label="已固定"
+                        className="h-3 w-3 shrink-0 text-slate-500"
+                      />
+                    )}
+                  </button>
+
+                  {isTabClosable && (
+                    <div className="relative mr-1 flex h-6 w-6 shrink-0 items-center justify-center">
+                      {tab.isDirty && (
+                        <span className="pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                          <span className="relative flex h-2 w-2">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
+                            <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500" />
+                          </span>
+                        </span>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={event => onTabClose(tab.id, event)}
                         className={cn(
-                          'truncate text-xs font-bold',
-                          tab.isPreview && 'italic'
+                          'rounded p-1 text-slate-500 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 group-hover:opacity-100 group-focus-within:opacity-100',
+                          themeStyles.focusRing,
+                          isActive && 'opacity-100'
                         )}
+                        aria-label={`关闭 ${tab.name}`}
                       >
-                        {tab.name}
-                      </span>
+                        <X size={13} />
+                      </button>
+                    </div>
+                  )}
+
+                  {isActive && isWorkspaceVariant && (
+                    <>
+                      <svg
+                        aria-hidden="true"
+                        data-testid="studio-workspace-tab-shoulder-left"
+                        focusable="false"
+                        shapeRendering="geometricPrecision"
+                        viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                        style={{
+                          bottom: -1,
+                          display: 'block',
+                          height: WORKSPACE_TAB_SHOULDER_SIZE,
+                          left: -WORKSPACE_TAB_SHOULDER_SIZE,
+                          pointerEvents: 'none',
+                          position: 'absolute',
+                          width: WORKSPACE_TAB_SHOULDER_SIZE,
+                          zIndex: 11,
+                        }}
+                      >
+                        <path
+                          d={WORKSPACE_TAB_SHOULDER_PATHS.leftFill}
+                          fill={STUDIO_WORKSPACE_SURFACE}
+                        />
+                        <path
+                          d={WORKSPACE_TAB_SHOULDER_PATHS.leftStroke}
+                          fill="none"
+                          stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                          strokeWidth="1"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      </svg>
+                      <svg
+                        aria-hidden="true"
+                        data-testid="studio-workspace-tab-shoulder-right"
+                        focusable="false"
+                        shapeRendering="geometricPrecision"
+                        viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                        style={{
+                          bottom: -1,
+                          display: 'block',
+                          height: WORKSPACE_TAB_SHOULDER_SIZE,
+                          pointerEvents: 'none',
+                          position: 'absolute',
+                          right: -WORKSPACE_TAB_SHOULDER_SIZE,
+                          width: WORKSPACE_TAB_SHOULDER_SIZE,
+                          zIndex: 11,
+                        }}
+                      >
+                        <path
+                          d={WORKSPACE_TAB_SHOULDER_PATHS.rightFill}
+                          fill={STUDIO_WORKSPACE_SURFACE}
+                        />
+                        <path
+                          d={WORKSPACE_TAB_SHOULDER_PATHS.rightStroke}
+                          fill="none"
+                          stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                          strokeWidth="1"
+                          vectorEffect="non-scaling-stroke"
+                        />
+                      </svg>
                     </>
                   )}
-                </span>
-                {tab.isPreviewable && !tab.isPreview && (
-                  <Pin
-                    aria-label="已固定"
-                    className="h-3 w-3 shrink-0 text-slate-500"
-                  />
-                )}
-              </button>
 
-              {isTabClosable && (
-                <div className="relative mr-1 flex h-6 w-6 shrink-0 items-center justify-center">
-                  {tab.isDirty && (
-                    <span className="pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-                      <span className="relative flex h-2 w-2">
-                        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-75" />
-                        <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500" />
-                      </span>
-                    </span>
+                  {isActive && (
+                    <span
+                      aria-hidden="true"
+                      data-testid={
+                        isWorkspaceVariant
+                          ? 'studio-workspace-tab-connector'
+                          : undefined
+                      }
+                      style={{
+                        background: isWorkspaceVariant
+                          ? STUDIO_WORKSPACE_SURFACE
+                          : '#0d1b2c',
+                        bottom: -1,
+                        height: 1,
+                        left: 0,
+                        pointerEvents: 'none',
+                        position: 'absolute',
+                        right: 0,
+                      }}
+                    />
                   )}
-
-                  <button
-                    type="button"
-                    onClick={event => onTabClose(tab.id, event)}
-                    className={cn(
-                      'rounded p-1 text-slate-500 opacity-0 transition-colors hover:bg-white/10 hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 group-hover:opacity-100 group-focus-within:opacity-100',
-                      themeStyles.focusRing,
-                      isActive && 'opacity-100'
-                    )}
-                    aria-label={`关闭 ${tab.name}`}
-                  >
-                    <X size={13} />
-                  </button>
                 </div>
-              )}
+              );
+            })}
 
-              {isActive && isWorkspaceVariant && (
-                <>
-                  <svg
-                    aria-hidden="true"
-                    data-testid="studio-workspace-tab-shoulder-left"
-                    focusable="false"
-                    shapeRendering="geometricPrecision"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
-                    style={{
-                      bottom: -1,
-                      display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
-                      left: -WORKSPACE_TAB_SHOULDER_SIZE,
-                      pointerEvents: 'none',
-                      position: 'absolute',
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
-                      zIndex: 11,
-                    }}
-                  >
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftFill}
-                      fill={STUDIO_WORKSPACE_SURFACE}
-                    />
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftStroke}
-                      fill="none"
-                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
-                      strokeWidth="1"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </svg>
-                  <svg
-                    aria-hidden="true"
-                    data-testid="studio-workspace-tab-shoulder-right"
-                    focusable="false"
-                    shapeRendering="geometricPrecision"
-                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
-                    style={{
-                      bottom: -1,
-                      display: 'block',
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
-                      pointerEvents: 'none',
-                      position: 'absolute',
-                      right: -WORKSPACE_TAB_SHOULDER_SIZE,
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
-                      zIndex: 11,
-                    }}
-                  >
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightFill}
-                      fill={STUDIO_WORKSPACE_SURFACE}
-                    />
-                    <path
-                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightStroke}
-                      fill="none"
-                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
-                      strokeWidth="1"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  </svg>
-                </>
-              )}
-
-              {isActive && (
-                <span
-                  aria-hidden="true"
-                  data-testid={
-                    isWorkspaceVariant
-                      ? 'studio-workspace-tab-connector'
-                      : undefined
-                  }
-                  style={{
-                    background: isWorkspaceVariant
-                      ? STUDIO_WORKSPACE_SURFACE
-                      : '#0d1b2c',
-                    bottom: -1,
-                    height: 1,
-                    left: 0,
-                    pointerEvents: 'none',
-                    position: 'absolute',
-                    right: 0,
-                  }}
-                />
-              )}
-            </div>
-          );
-        })}
-
-        {onTabCreate && (
-          <button
-            type="button"
-            onClick={onTabCreate}
-            className={cn(
-              'mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
-              themeStyles.focusRing,
-              isWorkspaceVariant && 'mb-1.5 h-9 w-9'
+            {!group.isFixed && onTabCreate && (
+              <button
+                type="button"
+                onClick={onTabCreate}
+                className={cn(
+                  'mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                  themeStyles.focusRing,
+                  isWorkspaceVariant && 'mb-1.5 h-9 w-9'
+                )}
+                title={createTooltip}
+                aria-label={createTooltip}
+              >
+                <Plus size={16} strokeWidth={2} />
+              </button>
             )}
-            title={createTooltip}
-            aria-label={createTooltip}
-          >
-            <Plus size={16} strokeWidth={2} />
-          </button>
-        )}
+          </div>
+        ))}
       </div>
 
       <StudioTabContextMenu

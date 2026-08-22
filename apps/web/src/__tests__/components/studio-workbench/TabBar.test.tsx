@@ -89,11 +89,15 @@ describe('TabBar', () => {
       'data-studio-fixed-tab',
       'true'
     );
-    expect(fixedTab.parentElement).toHaveStyle({
-      left: '16px',
-      position: 'sticky',
-      zIndex: 20,
-    });
+    const fixedRegion = screen.getByTestId('studio-fixed-tab-region');
+    const scrollableRegion = screen.getByTestId('studio-scrollable-tab-region');
+    expect(fixedRegion).toContainElement(fixedTab);
+    expect(scrollableRegion).not.toContainElement(fixedTab);
+    expect(scrollableRegion).toContainElement(
+      screen.getByRole('tab', { name: '标签 2' })
+    );
+    expect(fixedRegion).toHaveClass('shrink-0', 'bg-[#07111f]');
+    expect(scrollableRegion).toHaveClass('min-w-0', 'overflow-x-auto');
     expect(
       screen.queryByRole('button', { name: '关闭 标签 1' })
     ).not.toBeInTheDocument();
@@ -264,7 +268,7 @@ describe('TabBar', () => {
       />
     );
 
-    const tabList = screen.getByRole('tablist', { name: '工作区标签' });
+    const tabList = screen.getByTestId('studio-scrollable-tab-region');
     const activeTab = screen.getByRole('tab', {
       name: '标签 3',
     }).parentElement!;
@@ -288,7 +292,7 @@ describe('TabBar', () => {
     });
   });
 
-  it('does not move the fixed workspace tab when the strip is scrolled', async () => {
+  it('keeps the fixed workspace tab outside the scrolling region', async () => {
     render(
       <TabBar
         activeTabId="tab-1"
@@ -301,8 +305,10 @@ describe('TabBar', () => {
       />
     );
 
-    const tabList = screen.getByRole('tablist', { name: '工作区标签' });
+    const tabList = screen.getByTestId('studio-scrollable-tab-region');
+    const fixedRegion = screen.getByTestId('studio-fixed-tab-region');
     const fixedTab = screen.getByRole('tab', { name: '标签 1' });
+    const scrollingTab = screen.getByRole('tab', { name: '标签 10' });
     tabList.scrollLeft = 360;
 
     fireEvent(window, new Event('resize'));
@@ -310,11 +316,9 @@ describe('TabBar', () => {
     await waitFor(() => {
       expect(tabList.scrollLeft).toBe(360);
     });
-    expect(fixedTab.parentElement).toHaveStyle({
-      left: '16px',
-      position: 'sticky',
-      zIndex: 20,
-    });
+    expect(fixedRegion).toContainElement(fixedTab);
+    expect(tabList).not.toContainElement(fixedTab);
+    expect(tabList).toContainElement(scrollingTab);
   });
 
   it('pins a preview tab on double click', () => {
