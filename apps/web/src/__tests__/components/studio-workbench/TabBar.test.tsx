@@ -82,7 +82,7 @@ describe('TabBar', () => {
     expect(tabBar).toHaveStyle({ height: '100%' });
     expect(tab.parentElement).toHaveClass('border-b-0');
     expect(tab.parentElement).toHaveStyle({
-      background: '#0b1a2b',
+      background: '#07111f',
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
@@ -93,7 +93,7 @@ describe('TabBar', () => {
       zIndex: 10,
     });
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
-      background: '#0b1a2b',
+      background: '#07111f',
     });
   });
 

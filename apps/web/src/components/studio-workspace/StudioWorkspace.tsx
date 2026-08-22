@@ -45,8 +45,8 @@ import {
   STUDIO_CHROME_BACKGROUND,
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
-  STUDIO_WORKSPACE_SURFACE_BACKGROUND,
-  STUDIO_WORKSPACE_SURFACE_TOP,
+  STUDIO_WORKSPACE_SURFACE,
+  STUDIO_WORKSPACE_SURFACE_RADIUS,
   STUDIO_WORKSPACE_TAB_STYLE,
   STUDIO_WORKSPACE_WEAK_BORDER,
 } from '@/components/studio-workbench/studioShellStyles';
@@ -222,7 +222,7 @@ function StudioWorkspaceHeader({
               aria-hidden="true"
               data-testid="studio-fixed-home-tab-connector"
               style={{
-                background: STUDIO_WORKSPACE_SURFACE_TOP,
+                background: STUDIO_WORKSPACE_SURFACE,
                 bottom: -1,
                 height: 1,
                 left: 0,
@@ -1021,8 +1021,8 @@ export function StudioWorkspace({
             className="studio-shell-main flex min-w-0 flex-1 flex-col overflow-hidden"
             data-testid="studio-workspace-main"
             style={{
-              background: STUDIO_WORKSPACE_SURFACE_BACKGROUND,
-              borderTopLeftRadius: 12,
+              background: STUDIO_WORKSPACE_SURFACE,
+              borderTopLeftRadius: STUDIO_WORKSPACE_SURFACE_RADIUS,
               boxShadow: `inset 0 1px 0 ${STUDIO_WORKSPACE_WEAK_BORDER}`,
             }}
           >

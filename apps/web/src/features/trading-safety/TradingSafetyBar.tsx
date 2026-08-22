@@ -98,7 +98,7 @@ export function TradingSafetyBar({
             ) : isKilled ? (
               <ShieldAlert className="h-3 w-3 shrink-0 text-red-400" />
             ) : isHealthy ? (
-              <ShieldCheck className="h-3 w-3 shrink-0 text-sky-300" />
+              <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-400" />
             ) : (
               <AlertTriangle className="h-3 w-3 shrink-0 text-amber-400" />
             )}
@@ -110,7 +110,7 @@ export function TradingSafetyBar({
                   : isKilled
                     ? 'bg-red-400/15 text-red-300'
                     : isHealthy
-                      ? 'bg-sky-400/15 text-sky-200'
+                      ? 'bg-emerald-400/15 text-emerald-300'
                       : 'bg-amber-400/15 text-amber-200'
               )}
             >

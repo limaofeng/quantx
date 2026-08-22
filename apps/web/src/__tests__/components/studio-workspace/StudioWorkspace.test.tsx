@@ -155,7 +155,7 @@ describe('StudioWorkspace', () => {
     const fixedHomeTab = screen.getByTestId('studio-fixed-home-tab');
     expect(fixedHomeTab).toHaveClass('border-b-0');
     expect(fixedHomeTab).toHaveStyle({
-      background: '#0b1a2b',
+      background: '#07111f',
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
@@ -163,7 +163,7 @@ describe('StudioWorkspace', () => {
       zIndex: 10,
     });
     expect(screen.getByTestId('studio-fixed-home-tab-connector')).toHaveStyle({
-      background: '#0b1a2b',
+      background: '#07111f',
     });
     const activityBar = screen.getByTestId('studio-activity-bar');
     expect(activityBar).toHaveAttribute('data-variant', 'studio');
@@ -175,9 +175,7 @@ describe('StudioWorkspace', () => {
       borderTopLeftRadius: '12px',
       boxShadow: 'inset 0 1px 0 #22364d',
     });
-    expect(main.style.background).toBe(
-      'linear-gradient(180deg, rgb(11, 26, 43) 0px, rgb(9, 23, 37) 36px, rgb(7, 17, 31) 96px)'
-    );
+    expect(main).toHaveStyle({ background: '#07111f' });
     ['研究', '策略', '回测', '交易', '组合', '数据', '工具'].forEach(label =>
       expect(screen.getByText(label)).toBeVisible()
     );

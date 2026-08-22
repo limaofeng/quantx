@@ -94,8 +94,13 @@ describe('ActivityBar', () => {
     );
     expect(screen.getByText('行情')).toBeVisible();
     expect(screen.getByText('设置')).toBeVisible();
-    expect(screen.getByTestId('studio-environment-status')).toHaveTextContent(
-      'READY实盘'
+    const environmentStatus = screen.getByTestId('studio-environment-status');
+    expect(environmentStatus).toHaveTextContent('READY实盘');
+    expect(environmentStatus.firstElementChild).toHaveClass(
+      'text-emerald-300'
+    );
+    expect(environmentStatus.firstElementChild?.firstElementChild).toHaveClass(
+      'bg-emerald-400'
     );
     expect(screen.queryByTestId('studio-service-logo')).not.toBeInTheDocument();
   });

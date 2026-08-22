@@ -7,7 +7,7 @@ import { cn } from '@/utils/cn';
 import {
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
-  STUDIO_WORKSPACE_SURFACE_TOP,
+  STUDIO_WORKSPACE_SURFACE,
   STUDIO_WORKSPACE_TAB_STYLE,
 } from './studioShellStyles';
 import {
@@ -325,7 +325,7 @@ export function TabBar<T extends StudioTab>({
                   }
                   style={{
                     background: isWorkspaceVariant
-                      ? STUDIO_WORKSPACE_SURFACE_TOP
+                      ? STUDIO_WORKSPACE_SURFACE
                       : '#0d1b2c',
                     bottom: -1,
                     height: 1,
