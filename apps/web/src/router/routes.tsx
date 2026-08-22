@@ -9,7 +9,7 @@ import {
   PortfolioHoldingsIcon,
   SellManagementIcon,
   StockScreeningIcon,
-  StrategyGraphIcon,
+  StrategyManagementIcon,
   TTradeCycleIcon,
 } from '@/components/studio-workspace/StudioNavigationIcons';
 
@@ -202,7 +202,7 @@ export const appRoutes: AppRouteConfig[] = [
     preload: true,
     nav: {
       label: '策略管理',
-      icon: StrategyGraphIcon,
+      icon: StrategyManagementIcon,
       group: MAIN_GROUP,
       order: 50,
     },

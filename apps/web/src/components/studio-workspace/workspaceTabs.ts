@@ -13,7 +13,7 @@ import {
   PortfolioHoldingsIcon,
   SellManagementIcon,
   StockScreeningIcon,
-  StrategyGraphIcon,
+  StrategyManagementIcon,
 } from '@/components/studio-workspace/StudioNavigationIcons';
 import {
   findRoute,
@@ -135,7 +135,7 @@ function getTabIcon(pathname: string): LucideIcon {
   if (pathname === '/screening') return StockScreeningIcon;
   if (pathname.startsWith('/research')) return MarketResearchIcon;
   if (pathname.startsWith('/stock/')) return LineChart;
-  if (pathname.startsWith('/strategies')) return StrategyGraphIcon;
+  if (pathname.startsWith('/strategies')) return StrategyManagementIcon;
   if (
     [
       '/settings',

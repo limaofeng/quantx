@@ -69,6 +69,7 @@ const DEFAULT_WORKSPACE_PATH = '/';
 const MAX_PERSISTED_TABS = 12;
 const ASSISTANT_PANEL_ID = 'studio-ai-assistant-panel';
 const ASSISTANT_PANEL_STORAGE_SCOPE = 'studio-ai-assistant-panel';
+const STUDIO_NAVIGATION_ICON_STROKE_WIDTH = 1.75;
 const ASSISTANT_PANEL_SIZING = {
   defaultWidth: 400,
   maxWidth: 560,
@@ -240,7 +241,10 @@ function StudioWorkspaceHeader({
                     role="menuitem"
                     title={action.label}
                   >
-                    <Icon className="h-4 w-4 shrink-0 text-slate-500" />
+                    <Icon
+                      className="h-4 w-4 shrink-0 text-slate-500"
+                      strokeWidth={STUDIO_NAVIGATION_ICON_STROKE_WIDTH}
+                    />
                     <span className="truncate">
                       {action.shortLabel || action.label}
                     </span>
@@ -800,6 +804,7 @@ export function StudioWorkspace({
                   'h-3.5 w-3.5 shrink-0',
                   isActive ? 'text-blue-400' : 'text-slate-400'
                 )}
+                strokeWidth={STUDIO_NAVIGATION_ICON_STROKE_WIDTH}
               />
               <span
                 className={cn(

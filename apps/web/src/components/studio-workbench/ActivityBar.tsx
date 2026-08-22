@@ -6,6 +6,9 @@ import { STUDIO_CHROME_BACKGROUND } from './studioShellStyles';
 import { getStudioThemeStyles } from './themeStyles';
 import type { ActivityBarProps, StudioAction, StudioMode } from './types';
 
+const STUDIO_NAVIGATION_ICON_SIZE = 20;
+const STUDIO_NAVIGATION_ICON_STROKE_WIDTH = 1.75;
+
 export function ActivityBar({
   activeMode,
   environmentStatus,
@@ -72,7 +75,12 @@ export function ActivityBar({
             : undefined
         }
       >
-        <Icon size={isStudioVariant ? 21 : 18} strokeWidth={2} />
+        <Icon
+          size={isStudioVariant ? STUDIO_NAVIGATION_ICON_SIZE : 18}
+          strokeWidth={
+            isStudioVariant ? STUDIO_NAVIGATION_ICON_STROKE_WIDTH : 2
+          }
+        />
         {action.badge && (
           <span
             className={cn(
@@ -157,7 +165,12 @@ export function ActivityBar({
             : undefined
         }
       >
-        <Icon size={isStudioVariant ? 21 : 18} strokeWidth={2} />
+        <Icon
+          size={isStudioVariant ? STUDIO_NAVIGATION_ICON_SIZE : 18}
+          strokeWidth={
+            isStudioVariant ? STUDIO_NAVIGATION_ICON_STROKE_WIDTH : 2
+          }
+        />
         {isActive && (
           <span
             className={cn(

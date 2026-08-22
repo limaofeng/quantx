@@ -96,11 +96,15 @@ describe('ActivityBar', () => {
     );
     expect(screen.getByText('行情')).toBeVisible();
     expect(screen.getByText('设置')).toBeVisible();
+    const navigationIcon = screen
+      .getByRole('button', { name: '行情工作台' })
+      .querySelector('svg');
+    expect(navigationIcon).toHaveAttribute('width', '20');
+    expect(navigationIcon).toHaveAttribute('height', '20');
+    expect(navigationIcon).toHaveAttribute('stroke-width', '1.75');
     const environmentStatus = screen.getByTestId('studio-environment-status');
     expect(environmentStatus).toHaveTextContent('READY实盘');
-    expect(environmentStatus.firstElementChild).toHaveClass(
-      'text-emerald-300'
-    );
+    expect(environmentStatus.firstElementChild).toHaveClass('text-emerald-300');
     expect(environmentStatus.firstElementChild?.firstElementChild).toHaveClass(
       'bg-emerald-400'
     );
