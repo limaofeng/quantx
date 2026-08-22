@@ -99,6 +99,11 @@ describe('TabBar', () => {
     expect(fixedRegion).toHaveClass('shrink-0');
     expect(fixedRegion).not.toHaveClass('bg-[#07111f]');
     expect(scrollableRegion).toHaveClass('min-w-0', 'overflow-x-auto');
+    expect(scrollableRegion).toHaveStyle({
+      height: 'calc(100% + 1px)',
+      marginBottom: '-1px',
+      paddingBottom: '1px',
+    });
     expect(
       screen.queryByRole('button', { name: '关闭 标签 1' })
     ).not.toBeInTheDocument();
@@ -147,6 +152,11 @@ describe('TabBar', () => {
       'px-4'
     );
     expect(screen.getByRole('tablist', { name: '工作区标签' })).toHaveStyle({
+      height: 'calc(100% + 1px)',
+      marginBottom: '-1px',
+      paddingBottom: '1px',
+    });
+    expect(screen.getByTestId('studio-scrollable-tab-region')).toHaveStyle({
       height: 'calc(100% + 1px)',
       marginBottom: '-1px',
       paddingBottom: '1px',

@@ -262,6 +262,15 @@ export function TabBar<T extends StudioTab>({
                   : 'no-scrollbar flex h-full min-w-0 flex-1 items-end gap-0.5 overflow-x-auto overscroll-x-contain scroll-auto'
                 : 'contents'
             )}
+            style={
+              isWorkspaceVariant && !group.isFixed
+                ? {
+                    height: 'calc(100% + 1px)',
+                    marginBottom: -1,
+                    paddingBottom: 1,
+                  }
+                : undefined
+            }
             data-testid={
               isWorkspaceVariant
                 ? group.isFixed
