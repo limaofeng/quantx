@@ -8,7 +8,9 @@ import {
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
+  STUDIO_WORKSPACE_TAB_RADIUS,
   STUDIO_WORKSPACE_TAB_STYLE,
+  STUDIO_WORKSPACE_WEAK_BORDER,
 } from './studioShellStyles';
 import {
   StudioTabContextMenu,
@@ -17,6 +19,22 @@ import {
 } from './StudioTabContextMenu';
 import { getStudioThemeStyles } from './themeStyles';
 import type { StudioTab, StudioThemeName } from './types';
+
+const WORKSPACE_TAB_SHOULDER_SIZE = STUDIO_WORKSPACE_TAB_RADIUS + 1;
+const WORKSPACE_TAB_SHOULDER_KAPPA = 0.55228475;
+const workspaceTabShoulderFillControl = Number(
+  (WORKSPACE_TAB_SHOULDER_SIZE * WORKSPACE_TAB_SHOULDER_KAPPA).toFixed(2)
+);
+const workspaceTabShoulderStrokeRadius = WORKSPACE_TAB_SHOULDER_SIZE - 0.5;
+const workspaceTabShoulderStrokeControl = Number(
+  (workspaceTabShoulderStrokeRadius * WORKSPACE_TAB_SHOULDER_KAPPA).toFixed(2)
+);
+const WORKSPACE_TAB_SHOULDER_PATHS = {
+  leftFill: `M${WORKSPACE_TAB_SHOULDER_SIZE} 0 C${WORKSPACE_TAB_SHOULDER_SIZE} ${workspaceTabShoulderFillControl} ${workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE} 0 ${WORKSPACE_TAB_SHOULDER_SIZE} H${WORKSPACE_TAB_SHOULDER_SIZE} Z`,
+  leftStroke: `M${workspaceTabShoulderStrokeRadius} 0 C${workspaceTabShoulderStrokeRadius} ${workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeRadius} 0 ${workspaceTabShoulderStrokeRadius}`,
+  rightFill: `M0 0 C0 ${workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE - workspaceTabShoulderFillControl} ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE} H0 Z`,
+  rightStroke: `M0.5 0 C0.5 ${workspaceTabShoulderStrokeControl} ${WORKSPACE_TAB_SHOULDER_SIZE - workspaceTabShoulderStrokeControl} ${workspaceTabShoulderStrokeRadius} ${WORKSPACE_TAB_SHOULDER_SIZE} ${workspaceTabShoulderStrokeRadius}`,
+} as const;
 
 export interface TabBarProps<T extends StudioTab> {
   activeTabId: string | null;
@@ -62,7 +80,7 @@ export function TabBar<T extends StudioTab>({
       const activeTab = tabButtonRefs.current.get(activeTabId)?.parentElement;
       if (!tabList || !activeTab) return;
 
-      const padding = 8;
+      const padding = isWorkspaceVariant ? STUDIO_WORKSPACE_TAB_RADIUS + 4 : 8;
       const visibleStart = tabList.scrollLeft;
       const visibleEnd = visibleStart + tabList.clientWidth;
       const tabStart = activeTab.offsetLeft;
@@ -91,7 +109,7 @@ export function TabBar<T extends StudioTab>({
       resizeObserver?.disconnect();
       window.removeEventListener('resize', revealActiveTab);
     };
-  }, [activeTabId, tabs.length]);
+  }, [activeTabId, isWorkspaceVariant, tabs.length]);
 
   const handleContextMenuAction = useCallback(
     (action: StudioTabContextMenuAction, tabId: string) => {
@@ -345,6 +363,69 @@ export function TabBar<T extends StudioTab>({
                     <X size={13} />
                   </button>
                 </div>
+              )}
+
+              {isActive && isWorkspaceVariant && (
+                <>
+                  <svg
+                    aria-hidden="true"
+                    data-testid="studio-workspace-tab-shoulder-left"
+                    focusable="false"
+                    shapeRendering="geometricPrecision"
+                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                    style={{
+                      bottom: -1,
+                      display: 'block',
+                      height: WORKSPACE_TAB_SHOULDER_SIZE,
+                      left: -WORKSPACE_TAB_SHOULDER_SIZE,
+                      pointerEvents: 'none',
+                      position: 'absolute',
+                      width: WORKSPACE_TAB_SHOULDER_SIZE,
+                      zIndex: 11,
+                    }}
+                  >
+                    <path
+                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftFill}
+                      fill={STUDIO_WORKSPACE_SURFACE}
+                    />
+                    <path
+                      d={WORKSPACE_TAB_SHOULDER_PATHS.leftStroke}
+                      fill="none"
+                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                      strokeWidth="1"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                  <svg
+                    aria-hidden="true"
+                    data-testid="studio-workspace-tab-shoulder-right"
+                    focusable="false"
+                    shapeRendering="geometricPrecision"
+                    viewBox={`0 0 ${WORKSPACE_TAB_SHOULDER_SIZE} ${WORKSPACE_TAB_SHOULDER_SIZE}`}
+                    style={{
+                      bottom: -1,
+                      display: 'block',
+                      height: WORKSPACE_TAB_SHOULDER_SIZE,
+                      pointerEvents: 'none',
+                      position: 'absolute',
+                      right: -WORKSPACE_TAB_SHOULDER_SIZE,
+                      width: WORKSPACE_TAB_SHOULDER_SIZE,
+                      zIndex: 11,
+                    }}
+                  >
+                    <path
+                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightFill}
+                      fill={STUDIO_WORKSPACE_SURFACE}
+                    />
+                    <path
+                      d={WORKSPACE_TAB_SHOULDER_PATHS.rightStroke}
+                      fill="none"
+                      stroke={STUDIO_WORKSPACE_WEAK_BORDER}
+                      strokeWidth="1"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </svg>
+                </>
               )}
 
               {isActive && (

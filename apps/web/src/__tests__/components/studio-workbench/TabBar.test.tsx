@@ -157,12 +157,58 @@ describe('TabBar', () => {
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
       background: '#07111f',
     });
-    expect(
-      screen.queryByTestId('studio-workspace-tab-shoulder-left')
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId('studio-workspace-tab-shoulder-right')
-    ).not.toBeInTheDocument();
+    const leftShoulder = screen.getByTestId(
+      'studio-workspace-tab-shoulder-left'
+    );
+    const rightShoulder = screen.getByTestId(
+      'studio-workspace-tab-shoulder-right'
+    );
+    expect(leftShoulder).toHaveAttribute('viewBox', '0 0 9 9');
+    expect(leftShoulder).toHaveAttribute(
+      'shape-rendering',
+      'geometricPrecision'
+    );
+    expect(leftShoulder).toHaveStyle({
+      bottom: '-1px',
+      height: '9px',
+      left: '-9px',
+      pointerEvents: 'none',
+      width: '9px',
+      zIndex: 11,
+    });
+    expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
+      'd',
+      'M9 0 C9 4.97 4.97 9 0 9 H9 Z'
+    );
+    expect(leftShoulder.querySelectorAll('path')[0]).toHaveAttribute(
+      'fill',
+      '#07111f'
+    );
+    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'd',
+      'M8.5 0 C8.5 4.69 4.69 8.5 0 8.5'
+    );
+    expect(leftShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'stroke',
+      '#22364d'
+    );
+    expect(rightShoulder).toHaveAttribute('viewBox', '0 0 9 9');
+    expect(rightShoulder).toHaveStyle({
+      bottom: '-1px',
+      height: '9px',
+      pointerEvents: 'none',
+      right: '-9px',
+      width: '9px',
+      zIndex: 11,
+    });
+    expect(rightShoulder.querySelectorAll('path')[0]).toHaveAttribute(
+      'd',
+      'M0 0 C0 4.97 4.03 9 9 9 H0 Z'
+    );
+    expect(rightShoulder.querySelectorAll('path')[1]).toHaveAttribute(
+      'd',
+      'M0.5 0 C0.5 4.69 4.31 8.5 9 8.5'
+    );
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {
@@ -224,7 +270,7 @@ describe('TabBar', () => {
     fireEvent(window, new Event('resize'));
 
     await waitFor(() => {
-      expect(tabList.scrollLeft).toBe(466);
+      expect(tabList.scrollLeft).toBe(470);
     });
   });
 
