@@ -39,9 +39,9 @@ describe('TabBar', () => {
       screen.queryByTestId('studio-workspace-tab-connector')
     ).not.toBeInTheDocument();
     expect(firstTab).toHaveAttribute('title', '标签 1');
-    expect(screen.getByRole('tab', { name: '标签 2' }).parentElement).toHaveClass(
-      'hover:border-white/5'
-    );
+    expect(
+      screen.getByRole('tab', { name: '标签 2' }).parentElement
+    ).toHaveClass('hover:border-white/5');
     expect(firstTab).toHaveAttribute('aria-selected', 'true');
 
     fireEvent.keyDown(firstTab, { key: 'ArrowRight' });
@@ -89,12 +89,10 @@ describe('TabBar', () => {
       'bg-transparent'
     );
     expect(tabBar).toHaveStyle({ height: '100%' });
-    expect(
-      screen.getByRole('tablist', { name: '工作区标签' })
-    ).toHaveClass('px-4');
-    expect(
-      screen.getByRole('tablist', { name: '工作区标签' })
-    ).toHaveStyle({
+    expect(screen.getByRole('tablist', { name: '工作区标签' })).toHaveClass(
+      'px-4'
+    );
+    expect(screen.getByRole('tablist', { name: '工作区标签' })).toHaveStyle({
       height: 'calc(100% + 1px)',
       marginBottom: '-1px',
       paddingBottom: '1px',
@@ -124,36 +122,12 @@ describe('TabBar', () => {
     expect(screen.getByTestId('studio-workspace-tab-connector')).toHaveStyle({
       background: '#07111f',
     });
-    const leftShoulder = screen.getByTestId(
-      'studio-workspace-tab-shoulder-left'
-    );
-    const rightShoulder = screen.getByTestId(
-      'studio-workspace-tab-shoulder-right'
-    );
-    expect(leftShoulder).toHaveStyle({
-      background: '#040b15',
-      borderBottom: '1px solid #22364d',
-      borderBottomRightRadius: '12px',
-      borderRight: '1px solid #22364d',
-      bottom: '-1px',
-      boxShadow: '6px 6px 0 6px #07111f',
-      height: '13px',
-      left: '-12px',
-      width: '13px',
-      zIndex: 11,
-    });
-    expect(rightShoulder).toHaveStyle({
-      background: '#040b15',
-      borderBottom: '1px solid #22364d',
-      borderBottomLeftRadius: '12px',
-      borderLeft: '1px solid #22364d',
-      bottom: '-1px',
-      boxShadow: '-6px 6px 0 6px #07111f',
-      height: '13px',
-      right: '-12px',
-      width: '13px',
-      zIndex: 11,
-    });
+    expect(
+      screen.queryByTestId('studio-workspace-tab-shoulder-left')
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId('studio-workspace-tab-shoulder-right')
+    ).not.toBeInTheDocument();
   });
 
   it('keeps every tab in a horizontally scrollable strip', () => {

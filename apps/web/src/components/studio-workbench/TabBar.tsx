@@ -5,13 +5,10 @@ import type React from 'react';
 import { cn } from '@/utils/cn';
 
 import {
-  STUDIO_CHROME_BACKGROUND,
   STUDIO_HEADER_HEIGHT,
   STUDIO_WORKSPACE_ACTIVE_TAB_STYLE,
   STUDIO_WORKSPACE_SURFACE,
-  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
   STUDIO_WORKSPACE_TAB_STYLE,
-  STUDIO_WORKSPACE_WEAK_BORDER,
 } from './studioShellStyles';
 import {
   StudioTabContextMenu,
@@ -20,11 +17,6 @@ import {
 } from './StudioTabContextMenu';
 import { getStudioThemeStyles } from './themeStyles';
 import type { StudioTab, StudioThemeName } from './types';
-
-const WORKSPACE_TAB_SHOULDER_SIZE =
-  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS + 1;
-const WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET =
-  STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS / 2;
 
 export interface TabBarProps<T extends StudioTab> {
   activeTabId: string | null;
@@ -335,49 +327,6 @@ export function TabBar<T extends StudioTab>({
                     <X size={13} />
                   </button>
                 </div>
-              )}
-
-              {isActive && isWorkspaceVariant && (
-                <>
-                  <span
-                    aria-hidden="true"
-                    data-testid="studio-workspace-tab-shoulder-left"
-                    style={{
-                      background: STUDIO_CHROME_BACKGROUND,
-                      borderBottom: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
-                      borderBottomRightRadius:
-                        STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
-                      borderRight: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
-                      bottom: -1,
-                      boxShadow: `${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px 0 ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${STUDIO_WORKSPACE_SURFACE}`,
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
-                      left: -STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
-                      pointerEvents: 'none',
-                      position: 'absolute',
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
-                      zIndex: 11,
-                    }}
-                  />
-                  <span
-                    aria-hidden="true"
-                    data-testid="studio-workspace-tab-shoulder-right"
-                    style={{
-                      background: STUDIO_CHROME_BACKGROUND,
-                      borderBottom: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
-                      borderBottomLeftRadius:
-                        STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
-                      borderLeft: `1px solid ${STUDIO_WORKSPACE_WEAK_BORDER}`,
-                      bottom: -1,
-                      boxShadow: `${-WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px 0 ${WORKSPACE_TAB_SHOULDER_SHADOW_OFFSET}px ${STUDIO_WORKSPACE_SURFACE}`,
-                      height: WORKSPACE_TAB_SHOULDER_SIZE,
-                      pointerEvents: 'none',
-                      position: 'absolute',
-                      right: -STUDIO_WORKSPACE_TAB_SHOULDER_RADIUS,
-                      width: WORKSPACE_TAB_SHOULDER_SIZE,
-                      zIndex: 11,
-                    }}
-                  />
-                </>
               )}
 
               {isActive && (
