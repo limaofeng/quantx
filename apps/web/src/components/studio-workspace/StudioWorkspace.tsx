@@ -190,10 +190,7 @@ function StudioWorkspaceHeader({
           width: 'clamp(52px, calc(100vw - 716px), 172px)',
         }}
       >
-        <QuantXLogo />
-        <span className="hidden truncate text-[14px] font-semibold tracking-wide text-slate-100 md:block">
-          QuantX Studio
-        </span>
+        <QuantXLogo variant="studio" />
       </button>
 
       <div className="min-w-0 flex-1">{tabBar}</div>

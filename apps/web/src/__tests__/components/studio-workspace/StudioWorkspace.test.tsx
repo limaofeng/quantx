@@ -148,15 +148,16 @@ describe('StudioWorkspace', () => {
     const workspaceTabList = screen.getByRole('tablist', {
       name: '工作区标签',
     });
+    const brandButton = screen.getByRole('button', {
+      name: 'QuantX Studio · 打开行情工作台',
+    });
+    const brandMark = within(brandButton).getByTestId('studio-brand-logo');
+    expect(brandButton).not.toHaveClass('border-r');
+    expect(brandMark).toHaveAttribute('aria-hidden', 'true');
+    expect(brandMark).toHaveAttribute('viewBox', '0 0 32 32');
     expect(
-      screen.getByRole('button', {
-        name: 'QuantX Studio · 打开行情工作台',
-      })
-    ).not.toHaveClass('border-r');
-    expect(screen.getByTestId('studio-brand-logo')).toHaveAttribute(
-      'viewBox',
-      '0 0 32 32'
-    );
+      within(brandButton).getByTestId('studio-brand-wordmark')
+    ).toHaveTextContent('QuantX Studio');
     expect(
       screen.queryByRole('navigation', { name: '固定工作区' })
     ).not.toBeInTheDocument();
