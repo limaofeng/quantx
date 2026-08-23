@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dev Flow"
+  short_description: "Delegate implementation, review, tests, and commits"
+  default_prompt: "Use $dev-flow to implement this feature through delegated development and final verification."

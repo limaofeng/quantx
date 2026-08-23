@@ -1,4 +1,0 @@
-interface:
-  display_name: "Luna Dev"
-  short_description: "Luna builds, primary verifies, Spark commits"
-  default_prompt: "Use $luna-dev to implement this feature through delegated development and final verification."
