@@ -228,6 +228,13 @@ _register(
 )
 _register(
   "Mutation",
+  "strategy:read",
+  {"recordTTradeClientTelemetry"},
+  audiences=WEB_AND_NATIVE,
+  risk="NON_TRADING_WRITE",
+)
+_register(
+  "Mutation",
   "market:write",
   {"addHoliday", "bulkSaveHolidays", "deleteHoliday", "refreshStockDisclosures"},
   risk="NON_TRADING_WRITE",

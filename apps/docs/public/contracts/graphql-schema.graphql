@@ -3582,6 +3582,12 @@ type Mutation {
   """更新自选股排序"""
   reorderWatchlist(input: ReorderWatchlistInput!): WatchlistMutationResult!
 
+  """上报做 T V3 客户端固定低基数刷新遥测"""
+  recordTTradeClientTelemetry(input: TTradeClientTelemetryInput!): TTradeClientTelemetryResult!
+
+  """纯校验并规范化 V3 做 T 信号规则，不修改监控配置"""
+  previewTTradeSignalPolicy(input: TTradeSignalPolicyPreviewInput!): TTradeSignalPolicyPreviewResult!
+
   """确认已查看运行告警"""
   acknowledgeOperationalAlert(id: ID!): OperationalAlert!
 
