@@ -1,0 +1,2301 @@
+"""Fail-closed V3 T-trade replay acceptance and pressure-baseline runner.
+
+This module deliberately has no broker, QMT, PAPER, or LIVE entrypoint.  It
+only reads persisted account snapshots and historical Tick rows until an
+operator explicitly asks it to run an isolated ``BACKTEST`` after every held
+instrument/day has passed the same Tick-quality gate used by the Engine.
+
+The report has two independent verdicts:
+
+* the 20-trading-day causal-replay gate; and
+* an optional, explicitly non-gating, all-holdings pressure baseline.
+
+The latter is useful for freezing local SLO observations when the former is
+blocked by historical-data evidence.  It must never be represented as the
+20-day acceptance result.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+import platform
+import sys
+import time as wall_clock
+import uuid
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from datetime import time as clock_time
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo
+
+from quantx_domain.strategies.ashare_intraday_t_assistant import (
+  AshareIntradayTAssistantStrategy,
+)
+from quantx_domain.trading.t_trade_opportunity_engine import (
+  OPPORTUNITY_FEATURE_SCHEMA_VERSION,
+  OPPORTUNITY_POLICY_VERSION,
+)
+from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
+from quantx_infrastructure.database.connection import get_async_db
+from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
+from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+  T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+  T_TRADE_EVALUATION_KIND_MATERIAL,
+  TTradeInstrumentProfile,
+  TTradeOpportunityEvaluation,
+)
+from quantx_infrastructure.models.tick import Tick
+from quantx_infrastructure.repositories.daily_asset_snapshot_repository import (
+  DailyAssetPositionSnapshotRepository,
+  DailyAssetSnapshotRepository,
+)
+from quantx_infrastructure.repositories.instrument_repository import (
+  InstrumentRepository,
+)
+from quantx_infrastructure.services.historical_market_data_service import (
+  HistoricalMarketDataService,
+  HistoricalTickPaginationError,
+)
+from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
+from quantx_infrastructure.services.trading_time_service import TradingDateHelper
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from quantx_engine.strategy_executor import StrategyExecutor
+from quantx_engine.strategy_manager import StrategyManager
+
+DEFAULT_TRADING_DAYS = 20
+DEFAULT_AUDIT_CONCURRENCY = 4
+REPORT_SCHEMA_VERSION = 1
+PRESSURE_BASELINE_SCHEMA_VERSION = 1
+
+PERFORMANCE_REMEDIATION_MICROBENCHMARK = {
+  "status": "MICROBENCHMARK_NON_GATING",
+  "implementation": (
+    "packages/infrastructure/src/quantx_infrastructure/services/"
+    "t_trade_opportunity_runtime_service.py: batch already-closed diagnostic "
+    "windows in one owned session/atomic commit"
+  ),
+  "correctness_tests": [
+    "8 closed diagnostics preserve 8 rows with 1 session / 1 commit",
+    "batch failure rolls back and requeues every closed window (no partial write)",
+  ],
+  "batch_transaction_microtest": {
+    "closed_diagnostics": 8,
+    "preserved_rows": 8,
+    "owned_sessions": 1,
+    "commits": 1,
+  },
+  "sqlite_in_memory_microbenchmark": {
+    "workload": "320 rows / 8 streams",
+    "before": {"commits": 320, "elapsed_ms": 1016.579},
+    "after": {"commits": 40, "elapsed_ms": 551.746},
+    "commit_reduction_pct": 87.5,
+    "elapsed_reduction_pct": 45.725,
+  },
+  "focused_validation": "43 passed focused service + V3 Engine runtime/observability tests; ruff passed",
+  "full_9600_replayed_after_patch": False,
+  "slo_status": "BLOCKED",
+  "scope_limit": (
+    "isolated SQLite persistence microbenchmark only; no new full Engine "
+    "pressure run was performed after the patch, so it cannot pass/freeze SLO"
+  ),
+}
+
+
+class AcceptanceBlockedError(RuntimeError):
+  """Raised when an operator asks to run a gate that audit evidence blocks."""
+
+  def __init__(self, message: str, *, evidence: Optional[Mapping[str, Any]] = None):
+    super().__init__(message)
+    self.evidence = dict(evidence or {})
+
+
+def _digest(value: str) -> str:
+  return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _json_default(value: Any) -> Any:
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  if isinstance(value, Path):
+    return str(value)
+  if isinstance(value, set):
+    return sorted(value)
+  raise TypeError(f"not JSON serializable: {type(value).__name__}")
+
+
+def _stable_hash(value: Mapping[str, Any]) -> str:
+  encoded = json.dumps(
+    value,
+    sort_keys=True,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    default=_json_default,
+  ).encode("utf-8")
+  return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_object(value: Any, *, context: str) -> dict[str, Any]:
+  """Normalize a JSON/JSONB value while rejecting malformed run evidence."""
+
+  if value is None:
+    return {}
+  parsed = json.loads(value) if isinstance(value, str) else value
+  if not isinstance(parsed, Mapping):
+    raise RuntimeError(f"{context}_NOT_JSON_OBJECT")
+  return dict(parsed)
+
+
+def _value_as_str(value: Any) -> str:
+  return str(value or "").strip()
+
+
+@dataclass(frozen=True)
+class HeldInstrument:
+  """One aggregated, actual held instrument at a D-1 account snapshot."""
+
+  instrument_code: str
+  volume: int
+  available_volume: int
+  replayable: bool
+  reason: str = ""
+  last_price: float = 0.0
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "instrument_code": self.instrument_code,
+      "volume": self.volume,
+      "available_volume": self.available_volume,
+      "replayable": self.replayable,
+      "reason": self.reason or None,
+    }
+
+
+@dataclass(frozen=True)
+class SnapshotPortfolio:
+  """An immutable account D-1 snapshot and every positive holding in it."""
+
+  account_id: str
+  snapshot_id: str
+  snapshot_date: date
+  source: str
+  data_quality: str
+  holdings: tuple[HeldInstrument, ...]
+
+  @property
+  def instrument_codes(self) -> tuple[str, ...]:
+    return tuple(item.instrument_code for item in self.holdings)
+
+  @property
+  def non_replayable(self) -> tuple[HeldInstrument, ...]:
+    return tuple(item for item in self.holdings if not item.replayable)
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "account_sha256_16": _digest(self.account_id),
+      "snapshot_sha256_16": _digest(self.snapshot_id),
+      "snapshot_date": self.snapshot_date.isoformat(),
+      "source": self.source or None,
+      "data_quality": self.data_quality or None,
+      "holding_count": len(self.holdings),
+      "holdings": [item.to_dict() for item in self.holdings],
+    }
+
+
+@dataclass(frozen=True)
+class ReplayWindow:
+  """The next up-to-N real trading dates after one D-1 snapshot."""
+
+  snapshot: SnapshotPortfolio
+  trading_dates: tuple[date, ...]
+  requested_trading_days: int = DEFAULT_TRADING_DAYS
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "snapshot": self.snapshot.to_dict(),
+      "requested_trading_days": self.requested_trading_days,
+      "trading_dates": [item.isoformat() for item in self.trading_dates],
+    }
+
+
+@dataclass(frozen=True)
+class TickDayInspection:
+  """One Engine-equivalent strict Tick quality inspection."""
+
+  instrument_code: str
+  trading_date: date
+  complete: bool
+  classification: str
+  reason_codes: tuple[str, ...]
+  statistics: Mapping[str, Any]
+  message: str = ""
+
+  @classmethod
+  def from_engine_result(
+    cls,
+    *,
+    instrument_code: str,
+    trading_date: date,
+    result: Mapping[str, Any],
+  ) -> "TickDayInspection":
+    return cls(
+      instrument_code=instrument_code,
+      trading_date=trading_date,
+      complete=bool(result.get("complete")),
+      classification=_value_as_str(result.get("classification")) or "UNAVAILABLE",
+      reason_codes=tuple(str(item) for item in result.get("reason_codes") or []),
+      statistics=dict(result.get("statistics") or {}),
+      message=_value_as_str(result.get("message")),
+    )
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "instrument_code": self.instrument_code,
+      "trade_date": self.trading_date.isoformat(),
+      "complete": self.complete,
+      "classification": self.classification,
+      "reason_codes": list(self.reason_codes),
+      "statistics": dict(self.statistics),
+      "message": self.message or None,
+    }
+
+
+@dataclass(frozen=True)
+class WindowAudit:
+  """Coverage evidence for every held stock/day in one proposed replay window."""
+
+  window: ReplayWindow
+  inspections: Mapping[tuple[str, date], TickDayInspection]
+
+  @property
+  def expected_pair_count(self) -> int:
+    return len(self.window.snapshot.holdings) * len(self.window.trading_dates)
+
+  @property
+  def completed_pair_count(self) -> int:
+    return sum(item.complete for item in self.inspections.values())
+
+  @property
+  def full_shared_dates(self) -> tuple[date, ...]:
+    codes = self.window.snapshot.instrument_codes
+    return tuple(
+      day
+      for day in self.window.trading_dates
+      if codes
+      and all(self.inspections[(code, day)].complete for code in codes)
+    )
+
+  @property
+  def contiguous_shared_prefix_dates(self) -> tuple[date, ...]:
+    full_dates = set(self.full_shared_dates)
+    prefix: list[date] = []
+    for day in self.window.trading_dates:
+      if day not in full_dates:
+        break
+      prefix.append(day)
+    return tuple(prefix)
+
+  @property
+  def missing(self) -> tuple[TickDayInspection, ...]:
+    return tuple(
+      self.inspections[(code, day)]
+      for day in self.window.trading_dates
+      for code in self.window.snapshot.instrument_codes
+      if not self.inspections[(code, day)].complete
+    )
+
+  @property
+  def coverage_complete(self) -> bool:
+    return (
+      bool(self.window.snapshot.holdings)
+      and len(self.window.trading_dates) == self.window.requested_trading_days
+      and self.completed_pair_count == self.expected_pair_count
+    )
+
+  @property
+  def replayable_holdings_complete(self) -> bool:
+    return not self.window.snapshot.non_replayable
+
+  def blockers(self, *, abnormal_dates: Iterable[date] = ()) -> list[str]:
+    blockers: list[str] = []
+    if not self.window.snapshot.holdings:
+      blockers.append("NO_POSITIVE_HOLDINGS")
+    if len(self.window.trading_dates) != self.window.requested_trading_days:
+      blockers.append("TRADING_CALENDAR_WINDOW_INCOMPLETE")
+    if self.window.snapshot.non_replayable:
+      blockers.append("HELD_INSTRUMENT_NOT_REPLAYABLE")
+    if self.completed_pair_count != self.expected_pair_count:
+      blockers.append("ALL_HOLDINGS_TICK_COVERAGE_INCOMPLETE")
+    declared_abnormal_dates = set(abnormal_dates)
+    if not declared_abnormal_dates:
+      blockers.append("ABNORMAL_DAY_EVIDENCE_NOT_DECLARED")
+    elif not declared_abnormal_dates.intersection(self.window.trading_dates):
+      blockers.append("DECLARED_ABNORMAL_DAY_OUTSIDE_WINDOW")
+    return blockers
+
+  def to_dict(self, *, abnormal_dates: Iterable[date] = ()) -> dict[str, Any]:
+    reason_counts = Counter(
+      reason for item in self.missing for reason in item.reason_codes
+    )
+    return {
+      **self.window.to_dict(),
+      "coverage": {
+        "expected_instrument_days": self.expected_pair_count,
+        "complete_instrument_days": self.completed_pair_count,
+        "coverage_ratio": (
+          self.completed_pair_count / self.expected_pair_count
+          if self.expected_pair_count
+          else None
+        ),
+        "full_shared_dates": [item.isoformat() for item in self.full_shared_dates],
+        "contiguous_shared_prefix_dates": [
+          item.isoformat() for item in self.contiguous_shared_prefix_dates
+        ],
+        "reason_counts": dict(sorted(reason_counts.items())),
+      },
+      "formal_gate_blockers": self.blockers(abnormal_dates=abnormal_dates),
+      "missing_instrument_days": [item.to_dict() for item in self.missing],
+    }
+
+
+@dataclass(frozen=True)
+class SourceIdentityAudit:
+  """Evidence that every selected Tick can be paged by strict source identity."""
+
+  passed: bool
+  records_read: int
+  pages_read: int
+  per_instrument_day: Mapping[str, Mapping[str, Any]]
+  failure: Optional[Mapping[str, Any]] = None
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "passed": self.passed,
+      "records_read": self.records_read,
+      "pages_read": self.pages_read,
+      "pagination": "STRICT_SOURCE_IDENTITY_KEYSET",
+      "engine_global_order_key": (
+        "(continuity_generation, source_time_ms, tick_ordinal, "
+        "event_type, instrument_code, period)"
+      ),
+      "per_instrument_day": {
+        key: dict(value) for key, value in sorted(self.per_instrument_day.items())
+      },
+      "failure": dict(self.failure) if self.failure else None,
+    }
+
+
+@dataclass(frozen=True)
+class SyntheticPressureFixture:
+  """Deterministic, non-historical Tick load for a machine SLO baseline.
+
+  The fixture borrows only the actual D-1 holdings universe.  Its prices,
+  source identities, and market timestamps are generated and therefore cannot
+  be interpreted as market-history evidence.
+  """
+
+  snapshot_date: date
+  trading_dates: tuple[date, ...]
+  instrument_codes: tuple[str, ...]
+  ticks_per_instrument_day: int
+  fixture_sha256: str
+  ticks_by_instrument: Mapping[str, tuple[Tick, ...]]
+
+  @property
+  def tick_count(self) -> int:
+    return sum(len(items) for items in self.ticks_by_instrument.values())
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "kind": "SYNTHETIC_NON_HISTORICAL",
+      "schema_version": 1,
+      "fixture_sha256": self.fixture_sha256,
+      "snapshot_date": self.snapshot_date.isoformat(),
+      "trading_dates": [item.isoformat() for item in self.trading_dates],
+      "held_instruments": list(self.instrument_codes),
+      "ticks_per_instrument_day": self.ticks_per_instrument_day,
+      "tick_count": self.tick_count,
+      "market_time_policy": (
+        "Shanghai continuous sessions only: 09:30-11:30 and 13:00-15:00"
+      ),
+      "source_identity_policy": (
+        "explicit (continuity_generation=1, source_time_ms, tick_ordinal) "
+        "with globally deterministic ordinal per instrument"
+      ),
+      "not_historical_market_data": True,
+    }
+
+
+def _synthetic_session_timestamps(
+  trading_date: date,
+  count: int,
+) -> list[datetime]:
+  if count <= 0:
+    return []
+  morning_count = count // 2
+  afternoon_count = count - morning_count
+  sessions = (
+    (clock_time(9, 30), clock_time(11, 29, 59), morning_count),
+    (clock_time(13, 0), clock_time(14, 59, 59), afternoon_count),
+  )
+  timestamps: list[datetime] = []
+  shanghai = ZoneInfo("Asia/Shanghai")
+  for start, end, session_count in sessions:
+    if session_count <= 0:
+      continue
+    lower = datetime.combine(trading_date, start, tzinfo=shanghai)
+    upper = datetime.combine(trading_date, end, tzinfo=shanghai)
+    if session_count == 1:
+      timestamps.append(lower)
+      continue
+    span_seconds = int((upper - lower).total_seconds())
+    timestamps.extend(
+      lower + timedelta(seconds=round(index * span_seconds / (session_count - 1)))
+      for index in range(session_count)
+    )
+  return timestamps
+
+
+def build_synthetic_pressure_fixture(
+  audit: WindowAudit,
+  trading_dates: Sequence[date],
+  *,
+  ticks_per_instrument_day: int = 600,
+) -> SyntheticPressureFixture:
+  """Create explicit causal identities on legal intraday timestamps.
+
+  This function is intentionally deterministic.  Given the same D-1 holdings,
+  trading dates, and sample size it emits byte-for-byte equivalent identity and
+  price fields, then records a fixture hash in the report.
+  """
+
+  if ticks_per_instrument_day < 2:
+    raise ValueError("ticks_per_instrument_day must be at least 2")
+  selected_dates = tuple(trading_dates)
+  if not selected_dates:
+    raise AcceptanceBlockedError("SYNTHETIC_PRESSURE_NO_TRADING_DATES")
+  held = audit.window.snapshot.holdings
+  if not held:
+    raise AcceptanceBlockedError("SYNTHETIC_PRESSURE_NO_HELD_INSTRUMENTS")
+  fixture_hash = hashlib.sha256()
+  fixture_hash.update(b"quantx-v3-synthetic-pressure-v1\n")
+  fixture_hash.update(audit.window.snapshot.snapshot_date.isoformat().encode("ascii"))
+  fixture_hash.update(b"\n")
+  fixture_hash.update(
+    ",".join(item.isoformat() for item in selected_dates).encode("ascii")
+  )
+  fixture_hash.update(f"\n{ticks_per_instrument_day}\n".encode("ascii"))
+  ticks_by_instrument: dict[str, list[Tick]] = {
+    item.instrument_code: [] for item in held
+  }
+  stream_sequence = 0
+  for trading_date in selected_dates:
+    timestamps = _synthetic_session_timestamps(
+      trading_date, ticks_per_instrument_day
+    )
+    for point_index, timestamp in enumerate(timestamps):
+      source_time_ms = int(timestamp.timestamp() * 1000)
+      for instrument_index, item in enumerate(held):
+        # The deterministic movement remains strictly inside the supplied
+        # synthetic price limits and has no claim to forecast or recreate a
+        # market path.
+        base_price = item.last_price if item.last_price > 0 else 10.0 + instrument_index
+        movement = ((point_index % 17) - 8) * 0.00025
+        price = round(max(0.01, base_price * (1.0 + movement)), 4)
+        tick = Tick(
+          stock_code=item.instrument_code,
+          period="tick",
+          time=timestamp,
+          last_price=price,
+          open=round(base_price, 4),
+          high=round(max(base_price, price) * 1.0005, 4),
+          low=round(min(base_price, price) * 0.9995, 4),
+          last_close=round(base_price, 4),
+          amount=round(price * (point_index + 1) * 100, 4),
+          volume=float((point_index + 1) * 100),
+          pvolume=float((point_index + 1) * 100),
+          tickvol=100.0,
+          stock_status=0,
+          open_int=0,
+          last_settlement_price=0.0,
+          settlement_price=0.0,
+          transaction_num=stream_sequence + 1,
+          price_tick=0.01,
+          up_stop_price=round(base_price * 1.1, 4),
+          down_stop_price=round(base_price * 0.9, 4),
+          ask_price=[round(price + 0.01 * (level + 1), 4) for level in range(5)],
+          bid_price=[round(max(0.01, price - 0.01 * (level + 1)), 4) for level in range(5)],
+          ask_vol=[1_000.0] * 5,
+          bid_vol=[1_000.0] * 5,
+          source_time_ms=source_time_ms,
+          tick_ordinal=instrument_index,
+          continuity_generation=1,
+          market_stream_id="v3-synthetic-pressure-v1",
+          market_stream_sequence=stream_sequence,
+          market_stream_reset=False,
+        )
+        ticks_by_instrument[item.instrument_code].append(tick)
+        fixture_hash.update(
+          (
+            f"{item.instrument_code}|{timestamp.isoformat()}|{source_time_ms}|"
+            f"{instrument_index}|{price:.4f}|{stream_sequence}\n"
+          ).encode("utf-8")
+        )
+        stream_sequence += 1
+  return SyntheticPressureFixture(
+    snapshot_date=audit.window.snapshot.snapshot_date,
+    trading_dates=selected_dates,
+    instrument_codes=tuple(item.instrument_code for item in held),
+    ticks_per_instrument_day=ticks_per_instrument_day,
+    fixture_sha256=fixture_hash.hexdigest(),
+    ticks_by_instrument={
+      code: tuple(items) for code, items in ticks_by_instrument.items()
+    },
+  )
+
+
+@dataclass
+class LatencyAccumulator:
+  """Bounded exact latency recorder; reports incomplete precision if capped."""
+
+  max_samples: int = 2_000_000
+  values_ns: list[int] = field(default_factory=list)
+  dropped_samples: int = 0
+
+  def observe(self, elapsed_ns: int) -> None:
+    if len(self.values_ns) < self.max_samples:
+      self.values_ns.append(max(0, int(elapsed_ns)))
+    else:
+      self.dropped_samples += 1
+
+  @staticmethod
+  def _percentile(values: Sequence[int], quantile: float) -> Optional[float]:
+    if not values:
+      return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+      return float(ordered[0])
+    index = (len(ordered) - 1) * quantile
+    lower = int(index)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = index - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+  def to_dict(self) -> dict[str, Any]:
+    def milliseconds(quantile: float) -> Optional[float]:
+      value = self._percentile(self.values_ns, quantile)
+      return round(value / 1_000_000, 6) if value is not None else None
+
+    return {
+      "sample_count": len(self.values_ns),
+      "dropped_samples": self.dropped_samples,
+      "quantiles_exact": self.dropped_samples == 0,
+      "unit": "milliseconds",
+      "p50": milliseconds(0.50),
+      "p95": milliseconds(0.95),
+      "p99": milliseconds(0.99),
+      "max": (
+        round(max(self.values_ns) / 1_000_000, 6) if self.values_ns else None
+      ),
+    }
+
+
+@dataclass
+class DatabaseWriteCounters:
+  """Session-level write activity observed only inside the benchmark process."""
+
+  commits: int = 0
+  flushes: int = 0
+  dml_executes: int = 0
+
+  def to_dict(self) -> dict[str, int]:
+    return {
+      "commit_calls": self.commits,
+      "flush_calls": self.flushes,
+      "dml_execute_calls": self.dml_executes,
+    }
+
+
+class BenchmarkInstrumentation:
+  """Temporarily collect offline BACKTEST timings without changing Engine code."""
+
+  def __init__(self) -> None:
+    self.engine_tick = LatencyAccumulator()
+    self.strategy_evaluation = LatencyAccumulator()
+    self.state_checkpoint = LatencyAccumulator()
+    self.db_writes = DatabaseWriteCounters()
+    self._originals: dict[str, Any] = {}
+
+  async def __aenter__(self) -> "BenchmarkInstrumentation":
+    self._originals["process_tick"] = StrategyExecutor._process_tick
+    self._originals["strategy_step"] = AshareIntradayTAssistantStrategy.step
+    self._originals["checkpoint"] = RuntimeStateManager.checkpoint_strategy_state_changes
+    self._originals["commit"] = AsyncSession.commit
+    self._originals["flush"] = AsyncSession.flush
+    self._originals["execute"] = AsyncSession.execute
+
+    original_process_tick = self._originals["process_tick"]
+    original_strategy_step = self._originals["strategy_step"]
+    original_checkpoint = self._originals["checkpoint"]
+    original_commit = self._originals["commit"]
+    original_flush = self._originals["flush"]
+    original_execute = self._originals["execute"]
+
+    async def process_tick_wrapper(executor: Any, runtime: Any, tick: Any) -> Any:
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_process_tick(executor, runtime, tick)
+      finally:
+        self.engine_tick.observe(wall_clock.perf_counter_ns() - started)
+
+    async def strategy_step_wrapper(strategy: Any, strategy_input: Any) -> Any:
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_strategy_step(strategy, strategy_input)
+      finally:
+        self.strategy_evaluation.observe(wall_clock.perf_counter_ns() - started)
+
+    async def checkpoint_wrapper(state: Any, *args: Any, **kwargs: Any) -> Any:
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_checkpoint(state, *args, **kwargs)
+      finally:
+        self.state_checkpoint.observe(wall_clock.perf_counter_ns() - started)
+
+    async def commit_wrapper(session: Any, *args: Any, **kwargs: Any) -> Any:
+      self.db_writes.commits += 1
+      return await original_commit(session, *args, **kwargs)
+
+    async def flush_wrapper(session: Any, *args: Any, **kwargs: Any) -> Any:
+      self.db_writes.flushes += 1
+      return await original_flush(session, *args, **kwargs)
+
+    async def execute_wrapper(session: Any, statement: Any, *args: Any, **kwargs: Any) -> Any:
+      is_dml = bool(getattr(statement, "is_dml", False))
+      if is_dml:
+        self.db_writes.dml_executes += 1
+      return await original_execute(session, statement, *args, **kwargs)
+
+    StrategyExecutor._process_tick = process_tick_wrapper
+    AshareIntradayTAssistantStrategy.step = strategy_step_wrapper
+    RuntimeStateManager.checkpoint_strategy_state_changes = checkpoint_wrapper
+    AsyncSession.commit = commit_wrapper
+    AsyncSession.flush = flush_wrapper
+    AsyncSession.execute = execute_wrapper
+    return self
+
+  async def __aexit__(self, *_: Any) -> None:
+    StrategyExecutor._process_tick = self._originals["process_tick"]
+    AshareIntradayTAssistantStrategy.step = self._originals["strategy_step"]
+    RuntimeStateManager.checkpoint_strategy_state_changes = self._originals[
+      "checkpoint"
+    ]
+    AsyncSession.commit = self._originals["commit"]
+    AsyncSession.flush = self._originals["flush"]
+    AsyncSession.execute = self._originals["execute"]
+
+
+async def load_snapshot_portfolios(
+  *,
+  account_id: Optional[str] = None,
+) -> list[SnapshotPortfolio]:
+  """Load every persisted ACCOUNT D-1 snapshot for one unambiguous account.
+
+  We intentionally retain non-replayable holdings in the audit instead of
+  silently copying ``TTradeReplayService``'s historical skip list.  A pressure
+  baseline may only run when that snapshot has no such holdings.
+  """
+
+  async for db in get_async_db():
+    snapshot_repo = DailyAssetSnapshotRepository(db)
+    position_repo = DailyAssetPositionSnapshotRepository(db)
+    snapshots = await snapshot_repo.find_range(scope_type="ACCOUNT", limit=2_000)
+    accounts = sorted(
+      {
+        _value_as_str(item.account_id)
+        for item in snapshots
+        if _value_as_str(item.account_id)
+      }
+    )
+    selected_account = _value_as_str(account_id)
+    if not selected_account:
+      if len(accounts) != 1:
+        raise AcceptanceBlockedError(
+          "ACCOUNT_ID_AMBIGUOUS: specify --account-id when ACCOUNT snapshots "
+          f"belong to {len(accounts)} accounts"
+        )
+      selected_account = accounts[0]
+    if selected_account not in accounts:
+      raise AcceptanceBlockedError("ACCOUNT_SNAPSHOTS_NOT_FOUND")
+
+    selected = [
+      item
+      for item in snapshots
+      if _value_as_str(item.account_id) == selected_account
+      and _value_as_str(item.scope_type).upper() == "ACCOUNT"
+    ]
+    positions_by_snapshot: dict[str, list[dict[str, Any]]] = {}
+    instrument_codes: set[str] = set()
+    for snapshot in selected:
+      positions = TTradeReplayService._aggregate_snapshot_positions(
+        await position_repo.find_by_snapshot(snapshot.id)
+      )
+      positions_by_snapshot[snapshot.id] = positions
+      instrument_codes.update(
+        _value_as_str(item.get("stock_code")).upper()
+        for item in positions
+        if _value_as_str(item.get("stock_code"))
+      )
+
+    references = {
+      _value_as_str(item.id).upper(): item
+      for item in await InstrumentRepository(db).find_by_ids(sorted(instrument_codes))
+    }
+    portfolios: list[SnapshotPortfolio] = []
+    for snapshot in sorted(selected, key=lambda item: (item.trade_date, item.id)):
+      held: list[HeldInstrument] = []
+      for position in positions_by_snapshot[snapshot.id]:
+        code = _value_as_str(position.get("stock_code")).upper()
+        if not code:
+          continue
+        volume = max(0, int(position.get("volume", 0) or 0))
+        available_volume = min(
+          volume,
+          max(0, int(position.get("available_volume", 0) or 0)),
+        )
+        if volume <= 0:
+          continue
+        reference = references.get(code)
+        instrument_name = _value_as_str(
+          position.get("instrument_name") or getattr(reference, "name", "")
+        )
+        lifecycle_complete = bool(
+          reference is not None
+          and getattr(reference, "open_date", None) is not None
+          and getattr(reference, "expire_date", None) is not None
+          and instrument_name
+        )
+        if volume < 100 or available_volume < 100:
+          reason = "YESTERDAY_AVAILABLE_VOLUME_LT_ONE_LOT"
+        elif not lifecycle_complete:
+          reason = "INSTRUMENT_LIFECYCLE_REFERENCE_INCOMPLETE"
+        else:
+          reason = ""
+        held.append(
+          HeldInstrument(
+            instrument_code=code,
+          volume=volume,
+          available_volume=available_volume,
+          replayable=not reason,
+          reason=reason,
+          last_price=max(0.0, float(position.get("last_price", 0.0) or 0.0)),
+        )
+        )
+      portfolios.append(
+        SnapshotPortfolio(
+          account_id=selected_account,
+          snapshot_id=str(snapshot.id),
+          snapshot_date=snapshot.trade_date,
+          source=_value_as_str(snapshot.source),
+          data_quality=_value_as_str(snapshot.data_quality),
+          holdings=tuple(sorted(held, key=lambda item: item.instrument_code)),
+        )
+      )
+    return portfolios
+  raise AcceptanceBlockedError("DATABASE_SESSION_UNAVAILABLE")
+
+
+async def build_replay_windows(
+  snapshots: Sequence[SnapshotPortfolio],
+  *,
+  requested_trading_days: int = DEFAULT_TRADING_DAYS,
+) -> list[ReplayWindow]:
+  """Enumerate each D-1 snapshot's next up-to-N actual SH trading dates."""
+
+  if requested_trading_days <= 0:
+    raise ValueError("requested_trading_days must be positive")
+  if not snapshots:
+    return []
+  # 90 calendar days handles a normal 20-trading-day span plus Spring/Golden
+  # Week closures while keeping the historical calendar lookup bounded.
+  start = min(item.snapshot_date for item in snapshots) + timedelta(days=1)
+  end = max(item.snapshot_date for item in snapshots) + timedelta(days=90)
+  calendar = await TradingDateHelper().get_trading_calendar(
+    market="SH", start_date=start, end_date=end
+  )
+  windows: list[ReplayWindow] = []
+  for snapshot in snapshots:
+    future_dates = tuple(
+      item for item in calendar if item > snapshot.snapshot_date
+    )[:requested_trading_days]
+    windows.append(
+      ReplayWindow(
+        snapshot=snapshot,
+        trading_dates=future_dates,
+        requested_trading_days=requested_trading_days,
+      )
+    )
+  return windows
+
+
+async def audit_tick_coverage(
+  windows: Sequence[ReplayWindow],
+  *,
+  max_concurrency: int = DEFAULT_AUDIT_CONCURRENCY,
+) -> list[WindowAudit]:
+  """Run the Engine's strict Tick completeness check for every unique pair."""
+
+  if max_concurrency <= 0:
+    raise ValueError("max_concurrency must be positive")
+  pairs = sorted(
+    {
+      (code, trading_date)
+      for window in windows
+      for code in window.snapshot.instrument_codes
+      for trading_date in window.trading_dates
+    },
+    key=lambda item: (item[1], item[0]),
+  )
+  if not pairs:
+    return [WindowAudit(window=window, inspections={}) for window in windows]
+  manager = StrategyManager()
+  market_data = HistoricalMarketDataService()
+  semaphore = asyncio.Semaphore(max_concurrency)
+
+  async def inspect_pair(
+    code: str,
+    trading_date: date,
+  ) -> tuple[tuple[str, date], TickDayInspection]:
+    async with semaphore:
+      raw = await asyncio.to_thread(
+        manager._inspect_t_trade_replay_tick_day,
+        market_data,
+        code,
+        trading_date,
+      )
+    return (
+      (code, trading_date),
+      TickDayInspection.from_engine_result(
+        instrument_code=code,
+        trading_date=trading_date,
+        result=raw,
+      ),
+    )
+
+  inspected = await asyncio.gather(*(inspect_pair(*pair) for pair in pairs))
+  inspection_by_pair = dict(inspected)
+  return [
+    WindowAudit(
+      window=window,
+      inspections={
+        (code, trading_date): inspection_by_pair[(code, trading_date)]
+        for code in window.snapshot.instrument_codes
+        for trading_date in window.trading_dates
+      },
+    )
+    for window in windows
+  ]
+
+
+def select_formal_window(
+  audits: Sequence[WindowAudit],
+  *,
+  abnormal_dates: Iterable[date] = (),
+) -> Optional[WindowAudit]:
+  """Choose only a completely covered, all-held-instrument 20-day window."""
+
+  declared_abnormal = set(abnormal_dates)
+  eligible = [
+    audit
+    for audit in audits
+    if not audit.blockers(abnormal_dates=declared_abnormal)
+  ]
+  if not eligible:
+    return None
+  return max(
+    eligible,
+    key=lambda item: (
+      item.window.snapshot.snapshot_date,
+      len(item.window.snapshot.holdings),
+    ),
+  )
+
+
+def select_pressure_window(
+  audits: Sequence[WindowAudit],
+  *,
+  snapshot_date: date,
+) -> tuple[WindowAudit, tuple[date, ...]]:
+  """Choose the contiguous shared-complete prefix for one explicit D-1 date."""
+
+  selected = next(
+    (
+      audit
+      for audit in audits
+      if audit.window.snapshot.snapshot_date == snapshot_date
+    ),
+    None,
+  )
+  if selected is None:
+    raise AcceptanceBlockedError("PRESSURE_SNAPSHOT_NOT_FOUND")
+  if selected.window.snapshot.non_replayable:
+    raise AcceptanceBlockedError("PRESSURE_HELD_INSTRUMENT_NOT_REPLAYABLE")
+  prefix = selected.contiguous_shared_prefix_dates
+  if not prefix:
+    raise AcceptanceBlockedError("PRESSURE_NO_CONTIGUOUS_ALL_HOLDINGS_TICK_PREFIX")
+  return selected, prefix
+
+
+async def audit_source_identity(
+  audit: WindowAudit,
+  trading_dates: Sequence[date],
+) -> SourceIdentityAudit:
+  """Fail closed unless every selected day is fully keyset-paginatable.
+
+  The Engine owns the actual global merge.  This preflight proves that its
+  input rows have immutable source identities and that no offset/page limit is
+  being mistaken for end-of-history.
+  """
+
+  market_data = HistoricalMarketDataService()
+  records_read = 0
+  pages_read = 0
+  details: dict[str, dict[str, Any]] = {}
+  failures: list[dict[str, Any]] = []
+  for trading_date in trading_dates:
+    for code in audit.window.snapshot.instrument_codes:
+      key = f"{trading_date.isoformat()}:{code}"
+      day_records = 0
+      day_pages = 0
+      try:
+        async for page in market_data.iter_tick_pages(
+          stock_code=code,
+          start_time=datetime.combine(trading_date, clock_time(9, 25)),
+          end_time=datetime.combine(trading_date, clock_time(15, 5)),
+        ):
+          day_pages += 1
+          day_records += len(page)
+        details[key] = {
+          "passed": True,
+          "records": day_records,
+          "pages": day_pages,
+        }
+        records_read += day_records
+        pages_read += day_pages
+      except (HistoricalTickPaginationError, ValueError, RuntimeError) as exc:
+        evidence = {
+          "error_type": type(exc).__name__,
+          "message": str(exc),
+        }
+        details[key] = {
+          "passed": False,
+          "records": day_records,
+          "pages": day_pages,
+          "failure": evidence,
+        }
+        failures.append({"instrument_day": key, **evidence})
+  if failures:
+    return SourceIdentityAudit(
+      passed=False,
+      records_read=records_read,
+      pages_read=pages_read,
+      per_instrument_day=details,
+      failure={"failures": failures},
+    )
+  return SourceIdentityAudit(
+    passed=True,
+    records_read=records_read,
+    pages_read=pages_read,
+    per_instrument_day=details,
+  )
+
+
+async def _load_run_evidence(run_id: str) -> dict[str, Any]:
+  """Read only run-scoped persisted evidence after an isolated BACKTEST."""
+
+  async for db in get_async_db():
+    run = await db.get(StrategyRun, run_id)
+    if run is None:
+      raise RuntimeError("BACKTEST_RUN_NOT_PERSISTED")
+    rows = await db.execute(
+      select(
+        TTradeOpportunityEvaluation.record_kind,
+        func.count(TTradeOpportunityEvaluation.id),
+        func.coalesce(func.sum(TTradeOpportunityEvaluation.coalesced_count), 0),
+      )
+      .where(TTradeOpportunityEvaluation.strategy_run_id == run_id)
+      .group_by(TTradeOpportunityEvaluation.record_kind)
+    )
+    evaluation_by_kind = {
+      str(kind): {"rows": int(row_count), "logical_events": int(logical_count)}
+      for kind, row_count, logical_count in rows.all()
+    }
+    diagnostic = evaluation_by_kind.get(
+      T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+      {"rows": 0, "logical_events": 0},
+    )
+    logical_events = int(diagnostic["logical_events"])
+    diagnostic_rows = int(diagnostic["rows"])
+    profile_rows = await db.execute(
+      select(
+        TTradeInstrumentProfile.instrument_code,
+        TTradeInstrumentProfile.as_of,
+        TTradeInstrumentProfile.version,
+        TTradeInstrumentProfile.schema_version,
+        TTradeInstrumentProfile.fingerprint,
+      )
+      .where(TTradeInstrumentProfile.instrument_code.in_(list(run.instruments or [])))
+      .order_by(
+        TTradeInstrumentProfile.instrument_code.asc(),
+        TTradeInstrumentProfile.as_of.asc(),
+        TTradeInstrumentProfile.id.asc(),
+      )
+    )
+    parameters = _json_object(run.parameters, context="BACKTEST_PARAMETERS")
+    return {
+      "run_id": run_id,
+      "mode": str(getattr(run.mode, "value", run.mode) or ""),
+      "status": str(getattr(run.status, "value", run.status) or ""),
+      "error_message": _value_as_str(run.error_message) or None,
+      "parameters_sha256": _stable_hash(parameters),
+      "parameters": parameters,
+      "opportunity_policy_version": OPPORTUNITY_POLICY_VERSION,
+      "opportunity_feature_schema_version": OPPORTUNITY_FEATURE_SCHEMA_VERSION,
+      "evaluations": {
+        "by_record_kind": evaluation_by_kind,
+        "material_rows": int(
+          evaluation_by_kind.get(T_TRADE_EVALUATION_KIND_MATERIAL, {}).get(
+            "rows", 0
+          )
+        ),
+        "diagnostic_rows": diagnostic_rows,
+        "diagnostic_logical_events": logical_events,
+        "diagnostic_merge_ratio": (
+          round((logical_events - diagnostic_rows) / logical_events, 8)
+          if logical_events
+          else None
+        ),
+      },
+      "instrument_profiles": [
+        {
+          "instrument_code": str(code),
+          "as_of": as_of.isoformat() if as_of else None,
+          "version": str(version),
+          "schema_version": str(schema_version),
+          "fingerprint": str(fingerprint),
+        }
+        for code, as_of, version, schema_version, fingerprint in profile_rows.all()
+      ],
+    }
+  raise RuntimeError("DATABASE_SESSION_UNAVAILABLE")
+
+
+async def load_cancelled_full_pressure_attempt(
+  run_id: str,
+  *,
+  cancellation_reason: str,
+  fixture: SyntheticPressureFixture,
+) -> dict[str, Any]:
+  """Read immutable evidence for the intentionally stopped full-load attempt."""
+
+  async for db in get_async_db():
+    run = await db.get(StrategyRun, run_id)
+    if run is None:
+      raise AcceptanceBlockedError("CANCELLED_PRESSURE_RUN_NOT_FOUND")
+    parameters = _json_object(run.parameters, context="CANCELLED_BACKTEST_PARAMETERS")
+    if str(parameters.get("replay_acceptance") or "") != "V3_PRESSURE_BASELINE":
+      raise AcceptanceBlockedError("CANCELLED_RUN_IS_NOT_PRESSURE_BASELINE")
+    backtest = (
+      await db.execute(
+        select(StrategyBacktest)
+        .where(StrategyBacktest.strategy_run_id == run_id)
+        .order_by(StrategyBacktest.version.desc())
+        .limit(1)
+      )
+    ).scalar_one_or_none()
+    evaluation_rows = await db.execute(
+      select(
+        TTradeOpportunityEvaluation.record_kind,
+        func.count(TTradeOpportunityEvaluation.id),
+        func.coalesce(func.sum(TTradeOpportunityEvaluation.coalesced_count), 0),
+      )
+      .where(TTradeOpportunityEvaluation.strategy_run_id == run_id)
+      .group_by(TTradeOpportunityEvaluation.record_kind)
+    )
+    evaluations = {
+      str(kind): {"rows": int(row_count), "logical_events": int(logical_count)}
+      for kind, row_count, logical_count in evaluation_rows.all()
+    }
+    replay = await TTradeReplayService().get(run_id)
+    run_status = str(getattr(run.status, "value", run.status) or "").upper()
+    replay_status = str((replay or {}).get("status") or "").upper()
+    if run_status != "STOPPED" or replay_status != "CANCELLED":
+      raise AcceptanceBlockedError("CANCELLED_PRESSURE_RUN_NOT_TERMINAL")
+    actual_start = getattr(backtest, "start_time", None) or run.created_at
+    actual_end = getattr(backtest, "end_time", None) or run.updated_at
+    elapsed_seconds = (
+      round((actual_end - actual_start).total_seconds(), 6)
+      if isinstance(actual_start, datetime) and isinstance(actual_end, datetime)
+      else None
+    )
+    logical_events = sum(item["logical_events"] for item in evaluations.values())
+    return {
+      "status": "CANCELLED_BLOCKED_FULL_SYNTHETIC_PRESSURE",
+      "not_a_completed_slo": True,
+      "fixture": fixture.to_dict(),
+      "run_id": run_id,
+      "run_sha256_16": _digest(run_id),
+      "cancellation_reason": cancellation_reason,
+      "requested_replay_start": parameters.get("replay_start_time"),
+      "requested_replay_end": parameters.get("replay_end_time"),
+      "actual_started_at": actual_start.isoformat() if actual_start else None,
+      "actual_ended_at": actual_end.isoformat() if actual_end else None,
+      "wall_elapsed_seconds": elapsed_seconds,
+      "processed_until": (
+        replay.get("processed_until").isoformat()
+        if replay and replay.get("processed_until")
+        else None
+      ),
+      "progress_pct": replay.get("progress_pct") if replay else None,
+      "run_status": run_status,
+      "replay_status": replay_status,
+      "evaluations": evaluations,
+      "partial_materialization_logical_events_per_second": (
+        round(logical_events / elapsed_seconds, 6)
+        if elapsed_seconds and elapsed_seconds > 0
+        else None
+      ),
+      "unavailable_metrics": {
+        "engine_tick_latency_p50_p95_p99": "N/A: process cancellation releases in-memory samples",
+        "engine_tick_throughput": "N/A: completed Tick count was not durably checkpointed",
+        "cas_conflict_rate": "N/A: in-memory counter lost at cancellation",
+        "database_commit_calls": "N/A: in-process counter lost at cancellation",
+      },
+      "primary_observed_boundary": (
+        "production per-event RuntimeState checkpoint and post-CAS evaluation "
+        "materialization; this full 9,600-Tick load made only partial progress "
+        "within the allowed wall-time budget"
+      ),
+    }
+  raise RuntimeError("DATABASE_SESSION_UNAVAILABLE")
+
+
+async def load_completed_diagnostic_pressure_attempt(
+  run_id: str,
+  *,
+  fixture: SyntheticPressureFixture,
+) -> dict[str, Any]:
+  """Recover durable evidence for a completed, non-gating diagnostic run.
+
+  Latency and process-local DB counters are intentionally not reconstructed:
+  they were never persisted by the first runner process.  This makes a stale
+  diagnostic useful for auditability without upgrading it into a benchmark.
+  """
+
+  run_evidence = await _load_run_evidence(run_id)
+  parameters = _json_object(
+    run_evidence.get("parameters"), context="DIAGNOSTIC_BACKTEST_PARAMETERS"
+  )
+  expected_start = datetime.combine(fixture.trading_dates[0], clock_time(9, 30))
+  expected_end = datetime.combine(fixture.trading_dates[-1], clock_time(15, 0))
+  expected_codes = tuple(str(item).upper() for item in fixture.instrument_codes)
+  if (
+    parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
+    or parameters.get("replay_start_time") != expected_start.isoformat()
+    or parameters.get("replay_end_time") != expected_end.isoformat()
+  ):
+    raise AcceptanceBlockedError("DIAGNOSTIC_RUN_PARAMETERS_DO_NOT_MATCH_FIXTURE")
+
+  replay = await TTradeReplayService().get(run_id)
+  replay_status = str((replay or {}).get("status") or "").upper()
+  if (
+    str(run_evidence.get("mode") or "").upper() != "BACKTEST"
+    or str(run_evidence.get("status") or "").upper() != "COMPLETED"
+    or replay_status != "COMPLETED"
+  ):
+    raise AcceptanceBlockedError("DIAGNOSTIC_RUN_NOT_COMPLETED_BACKTEST")
+  persisted_codes = tuple(
+    str(item.get("stock_code") if isinstance(item, Mapping) else item).upper()
+    for item in list((replay or {}).get("instruments") or [])
+  )
+  if persisted_codes and persisted_codes != expected_codes:
+    raise AcceptanceBlockedError("DIAGNOSTIC_RUN_HOLDINGS_DO_NOT_MATCH_FIXTURE")
+
+  evaluations = dict(run_evidence.get("evaluations") or {})
+  material_rows = int(evaluations.get("material_rows") or 0)
+  diagnostic_rows = int(evaluations.get("diagnostic_rows") or 0)
+  return {
+    "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+    "status": "EXECUTED_DIAGNOSTIC_NON_GATING_VERSION_STALE",
+    "non_gating": True,
+    "diagnostic_non_gating": True,
+    "not_historical_replay": True,
+    "not_a_completed_slo": True,
+    "isolated_backtest": True,
+    "no_live_or_paper_broker": True,
+    "fixture": fixture.to_dict(),
+    "run_id": run_id,
+    "run_sha256_16": _digest(run_id),
+    "replay": replay,
+    "run_evidence": run_evidence,
+    "version_stale_reason": (
+      "the diagnostic runner imported the pre-batch-diagnostics implementation; "
+      "it completed before its process-local instrumentation could be persisted"
+    ),
+    "latency": {},
+    "throughput": {
+      "engine_ticks_processed": None,
+      "engine_ticks_per_second": None,
+      "unavailable_reason": "N/A: completed Tick count/timing were process-local",
+    },
+    "cas": {
+      "snapshot_conflicts": None,
+      "checkpoint_attempts": None,
+      "conflict_rate": None,
+      "unavailable_reason": "N/A: CAS counters were process-local",
+    },
+    "database_write_activity": {
+      "status": "N/A: commit/flush counters were process-local",
+    },
+    "resources": {
+      "status": "N/A: runner resource samples were process-local",
+    },
+    "production_path_coverage": {
+      "strategy_executor_global_source_order": (
+        "VERSION_STALE_NOT_REMEASURED: execution path was not re-instrumented"
+      ),
+      "strategy_evaluator": material_rows + diagnostic_rows > 0,
+      "runtime_state_checkpoint": "N/A: not durably measured",
+      "post_cas_evaluation_materialization": material_rows + diagnostic_rows > 0,
+    },
+    "frozen_local_slo": None,
+  }
+
+
+def _resource_start() -> dict[str, Any]:
+  """Return platform/process information without requiring an optional package."""
+
+  evidence: dict[str, Any] = {
+    "platform": platform.platform(),
+    "python": sys.version.split()[0],
+    "cpu_count": os.cpu_count(),
+  }
+  try:
+    import psutil
+
+    process = psutil.Process()
+    evidence["psutil_available"] = True
+    evidence["rss_bytes_start"] = int(process.memory_info().rss)
+    evidence["cpu_seconds_start"] = round(sum(process.cpu_times()[:2]), 6)
+  except (ImportError, OSError):
+    evidence["psutil_available"] = False
+  return evidence
+
+
+def _resource_finish(evidence: Mapping[str, Any]) -> dict[str, Any]:
+  result = dict(evidence)
+  if not result.get("psutil_available"):
+    return result
+  try:
+    import psutil
+
+    process = psutil.Process()
+    rss_end = int(process.memory_info().rss)
+    cpu_end = round(sum(process.cpu_times()[:2]), 6)
+    result["rss_bytes_end"] = rss_end
+    result["rss_bytes_delta"] = rss_end - int(result["rss_bytes_start"])
+    result["cpu_seconds_end"] = cpu_end
+    result["cpu_seconds_delta"] = round(
+      cpu_end - float(result["cpu_seconds_start"]), 6
+    )
+  except OSError as exc:
+    result["resource_read_error"] = type(exc).__name__
+  return result
+
+
+async def execute_isolated_backtest(
+  audit: WindowAudit,
+  trading_dates: Sequence[date],
+  *,
+  formal_gate: bool,
+  abnormal_dates: Iterable[date] = (),
+) -> dict[str, Any]:
+  """Run one preflighted isolated BACKTEST and capture a local SLO baseline.
+
+  ``formal_gate`` identifies report semantics only.  Both paths are isolated
+  BACKTESTs; callers may use ``formal_gate=False`` solely for an explicitly
+  marked short pressure baseline.
+  """
+
+  if not trading_dates:
+    raise AcceptanceBlockedError("BACKTEST_NO_TRADING_DATES")
+  full_dates = set(audit.full_shared_dates)
+  if any(item not in full_dates for item in trading_dates):
+    raise AcceptanceBlockedError("BACKTEST_TICK_COVERAGE_NOT_COMPLETE")
+  if audit.window.snapshot.non_replayable:
+    raise AcceptanceBlockedError("BACKTEST_HELD_INSTRUMENT_NOT_REPLAYABLE")
+
+  identity = await audit_source_identity(audit, trading_dates)
+  if not identity.passed:
+    raise AcceptanceBlockedError("BACKTEST_SOURCE_IDENTITY_NOT_PROVEN")
+
+  manager = StrategyManager()
+  original_supplement = manager._queue_missing_backtest_data_supplement
+  supplement_attempts = 0
+
+  async def forbid_supplement(*_: Any, **__: Any) -> dict[str, Any]:
+    nonlocal supplement_attempts
+    supplement_attempts += 1
+    raise RuntimeError("V3_ACCEPTANCE_FORBIDS_MARKET_DATA_SUPPLEMENT")
+
+  # A correct preflight never enters this function.  The interceptor provides
+  # defense in depth: this offline runner must not command a QMT Agent even if
+  # storage changes between preflight and the Engine's own data check.
+  manager._queue_missing_backtest_data_supplement = forbid_supplement
+  request_id = str(uuid.uuid4())
+  start_time = datetime.combine(trading_dates[0], clock_time(9, 30))
+  end_time = datetime.combine(trading_dates[-1], clock_time(15, 0))
+  payload = {
+    "account_id": audit.window.snapshot.account_id,
+    "start_time": start_time,
+    "end_time": end_time,
+    "replay_acceptance": "V3_CAUSAL_20D" if formal_gate else "V3_PRESSURE_BASELINE",
+    "replay_abnormal_dates": [
+      item.isoformat() for item in sorted(set(abnormal_dates)) if item in trading_dates
+    ],
+  }
+  resource_start = _resource_start()
+  started = wall_clock.perf_counter()
+  runtime_state: Any = None
+  try:
+    async with BenchmarkInstrumentation() as instrumentation:
+      service = TTradeReplayService(manager)
+      created = await service.start(payload, request_id=request_id)
+      run_id = str(created["run_id"])
+      runtime = manager.get_run(run_id)
+      if runtime is None or runtime.task is None:
+        raise RuntimeError("BACKTEST_RUNTIME_TASK_NOT_CREATED")
+      try:
+        await runtime.task
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        # Engine terminal status and persisted replay projection are the
+        # authoritative detailed evidence; collect them below before failing.
+        pass
+      await asyncio.sleep(0)
+      await asyncio.sleep(0)
+      runtime_state = runtime.state_manager
+      replay = await service.get(run_id)
+      run_evidence = await _load_run_evidence(run_id)
+    elapsed_seconds = wall_clock.perf_counter() - started
+  finally:
+    manager._queue_missing_backtest_data_supplement = original_supplement
+
+  cas_conflicts = int(
+    getattr(runtime_state, "snapshot_cas_conflicts", 0) or 0
+  )
+  checkpoint = instrumentation.state_checkpoint.to_dict()
+  checkpoint_attempts = int(checkpoint["sample_count"])
+  cas_denominator = checkpoint_attempts + cas_conflicts
+  return {
+    "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+    "status": (
+      "FORMAL_BACKTEST_EXECUTED" if formal_gate else "EXECUTED_NON_GATING"
+    ),
+    "isolated_backtest": True,
+    "no_live_or_paper_broker": True,
+    "market_data_supplement_forbidden": True,
+    "market_data_supplement_attempts": supplement_attempts,
+    "snapshot_date": audit.window.snapshot.snapshot_date.isoformat(),
+    "trading_dates": [item.isoformat() for item in trading_dates],
+    "held_instruments": list(audit.window.snapshot.instrument_codes),
+    "source_identity": identity.to_dict(),
+    "elapsed_seconds": round(elapsed_seconds, 6),
+    "throughput": {
+      "engine_ticks_processed": int(instrumentation.engine_tick.to_dict()["sample_count"]),
+      "engine_ticks_per_second": (
+        round(
+          int(instrumentation.engine_tick.to_dict()["sample_count"]) / elapsed_seconds,
+          6,
+        )
+        if elapsed_seconds > 0
+        else None
+      ),
+    },
+    "latency": {
+      "engine_tick": instrumentation.engine_tick.to_dict(),
+      "strategy_evaluation": instrumentation.strategy_evaluation.to_dict(),
+      "state_checkpoint": checkpoint,
+    },
+    "cas": {
+      "snapshot_conflicts": cas_conflicts,
+      "checkpoint_attempts": checkpoint_attempts,
+      "conflict_rate": (
+        round(cas_conflicts / cas_denominator, 8) if cas_denominator else None
+      ),
+    },
+    "database_write_activity": instrumentation.db_writes.to_dict(),
+    "resources": _resource_finish(resource_start),
+    "replay": replay,
+    "run_evidence": run_evidence,
+  }
+
+
+def _freeze_first_local_slo(
+  *,
+  latency: Mapping[str, Any],
+  throughput: Mapping[str, Any],
+  cas: Mapping[str, Any],
+  database_write_activity: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Freeze transparent first-run guardrails without calling them a release gate."""
+
+  def latency_limit(name: str) -> Optional[float]:
+    value = dict(latency.get("engine_tick") or {}).get(name)
+    if value is None:
+      return None
+    return round(float(value) * 1.5, 6)
+
+  ticks_per_second = throughput.get("engine_ticks_per_second")
+  throughput_floor = (
+    round(float(ticks_per_second) * 0.8, 6)
+    if ticks_per_second is not None
+    else None
+  )
+  observed_cas_rate = cas.get("conflict_rate")
+  return {
+    "status": "FROZEN_FIRST_LOCAL_SYNTHETIC_BASELINE",
+    "not_a_formal_replay_gate": True,
+    "policy": (
+      "first local synthetic baseline; latency upper bounds = observed × 1.5; "
+      "throughput floor = observed × 0.8; values require re-baselining on "
+      "hardware, runtime, or workload change"
+    ),
+    "limits": {
+      "engine_tick_p50_ms_max": latency_limit("p50"),
+      "engine_tick_p95_ms_max": latency_limit("p95"),
+      "engine_tick_p99_ms_max": latency_limit("p99"),
+      "engine_ticks_per_second_min": throughput_floor,
+      "cas_conflict_rate_max": (
+        max(float(observed_cas_rate), 0.001)
+        if observed_cas_rate is not None
+        else None
+      ),
+      "database_commit_calls_max": (
+        int(database_write_activity.get("commit_calls") or 0) * 2
+        if database_write_activity
+        else None
+      ),
+    },
+  }
+
+
+async def execute_synthetic_pressure_baseline(
+  audit: WindowAudit,
+  trading_dates: Sequence[date],
+  *,
+  ticks_per_instrument_day: int = 600,
+  diagnostic: bool = False,
+) -> dict[str, Any]:
+  """Exercise the production Engine with a deterministic non-historical load.
+
+  The real D-1 account snapshot supplies the all-holdings universe and initial
+  position state.  A temporary in-process loader replaces only historical Tick
+  reads; strategy evaluation, post-CAS state checkpointing, and evaluation
+  materialization remain the production code paths.
+  """
+
+  fixture = build_synthetic_pressure_fixture(
+    audit,
+    trading_dates,
+    ticks_per_instrument_day=ticks_per_instrument_day,
+  )
+  manager = StrategyManager()
+  original_data_check = manager._ensure_backtest_data_available
+  original_loader = StrategyExecutor._load_backtest_ticks
+  original_supplement = manager._queue_missing_backtest_data_supplement
+  supplement_attempts = 0
+
+  async def synthetic_data_check(_: Any) -> None:
+    # Historical data is intentionally not consulted for this declared
+    # synthetic benchmark.  The loader below is the sole Tick source.
+    return None
+
+  async def synthetic_loader(
+    _: Any,
+    __: Any,
+    ___: Any,
+    *,
+    instrument_code: str,
+    start_time: datetime,
+    end_time: datetime,
+  ) -> list[Tick]:
+    selected: list[Tick] = []
+    for tick in fixture.ticks_by_instrument.get(instrument_code, ()):
+      tick_time = tick.time.replace(tzinfo=None) if tick.time.tzinfo else tick.time
+      if start_time <= tick_time <= end_time:
+        selected.append(tick)
+    return selected
+
+  async def forbid_supplement(*_: Any, **__: Any) -> dict[str, Any]:
+    nonlocal supplement_attempts
+    supplement_attempts += 1
+    raise RuntimeError("V3_SYNTHETIC_PRESSURE_FORBIDS_MARKET_DATA_SUPPLEMENT")
+
+  manager._ensure_backtest_data_available = synthetic_data_check
+  manager._queue_missing_backtest_data_supplement = forbid_supplement
+  StrategyExecutor._load_backtest_ticks = synthetic_loader
+  request_id = str(uuid.uuid4())
+  start_time = datetime.combine(trading_dates[0], clock_time(9, 30))
+  end_time = datetime.combine(trading_dates[-1], clock_time(15, 0))
+  payload = {
+    "account_id": audit.window.snapshot.account_id,
+    "start_time": start_time,
+    "end_time": end_time,
+    "replay_acceptance": "V3_PRESSURE_BASELINE",
+  }
+  resource_start = _resource_start()
+  started = wall_clock.perf_counter()
+  runtime_state: Any = None
+  try:
+    async with BenchmarkInstrumentation() as instrumentation:
+      service = TTradeReplayService(manager)
+      created = await service.start(payload, request_id=request_id)
+      run_id = str(created["run_id"])
+      runtime = manager.get_run(run_id)
+      if runtime is None or runtime.task is None:
+        raise RuntimeError("SYNTHETIC_PRESSURE_RUNTIME_TASK_NOT_CREATED")
+      try:
+        await runtime.task
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        # Preserve the terminal result and run-scoped DB evidence below.
+        pass
+      await asyncio.sleep(0)
+      await asyncio.sleep(0)
+      runtime_state = runtime.state_manager
+      replay = await service.get(run_id)
+      run_evidence = await _load_run_evidence(run_id)
+    elapsed_seconds = wall_clock.perf_counter() - started
+  finally:
+    manager._ensure_backtest_data_available = original_data_check
+    manager._queue_missing_backtest_data_supplement = original_supplement
+    StrategyExecutor._load_backtest_ticks = original_loader
+
+  engine_tick_latency = instrumentation.engine_tick.to_dict()
+  checkpoint_latency = instrumentation.state_checkpoint.to_dict()
+  ticks_processed = int(engine_tick_latency["sample_count"])
+  cas_conflicts = int(
+    getattr(runtime_state, "snapshot_cas_conflicts", 0) or 0
+  )
+  checkpoint_attempts = int(checkpoint_latency["sample_count"])
+  cas_denominator = checkpoint_attempts + cas_conflicts
+  throughput = {
+    "engine_ticks_processed": ticks_processed,
+    "engine_ticks_per_second": (
+      round(ticks_processed / elapsed_seconds, 6) if elapsed_seconds > 0 else None
+    ),
+  }
+  cas = {
+    "snapshot_conflicts": cas_conflicts,
+    "checkpoint_attempts": checkpoint_attempts,
+    "conflict_rate": (
+      round(cas_conflicts / cas_denominator, 8) if cas_denominator else None
+    ),
+  }
+  database_write_activity = instrumentation.db_writes.to_dict()
+  latency = {
+    "engine_tick": engine_tick_latency,
+    "strategy_evaluation": instrumentation.strategy_evaluation.to_dict(),
+    "state_checkpoint": checkpoint_latency,
+  }
+  completed = str(replay.get("status") or "").upper() == "COMPLETED"
+  return {
+    "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+    "status": (
+      (
+        "EXECUTED_DIAGNOSTIC_NON_GATING"
+        if diagnostic
+        else "EXECUTED_SYNTHETIC_NON_HISTORICAL"
+      )
+      if completed
+      else "FAIL"
+    ),
+    "non_gating": True,
+    "diagnostic_non_gating": diagnostic,
+    "not_historical_replay": True,
+    "isolated_backtest": True,
+    "no_live_or_paper_broker": True,
+    "production_path_coverage": {
+      "strategy_executor_global_source_order": True,
+      "strategy_evaluator": ticks_processed > 0,
+      "runtime_state_checkpoint": checkpoint_attempts > 0,
+      "post_cas_evaluation_materialization": bool(
+        run_evidence["evaluations"]["material_rows"]
+        or run_evidence["evaluations"]["diagnostic_rows"]
+      ),
+    },
+    "fixture": fixture.to_dict(),
+    "market_data_supplement_forbidden": True,
+    "market_data_supplement_attempts": supplement_attempts,
+    "elapsed_seconds": round(elapsed_seconds, 6),
+    "throughput": throughput,
+    "latency": latency,
+    "cas": cas,
+    "database_write_activity": database_write_activity,
+    "resources": _resource_finish(resource_start),
+    "replay": replay,
+    "run_evidence": run_evidence,
+    "frozen_local_slo": (
+      None
+      if diagnostic
+      else _freeze_first_local_slo(
+        latency=latency,
+        throughput=throughput,
+        cas=cas,
+        database_write_activity=database_write_activity,
+      )
+    ),
+  }
+
+
+def build_report_document(
+  audits: Sequence[WindowAudit],
+  *,
+  requested_trading_days: int,
+  abnormal_dates: Iterable[date] = (),
+  formal_execution: Optional[Mapping[str, Any]] = None,
+  historical_short_window_preflight: Optional[Mapping[str, Any]] = None,
+  full_pressure_attempt: Optional[Mapping[str, Any]] = None,
+  pressure_baseline: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+  """Create a self-contained report object before rendering it to Markdown."""
+
+  declared_abnormal = tuple(sorted(set(abnormal_dates)))
+  formal_window = select_formal_window(audits, abnormal_dates=declared_abnormal)
+  if formal_execution:
+    formal_status = (
+      "PASS"
+      if str(formal_execution.get("replay", {}).get("status", "")).upper()
+      == "COMPLETED"
+      else "FAIL"
+    )
+  elif formal_window is not None:
+    formal_status = "READY_NOT_EXECUTED"
+  else:
+    formal_status = "BLOCKED"
+  return {
+    "schema_version": REPORT_SCHEMA_VERSION,
+    "generated_at": datetime.now().astimezone().isoformat(),
+    "scope": {
+      "requested_trading_days": requested_trading_days,
+      "calendar": "SH via TradingDateHelper",
+      "causality": "D-1 snapshot only; no future account state",
+      "all_holdings_policy": "no stock/day is silently excluded",
+      "tick_quality": "StrategyManager._inspect_t_trade_replay_tick_day",
+      "source_identity": "HistoricalMarketDataService.iter_tick_pages",
+      "execution": "isolated BACKTEST only; no QMT/PAPER/LIVE commands",
+    },
+    "declared_abnormal_dates": [item.isoformat() for item in declared_abnormal],
+    "formal_20_trading_day": {
+      "status": formal_status,
+      "selected_snapshot_date": (
+        formal_window.window.snapshot.snapshot_date.isoformat()
+        if formal_window
+        else None
+      ),
+      "execution": dict(formal_execution) if formal_execution else None,
+      "blocker": (
+        "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW"
+        if formal_window is None
+        else None
+      ),
+    },
+    "historical_short_window_source_identity_preflight": (
+      dict(historical_short_window_preflight)
+      if historical_short_window_preflight
+      else None
+    ),
+    "full_pressure_attempt": (
+      dict(full_pressure_attempt) if full_pressure_attempt else None
+    ),
+    "pressure_baseline": dict(pressure_baseline) if pressure_baseline else None,
+    "performance_remediation_microbenchmark": dict(
+      PERFORMANCE_REMEDIATION_MICROBENCHMARK
+    ),
+    "candidate_windows": [
+      audit.to_dict(abnormal_dates=declared_abnormal) for audit in audits
+    ],
+  }
+
+
+def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
+  """Render a concise human report; JSON retains every stock/day evidence row."""
+
+  formal = dict(report["formal_20_trading_day"])
+  pressure = report.get("pressure_baseline")
+  lines = [
+    "# 做 T V3 历史回放与全持仓压力验收",
+    "",
+    f"- 生成时间：`{report['generated_at']}`",
+    f"- 正式 20 交易日门禁：**{formal['status']}**",
+    "- 因果口径：D-1 账户日结快照；按 SH 真实交易日；所有正持仓均纳入，绝不自动剔除。",
+    "- Tick 口径：Engine 同款严格连续交易时段检查；正式/压力执行前另以严格 source-identity keyset 分页验证。",
+    "- 执行边界：仅隔离 `BACKTEST`；本工具不启动 QMT、不发送 PAPER/LIVE 指令、不补数。",
+    f"- 完整机读证据：[JSON]({json_name})",
+    "",
+    "## 20 个交易日严格因果回放",
+    "",
+  ]
+  if formal["status"] == "BLOCKED":
+    lines.extend(
+      [
+        "**BLOCKED**：没有任一 D-1 快照形成全持仓 20/20 Tick 完整窗口；因此没有启动正式回放。",
+        "",
+      ]
+    )
+  elif formal["status"] == "READY_NOT_EXECUTED":
+    lines.extend(["**READY_NOT_EXECUTED**：覆盖已通过，等待显式 `--execute`。", ""])
+  else:
+    lines.extend([f"**{formal['status']}**：详见 JSON 的 execution。", ""])
+
+  lines.extend(
+    [
+      "| D-1 快照 | 持仓 | 窗口 | 完整 instrument-day | 共同完整日 | 连续共同前缀 | 门禁阻塞 |",
+      "| --- | ---: | --- | ---: | --- | --- | --- |",
+    ]
+  )
+  for candidate in report["candidate_windows"]:
+    snapshot = candidate["snapshot"]
+    coverage = candidate["coverage"]
+    dates = candidate["trading_dates"]
+    blockers = candidate["formal_gate_blockers"]
+    window = f"{dates[0]}~{dates[-1]}" if dates else "-"
+    lines.append(
+      "| {snapshot} | {holdings} | {window} | {complete}/{expected} | {shared} | {prefix} | {blockers} |".format(
+        snapshot=snapshot["snapshot_date"],
+        holdings=snapshot["holding_count"],
+        window=window,
+        complete=coverage["complete_instrument_days"],
+        expected=coverage["expected_instrument_days"],
+        shared=",".join(coverage["full_shared_dates"]) or "-",
+        prefix=",".join(coverage["contiguous_shared_prefix_dates"]) or "-",
+        blockers=",".join(blockers) or "-",
+      )
+    )
+
+  lines.extend(["", "## 真实短窗口 source identity 预检（非 20 日门禁）", ""])
+  historical_preflight = report.get("historical_short_window_source_identity_preflight")
+  if historical_preflight:
+    source = dict(historical_preflight)
+    failure = dict(source.get("failure") or {})
+    failures = list(failure.get("failures") or [])
+    failure_counts = Counter(
+      str(item.get("message") or "UNKNOWN") for item in failures
+    )
+    lines.extend(
+      [
+        "**{}**：{} 个 instrument-day 严格 source-identity keyset 检查失败；"
+        "完整逐日证据在 JSON。".format(
+          "PASS" if source.get("passed") else "BLOCKED",
+          len(failures),
+        ),
+        "- 失败原因：{}".format(
+          "；".join(
+            f"{reason} × {count}" for reason, count in sorted(failure_counts.items())
+          )
+          or "-"
+        ),
+      ]
+    )
+  else:
+    lines.append("**NOT_RUN**：未选择真实短窗口进行 source identity 预检。")
+
+  lines.extend(["", "## 9,600 Tick 全持仓合成压力尝试", ""])
+  full_pressure_attempt = report.get("full_pressure_attempt")
+  if full_pressure_attempt:
+    full_attempt = dict(full_pressure_attempt)
+    full_fixture = dict(full_attempt.get("fixture") or {})
+    lines.extend(
+      [
+        "**{}**：本轮全负载没有完成，SLO 判定为 **BLOCKED/FAIL**，不得以小样本替代。".format(
+          full_attempt.get("status")
+        ),
+        "- runId=`{}`；请求区间={}~{}；处理至={}；进度={}%。".format(
+          full_attempt.get("run_id"),
+          full_attempt.get("requested_replay_start"),
+          full_attempt.get("requested_replay_end"),
+          full_attempt.get("processed_until"),
+          full_attempt.get("progress_pct"),
+        ),
+        "- 取消原因：{}；局部 materialization logical events/s={}。".format(
+          full_attempt.get("cancellation_reason"),
+          full_attempt.get("partial_materialization_logical_events_per_second"),
+        ),
+        "- fixture：`SYNTHETIC_NON_HISTORICAL`，sha256={}，{} ticks，{} instruments，合法交易时段={}。".format(
+          full_fixture.get("fixture_sha256"),
+          full_fixture.get("tick_count"),
+          len(list(full_fixture.get("held_instruments") or [])),
+          full_fixture.get("market_time_policy"),
+        ),
+        "- 观察到的主要耗时边界：{}。".format(
+          full_attempt.get("primary_observed_boundary")
+        ),
+        "- 未测项：{}。".format(full_attempt.get("unavailable_metrics")),
+      ]
+    )
+  else:
+    lines.append("**NOT_RUN**：未记录全 9,600 Tick 合成压力尝试。")
+
+  lines.extend(["", "## 全持仓合成压力基线 / 首次本机 SLO", ""])
+  if not pressure:
+    lines.append("**NOT_RUN**：未请求可选的合成压力基线。")
+  else:
+    status = str(pressure.get("status") or "UNKNOWN")
+    lines.append(
+      f"**{status}**：此结果为合成负载，不是历史回放，且不替代 20 交易日门禁。"
+    )
+    fixture = dict(pressure.get("fixture") or {})
+    if fixture:
+      lines.append(
+        "- fixture：sha256={}, {} ticks，{} instruments，合法交易时段={}。".format(
+          fixture.get("fixture_sha256"),
+          fixture.get("tick_count"),
+          len(list(fixture.get("held_instruments") or [])),
+          fixture.get("market_time_policy"),
+        )
+      )
+    if pressure.get("version_stale_reason"):
+      lines.append(
+        "- 版本可比性：`VERSION_STALE`；{}。".format(
+          pressure.get("version_stale_reason")
+        )
+      )
+    latency = dict(pressure.get("latency") or {})
+    throughput = dict(pressure.get("throughput") or {})
+    cas = dict(pressure.get("cas") or {})
+    lines.extend(
+      [
+        "- Engine tick 延迟（ms）：p50={p50}, p95={p95}, p99={p99}".format(
+          **dict(latency.get("engine_tick") or {})
+        )
+        if latency.get("engine_tick")
+        else "- Engine tick 延迟：无样本",
+        "- 策略评估延迟（ms）：p50={p50}, p95={p95}, p99={p99}".format(
+          **dict(latency.get("strategy_evaluation") or {})
+        )
+        if latency.get("strategy_evaluation")
+        else "- 策略评估延迟：无样本",
+        "- 吞吐：{} engine ticks/s（{} ticks）".format(
+          throughput.get("engine_ticks_per_second"),
+          throughput.get("engine_ticks_processed"),
+        ),
+        "- CAS：{} conflicts / {} checkpoint attempts，rate={}".format(
+          cas.get("snapshot_conflicts"),
+          cas.get("checkpoint_attempts"),
+          cas.get("conflict_rate"),
+        ),
+        "- DB 写活动：{}；评估：{}".format(
+          pressure.get("database_write_activity"),
+          dict(pressure.get("run_evidence") or {}).get("evaluations"),
+        ),
+        "- 生产路径覆盖边界：{}。".format(
+          pressure.get("production_path_coverage")
+        ),
+        "- 冻结 SLO：{}".format(
+          pressure.get("frozen_local_slo")
+          or "N/A（DIAGNOSTIC_NON_GATING 小样本不得冻结/判定 SLO）"
+        ),
+    ]
+  )
+  performance_microbenchmark = report.get("performance_remediation_microbenchmark")
+  if performance_microbenchmark:
+    micro = dict(performance_microbenchmark)
+    before = dict(
+      dict(micro.get("sqlite_in_memory_microbenchmark") or {}).get("before") or {}
+    )
+    after = dict(
+      dict(micro.get("sqlite_in_memory_microbenchmark") or {}).get("after") or {}
+    )
+    lines.extend(
+      [
+        "",
+        "## 后续性能修复微基准（非压力验收）",
+        "",
+        "**{}**：{}。".format(micro.get("status"), micro.get("implementation")),
+        "- 正确性微测：{}。".format(
+          "；".join(str(item) for item in micro.get("correctness_tests") or [])
+        ),
+        "- SQLite 内存微基准（{}）：{} commits / {} ms → {} commits / {} ms；"
+        "commit 减少 {}%，耗时减少 {}%。".format(
+          dict(micro.get("sqlite_in_memory_microbenchmark") or {}).get("workload"),
+          before.get("commits"),
+          before.get("elapsed_ms"),
+          after.get("commits"),
+          after.get("elapsed_ms"),
+          dict(micro.get("sqlite_in_memory_microbenchmark") or {}).get(
+            "commit_reduction_pct"
+          ),
+          dict(micro.get("sqlite_in_memory_microbenchmark") or {}).get(
+            "elapsed_reduction_pct"
+          ),
+        ),
+        "- 验证：{}。".format(micro.get("focused_validation")),
+        "- 门禁：**未重跑 9,600 Tick；SLO 仍为 {}。**".format(
+          micro.get("slo_status")
+        ),
+        "- 边界：{}。".format(micro.get("scope_limit")),
+      ]
+    )
+  lines.extend(
+    [
+      "",
+      "## 判定说明",
+      "",
+      "- `PASS` 只代表完成了已验证的正式 20 日 BACKTEST；不表示 PAPER、Canary 或 LIVE 验收。",
+      "- `BLOCKED` 是数据/输入证据不足，绝不以合成单测或短窗口替代真实 20 日/交易时段证据。",
+      "- `EXECUTED_SYNTHETIC_NON_HISTORICAL` 是全持仓、合成 Tick 的本机压力基线；它只能冻结机器 SLO，不能升级真实历史或正式门禁。",
+      "- `EXECUTED_DIAGNOSTIC_NON_GATING` 仅用于定位量化延迟与写入边界；即使完成，也不得替代或通过全负载 SLO。",
+      "",
+    ]
+  )
+  return "\n".join(lines)
+
+
+def write_report(report: Mapping[str, Any], path: Path) -> tuple[Path, Path]:
+  """Write Markdown and full JSON evidence together using atomic replacement."""
+
+  path.parent.mkdir(parents=True, exist_ok=True)
+  json_path = path.with_suffix(".json")
+  markdown = render_markdown(report, json_name=json_path.name)
+  json_payload = json.dumps(
+    report, ensure_ascii=False, indent=2, sort_keys=True, default=_json_default
+  )
+  for target, content in ((path, markdown), (json_path, json_payload + "\n")):
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(content, encoding="utf-8", newline="\n")
+    temporary.replace(target)
+  return path, json_path
+
+
+def _parse_date(value: str) -> date:
+  try:
+    return date.fromisoformat(value)
+  except ValueError as exc:
+    raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--account-id", help="account id; omitted only when unique")
+  parser.add_argument(
+    "--report",
+    type=Path,
+    default=Path("docs/reports/t-trade-v3-acceptance.md"),
+    help="Markdown report path; matching JSON evidence is written beside it",
+  )
+  parser.add_argument(
+    "--trading-days", type=int, default=DEFAULT_TRADING_DAYS, choices=range(1, 21)
+  )
+  parser.add_argument(
+    "--abnormal-date",
+    action="append",
+    type=_parse_date,
+    default=[],
+    help="declared abnormal trading day evidence required for formal gate",
+  )
+  parser.add_argument(
+    "--max-concurrency", type=int, default=DEFAULT_AUDIT_CONCURRENCY
+  )
+  parser.add_argument(
+    "--execute",
+    action="store_true",
+    help="execute only an already-complete formal causal window",
+  )
+  parser.add_argument(
+    "--synthetic-pressure",
+    action="store_true",
+    help=(
+      "run a deterministic, non-historical all-holdings Engine pressure "
+      "baseline; never a formal replay gate"
+    ),
+  )
+  parser.add_argument(
+    "--pressure-snapshot-date",
+    type=_parse_date,
+    help="required D-1 snapshot date for --synthetic-pressure",
+  )
+  parser.add_argument(
+    "--synthetic-ticks-per-instrument-day",
+    type=int,
+    default=600,
+    help="deterministic synthetic load per held instrument and trading day",
+  )
+  parser.add_argument(
+    "--reuse-audit-report",
+    type=Path,
+    help=(
+      "reuse an existing JSON audit report for a post-cancellation diagnostic; "
+      "the historical coverage evidence is not recalculated"
+    ),
+  )
+  parser.add_argument(
+    "--cancelled-full-pressure-run-id",
+    help="terminal isolated full-pressure BACKTEST run id to preserve in report",
+  )
+  parser.add_argument(
+    "--diagnostic-synthetic-pressure",
+    action="store_true",
+    help="run a small synthetic quantile diagnostic; never freeze or pass SLO",
+  )
+  parser.add_argument(
+    "--completed-diagnostic-pressure-run-id",
+    help=(
+      "recover durable evidence from a completed small diagnostic without "
+      "running it again; process-local quantiles remain N/A"
+    ),
+  )
+  parser.add_argument(
+    "--diagnostic-ticks-per-instrument-day",
+    type=int,
+    default=30,
+    help="small diagnostic synthetic load per held instrument and day",
+  )
+  return parser
+
+
+async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+  """Append cancellation/diagnostic evidence without repeating a 17-window audit."""
+
+  report_path = Path(args.reuse_audit_report)
+  json_path = report_path.with_suffix(".json")
+  try:
+    existing = json.loads(json_path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    raise AcceptanceBlockedError("REUSE_AUDIT_REPORT_UNREADABLE") from exc
+  if not isinstance(existing, dict) or not isinstance(
+    existing.get("candidate_windows"), list
+  ):
+    raise AcceptanceBlockedError("REUSE_AUDIT_REPORT_INVALID")
+  if args.pressure_snapshot_date is None:
+    raise ValueError("--reuse-audit-report requires --pressure-snapshot-date")
+  if args.synthetic_pressure:
+    raise ValueError(
+      "--reuse-audit-report supports only --diagnostic-synthetic-pressure"
+    )
+  snapshots = await load_snapshot_portfolios(account_id=args.account_id)
+  snapshot = next(
+    (
+      item
+      for item in snapshots
+      if item.snapshot_date == args.pressure_snapshot_date
+    ),
+    None,
+  )
+  if snapshot is None:
+    raise AcceptanceBlockedError("REUSE_AUDIT_SNAPSHOT_NOT_FOUND")
+  candidate = next(
+    (
+      item
+      for item in existing["candidate_windows"]
+      if str(dict(item.get("snapshot") or {}).get("snapshot_date") or "")
+      == args.pressure_snapshot_date.isoformat()
+    ),
+    None,
+  )
+  if not isinstance(candidate, Mapping):
+    raise AcceptanceBlockedError("REUSE_AUDIT_WINDOW_NOT_FOUND")
+  reported_codes = tuple(
+    str(item.get("instrument_code") or "").upper()
+    for item in list(dict(candidate.get("snapshot") or {}).get("holdings") or [])
+  )
+  if reported_codes != snapshot.instrument_codes:
+    raise AcceptanceBlockedError("REUSE_AUDIT_HOLDINGS_MISMATCH")
+  raw_prefix = list(
+    dict(candidate.get("coverage") or {}).get("contiguous_shared_prefix_dates")
+    or []
+  )
+  try:
+    pressure_dates = tuple(date.fromisoformat(str(item)) for item in raw_prefix)
+  except ValueError as exc:
+    raise AcceptanceBlockedError("REUSE_AUDIT_PREFIX_INVALID") from exc
+  if len(pressure_dates) < 2:
+    raise AcceptanceBlockedError("REUSE_AUDIT_PRESSURE_PREFIX_TOO_SHORT")
+  audit = WindowAudit(
+    window=ReplayWindow(
+      snapshot=snapshot,
+      trading_dates=pressure_dates,
+      requested_trading_days=DEFAULT_TRADING_DAYS,
+    ),
+    inspections={},
+  )
+  reused_preflight = existing.get("historical_short_window_source_identity_preflight")
+  historical_preflight = (
+    dict(reused_preflight)
+    if isinstance(reused_preflight, Mapping)
+    else (await audit_source_identity(audit, pressure_dates)).to_dict()
+  )
+  full_fixture = build_synthetic_pressure_fixture(
+    audit,
+    pressure_dates,
+    ticks_per_instrument_day=600,
+  )
+  full_pressure_attempt = None
+  if args.cancelled_full_pressure_run_id:
+    full_pressure_attempt = await load_cancelled_full_pressure_attempt(
+      args.cancelled_full_pressure_run_id,
+      cancellation_reason=(
+        "FULL_9600_TICK_SYNTHETIC_PRESSURE_EXCEEDED_REASONABLE_RUNTIME; "
+        "operator-authorized cancellation of this isolated BACKTEST only"
+      ),
+      fixture=full_fixture,
+    )
+  # A later report refresh (for example, after locating a cancelled full run)
+  # must not erase a completed diagnostic evidence block merely because this
+  # invocation does not request a second diagnostic execution.
+  pressure_baseline = existing.get("pressure_baseline")
+  if (
+    args.diagnostic_synthetic_pressure
+    and args.completed_diagnostic_pressure_run_id
+  ):
+    raise ValueError(
+      "--diagnostic-synthetic-pressure and "
+      "--completed-diagnostic-pressure-run-id are mutually exclusive"
+    )
+  if args.completed_diagnostic_pressure_run_id:
+    diagnostic_fixture = build_synthetic_pressure_fixture(
+      audit,
+      pressure_dates,
+      ticks_per_instrument_day=args.diagnostic_ticks_per_instrument_day,
+    )
+    pressure_baseline = await load_completed_diagnostic_pressure_attempt(
+      args.completed_diagnostic_pressure_run_id,
+      fixture=diagnostic_fixture,
+    )
+  elif args.diagnostic_synthetic_pressure:
+    try:
+      pressure_baseline = await execute_synthetic_pressure_baseline(
+        audit,
+        pressure_dates,
+        ticks_per_instrument_day=args.diagnostic_ticks_per_instrument_day,
+        diagnostic=True,
+      )
+    except Exception as exc:
+      pressure_baseline = {
+        "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+        "status": "FAIL",
+        "non_gating": True,
+        "diagnostic_non_gating": True,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+      }
+  existing["generated_at"] = datetime.now().astimezone().isoformat()
+  scope = dict(existing.get("scope") or {})
+  scope["coverage_evidence_reused_from"] = str(json_path)
+  existing["scope"] = scope
+  existing["historical_short_window_source_identity_preflight"] = historical_preflight
+  existing["full_pressure_attempt"] = full_pressure_attempt
+  existing["pressure_baseline"] = pressure_baseline
+  existing["performance_remediation_microbenchmark"] = dict(
+    PERFORMANCE_REMEDIATION_MICROBENCHMARK
+  )
+  formal_status = str(
+    dict(existing.get("formal_20_trading_day") or {}).get("status") or "BLOCKED"
+  )
+  return existing, 0 if formal_status == "PASS" else 2
+
+
+async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+  if bool(os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() == "true"):
+    raise AcceptanceBlockedError("REAL_TRADING_ENVIRONMENT_NOT_ALLOWED")
+  if args.reuse_audit_report:
+    return await _run_reuse_audit_cli(args)
+  if args.execute and args.synthetic_pressure:
+    raise ValueError("--execute and --synthetic-pressure are mutually exclusive")
+  if args.synthetic_pressure and args.pressure_snapshot_date is None:
+    raise ValueError("--synthetic-pressure requires --pressure-snapshot-date")
+
+  snapshots = await load_snapshot_portfolios(account_id=args.account_id)
+  windows = await build_replay_windows(
+    snapshots, requested_trading_days=args.trading_days
+  )
+  audits = await audit_tick_coverage(
+    windows, max_concurrency=args.max_concurrency
+  )
+  formal_window = select_formal_window(audits, abnormal_dates=args.abnormal_date)
+  formal_execution: Optional[dict[str, Any]] = None
+  historical_short_window_preflight: Optional[dict[str, Any]] = None
+  pressure_baseline: Optional[dict[str, Any]] = None
+  if args.execute:
+    if formal_window is None:
+      raise AcceptanceBlockedError("FORMAL_20_TRADING_DAY_GATE_BLOCKED")
+    formal_execution = await execute_isolated_backtest(
+      formal_window,
+      formal_window.window.trading_dates,
+      formal_gate=True,
+      abnormal_dates=args.abnormal_date,
+    )
+  if args.synthetic_pressure:
+    pressure_audit, pressure_dates = select_pressure_window(
+      audits,
+      snapshot_date=args.pressure_snapshot_date,
+    )
+    historical_short_window_preflight = (
+      await audit_source_identity(pressure_audit, pressure_dates)
+    ).to_dict()
+    try:
+      pressure_baseline = await execute_synthetic_pressure_baseline(
+        pressure_audit,
+        pressure_dates,
+        ticks_per_instrument_day=args.synthetic_ticks_per_instrument_day,
+      )
+    except Exception as exc:
+      pressure_baseline = {
+        "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+        "status": "FAIL",
+        "snapshot_date": args.pressure_snapshot_date.isoformat(),
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "non_gating": True,
+      }
+  report = build_report_document(
+    audits,
+    requested_trading_days=args.trading_days,
+    abnormal_dates=args.abnormal_date,
+    formal_execution=formal_execution,
+    historical_short_window_preflight=historical_short_window_preflight,
+    pressure_baseline=pressure_baseline,
+  )
+  # Formal status governs the process exit: a short baseline never returns a
+  # false-zero exit code for a blocked 20-day acceptance gate.
+  formal_status = report["formal_20_trading_day"]["status"]
+  return report, 0 if formal_status == "PASS" else 2
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+  parser = build_parser()
+  args = parser.parse_args(argv)
+  try:
+    report, result_code = asyncio.run(run_cli(args))
+  except (AcceptanceBlockedError, ValueError) as exc:
+    parser.error(str(exc))
+    return 2
+  markdown_path, json_path = write_report(report, args.report)
+  print(f"formal_20_day={report['formal_20_trading_day']['status']}")
+  print(f"markdown={markdown_path}")
+  print(f"json={json_path}")
+  return result_code
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

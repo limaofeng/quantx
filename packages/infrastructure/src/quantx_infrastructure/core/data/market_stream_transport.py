@@ -495,6 +495,7 @@ class MarketStreamStore:
     *,
     status: str,
     stream_id: str,
+    generation: int = 0,
     sequence: int,
     captured_at: datetime | None,
     instrument_count: int,
@@ -505,6 +506,7 @@ class MarketStreamStore:
     state = MarketStreamState(
       status=status,
       stream_id=stream_id,
+      generation=generation,
       sequence=sequence,
       captured_at=captured_at,
       updated_at=_utcnow(),

@@ -49,6 +49,9 @@ from quantx_infrastructure.services.market_data_request_service import (
   queue_market_data_sync,
   request_market_data_sync,
 )
+from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
+  TTradeCandidateOutcomePersistenceFacade,
+)
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
   TTradeReplayUpdateKind,
   t_trade_replay_projection_service,
@@ -101,9 +104,13 @@ class StrategyManager:
       self.running = False
       self.logger = logging.getLogger("StrategyManager")
       self.parameter_manager = ParameterManager()
+      self.candidate_outcome_facade = TTradeCandidateOutcomePersistenceFacade()
 
       # 核心组件：策略执行器
-      self.executor = StrategyExecutor(max_workers=10)
+      self.executor = StrategyExecutor(
+        max_workers=10,
+        candidate_outcome_facade=self.candidate_outcome_facade,
+      )
       self._executor_retired = False
       self._shutdown_in_progress = False
       self._executor_shutdown_task: Optional[asyncio.Task[None]] = None
@@ -154,7 +161,9 @@ class StrategyManager:
         await backtest_repo.update_backtest_start(backtest_id, time_utils.now())
         break
     except Exception as exc:
-      self.logger.warning(f"更新回测开始状态失败: backtest_id={backtest_id}, error={exc}")
+      self.logger.warning(
+        f"更新回测开始状态失败: backtest_id={backtest_id}, error={exc}"
+      )
 
   async def _mark_backtest_error_safely(
     self,
@@ -177,7 +186,9 @@ class StrategyManager:
         )
         break
     except Exception as exc:
-      self.logger.warning(f"更新回测失败状态失败: backtest_id={backtest_id}, error={exc}")
+      self.logger.warning(
+        f"更新回测失败状态失败: backtest_id={backtest_id}, error={exc}"
+      )
 
   async def start(self):
     """启动策略管理器服务"""
@@ -194,6 +205,7 @@ class StrategyManager:
       self.executor = StrategyExecutor(
         max_workers=previous_executor.max_workers,
         exit_strategy_registry=previous_executor.exit_strategy_registry,
+        candidate_outcome_facade=self.candidate_outcome_facade,
       )
       self._executor_retired = False
       self._executor_shutdown_task = None
@@ -269,9 +281,7 @@ class StrategyManager:
         if runtime_task is not None and not runtime_task.done():
           active_tasks.append(f"{runtime.run_id}:{task_name}")
     if active_tasks:
-      raise RuntimeError(
-        "旧策略执行器仍有未结束任务: " + ", ".join(active_tasks)
-      )
+      raise RuntimeError("旧策略执行器仍有未结束任务: " + ", ".join(active_tasks))
 
   async def _sync_strategies(self):
     """协调策略到数据库"""
@@ -299,7 +309,7 @@ class StrategyManager:
 
   async def _restore_runs(self):
     """从数据库恢复活跃的策略运行实例
-    
+
     恢复以下状态的运行实例到 executor：
     - RUNNING: 恢复后自动启动
     - PAUSED: 恢复到 executor 但不启动，等待用户 resume
@@ -313,19 +323,26 @@ class StrategyManager:
 
         for run in active_runs:
           try:
-            status_name = run.status.value if hasattr(run.status, 'value') else run.status
-            self.logger.info(f"恢复策略运行: {run.id} ({run.name}), 状态: {status_name}")
+            status_name = (
+              run.status.value if hasattr(run.status, "value") else run.status
+            )
+            self.logger.info(
+              f"恢复策略运行: {run.id} ({run.name}), 状态: {status_name}"
+            )
 
             # 获取关联的策略信息
             if not run.strategy:
               # 如果没有预加载，手动查询
               from quantx_infrastructure.models.strategy import Strategy
+
               stmt = select(Strategy).filter(Strategy.id == run.strategy_id)
               res = await db.execute(stmt)
               run.strategy = res.scalar_one_or_none()
 
             if not run.strategy:
-              self.logger.error(f"恢复运行 {run.id} 失败: 找不到策略模板 {run.strategy_id}")
+              self.logger.error(
+                f"恢复运行 {run.id} 失败: 找不到策略模板 {run.strategy_id}"
+              )
               continue
 
             # 载入运行参数
@@ -339,8 +356,12 @@ class StrategyManager:
                 run.strategy.class_name, run.strategy.file_path
               )
             except Exception as e:
-              self.logger.error(f"恢复运行 {run.id} 失败: 无法加载策略类 {run.strategy.class_name}: {e}")
-              await repo.update_strategy_run_status(run.id, "ERROR", f"策略代码加载失败: {e}")
+              self.logger.error(
+                f"恢复运行 {run.id} 失败: 无法加载策略类 {run.strategy.class_name}: {e}"
+              )
+              await repo.update_strategy_run_status(
+                run.id, "ERROR", f"策略代码加载失败: {e}"
+              )
               continue
 
             mode_value = str(getattr(run.mode, "value", run.mode)).lower()
@@ -361,7 +382,12 @@ class StrategyManager:
                 backtest_start_time = (
                   self._read_backtest_time_from_parameters(
                     parameters,
-                    ["backtestStartTime", "backtest_start_time", "startTime", "start_time"],
+                    [
+                      "backtestStartTime",
+                      "backtest_start_time",
+                      "startTime",
+                      "start_time",
+                    ],
                   )
                   or backtest.backtest_start_time
                 )
@@ -395,14 +421,9 @@ class StrategyManager:
                 f"run_id={run.id}, backtest_id={backtest.id}, v{backtest_version}"
               )
               should_start = True
-            if (
-              is_t_trade_replay
-              and status_value == StrategyRunStatus.PENDING.value
-            ):
+            if is_t_trade_replay and status_value == StrategyRunStatus.PENDING.value:
               projection = await t_trade_replay_projection_service.get(run.id)
-              projection_status = str(
-                (projection or {}).get("status") or ""
-              ).upper()
+              projection_status = str((projection or {}).get("status") or "").upper()
               if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
                 self.logger.warning(
                   "检测到中断的做 T 回放启动，恢复后台准备: run_id=%s",
@@ -421,9 +442,7 @@ class StrategyManager:
                 if replay_job_id
                 else None
               )
-              projection_status = str(
-                (projection or {}).get("status") or ""
-              ).upper()
+              projection_status = str((projection or {}).get("status") or "").upper()
               if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
                 self.logger.warning(
                   "检测到中断的打板回放启动，恢复后台准备: run_id=%s",
@@ -470,9 +489,7 @@ class StrategyManager:
                 else:
                   runtime = self.executor.get(run.id)
                   error_message = (
-                    str(runtime.error_message or "")
-                    if runtime is not None
-                    else ""
+                    str(runtime.error_message or "") if runtime is not None else ""
                   )
                   self.logger.error(
                     "策略运行 %s 恢复启动失败%s",
@@ -481,7 +498,9 @@ class StrategyManager:
                   )
             else:
               # PAUSED 和 PENDING 状态只加载到 executor，等待用户操作
-              self.logger.info(f"策略运行 {run.id} 已加载到 executor (状态: {status_name})")
+              self.logger.info(
+                f"策略运行 {run.id} 已加载到 executor (状态: {status_name})"
+              )
 
           except Exception as e:
             self.logger.error(f"恢复策略运行实例 {run.id} 失败: {e}")
@@ -573,6 +592,7 @@ class StrategyManager:
       from quantx_infrastructure.repositories.backtest_repository import (
         BacktestRepository,
       )
+
       async for db in get_async_db():
         backtest_repo = BacktestRepository(db)
         backtest = await backtest_repo.create_backtest(
@@ -591,6 +611,7 @@ class StrategyManager:
 
     # 自动启动（后台异步，不阻塞 API 响应）
     if auto_start:
+
       async def _safe_start():
         try:
           await self.start_strategy(run_id)
@@ -600,6 +621,7 @@ class StrategyManager:
             await self._update_runtime_status(run_id, "ERROR", str(e))
           except Exception:
             pass
+
       asyncio.create_task(_safe_start())
 
     return run_id
@@ -696,7 +718,9 @@ class StrategyManager:
       template_record = await snapshot_repo.get_template(run_id)
       if not template_record and latest:
         for path in self._backtest_result_path_candidates(latest.result_path):
-          latest_snapshot = await BacktestResultStorage.load_latest_grid_book_snapshot(path)
+          latest_snapshot = await BacktestResultStorage.load_latest_grid_book_snapshot(
+            path
+          )
           if not latest_snapshot:
             continue
           template_snapshot = grid_book_to_template_snapshot(
@@ -719,7 +743,9 @@ class StrategyManager:
         template_snapshot = normalize_grid_book(
           dict(template_record.snapshot or {}),
           run_id=run_id,
-          instrument_code=(instruments[0] if instruments else parameters.get("instrument_code", "")),
+          instrument_code=(
+            instruments[0] if instruments else parameters.get("instrument_code", "")
+          ),
           parameters=parameters,
           editable=True,
           needs_backtest=True,
@@ -732,24 +758,20 @@ class StrategyManager:
           template_snapshot.get("version", 1) or 1
         )
 
-      persisted_start_time = (
-        self._read_backtest_time_from_parameters(
-          parameters,
-          ["backtestStartTime", "backtest_start_time", "startTime", "start_time"],
-        )
-        or (latest.backtest_start_time if latest else None)
-      )
-      persisted_end_time = (
-        self._read_backtest_time_from_parameters(
-          parameters,
-          ["backtestEndTime", "backtest_end_time", "endTime", "end_time"],
-        )
-        or (latest.backtest_end_time if latest else None)
-      )
+      persisted_start_time = self._read_backtest_time_from_parameters(
+        parameters,
+        ["backtestStartTime", "backtest_start_time", "startTime", "start_time"],
+      ) or (latest.backtest_start_time if latest else None)
+      persisted_end_time = self._read_backtest_time_from_parameters(
+        parameters,
+        ["backtestEndTime", "backtest_end_time", "endTime", "end_time"],
+      ) or (latest.backtest_end_time if latest else None)
       start_time = backtest_start_time or persisted_start_time
       end_time = backtest_end_time or persisted_end_time
       if not start_time or not end_time:
-        raise ValueError("无法确定回测时间范围，请先配置 backtestStartTime/backtestEndTime")
+        raise ValueError(
+          "无法确定回测时间范围，请先配置 backtestStartTime/backtestEndTime"
+        )
       if end_time < start_time:
         raise ValueError("回测结束时间不能早于开始时间")
 
@@ -870,7 +892,9 @@ class StrategyManager:
     success = await self.executor.start(run_id)
 
     if success:
-      if runtime.context.mode == StrategyRunMode.BACKTEST and runtime.context.backtest_id:
+      if (
+        runtime.context.mode == StrategyRunMode.BACKTEST and runtime.context.backtest_id
+      ):
         await self._mark_backtest_started_safely(runtime.context.backtest_id)
 
       # 注册任务完成回调
@@ -977,9 +1001,10 @@ class StrategyManager:
             persisted_parameters = run.parameters or {}
             if isinstance(persisted_parameters, str):
               persisted_parameters = json.loads(persisted_parameters)
-            account_id = account_id or str(
-              dict(persisted_parameters or {}).get("account_id") or ""
-            ).strip()
+            account_id = (
+              account_id
+              or str(dict(persisted_parameters or {}).get("account_id") or "").strip()
+            )
           if not backtest_id:
             history = await BacktestRepository(db).get_backtests_by_run(run_id)
             backtest_id = history[0].id if history else None
@@ -1050,8 +1075,7 @@ class StrategyManager:
       if period and str(period).lower() != "tick"
     }
     if any(
-      str(period).lower() == "tick"
-      for period in requirements.get("periods") or []
+      str(period).lower() == "tick" for period in requirements.get("periods") or []
     ):
       require_tick = True
 
@@ -1074,8 +1098,7 @@ class StrategyManager:
     )
 
     self.logger.info(
-      f"回测历史数据检查完成: {runtime.run_id}, "
-      f"缺失标的数量: {len(missing_before)}"
+      f"回测历史数据检查完成: {runtime.run_id}, 缺失标的数量: {len(missing_before)}"
     )
 
     if not missing_before:
@@ -1215,9 +1238,7 @@ class StrategyManager:
         if status == "skipped":
           summary["status"] = "AGENT_UNAVAILABLE"
           summary["reason"] = str(result.get("reason") or "")
-          self.logger.info(
-            "做 T 回放未排队可选补数：当前没有在线 market-data Agent"
-          )
+          self.logger.info("做 T 回放未排队可选补数：当前没有在线 market-data Agent")
           return summary
         request_id = str(result.get("request_id") or "")
         if status == "success":
@@ -1259,9 +1280,7 @@ class StrategyManager:
     available = [
       code for code in runtime.context.instruments if code not in missing_codes
     ]
-    metadata = dict(
-      runtime.context.parameters.get("initial_instrument_metadata") or {}
-    )
+    metadata = dict(runtime.context.parameters.get("initial_instrument_metadata") or {})
     skipped_by_code = {
       str(item.get("stock_code") or ""): dict(item)
       for item in list(
@@ -1672,14 +1691,16 @@ class StrategyManager:
       reason_codes.append("NO_TICK_DATA")
     if invalid_timestamp_count:
       reason_codes.append("INVALID_TICK_TIMESTAMPS")
-    if (
-      len(continuous_times) < _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY
-    ):
+    if len(continuous_times) < _T_TRADE_REPLAY_MIN_CONTINUOUS_TICKS_PER_DAY:
       reason_codes.append("TICK_COUNT_TOO_LOW")
 
     tolerance = _T_TRADE_REPLAY_SESSION_EDGE_TOLERANCE
-    morning_start = datetime.combine(trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][0])
-    morning_end = datetime.combine(trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][1])
+    morning_start = datetime.combine(
+      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][0]
+    )
+    morning_end = datetime.combine(
+      trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[0][1]
+    )
     afternoon_start = datetime.combine(
       trading_date, _T_TRADE_REPLAY_CONTINUOUS_SESSIONS[1][0]
     )
@@ -1872,8 +1893,7 @@ class StrategyManager:
           preview = f"{dates[0].strftime('%Y-%m-%d')}, {dates[1].strftime('%Y-%m-%d')}"
         else:
           preview = (
-            f"{dates[0].strftime('%Y-%m-%d')} ... "
-            f"{dates[-1].strftime('%Y-%m-%d')}"
+            f"{dates[0].strftime('%Y-%m-%d')} ... {dates[-1].strftime('%Y-%m-%d')}"
           )
         segments.append(f"日期[{preview}]")
       issues = list(info.get("quality_issues") or [])
@@ -1895,41 +1915,42 @@ class StrategyManager:
   async def _restart_strategy_impl(self, run_id: str) -> bool:
     """内部实现重启逻辑"""
     import os
+
     run_info = None
-    
+
     # 1. DB 操作：获取并重置
     async for db in get_async_db():
       repo = StrategyRunRepository(db)
       run = await repo.find_run_by_id(run_id)
       if not run:
         raise ValueError(f"未找到策略运行实例: {run_id}")
-      
+
       if run.mode != StrategyRunMode.BACKTEST:
         raise ValueError("仅支持重启回测模式的策略")
-        
+
       allowed_statuses = {
         StrategyRunStatus.COMPLETED,
         StrategyRunStatus.STOPPED,
         StrategyRunStatus.ERROR,
-        StrategyRunStatus.FAILED
+        StrategyRunStatus.FAILED,
       }
       status_value = (
         run.status.value if isinstance(run.status, StrategyRunStatus) else run.status
       )
       if status_value not in {status.value for status in allowed_statuses}:
         raise ValueError(f"当前状态 {run.status} 不允许重启，仅支持终止状态")
-      
+
       # 提取重建 Context 需要的信息
       strategy_class_name = run.strategy.class_name
       strategy_file_path = run.strategy.file_path
-      
+
       parameters = run.parameters
       if isinstance(parameters, str):
         parameters = json.loads(parameters)
-        
+
       instruments = run.instruments or []
       initial_capital = run.initial_capital or 1000000.0
-      
+
       # 清理日志
       log_file = f"logs/strategy/{run_id}.jsonl"
       if os.path.exists(log_file):
@@ -1944,9 +1965,9 @@ class StrategyManager:
       run.error_message = None
       run.start_time = None
       run.stop_time = None
-      
+
       await db.commit()
-      
+
       # 保存信息用于后续重建
       run_info = {
         "id": run.id,
@@ -1957,58 +1978,58 @@ class StrategyManager:
         "parameters": parameters,
         "instruments": instruments,
         "initial_capital": initial_capital,
-        "mode": run.mode
+        "mode": run.mode,
       }
       break
-      
+
     if not run_info:
-        return False
-        
-        # 2. 内存操作：重建 Runtime
+      return False
+
+      # 2. 内存操作：重建 Runtime
     try:
-        if self.executor.get(run_id):
-            await self.executor.delete(run_id)
+      if self.executor.get(run_id):
+        await self.executor.delete(run_id)
 
-        strategy_class = strategy_registry.get_strategy_class(
-            run_info["class_name"], run_info["file_path"]
-        )
-        
-        # 尝试从 parameters 中恢复回测时间范围
-        params = run_info["parameters"] or {}
-        
-        context = StrategyContext(
-          run_id=run_info["id"],
-          mode=run_info["mode"],
-          instruments=run_info["instruments"],
-          parameters=params,
-          initial_capital=run_info["initial_capital"],
-          # 尝试从参数恢复时间，如果不存在则为 None
-          backtest_start_time=None, 
-          backtest_end_time=None,
-        )
+      strategy_class = strategy_registry.get_strategy_class(
+        run_info["class_name"], run_info["file_path"]
+      )
 
-        await self.executor.create(
-            run_id=run_info["id"],
-            name=run_info["name"],
-            strategy_id=run_info["strategy_id"],
-            strategy_class=strategy_class,
-            context=context
-        )
+      # 尝试从 parameters 中恢复回测时间范围
+      params = run_info["parameters"] or {}
 
-        # 3. 启动
-        await self.start_strategy(run_id)
-        return True
+      context = StrategyContext(
+        run_id=run_info["id"],
+        mode=run_info["mode"],
+        instruments=run_info["instruments"],
+        parameters=params,
+        initial_capital=run_info["initial_capital"],
+        # 尝试从参数恢复时间，如果不存在则为 None
+        backtest_start_time=None,
+        backtest_end_time=None,
+      )
+
+      await self.executor.create(
+        run_id=run_info["id"],
+        name=run_info["name"],
+        strategy_id=run_info["strategy_id"],
+        strategy_class=strategy_class,
+        context=context,
+      )
+
+      # 3. 启动
+      await self.start_strategy(run_id)
+      return True
 
     except Exception as e:
-        self.logger.error(f"重建策略运行时失败: {e}")
-        # 此时 DB 已经是 PENDING，但内存没起来，用户可以再次点击 Start
-        return False
+      self.logger.error(f"重建策略运行时失败: {e}")
+      # 此时 DB 已经是 PENDING，但内存没起来，用户可以再次点击 Start
+      return False
 
   async def clone_strategy(
     self,
     source_run_id: str,
     target_mode: StrategyRunMode,
-    parameter_overrides: Optional[Dict[str, Any]] = None
+    parameter_overrides: Optional[Dict[str, Any]] = None,
   ) -> str:
     """
     克隆策略运行实例（例如：将回测克隆为模拟盘）
@@ -2245,26 +2266,41 @@ class StrategyManager:
     instruments: List[str],
     *,
     instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    parameters: Optional[Dict[str, Any]] = None,
+    configuration_changed: bool = False,
   ) -> Dict[str, List[str]]:
-    """调整动态标的池，并把最新快照持久化到 StrategyRun。"""
+    """Atomically apply a dynamic universe/config snapshot to one runtime."""
 
     runtime = self.executor.get(run_id)
     if runtime is None:
       raise ValueError(f"策略运行不存在: {run_id}")
     previous = list(runtime.context.instruments or [])
+    previous_parameters = dict(runtime.context.parameters or {})
     result = await self.executor.reconcile_instruments(
       run_id,
       instruments,
       instrument_metadata=instrument_metadata,
+      parameters=parameters,
+      configuration_changed=configuration_changed,
     )
     try:
       async for db in get_async_db():
-        await StrategyRunRepository(db).update_run(
-          run_id, {"instruments": list(result["instruments"])}
-        )
+        updates: Dict[str, Any] = {"instruments": list(result["instruments"])}
+        if parameters is not None:
+          updates["parameters"] = dict(parameters)
+        run = await StrategyRunRepository(db).update_run(run_id, updates)
+        if run is None:
+          raise ValueError(f"策略运行不存在: {run_id}")
         break
     except Exception:
-      await self.executor.reconcile_instruments(run_id, previous)
+      await self.executor.reconcile_instruments(
+        run_id,
+        previous,
+        parameters=previous_parameters if parameters is not None else None,
+        # A rollback is also a policy boundary. Rewarm again instead of
+        # restoring any candidate created under the failed configuration.
+        configuration_changed=configuration_changed,
+      )
       raise
     return result
 
@@ -2348,7 +2384,7 @@ class StrategyManager:
         self.logger.error(f"策略运行任务异常结束: {run_id}, {exc}")
         await self._update_runtime_status(run_id, "ERROR", str(exc))
         return
-      
+
       # 正常结束
       # 检查 runtime 状态，确定是否是自然完成
       runtime = self.executor.get(run_id)
@@ -2364,8 +2400,8 @@ class StrategyManager:
             error_message,
           )
       elif runtime and runtime.status == ExecutionStatus.STOPPED:
-         status = "STOPPED"
-      
+        status = "STOPPED"
+
       if status == "ERROR":
         await self._update_runtime_status(run_id, status, error_message)
       else:
@@ -2474,4 +2510,3 @@ class StrategyManager:
 
 # 创建全局单例
 strategy_manager = StrategyManager()
-

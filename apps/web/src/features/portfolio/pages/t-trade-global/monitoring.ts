@@ -1,27 +1,286 @@
 import { isTradingHours } from '@/shared/utils/date';
 
-export type EvaluationTelemetry = {
-  phase: string;
-  lastTickAt: string;
-  processedTickCount: number;
-  windowSampleCount: number;
-  windowCoverageSeconds: number;
-  triggered: boolean;
-  reason: string;
-  signalType: string;
-  signalPrice: number;
+export const DATA_HEALTH_VALUES = [
+  'WARMING',
+  'READY',
+  'DEGRADED',
+  'STALE',
+  'CONTINUITY_LOST',
+  'INSUFFICIENT',
+] as const;
+
+export const PULLBACK_PHASE_VALUES = [
+  'OBSERVING',
+  'PULLBACK_FORMING',
+  'LOW_STABILIZING',
+  'REBOUND_CONFIRMING',
+  'CANDIDATE_LATCHED',
+  'SUPPRESSED',
+] as const;
+
+export const MOMENTUM_PHASE_VALUES = [
+  'OBSERVING',
+  'BASELINING',
+  'MOMENTUM_BUILDING',
+  'ACCELERATING',
+  'OVEREXTENDED',
+  'CANDIDATE_LATCHED',
+  'SUPPRESSED',
+] as const;
+
+export const CANDIDATE_STATUS_VALUES = [
+  'NONE',
+  'LATCHED',
+  'AWAITING_APPROVAL',
+  'SUPPRESSED',
+  'REARMING',
+] as const;
+
+export const SIGNAL_PATH_VALUES = [
+  'PULLBACK_REBOUND',
+  'MOMENTUM_ACCELERATION',
+] as const;
+
+// Keep this list aligned with the published TTradeDominantPhase enum. The
+// GraphQL scalar is currently represented as a string in this hand-written
+// client shape, so trust must not be based on a partial label map.
+export const DOMINANT_PHASE_VALUES = [
+  'NONE',
+  'PULLBACK_OBSERVING',
+  'PULLBACK_FORMING',
+  'PULLBACK_LOW_STABILIZING',
+  'PULLBACK_REBOUND_CONFIRMING',
+  'PULLBACK_CANDIDATE_LATCHED',
+  'PULLBACK_SUPPRESSED',
+  'MOMENTUM_OBSERVING',
+  'MOMENTUM_BASELINING',
+  'MOMENTUM_BUILDING',
+  'MOMENTUM_ACCELERATING',
+  'MOMENTUM_OVEREXTENDED',
+  'MOMENTUM_CANDIDATE_LATCHED',
+  'MOMENTUM_SUPPRESSED',
+] as const;
+
+export const SIGNAL_STATE_SCHEMA_VERSION = '3';
+export const SIGNAL_FEATURE_SCHEMA_VERSION = '1';
+
+export const T_TRADE_CLIENT_TELEMETRY_EVENTS = [
+  'REFRESH_SUCCESS',
+  'REFRESH_FAILURE',
+  'SUBSCRIPTION_RECONNECTED',
+] as const;
+
+export type TTradeClientTelemetryEvent =
+  (typeof T_TRADE_CLIENT_TELEMETRY_EVENTS)[number];
+
+export type SignalSnapshotRefreshCoordinator = ReturnType<
+  typeof createSignalSnapshotRefreshCoordinator
+>;
+
+/**
+ * Serializes monitor refreshes and binds trust to the epoch that requested
+ * them. URQL's hook reexecute function is fire-and-forget and operations with
+ * the same key may be deduplicated, so a newer reconnect waits for the prior
+ * request to finish before it starts its own network-only request.
+ */
+export function createSignalSnapshotRefreshCoordinator() {
+  let currentEpoch = 0;
+  let currentAccountId: string | null = null;
+  let trustedEpoch: number | null = null;
+  let inFlight: Promise<boolean> | null = null;
+
+  const beginEpoch = (accountId: string | null | undefined) => {
+    currentEpoch += 1;
+    currentAccountId = accountId || null;
+    trustedEpoch = null;
+    return currentEpoch;
+  };
+
+  const isCurrent = (epoch: number, accountId: string) =>
+    epoch === currentEpoch && accountId === currentAccountId;
+
+  const isTrusted = (accountId: string) =>
+    trustedEpoch === currentEpoch && accountId === currentAccountId;
+
+  const refresh = async (
+    epoch: number,
+    accountId: string,
+    request: () => PromiseLike<boolean>
+  ): Promise<boolean> => {
+    const previous = inFlight;
+    if (previous) await previous.catch(() => false);
+
+    // A disconnect, account change, or newer reconnect invalidates the work
+    // that was waiting behind the previous request.
+    if (!isCurrent(epoch, accountId)) return false;
+
+    let requestPromise: Promise<boolean>;
+    try {
+      requestPromise = Promise.resolve().then(request);
+    } catch {
+      return false;
+    }
+    inFlight = requestPromise;
+    try {
+      const succeeded = await requestPromise;
+      if (!succeeded || !isCurrent(epoch, accountId)) return false;
+      trustedEpoch = epoch;
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (inFlight === requestPromise) inFlight = null;
+    }
+  };
+
+  return {
+    beginEpoch,
+    currentEpoch: () => currentEpoch,
+    isCurrent,
+    isTrusted,
+    refresh,
+  };
+}
+
+export function createTTradeClientTelemetryReporter(
+  send: (event: TTradeClientTelemetryEvent) => PromiseLike<unknown> | unknown,
+  options: { now?: () => number; throttleMs?: number } = {}
+) {
+  const now = options.now ?? Date.now;
+  const throttleMs = Math.max(0, options.throttleMs ?? 30_000);
+  const allowedEvents = new Set<string>(T_TRADE_CLIENT_TELEMETRY_EVENTS);
+  const lastSentAt = new Map<TTradeClientTelemetryEvent, number>();
+  const inFlight = new Set<TTradeClientTelemetryEvent>();
+
+  return (event: TTradeClientTelemetryEvent): boolean => {
+    if (!allowedEvents.has(event) || inFlight.has(event)) return false;
+    const timestamp = now();
+    const previous = lastSentAt.get(event);
+    if (previous != null && timestamp - previous < throttleMs) return false;
+    lastSentAt.set(event, timestamp);
+    inFlight.add(event);
+    void Promise.resolve()
+      .then(() => send(event))
+      .catch(() => undefined)
+      .finally(() => inFlight.delete(event));
+    return true;
+  };
+}
+
+export type SignalReason = {
+  code: string;
+  label: string;
+  detail: string;
+};
+
+export type SignalGate = {
+  code: string;
+  label: string;
+  passed: boolean;
+  observedValue?: number | null;
+  requiredValue?: number | null;
+  detail: string;
+};
+
+export type ScoreContribution = {
+  code: string;
+  label: string;
+  points: number;
+  maxPoints: number;
+  observedValue?: number | null;
+  targetValue?: number | null;
+  detail: string;
+};
+
+export type SignalBlocker = {
+  code: string;
+  label: string;
+  detail: string;
+};
+
+export type SignalFeatures = {
+  sampleCount: number;
+  coverageSeconds?: number | null;
+  maxGapSeconds?: number | null;
+  price?: number | null;
+  priceTick?: number | null;
+  bidPrice?: number | null;
+  askPrice?: number | null;
+  spreadTicks?: number | null;
+  spreadPct?: number | null;
+  bookImbalance?: number | null;
+  sessionVwap?: number | null;
+  vwapPremiumPct?: number | null;
   windowHigh?: number | null;
   windowLow?: number | null;
   pullbackPct?: number | null;
   reboundPct?: number | null;
-  vwap?: number | null;
-  vwapPremiumPct?: number | null;
-  spreadTicks?: number | null;
-  spreadPct?: number | null;
+  secondsSinceLow?: number | null;
+  reboundSlopePctPerSecond?: number | null;
+  rangePosition?: number | null;
   momentumRisePct?: number | null;
   momentumMoveSeconds?: number | null;
-  momentumAmountVelocityRatio?: number | null;
+  momentumWindowHigh?: number | null;
+  momentumRangePosition?: number | null;
   momentumBaselineCoverageSeconds?: number | null;
+  momentumAmountVelocityRatio?: number | null;
+};
+
+export type SignalBranch = {
+  phase: string;
+  score?: number | null;
+  preview: boolean;
+  candidateReady: boolean;
+  hardGates: readonly SignalGate[];
+  scoreContributions: readonly ScoreContribution[];
+  blockers: readonly SignalBlocker[];
+};
+
+export type SignalSnapshot = {
+  instrumentCode: string;
+  tradeDate: string;
+  evaluatedAt: string;
+  sourceAt: string;
+  sourceTimeMs: string;
+  tickOrdinal: string;
+  continuityGeneration: string;
+  dataAgeMs?: number | null;
+  windowCoverageSeconds?: number | null;
+  sampleCount: number;
+  dataHealth: string;
+  dataHealthReasons: readonly SignalReason[];
+  pullbackPhase: string;
+  momentumPhase: string;
+  dominantPhase: string;
+  selectedPath?: string | null;
+  pullbackScore?: number | null;
+  momentumScore?: number | null;
+  opportunityScore?: number | null;
+  previewThreshold: number;
+  candidateThreshold: number;
+  revalidateThreshold: number;
+  rearmThreshold: number;
+  features: SignalFeatures;
+  pullback: SignalBranch;
+  momentum: SignalBranch;
+  hardGates: readonly SignalGate[];
+  scoreContributions: readonly ScoreContribution[];
+  topBlockers: readonly SignalBlocker[];
+  episodeId?: string | null;
+  candidateId?: string | null;
+  candidateFingerprint?: string | null;
+  candidateStatus: string;
+  candidateCreatedAt?: string | null;
+  candidateExpiresAt?: string | null;
+  pendingEntryIntentId?: string | null;
+  signalVersion: number;
+  candidateStateVersion: number;
+  stateSchemaVersion: string;
+  featureSchemaVersion: string;
+  policyVersion: string;
+  configVersion: number;
+  profileVersion?: string | null;
+  profileFingerprint?: string | null;
 };
 
 export type MonitorSession = {
@@ -30,7 +289,6 @@ export type MonitorSession = {
   runStatus: string;
   status: string;
   mode: string;
-  currentSignal?: unknown;
   pendingEntryIntentId?: string | null;
   pendingExitIntentId?: string | null;
   entryOrderStatus: string;
@@ -50,7 +308,8 @@ export type MonitorSession = {
   completedCycles: number;
   canCancel: boolean;
   errorMessage?: string | null;
-  latestEvaluation?: EvaluationTelemetry | null;
+  plannedEntryAmount?: number;
+  signalSnapshot?: SignalSnapshot | null;
 };
 
 export type MonitorHolding = {
@@ -65,25 +324,8 @@ export type MonitorHolding = {
   session?: MonitorSession | null;
 };
 
-export type MonitorConfig = {
-  signalLookbackSeconds: number;
-  stabilizationSeconds: number;
-  pullbackThresholdPct: number;
-  reboundThresholdPct: number;
-  maxSpreadTicks: number;
-  momentumEnabled: boolean;
-  momentumWindowSeconds: number;
-  momentumMinRisePct: number;
-  momentumMinMoveSeconds: number;
-  momentumBaselineSeconds: number;
-  momentumMinAmountVelocityRatio: number;
-  momentumMinVwapPremiumPct: number;
-  momentumMaxVwapPremiumPct: number;
-  momentumMaxSpreadTicks: number;
-  momentumMaxSpreadPct: number;
-};
-
-export type FreshnessLevel = 'LIVE' | 'DELAYED' | 'STALE' | 'CLOSED' | 'MISSING';
+export type FreshnessLevel =
+  'LIVE' | 'DELAYED' | 'STALE' | 'CLOSED' | 'MISSING';
 
 export type Freshness = {
   ageSeconds: number | null;
@@ -91,30 +333,60 @@ export type Freshness = {
   level: FreshnessLevel;
 };
 
-const evaluationReasonLabels: Record<string, string> = {
-  TICK_PROCESSED: '本 Tick 已处理',
-  INSUFFICIENT_TICKS: '积累观察样本',
-  WAITING_PULLBACK: '等待回撤幅度',
-  WAITING_REBOUND: '等待企稳反弹',
-  WAITING_STABILIZATION: '等待走势稳定',
-  WAITING_MOMENTUM_RISE: '等待动量涨幅',
-  WAITING_MOMENTUM_DURATION: '等待动量持续',
-  WAITING_AMOUNT_ACCELERATION: '等待成交加速',
-  WAITING_VWAP_PREMIUM: '等待 VWAP 溢价',
-  VWAP_PREMIUM_TOO_HIGH: 'VWAP 溢价过高',
-  SPREAD_TOO_WIDE: '买卖价差过宽',
-  INTENT_PENDING: '已有指令等待确认',
-  COOLDOWN_ACTIVE: '批次冷却中',
-  END_OF_DAY_ENTRY_BLOCKED: '临近收盘，停止新开批次',
-  WAITING_FOR_EXIT_PLAN_REGISTRATION: '等待卖出计划注册',
-  MONITOR_ENGINE_EXIT_PLAN: '持续评估卖出计划',
-  PULLBACK_REBOUND_TRIGGERED: '回撤反弹机会已触发',
-  MOMENTUM_ACCELERATION_TRIGGERED: '动量加速机会已触发',
+export type AttentionRow<TQuote = unknown> = {
+  attentionLevel: number;
+  distanceToCandidate: number | null;
+  holding: MonitorHolding;
+  quote?: TQuote;
+  session?: MonitorSession | null;
+  snapshot?: SignalSnapshot | null;
 };
 
-export function evaluationReasonLabel(reason?: string | null) {
-  const normalized = String(reason || '').toUpperCase();
-  return evaluationReasonLabels[normalized] || reason || '等待首个有效 Tick';
+const includes = (values: readonly string[], candidate: unknown): boolean =>
+  typeof candidate === 'string' && values.includes(candidate);
+
+export function isKnownSignalSnapshot(
+  snapshot: SignalSnapshot | null | undefined
+): snapshot is SignalSnapshot {
+  if (!snapshot) return false;
+  return (
+    includes(DATA_HEALTH_VALUES, snapshot.dataHealth) &&
+    includes(PULLBACK_PHASE_VALUES, snapshot.pullbackPhase) &&
+    includes(MOMENTUM_PHASE_VALUES, snapshot.momentumPhase) &&
+    includes(DOMINANT_PHASE_VALUES, snapshot.dominantPhase) &&
+    includes(CANDIDATE_STATUS_VALUES, snapshot.candidateStatus) &&
+    (snapshot.selectedPath == null ||
+      includes(SIGNAL_PATH_VALUES, snapshot.selectedPath)) &&
+    snapshot.stateSchemaVersion === SIGNAL_STATE_SCHEMA_VERSION &&
+    snapshot.featureSchemaVersion === SIGNAL_FEATURE_SCHEMA_VERSION &&
+    typeof snapshot.policyVersion === 'string' &&
+    snapshot.policyVersion.length > 0
+  );
+}
+
+export function canApproveSnapshot(
+  snapshot: SignalSnapshot | null | undefined,
+  now = new Date()
+): snapshot is SignalSnapshot & {
+  candidateId: string;
+  candidateFingerprint: string;
+  pendingEntryIntentId: string;
+} {
+  if (!isKnownSignalSnapshot(snapshot)) return false;
+  const expiresAt = snapshot.candidateExpiresAt
+    ? Date.parse(snapshot.candidateExpiresAt)
+    : Number.NaN;
+  return (
+    snapshot.candidateStatus === 'AWAITING_APPROVAL' &&
+    Boolean(
+      snapshot.candidateId &&
+      snapshot.candidateFingerprint &&
+      snapshot.pendingEntryIntentId
+    ) &&
+    snapshot.candidateStateVersion > 0 &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > now.getTime()
+  );
 }
 
 export function classifyFreshness(
@@ -137,7 +409,11 @@ export function classifyFreshness(
   const liveLimit = kind === 'QUOTE' ? 5 : 15;
   const delayedLimit = kind === 'QUOTE' ? 15 : 30;
   if (ageSeconds <= liveLimit) {
-    return { ageSeconds, label: kind === 'QUOTE' ? '实时' : '心跳正常', level: 'LIVE' };
+    return {
+      ageSeconds,
+      label: kind === 'QUOTE' ? '实时' : '心跳正常',
+      level: 'LIVE',
+    };
   }
   if (ageSeconds <= delayedLimit) {
     return { ageSeconds, label: '延迟', level: 'DELAYED' };
@@ -145,53 +421,23 @@ export function classifyFreshness(
   return { ageSeconds, label: '陈旧', level: 'STALE' };
 }
 
-function safeRatio(value?: number | null, threshold?: number | null) {
-  if (!threshold || threshold <= 0) return 0;
-  return Math.max(0, Number(value || 0) / threshold);
+function candidateSortRank(snapshot?: SignalSnapshot | null) {
+  if (snapshot?.candidateStatus === 'AWAITING_APPROVAL') return 0;
+  if (snapshot?.candidateStatus === 'LATCHED') return 1;
+  if (
+    snapshot?.opportunityScore != null &&
+    snapshot.opportunityScore >= snapshot.previewThreshold
+  ) {
+    return 2;
+  }
+  if (snapshot?.dataHealth === 'READY') return 3;
+  return 4;
 }
-
-export function conditionProgress(
-  evaluation: EvaluationTelemetry | null | undefined,
-  config: MonitorConfig
-) {
-  if (!evaluation) return 0;
-  const pullbackPath = Math.min(
-    safeRatio(evaluation.pullbackPct, config.pullbackThresholdPct),
-    safeRatio(evaluation.reboundPct, config.reboundThresholdPct)
-  );
-  const momentumPath = config.momentumEnabled
-    ? Math.min(
-        safeRatio(evaluation.momentumRisePct, config.momentumMinRisePct),
-        safeRatio(
-          evaluation.momentumMoveSeconds,
-          config.momentumMinMoveSeconds
-        ),
-        safeRatio(
-          evaluation.momentumAmountVelocityRatio,
-          config.momentumMinAmountVelocityRatio
-        )
-      )
-    : 0;
-  return Math.min(1, Math.max(pullbackPath, momentumPath));
-}
-
-export type AttentionRow<TQuote = unknown> = {
-  attentionLevel: number;
-  conditionProgress: number;
-  heartbeatFreshness: Freshness;
-  holding: MonitorHolding;
-  quote?: TQuote;
-  quoteFreshness: Freshness;
-  session?: MonitorSession | null;
-};
 
 export function buildAttentionRows<TQuote extends { time: string }>(
   holdings: readonly MonitorHolding[],
   sessions: readonly MonitorSession[],
-  quotes: ReadonlyMap<string, TQuote>,
-  config: MonitorConfig,
-  now: Date,
-  isCurrentTradingDay?: boolean
+  quotes: ReadonlyMap<string, TQuote>
 ): AttentionRow<TQuote>[] {
   const sessionsByCode = new Map(
     sessions
@@ -202,58 +448,28 @@ export function buildAttentionRows<TQuote extends { time: string }>(
     .map(holding => {
       const code = holding.stockCode.toUpperCase();
       const session = sessionsByCode.get(code) || holding.session;
-      const quote = quotes.get(holding.stockCode) || quotes.get(code);
-      const quoteFreshness = classifyFreshness(
-        quote?.time,
-        now,
-        'QUOTE',
-        isCurrentTradingDay
-      );
-      const heartbeatFreshness = classifyFreshness(
-        session?.latestEvaluation?.lastTickAt,
-        now,
-        'HEARTBEAT',
-        isCurrentTradingDay
-      );
-      const progress = conditionProgress(session?.latestEvaluation, config);
-      const hasError = Boolean(
-        session?.errorMessage ||
-          ['ERROR', 'RECONCILE_REQUIRED', 'KILL_SWITCHED'].includes(
-            String(session?.status || holding.status).toUpperCase()
-          )
-      );
-      const pending = Boolean(
-        session?.pendingEntryIntentId || session?.pendingExitIntentId
-      );
-      const staleDuringTrading =
-        quoteFreshness.level === 'STALE' || quoteFreshness.level === 'MISSING';
-      const activeOrDraining = Boolean(
-        session?.activeVolume || holding.status === 'DRAINING'
-      );
-      const attentionLevel = hasError
-        ? 0
-        : pending
-          ? 1
-          : staleDuringTrading
-            ? 2
-            : activeOrDraining
-              ? 3
-              : progress >= 0.7
-                ? 4
-                : 5;
+      const snapshot = session?.signalSnapshot;
+      const distanceToCandidate =
+        snapshot?.opportunityScore == null
+          ? null
+          : Math.max(
+              0,
+              snapshot.candidateThreshold - snapshot.opportunityScore
+            );
       return {
-        attentionLevel,
-        conditionProgress: progress,
-        heartbeatFreshness,
+        attentionLevel: candidateSortRank(snapshot),
+        distanceToCandidate,
         holding,
-        quote,
-        quoteFreshness,
+        quote: quotes.get(holding.stockCode) || quotes.get(code),
         session,
+        snapshot,
       };
     })
     .sort(
       (left, right) =>
         left.attentionLevel - right.attentionLevel ||
+        (left.distanceToCandidate ?? Number.POSITIVE_INFINITY) -
+          (right.distanceToCandidate ?? Number.POSITIVE_INFINITY) ||
         left.holding.stockCode.localeCompare(right.holding.stockCode)
     );
 }

@@ -48,3 +48,9 @@ class Tick:
   bid_price: List[float] = field(default_factory=list)
   ask_vol: List[float] = field(default_factory=list)
   bid_vol: List[float] = field(default_factory=list)
+  source_time_ms: int = 0
+  tick_ordinal: int = 0
+  continuity_generation: int = 0
+  market_stream_id: str = ""
+  market_stream_sequence: int = 0
+  market_stream_reset: bool = False

@@ -2,10 +2,8 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
-  Clock3,
-  DatabaseBackup,
+  Database,
   Gauge,
-  HeartPulse,
   Loader2,
   Play,
   Radio,
@@ -16,6 +14,7 @@ import {
   ShieldCheck,
   Square,
   Waves,
+  XCircle,
 } from 'lucide-react';
 import * as React from 'react';
 
@@ -34,24 +33,21 @@ import type { LiveMarketQuote } from '../../hooks/useRealTimeHoldings';
 
 import {
   buildAttentionRows,
-  conditionProgress,
-  evaluationReasonLabel,
-  type Freshness,
-  type MonitorConfig,
+  CANDIDATE_STATUS_VALUES,
+  DATA_HEALTH_VALUES,
+  isKnownSignalSnapshot,
+  MOMENTUM_PHASE_VALUES,
+  PULLBACK_PHASE_VALUES,
   type MonitorHolding,
   type MonitorSession,
+  type SignalSnapshot,
 } from './monitoring';
 import type {
   QuoteHistoryByCode,
   QuoteHistoryPoint,
 } from './useLiveQuoteHistory';
 import { useMarketDataHealth } from './useMarketDataHealth';
-import {
-  formatNumber,
-  formatSignedPercent,
-  formatTime,
-  quoteTone,
-} from './utils';
+import { formatNumber, formatTime } from './utils';
 
 type ReadinessLike = {
   automationReady: boolean;
@@ -78,7 +74,7 @@ type ReadinessLike = {
   checkedAt: string;
 };
 
-export type TTradeMonitorLike = MonitorConfig & {
+export type TTradeMonitorLike = {
   enabled: boolean;
   mode: string;
   holdingCount: number;
@@ -108,6 +104,66 @@ export type TTradeMonitorLike = MonitorConfig & {
   readiness?: ReadinessLike | null;
 };
 
+export type SignalEvaluationLike = {
+  id: string;
+  accountId: string;
+  runId: string;
+  stockCode: string;
+  eventKind: string;
+  eventType: string;
+  evaluatedAt: string;
+  coalescedCount: number;
+  policyVersion: string;
+  signalSnapshot?: SignalSnapshot | null;
+};
+
+const healthLabels: Record<string, string> = {
+  WARMING: '重热中',
+  READY: '数据就绪',
+  DEGRADED: '数据降级',
+  STALE: '数据陈旧',
+  CONTINUITY_LOST: '连续性中断',
+  INSUFFICIENT: '数据不足',
+};
+
+const candidateLabels: Record<string, string> = {
+  NONE: '无候选',
+  LATCHED: '候选已锁存',
+  AWAITING_APPROVAL: '等待人工确认',
+  SUPPRESSED: '候选已抑制',
+  REARMING: '等待再武装',
+};
+
+const pathLabels: Record<string, string> = {
+  PULLBACK_REBOUND: '回撤反弹',
+  MOMENTUM_ACCELERATION: '早期动量',
+};
+
+const phaseLabels: Record<string, string> = {
+  NONE: '暂无主导形态',
+  OBSERVING: '观察中',
+  PULLBACK_FORMING: '回撤形成',
+  LOW_STABILIZING: '低点企稳',
+  REBOUND_CONFIRMING: '反弹确认',
+  BASELINING: '建立基线',
+  MOMENTUM_BUILDING: '动量形成',
+  ACCELERATING: '加速确认',
+  OVEREXTENDED: '过度延伸',
+  CANDIDATE_LATCHED: '候选锁存',
+  SUPPRESSED: '已抑制',
+  PULLBACK_OBSERVING: '回撤 · 观察',
+  PULLBACK_LOW_STABILIZING: '回撤 · 低点企稳',
+  PULLBACK_REBOUND_CONFIRMING: '回撤 · 反弹确认',
+  PULLBACK_CANDIDATE_LATCHED: '回撤 · 候选锁存',
+  PULLBACK_SUPPRESSED: '回撤 · 已抑制',
+  MOMENTUM_OBSERVING: '动量 · 观察',
+  MOMENTUM_BASELINING: '动量 · 建立基线',
+  MOMENTUM_ACCELERATING: '动量 · 加速确认',
+  MOMENTUM_OVEREXTENDED: '动量 · 过度延伸',
+  MOMENTUM_CANDIDATE_LATCHED: '动量 · 候选锁存',
+  MOMENTUM_SUPPRESSED: '动量 · 已抑制',
+};
+
 function useNow() {
   const [now, setNow] = React.useState(() => new Date());
   React.useEffect(() => {
@@ -118,57 +174,45 @@ function useNow() {
 }
 
 function formatAge(seconds?: number | null) {
-  if (seconds == null || !Number.isFinite(seconds)) return '--';
+  if (seconds == null || !Number.isFinite(seconds)) return '不可计算';
   if (seconds < 60) return `${Math.round(seconds)} 秒`;
   if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`;
   return `${Math.round(seconds / 3600)} 小时`;
 }
 
-function freshnessTone(freshness: Freshness) {
-  if (freshness.level === 'LIVE') return 'text-emerald-300';
-  if (freshness.level === 'DELAYED') return 'text-amber-300';
-  if (freshness.level === 'STALE' || freshness.level === 'MISSING') {
-    return 'text-rose-300';
-  }
-  return 'text-slate-500';
+function nullableNumber(value?: number | null, digits = 2, suffix = '') {
+  return value == null || !Number.isFinite(value)
+    ? '不可计算'
+    : `${formatNumber(value, digits)}${suffix}`;
 }
 
-function FreshnessLabel({
-  freshness,
-  source,
-}: {
-  freshness: Freshness;
-  source?: string;
-}) {
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5',
-        freshnessTone(freshness)
-      )}
-    >
-      <span
-        aria-hidden="true"
-        className={cn(
-          'h-1.5 w-1.5 rounded-full',
-          freshness.level === 'LIVE'
-            ? 'bg-emerald-400'
-            : freshness.level === 'DELAYED'
-              ? 'bg-amber-400'
-              : freshness.level === 'CLOSED'
-                ? 'bg-slate-600'
-                : 'bg-rose-400'
-        )}
-      />
-      {source && <span className="text-slate-500">{source}</span>}
-      {freshness.label}
-      {freshness.ageSeconds != null && (
-        <span className="font-mono text-slate-600">
-          {Math.round(freshness.ageSeconds)}s
-        </span>
-      )}
-    </span>
-  );
+function thresholdNumber(value?: number | null) {
+  return value == null || !Number.isFinite(value)
+    ? '不可用'
+    : formatNumber(value, 1);
+}
+
+function scoreLabel(snapshot?: SignalSnapshot | null) {
+  return snapshot?.opportunityScore == null
+    ? `不可计算 / ${nullableNumber(snapshot?.candidateThreshold, 0)}`
+    : `${formatNumber(snapshot.opportunityScore, 1)} / ${formatNumber(snapshot.candidateThreshold, 1)}`;
+}
+
+function scoreTone(snapshot?: SignalSnapshot | null) {
+  if (snapshot?.opportunityScore == null) return 'text-slate-500';
+  if (snapshot.opportunityScore >= snapshot.candidateThreshold)
+    return 'text-emerald-300';
+  if (snapshot.opportunityScore >= snapshot.previewThreshold)
+    return 'text-amber-300';
+  return 'text-slate-300';
+}
+
+function healthTone(health?: string) {
+  if (health === 'READY')
+    return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200';
+  if (health === 'WARMING' || health === 'DEGRADED')
+    return 'border-amber-400/25 bg-amber-400/10 text-amber-200';
+  return 'border-rose-400/25 bg-rose-400/10 text-rose-200';
 }
 
 function StatusCell({
@@ -203,8 +247,8 @@ function StatusCell({
 export function TTradeHealthConsole({
   accountId,
   actionLoading,
+  loading = false,
   monitor,
-  isCurrentTradingDay,
   onRefresh,
   onReconcile,
   onToggleMonitoring,
@@ -212,11 +256,13 @@ export function TTradeHealthConsole({
   quoteConnected,
   quoteError,
   refreshing,
+  snapshotTrusted = false,
   toggleDisabled,
   wsStatus,
 }: {
   accountId: string;
   actionLoading: boolean;
+  loading?: boolean;
   monitor?: TTradeMonitorLike;
   isCurrentTradingDay?: boolean;
   onRefresh: () => void;
@@ -226,30 +272,25 @@ export function TTradeHealthConsole({
   quoteConnected: boolean;
   quoteError?: { message?: string } | null;
   refreshing: boolean;
+  snapshotTrusted?: boolean;
   toggleDisabled: boolean;
   wsStatus: GraphqlWsStatus;
 }) {
-  const now = useNow();
   const marketData = useMarketDataHealth();
   const readiness = monitor?.readiness;
-  const rows = monitor
-    ? buildAttentionRows(
-        monitor.holdings,
-        monitor.sessions,
-        quotes,
-        monitor,
-        now,
-        isCurrentTradingDay
-      )
-    : [];
-  const telemetryCoverage = rows.filter(
-    row => row.session?.latestEvaluation
-  ).length;
-  const staleCount = rows.filter(
-    row =>
-      ['STALE', 'MISSING'].includes(row.quoteFreshness.level) ||
-      ['STALE', 'MISSING'].includes(row.heartbeatFreshness.level)
-  ).length;
+  const snapshots = (monitor?.sessions || [])
+    .map(session => session.signalSnapshot)
+    .filter((snapshot): snapshot is SignalSnapshot => Boolean(snapshot));
+  const healthCounts = new Map<string, number>();
+  for (const snapshot of snapshots) {
+    healthCounts.set(
+      snapshot.dataHealth,
+      (healthCounts.get(snapshot.dataHealth) || 0) + 1
+    );
+  }
+  const readyCount = healthCounts.get('READY') || 0;
+  const hasSignalSnapshots = snapshots.length > 0;
+  const failClosedCount = snapshots.length - readyCount;
   const exceptionCount =
     Number(
       Boolean(
@@ -264,11 +305,6 @@ export function TTradeHealthConsole({
     monitor?.blockedReasons[0] ||
     monitor?.positionSnapshotError ||
     monitor?.lastError;
-  const wsHealthy = wsStatus === 'connected';
-  const marketDataReady = marketData.status.toLowerCase() === 'ready';
-  const marketDataPending = ['checking', 'starting', 'syncing'].includes(
-    marketData.status.toLowerCase()
-  );
   const automaticReady = Boolean(
     (readiness?.automationReady ?? monitor?.canActivateLive) &&
     !(readiness?.killSwitch ?? monitor?.killSwitch)
@@ -280,7 +316,7 @@ export function TTradeHealthConsole({
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-[9px] font-black uppercase tracking-[0.24em] text-red-300">
-              Live operations
+              Stateful opportunity V3
             </div>
             <h1 className="mt-1 text-base font-black">健康控制台</h1>
             <div className="mt-1 font-mono text-[9px] text-slate-600">
@@ -290,7 +326,7 @@ export function TTradeHealthConsole({
           <button
             type="button"
             aria-label="刷新健康控制台"
-            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-white/[0.08] text-slate-500 hover:border-red-400/25 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-white/[0.08] text-slate-500 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
@@ -304,7 +340,11 @@ export function TTradeHealthConsole({
         </div>
       </div>
 
-      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/[0.06] p-3">
+      <div
+        aria-atomic="true"
+        aria-live="polite"
+        className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/[0.06] p-3"
+      >
         <StatusCell
           icon={Radio}
           label="监控运行"
@@ -313,146 +353,142 @@ export function TTradeHealthConsole({
         />
         <StatusCell
           icon={ShieldCheck}
-          label="做 T 自动化"
+          label="自动执行"
           tone={automaticReady ? 'emerald' : 'sky'}
-          value={automaticReady ? '账户门禁已通过' : '安全关闭'}
+          value={automaticReady ? '门禁已通过' : '安全关闭'}
         />
         <StatusCell
           icon={Gauge}
-          label="执行模式"
-          tone={monitor?.mode === 'live' ? 'rose' : 'slate'}
-          value={monitor?.mode === 'live' ? 'LIVE 实盘' : 'PAPER 模拟'}
+          label="信号快照 READY"
+          tone={
+            !hasSignalSnapshots
+              ? 'slate'
+              : failClosedCount
+                ? 'amber'
+                : 'emerald'
+          }
+          value={
+            hasSignalSnapshots
+              ? `${readyCount} / ${snapshots.length}`
+              : '等待快照'
+          }
         />
         <StatusCell
           icon={Server}
-          label="页面 GraphQL WS"
+          label="订阅 / 真源"
           tone={
-            wsHealthy
-              ? 'emerald'
-              : wsStatus === 'reconnecting'
-                ? 'amber'
-                : 'rose'
-          }
-          value={wsStatus === 'connected' ? '已连接' : wsStatus}
-        />
-        <StatusCell
-          icon={Waves}
-          label="上游行情链路"
-          tone={
-            marketDataReady ? 'emerald' : marketDataPending ? 'amber' : 'rose'
+            wsStatus === 'connected' && snapshotTrusted ? 'emerald' : 'amber'
           }
           value={
-            marketDataReady
-              ? `READY · #${marketData.engineSequence ?? marketData.sequence ?? 0}`
-              : marketData.status.toUpperCase()
+            <span className="block leading-4">
+              订阅{wsStatus === 'connected' ? '已连接' : wsStatus} · 查询
+              {snapshotTrusted ? '已复核' : '待复核'}
+            </span>
           }
         />
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+      <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
+        {loading && !monitor && (
+          <div
+            role="status"
+            aria-busy="true"
+            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-3 py-3 text-[10px] text-cyan-100"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            正在读取账户健康快照…
+          </div>
+        )}
+        {!loading && !monitor && !accountId && (
+          <div
+            role="status"
+            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-[10px] leading-4 text-amber-100"
+          >
+            尚未配置交易账户，健康控制台处于只读等待状态。
+          </div>
+        )}
+        {!loading && !monitor && accountId && (
+          <div
+            role="status"
+            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-[10px] leading-4 text-amber-100"
+          >
+            当前账户尚未返回健康快照；控制台保持安全关闭，请刷新或先完成持仓同步。
+          </div>
+        )}
         <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
-            <span>双流覆盖</span>
-            <span>{monitor?.monitoredCount || 0} 只监控</span>
+          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+            服务端数据健康
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {DATA_HEALTH_VALUES.map(health => (
+              <div
+                key={health}
+                className="flex items-center justify-between border border-white/[0.06] px-2 py-1.5 text-[9px]"
+              >
+                <span
+                  className={
+                    health === 'READY' ? 'text-emerald-300' : 'text-slate-500'
+                  }
+                >
+                  {healthLabels[health]}
+                </span>
+                <span className="font-mono text-slate-300">
+                  {healthCounts.get(health) || 0}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-[9px] leading-4 text-slate-600">
+            READY 与阻断原因完全来自服务端信号快照；页面行情仅用于价格展示。
+          </p>
+        </section>
+
+        <section className="border-b border-white/[0.06] p-3">
+          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+            链路与投影
           </div>
           <div className="space-y-2 text-[10px]">
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-2 text-slate-400">
+            <div className="flex items-center justify-between">
+              <span className="inline-flex items-center gap-2 text-slate-500">
                 <Waves className="h-3.5 w-3.5 text-cyan-400" />
-                页面行情推送
+                页面行情
               </span>
               <span
                 className={
                   quoteConnected ? 'text-emerald-300' : 'text-amber-300'
                 }
               >
-                {quotes.size} / {monitor?.holdings.length || 0}
+                {quotes.size} 只
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-2 text-slate-400">
+            <div className="flex items-center justify-between">
+              <span className="inline-flex items-center gap-2 text-slate-500">
                 <Server className="h-3.5 w-3.5 text-violet-400" />
-                Agent → Engine
+                上游行情
               </span>
-              <span
-                className={
-                  marketDataReady
-                    ? 'text-emerald-300'
-                    : marketDataPending
-                      ? 'text-amber-300'
-                      : 'text-rose-300'
-                }
-              >
-                {marketData.status.toUpperCase()} ·{' '}
-                {formatAge(marketData.engineAgeSeconds)}
+              <span className="text-slate-300">
+                {marketData.status.toUpperCase()}
               </span>
             </div>
-            <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
-              <div
-                className="h-full bg-cyan-400 transition-[width] duration-300 motion-reduce:transition-none"
-                style={{
-                  width: `${monitor?.holdings.length ? Math.min(100, (quotes.size / monitor.holdings.length) * 100) : 0}%`,
-                }}
-              />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-2 text-slate-400">
-                <HeartPulse className="h-3.5 w-3.5 text-red-400" />
-                策略心跳
-              </span>
-              <span
-                className={
-                  telemetryCoverage ? 'text-emerald-300' : 'text-amber-300'
-                }
-              >
-                {telemetryCoverage} / {monitor?.holdings.length || 0}
-              </span>
-            </div>
-            <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
-              <div
-                className="h-full bg-red-400 transition-[width] duration-300 motion-reduce:transition-none"
-                style={{
-                  width: `${monitor?.holdings.length ? Math.min(100, (telemetryCoverage / monitor.holdings.length) * 100) : 0}%`,
-                }}
-              />
-            </div>
-            <p className="pt-1 leading-4 text-slate-600">
-              页面由 GraphQL WS 推送；行情年龄取 miniQMT 源 Tick
-              时间，上游链路状态独立显示。
-            </p>
-          </div>
-        </section>
-
-        <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
-            账户事实
-          </div>
-          <div className="space-y-2 text-[10px]">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between">
               <span className="text-slate-500">持仓快照</span>
-              <span className="text-right text-slate-300">
+              <span className="text-slate-300">
                 {formatTime(
                   monitor?.positionSnapshotReceivedAt ||
                     monitor?.positionSnapshotReportedAt
                 )}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between">
               <span className="text-slate-500">监控投影</span>
-              <span className="text-right text-slate-300">
+              <span className="text-slate-300">
                 {formatTime(monitor?.projectionGeneratedAt)}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center justify-between">
               <span className="text-slate-500">对账年龄</span>
               <span className="font-mono text-slate-300">
                 {formatAge(readiness?.reconciliationAgeSeconds)}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-slate-500">最近备份</span>
-              <span className="text-right text-slate-300">
-                {formatTime(readiness?.lastBackupAt)}
               </span>
             </div>
           </div>
@@ -476,14 +512,14 @@ export function TTradeHealthConsole({
               value={monitor?.activeBatchCount || 0}
             />
             <StatusCell
-              icon={Clock3}
-              label="陈旧数据"
-              tone={staleCount ? 'rose' : 'slate'}
-              value={staleCount}
+              icon={ShieldAlert}
+              label="非 READY"
+              tone={failClosedCount ? 'rose' : 'slate'}
+              value={failClosedCount}
             />
             <StatusCell
               icon={AlertTriangle}
-              label="异常"
+              label="运行异常"
               tone={exceptionCount ? 'rose' : 'slate'}
               value={exceptionCount}
             />
@@ -497,7 +533,7 @@ export function TTradeHealthConsole({
             ) : (
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
             )}
-            做 T 首要门禁
+            外部发意图门禁
           </div>
           <p
             className={cn(
@@ -505,26 +541,8 @@ export function TTradeHealthConsole({
               blockedReason ? 'text-amber-100' : 'text-emerald-200'
             )}
           >
-            {blockedReason || '当前没有阻断项'}
+            {blockedReason || '当前没有账户级阻断项'}
           </p>
-          {readiness && (
-            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-white/[0.05] pt-3 font-mono text-[9px] text-slate-600">
-              <span>队列 {readiness.queuedCommandCount}</span>
-              <span>延迟 {formatAge(readiness.queueDelaySeconds)}</span>
-              <span>死信 {readiness.deadLetterCount}</span>
-              <span>待报 {readiness.journalPendingReports}</span>
-              <span>Engine {readiness.engineStatus}</span>
-              <span>Agent {readiness.agentStatus}</span>
-            </div>
-          )}
-          {!readiness && monitor && (
-            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 border-t border-white/[0.05] pt-3 font-mono text-[9px] text-slate-600">
-              <span>Stage {monitor.rolloutStage}</span>
-              <span>对账 {monitor.reconcileStatus}</span>
-              <span>Engine {monitor.engineStatus}</span>
-              <span>Agent {monitor.agentStatus}</span>
-            </div>
-          )}
         </section>
       </div>
 
@@ -533,7 +551,7 @@ export function TTradeHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 cursor-pointer rounded-sm border-white/10 text-[10px] text-slate-300"
+            className="h-8 rounded-sm border-white/10 text-[10px]"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
@@ -543,7 +561,7 @@ export function TTradeHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 cursor-pointer rounded-sm border-white/10 text-[10px] text-slate-300"
+            className="h-8 rounded-sm border-white/10 text-[10px]"
             disabled={!accountId || actionLoading}
             onClick={onReconcile}
           >
@@ -554,7 +572,7 @@ export function TTradeHealthConsole({
         <Button
           type="button"
           className={cn(
-            'h-9 w-full cursor-pointer rounded-sm text-[10px] font-black',
+            'h-9 w-full rounded-sm text-[10px] font-black',
             monitor?.enabled
               ? 'bg-slate-700 text-white hover:bg-slate-600'
               : 'bg-red-500 text-white hover:bg-red-400'
@@ -576,544 +594,951 @@ export function TTradeHealthConsole({
   );
 }
 
-function Sparkline({
-  className,
-  label,
-  points,
-}: {
-  className?: string;
-  label: string;
-  points: readonly QuoteHistoryPoint[];
-}) {
-  const width = 240;
-  const height = 64;
+function PriceSparkline({ points }: { points: readonly QuoteHistoryPoint[] }) {
   if (points.length < 2) {
     return (
       <div
-        className={cn(
-          'flex items-center justify-center text-[9px] text-slate-700',
-          className
-        )}
+        className="flex h-16 items-center justify-center text-[9px] text-slate-600"
         role="img"
-        aria-label={`${label}：等待实时行情样本`}
+        aria-label="价格走势：样本不足"
       >
-        等待走势
+        等待价格样本
       </div>
     );
   }
   const prices = points.map(point => point.price);
   const min = Math.min(...prices);
   const max = Math.max(...prices);
-  const range = Math.max(max - min, Math.abs(max) * 0.0005, 0.001);
-  const path = points
-    .map((point, index) => {
-      const x = (index / Math.max(1, points.length - 1)) * width;
-      const y = height - ((point.price - min) / range) * (height - 8) - 4;
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
+  const span = max - min || 1;
+  const polyline = points
+    .map(
+      (point, index) =>
+        `${(index / (points.length - 1)) * 100},${40 - ((point.price - min) / span) * 36}`
+    )
     .join(' ');
-  const positive = points.at(-1)!.price >= points[0].price;
   return (
-    <svg
-      className={cn('overflow-visible', className)}
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      role="img"
-      aria-label={`${label}：2 分钟价格走势，共 ${points.length} 个样本`}
-    >
-      <title>{label} 2 分钟实时走势</title>
-      <line
-        x1="0"
-        y1={height / 2}
-        x2={width}
-        y2={height / 2}
-        stroke="rgba(148,163,184,0.12)"
-        strokeDasharray="3 4"
-      />
-      <path
-        d={path}
-        fill="none"
-        stroke={positive ? '#f87171' : '#34d399'}
-        strokeWidth="2"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
-}
-
-function InspectorMetric({
-  label,
-  threshold,
-  value,
-}: {
-  label: string;
-  threshold?: string;
-  value: string;
-}) {
-  return (
-    <div className="border-b border-white/[0.05] py-2.5 last:border-b-0">
-      <div className="flex items-center justify-between gap-4">
-        <span className="text-[10px] text-slate-500">{label}</span>
-        <span className="font-mono text-xs font-bold text-slate-100">
-          {value}
-        </span>
+    <div>
+      <svg
+        className="h-16 w-full"
+        viewBox="0 0 100 44"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={`价格走势，最低 ${formatNumber(min, 3)}，最高 ${formatNumber(max, 3)}`}
+      >
+        <polyline
+          fill="none"
+          stroke="rgb(34 211 238)"
+          strokeWidth="1.2"
+          vectorEffect="non-scaling-stroke"
+          points={polyline}
+        />
+      </svg>
+      <div className="flex justify-between font-mono text-[9px] text-slate-600">
+        <span>低 {formatNumber(min, 3)}</span>
+        <span>高 {formatNumber(max, 3)}</span>
       </div>
-      {threshold && (
-        <div className="mt-1 text-right text-[9px] text-slate-600">
-          阈值 {threshold}
-        </div>
-      )}
     </div>
   );
 }
 
-function TTradeInspector({
-  config,
-  holding,
-  history,
-  onIgnore,
-  quote,
-  session,
+type SignalTrendMetric = {
+  key: 'score' | 'preview' | 'candidate' | 'revalidate' | 'rearm';
+  label: string;
+  color: string;
+  dash?: string;
+  value: (snapshot: SignalSnapshot) => number | null | undefined;
+};
+
+type SignalTrendSegment = {
+  id: string;
+  generation: string;
+  metric: SignalTrendMetric;
+  points: Array<{ generation: string; index: number; value: number }>;
+};
+
+const signalTrendMetrics: readonly SignalTrendMetric[] = [
+  {
+    key: 'score',
+    label: '机会分',
+    color: 'rgb(34 211 238)',
+    value: snapshot => snapshot.opportunityScore,
+  },
+  {
+    key: 'preview',
+    label: '重点观察',
+    color: 'rgb(250 204 21)',
+    dash: '2 2',
+    value: snapshot => snapshot.previewThreshold,
+  },
+  {
+    key: 'candidate',
+    label: '候选锁存',
+    color: 'rgb(251 146 60)',
+    dash: '4 2',
+    value: snapshot => snapshot.candidateThreshold,
+  },
+  {
+    key: 'revalidate',
+    label: '确认重验',
+    color: 'rgb(244 114 182)',
+    dash: '6 2',
+    value: snapshot => snapshot.revalidateThreshold,
+  },
+  {
+    key: 'rearm',
+    label: '再武装',
+    color: 'rgb(167 139 250)',
+    dash: '1 2',
+    value: snapshot => snapshot.rearmThreshold,
+  },
+];
+
+function compareSignalIdentity(left: SignalSnapshot, right: SignalSnapshot) {
+  for (const [leftValue, rightValue] of [
+    [left.continuityGeneration, right.continuityGeneration],
+    [left.sourceTimeMs, right.sourceTimeMs],
+    [left.tickOrdinal, right.tickOrdinal],
+  ]) {
+    const leftNumber = Number(leftValue);
+    const rightNumber = Number(rightValue);
+    const comparison =
+      Number.isFinite(leftNumber) && Number.isFinite(rightNumber)
+        ? leftNumber - rightNumber
+        : leftValue.localeCompare(rightValue);
+    if (comparison !== 0) return comparison;
+  }
+  return 0;
+}
+
+function signalIdentity(snapshot: SignalSnapshot) {
+  return `${snapshot.continuityGeneration}:${snapshot.sourceTimeMs}:${snapshot.tickOrdinal}`;
+}
+
+function SignalScoreTrend({
+  evaluations,
+  snapshot,
 }: {
-  config: MonitorConfig;
-  holding: MonitorHolding;
-  history: readonly QuoteHistoryPoint[];
-  onIgnore?: (stockCode: string, ignored: boolean) => void;
-  quote?: LiveMarketQuote;
-  session?: MonitorSession | null;
+  evaluations: readonly SignalEvaluationLike[];
+  snapshot: SignalSnapshot;
 }) {
-  const evaluation = session?.latestEvaluation;
-  const progress = conditionProgress(evaluation, config);
-  const metric = (value?: number | null, digits = 2, suffix = '') =>
-    value == null ? '--' : `${formatNumber(value, digits)}${suffix}`;
+  const byIdentity = new Map<string, SignalSnapshot>();
+  for (const evaluation of evaluations) {
+    if (evaluation.signalSnapshot) {
+      byIdentity.set(
+        signalIdentity(evaluation.signalSnapshot),
+        evaluation.signalSnapshot
+      );
+    }
+  }
+  byIdentity.set(signalIdentity(snapshot), snapshot);
+  const snapshots = [...byIdentity.values()].sort(compareSignalIdentity);
+  const segments = signalTrendMetrics.flatMap(metric => {
+    const result: SignalTrendSegment[] = [];
+    let current: (typeof result)[number] | undefined;
+    let serial = 0;
+    snapshots.forEach((item, index) => {
+      const value = metric.value(item);
+      if (value == null || !Number.isFinite(value)) {
+        current = undefined;
+        return;
+      }
+      if (!current || current.generation !== item.continuityGeneration) {
+        current = {
+          id: `${metric.key}:${item.continuityGeneration}:${serial++}`,
+          generation: item.continuityGeneration,
+          metric,
+          points: [],
+        };
+        result.push(current);
+      }
+      current.points.push({
+        generation: item.continuityGeneration,
+        index,
+        value,
+      });
+    });
+    return result;
+  });
+  const x = (index: number) =>
+    snapshots.length === 1 ? 50 : 2 + (index / (snapshots.length - 1)) * 96;
+  const y = (value: number) => 64 - (value / 100) * 58;
+
   return (
-    <div className="mt-5 space-y-5">
-      <section className="border border-white/[0.07] bg-white/[0.02] p-3">
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
-              实时行情流
+    <div className="border border-white/[0.06] p-3">
+      <svg
+        className="h-44 w-full"
+        viewBox="0 0 100 68"
+        preserveAspectRatio="none"
+        role="img"
+        aria-label="机会分与四条服务端阈值趋势；缺失值和连续代际切换均断线"
+      >
+        {[0, 50, 100].map(value => (
+          <line
+            key={value}
+            x1="2"
+            x2="98"
+            y1={y(value)}
+            y2={y(value)}
+            stroke="rgb(71 85 105)"
+            strokeOpacity="0.3"
+            strokeWidth="0.35"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        {segments.map(segment => {
+          const points = segment.points
+            .map(point => `${x(point.index)},${y(point.value)}`)
+            .join(' ');
+          return (
+            <React.Fragment key={segment.id}>
+              <polyline
+                data-testid="signal-trend-segment"
+                data-series={segment.metric.key}
+                data-generation={segment.generation}
+                data-point-count={segment.points.length}
+                data-values={segment.points.map(point => point.value).join(',')}
+                fill="none"
+                stroke={segment.metric.color}
+                strokeDasharray={segment.metric.dash}
+                strokeOpacity={
+                  segment.metric.key === 'revalidate' &&
+                  snapshot.candidateStatus !== 'AWAITING_APPROVAL'
+                    ? '0.45'
+                    : '1'
+                }
+                strokeWidth={
+                  segment.metric.key === 'score'
+                    ? '1.5'
+                    : segment.metric.key === 'revalidate' &&
+                        snapshot.candidateStatus === 'AWAITING_APPROVAL'
+                      ? '1.35'
+                      : '1'
+                }
+                vectorEffect="non-scaling-stroke"
+                points={points}
+              />
+              {segment.points.map(point => (
+                <circle
+                  key={`${segment.id}:${point.index}`}
+                  cx={x(point.index)}
+                  cy={y(point.value)}
+                  r={segment.metric.key === 'score' ? '0.8' : '0.55'}
+                  fill={segment.metric.color}
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </React.Fragment>
+          );
+        })}
+      </svg>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-[9px] sm:grid-cols-5">
+        {signalTrendMetrics.map(metric => {
+          const value = metric.value(snapshot);
+          return (
+            <div key={metric.key} className="flex min-w-0 items-center gap-1.5">
+              <span
+                className="h-0.5 w-4 shrink-0"
+                style={{ backgroundColor: metric.color }}
+                aria-hidden="true"
+              />
+              <span className="truncate text-slate-500">{metric.label}</span>
+              <span className="font-mono text-slate-200">
+                {thresholdNumber(value)}
+              </span>
             </div>
-            <div
-              className={cn(
-                'mt-1 font-mono text-2xl font-black',
-                quoteTone(quote?.changePercent)
-              )}
-            >
-              {quote ? formatNumber(quote.currentPrice, 3) : '--'}
-            </div>
-          </div>
-          <div
+          );
+        })}
+      </div>
+      <div className="mt-2 text-[9px] text-slate-600">
+        仅连接同一 continuity generation 内的服务端值；代际变化或缺值处断线。
+      </div>
+      <div className="mt-1 flex justify-between gap-2 text-[8px] text-slate-700">
+        <span>机会分（0–100）</span>
+        <span>
+          源时间：{formatTime(snapshots[0]?.sourceAt)} →{' '}
+          {formatTime(snapshots[snapshots.length - 1]?.sourceAt)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function FsmTrack({
+  title,
+  values,
+  current,
+}: {
+  title: string;
+  values: readonly string[];
+  current: string;
+}) {
+  return (
+    <section aria-label={`${title}状态机`}>
+      <div className="mb-2 flex items-center justify-between text-[10px]">
+        <span className="font-black text-slate-300">{title}</span>
+        <span className="text-cyan-200">{phaseLabels[current] || current}</span>
+      </div>
+      <ol className="grid gap-1 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">
+        {values.map(value => (
+          <li
+            key={value}
+            aria-current={value === current ? 'step' : undefined}
             className={cn(
-              'font-mono text-sm font-bold',
-              quoteTone(quote?.changePercent)
+              'border px-2 py-1.5 text-[9px]',
+              value === current
+                ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-100'
+                : 'border-white/[0.05] text-slate-600'
             )}
           >
-            {formatSignedPercent(quote?.changePercent)}
+            {phaseLabels[value] || value}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function SnapshotInspector({
+  evaluations,
+  history,
+  holding,
+  snapshot,
+}: {
+  evaluations: readonly SignalEvaluationLike[];
+  history: readonly QuoteHistoryPoint[];
+  holding: MonitorHolding;
+  snapshot?: SignalSnapshot | null;
+}) {
+  const now = useNow();
+  if (!snapshot) {
+    return (
+      <div className="mt-6 border border-amber-400/15 bg-amber-400/[0.05] p-4 text-xs text-amber-100">
+        服务端尚未生成 V3 信号快照。当前不可判断，也不能确认买入。
+      </div>
+    );
+  }
+  const compatible = isKnownSignalSnapshot(snapshot);
+  const expiresAt = snapshot.candidateExpiresAt
+    ? Date.parse(snapshot.candidateExpiresAt)
+    : Number.NaN;
+  const ttlSeconds = Number.isFinite(expiresAt)
+    ? Math.max(0, Math.ceil((expiresAt - now.getTime()) / 1000))
+    : null;
+  const blocker = snapshot.topBlockers[0];
+  const instrumentEvaluations = evaluations.filter(
+    item => item.stockCode === holding.stockCode
+  );
+
+  return (
+    <div className="space-y-5 py-5 text-slate-300">
+      {!compatible && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 border border-rose-400/25 bg-rose-400/[0.08] p-3 text-[10px] leading-4 text-rose-100"
+        >
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          版本不兼容或出现未知状态。页面已进入只读失败态，禁止确认。
+        </div>
+      )}
+
+      <section className="border border-white/[0.07] bg-white/[0.025] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">
+              服务端结论
+            </div>
+            <div className="mt-1 text-sm font-black text-slate-100">
+              {candidateLabels[snapshot.candidateStatus] ||
+                `未知状态 · ${snapshot.candidateStatus}`}
+            </div>
+            <div className="mt-1 text-[10px] text-slate-500">
+              {pathLabels[snapshot.selectedPath || ''] || '尚未选择路径'} ·{' '}
+              {phaseLabels[snapshot.dominantPhase] || snapshot.dominantPhase}
+            </div>
+          </div>
+          <div className="text-right">
+            <div
+              className={cn(
+                'font-mono text-xl font-black',
+                scoreTone(snapshot)
+              )}
+            >
+              {scoreLabel(snapshot)}
+            </div>
+            <div className="text-[9px] text-slate-600">
+              规则机会分 / 候选阈值，不是概率
+            </div>
           </div>
         </div>
-        <Sparkline
-          className="mt-4 h-28 w-full"
-          label={holding.stockCode}
-          points={history}
-        />
-        <div className="mt-2 flex justify-between font-mono text-[9px] text-slate-600">
-          <span>2 分钟</span>
-          <span>{formatTime(quote?.time)}</span>
-        </div>
-      </section>
-
-      <section>
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-black text-slate-200">策略评估</h3>
-          <span className="border border-red-400/20 bg-red-400/[0.07] px-2 py-1 font-mono text-[9px] text-red-200">
-            {evaluation?.phase || 'WAITING_FIRST_TICK'}
+        <div className="mt-3 flex items-start gap-2 border-t border-white/[0.05] pt-3 text-[10px] leading-4">
+          {blocker ? (
+            <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+          ) : (
+            <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+          )}
+          <span className={blocker ? 'text-amber-100' : 'text-emerald-200'}>
+            {blocker
+              ? `${blocker.label}：${blocker.detail}`
+              : '当前无服务端 blocker'}
           </span>
         </div>
-        <p className="mt-2 text-[11px] text-slate-400">
-          {evaluationReasonLabel(evaluation?.reason)}
-        </p>
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-          <div
-            className="h-full bg-red-400 transition-[width] motion-reduce:transition-none"
-            style={{ width: `${Math.round(progress * 100)}%` }}
-          />
-        </div>
-        <div className="mt-1 text-right font-mono text-[9px] text-slate-600">
-          条件进度 {Math.round(progress * 100)}%
-        </div>
-        <div className="mt-3 border-y border-white/[0.06]">
-          <InspectorMetric
-            label="回撤"
-            value={metric(evaluation?.pullbackPct, 2, '%')}
-            threshold={`≥ ${formatNumber(config.pullbackThresholdPct)}%`}
-          />
-          <InspectorMetric
-            label="反弹"
-            value={metric(evaluation?.reboundPct, 2, '%')}
-            threshold={`≥ ${formatNumber(config.reboundThresholdPct)}%`}
-          />
-          <InspectorMetric
-            label="动量涨幅"
-            value={metric(evaluation?.momentumRisePct, 2, '%')}
-            threshold={`≥ ${formatNumber(config.momentumMinRisePct)}%`}
-          />
-          <InspectorMetric
-            label="动量持续"
-            value={metric(evaluation?.momentumMoveSeconds, 0, ' 秒')}
-            threshold={`≥ ${config.momentumMinMoveSeconds} 秒`}
-          />
-          <InspectorMetric
-            label="成交加速比"
-            value={metric(evaluation?.momentumAmountVelocityRatio, 2, 'x')}
-            threshold={`≥ ${formatNumber(config.momentumMinAmountVelocityRatio)}x`}
-          />
-          <InspectorMetric
-            label="基线覆盖"
-            value={metric(
-              evaluation?.momentumBaselineCoverageSeconds,
-              0,
-              ' 秒'
-            )}
-            threshold={`${config.momentumBaselineSeconds} 秒`}
-          />
-          <InspectorMetric
-            label="VWAP / 溢价"
-            value={`${metric(evaluation?.vwap, 3)} / ${metric(evaluation?.vwapPremiumPct, 2, '%')}`}
-            threshold={`${formatNumber(config.momentumMinVwapPremiumPct)}%–${formatNumber(config.momentumMaxVwapPremiumPct)}%`}
-          />
-          <InspectorMetric
-            label="价差"
-            value={`${metric(evaluation?.spreadTicks, 1, ' Tick')} / ${metric(evaluation?.spreadPct, 3, '%')}`}
-            threshold={`回撤 ≤ ${config.maxSpreadTicks} Tick`}
-          />
+        <div className="mt-2 font-mono text-[9px] text-slate-600">
+          source {formatTime(snapshot.sourceAt)} · identity{' '}
+          {snapshot.continuityGeneration}/{snapshot.sourceTimeMs}/
+          {snapshot.tickOrdinal}
         </div>
       </section>
 
       <section>
-        <h3 className="text-xs font-black text-slate-200">持仓与批次</h3>
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          <StatusCell
-            icon={DatabaseBackup}
-            label="持仓 / 可用"
-            tone="slate"
-            value={`${holding.volume.toLocaleString()} / ${holding.availableVolume.toLocaleString()}`}
-          />
-          <StatusCell
-            icon={Activity}
-            label="活跃仓"
-            tone={session?.activeVolume ? 'emerald' : 'slate'}
-            value={session?.activeVolume?.toLocaleString() || 0}
-          />
-          <StatusCell
-            icon={Gauge}
-            label="批次盈亏"
-            tone={(session?.lastNetProfitPct || 0) >= 0 ? 'rose' : 'sky'}
-            value={
-              session?.activeVolume
-                ? `${formatNumber(session.lastNetProfitPct)}%`
-                : '--'
-            }
-          />
-          <StatusCell
-            icon={CheckCircle2}
-            label="完成次数"
-            tone="slate"
-            value={session?.completedCycles || 0}
-          />
-        </div>
-        <div className="mt-3 border-y border-white/[0.06]">
-          <InspectorMetric
-            label="策略状态"
-            value={session?.status || holding.status}
-          />
-          <InspectorMetric
-            label="买入委托"
-            value={session?.entryOrderStatus || '--'}
-          />
-          <InspectorMetric
-            label="卖出委托"
-            value={session?.exitOrderStatus || '--'}
-          />
-          <InspectorMetric
-            label="买入均价 / 成交"
-            value={`${metric(session?.entryAvgPrice, 3)} / ${(session?.entryFilledVolume || 0).toLocaleString()} 股`}
-          />
-          <InspectorMetric
-            label="卖出均价 / 成交"
-            value={`${metric(session?.exitAvgPrice, 3)} / ${(session?.exitFilledVolume || 0).toLocaleString()} 股`}
-          />
+        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          价格上下文
+        </h3>
+        <PriceSparkline points={history} />
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
+          {[
+            ['服务端价格', nullableNumber(snapshot.features.price, 3)],
+            ['VWAP', nullableNumber(snapshot.features.sessionVwap, 3)],
+            ['窗口高点', nullableNumber(snapshot.features.windowHigh, 3)],
+            ['窗口低点', nullableNumber(snapshot.features.windowLow, 3)],
+            ['回撤', nullableNumber(snapshot.features.pullbackPct, 2, '%')],
+            ['反弹', nullableNumber(snapshot.features.reboundPct, 2, '%')],
+            [
+              'VWAP 偏离',
+              nullableNumber(snapshot.features.vwapPremiumPct, 2, '%'),
+            ],
+            ['价差', nullableNumber(snapshot.features.spreadTicks, 2, ' tick')],
+          ].map(([label, value]) => (
+            <div key={label} className="border border-white/[0.06] p-2">
+              <div className="text-slate-600">{label}</div>
+              <div className="mt-1 font-mono text-slate-200">{value}</div>
+            </div>
+          ))}
         </div>
       </section>
 
-      {onIgnore && (
-        <Button
-          type="button"
-          variant="outline"
-          className="h-9 w-full cursor-pointer rounded-sm border-white/10 text-[10px] text-slate-300"
-          onClick={() => onIgnore(holding.stockCode, !holding.ignored)}
-        >
-          {holding.ignored ? '恢复该标的监控' : '忽略该标的'}
-        </Button>
-      )}
+      <section>
+        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          分数趋势与四条阈值
+        </h3>
+        <SignalScoreTrend
+          evaluations={instrumentEvaluations}
+          snapshot={snapshot}
+        />
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {[
+            ['重点观察', snapshot.previewThreshold],
+            ['候选锁存', snapshot.candidateThreshold],
+            ['确认重验', snapshot.revalidateThreshold],
+            ['再武装', snapshot.rearmThreshold],
+          ].map(([label, value]) => (
+            <div
+              key={String(label)}
+              className="border border-white/[0.06] p-2 text-[9px]"
+            >
+              <div className="text-slate-600">{label}</div>
+              <div className="mt-1 font-mono text-slate-200">
+                {thresholdNumber(Number(value))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full min-w-[420px] text-left text-[9px]">
+            <caption className="sr-only">
+              最近服务端机会分历史；缺失值保持不可计算
+            </caption>
+            <thead className="text-slate-600">
+              <tr>
+                <th className="py-1">源时间</th>
+                <th>事件</th>
+                <th>路径</th>
+                <th>机会分</th>
+                <th>数据健康</th>
+              </tr>
+            </thead>
+            <tbody>
+              {instrumentEvaluations.slice(0, 12).map(item => (
+                <tr key={item.id} className="border-t border-white/[0.05]">
+                  <td className="py-1.5 font-mono">
+                    {formatTime(
+                      item.signalSnapshot?.sourceAt || item.evaluatedAt
+                    )}
+                  </td>
+                  <td>{item.eventKind}</td>
+                  <td>
+                    {pathLabels[item.signalSnapshot?.selectedPath || ''] ||
+                      '未选择'}
+                  </td>
+                  <td>
+                    {nullableNumber(item.signalSnapshot?.opportunityScore, 1)}
+                  </td>
+                  <td>
+                    {healthLabels[item.signalSnapshot?.dataHealth || ''] ||
+                      '不可计算'}
+                  </td>
+                </tr>
+              ))}
+              {instrumentEvaluations.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-slate-600">
+                    暂无持久化评估历史
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <FsmTrack
+          title="回撤反弹 FSM"
+          values={PULLBACK_PHASE_VALUES}
+          current={snapshot.pullbackPhase}
+        />
+        <FsmTrack
+          title="早期动量 FSM"
+          values={MOMENTUM_PHASE_VALUES}
+          current={snapshot.momentumPhase}
+        />
+      </div>
+
+      <section>
+        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          硬门禁
+        </h3>
+        <div className="space-y-1.5">
+          {snapshot.hardGates.map(gate => (
+            <div
+              key={gate.code}
+              className={cn(
+                'grid gap-2 border px-3 py-2 text-[10px] sm:grid-cols-[18px_minmax(120px,0.7fr)_1fr_auto]',
+                gate.passed
+                  ? 'border-emerald-400/10 bg-emerald-400/[0.025]'
+                  : 'border-rose-400/20 bg-rose-400/[0.05]'
+              )}
+            >
+              {gate.passed ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              ) : (
+                <XCircle className="h-4 w-4 text-rose-300" />
+              )}
+              <span className="font-bold text-slate-200">{gate.label}</span>
+              <span className="text-slate-500">{gate.detail}</span>
+              <span className="font-mono text-slate-400">
+                {nullableNumber(gate.observedValue)} /{' '}
+                {nullableNumber(gate.requiredValue)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section>
+        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          分数贡献
+        </h3>
+        <div className="space-y-2">
+          {snapshot.scoreContributions.map(item => {
+            const width =
+              item.maxPoints > 0
+                ? Math.min(
+                    100,
+                    Math.max(0, (item.points / item.maxPoints) * 100)
+                  )
+                : 0;
+            return (
+              <div
+                key={item.code}
+                className="border border-white/[0.06] p-2.5 text-[10px]"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-bold text-slate-300">{item.label}</span>
+                  <span className="font-mono text-slate-200">
+                    {formatNumber(item.points, 1)} /{' '}
+                    {formatNumber(item.maxPoints, 1)}
+                  </span>
+                </div>
+                <div className="mt-2 h-1 bg-white/[0.06]">
+                  <div
+                    className="h-full bg-cyan-400 motion-reduce:transition-none"
+                    style={{ width: `${width}%` }}
+                  />
+                </div>
+                <div className="mt-1.5 flex flex-wrap justify-between gap-2 text-[9px] text-slate-600">
+                  <span>{item.detail}</span>
+                  <span>
+                    观测 {nullableNumber(item.observedValue)} · 目标{' '}
+                    {nullableNumber(item.targetValue)}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="grid gap-3 lg:grid-cols-2">
+        <div className="border border-white/[0.07] p-3">
+          <h3 className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+            数据健康
+          </h3>
+          <div className="mt-3 grid grid-cols-2 gap-2 text-[9px]">
+            <div>
+              <span className="text-slate-600">状态</span>
+              <div className="mt-1 text-slate-200">
+                {healthLabels[snapshot.dataHealth] || snapshot.dataHealth}
+              </div>
+            </div>
+            <div>
+              <span className="text-slate-600">数据年龄</span>
+              <div className="mt-1 font-mono text-slate-200">
+                {snapshot.dataAgeMs == null
+                  ? '不可计算'
+                  : `${snapshot.dataAgeMs} ms`}
+              </div>
+            </div>
+            <div>
+              <span className="text-slate-600">窗口覆盖</span>
+              <div className="mt-1 font-mono text-slate-200">
+                {snapshot.windowCoverageSeconds == null
+                  ? '不可计算'
+                  : `${snapshot.windowCoverageSeconds} 秒`}
+              </div>
+            </div>
+            <div>
+              <span className="text-slate-600">样本数</span>
+              <div className="mt-1 font-mono text-slate-200">
+                {snapshot.sampleCount}
+              </div>
+            </div>
+            <div>
+              <span className="text-slate-600">画像版本</span>
+              <div className="mt-1 break-all font-mono text-slate-200">
+                {snapshot.profileVersion || '不可用'}
+              </div>
+            </div>
+            <div>
+              <span className="text-slate-600">连续代际</span>
+              <div className="mt-1 font-mono text-slate-200">
+                {snapshot.continuityGeneration}
+              </div>
+            </div>
+          </div>
+          <ul className="mt-3 space-y-1 border-t border-white/[0.05] pt-2 text-[9px] text-slate-500">
+            {snapshot.dataHealthReasons.map(reason => (
+              <li key={reason.code}>
+                <span className="text-slate-300">{reason.label}</span> ·{' '}
+                {reason.detail}
+              </li>
+            ))}
+            {snapshot.dataHealthReasons.length === 0 && (
+              <li>服务端未报告数据健康异常</li>
+            )}
+          </ul>
+        </div>
+        <div className="border border-white/[0.07] p-3">
+          <h3 className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+            候选与执行审计
+          </h3>
+          <div className="mt-3 space-y-2 text-[9px]">
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">候选状态</span>
+              <span>
+                {candidateLabels[snapshot.candidateStatus] ||
+                  snapshot.candidateStatus}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">候选 TTL</span>
+              <span
+                className={
+                  ttlSeconds === 0 ? 'text-rose-300' : 'text-slate-200'
+                }
+              >
+                {ttlSeconds == null ? '不可计算' : `${ttlSeconds} 秒`}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">Episode</span>
+              <span className="max-w-[65%] break-all font-mono">
+                {snapshot.episodeId || '无'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">Candidate</span>
+              <span className="max-w-[65%] break-all font-mono">
+                {snapshot.candidateId || '无'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">Fingerprint</span>
+              <span className="max-w-[65%] break-all font-mono">
+                {snapshot.candidateFingerprint || '无'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3">
+              <span className="text-slate-600">TradeIntent</span>
+              <span className="max-w-[65%] break-all font-mono">
+                {snapshot.pendingEntryIntentId || '无'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-3 border-t border-white/[0.05] pt-2">
+              <span className="text-slate-600">版本</span>
+              <span className="max-w-[65%] break-all text-right font-mono">
+                state {snapshot.stateSchemaVersion} · feature{' '}
+                {snapshot.featureSchemaVersion} · policy{' '}
+                {snapshot.policyVersion} · config {snapshot.configVersion}
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
 
 export function TTradeLiveBoard({
-  historyByCode,
+  evaluations = [],
+  historyByCode = new Map(),
   loading,
   monitor,
-  isCurrentTradingDay,
   onIgnore,
   quotes,
 }: {
-  historyByCode: QuoteHistoryByCode;
+  evaluations?: readonly SignalEvaluationLike[];
+  historyByCode?: QuoteHistoryByCode;
   loading: boolean;
   monitor?: TTradeMonitorLike;
-  isCurrentTradingDay?: boolean;
   onIgnore?: (stockCode: string, ignored: boolean) => void;
   quotes: ReadonlyMap<string, LiveMarketQuote>;
 }) {
-  const now = useNow();
   const [selectedCode, setSelectedCode] = React.useState<string | null>(null);
-  const lastSelectedCodeRef = React.useRef<string | null>(null);
   const rowButtonRefs = React.useRef(new Map<string, HTMLButtonElement>());
-  const rows = React.useMemo(
-    () =>
-      monitor
-        ? buildAttentionRows(
-            monitor.holdings,
-            monitor.sessions,
-            quotes,
-            monitor,
-            now,
-            isCurrentTradingDay
-          )
-        : [],
-    [isCurrentTradingDay, monitor, now, quotes]
-  );
+  const lastSelectedCodeRef = React.useRef<string | null>(null);
+  const rows = monitor
+    ? buildAttentionRows(monitor.holdings, monitor.sessions, quotes)
+    : [];
   const selected = rows.find(row => row.holding.stockCode === selectedCode);
+
+  if (loading && !monitor) {
+    return (
+      <div
+        role="status"
+        aria-busy="true"
+        className="flex h-full items-center justify-center text-xs text-slate-600"
+      >
+        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
+        读取服务端信号快照…
+      </div>
+    );
+  }
+  if (!monitor || rows.length === 0) {
+    return (
+      <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
+        <Database className="h-10 w-10 text-slate-800" />
+        <div className="mt-3 text-sm font-bold text-slate-500">
+          暂无可展示持仓
+        </div>
+        <div className="mt-1 text-[10px] text-slate-700">
+          持仓同步并生成 V3 快照后显示
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
       <div className="min-h-0 flex-1 overflow-auto custom-scrollbar">
-        <table className="w-full min-w-[1120px] text-left text-xs">
-          <thead className="sticky top-0 z-10 bg-[#0b1628] text-[9px] font-black uppercase tracking-[0.1em] text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.05)]">
-            <tr>
-              <th className="px-4 py-2.5">标的 / 持仓</th>
-              <th className="px-3 py-2.5 text-right">实时行情</th>
-              <th className="px-3 py-2.5">2 分钟走势</th>
-              <th className="px-3 py-2.5">策略心跳</th>
-              <th className="px-3 py-2.5">最近判断</th>
-              <th className="px-4 py-2.5">T 批次状态</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(row => {
-              const evaluation = row.session?.latestEvaluation;
-              const history = historyByCode.get(row.holding.stockCode) || [];
-              return (
-                <tr
-                  key={row.holding.stockCode}
-                  className="border-b border-white/[0.045] transition-colors hover:bg-white/[0.03] focus-within:bg-white/[0.03] motion-reduce:transition-none"
+        {loading && monitor && (
+          <div
+            role="status"
+            aria-busy="true"
+            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            正在刷新服务端快照，暂保留上次可信结果…
+          </div>
+        )}
+        <div className="hidden min-w-[880px] grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] border-b border-white/[0.06] px-4 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600 lg:grid">
+          <span>持仓标的</span>
+          <span>服务端价格</span>
+          <span>数据健康</span>
+          <span>形态 / 路径</span>
+          <span>机会分</span>
+          <span>第一 blocker</span>
+          <span>候选状态</span>
+        </div>
+        {rows.map(row => {
+          const snapshot = row.snapshot;
+          const compatible = !snapshot || isKnownSignalSnapshot(snapshot);
+          const blocker = snapshot?.topBlockers[0];
+          const HealthIcon =
+            snapshot?.dataHealth === 'READY'
+              ? CheckCircle2
+              : snapshot?.dataHealth
+                ? AlertTriangle
+                : Database;
+          const CandidateIcon =
+            snapshot?.candidateStatus === 'AWAITING_APPROVAL'
+              ? Activity
+              : snapshot?.candidateStatus === 'LATCHED'
+                ? CheckCircle2
+                : ShieldAlert;
+          return (
+            <button
+              key={row.holding.stockCode}
+              ref={element => {
+                if (element)
+                  rowButtonRefs.current.set(row.holding.stockCode, element);
+                else rowButtonRefs.current.delete(row.holding.stockCode);
+              }}
+              type="button"
+              aria-label={`检查 ${row.holding.instrumentName || row.holding.stockCode}`}
+              onClick={() => {
+                lastSelectedCodeRef.current = row.holding.stockCode;
+                setSelectedCode(row.holding.stockCode);
+              }}
+              className="grid w-full cursor-pointer gap-3 border-b border-white/[0.05] px-4 py-3 text-left transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60 lg:min-w-[880px] lg:grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] lg:items-center"
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-xs font-black text-slate-100">
+                  {row.holding.instrumentName || row.holding.stockCode}
+                </span>
+                <span className="mt-0.5 block font-mono text-[9px] text-slate-600">
+                  {row.holding.stockCode} · 持仓{' '}
+                  {row.holding.volume.toLocaleString()}
+                </span>
+              </span>
+              <span className="font-mono text-xs text-slate-200">
+                <span className="mr-2 text-[9px] text-slate-600 lg:hidden">
+                  价格
+                </span>
+                {nullableNumber(snapshot?.features.price, 3)}
+                <span className="mt-0.5 block text-[8px] font-normal text-slate-600">
+                  {snapshot
+                    ? `源时间 ${formatTime(snapshot.sourceAt)}`
+                    : '等待源时间'}
+                </span>
+              </span>
+              <span>
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1 border px-2 py-0.5 text-[9px] font-black',
+                    healthTone(snapshot?.dataHealth)
+                  )}
                 >
-                  <td className="p-0">
-                    <button
-                      type="button"
-                      className="block w-full cursor-pointer px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60"
-                      onClick={() => {
-                        lastSelectedCodeRef.current = row.holding.stockCode;
-                        setSelectedCode(row.holding.stockCode);
-                      }}
-                      ref={element => {
-                        if (element) {
-                          rowButtonRefs.current.set(
-                            row.holding.stockCode,
-                            element
-                          );
-                        } else {
-                          rowButtonRefs.current.delete(row.holding.stockCode);
-                        }
-                      }}
-                      aria-label={`检查 ${row.holding.instrumentName || row.holding.stockCode}`}
-                    >
-                      <div className="font-black text-slate-100">
-                        {row.holding.instrumentName || row.holding.stockCode}
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px] text-slate-600">
-                        <span>{row.holding.stockCode}</span>
-                        <span>
-                          {row.holding.volume.toLocaleString()} /{' '}
-                          {row.holding.availableVolume.toLocaleString()} 股
-                        </span>
-                      </div>
-                    </button>
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    <div
-                      className={cn(
-                        'font-mono text-sm font-black tabular-nums',
-                        quoteTone(row.quote?.changePercent)
-                      )}
-                    >
-                      {row.quote
-                        ? formatNumber(row.quote.currentPrice, 3)
-                        : '--'}
-                    </div>
-                    <div
-                      className={cn(
-                        'mt-0.5 font-mono text-[10px]',
-                        quoteTone(row.quote?.changePercent)
-                      )}
-                    >
-                      {formatSignedPercent(row.quote?.changePercent)}
-                    </div>
-                    <div className="mt-1 text-[9px]">
-                      <FreshnessLabel
-                        freshness={row.quoteFreshness}
-                        source="源 Tick"
-                      />
-                    </div>
-                  </td>
-                  <td className="px-3 py-3">
-                    <Sparkline
-                      className="h-10 w-36"
-                      label={row.holding.stockCode}
-                      points={history}
-                    />
-                    <div className="mt-1 font-mono text-[9px] text-slate-700">
-                      {history.length} / 120 点
-                    </div>
-                  </td>
-                  <td className="px-3 py-3">
-                    <div className="text-[10px] font-bold text-slate-300">
-                      {evaluation?.phase || '等待首个有效 Tick'}
-                    </div>
-                    <div className="mt-1 text-[9px]">
-                      <FreshnessLabel freshness={row.heartbeatFreshness} />
-                    </div>
-                    <div className="mt-1 font-mono text-[9px] text-slate-700">
-                      Tick #
-                      {evaluation?.processedTickCount?.toLocaleString() || '--'}{' '}
-                      · 窗口 {evaluation?.windowSampleCount || 0}
-                    </div>
-                  </td>
-                  <td className="px-3 py-3">
-                    <div
-                      className={cn(
-                        'max-w-[220px] truncate text-[10px] font-bold',
-                        evaluation?.triggered
-                          ? 'text-amber-200'
-                          : 'text-slate-300'
-                      )}
-                      title={evaluationReasonLabel(evaluation?.reason)}
-                    >
-                      {evaluationReasonLabel(evaluation?.reason)}
-                    </div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <div className="h-1 w-24 overflow-hidden rounded-full bg-white/[0.06]">
-                        <div
-                          className="h-full bg-red-400"
-                          style={{
-                            width: `${Math.round(row.conditionProgress * 100)}%`,
-                          }}
-                        />
-                      </div>
-                      <span className="font-mono text-[9px] text-slate-600">
-                        {Math.round(row.conditionProgress * 100)}%
-                      </span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="text-[10px] font-black text-slate-300">
-                      {row.session?.status || row.holding.status}
-                    </div>
-                    <div className="mt-1 font-mono text-[9px] text-slate-600">
-                      活跃 {row.session?.activeVolume?.toLocaleString() || 0} ·
-                      完成 {row.session?.completedCycles || 0}
-                    </div>
-                    {(row.session?.pendingEntryIntentId ||
-                      row.session?.pendingExitIntentId) && (
-                      <div className="mt-1 text-[9px] font-bold text-amber-300">
-                        等待订单确认 / 回报
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-
-        {!loading && rows.length === 0 && (
-          <div className="flex min-h-64 flex-col items-center justify-center text-center">
-            <Radio className="h-10 w-10 text-slate-800" />
-            <div className="mt-3 text-sm font-bold text-slate-500">
-              暂无作战台标的
-            </div>
-            <div className="mt-1 text-[10px] text-slate-700">
-              同步账户持仓后自动生成监控范围
-            </div>
-          </div>
-        )}
-        {loading && rows.length === 0 && (
-          <div className="flex min-h-64 items-center justify-center gap-2 text-xs text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-            加载监控投影
-          </div>
-        )}
-      </div>
-
-      <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t border-white/[0.05] bg-[#07111f] px-4 py-2 text-[9px] text-slate-600">
-        <span className="inline-flex items-center gap-1.5">
-          <Waves className="h-3 w-3 text-cyan-400" />
-          页面 GraphQL WS 推送
-        </span>
-        <span>行情年龄为 miniQMT 源 Tick 时间，不等同于链路传输延迟</span>
-        <span className="inline-flex items-center gap-1.5">
-          <HeartPulse className="h-3 w-3 text-red-400" />
-          策略投影约 10 秒更新
-        </span>
-        <span>排序：异常 → 待确认 → 陈旧 → 活跃批次 → 条件接近</span>
+                  <HealthIcon className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  {compatible
+                    ? healthLabels[snapshot?.dataHealth || ''] || '等待快照'
+                    : '版本不兼容'}
+                </span>
+                <span className="mt-1 block text-[8px] text-slate-600">
+                  {snapshot?.dataHealthReasons[0]?.label ||
+                    (snapshot?.dataHealth === 'READY'
+                      ? '无健康异常'
+                      : '等待原因')}
+                </span>
+              </span>
+              <span className="text-[10px] text-slate-300">
+                <span className="mr-2 text-slate-600 lg:hidden">形态</span>
+                {phaseLabels[snapshot?.dominantPhase || ''] || '等待服务端评估'}
+                <span className="mt-0.5 block text-[9px] text-slate-600">
+                  {pathLabels[snapshot?.selectedPath || ''] || '尚未选择路径'}
+                </span>
+              </span>
+              <span
+                className={cn(
+                  'font-mono text-xs font-black',
+                  scoreTone(snapshot)
+                )}
+              >
+                <span className="mr-2 text-[9px] font-normal text-slate-600 lg:hidden">
+                  机会分
+                </span>
+                {scoreLabel(snapshot)}
+              </span>
+              <span className="truncate text-[10px] text-amber-100">
+                <span className="mr-2 text-slate-600 lg:hidden">阻断</span>
+                {blocker?.label ||
+                  (snapshot?.dataHealth === 'READY'
+                    ? '无'
+                    : snapshot?.dataHealthReasons[0]?.label || '等待快照')}
+              </span>
+              <span className="text-[10px] font-bold text-slate-300">
+                <span className="mr-2 text-slate-600 lg:hidden">候选</span>
+                <CandidateIcon className="mr-1 inline-block h-3 w-3" aria-hidden="true" />
+                {candidateLabels[snapshot?.candidateStatus || ''] || '无候选'}
+                <span className="mt-0.5 block text-[8px] font-normal text-slate-600">
+                  批次 {row.session?.status || '无活动批次'}
+                </span>
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       <Sheet
         open={Boolean(selected)}
-        onOpenChange={open => !open && setSelectedCode(null)}
+        onOpenChange={open => {
+          if (open) return;
+          setSelectedCode(null);
+          window.setTimeout(() => {
+            const code = lastSelectedCodeRef.current;
+            if (code) rowButtonRefs.current.get(code)?.focus();
+          }, 0);
+        }}
       >
         <SheetContent
           side="right"
-          className="w-[92vw] overflow-y-auto border-white/[0.08] bg-[#081321] p-5 text-slate-100 motion-reduce:animate-none motion-reduce:transition-none sm:max-w-[540px] custom-scrollbar"
-          onCloseAutoFocus={event => {
-            event.preventDefault();
-            const code = lastSelectedCodeRef.current;
-            if (code) rowButtonRefs.current.get(code)?.focus();
-          }}
+          className="w-full overflow-y-auto border-white/[0.08] bg-[#081322] p-5 custom-scrollbar sm:max-w-2xl xl:max-w-4xl"
         >
-          {selected && monitor && (
+          {selected && (
             <>
               <SheetHeader className="border-b border-white/[0.06] pb-4 pr-8 text-left">
-                <SheetTitle className="text-lg font-black text-slate-100">
-                  {selected.holding.instrumentName ||
-                    selected.holding.stockCode}
-                </SheetTitle>
-                <SheetDescription className="font-mono text-[10px] text-slate-500">
-                  {selected.holding.stockCode} · 策略与批次检查器
-                </SheetDescription>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <SheetTitle className="text-lg font-black text-slate-100">
+                      {selected.holding.instrumentName ||
+                        selected.holding.stockCode}
+                    </SheetTitle>
+                    <SheetDescription className="font-mono text-[10px] text-slate-500">
+                      {selected.holding.stockCode} · V3 服务端信号检查器
+                    </SheetDescription>
+                  </div>
+                  {onIgnore && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 rounded-sm border-white/10 text-[10px]"
+                      onClick={() =>
+                        onIgnore(
+                          selected.holding.stockCode,
+                          !selected.holding.ignored
+                        )
+                      }
+                    >
+                      {selected.holding.ignored ? '恢复监控' : '加入忽略'}
+                    </Button>
+                  )}
+                </div>
               </SheetHeader>
-              <TTradeInspector
-                config={monitor}
-                holding={selected.holding}
+              <SnapshotInspector
+                evaluations={evaluations}
                 history={historyByCode.get(selected.holding.stockCode) || []}
-                onIgnore={onIgnore}
-                quote={selected.quote}
-                session={selected.session}
+                holding={selected.holding}
+                snapshot={selected.snapshot}
               />
             </>
           )}
         </SheetContent>
       </Sheet>
+      <div className="sr-only" aria-live="polite">
+        信号列表已更新，共 {rows.length} 只持仓
+      </div>
     </>
   );
 }
+
+export { CANDIDATE_STATUS_VALUES };

@@ -1168,6 +1168,58 @@ export enum StrategyStatus {
   Upgrading = 'UPGRADING'
 }
 
+/** 确认 V3 做 T 候选时客户端观察到的 CAS 身份 */
+export type TTradeCandidateApprovalExpectationInput = {
+  candidateFingerprint: Scalars['String']['input'];
+  candidateId: Scalars['ID']['input'];
+  candidateStateVersion: Scalars['Int']['input'];
+  configVersion: Scalars['Int']['input'];
+  policyVersion: Scalars['String']['input'];
+  signalVersion: Scalars['Int']['input'];
+};
+
+/** 做 T 候选生命周期 */
+export enum TTradeCandidateStatus {
+  AwaitingApproval = 'AWAITING_APPROVAL',
+  Latched = 'LATCHED',
+  None = 'NONE',
+  Rearming = 'REARMING',
+  Suppressed = 'SUPPRESSED'
+}
+
+/** 做 T 候选全链路完整性 */
+export enum TTradeCandidateTraceIntegrityStatus {
+  Broken = 'BROKEN',
+  Complete = 'COMPLETE',
+  InProgress = 'IN_PROGRESS'
+}
+
+/** 做 T V3 客户端低基数遥测事件 */
+export enum TTradeClientTelemetryEvent {
+  RefreshFailure = 'REFRESH_FAILURE',
+  RefreshSuccess = 'REFRESH_SUCCESS',
+  SubscriptionReconnected = 'SUBSCRIPTION_RECONNECTED'
+}
+
+/** 上报做 T V3 客户端低基数遥测 */
+export type TTradeClientTelemetryInput = {
+  accountId: Scalars['String']['input'];
+  event: TTradeClientTelemetryEvent;
+  platform: TTradeClientTelemetryPlatform;
+  surface: TTradeClientTelemetrySurface;
+};
+
+/** 做 T V3 客户端遥测平台 */
+export enum TTradeClientTelemetryPlatform {
+  Ios = 'IOS',
+  Web = 'WEB'
+}
+
+/** 做 T V3 客户端遥测固定界面 */
+export enum TTradeClientTelemetrySurface {
+  TTradeSignalV3 = 'T_TRADE_SIGNAL_V3'
+}
+
 /** 原生端两阶段做 T 安全控制动作 */
 export enum TTradeControlAction {
   ActivateCanary = 'ACTIVATE_CANARY',
@@ -1193,6 +1245,24 @@ export type TTradeControlPreviewInput = {
   targetStage?: InputMaybe<TTradeRolloutTarget>;
 };
 
+/** 做 T 列表压缩展示的主导阶段 */
+export enum TTradeDominantPhase {
+  MomentumAccelerating = 'MOMENTUM_ACCELERATING',
+  MomentumBaselining = 'MOMENTUM_BASELINING',
+  MomentumBuilding = 'MOMENTUM_BUILDING',
+  MomentumCandidateLatched = 'MOMENTUM_CANDIDATE_LATCHED',
+  MomentumObserving = 'MOMENTUM_OBSERVING',
+  MomentumOverextended = 'MOMENTUM_OVEREXTENDED',
+  MomentumSuppressed = 'MOMENTUM_SUPPRESSED',
+  None = 'NONE',
+  PullbackCandidateLatched = 'PULLBACK_CANDIDATE_LATCHED',
+  PullbackForming = 'PULLBACK_FORMING',
+  PullbackLowStabilizing = 'PULLBACK_LOW_STABILIZING',
+  PullbackObserving = 'PULLBACK_OBSERVING',
+  PullbackReboundConfirming = 'PULLBACK_REBOUND_CONFIRMING',
+  PullbackSuppressed = 'PULLBACK_SUPPRESSED'
+}
+
 /** 导入外部已成交的做 T 买入批次 */
 export type TTradeExternalEntryInput = {
   accountId: Scalars['String']['input'];
@@ -1203,11 +1273,11 @@ export type TTradeExternalEntryInput = {
 /** 保存全局持仓做 T 监控设置 */
 export type TTradeGlobalSettingsInput = {
   accountId: Scalars['String']['input'];
-  approvalTtlSeconds?: Scalars['Int']['input'];
   autoExitAcknowledged?: Scalars['Boolean']['input'];
   baseFloorPct?: Scalars['Float']['input'];
   cooldownSeconds?: Scalars['Int']['input'];
   enabled?: Scalars['Boolean']['input'];
+  expectedConfigVersion: Scalars['Int']['input'];
   hardStopEnabled?: Scalars['Boolean']['input'];
   hardStopPct?: Scalars['Float']['input'];
   highProfitArmPct?: Scalars['Float']['input'];
@@ -1221,35 +1291,41 @@ export type TTradeGlobalSettingsInput = {
   maxGapPct?: Scalars['Float']['input'];
   maxHoldingTradingDays?: Scalars['Int']['input'];
   maxPriceDeviationPct?: Scalars['Float']['input'];
-  maxSpreadTicks?: Scalars['Int']['input'];
   maxTotalTExposurePct?: Scalars['Float']['input'];
   maxTradeAmount?: Scalars['Float']['input'];
   mode?: Scalars['String']['input'];
-  momentumBaselineSeconds?: Scalars['Int']['input'];
-  momentumEnabled?: Scalars['Boolean']['input'];
-  momentumHighToleranceTicks?: Scalars['Int']['input'];
-  momentumMaxSpreadPct?: Scalars['Float']['input'];
-  momentumMaxSpreadTicks?: Scalars['Int']['input'];
-  momentumMaxVwapPremiumPct?: Scalars['Float']['input'];
-  momentumMinAmountVelocityRatio?: Scalars['Float']['input'];
-  momentumMinMoveSeconds?: Scalars['Int']['input'];
-  momentumMinRisePct?: Scalars['Float']['input'];
-  momentumMinVwapPremiumPct?: Scalars['Float']['input'];
-  momentumWindowSeconds?: Scalars['Int']['input'];
-  pullbackThresholdPct?: Scalars['Float']['input'];
   rapidReversalConfirmTicks?: Scalars['Int']['input'];
   rapidReversalDrawdownPct?: Scalars['Float']['input'];
   rapidReversalEnabled?: Scalars['Boolean']['input'];
   rapidReversalWindowSeconds?: Scalars['Int']['input'];
-  reboundThresholdPct?: Scalars['Float']['input'];
-  signalLookbackSeconds?: Scalars['Int']['input'];
-  stabilizationSeconds?: Scalars['Int']['input'];
+  signalPolicy: TTradeSignalPolicyInput;
   targetProfitPct?: Scalars['Float']['input'];
   targetTradeAmount?: Scalars['Float']['input'];
   timeExitMode?: TTradeTimeExitMode;
   timeExitTime?: Scalars['String']['input'];
   trailingGapSlope?: Scalars['Float']['input'];
 };
+
+/** 做 T 动量加速分支阶段 */
+export enum TTradeMomentumPhase {
+  Accelerating = 'ACCELERATING',
+  Baselining = 'BASELINING',
+  CandidateLatched = 'CANDIDATE_LATCHED',
+  MomentumBuilding = 'MOMENTUM_BUILDING',
+  Observing = 'OBSERVING',
+  Overextended = 'OVEREXTENDED',
+  Suppressed = 'SUPPRESSED'
+}
+
+/** 做 T 回撤反弹分支阶段 */
+export enum TTradePullbackPhase {
+  CandidateLatched = 'CANDIDATE_LATCHED',
+  LowStabilizing = 'LOW_STABILIZING',
+  Observing = 'OBSERVING',
+  PullbackForming = 'PULLBACK_FORMING',
+  ReboundConfirming = 'REBOUND_CONFIRMING',
+  Suppressed = 'SUPPRESSED'
+}
 
 /** 做 T 历史回放的手工初始持仓 */
 export type TTradeReplayPositionInput = {
@@ -1265,7 +1341,6 @@ export type TTradeReplayPositionInput = {
 /** 启动做 T 历史回放 */
 export type TTradeReplayStartInput = {
   accountId: Scalars['String']['input'];
-  approvalTtlSeconds?: Scalars['Int']['input'];
   baseFloorPct?: Scalars['Float']['input'];
   commissionRate?: Scalars['Float']['input'];
   cooldownSeconds?: Scalars['Int']['input'];
@@ -1287,30 +1362,15 @@ export type TTradeReplayStartInput = {
   maxGapPct?: Scalars['Float']['input'];
   maxHoldingTradingDays?: Scalars['Int']['input'];
   maxPriceDeviationPct?: Scalars['Float']['input'];
-  maxSpreadTicks?: Scalars['Int']['input'];
   maxTotalTExposurePct?: Scalars['Float']['input'];
   maxTradeAmount?: Scalars['Float']['input'];
   minimumCommission?: Scalars['Float']['input'];
-  momentumBaselineSeconds?: Scalars['Int']['input'];
-  momentumEnabled?: Scalars['Boolean']['input'];
-  momentumHighToleranceTicks?: Scalars['Int']['input'];
-  momentumMaxSpreadPct?: Scalars['Float']['input'];
-  momentumMaxSpreadTicks?: Scalars['Int']['input'];
-  momentumMaxVwapPremiumPct?: Scalars['Float']['input'];
-  momentumMinAmountVelocityRatio?: Scalars['Float']['input'];
-  momentumMinMoveSeconds?: Scalars['Int']['input'];
-  momentumMinRisePct?: Scalars['Float']['input'];
-  momentumMinVwapPremiumPct?: Scalars['Float']['input'];
-  momentumWindowSeconds?: Scalars['Int']['input'];
-  pullbackThresholdPct?: Scalars['Float']['input'];
   rapidReversalConfirmTicks?: Scalars['Int']['input'];
   rapidReversalDrawdownPct?: Scalars['Float']['input'];
   rapidReversalEnabled?: Scalars['Boolean']['input'];
   rapidReversalWindowSeconds?: Scalars['Int']['input'];
-  reboundThresholdPct?: Scalars['Float']['input'];
-  signalLookbackSeconds?: Scalars['Int']['input'];
+  signalPolicy: TTradeSignalPolicyInput;
   slippageRate?: Scalars['Float']['input'];
-  stabilizationSeconds?: Scalars['Int']['input'];
   stampTaxRate?: Scalars['Float']['input'];
   startTime: Scalars['DateTime']['input'];
   targetProfitPct?: Scalars['Float']['input'];
@@ -1335,54 +1395,137 @@ export enum TTradeRolloutTarget {
   Live = 'LIVE'
 }
 
-/** 启动持仓做 T 会话 */
-export type TTradeStartInput = {
+/** 做 T 机会引擎数据健康 */
+export enum TTradeSignalDataHealth {
+  ContinuityLost = 'CONTINUITY_LOST',
+  Degraded = 'DEGRADED',
+  Insufficient = 'INSUFFICIENT',
+  Ready = 'READY',
+  Stale = 'STALE',
+  Warming = 'WARMING'
+}
+
+/** 做 T 信号评估持久化种类 */
+export enum TTradeSignalEvaluationKind {
+  CoalescedDiagnostic = 'COALESCED_DIAGNOSTIC',
+  Material = 'MATERIAL'
+}
+
+/** 做 T 信号路径 */
+export enum TTradeSignalPath {
+  MomentumAcceleration = 'MOMENTUM_ACCELERATION',
+  PullbackRebound = 'PULLBACK_REBOUND'
+}
+
+/** V3 做 T 机会引擎规则参数 */
+export type TTradeSignalPolicyInput = {
+  allowedSessionCodes: Array<Scalars['String']['input']>;
+  candidateConfirmSeconds: Scalars['Int']['input'];
+  candidateConfirmTicks: Scalars['Int']['input'];
+  candidateScore: Scalars['Float']['input'];
+  candidateTtlSeconds: Scalars['Int']['input'];
+  closeProtectionSeconds: Scalars['Int']['input'];
+  continuousAmEndTime: Scalars['String']['input'];
+  continuousAmStartTime: Scalars['String']['input'];
+  continuousPmEndTime: Scalars['String']['input'];
+  continuousPmStartTime: Scalars['String']['input'];
+  maxQuoteAgeMs: Scalars['Int']['input'];
+  maxSamples: Scalars['Int']['input'];
+  momentumBaselineCoverageRatio: Scalars['Float']['input'];
+  momentumBaselineSeconds: Scalars['Int']['input'];
+  momentumBookImbalanceScoreMaxRatio: Scalars['Float']['input'];
+  momentumBookImbalanceScoreMinRatio: Scalars['Float']['input'];
+  momentumBookImbalanceWeight: Scalars['Float']['input'];
+  momentumDataQualityPenaltyPoints: Scalars['Float']['input'];
+  momentumEnabled: Scalars['Boolean']['input'];
+  momentumFormationThresholdMultiplier: Scalars['Float']['input'];
+  momentumHighToleranceTicks: Scalars['Int']['input'];
+  momentumLiquidityFullScoreSpreadTicks: Scalars['Float']['input'];
+  momentumLiquidityWeight: Scalars['Float']['input'];
+  momentumLiquidityZeroScoreSpreadTicks: Scalars['Float']['input'];
+  momentumMaxSpreadPct: Scalars['Float']['input'];
+  momentumMaxSpreadTicks: Scalars['Int']['input'];
+  momentumMaxVwapPremiumPct: Scalars['Float']['input'];
+  momentumMinAmountVelocityRatio: Scalars['Float']['input'];
+  momentumMinCoverageSeconds: Scalars['Int']['input'];
+  momentumMinMoveSeconds: Scalars['Int']['input'];
+  momentumMinRisePct: Scalars['Float']['input'];
+  momentumMinSamples: Scalars['Int']['input'];
+  momentumMinVwapPremiumPct: Scalars['Float']['input'];
+  momentumOverextensionPenaltyFullPremiumPct: Scalars['Float']['input'];
+  momentumOverextensionPenaltyPoints: Scalars['Float']['input'];
+  momentumOverextensionPenaltyStartPremiumPct: Scalars['Float']['input'];
+  momentumPersistenceScoreMaxRatio: Scalars['Float']['input'];
+  momentumPersistenceScoreMinRatio: Scalars['Float']['input'];
+  momentumPersistenceWeight: Scalars['Float']['input'];
+  momentumRequiredFields: Array<Scalars['String']['input']>;
+  momentumRiseScoreMinPct: Scalars['Float']['input'];
+  momentumRiseScoreTargetMultiplier: Scalars['Float']['input'];
+  momentumRiseWeight: Scalars['Float']['input'];
+  momentumSlopeScoreMinPctPerSecond: Scalars['Float']['input'];
+  momentumSlopeScoreTargetMultiplier: Scalars['Float']['input'];
+  momentumSlopeWeight: Scalars['Float']['input'];
+  momentumTurnoverScoreMinRatio: Scalars['Float']['input'];
+  momentumTurnoverScoreTargetMultiplier: Scalars['Float']['input'];
+  momentumTurnoverWeight: Scalars['Float']['input'];
+  momentumVwapWeight: Scalars['Float']['input'];
+  momentumVwapZeroScoreMaxPremiumPct: Scalars['Float']['input'];
+  momentumVwapZeroScoreMinPremiumPct: Scalars['Float']['input'];
+  momentumWindowSeconds: Scalars['Int']['input'];
+  previewScore: Scalars['Float']['input'];
+  profileMomentumRiseMaxMultiplier: Scalars['Float']['input'];
+  profileMomentumRiseMinMultiplier: Scalars['Float']['input'];
+  profileMomentumVelocityMaxRatio: Scalars['Float']['input'];
+  profileMomentumVelocityMinRatio: Scalars['Float']['input'];
+  profilePullbackThresholdMaxMultiplier: Scalars['Float']['input'];
+  profilePullbackThresholdMinMultiplier: Scalars['Float']['input'];
+  pullbackChasePenaltyFullPremiumPct: Scalars['Float']['input'];
+  pullbackChasePenaltyPoints: Scalars['Float']['input'];
+  pullbackChasePenaltyStartPremiumPct: Scalars['Float']['input'];
+  pullbackDataQualityPenaltyPoints: Scalars['Float']['input'];
+  pullbackDepthScoreMinPct: Scalars['Float']['input'];
+  pullbackDepthScoreTargetMultiplier: Scalars['Float']['input'];
+  pullbackDepthWeight: Scalars['Float']['input'];
+  pullbackFormationThresholdMultiplier: Scalars['Float']['input'];
+  pullbackLiquidityFullScoreSpreadTicks: Scalars['Float']['input'];
+  pullbackLiquidityWeight: Scalars['Float']['input'];
+  pullbackLiquidityZeroScoreSpreadTicks: Scalars['Float']['input'];
+  pullbackLookbackSeconds: Scalars['Int']['input'];
+  pullbackMaxSpreadTicks: Scalars['Int']['input'];
+  pullbackMinCoverageSeconds: Scalars['Int']['input'];
+  pullbackMinSamples: Scalars['Int']['input'];
+  pullbackReboundScoreMaxPct: Scalars['Float']['input'];
+  pullbackReboundScoreMinPct: Scalars['Float']['input'];
+  pullbackReboundThresholdPct: Scalars['Float']['input'];
+  pullbackReboundWeight: Scalars['Float']['input'];
+  pullbackRequiredFields: Array<Scalars['String']['input']>;
+  pullbackStabilizationScoreMaxSeconds: Scalars['Float']['input'];
+  pullbackStabilizationScoreMinSeconds: Scalars['Float']['input'];
+  pullbackStabilizationSeconds: Scalars['Int']['input'];
+  pullbackStabilizationWeight: Scalars['Float']['input'];
+  pullbackThresholdPct: Scalars['Float']['input'];
+  pullbackTurnSlopeScoreMaxPctPerSecond: Scalars['Float']['input'];
+  pullbackTurnSlopeScoreMinPctPerSecond: Scalars['Float']['input'];
+  pullbackTurnSlopeWeight: Scalars['Float']['input'];
+  pullbackVolumeBaselineWindowSeconds: Scalars['Int']['input'];
+  pullbackVolumeScoreMaxRatio: Scalars['Float']['input'];
+  pullbackVolumeScoreMinRatio: Scalars['Float']['input'];
+  pullbackVolumeShortWindowSeconds: Scalars['Int']['input'];
+  pullbackVolumeWeight: Scalars['Float']['input'];
+  pullbackVwapFullScoreMaxPremiumPct: Scalars['Float']['input'];
+  pullbackVwapWeight: Scalars['Float']['input'];
+  pullbackVwapZeroScorePremiumPct: Scalars['Float']['input'];
+  rearmScore: Scalars['Float']['input'];
+  rearmSeconds: Scalars['Int']['input'];
+  revalidateScore: Scalars['Float']['input'];
+  sparseDegradedGapSeconds: Scalars['Int']['input'];
+};
+
+/** 纯校验做 T 信号规则，不写入运行配置 */
+export type TTradeSignalPolicyPreviewInput = {
   accountId: Scalars['String']['input'];
-  approvalTtlSeconds?: Scalars['Int']['input'];
-  autoExitAcknowledged?: Scalars['Boolean']['input'];
-  baseFloorPct?: Scalars['Float']['input'];
-  cooldownSeconds?: Scalars['Int']['input'];
-  hardStopEnabled?: Scalars['Boolean']['input'];
-  hardStopPct?: Scalars['Float']['input'];
-  highProfitArmPct?: Scalars['Float']['input'];
-  highProfitLockEnabled?: Scalars['Boolean']['input'];
-  highProfitMaxDrawdownPct?: Scalars['Float']['input'];
-  initialGapPct?: Scalars['Float']['input'];
-  limitUpTouchExitEnabled?: Scalars['Boolean']['input'];
-  limitUpTouchToleranceTicks?: Scalars['Int']['input'];
-  maxConcurrentBatches?: Scalars['Int']['input'];
-  maxGapPct?: Scalars['Float']['input'];
-  maxHoldingTradingDays?: Scalars['Int']['input'];
-  maxPriceDeviationPct?: Scalars['Float']['input'];
-  maxSpreadTicks?: Scalars['Int']['input'];
-  maxTotalTExposurePct?: Scalars['Float']['input'];
-  maxTradeAmount?: Scalars['Float']['input'];
-  mode?: Scalars['String']['input'];
-  momentumBaselineSeconds?: Scalars['Int']['input'];
-  momentumEnabled?: Scalars['Boolean']['input'];
-  momentumHighToleranceTicks?: Scalars['Int']['input'];
-  momentumMaxSpreadPct?: Scalars['Float']['input'];
-  momentumMaxSpreadTicks?: Scalars['Int']['input'];
-  momentumMaxVwapPremiumPct?: Scalars['Float']['input'];
-  momentumMinAmountVelocityRatio?: Scalars['Float']['input'];
-  momentumMinMoveSeconds?: Scalars['Int']['input'];
-  momentumMinRisePct?: Scalars['Float']['input'];
-  momentumMinVwapPremiumPct?: Scalars['Float']['input'];
-  momentumWindowSeconds?: Scalars['Int']['input'];
-  pullbackThresholdPct?: Scalars['Float']['input'];
-  rapidReversalConfirmTicks?: Scalars['Int']['input'];
-  rapidReversalDrawdownPct?: Scalars['Float']['input'];
-  rapidReversalEnabled?: Scalars['Boolean']['input'];
-  rapidReversalWindowSeconds?: Scalars['Int']['input'];
-  reboundThresholdPct?: Scalars['Float']['input'];
-  signalLookbackSeconds?: Scalars['Int']['input'];
-  stabilizationSeconds?: Scalars['Int']['input'];
-  stockCode: Scalars['String']['input'];
-  targetProfitPct?: Scalars['Float']['input'];
-  targetTradeAmount?: Scalars['Float']['input'];
-  timeExitMode?: TTradeTimeExitMode;
-  timeExitTime?: Scalars['String']['input'];
-  trailingGapSlope?: Scalars['Float']['input'];
+  expectedConfigVersion: Scalars['Int']['input'];
+  signalPolicy: TTradeSignalPolicyInput;
 };
 
 /** T 批次时间退出模式 */

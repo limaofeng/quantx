@@ -775,6 +775,17 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "previewTTradeSignalPolicy": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "t-trade:control"
+        ],
+        "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
       "reconcileExitPlanCapacity": {
         "audiences": [
           "web",
@@ -807,6 +818,17 @@
           "t-trade:control"
         ],
         "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "recordTTradeClientTelemetry": {
+        "audiences": [
+          "web",
+          "native"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
       "redeemClearedPosition": {
@@ -1216,17 +1238,6 @@
           "strategy:write"
         ],
         "risk": "NON_TRADING_WRITE",
-        "stability": "supported"
-      },
-      "startTTradeSession": {
-        "audiences": [
-          "web",
-          "native"
-        ],
-        "requiredPermissions": [
-          "t-trade:control"
-        ],
-        "risk": "TRADING_WRITE",
         "stability": "supported"
       },
       "stopStrategy": {
@@ -2583,6 +2594,18 @@
         "risk": "READ",
         "stability": "supported"
       },
+      "tTradeCandidateTrace": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
       "tTradeGlobalMonitor": {
         "audiences": [
           "web",
@@ -2679,7 +2702,7 @@
         "risk": "READ",
         "stability": "supported"
       },
-      "tTradeSignalHistory": {
+      "tTradeSignalDiagnostics": {
         "audiences": [
           "web",
           "native",
@@ -2691,7 +2714,7 @@
         "risk": "READ",
         "stability": "supported"
       },
-      "tTradeSignalHistoryPage": {
+      "tTradeSignalEvaluations": {
         "audiences": [
           "web",
           "native",

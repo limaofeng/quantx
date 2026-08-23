@@ -127,6 +127,18 @@ deployments:
       collision_strategy: CANCEL_NEW
       grace_period_seconds: 120
     version: "0.2.0"
+  - name: t-trade-instrument-profile
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/t_trade_instrument_profile_flow.py:t_trade_instrument_profile_flow
+    work_pool: *quantx_process_pool
+    description: 收盘后从历史 Tick 生成持仓做 T 有状态机会引擎 D-1 标的画像
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "50 15 * * 1-5"
+        timezone: Asia/Shanghai
+    version: "0.1.0"
   - name: announcement-sync
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/announcement_sync_flow.py:announcement_sync_flow
     work_pool: *quantx_process_pool

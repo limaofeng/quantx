@@ -88,6 +88,7 @@ class WholeQuoteHub:
     self.stale_after_seconds = max(1.0, float(stale_after_seconds))
     self.status = WholeQuoteStatus.OFFLINE
     self.stream_id = ""
+    self.generation = 0
     self.sequence = 0
     self.universe_count = 0
     self.universe_hash = ""
@@ -179,7 +180,10 @@ class WholeQuoteHub:
     if hydrated is None:
       return False
     state, latest = hydrated
+    previous_identity = (self.generation, self.stream_id)
+    had_previous_identity = bool(previous_identity[0] and previous_identity[1])
     self.stream_id = state.stream_id
+    self.generation = int(state.generation or 0)
     self.sequence = state.sequence
     self.universe_count = state.universe_count
     self.universe_hash = state.universe_hash
@@ -189,17 +193,27 @@ class WholeQuoteHub:
       latest,
       state.captured_at,
     )
-    if not await self._validate_authoritative_ready(
+    authoritative_generation = await self._validate_authoritative_ready(
       stream_id=state.stream_id,
+      generation=state.generation,
       sequence=state.sequence,
       captured_at=state.captured_at,
       received_monotonic=received_monotonic,
       allow_authority_ahead=False,
-    ):
+    )
+    if authoritative_generation is None:
       if self.status is WholeQuoteStatus.STALE:
         self._latest = {}
         self._source_times = {}
       return False
+    self.generation = authoritative_generation
+    self._latest = self._decorate_dispatch_data(
+      self._latest,
+      generation=authoritative_generation,
+      stream_id=state.stream_id,
+      sequence=state.sequence,
+      continuity_reset=had_previous_identity,
+    )
     self._last_received_monotonic = received_monotonic
     if self._has_lagging_consumer():
       self._set_status(WholeQuoteStatus.STALE)
@@ -248,6 +262,7 @@ class WholeQuoteHub:
     apply_started = time.monotonic()
     previous_status = self.status
     previous_stream_id = self.stream_id
+    previous_generation = self.generation
     try:
       decode_started = time.monotonic()
       if len(payload) >= self._DECODE_OFFLOAD_BYTES:
@@ -312,8 +327,11 @@ class WholeQuoteHub:
     self.sequence = batch.sequence
     self._last_sequence_progress_monotonic = time.monotonic()
     self.last_captured_at = batch.captured_at
-    if not await self._validate_authoritative_ready(
+    authoritative_generation = await self._validate_authoritative_ready(
       stream_id=batch.stream_id,
+      generation=(
+        previous_generation if previous_stream_id == batch.stream_id else None
+      ),
       sequence=batch.sequence,
       captured_at=batch.captured_at,
       received_monotonic=received_monotonic,
@@ -322,9 +340,39 @@ class WholeQuoteHub:
         and self.status is WholeQuoteStatus.READY
         and previous_stream_id == batch.stream_id
       ),
-    ):
+    )
+    if authoritative_generation is None:
+      if self.status is WholeQuoteStatus.SYNCING:
+        await self._hydrate_from_store()
       self.last_apply_ms = (time.monotonic() - apply_started) * 1000
       return
+    self.generation = authoritative_generation
+    continuity_reset = bool(
+      previous_stream_id
+      and (
+        previous_stream_id != batch.stream_id
+        or (
+          previous_generation > 0
+          and previous_generation != authoritative_generation
+        )
+      )
+    )
+    decorate_target = (
+      accepted
+      if previous_status is WholeQuoteStatus.READY
+      else self._latest
+    )
+    decorated = self._decorate_dispatch_data(
+      decorate_target,
+      generation=authoritative_generation,
+      stream_id=batch.stream_id,
+      sequence=batch.sequence,
+      continuity_reset=continuity_reset,
+    )
+    for code, tick in decorated.items():
+      self._latest[code] = tick
+    if previous_status is WholeQuoteStatus.READY:
+      accepted = decorated
     self._last_received_monotonic = received_monotonic
     if self._has_lagging_consumer():
       self._set_status(WholeQuoteStatus.STALE)
@@ -354,6 +402,39 @@ class WholeQuoteHub:
     self._source_times[code] = source_time
     self._latest[code] = tick
     return True
+
+  @classmethod
+  def _decorate_dispatch_data(
+    cls,
+    data: dict[str, dict[str, Any]],
+    *,
+    generation: int,
+    stream_id: str,
+    sequence: int,
+    continuity_reset: bool,
+  ) -> dict[str, dict[str, Any]]:
+    """Attach immutable authority lineage to every locally dispatched quote."""
+
+    decorated: dict[str, dict[str, Any]] = {}
+    for code, raw_tick in data.items():
+      tick = dict(raw_tick)
+      source_time_ms = int(
+        round(cls._tick_source_time(tick, None) * 1000)
+      )
+      tick.update(
+        {
+          "source_time_ms": source_time_ms,
+          # One quote per instrument exists in a whole-market batch. The global
+          # batch sequence is therefore a stable per-generation tie breaker.
+          "tick_ordinal": int(sequence),
+          "continuity_generation": int(generation),
+          "market_stream_id": str(stream_id),
+          "market_stream_sequence": int(sequence),
+          "market_stream_reset": bool(continuity_reset),
+        }
+      )
+      decorated[code] = tick
+    return decorated
 
   async def _prepare_snapshot(
     self,
@@ -573,6 +654,7 @@ class WholeQuoteHub:
     return {
       "status": self.status.value,
       "stream_id": self.stream_id,
+      "generation": self.generation,
       "sequence": self.sequence,
       "instrument_count": len(self._latest),
       "captured_at": self.last_captured_at,
@@ -667,6 +749,13 @@ class WholeQuoteHub:
       self._authority_ahead_since_monotonic = None
       self._set_status(WholeQuoteStatus.SYNCING)
       await self._publish_watermark(reason="API market stream id changed")
+      if self._payloads_in_flight == 0:
+        await self._hydrate_from_store()
+      return
+    if int(api_state.generation or 0) != self.generation:
+      self._authority_ahead_since_monotonic = None
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(reason="API market stream generation changed")
       if self._payloads_in_flight == 0:
         await self._hydrate_from_store()
       return
@@ -788,11 +877,12 @@ class WholeQuoteHub:
     self,
     *,
     stream_id: str,
+    generation: int | None = None,
     sequence: int,
     captured_at: datetime | None,
     received_monotonic: float,
     allow_authority_ahead: bool,
-  ) -> bool:
+  ) -> int | None:
     self.last_processing_age_ms = max(
       0.0,
       (time.monotonic() - received_monotonic) * 1000,
@@ -806,7 +896,7 @@ class WholeQuoteHub:
         "WholeQuoteHub authority check failed: error=%s",
         exc.__class__.__name__,
       )
-      return False
+      return None
     if api_state is None or api_state.status != "READY":
       self.authority_rejections += 1
       desired = (
@@ -818,12 +908,25 @@ class WholeQuoteHub:
       )
       self._set_status(desired)
       await self._publish_watermark(reason="API market stream is not ready")
-      return False
+      return None
     if api_state.stream_id != stream_id:
       self.authority_rejections += 1
       self._set_status(WholeQuoteStatus.SYNCING)
       await self._publish_watermark(reason="API market stream id changed")
-      return False
+      return None
+    authoritative_generation = int(api_state.generation or 0)
+    if authoritative_generation <= 0:
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(
+        reason="API market stream generation is unavailable"
+      )
+      return None
+    if generation is not None and int(generation) != authoritative_generation:
+      self.authority_rejections += 1
+      self._set_status(WholeQuoteStatus.SYNCING)
+      await self._publish_watermark(reason="API market stream generation changed")
+      return None
     trading_session = await self.is_trading_session()
     if trading_session and not self._freshness_matches_state(
       api_state,
@@ -834,7 +937,7 @@ class WholeQuoteHub:
       await self._publish_watermark(
         reason="API market freshness lease expired or mismatched"
       )
-      return False
+      return None
     if api_state.sequence < sequence:
       self.authority_rejections += 1
       self._authority_ahead_since_monotonic = None
@@ -842,7 +945,7 @@ class WholeQuoteHub:
       await self._publish_watermark(
         reason="API market watermark is behind local batch"
       )
-      return False
+      return None
     if api_state.sequence > sequence:
       if not allow_authority_ahead:
         self.authority_rejections += 1
@@ -850,7 +953,7 @@ class WholeQuoteHub:
         await self._publish_watermark(
           reason="API market watermark is ahead of recovering Engine"
         )
-        return False
+        return None
       if self._authority_ahead_since_monotonic is None:
         self._authority_ahead_since_monotonic = time.monotonic()
     else:
@@ -869,7 +972,7 @@ class WholeQuoteHub:
       self.last_batch_age_seconds = self._captured_age_seconds(captured_at)
       self._set_status(WholeQuoteStatus.STALE)
       await self._publish_watermark(reason=str(exc))
-      return False
+      return None
     self.last_batch_age_seconds = captured_age
     processing_stale = (
       self.last_processing_age_ms / 1000 > self.stale_after_seconds
@@ -880,8 +983,8 @@ class WholeQuoteHub:
       await self._publish_watermark(
         reason="market batch processing exceeded freshness window"
       )
-      return False
-    return True
+      return None
+    return authoritative_generation
 
   @staticmethod
   def _freshness_matches_state(api_state: Any, freshness: Any) -> bool:
@@ -966,6 +1069,7 @@ class WholeQuoteHub:
     await self.store.write_engine_state(
       status=self.status.value,
       stream_id=self.stream_id,
+      generation=self.generation,
       sequence=self.sequence,
       captured_at=self.last_captured_at,
       instrument_count=len(self._latest),

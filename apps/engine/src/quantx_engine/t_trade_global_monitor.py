@@ -7,6 +7,12 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from quantx_application.t_trade_v3 import (
+  SignalPolicyChangePlanner,
+  SignalPolicyChangeRequest,
+  SignalPolicyConfigSnapshot,
+)
+from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.enums import StrategyRunMode
@@ -26,6 +32,8 @@ from quantx_infrastructure.services.t_trade_operations_service import (
 )
 from quantx_infrastructure.services.t_trade_service import TTradeService
 
+from .t_trade_coordination import t_trade_account_coordination_lock
+
 logger = logging.getLogger(__name__)
 
 GLOBAL_SETTING_DEFAULTS: Dict[str, Any] = {
@@ -33,23 +41,7 @@ GLOBAL_SETTING_DEFAULTS: Dict[str, Any] = {
   "max_trade_amount": 12_000.0,
   "max_concurrent_batches": 3,
   "max_total_t_exposure_pct": 0.1,
-  "signal_lookback_seconds": 300,
-  "stabilization_seconds": 15,
-  "pullback_threshold_pct": 0.8,
-  "rebound_threshold_pct": 0.2,
-  "max_spread_ticks": 3,
-  "momentum_enabled": True,
-  "momentum_window_seconds": 60,
-  "momentum_min_rise_pct": 0.8,
-  "momentum_min_move_seconds": 15,
-  "momentum_baseline_seconds": 300,
-  "momentum_min_amount_velocity_ratio": 2.0,
-  "momentum_min_vwap_premium_pct": 2.0,
-  "momentum_max_vwap_premium_pct": 3.5,
-  "momentum_high_tolerance_ticks": 1,
-  "momentum_max_spread_ticks": 10,
-  "momentum_max_spread_pct": 0.3,
-  "approval_ttl_seconds": 30,
+  "signal_policy": OpportunityPolicy().to_dict(),
   "max_price_deviation_pct": 0.3,
   "max_exit_slippage_bps": 30.0,
   "target_profit_pct": 2.0,
@@ -75,6 +67,21 @@ GLOBAL_SETTING_DEFAULTS: Dict[str, Any] = {
 }
 
 ACTIVE_T_STRATEGY_RUN_STATUSES = {"pending", "starting", "running", "paused"}
+CONFIG_APPLY_PENDING_MARKER = "CONFIG_APPLY_PENDING"
+CONFIG_APPLIED_CODE = "CONFIG_APPLIED"
+CONFIG_APPLY_PENDING_CODE = "CONFIG_APPLY_PENDING"
+
+
+class TTradeConfigVersionConflict(ValueError):
+  """A monitor save used a stale optimistic-concurrency token."""
+
+  def __init__(self, expected: int, actual: int) -> None:
+    self.expected = expected
+    self.actual = actual
+    super().__init__(
+      "CONFIG_VERSION_CONFLICT: "
+      f"expected_config_version={expected}, actual_config_version={actual}"
+    )
 
 
 class TTradeGlobalMonitorService:
@@ -90,7 +97,6 @@ class TTradeGlobalMonitorService:
     self.position_service = PositionService()
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
-    self._account_locks: Dict[str, asyncio.Lock] = {}
 
   async def start(self) -> None:
     if self._task and not self._task.done():
@@ -115,6 +121,14 @@ class TTradeGlobalMonitorService:
     account_id = str(payload.get("account_id", "") or "").strip()
     if not account_id:
       raise ValueError("账户不能为空")
+    if "expected_config_version" not in payload:
+      raise ValueError("expected_config_version 不能为空")
+    try:
+      expected_config_version = int(payload["expected_config_version"])
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise ValueError("expected_config_version 必须是非负整数") from exc
+    if expected_config_version < 0:
+      raise ValueError("expected_config_version 必须是非负整数")
     mode = self.session_service._parse_mode(payload.get("mode", "paper"))
     settings = self._settings_from_payload(payload)
     self.session_service._validate_parameters(settings, mode)
@@ -123,24 +137,147 @@ class TTradeGlobalMonitorService:
     if enabled and mode == StrategyRunMode.LIVE and not acknowledged:
       raise ValueError("启动全局实盘做 T 前必须确认自动卖出授权")
 
-    async for db in get_async_db():
-      repo = TTradeGlobalConfigRepository(db)
-      config = await repo.find_by_account(account_id)
-      if config is None:
-        config = TTradeGlobalConfig(account_id=account_id)
-      config.enabled = enabled
-      config.mode = mode.value
-      config.auto_exit_acknowledged = acknowledged
-      config.ignored_stock_codes = self._normalize_ignored_codes(
-        payload.get("ignored_stock_codes", [])
+    # The same account lock is also acquired by V3 manual approval.  Keep it
+    # across the optimistic database mutation and runtime reconcile so an old
+    # candidate is linearized before the save or invalidated before approval.
+    lock = t_trade_account_coordination_lock(account_id)
+    async with lock:
+      async for db in get_async_db():
+        repo = TTradeGlobalConfigRepository(db)
+        config = await repo.find_by_account_for_update(account_id)
+        actual_config_version = int(config.config_version or 0) if config else 0
+        if actual_config_version != expected_config_version:
+          raise TTradeConfigVersionConflict(
+            expected_config_version,
+            actual_config_version,
+          )
+        if config is None:
+          config = TTradeGlobalConfig(account_id=account_id)
+        config.enabled = enabled
+        config.mode = mode.value
+        config.auto_exit_acknowledged = acknowledged
+        config.ignored_stock_codes = self._normalize_ignored_codes(
+          payload.get("ignored_stock_codes", [])
+        )
+        config.settings = settings
+        config.config_version = actual_config_version + 1
+        # Mark the new version as pending before committing it.  This closes
+        # the crash window between the durable config write and runtime
+        # rewarm: a restart/periodic reconcile must remain fail-closed until
+        # it clears this marker after a successful apply.
+        config.last_error = (
+          f"{CONFIG_APPLY_PENDING_MARKER}: config_version={config.config_version}"
+        )
+        await repo.save(config)
+        break
+      # Invalidate the previous runtime's entry authorization immediately
+      # after the version commit, before the full reconcile starts.
+      await self._block_new_entries_if_needed(
+        config,
+        [CONFIG_APPLY_PENDING_MARKER],
       )
-      config.settings = settings
-      config.config_version = int(config.config_version or 0) + 1
-      config.last_error = None
-      await repo.save(config)
-      break
-    await self.reconcile_account(account_id)
-    return await self.get_monitor(account_id)
+      committed_run_id = config.strategy_run_id
+      try:
+        monitor = await self._reconcile_account_locked(account_id)
+        return self._with_apply_outcome(monitor)
+      except Exception as exc:
+        # The config row is already committed at this point.  Never turn an
+        # unexpected post-commit reconcile failure into a validation failure:
+        # retain the old run link, block entry authority, and persist an
+        # actionable pending error for periodic/manual recovery.
+        if committed_run_id and not config.strategy_run_id:
+          config.strategy_run_id = committed_run_id
+        errors = [
+          f"{CONFIG_APPLY_PENDING_MARKER}: 配置应用失败: {exc}",
+        ]
+        await self._block_new_entries_if_needed(config, errors)
+        try:
+          await self._save_reconcile_config(config, errors)
+        except Exception as persist_exc:
+          logger.exception(
+            "保存做 T 配置应用失败状态失败: account=%s error=%s",
+            account_id,
+            persist_exc,
+          )
+        try:
+          monitor = dict(await self.get_monitor(account_id) or {})
+        except Exception as monitor_exc:
+          logger.exception(
+            "读取做 T 配置应用失败监控失败: account=%s error=%s",
+            account_id,
+            monitor_exc,
+          )
+          monitor = {}
+        monitor["account_id"] = account_id
+        monitor["config_version"] = int(config.config_version or 0)
+        monitor["strategy_run_id"] = config.strategy_run_id
+        monitor["last_error"] = "; ".join(errors[:20])
+        return self._with_apply_outcome(monitor)
+
+  async def preview_signal_policy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize a policy without mutating runtime or persistence."""
+
+    account_id = str(payload.get("account_id", "") or "").strip()
+    if not account_id:
+      raise ValueError("账户不能为空")
+    if "expected_config_version" not in payload:
+      raise ValueError("expected_config_version 不能为空")
+    try:
+      expected = int(payload["expected_config_version"])
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise ValueError("expected_config_version 必须是非负整数") from exc
+    if expected < 0:
+      raise ValueError("expected_config_version 必须是非负整数")
+    config = await self._load_config(account_id)
+    actual = int(config.config_version or 0) if config else 0
+    if expected != actual:
+      raise TTradeConfigVersionConflict(expected, actual)
+
+    current = self.session_service._normalize_signal_policy(
+      (config.settings or {}).get("signal_policy") if config else None
+    )
+    requested_policy = payload.get("signal_policy")
+    if requested_policy is None:
+      requested_policy = OpportunityPolicy().to_dict()
+    try:
+      plan = SignalPolicyChangePlanner().plan(
+        SignalPolicyChangeRequest(
+          account_id=account_id,
+          expected_config_version=expected,
+          signal_policy=requested_policy,
+        ),
+        SignalPolicyConfigSnapshot(
+          account_id=account_id,
+          config_version=actual,
+          signal_policy=current,
+        ),
+      )
+    except (TypeError, ValueError, OverflowError) as exc:
+      return {
+        "errors": [str(exc)],
+        "warnings": [],
+        "normalized_policy": None,
+        "changed_fields": [],
+        "requires_rewarm": False,
+        "config_version": actual,
+      }
+    if not plan.valid:
+      return {
+        "errors": list(plan.errors),
+        "warnings": [],
+        "normalized_policy": None,
+        "changed_fields": [],
+        "requires_rewarm": False,
+        "config_version": actual,
+      }
+    return {
+      "errors": list(plan.errors),
+      "warnings": list(plan.warnings),
+      "normalized_policy": dict(plan.normalized_policy or {}),
+      "changed_fields": list(plan.changed_fields),
+      "requires_rewarm": plan.requires_rewarm,
+      "config_version": actual,
+    }
 
   async def get_monitor(self, account_id: str) -> Dict[str, Any]:
     normalized = str(account_id or "").strip()
@@ -295,7 +432,7 @@ class TTradeGlobalMonitorService:
     normalized = str(account_id or "").strip()
     if not normalized:
       raise ValueError("账户不能为空")
-    lock = self._account_locks.setdefault(normalized, asyncio.Lock())
+    lock = t_trade_account_coordination_lock(normalized)
     async with lock:
       return await self._reconcile_account_locked(normalized)
 
@@ -305,10 +442,14 @@ class TTradeGlobalMonitorService:
       return await self.get_monitor(account_id)
     errors: List[str] = []
     try:
-      await self.position_service.read_agent_snapshot(account_id)
-      positions = await self.position_service.get_positions(account_id=account_id)
+      _, positions = await self.position_service.read_validated_snapshot_and_positions(
+        account_id
+      )
     except Exception as exc:
-      await self._record_reconcile_result(config.id, [f"持仓快照读取失败: {exc}"])
+      error = f"持仓快照读取失败: {exc}"
+      errors = [error]
+      await self._block_new_entries_if_needed(config, errors)
+      await self._record_reconcile_result(config.id, errors)
       return await self.get_monitor(account_id)
 
     sessions: List[Dict[str, Any]] = []
@@ -323,6 +464,7 @@ class TTradeGlobalMonitorService:
       errors.append(f"做 T 活跃实例扫描失败: {exc}")
 
     sessions_by_run: Dict[str, List[Dict[str, Any]]] = {}
+    session_read_unknown_run_ids = set()
     candidate_run_ids = list(active_run_ids)
     if config.strategy_run_id and config.strategy_run_id not in candidate_run_ids:
       candidate_run_ids.append(config.strategy_run_id)
@@ -331,11 +473,19 @@ class TTradeGlobalMonitorService:
         sessions_by_run[run_id] = await self.session_service.get_run_sessions(run_id)
       except Exception as exc:
         coordination_blocked = True
+        session_read_unknown_run_ids.add(str(run_id))
         errors.append(f"做 T 实例 {run_id} 状态读取失败: {exc}")
 
     if config.strategy_run_id:
-      sessions = sessions_by_run.get(config.strategy_run_id, [])
-      if not sessions:
+      configured_run_id = str(config.strategy_run_id)
+      if configured_run_id in sessions_by_run:
+        sessions = sessions_by_run[configured_run_id]
+      else:
+        # Keep the durable run pointer when its session read failed.  Clearing
+        # it would allow adoption of another run and could leave the old
+        # runtime emitting under an unapplied configuration.
+        sessions = []
+      if configured_run_id in sessions_by_run and not sessions:
         config.strategy_run_id = None
 
     if not config.strategy_run_id:
@@ -348,6 +498,24 @@ class TTradeGlobalMonitorService:
       run_id for run_id in active_run_ids if run_id != config.strategy_run_id
     ]
     for duplicate_run_id in duplicate_run_ids:
+      if str(duplicate_run_id) in session_read_unknown_run_ids:
+        # A duplicate whose sessions could not be read is not known to be
+        # idle.  Stopping or adopting it would risk orphaning active exits or
+        # orders, so keep coordination blocked and only attempt the
+        # entry-authority invalidation, which preserves known exit state.
+        coordination_blocked = True
+        errors.append(
+          f"重复做 T 实例 {duplicate_run_id} 状态未知，拒绝停止或接管；"
+          "已停止其新入场协调"
+        )
+        try:
+          await self.session_service.block_account_strategy_entries(
+            duplicate_run_id,
+            reason=CONFIG_APPLY_PENDING_MARKER,
+          )
+        except Exception as exc:
+          errors.append(f"关闭未知重复实例新入场失败: {exc}")
+        continue
       duplicate_sessions = sessions_by_run.get(duplicate_run_id, [])
       if self._sessions_have_open_work(duplicate_sessions):
         coordination_blocked = True
@@ -355,6 +523,17 @@ class TTradeGlobalMonitorService:
           "检测到多个做 T 活跃实例，重复实例仍有持仓批次或待处理意图："
           f"{duplicate_run_id}；已停止新建和标的协调"
         )
+        # An open-work duplicate must remain alive long enough to settle its
+        # exits, pending intents, and reservations, but it must not retain the
+        # authority to emit a new entry from a stale runtime snapshot.  Use the
+        # public invalidation boundary on that exact run; never stop it here.
+        try:
+          await self.session_service.block_account_strategy_entries(
+            duplicate_run_id,
+            reason=CONFIG_APPLY_PENDING_MARKER,
+          )
+        except Exception as exc:
+          errors.append(f"关闭重复实例 {duplicate_run_id} 新入场失败: {exc}")
         continue
       try:
         result = await self.session_service.stop_account_strategy(duplicate_run_id)
@@ -373,12 +552,16 @@ class TTradeGlobalMonitorService:
       force_draining=mode_mismatch,
     )
     if config.strategy_run_id:
-      await self._reject_stale_pending(
-        config.strategy_run_id,
-        sessions,
-        metadata,
-        int(config.config_version or 0),
-      )
+      try:
+        await self._reject_stale_pending(
+          config.strategy_run_id,
+          sessions,
+          metadata,
+          int(config.config_version or 0),
+        )
+      except Exception as exc:
+        coordination_blocked = True
+        errors.append(f"旧做 T 待确认意图失效失败: {exc}")
 
     active_count = sum(
       1 for item in sessions if int(item.get("active_volume", 0) or 0) > 0
@@ -445,6 +628,7 @@ class TTradeGlobalMonitorService:
 
     if config.enabled and desired and not mode_mismatch and not coordination_blocked:
       payload = self._strategy_payload(config, account_id)
+      configuration_changed = self._configuration_changed(config, sessions)
       try:
         if config.strategy_run_id:
           result = await self.session_service.update_account_strategy(
@@ -452,6 +636,7 @@ class TTradeGlobalMonitorService:
             payload,
             desired,
             metadata,
+            configuration_changed=configuration_changed,
           )
           config.universe_revision = int(config.universe_revision or 0) + (
             1 if result.get("added") or result.get("removed") else 0
@@ -464,21 +649,86 @@ class TTradeGlobalMonitorService:
           )
           config.universe_revision = int(config.universe_revision or 0) + 1
       except Exception as exc:
+        coordination_blocked = True
         errors.append(f"动态持仓策略协调失败: {exc}")
     elif config.strategy_run_id and active_count > 0 and not coordination_blocked:
       payload = self._strategy_payload(config, account_id)
+      configuration_changed = self._configuration_changed(config, sessions)
       try:
         await self.session_service.update_account_strategy(
           config.strategy_run_id,
           payload,
           desired,
           metadata,
+          configuration_changed=configuration_changed,
         )
       except Exception as exc:
+        coordination_blocked = True
         errors.append(f"退出中标的协调失败: {exc}")
 
-    await self._save_reconcile_config(config, errors)
+    await self._block_new_entries_if_needed(config, errors)
+    try:
+      await self._save_reconcile_config(config, errors)
+    except Exception as exc:
+      # Keep the pre-commit CONFIG_APPLY_PENDING marker durable when the
+      # reconcile projection itself cannot be persisted.  The next periodic or
+      # manual reconcile can retry and clear it after a successful apply.
+      errors.append(f"保存做 T 对账状态失败: {exc}")
+      await self._block_new_entries_if_needed(config, errors)
     return await self.get_monitor(account_id)
+
+  @staticmethod
+  def _configuration_changed(
+    config: TTradeGlobalConfig,
+    sessions: List[Dict[str, Any]],
+  ) -> bool:
+    """Return whether the persisted config is newer than the live run.
+
+    A periodic universe reconciliation is also used to refresh position
+    metadata.  It must not be treated as a policy/configuration change merely
+    because the call repeats.  The run session projection carries the config
+    version that was applied to that runtime.  Missing or malformed versions
+    are deliberately fail-closed: the next reconciliation must re-apply the
+    configuration and expire stale pending candidates.
+    """
+
+    raw_expected_version = getattr(config, "config_version", None)
+    if (
+      raw_expected_version is None
+      or raw_expected_version == ""
+      or isinstance(raw_expected_version, bool)
+    ):
+      return True
+    try:
+      if (
+        isinstance(raw_expected_version, float)
+        and not raw_expected_version.is_integer()
+      ):
+        return True
+      expected_version = int(raw_expected_version)
+    except (TypeError, ValueError, OverflowError):
+      return True
+    if not sessions:
+      return True
+    for session in sessions:
+      session_version = TTradeGlobalMonitorService._session_config_version(session)
+      if session_version is None:
+        return True
+      if session_version != expected_version:
+        return True
+    return False
+
+  @staticmethod
+  def _session_config_version(session: Dict[str, Any]) -> Optional[int]:
+    raw_version = session.get("global_config_version")
+    if raw_version is None or raw_version == "" or isinstance(raw_version, bool):
+      return None
+    try:
+      if isinstance(raw_version, float) and not raw_version.is_integer():
+        return None
+      return int(raw_version)
+    except (TypeError, ValueError, OverflowError):
+      return None
 
   @staticmethod
   def _sessions_have_open_work(sessions: List[Dict[str, Any]]) -> bool:
@@ -565,7 +815,8 @@ class TTradeGlobalMonitorService:
       if not intent_id:
         continue
       code = session["stock_code"]
-      stale = int(session.get("global_config_version", 0) or 0) != config_version
+      session_version = self._session_config_version(session)
+      stale = session_version is None or session_version != config_version
       if stale or not bool(metadata.get(code, {}).get("eligible", False)):
         await self.session_service.reject_entry(
           run_id,
@@ -640,6 +891,23 @@ class TTradeGlobalMonitorService:
       return await TTradeGlobalConfigRepository(db).find_all_configs()
     return []
 
+  async def _block_new_entries_if_needed(
+    self,
+    config: TTradeGlobalConfig,
+    errors: List[str],
+  ) -> None:
+    """Fail closed when runtime reconciliation is incomplete."""
+
+    if not errors or not config.strategy_run_id:
+      return
+    try:
+      await self.session_service.block_account_strategy_entries(
+        config.strategy_run_id,
+        reason=CONFIG_APPLY_PENDING_MARKER,
+      )
+    except Exception as exc:
+      errors.append(f"关闭做 T 新入场失败: {exc}")
+
   async def _save_reconcile_config(
     self, config: TTradeGlobalConfig, errors: List[str]
   ) -> None:
@@ -653,6 +921,18 @@ class TTradeGlobalMonitorService:
         current.last_error = "; ".join(errors[:20]) or None
         await repo.save(current)
       break
+
+  @staticmethod
+  def _with_apply_outcome(monitor: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach an explicit save/apply outcome without changing GraphQL shape."""
+
+    result = dict(monitor or {})
+    has_error = bool(str(result.get("last_error") or "").strip())
+    result["apply_status"] = "PENDING" if has_error else "APPLIED"
+    result["apply_code"] = (
+      CONFIG_APPLY_PENDING_CODE if has_error else CONFIG_APPLIED_CODE
+    )
+    return result
 
   async def _record_reconcile_result(self, config_id: str, errors: List[str]) -> None:
     async for db in get_async_db():
@@ -737,14 +1017,27 @@ class TTradeGlobalMonitorService:
 
   def _settings_from_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
     normalized = self._normalized_settings(payload)
-    return {key: normalized[key] for key in GLOBAL_SETTING_DEFAULTS}
+    return {
+      key: (
+        dict(normalized[key])
+        if key == "signal_policy"
+        else normalized[key]
+      )
+      for key in GLOBAL_SETTING_DEFAULTS
+    }
 
   def _normalized_settings(self, settings: Any) -> Dict[str, Any]:
     normalized = self.session_service._normalize_exit_settings(dict(settings or {}))
     return {
       **GLOBAL_SETTING_DEFAULTS,
       **{
-        key: normalized.get(key, default)
+        key: (
+          self.session_service._normalize_signal_policy(
+            normalized.get("signal_policy")
+          )
+          if key == "signal_policy"
+          else normalized.get(key, default)
+        )
         for key, default in GLOBAL_SETTING_DEFAULTS.items()
       },
     }

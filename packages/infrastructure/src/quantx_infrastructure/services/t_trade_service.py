@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, time
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from quantx_application.t_trade_v3 import normalize_signal_policy
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
@@ -28,13 +30,62 @@ from quantx_infrastructure.repositories.strategy_run_state_repository import (
 from quantx_infrastructure.repositories.t_trade_imported_entry_repository import (
   TTradeImportedEntryRepository,
 )
-from quantx_infrastructure.repositories.trade_intent_repository import (
-  TradeIntentRepository,
-)
 from quantx_infrastructure.services.order_service import OrderService
+from quantx_infrastructure.services.t_trade_signal_diagnostics_service import (
+  TTradeSignalDiagnosticsService,
+)
 
 T_TRADE_CLASS_NAME = T_TRADE_STRATEGY_CLASS_NAME
 ACTIVE_RUN_STATUSES = {"pending", "running", "paused"}
+
+
+@dataclass(frozen=True)
+class TTradeApprovalExpectation:
+  """Client-observed V3 candidate identity used as an approval CAS token."""
+
+  signal_version: int = 0
+  candidate_id: str = ""
+  candidate_fingerprint: str = ""
+  candidate_state_version: int = 0
+  config_version: Optional[int] = None
+  policy_version: str = ""
+
+  @classmethod
+  def from_payload(cls, payload: Mapping[str, Any]) -> "TTradeApprovalExpectation":
+    return cls(
+      signal_version=cls._integer(payload.get("expected_signal_version")),
+      candidate_id=str(payload.get("expected_candidate_id") or "").strip(),
+      candidate_fingerprint=str(
+        payload.get("expected_candidate_fingerprint") or ""
+      ).strip(),
+      candidate_state_version=cls._integer(
+        payload.get("expected_candidate_state_version")
+      ),
+      config_version=(
+        cls._integer(payload.get("expected_config_version"))
+        if "expected_config_version" in payload
+        and payload.get("expected_config_version") is not None
+        else None
+      ),
+      policy_version=str(payload.get("expected_policy_version") or "").strip(),
+    )
+
+  @staticmethod
+  def _integer(value: Any) -> int:
+    try:
+      return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+      return 0
+
+  def to_dict(self) -> Dict[str, Any]:
+    return {
+      "signal_version": self.signal_version,
+      "candidate_id": self.candidate_id,
+      "candidate_fingerprint": self.candidate_fingerprint,
+      "candidate_state_version": self.candidate_state_version,
+      "config_version": self.config_version,
+      "policy_version": self.policy_version,
+    }
 
 
 class TTradeService:
@@ -47,6 +98,28 @@ class TTradeService:
     if self._runtime_manager is None:
       raise RuntimeError("该操作只能由 QuantX Engine 执行")
     return self._runtime_manager
+
+  async def signal_diagnostics(
+    self,
+    account_id: str,
+    *,
+    stock_code: Optional[str],
+    start_time: datetime,
+    end_time: datetime,
+    merge_versions: bool = False,
+  ) -> Dict[str, Any]:
+    """Aggregate V3 evidence with READY instrument-time as its denominator."""
+
+    async for db in get_async_db():
+      return await TTradeSignalDiagnosticsService().signal_diagnostics(
+        account_id,
+        stock_code=stock_code,
+        start_time=start_time,
+        end_time=end_time,
+        merge_versions=merge_versions,
+        db=db,
+      )
+    raise RuntimeError("做 T 信号诊断数据库会话不可用")
 
   async def start_account_strategy(
     self,
@@ -94,19 +167,19 @@ class TTradeService:
     payload: Dict[str, Any],
     instruments: List[str],
     instrument_metadata: Dict[str, Dict[str, Any]],
+    *,
+    configuration_changed: bool,
   ) -> Dict[str, List[str]]:
     mode = self._parse_mode(payload.get("mode", "paper"))
     self._validate_parameters(payload, mode)
     strategy_manager = self._require_runtime_manager()
-    await strategy_manager.update_run_parameters(run_id, self.build_parameters(payload))
     return await strategy_manager.reconcile_run_instruments(
       run_id,
       instruments,
       instrument_metadata=instrument_metadata,
+      parameters=self.build_parameters(payload),
+      configuration_changed=bool(configuration_changed),
     )
-
-  async def start_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-    raise ValueError("做 T 已改为账户级全局策略，请从“做 T 助手”快捷入口启动")
 
   async def get_session(
     self,
@@ -212,128 +285,61 @@ class TTradeService:
       ]
     return []
 
-  async def list_signal_history(
-    self, account_id: str, limit: int = 50
-  ) -> List[Dict[str, Any]]:
-    """Return recent persisted entry signals across this account's T-trade runs."""
-    normalized_account_id = str(account_id or "").strip()
-    if not normalized_account_id:
-      raise ValueError("账户不能为空")
-    safe_limit = max(1, min(int(limit or 50), 100))
-
-    async for db in get_async_db():
-      runs = await StrategyRunRepository(db).find_all_strategy_runs()
-      run_ids = [
-        str(run.id)
-        for run in runs
-        if run.strategy
-        and run.strategy.class_name == T_TRADE_CLASS_NAME
-        and str(self._mapping(run.parameters).get("account_id", ""))
-        == normalized_account_id
-      ]
-      records = await TradeIntentRepository(db).find_recent_t_trade_entries(
-        run_ids, safe_limit
-      )
-      return [self._project_signal_history_entry(record) for record in records]
-    return []
-
-  async def list_signal_history_page(
-    self,
-    account_id: str,
-    *,
-    cursor_created_at: Optional[datetime] = None,
-    cursor_id: Optional[str] = None,
-    first: int = 30,
-  ) -> tuple[List[Dict[str, Any]], bool]:
-    normalized_account_id = str(account_id or "").strip()
-    if not normalized_account_id:
-      raise ValueError("账户不能为空")
-    async for db in get_async_db():
-      runs = await StrategyRunRepository(db).find_all_strategy_runs()
-      run_ids = [
-        str(run.id)
-        for run in runs
-        if run.strategy
-        and run.strategy.class_name == T_TRADE_CLASS_NAME
-        and str(self._mapping(run.parameters).get("account_id", ""))
-        == normalized_account_id
-      ]
-      records, has_next_page = await TradeIntentRepository(
-        db
-      ).find_recent_t_trade_entries_page(
-        run_ids,
-        cursor_created_at=cursor_created_at,
-        cursor_id=cursor_id,
-        first=first,
-      )
-      rows = []
-      for record in records:
-        row = self._project_signal_history_entry(record)
-        row["_cursor_created_at"] = record.created_at
-        row["_cursor_id"] = record.id
-        rows.append(row)
-      return rows, has_next_page
-    return [], False
-
-  async def approve_entry(self, run_id: str, intent_id: str) -> Dict[str, Any]:
+  async def block_account_strategy_entries(
+    self, run_id: str, *, reason: str = "GLOBAL_CONFIG_APPLY_PENDING"
+  ) -> None:
     strategy_manager = self._require_runtime_manager()
-    result = await strategy_manager.executor.approve_trade_intent(run_id, intent_id)
+    executor = getattr(strategy_manager, "executor", None)
+    invalidate = getattr(executor, "invalidate_t_trade_entry_authority", None)
+    if not callable(invalidate):
+      raise RuntimeError("Engine 缺少做 T 新入场 authority 失效接口")
+    account_id = ""
+    runtime = strategy_manager.get_run(run_id)
+    if runtime is not None:
+      context = getattr(runtime, "context", None)
+      account_id = str(
+        dict(getattr(context, "parameters", {}) or {}).get("account_id")
+        or ""
+      ).strip()
+    if not await invalidate(run_id, account_id=account_id, reason=reason):
+      raise ValueError(f"策略运行不存在或账户作用域不匹配: {run_id}")
+
+  async def approve_entry(
+    self,
+    run_id: str,
+    intent_id: str,
+    *,
+    approval_expectation: Optional[TTradeApprovalExpectation] = None,
+    approval_audit: Optional[Mapping[str, Any]] = None,
+  ) -> Dict[str, Any]:
+    strategy_manager = self._require_runtime_manager()
+    session_before_approval = await self.get_session(run_id, intent_id=intent_id)
+    result = await strategy_manager.executor.approve_trade_intent(
+      run_id,
+      intent_id,
+      approval_expectation=(
+        approval_expectation.to_dict() if approval_expectation is not None else None
+      ),
+      approval_audit=approval_audit,
+    )
+    stock_code = str(session_before_approval.get("stock_code") or "")
     return {
       **result,
-      "session": await self.get_session(run_id, intent_id=intent_id),
-    }
-
-  @staticmethod
-  def _project_signal_history_entry(record: Any) -> Dict[str, Any]:
-    metadata = dict(getattr(record, "intent_metadata", {}) or {})
-    signal = dict(metadata.get("signal", {}) or {})
-    created_at = getattr(record, "created_at", None)
-    intent_created_at = metadata.get("intent_created_at")
-    if intent_created_at:
-      try:
-        created_at = datetime.fromisoformat(
-          str(intent_created_at).replace("Z", "+00:00")
-        )
-      except (TypeError, ValueError):
-        pass
-    ttl_ms = max(0, int(metadata.get("approval_ttl_ms", 0) or 0))
-    expires_at = (
-      created_at + timedelta(milliseconds=ttl_ms) if created_at and ttl_ms else None
-    )
-    return {
-      "intent_id": str(getattr(record, "id", "") or ""),
-      "run_id": str(getattr(record, "strategy_run_id", "") or ""),
-      "stock_code": str(getattr(record, "instrument_code", "") or ""),
-      "status": str(getattr(record, "status", "") or ""),
-      "status_reason": str(getattr(record, "notes", "") or ""),
-      "signal_price": float(
-        signal.get("signal_price", 0.0)
-        or getattr(record, "limit_price_hint", 0.0)
-        or 0.0
-      ),
-      "pullback_pct": float(signal.get("pullback_pct", 0.0) or 0.0),
-      "rebound_pct": float(signal.get("rebound_pct", 0.0) or 0.0),
-      "requested_volume": int(
-        signal.get("requested_volume", 0)
-        or metadata.get("requested_entry_volume", 0)
-        or getattr(record, "target_volume", 0)
-        or 0
-      ),
-      "created_at": created_at,
-      "expires_at": expires_at,
-      "updated_at": getattr(record, "updated_at", None),
+      "session": await self.get_session(run_id, stock_code=stock_code),
     }
 
   async def reject_entry(
     self, run_id: str, intent_id: str, reason: str = "USER_REJECTED"
   ) -> Dict[str, Any]:
     strategy_manager = self._require_runtime_manager()
+    session_before_rejection = await self.get_session(run_id, intent_id=intent_id)
     result = await strategy_manager.executor.reject_trade_intent(
       run_id, intent_id, reason=reason
     )
+    stock_code = str(session_before_rejection.get("stock_code") or "")
     return {
       **result,
-      "session": await self.get_session(run_id, intent_id=intent_id),
+      "session": await self.get_session(run_id, stock_code=stock_code),
     }
 
   async def import_external_entry(
@@ -519,23 +525,7 @@ class TTradeService:
       "max_trade_amount",
       "max_concurrent_batches",
       "max_total_t_exposure_pct",
-      "signal_lookback_seconds",
-      "stabilization_seconds",
-      "pullback_threshold_pct",
-      "rebound_threshold_pct",
-      "max_spread_ticks",
-      "momentum_enabled",
-      "momentum_window_seconds",
-      "momentum_min_rise_pct",
-      "momentum_min_move_seconds",
-      "momentum_baseline_seconds",
-      "momentum_min_amount_velocity_ratio",
-      "momentum_min_vwap_premium_pct",
-      "momentum_max_vwap_premium_pct",
-      "momentum_high_tolerance_ticks",
-      "momentum_max_spread_ticks",
-      "momentum_max_spread_pct",
-      "approval_ttl_seconds",
+      "signal_policy",
       "max_price_deviation_pct",
       "target_profit_pct",
       "base_floor_pct",
@@ -602,47 +592,11 @@ class TTradeService:
     active_volume = max(0, entry_volume - exit_volume)
     pending_entry = str(state.get("pending_entry_intent_id", "") or "")
     pending_exit = str(state.get("pending_exit_intent_id", "") or "")
-    telemetry = dict(state.get("monitoring_telemetry", {}) or {})
-    last_tick_at_ms = int(telemetry.get("last_tick_at_ms", 0) or 0)
-    latest_evaluation = None
-    if last_tick_at_ms > 0:
-      latest_evaluation = {
-        "phase": str(telemetry.get("phase", "ENTRY_SCAN") or "ENTRY_SCAN"),
-        "last_tick_at": datetime.fromtimestamp(last_tick_at_ms / 1000),
-        "processed_tick_count": int(
-          telemetry.get("processed_tick_count", 0) or 0
-        ),
-        "window_sample_count": int(telemetry.get("window_sample_count", 0) or 0),
-        "window_coverage_seconds": float(
-          telemetry.get("window_coverage_seconds", 0.0) or 0.0
-        ),
-        "triggered": bool(telemetry.get("triggered", False)),
-        "reason": str(telemetry.get("reason", "") or ""),
-        "signal_type": str(telemetry.get("signal_type", "NONE") or "NONE"),
-        "signal_price": float(telemetry.get("signal_price", 0.0) or 0.0),
-        "window_high": self._optional_float(telemetry.get("window_high")),
-        "window_low": self._optional_float(telemetry.get("window_low")),
-        "pullback_pct": self._optional_float(telemetry.get("pullback_pct")),
-        "rebound_pct": self._optional_float(telemetry.get("rebound_pct")),
-        "vwap": self._optional_float(telemetry.get("vwap")),
-        "vwap_premium_pct": self._optional_float(
-          telemetry.get("vwap_premium_pct")
-        ),
-        "spread_ticks": self._optional_float(telemetry.get("spread_ticks")),
-        "spread_pct": self._optional_float(telemetry.get("spread_pct")),
-        "momentum_rise_pct": self._optional_float(
-          telemetry.get("momentum_rise_pct")
-        ),
-        "momentum_move_seconds": self._optional_float(
-          telemetry.get("momentum_move_seconds")
-        ),
-        "momentum_amount_velocity_ratio": self._optional_float(
-          telemetry.get("momentum_amount_velocity_ratio")
-        ),
-        "momentum_baseline_coverage_seconds": self._optional_float(
-          telemetry.get("momentum_baseline_coverage_seconds")
-        ),
-      }
+    opportunity = dict(state.get("opportunity") or {})
+    raw_signal_snapshot = opportunity.get("latest_evaluation")
+    signal_snapshot = (
+      dict(raw_signal_snapshot) if isinstance(raw_signal_snapshot, dict) else None
+    )
     return {
       "run_id": run.id,
       "account_id": str(params.get("account_id", "") or ""),
@@ -650,13 +604,11 @@ class TTradeService:
       "mode": run.mode.value if run.mode else "",
       "run_status": run_status,
       "status": str(state.get("status", "STARTING") or "STARTING"),
-      "position_shares": int(state.get("position_shares", 0) or 0),
-      "position_available_shares": int(state.get("position_available_shares", 0) or 0),
       "target_trade_amount": float(
         params.get("target_trade_amount", 10_000.0) or 10_000.0
       ),
       "max_trade_amount": float(params.get("max_trade_amount", 12_000.0) or 12_000.0),
-      "planned_entry_volume": int(state.get("requested_entry_volume", 0) or 0),
+      "planned_entry_amount": float(state.get("requested_entry_amount", 0.0) or 0.0),
       "target_profit_pct": float(params.get("target_profit_pct", 2.0) or 2.0),
       "base_floor_pct": float(params.get("base_floor_pct", 0.5) or 0.5),
       "hard_stop_enabled": bool(
@@ -671,7 +623,6 @@ class TTradeService:
       "max_holding_trading_days": int(
         self._normalize_exit_settings(params)["max_holding_trading_days"]
       ),
-      "current_signal": dict(state.get("current_signal", {}) or {}),
       "pending_entry_intent_id": pending_entry or None,
       "pending_exit_intent_id": pending_exit or None,
       "entry_order_status": str(state.get("entry_order_status", "") or ""),
@@ -695,7 +646,7 @@ class TTradeService:
       "updated_at": run.updated_at,
       "global_monitor_id": str(params.get("global_monitor_id", "") or "") or None,
       "global_config_version": int(params.get("global_config_version", 0) or 0),
-      "latest_evaluation": latest_evaluation,
+      "signal_snapshot": signal_snapshot,
     }
 
   @staticmethod
@@ -734,27 +685,12 @@ class TTradeService:
   @classmethod
   def _validate_parameters(cls, payload: Dict[str, Any], mode: StrategyRunMode) -> None:
     payload = cls._normalize_exit_settings(payload)
+    cls._normalize_signal_policy(payload.get("signal_policy"))
     numeric_ranges = {
       "target_trade_amount": (100.0, 1_000_000.0, 10_000.0),
       "max_trade_amount": (100.0, 1_000_000.0, 12_000.0),
       "max_concurrent_batches": (1.0, 20.0, 3.0),
       "max_total_t_exposure_pct": (0.01, 1.0, 0.1),
-      "signal_lookback_seconds": (60.0, 900.0, 300.0),
-      "stabilization_seconds": (3.0, 120.0, 15.0),
-      "pullback_threshold_pct": (0.1, 5.0, 0.8),
-      "rebound_threshold_pct": (0.05, 2.0, 0.2),
-      "max_spread_ticks": (1.0, 10.0, 3.0),
-      "momentum_window_seconds": (15.0, 300.0, 60.0),
-      "momentum_min_rise_pct": (0.1, 10.0, 0.8),
-      "momentum_min_move_seconds": (3.0, 120.0, 15.0),
-      "momentum_baseline_seconds": (60.0, 900.0, 300.0),
-      "momentum_min_amount_velocity_ratio": (1.0, 20.0, 2.0),
-      "momentum_min_vwap_premium_pct": (0.0, 10.0, 2.0),
-      "momentum_max_vwap_premium_pct": (0.1, 20.0, 3.5),
-      "momentum_high_tolerance_ticks": (0.0, 20.0, 1.0),
-      "momentum_max_spread_ticks": (1.0, 30.0, 10.0),
-      "momentum_max_spread_pct": (0.01, 2.0, 0.3),
-      "approval_ttl_seconds": (5.0, 300.0, 30.0),
       "max_price_deviation_pct": (0.05, 2.0, 0.3),
       "target_profit_pct": (0.1, 20.0, 2.0),
       "base_floor_pct": (-2.0, 10.0, 0.5),
@@ -783,14 +719,6 @@ class TTradeService:
       if not math.isfinite(value) or value < minimum or value > maximum:
         raise ValueError(f"参数 {key} 必须在 {minimum:g} 到 {maximum:g} 之间")
       values[key] = value
-    if values["stabilization_seconds"] >= values["signal_lookback_seconds"]:
-      raise ValueError("低点稳定时间必须小于信号观察窗口")
-    if values["momentum_min_move_seconds"] > values["momentum_window_seconds"]:
-      raise ValueError("动量最短持续时间不能超过动量观察窗口")
-    if (
-      values["momentum_min_vwap_premium_pct"] >= values["momentum_max_vwap_premium_pct"]
-    ):
-      raise ValueError("动量 VWAP 最小溢价必须低于最大溢价")
     if values["max_trade_amount"] < values["target_trade_amount"]:
       raise ValueError("单次金额硬上限不能低于目标单次金额")
     if values["base_floor_pct"] >= values["target_profit_pct"]:
@@ -861,4 +789,11 @@ class TTradeService:
         "hard_stop_pct" in normalized and "time_exit_mode" not in payload
       )
     normalized["hard_stop_pct"] = normalized.get("hard_stop_pct", -0.8)
+    normalized["signal_policy"] = TTradeService._normalize_signal_policy(
+      normalized.get("signal_policy")
+    )
     return normalized
+
+  @staticmethod
+  def _normalize_signal_policy(value: Any) -> Dict[str, Any]:
+    return normalize_signal_policy(value)

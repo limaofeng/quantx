@@ -9,11 +9,86 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeGlobalMonitor,
   TTradeReplayStartInput,
   TTradeRolloutTarget,
+  TTradeSignalPolicyInput,
   TTradeTimeExitMode,
 )
+from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.services.engine_command_service import EngineCommandReceipt
 from quantx_infrastructure.services.t_trade_service import TTradeService
+
+
+def _policy_input() -> TTradeSignalPolicyInput:
+  payload = OpportunityPolicy().to_dict()
+  payload.pop("policy_version")
+  payload.pop("feature_schema_version")
+  return TTradeSignalPolicyInput(**payload)
+
+
+def _policy_projection() -> dict:
+  return TTradeResolver._policy_from_input(_policy_input()).to_dict()
+
+
+def _signal_snapshot() -> dict:
+  return {
+    "instrument_code": "600000.SH",
+    "trade_date": "2026-08-13",
+    "evaluated_at_ms": 1_765_000_000_250,
+    "source_time_ms": 1_765_000_000_000,
+    "tick_ordinal": 9_007_199_254_740_993,
+    "continuity_generation": 9_007_199_254_740_995,
+    "data_health": "READY",
+    "data_health_reasons": [],
+    "features": {"sample_count": 7, "coverage_seconds": 15.4},
+    "pullback": {
+      "phase": "REBOUND_CONFIRMING",
+      "score": 76.0,
+      "preview": True,
+      "candidate_ready": True,
+      "components": [
+        {
+          "name": "PULLBACK_DEPTH",
+          "raw_value": 1.1,
+          "contribution": 22.0,
+          "weight": 25.0,
+          "detail": "",
+        }
+      ],
+      "hard_gates": [{"code": "DATA_READY", "passed": True, "detail": ""}],
+      "blockers": [],
+    },
+    "momentum": {
+      "phase": "BASELINING",
+      "score": None,
+      "preview": False,
+      "candidate_ready": False,
+      "components": [],
+      "hard_gates": [],
+      "blockers": ["MOMENTUM_PATTERN_NOT_CONFIRMED"],
+    },
+    "selected_path": "PULLBACK_REBOUND",
+    "opportunity_score": 76.0,
+    "hard_gates": [{"code": "DATA_READY", "passed": True, "detail": ""}],
+    "blockers": [],
+    "candidate_status": "AWAITING_APPROVAL",
+    "candidate_id": "candidate-1",
+    "candidate_fingerprint": "fingerprint-1",
+    "episode_id": "episode-1",
+    "candidate_created_at_ms": 1_765_000_000_000,
+    "candidate_expires_at_ms": 1_765_000_030_000,
+    "preview_threshold": 55.0,
+    "candidate_threshold": 72.0,
+    "revalidate_threshold": 60.0,
+    "rearm_threshold": 45.0,
+    "signal_version": 4,
+    "candidate_state_version": 4,
+    "state_schema_version": "3",
+    "feature_schema_version": "1",
+    "policy_version": "t_trade_opportunity_v3.0.0",
+    "config_version": 8,
+    "profile_version": "profile-20260812",
+    "profile_fingerprint": "profile-fingerprint",
+  }
 
 
 def test_global_monitor_projects_graphql_scalar_types():
@@ -32,12 +107,7 @@ def test_global_monitor_projects_graphql_scalar_types():
       "max_trade_amount": 12_000.0,
       "max_concurrent_batches": 3,
       "max_total_t_exposure_pct": 0.1,
-      "signal_lookback_seconds": 300,
-      "stabilization_seconds": 15,
-      "pullback_threshold_pct": 0.8,
-      "rebound_threshold_pct": 0.2,
-      "max_spread_ticks": 3,
-      "approval_ttl_seconds": 30,
+      "signal_policy": _policy_projection(),
       "max_price_deviation_pct": 0.3,
       "target_profit_pct": 2.0,
       "base_floor_pct": 0.5,
@@ -108,11 +178,11 @@ def test_global_monitor_projects_graphql_scalar_types():
   assert isinstance(monitor.readiness.checked_at, datetime)
   assert monitor.readiness.checks[0].passed is True
   assert monitor.max_exit_slippage_bps == 30.0
-  assert monitor.momentum_enabled is True
-  assert monitor.momentum_window_seconds == 60
-  assert monitor.momentum_min_amount_velocity_ratio == 2.0
-  assert monitor.momentum_min_vwap_premium_pct == 2.0
-  assert monitor.momentum_max_vwap_premium_pct == 3.5
+  assert monitor.signal_policy.momentum_enabled is True
+  assert monitor.signal_policy.momentum_window_seconds == 60
+  assert monitor.signal_policy.momentum_min_amount_velocity_ratio == 2.0
+  assert monitor.signal_policy.momentum_min_vwap_premium_pct == 2.0
+  assert monitor.signal_policy.momentum_max_vwap_premium_pct == 3.5
   assert monitor.limit_up_touch_exit_enabled is True
   assert monitor.limit_up_touch_tolerance_ticks == 0
   assert monitor.high_profit_lock_enabled is True
@@ -323,7 +393,7 @@ def test_replay_projection_exposes_generated_report_and_capital_metrics():
 
 
 @pytest.mark.asyncio
-async def test_replay_start_processing_receipt_is_an_ack_not_validation_failure(
+async def test_replay_start_processing_receipt_is_explicitly_pending(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   receipt = EngineCommandReceipt(
@@ -346,16 +416,20 @@ async def test_replay_start_processing_receipt_is_an_ack_not_validation_failure(
       idempotency_key="  replay-request-1  ",
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
+      signal_policy=_policy_input(),
     )
   )
 
-  assert result.success is True
-  assert result.code == "REPLAY_ACCEPTED"
-  assert result.replay is not None
-  assert result.replay.run_id == receipt.message_id
-  assert result.replay.status == "PENDING"
+  assert result.success is False
+  assert result.code == "T_TRADE_REPLAY_START_COMMAND_PENDING"
+  assert result.replay is None
+  assert "尚不知是否已提交" in result.message
   request.assert_awaited_once()
-  assert request.await_args.kwargs["idempotency_key"] == "replay-request-1"
+  assert request.await_args.kwargs["idempotency_key"] == (
+    resolver_module._namespaced_client_idempotency_key(
+      "replay-start", "account-1", "replay-request-1"
+    )
+  )
 
 
 @pytest.mark.asyncio
@@ -382,6 +456,7 @@ async def test_replay_start_failed_receipt_is_not_mislabeled_as_validation(
       idempotency_key="replay-request-2",
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
+      signal_policy=_policy_input(),
     )
   )
 
@@ -436,6 +511,7 @@ async def test_replay_start_succeeded_command_with_pending_run_is_accepted(
       idempotency_key="replay-request-4",
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
+      signal_policy=_policy_input(),
     )
   )
 
@@ -458,6 +534,7 @@ async def test_replay_start_rejects_blank_idempotency_key(
       idempotency_key="   ",
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
+      signal_policy=_policy_input(),
     )
   )
 
@@ -482,15 +559,16 @@ async def test_replay_start_submission_exception_is_structured(
       idempotency_key="replay-request-3",
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
+      signal_policy=_policy_input(),
     )
   )
 
   assert result.success is False
-  assert result.code == "REPLAY_START_FAILED"
-  assert result.message == "做 T 历史回放请求提交失败，请稍后重试"
+  assert result.code == "T_TRADE_REPLAY_START_OUTCOME_UNKNOWN"
+  assert "尚不知是否已提交" in result.message
 
 
-def test_session_graphql_projection_maps_latest_evaluation_and_legacy_null():
+def test_session_graphql_projection_maps_typed_signal_snapshot_and_null():
   now = datetime(2026, 8, 13, 10, 5)
   run = SimpleNamespace(
     id="run-telemetry",
@@ -508,24 +586,20 @@ def test_session_graphql_projection_maps_latest_evaluation_and_legacy_null():
   )
   projected = service._project_session(
     **base,
-    state={
-      "monitoring_telemetry": {
-        "phase": "ENTRY_SCAN",
-        "last_tick_at_ms": int(now.timestamp() * 1000),
-        "processed_tick_count": 7,
-        "reason": "INSUFFICIENT_TICKS",
-      }
-    },
+    state={},
   )
-  legacy = service._project_session(**base, state={})
+  projected["signal_snapshot"] = _signal_snapshot()
+  without_snapshot = service._project_session(**base, state={})
 
   session = TTradeResolver._session_type(projected)
-  legacy_session = TTradeResolver._session_type(legacy)
+  empty_session = TTradeResolver._session_type(without_snapshot)
 
-  assert session.latest_evaluation is not None
-  assert session.latest_evaluation.processed_tick_count == 7
-  assert isinstance(session.latest_evaluation.last_tick_at, datetime)
-  assert legacy_session.latest_evaluation is None
+  assert session.signal_snapshot is not None
+  assert session.signal_snapshot.sample_count == 7
+  assert session.signal_snapshot.source_time_ms == "1765000000000"
+  assert session.signal_snapshot.tick_ordinal == "9007199254740993"
+  assert session.signal_snapshot.pending_entry_intent_id is None
+  assert empty_session.signal_snapshot is None
 
 
 @pytest.mark.asyncio
@@ -544,8 +618,10 @@ async def test_live_activation_failure_is_audited(
     "account-1",
     user_id="user-1",
     policy_version=3,
+    snapshot_id="snapshot-1",
     target_stage=TTradeRolloutTarget.LIVE,
     confirmation="wrong",
+    idempotency_key="activate-operation-1",
   )
 
   assert result.success is False
@@ -576,7 +652,9 @@ async def test_controlled_window_failure_is_audited(
   result = await TTradeResolver.begin_controlled_window(
     "account-1",
     user_id="user-1",
+    policy_version=3,
     snapshot_id="snapshot-1",
+    idempotency_key="begin-operation-1",
   )
 
   assert result.success is False
@@ -590,3 +668,61 @@ async def test_controlled_window_failure_is_audited(
       "reason": "当前仍有 3 笔 QMT 手工委托可能成交",
     },
   )
+
+
+@pytest.mark.asyncio
+async def test_live_activation_readback_failure_converges_from_committed_marker(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service = SimpleNamespace(
+    activate_rollout=AsyncMock(
+      side_effect=ValueError("readiness JSON 暂时无法验证")
+    ),
+    operation_marker_exists=AsyncMock(return_value=True),
+    record_event=AsyncMock(),
+  )
+  monkeypatch.setattr(TTradeResolver, "operations_service", service)
+
+  result = await TTradeResolver.activate_live(
+    "account-1",
+    user_id="user-1",
+    policy_version=3,
+    snapshot_id="snapshot-1",
+    target_stage=TTradeRolloutTarget.LIVE,
+    confirmation="LIVE:account-1",
+    idempotency_key="activate-operation-committed",
+  )
+
+  assert result.success is True
+  assert result.code == "LIVE_ACTIVATED"
+  assert result.readiness is None
+  service.operation_marker_exists.assert_awaited_once()
+  service.record_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_controlled_window_readback_failure_converges_from_committed_marker(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  service = SimpleNamespace(
+    begin_controlled_window=AsyncMock(
+      side_effect=ValueError("readiness JSON 暂时无法验证")
+    ),
+    operation_marker_exists=AsyncMock(return_value=True),
+    record_event=AsyncMock(),
+  )
+  monkeypatch.setattr(TTradeResolver, "operations_service", service)
+
+  result = await TTradeResolver.begin_controlled_window(
+    "account-1",
+    user_id="user-1",
+    policy_version=3,
+    snapshot_id="snapshot-1",
+    idempotency_key="begin-operation-committed",
+  )
+
+  assert result.success is True
+  assert result.code == "CONTROLLED_WINDOW_STARTED"
+  assert result.readiness is None
+  service.operation_marker_exists.assert_awaited_once()
+  service.record_event.assert_not_awaited()

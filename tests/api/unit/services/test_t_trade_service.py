@@ -1,11 +1,20 @@
+import hashlib
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-import quantx_infrastructure.services.t_trade_service as t_trade_service_module
+from quantx_application.t_trade_v3 import normalize_signal_policy
+from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.models.enums import StrategyRunMode
 from quantx_infrastructure.services.t_trade_service import TTradeService
+
+
+def signal_policy(**overrides):
+  payload = OpportunityPolicy().to_dict()
+  payload.update(overrides)
+  return payload
 
 
 def test_t_trade_parameters_accept_safe_defaults():
@@ -29,22 +38,26 @@ def test_t_trade_amount_hard_cap_must_cover_target():
 
 
 def test_t_trade_momentum_window_must_cover_minimum_move():
-  with pytest.raises(ValueError, match="动量最短持续时间不能超过动量观察窗口"):
+  with pytest.raises(ValueError, match="momentum_min_move_seconds"):
     TTradeService._validate_parameters(
       {
-        "momentum_window_seconds": 30,
-        "momentum_min_move_seconds": 31,
+        "signal_policy": signal_policy(
+          momentum_window_seconds=30,
+          momentum_min_move_seconds=31,
+        )
       },
       StrategyRunMode.PAPER,
     )
 
 
 def test_t_trade_momentum_vwap_band_must_be_ordered():
-  with pytest.raises(ValueError, match="动量 VWAP 最小溢价必须低于最大溢价"):
+  with pytest.raises(ValueError, match="momentum VWAP premium band"):
     TTradeService._validate_parameters(
       {
-        "momentum_min_vwap_premium_pct": 3.5,
-        "momentum_max_vwap_premium_pct": 3.5,
+        "signal_policy": signal_policy(
+          momentum_min_vwap_premium_pct=3.5,
+          momentum_max_vwap_premium_pct=3.5,
+        )
       },
       StrategyRunMode.PAPER,
     )
@@ -125,7 +138,7 @@ def test_t_trade_mapping_rejects_non_object_json():
   assert TTradeService._mapping('["not", "an", "object"]') == {}
 
 
-def test_session_projection_maps_monitoring_telemetry_and_keeps_legacy_null():
+def test_session_projection_maps_only_server_signal_snapshot():
   now = datetime(2026, 8, 13, 10, 5, tzinfo=timezone.utc)
   run = SimpleNamespace(
     id="run-telemetry",
@@ -136,19 +149,13 @@ def test_session_projection_maps_monitoring_telemetry_and_keeps_legacy_null():
   service = TTradeService()
   params = {"account_id": "account-1"}
   state = {
-    "monitoring_telemetry": {
-      "phase": "ENTRY_SCAN",
-      "last_tick_at_ms": int(now.timestamp() * 1000),
-      "processed_tick_count": 123,
-      "window_sample_count": 45,
-      "window_coverage_seconds": 119.0,
-      "triggered": False,
-      "reason": "WAITING_PULLBACK",
-      "signal_type": "NONE",
-      "signal_price": 10.12,
-      "window_high": 10.2,
-      "pullback_pct": 0.4,
-      "vwap": None,
+    "opportunity": {
+      "latest_evaluation": {
+        "evaluated_at_ms": int(now.timestamp() * 1000),
+        "data_health": "READY",
+        "opportunity_score": 61.0,
+        "features": {"session_vwap": None},
+      }
     }
   }
 
@@ -160,7 +167,7 @@ def test_session_projection_maps_monitoring_telemetry_and_keeps_legacy_null():
     stock_code="600000.SH",
     state=state,
   )
-  legacy = service._project_session(
+  missing = service._project_session(
     run=run,
     run_status="RUNNING",
     error_message=None,
@@ -169,12 +176,98 @@ def test_session_projection_maps_monitoring_telemetry_and_keeps_legacy_null():
     state={},
   )
 
-  assert projected["latest_evaluation"]["processed_tick_count"] == 123
-  assert projected["latest_evaluation"]["vwap"] is None
-  assert projected["latest_evaluation"]["last_tick_at"].timestamp() == pytest.approx(
-    now.timestamp()
+  assert projected["signal_snapshot"] == state["opportunity"]["latest_evaluation"]
+  assert projected["signal_snapshot"]["features"]["session_vwap"] is None
+  assert missing["signal_snapshot"] is None
+
+
+def test_signal_policy_normalization_assigns_deterministic_version():
+  first = TTradeService._normalize_signal_policy(signal_policy(candidate_score=74.0))
+  second = TTradeService._normalize_signal_policy(signal_policy(candidate_score=74.0))
+
+  assert first == second
+  assert first["policy_version"].startswith("t_trade_opportunity_v3.")
+  assert first["policy_version"] != "t_trade_opportunity_v3.0.0"
+
+  version_payload = {
+    key: value for key, value in first.items() if key != "policy_version"
+  }
+  encoded = json.dumps(
+    version_payload,
+    sort_keys=True,
+    separators=(",", ":"),
+    allow_nan=False,
+  ).encode("utf-8")
+  assert first["policy_version"] == (
+    f"t_trade_opportunity_v3.{hashlib.sha256(encoded).hexdigest()[:12]}"
   )
-  assert legacy["latest_evaluation"] is None
+
+  spoofed = signal_policy(candidate_score=74.0)
+  spoofed["policy_version"] = "client-controlled-version"
+  assert TTradeService._normalize_signal_policy(spoofed) == first
+
+
+def test_signal_policy_normalization_rejects_partial_unknown_and_old_feature_schema():
+  with pytest.raises(ValueError, match="signal_policy missing fields"):
+    TTradeService._normalize_signal_policy({"candidate_score": 74.0})
+  with pytest.raises(ValueError, match="signal_policy has unknown fields"):
+    TTradeService._normalize_signal_policy({**signal_policy(), "hidden_magic": 1})
+  with pytest.raises(ValueError, match="feature_schema_version is not current"):
+    TTradeService._normalize_signal_policy(signal_policy(feature_schema_version=999))
+
+
+@pytest.mark.parametrize(
+  "payload",
+  [
+    None,
+    signal_policy(),
+    signal_policy(candidate_score=74.0, policy_version="client-version"),
+  ],
+)
+def test_signal_policy_normalization_matches_application_canonical(payload):
+  assert TTradeService._normalize_signal_policy(payload) == normalize_signal_policy(
+    payload
+  )
+
+
+@pytest.mark.parametrize(
+  "payload",
+  [
+    "not-a-policy",
+    [],
+    {"candidate_score": 74.0},
+    {**signal_policy(), "hidden_magic": 1},
+  ],
+)
+def test_signal_policy_validation_errors_match_application_canonical(payload):
+  with pytest.raises(ValueError) as application_error:
+    normalize_signal_policy(payload)
+  with pytest.raises(type(application_error.value)) as service_error:
+    TTradeService._normalize_signal_policy(payload)
+  assert str(service_error.value) == str(application_error.value)
+
+
+def test_policy_version_hash_covers_every_configuration_category():
+  variants = [
+    {"max_quote_age_ms": 3_001},
+    {"pullback_min_samples": 4},
+    {"pullback_required_fields": ["bid_price", "ask_price"]},
+    {"allowed_session_codes": ["CONTINUOUS_AM"]},
+    {"continuous_am_start_time": "09:31:00"},
+    {"pullback_lookback_seconds": 301},
+    {"profile_pullback_threshold_min_multiplier": 0.8},
+    {"pullback_depth_weight": 24.0, "pullback_rebound_weight": 21.0},
+    {"pullback_rebound_score_max_pct": 0.25},
+    {"pullback_data_quality_penalty_points": 11.0},
+    {"candidate_confirm_seconds": 3},
+  ]
+  versions = {
+    TTradeService._normalize_signal_policy(signal_policy(**overrides))["policy_version"]
+    for overrides in variants
+  }
+
+  assert len(versions) == len(variants)
+  assert "t_trade_opportunity_v3.0.0" not in versions
 
 
 @pytest.mark.asyncio
@@ -217,75 +310,80 @@ async def test_ensure_account_strategy_running_resumes_live_paused_runtime():
   manager.start_strategy.assert_not_awaited()
 
 
-def test_signal_history_projection_keeps_expiry_and_audit_reason():
-  created_at = datetime(2026, 7, 22, 9, 30, tzinfo=timezone.utc)
-  record = SimpleNamespace(
-    id="intent-1",
-    strategy_run_id="run-1",
-    instrument_code="600000.SH",
-    status="EXPIRED",
-    notes="APPROVAL_TTL_EXPIRED",
-    limit_price_hint=10.12,
-    target_volume=900,
-    created_at=created_at,
-    updated_at=datetime(2026, 7, 22, 9, 30, 31, tzinfo=timezone.utc),
-    intent_metadata={
-      "approval_ttl_ms": 30_000,
-      "intent_created_at": created_at.isoformat(),
-      "requested_entry_volume": 800,
-      "signal": {
-        "signal_price": 10.1,
-        "pullback_pct": 0.92,
-        "rebound_pct": 0.24,
-      },
-    },
+@pytest.mark.asyncio
+async def test_block_account_strategy_entries_clears_only_entry_authorization():
+  runtime = SimpleNamespace(
+    context=SimpleNamespace(parameters={"account_id": "account-1"}),
+  )
+  invalidate = AsyncMock(return_value=True)
+  manager = SimpleNamespace(
+    get_run=lambda _run_id: runtime,
+    executor=SimpleNamespace(invalidate_t_trade_entry_authority=invalidate),
+  )
+  service = TTradeService(manager)
+
+  await service.block_account_strategy_entries(
+    "run-global",
+    reason="CONFIG_APPLY_PENDING",
   )
 
-  result = TTradeService._project_signal_history_entry(record)
-
-  assert result["status"] == "EXPIRED"
-  assert result["status_reason"] == "APPROVAL_TTL_EXPIRED"
-  assert result["signal_price"] == 10.1
-  assert result["requested_volume"] == 800
-  assert (result["expires_at"] - result["created_at"]).total_seconds() == 30
+  invalidate.assert_called_once_with(
+    "run-global",
+    account_id="account-1",
+    reason="CONFIG_APPLY_PENDING",
+  )
 
 
 @pytest.mark.asyncio
-async def test_signal_history_is_scoped_to_account_across_runs(monkeypatch):
-  runs = [
-    SimpleNamespace(
-      id="run-1",
-      strategy=SimpleNamespace(class_name="AshareIntradayTAssistantStrategy"),
-      parameters={"account_id": "account-1"},
-    ),
-    SimpleNamespace(
-      id="run-2",
-      strategy=SimpleNamespace(class_name="AshareIntradayTAssistantStrategy"),
-      parameters='{"account_id":"account-1"}',
-    ),
-    SimpleNamespace(
-      id="run-other",
-      strategy=SimpleNamespace(class_name="AshareIntradayTAssistantStrategy"),
-      parameters={"account_id": "account-2"},
-    ),
+async def test_reject_entry_captures_stock_before_terminalizing_intent():
+  calls: list[tuple[str, str | None, str | None]] = []
+
+  async def get_session(
+    run_id: str,
+    *,
+    intent_id: str | None = None,
+    stock_code: str | None = None,
+  ):
+    calls.append((run_id, intent_id, stock_code))
+    if intent_id:
+      return {"stock_code": "600000.SH", "status": "AWAITING_APPROVAL"}
+    return {"stock_code": stock_code, "status": "REJECTED"}
+
+  reject = AsyncMock(return_value={"success": True, "code": "REJECTED"})
+  service = TTradeService(
+    SimpleNamespace(executor=SimpleNamespace(reject_trade_intent=reject))
+  )
+  service.get_session = get_session
+
+  result = await service.reject_entry("run-1", "intent-1")
+
+  assert result["session"]["stock_code"] == "600000.SH"
+  assert calls == [
+    ("run-1", "intent-1", None),
+    ("run-1", None, "600000.SH"),
   ]
-  run_repo = SimpleNamespace(find_all_strategy_runs=AsyncMock(return_value=runs))
-  intent_repo = SimpleNamespace(find_recent_t_trade_entries=AsyncMock(return_value=[]))
+  reject.assert_awaited_once_with("run-1", "intent-1", reason="USER_REJECTED")
 
-  async def fake_db():
-    yield object()
 
-  monkeypatch.setattr(t_trade_service_module, "get_async_db", fake_db)
-  monkeypatch.setattr(
-    t_trade_service_module, "StrategyRunRepository", lambda _db: run_repo
+@pytest.mark.asyncio
+async def test_update_account_strategy_forwards_explicit_configuration_change():
+  manager = SimpleNamespace(
+    reconcile_run_instruments=AsyncMock(
+      return_value={"added": [], "removed": [], "instruments": ["600000.SH"]}
+    )
   )
-  monkeypatch.setattr(
-    t_trade_service_module, "TradeIntentRepository", lambda _db: intent_repo
+  service = TTradeService(manager)
+
+  await service.update_account_strategy(
+    "run-global",
+    {},
+    ["600000.SH"],
+    {},
+    configuration_changed=False,
   )
 
-  result = await TTradeService().list_signal_history("account-1", limit=25)
-
-  assert result == []
-  intent_repo.find_recent_t_trade_entries.assert_awaited_once_with(
-    ["run-1", "run-2"], 25
+  manager.reconcile_run_instruments.assert_awaited_once()
+  assert (
+    manager.reconcile_run_instruments.await_args.kwargs["configuration_changed"]
+    is False
   )

@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional
 from quantx_infrastructure.core.utils import time_utils
 
 if TYPE_CHECKING:
+    from quantx_domain.strategies.base import TradeIntent
+
     from quantx_infrastructure.core.backtest_result_storage import (
         BacktestResultStorage,
     )
@@ -46,7 +48,24 @@ BUCKET_LEDGER_VIOLATIONS_KEY = "bucket_ledger_violations"
 MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY = (
     "market_continuity_reconcile_required"
 )
+T_TRADE_MATERIAL_EVENT_OUTBOX_KEY = "t_trade_material_event_outbox"
+T_TRADE_PAPER_FILL_OUTBOX_KEY = "t_trade_paper_fill_outbox"
 _MAX_APPLIED_RUNTIME_EVENT_KEYS = 2_000
+_MAX_T_TRADE_MATERIAL_OUTBOX_EVENTS = 128
+_MAX_T_TRADE_PAPER_FILL_OUTBOX_FACTS = 128
+_MAX_TERMINAL_TRADE_INTENT_CACHE_ENTRIES = 512
+_TERMINAL_TRADE_INTENT_STATUSES = frozenset(
+    {
+        "CANCELED",
+        "CANCELLED",
+        "EXPIRED",
+        "FAILED",
+        "FILLED",
+        "RECONCILED_ZERO_FILL",
+        "REJECTED",
+        "SUPPRESSED",
+    }
+)
 _MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
     {
         APPLIED_CORPORATE_ACTIONS_KEY,
@@ -60,6 +79,8 @@ _MANAGER_OWNED_CUSTOM_STATE_KEYS = frozenset(
         RUNTIME_RECONCILIATION_REASON_KEY,
         RUNTIME_RECONCILIATION_STATUS_KEY,
         RUNTIME_SNAPSHOT_ATTEMPT_KEY,
+        T_TRADE_MATERIAL_EVENT_OUTBOX_KEY,
+        T_TRADE_PAPER_FILL_OUTBOX_KEY,
     }
 )
 
@@ -78,6 +99,14 @@ class RuntimeStateRestoreResult:
 
     status: RuntimeStateRestoreStatus
     state: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RestoredManualTradeIntent:
+    """One account/run-validated durable manual intent used during startup."""
+
+    intent: "TradeIntent"
+    durable_status: str
 
 
 class RuntimeStateRestoreError(RuntimeError):
@@ -121,6 +150,8 @@ class RuntimeStateManager:
     _dirty: bool = field(default=False, repr=False)
     _dirty_revision: int = field(default=0, repr=False)
     _last_snapshot_attempt_revision: int = field(default=-1, repr=False)
+    _snapshot_cas_conflicts: int = field(default=0, repr=False)
+    _last_snapshot_failure_code: Optional[str] = field(default=None, repr=False)
 
     # 资金/持仓冻结索引；镜像到 custom state，供 Engine 重启恢复。
     _reservations: Dict[str, float] = field(default_factory=dict, repr=False)
@@ -129,6 +160,10 @@ class RuntimeStateManager:
     )
     _bucket_ledger: Any = field(default=None, repr=False)
     _decision_trace_logger: Any = field(default=None, repr=False)
+    _unpersisted_trade_intent_ids: set[str] = field(
+        default_factory=set,
+        repr=False,
+    )
 
     # 后台任务
     _snapshot_task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -536,11 +571,6 @@ class RuntimeStateManager:
             return None
 
         try:
-            from quantx_domain.strategies.base import (
-                TradeIntent,
-                TradeIntentExecutionMode,
-            )
-
             from quantx_infrastructure.database.connection import get_async_db
             from quantx_infrastructure.repositories.trade_intent_repository import (
                 TradeIntentRepository,
@@ -552,40 +582,130 @@ class RuntimeStateManager:
                     return None
 
                 data = record.to_dict()
-                metadata = dict(data.get("metadata") or {})
-                created_at_raw = metadata.get("intent_created_at")
-                created_at = (
-                    datetime.fromisoformat(created_at_raw)
-                    if isinstance(created_at_raw, str) and created_at_raw
-                    else record.created_at
-                )
-                intent = TradeIntent(
-                    strategy_id=str(record.strategy_id or ""),
-                    run_id=str(record.strategy_run_id),
-                    instrument_code=str(record.instrument_code),
-                    direction=str(record.direction),
-                    bucket=str(record.bucket or "core"),
-                    reason=str(record.reason or ""),
-                    priority=str(record.priority or "NORMAL"),
-                    intent_type=str(record.intent_type) if record.intent_type else None,
-                    confidence=float(record.confidence or 0.0),
-                    target_amount=record.target_amount,
-                    target_position_pct=record.target_position_pct,
-                    target_volume=record.target_volume,
-                    limit_price_hint=record.limit_price_hint,
-                    execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
-                    approval_ttl_ms=metadata.get("approval_ttl_ms"),
-                    max_price_deviation_bps=metadata.get("max_price_deviation_bps"),
-                    metadata=metadata,
-                    trace_id=record.trace_id,
-                    intent_id=str(record.id),
-                    created_at=created_at or time_utils.now(),
-                )
-                self._state.setdefault("trade_intents", {})[intent_id] = data
+                intent = self._manual_trade_intent_from_record(record)
+                self._unpersisted_trade_intent_ids.discard(intent_id)
+                self._cache_trade_intent(data)
                 return intent
         except Exception as e:
             self.logger.error(f"恢复人工确认交易意图失败: intent_id={intent_id}, error={e}")
         return None
+
+    async def restore_v3_manual_candidate_intents(
+        self,
+        *,
+        account_id: str,
+        linked_intent_ids: Optional[list[str]] = None,
+    ) -> list[RestoredManualTradeIntent]:
+        """Load active V3 manual candidates under one exact account/run scope.
+
+        Unlike the ordinary single-intent restore helper, this method is a
+        startup safety boundary: database errors, missing ownership, and any
+        account mismatch raise instead of silently degrading.
+        """
+
+        if not self.persist_enabled:
+            return []
+        normalized_account_id = str(account_id or "").strip()
+        if not normalized_account_id:
+            raise RuntimeStateRestoreError(
+                f"V3 候选恢复缺少账户绑定: run_id={self.run_id}"
+            )
+
+        from quantx_infrastructure.database.connection import get_async_db
+        from quantx_infrastructure.models.strategy_run import StrategyRun
+        from quantx_infrastructure.repositories.trade_intent_repository import (
+            TradeIntentRepository,
+        )
+
+        opened_session = False
+        async for db in get_async_db():
+            opened_session = True
+            strategy_run = await db.get(StrategyRun, self.run_id)
+            if strategy_run is None:
+                raise RuntimeStateRestoreError(
+                    f"V3 候选恢复找不到策略运行: run_id={self.run_id}"
+                )
+            run_parameters = dict(strategy_run.parameters or {})
+            run_account_id = str(run_parameters.get("account_id") or "").strip()
+            if run_account_id != normalized_account_id:
+                raise RuntimeStateRestoreError(
+                    "V3 候选恢复账户与策略运行不匹配: "
+                    f"run_id={self.run_id}"
+                )
+
+            records = await TradeIntentRepository(
+                db
+            ).find_v3_manual_candidate_recovery_intents(
+                self.run_id,
+                linked_intent_ids=linked_intent_ids,
+            )
+            restored: list[RestoredManualTradeIntent] = []
+            for record in records:
+                metadata = dict(record.intent_metadata or {})
+                row_account_id = str(record.account_id or "").strip()
+                metadata_account_id = str(metadata.get("account_id") or "").strip()
+                if (
+                    row_account_id != normalized_account_id
+                    or metadata_account_id != normalized_account_id
+                    or str(record.strategy_run_id or "") != self.run_id
+                ):
+                    raise RuntimeStateRestoreError(
+                        "V3 候选恢复意图所有权不匹配: "
+                        f"run_id={self.run_id}, intent_id={record.id}"
+                    )
+                data = record.to_dict()
+                self._unpersisted_trade_intent_ids.discard(str(record.id))
+                self._cache_trade_intent(data)
+                restored.append(
+                    RestoredManualTradeIntent(
+                        intent=self._manual_trade_intent_from_record(record),
+                        durable_status=str(record.status or "").strip().upper(),
+                    )
+                )
+            return restored
+        if not opened_session:
+            raise RuntimeStateRestoreError(
+                f"V3 候选恢复未获得数据库会话: run_id={self.run_id}"
+            )
+        return []
+
+    @staticmethod
+    def _manual_trade_intent_from_record(record: Any) -> "TradeIntent":
+        from quantx_domain.strategies.base import (
+            TradeIntent,
+            TradeIntentExecutionMode,
+        )
+
+        data = record.to_dict()
+        metadata = dict(data.get("metadata") or {})
+        created_at_raw = metadata.get("intent_created_at")
+        created_at = (
+            datetime.fromisoformat(created_at_raw)
+            if isinstance(created_at_raw, str) and created_at_raw
+            else record.created_at
+        )
+        return TradeIntent(
+            strategy_id=str(record.strategy_id or ""),
+            run_id=str(record.strategy_run_id),
+            instrument_code=str(record.instrument_code),
+            direction=str(record.direction),
+            bucket=str(record.bucket or "core"),
+            reason=str(record.reason or ""),
+            priority=str(record.priority or "NORMAL"),
+            intent_type=str(record.intent_type) if record.intent_type else None,
+            confidence=float(record.confidence or 0.0),
+            target_amount=record.target_amount,
+            target_position_pct=record.target_position_pct,
+            target_volume=record.target_volume,
+            limit_price_hint=record.limit_price_hint,
+            execution_mode=TradeIntentExecutionMode.MANUAL_CONFIRM,
+            approval_ttl_ms=metadata.get("approval_ttl_ms"),
+            max_price_deviation_bps=metadata.get("max_price_deviation_bps"),
+            metadata=metadata,
+            trace_id=record.trace_id,
+            intent_id=str(record.id),
+            created_at=created_at or time_utils.now(),
+        )
 
     async def get_trade_intent_snapshot(
         self, intent_id: str
@@ -835,6 +955,7 @@ class RuntimeStateManager:
                         ledger_snapshot = custom_state.get(
                             BUCKET_LEDGER_CUSTOM_STATE_KEY
                         )
+                        reconciliation_changed = False
                         if ledger_snapshot:
                             from quantx_domain.trading.bucket_ledger import BucketLedger
 
@@ -853,6 +974,15 @@ class RuntimeStateManager:
                             self._state["bucket_ledger"] = (
                                 self._bucket_ledger.to_dict()
                             )
+                        else:
+                            from quantx_domain.trading.bucket_ledger import BucketLedger
+
+                            self._bucket_ledger = BucketLedger(run_id=self.run_id)
+                            for code, position in self._state["positions"].items():
+                                self._bucket_ledger.sync_position(code, position)
+                            self._state["bucket_ledger"] = (
+                                self._bucket_ledger.to_dict()
+                            )
                         self._dirty = bool(
                             ledger_snapshot and reconciliation_changed
                         )
@@ -864,18 +994,46 @@ class RuntimeStateManager:
                     return True
 
                 if authoritative_version > expected_version:
-                    # A different writer won the CAS. Adopt its version and its
-                    # API-owned grid snapshot, while retaining Engine changes for
-                    # the next CAS attempt instead of overwriting the winner.
-                    self._state["version"] = authoritative_version
-                    local_custom = self._state.setdefault("custom", {})
-                    if GRID_BOOK_CUSTOM_STATE_KEY in custom_state:
-                        local_custom[GRID_BOOK_CUSTOM_STATE_KEY] = copy.deepcopy(
-                            custom_state[GRID_BOOK_CUSTOM_STATE_KEY]
+                    # A different writer won the CAS.  The local custom state
+                    # was computed from an obsolete snapshot and must never be
+                    # retried under the winner's version: doing so can overwrite
+                    # a newer candidate with stale Engine state.  Adopt the full
+                    # authoritative snapshot and leave the caller to fail-stop
+                    # and recompute from a fresh runtime generation.
+                    positions = (
+                        await StrategyRunPositionRepository(db).get_all_positions(
+                            self.run_id
                         )
+                    )
+                    self._state["version"] = authoritative_version
+                    self._state["custom"] = custom_state
+                    self._state["account"] = {
+                        "cash": float(state_record.cash or 0.0),
+                        "frozen_cash": float(state_record.frozen_cash or 0.0),
+                        "total_asset": float(state_record.total_asset or 0.0),
+                    }
+                    self._state["positions"] = {
+                        position.instrument_code: position.to_dict()
+                        for position in positions
+                    }
+                    self._restore_reservation_state()
+                    ledger_snapshot = custom_state.get(
+                        BUCKET_LEDGER_CUSTOM_STATE_KEY
+                    )
+                    if ledger_snapshot:
+                        from quantx_domain.trading.bucket_ledger import BucketLedger
+
+                        self._bucket_ledger = BucketLedger.from_dict(ledger_snapshot)
+                        if not self._bucket_ledger.run_id:
+                            self._bucket_ledger.run_id = self.run_id
                     else:
-                        local_custom.pop(GRID_BOOK_CUSTOM_STATE_KEY, None)
-                    self._dirty = True
+                        from quantx_domain.trading.bucket_ledger import BucketLedger
+
+                        self._bucket_ledger = BucketLedger(run_id=self.run_id)
+                        for code, position in self._state["positions"].items():
+                            self._bucket_ledger.sync_position(code, position)
+                    self._state["bucket_ledger"] = self._bucket_ledger.to_dict()
+                    self._dirty = False
                 return False
         except Exception as e:
             self.logger.error(
@@ -893,6 +1051,7 @@ class RuntimeStateManager:
         async with self._snapshot_lock:
             if not self._dirty:
                 return True
+            self._last_snapshot_failure_code = None
             snapshot_token = ""
             snapshot_revision = self._dirty_revision
             expected_version = int(self._state.get("version", 0) or 0)
@@ -926,6 +1085,8 @@ class RuntimeStateManager:
                         commit=False,
                     )
                     if not saved:
+                        self._snapshot_cas_conflicts += 1
+                        self._last_snapshot_failure_code = "CAS_CONFLICT"
                         raise RuntimeError(
                             "runtime state snapshot version conflict: "
                             f"run_id={self.run_id}, expected_version={expected_version}"
@@ -962,6 +1123,8 @@ class RuntimeStateManager:
                     break
                 return True
             except Exception as e:
+                if self._last_snapshot_failure_code is None:
+                    self._last_snapshot_failure_code = "PERSISTENCE_ERROR"
                 self.logger.error(f"保存快照失败: {e}")
                 if snapshot_token:
                     return await self._reconcile_snapshot_attempt(
@@ -970,6 +1133,14 @@ class RuntimeStateManager:
                         expected_version=expected_version,
                     )
                 return False
+
+    @property
+    def snapshot_cas_conflicts(self) -> int:
+        return self._snapshot_cas_conflicts
+
+    @property
+    def last_snapshot_failure_code(self) -> Optional[str]:
+        return self._last_snapshot_failure_code
 
     async def _snapshot_loop(self) -> None:
         """后台快照循环"""
@@ -1741,10 +1912,41 @@ class RuntimeStateManager:
         """Persist a TradeIntent snapshot before it enters sizing/risk routing."""
         data = self._trade_intent_record_data(intent, status=status)
         intent_id = data["id"]
-        self._state.setdefault("trade_intents", {})[intent_id] = data
+        self._cache_trade_intent(data, prune_terminal=False)
+        if self.persist_enabled:
+            self._unpersisted_trade_intent_ids.add(intent_id)
         if self._backtest_storage and hasattr(self._backtest_storage, "add_trade_intent"):
             self._backtest_storage.add_trade_intent(dict(data))
-        await self._upsert_trade_intent_record(data)
+        persisted = await self._upsert_trade_intent_record(data, create_only=True)
+        if persisted:
+            self._unpersisted_trade_intent_ids.discard(intent_id)
+            self._prune_terminal_trade_intent_cache(
+                self._state.setdefault("trade_intents", {})
+            )
+        self._mark_dirty()
+
+    async def record_trade_intent_strict(
+        self,
+        intent,
+        status: str = "PENDING",
+    ) -> None:
+        """Persist an intent or raise before exposing it to runtime consumers.
+
+        The ordinary recorder retains its historical best-effort behaviour for
+        existing strategies. Stateful opportunity candidates use this strict
+        boundary so a failed database append cannot become an in-memory manual
+        approval that disappears on restart.
+        """
+
+        data = self._trade_intent_record_data(intent, status=status)
+        await self._upsert_trade_intent_record_strict(data, create_only=True)
+        self._unpersisted_trade_intent_ids.discard(data["id"])
+        self._cache_trade_intent(data)
+        if self._backtest_storage and hasattr(
+            self._backtest_storage,
+            "add_trade_intent",
+        ):
+            self._backtest_storage.add_trade_intent(dict(data))
         self._mark_dirty()
 
     async def update_trade_intent_status(
@@ -1753,7 +1955,12 @@ class RuntimeStateManager:
         """Update a persisted TradeIntent lifecycle status."""
         if not intent_id:
             return
-        existing = dict(self._state.setdefault("trade_intents", {}).get(intent_id, {}))
+        existing = await self._trade_intent_update_base(
+            intent_id,
+            strict=False,
+        )
+        if existing is None:
+            return
         existing.setdefault("id", intent_id)
         existing["status"] = status
         accumulate_executed_volume = bool(updates.pop("accumulate_executed_volume", False))
@@ -1772,32 +1979,230 @@ class RuntimeStateManager:
                     updates["executed_price"] = previous_price
             updates["executed_volume"] = total_volume
         existing.update({key: value for key, value in updates.items() if value is not None})
-        self._state["trade_intents"][intent_id] = existing
+        if self.persist_enabled:
+            self._unpersisted_trade_intent_ids.add(intent_id)
+        self._cache_trade_intent(existing, prune_terminal=False)
         if self._backtest_storage and hasattr(self._backtest_storage, "add_trade_intent"):
             self._backtest_storage.add_trade_intent(dict(existing))
-        await self._upsert_trade_intent_record(existing)
+        persisted = await self._upsert_trade_intent_record(existing)
+        if persisted:
+            self._unpersisted_trade_intent_ids.discard(intent_id)
+            self._prune_terminal_trade_intent_cache(
+                self._state.setdefault("trade_intents", {})
+            )
         self._mark_dirty()
 
-    async def _upsert_trade_intent_record(self, data: Dict[str, Any]) -> None:
+    async def update_trade_intent_status_strict(
+        self,
+        intent_id: Optional[str],
+        status: str,
+        **updates: Any,
+    ) -> None:
+        """Durably advance an intent status before changing runtime truth."""
+
+        if not intent_id:
+            raise ValueError("交易意图标识不能为空")
+        existing = await self._trade_intent_update_base(
+            intent_id,
+            strict=True,
+        )
+        if existing is None:  # pragma: no cover - strict loader always raises
+            raise RuntimeStateRestoreError(
+                f"交易意图持久化快照不可用: intent_id={intent_id}"
+            )
+        existing.setdefault("id", intent_id)
+        existing["status"] = status
+        if updates.pop("accumulate_executed_volume", False):
+            previous_volume = int(existing.get("executed_volume", 0) or 0)
+            fill_volume = int(updates.get("executed_volume", 0) or 0)
+            total_volume = previous_volume + fill_volume
+            previous_price = float(existing.get("executed_price", 0.0) or 0.0)
+            fill_price = float(updates.get("executed_price", 0.0) or 0.0)
+            if total_volume > 0:
+                if previous_volume > 0 and previous_price > 0 and fill_price > 0:
+                    updates["executed_price"] = (
+                        previous_price * previous_volume + fill_price * fill_volume
+                    ) / total_volume
+                elif fill_price <= 0:
+                    updates["executed_price"] = previous_price
+            updates["executed_volume"] = total_volume
+        existing.update(
+            {key: value for key, value in updates.items() if value is not None}
+        )
+        await self._upsert_trade_intent_record_strict(existing)
+        self._unpersisted_trade_intent_ids.discard(intent_id)
+        self._cache_trade_intent(existing)
+        if self._backtest_storage and hasattr(
+            self._backtest_storage,
+            "add_trade_intent",
+        ):
+            self._backtest_storage.add_trade_intent(dict(existing))
+        self._mark_dirty()
+
+    async def _trade_intent_update_base(
+        self,
+        intent_id: str,
+        *,
+        strict: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """Load complete lifecycle truth when the bounded cache missed.
+
+        A terminal record can legitimately receive a late broker report after
+        LRU eviction.  In persistent runtimes that update must be based on the
+        complete database row; synthesizing ``{"id": ...}`` would reset
+        metadata and cumulative fill fields.  Ordinary callers keep their
+        historical best-effort contract by returning without a write, while
+        strict callers fail closed.
+        """
+
+        cached = self._state.setdefault("trade_intents", {}).get(intent_id)
+        if cached is not None:
+            return dict(cached)
         if not self.persist_enabled:
-            return
+            return {"id": intent_id}
+
         try:
             from quantx_infrastructure.database.connection import get_async_db
             from quantx_infrastructure.repositories.trade_intent_repository import (
                 TradeIntentRepository,
             )
 
-            payload = self._db_trade_intent_payload(data)
+            opened_session = False
             async for db in get_async_db():
-                repo = TradeIntentRepository(db)
+                opened_session = True
+                record = await TradeIntentRepository(db).find_by_id(intent_id)
+                if record is None:
+                    raise RuntimeStateRestoreError(
+                        "交易意图持久化记录不存在: "
+                        f"run_id={self.run_id}, intent_id={intent_id}"
+                    )
+                record_id = str(getattr(record, "id", "") or "").strip()
+                record_run_id = str(
+                    getattr(record, "strategy_run_id", "") or ""
+                ).strip()
+                if record_id != intent_id or record_run_id != self.run_id:
+                    raise RuntimeStateRestoreError(
+                        "交易意图持久化记录所有权不匹配: "
+                        f"run_id={self.run_id}, intent_id={intent_id}"
+                    )
+                snapshot = dict(record.to_dict())
+                # ``to_dict`` is API-oriented and serializes datetimes. Keep
+                # the ORM value for a later SQLAlchemy update payload.
+                snapshot["executed_time"] = getattr(
+                    record,
+                    "executed_time",
+                    None,
+                )
+                return snapshot
+            if not opened_session:
+                raise RuntimeStateRestoreError(
+                    "交易意图持久化读取未获得数据库会话: "
+                    f"run_id={self.run_id}, intent_id={intent_id}"
+                )
+        except Exception as exc:
+            message = (
+                "交易意图缓存缺失且持久化快照读取失败，拒绝残缺更新: "
+                f"run_id={self.run_id}, intent_id={intent_id}"
+            )
+            if strict:
+                if isinstance(exc, RuntimeStateRestoreError):
+                    raise
+                raise RuntimeStateRestoreError(message) from exc
+            self.logger.error("%s, error=%s", message, exc)
+            return None
+        return None
+
+    def _cache_trade_intent(
+        self,
+        data: Dict[str, Any],
+        *,
+        prune_terminal: bool = True,
+    ) -> None:
+        """Keep active intents and only a bounded LRU of durable history.
+
+        ``strategy_trade_intents`` (or the backtest event storage) remains the
+        historical source of truth.  Runtime memory is needed for in-flight
+        lifecycle updates, especially cumulative partial fills, so statuses
+        are evicted only when they are explicitly known to be terminal.
+        Unknown/new statuses fail safe by remaining resident.
+        """
+
+        intent_id = str(data.get("id") or "").strip()
+        if not intent_id:
+            raise ValueError("交易意图标识不能为空")
+        cache = self._state.setdefault("trade_intents", {})
+        # Plain dict insertion order is the LRU order. Refresh an intent on
+        # every lifecycle write so the just-completed record remains available
+        # for immediate reconciliation and cumulative-fill assertions.
+        cache.pop(intent_id, None)
+        cache[intent_id] = data
+        if prune_terminal:
+            self._prune_terminal_trade_intent_cache(cache)
+
+    def _prune_terminal_trade_intent_cache(
+        self,
+        cache: Dict[str, Dict[str, Any]],
+    ) -> None:
+        terminal_ids = [
+            intent_id
+            for intent_id, item in cache.items()
+            if intent_id not in self._unpersisted_trade_intent_ids
+            and str(_enum_value(dict(item or {}).get("status")) or "")
+            .strip()
+            .upper()
+            in _TERMINAL_TRADE_INTENT_STATUSES
+        ]
+        excess = len(terminal_ids) - _MAX_TERMINAL_TRADE_INTENT_CACHE_ENTRIES
+        for intent_id in terminal_ids[: max(0, excess)]:
+            cache.pop(intent_id, None)
+
+    async def _upsert_trade_intent_record(
+        self,
+        data: Dict[str, Any],
+        *,
+        create_only: bool = False,
+    ) -> bool:
+        if not self.persist_enabled:
+            return True
+        try:
+            await self._upsert_trade_intent_record_strict(
+                data,
+                create_only=create_only,
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"交易意图持久化失败: {e}")
+            return False
+
+    async def _upsert_trade_intent_record_strict(
+        self,
+        data: Dict[str, Any],
+        *,
+        create_only: bool = False,
+    ) -> None:
+        if not self.persist_enabled:
+            return
+        from quantx_infrastructure.database.connection import get_async_db
+        from quantx_infrastructure.repositories.trade_intent_repository import (
+            TradeIntentRepository,
+        )
+
+        payload = self._db_trade_intent_payload(data)
+        opened_session = False
+        async for db in get_async_db():
+            opened_session = True
+            repo = TradeIntentRepository(db)
+            if create_only:
+                await repo.create_intent_idempotent(payload)
+            else:
                 existing = await repo.find_by_id(payload["id"])
                 if existing:
                     await repo.update_intent(payload["id"], payload)
                 else:
                     await repo.create_intent(payload)
-                break
-        except Exception as e:
-            self.logger.error(f"交易意图持久化失败: {e}")
+            break
+        if not opened_session:
+            raise RuntimeError("交易意图数据库会话不可用")
 
     def _trade_intent_record_data(self, intent, *, status: str) -> Dict[str, Any]:
         metadata = dict(getattr(intent, "metadata", {}) or {})
@@ -1815,6 +2220,7 @@ class RuntimeStateManager:
         return {
             "id": str(getattr(intent, "intent_id", "") or ""),
             "strategy_run_id": str(getattr(intent, "run_id", self.run_id) or self.run_id),
+            "account_id": str(metadata.get("account_id") or "").strip() or None,
             "strategy_id": str(getattr(intent, "strategy_id", "") or ""),
             "instrument_code": str(getattr(intent, "instrument_code", "") or ""),
             "direction": _enum_value(getattr(intent, "direction", "")),
@@ -1837,6 +2243,7 @@ class RuntimeStateManager:
         allowed = {
             "id",
             "strategy_run_id",
+            "account_id",
             "strategy_id",
             "instrument_code",
             "direction",
@@ -2041,6 +2448,15 @@ class RuntimeStateManager:
         """获取完整自定义状态"""
         return self._state.get("custom", {}).copy()
 
+    def get_strategy_custom_state(self) -> Dict[str, Any]:
+        """Return only strategy-owned state, excluding manager outboxes/gates."""
+
+        return {
+            key: copy.deepcopy(value)
+            for key, value in dict(self._state.get("custom", {}) or {}).items()
+            if key not in _MANAGER_OWNED_CUSTOM_STATE_KEYS
+        }
+
     def update_custom_state(self, updates: Dict[str, Any]) -> None:
         """批量更新自定义状态"""
         if not updates:
@@ -2072,6 +2488,109 @@ class RuntimeStateManager:
                 if key not in excluded
             }
         )
+
+    def enqueue_t_trade_material_events(
+        self,
+        events: Iterable[Dict[str, Any]],
+    ) -> None:
+        """Append stable MATERIAL events to the manager-owned durable outbox."""
+
+        normalized = self._normalize_t_trade_outbox_items(
+            events,
+            identity_key="event_key",
+        )
+        if not normalized:
+            return
+        current = dict(
+            self.get_custom(T_TRADE_MATERIAL_EVENT_OUTBOX_KEY, {}) or {}
+        )
+        for identity, payload in normalized:
+            current.setdefault(identity, payload)
+        if len(current) > _MAX_T_TRADE_MATERIAL_OUTBOX_EVENTS:
+            raise RuntimeError("做 T MATERIAL 持久化发件箱超过 128 条安全上限")
+        self.set_custom(T_TRADE_MATERIAL_EVENT_OUTBOX_KEY, current)
+
+    def pending_t_trade_material_events(self) -> list[Dict[str, Any]]:
+        return [
+            copy.deepcopy(value)
+            for value in dict(
+                self.get_custom(T_TRADE_MATERIAL_EVENT_OUTBOX_KEY, {}) or {}
+            ).values()
+        ]
+
+    def acknowledge_t_trade_material_events(
+        self,
+        event_keys: Iterable[str],
+    ) -> None:
+        self._acknowledge_t_trade_outbox_items(
+            T_TRADE_MATERIAL_EVENT_OUTBOX_KEY,
+            event_keys,
+        )
+
+    def enqueue_t_trade_paper_fill_fact(self, fact: Dict[str, Any]) -> None:
+        normalized = self._normalize_t_trade_outbox_items(
+            [fact],
+            identity_key="fact_key",
+        )
+        current = dict(self.get_custom(T_TRADE_PAPER_FILL_OUTBOX_KEY, {}) or {})
+        for identity, payload in normalized:
+            current.setdefault(identity, payload)
+        if len(current) > _MAX_T_TRADE_PAPER_FILL_OUTBOX_FACTS:
+            raise RuntimeError("做 T PAPER 成交发件箱超过 128 条安全上限")
+        self.set_custom(T_TRADE_PAPER_FILL_OUTBOX_KEY, current)
+
+    def pending_t_trade_paper_fill_facts(self) -> list[Dict[str, Any]]:
+        return [
+            copy.deepcopy(value)
+            for value in dict(
+                self.get_custom(T_TRADE_PAPER_FILL_OUTBOX_KEY, {}) or {}
+            ).values()
+        ]
+
+    def acknowledge_t_trade_paper_fill_facts(
+        self,
+        fact_keys: Iterable[str],
+    ) -> None:
+        self._acknowledge_t_trade_outbox_items(
+            T_TRADE_PAPER_FILL_OUTBOX_KEY,
+            fact_keys,
+        )
+
+    @staticmethod
+    def _normalize_t_trade_outbox_items(
+        items: Iterable[Dict[str, Any]],
+        *,
+        identity_key: str,
+    ) -> list[tuple[str, Dict[str, Any]]]:
+        normalized: list[tuple[str, Dict[str, Any]]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise ValueError("做 T 持久化发件箱项目必须是对象")
+            payload = copy.deepcopy(raw)
+            identity = str(payload.get(identity_key) or "").strip()
+            if not identity:
+                raise ValueError(f"做 T 持久化发件箱缺少 {identity_key}")
+            try:
+                json.dumps(payload, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("做 T 持久化发件箱项目不是有限 JSON") from exc
+            normalized.append((identity, payload))
+        return normalized
+
+    def _acknowledge_t_trade_outbox_items(
+        self,
+        key: str,
+        identities: Iterable[str],
+    ) -> None:
+        current = dict(self.get_custom(key, {}) or {})
+        changed = False
+        for identity in identities:
+            normalized = str(identity or "").strip()
+            if normalized in current:
+                current.pop(normalized, None)
+                changed = True
+        if changed:
+            self.set_custom(key, current)
 
     def unset_strategy_custom_state(self, keys: Iterable[str]) -> None:
         """Delete explicit strategy-owned keys while preserving manager gates."""

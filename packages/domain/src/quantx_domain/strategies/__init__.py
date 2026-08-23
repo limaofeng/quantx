@@ -11,6 +11,9 @@ from .ashare_limit_up_board_assistant import AshareLimitUpBoardAssistantStrategy
 from .ashare_managed_entry_plan import AshareManagedEntryPlanStrategy
 from .ashare_supermarket import AshareSupermarketStrategy
 from .base import (
+  ManualApprovalRecoveryCandidate,
+  MarketDataContext,
+  MarketDataSession,
   OrderStateEvent,
   RuntimeStatePatch,
   StrategyBase,
@@ -34,6 +37,9 @@ __all__ = [
   "StrategyContext",
   "StrategyRunMode",
   "StrategyCadence",
+  "MarketDataContext",
+  "MarketDataSession",
+  "ManualApprovalRecoveryCandidate",
   "StrategyInput",
   "StrategyOutput",
   "TradeIntent",

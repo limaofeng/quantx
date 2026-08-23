@@ -17,6 +17,7 @@
 
 | 文档 | 定位 |
 |---|---|
+| [持仓做 T 有状态机会引擎 V3 实施规格](../plans/持仓做T有状态机会引擎V3实施规格.md) | 做 T 入场信号的有状态规则引擎：数据健康、双 FSM、评分/门禁、episode、候选、真源、GraphQL、Web/iOS、测试与迁移 |
 | [A 股动态天平双仓策略实现落地规格与迁移计划](../plans/A股动态天平双仓策略实现落地规格与迁移计划.md) | 从当前 Python 策略框架迁移到 `StrategyBase.step()`、`TradeIntent`、`OrderRiskDecision` 和 `BucketLedger` 的破坏性实施路线 |
 | [A 股建仓/加仓托管计划模块设计与落地规格](../plans/A股建仓加仓托管计划模块设计与落地规格.md) | 固定单标的建仓/加仓托管的 EntryPlan 领域、状态机、授权、GraphQL、前端工作台和分阶段实施规格 |
 

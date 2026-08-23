@@ -1,5 +1,274 @@
 import { gql } from '@/generated/gql';
 
+export const TTradeSignalPolicyFieldsFragment = gql(`
+  fragment Portfolio_TTradeSignalPolicyFields on TTradeSignalPolicy {
+    policyVersion
+    featureSchemaVersion
+    maxSamples
+    maxQuoteAgeMs
+    pullbackMinSamples
+    pullbackMinCoverageSeconds
+    momentumMinSamples
+    momentumMinCoverageSeconds
+    sparseDegradedGapSeconds
+    pullbackRequiredFields
+    momentumRequiredFields
+    allowedSessionCodes
+    continuousAmStartTime
+    continuousAmEndTime
+    continuousPmStartTime
+    continuousPmEndTime
+    closeProtectionSeconds
+    pullbackLookbackSeconds
+    pullbackStabilizationSeconds
+    pullbackThresholdPct
+    pullbackFormationThresholdMultiplier
+    pullbackReboundThresholdPct
+    pullbackMaxSpreadTicks
+    pullbackVolumeShortWindowSeconds
+    pullbackVolumeBaselineWindowSeconds
+    momentumEnabled
+    momentumWindowSeconds
+    momentumMinRisePct
+    momentumFormationThresholdMultiplier
+    momentumMinMoveSeconds
+    momentumBaselineSeconds
+    momentumBaselineCoverageRatio
+    momentumMinAmountVelocityRatio
+    momentumMinVwapPremiumPct
+    momentumMaxVwapPremiumPct
+    momentumHighToleranceTicks
+    momentumMaxSpreadTicks
+    momentumMaxSpreadPct
+    profilePullbackThresholdMinMultiplier
+    profilePullbackThresholdMaxMultiplier
+    profileMomentumRiseMinMultiplier
+    profileMomentumRiseMaxMultiplier
+    profileMomentumVelocityMinRatio
+    profileMomentumVelocityMaxRatio
+    pullbackDepthWeight
+    pullbackReboundWeight
+    pullbackStabilizationWeight
+    pullbackTurnSlopeWeight
+    pullbackVwapWeight
+    pullbackLiquidityWeight
+    pullbackVolumeWeight
+    momentumRiseWeight
+    momentumTurnoverWeight
+    momentumSlopeWeight
+    momentumPersistenceWeight
+    momentumVwapWeight
+    momentumLiquidityWeight
+    momentumBookImbalanceWeight
+    pullbackDepthScoreMinPct
+    pullbackDepthScoreTargetMultiplier
+    pullbackReboundScoreMinPct
+    pullbackReboundScoreMaxPct
+    pullbackStabilizationScoreMinSeconds
+    pullbackStabilizationScoreMaxSeconds
+    pullbackTurnSlopeScoreMinPctPerSecond
+    pullbackTurnSlopeScoreMaxPctPerSecond
+    pullbackVwapFullScoreMaxPremiumPct
+    pullbackVwapZeroScorePremiumPct
+    pullbackLiquidityFullScoreSpreadTicks
+    pullbackLiquidityZeroScoreSpreadTicks
+    pullbackVolumeScoreMinRatio
+    pullbackVolumeScoreMaxRatio
+    momentumRiseScoreMinPct
+    momentumRiseScoreTargetMultiplier
+    momentumTurnoverScoreMinRatio
+    momentumTurnoverScoreTargetMultiplier
+    momentumSlopeScoreMinPctPerSecond
+    momentumSlopeScoreTargetMultiplier
+    momentumPersistenceScoreMinRatio
+    momentumPersistenceScoreMaxRatio
+    momentumVwapZeroScoreMinPremiumPct
+    momentumVwapZeroScoreMaxPremiumPct
+    momentumLiquidityFullScoreSpreadTicks
+    momentumLiquidityZeroScoreSpreadTicks
+    momentumBookImbalanceScoreMinRatio
+    momentumBookImbalanceScoreMaxRatio
+    pullbackDataQualityPenaltyPoints
+    pullbackChasePenaltyStartPremiumPct
+    pullbackChasePenaltyFullPremiumPct
+    pullbackChasePenaltyPoints
+    momentumDataQualityPenaltyPoints
+    momentumOverextensionPenaltyStartPremiumPct
+    momentumOverextensionPenaltyFullPremiumPct
+    momentumOverextensionPenaltyPoints
+    previewScore
+    candidateScore
+    revalidateScore
+    rearmScore
+    candidateConfirmSeconds
+    candidateConfirmTicks
+    candidateTtlSeconds
+    rearmSeconds
+  }
+`);
+
+export const TTradeSignalSnapshotFieldsFragment = gql(`
+  fragment Portfolio_TTradeSignalSnapshotFields on TTradeSignalSnapshot {
+    instrumentCode
+    tradeDate
+    evaluatedAt
+    sourceAt
+    sourceTimeMs
+    tickOrdinal
+    continuityGeneration
+    dataAgeMs
+    windowCoverageSeconds
+    sampleCount
+    dataHealth
+    dataHealthReasons {
+      code
+      label
+      detail
+    }
+    pullbackPhase
+    momentumPhase
+    dominantPhase
+    selectedPath
+    pullbackScore
+    momentumScore
+    opportunityScore
+    previewThreshold
+    candidateThreshold
+    revalidateThreshold
+    rearmThreshold
+    features {
+      sampleCount
+      coverageSeconds
+      maxGapSeconds
+      price
+      priceTick
+      bidPrice
+      askPrice
+      spreadTicks
+      spreadPct
+      bookImbalance
+      sessionVwap
+      vwapPremiumPct
+      return5sPct
+      return15sPct
+      return30sPct
+      return60sPct
+      return300sPct
+      priceSlope60sPctPerSecond
+      priceAccelerationPctPerSecond2
+      realizedVolatility60sPct
+      realizedVolatility300sPct
+      windowHigh
+      windowLow
+      pullbackPct
+      reboundPct
+      secondsSinceLow
+      reboundSlopePctPerSecond
+      rangePosition
+      amountVelocityRatio15s60s
+      momentumRisePct
+      momentumMoveSeconds
+      momentumWindowHigh
+      momentumRangePosition
+      momentumBaselineCoverageSeconds
+      momentumAmountVelocityRatio
+    }
+    pullback {
+      phase
+      score
+      preview
+      candidateReady
+      hardGates {
+        code
+        label
+        passed
+        observedValue
+        requiredValue
+        detail
+      }
+      scoreContributions {
+        code
+        label
+        points
+        maxPoints
+        observedValue
+        targetValue
+        detail
+      }
+      blockers {
+        code
+        label
+        detail
+      }
+    }
+    momentum {
+      phase
+      score
+      preview
+      candidateReady
+      hardGates {
+        code
+        label
+        passed
+        observedValue
+        requiredValue
+        detail
+      }
+      scoreContributions {
+        code
+        label
+        points
+        maxPoints
+        observedValue
+        targetValue
+        detail
+      }
+      blockers {
+        code
+        label
+        detail
+      }
+    }
+    hardGates {
+      code
+      label
+      passed
+      observedValue
+      requiredValue
+      detail
+    }
+    scoreContributions {
+      code
+      label
+      points
+      maxPoints
+      observedValue
+      targetValue
+      detail
+    }
+    topBlockers {
+      code
+      label
+      detail
+    }
+    episodeId
+    candidateId
+    candidateFingerprint
+    candidateStatus
+    candidateCreatedAt
+    candidateExpiresAt
+    pendingEntryIntentId
+    signalVersion
+    candidateStateVersion
+    stateSchemaVersion
+    featureSchemaVersion
+    policyVersion
+    configVersion
+    profileVersion
+    profileFingerprint
+  }
+`);
+
 export const TTradeInstrumentNameQuery = gql(`
   query Portfolio_TTradeInstrumentName($stockCode: String!) {
     instrument(stockCode: $stockCode) {
@@ -25,23 +294,9 @@ export const TTradeGlobalMonitorQuery = gql(`
       maxTradeAmount
       maxConcurrentBatches
       maxTotalTExposurePct
-      signalLookbackSeconds
-      stabilizationSeconds
-      pullbackThresholdPct
-      reboundThresholdPct
-      maxSpreadTicks
-      momentumEnabled
-      momentumWindowSeconds
-      momentumMinRisePct
-      momentumMinMoveSeconds
-      momentumBaselineSeconds
-      momentumMinAmountVelocityRatio
-      momentumMinVwapPremiumPct
-      momentumMaxVwapPremiumPct
-      momentumHighToleranceTicks
-      momentumMaxSpreadTicks
-      momentumMaxSpreadPct
-      approvalTtlSeconds
+      signalPolicy {
+        ...Portfolio_TTradeSignalPolicyFields
+      }
       maxPriceDeviationPct
       targetProfitPct
       baseFloorPct
@@ -168,28 +423,9 @@ export const TTradeGlobalMonitorQuery = gql(`
           lastExitReason
           canCancel
           errorMessage
-          latestEvaluation {
-            phase
-            lastTickAt
-            processedTickCount
-            windowSampleCount
-            windowCoverageSeconds
-            triggered
-            reason
-            signalType
-            signalPrice
-            windowHigh
-            windowLow
-            pullbackPct
-            reboundPct
-            vwap
-            vwapPremiumPct
-            spreadTicks
-            spreadPct
-            momentumRisePct
-            momentumMoveSeconds
-            momentumAmountVelocityRatio
-            momentumBaselineCoverageSeconds
+          plannedEntryAmount
+          signalSnapshot {
+            ...Portfolio_TTradeSignalSnapshotFields
           }
         }
       }
@@ -201,8 +437,7 @@ export const TTradeGlobalMonitorQuery = gql(`
         mode
         targetTradeAmount
         maxTradeAmount
-        plannedEntryVolume
-        currentSignal
+        plannedEntryAmount
         pendingEntryIntentId
         pendingExitIntentId
         entryOrderStatus
@@ -222,28 +457,8 @@ export const TTradeGlobalMonitorQuery = gql(`
         canCancel
         completedCycles
         errorMessage
-        latestEvaluation {
-          phase
-          lastTickAt
-          processedTickCount
-          windowSampleCount
-          windowCoverageSeconds
-          triggered
-          reason
-          signalType
-          signalPrice
-          windowHigh
-          windowLow
-          pullbackPct
-          reboundPct
-          vwap
-          vwapPremiumPct
-          spreadTicks
-          spreadPct
-          momentumRisePct
-          momentumMoveSeconds
-          momentumAmountVelocityRatio
-          momentumBaselineCoverageSeconds
+        signalSnapshot {
+          ...Portfolio_TTradeSignalSnapshotFields
         }
       }
     }
@@ -386,34 +601,207 @@ export const TTradeBatchEventsPageQuery = gql(`
   }
 `);
 
-export const TTradeSignalHistoryPageQuery = gql(`
-  query Portfolio_TTradeSignalHistoryPage(
+export const TTradeSignalEvaluationsQuery = gql(`
+  query Portfolio_TTradeSignalEvaluations(
     $accountId: String!
+    $stockCode: String
+    $eventKinds: [TTradeSignalEvaluationKind!]
+    $startTime: DateTime
+    $endTime: DateTime
     $first: Int!
     $after: String
   ) {
-    tTradeSignalHistoryPage(
+    tTradeSignalEvaluations(
       accountId: $accountId
+      stockCode: $stockCode
+      eventKinds: $eventKinds
+      startTime: $startTime
+      endTime: $endTime
       first: $first
       after: $after
     ) {
       items {
-        intentId
+        id
+        accountId
         runId
         stockCode
-        status
-        statusReason
-        signalPrice
-        pullbackPct
-        reboundPct
-        requestedVolume
-        createdAt
-        expiresAt
-        updatedAt
+        eventKind
+        eventType
+        evaluatedAt
+        windowStartedAt
+        windowEndedAt
+        coalescedCount
+        policyVersion
+        schemaVersion
+        contentFingerprint
+        signalSnapshot {
+          ...Portfolio_TTradeSignalSnapshotFields
+        }
       }
       pageInfo {
         hasNextPage
         endCursor
+      }
+    }
+  }
+`);
+
+export const TTradeSignalDiagnosticsQuery = gql(`
+  query Portfolio_TTradeSignalDiagnostics(
+    $accountId: String!
+    $stockCode: String
+    $startTime: DateTime!
+    $endTime: DateTime!
+    $mergeVersions: Boolean! = false
+  ) {
+    tTradeSignalDiagnostics(
+      accountId: $accountId
+      stockCode: $stockCode
+      startTime: $startTime
+      endTime: $endTime
+      mergeVersions: $mergeVersions
+    ) {
+      available
+      reasonCode
+      reason
+      accountId
+      stockCode
+      startTime
+      endTime
+      mergedVersions
+      warnings
+      partitions {
+        policyVersion
+        featureSchemaVersion
+        profileVersion
+        denominator {
+          code
+          label
+          readyInstrumentSeconds
+        }
+        funnel {
+          code
+          label
+          unitCode
+          denominatorCode
+          count
+          conversionRate
+        }
+        blockers {
+          blocker {
+            code
+            label
+            detail
+          }
+          count
+          rate
+          denominatorCode
+          denominatorValue
+        }
+        scoreDistribution {
+          policyVersion
+          featureSchemaVersion
+          profileVersion
+          path
+          lowerBound
+          upperBound
+          count
+        }
+        fsmDwell {
+          branch
+          phase
+          durationSeconds
+          transitionCount
+        }
+        fsmTransitions {
+          branch
+          fromPhase
+          toPhase
+          count
+        }
+        candidateOutcomes {
+          code
+          label
+          count
+        }
+        postCandidatePerformance {
+          available
+          reasonCode
+          reason
+          sampleCount
+          netMfePct
+          netMaePct
+          fixedWindowReturns {
+            windowSeconds
+            sampleCount
+            averageNetReturnPct
+          }
+          requiredDataCodes
+        }
+      }
+      versionGroups {
+        policyVersion
+        featureSchemaVersion
+        profileVersion
+        count
+      }
+    }
+  }
+`);
+
+export const TTradeCandidateTraceQuery = gql(`
+  query Portfolio_TTradeCandidateTrace(
+    $accountId: String!
+    $strategyRunId: String!
+    $candidateId: String!
+  ) {
+    tTradeCandidateTrace(
+      accountId: $accountId
+      strategyRunId: $strategyRunId
+      candidateId: $candidateId
+    ) {
+      accountId
+      candidateId
+      strategyRunId
+      instrumentCode
+      sourceEvaluationId
+      sourceIdentity {
+        sourceTimeMs
+        tickOrdinal
+        continuityGeneration
+        tradeDate
+        candidateFingerprint
+        policyVersion
+        featureSchemaVersion
+        profileVersion
+      }
+      integrityStatus
+      missingReasons {
+        code
+        stage
+        expected
+        detail
+      }
+      links {
+        evaluationIds
+        intentIds
+        clientOrderIds
+        correlationIds
+        brokerOrderIds
+        orderIds
+        tradeIds
+        batchIds
+        exitPlanIds
+        exitPlanEventIds
+      }
+      events {
+        stage
+        eventType
+        entityId
+        occurredAt
+        status
+        relatedIds
+        details
       }
     }
   }
@@ -425,6 +813,84 @@ export const TTradeUpdatesSubscription = gql(`
       accountId
       version
       occurredAt
+    }
+  }
+`);
+
+export const RecordTTradeClientTelemetryMutation = gql(`
+  mutation Portfolio_RecordTTradeClientTelemetry(
+    $accountId: String!
+    $refreshSuccess: Boolean!
+    $refreshFailure: Boolean!
+    $subscriptionReconnected: Boolean!
+  ) {
+    refreshSuccess: recordTTradeClientTelemetry(
+      input: {
+        accountId: $accountId
+        platform: WEB
+        event: REFRESH_SUCCESS
+        surface: T_TRADE_SIGNAL_V3
+      }
+    ) @include(if: $refreshSuccess) {
+      accepted
+    }
+    refreshFailure: recordTTradeClientTelemetry(
+      input: {
+        accountId: $accountId
+        platform: WEB
+        event: REFRESH_FAILURE
+        surface: T_TRADE_SIGNAL_V3
+      }
+    ) @include(if: $refreshFailure) {
+      accepted
+    }
+    subscriptionReconnected: recordTTradeClientTelemetry(
+      input: {
+        accountId: $accountId
+        platform: WEB
+        event: SUBSCRIPTION_RECONNECTED
+        surface: T_TRADE_SIGNAL_V3
+      }
+    ) @include(if: $subscriptionReconnected) {
+      accepted
+    }
+  }
+`);
+
+export const ApproveTTradeEntryV3Mutation = gql(`
+  mutation Portfolio_ApproveTTradeEntryV3(
+    $runId: String!
+    $intentId: String!
+    $expectation: TTradeCandidateApprovalExpectationInput!
+    $idempotencyKey: String!
+  ) {
+    approveTTradeEntry(
+      runId: $runId
+      intentId: $intentId
+      expectation: $expectation
+      idempotencyKey: $idempotencyKey
+    ) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+      }
+    }
+  }
+`);
+
+export const RejectTTradeEntryV3Mutation = gql(`
+  mutation Portfolio_RejectTTradeEntryV3($runId: String!, $intentId: String!) {
+    rejectTTradeEntry(runId: $runId, intentId: $intentId) {
+      success
+      code
+      message
+      session {
+        runId
+        status
+      }
     }
   }
 `);
@@ -511,11 +977,15 @@ export const TTradeOperationsQuery = gql(`
 export const BeginTTradeControlledWindowMutation = gql(`
   mutation Portfolio_BeginTTradeControlledWindow(
     $accountId: String!
+    $policyVersion: Int!
     $snapshotId: String!
+    $idempotencyKey: String!
   ) {
     beginTTradeControlledWindow(
       accountId: $accountId
+      policyVersion: $policyVersion
       snapshotId: $snapshotId
+      idempotencyKey: $idempotencyKey
     ) {
       success
       code
@@ -537,12 +1007,16 @@ export const ActivateTTradeLiveMutation = gql(`
   mutation Portfolio_ActivateTTradeLive(
     $accountId: String!
     $policyVersion: Int!
+    $snapshotId: String!
+    $idempotencyKey: String!
     $targetStage: TTradeRolloutTarget!
     $confirmation: String!
   ) {
     activateTTradeLive(
       accountId: $accountId
       policyVersion: $policyVersion
+      snapshotId: $snapshotId
+      idempotencyKey: $idempotencyKey
       targetStage: $targetStage
       confirmation: $confirmation
     ) {
@@ -578,8 +1052,13 @@ export const TriggerTTradeKillSwitchMutation = gql(`
   mutation Portfolio_TriggerTTradeKillSwitch(
     $accountId: String!
     $reason: String!
+    $idempotencyKey: String!
   ) {
-    triggerTTradeKillSwitch(accountId: $accountId, reason: $reason) {
+    triggerTTradeKillSwitch(
+      accountId: $accountId
+      reason: $reason
+      idempotencyKey: $idempotencyKey
+    ) {
       success
       code
       message
@@ -599,25 +1078,6 @@ export const CancelTTradeOrderMutation = gql(`
       success
       code
       message
-    }
-  }
-`);
-
-export const TTradeSignalHistoryQuery = gql(`
-  query Portfolio_TTradeSignalHistory($accountId: String!, $limit: Int!) {
-    tTradeSignalHistory(accountId: $accountId, limit: $limit) {
-      intentId
-      runId
-      stockCode
-      status
-      statusReason
-      signalPrice
-      pullbackPct
-      reboundPct
-      requestedVolume
-      createdAt
-      expiresAt
-      updatedAt
     }
   }
 `);
@@ -657,13 +1117,52 @@ export const SaveTTradeGlobalMonitorMutation = gql(`
       success
       code
       message
+      monitor {
+        accountId
+        configVersion
+        signalPolicy {
+          ...Portfolio_TTradeSignalPolicyFields
+        }
+      }
+    }
+  }
+`);
+
+export const PreviewTTradeSignalPolicyMutation = gql(`
+  mutation Portfolio_PreviewTTradeSignalPolicy(
+    $input: TTradeSignalPolicyPreviewInput!
+  ) {
+    previewTTradeSignalPolicy(input: $input) {
+      valid
+      configVersion
+      errors {
+        code
+        field
+        message
+      }
+      warnings {
+        code
+        field
+        message
+      }
+      normalizedPolicy {
+        ...Portfolio_TTradeSignalPolicyFields
+      }
+      changedFields
+      requiresRewarm
     }
   }
 `);
 
 export const ReconcileTTradeGlobalMonitorMutation = gql(`
-  mutation Portfolio_ReconcileTTradeGlobalMonitor($accountId: String!) {
-    reconcileTTradeGlobalMonitor(accountId: $accountId) {
+  mutation Portfolio_ReconcileTTradeGlobalMonitor(
+    $accountId: String!
+    $idempotencyKey: String!
+  ) {
+    reconcileTTradeGlobalMonitor(
+      accountId: $accountId
+      idempotencyKey: $idempotencyKey
+    ) {
       success
       code
       message

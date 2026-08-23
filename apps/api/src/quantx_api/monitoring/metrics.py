@@ -5,6 +5,7 @@ Prometheus 指标定义和收集中间件
 import logging
 import time
 from datetime import datetime, timezone
+from math import isfinite
 
 from fastapi import Request, Response
 from prometheus_client import (
@@ -135,6 +136,76 @@ MARKET_STREAM_INSTRUMENTS = Gauge(
   "quantx_market_stream_instruments",
   "Instrument count in the last whole-market frame",
 )
+T_TRADE_V3_RUNTIME_VALUE = Gauge(
+  "quantx_t_trade_v3_runtime_value",
+  "Engine-observed T-trade V3 cumulative value since the current Engine start",
+  ["engine_instance", "metric", "path", "health", "detail"],
+)
+T_TRADE_V3_ACTIVE_STREAMS = Gauge(
+  "quantx_t_trade_v3_active_streams",
+  "Number of T-trade V3 run/instrument streams observed by the Engine",
+  ["engine_instance"],
+)
+T_TRADE_V3_ACCUMULATOR_STATE = Gauge(
+  "quantx_t_trade_v3_accumulator_state",
+  "Bounded T-trade V3 accumulator capacity, loss accounting, and export state",
+  ["engine_instance", "measure"],
+)
+T_TRADE_V3_PROJECTION_VALUE = Gauge(
+  "quantx_t_trade_v3_projection_value",
+  "Engine projection and subscription coalescer cumulative values",
+  ["engine_instance", "metric"],
+)
+T_TRADE_CLIENT_EVENTS = Counter(
+  "quantx_t_trade_client_events_total",
+  "Bounded client-side T-trade V3 refresh and subscription recovery events",
+  ["surface", "platform", "event"],
+)
+
+_T_TRADE_CLIENT_SURFACES = frozenset({"T_TRADE_SIGNAL_V3"})
+_T_TRADE_CLIENT_PLATFORMS = frozenset({"WEB", "IOS"})
+_T_TRADE_CLIENT_EVENT_CODES = frozenset(
+  {"REFRESH_SUCCESS", "REFRESH_FAILURE", "SUBSCRIPTION_RECONNECTED"}
+)
+_T_TRADE_V3_RUNTIME_SCHEMA_VERSION = 2
+_T_TRADE_V3_MAX_RUNTIME_SERIES = 1_024
+_T_TRADE_V3_MAX_ACTIVE_STREAMS = 4_096
+_T_TRADE_V3_MAX_EXACT_COUNTER = (1 << 53) - 1
+_T_TRADE_V3_PATHS = frozenset(
+  {"NONE", "PULLBACK_REBOUND", "MOMENTUM_ACCELERATION"}
+)
+_T_TRADE_V3_HEALTH = frozenset(
+  {
+    "WARMING",
+    "READY",
+    "DEGRADED",
+    "STALE",
+    "CONTINUITY_LOST",
+    "INSUFFICIENT",
+    "UNKNOWN",
+  }
+)
+
+
+def record_t_trade_client_event(
+  *,
+  surface: str,
+  platform: str,
+  event: str,
+) -> None:
+  """Increment only the fixed low-cardinality T-trade client label set."""
+
+  if surface not in _T_TRADE_CLIENT_SURFACES:
+    raise ValueError("unsupported T-trade client telemetry surface")
+  if platform not in _T_TRADE_CLIENT_PLATFORMS:
+    raise ValueError("unsupported T-trade client telemetry platform")
+  if event not in _T_TRADE_CLIENT_EVENT_CODES:
+    raise ValueError("unsupported T-trade client telemetry event")
+  T_TRADE_CLIENT_EVENTS.labels(
+    surface=surface,
+    platform=platform,
+    event=event,
+  ).inc()
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):
@@ -199,6 +270,195 @@ def _set_latency(phase: str, values: list[float]) -> None:
   DELIVERY_LATENCY.labels(phase=phase, statistic="maximum").set(
     max(values, default=0)
   )
+
+
+def _bounded_metric_label(value: object, *, fallback: str = "UNKNOWN") -> str:
+  normalized = str(value or "").strip().upper()
+  if not normalized:
+    return fallback
+  if len(normalized) > 80 or any(
+    not (char.isalnum() or char in {"_", "-", ".", ":", ">"})
+    for char in normalized
+  ):
+    return "OTHER"
+  return normalized
+
+
+def _t_trade_v3_count(value: object) -> int | None:
+  if not isinstance(value, int) or isinstance(value, bool):
+    return None
+  if value < 0 or value > _T_TRADE_V3_MAX_EXACT_COUNTER:
+    return None
+  return value
+
+
+def _validated_t_trade_v3_runtime(
+  runtime: dict[object, object],
+) -> tuple[dict[str, int], list[tuple[str, str, str, str, float]]] | None:
+  """Validate the complete bounded snapshot before creating Prometheus children."""
+
+  if runtime.get("schemaVersion") != _T_TRADE_V3_RUNTIME_SCHEMA_VERSION:
+    return None
+  counts: dict[str, int] = {}
+  for key in (
+    "activeStreamCount",
+    "streamCapacity",
+    "streamEvictionsTotal",
+    "seriesCount",
+    "seriesCapacity",
+    "seriesOverflowUpdatesTotal",
+  ):
+    value = _t_trade_v3_count(runtime.get(key))
+    if value is None:
+      return None
+    counts[key] = value
+  if not 0 < counts["seriesCapacity"] <= _T_TRADE_V3_MAX_RUNTIME_SERIES:
+    return None
+  if not 0 < counts["streamCapacity"] <= _T_TRADE_V3_MAX_ACTIVE_STREAMS:
+    return None
+  if counts["activeStreamCount"] > counts["streamCapacity"]:
+    return None
+
+  raw_series = runtime.get("series")
+  if not isinstance(raw_series, list):
+    return None
+  if (
+    len(raw_series) != counts["seriesCount"]
+    or len(raw_series) > counts["seriesCapacity"]
+  ):
+    return None
+
+  parsed: list[tuple[str, str, str, str, float]] = []
+  seen: set[tuple[str, str, str, str]] = set()
+  for item in raw_series:
+    if not isinstance(item, dict) or "policyVersion" in item:
+      return None
+    try:
+      value = float(item.get("value", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+      return None
+    if not isfinite(value) or value < 0:
+      return None
+    metric = _bounded_metric_label(item.get("metric"))
+    path = _bounded_metric_label(item.get("path"), fallback="NONE")
+    health = _bounded_metric_label(item.get("health"))
+    detail = _bounded_metric_label(item.get("detail"), fallback="TOTAL")
+    if path not in _T_TRADE_V3_PATHS or health not in _T_TRADE_V3_HEALTH:
+      return None
+    labels = (metric, path, health, detail)
+    if labels in seen:
+      return None
+    seen.add(labels)
+    parsed.append((*labels, value))
+  return counts, parsed
+
+
+_T_TRADE_PROJECTION_COUNTERS = frozenset(
+  {
+    "received_total",
+    "immediate_total",
+    "pending_cancelled_by_material_total",
+    "coalesced_replacements_total",
+    "coalesced_windows_total",
+    "flush_published_total",
+    "projection_failures_total",
+    "projection_missing_total",
+    "published_total",
+    "publish_failures_total",
+  }
+)
+
+
+def _validated_t_trade_projection(
+  projection: dict[object, object],
+) -> list[tuple[str, float]] | None:
+  """Validate the complete fixed-schema projection metrics snapshot."""
+
+  if projection.get("schemaVersion") != 1:
+    return None
+  counters = projection.get("counters")
+  if not isinstance(counters, dict) or any(
+    not isinstance(metric, str) or metric not in _T_TRADE_PROJECTION_COUNTERS
+    for metric in counters
+  ):
+    return None
+  parsed: list[tuple[str, float]] = []
+  for metric, raw_value in counters.items():
+    value = _t_trade_v3_count(raw_value)
+    if value is None:
+      return None
+    parsed.append((metric.upper(), float(value)))
+  for metric, key in (
+    ("PENDING_NOTICE_COUNT", "pendingNoticeCount"),
+    ("ACTIVE_NOTICE_TASK_COUNT", "activeNoticeTaskCount"),
+  ):
+    value = _t_trade_v3_count(projection.get(key))
+    if value is None:
+      return None
+    parsed.append((metric, float(value)))
+  return parsed
+
+
+def _set_t_trade_v3_engine_metrics(heartbeat: object | None) -> None:
+  """Project the separate Engine process's bounded heartbeat snapshot."""
+
+  T_TRADE_V3_RUNTIME_VALUE.clear()
+  T_TRADE_V3_ACTIVE_STREAMS.clear()
+  T_TRADE_V3_ACCUMULATOR_STATE.clear()
+  T_TRADE_V3_PROJECTION_VALUE.clear()
+  if heartbeat is None:
+    return
+  instance_id = _bounded_metric_label(getattr(heartbeat, "instance_id", None))
+  details = dict(getattr(heartbeat, "details", None) or {})
+  runtime = details.get("tTradeV3")
+  projection = details.get("tTradeProjection")
+  # The two sections are one heartbeat contract.  Exporting a valid-looking
+  # half when the other half is missing or malformed would silently present a
+  # partial, potentially stale picture to Prometheus consumers.
+  validated_runtime = (
+    _validated_t_trade_v3_runtime(runtime) if isinstance(runtime, dict) else None
+  )
+  validated_projection = (
+    _validated_t_trade_projection(projection)
+    if isinstance(projection, dict)
+    else None
+  )
+  rejected = validated_runtime is None or validated_projection is None
+  T_TRADE_V3_ACCUMULATOR_STATE.labels(
+    engine_instance=instance_id,
+    measure="SNAPSHOT_REJECTED",
+  ).set(1 if rejected else 0)
+  if rejected:
+    return
+
+  counts, series = validated_runtime
+  T_TRADE_V3_ACTIVE_STREAMS.labels(engine_instance=instance_id).set(
+    counts["activeStreamCount"]
+  )
+  for measure, key in (
+    ("SERIES_COUNT", "seriesCount"),
+    ("SERIES_CAPACITY", "seriesCapacity"),
+    ("SERIES_OVERFLOW_UPDATES_TOTAL", "seriesOverflowUpdatesTotal"),
+    ("STREAM_CAPACITY", "streamCapacity"),
+    ("STREAM_EVICTIONS_TOTAL", "streamEvictionsTotal"),
+  ):
+    T_TRADE_V3_ACCUMULATOR_STATE.labels(
+      engine_instance=instance_id,
+      measure=measure,
+    ).set(counts[key])
+  for metric, path, health, detail, value in series:
+    T_TRADE_V3_RUNTIME_VALUE.labels(
+      engine_instance=instance_id,
+      metric=metric,
+      path=path,
+      health=health,
+      detail=detail,
+    ).set(value)
+  for metric, value in validated_projection:
+    T_TRADE_V3_PROJECTION_VALUE.labels(
+      engine_instance=instance_id,
+      metric=metric,
+    ).set(value)
 
 
 async def update_operational_metrics() -> None:
@@ -325,6 +585,9 @@ async def update_operational_metrics() -> None:
       AGENT_JOURNAL_INTEGRITY.labels(device_id=device_id).set(
         1 if details.get("journalIntegrity") == "ok" else 0
       )
+
+    engine_heartbeat = await db.get(RuntimeComponentHeartbeat, "engine")
+    _set_t_trade_v3_engine_metrics(engine_heartbeat)
 
     alert_rows = (
       await db.execute(

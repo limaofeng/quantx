@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -171,6 +171,10 @@ class TTradeReplayService:
       raise ValueError("回放区间内没有交易日")
     if len(trading_dates) > 20:
       raise ValueError("单次回放最多支持 20 个交易日")
+    rollout_evidence_request = self._normalize_rollout_evidence_request(
+      payload,
+      trading_dates=trading_dates,
+    )
     if await self._has_active_replay(account_id):
       raise ValueError("该账户已有正在执行的做 T 回放，请等待完成或先取消")
 
@@ -305,6 +309,7 @@ class TTradeReplayService:
         "ambiguous_action": "STRICT_RISK_REJECT",
       },
       "replay_price_limit_source_counts": {},
+      **rollout_evidence_request,
       "replay_snapshot_id": snapshot.id if snapshot else None,
       "replay_snapshot_date": (snapshot.trade_date.isoformat() if snapshot else None),
       "replay_start_time": start_time.isoformat(),
@@ -587,6 +592,49 @@ class TTradeReplayService:
       "snapshot_data_quality": snapshot_data_quality or None,
       "portfolio_as_of": manual_as_of.isoformat() if manual_as_of else None,
       "quality_flags": sorted(quality_flags),
+    }
+
+  @staticmethod
+  def _normalize_rollout_evidence_request(
+    payload: Dict[str, Any],
+    *,
+    trading_dates: List[date],
+  ) -> Dict[str, Any]:
+    """Preserve only validated formal-replay evidence metadata.
+
+    This is not an approval switch: a V3 marker can only be attached to an
+    exact 20-day BACKTEST with a declared abnormal day inside its immutable
+    SH trading calendar.  Metrics and the rollout evaluator still require
+    successful execution, strict Tick audit, durable candidate facts, and
+    PAPER evidence before any execution stage can be activated.
+    """
+
+    acceptance = str(payload.get("replay_acceptance") or "").strip().upper()
+    if not acceptance:
+      return {}
+    if acceptance == "V3_PRESSURE_BASELINE":
+      return {"replay_acceptance": acceptance}
+    if acceptance != "V3_CAUSAL_20D":
+      raise ValueError("未知的回放验收类型")
+    if len(trading_dates) != 20:
+      raise ValueError("V3 正式因果回放必须恰好覆盖 20 个交易日")
+    raw_dates = payload.get("replay_abnormal_dates")
+    if not isinstance(raw_dates, list) or not raw_dates:
+      raise ValueError("V3 正式因果回放必须声明至少一个异常行情日")
+    allowed = {item.isoformat() for item in trading_dates}
+    normalized: set[str] = set()
+    for value in raw_dates:
+      try:
+        parsed = date.fromisoformat(str(value or "").strip())
+      except ValueError as exc:
+        raise ValueError("异常行情日必须使用 YYYY-MM-DD") from exc
+      encoded = parsed.isoformat()
+      if encoded not in allowed:
+        raise ValueError("声明的异常行情日不在正式回放交易日窗口内")
+      normalized.add(encoded)
+    return {
+      "replay_acceptance": acceptance,
+      "replay_abnormal_dates": sorted(normalized),
     }
 
   @staticmethod

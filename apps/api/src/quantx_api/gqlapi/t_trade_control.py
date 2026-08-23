@@ -20,7 +20,11 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountTradingRolloutEvent,
 )
 from quantx_infrastructure.services.t_trade_operations_service import (
+  TTradeOperationIdempotencyError,
   TTradeOperationsService,
+)
+from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
+  V3_ROLLOUT_GATE_CODES,
 )
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -69,7 +73,7 @@ _ACTIVATION_GATE_CODES = _PREPARATION_GATE_CODES | frozenset(
     "CONTROLLED_WINDOW_ACTIVE",
     "NO_EXTERNAL_BROKER_ACTIVITY",
   }
-)
+) | V3_ROLLOUT_GATE_CODES
 
 _CONTROL_EVENT_TYPES = {
   TTradeControlAction.BEGIN_CONTROLLED_WINDOW: "CONTROLLED_WINDOW_STARTED",
@@ -323,8 +327,11 @@ async def _operation_marker_exists(
   details = dict(event.details or {})
   context_matches = str(details.get("operationId") or "") == challenge_id
   if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW:
-    context_matches = context_matches and str(event.snapshot_id or "") == (
-      request.snapshot_id
+    context_matches = (
+      context_matches
+      and str(event.snapshot_id or "") == request.snapshot_id
+      and str(details.get("policyVersion") or "")
+      == str(request.policy_version)
     )
   elif request.action in {
     TTradeControlAction.ACTIVATE_CANARY,
@@ -451,6 +458,12 @@ def _readiness_binding(readiness: dict[str, Any]) -> dict[str, Any]:
     "unresolved_critical_alert_count": int(
       readiness.get("unresolved_critical_alert_count") or 0
     ),
+    # Bind the exact durable-evidence summary into the device challenge.  A
+    # CANARY/LIVE confirmation cannot reuse a preview after the V3 evidence
+    # changed, even if generic runtime checks happen to remain green.
+    "v3_rollout_evidence": _json_safe(
+      dict(readiness.get("v3_rollout_evidence") or {})
+    ),
     "checks": checks,
   }
 
@@ -518,6 +531,8 @@ def _validate_action_readiness(
   request: TTradeControlRequestData,
   readiness: dict[str, Any],
   rollout: Optional[AccountTradingRollout],
+  *,
+  allow_pending_operator_review: bool = False,
 ) -> None:
   binding = _rollout_binding(rollout)
   if request.action == TTradeControlAction.KILL_SWITCH:
@@ -544,6 +559,21 @@ def _validate_action_readiness(
     if request.action == TTradeControlAction.BEGIN_CONTROLLED_WINDOW
     else _ACTIVATION_GATE_CODES
   )
+  # This device-bound route may create the §19.5 acknowledgement together
+  # with activation.  Let it proceed when, and only when, that single
+  # acknowledgement is pending; all replay, PAPER, trace, quality, runtime,
+  # and finite-exposure gates remain required.  The operations service
+  # re-evaluates durable evidence under the rollout lock before persisting the
+  # acknowledgement with activation.
+  if (
+    allow_pending_operator_review
+    and request.action
+    in {
+      TTradeControlAction.ACTIVATE_CANARY,
+      TTradeControlAction.ACTIVATE_LIVE,
+    }
+  ):
+    required = required - {"V3_OPERATOR_REVIEW_CONFIRMED"}
   failure = _gate_failure(readiness, required)
   if failure:
     raise TradeApprovalChallengeError("T_TRADE_CONTROL_NOT_READY", failure)
@@ -766,7 +796,18 @@ class TTradeControlChallengeService:
           if request.action == TTradeControlAction.KILL_SWITCH
           else await cls.operations_service.readiness(request.account_id)
         )
-        _validate_action_readiness(request, readiness, rollout)
+        _validate_action_readiness(
+          request,
+          readiness,
+          rollout,
+          allow_pending_operator_review=(
+            request.action
+            in {
+              TTradeControlAction.ACTIVATE_CANARY,
+              TTradeControlAction.ACTIVATE_LIVE,
+            }
+          ),
+        )
         payload = _payload(
           principal=current,
           request=request,
@@ -875,6 +916,29 @@ class TTradeControlChallengeService:
     readiness: Optional[dict[str, Any]] = None
     async with AsyncSessionLocal() as db:
       try:
+        # Route from an unlocked snapshot only to learn which account session
+        # must be serialized.  Every mutating path takes the principal/session
+        # lock before the challenge lock; the locked challenge is re-read and
+        # all token/binding checks below use that authoritative row.
+        routing_challenge = (
+          await db.execute(
+            select(TradeConfirmationChallenge)
+            .where(TradeConfirmationChallenge.id == normalized_id)
+          )
+        ).scalar_one_or_none()
+        if routing_challenge is None:
+          raise TradeApprovalChallengeError(
+            "CONFIRMATION_NOT_FOUND",
+            "确认挑战不存在或已失效",
+          )
+        routing_request = _request_from_payload(
+          dict(routing_challenge.payload or {})
+        )
+        current = await cls._lock_current_principal(
+          db,
+          principal,
+          routing_request.account_id,
+        )
         challenge = (
           await db.execute(
             select(TradeConfirmationChallenge)
@@ -888,10 +952,11 @@ class TTradeControlChallengeService:
             "确认挑战不存在或已失效",
           )
         payload = dict(challenge.payload or {})
+        request = _request_from_payload(payload)
         try:
           validate_persistent_trade_challenge(
             challenge=challenge,
-            principal=principal,
+            principal=current,
             action=T_TRADE_CONTROL_CHALLENGE,
             confirmation_token=token,
             now=time_utils.now(),
@@ -900,12 +965,6 @@ class TTradeControlChallengeService:
           )
         except AuthError as exc:
           raise TradeApprovalChallengeError(exc.code, exc.message) from exc
-        request = _request_from_payload(payload)
-        current = await cls._lock_current_principal(
-          db,
-          principal,
-          request.account_id,
-        )
         actor_user_id = current.user_id
         session_binding = dict(payload.get("session_binding") or {})
         if session_binding != {
@@ -950,7 +1009,18 @@ class TTradeControlChallengeService:
         if request.action != TTradeControlAction.KILL_SWITCH:
           readiness = await cls.operations_service.readiness(request.account_id)
           try:
-            _validate_action_readiness(request, readiness, rollout)
+            _validate_action_readiness(
+              request,
+              readiness,
+              rollout,
+              allow_pending_operator_review=(
+                request.action
+                in {
+                  TTradeControlAction.ACTIVATE_CANARY,
+                  TTradeControlAction.ACTIVATE_LIVE,
+                }
+              ),
+            )
             if _rollout_binding(rollout) != dict(payload.get("rollout_binding") or {}):
               raise TradeApprovalChallengeError(
                 "ROLLOUT_CHANGED",
@@ -1014,6 +1084,7 @@ class TTradeControlChallengeService:
           request.account_id,
           user_id=user_id,
           snapshot_id=request.snapshot_id,
+          expected_policy_version=request.policy_version,
           operation_id=challenge_id,
         )
         code = "CONTROLLED_WINDOW_APPLIED"
@@ -1032,6 +1103,7 @@ class TTradeControlChallengeService:
             if request.action == TTradeControlAction.ACTIVATE_LIVE
             else ""
           ),
+          expected_snapshot_id=request.snapshot_id,
           operation_id=challenge_id,
         )
         code = f"{target}_ACTIVATION_APPLIED"
@@ -1057,6 +1129,14 @@ class TTradeControlChallengeService:
           operation_status="APPLIED",
           operation_code=_CONTROL_APPLIED_CODES[request.action],
           message="做 T 控制已应用；委托与成交终态仍以券商回报为准",
+        )
+      if isinstance(exc, TTradeOperationIdempotencyError):
+        return await cls._record_operation_result(
+          challenge_id=challenge_id,
+          request=request,
+          operation_status="REJECTED",
+          operation_code=exc.code,
+          message="做 T 控制幂等键已绑定不同请求，请生成新的幂等键",
         )
       if isinstance(exc, ValueError):
         return await cls._record_operation_result(

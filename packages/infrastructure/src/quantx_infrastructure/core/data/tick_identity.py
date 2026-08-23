@@ -164,6 +164,8 @@ def tick_source_time_ms(tick: Tick) -> int:
       missing_source = True
     elif not math.isfinite(source_number) or not source_number.is_integer():
       raise ValueError(f"invalid Tick source_time_ms: {source_value!r}")
+    elif source_number < 0:
+      raise ValueError(f"invalid Tick source_time_ms: {source_value!r}")
     else:
       return int(source_number)
 
@@ -200,6 +202,40 @@ def _full_snapshot_payload(tick: Tick) -> str:
     for name, value in _tick_fields(tick).items()
     if name not in {"time", "source_time_ms", "tick_ordinal"}
   }
+  return _canonical_json(payload)
+
+
+_PAGE_SOURCE_TIME_UNSET = object()
+
+
+def tick_page_content_identity(
+  tick: Tick,
+  *,
+  normalized_source_time_ms: int | None | object = _PAGE_SOURCE_TIME_UNSET,
+) -> str:
+  """Return a canonical identity for every field in a paged Tick snapshot.
+
+  ``tick_snapshot_identity`` intentionally ignores storage/runtime fields and
+  several unstable XTData values because it is the stable overlap identity
+  shared by historical and realtime codecs.  Pagination needs a stricter
+  identity: a backend that repeats a page must be detected even when only
+  ``tickvol``, ``pvolume`` or another otherwise-unstable field differs.
+
+  The source timestamp is represented by ``tick_source_time_ms`` so a legacy
+  missing/zero value has the same page identity as its timestamp-derived form.
+  Callers that already attempted source-time parsing may pass ``None`` as an
+  override to defer an invalid value to the final normalization step.
+  """
+
+  if normalized_source_time_ms is _PAGE_SOURCE_TIME_UNSET:
+    normalized_source_time_ms = tick_source_time_ms(tick)
+
+  fields = _tick_fields(tick)
+  payload = {
+    name: _canonical_value(value)
+    for name, value in sorted(fields.items(), key=lambda item: str(item[0]))
+  }
+  payload["source_time_ms"] = _canonical_value(normalized_source_time_ms)
   return _canonical_json(payload)
 
 
@@ -248,10 +284,37 @@ def _clone_tick(tick: Tick) -> Tick:
   return Tick(**dict(vars(tick)))
 
 
-def _storage_time(source_time_ms: int, ordinal: int) -> datetime:
-  source_utc = _EPOCH_UTC + timedelta(milliseconds=source_time_ms)
-  source_shanghai = time_utils.to_shanghai(source_utc)
-  return source_shanghai + timedelta(microseconds=ordinal)
+def tick_storage_time(source_time_ms: int, ordinal: int) -> datetime:
+  """Return the canonical persisted Shanghai storage time for a Tick identity.
+
+  The timestamp is reversible: the source millisecond is encoded in the base
+  instant and the ordinal is encoded as microseconds.  Keep the range checks
+  here so ingestion, historical cursors, and validation cannot drift apart.
+  """
+
+  if isinstance(source_time_ms, bool) or isinstance(ordinal, bool):
+    raise ValueError("Tick storage identity must contain integer values")
+  try:
+    normalized_source_time_ms = int(source_time_ms)
+    normalized_ordinal = int(ordinal)
+  except (TypeError, ValueError, OverflowError) as exc:
+    raise ValueError("Tick storage identity must contain integer values") from exc
+  if (
+    source_time_ms != normalized_source_time_ms
+    or ordinal != normalized_ordinal
+    or normalized_source_time_ms < 0
+    or normalized_ordinal < 0
+    or normalized_ordinal >= HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
+  ):
+    raise ValueError("Tick storage identity is out of range")
+  try:
+    source_utc = _EPOCH_UTC + timedelta(
+      milliseconds=normalized_source_time_ms,
+      microseconds=normalized_ordinal,
+    )
+  except OverflowError as exc:
+    raise ValueError("Tick storage identity cannot produce a datetime") from exc
+  return time_utils.to_shanghai(source_utc)
 
 
 def normalize_ticks_losslessly(ticks: Sequence[Tick]) -> list[Tick]:
@@ -313,7 +376,7 @@ def merge_ticks_losslessly(*sequences: Sequence[Tick]) -> list[Tick]:
       clone = _clone_tick(tick)
       clone.source_time_ms = source_time_ms
       clone.tick_ordinal = ordinal
-      clone.time = _storage_time(source_time_ms, ordinal)
+      clone.time = tick_storage_time(source_time_ms, ordinal)
       normalized.append(clone)
 
   return normalized
@@ -336,6 +399,8 @@ __all__ = [
   "merge_ticks_losslessly",
   "normalize_ticks_losslessly",
   "tick_query_end_time",
+  "tick_storage_time",
+  "tick_page_content_identity",
   "tick_snapshot_identity",
   "tick_source_time_ms",
 ]

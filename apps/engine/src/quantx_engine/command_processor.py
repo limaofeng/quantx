@@ -24,7 +24,10 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_service import EntryPlanService
 from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
-from quantx_infrastructure.services.t_trade_service import TTradeService
+from quantx_infrastructure.services.t_trade_service import (
+  TTradeApprovalExpectation,
+  TTradeService,
+)
 from sqlalchemy import select, update
 
 from quantx_engine.strategy_manager import strategy_manager
@@ -389,11 +392,14 @@ async def _dispatch(
     return _json_value(await board_replay_service.cancel(payload["job_id"]))
 
   t_trade_service = TTradeService(strategy_manager)
-  if command_type == "T_TRADE_START_SESSION":
-    return _json_value(await t_trade_service.start_session(payload["input"]))
   if command_type == "T_TRADE_APPROVE_ENTRY":
     return _json_value(
-      await t_trade_service.approve_entry(payload["run_id"], payload["intent_id"])
+      await t_trade_service.approve_entry(
+        payload["run_id"],
+        payload["intent_id"],
+        approval_expectation=TTradeApprovalExpectation.from_payload(payload),
+        approval_audit=dict(payload.get("approval_audit") or {}),
+      )
     )
   if command_type == "T_TRADE_REJECT_ENTRY":
     return _json_value(
@@ -413,6 +419,10 @@ async def _dispatch(
     return _json_value(await t_trade_service.stop_session(payload["run_id"]))
   if command_type == "T_TRADE_GLOBAL_SAVE":
     return _json_value(await t_trade_global_monitor.save_config(payload["input"]))
+  if command_type == "T_TRADE_SIGNAL_POLICY_PREVIEW":
+    return _json_value(
+      await t_trade_global_monitor.preview_signal_policy(payload["input"])
+    )
   if command_type == "T_TRADE_GLOBAL_GET":
     return _json_value(
       await t_trade_global_monitor.get_monitor(payload["account_id"])

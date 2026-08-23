@@ -25,6 +25,18 @@ class TTradeGlobalConfigRepository(BaseRepository[TTradeGlobalConfig]):
     )
     return result.scalar_one_or_none()
 
+  async def find_by_account_for_update(
+    self, account_id: str
+  ) -> Optional[TTradeGlobalConfig]:
+    """Lock one existing personal-account config for versioned mutation."""
+
+    result = await self.db.execute(
+      select(TTradeGlobalConfig)
+      .where(TTradeGlobalConfig.account_id == account_id)
+      .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
   async def find_all_configs(self) -> List[TTradeGlobalConfig]:
     result = await self.db.execute(
       select(TTradeGlobalConfig).order_by(TTradeGlobalConfig.created_at.asc())

@@ -136,7 +136,6 @@ def test_trade_approval_mutations_require_independent_permission(
     ("confirmExitPlanAuthorization", "liquidation:control"),
     ("saveTTradeGlobalMonitor", "t-trade:control"),
     ("reconcileTTradeGlobalMonitor", "t-trade:control"),
-    ("startTTradeSession", "t-trade:control"),
     ("stopTTradeSession", "t-trade:control"),
     ("cancelTTradeOrder", "t-trade:control"),
     ("rejectTTradeEntry", "t-trade:control"),
@@ -257,7 +256,8 @@ async def test_native_session_can_use_dedicated_control_scope():
     ("Query", "researchRun", "market:read"),
     ("Query", "tTradeBatchesPage", "strategy:read"),
     ("Query", "tTradeBatchEventsPage", "strategy:read"),
-    ("Query", "tTradeSignalHistoryPage", "strategy:read"),
+    ("Query", "tTradeSignalEvaluations", "strategy:read"),
+    ("Query", "tTradeSignalDiagnostics", "strategy:read"),
     ("Subscription", "tTradeUpdates", "strategy:read"),
     ("Subscription", "tTradeReplayUpdates", "strategy:read"),
     ("Subscription", "firstBoardPromotionUpdates", "strategy:read"),
@@ -267,6 +267,7 @@ async def test_native_session_can_use_dedicated_control_scope():
     ("Mutation", "resolveAiAssistantApproval", "assistant:write"),
     ("Mutation", "saveFirstBoardAssistant", "limit-up:control"),
     ("Mutation", "setFirstBoardCandidatePreference", "limit-up:control"),
+    ("Mutation", "previewTTradeSignalPolicy", "t-trade:control"),
   ],
 )
 def test_new_portfolio_and_t_trade_fields_have_explicit_permissions(

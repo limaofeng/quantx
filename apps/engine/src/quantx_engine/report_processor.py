@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import md5, sha256
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from quantx_contracts import (
   TERMINAL_ORDER_STATUSES,
@@ -67,6 +68,11 @@ from quantx_infrastructure.services.trade_service import TradeService
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
+
+from .t_trade_coordination import t_trade_account_coordination_lock
+
+_MAX_TRADE_RUNTIME_AUTHORITY_SCAN = 4096
+_MAX_SNAPSHOT_ACCOUNT_SCOPE = 4096
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +142,14 @@ def _report_account_ids(payload: dict[str, Any]) -> set[str]:
   def add(value: Any) -> None:
     normalized = str(value or "").strip()
     if normalized:
+      if (
+        normalized not in account_ids
+        and len(account_ids) >= _MAX_SNAPSHOT_ACCOUNT_SCOPE
+      ):
+        raise RetryableReportError(
+          "Agent snapshot account scope exceeds limit: "
+          f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+        )
       account_ids.add(normalized)
 
   add(payload.get("account_id"))
@@ -152,20 +166,212 @@ def _report_account_ids(payload: dict[str, Any]) -> set[str]:
     "position_deltas",
     "positions",
   ):
-    for item in payload.get(collection_name) or []:
+    values = payload.get(collection_name) or []
+    try:
+      collection_count = len(values)
+    except TypeError as exc:
+      raise RetryableReportError(
+        f"Agent snapshot {collection_name} scope不可有界复制"
+      ) from exc
+    if collection_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        f"Agent snapshot {collection_name} scope exceeds limit: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
+    for item in values:
       if isinstance(item, dict):
         add(item.get("account_id"))
   positions_by_account = payload.get("positions_by_account")
   if isinstance(positions_by_account, dict):
+    if len(positions_by_account) > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        "Agent snapshot positions account scope exceeds limit: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
     for account_id in positions_by_account:
       add(account_id)
   section_completeness = payload.get("section_completeness_by_account")
   if isinstance(section_completeness, dict):
+    if len(section_completeness) > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        "Agent snapshot section account scope exceeds limit: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
     for account_id in section_completeness:
       add(account_id)
-  for account_id in payload.get("unavailable_accounts") or []:
+  unavailable_accounts = payload.get("unavailable_accounts") or []
+  try:
+    unavailable_count = len(unavailable_accounts)
+  except TypeError as exc:
+    raise RetryableReportError(
+      "Agent snapshot unavailable account scope不可有界复制"
+    ) from exc
+  if unavailable_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+    raise RetryableReportError(
+      "Agent snapshot unavailable account scope exceeds limit: "
+      f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+    )
+  for account_id in unavailable_accounts:
     add(account_id)
   return account_ids
+
+
+async def _invalidate_t_trade_entry_authority_for_account(
+  account_id: str,
+  *,
+  reason: str,
+) -> None:
+  """Clear every in-memory V3 entry authority for one exact account.
+
+  Report processing is an Engine concern, so it may reach the process-local
+  StrategyManager.  Keep the lookup bounded to the executor's in-memory runs;
+  durable state is not a substitute for the executor invalidation boundary.
+  The caller owns the account coordination lock.  The executor boundary then
+  acquires the per-runtime approval lock, preserving account -> approval order.
+  """
+
+  normalized_account = str(account_id or "").strip()
+  if not normalized_account:
+    raise ValueError("account_id is required for T-trade authority invalidation")
+
+  # Lazy import avoids loading the Engine singleton during report module
+  # initialization and keeps the authority boundary local to Engine.
+  from .strategy_manager import strategy_manager
+
+  executor = getattr(strategy_manager, "executor", None)
+  runs = getattr(executor, "runs", None)
+  if not hasattr(runs, "items"):
+    raise RetryableReportError(
+      "T-trade executor runtime registry unavailable; authority not cleared"
+    )
+
+  try:
+    run_count = len(runs)
+  except Exception as exc:
+    raise RetryableReportError(
+      "无法确定 T-trade runtime 数量，拒绝跳过账户 authority 清理"
+    ) from exc
+  if run_count > _MAX_TRADE_RUNTIME_AUTHORITY_SCAN:
+    raise RetryableReportError(
+      "T-trade runtime 数量超过 authority 清理上限: "
+      f"{run_count}>{_MAX_TRADE_RUNTIME_AUTHORITY_SCAN}"
+    )
+  try:
+    runtime_items = list(runs.items())
+  except Exception as exc:
+    raise RetryableReportError(
+      "无法复制 T-trade runtime，拒绝跳过账户 authority 清理"
+    ) from exc
+  if len(runtime_items) > _MAX_TRADE_RUNTIME_AUTHORITY_SCAN:
+    raise RetryableReportError(
+      "T-trade runtime 复制结果超过 authority 清理上限: "
+      f"{len(runtime_items)}>{_MAX_TRADE_RUNTIME_AUTHORITY_SCAN}"
+    )
+
+  uses_t_trade = getattr(executor, "_uses_t_trade_opportunity_runtime", None)
+  invalidate = getattr(executor, "invalidate_t_trade_entry_authority", None)
+  failures: list[str] = []
+  for raw_run_id, runtime in runtime_items:
+    context = getattr(runtime, "context", None)
+    parameters = dict(getattr(context, "parameters", {}) or {})
+    runtime_account = str(parameters.get("account_id") or "").strip()
+    if runtime_account != normalized_account:
+      continue
+
+    try:
+      if callable(uses_t_trade):
+        is_t_trade = bool(uses_t_trade(runtime))
+      else:
+        strategy = getattr(runtime, "strategy", None)
+        strategy_class = getattr(runtime, "strategy_class", None)
+        is_t_trade = bool(
+          getattr(strategy, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
+          or getattr(strategy_class, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
+          or parameters.get("t_trade_opportunity_v3")
+        )
+    except Exception as exc:
+      failures.append(f"{raw_run_id}: runtime classification failed: {exc}")
+      continue
+    if not is_t_trade:
+      continue
+
+    run_id = str(raw_run_id or getattr(runtime, "run_id", "")).strip()
+    if not run_id or not callable(invalidate):
+      failures.append(f"{run_id or raw_run_id}: invalidation boundary unavailable")
+      continue
+    try:
+      invalidated = await invalidate(
+        run_id,
+        account_id=normalized_account,
+        reason=reason,
+      )
+    except Exception as exc:
+      failures.append(f"{run_id}: {exc}")
+      continue
+    if not bool(invalidated):
+      failures.append(f"{run_id}: invalidation returned false")
+
+  if failures:
+    raise RetryableReportError(
+      "T-trade entry authority invalidation failed: "
+      + "; ".join(failures[:20])
+    )
+
+
+async def _run_account_snapshot_mutation(
+  account_id: str,
+  mutation: Callable[[], Awaitable[Any]],
+  *,
+  reason: str,
+) -> Any:
+  """Linearize one durable snapshot mutation and authority invalidation."""
+
+  normalized_account = str(account_id or "").strip()
+  if not normalized_account:
+    raise ValueError("account_id is required for snapshot mutation")
+
+  async with t_trade_account_coordination_lock(normalized_account):
+    mutation_error: Optional[Exception] = None
+    result: Any = None
+    try:
+      result = await mutation()
+    except Exception as exc:
+      mutation_error = exc
+
+    mutation_marker_error: Optional[Exception] = None
+    if mutation_error is not None:
+      try:
+        marker = getattr(PositionService(), "mark_snapshot_failure", None)
+        if not callable(marker):
+          raise RuntimeError("PositionService.mark_snapshot_failure 不可用")
+        await marker(
+          normalized_account,
+          f"{reason}:APPLY_FAILED",
+        )
+      except Exception as exc:
+        mutation_marker_error = exc
+
+    try:
+      await _invalidate_t_trade_entry_authority_for_account(
+        normalized_account,
+        reason=reason,
+      )
+    except Exception as authority_error:
+      detail = f"account={normalized_account}"
+      if mutation_error is not None:
+        detail += f", mutation={mutation_error!s}"
+      raise RetryableReportError(
+        "T-trade snapshot authority invalidation failed: " + detail
+      ) from authority_error
+
+    if mutation_marker_error is not None:
+      raise RetryableReportError(
+        "T-trade snapshot mutation failure marker failed: "
+        f"account={normalized_account}, error={mutation_marker_error}"
+      ) from mutation_marker_error
+    if mutation_error is not None:
+      raise mutation_error
+    return result
 
 
 _REQUIRED_SNAPSHOT_SECTIONS = ("account", "positions", "orders", "trades")
@@ -188,6 +394,18 @@ def _complete_snapshot_account_ids(
     or not isinstance(positions_by_account, dict)
   ):
     return None
+  scoped_values = (
+    ("accounts", accounts),
+    ("positions_by_account", positions_by_account),
+    ("section_completeness_by_account", section_completeness),
+    ("unavailable_accounts", unavailable_accounts),
+  )
+  for section_name, values in scoped_values:
+    if len(values) > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        f"Agent snapshot {section_name} scope exceeds limit: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
   account_record_ids = {
     str(item.get("account_id") or "").strip()
     for item in accounts
@@ -234,6 +452,35 @@ def _snapshot_section_is_complete(
     isinstance(account_values, dict)
     and account_values.get(section) is True
   )
+
+
+def _authoritative_full_snapshot_account_ids(
+  payload: dict[str, Any],
+  *,
+  protocol_version: str,
+) -> Optional[set[str]]:
+  """Return covered accounts when a payload can promote a full snapshot."""
+
+  if payload.get("is_complete") is not True or str(protocol_version) != "1.1":
+    return None
+  snapshot_id = str(payload.get("snapshot_id") or "").strip()
+  snapshot_hash = str(payload.get("snapshot_hash") or "")
+  if not snapshot_id or len(snapshot_hash) != 64:
+    return None
+  hash_input = {
+    key: value for key, value in payload.items() if key != "snapshot_hash"
+  }
+  expected_hash = sha256(
+    json.dumps(
+      hash_input,
+      sort_keys=True,
+      separators=(",", ":"),
+      default=str,
+    ).encode("utf-8")
+  ).hexdigest()
+  if expected_hash != snapshot_hash:
+    return None
+  return _complete_snapshot_account_ids(payload)
 
 
 def _was_automatic_reconciliation_pause(reason: Any) -> bool:
@@ -598,27 +845,102 @@ async def _fail_closed_incomplete_snapshot(
   reported_at: datetime,
   failure_kind: str,
   failure_reason: str,
+  account_ids_override: Optional[set[str]] = None,
 ) -> None:
   """Invalidate live authority after an attempted incomplete full snapshot."""
 
-  account_ids = _report_account_ids(payload)
+  scope_validation_failed = False
+  if account_ids_override is not None:
+    try:
+      override_count = len(account_ids_override)
+    except TypeError as exc:
+      raise RetryableReportError(
+        "完整账户快照 override 账户范围不可有界复制"
+      ) from exc
+    if override_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+      raise RetryableReportError(
+        "完整账户快照 override 账户范围超过限制: "
+        f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+      )
+    account_ids = {
+      str(value).strip()
+      for value in account_ids_override
+      if str(value).strip()
+    }
+  else:
+    try:
+      account_ids = _report_account_ids(payload)
+    except RetryableReportError:
+      # A malformed full report can fail scope discovery before the ordinary
+      # device-scope fallback below. Preserve fail-closed behavior by using
+      # the authenticated scope rather than abandoning the stale marker.
+      account_ids = set()
+      scope_validation_failed = True
   if not account_ids:
-    return
+    # A malformed report may omit every account field.  The authenticated
+    # device scope is the only safe fallback for the personal single-account
+    # deployment; silently returning would leave the previous complete
+    # snapshot and in-memory entry authority usable.
+    async with AsyncSessionLocal() as lookup_db:
+      try:
+        device = await lookup_db.get(AgentDevice, device_id)
+      except Exception as exc:
+        raise RetryableReportError(
+          "无法读取 Agent 授权账户，拒绝忽略无账户快照失败"
+        ) from exc
+      if device is not None and device.revoked_at is None:
+        authorized_values = device.authorized_account_ids or []
+        if isinstance(authorized_values, str):
+          authorized_values = [authorized_values]
+        try:
+          authorized_count = len(authorized_values)
+        except TypeError as exc:
+          raise RetryableReportError(
+            "Agent 授权账户范围不可有界复制"
+          ) from exc
+        if authorized_count > _MAX_SNAPSHOT_ACCOUNT_SCOPE:
+          raise RetryableReportError(
+            "Agent 授权账户范围超过限制: "
+            f"{_MAX_SNAPSHOT_ACCOUNT_SCOPE}"
+          )
+        account_ids = {
+          str(value).strip()
+          for value in list(authorized_values)
+          if str(value).strip()
+        }
+    if not account_ids:
+      raise RetryableReportError(
+        "完整账户快照失败但无法从报告或 Agent 授权范围确定账户"
+      )
   snapshot_id = str(payload.get("snapshot_id") or "").strip() or None
-  section_values = payload.get("section_completeness_by_account")
-  unavailable_accounts = {
-    str(value).strip()
-    for value in payload.get("unavailable_accounts") or []
-    if str(value).strip()
-  }
+  raw_section_values = payload.get("section_completeness_by_account")
+  section_values = (
+    raw_section_values
+    if isinstance(raw_section_values, dict)
+    and len(raw_section_values) <= _MAX_SNAPSHOT_ACCOUNT_SCOPE
+    else None
+  )
+  raw_unavailable_accounts = payload.get("unavailable_accounts") or []
+  try:
+    unavailable_count = len(raw_unavailable_accounts)
+  except TypeError:
+    unavailable_count = _MAX_SNAPSHOT_ACCOUNT_SCOPE + 1
+  unavailable_accounts = (
+    {
+      str(value).strip()
+      for value in raw_unavailable_accounts
+      if str(value).strip()
+    }
+    if unavailable_count <= _MAX_SNAPSHOT_ACCOUNT_SCOPE
+    else set()
+  )
   blocked_accounts: list[str] = []
+  authority_failures: list[str] = []
+  snapshot_failures: list[str] = []
+  position_service = PositionService()
   async with AsyncSessionLocal() as db:
     for account_id in sorted(account_ids):
-      raw_sections = (
-        section_values.get(account_id)
-        if isinstance(section_values, dict)
-        else None
-      )
+      raw_sections = section_values.get(account_id) if section_values else None
       incomplete_sections = [
         section
         for section in _REQUIRED_SNAPSHOT_SECTIONS
@@ -630,6 +952,8 @@ async def _fail_closed_incomplete_snapshot(
         "reason": failure_reason,
         "business_id": account_id,
       }
+      if scope_validation_failed:
+        discrepancy["scopeValidation"] = "BOUNDED_DEVICE_FALLBACK"
       if failure_kind == "SNAPSHOT_SECTION_INCOMPLETE":
         discrepancy.update(
           {
@@ -638,51 +962,76 @@ async def _fail_closed_incomplete_snapshot(
           }
         )
       discrepancies = [discrepancy]
-      rollout = await db.get(
-        AccountTradingRollout,
-        account_id,
-        with_for_update=True,
-      )
-      if rollout is None:
-        rollout = AccountTradingRollout(account_id=account_id)
-        db.add(rollout)
-      previous_stage = str(rollout.stage)
-      window_was_active = bool(rollout.controlled_window_active)
-      rollout.reconcile_status = "RECONCILE_REQUIRED"
-      rollout.enabled = False
-      if not rollout.kill_switch:
-        rollout.stage = "PAUSED"
-      rollout.paused_reason = json.dumps(
-        discrepancies,
-        ensure_ascii=False,
-        default=str,
-      )[:2000]
-      if window_was_active:
-        rollout.controlled_window_active = False
-        rollout.controlled_window_snapshot_id = None
-        rollout.controlled_window_snapshot_hash = None
-        rollout.controlled_window_started_at = None
-        rollout.controlled_window_started_by_user_id = None
-        rollout.controlled_window_external_order_ids = []
-        rollout.controlled_window_external_trade_ids = []
-      db.add(
-        AccountTradingRolloutEvent(
-          event_id=str(uuid.uuid4()),
-          account_id=account_id,
-          event_type="SNAPSHOT_INCOMPLETE",
-          previous_stage=previous_stage,
-          next_stage=str(rollout.stage),
-          snapshot_id=snapshot_id,
-          details={
-            "deviceId": device_id,
-            "reportedAt": reported_at.isoformat(),
-            "discrepancies": discrepancies,
-            "controlledWindowInvalidated": window_was_active,
-          },
-          created_at=utcnow(),
+      # Account coordination is intentionally scoped to the snapshot/failure
+      # authority boundary.  Order/trade convergence remains outside this
+      # lock, while monitor/candidate/approval cannot observe the old complete
+      # snapshot or old V3 entry authority during this transition.
+      async with t_trade_account_coordination_lock(account_id):
+        try:
+          await position_service.mark_snapshot_failure(
+            account_id,
+            f"{failure_kind}:{failure_reason}",
+          )
+        except Exception as exc:
+          snapshot_failures.append(f"{account_id}: {exc}")
+        try:
+          await _invalidate_t_trade_entry_authority_for_account(
+            account_id,
+            reason=f"{failure_kind}:{failure_reason}",
+          )
+        except Exception as exc:
+          authority_failures.append(f"{account_id}: {exc}")
+
+        rollout = await db.get(
+          AccountTradingRollout,
+          account_id,
+          with_for_update=True,
         )
-      )
-      blocked_accounts.append(account_id)
+        if rollout is None:
+          rollout = AccountTradingRollout(account_id=account_id)
+          db.add(rollout)
+        previous_stage = str(rollout.stage)
+        window_was_active = bool(rollout.controlled_window_active)
+        rollout.reconcile_status = "RECONCILE_REQUIRED"
+        rollout.enabled = False
+        if not rollout.kill_switch:
+          rollout.stage = "PAUSED"
+        rollout.paused_reason = json.dumps(
+          discrepancies,
+          ensure_ascii=False,
+          default=str,
+        )[:2000]
+        if window_was_active:
+          rollout.controlled_window_active = False
+          rollout.controlled_window_snapshot_id = None
+          rollout.controlled_window_snapshot_hash = None
+          rollout.controlled_window_started_at = None
+          rollout.controlled_window_started_by_user_id = None
+          rollout.controlled_window_external_order_ids = []
+          rollout.controlled_window_external_trade_ids = []
+        db.add(
+          AccountTradingRolloutEvent(
+            event_id=str(uuid.uuid4()),
+            account_id=account_id,
+            event_type="SNAPSHOT_INCOMPLETE",
+            previous_stage=previous_stage,
+            next_stage=str(rollout.stage),
+            snapshot_id=snapshot_id,
+            details={
+              "deviceId": device_id,
+              "reportedAt": reported_at.isoformat(),
+              "discrepancies": discrepancies,
+              "controlledWindowInvalidated": window_was_active,
+            },
+            created_at=utcnow(),
+          )
+        )
+        blocked_accounts.append(account_id)
+        # Commit the durable fail-closed rollout marker before releasing this
+        # account lock.  ``mark_snapshot_failure`` normally commits through a
+        # separate PositionService session; if that write failed, this marker
+        # is the remaining durable barrier against monitor re-authorization.
+        await db.commit()
 
     heartbeat = await db.get(
       RuntimeComponentHeartbeat,
@@ -697,6 +1046,11 @@ async def _fail_closed_incomplete_snapshot(
         heartbeat.status = "RECONCILE_REQUIRED"
       heartbeat.updated_at = utcnow()
     await db.commit()
+  if snapshot_failures or authority_failures:
+    details = [*snapshot_failures, *authority_failures]
+    raise RetryableReportError(
+      "完整账户快照失败边界未完全收敛: " + "; ".join(details[:20])
+    )
 
 
 async def _process_delta_report(
@@ -705,14 +1059,86 @@ async def _process_delta_report(
   *,
   protocol_version: str = "1.0",
 ) -> None:
+  full_attempt_state: dict[str, set[str]] = {}
+  try:
+    await _process_delta_report_inner(
+      device_id,
+      payload,
+      protocol_version=protocol_version,
+      _full_attempt_state=full_attempt_state,
+    )
+  except Exception:
+    # Once a protocol-1.1 full payload has passed identity/completeness
+    # validation, *any* later failure (including order/trade convergence,
+    # sequence conversion, position promotion, or rollout projection) must
+    # invalidate the snapshot.  This closes the old-complete/new-complete
+    # ambiguity before the report is retried or dead-lettered.
+    full_snapshot_attempt = bool(
+      payload.get("is_complete") is True
+      or "section_completeness_by_account" in payload
+      or "unavailable_accounts" in payload
+    )
+    scope_validation_failed = False
+    try:
+      authoritative_accounts = _authoritative_full_snapshot_account_ids(
+        payload,
+        protocol_version=protocol_version,
+      )
+    except Exception:
+      # Scope validation itself may fail before the inner handler reaches its
+      # normal invalid-full fail-close path (for example, a 4097-account
+      # positions map).  Do not repeat the unbounded parser here.  Passing an
+      # explicit empty override makes the failure helper derive the bounded,
+      # authenticated device scope instead.
+      authoritative_accounts = None
+      scope_validation_failed = True
+    if not scope_validation_failed and full_snapshot_attempt:
+      try:
+        _report_account_ids(payload)
+      except RetryableReportError:
+        # Identity validation can return ``None`` before it reaches the
+        # account-scope parser (for example, a missing hash on an oversized
+        # full payload).  Recheck the bounded scope independently so malformed
+        # reports still take the authenticated-device fail-close path.
+        scope_validation_failed = True
+    stale_accounts = set(full_attempt_state.get("stale_accounts") or set())
+    failure_accounts = (
+      authoritative_accounts - stale_accounts
+      if authoritative_accounts is not None
+      else set()
+    )
+    if failure_accounts or (scope_validation_failed and full_snapshot_attempt):
+      await _fail_closed_incomplete_snapshot(
+        device_id,
+        payload,
+        reported_at=_safe_snapshot_failure_time(
+          payload.get("source_event_at")
+        ),
+        failure_kind="SNAPSHOT_APPLY_FAILED",
+        failure_reason="FULL_SNAPSHOT_APPLY_FAILED",
+        account_ids_override=failure_accounts,
+      )
+    raise
+
+
+async def _process_delta_report_inner(
+  device_id: str,
+  payload: dict[str, Any],
+  *,
+  protocol_version: str = "1.0",
+  _full_attempt_state: Optional[dict[str, set[str]]] = None,
+) -> None:
+  full_attempt_state = _full_attempt_state if _full_attempt_state is not None else {}
+  stale_full_accounts: set[str] = set()
+  full_attempt_state["stale_accounts"] = stale_full_accounts
   declared_complete = payload.get("is_complete") is True
-  complete_account_ids = (
-    _complete_snapshot_account_ids(payload) if declared_complete else None
-  )
   full_snapshot_attempt = bool(
     declared_complete
     or "section_completeness_by_account" in payload
     or "unavailable_accounts" in payload
+  )
+  complete_account_ids = (
+    _complete_snapshot_account_ids(payload) if declared_complete else None
   )
   snapshot_id = str(payload.get("snapshot_id") or "")
   snapshot_hash = str(payload.get("snapshot_hash") or "")
@@ -743,7 +1169,34 @@ async def _process_delta_report(
     and complete_account_ids is not None
     and identity_valid
   )
-  reported_at = _parse_report_time(payload.get("source_event_at"))
+  reported_at = (
+    _parse_authoritative_snapshot_time(payload.get("source_event_at"))
+    if authoritative
+    else (
+      _safe_snapshot_failure_time(payload.get("source_event_at"))
+      if full_snapshot_attempt
+      else _parse_report_time(payload.get("source_event_at"))
+    )
+  )
+  position_service = PositionService()
+  full_snapshot_sequence: Optional[int] = None
+  full_snapshot_groups: dict[str, list[Any]] = {}
+  if authoritative:
+    # Parse and snapshot the account groups before any order/trade convergence.
+    # A malformed sequence is an authoritative full-attempt failure and is
+    # handled by the outer fail-closed boundary.
+    full_snapshot_sequence = _parse_authoritative_snapshot_sequence(payload)
+    groups_value = payload.get("positions_by_account")
+    if isinstance(groups_value, dict):
+      full_snapshot_groups = {
+        str(account_id or "").strip(): list(positions or [])
+        for account_id, positions in groups_value.items()
+        if str(account_id or "").strip()
+      }
+    else:
+      account_id = str(payload.get("account_id") or "").strip()
+      if account_id:
+        full_snapshot_groups[account_id] = list(payload.get("positions") or [])
   if full_snapshot_attempt and not authoritative:
     if protocol_version != "1.1":
       failure_kind = "SNAPSHOT_PROTOCOL_INVALID"
@@ -770,7 +1223,69 @@ async def _process_delta_report(
   if snapshot_identity_error:
     raise ValueError(snapshot_identity_error)
 
+  if authoritative:
+    begin_full_snapshot_attempt = getattr(
+      position_service,
+      "begin_full_snapshot_attempt",
+      None,
+    )
+    invalidate_reason = "SNAPSHOT_APPLY_IN_PROGRESS"
+    # Full snapshots first CAS their observed generation into a durable
+    # in-progress state.  This closes the old-complete window before any
+    # order/trade convergence runs outside the account lock.  A duplicate
+    # sequence is deliberately a no-op: the newer complete snapshot must
+    # remain usable and must never be downgraded.
+    if not callable(begin_full_snapshot_attempt):
+      raise RetryableReportError(
+        "完整快照缺少持久化 begin attempt 边界"
+      )
+    for account_id in sorted(full_snapshot_groups):
+      async with t_trade_account_coordination_lock(account_id):
+        result = await begin_full_snapshot_attempt(
+          account_id=account_id,
+          sequence=int(full_snapshot_sequence or 0),
+          reported_at=reported_at,
+          source="QMT_AGENT",
+        )
+        result_dict = dict(result) if isinstance(result, dict) else {}
+        if result_dict.get("reason") == "STALE_SEQUENCE":
+          stale_full_accounts.add(account_id)
+          continue
+        if not result_dict.get("applied", False):
+          raise RetryableReportError(
+            "完整快照 begin attempt 未完成: "
+            + str(result_dict.get("reason") or "UNKNOWN")
+          )
+        await _invalidate_t_trade_entry_authority_for_account(
+          account_id,
+          reason=invalidate_reason,
+        )
+
+  all_authoritative_accounts = set(full_snapshot_groups)
+
+  def skip_stale_full_item(
+    value: Any,
+    *,
+    unknown_account_is_stale: bool = False,
+  ) -> bool:
+    if not authoritative or not stale_full_accounts:
+      return False
+    raw_account_id = value.get("account_id") if isinstance(value, dict) else ""
+    account_id = str(raw_account_id or "").strip()
+    return bool(
+      account_id in stale_full_accounts
+      or (
+        not account_id
+        and (
+          unknown_account_is_stale
+          or bool(stale_full_accounts)
+        )
+      )
+    )
+
   for order in payload.get("orders") or []:
+    if skip_stale_full_item(order):
+      continue
     await _process_order_report(
       {
         "client_order_id": order.get("client_order_id"),
@@ -783,6 +1298,8 @@ async def _process_delta_report(
       }
     )
   for trade in payload.get("trades") or []:
+    if skip_stale_full_item(trade):
+      continue
     await _process_execution_report(
       {
         "client_order_id": trade.get("client_order_id"),
@@ -798,6 +1315,8 @@ async def _process_delta_report(
   for account in payload.get("accounts") or []:
     account_value = dict(account)
     account_id = str(account_value.get("account_id") or "").strip()
+    if skip_stale_full_item(account_value):
+      continue
     if full_snapshot_attempt and not _snapshot_section_is_complete(
       payload,
       account_id,
@@ -806,6 +1325,8 @@ async def _process_delta_report(
       continue
     await _upsert_account(account_value)
   for error in payload.get("order_errors") or []:
+    if skip_stale_full_item(error, unknown_account_is_stale=True):
+      continue
     reason = str(error.get("error_msg") or error.get("reason") or "")
     terminal_status = (
       "EXPIRED"
@@ -840,6 +1361,8 @@ async def _process_delta_report(
       ),
     )
   for error in payload.get("cancel_errors") or []:
+    if skip_stale_full_item(error, unknown_account_is_stale=True):
+      continue
     reason = str(error.get("error_msg") or error.get("reason") or "")
     client_order_id = str(error.get("client_order_id") or "")
     if client_order_id:
@@ -855,32 +1378,8 @@ async def _process_delta_report(
         reason=reason,
       )
 
-  sequence = int(
-    payload.get("source_sequence")
-    or payload.get("sequence")
-    or time_utils.now().timestamp() * 1_000_000
-  )
-  if authoritative:
-    groups_value = payload.get("positions_by_account")
-    if isinstance(groups_value, dict):
-      groups = groups_value.items()
-    else:
-      account_id = str(payload.get("account_id") or "")
-      groups = (
-        [(account_id, payload.get("positions") or [])]
-        if account_id
-        else []
-      )
-    for account_id, positions in groups:
-      await PositionService().apply_full_snapshot(
-        account_id=str(account_id),
-        positions=list(positions),
-        sequence=sequence,
-        reported_at=reported_at,
-        source="QMT_AGENT",
-        is_complete=True,
-      )
-  elif not full_snapshot_attempt:
+  full_snapshot_results: dict[str, dict[str, Any]] = {}
+  if not authoritative and not full_snapshot_attempt:
     default_account_id = str(payload.get("account_id") or "")
     deltas = payload.get("position_deltas")
     if deltas is None:
@@ -890,7 +1389,14 @@ async def _process_delta_report(
       account_id = str(value.get("account_id") or default_account_id)
       if not account_id:
         raise ValueError("持仓增量缺少 account_id")
-      await PositionService().apply_position_delta(value, account_id)
+      await _run_account_snapshot_mutation(
+        account_id,
+        lambda value=value, account_id=account_id: position_service.apply_position_delta(
+          value,
+          account_id,
+        ),
+        reason="BROKER_POSITION_DELTA_APPLIED",
+      )
 
   if authoritative:
     ready_accounts: list[str] = []
@@ -907,132 +1413,36 @@ async def _process_delta_report(
       if str(value)
     )
     for account_id in sorted(account_ids):
-      async with AsyncSessionLocal() as db:
-        existing_rollout = await db.get(AccountTradingRollout, account_id)
-        controlled_window_active = bool(
-          existing_rollout and existing_rollout.controlled_window_active
-        )
-        acknowledged_external_order_ids = {
-          str(value)
-          for value in list(
-            existing_rollout.controlled_window_external_order_ids or []
-          )
-        } if existing_rollout else set()
-        acknowledged_external_trade_ids = {
-          str(value)
-          for value in list(
-            existing_rollout.controlled_window_external_trade_ids or []
-          )
-        } if existing_rollout else set()
-        allow_external_activity = bool(
-          existing_rollout is None
-          or (
-            not existing_rollout.enabled
-            and not existing_rollout.kill_switch
-            and str(existing_rollout.stage).upper() in {"SHADOW", "PAUSED"}
-            and not controlled_window_active
+      if account_id in stale_full_accounts:
+        # A duplicate full report must not re-project an older snapshot over
+        # the current rollout or heartbeat state.
+        full_snapshot_results[account_id] = {"reason": "STALE_SEQUENCE"}
+        continue
+      async with t_trade_account_coordination_lock(account_id):
+        result, is_blocked, summary = (
+          await _reconcile_authoritative_full_account_locked(
+            account_id,
+            payload,
+            snapshot_id=snapshot_id,
+            snapshot_hash=snapshot_hash,
+            reported_at=reported_at,
+            sequence=int(full_snapshot_sequence or 0),
+            positions=full_snapshot_groups.get(account_id, []),
+            position_service=position_service,
           )
         )
-      reconciliation = await _snapshot_discrepancies(
-        account_id,
-        payload,
-        allow_external_activity=allow_external_activity,
-        acknowledged_external_order_ids=acknowledged_external_order_ids,
-        acknowledged_external_trade_ids=acknowledged_external_trade_ids,
-      )
-      discrepancies = list(reconciliation["blocking_discrepancies"])
-      async with AsyncSessionLocal() as db:
-        rollout = await db.get(
-          AccountTradingRollout,
-          account_id,
-          with_for_update=True,
-        )
-        if rollout is None:
-          rollout = AccountTradingRollout(account_id=account_id)
-          db.add(rollout)
-        rollout.last_snapshot_id = snapshot_id or None
-        rollout.last_snapshot_hash = snapshot_hash or None
-        rollout.last_snapshot_at = to_naive_utc(reported_at)
-        rollout.reconcile_status = (
-          "READY"
-          if authoritative and not discrepancies
-          else "RECONCILE_REQUIRED"
-        )
-        if not authoritative:
-          discrepancies.insert(
-            0,
-            {
-              "kind": "PROTOCOL_1_1_REQUIRED",
-              "business_id": account_id,
-            },
-          )
-        if discrepancies:
-          window_was_active = bool(rollout.controlled_window_active)
-          previous_stage = str(rollout.stage)
-          rollout.enabled = False
-          if not rollout.kill_switch:
-            rollout.stage = "PAUSED"
-          rollout.paused_reason = json.dumps(
-            discrepancies[:20],
-            ensure_ascii=False,
-            default=str,
-          )[:2000]
-          if window_was_active:
-            rollout.controlled_window_active = False
-            rollout.controlled_window_snapshot_id = None
-            rollout.controlled_window_snapshot_hash = None
-            rollout.controlled_window_started_at = None
-            rollout.controlled_window_started_by_user_id = None
-            rollout.controlled_window_external_order_ids = []
-            rollout.controlled_window_external_trade_ids = []
-            db.add(
-              AccountTradingRolloutEvent(
-                event_id=str(uuid.uuid4()),
-                account_id=account_id,
-                event_type="CONTROLLED_WINDOW_INVALIDATED",
-                previous_stage=previous_stage,
-                next_stage=str(rollout.stage),
-                snapshot_id=snapshot_id or None,
-                details={"discrepancies": discrepancies[:20]},
-                created_at=utcnow(),
-              )
-            )
+        full_snapshot_results[account_id] = result
+        if result.get("reason") == "STALE_SEQUENCE":
+          stale_full_accounts.add(account_id)
+          continue
+        if is_blocked:
           blocked_accounts.append(account_id)
         else:
-          if (
-            str(rollout.stage).upper() == "PAUSED"
-            and _was_automatic_reconciliation_pause(rollout.paused_reason)
-          ):
-            # A recovered automatic pause returns to the read-only preparation
-            # stage. It never silently resumes CANARY/LIVE order authority.
-            rollout.stage = "SHADOW"
-            rollout.enabled = False
-            rollout.paused_reason = None
           ready_accounts.append(account_id)
-        reconciliation_accounts[account_id] = {
-          "snapshotId": snapshot_id,
-          "snapshotAt": reported_at.isoformat(),
-          "status": rollout.reconcile_status,
-          "manualCoexistence": allow_external_activity,
-          "externalOrderCount": len(reconciliation["external_orders"]),
-          "externalTradeCount": len(reconciliation["external_trades"]),
-          "newExternalOrderCount": sum(
-            not bool(item.get("acknowledged"))
-            for item in reconciliation["external_orders"]
-          ),
-          "newExternalTradeCount": sum(
-            not bool(item.get("acknowledged"))
-            for item in reconciliation["external_trades"]
-          ),
-          "workingExternalOrderCount": sum(
-            str(item.get("status") or "")
-            in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
-            for item in reconciliation["external_orders"]
-          ),
-          "controlledWindowActive": bool(rollout.controlled_window_active),
-          "blockingDiscrepancyCount": len(discrepancies),
-        }
-        await db.commit()
+        reconciliation_accounts[account_id] = summary
+
+    if stale_full_accounts and stale_full_accounts == all_authoritative_accounts:
+      return
 
     async with AsyncSessionLocal() as db:
       heartbeat = await db.get(
@@ -1045,17 +1455,24 @@ async def _process_delta_report(
         account_details.update(reconciliation_accounts)
         details.update(
           {
-            "snapshotId": snapshot_id,
-            "snapshotHash": snapshot_hash,
-            "snapshotAt": reported_at.isoformat(),
             "readyAccounts": ready_accounts,
             "blockedAccounts": blocked_accounts,
             "accountReconciliation": account_details,
           }
         )
+        if not stale_full_accounts:
+          details.update(
+            {
+              "snapshotId": snapshot_id,
+              "snapshotHash": snapshot_hash,
+              "snapshotAt": reported_at.isoformat(),
+            }
+          )
         observed_at = utcnow()
         heartbeat.details = details
-        if _snapshot_can_promote_heartbeat(heartbeat.status):
+        if not stale_full_accounts and _snapshot_can_promote_heartbeat(
+          heartbeat.status
+        ):
           next_status = (
             "READY" if not blocked_accounts else "RECONCILE_REQUIRED"
           )
@@ -1077,6 +1494,229 @@ async def _process_delta_report(
                 heartbeat.details = details
         heartbeat.updated_at = observed_at
         await db.commit()
+
+
+async def _reconcile_authoritative_full_account_locked(
+  account_id: str,
+  payload: dict[str, Any],
+  *,
+  snapshot_id: str,
+  snapshot_hash: str,
+  reported_at: datetime,
+  sequence: int,
+  positions: list[Any],
+  position_service: PositionService,
+) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+  """Prepare, project, and finalize one full account under its lock."""
+
+  prepare = getattr(position_service, "prepare_full_snapshot", None)
+  if not callable(prepare):
+    raise RetryableReportError(
+      "完整快照缺少持久化 prepare 边界"
+    )
+  result = await prepare(
+      account_id=account_id,
+      positions=list(positions),
+      sequence=sequence,
+      reported_at=reported_at,
+      source="QMT_AGENT",
+  )
+  result_dict = dict(result) if isinstance(result, dict) else {}
+  if result_dict.get("reason") == "STALE_SEQUENCE":
+    # A concurrent writer should already be impossible under the shared
+    # account lock.  Keep this defensive branch so a stale duplicate can never
+    # rewrite rollout snapshot metadata or trigger a downgrade.
+    return result_dict, False, {}
+
+  async with AsyncSessionLocal() as db:
+    existing_rollout = await db.get(AccountTradingRollout, account_id)
+    controlled_window_active = bool(
+      existing_rollout and existing_rollout.controlled_window_active
+    )
+    acknowledged_external_order_ids = {
+      str(value)
+      for value in list(
+        existing_rollout.controlled_window_external_order_ids or []
+      )
+    } if existing_rollout else set()
+    acknowledged_external_trade_ids = {
+      str(value)
+      for value in list(
+        existing_rollout.controlled_window_external_trade_ids or []
+      )
+    } if existing_rollout else set()
+    allow_external_activity = bool(
+      existing_rollout is None
+      or (
+        not existing_rollout.enabled
+        and not existing_rollout.kill_switch
+        and str(existing_rollout.stage).upper() in {"SHADOW", "PAUSED"}
+        and not controlled_window_active
+      )
+    )
+  reconciliation = await _snapshot_discrepancies(
+    account_id,
+    payload,
+    allow_external_activity=allow_external_activity,
+    acknowledged_external_order_ids=acknowledged_external_order_ids,
+    acknowledged_external_trade_ids=acknowledged_external_trade_ids,
+  )
+  discrepancies = list(reconciliation["blocking_discrepancies"])
+  async with AsyncSessionLocal() as db:
+    rollout = await db.get(
+      AccountTradingRollout,
+      account_id,
+      with_for_update=True,
+    )
+    if rollout is None:
+      rollout = AccountTradingRollout(account_id=account_id)
+      db.add(rollout)
+    rollout.last_snapshot_id = snapshot_id or None
+    rollout.last_snapshot_hash = snapshot_hash or None
+    rollout.last_snapshot_at = to_naive_utc(reported_at)
+    rollout.reconcile_status = "READY" if not discrepancies else "RECONCILE_REQUIRED"
+    if discrepancies:
+      window_was_active = bool(rollout.controlled_window_active)
+      previous_stage = str(rollout.stage)
+      rollout.enabled = False
+      if not rollout.kill_switch:
+        rollout.stage = "PAUSED"
+      rollout.paused_reason = json.dumps(
+        discrepancies[:20],
+        ensure_ascii=False,
+        default=str,
+      )[:2000]
+      if window_was_active:
+        rollout.controlled_window_active = False
+        rollout.controlled_window_snapshot_id = None
+        rollout.controlled_window_snapshot_hash = None
+        rollout.controlled_window_started_at = None
+        rollout.controlled_window_started_by_user_id = None
+        rollout.controlled_window_external_order_ids = []
+        rollout.controlled_window_external_trade_ids = []
+        db.add(
+          AccountTradingRolloutEvent(
+            event_id=str(uuid.uuid4()),
+            account_id=account_id,
+            event_type="CONTROLLED_WINDOW_INVALIDATED",
+            previous_stage=previous_stage,
+            next_stage=str(rollout.stage),
+            snapshot_id=snapshot_id or None,
+            details={"discrepancies": discrepancies[:20]},
+            created_at=utcnow(),
+          )
+        )
+    else:
+      if (
+        str(rollout.stage).upper() == "PAUSED"
+        and _was_automatic_reconciliation_pause(rollout.paused_reason)
+      ):
+        # A recovered automatic pause returns to the read-only preparation
+        # stage.  It never silently resumes CANARY/LIVE order authority.
+        rollout.stage = "SHADOW"
+        rollout.enabled = False
+        rollout.paused_reason = None
+    summary = {
+      "snapshotId": snapshot_id,
+      "snapshotAt": reported_at.isoformat(),
+      "status": rollout.reconcile_status,
+      "manualCoexistence": allow_external_activity,
+      "externalOrderCount": len(reconciliation["external_orders"]),
+      "externalTradeCount": len(reconciliation["external_trades"]),
+      "newExternalOrderCount": sum(
+        not bool(item.get("acknowledged"))
+        for item in reconciliation["external_orders"]
+      ),
+      "newExternalTradeCount": sum(
+        not bool(item.get("acknowledged"))
+        for item in reconciliation["external_trades"]
+      ),
+      "workingExternalOrderCount": sum(
+        str(item.get("status") or "")
+        in {"PENDING", "SUBMITTED", "PARTIAL_FILLED"}
+        for item in reconciliation["external_orders"]
+      ),
+      "controlledWindowActive": bool(rollout.controlled_window_active),
+      "blockingDiscrepancyCount": len(discrepancies),
+    }
+    await db.commit()
+
+  try:
+    await _invalidate_t_trade_entry_authority_for_account(
+      account_id,
+      reason="BROKER_POSITION_SNAPSHOT_UPDATED",
+    )
+  except Exception as authority_error:
+    # Keep the prepared broker marker incomplete and block rollout while the
+    # same account lock is still held, before surfacing a retryable error.
+    marker_error: Optional[Exception] = None
+    try:
+      await position_service.mark_snapshot_failure(
+        account_id,
+        "SNAPSHOT_AUTHORITY_INVALIDATION_FAILED",
+      )
+    except Exception as exc:
+      marker_error = exc
+    async with AsyncSessionLocal() as db:
+      rollout = await db.get(
+        AccountTradingRollout,
+        account_id,
+        with_for_update=True,
+      )
+      if rollout is None:
+        rollout = AccountTradingRollout(account_id=account_id)
+        db.add(rollout)
+      rollout.reconcile_status = "RECONCILE_REQUIRED"
+      rollout.enabled = False
+      if not rollout.kill_switch:
+        rollout.stage = "PAUSED"
+      rollout.paused_reason = json.dumps(
+        [
+          {
+            "kind": "SNAPSHOT_AUTHORITY_INVALIDATION_FAILED",
+            "reason": str(authority_error),
+          }
+        ],
+        ensure_ascii=False,
+        default=str,
+      )[:2000]
+      await db.commit()
+    detail = str(authority_error)
+    if marker_error is not None:
+      detail += f"; marker={marker_error}"
+    raise RetryableReportError(
+      "完整快照 authority 失效边界未完成: " + detail
+    ) from authority_error
+
+  if not discrepancies:
+    finalize = getattr(position_service, "finalize_full_snapshot", None)
+    if not callable(finalize):
+      raise RetryableReportError(
+        "完整快照缺少持久化 finalize 边界"
+      )
+    finalized = await finalize(
+      account_id=account_id,
+      sequence=sequence,
+      reported_at=reported_at,
+      source="QMT_AGENT",
+    )
+    if not isinstance(finalized, dict) or not finalized.get("applied", False):
+      reason = (
+        finalized.get("reason")
+        if isinstance(finalized, dict)
+        else "UNKNOWN"
+      )
+      if reason == "STALE_SEQUENCE" and isinstance(finalized, dict):
+        # A direct/concurrent durable writer may have advanced or invalidated
+        # this generation after prepare. Treat it as a stale duplicate so the
+        # outer failure boundary cannot downgrade the newer current marker.
+        return finalized, False, {}
+      raise RetryableReportError(
+        "完整快照 finalize 未完成: " + str(reason or "UNKNOWN")
+      )
+    result_dict = finalized
+
+  return result_dict, bool(discrepancies), summary
 
 
 async def _snapshot_discrepancies(
@@ -1232,6 +1872,62 @@ def _parse_report_time(value: Any) -> datetime:
     except ValueError:
       pass
   return time_utils.now()
+
+
+def _parse_authoritative_snapshot_time(value: Any) -> datetime:
+  """Parse a full-snapshot timestamp without turning bad input into ``now``."""
+
+  if value is None or value == "":
+    return time_utils.now()
+  if isinstance(value, datetime):
+    return value
+  if isinstance(value, (int, float)) and not isinstance(value, bool):
+    numeric = float(value)
+    if not math.isfinite(numeric):
+      raise ValueError("完整账户快照 source_event_at 不是有限时间")
+    try:
+      return datetime.fromtimestamp(numeric, tz=time_utils.now().tzinfo)
+    except (OverflowError, OSError, ValueError) as exc:
+      raise ValueError("完整账户快照 source_event_at 不可解析") from exc
+  if isinstance(value, str) and value.strip():
+    try:
+      return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+      raise ValueError("完整账户快照 source_event_at 不可解析") from exc
+  raise ValueError("完整账户快照 source_event_at 类型无效")
+
+
+def _safe_snapshot_failure_time(value: Any) -> datetime:
+  """Return a local failure timestamp even when the report timestamp is bad."""
+
+  try:
+    return _parse_authoritative_snapshot_time(value)
+  except (TypeError, ValueError, OverflowError, OSError):
+    return time_utils.now()
+
+
+def _parse_authoritative_snapshot_sequence(payload: dict[str, Any]) -> int:
+  """Require an explicit positive integer generation for protocol-1.1 full data."""
+
+  if "source_sequence" in payload:
+    raw_value = payload.get("source_sequence")
+  elif "sequence" in payload:
+    raw_value = payload.get("sequence")
+  else:
+    raise ValueError("完整账户快照缺少正整数 sequence")
+  if raw_value is None or isinstance(raw_value, bool):
+    raise ValueError("完整账户快照 sequence 必须是正整数")
+  if isinstance(raw_value, float) and not raw_value.is_integer():
+    raise ValueError("完整账户快照 sequence 必须是正整数")
+  if isinstance(raw_value, Decimal) and raw_value != raw_value.to_integral_value():
+    raise ValueError("完整账户快照 sequence 必须是正整数")
+  try:
+    sequence = int(raw_value)
+  except (TypeError, ValueError, OverflowError) as exc:
+    raise ValueError("完整账户快照 sequence 必须是正整数") from exc
+  if sequence <= 0:
+    raise ValueError("完整账户快照 sequence 必须是正整数")
+  return sequence
 
 
 _FILL_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}
@@ -1404,8 +2100,13 @@ def _authoritative_snapshot_identity(
     report.message_type != "delta_report"
     or str(report.protocol_version or "") != "1.1"
     or payload.get("is_complete") is not True
-    or _complete_snapshot_account_ids(payload) is None
   ):
+    return None
+  try:
+    if _complete_snapshot_account_ids(payload) is None:
+      return None
+    _parse_authoritative_snapshot_sequence(payload)
+  except (RetryableReportError, TypeError, ValueError, OverflowError):
     return None
   snapshot_id = str(payload.get("snapshot_id") or "").strip()
   snapshot_hash = str(payload.get("snapshot_hash") or "").strip().lower()
@@ -1491,15 +2192,29 @@ async def _full_snapshot_zero_fill_items(
     return []
   snapshot_id, snapshot_hash = identity
   payload = dict(report.payload or {})
-  snapshot_sequence = max(
-    0,
-    int(payload.get("source_sequence") or payload.get("sequence") or 0),
-  )
-  if snapshot_sequence <= 0:
+  try:
+    snapshot_sequence = _parse_authoritative_snapshot_sequence(payload)
+  except (TypeError, ValueError, OverflowError):
     return []
 
   results: list[tuple[str, dict[str, Any]]] = []
   seen_orders: set[tuple[str, str]] = set()
+  checkpoint_by_account: dict[str, bool] = {}
+
+  async def has_current_ready_checkpoint(account_id: str) -> bool:
+    normalized_account = str(account_id or "").strip()
+    if not normalized_account:
+      return False
+    if normalized_account not in checkpoint_by_account:
+      rollout = await db.get(AccountTradingRollout, normalized_account)
+      checkpoint_by_account[normalized_account] = bool(
+        rollout is not None
+        and str(rollout.last_snapshot_id or "") == snapshot_id
+        and str(rollout.last_snapshot_hash or "") == snapshot_hash
+        and str(rollout.reconcile_status or "").upper() == "READY"
+      )
+    return checkpoint_by_account[normalized_account]
+
   for raw_order in payload.get("orders") or []:
     if not isinstance(raw_order, dict):
       continue
@@ -1532,6 +2247,7 @@ async def _full_snapshot_zero_fill_items(
       or not instrument_code
       or (client_order_id, broker_order_id) in seen_orders
       or not _snapshot_fully_covers_account(payload, account_id)
+      or not await has_current_ready_checkpoint(account_id)
     ):
       continue
     seen_orders.add((client_order_id, broker_order_id))
@@ -2272,6 +2988,27 @@ async def _stage_runtime_events(report: AgentReportInbox) -> None:
       # breaking the event+projection atomicity exercised by local tests.
       await db.begin()
       runtime_items = _report_items(report)
+      authoritative_identity = _authoritative_snapshot_identity(report)
+      if authoritative_identity is not None:
+        snapshot_id, snapshot_hash = authoritative_identity
+        checkpoint_by_account: dict[str, bool] = {}
+        filtered_runtime_items: list[tuple[str, dict[str, Any]]] = []
+        for event_type, item in runtime_items:
+          account_id = str(item.get("account_id") or "").strip()
+          if not account_id:
+            # A full snapshot item without an account cannot be safely tied to
+            # a current account after a mixed-generation replay.
+            continue
+          if account_id not in checkpoint_by_account:
+            rollout = await db.get(AccountTradingRollout, account_id)
+            checkpoint_by_account[account_id] = bool(
+              rollout is not None
+              and str(rollout.last_snapshot_id or "") == snapshot_id
+              and str(rollout.last_snapshot_hash or "") == snapshot_hash
+            )
+          if checkpoint_by_account[account_id]:
+            filtered_runtime_items.append((event_type, item))
+        runtime_items = filtered_runtime_items
       runtime_items.extend(await _full_snapshot_zero_fill_items(db, report))
       last_staged_at: Optional[datetime] = None
       for event_type, raw_item in runtime_items:

@@ -52,6 +52,12 @@ describe('workspace page surface contract', () => {
         /export function TTradeHealthConsole[\s\S]*?return \(\s*<aside className="([^"]+)"/,
     },
     {
+      label: 'TTradeSignalsView',
+      path: '../../../features/portfolio/pages/t-trade-global/TTradeSignalsView.tsx',
+      pattern:
+        /export function TTradeSignalsView[\s\S]*?return \(\s*<div className="([^"]+)"/,
+    },
+    {
       label: 'LimitUpBoardHealthConsole',
       path: '../../../features/strategies/components/LimitUpBoardHealthConsole.tsx',
       pattern:
@@ -96,7 +102,6 @@ describe('workspace page surface contract', () => {
     'monitorView',
     'positionsView',
     'eventsView',
-    'signalsView',
     'settingsView',
   ])('uses the workspace surface token for TTradeGlobalPage %s', viewName => {
     const source = readSource(

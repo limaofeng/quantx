@@ -29,6 +29,9 @@ from quantx_infrastructure.models.agent_runtime import (
   AccountTradingRollout,
   AccountTradingRolloutEvent,
 )
+from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
+  V3_ROLLOUT_GATE_CODES,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -52,7 +55,7 @@ _PREPARATION_CODES = {
 _ACTIVATION_CODES = _PREPARATION_CODES | {
   "CONTROLLED_WINDOW_ACTIVE",
   "NO_EXTERNAL_BROKER_ACTIVITY",
-}
+} | V3_ROLLOUT_GATE_CODES
 
 
 def _readiness(
@@ -89,6 +92,10 @@ def _readiness(
     "queued_command_count": 0,
     "dead_letter_count": 0,
     "unresolved_critical_alert_count": 0,
+    "v3_rollout_evidence": {
+      "schema_version": 1,
+      "fingerprint": "v3-evidence-fingerprint-1",
+    },
     "checks": [
       {
         "code": code,
@@ -317,6 +324,16 @@ async def _expire_dispatch_lease(session_factory, challenge_id: str) -> None:
         time_utils.now() - timedelta(seconds=10)
       ).isoformat(),
     }
+    await db.commit()
+
+
+async def _mark_controlled_window(session_factory) -> None:
+  async with session_factory() as db:
+    rollout = await db.get(AccountTradingRollout, "ACCOUNT-1")
+    assert rollout is not None
+    rollout.controlled_window_active = True
+    rollout.controlled_window_snapshot_id = "snapshot-1"
+    rollout.controlled_window_snapshot_hash = "a" * 64
     await db.commit()
 
 
@@ -600,6 +617,101 @@ async def test_gate_change_consumes_challenge_but_rejects_operation(
 
 
 @pytest.mark.asyncio
+async def test_canary_confirmation_can_atomically_record_pending_v3_operator_review(
+  control_database,
+  monkeypatch,
+) -> None:
+  await _mark_controlled_window(control_database)
+  pending_review = _readiness(
+    controlled_window_active=True,
+    failed_codes={"V3_OPERATOR_REVIEW_CONFIRMED"},
+  )
+  operations = _use_operations(
+    monkeypatch,
+    pending_review,
+    pending_review,
+  )
+  preview = await TTradeControlChallengeService.issue(
+    principal=_principal(),
+    request=_request(
+      action=TTradeControlAction.ACTIVATE_CANARY,
+      key="canary-v3-review-required-1",
+    ),
+  )
+
+  result = await TTradeControlChallengeService.confirm(
+    principal=_principal(),
+    challenge_id=preview.challenge_id,
+    confirmation_token=preview.confirmation_token or "",
+  )
+
+  assert result.challenge_consumed is True
+  assert result.operation_status == "APPLIED", (result.operation_code, result.message)
+  assert result.operation_code == "CANARY_ACTIVATION_APPLIED"
+  assert operations.activate_calls[0]["operation_id"] == preview.challenge_id
+
+
+@pytest.mark.asyncio
+async def test_canary_review_path_cannot_bypass_another_v3_gate(
+  control_database,
+  monkeypatch,
+) -> None:
+  await _mark_controlled_window(control_database)
+  operations = _use_operations(
+    monkeypatch,
+    _readiness(
+      controlled_window_active=True,
+      failed_codes={"V3_REPLAY_20_TRADING_DAYS"},
+    ),
+  )
+
+  with pytest.raises(TradeApprovalChallengeError) as rejected:
+    await TTradeControlChallengeService.issue(
+      principal=_principal(),
+      request=_request(
+        action=TTradeControlAction.ACTIVATE_CANARY,
+        key="canary-v3-replay-required-1",
+      ),
+    )
+
+  assert rejected.value.code == "T_TRADE_CONTROL_NOT_READY"
+  assert operations.activate_calls == []
+
+
+@pytest.mark.asyncio
+async def test_canary_confirmation_rejects_changed_v3_evidence_binding(
+  control_database,
+  monkeypatch,
+) -> None:
+  await _mark_controlled_window(control_database)
+  changed = _readiness(controlled_window_active=True)
+  changed["v3_rollout_evidence"]["fingerprint"] = "v3-evidence-fingerprint-2"
+  operations = _use_operations(
+    monkeypatch,
+    _readiness(controlled_window_active=True),
+    changed,
+  )
+  preview = await TTradeControlChallengeService.issue(
+    principal=_principal(),
+    request=_request(
+      action=TTradeControlAction.ACTIVATE_CANARY,
+      key="canary-v3-evidence-binding-1",
+    ),
+  )
+
+  result = await TTradeControlChallengeService.confirm(
+    principal=_principal(),
+    challenge_id=preview.challenge_id,
+    confirmation_token=preview.confirmation_token or "",
+  )
+
+  assert result.challenge_consumed is True
+  assert result.operation_status == "REJECTED"
+  assert result.operation_code == "READINESS_CHANGED"
+  assert operations.activate_calls == []
+
+
+@pytest.mark.asyncio
 async def test_real_switch_changes_fail_closed_with_testing_switches_off(
   control_database,
   monkeypatch,
@@ -727,7 +839,7 @@ async def test_event_marker_recovers_crash_after_apply_without_repeating_operati
         previous_stage="SHADOW",
         next_stage="SHADOW",
         snapshot_id="snapshot-1",
-        details={"operationId": preview.challenge_id},
+        details={"operationId": preview.challenge_id, "policyVersion": 3},
         created_at=utcnow(),
       )
     )
@@ -782,6 +894,46 @@ async def test_event_marker_with_wrong_operation_binding_is_rejected(
 
 
 @pytest.mark.asyncio
+async def test_begin_marker_with_same_snapshot_but_different_policy_is_rejected(
+  control_database,
+  monkeypatch,
+) -> None:
+  operations = _use_operations(monkeypatch)
+  preview = await TTradeControlChallengeService.issue(
+    principal=_principal(),
+    request=_request(key="marker-policy-conflict-1"),
+  )
+  await _expire_dispatch_lease(control_database, preview.challenge_id)
+  async with control_database() as db:
+    db.add(
+      AccountTradingRolloutEvent(
+        event_id=preview.challenge_id,
+        account_id="ACCOUNT-1",
+        event_type="CONTROLLED_WINDOW_STARTED",
+        actor_user_id="user-1",
+        previous_stage="SHADOW",
+        next_stage="SHADOW",
+        snapshot_id="snapshot-1",
+        details={
+          "operationId": preview.challenge_id,
+          "policyVersion": 4,
+        },
+        created_at=utcnow(),
+      )
+    )
+    await db.commit()
+
+  with pytest.raises(TradeApprovalChallengeError) as conflict:
+    await TTradeControlChallengeService.confirm(
+      principal=_principal(),
+      challenge_id=preview.challenge_id,
+      confirmation_token=preview.confirmation_token or "",
+    )
+  assert conflict.value.code == "CONTROL_OPERATION_MARKER_CONFLICT"
+  assert operations.begin_calls == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_confirmation_uses_fresh_lease_and_applies_once(
   control_database,
   monkeypatch,
@@ -813,4 +965,53 @@ async def test_concurrent_confirmation_uses_fresh_lease_and_applies_once(
   assert concurrent.challenge_consumed is True
   assert concurrent.operation_status == "DISPATCHING"
   assert first.operation_status == "APPLIED"
+  assert len(operations.begin_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_preview_and_confirmation_share_session_then_challenge_lock_order(
+  control_database,
+  monkeypatch,
+) -> None:
+  operations = _use_operations(monkeypatch)
+  preview = await TTradeControlChallengeService.issue(
+    principal=_principal(),
+    request=_request(key="preview-confirm-lock-order-1"),
+  )
+
+  original_lock = TTradeControlChallengeService._lock_current_principal
+  barrier = asyncio.Barrier(2)
+
+  async def synchronized_lock(cls, db, principal, account_id):
+    current = await original_lock(db, principal, account_id)
+    await barrier.wait()
+    return current
+
+  monkeypatch.setattr(
+    TTradeControlChallengeService,
+    "_lock_current_principal",
+    classmethod(synchronized_lock),
+  )
+
+  confirmation_task = asyncio.create_task(
+    TTradeControlChallengeService.confirm(
+      principal=_principal(),
+      challenge_id=preview.challenge_id,
+      confirmation_token=preview.confirmation_token or "",
+    )
+  )
+  preview_task = asyncio.create_task(
+    TTradeControlChallengeService.issue(
+      principal=_principal(),
+      request=_request(key="preview-confirm-lock-order-1"),
+    )
+  )
+  confirmation, replayed_preview = await asyncio.wait_for(
+    asyncio.gather(confirmation_task, preview_task),
+    timeout=2,
+  )
+
+  assert confirmation.challenge_consumed is True
+  assert replayed_preview.challenge_id == preview.challenge_id
+  assert replayed_preview.confirmation_token is None
   assert len(operations.begin_calls) == 1

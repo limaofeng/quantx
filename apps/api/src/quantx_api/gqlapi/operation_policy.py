@@ -130,6 +130,7 @@ _register(
     "tTradeBatchEventsPage",
     "tTradeBatches",
     "tTradeBatchesPage",
+    "tTradeCandidateTrace",
     "tTradeGlobalMonitor",
     "tTradeImportedEntries",
     "tTradeReplay",
@@ -138,8 +139,8 @@ _register(
     "tTradeReplayPreparation",
     "tTradeSession",
     "tTradeSessions",
-    "tTradeSignalHistory",
-    "tTradeSignalHistoryPage",
+    "tTradeSignalDiagnostics",
+    "tTradeSignalEvaluations",
     "validateTTradeLiveReadiness",
   },
 )
@@ -345,11 +346,11 @@ _register(
     "pauseTTradeEntries",
     "previewTTradeControl",
     "previewTTradeEntryApproval",
+    "previewTTradeSignalPolicy",
     "reconcileTTradeGlobalMonitor",
     "rejectTTradeEntry",
     "resolveOperationalAlert",
     "saveTTradeGlobalMonitor",
-    "startTTradeSession",
     "stopTTradeSession",
   },
   audiences=WEB_AND_NATIVE,
@@ -508,9 +509,7 @@ _register(
 )
 
 
-def operation_policy(
-  operation_name: str, field_name: str
-) -> GraphQLOperationPolicy:
+def operation_policy(operation_name: str, field_name: str) -> GraphQLOperationPolicy:
   key = (operation_name, normalize_field_name(field_name))
   try:
     return _POLICIES[key]

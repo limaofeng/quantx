@@ -5,7 +5,9 @@ from typing import List, Optional
 
 import strawberry
 
-from ..resolvers.t_trade import TTradeResolver
+from quantx_api.monitoring.metrics import record_t_trade_client_event
+
+from ..resolvers.t_trade import EngineCommandPendingError, TTradeResolver
 from ..resolvers.trading_safety import AccountExecutionSafetyResolver
 from ..security import authorized_account_id, principal_from_context
 from ..t_trade_control import (
@@ -23,6 +25,10 @@ from ..types.t_trade_types import (
   TTradeBatchEvent,
   TTradeBatchEventPage,
   TTradeBatchPage,
+  TTradeCandidateApprovalExpectationInput,
+  TTradeCandidateTrace,
+  TTradeClientTelemetryInput,
+  TTradeClientTelemetryResult,
   TTradeControlConfirmationInput,
   TTradeControlConfirmationResult,
   TTradeControlPreview,
@@ -44,9 +50,11 @@ from ..types.t_trade_types import (
   TTradeReplayStartInput,
   TTradeRolloutTarget,
   TTradeSession,
-  TTradeSignalHistoryEntry,
-  TTradeSignalHistoryPage,
-  TTradeStartInput,
+  TTradeSignalDiagnostics,
+  TTradeSignalEvaluationKind,
+  TTradeSignalEvaluationPage,
+  TTradeSignalPolicyPreviewInput,
+  TTradeSignalPolicyPreviewResult,
 )
 from ..types.trade_approval_types import (
   TradeApprovalConfirmationResult,
@@ -90,18 +98,58 @@ class TTradeQuery:
       after,
     )
 
-  @strawberry.field(description="游标分页查询做 T 信号历史")
-  async def t_trade_signal_history_page(
+  @strawberry.field(description="查询 V3 做 T 信号评估证据，默认只返回 MATERIAL")
+  async def t_trade_signal_evaluations(
     self,
     info: strawberry.types.Info,
     account_id: str,
+    stock_code: Optional[str] = None,
+    event_kinds: Optional[List[TTradeSignalEvaluationKind]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
     first: int = 30,
     after: Optional[str] = None,
-  ) -> TTradeSignalHistoryPage:
-    return await TTradeResolver.list_signal_history_page(
+  ) -> TTradeSignalEvaluationPage:
+    return await TTradeResolver.list_signal_evaluations(
       authorized_account_id(info, account_id),
-      first,
-      after,
+      stock_code=stock_code,
+      event_kinds=event_kinds,
+      start_time=start_time,
+      end_time=end_time,
+      first=first,
+      after=after,
+    )
+
+  @strawberry.field(description="按候选标识追溯评估、意图、委托、成交与退出计划")
+  async def t_trade_candidate_trace(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    strategy_run_id: str,
+    candidate_id: str,
+  ) -> Optional[TTradeCandidateTrace]:
+    return await TTradeResolver.candidate_trace(
+      authorized_account_id(info, account_id),
+      strategy_run_id,
+      candidate_id,
+    )
+
+  @strawberry.field(description="查询 V3 做 T 信号诊断聚合及其统计口径")
+  async def t_trade_signal_diagnostics(
+    self,
+    info: strawberry.types.Info,
+    account_id: str,
+    start_time: datetime,
+    end_time: datetime,
+    stock_code: Optional[str] = None,
+    merge_versions: bool = False,
+  ) -> TTradeSignalDiagnostics:
+    return await TTradeResolver.signal_diagnostics(
+      authorized_account_id(info, account_id),
+      stock_code=stock_code,
+      start_time=start_time,
+      end_time=end_time,
+      merge_versions=merge_versions,
     )
 
   @strawberry.field(description="查询做 T 生产就绪和灰度状态")
@@ -184,18 +232,6 @@ class TTradeQuery:
       authorized_account_id(info, account_id)
     )
 
-  @strawberry.field(description="查询账户最近的做 T 买入确认信号历史")
-  async def t_trade_signal_history(
-    self,
-    info: strawberry.types.Info,
-    account_id: str,
-    limit: int = 50,
-  ) -> List[TTradeSignalHistoryEntry]:
-    return await TTradeResolver.list_signal_history(
-      authorized_account_id(info, account_id),
-      limit,
-    )
-
   @strawberry.field(description="查询单个做 T 会话")
   async def t_trade_session(
     self,
@@ -263,6 +299,29 @@ class TTradeQuery:
 
 @strawberry.type(description="持仓做 T 操作")
 class TTradeMutation:
+  @strawberry.mutation(description="上报做 T V3 客户端固定低基数刷新遥测")
+  async def record_t_trade_client_telemetry(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeClientTelemetryInput,
+  ) -> TTradeClientTelemetryResult:
+    authorized_account_id(info, input.account_id)
+    record_t_trade_client_event(
+      surface=input.surface.value,
+      platform=input.platform.value,
+      event=input.event.value,
+    )
+    return TTradeClientTelemetryResult(accepted=True)
+
+  @strawberry.mutation(description="纯校验并规范化 V3 做 T 信号规则，不修改监控配置")
+  async def preview_t_trade_signal_policy(
+    self,
+    info: strawberry.types.Info,
+    input: TTradeSignalPolicyPreviewInput,
+  ) -> TTradeSignalPolicyPreviewResult:
+    authorized_account_id(info, input.account_id)
+    return await TTradeResolver.preview_signal_policy(input)
+
   @strawberry.mutation(description="确认已查看运行告警")
   async def acknowledge_operational_alert(
     self,
@@ -311,19 +370,12 @@ class TTradeMutation:
     self,
     info: strawberry.types.Info,
     account_id: str,
+    idempotency_key: str,
   ) -> TTradeGlobalMutationResult:
     return await TTradeResolver.reconcile_global_monitor(
-      authorized_account_id(info, account_id)
+      authorized_account_id(info, account_id),
+      idempotency_key,
     )
-
-  @strawberry.mutation(description="启动持仓做 T 会话")
-  async def start_t_trade_session(
-    self,
-    info: strawberry.types.Info,
-    input: TTradeStartInput,
-  ) -> TTradeMutationResult:
-    authorized_account_id(info, input.account_id)
-    return await TTradeResolver.start_session(input)
 
   @strawberry.mutation(description="确认做 T 买入信号")
   async def approve_t_trade_entry(
@@ -331,8 +383,8 @@ class TTradeMutation:
     info: strawberry.types.Info,
     run_id: str,
     intent_id: str,
-    expected_signal_version: int = 0,
-    idempotency_key: str = "",
+    expectation: TTradeCandidateApprovalExpectationInput,
+    idempotency_key: str,
   ) -> TTradeMutationResult:
     owner_account_id = await TTradeResolver.session_account_id(run_id)
     authorized_account_id(info, owner_account_id)
@@ -340,11 +392,11 @@ class TTradeMutation:
     return await TTradeResolver.approve_entry(
       run_id,
       intent_id,
-      expected_signal_version=expected_signal_version,
+      expectation=expectation,
       idempotency_key=idempotency_key,
       actor_id=principal.user_id,
       device_session_id=principal.device_session_id,
-      approval_channel="GRAPHQL_LEGACY",
+      approval_channel="GRAPHQL",
     )
 
   @strawberry.mutation(description="生成一次做 T 买入确认的短时设备绑定预览")
@@ -384,27 +436,56 @@ class TTradeMutation:
     run_id: str,
     intent_id: str,
     confirmation_token: str,
+    expectation: TTradeCandidateApprovalExpectationInput,
   ) -> TradeApprovalConfirmationResult:
     principal = principal_from_context(info.context)
     principal.require_permission("trade:approve")
+    challenge_id: Optional[str] = None
     try:
       owner_account_id = await TTradeResolver.session_account_id(run_id)
       resolved_account_id = authorized_account_id(info, owner_account_id)
-      challenge_id = await TradeApprovalChallengeService.consume(
+      command_payload = TTradeResolver.approval_command_payload(
+        run_id,
+        intent_id,
+        expectation=expectation,
+        actor_id=principal.user_id,
+        device_session_id=principal.device_session_id,
+        approval_channel="IOS_BIOMETRIC",
+      )
+      dispatch = await TradeApprovalChallengeService.consume(
         principal=principal,
         action=T_TRADE_ENTRY_APPROVAL,
         account_id=resolved_account_id,
         run_id=run_id,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
+        command_type="T_TRADE_APPROVE_ENTRY",
+        command_aggregate_id=run_id,
+        command_idempotency_key_factory=lambda value: (
+          TTradeResolver.approval_command_idempotency_key(
+            account_id=resolved_account_id,
+            run_id=run_id,
+            intent_id=intent_id,
+            client_key=value,
+          )
+        ),
+        command_payload=command_payload,
+        return_command_reference=True,
       )
-      result = await TTradeResolver.approve_entry(
-        run_id,
-        intent_id,
-        idempotency_key=challenge_id,
-        actor_id=principal.user_id,
-        device_session_id=principal.device_session_id,
-        approval_channel="IOS_BIOMETRIC",
+      challenge_id = dispatch.challenge_id
+      result_payload = await TTradeResolver._existing_engine_request(
+        dispatch.message_id,
+        "T_TRADE_APPROVE_ENTRY",
+      )
+      result = TTradeMutationResult(
+        success=bool(result_payload.get("success")),
+        code=str(result_payload.get("code", "")),
+        message=str(result_payload.get("message", "")),
+        session=(
+          TTradeResolver._session_type(result_payload["session"])
+          if result_payload.get("session")
+          else None
+        ),
       )
       return TradeApprovalConfirmationResult(
         success=result.success,
@@ -413,9 +494,33 @@ class TTradeMutation:
         challenge_id=challenge_id,
       )
     except TradeApprovalChallengeError as exc:
-      return TradeApprovalConfirmationResult(False, exc.code, exc.message)
+      return TradeApprovalConfirmationResult(
+        False,
+        exc.code,
+        exc.message,
+        challenge_id=challenge_id,
+      )
+    except EngineCommandPendingError as exc:
+      return TradeApprovalConfirmationResult(
+        False,
+        "T_TRADE_APPROVE_ENTRY_COMMAND_PENDING",
+        f"确认请求仍在处理中，尚不知是否已提交；请稍后重试（命令 {exc.receipt.message_id}）",
+        challenge_id=challenge_id,
+      )
     except ValueError as exc:
-      return TradeApprovalConfirmationResult(False, "VALIDATION_FAILED", str(exc))
+      return TradeApprovalConfirmationResult(
+        False,
+        "VALIDATION_FAILED",
+        str(exc),
+        challenge_id=challenge_id,
+      )
+    except Exception:
+      return TradeApprovalConfirmationResult(
+        False,
+        "T_TRADE_APPROVE_ENTRY_OUTCOME_UNKNOWN",
+        "确认请求提交结果尚不知是否已提交，请继续重试原确认请求",
+        challenge_id=challenge_id,
+      )
 
   @strawberry.mutation(
     name="previewTTradeControl",
@@ -542,7 +647,9 @@ class TTradeMutation:
     self,
     info: strawberry.types.Info,
     account_id: str,
+    policy_version: int,
     snapshot_id: str,
+    idempotency_key: str,
   ) -> TTradeOperationsMutationResult:
     resolved = authorized_account_id(info, account_id)
     principal = principal_from_context(info.context)
@@ -550,7 +657,9 @@ class TTradeMutation:
     return await TTradeResolver.begin_controlled_window(
       resolved,
       user_id=principal.user_id,
+      policy_version=policy_version,
       snapshot_id=snapshot_id,
+      idempotency_key=idempotency_key,
     )
 
   @strawberry.mutation(description="完成门禁检查并启用 Canary 或开发环境正式 LIVE")
@@ -559,6 +668,8 @@ class TTradeMutation:
     info: strawberry.types.Info,
     account_id: str,
     policy_version: int,
+    snapshot_id: str,
+    idempotency_key: str,
     target_stage: TTradeRolloutTarget = TTradeRolloutTarget.CANARY,
     confirmation: str = "",
   ) -> TTradeOperationsMutationResult:
@@ -569,8 +680,10 @@ class TTradeMutation:
       resolved,
       user_id=principal.user_id,
       policy_version=policy_version,
+      snapshot_id=snapshot_id,
       target_stage=target_stage,
       confirmation=confirmation,
+      idempotency_key=idempotency_key,
     )
 
   @strawberry.mutation(description="停止做 T 新买入，继续保护已有批次")
@@ -595,6 +708,7 @@ class TTradeMutation:
     info: strawberry.types.Info,
     account_id: str,
     reason: str,
+    idempotency_key: str,
   ) -> TTradeOperationsMutationResult:
     resolved = authorized_account_id(info, account_id)
     principal = principal_from_context(info.context)
@@ -603,6 +717,7 @@ class TTradeMutation:
       resolved,
       reason,
       user_id=principal.user_id,
+      idempotency_key=idempotency_key,
     )
 
   @strawberry.mutation(description="撤销当前仍可撤的做 T 委托")

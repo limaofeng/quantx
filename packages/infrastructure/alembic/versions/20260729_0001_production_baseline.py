@@ -71,6 +71,9 @@ POST_BASELINE_TABLES = {
   "ios_push_category_preferences",
   "ios_push_registrations",
   "trade_confirmation_challenges",
+  "t_trade_instrument_profiles",
+  "t_trade_candidate_outcomes",
+  "t_trade_opportunity_evaluations",
   "t_trade_replay_projections",
 }
 POST_BASELINE_COLUMNS = {
@@ -114,6 +117,10 @@ POST_BASELINE_COLUMNS = {
 }
 POST_BASELINE_INDEXES = {
   "orders": {"ix_orders_exit_plan_cost_basis"},
+  # Added by 20260823_0030 for the candidate-outcome repair cursor.  Keep it
+  # out of the immutable baseline so a fresh database does not create the
+  # index before the revision that owns it runs.
+  "strategy_runtime_events": {"ix_strategy_runtime_event_run_created"},
 }
 
 

@@ -6,11 +6,14 @@
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Dict, List, Optional, Union
 
 import pandas as pd
+from quantx_contracts import HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
 
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.models.tick import Tick
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
@@ -19,8 +22,82 @@ from quantx_infrastructure.services.divid_factor_service import DividFactorServi
 from quantx_infrastructure.services.instrument_service import InstrumentService
 
 
+class HistoricalTickPaginationError(ValueError):
+  """Raised when a historical Tick stream cannot prove completeness."""
+
+
+def _strict_source_identity(tick: Tick) -> tuple[int, int]:
+  source_value = getattr(tick, "source_time_ms", None)
+  ordinal_value = getattr(tick, "tick_ordinal", None)
+  if isinstance(source_value, bool) or isinstance(ordinal_value, bool):
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity contains a boolean value"
+    )
+  try:
+    source_time_ms = int(source_value)
+    tick_ordinal = int(ordinal_value)
+  except (TypeError, ValueError, OverflowError) as exc:
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity is not integral"
+    ) from exc
+  if (
+    source_time_ms <= 0
+    or tick_ordinal < 0
+    or tick_ordinal >= HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
+  ):
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity is missing or out of range"
+    )
+  if source_value != source_time_ms or ordinal_value != tick_ordinal:
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity is not losslessly represented"
+    )
+  return source_time_ms, tick_ordinal
+
+
+def _storage_time_utc(source_time_ms: int, tick_ordinal: int) -> datetime:
+  try:
+    from quantx_infrastructure.core.data.tick_identity import tick_storage_time
+
+    return time_utils.to_utc(
+      tick_storage_time(source_time_ms, tick_ordinal)
+    )
+  except (OverflowError, ValueError) as exc:
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity cannot produce a storage timestamp"
+    ) from exc
+
+
+def _validate_storage_time(
+  tick: Tick,
+  source_key: tuple[int, int],
+) -> None:
+  raw_time = getattr(tick, "time", None)
+  if hasattr(raw_time, "to_pydatetime"):
+    raw_time = raw_time.to_pydatetime()
+  if not isinstance(raw_time, datetime):
+    raise HistoricalTickPaginationError(
+      "historical Tick storage time is missing or not a datetime"
+    )
+  try:
+    actual_time = time_utils.to_utc(raw_time)
+  except (TypeError, ValueError, OverflowError, OSError) as exc:
+    raise HistoricalTickPaginationError(
+      "historical Tick storage time cannot be normalized"
+    ) from exc
+  expected_time = _storage_time_utc(*source_key)
+  if actual_time != expected_time:
+    raise HistoricalTickPaginationError(
+      "historical Tick storage time does not match source identity"
+    )
+
+
 class HistoricalMarketDataService:
   """历史市场数据服务类"""
+
+  MAX_TICK_PAGE_SIZE = 10_000
+  DEFAULT_TICK_MAX_PAGES = 1_024
+  DEFAULT_TICK_MAX_SOURCE_ROWS = 2_000_000
 
   _BASE_PERIODS = {"1m", "1d"}
   _INTRADAY_AGG_MAP = {
@@ -535,6 +612,123 @@ class HistoricalMarketDataService:
       if adjusted is not None:
         return adjusted
     return ticks
+
+  async def iter_tick_pages(
+    self,
+    *,
+    stock_code: str,
+    start_time: datetime,
+    end_time: datetime,
+    page_size: int = MAX_TICK_PAGE_SIZE,
+    max_pages: int = DEFAULT_TICK_MAX_PAGES,
+    max_source_ticks: int = DEFAULT_TICK_MAX_SOURCE_ROWS,
+  ) -> AsyncIterator[List[Tick]]:
+    """Stream historical Tick pages using a strict source-identity cursor.
+
+    This path is intentionally separate from ``get_tick_data``.  The latter
+    remains an offset-oriented compatibility API, while profile materializing
+    must prove that every source row was visited.  A terminal empty query is
+    always performed after the last non-empty page, including a short page;
+    this prevents a backend-side page cap from being mistaken for end of
+    history.
+    """
+
+    requested_page_size = int(page_size)
+    if requested_page_size <= 0 or requested_page_size > self.MAX_TICK_PAGE_SIZE:
+      raise ValueError("historical Tick page size must be between 1 and 10000")
+    page_limit = int(max_pages)
+    if page_limit <= 0:
+      raise ValueError("historical Tick max_pages must be positive")
+    source_limit = int(max_source_ticks)
+    if source_limit <= 0:
+      raise ValueError("historical Tick max_source_ticks must be positive")
+
+    cursor: Optional[tuple[int, int]] = None
+    previous_key: Optional[tuple[int, int]] = None
+    page_count = 0
+    source_count = 0
+    while True:
+      # The final empty probe is not a data page.  It is required to prove
+      # completeness when the last data page happens to be full.
+      if page_count >= page_limit:
+        page = await self._read_source_identity_page(
+          stock_code=stock_code,
+          start_time=start_time,
+          end_time=end_time,
+          after=cursor,
+          limit=requested_page_size,
+        )
+        if page:
+          raise HistoricalTickPaginationError(
+            "historical Tick page limit reached before the source was exhausted"
+          )
+        return
+
+      page = await self._read_source_identity_page(
+        stock_code=stock_code,
+        start_time=start_time,
+        end_time=end_time,
+        after=cursor,
+        limit=requested_page_size,
+      )
+      if not page:
+        return
+      if len(page) > requested_page_size:
+        raise HistoricalTickPaginationError(
+          "historical Tick source returned more rows than the requested page"
+        )
+
+      page_previous = previous_key
+      for tick in page:
+        key = _strict_source_identity(tick)
+        _validate_storage_time(tick, key)
+        if page_previous is not None and key <= page_previous:
+          raise HistoricalTickPaginationError(
+            "historical Tick page is duplicated, unordered, or non-progressing"
+          )
+        page_previous = key
+      if page_previous is None:
+        raise HistoricalTickPaginationError("historical Tick page has no source rows")
+
+      source_count += len(page)
+      if source_count > source_limit:
+        raise HistoricalTickPaginationError(
+          "historical Tick source row limit reached before completeness was proven"
+        )
+      page_count += 1
+      previous_key = page_previous
+      cursor = page_previous
+      yield page
+
+  async def _read_source_identity_page(
+    self,
+    *,
+    stock_code: str,
+    start_time: datetime,
+    end_time: datetime,
+    after: Optional[tuple[int, int]],
+    limit: int,
+  ) -> List[Tick]:
+    reader = getattr(self.tick_repo, "find_source_identity_page", None)
+    if not callable(reader):
+      raise HistoricalTickPaginationError(
+        "Tick repository does not provide strict source-identity pagination"
+      )
+    try:
+      return await asyncio.to_thread(
+        reader,
+        stock_code=stock_code,
+        start_time=start_time,
+        end_time=end_time,
+        after=after,
+        limit=limit,
+      )
+    except HistoricalTickPaginationError:
+      raise
+    except ValueError as exc:
+      raise HistoricalTickPaginationError(
+        "historical Tick repository query could not prove page integrity"
+      ) from exc
 
   def clear_klines(self, period: str, stock_code: str = None) -> int:
     """清除K线数据"""

@@ -15,27 +15,50 @@ Engine 策略执行器 - 专注于策略运行的并发执行和资源管理
 
 import asyncio
 import copy
+import hashlib
 import inspect
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from enum import Enum
 from math import isfinite
 from time import monotonic
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Type
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Mapping, Optional, Type
 
+from quantx_application.t_trade_v3 import (
+  D1ProfileReadReason,
+  D1ProfileReadRequest,
+  EvaluateIntentEmissionGate,
+  EvaluationMaterializationError,
+  IntentEmissionGateInput,
+  MaterializeEvaluationAfterCAS,
+  PostCasEvaluationInput,
+  ReadD1ReferenceProfile,
+  TTradeAccountFacts,
+  compute_t_trade_account_facts,
+)
 from quantx_contracts.market_stream import (
   MARKET_STREAM_MAX_CAPTURE_AGE_SECONDS,
   MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS,
 )
 from quantx_domain.brokers.backtest import BacktestBroker
-from quantx_domain.brokers.base import BrokerBase, OrderRequest, OrderStatus, Position
+from quantx_domain.brokers.base import (
+  BrokerBase,
+  OrderRequest,
+  OrderStatus,
+  Position,
+  TradeRecord,
+)
 from quantx_domain.brokers.base import OrderType as BrokerOrderType
 from quantx_domain.brokers.simulator import SimulatorBroker
 from quantx_domain.strategies.base import (
+  ManualApprovalRecoveryCandidate,
+  MarketDataContext,
+  MarketDataSession,
   OrderStateEvent,
   StrategyBase,
   StrategyCadence,
@@ -48,6 +71,7 @@ from quantx_domain.strategies.base import (
   TradeIntentDirection,
   TradeIntentExecutionMode,
   TradeIntentPriority,
+  validate_runtime_state_patch_contents,
 )
 from quantx_domain.trading import (
   EXIT_PLAN_BOOK_STATE_KEY,
@@ -67,6 +91,7 @@ from quantx_domain.trading import (
   ExitT1Policy,
   ManagedEntryPlanState,
   MarketDataSnapshot,
+  OpportunityPolicy,
   OrderRiskDecision,
   OrderSizer,
   PortfolioOrchestrationLayer,
@@ -86,6 +111,12 @@ from quantx_infrastructure.core.data import (
   HistoricalDataAdapter,
   adapter_manager,
 )
+from quantx_infrastructure.core.data.tick_identity import (
+  normalize_ticks_losslessly,
+  tick_page_content_identity,
+  tick_snapshot_identity,
+  tick_source_time_ms,
+)
 from quantx_infrastructure.core.market_data_manager import MarketDataManager
 from quantx_infrastructure.core.runtime_log_manager import RuntimeLogManager
 from quantx_infrastructure.core.strategy_performance import (
@@ -101,6 +132,7 @@ from quantx_infrastructure.models.agent_runtime import (
   StrategyRuntimeEvent,
   TradeCommandOutbox,
 )
+from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_authorization_service import (
@@ -108,15 +140,37 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
   scope_from_managed_entry_config,
 )
+from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
+  TTradeCandidateOutcomePersistenceFacade,
+)
+from quantx_infrastructure.services.t_trade_monitor_projection_service import (
+  TTradeMonitorProjectionService,
+  t_trade_monitor_projection_service,
+)
+from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
+  T_TRADE_OPPORTUNITY_EVALUATION_EVENT,
+  TTradeOpportunityRuntimeService,
+  t_trade_opportunity_runtime_service,
+)
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
   TTradeReplayUpdateKind,
   t_trade_replay_projection_service,
 )
+from quantx_infrastructure.services.t_trade_signal_diagnostics_service import (
+  TTradeSignalDiagnosticsService,
+)
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from .replay_clock import ReplayClock
+from .t_trade_coordination import t_trade_account_coordination_lock
+from .t_trade_observability import (
+  TTradeRuntimeObservability,
+  t_trade_runtime_observability,
+)
+from .t_trade_phase_one_baseline import TTradePhaseOneBaselineAccumulator
 
 if TYPE_CHECKING:
   from quantx_infrastructure.core.market_data_manager import MarketDataManager
@@ -129,10 +183,23 @@ _T_TRADE_REPLAY_MAX_TICK_PAGES_PER_WINDOW = 100
 _DURABLE_EVENT_APPLY_TIMEOUT_SECONDS = 10.0
 _RUNTIME_MARKET_EVENT_QUEUE_CAPACITY = 256
 _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS = 3.0
+_T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS = 30.0
+# Profile snapshots are process-local decision inputs.  Keep their cardinality
+# bounded independently from the eligibility snapshot so a long-running
+# account-level runtime cannot grow forever as its universe rotates.
+_T_TRADE_PROFILE_CACHE_MAX_ENTRIES = 4096
+# The eligibility map is a point-in-time runtime input, not an unbounded
+# holding/session cache.  A single account does not need more entries than
+# this; rejecting a larger reconcile keeps the fail-closed boundary bounded.
+_T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS = 4096
 
 
 class RuntimeConsumerUnavailable(RuntimeError):
   """A durable report cannot currently reach a live serial consumer."""
+
+
+class _PendingApprovalStatusPersistenceError(RuntimeError):
+  """A manual intent terminal status did not reach its durable truth."""
 
 
 class ExecutionStatus(Enum):
@@ -194,9 +261,7 @@ class StrategyRuntime:
   event_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
   #: 可丢弃但有界的实时行情队列；不得承载控制或券商回报。
   market_event_queue: asyncio.Queue = field(
-    default_factory=lambda: asyncio.Queue(
-      maxsize=_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY
-    ),
+    default_factory=lambda: asyncio.Queue(maxsize=_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY),
     repr=False,
   )
   _event_queue_wakeup: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -214,6 +279,19 @@ class StrategyRuntime:
   )
   _market_continuity_generations: Dict[str, int] = field(
     default_factory=dict,
+    repr=False,
+  )
+  #: Last authority identity received from WholeQuoteHub. Routing epochs above
+  #: remain process-local guards; strategy contexts use this transport truth.
+  _market_transport_generation: int = field(default=0, repr=False)
+  _market_transport_stream_id: str = field(default="", repr=False)
+  _market_transport_sequences: Dict[str, int] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _market_transport_reset_token: str = field(default="", repr=False)
+  _restored_market_windows_unverified: set[str] = field(
+    default_factory=set,
     repr=False,
   )
   _processing_market_events: Dict[str, tuple[int, float]] = field(
@@ -308,6 +386,34 @@ class StrategyRuntime:
   exit_plan_book: ExitPlanBook = field(default_factory=ExitPlanBook, repr=False)
   _last_replay_projection_at: float = field(default=0.0, repr=False)
   _last_replay_progress_pct: float = field(default=0.0, repr=False)
+  #: Engine-owned, bounded point-in-time eligibility authority for V3 entry
+  #: emission.  Values are stamped with the runtime/account scope so a stale
+  #: or accidentally shared snapshot can never authorize a Tick.
+  t_trade_intent_emission_by_instrument: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  #: Strict T-trade replay-only shadow evidence; never strategy input.
+  t_trade_phase_one_baseline: Optional[TTradePhaseOneBaselineAccumulator] = field(
+    default=None,
+    repr=False,
+  )
+  #: Point-in-time profiles are loaded once per instrument and source trade day.
+  _t_trade_opportunity_profiles: Dict[tuple[str, str], Optional[Dict[str, Any]]] = (
+    field(default_factory=dict, repr=False)
+  )
+  _t_trade_opportunity_profile_errors: Dict[tuple[str, str], str] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _t_trade_opportunity_profile_retry_after: Dict[tuple[str, str], float] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _t_trade_opportunity_failures: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict,
+    repr=False,
+  )
 
   @property
   def mode(self) -> StrategyRunMode:
@@ -488,6 +594,11 @@ class StrategyExecutor:
     max_workers: int = 10,
     *,
     exit_strategy_registry: Optional[ExitStrategyRegistry] = None,
+    opportunity_runtime_service: Optional[TTradeOpportunityRuntimeService] = None,
+    opportunity_update_service: Optional[TTradeMonitorProjectionService] = None,
+    opportunity_diagnostics_service: Optional[TTradeSignalDiagnosticsService] = None,
+    candidate_outcome_facade: Optional[TTradeCandidateOutcomePersistenceFacade] = None,
+    opportunity_observability: Optional[TTradeRuntimeObservability] = None,
   ):
     """
     初始化策略执行器
@@ -504,6 +615,34 @@ class StrategyExecutor:
     self.market_data_manager = MarketDataManager()
     self.exit_strategy_registry = (
       exit_strategy_registry or ExitStrategyRegistry.builtins()
+    )
+    self.opportunity_runtime_service = (
+      opportunity_runtime_service or t_trade_opportunity_runtime_service
+    )
+    # Application use cases own the V3 boundaries.  The concrete runtime
+    # service remains the adapter, while this composition root supplies the
+    # Shanghai-causal profile read, post-CAS materialization and external
+    # emission gate used by the existing Engine path.
+    self._d1_profile_reader = ReadD1ReferenceProfile(
+      self.opportunity_runtime_service
+    )
+    self._evaluation_materializer = MaterializeEvaluationAfterCAS(
+      self.opportunity_runtime_service
+    )
+    self._intent_emission_gate = EvaluateIntentEmissionGate()
+    self.opportunity_update_service = (
+      opportunity_update_service or t_trade_monitor_projection_service
+    )
+    self.opportunity_diagnostics_service = (
+      opportunity_diagnostics_service or TTradeSignalDiagnosticsService()
+    )
+    self.candidate_outcome_facade = candidate_outcome_facade
+    self._candidate_outcome_activity: Dict[tuple[str, str], bool] = {}
+    self._candidate_outcome_reconciled_runs: set[str] = set()
+    self._candidate_outcome_repair_attempts: Dict[str, int] = {}
+    self._candidate_outcome_repair_retry_at_ms: Dict[str, int] = {}
+    self.opportunity_observability = (
+      opportunity_observability or t_trade_runtime_observability
     )
 
   def register_exit_strategy(self, strategy: str, evaluator: Any) -> None:
@@ -656,9 +795,20 @@ class StrategyExecutor:
     runtime._active_market_continuity_losses.clear()
     runtime._market_fail_closed_codes.clear()
     runtime._market_continuity_generations.clear()
+    runtime._market_transport_generation = 0
+    runtime._market_transport_stream_id = ""
+    runtime._market_transport_sequences.clear()
+    runtime._market_transport_reset_token = ""
+    runtime._restored_market_windows_unverified.clear()
     runtime._processing_market_events.clear()
     runtime._market_invalidation_checkpoints.clear()
     runtime._handled_market_invalidations.clear()
+    runtime._t_trade_opportunity_profiles.clear()
+    runtime._t_trade_opportunity_profile_errors.clear()
+    runtime._t_trade_opportunity_profile_retry_after.clear()
+    runtime._t_trade_opportunity_failures.clear()
+    runtime.t_trade_intent_emission_by_instrument.clear()
+    runtime.t_trade_phase_one_baseline = None
     runtime.event_queue = asyncio.Queue()
     runtime.market_event_queue = asyncio.Queue(
       maxsize=_RUNTIME_MARKET_EVENT_QUEUE_CAPACITY
@@ -667,6 +817,24 @@ class StrategyExecutor:
     for attribute in ("account_info", "positions"):
       if hasattr(runtime.context, attribute):
         delattr(runtime.context, attribute)
+
+  @staticmethod
+  def _restored_causal_market_window_codes(runtime: StrategyRuntime) -> set[str]:
+    """Return restored V3 windows whose live transport continuity is unknown."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST or runtime.strategy is None:
+      return set()
+    raw_states = runtime.strategy.state.get("instrument_states", {})
+    states = dict(raw_states) if isinstance(raw_states, Mapping) else {}
+    restored: set[str] = set()
+    for raw_code, raw_state in states.items():
+      state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+      opportunity = dict(state.get("opportunity") or {})
+      if opportunity.get("samples") or opportunity.get("candidate"):
+        code = str(raw_code or "").strip().upper()
+        if code:
+          restored.add(code)
+    return restored
 
   def _replay_restored_market_continuity_gates(
     self,
@@ -781,6 +949,7 @@ class StrategyExecutor:
     self._reset_runtime_generation_transients(runtime)
 
     try:
+      self._initialize_t_trade_phase_one_baseline(runtime)
       # 更新状态
       runtime.status = ExecutionStatus.STARTING
       if runtime.context.mode == StrategyRunMode.BACKTEST:
@@ -852,9 +1021,21 @@ class StrategyExecutor:
         evaluator=ExitPlanEvaluator(self.exit_strategy_registry),
       )
       if runtime.strategy and hasattr(runtime.strategy, "apply_state_snapshot"):
-        strategy_snapshot = dict((restored_state or {}).get("custom") or {})
+        strategy_snapshot_loader = getattr(
+          runtime.state_manager,
+          "get_strategy_custom_state",
+          None,
+        )
+        strategy_snapshot = (
+          dict(strategy_snapshot_loader() or {})
+          if callable(strategy_snapshot_loader)
+          else dict((restored_state or {}).get("custom") or {})
+        )
         strategy_snapshot.pop(EXIT_PLAN_BOOK_STATE_KEY, None)
         runtime.strategy.apply_state_snapshot(strategy_snapshot)
+      runtime._restored_market_windows_unverified.update(
+        self._restored_causal_market_window_codes(runtime)
+      )
       runtime.durable_event_barrier_key = (
         await runtime.state_manager.get_earliest_unapplied_runtime_event_key()
         if runtime.context.mode == StrategyRunMode.LIVE
@@ -962,9 +1143,7 @@ class StrategyExecutor:
         await runtime.state_manager.start()
         await runtime.state_manager.start_state_sync(runtime.strategy)
         if runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
-          checkpointed = (
-            await runtime.state_manager.checkpoint_strategy_state_changes()
-          )
+          checkpointed = await runtime.state_manager.checkpoint_strategy_state_changes()
           if not checkpointed:
             raise RuntimeError("策略启动状态安全快照失败，拒绝进入实时执行循环")
       runtime.task = asyncio.create_task(self._run_strategy_loop(runtime))
@@ -1358,11 +1537,15 @@ class StrategyExecutor:
 
   @staticmethod
   def _runtime_market_event_code(data: Any) -> str:
-    return str(
-      getattr(data, "stock_code", None)
-      or getattr(data, "instrument_code", None)
-      or ""
-    ).strip().upper()
+    return (
+      str(
+        getattr(data, "stock_code", None)
+        or getattr(data, "instrument_code", None)
+        or ""
+      )
+      .strip()
+      .upper()
+    )
 
   @staticmethod
   def _runtime_tick_source_age_seconds(data: Any) -> Optional[float]:
@@ -1371,9 +1554,109 @@ class StrategyExecutor:
       timestamp = timestamp.to_pydatetime()
     if not isinstance(timestamp, datetime):
       return None
+    return (time_utils.now() - time_utils.to_shanghai(timestamp)).total_seconds()
+
+  def _runtime_market_transport_lineage(
+    self,
+    data: Any,
+  ) -> tuple[int, str, int, bool] | None:
+    try:
+      generation = int(self._get_value(data, "continuity_generation") or 0)
+      stream_id = str(self._get_value(data, "market_stream_id") or "").strip()
+      sequence = int(
+        self._get_value(data, "market_stream_sequence")
+        or self._get_value(data, "source_sequence")
+        or 0
+      )
+    except (TypeError, ValueError, OverflowError):
+      return None
+    if generation <= 0 or not stream_id or sequence <= 0:
+      return None
     return (
-      time_utils.now() - time_utils.to_shanghai(timestamp)
-    ).total_seconds()
+      generation,
+      stream_id,
+      sequence,
+      self._coerce_bool(self._get_value(data, "market_stream_reset")),
+    )
+
+  def _observe_runtime_market_transport(
+    self,
+    runtime: StrategyRuntime,
+    data: Any,
+  ) -> bool:
+    """Install a fail-closed gate before queuing a changed live lineage."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return True
+    code = self._runtime_market_event_code(data)
+    lineage = self._runtime_market_transport_lineage(data)
+    if lineage is None:
+      if code in runtime._market_fail_closed_codes:
+        runtime.market_tick_source_rejections += 1
+        runtime.market_events_dropped += 1
+        return False
+      _dropped, affected = self._drain_runtime_market_queue(runtime)
+      if code:
+        affected.add(code)
+      self._mark_runtime_market_continuity_lost(
+        runtime,
+        affected,
+        reason="MARKET_TRANSPORT_LINEAGE_UNAVAILABLE",
+      )
+      runtime._restored_market_windows_unverified.clear()
+      runtime.market_tick_source_rejections += 1
+      runtime.market_events_dropped += 1
+      return False
+
+    generation, stream_id, sequence, reset_requested = lineage
+    current_generation = runtime._market_transport_generation
+    current_stream_id = runtime._market_transport_stream_id
+    if current_generation > 0 and generation < current_generation:
+      runtime.market_events_dropped += 1
+      return False
+
+    identity_changed = bool(
+      current_generation > 0
+      and current_stream_id
+      and (generation != current_generation or stream_id != current_stream_id)
+    )
+    if identity_changed:
+      runtime._market_transport_sequences.clear()
+    if current_generation <= 0 or not current_stream_id or identity_changed:
+      runtime._market_transport_generation = generation
+      runtime._market_transport_stream_id = stream_id
+
+    reset_token = f"{generation}:{stream_id}:{sequence}"
+    explicit_reset = bool(
+      reset_requested and reset_token != runtime._market_transport_reset_token
+    )
+    restart_unverified = bool(runtime._restored_market_windows_unverified)
+    if identity_changed or explicit_reset or restart_unverified:
+      _dropped, affected = self._drain_runtime_market_queue(runtime)
+      affected.update(runtime.context.instruments or [])
+      affected.update(runtime._restored_market_windows_unverified)
+      reason = (
+        "MARKET_TRANSPORT_IDENTITY_CHANGED"
+        if identity_changed
+        else "MARKET_STREAM_RESYNC"
+        if explicit_reset
+        else "RUNTIME_RESTART_CONTINUITY_UNPROVEN"
+      )
+      self._mark_runtime_market_continuity_lost(
+        runtime,
+        affected,
+        reason=reason,
+      )
+      runtime._restored_market_windows_unverified.clear()
+    if reset_requested:
+      runtime._market_transport_reset_token = reset_token
+
+    previous_sequence = runtime._market_transport_sequences.get(code, 0)
+    if previous_sequence and sequence <= previous_sequence:
+      runtime.market_events_dropped += 1
+      return False
+    runtime._market_transport_sequences[code] = sequence
+    return True
 
   def _mark_runtime_market_continuity_lost(
     self,
@@ -1444,6 +1727,31 @@ class StrategyExecutor:
     runtime.market_events_dropped += dropped
     return dropped, affected
 
+  @staticmethod
+  def _drain_runtime_control_queue_after_fail_stop(
+    runtime: StrategyRuntime,
+    *,
+    reason: str,
+  ) -> None:
+    """Balance queued work after a fatal serial-consumer durability failure."""
+
+    while True:
+      try:
+        event_type, data = runtime.event_queue.get_nowait()
+      except asyncio.QueueEmpty:
+        break
+      try:
+        completion = None
+        if event_type in {"durable_order", "durable_trade"}:
+          _payload, completion = data
+        elif event_type == "universe" and isinstance(data, dict):
+          completion = data.get("future")
+        if completion is not None and not completion.done():
+          completion.set_exception(RuntimeConsumerUnavailable(reason))
+      finally:
+        runtime.event_queue.task_done()
+    StrategyExecutor._drain_runtime_market_queue(runtime)
+
   def _enqueue_runtime_market_event(
     self,
     runtime: StrategyRuntime,
@@ -1453,6 +1761,12 @@ class StrategyExecutor:
     # Historical replays are lossless and already drive their own serial clock.
     if runtime.context.mode == StrategyRunMode.BACKTEST:
       self._put_runtime_control_event_nowait(runtime, (event_type, data))
+      return
+
+    if event_type == "tick" and not self._observe_runtime_market_transport(
+      runtime,
+      data,
+    ):
       return
 
     code = self._runtime_market_event_code(data)
@@ -1526,8 +1840,7 @@ class StrategyExecutor:
           metadata = dict(intent.metadata or {})
           if (
             intent.direction != TradeIntentDirection.BUY
-            or intent.execution_mode
-            != TradeIntentExecutionMode.MANUAL_CONFIRM
+            or intent.execution_mode != TradeIntentExecutionMode.MANUAL_CONFIRM
             or str(metadata.get("t_trade_role") or "").lower() != "entry"
             or str(intent.instrument_code or "").strip().upper() != code
           ):
@@ -1570,17 +1883,14 @@ class StrategyExecutor:
         )
     if not saved:
       self.logger.error(
-        "策略行情观察窗失效尚未持久化，保持交易门禁: "
-        "run_id=%s instruments=%s",
+        "策略行情观察窗失效尚未持久化，保持交易门禁: run_id=%s instruments=%s",
         runtime.run_id,
         sorted(runtime._market_invalidation_checkpoints),
       )
       return
 
     clear_candidates: List[tuple[str, int]] = []
-    for code, generation in list(
-      runtime._market_invalidation_checkpoints.items()
-    ):
+    for code, generation in list(runtime._market_invalidation_checkpoints.items()):
       if (
         runtime._market_continuity_generations.get(code, 0) == generation
         and code not in runtime._pending_market_invalidations
@@ -1628,8 +1938,7 @@ class StrategyExecutor:
         )
     if not clear_saved:
       self.logger.error(
-        "行情连续性门禁清除尚未持久化，保持运行时门禁: "
-        "run_id=%s instruments=%s",
+        "行情连续性门禁清除尚未持久化，保持运行时门禁: run_id=%s instruments=%s",
         runtime.run_id,
         sorted(code for code, _generation in clear_candidates),
       )
@@ -1802,9 +2111,7 @@ class StrategyExecutor:
           completion = data.get("future")
         if completion is not None and not completion.done():
           completion.set_exception(
-            RuntimeConsumerUnavailable(
-              f"策略运行已停止消费事件: {runtime.run_id}"
-            )
+            RuntimeConsumerUnavailable(f"策略运行已停止消费事件: {runtime.run_id}")
           )
       finally:
         runtime.event_queue.task_done()
@@ -1815,9 +2122,7 @@ class StrategyExecutor:
 
     if not runtime._adapter_ref_acquired:
       return
-    await adapter_manager.release_adapter_for_mode(
-      runtime.context.mode.value.lower()
-    )
+    await adapter_manager.release_adapter_for_mode(runtime.context.mode.value.lower())
     # AdapterManager keeps the final reference until disconnect succeeds, so
     # this flag remains set when the awaited release raises and can be retried.
     runtime._adapter_ref_acquired = False
@@ -1856,8 +2161,7 @@ class StrategyExecutor:
       or (
         not state_manager._running
         and (
-          state_manager._snapshot_task is None
-          or state_manager._snapshot_task.done()
+          state_manager._snapshot_task is None or state_manager._snapshot_task.done()
         )
         and (
           state_manager._state_sync_task is None
@@ -2061,6 +2365,15 @@ class StrategyExecutor:
         final_snapshot_ready = False
         self.logger.error("异常终止停止状态同步失败: %s, %s", runtime.run_id, exc)
       try:
+        await self._flush_t_trade_opportunity_diagnostics(runtime)
+      except Exception as exc:
+        cleanup_errors.append("t_trade_opportunity_diagnostics")
+        self.logger.error(
+          "异常终止刷新做 T 机会诊断失败: %s, %s",
+          runtime.run_id,
+          exc,
+        )
+      try:
         if runtime.performance_recorder:
           await runtime.performance_recorder.flush()
       except Exception as exc:
@@ -2170,13 +2483,13 @@ class StrategyExecutor:
     previous_status = runtime.status
 
     if runtime.status == ExecutionStatus.STOPPED:
+      self.opportunity_observability.forget_run(run_id)
       return True
     if runtime.status == ExecutionStatus.STOPPING:
       self.logger.error("策略停止状态无活动 owner，拒绝提前报告成功: %s", run_id)
       return False
     if previous_status == ExecutionStatus.ERROR and (
-      runtime._startup_abort_task is not None
-      or runtime._startup_abort_complete
+      runtime._startup_abort_task is not None or runtime._startup_abort_complete
     ):
       try:
         await self._ensure_startup_abort(runtime)
@@ -2192,6 +2505,7 @@ class StrategyExecutor:
         self.logger.error("失败启动代资源尚未收敛，拒绝标记已停止: %s", run_id)
         return False
       runtime.status = ExecutionStatus.STOPPED
+      self.opportunity_observability.forget_run(run_id)
       self.logger.info("失败启动代已安全停止（未写最终快照）: %s", run_id)
       return True
     active_exit_plans = runtime.exit_plan_book.active_plans()
@@ -2233,6 +2547,7 @@ class StrategyExecutor:
         runtime.status = ExecutionStatus.STOPPING
       await self._quiesce_runtime_tasks(runtime)
       await self._clear_realtime_subscriptions(runtime)
+      await self._finalize_t_trade_candidate_outcomes(runtime)
 
       # 停止策略
       if runtime.strategy:
@@ -2247,6 +2562,8 @@ class StrategyExecutor:
       # 停止策略状态同步
       if runtime.state_manager:
         await runtime.state_manager.stop_state_sync(runtime.strategy)
+
+      await self._flush_t_trade_opportunity_diagnostics(runtime)
 
       # 更新指标
       if runtime.metrics and runtime.broker:
@@ -2283,11 +2600,9 @@ class StrategyExecutor:
       await self._release_runtime_adapter(runtime)
       await self._quiesce_runtime_tasks(runtime)
 
-      if (
-        runtime.context.parameters.get("limit_up_board_replay")
-        and previous_status
-        not in {ExecutionStatus.COMPLETED, ExecutionStatus.ERROR}
-      ):
+      if runtime.context.parameters.get(
+        "limit_up_board_replay"
+      ) and previous_status not in {ExecutionStatus.COMPLETED, ExecutionStatus.ERROR}:
         await self._persist_limit_up_board_replay_terminal(
           runtime,
           status="CANCELLED",
@@ -2295,6 +2610,7 @@ class StrategyExecutor:
         )
 
       runtime.status = ExecutionStatus.STOPPED
+      self.opportunity_observability.forget_run(run_id)
 
       self.logger.info(f"策略运行停止成功: {run_id}")
       return True
@@ -2315,6 +2631,45 @@ class StrategyExecutor:
       self.logger.error(f"停止策略运行失败: {run_id}, 错误: {e}")
       await self._ensure_terminal_cleanup(runtime)
       return False
+
+  async def _flush_t_trade_opportunity_diagnostics(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    if not self._uses_t_trade_opportunity_runtime(runtime):
+      return
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      return
+    errors: list[Exception] = []
+    flush_diagnostics = getattr(
+      self.opportunity_runtime_service,
+      "flush_diagnostics",
+      None,
+    )
+    if callable(flush_diagnostics):
+      try:
+        await flush_diagnostics(
+          account_id=account_id,
+          strategy_run_id=runtime.run_id,
+        )
+      except Exception as exc:
+        errors.append(exc)
+    flush_notices = getattr(
+      self.opportunity_update_service,
+      "flush_opportunity_notices",
+      None,
+    )
+    if callable(flush_notices):
+      try:
+        await flush_notices(
+          account_id=account_id,
+          strategy_run_id=runtime.run_id,
+        )
+      except Exception as exc:
+        errors.append(exc)
+    if errors:
+      raise RuntimeError("做 T 机会诊断或更新通知收尾失败") from errors[0]
 
   async def pause(self, run_id: str) -> bool:
     """
@@ -2410,6 +2765,8 @@ class StrategyExecutor:
     instruments: List[str],
     *,
     instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    parameters: Optional[Dict[str, Any]] = None,
+    configuration_changed: bool = False,
   ) -> Dict[str, List[str]]:
     """串行调整运行中策略的标的池和实时行情订阅。"""
 
@@ -2428,10 +2785,10 @@ class StrategyExecutor:
       if code and code not in normalized:
         normalized.append(code)
 
-    if (
-      runtime.context.mode != StrategyRunMode.BACKTEST
-      and runtime.status in {ExecutionStatus.RUNNING, ExecutionStatus.PAUSED}
-    ):
+    if runtime.context.mode != StrategyRunMode.BACKTEST and runtime.status in {
+      ExecutionStatus.RUNNING,
+      ExecutionStatus.PAUSED,
+    }:
       future = asyncio.get_running_loop().create_future()
       await self._put_runtime_control_event(
         runtime,
@@ -2440,9 +2797,11 @@ class StrategyExecutor:
           {
             "instruments": normalized,
             "instrument_metadata": dict(instrument_metadata or {}),
+            "parameters": dict(parameters) if parameters is not None else None,
+            "configuration_changed": bool(configuration_changed),
             "future": future,
           },
-        )
+        ),
       )
       return await future
 
@@ -2454,7 +2813,23 @@ class StrategyExecutor:
       )
 
     current = list(runtime.context.instruments or [])
+    previous_parameters = dict(runtime.context.parameters or {})
+    if parameters is not None:
+      runtime.context.parameters = dict(parameters)
     runtime.context.instruments = normalized
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      try:
+        staged_emission = self._build_t_trade_intent_emission_snapshot(
+          runtime,
+          normalized,
+          instrument_metadata,
+        )
+      except Exception:
+        runtime.context.parameters = previous_parameters
+        runtime.context.instruments = current
+        self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
+      self._publish_t_trade_intent_emission_snapshot(runtime, staged_emission)
     return {
       "added": [code for code in normalized if code not in current],
       "removed": [code for code in current if code not in normalized],
@@ -2504,9 +2879,7 @@ class StrategyExecutor:
       try:
         stopped = bool(task.result())
       except BaseException as exc:
-        stop_outcomes[run_id] = (
-          f"stop raised {type(exc).__name__}: {exc}"
-        )
+        stop_outcomes[run_id] = f"stop raised {type(exc).__name__}: {exc}"
         continue
       if not stopped:
         stop_outcomes[run_id] = "stop returned false"
@@ -2629,16 +3002,12 @@ class StrategyExecutor:
 
     # 订阅订单和成交回调
     order_subscription = runtime.broker.subscribe_order_updates(
-      lambda order: self._put_runtime_control_event_nowait(
-        runtime, ("order", order)
-      )
+      lambda order: self._put_runtime_control_event_nowait(runtime, ("order", order))
     )
     if inspect.isawaitable(order_subscription):
       await order_subscription
     trade_subscription = runtime.broker.subscribe_trade_updates(
-      lambda trade: self._put_runtime_control_event_nowait(
-        runtime, ("trade", trade)
-      )
+      lambda trade: self._put_runtime_control_event_nowait(runtime, ("trade", trade))
     )
     if inspect.isawaitable(trade_subscription):
       await trade_subscription
@@ -2653,9 +3022,20 @@ class StrategyExecutor:
     if runtime.context.mode != StrategyRunMode.BACKTEST or not runtime.strategy:
       return
     metadata = dict(runtime.context.parameters.get("initial_instrument_metadata") or {})
-    if not metadata:
-      return
     desired = list(runtime.context.instruments or [])
+    if not metadata and not self._uses_t_trade_opportunity_runtime(runtime):
+      return
+    staged_emission: Optional[Dict[str, Dict[str, Any]]] = None
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      try:
+        staged_emission = self._build_t_trade_intent_emission_snapshot(
+          runtime,
+          desired,
+          metadata,
+        )
+      except Exception:
+        self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
     state = runtime.strategy.state.to_dict()
     account = runtime.state_manager.get_account_quota() if runtime.state_manager else {}
     positions = (
@@ -2677,8 +3057,15 @@ class StrategyExecutor:
       strategy_state=state,
       parameters=dict(runtime.context.parameters or {}),
     )
-    output = await runtime.strategy.step(reconcile_input)
-    await self._process_strategy_output(runtime, output, reconcile_input)
+    try:
+      output = await runtime.strategy.step(reconcile_input)
+      await self._process_strategy_output(runtime, output, reconcile_input)
+    except Exception:
+      if staged_emission is not None:
+        self._clear_t_trade_intent_emission_snapshot(runtime)
+      raise
+    if staged_emission is not None:
+      self._publish_t_trade_intent_emission_snapshot(runtime, staged_emission)
 
   async def _run_strategy_loop(self, runtime: StrategyRuntime) -> None:
     """策略运行循环"""
@@ -2692,7 +3079,9 @@ class StrategyExecutor:
       if runtime.context.mode == StrategyRunMode.BACKTEST:
         self._runtime_log(runtime, "INFO", "回测执行开始")
         await self._run_backtest_loop(runtime)
+        self._finalize_t_trade_phase_one_baseline(runtime)
         await self._finalize_t_trade_replay(runtime)
+        await self._finalize_t_trade_candidate_outcomes(runtime)
       else:
         # 实时模式下，_run_realtime_loop 主要负责状态更新和心跳
         # 事件处理在 _process_event_queue 中进行
@@ -2743,7 +3132,13 @@ class StrategyExecutor:
                 write_t_trade_replay_report,
               )
 
-              replay_metrics = build_t_trade_replay_metrics(runtime)
+              opportunity_diagnostics = (
+                await self._load_t_trade_replay_opportunity_diagnostics(runtime)
+              )
+              replay_metrics = build_t_trade_replay_metrics(
+                runtime,
+                opportunity_diagnostics=opportunity_diagnostics,
+              )
               try:
                 replay_metrics["report"] = write_t_trade_replay_report(
                   result_path,
@@ -2757,7 +3152,7 @@ class StrategyExecutor:
                 self.logger.exception("做 T 回放报告生成失败")
                 replay_metrics["report"] = {
                   "status": "FAILED",
-                  "schema_version": 1,
+                  "schema_version": 2,
                   "generated_at": None,
                   "conclusion_code": "REPORT_GENERATION_FAILED",
                   "conclusion": "回放已完成，但报告文件生成失败，请检查 Engine 日志。",
@@ -2770,8 +3165,8 @@ class StrategyExecutor:
                 build_limit_up_board_replay_metrics,
               )
 
-              metrics["limit_up_board_replay"] = (
-                build_limit_up_board_replay_metrics(runtime)
+              metrics["limit_up_board_replay"] = build_limit_up_board_replay_metrics(
+                runtime
               )
             if runtime.performance_recorder:
               try:
@@ -2957,9 +3352,7 @@ class StrategyExecutor:
           await data_adapter.subscribe_kline(
             instrument_code,
             period,
-            lambda kline: self._enqueue_runtime_market_event(
-              runtime, "kline", kline
-            ),
+            lambda kline: self._enqueue_runtime_market_event(runtime, "kline", kline),
           )
       else:
         # 仅K线模式 - 支持多周期
@@ -2967,9 +3360,7 @@ class StrategyExecutor:
           await data_adapter.subscribe_kline(
             instrument_code,
             period,
-            lambda kline: self._enqueue_runtime_market_event(
-              runtime, "kline", kline
-            ),
+            lambda kline: self._enqueue_runtime_market_event(runtime, "kline", kline),
           )
 
   async def _run_limit_up_board_replay(
@@ -3232,7 +3623,14 @@ class StrategyExecutor:
   ) -> Dict[str, Any]:
     if self.runs.get(runtime.run_id) is not runtime:
       raise ValueError("Replay runtime is not registered in this executor")
-    return await self.approve_trade_intent(runtime.run_id, intent_id)
+    intent = runtime.pending_approvals.get(intent_id)
+    return await self.approve_trade_intent(
+      runtime.run_id,
+      intent_id,
+      approval_expectation=(
+        self._v3_t_trade_expectation_from_intent(intent) if intent is not None else None
+      ),
+    )
 
   async def reject_replay_intent(
     self,
@@ -3396,6 +3794,60 @@ class StrategyExecutor:
     )
     return decision, intent
 
+  async def _load_t_trade_replay_opportunity_diagnostics(
+    self,
+    runtime: StrategyRuntime,
+  ) -> Dict[str, Any]:
+    """Load only the immutable V3 evidence belonging to this replay run."""
+
+    params = dict(runtime.context.parameters or {})
+    account_id = str(params.get("account_id") or "").strip()
+
+    def parse_window(value: Any) -> Optional[datetime]:
+      if isinstance(value, datetime):
+        return value
+      if isinstance(value, str) and value.strip():
+        try:
+          return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+          return None
+      return None
+
+    start_time = parse_window(runtime.context.backtest_start_time) or parse_window(
+      params.get("replay_start_time")
+    )
+    end_time = parse_window(runtime.context.backtest_end_time) or parse_window(
+      params.get("replay_end_time")
+    )
+    if (
+      not account_id or start_time is None or end_time is None or start_time >= end_time
+    ):
+      return {
+        "available": False,
+        "reason_code": "DIAGNOSTICS_SCOPE_UNAVAILABLE",
+        "reason": "回放缺少账户或有效时间范围，无法加载 V3 机会诊断。",
+      }
+    try:
+      async with AsyncSessionLocal() as db:
+        return await self.opportunity_diagnostics_service.signal_diagnostics(
+          account_id,
+          stock_code=None,
+          start_time=start_time,
+          end_time=end_time,
+          db=db,
+          strategy_run_id=runtime.run_id,
+        )
+    except Exception as exc:
+      self.logger.exception(
+        "加载做 T V3 回放诊断失败: run_id=%s",
+        runtime.run_id,
+      )
+      return {
+        "available": False,
+        "reason_code": "DIAGNOSTICS_LOAD_FAILED",
+        "reason": f"V3 机会诊断加载失败: {exc}",
+      }
+
   async def _finalize_t_trade_replay(self, runtime: StrategyRuntime) -> None:
     """Close replay-created T batches on the final tradable quote."""
 
@@ -3525,7 +3977,7 @@ class StrategyExecutor:
       for window_start, window_end in self._iter_backtest_windows(
         day_start, day_end, window_hours
       ):
-        events: List[tuple[datetime, int, str, str, Any]] = []
+        events: List[tuple[datetime, int, tuple[int, int, int], str, str, Any]] = []
         for code in instrument_codes:
           if use_tick_data:
             ticks = await self._load_backtest_ticks(
@@ -3544,7 +3996,16 @@ class StrategyExecutor:
               and (previous_tick is None or tick.time > previous_tick)
             ]
             for tick in self._filter_backtest_continuous_session_events(filtered_ticks):
-              events.append((tick.time, 0, code, "tick", tick))
+              events.append(
+                (
+                  tick.time,
+                  0,
+                  self._backtest_tick_source_identity(tick),
+                  code,
+                  "tick",
+                  tick,
+                )
+              )
           for period in periods:
             klines = await data_adapter.get_klines(
               instrument_code=code,
@@ -3566,10 +4027,24 @@ class StrategyExecutor:
               )
             for kline in filtered_klines:
               event_time = self._get_kline_end_time(kline, period, alignment=alignment)
-              events.append((event_time, 1, code, period, kline))
+              events.append(
+                (
+                  event_time,
+                  1,
+                  (0, int(event_time.timestamp() * 1000), 0),
+                  code,
+                  period,
+                  kline,
+                )
+              )
 
-        events.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-        for _, event_type, code, period, event in events:
+        if use_tick_data and not periods:
+          # V3 Tick replay is ordered by the immutable source identity, not by
+          # the per-instrument fetch order or an arbitrary stock-code tie-break.
+          events.sort(key=lambda item: (item[2], item[1], item[3], item[4]))
+        else:
+          events.sort(key=lambda item: (item[0], item[1], item[3], item[4]))
+        for _, event_type, _, code, period, event in events:
           if runtime.status != ExecutionStatus.RUNNING:
             break
           if event_type == 0:
@@ -3597,6 +4072,34 @@ class StrategyExecutor:
       f"多标的全局时间线回测完成: instruments={len(instrument_codes)}, "
       f"tick={totals['tick']}, kline={totals['kline']}",
     )
+
+  def _backtest_tick_source_identity(
+    self,
+    tick: Any,
+  ) -> tuple[int, int, int]:
+    """Return the causal identity used to merge a replay Tick globally."""
+
+    generation = self._safe_non_negative_int(
+      self._get_value(tick, "continuity_generation"),
+      default=0,
+    )
+    try:
+      source_time_ms = tick_source_time_ms(tick)
+    except (TypeError, ValueError, OverflowError):
+      timestamp = self._get_value(tick, "time")
+      source_time_ms = (
+        int(time_utils.to_utc(timestamp).timestamp() * 1000)
+        if isinstance(timestamp, datetime)
+        else 0
+      )
+    tick_ordinal = self._safe_non_negative_int(
+      self._get_value(tick, "tick_ordinal"),
+      default=self._safe_non_negative_int(
+        self._get_value(tick, "transaction_num"),
+        default=0,
+      ),
+    )
+    return generation, source_time_ms, tick_ordinal
 
   async def _load_backtest_ticks(
     self,
@@ -3640,7 +4143,9 @@ class StrategyExecutor:
     offset = 0
     queries = 0
     nonempty_pages = 0
-    previous_page_signature: Optional[tuple[Any, ...]] = None
+    # One entry per accepted page; the safety limit below caps this at
+    # max_pages while retaining enough history to catch A-B-A repeats.
+    seen_page_signatures: set[tuple[Any, ...]] = set()
     previous_last_time: Optional[datetime] = None
 
     while True:
@@ -3702,6 +4207,7 @@ class StrategyExecutor:
         break
 
       page_times: List[datetime] = []
+      page_source_times: List[Optional[int]] = []
       for item in page_items:
         item_time = getattr(item, "time", None)
         if hasattr(item_time, "to_pydatetime"):
@@ -3718,7 +4224,36 @@ class StrategyExecutor:
           )
         page_times.append(time_utils.to_shanghai(item_time))
 
-      if any(current < previous for previous, current in zip(page_times, page_times[1:])):
+        explicit_source_time = getattr(item, "source_time_ms", None)
+        try:
+          explicit_source_number = float(explicit_source_time)
+        except (TypeError, ValueError, OverflowError):
+          explicit_source_number = None
+        if (
+          explicit_source_number is not None
+          and isfinite(explicit_source_number)
+          and explicit_source_number < 0
+        ):
+          self._raise_t_trade_replay_tick_data_partial(
+            runtime,
+            instrument_code=instrument_code,
+            start_time=start_time,
+            end_time=end_time,
+            reason_code="INVALID_TICK_SOURCE_TIME",
+            message="历史 Tick 包含负数 source_time_ms",
+            details={"offset": offset},
+          )
+        try:
+          page_source_times.append(tick_source_time_ms(item))
+        except Exception:
+          # Keep malformed non-negative source values on the existing
+          # post-pagination normalization path so invalid legacy codecs still
+          # report TICK_IDENTITY_NORMALIZATION_FAILED after all pages are read.
+          page_source_times.append(None)
+
+      if any(
+        current < previous for previous, current in zip(page_times, page_times[1:])
+      ):
         self._raise_t_trade_replay_tick_data_partial(
           runtime,
           instrument_code=instrument_code,
@@ -3728,12 +4263,49 @@ class StrategyExecutor:
           message="历史 Tick 分页结果未按时间升序返回",
           details={"offset": offset},
         )
+      try:
+        page_identity_digest = hashlib.sha256(
+          "\x1f".join(
+            "\x1e".join(
+              (
+                page_time.isoformat(),
+                str(
+                  source_time_ms
+                  if source_time_ms is not None
+                  else getattr(item, "source_time_ms", None)
+                ),
+                str(getattr(item, "tick_ordinal", None)),
+                tick_snapshot_identity(item),
+                tick_page_content_identity(
+                  item,
+                  normalized_source_time_ms=source_time_ms,
+                ),
+              )
+            )
+            for item, page_time, source_time_ms in zip(
+              page_items,
+              page_times,
+              page_source_times,
+            )
+          ).encode("utf-8")
+        ).hexdigest()
+      except Exception as exc:
+        self._raise_t_trade_replay_tick_data_partial(
+          runtime,
+          instrument_code=instrument_code,
+          start_time=start_time,
+          end_time=end_time,
+          reason_code="TICK_PAGE_SIGNATURE_FAILED",
+          message="历史 Tick 分页结果无法生成确定性内容签名",
+          details={"offset": offset, "error_type": type(exc).__name__},
+        )
       page_signature = (
         len(page_items),
         page_times[0].isoformat(),
         page_times[-1].isoformat(),
+        page_identity_digest,
       )
-      if previous_page_signature == page_signature:
+      if page_signature in seen_page_signatures:
         self._raise_t_trade_replay_tick_data_partial(
           runtime,
           instrument_code=instrument_code,
@@ -3756,7 +4328,7 @@ class StrategyExecutor:
 
       ticks.extend(page_items)
       nonempty_pages += 1
-      previous_page_signature = page_signature
+      seen_page_signatures.add(page_signature)
       previous_last_time = page_times[-1]
       offset += len(page_items)
       if len(page_items) < page_size:
@@ -3775,6 +4347,22 @@ class StrategyExecutor:
             "maximum_pages": max_pages,
           },
         )
+
+    try:
+      # Normalize only after every page has been read.  Per-page normalization
+      # would restart same-millisecond ordinals at each offset and could make
+      # cross-page source identities collide in the global replay timeline.
+      ticks = normalize_ticks_losslessly(ticks)
+    except Exception as exc:
+      self._raise_t_trade_replay_tick_data_partial(
+        runtime,
+        instrument_code=instrument_code,
+        start_time=start_time,
+        end_time=end_time,
+        reason_code="TICK_IDENTITY_NORMALIZATION_FAILED",
+        message="历史 Tick source identity 规范化失败，拒绝生成不完整绩效",
+        details={"error_type": type(exc).__name__},
+      )
 
     self._record_t_trade_replay_tick_read_success(
       runtime,
@@ -5093,9 +5681,7 @@ class StrategyExecutor:
         state_manager._position_reservations
       ),
       "manager_bucket_ledger": copy.deepcopy(state_manager._bucket_ledger),
-      "t_trade_entry_reservations": copy.deepcopy(
-        runtime.t_trade_entry_reservations
-      ),
+      "t_trade_entry_reservations": copy.deepcopy(runtime.t_trade_entry_reservations),
       "strategy_state": (
         copy.deepcopy(runtime.strategy.state.to_dict())
         if runtime.strategy is not None
@@ -5154,6 +5740,8 @@ class StrategyExecutor:
       durable_rollback_snapshot = None
       durable_event_key = ""
       durable_strategy_patch = None
+      paper_fill_fact: Optional[Dict[str, Any]] = None
+      paper_candidate_trade = False
       try:
         completion = None
         next_event = await self._next_runtime_event(runtime)
@@ -5241,9 +5829,7 @@ class StrategyExecutor:
             future = data.get("future")
             if future is not None and not future.done():
               future.set_exception(
-                RuntimeError(
-                  "持久化回报尚未完成快照，暂不执行标的池变更"
-                )
+                RuntimeError("持久化回报尚未完成快照，暂不执行标的池变更")
               )
           continue
         if durable_event:
@@ -5259,22 +5845,25 @@ class StrategyExecutor:
             and durable_event_key != runtime.durable_event_barrier_key
           ):
             raise RuntimeError(
-              "持久化运行时事件屏障仍在等待: "
-              f"{runtime.durable_event_barrier_key}"
+              f"持久化运行时事件屏障仍在等待: {runtime.durable_event_barrier_key}"
             )
           if runtime.state_manager.has_applied_runtime_event(durable_event_key):
             checkpointed = await runtime.state_manager.checkpoint_durable_runtime_event(
               durable_event_key
             )
             if not checkpointed:
-              raise RuntimeError(
-                f"持久化运行时事件快照重试失败: {durable_event_key}"
-              )
+              raise RuntimeError(f"持久化运行时事件快照重试失败: {durable_event_key}")
             if (
               runtime.durable_event_barrier_key == durable_event_key
               and not runtime.durable_startup_barrier
             ):
               runtime.durable_event_barrier_key = None
+            if event_type == "trade":
+              await self._record_t_trade_candidate_fill(
+                runtime,
+                data,
+                durable_event=True,
+              )
             if completion is not None and not completion.done():
               completion.set_result(True)
             continue
@@ -5393,13 +5982,27 @@ class StrategyExecutor:
             await runtime.performance_recorder.record(runtime, "order", data)
 
         elif event_type == "trade":
+          trade_metadata = dict(getattr(data, "metadata", {}) or {})
+          paper_candidate_trade = bool(
+            runtime.context.mode == StrategyRunMode.PAPER
+            and not durable_event
+            and str(trade_metadata.get("candidate_id") or "").strip()
+          )
+          if paper_candidate_trade:
+            # Validate/freeze the complete fact before any account, strategy or
+            # intent state is advanced.  A malformed simulator callback can
+            # therefore fail-stop without requiring a best-effort rollback.
+            paper_fill_fact = await self._build_t_trade_paper_fill_fact(runtime, data)
+            if paper_fill_fact is None:
+              raise RuntimeError("做 T PAPER 候选成交未生成 durable fact")
+            durable_rollback_snapshot = self._capture_durable_runtime_state(runtime)
           self._update_broker_report_health(runtime, "trade", data)
           # 持久化成交记录（不再支持，如有独立成交表可在此处保存）
           # 但交易信号是独立表，如果这里能关联到信号，可以更新信号状态
 
           if runtime.state_manager:
             runtime.state_manager.apply_trade(data)
-            metadata = dict(getattr(data, "metadata", {}) or {})
+            metadata = trade_metadata
             trade_status = "FILLED"
             try:
               order = await runtime.broker.get_order(getattr(data, "order_id", ""))
@@ -5433,14 +6036,35 @@ class StrategyExecutor:
             await self._notify_strategy_trade(
               runtime,
               TradeExecutionEvent.from_raw(data),
+              raise_on_error=paper_candidate_trade,
             )
           if runtime.performance_recorder and not durable_event:
             await runtime.performance_recorder.record(runtime, "trade", data)
+          if paper_candidate_trade:
+            enqueue_paper_fill = getattr(
+              runtime.state_manager,
+              "enqueue_t_trade_paper_fill_fact",
+              None,
+            )
+            if not callable(enqueue_paper_fill):
+              raise RuntimeError("V3 做 T PAPER 运行缺少成交 durable outbox")
+            enqueue_paper_fill(paper_fill_fact)
 
         elif event_type == "universe":
           future = data.get("future")
           try:
-            if runtime.context.mode == StrategyRunMode.BACKTEST:
+            configuration_changed = bool(data.get("configuration_changed"))
+            if configuration_changed:
+              async with runtime.approval_lock:
+                await self._expire_v3_t_trade_candidates_for_config_change(runtime)
+                result = await self._apply_realtime_instrument_reconcile(
+                  runtime,
+                  list(data.get("instruments") or []),
+                  instrument_metadata=dict(data.get("instrument_metadata") or {}),
+                  parameters=data.get("parameters"),
+                  configuration_changed=True,
+                )
+            elif runtime.context.mode == StrategyRunMode.BACKTEST:
               result = await self._apply_backtest_instrument_reconcile(
                 runtime,
                 list(data.get("instruments") or []),
@@ -5451,6 +6075,7 @@ class StrategyExecutor:
                 runtime,
                 list(data.get("instruments") or []),
                 instrument_metadata=dict(data.get("instrument_metadata") or {}),
+                parameters=data.get("parameters"),
               )
             if future and not future.done():
               future.set_result(result)
@@ -5488,27 +6113,95 @@ class StrategyExecutor:
             ),
           )
           if not checkpointed:
-            raise RuntimeError(
-              f"持久化运行时事件原子快照失败: {durable_event_key}"
-            )
+            raise RuntimeError(f"持久化运行时事件原子快照失败: {durable_event_key}")
           if (
             runtime.durable_event_barrier_key == durable_event_key
             and not runtime.durable_startup_barrier
           ):
             runtime.durable_event_barrier_key = None
+        if event_type == "trade" and (
+          durable_event
+          or runtime.context.mode
+          in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
+        ):
+          trade_metadata = dict(getattr(data, "metadata", {}) or {})
+          if (
+            runtime.context.mode == StrategyRunMode.PAPER
+            and not durable_event
+            and trade_metadata.get("candidate_id")
+          ):
+            if paper_fill_fact is None:
+              raise RuntimeError("做 T PAPER 候选成交未生成 durable fact")
+            checkpointed = bool(
+              runtime.state_manager
+              and await runtime.state_manager.checkpoint_strategy_state_changes()
+            )
+            if not checkpointed:
+              message = (
+                "做 T PAPER 候选成交状态与 outbox 未完成权威检查点: "
+                f"run_id={runtime.run_id} trade_id={getattr(data, 'trade_id', None)}"
+              )
+              raise RuntimeError(message)
+            await self._replay_pending_t_trade_paper_fill_facts(runtime)
+          elif (
+            runtime.context.mode == StrategyRunMode.BACKTEST
+            and not durable_event
+            and trade_metadata.get("candidate_id")
+          ):
+            checkpointed = bool(
+              runtime.state_manager
+              and await runtime.state_manager.checkpoint_strategy_state_changes()
+            )
+            if not checkpointed:
+              message = (
+                "做 T 回放候选成交状态未完成权威检查点，跳过结果归集: "
+                f"run_id={runtime.run_id} trade_id={getattr(data, 'trade_id', None)}"
+              )
+              if self._requires_replay_event_integrity(runtime):
+                runtime.status = ExecutionStatus.ERROR
+                runtime.error_message = (
+                  "T_TRADE_CANDIDATE_OUTCOME_FILL_CHECKPOINT_FAILED"
+                )
+                raise RuntimeError(message)
+              self.logger.error(message)
+            else:
+              await self._record_t_trade_candidate_fill(
+                runtime,
+                data,
+                durable_event=False,
+              )
+          else:
+            await self._record_t_trade_candidate_fill(
+              runtime,
+              data,
+              durable_event=durable_event,
+            )
         if completion is not None and not completion.done():
           completion.set_result(True)
 
       except Exception as e:
+        has_applied_runtime_event = getattr(
+          runtime.state_manager,
+          "has_applied_runtime_event",
+          None,
+        )
         marker_installed = bool(
-          durable_rollback_snapshot is not None
-          and runtime.state_manager is not None
-          and runtime.state_manager.has_applied_runtime_event(durable_event_key)
+          durable_event_key
+          and durable_rollback_snapshot is not None
+          and callable(has_applied_runtime_event)
+          and has_applied_runtime_event(durable_event_key)
+        )
+        cas_conflict = bool(
+          str(
+            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+          )
+          == "CAS_CONFLICT"
         )
         if (
           durable_rollback_snapshot is not None
           and runtime.state_manager is not None
           and not marker_installed
+          and not (paper_candidate_trade and cas_conflict)
         ):
           self._restore_durable_runtime_state(
             runtime,
@@ -5520,6 +6213,20 @@ class StrategyExecutor:
           runtime.durable_event_barrier_key = durable_event_key
         if completion is not None and not completion.done():
           completion.set_exception(e)
+        if paper_candidate_trade:
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = (
+            "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+            if cas_conflict
+            else "T_TRADE_PAPER_FILL_DURABILITY_FAILED"
+          )
+          self._drain_runtime_control_queue_after_fail_stop(
+            runtime,
+            reason=(
+              "做 T PAPER 候选成交未完成持久化收敛，运行已停止: "
+              f"{runtime.run_id}"
+            ),
+          )
         self.logger.error(f"处理事件失败: {e}")
         if runtime.metrics:
           runtime.metrics.error_count += 1
@@ -5578,8 +6285,7 @@ class StrategyExecutor:
     except asyncio.TimeoutError as exc:
       future.cancel()
       raise RuntimeConsumerUnavailable(
-        "策略运行事件消费者未在时限内确认持久化回报: "
-        f"{runtime.run_id}"
+        f"策略运行事件消费者未在时限内确认持久化回报: {runtime.run_id}"
       ) from exc
 
   def arm_durable_event_barrier(
@@ -5602,9 +6308,7 @@ class StrategyExecutor:
     runtime = self.runs.get(run_id)
     if runtime is None or runtime.state_manager is None:
       return None
-    next_key = (
-      await runtime.state_manager.get_earliest_unapplied_runtime_event_key()
-    )
+    next_key = await runtime.state_manager.get_earliest_unapplied_runtime_event_key()
     runtime.durable_event_barrier_key = next_key
     runtime.durable_startup_barrier = bool(next_key)
     return next_key
@@ -5698,6 +6402,11 @@ class StrategyExecutor:
       )
       await self._board_replay_report_barrier(runtime)
 
+      await self._ensure_t_trade_opportunity_profile(
+        runtime,
+        instrument_code=tick.stock_code,
+        evaluated_at=tick.time,
+      )
       strategy_input = self._build_strategy_input(
         runtime,
         cadence=StrategyCadence.TICK,
@@ -5708,6 +6417,12 @@ class StrategyExecutor:
       )
       output = await strategy.step(strategy_input)
       await self._process_strategy_output(runtime, output, strategy_input)
+      self._observe_t_trade_phase_one_baseline(runtime, strategy_input)
+      await self._observe_t_trade_candidate_outcomes(
+        runtime,
+        input_snapshot=strategy_input,
+        market_data=market_snapshot,
+      )
       await self._board_replay_report_barrier(runtime)
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "tick", tick)
@@ -5934,9 +6649,7 @@ class StrategyExecutor:
       plan_cash_buffer = -1.0
     if plan_cash_buffer == plan_cash_buffer and 0 <= plan_cash_buffer < 1:
       try:
-        existing_cash_buffer = float(
-          risk_caps.get("min_cash_buffer_pct", 0.0) or 0.0
-        )
+        existing_cash_buffer = float(risk_caps.get("min_cash_buffer_pct", 0.0) or 0.0)
       except (TypeError, ValueError):
         existing_cash_buffer = 0.0
       risk_caps["min_cash_buffer_pct"] = max(
@@ -5968,6 +6681,474 @@ class StrategyExecutor:
       parameters=parameters,
     )
 
+  async def _ensure_t_trade_opportunity_profile(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    evaluated_at: datetime,
+  ) -> None:
+    """Load one strictly prior profile for the first source Tick of a day."""
+
+    if not self._uses_t_trade_opportunity_runtime(runtime):
+      return
+    code = str(instrument_code or "").strip().upper()
+    source_evaluated_at = time_utils.to_shanghai(evaluated_at)
+    trade_date = source_evaluated_at.date().isoformat()
+    profile_lookup_clock = source_evaluated_at.timestamp()
+    cache_key = (code, trade_date)
+    if cache_key in runtime._t_trade_opportunity_profiles:
+      cached = runtime._t_trade_opportunity_profiles[cache_key]
+      retry_after = runtime._t_trade_opportunity_profile_retry_after.get(
+        cache_key,
+        0.0,
+      )
+      if cached is not None or profile_lookup_clock < retry_after:
+        return
+
+    required_version = (
+      str(runtime.context.parameters.get("t_trade_profile_version") or "").strip()
+      or None
+    )
+    try:
+      profile_result = await self._d1_profile_reader.execute(
+        D1ProfileReadRequest(
+          instrument_code=code,
+          # The application contract compares the profile's trade date against
+          # this normalized Shanghai evaluation date.  Passing the normalized
+          # value avoids an aware-UTC midnight crossing changing the D-1 set.
+          evaluated_at=source_evaluated_at,
+          required_version=required_version,
+        )
+      )
+      profile = (
+        profile_result.profile.to_dict()
+        if profile_result.available and profile_result.profile is not None
+        else None
+      )
+      if profile is not None and profile_result.profile_fingerprint:
+        profile["profile_fingerprint"] = profile_result.profile_fingerprint
+      runtime._t_trade_opportunity_profiles[cache_key] = (
+        copy.deepcopy(profile) if profile is not None else None
+      )
+      if profile is None:
+        runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
+          profile_lookup_clock + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
+        )
+      else:
+        runtime._t_trade_opportunity_profile_retry_after.pop(cache_key, None)
+      if profile_result.reason is D1ProfileReadReason.READ_FAILED:
+        runtime._t_trade_opportunity_profile_errors[cache_key] = (
+          "PROFILE_LOOKUP_FAILED"
+        )
+        self._runtime_log(
+          runtime,
+          "ERROR",
+          "做 T 标的画像读取失败，短暂保守门禁并定时重试: "
+          f"instrument={code} trade_date={trade_date} "
+          f"error={profile_result.error_type or profile_result.reason.value}",
+        )
+      else:
+        # NOT_FOUND and the adapter's invalid/non-causal/version-filtered
+        # results historically became an unavailable profile, not a storage
+        # failure.  Keep the existing audit and retry classification intact.
+        runtime._t_trade_opportunity_profile_errors.pop(cache_key, None)
+    except Exception as exc:
+      # Storage unavailability is not permission to reuse yesterday's cached
+      # value. The strategy receives None and therefore remains INSUFFICIENT.
+      runtime._t_trade_opportunity_profiles[cache_key] = None
+      runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
+        profile_lookup_clock + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
+      )
+      runtime._t_trade_opportunity_profile_errors[cache_key] = "PROFILE_LOOKUP_FAILED"
+      self._runtime_log(
+        runtime,
+        "ERROR",
+        "做 T 标的画像读取失败，短暂保守门禁并定时重试: "
+        f"instrument={code} trade_date={trade_date} error={exc}",
+      )
+
+    # A long-running account-level runtime only needs the active trade day's
+    # point-in-time image. Pruning prevents process-local growth without
+    # changing replay decisions.
+    for key in list(runtime._t_trade_opportunity_profiles):
+      if key[0] == code and key != cache_key:
+        runtime._t_trade_opportunity_profiles.pop(key, None)
+        runtime._t_trade_opportunity_profile_errors.pop(key, None)
+        runtime._t_trade_opportunity_profile_retry_after.pop(key, None)
+    self._prune_t_trade_opportunity_profile_cache(
+      runtime,
+      keep_key=cache_key,
+    )
+
+  @staticmethod
+  def _prune_t_trade_opportunity_profile_cache(
+    runtime: StrategyRuntime,
+    *,
+    removed_instruments: Iterable[str] = (),
+    keep_key: Optional[tuple[str, str]] = None,
+  ) -> None:
+    """Bound all profile-cache partitions and evict departed instruments."""
+
+    removed = {
+      str(instrument_code or "").strip().upper()
+      for instrument_code in removed_instruments
+      if str(instrument_code or "").strip()
+    }
+    profiles = runtime._t_trade_opportunity_profiles
+    errors = runtime._t_trade_opportunity_profile_errors
+    retry_after = runtime._t_trade_opportunity_profile_retry_after
+
+    for key in set(profiles) | set(errors) | set(retry_after):
+      if key[0] in removed:
+        profiles.pop(key, None)
+        errors.pop(key, None)
+        retry_after.pop(key, None)
+
+    limit = max(0, int(_T_TRADE_PROFILE_CACHE_MAX_ENTRIES))
+    while len(profiles) > limit:
+      eviction_key = next(
+        (key for key in profiles if key != keep_key),
+        next(iter(profiles)),
+      )
+      profiles.pop(eviction_key, None)
+      errors.pop(eviction_key, None)
+      retry_after.pop(eviction_key, None)
+
+    # Error and retry maps may outlive a partially restored or interrupted
+    # lookup.  They are never meaningful without the matching profile slot.
+    for key in set(errors) | set(retry_after):
+      if key not in profiles:
+        errors.pop(key, None)
+        retry_after.pop(key, None)
+
+  @staticmethod
+  def _uses_t_trade_opportunity_runtime(runtime: StrategyRuntime) -> bool:
+    strategy = runtime.strategy
+    strategy_class = getattr(runtime, "strategy_class", None)
+    return bool(
+      getattr(strategy, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
+      or getattr(strategy_class, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
+      or runtime.context.parameters.get("t_trade_opportunity_v3")
+    )
+
+  @staticmethod
+  def _t_trade_runtime_scope(runtime: StrategyRuntime) -> tuple[str, str, str]:
+    """Return the only scope that may authorize a strategy Tick.
+
+    ``StrategyRuntime.run_id`` is the Engine owner identity.  The context is
+    checked as a second independent value because a restored or hand-built
+    context must not silently borrow another run's eligibility snapshot.
+    """
+
+    runtime_run_id = str(runtime.run_id or "").strip()
+    context_run_id = str(getattr(runtime.context, "run_id", "") or "").strip()
+    account_id = str(
+      dict(runtime.context.parameters or {}).get("account_id") or ""
+    ).strip()
+    return runtime_run_id, context_run_id, account_id
+
+  @staticmethod
+  def _t_trade_metadata_scope(
+    metadata: Mapping[str, Any],
+  ) -> tuple[str, str]:
+    """Read optional producer scope without requiring it from old metadata."""
+
+    nested_scope = metadata.get("scope")
+    scope = nested_scope if isinstance(nested_scope, Mapping) else metadata
+    account_id = str(scope.get("account_id") or "").strip()
+    run_id = str(
+      scope.get("run_id") or scope.get("strategy_run_id") or ""
+    ).strip()
+    return account_id, run_id
+
+  @staticmethod
+  def _t_trade_unique_blockers(values: Any) -> list[str]:
+    blockers: list[str] = []
+    raw_values = values if isinstance(values, (list, tuple, set)) else [values]
+    for value in raw_values:
+      normalized = str(value or "").strip()
+      if normalized and normalized not in blockers:
+        blockers.append(normalized)
+    return blockers
+
+  def _build_t_trade_intent_emission_snapshot(
+    self,
+    runtime: StrategyRuntime,
+    instruments: List[str],
+    instrument_metadata: Optional[Mapping[str, Any]],
+  ) -> Dict[str, Dict[str, Any]]:
+    """Build a complete, bounded eligibility snapshot before publishing it.
+
+    The returned mapping is deliberately independent from ``context`` and
+    strategy state.  Missing metadata is represented as a blocked entry so a
+    successful universe reconcile still yields a deterministic strategy
+    context; entries not in the desired universe are absent altogether.
+    """
+
+    desired: list[str] = []
+    for raw_code in instruments or []:
+      code = str(raw_code or "").strip().upper()
+      if code and code not in desired:
+        desired.append(code)
+    if len(desired) > _T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS:
+      raise ValueError(
+        "做 T 意图发射资格快照超过有界标的上限: "
+        f"{len(desired)} > {_T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS}"
+      )
+
+    if instrument_metadata is not None and not isinstance(
+      instrument_metadata, Mapping
+    ):
+      raise ValueError("做 T 意图发射元数据必须是映射")
+    if (
+      instrument_metadata is not None
+      and len(instrument_metadata) > _T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS
+    ):
+      raise ValueError(
+        "做 T 意图发射元数据超过有界标的上限: "
+        f"{len(instrument_metadata)} > {_T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS}"
+      )
+
+    metadata_by_code: Dict[str, Mapping[str, Any]] = {}
+    for raw_code, raw_value in (instrument_metadata or {}).items():
+      code = str(raw_code or "").strip().upper()
+      if not code or not isinstance(raw_value, Mapping):
+        continue
+      metadata_by_code[code] = raw_value
+
+    runtime_run_id, context_run_id, account_id = self._t_trade_runtime_scope(runtime)
+    scope_blockers: list[str] = []
+    if not runtime_run_id or not context_run_id:
+      scope_blockers.extend(
+        [
+          "T_TRADE_INTENT_EMISSION_SCOPE_UNAVAILABLE",
+          "T_TRADE_INTENT_EMISSION_RUN_SCOPE_UNAVAILABLE",
+        ]
+      )
+    elif runtime_run_id != context_run_id:
+      scope_blockers.extend(
+        [
+          "T_TRADE_INTENT_EMISSION_SCOPE_MISMATCH",
+          "T_TRADE_INTENT_EMISSION_RUN_SCOPE_MISMATCH",
+        ]
+      )
+    if not account_id:
+      scope_blockers.extend(
+        [
+          "T_TRADE_INTENT_EMISSION_SCOPE_UNAVAILABLE",
+          "T_TRADE_INTENT_EMISSION_ACCOUNT_SCOPE_UNAVAILABLE",
+        ]
+      )
+    scope_blockers = self._t_trade_unique_blockers(scope_blockers)
+
+    snapshot: Dict[str, Dict[str, Any]] = {}
+    for code in desired:
+      item = metadata_by_code.get(code)
+      blockers = list(scope_blockers)
+      eligible = False
+      draining = False
+      metadata_account_id = ""
+      metadata_run_id = ""
+      if item is None:
+        blockers.append("UNIVERSE_ELIGIBILITY_UNAVAILABLE")
+      else:
+        metadata_account_id, metadata_run_id = self._t_trade_metadata_scope(item)
+        if metadata_account_id and metadata_account_id != account_id:
+          blockers.extend(
+            [
+              "T_TRADE_INTENT_EMISSION_SCOPE_MISMATCH",
+              "T_TRADE_INTENT_EMISSION_ACCOUNT_SCOPE_MISMATCH",
+            ]
+          )
+        if metadata_run_id and metadata_run_id != runtime_run_id:
+          blockers.extend(
+            [
+              "T_TRADE_INTENT_EMISSION_SCOPE_MISMATCH",
+              "T_TRADE_INTENT_EMISSION_RUN_SCOPE_MISMATCH",
+            ]
+          )
+        eligible = item.get("eligible") is True
+        draining = item.get("draining") is True
+        blockers.extend(self._t_trade_unique_blockers(item.get("blockers")))
+        if draining:
+          blockers.append("INSTRUMENT_DRAINING")
+        if not eligible and not blockers:
+          blockers.append(str(item.get("reason") or "POSITION_NOT_ELIGIBLE"))
+
+      blockers = self._t_trade_unique_blockers(blockers)
+      snapshot[code] = {
+        "instrument_code": code,
+        "run_id": runtime_run_id,
+        "account_id": account_id,
+        "eligible": eligible,
+        "draining": draining,
+        # Dynamic account facts are deliberately absent here.  They are read
+        # afresh for every Tick so a point-in-time universe snapshot cannot
+        # accidentally authorize a later account state.
+        "allowed": bool(eligible and not blockers),
+        "blockers": blockers,
+      }
+    return snapshot
+
+  @staticmethod
+  def _publish_t_trade_intent_emission_snapshot(
+    runtime: StrategyRuntime,
+    snapshot: Dict[str, Dict[str, Any]],
+  ) -> None:
+    """Publish one fully built map; assignment is the atomic visibility point."""
+
+    runtime.t_trade_intent_emission_by_instrument = {
+      str(code): {
+        **dict(value),
+        "blockers": list(value.get("blockers") or []),
+      }
+      for code, value in snapshot.items()
+    }
+
+  @staticmethod
+  def _clear_t_trade_intent_emission_snapshot(runtime: StrategyRuntime) -> None:
+    """Drop all prior authorization after any failed reconcile boundary."""
+
+    runtime.t_trade_intent_emission_by_instrument = {}
+
+  def _t_trade_intent_emission_context(
+    self,
+    runtime: StrategyRuntime,
+    instrument_code: str,
+    *,
+    requested_amount: Any = None,
+    current_intent_id: Optional[str] = None,
+    check_coordination_lock: bool = True,
+  ) -> Dict[str, Any]:
+    """Return a scope-checked strategy context, always fail-closed."""
+
+    code = str(instrument_code or "").strip().upper()
+    entry = runtime.t_trade_intent_emission_by_instrument.get(code)
+    runtime_run_id, context_run_id, account_id = self._t_trade_runtime_scope(runtime)
+    if entry is None:
+      entry = None
+    elif not isinstance(entry, Mapping):
+      return {
+        "allowed": False,
+        "blockers": ["T_TRADE_INTENT_EMISSION_CONTEXT_INVALID"],
+      }
+
+    parameters = dict(runtime.context.parameters or {})
+    if requested_amount is None:
+      requested_amount = parameters.get(
+        "target_trade_amount",
+        parameters.get("target_amount"),
+      )
+    facts = self._t_trade_account_facts(
+      runtime,
+      instrument_code=code,
+      requested_amount=requested_amount,
+      current_intent_id=current_intent_id,
+    )
+    gate_result = self._intent_emission_gate.execute(
+      IntentEmissionGateInput(
+        account_id=account_id,
+        runtime_run_id=runtime_run_id,
+        context_run_id=context_run_id,
+        instrument_code=code,
+        universe_entry=entry,
+        **facts.to_gate_facts(),
+      )
+    )
+    gate_blockers = list(gate_result.blockers)
+    if facts.blockers:
+      # The pure account snapshot result already carries the stable, actionable
+      # reason.  Do not dilute it with the four derivative tri-state UNKNOWN
+      # codes produced from the same missing snapshot; unrelated scope and
+      # universe blockers remain visible.
+      unknown_fact_codes = {
+        "T_TRADE_RECONCILIATION_STATUS_UNKNOWN",
+        "T_TRADE_ACCOUNT_CONCURRENT_BATCH_LIMIT_UNKNOWN",
+        "T_TRADE_ACCOUNT_TOTAL_EXPOSURE_LIMIT_UNKNOWN",
+        "T_TRADE_SAME_INSTRUMENT_PENDING_INTENT_UNKNOWN",
+      }
+      gate_blockers = [
+        blocker for blocker in gate_blockers if blocker not in unknown_fact_codes
+      ]
+    blockers = self._t_trade_unique_blockers([*facts.blockers, *gate_blockers])
+    if account_id and check_coordination_lock:
+      coordination_lock = t_trade_account_coordination_lock(account_id)
+      if coordination_lock.locked():
+        blockers.append("T_TRADE_ACCOUNT_COORDINATION_IN_PROGRESS")
+    blockers = self._t_trade_unique_blockers(blockers)
+    return {
+      "allowed": not blockers,
+      "blockers": blockers,
+    }
+
+  def _t_trade_account_facts(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    requested_amount: Any,
+    current_intent_id: Optional[str] = None,
+  ) -> TTradeAccountFacts:
+    """Read and normalize the current account facts without mutating state."""
+
+    strategy_states = None
+    if runtime.strategy is not None:
+      raw_states = runtime.strategy.state.get("instrument_states")
+      strategy_states = raw_states if isinstance(raw_states, Mapping) else None
+    state_manager = runtime.state_manager
+    account_quota = None
+    get_account_quota = getattr(state_manager, "get_account_quota", None)
+    if callable(get_account_quota):
+      try:
+        account_quota = get_account_quota()
+      except Exception:
+        account_quota = None
+    parameters = dict(runtime.context.parameters or {})
+    return compute_t_trade_account_facts(
+      strategy_states,
+      runtime.t_trade_entry_reservations,
+      account_quota,
+      requested_amount,
+      instrument_code=instrument_code,
+      current_intent_id=current_intent_id,
+      max_concurrent_batches=parameters.get("max_concurrent_batches"),
+      max_total_exposure_pct=parameters.get("max_total_t_exposure_pct"),
+    )
+
+  async def invalidate_t_trade_entry_authority(
+    self,
+    run_id: str,
+    *,
+    account_id: Optional[str] = None,
+    reason: str = "T_TRADE_ENTRY_AUTHORITY_INVALIDATED",
+  ) -> bool:
+    """Clear only new-entry authority while retaining exit state and batches."""
+
+    runtime = self.runs.get(str(run_id or "").strip())
+    if runtime is None:
+      return False
+    expected_account = str(account_id or "").strip()
+    actual_account = str(
+      dict(runtime.context.parameters or {}).get("account_id") or ""
+    ).strip()
+    if expected_account and expected_account != actual_account:
+      return False
+    # The caller owns the account coordination lock.  Acquire the runtime
+    # approval lock so an in-flight candidate cannot publish an AWAITING
+    # transition after this invalidation becomes visible.
+    await runtime.approval_lock.acquire()
+    try:
+      self._clear_t_trade_intent_emission_snapshot(runtime)
+      self._runtime_log(
+        runtime,
+        "WARNING",
+        f"做 T 新入场 authority 已失败关闭: reason={reason}",
+      )
+      return True
+    finally:
+      runtime.approval_lock.release()
+
   def _build_strategy_input(
     self,
     runtime: StrategyRuntime,
@@ -5992,6 +7173,13 @@ class StrategyExecutor:
       cadence=cadence,
       instrument_code=instrument_code,
       market_data=market_data,
+      market_data_context=self._build_market_data_context(
+        runtime,
+        cadence=cadence,
+        instrument_code=instrument_code,
+        timestamp=timestamp,
+        event=event,
+      ),
       event=event,
       portfolio_state=snapshot.portfolio_state,
       bucket_ledger=snapshot.bucket_ledger,
@@ -6014,6 +7202,147 @@ class StrategyExecutor:
       strategy_state=snapshot.runtime_state,
       parameters=snapshot.parameters,
     )
+
+  def _build_market_data_context(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    cadence: StrategyCadence,
+    instrument_code: str,
+    timestamp: datetime,
+    event: Any,
+  ) -> MarketDataContext:
+    """Expose Engine-owned market lineage without leaking transport objects."""
+
+    code = str(instrument_code or "").strip().upper()
+    source_time_ms = self._safe_non_negative_int(
+      self._get_value(event, "source_time_ms"),
+      default=int(timestamp.timestamp() * 1000),
+    )
+    tick_ordinal = self._safe_non_negative_int(
+      self._get_value(event, "tick_ordinal"),
+      default=self._safe_non_negative_int(
+        self._get_value(event, "transaction_num"),
+        default=0,
+      ),
+    )
+    source_sequence = self._safe_non_negative_int(
+      self._get_value(event, "market_stream_sequence"),
+      default=self._safe_non_negative_int(
+        self._get_value(event, "source_sequence"),
+        default=0,
+      ),
+    )
+    transport_generation = self._safe_non_negative_int(
+      self._get_value(event, "continuity_generation"),
+      default=0,
+    )
+    is_replay = runtime.context.mode == StrategyRunMode.BACKTEST
+    generation = (
+      transport_generation
+      if transport_generation > 0
+      else max(
+        0,
+        int(
+          (
+            runtime._market_transport_generation
+            if not is_replay
+            else runtime._market_continuity_generations.get(code, 0)
+          )
+          or 0
+        ),
+      )
+    )
+    received_at_ms = (
+      source_time_ms if is_replay else int(time_utils.now().timestamp() * 1000)
+    )
+    source = (
+      "REPLAY"
+      if is_replay
+      else "REALTIME"
+      if cadence in {StrategyCadence.TICK, StrategyCadence.BAR}
+      else "CONTROL"
+    )
+    source_timestamp = time_utils.to_shanghai(
+      datetime.fromtimestamp(source_time_ms / 1000, timezone.utc)
+    )
+    explicit_trade_date = self._get_value(event, "trade_date")
+    if isinstance(explicit_trade_date, datetime):
+      trade_date = explicit_trade_date.date()
+    elif isinstance(explicit_trade_date, date):
+      trade_date = explicit_trade_date
+    elif isinstance(explicit_trade_date, str) and explicit_trade_date:
+      try:
+        trade_date = datetime.fromisoformat(explicit_trade_date).date()
+      except ValueError:
+        trade_date = source_timestamp.date()
+    else:
+      trade_date = source_timestamp.date()
+
+    explicit_session = self._get_value(event, "session")
+    try:
+      session = (
+        explicit_session
+        if isinstance(explicit_session, MarketDataSession)
+        else MarketDataSession(str(explicit_session))
+      )
+    except (TypeError, ValueError):
+      session = self._classify_market_data_session(source_timestamp)
+
+    explicit_stale = self._get_value(event, "quote_stale")
+    quote_stale = False if explicit_stale is None else self._coerce_bool(explicit_stale)
+    return MarketDataContext(
+      source=source,
+      stream_id=(
+        str(self._get_value(event, "market_stream_id") or "").strip()
+        or (
+          runtime._market_transport_stream_id
+          if not is_replay
+          else f"{runtime.run_id}:replay"
+        )
+      ),
+      continuity_generation=generation,
+      source_sequence=source_sequence,
+      source_time_ms=source_time_ms,
+      tick_ordinal=tick_ordinal,
+      received_at_ms=received_at_ms,
+      quote_stale=quote_stale,
+      session=session,
+      trade_date=trade_date,
+    )
+
+  @staticmethod
+  def _classify_market_data_session(value: datetime) -> MarketDataSession:
+    """Classify source time once in Engine; strategies never consult a clock."""
+
+    current = value.time()
+    if current < time(9, 15):
+      return MarketDataSession.PRE_OPEN
+    if current < time(9, 30):
+      return MarketDataSession.OPENING_AUCTION
+    if current <= time(11, 30):
+      return MarketDataSession.CONTINUOUS_AM
+    if current < time(13, 0):
+      return MarketDataSession.LUNCH_BREAK
+    if current < time(14, 57):
+      return MarketDataSession.CONTINUOUS_PM
+    if current <= time(15, 0):
+      return MarketDataSession.CLOSING_AUCTION
+    return MarketDataSession.CLOSED
+
+  @staticmethod
+  def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+      return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+  @staticmethod
+  def _safe_non_negative_int(value: Any, *, default: int) -> int:
+    try:
+      parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+      parsed = int(default)
+    return max(0, parsed)
 
   def _build_execution_profile(
     self,
@@ -6057,23 +7386,48 @@ class StrategyExecutor:
         previous_market_context = runtime.strategy.state.get("last_market_context")
       except Exception:
         previous_market_context = None
+    instrument_code = (
+      market_data.instrument_code
+      if market_data and market_data.instrument_code
+      else (getattr(event, "stock_code", None) or getattr(event, "code", None) or "")
+    )
+    evaluated_at = (
+      market_data.timestamp
+      if market_data and market_data.timestamp
+      else runtime.context.current_time
+    )
     data_context = AshareDataContextProvider().build_context(
-      instrument_code=(
-        market_data.instrument_code
-        if market_data and market_data.instrument_code
-        else (getattr(event, "stock_code", None) or getattr(event, "code", None) or "")
-      ),
-      timestamp=(
-        market_data.timestamp
-        if market_data and market_data.timestamp
-        else runtime.context.current_time
-      ),
+      instrument_code=instrument_code,
+      timestamp=(evaluated_at),
       market_data=market_data,
       event=event,
       parameters=params,
       previous_market_context=previous_market_context,
     )
-    return data_context.market_context
+    market_context = dict(data_context.market_context or {})
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      market_context["t_trade_intent_emission"] = (
+        self._t_trade_intent_emission_context(runtime, instrument_code)
+      )
+    if self._uses_t_trade_opportunity_runtime(runtime) and isinstance(
+      evaluated_at, datetime
+    ):
+      cache_key = (
+        str(instrument_code or "").strip().upper(),
+        time_utils.to_shanghai(evaluated_at).date().isoformat(),
+      )
+      market_context["t_trade_instrument_profile"] = copy.deepcopy(
+        runtime._t_trade_opportunity_profiles.get(cache_key)
+      )
+      profile_error = runtime._t_trade_opportunity_profile_errors.get(cache_key)
+      if profile_error:
+        market_context["t_trade_instrument_profile_error"] = profile_error
+      runtime_failure = runtime._t_trade_opportunity_failures.get(cache_key[0])
+      if runtime_failure:
+        market_context["t_trade_opportunity_runtime_error"] = copy.deepcopy(
+          runtime_failure
+        )
+    return market_context
 
   def _build_risk_caps(
     self,
@@ -6156,6 +7510,28 @@ class StrategyExecutor:
   ) -> None:
     if not output:
       return
+    try:
+      self.opportunity_observability.observe_output(
+        run_id=runtime.run_id,
+        output=output,
+      )
+    except Exception as exc:
+      # Metrics are deliberately non-authoritative and must never interrupt a
+      # strategy decision or its durability boundary.
+      self.logger.warning(
+        "做 T 运行指标采集降级: run_id=%s error=%s",
+        runtime.run_id,
+        exc.__class__.__name__,
+      )
+    opportunity_events = self._t_trade_opportunity_evaluation_events(output)
+    if opportunity_events:
+      await self._process_t_trade_opportunity_output(
+        runtime,
+        output,
+        opportunity_events=opportunity_events,
+        input_snapshot=input_snapshot,
+      )
+      return
     intents = output.trade_intents or []
     if not self._accepts_non_durable_output(runtime):
       self._runtime_log(
@@ -6182,9 +7558,7 @@ class StrategyExecutor:
     )
     continuity_failures: list[tuple[TradeIntent, tuple[str, str]]] = []
     if input_continuity_failure is not None:
-      continuity_failures = [
-        (intent, input_continuity_failure) for intent in intents
-      ]
+      continuity_failures = [(intent, input_continuity_failure) for intent in intents]
     else:
       for intent in intents:
         failure = self._runtime_market_continuity_failure(
@@ -6238,7 +7612,11 @@ class StrategyExecutor:
           and runtime.context.parameters.get("auto_approve_manual_intents")
           and not runtime.context.parameters.get("limit_up_board_replay")
         ):
-          result = await self.approve_trade_intent(runtime.run_id, intent.intent_id)
+          result = await self.approve_trade_intent(
+            runtime.run_id,
+            intent.intent_id,
+            approval_expectation=self._v3_t_trade_expectation_from_intent(intent),
+          )
           self._runtime_log(
             runtime,
             "INFO" if result.get("success") else "WARNING",
@@ -6255,19 +7633,2213 @@ class StrategyExecutor:
         continue
       await self._process_trade_intent(runtime, intent)
 
+  @staticmethod
+  def _t_trade_opportunity_evaluation_events(
+    output: StrategyOutput,
+  ) -> List[Dict[str, Any]]:
+    patch = output.runtime_state_patch
+    if patch is None:
+      return []
+    events = list(getattr(patch, "append_events", []) or [])
+    return [
+      dict(event)
+      for event in events
+      if isinstance(event, Mapping)
+      and event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+    ]
+
+  @staticmethod
+  def _t_trade_observability_labels(
+    events: List[Dict[str, Any]],
+  ) -> Dict[str, str]:
+    snapshot = next(
+      (
+        dict(event.get("signal_snapshot") or {})
+        for event in reversed(events)
+        if isinstance(event.get("signal_snapshot"), Mapping)
+      ),
+      {},
+    )
+    return {
+      "path": str(snapshot.get("selected_path") or "NONE"),
+      "health": str(snapshot.get("data_health") or "UNKNOWN"),
+      "policy_version": str(snapshot.get("policy_version") or "UNKNOWN"),
+    }
+
+  @staticmethod
+  def _is_transient_evaluation_materialization_error(exc: Exception) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OperationalError)):
+      return True
+    if isinstance(exc, DBAPIError):
+      return bool(getattr(exc, "connection_invalidated", False))
+    return exc.__class__.__name__ in {
+      "CannotConnectNowError",
+      "ConnectionDoesNotExistError",
+      "ConnectionFailureError",
+      "InterfaceError",
+      "TooManyConnectionsError",
+    }
+
+  async def _materialize_t_trade_evaluation_with_retry(
+    self,
+    *,
+    event: Dict[str, Any],
+    account_id: str,
+    strategy_run_id: str,
+    labels: Dict[str, str],
+    cas_committed: bool,
+  ) -> Any:
+    """Retry post-CAS appends; event_key keeps retries idempotent.
+
+    Every caller supplies the successful RuntimeState checkpoint fact.  The
+    application use case remains the final guard so a future caller cannot
+    accidentally materialize an event before its CAS boundary.
+    """
+
+    maximum_attempts = 3
+    for attempt in range(1, maximum_attempts + 1):
+      try:
+        materialized = await self._evaluation_materializer.execute(
+          PostCasEvaluationInput(
+            event=event,
+            account_id=account_id,
+            strategy_run_id=strategy_run_id,
+            cas_committed=cas_committed,
+          )
+        )
+        if not materialized.materialized:
+          raise RuntimeError(materialized.reason or "RUNTIME_STATE_CAS_NOT_COMMITTED")
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_attempts_total",
+          detail="SUCCESS",
+          **labels,
+        )
+        return materialized.record
+      except Exception as exc:
+        classification_error = (
+          exc.cause
+          if isinstance(exc, EvaluationMaterializationError)
+          else exc
+        )
+        transient = self._is_transient_evaluation_materialization_error(
+          classification_error
+        )
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_attempts_total",
+          detail=("TRANSIENT_FAILURE" if transient else "PERMANENT_FAILURE"),
+          **labels,
+        )
+        if not transient or attempt >= maximum_attempts:
+          raise classification_error
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_retries_total",
+          detail=f"RETRY_{attempt}",
+          **labels,
+        )
+        await asyncio.sleep(0.05 * (2 ** (attempt - 1)))
+    raise RuntimeError("unreachable T-trade evaluation materialization retry state")
+
+  async def _seed_t_trade_candidate_outcome(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    account_id: str,
+    event: Mapping[str, Any],
+    strict: bool = False,
+  ) -> bool:
+    facade = self.candidate_outcome_facade
+    if facade is None:
+      return True
+    try:
+      state = await facade.seed_material_event(
+        account_id=account_id,
+        strategy_run_id=runtime.run_id,
+        event=event,
+      )
+      if state is not None and self._candidate_outcome_state_is_active(state):
+        self._candidate_outcome_activity[
+          (runtime.run_id, state.definition.instrument_code)
+        ] = True
+      return True
+    except Exception:
+      self._candidate_outcome_reconciled_runs.discard(runtime.run_id)
+      self._candidate_outcome_repair_attempts.pop(runtime.run_id, None)
+      self._candidate_outcome_repair_retry_at_ms.pop(runtime.run_id, None)
+      self.logger.exception(
+        "做 T 候选结果初始化失败: run_id=%s event_key=%s",
+        runtime.run_id,
+        event.get("event_key"),
+      )
+      if strict or self._requires_replay_event_integrity(runtime):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_CANDIDATE_OUTCOME_SEED_FAILED"
+        raise
+      return False
+
+  async def _acknowledge_t_trade_material_events(
+    self,
+    runtime: StrategyRuntime,
+    events: List[Mapping[str, Any]],
+  ) -> None:
+    if runtime.context.mode not in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+      return
+    keys = [
+      str(event.get("event_key") or "").strip()
+      for event in events
+      if str(event.get("record_kind") or "").upper() == "MATERIAL"
+      and str(event.get("event_key") or "").strip()
+    ]
+    if not keys:
+      return
+    acknowledge = getattr(
+      runtime.state_manager,
+      "acknowledge_t_trade_material_events",
+      None,
+    )
+    force_save = getattr(runtime.state_manager, "force_save", None)
+    if not callable(acknowledge) or not callable(force_save):
+      raise RuntimeError("V3 做 T 运行缺少 MATERIAL outbox 确认边界")
+    acknowledge(keys)
+    try:
+      saved = bool(await force_save())
+    except Exception:
+      saved = False
+      save_error = True
+    else:
+      save_error = False
+    if saved:
+      return
+
+    # A non-CAS persistence failure only removed the entries in memory. Put
+    # them back before another background snapshot can accidentally erase the
+    # still-pending durable rows. A CAS loser has already adopted the external
+    # winner and must never resurrect an event that the winner may have acked.
+    if (
+      str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
+      != "CAS_CONFLICT"
+    ):
+      enqueue = getattr(
+        runtime.state_manager,
+        "enqueue_t_trade_material_events",
+        None,
+      )
+      if callable(enqueue):
+        enqueue([dict(event) for event in events])
+    if save_error:
+      raise RuntimeError("V3 做 T MATERIAL outbox 确认保存异常")
+    raise RuntimeError("V3 做 T MATERIAL outbox 确认保存失败")
+
+  async def _replay_pending_t_trade_material_events(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    if runtime.context.mode not in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+      return
+    pending_loader = getattr(
+      runtime.state_manager,
+      "pending_t_trade_material_events",
+      None,
+    )
+    if not callable(pending_loader):
+      raise RuntimeError("V3 做 T 运行缺少 MATERIAL durable outbox")
+    pending = [dict(event) for event in list(pending_loader() or [])]
+    if not pending:
+      return
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      raise RuntimeError("V3 做 T MATERIAL outbox 重放缺少账户绑定")
+    acknowledged: List[Mapping[str, Any]] = []
+    for event in pending:
+      labels = self._t_trade_observability_labels([event])
+      await self._materialize_t_trade_evaluation_with_retry(
+        event=event,
+        account_id=account_id,
+        strategy_run_id=runtime.run_id,
+        labels=labels,
+        cas_committed=True,
+      )
+      seeded = await self._seed_t_trade_candidate_outcome(
+        runtime,
+        account_id=account_id,
+        event=event,
+        strict=True,
+      )
+      if not seeded:
+        raise RuntimeError("V3 做 T MATERIAL outbox 候选结果初始化失败")
+      acknowledged.append(event)
+    await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+
+  @staticmethod
+  def _initialize_t_trade_phase_one_baseline(runtime: StrategyRuntime) -> None:
+    runtime.t_trade_phase_one_baseline = None
+    if (
+      runtime.context.mode == StrategyRunMode.BACKTEST
+      and runtime.context.parameters.get("t_trade_replay")
+    ):
+      runtime.t_trade_phase_one_baseline = TTradePhaseOneBaselineAccumulator(
+        runtime.run_id
+      )
+
+  @staticmethod
+  def _observe_t_trade_phase_one_baseline(
+    runtime: StrategyRuntime,
+    strategy_input: StrategyInput,
+  ) -> None:
+    baseline = runtime.t_trade_phase_one_baseline
+    if baseline is not None:
+      v3_data_ready, v3_candidate_path = (
+        StrategyExecutor._t_trade_phase_one_v3_comparison_fact(
+          runtime,
+          strategy_input,
+        )
+      )
+      baseline.observe(
+        strategy_input,
+        v3_data_ready=v3_data_ready,
+        v3_candidate_path=v3_candidate_path,
+      )
+
+  @staticmethod
+  def _t_trade_phase_one_v3_comparison_fact(
+    runtime: StrategyRuntime,
+    strategy_input: StrategyInput,
+  ) -> tuple[Optional[bool], Optional[str]]:
+    strategy = runtime.strategy
+    state_container = getattr(strategy, "state", None)
+    if strategy is None or state_container is None:
+      return None, None
+    raw_states = state_container.get("instrument_states", {})
+    states = dict(raw_states) if isinstance(raw_states, Mapping) else {}
+    raw_state = states.get(str(strategy_input.instrument_code or "").upper())
+    state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+    opportunity = dict(state.get("opportunity") or {})
+    evaluation = dict(opportunity.get("latest_evaluation") or {})
+    context = strategy_input.market_data_context
+    try:
+      same_source = bool(
+        int(evaluation.get("source_time_ms") or -1) == int(context.source_time_ms)
+        and int(evaluation.get("tick_ordinal") or -1) == int(context.tick_ordinal)
+        and str(evaluation.get("continuity_generation") or "")
+        == str(context.continuity_generation)
+      )
+    except (TypeError, ValueError, OverflowError):
+      same_source = False
+    if not same_source:
+      return None, None
+    data_ready = str(evaluation.get("data_health") or "").upper() == "READY"
+    candidate_path: Optional[str] = None
+    try:
+      candidate_created_on_source = bool(
+        evaluation.get("candidate_id")
+        and int(evaluation.get("candidate_created_at_ms") or -1)
+        == int(context.source_time_ms)
+      )
+    except (TypeError, ValueError, OverflowError):
+      candidate_created_on_source = False
+    if candidate_created_on_source:
+      candidate_path = str(evaluation.get("selected_path") or "").upper() or None
+    return data_ready, candidate_path
+
+  def _finalize_t_trade_phase_one_baseline(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    baseline = runtime.t_trade_phase_one_baseline
+    if baseline is None:
+      return
+    finalized_at_ms = int(
+      time_utils.to_utc(self._runtime_now(runtime)).timestamp() * 1000
+    )
+    baseline.finalize(finalized_at_ms)
+
+  async def _observe_t_trade_candidate_outcomes(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    input_snapshot: StrategyInput,
+    market_data: MarketDataSnapshot,
+  ) -> None:
+    facade = self.candidate_outcome_facade
+    context = input_snapshot.market_data_context
+    if (
+      facade is None
+      or context is None
+      or not self._uses_t_trade_opportunity_runtime(runtime)
+    ):
+      return
+    if runtime.context.mode == StrategyRunMode.PAPER:
+      try:
+        await self._replay_pending_t_trade_paper_fill_facts(runtime)
+      except Exception:
+        self.logger.exception(
+          "做 T PAPER 候选结果 outbox 重放失败，保留事实等待后续 Tick: "
+          "run_id=%s instrument=%s",
+          runtime.run_id,
+          input_snapshot.instrument_code,
+        )
+        return
+    activity_key = (
+      runtime.run_id,
+      str(input_snapshot.instrument_code or "").upper(),
+    )
+    if (
+      runtime.context.mode == StrategyRunMode.LIVE
+      and runtime.run_id not in self._candidate_outcome_reconciled_runs
+      and int(context.source_time_ms)
+      >= self._candidate_outcome_repair_retry_at_ms.get(runtime.run_id, 0)
+    ):
+      try:
+        repair = await facade.reconcile_applied_trade_events(
+          strategy_run_id=runtime.run_id,
+        )
+        self._candidate_outcome_repair_attempts.pop(runtime.run_id, None)
+        self._candidate_outcome_repair_retry_at_ms.pop(runtime.run_id, None)
+        if repair.complete:
+          self._candidate_outcome_reconciled_runs.add(runtime.run_id)
+        elif repair.deferred_count:
+          self._candidate_outcome_repair_retry_at_ms[runtime.run_id] = (
+            int(context.source_time_ms) + 5_000
+          )
+        if repair.quarantined_count:
+          self.logger.warning(
+            "做 T 候选结果隔离无效 APPLIED 成交: run_id=%s instrument=%s "
+            "quarantined=%s issues=%s",
+            runtime.run_id,
+            input_snapshot.instrument_code,
+            repair.quarantined_count,
+            dict(repair.issue_counts),
+          )
+        if repair.states:
+          active_instruments = {
+            str(state.definition.instrument_code or "").strip().upper()
+            for state in repair.states
+            if self._candidate_outcome_state_is_active(state)
+            and str(state.definition.instrument_code or "").strip()
+          }
+          for instrument_code in active_instruments:
+            self._candidate_outcome_activity[
+              (runtime.run_id, instrument_code)
+            ] = True
+      except Exception:
+        attempt = min(
+          self._candidate_outcome_repair_attempts.get(runtime.run_id, 0) + 1,
+          6,
+        )
+        self._candidate_outcome_repair_attempts[runtime.run_id] = attempt
+        delay_ms = min(60_000, 5_000 * (2 ** (attempt - 1)))
+        self._candidate_outcome_repair_retry_at_ms[runtime.run_id] = (
+          int(context.source_time_ms) + delay_ms
+        )
+        self.logger.exception(
+          "做 T 候选结果持久化成交重放失败: run_id=%s instrument=%s retry_in_ms=%s",
+          runtime.run_id,
+          input_snapshot.instrument_code,
+          delay_ms,
+        )
+    if self._candidate_outcome_activity.get(activity_key) is False:
+      return
+    try:
+      states = await facade.observe_tick(
+        strategy_run_id=runtime.run_id,
+        instrument_code=str(input_snapshot.instrument_code or "").upper(),
+        source_time_ms=int(context.source_time_ms),
+        tick_ordinal=int(context.tick_ordinal),
+        continuity_generation=str(context.continuity_generation),
+        price=float(market_data.price),
+        trading_halted=bool(market_data.suspended),
+      )
+      self._candidate_outcome_activity[activity_key] = any(
+        self._candidate_outcome_state_is_active(state) for state in (states or [])
+      )
+    except Exception:
+      self.logger.exception(
+        "做 T 候选结果 Tick 成熟失败: run_id=%s instrument=%s",
+        runtime.run_id,
+        input_snapshot.instrument_code,
+      )
+      if self._requires_replay_event_integrity(runtime):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_CANDIDATE_OUTCOME_TICK_FAILED"
+        raise
+
+  async def _build_t_trade_paper_fill_fact(
+    self,
+    runtime: StrategyRuntime,
+    trade: Any,
+  ) -> Optional[Dict[str, Any]]:
+    """Freeze one simulator fill before the strategy snapshot is committed."""
+
+    if runtime.context.mode != StrategyRunMode.PAPER:
+      return None
+    metadata = dict(getattr(trade, "metadata", {}) or {})
+    candidate_id = str(metadata.get("candidate_id") or "").strip()
+    if not candidate_id:
+      return None
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    instrument_code = str(getattr(trade, "instrument_code", "") or "").strip().upper()
+    trade_id = str(getattr(trade, "trade_id", "") or "").strip()
+    order_id = str(getattr(trade, "order_id", "") or "").strip()
+    role = str(metadata.get("t_trade_role") or "").strip().upper()
+    candidate_fingerprint = str(
+      metadata.get("candidate_fingerprint") or ""
+    ).strip()
+    policy_version = str(metadata.get("policy_version") or "").strip()
+    intent_id = str(metadata.get("intent_id") or "").strip()
+    if (
+      not account_id
+      or not instrument_code
+      or not trade_id
+      or not order_id
+      or role not in {"ENTRY", "EXIT"}
+      or not candidate_fingerprint
+      or not policy_version
+      or not intent_id
+      or str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
+      or str(metadata.get("account_id") or "").strip() != account_id
+      or str(metadata.get("instrument_code") or "").strip().upper()
+      != instrument_code
+    ):
+      raise ValueError("做 T PAPER 成交缺少完整且匹配的候选作用域")
+
+    trade_time = getattr(trade, "trade_time", None)
+    if not isinstance(trade_time, datetime):
+      raise ValueError("做 T PAPER 成交缺少权威成交时间")
+    trade_type = str(
+      getattr(getattr(trade, "trade_type", None), "value", None)
+      or getattr(trade, "trade_type", "")
+      or ""
+    ).strip().upper()
+    if trade_type not in {item.value for item in BrokerOrderType}:
+      raise ValueError("做 T PAPER 成交方向无效")
+
+    price = float(getattr(trade, "price", 0.0) or 0.0)
+    volume = int(getattr(trade, "volume", 0) or 0)
+    amount = float(getattr(trade, "amount", 0.0) or 0.0)
+    commission = float(getattr(trade, "commission", 0.0) or 0.0)
+    if (
+      not isfinite(price)
+      or price <= 0
+      or volume <= 0
+      or not isfinite(amount)
+      or amount < 0
+      or not isfinite(commission)
+      or commission < 0
+    ):
+      raise ValueError("做 T PAPER 成交数值无效")
+
+    entry_complete: Optional[bool] = None
+    entry_target_volume: Optional[int] = None
+    if role == "ENTRY":
+      order = await runtime.broker.get_order(order_id)
+      requested_volume = int(
+        getattr(getattr(order, "request", None), "volume", 0) or 0
+      )
+      if requested_volume <= 0:
+        raise ValueError("做 T PAPER 入场成交缺少委托目标数量")
+      entry_target_volume = requested_volume
+      entry_complete = bool(
+        order is not None
+        and order.status == OrderStatus.FILLED
+        and int(getattr(order, "filled_volume", 0) or 0) >= requested_volume
+      )
+
+    persisted_metadata = {
+      "strategy_run_id": runtime.run_id,
+      "account_id": account_id,
+      "instrument_code": instrument_code,
+      "candidate_id": candidate_id,
+      "candidate_fingerprint": candidate_fingerprint,
+      "policy_version": policy_version,
+      "t_trade_role": role.lower(),
+      "intent_id": intent_id,
+    }
+    return {
+      "schema_version": 1,
+      "fact_key": f"paper-fill:{runtime.run_id}:{trade_id}",
+      "trade_id": trade_id,
+      "order_id": order_id,
+      "instrument_code": instrument_code,
+      "trade_type": trade_type,
+      "price": price,
+      "volume": volume,
+      "amount": amount,
+      "commission": commission,
+      "trade_time": trade_time.isoformat(),
+      "metadata": persisted_metadata,
+      "entry_complete": entry_complete,
+      "entry_target_volume": entry_target_volume,
+    }
+
+  @staticmethod
+  def _trade_from_t_trade_paper_fill_fact(
+    runtime: StrategyRuntime,
+    fact: Mapping[str, Any],
+  ) -> tuple[TradeRecord, Optional[bool], Optional[int]]:
+    """Strictly restore a bounded PAPER fill fact from RuntimeState."""
+
+    if int(fact.get("schema_version") or 0) != 1:
+      raise ValueError("做 T PAPER 成交 outbox schema 不受支持")
+    metadata = dict(fact.get("metadata") or {})
+    trade_id = str(fact.get("trade_id") or "").strip()
+    expected_key = f"paper-fill:{runtime.run_id}:{trade_id}"
+    if str(fact.get("fact_key") or "").strip() != expected_key:
+      raise ValueError("做 T PAPER 成交 outbox 业务键不匹配")
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    instrument_code = str(fact.get("instrument_code") or "").strip().upper()
+    order_id = str(fact.get("order_id") or "").strip()
+    candidate_id = str(metadata.get("candidate_id") or "").strip()
+    candidate_fingerprint = str(
+      metadata.get("candidate_fingerprint") or ""
+    ).strip()
+    policy_version = str(metadata.get("policy_version") or "").strip()
+    intent_id = str(metadata.get("intent_id") or "").strip()
+    missing_identity_fields = [
+      field_name
+      for field_name, value in (
+        ("trade_id", trade_id),
+        ("account_id", account_id),
+        ("instrument_code", instrument_code),
+        ("order_id", order_id),
+        ("candidate_id", candidate_id),
+        ("candidate_fingerprint", candidate_fingerprint),
+        ("policy_version", policy_version),
+        ("intent_id", intent_id),
+      )
+      if not value
+    ]
+    if missing_identity_fields:
+      raise ValueError(
+        "做 T PAPER 成交 outbox 缺少候选身份字段: "
+        + ",".join(missing_identity_fields)
+      )
+    if (
+      str(metadata.get("strategy_run_id") or "").strip() != runtime.run_id
+      or str(metadata.get("account_id") or "").strip() != account_id
+      or str(metadata.get("instrument_code") or "").strip().upper()
+      != instrument_code
+    ):
+      raise ValueError("做 T PAPER 成交 outbox 作用域不匹配")
+    try:
+      trade_time = datetime.fromisoformat(str(fact.get("trade_time") or ""))
+      trade_type = BrokerOrderType(str(fact.get("trade_type") or "").upper())
+      price = float(fact.get("price"))
+      volume = int(fact.get("volume"))
+      amount = float(fact.get("amount"))
+      commission = float(fact.get("commission"))
+    except (TypeError, ValueError, OverflowError) as exc:
+      raise ValueError("做 T PAPER 成交 outbox 载荷无效") from exc
+    if (
+      not isfinite(price)
+      or price <= 0
+      or volume <= 0
+      or not isfinite(amount)
+      or amount < 0
+      or not isfinite(commission)
+      or commission < 0
+    ):
+      raise ValueError("做 T PAPER 成交 outbox 数值无效")
+    role = str(metadata.get("t_trade_role") or "").strip().upper()
+    raw_complete = fact.get("entry_complete")
+    raw_target = fact.get("entry_target_volume")
+    if role == "ENTRY":
+      if not isinstance(raw_complete, bool):
+        raise ValueError("做 T PAPER 入场成交 outbox 缺少完成态")
+      try:
+        entry_target_volume = int(raw_target)
+      except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("做 T PAPER 入场成交 outbox 缺少目标数量") from exc
+      if entry_target_volume <= 0:
+        raise ValueError("做 T PAPER 入场成交 outbox 目标数量无效")
+      entry_complete: Optional[bool] = raw_complete
+    elif role == "EXIT":
+      if raw_complete is not None or raw_target is not None:
+        raise ValueError("做 T PAPER 出场成交 outbox 包含非法入场字段")
+      entry_complete = None
+      entry_target_volume = None
+    else:
+      raise ValueError("做 T PAPER 成交 outbox 角色无效")
+    return (
+      TradeRecord(
+        trade_id=trade_id,
+        order_id=order_id,
+        instrument_code=instrument_code,
+        trade_type=trade_type,
+        price=price,
+        volume=volume,
+        amount=amount,
+        commission=commission,
+        trade_time=trade_time,
+        metadata=metadata,
+      ),
+      entry_complete,
+      entry_target_volume,
+    )
+
+  async def _acknowledge_t_trade_paper_fill_facts(
+    self,
+    runtime: StrategyRuntime,
+    facts: List[Mapping[str, Any]],
+  ) -> None:
+    if not facts:
+      return
+    acknowledge = getattr(
+      runtime.state_manager,
+      "acknowledge_t_trade_paper_fill_facts",
+      None,
+    )
+    force_save = getattr(runtime.state_manager, "force_save", None)
+    keys = [str(fact.get("fact_key") or "").strip() for fact in facts]
+    if not callable(acknowledge) or not callable(force_save) or not all(keys):
+      raise RuntimeError("V3 做 T PAPER 成交缺少 outbox 确认边界")
+    acknowledge(keys)
+    try:
+      saved = bool(await force_save())
+    except Exception:
+      saved = False
+      save_error = True
+    else:
+      save_error = False
+    if saved:
+      return
+    if (
+      str(getattr(runtime.state_manager, "last_snapshot_failure_code", "") or "")
+      != "CAS_CONFLICT"
+    ):
+      enqueue = getattr(
+        runtime.state_manager,
+        "enqueue_t_trade_paper_fill_fact",
+        None,
+      )
+      if callable(enqueue):
+        for fact in facts:
+          enqueue(dict(fact))
+    if save_error:
+      raise RuntimeError("V3 做 T PAPER 成交 outbox 确认保存异常")
+    raise RuntimeError("V3 做 T PAPER 成交 outbox 确认保存失败")
+
+  async def _replay_pending_t_trade_paper_fill_facts(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    if runtime.context.mode != StrategyRunMode.PAPER:
+      return
+    pending_loader = getattr(
+      runtime.state_manager,
+      "pending_t_trade_paper_fill_facts",
+      None,
+    )
+    if not callable(pending_loader):
+      raise RuntimeError("V3 做 T PAPER 运行缺少成交 durable outbox")
+    pending = [dict(fact) for fact in list(pending_loader() or [])]
+    if not pending:
+      return
+    restored: List[
+      tuple[Mapping[str, Any], TradeRecord, Optional[bool], Optional[int]]
+    ] = []
+    for fact in pending:
+      trade, entry_complete, entry_target_volume = (
+        self._trade_from_t_trade_paper_fill_fact(runtime, fact)
+      )
+      restored.append((fact, trade, entry_complete, entry_target_volume))
+    # JSON/JSONB object member order is not a causal guarantee.  Keep each
+    # candidate's entry fills ahead of its exits, then retain simulator time and
+    # the stable fact key as deterministic tie-breakers.  A lone exit remains
+    # valid when its entry was already acknowledged in an earlier checkpoint.
+    restored.sort(
+      key=lambda item: (
+        str(item[1].metadata.get("candidate_id") or ""),
+        0
+        if str(item[1].metadata.get("t_trade_role") or "").upper() == "ENTRY"
+        else 1,
+        time_utils.to_utc(item[1].trade_time).timestamp(),
+        str(item[0].get("fact_key") or ""),
+      )
+    )
+    acknowledged: List[Mapping[str, Any]] = []
+    for fact, trade, entry_complete, entry_target_volume in restored:
+      recorded = await self._record_t_trade_candidate_fill(
+        runtime,
+        trade,
+        durable_event=False,
+        entry_complete=entry_complete,
+        entry_target_volume=entry_target_volume,
+        strict=True,
+      )
+      if not recorded:
+        raise RuntimeError("V3 做 T PAPER 成交结果尚未收敛")
+      acknowledged.append(fact)
+    await self._acknowledge_t_trade_paper_fill_facts(runtime, acknowledged)
+
+  async def _record_t_trade_candidate_fill(
+    self,
+    runtime: StrategyRuntime,
+    trade: Any,
+    *,
+    durable_event: bool,
+    entry_complete: Optional[bool] = None,
+    entry_target_volume: Optional[int] = None,
+    strict: bool = False,
+  ) -> bool:
+    facade = self.candidate_outcome_facade
+    metadata = dict(getattr(trade, "metadata", {}) or {})
+    if (
+      not metadata.get("candidate_id")
+      or runtime.context.mode
+      not in {
+        StrategyRunMode.BACKTEST,
+        StrategyRunMode.PAPER,
+        StrategyRunMode.LIVE,
+      }
+      or (runtime.context.mode == StrategyRunMode.LIVE and not durable_event)
+    ):
+      return True
+    if facade is None:
+      if strict:
+        raise RuntimeError("做 T 候选结果持久化边界不可用")
+      self.logger.error(
+        "做 T 候选结果持久化边界不可用: run_id=%s trade_id=%s",
+        runtime.run_id,
+        getattr(trade, "trade_id", None),
+      )
+      return False
+    if (
+      runtime.context.mode in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
+      and str(metadata.get("t_trade_role") or "").lower() == "entry"
+      and entry_complete is None
+      and entry_target_volume is None
+    ):
+      order = await runtime.broker.get_order(str(getattr(trade, "order_id", "") or ""))
+      requested_volume = int(getattr(getattr(order, "request", None), "volume", 0) or 0)
+      entry_target_volume = requested_volume or None
+      entry_complete = bool(
+        order is not None
+        and order.status == OrderStatus.FILLED
+        and requested_volume > 0
+        and int(getattr(order, "filled_volume", 0) or 0) >= requested_volume
+      )
+    simulated_fee = (
+      float(getattr(trade, "commission", 0.0) or 0.0)
+      if runtime.context.mode in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER}
+      else None
+    )
+    try:
+      state = await facade.record_trade_fact(
+        strategy_run_id=runtime.run_id,
+        trade=trade,
+        entry_complete=entry_complete,
+        authoritative_fee=simulated_fee,
+        fee_is_authoritative=runtime.context.mode
+        in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER},
+        entry_target_volume=entry_target_volume,
+      )
+      if state is not None:
+        if self._candidate_outcome_state_is_active(state):
+          self._candidate_outcome_activity[
+            (runtime.run_id, state.definition.instrument_code)
+          ] = True
+        return True
+      elif runtime.context.mode == StrategyRunMode.LIVE:
+        self._candidate_outcome_reconciled_runs.discard(runtime.run_id)
+        self._candidate_outcome_repair_attempts.pop(runtime.run_id, None)
+        self._candidate_outcome_repair_retry_at_ms.pop(runtime.run_id, None)
+        self.logger.error(
+          "做 T 候选结果成交缺少 seed，等待从 APPLIED 成交真源修复: "
+          "run_id=%s trade_id=%s",
+          runtime.run_id,
+          getattr(trade, "trade_id", None),
+        )
+      else:
+        self.logger.error(
+          "做 T 候选结果成交缺少 seed，保留 PAPER outbox 等待重放: "
+          "run_id=%s trade_id=%s",
+          runtime.run_id,
+          getattr(trade, "trade_id", None),
+        )
+      if strict:
+        raise RuntimeError("做 T 候选结果成交缺少 MATERIAL seed")
+      return False
+    except Exception:
+      self._candidate_outcome_reconciled_runs.discard(runtime.run_id)
+      self._candidate_outcome_repair_attempts.pop(runtime.run_id, None)
+      self._candidate_outcome_repair_retry_at_ms.pop(runtime.run_id, None)
+      self.logger.exception(
+        "做 T 候选结果成交归集失败: run_id=%s trade_id=%s",
+        runtime.run_id,
+        getattr(trade, "trade_id", None),
+      )
+      if strict or self._requires_replay_event_integrity(runtime):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_CANDIDATE_OUTCOME_FILL_FAILED"
+        raise
+      return False
+
+  async def _finalize_t_trade_candidate_outcomes(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    facade = self.candidate_outcome_facade
+    if facade is None or not self._uses_t_trade_opportunity_runtime(runtime):
+      return
+    finalized_at = self._runtime_now(runtime)
+    finalized_at_ms = int(time_utils.to_utc(finalized_at).timestamp() * 1000)
+    try:
+      await facade.finalize_run(
+        strategy_run_id=runtime.run_id,
+        finalized_at_ms=finalized_at_ms,
+      )
+      for key in list(self._candidate_outcome_activity):
+        if key[0] == runtime.run_id:
+          self._candidate_outcome_activity.pop(key, None)
+      self._candidate_outcome_reconciled_runs.discard(runtime.run_id)
+      self._candidate_outcome_repair_attempts.pop(runtime.run_id, None)
+      self._candidate_outcome_repair_retry_at_ms.pop(runtime.run_id, None)
+    except Exception:
+      self.logger.exception(
+        "做 T 候选结果终态归集失败: run_id=%s",
+        runtime.run_id,
+      )
+      if self._requires_replay_event_integrity(runtime):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_CANDIDATE_OUTCOME_FINALIZE_FAILED"
+        raise
+
+  @staticmethod
+  def _candidate_outcome_state_is_active(state: Any) -> bool:
+    status = str(getattr(getattr(state, "status", None), "value", ""))
+    post_fill_status = str(
+      getattr(getattr(getattr(state, "post_fill", None), "status", None), "value", "")
+    )
+    return status == "OBSERVING" or post_fill_status == "OBSERVING"
+
+  async def _notify_t_trade_opportunity_update(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    source_time_ms: int,
+    events: List[Dict[str, Any]],
+    immediate: Optional[bool] = None,
+  ) -> None:
+    """Wake clients only after the corresponding RuntimeState is durable."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return
+    notify = getattr(self.opportunity_update_service, "notify_opportunity", None)
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    normalized_code = str(instrument_code or "").strip().upper()
+    if not account_id or not normalized_code or not callable(notify):
+      return
+    normalized_source_time_ms = int(source_time_ms or 0)
+    if normalized_source_time_ms <= 0:
+      normalized_source_time_ms = max(
+        (int(event.get("evaluated_at_ms", 0) or 0) for event in events),
+        default=0,
+      )
+    state_version = 0
+    state: Dict[str, Any] = {}
+    opportunity: Dict[str, Any] = {}
+    if runtime.strategy is not None:
+      raw_states = runtime.strategy.state.get("instrument_states", {})
+      states = dict(raw_states) if isinstance(raw_states, Mapping) else {}
+      raw_state = states.get(normalized_code)
+      state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+      if not state and hasattr(runtime.strategy.state, "to_dict"):
+        state = dict(runtime.strategy.state.to_dict())
+      opportunity = dict(state.get("opportunity") or {})
+      state_version = int(opportunity.get("state_version", 0) or 0)
+    signal_snapshot = opportunity.get("latest_evaluation")
+    if not isinstance(signal_snapshot, Mapping):
+      signal_snapshot = next(
+        (
+          event.get("signal_snapshot")
+          for event in reversed(events)
+          if isinstance(event.get("signal_snapshot"), Mapping)
+        ),
+        None,
+      )
+    if not isinstance(signal_snapshot, Mapping):
+      self.logger.warning(
+        "做 T 机会状态已落盘但缺少可投影快照: run_id=%s instrument=%s",
+        runtime.run_id,
+        normalized_code,
+      )
+      return
+    is_material = (
+      bool(immediate)
+      if immediate is not None
+      else any(
+        str(event.get("record_kind") or "").upper() == "MATERIAL" for event in events
+      )
+    )
+    version = (
+      f"v3:{runtime.run_id}:{normalized_code}:"
+      f"{normalized_source_time_ms}:{state_version}"
+    )
+    labels = self._t_trade_observability_labels(events)
+    published = False
+    try:
+      publish_result = await notify(
+        account_id=account_id,
+        strategy_run_id=runtime.run_id,
+        instrument_code=normalized_code,
+        version=version,
+        immediate=is_material,
+        session_patch={
+          "signal_snapshot": dict(signal_snapshot),
+          "pending_entry_intent_id": (
+            str(state.get("pending_entry_intent_id") or "") or None
+          ),
+          "entry_order_status": str(state.get("entry_order_status") or ""),
+        },
+      )
+      published = publish_result is not False
+    except Exception as exc:
+      self.logger.warning(
+        "做 T 机会状态已落盘但更新通知失败: run_id=%s instrument=%s error=%s",
+        runtime.run_id,
+        normalized_code,
+        exc,
+      )
+    finally:
+      observed_at_ms = int(time_utils.now().timestamp() * 1000)
+      self.opportunity_observability.record_projection(
+        lag_seconds=(
+          max(0, observed_at_ms - normalized_source_time_ms) / 1000.0
+          if normalized_source_time_ms > 0
+          else 0.0
+        ),
+        published=published,
+        coalesced=not is_material,
+        **labels,
+      )
+
+  @staticmethod
+  def _is_v3_t_trade_manual_intent(intent: TradeIntent) -> bool:
+    metadata = dict(intent.metadata or {})
+    try:
+      schema_version = int(metadata.get("opportunity_schema_version") or 0)
+    except (TypeError, ValueError, OverflowError):
+      schema_version = 0
+    return bool(
+      intent.direction == TradeIntentDirection.BUY
+      and intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+      and str(metadata.get("t_trade_role") or "").lower() == "entry"
+      and schema_version >= 3
+    )
+
+  async def _process_t_trade_opportunity_output(
+    self,
+    runtime: StrategyRuntime,
+    output: StrategyOutput,
+    *,
+    opportunity_events: List[Dict[str, Any]],
+    input_snapshot: Optional[StrategyInput],
+  ) -> None:
+    """Commit V3 candidate truth before any manual approval is observable."""
+
+    intents = list(output.trade_intents or [])
+    v3_manual_intents = [
+      intent for intent in intents if self._is_v3_t_trade_manual_intent(intent)
+    ]
+    source_time_ms = (
+      int(input_snapshot.market_data_context.source_time_ms)
+      if input_snapshot is not None
+      else 0
+    )
+    instrument_code = (
+      str(input_snapshot.instrument_code or "").strip().upper()
+      if input_snapshot is not None
+      else str(opportunity_events[0].get("instrument_code") or "").strip().upper()
+    )
+    observability_labels = self._t_trade_observability_labels(opportunity_events)
+
+    if len(v3_manual_intents) > 1:
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_MULTIPLE_CANDIDATE_INTENTS",
+        message="同一机会评估最多允许一个 V3 入场意图",
+      )
+      return
+
+    if not self._accepts_non_durable_output(runtime):
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="RUNTIME_NOT_RUNNING",
+        message="策略运行不在 RUNNING 状态，机会输出未进入持久化链",
+      )
+      return
+    if runtime.state_manager is None or runtime.strategy is None:
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_RUNTIME_STATE_UNAVAILABLE",
+        message="做 T 机会状态持久化边界不可用",
+      )
+      return
+    try:
+      await self._replay_pending_t_trade_material_events(runtime)
+    except Exception as exc:
+      cas_conflict = (
+        str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+        )
+        == "CAS_CONFLICT"
+      )
+      if cas_conflict:
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code=(
+          "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+          if cas_conflict
+          else "T_TRADE_MATERIAL_OUTBOX_REPLAY_FAILED"
+        ),
+        message=f"做 T 待补审计事件尚未收敛: {exc}",
+      )
+      return
+    reconciliation_failure = self._runtime_state_reconciliation_failure(runtime)
+    if reconciliation_failure is not None and intents:
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code=reconciliation_failure[0],
+        message=reconciliation_failure[1],
+      )
+      return
+    continuity_failure = self._runtime_market_continuity_failure(
+      runtime,
+      instrument_code,
+    )
+    if continuity_failure is not None and intents:
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code=continuity_failure[0],
+        message=continuity_failure[1],
+      )
+      return
+    if v3_manual_intents and not any(
+      str(event.get("record_kind") or "").upper() == "MATERIAL"
+      for event in opportunity_events
+    ):
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_CANDIDATE_EVALUATION_REQUIRED",
+        message="V3 待确认候选缺少 MATERIAL 评估证据",
+      )
+      return
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      created_at = self._runtime_now(runtime)
+      for intent in intents:
+        intent.created_at = created_at
+
+    checkpoint_failure_recorded = False
+    try:
+      if output.runtime_state_patch:
+        self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
+      if output.exit_plan_commands:
+        for command in output.exit_plan_commands:
+          runtime.exit_plan_book.apply_command(command)
+        self._persist_exit_plan_book(runtime)
+      if not await runtime.state_manager.checkpoint_strategy_state_changes():
+        checkpoint_code = str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "")
+          or "CHECKPOINT_REJECTED"
+        )
+        self.opportunity_observability.record_operation(
+          "runtime_state_checkpoint_failures_total",
+          detail=checkpoint_code,
+          **observability_labels,
+        )
+        if checkpoint_code == "CAS_CONFLICT":
+          self.opportunity_observability.record_operation(
+            "runtime_state_cas_conflicts_total",
+            detail="CAS_CONFLICT",
+            **observability_labels,
+          )
+        checkpoint_failure_recorded = True
+        raise RuntimeError("T_TRADE_STATE_CHECKPOINT_FAILED")
+      self.opportunity_observability.record_operation(
+        "runtime_state_checkpoints_total",
+        detail="SUCCESS",
+        **observability_labels,
+      )
+    except Exception as exc:
+      if (
+        checkpoint_failure_recorded
+        and str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+        )
+        == "CAS_CONFLICT"
+      ):
+        # RuntimeStateManager has adopted the concurrent winner in full.  Any
+        # compensation derived from this stale StrategyOutput would be another
+        # write based on the losing snapshot, so stop this generation without
+        # producing or checkpointing a second patch.
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+        self._reject_t_trade_opportunity_output(
+          runtime,
+          instrument_code=instrument_code,
+          source_time_ms=source_time_ms,
+          intents=intents,
+          code="T_TRADE_RUNTIME_STATE_CAS_CONFLICT",
+          message="做 T 机会状态发生并发版本冲突；当前运行已停止并等待权威重启",
+        )
+        return
+      if not checkpoint_failure_recorded:
+        self.opportunity_observability.record_operation(
+          "runtime_state_checkpoint_failures_total",
+          detail=exc.__class__.__name__,
+          **observability_labels,
+        )
+      compensations = await self._compensate_failed_t_trade_candidates(
+        runtime,
+        v3_manual_intents,
+        code="T_TRADE_STATE_CHECKPOINT_FAILED",
+        source_time_ms=source_time_ms,
+      )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_STATE_CHECKPOINT_FAILED",
+        message=f"做 T 机会状态 CAS 检查点失败: {exc}",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      compensations = await self._compensate_failed_t_trade_candidates(
+        runtime,
+        v3_manual_intents,
+        code="T_TRADE_ACCOUNT_REQUIRED",
+        source_time_ms=source_time_ms,
+      )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_ACCOUNT_REQUIRED",
+        message="做 T 机会评估缺少唯一证券账户绑定",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+    material_events_to_ack: List[Mapping[str, Any]] = []
+    try:
+      for event in opportunity_events:
+        await self._materialize_t_trade_evaluation_with_retry(
+          event=event,
+          account_id=account_id,
+          strategy_run_id=runtime.run_id,
+          labels=observability_labels,
+          cas_committed=True,
+        )
+        seeded = await self._seed_t_trade_candidate_outcome(
+          runtime,
+          account_id=account_id,
+          event=event,
+        )
+        if seeded and str(event.get("record_kind") or "").upper() == "MATERIAL":
+          material_events_to_ack.append(event)
+    except Exception as exc:
+      compensations = await self._compensate_failed_t_trade_candidates(
+        runtime,
+        v3_manual_intents,
+        code="T_TRADE_EVALUATION_PERSIST_FAILED",
+        source_time_ms=source_time_ms,
+      )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_EVALUATION_PERSIST_FAILED",
+        message=f"做 T 机会评估物化失败: {exc}",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+    try:
+      await self._acknowledge_t_trade_material_events(
+        runtime,
+        material_events_to_ack,
+      )
+    except Exception as exc:
+      if (
+        str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+        )
+        == "CAS_CONFLICT"
+      ):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+        self._reject_t_trade_opportunity_output(
+          runtime,
+          instrument_code=instrument_code,
+          source_time_ms=source_time_ms,
+          intents=intents,
+          code="T_TRADE_RUNTIME_STATE_CAS_CONFLICT",
+          message="做 T MATERIAL outbox 确认发生版本冲突；当前运行已停止",
+        )
+        return
+      # The evaluation is already durable and the prior checkpoint still
+      # contains the outbox item.  A restart will replay it idempotently, so an
+      # acknowledgement write failure must not create a ghost candidate.
+      self.logger.warning(
+        "做 T MATERIAL outbox 确认暂未保存，将在后续或重启重放: "
+        "run_id=%s instrument=%s error=%s",
+        runtime.run_id,
+        instrument_code,
+        exc,
+      )
+
+    # V3 entry candidates have one account-scoped linearization point.  The
+    # helper keeps the runtime approval lock through the strict intent row,
+    # candidate LATCHED->AWAITING CAS, durable status, and pending-approval
+    # visibility.  Compensation is deliberately performed after it releases
+    # both locks so an OrderStateEvent/MATERIAL path cannot re-enter them.
+    if v3_manual_intents:
+      transition_failure, persisted_intents = (
+        await self._persist_v3_candidate_transition_under_locks(
+          runtime,
+          intents=intents,
+          v3_manual_intents=v3_manual_intents,
+          output=output,
+          input_snapshot=input_snapshot,
+          source_time_ms=source_time_ms,
+        )
+      )
+      if transition_failure is not None:
+        failure_code, failure_message = transition_failure
+        if failure_code == "T_TRADE_RUNTIME_STATE_CAS_CONFLICT":
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+          self._reject_t_trade_opportunity_output(
+            runtime,
+            instrument_code=instrument_code,
+            source_time_ms=source_time_ms,
+            intents=intents,
+            code=failure_code,
+            message=failure_message,
+          )
+          return
+        for persisted_intent in persisted_intents:
+          await self._reject_persisted_t_trade_intent(
+            runtime,
+            persisted_intent,
+            code=failure_code,
+          )
+        compensations = await self._compensate_failed_t_trade_candidates(
+          runtime,
+          v3_manual_intents,
+          code=failure_code,
+          source_time_ms=source_time_ms,
+        )
+        self._reject_t_trade_opportunity_output(
+          runtime,
+          instrument_code=instrument_code,
+          source_time_ms=source_time_ms,
+          intents=intents,
+          code=failure_code,
+          message=failure_message,
+        )
+        runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+          compensations
+        )
+        return
+
+      # Pending approvals are now visible while the approval lock was held;
+      # only the client wake-up and non-V3 dispatch happen after release.
+      await self._notify_t_trade_opportunity_update(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        events=opportunity_events,
+      )
+      v3_ids = {intent.intent_id for intent in v3_manual_intents}
+      for intent in intents:
+        if intent.intent_id in v3_ids:
+          if (
+            runtime.context.mode == StrategyRunMode.BACKTEST
+            and runtime.context.parameters.get("auto_approve_manual_intents")
+            and not runtime.context.parameters.get("limit_up_board_replay")
+          ):
+            result = await self.approve_trade_intent(
+              runtime.run_id,
+              intent.intent_id,
+              approval_expectation=self._v3_t_trade_expectation_from_intent(intent),
+            )
+            self._runtime_log(
+              runtime,
+              "INFO" if result.get("success") else "WARNING",
+              "回放测试自动确认 V3 做 T 候选: "
+              f"intent_id={intent.intent_id}, result={result.get('code')}",
+            )
+          else:
+            self._runtime_log(
+              runtime,
+              "INFO",
+              "V3 做 T 候选已完成状态、评估和意图持久化，等待人工确认: "
+              f"instrument={intent.instrument_code} intent_id={intent.intent_id}",
+            )
+          continue
+        if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
+          runtime.pending_approvals[intent.intent_id] = intent
+        else:
+          await self._process_trade_intent(runtime, intent)
+      return
+
+    strict_recorder = getattr(
+      runtime.state_manager,
+      "record_trade_intent_strict",
+      None,
+    )
+    if intents and not callable(strict_recorder):
+      compensations = await self._compensate_failed_t_trade_candidates(
+        runtime,
+        v3_manual_intents,
+        code="T_TRADE_STRICT_INTENT_PERSISTENCE_UNAVAILABLE",
+        source_time_ms=source_time_ms,
+      )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_STRICT_INTENT_PERSISTENCE_UNAVAILABLE",
+        message="做 T 候选缺少严格 TradeIntent 持久化边界",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+    persisted_intents: List[TradeIntent] = []
+    try:
+      for intent in intents:
+        status = (
+          "PENDING"
+          if intent.intent_id
+          in {candidate.intent_id for candidate in v3_manual_intents}
+          else "AWAITING_APPROVAL"
+          if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+          else "PENDING"
+        )
+        await strict_recorder(intent, status=status)
+        persisted_intents.append(intent)
+    except Exception as exc:
+      for persisted_intent in persisted_intents:
+        await self._reject_persisted_t_trade_intent(
+          runtime,
+          persisted_intent,
+          code="T_TRADE_INTENT_PERSIST_FAILED",
+        )
+      compensations = await self._compensate_failed_t_trade_candidates(
+        runtime,
+        v3_manual_intents,
+        code="T_TRADE_INTENT_PERSIST_FAILED",
+        source_time_ms=source_time_ms,
+      )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=intents,
+        code="T_TRADE_INTENT_PERSIST_FAILED",
+        message=f"做 T TradeIntent 持久化失败: {exc}",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+
+    if runtime.metrics:
+      runtime.metrics.trade_intents_generated += len(intents)
+    for intent in intents:
+      runtime.strategy.record_trade_intent(intent)
+    self._record_strategy_output_trace(runtime, output, input_snapshot)
+
+    for intent in v3_manual_intents:
+      failure = await self._mark_t_trade_candidate_awaiting_approval(
+        runtime,
+        intent,
+        source_time_ms=source_time_ms,
+      )
+      if failure is not None:
+        if failure[0] == "T_TRADE_RUNTIME_STATE_CAS_CONFLICT":
+          # RuntimeStateManager has already adopted the authoritative winner.
+          # The strategy object still represents the losing generation, so no
+          # rejection, compensation, audit materialization or intent status
+          # update may be derived from it.
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+          self._reject_t_trade_opportunity_output(
+            runtime,
+            instrument_code=intent.instrument_code,
+            source_time_ms=source_time_ms,
+            intents=[intent],
+            code=failure[0],
+            message=failure[1],
+          )
+          return
+        await self._reject_persisted_t_trade_intent(
+          runtime,
+          intent,
+          code=failure[0],
+        )
+        compensation = await self._compensate_failed_t_trade_candidate(
+          runtime,
+          intent,
+          code=failure[0],
+          source_time_ms=source_time_ms,
+        )
+        self._reject_t_trade_opportunity_output(
+          runtime,
+          instrument_code=intent.instrument_code,
+          source_time_ms=source_time_ms,
+          intents=[intent],
+          code=failure[0],
+          message=failure[1],
+        )
+        runtime._t_trade_opportunity_failures[
+          str(intent.instrument_code or "").strip().upper()
+        ]["compensation"] = compensation
+        return
+
+    strict_status_updater = getattr(
+      runtime.state_manager,
+      "update_trade_intent_status_strict",
+      None,
+    )
+    if v3_manual_intents and not callable(strict_status_updater):
+      compensations: Dict[str, Dict[str, Any]] = {}
+      for intent in v3_manual_intents:
+        await self._reject_persisted_t_trade_intent(
+          runtime,
+          intent,
+          code="T_TRADE_STRICT_INTENT_STATUS_UNAVAILABLE",
+        )
+        compensations[
+          intent.intent_id
+        ] = await self._compensate_failed_t_trade_candidate(
+          runtime,
+          intent,
+          code="T_TRADE_STRICT_INTENT_STATUS_UNAVAILABLE",
+          source_time_ms=source_time_ms,
+        )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=v3_manual_intents,
+        code="T_TRADE_STRICT_INTENT_STATUS_UNAVAILABLE",
+        message="做 T 候选缺少严格的待确认状态持久化边界",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+    try:
+      for intent in v3_manual_intents:
+        await strict_status_updater(
+          intent.intent_id,
+          "AWAITING_APPROVAL",
+          metadata=dict(intent.metadata or {}),
+          notes="T_TRADE_CANDIDATE_AWAITING_DURABLE",
+        )
+    except Exception as exc:
+      compensations = {}
+      for intent in v3_manual_intents:
+        await self._reject_persisted_t_trade_intent(
+          runtime,
+          intent,
+          code="T_TRADE_INTENT_STATUS_PERSIST_FAILED",
+        )
+        compensations[
+          intent.intent_id
+        ] = await self._compensate_failed_t_trade_candidate(
+          runtime,
+          intent,
+          code="T_TRADE_INTENT_STATUS_PERSIST_FAILED",
+          source_time_ms=source_time_ms,
+        )
+      self._reject_t_trade_opportunity_output(
+        runtime,
+        instrument_code=instrument_code,
+        source_time_ms=source_time_ms,
+        intents=v3_manual_intents,
+        code="T_TRADE_INTENT_STATUS_PERSIST_FAILED",
+        message=f"做 T 候选待确认状态持久化失败: {exc}",
+      )
+      runtime._t_trade_opportunity_failures[instrument_code]["compensation"] = (
+        compensations
+      )
+      return
+
+    if not self._accepts_non_durable_output(runtime):
+      v3_ids = {intent.intent_id for intent in v3_manual_intents}
+      for intent in intents:
+        if intent.intent_id in v3_ids:
+          await self._reject_persisted_t_trade_intent(
+            runtime,
+            intent,
+            code=f"RUNTIME_{runtime.status.value}",
+          )
+          await self._compensate_failed_t_trade_candidate(
+            runtime,
+            intent,
+            code=f"RUNTIME_{runtime.status.value}",
+            source_time_ms=source_time_ms,
+          )
+        else:
+          await self._reject_intent_during_runtime_transition(runtime, intent)
+      return
+
+    v3_ids = {intent.intent_id for intent in v3_manual_intents}
+    runtime._t_trade_opportunity_failures.pop(instrument_code, None)
+    for intent in v3_manual_intents:
+      runtime.pending_approvals[intent.intent_id] = intent
+    await self._notify_t_trade_opportunity_update(
+      runtime,
+      instrument_code=instrument_code,
+      source_time_ms=source_time_ms,
+      events=opportunity_events,
+    )
+    for intent in intents:
+      if intent.intent_id in v3_ids:
+        if (
+          runtime.context.mode == StrategyRunMode.BACKTEST
+          and runtime.context.parameters.get("auto_approve_manual_intents")
+          and not runtime.context.parameters.get("limit_up_board_replay")
+        ):
+          result = await self.approve_trade_intent(
+            runtime.run_id,
+            intent.intent_id,
+            approval_expectation=self._v3_t_trade_expectation_from_intent(intent),
+          )
+          self._runtime_log(
+            runtime,
+            "INFO" if result.get("success") else "WARNING",
+            "回放测试自动确认 V3 做 T 候选: "
+            f"intent_id={intent.intent_id}, result={result.get('code')}",
+          )
+          continue
+        self._runtime_log(
+          runtime,
+          "INFO",
+          "V3 做 T 候选已完成状态、评估和意图持久化，等待人工确认: "
+          f"instrument={intent.instrument_code} intent_id={intent.intent_id}",
+        )
+        continue
+      if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM:
+        runtime.pending_approvals[intent.intent_id] = intent
+      else:
+        await self._process_trade_intent(runtime, intent)
+
+  async def _persist_v3_candidate_transition_under_locks(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    intents: List[TradeIntent],
+    v3_manual_intents: List[TradeIntent],
+    output: StrategyOutput,
+    input_snapshot: Optional[StrategyInput],
+    source_time_ms: int,
+  ) -> tuple[Optional[tuple[str, str]], List[TradeIntent]]:
+    """Recheck and publish V3 candidates under account -> approval locks.
+
+    The account lock is checked before its uncontended acquire because this
+    method runs on the market-event loop. Global reconciliation may hold the
+    lock while waiting for this runtime's event turn; in that case this path
+    fails closed immediately. Approval remains held through every durable
+    candidate transition.
+    """
+
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    coordination_lock = t_trade_account_coordination_lock(account_id)
+    if not coordination_lock.try_acquire():
+      return (
+        (
+          "T_TRADE_ACCOUNT_COORDINATION_IN_PROGRESS",
+          "账户做 T 协调正在更新，候选已保守抑制，请等待下一次信号",
+        ),
+        [],
+      )
+    try:
+      # The synchronous account try-acquire above prevents a market-event
+      # deadlock with reconciliation.  No account waiter is ever created here.
+      if runtime.approval_lock.locked():
+        return (
+          (
+            "T_TRADE_APPROVAL_COORDINATION_IN_PROGRESS",
+            "做 T 审批正在收敛，候选已保守抑制，请等待下一次信号",
+          ),
+          [],
+        )
+      await runtime.approval_lock.acquire()
+      try:
+        for intent in v3_manual_intents:
+          gate = self._t_trade_intent_emission_context(
+            runtime,
+            intent.instrument_code,
+            requested_amount=intent.target_amount,
+            current_intent_id=intent.intent_id,
+            check_coordination_lock=False,
+          )
+          if not gate.get("allowed"):
+            blockers = self._t_trade_unique_blockers(gate.get("blockers"))
+            return (
+              (
+                blockers[0] if blockers else "T_TRADE_INTENT_EMISSION_BLOCKED",
+                "候选在严格意图持久化前未通过最新账户与标的门禁："
+                + (", ".join(blockers) if blockers else "UNKNOWN"),
+              ),
+              [],
+            )
+
+        if not self._accepts_non_durable_output(runtime):
+          return (
+            (
+              "RUNTIME_NOT_RUNNING",
+              "策略运行不在 RUNNING 状态，候选未进入严格意图持久化",
+            ),
+            [],
+          )
+        strict_recorder = getattr(
+          runtime.state_manager,
+          "record_trade_intent_strict",
+          None,
+        )
+        if not callable(strict_recorder):
+          return (
+            (
+              "T_TRADE_STRICT_INTENT_PERSISTENCE_UNAVAILABLE",
+              "做 T 候选缺少严格 TradeIntent 持久化边界",
+            ),
+            [],
+          )
+        strict_status_updater = getattr(
+          runtime.state_manager,
+          "update_trade_intent_status_strict",
+          None,
+        )
+        if v3_manual_intents and not callable(strict_status_updater):
+          return (
+            (
+              "T_TRADE_STRICT_INTENT_STATUS_UNAVAILABLE",
+              "做 T 候选缺少严格的待确认状态持久化边界",
+            ),
+            [],
+          )
+
+        persisted: List[TradeIntent] = []
+        try:
+          for intent in intents:
+            status = (
+              "PENDING"
+              if intent.intent_id in {candidate.intent_id for candidate in v3_manual_intents}
+              else "AWAITING_APPROVAL"
+              if intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
+              else "PENDING"
+            )
+            await strict_recorder(intent, status=status)
+            persisted.append(intent)
+        except Exception as exc:
+          return (
+            (
+              "T_TRADE_INTENT_PERSIST_FAILED",
+              f"做 T TradeIntent 持久化失败: {exc}",
+            ),
+            persisted,
+          )
+
+        if runtime.metrics:
+          runtime.metrics.trade_intents_generated += len(intents)
+        for intent in intents:
+          runtime.strategy.record_trade_intent(intent)
+        self._record_strategy_output_trace(runtime, output, input_snapshot)
+
+        for intent in v3_manual_intents:
+          failure = await self._mark_t_trade_candidate_awaiting_approval(
+            runtime,
+            intent,
+            source_time_ms=source_time_ms,
+          )
+          if failure is not None:
+            return failure, persisted
+
+        try:
+          for intent in v3_manual_intents:
+            await strict_status_updater(
+              intent.intent_id,
+              "AWAITING_APPROVAL",
+              metadata=dict(intent.metadata or {}),
+              notes="T_TRADE_CANDIDATE_AWAITING_DURABLE",
+            )
+        except Exception as exc:
+          return (
+            (
+              "T_TRADE_INTENT_STATUS_PERSIST_FAILED",
+              f"做 T 候选待确认状态持久化失败: {exc}",
+            ),
+            persisted,
+          )
+
+        if not self._accepts_non_durable_output(runtime):
+          return (
+            (
+              f"RUNTIME_{runtime.status.value}",
+              f"策略运行已进入 {runtime.status.value}，候选未开放确认",
+            ),
+            persisted,
+          )
+        runtime._t_trade_opportunity_failures.pop(
+          str(v3_manual_intents[0].instrument_code or "").strip().upper(),
+          None,
+        )
+        for intent in v3_manual_intents:
+          runtime.pending_approvals[intent.intent_id] = intent
+        return None, persisted
+      finally:
+        runtime.approval_lock.release()
+    finally:
+      coordination_lock.release()
+
+  async def _mark_t_trade_candidate_awaiting_approval(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    source_time_ms: int,
+  ) -> Optional[tuple[str, str]]:
+    hook = getattr(
+      runtime.strategy,
+      "mark_candidate_awaiting_approval",
+      None,
+    )
+    candidate_id = str((intent.metadata or {}).get("candidate_id") or "").strip()
+    if not callable(hook) or not candidate_id:
+      return (
+        "T_TRADE_CANDIDATE_AWAITING_HOOK_UNAVAILABLE",
+        "V3 候选无法建立持久化的待确认关联",
+      )
+    try:
+      result = hook(
+        intent.instrument_code,
+        candidate_id,
+        intent.intent_id,
+        source_time_ms=source_time_ms,
+      )
+      patch = await result if inspect.isawaitable(result) else result
+      if patch is None:
+        return (
+          "T_TRADE_CANDIDATE_AWAITING_PATCH_MISSING",
+          "V3 候选待确认关联未返回状态补丁",
+        )
+      self._apply_runtime_state_patch(runtime, patch)
+      if not await runtime.state_manager.checkpoint_strategy_state_changes():
+        if (
+          str(
+            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+          )
+          == "CAS_CONFLICT"
+        ):
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+          return (
+            "T_TRADE_RUNTIME_STATE_CAS_CONFLICT",
+            "做 T 候选待确认状态发生并发版本冲突；当前运行已停止并等待权威重启",
+          )
+        return (
+          "T_TRADE_CANDIDATE_AWAITING_CHECKPOINT_FAILED",
+          "V3 候选待确认关联状态保存失败",
+        )
+    except Exception as exc:
+      if (
+        str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+        )
+        == "CAS_CONFLICT"
+      ):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+        return (
+          "T_TRADE_RUNTIME_STATE_CAS_CONFLICT",
+          "做 T 候选待确认状态发生并发版本冲突；当前运行已停止并等待权威重启",
+        )
+      return (
+        "T_TRADE_CANDIDATE_AWAITING_CHECKPOINT_FAILED",
+        f"V3 候选待确认关联状态保存失败: {exc}",
+      )
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    linked_events = [
+      dict(event)
+      for event in list(getattr(patch, "append_events", []) or [])
+      if isinstance(event, Mapping)
+      and event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+    ]
+    try:
+      acknowledged: List[Mapping[str, Any]] = []
+      for event in linked_events:
+        await self._materialize_t_trade_evaluation_with_retry(
+          event=event,
+          account_id=account_id,
+          strategy_run_id=runtime.run_id,
+          labels=self._t_trade_observability_labels([event]),
+          cas_committed=True,
+        )
+        seeded = await self._seed_t_trade_candidate_outcome(
+          runtime,
+          account_id=account_id,
+          event=event,
+          strict=True,
+        )
+        if not seeded:
+          raise RuntimeError("V3 做 T 候选结果初始化失败")
+        acknowledged.append(event)
+      await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+    except Exception as exc:
+      if (
+        str(
+          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+        )
+        == "CAS_CONFLICT"
+      ):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+        return (
+          "T_TRADE_RUNTIME_STATE_CAS_CONFLICT",
+          "做 T MATERIAL 确认发生并发版本冲突；当前运行已停止并等待权威重启",
+        )
+      return (
+        "T_TRADE_EVALUATION_PERSIST_FAILED",
+        f"V3 候选意图关联评估物化失败: {exc}",
+      )
+    return None
+
+  async def _reject_persisted_t_trade_intent(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    code: str,
+  ) -> None:
+    updates = {
+      "metadata": {**dict(intent.metadata or {}), "runtime_gate": code},
+      "notes": code,
+    }
+    strict_updater = getattr(
+      runtime.state_manager,
+      "update_trade_intent_status_strict",
+      None,
+    )
+    try:
+      if callable(strict_updater):
+        await strict_updater(intent.intent_id, "REJECTED", **updates)
+      else:
+        await runtime.state_manager.update_trade_intent_status(
+          intent.intent_id,
+          "REJECTED",
+          **updates,
+        )
+    except Exception:
+      # The initial V3 record remains PENDING, never AWAITING_APPROVAL, so a
+      # failed rejection update still cannot be restored or exposed for approval.
+      self.logger.exception(
+        "做 T 候选持久化拒绝状态收敛失败: run_id=%s intent_id=%s",
+        runtime.run_id,
+        intent.intent_id,
+      )
+
+  async def _compensate_failed_t_trade_candidate(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    code: str,
+    source_time_ms: int,
+  ) -> Dict[str, Any]:
+    """Suppress the exact pre-routing candidate after a guarded-chain failure."""
+
+    result: Dict[str, Any] = {
+      "state_compensated": False,
+      "checkpointed": False,
+      "evaluation_materialized": False,
+    }
+    runtime.pending_approvals.pop(intent.intent_id, None)
+    candidate_id = str((intent.metadata or {}).get("candidate_id") or "").strip()
+    candidate_status, current_candidate_id, _pending_intent_id = (
+      self._t_trade_candidate_projection(runtime, intent)
+    )
+    if not candidate_id or current_candidate_id != candidate_id:
+      result["error"] = "CANDIDATE_IDENTITY_MISMATCH"
+      return result
+    if candidate_status not in {"LATCHED", "AWAITING_APPROVAL"}:
+      result["state_compensated"] = candidate_status in {
+        "NONE",
+        "SUPPRESSED",
+        "REARMING",
+      }
+      if not result["state_compensated"]:
+        result["error"] = f"CANDIDATE_STATUS_UNEXPECTED: {candidate_status}"
+      return result
+    timestamp = (
+      datetime.fromtimestamp(source_time_ms / 1000, timezone.utc)
+      if source_time_ms > 0
+      else None
+    )
+    try:
+      patch = await self._notify_strategy_order(
+        runtime,
+        OrderStateEvent(
+          order_id=None,
+          status="REJECTED",
+          filled_volume=0,
+          error_message="做 T 候选持久化链失败，未创建券商委托",
+          timestamp=timestamp,
+          metadata={
+            **dict(intent.metadata or {}),
+            "intent_id": intent.intent_id,
+            "instrument_code": intent.instrument_code,
+            "approval_reason": code,
+            "source_time_ms": source_time_ms,
+          },
+        ),
+        raise_on_error=True,
+      )
+    except Exception as exc:
+      result["error"] = f"ORDER_COMPENSATION_FAILED: {exc}"
+      return result
+
+    result["state_compensated"] = self._t_trade_candidate_is_suppressed(
+      runtime,
+      intent,
+    )
+    if not result["state_compensated"]:
+      result["error"] = "CANDIDATE_REMAINS_ACTIONABLE"
+      return result
+    checkpoint = getattr(
+      runtime.state_manager,
+      "checkpoint_strategy_state_changes",
+      None,
+    )
+    try:
+      result["checkpointed"] = bool(callable(checkpoint) and await checkpoint())
+    except Exception as exc:
+      result["error"] = f"SUPPRESSION_CHECKPOINT_FAILED: {exc}"
+      return result
+    if not result["checkpointed"]:
+      result["error"] = "SUPPRESSION_CHECKPOINT_FAILED"
+      return result
+
+    suppression_events = [
+      dict(event)
+      for event in list(getattr(patch, "append_events", []) or [])
+      if isinstance(event, Mapping)
+      and event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+      and str(event.get("record_kind") or "").upper() == "MATERIAL"
+      and str(event.get("event_type") or "").upper() == "CANDIDATE_SUPPRESSED"
+    ]
+    if not suppression_events:
+      # The exact candidate is already suppressed. State is authoritative and
+      # no duplicate material event is necessary for an idempotent retry.
+      result["evaluation_materialized"] = True
+      await self._notify_t_trade_opportunity_update(
+        runtime,
+        instrument_code=intent.instrument_code,
+        source_time_ms=source_time_ms,
+        events=[],
+        immediate=True,
+      )
+      return result
+    try:
+      account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+      acknowledged: List[Mapping[str, Any]] = []
+      for event in suppression_events:
+        await self._materialize_t_trade_evaluation_with_retry(
+          event=event,
+          account_id=account_id,
+          strategy_run_id=runtime.run_id,
+          labels=self._t_trade_observability_labels([event]),
+          cas_committed=True,
+        )
+        seeded = await self._seed_t_trade_candidate_outcome(
+          runtime,
+          account_id=account_id,
+          event=event,
+          strict=True,
+        )
+        if not seeded:
+          raise RuntimeError("V3 做 T 抑制事件候选结果初始化失败")
+        acknowledged.append(event)
+      await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+      result["evaluation_materialized"] = True
+    except Exception as exc:
+      # The durable suppressed state and its outbox item remain fail-closed;
+      # startup or the next evaluation replays the same stable event key.
+      result["error"] = f"SUPPRESSION_EVALUATION_FAILED: {exc}"
+      self.logger.exception(
+        "做 T 候选抑制评估物化失败，但状态已保守落盘: run_id=%s intent_id=%s",
+        runtime.run_id,
+        intent.intent_id,
+      )
+    await self._notify_t_trade_opportunity_update(
+      runtime,
+      instrument_code=intent.instrument_code,
+      source_time_ms=source_time_ms,
+      events=(suppression_events if result["evaluation_materialized"] else []),
+      immediate=True,
+    )
+    return result
+
+  async def _compensate_failed_t_trade_candidates(
+    self,
+    runtime: StrategyRuntime,
+    intents: List[TradeIntent],
+    *,
+    code: str,
+    source_time_ms: int,
+  ) -> Dict[str, Dict[str, Any]]:
+    return {
+      intent.intent_id: await self._compensate_failed_t_trade_candidate(
+        runtime,
+        intent,
+        code=code,
+        source_time_ms=source_time_ms,
+      )
+      for intent in intents
+    }
+
+  @staticmethod
+  def _t_trade_candidate_projection(
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> tuple[str, str, str]:
+    strategy = runtime.strategy
+    if strategy is None:
+      return "", "", ""
+    raw_states = strategy.state.get("instrument_states", {})
+    states = dict(raw_states) if isinstance(raw_states, Mapping) else {}
+    raw_state = states.get(intent.instrument_code) or states.get(
+      str(intent.instrument_code or "").strip().upper()
+    )
+    state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
+    if not state:
+      # Lightweight strategy protocol fakes may expose the same keys at root.
+      state = strategy.state.to_dict() if hasattr(strategy.state, "to_dict") else {}
+    opportunity = dict(state.get("opportunity") or {})
+    candidate = dict(opportunity.get("candidate") or {})
+    latest_evaluation = dict(opportunity.get("latest_evaluation") or {})
+    awaiting = dict(state.get("awaiting") or {})
+    return (
+      str(
+        opportunity.get("candidate_status") or state.get("candidate_status") or ""
+      ).upper(),
+      str(
+        candidate.get("candidate_id")
+        or latest_evaluation.get("candidate_id")
+        or opportunity.get("candidate_id")
+        or awaiting.get("candidate_id")
+        or ""
+      ),
+      str(state.get("pending_entry_intent_id") or ""),
+    )
+
+  @classmethod
+  def _t_trade_candidate_is_suppressed(
+    cls,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> bool:
+    candidate_status, current_candidate_id, pending_intent_id = (
+      cls._t_trade_candidate_projection(runtime, intent)
+    )
+    expected_candidate_id = str(
+      (intent.metadata or {}).get("candidate_id") or ""
+    ).strip()
+    return bool(
+      current_candidate_id == expected_candidate_id
+      and candidate_status in {"NONE", "SUPPRESSED", "REARMING"}
+      and pending_intent_id != intent.intent_id
+    )
+
+  def _reject_t_trade_opportunity_output(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_code: str,
+    source_time_ms: int,
+    intents: List[TradeIntent],
+    code: str,
+    message: str,
+  ) -> None:
+    normalized_code = str(instrument_code or "").strip().upper()
+    runtime._t_trade_opportunity_failures[normalized_code] = {
+      "code": str(code),
+      "message": str(message),
+      "source_time_ms": int(source_time_ms or 0),
+      "intent_ids": [intent.intent_id for intent in intents],
+    }
+    for intent in intents:
+      runtime.pending_approvals.pop(intent.intent_id, None)
+    if runtime.metrics:
+      runtime.metrics.error_count += 1
+    self._runtime_log(
+      runtime,
+      "ERROR",
+      "做 T 机会输出已保守拒绝: "
+      f"code={code} instrument={normalized_code} message={message}",
+    )
+
   async def approve_trade_intent(
     self,
     run_id: str,
     intent_id: str,
     *,
+    approval_expectation: Optional[Mapping[str, Any]] = None,
     approval_audit: Optional[Mapping[str, Any]] = None,
   ) -> Dict[str, Any]:
-    """Approve one manual-confirm intent after rechecking TTL and price drift."""
+    """Approve one manual-confirm intent after an in-lock fail-closed recheck."""
 
     runtime = self.runs.get(run_id)
     if runtime is None:
       return {"success": False, "code": "RUN_NOT_FOUND", "message": "策略运行不存在"}
-    async with runtime.approval_lock:
+    async with AsyncExitStack() as approval_stack:
+      parameters = dict(runtime.context.parameters or {})
+      account_id = str(parameters.get("account_id") or "").strip()
+      if account_id and str(parameters.get("global_monitor_id") or "").strip():
+        await approval_stack.enter_async_context(
+          t_trade_account_coordination_lock(account_id)
+        )
+      await approval_stack.enter_async_context(runtime.approval_lock)
       if not self._accepts_non_durable_output(runtime):
         return {
           "success": False,
@@ -6306,15 +9878,54 @@ class StrategyExecutor:
           "message": reconciliation_failure[1],
         }
 
+      candidate_failure = self._v3_t_trade_candidate_approval_failure(
+        runtime,
+        intent,
+        approval_expectation=approval_expectation,
+      )
+      if candidate_failure is not None:
+        code, message, invalidate_intent = candidate_failure
+        if invalidate_intent:
+          persistence_failure = await self._terminalize_pending_approval_for_request(
+            runtime,
+            intent,
+            status="EXPIRED",
+            reason=code,
+            message=message,
+          )
+          if persistence_failure is not None:
+            return persistence_failure
+        return {"success": False, "code": code, "message": message}
+
+      durable_config_failure = await self._v3_t_trade_durable_config_failure(
+        runtime,
+        intent,
+      )
+      if durable_config_failure is not None:
+        code, message, invalidate_intent = durable_config_failure
+        if invalidate_intent:
+          persistence_failure = await self._terminalize_pending_approval_for_request(
+            runtime,
+            intent,
+            status="EXPIRED",
+            reason=code,
+            message=message,
+          )
+          if persistence_failure is not None:
+            return persistence_failure
+        return {"success": False, "code": code, "message": message}
+
       failure = self._approval_failure(runtime, intent)
       if failure is not None:
-        await self._reject_pending_approval(
+        persistence_failure = await self._terminalize_pending_approval_for_request(
           runtime,
           intent,
           status="EXPIRED",
           reason=failure[0],
           message=failure[1],
         )
+        if persistence_failure is not None:
+          return persistence_failure
         return {"success": False, "code": failure[0], "message": failure[1]}
 
       portfolio_failure = self._t_trade_portfolio_approval_failure(runtime, intent)
@@ -6325,15 +9936,102 @@ class StrategyExecutor:
           "message": portfolio_failure[1],
         }
 
-      self._reserve_t_trade_entry_exposure(runtime, intent)
-
-      runtime.pending_approvals.pop(intent_id, None)
       if runtime.state_manager:
-        await runtime.state_manager.update_trade_intent_status(
-          intent_id,
-          "APPROVED",
-          notes="MANUAL_APPROVAL_ACCEPTED",
+        strict_status_update = getattr(
+          runtime.state_manager,
+          "update_trade_intent_status_strict",
+          None,
         )
+        if not callable(strict_status_update):
+          if self._is_v3_t_trade_manual_intent(intent):
+            return {
+              "success": False,
+              "code": "T_TRADE_APPROVAL_STATUS_PERSISTENCE_UNAVAILABLE",
+              "message": "确认状态缺少严格持久化边界，信号仍保持待确认",
+            }
+          strict_status_update = getattr(
+            runtime.state_manager,
+            "update_trade_intent_status",
+            None,
+          )
+        if not callable(strict_status_update):
+          return {
+            "success": False,
+            "code": "APPROVAL_STATUS_PERSISTENCE_UNAVAILABLE",
+            "message": "确认状态无法持久化，信号仍保持待确认",
+          }
+        try:
+          await strict_status_update(
+            intent_id,
+            "APPROVED",
+            notes="MANUAL_APPROVAL_ACCEPTED",
+          )
+        except Exception as exc:
+          if runtime.metrics:
+            runtime.metrics.error_count += 1
+          self._runtime_log(
+            runtime,
+            "ERROR",
+            "人工确认状态持久化失败，未占用敞口且未进入订单路由: "
+            f"intent_id={intent_id} error={exc}",
+          )
+          return {
+            "success": False,
+            "code": (
+              "T_TRADE_APPROVAL_STATUS_PERSIST_FAILED"
+              if self._is_v3_t_trade_manual_intent(intent)
+              else "APPROVAL_STATUS_PERSIST_FAILED"
+            ),
+            "message": "确认状态保存失败，信号仍保持待确认，请稍后重试",
+          }
+      # The durable status write above yields to the runtime event loop. Recheck
+      # every mutable gate before the synchronous strategy PENDING transition so
+      # a newer tick, continuity barrier, or account snapshot cannot slip through
+      # the approval window.
+      late_failure: Optional[tuple[str, str]] = None
+      if runtime.durable_event_barrier_key:
+        late_failure = (
+          "DURABLE_RECONCILIATION_REQUIRED",
+          "成交回报状态正在安全落盘，请稍后重试确认",
+        )
+      if late_failure is None:
+        late_failure = self._runtime_state_reconciliation_failure(runtime)
+      if late_failure is None:
+        late_candidate_failure = self._v3_t_trade_candidate_approval_failure(
+          runtime,
+          intent,
+          approval_expectation=approval_expectation,
+        )
+        if late_candidate_failure is not None:
+          late_failure = late_candidate_failure[:2]
+      if late_failure is None:
+        late_durable_config_failure = await self._v3_t_trade_durable_config_failure(
+          runtime, intent
+        )
+        if late_durable_config_failure is not None:
+          late_failure = late_durable_config_failure[:2]
+      if late_failure is None:
+        late_failure = self._approval_failure(runtime, intent)
+      if late_failure is None:
+        late_failure = self._t_trade_portfolio_approval_failure(runtime, intent)
+      if late_failure is not None:
+        persistence_failure = await self._terminalize_pending_approval_for_request(
+          runtime,
+          intent,
+          status="EXPIRED",
+          reason=late_failure[0],
+          message=late_failure[1],
+          strict_persistence=True,
+        )
+        if persistence_failure is not None:
+          return persistence_failure
+        return {
+          "success": False,
+          "code": late_failure[0],
+          "message": late_failure[1],
+        }
+      self._reserve_t_trade_entry_exposure(runtime, intent)
+      runtime.pending_approvals.pop(intent_id, None)
       await self._notify_strategy_order(
         runtime,
         OrderStateEvent(
@@ -6412,8 +10110,7 @@ class StrategyExecutor:
     if account_id:
       expected["account_id"] = account_id
     if not challenge.get("consumed_at") or any(
-      str(challenge.get(key) or "") != str(value)
-      for key, value in expected.items()
+      str(challenge.get(key) or "") != str(value) for key, value in expected.items()
     ):
       return failure
     return None
@@ -6422,6 +10119,13 @@ class StrategyExecutor:
     """Restore only strategy-declared manual intents, preserving TTL semantics."""
     if not runtime.strategy or not runtime.state_manager:
       return
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      # Recover V3 audit truth before inspecting candidate/intent pairs.
+      # MATERIAL events seed the outcome row that PAPER fill facts may
+      # reference. Unrelated manual-entry strategies do not own these outboxes.
+      await self._replay_pending_t_trade_material_events(runtime)
+      await self._replay_pending_t_trade_paper_fill_facts(runtime)
+      await self._converge_v3_t_trade_startup_candidates(runtime)
     inspected_intent_ids: set[str] = set()
     for intent_id in runtime.strategy.pending_manual_intent_ids():
       inspected_intent_ids.add(intent_id)
@@ -6458,13 +10162,12 @@ class StrategyExecutor:
           status="EXPIRED",
           reason=invalidation[0],
           message=invalidation[1],
+          strict_persistence=True,
         )
         self._checkpoint_restored_strategy_state(runtime)
         force_save = getattr(runtime.state_manager, "force_save", None)
         if callable(force_save) and not await force_save():
-          raise RuntimeError(
-            "恢复的待确认信号失效状态保存失败，拒绝启动策略运行"
-          )
+          raise RuntimeError("恢复的待确认信号失效状态保存失败，拒绝启动策略运行")
         continue
       runtime.pending_approvals[intent.intent_id] = intent
       self._runtime_log(
@@ -6490,6 +10193,328 @@ class StrategyExecutor:
         intent_id=managed_state.pending_intent_id,
         state=managed_state,
       )
+
+  async def _converge_v3_t_trade_startup_candidates(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    """Fail closed across every V3 candidate persistence crash window.
+
+    The normal write chain intentionally uses small durable boundaries.  A
+    process can therefore stop after the LATCHED checkpoint, after the initial
+    PENDING intent append, or after linking state to the intent but before the
+    row advances to AWAITING_APPROVAL.  Startup never resumes those ambiguous
+    candidates and never routes them: it terminates mismatched rows, asks the
+    strategy to suppress state through ``OrderStateEvent``, checkpoints that
+    state together with the stable audit event in the manager-owned outbox,
+    then materializes and acknowledges the event idempotently.
+    """
+
+    strategy = runtime.strategy
+    state_manager = runtime.state_manager
+    if strategy is None or state_manager is None:
+      return
+    recovery_projection = strategy.manual_approval_recovery_candidates()
+    if recovery_projection is None:
+      return
+    if not bool(getattr(state_manager, "persist_enabled", True)):
+      return
+
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      raise RuntimeError("V3 候选启动收敛缺少唯一账户绑定")
+    loader = getattr(state_manager, "restore_v3_manual_candidate_intents", None)
+    strict_updater = getattr(state_manager, "update_trade_intent_status_strict", None)
+    force_save = getattr(state_manager, "force_save", None)
+    if not callable(loader) or not callable(strict_updater) or not callable(force_save):
+      raise RuntimeError("V3 候选启动收敛缺少严格持久化边界")
+
+    async with t_trade_account_coordination_lock(account_id):
+      candidates = list(recovery_projection)
+      durable_rows = list(
+        await loader(
+          account_id=account_id,
+          linked_intent_ids=[
+            candidate.pending_intent_id
+            for candidate in candidates
+            if candidate.pending_intent_id
+          ],
+        )
+        or []
+      )
+      self._validate_v3_startup_recovery_scope(
+        runtime,
+        account_id=account_id,
+        durable_rows=durable_rows,
+        candidates=candidates,
+      )
+
+      consistent_intent_ids: set[str] = set()
+      for restored in durable_rows:
+        intent = restored.intent
+        durable_status = str(restored.durable_status or "").strip().upper()
+        state = self._matching_v3_recovery_candidate(candidates, intent)
+        if (
+          durable_status == "AWAITING_APPROVAL"
+          and state is not None
+          and self._is_consistent_v3_awaiting_pair(state, intent)
+        ):
+          consistent_intent_ids.add(intent.intent_id)
+          continue
+        if durable_status not in {"PENDING", "AWAITING_APPROVAL"}:
+          continue
+        terminal_status = "REJECTED" if durable_status == "PENDING" else "EXPIRED"
+        reason = (
+          "T_TRADE_STARTUP_ORPHAN_PENDING_INTENT"
+          if durable_status == "PENDING"
+          else "T_TRADE_STARTUP_APPROVAL_STATE_MISMATCH"
+        )
+        await strict_updater(
+          intent.intent_id,
+          terminal_status,
+          metadata={
+            **dict(intent.metadata or {}),
+            "runtime_gate": reason,
+            "startup_recovery": True,
+          },
+          notes=reason,
+        )
+        runtime.pending_approvals.pop(intent.intent_id, None)
+
+      suppressed_events: List[Dict[str, Any]] = []
+      suppressed_instruments: set[str] = set()
+      for candidate in candidates:
+        if candidate.pending_intent_id in consistent_intent_ids:
+          continue
+        matching_rows = [
+          restored
+          for restored in durable_rows
+          if self._v3_recovery_candidate_matches_intent(
+            candidate,
+            restored.intent,
+          )
+        ]
+        linked = next(
+          (
+            restored
+            for restored in matching_rows
+            if restored.intent.intent_id == candidate.pending_intent_id
+          ),
+          matching_rows[0] if matching_rows else None,
+        )
+        if (
+          candidate.candidate_status == "AWAITING_APPROVAL"
+          and linked is not None
+          and linked.intent.intent_id == candidate.pending_intent_id
+          and str(linked.durable_status or "").strip().upper()
+          not in {"PENDING", "AWAITING_APPROVAL"}
+          and dict(linked.intent.metadata or {}).get("startup_recovery") is not True
+        ):
+          # The intent advanced beyond manual approval before the last runtime
+          # snapshot.  Existing durable order/report reconciliation owns this
+          # case and must not be collapsed into an orphan-candidate rejection.
+          continue
+        intent_id = (
+          linked.intent.intent_id if linked is not None else candidate.pending_intent_id
+        )
+        status = (
+          "EXPIRED" if candidate.candidate_status == "AWAITING_APPROVAL" else "REJECTED"
+        )
+        reason = (
+          "T_TRADE_STARTUP_APPROVAL_STATE_MISMATCH"
+          if candidate.candidate_status == "AWAITING_APPROVAL"
+          else "T_TRADE_STARTUP_ORPHAN_PENDING_INTENT"
+          if matching_rows
+          else "T_TRADE_STARTUP_ORPHAN_LATCHED_CANDIDATE"
+        )
+        metadata = {
+          **(dict(linked.intent.metadata or {}) if linked is not None else {}),
+          "t_trade_role": "entry",
+          "account_id": account_id,
+          "instrument_code": candidate.instrument_code,
+          "candidate_id": candidate.candidate_id,
+          "candidate_fingerprint": candidate.candidate_fingerprint,
+          "candidate_state_version": candidate.candidate_state_version,
+          "intent_id": intent_id,
+          "source_time_ms": candidate.source_time_ms,
+          "approval_reason": reason,
+          "startup_recovery": True,
+        }
+        timestamp = (
+          datetime.fromtimestamp(candidate.source_time_ms / 1000, timezone.utc)
+          if candidate.source_time_ms > 0
+          else None
+        )
+        patch = await self._notify_strategy_order(
+          runtime,
+          OrderStateEvent(
+            order_id=None,
+            status=status,
+            filled_volume=0,
+            error_message="做 T 候选持久化在重启时发现不完整，已禁止恢复下单",
+            timestamp=timestamp,
+            metadata=metadata,
+          ),
+          raise_on_error=True,
+        )
+        remaining = list(strategy.manual_approval_recovery_candidates() or [])
+        if any(
+          item.instrument_code == candidate.instrument_code
+          and item.candidate_id == candidate.candidate_id
+          for item in remaining
+        ):
+          raise RuntimeError(
+            "V3 候选启动收敛后仍可执行: "
+            f"run_id={runtime.run_id}, candidate_id={candidate.candidate_id}"
+          )
+        material_events = [
+          dict(event)
+          for event in list(getattr(patch, "append_events", []) or [])
+          if isinstance(event, Mapping)
+          and event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+          and str(event.get("record_kind") or "").upper() == "MATERIAL"
+          and str(event.get("event_type") or "").upper() == "CANDIDATE_SUPPRESSED"
+        ]
+        if not material_events:
+          raise RuntimeError(
+            "V3 候选启动抑制缺少 MATERIAL 审计: "
+            f"run_id={runtime.run_id}, candidate_id={candidate.candidate_id}"
+          )
+        suppressed_events.extend(material_events)
+        suppressed_instruments.add(candidate.instrument_code)
+
+      if suppressed_events:
+        # The suppression state and stable events must share the first durable
+        # boundary. If the process stops afterwards, startup replays the outbox
+        # and cannot accidentally restore an actionable candidate.
+        self._checkpoint_restored_strategy_state(runtime)
+        if not await force_save():
+          raise RuntimeError("V3 候选启动抑制状态保存失败，拒绝启动策略运行")
+        acknowledged: List[Mapping[str, Any]] = []
+        for event in suppressed_events:
+          await self._materialize_t_trade_evaluation_with_retry(
+            event=event,
+            account_id=account_id,
+            strategy_run_id=runtime.run_id,
+            labels=self._t_trade_observability_labels([event]),
+            cas_committed=True,
+          )
+          seeded = await self._seed_t_trade_candidate_outcome(
+            runtime,
+            account_id=account_id,
+            event=event,
+            strict=True,
+          )
+          if not seeded:
+            raise RuntimeError("V3 候选启动抑制结果初始化失败")
+          acknowledged.append(event)
+        await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+        for instrument_code in sorted(suppressed_instruments):
+          await self._notify_t_trade_opportunity_update(
+            runtime,
+            instrument_code=instrument_code,
+            source_time_ms=max(
+              (
+                item.source_time_ms
+                for item in candidates
+                if item.instrument_code == instrument_code
+              ),
+              default=0,
+            ),
+            events=[
+              event
+              for event in suppressed_events
+              if str(event.get("instrument_code") or "").strip().upper()
+              == instrument_code
+            ],
+            immediate=True,
+          )
+        self._runtime_log(
+          runtime,
+          "WARNING",
+          "已收敛做 T 候选跨事务崩溃窗口，所有不完整候选均禁止恢复下单: "
+          f"candidate_count={len(suppressed_events)}",
+        )
+
+  @staticmethod
+  def _validate_v3_startup_recovery_scope(
+    runtime: StrategyRuntime,
+    *,
+    account_id: str,
+    durable_rows: List[Any],
+    candidates: List[ManualApprovalRecoveryCandidate],
+  ) -> None:
+    candidate_keys: set[tuple[str, str]] = set()
+    for candidate in candidates:
+      key = (candidate.instrument_code, candidate.candidate_id)
+      if (
+        not candidate.instrument_code
+        or not candidate.candidate_id
+        or key in candidate_keys
+      ):
+        raise RuntimeError("V3 候选启动收敛投影身份无效或重复")
+      candidate_keys.add(key)
+    for restored in durable_rows:
+      intent = restored.intent
+      metadata = dict(intent.metadata or {})
+      if (
+        intent.run_id != runtime.run_id
+        or str(metadata.get("account_id") or "").strip() != account_id
+        or intent.direction != TradeIntentDirection.BUY
+        or intent.execution_mode != TradeIntentExecutionMode.MANUAL_CONFIRM
+        or str(metadata.get("t_trade_role") or "").strip().lower() != "entry"
+      ):
+        raise RuntimeError(
+          "V3 候选启动收敛意图作用域无效: "
+          f"run_id={runtime.run_id}, intent_id={intent.intent_id}"
+        )
+
+  @classmethod
+  def _matching_v3_recovery_candidate(
+    cls,
+    candidates: List[ManualApprovalRecoveryCandidate],
+    intent: TradeIntent,
+  ) -> Optional[ManualApprovalRecoveryCandidate]:
+    return next(
+      (
+        candidate
+        for candidate in candidates
+        if cls._v3_recovery_candidate_matches_intent(candidate, intent)
+      ),
+      None,
+    )
+
+  @staticmethod
+  def _v3_recovery_candidate_matches_intent(
+    candidate: ManualApprovalRecoveryCandidate,
+    intent: TradeIntent,
+  ) -> bool:
+    metadata = dict(intent.metadata or {})
+    return bool(
+      candidate.instrument_code == str(intent.instrument_code or "").strip().upper()
+      and candidate.candidate_id == str(metadata.get("candidate_id") or "").strip()
+      and candidate.candidate_fingerprint
+      == str(metadata.get("candidate_fingerprint") or "").strip()
+    )
+
+  @classmethod
+  def _is_consistent_v3_awaiting_pair(
+    cls,
+    candidate: ManualApprovalRecoveryCandidate,
+    intent: TradeIntent,
+  ) -> bool:
+    metadata = dict(intent.metadata or {})
+    try:
+      intent_state_version = int(metadata.get("candidate_state_version") or 0)
+    except (TypeError, ValueError, OverflowError):
+      return False
+    return bool(
+      cls._v3_recovery_candidate_matches_intent(candidate, intent)
+      and candidate.candidate_status == "AWAITING_APPROVAL"
+      and candidate.pending_intent_id == intent.intent_id
+      and candidate.order_status == "AWAITING_APPROVAL"
+      and candidate.candidate_state_version == intent_state_version
+    )
 
   async def _converge_restored_manual_intent_status(
     self,
@@ -6529,9 +10554,7 @@ class StrategyExecutor:
       return
     instrument_code, _entry_state = matched_entry
 
-    snapshot_reader = getattr(
-      runtime.state_manager, "get_trade_intent_snapshot", None
-    )
+    snapshot_reader = getattr(runtime.state_manager, "get_trade_intent_snapshot", None)
     if not callable(snapshot_reader):
       return
     durable = await snapshot_reader(intent_id)
@@ -6680,9 +10703,7 @@ class StrategyExecutor:
         "entry_rule_id": state.pending_rule_id,
         "intent_id": intent_id,
         "instrument_code": instrument_code,
-        "approval_reason": str(
-          truth.get("reason") or "APPROVED_WITHOUT_DURABLE_ORDER"
-        ),
+        "approval_reason": str(truth.get("reason") or "APPROVED_WITHOUT_DURABLE_ORDER"),
       }
       runtime.pending_approvals.pop(intent_id, None)
       if runtime.state_manager:
@@ -7043,14 +11064,14 @@ class StrategyExecutor:
         "RECONCILE_REQUIRED",
       }:
         continue
-      requested = int(state.get("requested_entry_volume", 0) or 0)
-      filled = int(state.get("entry_filled_volume", 0) or 0)
-      remaining = max(0, requested - filled)
-      if remaining <= 0:
+      requested_amount = float(state.get("requested_entry_amount", 0.0) or 0.0)
+      if requested_amount <= 0:
         continue
-      signal = dict(state.get("current_signal", {}) or {})
+      opportunity = dict(state.get("opportunity", {}) or {})
+      evaluation = dict(opportunity.get("latest_evaluation", {}) or {})
+      features = dict(evaluation.get("features", {}) or {})
       price = float(
-        signal.get("signal_price", 0.0)
+        features.get("price", 0.0)
         or state.get("last_price", 0.0)
         or state.get("entry_avg_price", 0.0)
         or 0.0
@@ -7058,10 +11079,11 @@ class StrategyExecutor:
       runtime.t_trade_entry_reservations[intent_id] = {
         "instrument_code": str(code),
         "batch_id": state.get("batch_id"),
-        "requested_volume": requested,
-        "volume": remaining,
+        "requested_volume": 0,
+        "volume": 0,
+        "requested_amount": requested_amount,
         "price": price,
-        "amount": remaining * price,
+        "amount": requested_amount,
       }
 
   async def reject_trade_intent(
@@ -7080,22 +11102,22 @@ class StrategyExecutor:
           "code": "INTENT_NOT_AWAITING_APPROVAL",
           "message": "信号不存在、已处理或已过期",
         }
-      await self._reject_pending_approval(
+      persistence_failure = await self._terminalize_pending_approval_for_request(
         runtime,
         intent,
         status="REJECTED",
         reason=reason,
         message="用户已忽略本次交易信号",
       )
+      if persistence_failure is not None:
+        return persistence_failure
       return {"success": True, "code": "REJECTED", "message": "信号已忽略"}
 
   async def cancel_open_buy_orders(self, run_id: str, reason: str) -> int:
     """Request durable cancellation while preserving late broker fills."""
 
     async with AsyncSessionLocal() as db:
-      requests = await TradeCommandService(
-        db
-      ).request_strategy_buy_cancellations(
+      requests = await TradeCommandService(db).request_strategy_buy_cancellations(
         strategy_run_id=run_id,
         reason=reason,
       )
@@ -7145,21 +11167,419 @@ class StrategyExecutor:
         )
       return len(requests)
 
+  def _v3_t_trade_candidate_approval_failure(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    approval_expectation: Optional[Mapping[str, Any]],
+  ) -> Optional[tuple[str, str, bool]]:
+    """Validate the V3 candidate CAS token and current opportunity snapshot.
+
+    The boolean in the return value indicates whether durable intent truth must
+    also be expired. A stale client token does not invalidate the authoritative
+    candidate; a mismatch against current strategy state does.
+    """
+
+    metadata = dict(intent.metadata or {})
+    is_v3_t_entry = bool(
+      intent.direction == TradeIntentDirection.BUY
+      and str(metadata.get("t_trade_role") or "").lower() == "entry"
+      and self._safe_non_negative_int(
+        metadata.get("opportunity_schema_version"), default=0
+      )
+      >= 3
+    )
+    if not is_v3_t_entry:
+      return None
+
+    expected = dict(approval_expectation or {})
+    expected_signal_version = self._safe_non_negative_int(
+      expected.get("signal_version"), default=0
+    )
+    expected_candidate_id = str(expected.get("candidate_id") or "").strip()
+    expected_fingerprint = str(expected.get("candidate_fingerprint") or "").strip()
+    expected_state_version = self._safe_non_negative_int(
+      expected.get("candidate_state_version"), default=0
+    )
+    expected_config_version_raw = expected.get("config_version")
+    expected_policy_version = str(expected.get("policy_version") or "").strip()
+    if (
+      expected_signal_version <= 0
+      or not expected_candidate_id
+      or not expected_fingerprint
+      or expected_state_version <= 0
+      or expected_config_version_raw is None
+      or not expected_policy_version
+    ):
+      return (
+        "T_TRADE_APPROVAL_EXPECTATION_REQUIRED",
+        "确认请求缺少完整的候选指纹与版本，请刷新最新信号后重试",
+        False,
+      )
+    expected_config_version = self._safe_non_negative_int(
+      expected_config_version_raw, default=0
+    )
+
+    actual_signal_version = self._safe_non_negative_int(
+      metadata.get("signal_version"), default=0
+    )
+    actual_candidate_id = str(metadata.get("candidate_id") or "").strip()
+    actual_fingerprint = str(metadata.get("candidate_fingerprint") or "").strip()
+    actual_state_version = self._safe_non_negative_int(
+      metadata.get("candidate_state_version"), default=0
+    )
+    actual_config_version = self._safe_non_negative_int(
+      metadata.get("config_version"), default=0
+    )
+    actual_policy_version = str(metadata.get("policy_version") or "").strip()
+    if (
+      actual_signal_version <= 0
+      or not actual_candidate_id
+      or not actual_fingerprint
+      or actual_state_version <= 0
+      or "config_version" not in metadata
+      or not actual_policy_version
+      or str(metadata.get("candidate_status") or "").upper() != "AWAITING_APPROVAL"
+    ):
+      return (
+        "T_TRADE_CANDIDATE_IDENTITY_INVALID",
+        "待确认意图缺少可验证的 V3 候选身份，已保守失效",
+        True,
+      )
+
+    client_comparisons = (
+      (
+        expected_signal_version == actual_signal_version,
+        "T_TRADE_SIGNAL_VERSION_MISMATCH",
+        "信号版本已变化，请刷新后确认最新候选",
+      ),
+      (
+        expected_candidate_id == actual_candidate_id,
+        "T_TRADE_CANDIDATE_ID_MISMATCH",
+        "候选已变化，请刷新后确认最新候选",
+      ),
+      (
+        expected_fingerprint == actual_fingerprint,
+        "T_TRADE_CANDIDATE_FINGERPRINT_MISMATCH",
+        "候选指纹不一致，请刷新后确认最新候选",
+      ),
+      (
+        expected_state_version == actual_state_version,
+        "T_TRADE_CANDIDATE_STATE_VERSION_MISMATCH",
+        "候选状态版本已变化，请刷新后重试",
+      ),
+      (
+        expected_config_version == actual_config_version,
+        "T_TRADE_CONFIG_VERSION_MISMATCH",
+        "做 T 参数版本已变化，请刷新最新信号",
+      ),
+      (
+        expected_policy_version == actual_policy_version,
+        "T_TRADE_POLICY_VERSION_MISMATCH",
+        "机会策略版本已变化，请刷新最新信号",
+      ),
+    )
+    for matched, code, message in client_comparisons:
+      if not matched:
+        return code, message, False
+
+    if runtime.strategy is None:
+      return (
+        "T_TRADE_CANDIDATE_STATE_MISSING",
+        "策略候选状态不可用，已保守失效",
+        True,
+      )
+    raw_instrument_states = runtime.strategy.state.get("instrument_states", {})
+    instrument_states = (
+      dict(raw_instrument_states) if isinstance(raw_instrument_states, Mapping) else {}
+    )
+    raw_instrument_state = instrument_states.get(intent.instrument_code)
+    instrument_state = (
+      dict(raw_instrument_state) if isinstance(raw_instrument_state, Mapping) else {}
+    )
+    raw_opportunity = instrument_state.get("opportunity")
+    opportunity = dict(raw_opportunity) if isinstance(raw_opportunity, Mapping) else {}
+    raw_candidate = opportunity.get("candidate")
+    candidate = dict(raw_candidate) if isinstance(raw_candidate, Mapping) else {}
+    if not opportunity or not candidate:
+      return (
+        "T_TRADE_CANDIDATE_STATE_MISSING",
+        "当前机会候选状态不可用，已保守失效",
+        True,
+      )
+
+    if (
+      str(instrument_state.get("pending_entry_intent_id") or "") != intent.intent_id
+      or str(instrument_state.get("entry_order_status") or "").upper()
+      != "AWAITING_APPROVAL"
+      or str(opportunity.get("candidate_status") or "").upper() != "AWAITING_APPROVAL"
+      or opportunity.get("candidate_awaiting_approval") is not True
+    ):
+      return (
+        "T_TRADE_CANDIDATE_NOT_AWAITING_APPROVAL",
+        "该意图已不是当前等待确认的机会候选，已保守失效",
+        True,
+      )
+
+    if (
+      str(candidate.get("candidate_id") or "") != actual_candidate_id
+      or str(candidate.get("fingerprint") or "") != actual_fingerprint
+      or self._safe_non_negative_int(opportunity.get("state_version"), default=0)
+      != actual_state_version
+    ):
+      return (
+        "T_TRADE_CANDIDATE_NOT_LATEST",
+        "待确认意图与当前最新候选不一致，已保守失效",
+        True,
+      )
+    if (
+      "config_version" not in opportunity
+      or self._safe_non_negative_int(opportunity.get("config_version"), default=0)
+      != actual_config_version
+    ):
+      return (
+        "T_TRADE_CONFIG_VERSION_CHANGED",
+        "当前做 T 参数版本已变化，旧候选已保守失效",
+        True,
+      )
+    if str(opportunity.get("policy_version") or "") != actual_policy_version:
+      return (
+        "T_TRADE_POLICY_VERSION_CHANGED",
+        "当前机会策略版本已变化，旧候选已保守失效",
+        True,
+      )
+
+    raw_evaluation = opportunity.get("latest_evaluation")
+    evaluation = dict(raw_evaluation) if isinstance(raw_evaluation, Mapping) else {}
+    if not evaluation:
+      return (
+        "T_TRADE_REVALIDATION_UNAVAILABLE",
+        "当前机会重验快照不可用，已保守失效",
+        True,
+      )
+    if (
+      str(evaluation.get("candidate_id") or "") != actual_candidate_id
+      or str(evaluation.get("candidate_fingerprint") or "") != actual_fingerprint
+      or str(evaluation.get("policy_version") or "") != actual_policy_version
+    ):
+      return (
+        "T_TRADE_CANDIDATE_NOT_LATEST",
+        "当前重验快照不属于待确认候选，已保守失效",
+        True,
+      )
+    candidate_path = str(candidate.get("path") or "").strip().upper()
+    evaluation_path = str(evaluation.get("selected_path") or "").strip().upper()
+    if not candidate_path or evaluation_path != candidate_path:
+      return (
+        "T_TRADE_CANDIDATE_PATH_MISMATCH",
+        "当前重验路径与待确认候选路径不一致，候选已保守失效",
+        True,
+      )
+    if str(evaluation.get("data_health") or "").upper() != "READY":
+      return (
+        "T_TRADE_DATA_HEALTH_NOT_READY",
+        "当前行情数据健康状态不是 READY，候选已保守失效",
+        True,
+      )
+
+    try:
+      score = float(evaluation.get("opportunity_score"))
+      revalidate_score = float(opportunity.get("revalidate_score"))
+    except (TypeError, ValueError, OverflowError):
+      score = float("nan")
+      revalidate_score = float("nan")
+    if not isfinite(score) or not isfinite(revalidate_score):
+      return (
+        "T_TRADE_REVALIDATE_SCORE_UNAVAILABLE",
+        "当前机会分数或重验阈值不可用，候选已保守失效",
+        True,
+      )
+    if score < revalidate_score:
+      return (
+        "T_TRADE_REVALIDATE_SCORE_BELOW_FLOOR",
+        "当前机会分数已低于确认阈值，候选已保守失效",
+        True,
+      )
+
+    hard_gates = evaluation.get("hard_gates")
+    if not isinstance(hard_gates, (list, tuple)) or not hard_gates:
+      return (
+        "T_TRADE_HARD_GATES_UNAVAILABLE",
+        "当前硬门禁快照不可用，候选已保守失效",
+        True,
+      )
+    failed_gate_codes = []
+    for gate in hard_gates:
+      if not isinstance(gate, Mapping):
+        failed_gate_codes.append("UNKNOWN_GATE")
+        continue
+      item = dict(gate)
+      if item.get("passed") is not True:
+        failed_gate_codes.append(str(item.get("code") or "UNKNOWN_GATE"))
+    if failed_gate_codes:
+      return (
+        "T_TRADE_HARD_GATE_BLOCKED",
+        f"当前硬门禁未通过：{', '.join(failed_gate_codes)}",
+        True,
+      )
+    blockers = evaluation.get("blockers")
+    if not isinstance(blockers, (list, tuple)):
+      return (
+        "T_TRADE_REVALIDATION_UNAVAILABLE",
+        "当前机会阻断项快照不可用，候选已保守失效",
+        True,
+      )
+    normalized_blockers = [str(item) for item in blockers if str(item)]
+    if normalized_blockers:
+      return (
+        "T_TRADE_REVALIDATION_BLOCKED",
+        f"当前机会已被阻断：{', '.join(normalized_blockers)}",
+        True,
+      )
+    return None
+
+  async def _v3_t_trade_durable_config_failure(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+  ) -> Optional[tuple[str, str, bool]]:
+    """Compare a global-monitor candidate with current durable configuration.
+
+    Runtime candidate metadata alone cannot close the interval between a
+    successful config commit and the serial runtime rewarm.  The shared account
+    lock linearizes normal saves with approval; this database check is the
+    fail-closed guard for reconcile failures and process recovery.
+    """
+
+    parameters = dict(runtime.context.parameters or {})
+    monitor_id = str(parameters.get("global_monitor_id") or "").strip()
+    account_id = str(parameters.get("account_id") or "").strip()
+    metadata = dict(intent.metadata or {})
+    try:
+      schema_version = int(metadata.get("opportunity_schema_version") or 0)
+      candidate_config_version = int(metadata.get("config_version") or 0)
+    except (TypeError, ValueError, OverflowError):
+      schema_version = 0
+      candidate_config_version = -1
+    is_global_v3_entry = bool(
+      monitor_id
+      and account_id
+      and schema_version >= 3
+      and intent.direction == TradeIntentDirection.BUY
+      and str(metadata.get("t_trade_role") or "").lower() == "entry"
+    )
+    if not is_global_v3_entry or runtime.context.mode == StrategyRunMode.BACKTEST:
+      return None
+
+    try:
+      async with AsyncSessionLocal() as db:
+        result = await db.execute(
+          select(TTradeGlobalConfig).where(TTradeGlobalConfig.id == monitor_id)
+        )
+        config = result.scalar_one_or_none()
+    except Exception as exc:
+      self._runtime_log(
+        runtime,
+        "ERROR",
+        f"做 T 审批无法读取权威配置，已保守阻断: account={account_id} error={exc}",
+      )
+      return (
+        "T_TRADE_DURABLE_CONFIG_UNAVAILABLE",
+        "当前无法校验做 T 权威参数版本，请稍后重试",
+        False,
+      )
+
+    if config is None or str(config.account_id or "").strip() != account_id:
+      return (
+        "T_TRADE_DURABLE_CONFIG_MISSING",
+        "做 T 权威配置不存在或账户不匹配，旧候选已保守失效",
+        True,
+      )
+    if not bool(config.enabled):
+      return (
+        "T_TRADE_GLOBAL_MONITOR_DISABLED",
+        "做 T 全局监控已关闭，旧候选已保守失效",
+        True,
+      )
+    if str(config.strategy_run_id or "") != runtime.run_id:
+      return (
+        "T_TRADE_GLOBAL_RUN_CHANGED",
+        "做 T 权威运行实例已变化，旧候选已保守失效",
+        True,
+      )
+    if str(config.mode or "").lower() != runtime.context.mode.value.lower():
+      return (
+        "T_TRADE_GLOBAL_MODE_CHANGED",
+        "做 T 运行模式已变化，旧候选已保守失效",
+        True,
+      )
+    if int(config.config_version or 0) != candidate_config_version:
+      return (
+        "T_TRADE_CONFIG_VERSION_CHANGED",
+        "当前做 T 参数版本已变化，旧候选已保守失效",
+        True,
+      )
+    return None
+
+  @staticmethod
+  def _v3_t_trade_expectation_from_intent(
+    intent: TradeIntent,
+  ) -> Optional[Dict[str, Any]]:
+    """Build the same CAS token for deterministic internal backtest approval."""
+
+    metadata = dict(intent.metadata or {})
+    try:
+      schema_version = int(metadata.get("opportunity_schema_version") or 0)
+    except (TypeError, ValueError, OverflowError):
+      schema_version = 0
+    if (
+      intent.direction != TradeIntentDirection.BUY
+      or str(metadata.get("t_trade_role") or "").lower() != "entry"
+      or schema_version < 3
+    ):
+      return None
+    return {
+      "signal_version": metadata.get("signal_version"),
+      "candidate_id": metadata.get("candidate_id"),
+      "candidate_fingerprint": metadata.get("candidate_fingerprint"),
+      "candidate_state_version": metadata.get("candidate_state_version"),
+      "config_version": metadata.get("config_version"),
+      "policy_version": metadata.get("policy_version"),
+    }
+
   @staticmethod
   def _execution_quote_max_age_seconds(
     runtime: StrategyRuntime,
     intent: TradeIntent,
-  ) -> float:
+  ) -> Optional[float]:
     metadata = dict(intent.metadata or {})
     is_t_manual_entry = bool(
       intent.direction == TradeIntentDirection.BUY
       and intent.execution_mode == TradeIntentExecutionMode.MANUAL_CONFIRM
       and str(metadata.get("t_trade_role") or "").lower() == "entry"
     )
+    try:
+      opportunity_schema_version = int(metadata.get("opportunity_schema_version") or 0)
+    except (TypeError, ValueError, OverflowError):
+      opportunity_schema_version = 0
+    if is_t_manual_entry and opportunity_schema_version >= 3:
+      raw_policy = dict(runtime.context.parameters or {}).get("signal_policy")
+      if not isinstance(raw_policy, Mapping):
+        return None
+      try:
+        policy = OpportunityPolicy.from_dict(raw_policy)
+      except (TypeError, ValueError):
+        return None
+      candidate_policy_version = str(metadata.get("policy_version") or "").strip()
+      if (
+        not candidate_policy_version
+        or candidate_policy_version != policy.policy_version
+      ):
+        return None
+      return policy.max_quote_age_ms / 1000.0
     default = (
-      _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS
-      if is_t_manual_entry
-      else 0.0
+      _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS if is_t_manual_entry else 0.0
     )
     raw_value = dict(runtime.context.parameters or {}).get(
       "execution_quote_max_age_seconds",
@@ -7217,6 +11637,11 @@ class StrategyExecutor:
 
     market_data = runtime.latest_market_data.get(intent.instrument_code)
     quote_max_age = self._execution_quote_max_age_seconds(runtime, intent)
+    if quote_max_age is None:
+      return (
+        "T_TRADE_SIGNAL_POLICY_INVALID",
+        "当前做 T 信号策略缺失、无效或版本不匹配，不能确认该候选",
+      )
     if intent.direction == TradeIntentDirection.BUY and quote_max_age > 0:
       if market_data is None:
         return "APPROVAL_QUOTE_MISSING", "确认时缺少最新执行行情，请等待新信号"
@@ -7230,7 +11655,12 @@ class StrategyExecutor:
         quote_at = quote_at.replace(tzinfo=approval_at.tzinfo)
       if quote_at.tzinfo is not None and approval_at.tzinfo is None:
         approval_at = approval_at.replace(tzinfo=quote_at.tzinfo)
-      quote_age = max(0.0, (approval_at - quote_at).total_seconds())
+      quote_age = (approval_at - quote_at).total_seconds()
+      if quote_age < -MARKET_STREAM_MAX_FUTURE_SKEW_SECONDS:
+        return (
+          "APPROVAL_QUOTE_TIME_INVALID",
+          "确认时执行行情时间晚于运行时钟，请等待行情恢复",
+        )
       if quote_age > quote_max_age:
         return "APPROVAL_QUOTE_STALE", "确认时执行行情已超过有效期，请等待新信号"
     reference_price = float(intent.limit_price_hint or 0.0)
@@ -7266,63 +11696,6 @@ class StrategyExecutor:
       return None
 
     params = dict(runtime.context.parameters or {})
-    max_batches = max(1, int(params.get("max_concurrent_batches", 3) or 3))
-    max_exposure_pct = float(params.get("max_total_t_exposure_pct", 0.1) or 0.1)
-    states = {}
-    if runtime.strategy:
-      states = dict(runtime.strategy.state.get("instrument_states", {}) or {})
-    if any(
-      any(
-        str(item.get(f"{role}_order_status", "") or "").upper()
-        == "RECONCILE_REQUIRED"
-        and bool(item.get(f"pending_{role}_intent_id"))
-        for role in ("entry", "exit")
-      )
-      for item in (dict(raw_state or {}) for raw_state in states.values())
-    ):
-      return (
-        "T_TRADE_RECONCILIATION_REQUIRED",
-        "存在尚未由持久化券商回报收敛的做 T 委托，暂不允许确认新批次",
-      )
-
-    active_batch_keys: set[str] = set()
-    active_exposure = 0.0
-    for instrument_code, state in states.items():
-      item = dict(state or {})
-      active_volume = max(
-        0,
-        int(item.get("entry_filled_volume", 0) or 0)
-        - int(item.get("exit_filled_volume", 0) or 0),
-      )
-      if active_volume > 0:
-        batch_key = str(
-          item.get("batch_id") or item.get("instrument_code") or instrument_code
-        )
-        active_batch_keys.add(batch_key)
-        active_exposure += active_volume * float(
-          item.get("entry_avg_price", 0.0) or 0.0
-        )
-      elif item.get("batch_id") and str(
-        item.get("entry_order_status", "") or ""
-      ).upper() in {
-        "PENDING",
-        "SUBMITTED",
-        "ACCEPTED",
-        "PARTIAL_FILLED",
-        "FILLED",
-      }:
-        active_batch_keys.add(str(item["batch_id"]))
-
-    reserved_batch_keys = {
-      str(item.get("batch_id") or item.get("instrument_code") or intent_id)
-      for intent_id, item in runtime.t_trade_entry_reservations.items()
-    }
-    if len(active_batch_keys | reserved_batch_keys) >= max_batches:
-      return (
-        "T_TRADE_CONCURRENT_BATCH_LIMIT",
-        f"账户级做 T 批次已达到上限（{max_batches} 个），信号仍保留至过期",
-      )
-
     market_data = runtime.latest_market_data.get(intent.instrument_code)
     asks = list(getattr(market_data, "ask_price", []) or []) if market_data else []
     current_price = float(
@@ -7332,33 +11705,77 @@ class StrategyExecutor:
       or 0.0
     )
     requested_volume = int(intent.target_volume or 0)
-    requested_amount = current_price * requested_volume
+    requested_amount = float(intent.target_amount or 0.0)
+    if requested_amount <= 0 and requested_volume > 0:
+      requested_amount = current_price * requested_volume
     max_trade_amount = float(params.get("max_trade_amount", 12_000.0) or 12_000.0)
-    account = runtime.state_manager.get_account_quota() if runtime.state_manager else {}
-    total_asset = float(
-      account.get("total_asset", account.get("total_value", 0.0)) or 0.0
-    )
-    if total_asset <= 0 or current_price <= 0 or requested_volume <= 0:
+    if not isfinite(current_price) or current_price <= 0:
       return (
         "T_TRADE_PORTFOLIO_SNAPSHOT_STALE",
-        "账户资产或最新可执行价格不可用，暂不允许确认新批次",
+        "最新可执行价格不可用，暂不允许确认新批次",
+      )
+    if not isfinite(requested_amount) or requested_amount <= 0:
+      return (
+        "T_TRADE_PORTFOLIO_SNAPSHOT_STALE",
+        "目标金额不可用，暂不允许确认新批次",
       )
     if requested_amount > max_trade_amount + 1e-6:
       return (
         "T_TRADE_SINGLE_AMOUNT_LIMIT",
         f"按最新卖一价计算将超过单次金额硬上限 ¥{max_trade_amount:,.2f}",
       )
-
-    reserved_exposure = sum(
-      float(item.get("amount", 0.0) or 0.0)
-      for item in runtime.t_trade_entry_reservations.values()
+    # Rebuild the full current emission decision instead of trusting the
+    # candidate's historical external-blocker snapshot.  This includes the
+    # latest universe/ignore/holding eligibility entry and all four account
+    # facts, while excluding this intent from its own pending check.
+    emission_gate = self._t_trade_intent_emission_context(
+      runtime,
+      intent.instrument_code,
+      requested_amount=requested_amount,
+      current_intent_id=intent.intent_id,
+      check_coordination_lock=False,
     )
-    if (
-      active_exposure + reserved_exposure + requested_amount
-      > total_asset * max_exposure_pct
-    ):
+    if not emission_gate.get("allowed"):
+      blockers = self._t_trade_unique_blockers(emission_gate.get("blockers"))
+      code = blockers[0] if blockers else "T_TRADE_INTENT_EMISSION_BLOCKED"
       return (
-        "T_TRADE_TOTAL_EXPOSURE_LIMIT",
+        code,
+        "当前做 T 入场门禁未通过："
+        + (", ".join(blockers) if blockers else code),
+      )
+    facts = self._t_trade_account_facts(
+      runtime,
+      instrument_code=intent.instrument_code,
+      requested_amount=requested_amount,
+      current_intent_id=intent.intent_id,
+    )
+    if facts.blockers:
+      return (
+        facts.blockers[0],
+        facts.message or "账户做 T 快照不可用，暂不允许确认新批次",
+      )
+    if facts.reconciliation_required:
+      return (
+        "T_TRADE_RECONCILIATION_REQUIRED",
+        "存在尚未由持久化券商回报收敛的做 T 委托，暂不允许确认新批次",
+      )
+    if facts.same_instrument_pending_intent_exists:
+      return (
+        "T_TRADE_SAME_INSTRUMENT_PENDING_INTENT_EXISTS",
+        "同一标的已有待处理做 T 入场意图，暂不允许重复确认",
+      )
+    if facts.account_concurrent_batch_limit_reached:
+      max_batches = max(1, int(params.get("max_concurrent_batches", 3) or 3))
+      return (
+        "T_TRADE_ACCOUNT_CONCURRENT_BATCH_LIMIT_REACHED",
+        f"账户级做 T 批次已达到上限（{max_batches} 个），信号仍保留至过期",
+      )
+    if facts.account_total_exposure_limit_reached:
+      max_exposure_pct = float(
+        params.get("max_total_t_exposure_pct", 0.1) or 0.1
+      )
+      return (
+        "T_TRADE_ACCOUNT_TOTAL_EXPOSURE_LIMIT_REACHED",
         f"确认后将超过账户总资产 {max_exposure_pct * 100:g}% 的做 T 敞口上限",
       )
     return None
@@ -7385,8 +11802,10 @@ class StrategyExecutor:
       "batch_id": metadata.get("t_batch_id"),
       "requested_volume": int(intent.target_volume or 0),
       "volume": int(intent.target_volume or 0),
+      "requested_amount": float(intent.target_amount or 0.0),
       "price": price,
-      "amount": price * int(intent.target_volume or 0),
+      "amount": float(intent.target_amount or 0.0)
+      or price * int(intent.target_volume or 0),
     }
 
   def _update_t_trade_entry_reservation(
@@ -7401,16 +11820,22 @@ class StrategyExecutor:
     intent_id = str(metadata.get("intent_id", "") or "")
     if not intent_id or intent_id not in runtime.t_trade_entry_reservations:
       return
-    raw_status = self._get_value(order, "status", "")
-    status = str(getattr(raw_status, "value", raw_status)).upper()
-    if status not in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}:
-      return
     reservation = runtime.t_trade_entry_reservations[intent_id]
     requested_volume = int(
       reservation.get("requested_volume", 0)
       or self._get_value(request, "volume", 0)
       or 0
     )
+    if requested_volume > 0:
+      reservation["requested_volume"] = requested_volume
+      reservation["volume"] = requested_volume
+      reservation["amount"] = requested_volume * float(
+        reservation.get("price", 0.0) or 0.0
+      )
+    raw_status = self._get_value(order, "status", "")
+    status = str(getattr(raw_status, "value", raw_status)).upper()
+    if status not in {"FILLED", "REJECTED", "CANCELLED", "EXPIRED"}:
+      return
     filled_volume = int(self._get_value(order, "filled_volume", 0) or 0)
     terminal_volume = requested_volume if status == "FILLED" else filled_volume
     if terminal_volume <= 0:
@@ -7459,7 +11884,12 @@ class StrategyExecutor:
     reflected_volume = max(0, int(state.get("entry_filled_volume", 0) or 0))
     requested_volume = max(
       0,
-      int(reservation.get("requested_volume", 0) or reservation.get("volume", 0) or 0),
+      int(
+        reservation.get("requested_volume", 0)
+        or self._get_value(request, "volume", 0)
+        or reservation.get("volume", 0)
+        or 0
+      ),
     )
     terminal_status = str(reservation.get("terminal_status", "") or "")
     terminal_volume = max(
@@ -7468,6 +11898,9 @@ class StrategyExecutor:
     )
     if terminal_status and reflected_volume >= terminal_volume:
       runtime.t_trade_entry_reservations.pop(intent_id, None)
+      return
+    if requested_volume <= 0 and not terminal_status:
+      # V3 reserves target_amount before OrderSizer derives a legal lot count.
       return
     remaining = max(
       0,
@@ -7543,13 +11976,41 @@ class StrategyExecutor:
     status: str,
     reason: str,
     message: str,
+    strict_persistence: bool = False,
   ) -> None:
-    if runtime.state_manager:
-      await runtime.state_manager.update_trade_intent_status(
-        intent.intent_id,
-        status,
-        notes=reason,
+    requires_strict = strict_persistence or self._is_v3_t_trade_manual_intent(intent)
+    if runtime.state_manager is None:
+      if requires_strict:
+        raise _PendingApprovalStatusPersistenceError(
+          "待确认意图缺少状态持久化管理器"
+        )
+    else:
+      updater = getattr(
+        runtime.state_manager,
+        (
+          "update_trade_intent_status_strict"
+          if requires_strict
+          else "update_trade_intent_status"
+        ),
+        None,
       )
+      if not callable(updater):
+        error = "待确认意图缺少严格状态持久化边界"
+        if requires_strict:
+          raise _PendingApprovalStatusPersistenceError(error)
+        raise RuntimeError(error)
+      try:
+        await updater(
+          intent.intent_id,
+          status,
+          notes=reason,
+        )
+      except Exception as exc:
+        if requires_strict:
+          raise _PendingApprovalStatusPersistenceError(
+            "待确认意图终结状态持久化失败"
+          ) from exc
+        raise
     runtime.pending_approvals.pop(intent.intent_id, None)
     await self._notify_strategy_order(
       runtime,
@@ -7564,6 +12025,48 @@ class StrategyExecutor:
         },
       ),
     )
+
+  async def _terminalize_pending_approval_for_request(
+    self,
+    runtime: StrategyRuntime,
+    intent: TradeIntent,
+    *,
+    status: str,
+    reason: str,
+    message: str,
+    strict_persistence: bool = False,
+  ) -> Optional[Dict[str, Any]]:
+    """Return a stable request failure while preserving an uncommitted intent."""
+
+    try:
+      await self._reject_pending_approval(
+        runtime,
+        intent,
+        status=status,
+        reason=reason,
+        message=message,
+        strict_persistence=strict_persistence,
+      )
+    except _PendingApprovalStatusPersistenceError as exc:
+      if runtime.metrics:
+        runtime.metrics.error_count += 1
+      self._runtime_log(
+        runtime,
+        "ERROR",
+        "待确认信号终结状态持久化失败，保留待确认状态: "
+        f"intent_id={intent.intent_id} status={status} error={exc}",
+      )
+      is_v3 = self._is_v3_t_trade_manual_intent(intent)
+      return {
+        "success": False,
+        "code": (
+          "T_TRADE_APPROVAL_STATUS_PERSIST_FAILED"
+          if is_v3
+          else "APPROVAL_STATUS_PERSIST_FAILED"
+        ),
+        "message": "信号状态保存失败，信号仍保持待确认，请稍后重试",
+      }
+    return None
 
   def _record_strategy_output_trace(
     self,
@@ -7611,9 +12114,60 @@ class StrategyExecutor:
   def _apply_runtime_state_patch(self, runtime: StrategyRuntime, patch) -> None:
     if not runtime.strategy or not patch:
       return
-    updates = dict(getattr(patch, "set", {}) or {})
-    unset = list(getattr(patch, "unset", []) or [])
-    events = list(getattr(patch, "append_events", []) or [])
+    raw_updates = getattr(patch, "set", None)
+    raw_unset = getattr(patch, "unset", None)
+    raw_events = getattr(patch, "append_events", None)
+    updates_source = {} if raw_updates is None else raw_updates
+    unset_source = [] if raw_unset is None else raw_unset
+    events_source = [] if raw_events is None else raw_events
+
+    # RuntimeStatePatch.__post_init__ is not a sufficient trust boundary: a
+    # plugin can return a duck-typed object, and a valid dataclass remains
+    # mutable after construction.  Validate every payload before the first
+    # StrategyStateProxy write so rejection is atomic and fail-closed.
+    validate_runtime_state_patch_contents(
+      set_values=updates_source,
+      append_events=events_source,
+    )
+    if not isinstance(unset_source, (list, tuple)) or any(
+      not isinstance(key, str) for key in unset_source
+    ):
+      raise ValueError("RuntimeStatePatch.unset must be a list of strings")
+
+    updates = dict(updates_source)
+    unset = list(unset_source)
+    events = [dict(event) for event in events_source]
+    material_events = [
+      event
+      for event in events
+      if event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+      and str(event.get("record_kind") or "").upper() == "MATERIAL"
+    ]
+    if material_events and runtime.context.mode in {
+      StrategyRunMode.PAPER,
+      StrategyRunMode.LIVE,
+    }:
+      # Stage the manager-owned outbox before publishing any StrategyStateProxy
+      # delta.  This method does not await, so the periodic snapshot task cannot
+      # interleave between the outbox mutation and the state changes below.  If
+      # validation/capacity fails, no strategy delta has been emitted and the
+      # runtime is fail-stopped instead of leaving a ghost candidate that a
+      # later state-sync could persist without its MATERIAL evidence.
+      enqueue = getattr(
+        runtime.state_manager,
+        "enqueue_t_trade_material_events",
+        None,
+      )
+      if not callable(enqueue):
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_MATERIAL_OUTBOX_UNAVAILABLE"
+        raise RuntimeError("V3 做 T 运行缺少 MATERIAL durable outbox")
+      try:
+        enqueue(material_events)
+      except Exception:
+        runtime.status = ExecutionStatus.ERROR
+        runtime.error_message = "T_TRADE_MATERIAL_OUTBOX_ENQUEUE_FAILED"
+        raise
     if updates:
       runtime.strategy.state.update(updates)
     if unset:
@@ -7797,8 +12351,7 @@ class StrategyExecutor:
     resulting_position_pct = (market_value + amount) / total_asset
 
     protected_price = self._authorization_decimal(
-      (intent.metadata or {}).get("protected_limit_price")
-      or intent.limit_price_hint
+      (intent.metadata or {}).get("protected_limit_price") or intent.limit_price_hint
     )
     if protected_price is None or protected_price <= 0:
       return ("PROTECTED_PRICE_REQUIRED", "自动买入缺少受保护的决策价格")
@@ -7811,9 +12364,7 @@ class StrategyExecutor:
     )
     try:
       async with AsyncSessionLocal() as db:
-        validation = await EntryPlanAuthorizationService(
-          db
-        ).validate_or_invalidate(
+        validation = await EntryPlanAuthorizationService(db).validate_or_invalidate(
           plan_id=runtime.run_id,
           current_scope=scope,
           account_id=account_id,
@@ -7900,9 +12451,7 @@ class StrategyExecutor:
       )
     runtime.pending_approvals[intent.intent_id] = intent
     if runtime.strategy is not None:
-      entry_state = dict(
-        runtime.strategy.state.get("managed_entry_plan", {}) or {}
-      )
+      entry_state = dict(runtime.strategy.state.get("managed_entry_plan", {}) or {})
       entry_state["phase"] = "AWAITING_APPROVAL"
       runtime.strategy.state.set(
         "managed_entry_plan",
@@ -8240,6 +12789,12 @@ class StrategyExecutor:
         return
       if decision.final_volume != request.volume:
         request.volume = decision.final_volume
+      if str(request.metadata.get("t_trade_role") or "").lower() == "entry":
+        # V3 emits an amount target and OrderSizer is the first authority that
+        # can derive a legal A-share lot count. Persist that execution fact in
+        # the order/report lineage; candidate analytics must never infer it
+        # from target_amount or the fill observed so far.
+        request.metadata["requested_entry_volume"] = int(request.volume)
 
       authorization_failure = await self._authorize_live_auto_managed_entry(
         runtime,
@@ -8672,12 +13227,41 @@ class StrategyExecutor:
     )
     return subscription_ids
 
+  async def _expire_v3_t_trade_candidates_for_config_change(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    """Expire every authoritative unapproved V3 entry before policy rewarm."""
+
+    candidates = list(runtime.pending_approvals.values())
+    for intent in candidates:
+      metadata = dict(intent.metadata or {})
+      try:
+        schema_version = int(metadata.get("opportunity_schema_version") or 0)
+      except (TypeError, ValueError, OverflowError):
+        schema_version = 0
+      if not (
+        schema_version >= 3
+        and intent.direction == TradeIntentDirection.BUY
+        and str(metadata.get("t_trade_role") or "").lower() == "entry"
+      ):
+        continue
+      await self._reject_pending_approval(
+        runtime,
+        intent,
+        status="EXPIRED",
+        reason="GLOBAL_CONFIG_CHANGED",
+        message="做 T 参数已更新，旧候选已失效并重新预热",
+      )
+
   async def _apply_realtime_instrument_reconcile(
     self,
     runtime: StrategyRuntime,
     instruments: List[str],
     *,
     instrument_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+    parameters: Optional[Mapping[str, Any]] = None,
+    configuration_changed: bool = False,
   ) -> Dict[str, List[str]]:
     """在运行事件队列内安全调整标的池和订阅。"""
 
@@ -8689,6 +13273,22 @@ class StrategyExecutor:
     previous = list(runtime.context.instruments or [])
     membership_added = [code for code in desired if code not in previous]
     membership_removed = [code for code in previous if code not in desired]
+    previous_parameters = dict(runtime.context.parameters or {})
+    if parameters is not None:
+      runtime.context.parameters = dict(parameters)
+
+    staged_emission: Optional[Dict[str, Dict[str, Any]]] = None
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      try:
+        staged_emission = self._build_t_trade_intent_emission_snapshot(
+          runtime,
+          desired,
+          instrument_metadata,
+        )
+      except Exception:
+        runtime.context.parameters = previous_parameters
+        self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
 
     async with runtime.realtime_subscription_lock:
       subscribed = set(runtime.realtime_subscription_ids)
@@ -8704,44 +13304,66 @@ class StrategyExecutor:
           created.append(code)
       except Exception:
         runtime.context.instruments = previous
+        runtime.context.parameters = previous_parameters
+        if self._uses_t_trade_opportunity_runtime(runtime):
+          self._clear_t_trade_intent_emission_snapshot(runtime)
         for code in created:
           for subscription_id in runtime.realtime_subscription_ids.pop(code, []):
             await runtime.data_adapter.unsubscribe(subscription_id)
         raise
 
-      for code in to_unsubscribe:
-        for subscription_id in runtime.realtime_subscription_ids.pop(code, []):
-          await runtime.data_adapter.unsubscribe(subscription_id)
-        runtime.latest_market_data.pop(code, None)
-        self.logger.info("取消已移出标的池的实时订阅: %s", code)
+      try:
+        for code in to_unsubscribe:
+          for subscription_id in runtime.realtime_subscription_ids.pop(code, []):
+            await runtime.data_adapter.unsubscribe(subscription_id)
+          runtime.latest_market_data.pop(code, None)
+          self.logger.info("取消已移出标的池的实时订阅: %s", code)
+      except Exception:
+        if self._uses_t_trade_opportunity_runtime(runtime):
+          self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
 
     if runtime.strategy:
-      self._sync_dynamic_holding_inventory(runtime, instrument_metadata)
-      state = runtime.strategy.state.to_dict()
-      account = (
-        runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+      try:
+        self._sync_dynamic_holding_inventory(runtime, instrument_metadata)
+        state = runtime.strategy.state.to_dict()
+        account = (
+          runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+        )
+        positions = (
+          runtime.state_manager.get_all_positions() if runtime.state_manager else {}
+        )
+        reconcile_input = StrategyInput(
+          run_id=runtime.run_id,
+          strategy_id=str(runtime.strategy_id),
+          timestamp=runtime.context.current_time or time_utils.now(),
+          cadence=StrategyCadence.RECONCILE,
+          instrument_code="",
+          event={
+            "added": membership_added,
+            "removed": membership_removed,
+            "instruments": desired,
+            "instrument_metadata": dict(instrument_metadata or {}),
+            "configuration_changed": bool(configuration_changed),
+          },
+          portfolio_state={"account": account, "positions": positions},
+          strategy_state=state,
+          parameters=dict(runtime.context.parameters or {}),
+        )
+        output = await runtime.strategy.step(reconcile_input)
+        await self._process_strategy_output(runtime, output, reconcile_input)
+      except Exception:
+        if self._uses_t_trade_opportunity_runtime(runtime):
+          self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
+
+    if staged_emission is not None:
+      self._publish_t_trade_intent_emission_snapshot(runtime, staged_emission)
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      self._prune_t_trade_opportunity_profile_cache(
+        runtime,
+        removed_instruments=membership_removed,
       )
-      positions = (
-        runtime.state_manager.get_all_positions() if runtime.state_manager else {}
-      )
-      reconcile_input = StrategyInput(
-        run_id=runtime.run_id,
-        strategy_id=str(runtime.strategy_id),
-        timestamp=runtime.context.current_time or time_utils.now(),
-        cadence=StrategyCadence.RECONCILE,
-        instrument_code="",
-        event={
-          "added": membership_added,
-          "removed": membership_removed,
-          "instruments": desired,
-          "instrument_metadata": dict(instrument_metadata or {}),
-        },
-        portfolio_state={"account": account, "positions": positions},
-        strategy_state=state,
-        parameters=dict(runtime.context.parameters or {}),
-      )
-      output = await runtime.strategy.step(reconcile_input)
-      await self._process_strategy_output(runtime, output, reconcile_input)
 
     return {
       "added": membership_added,
@@ -8773,43 +13395,70 @@ class StrategyExecutor:
     for code in sorted(self._board_replay_sticky_instruments(runtime)):
       if code not in desired:
         desired.append(code)
-      if code not in metadata or str(metadata[code].get("source") or "").upper() == "DRAINING":
+      if (
+        code not in metadata
+        or str(metadata[code].get("source") or "").upper() == "DRAINING"
+      ):
         metadata[code] = self._board_replay_draining_metadata(runtime, code)
     previous = list(runtime.context.instruments or [])
     membership_added = [code for code in desired if code not in previous]
     membership_removed = [code for code in previous if code not in desired]
+    staged_emission: Optional[Dict[str, Dict[str, Any]]] = None
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      try:
+        staged_emission = self._build_t_trade_intent_emission_snapshot(
+          runtime,
+          desired,
+          metadata,
+        )
+      except Exception:
+        self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
     runtime.context.instruments = desired
     for code in membership_removed:
       runtime.latest_market_data.pop(code, None)
 
     if runtime.strategy:
-      self._sync_dynamic_holding_inventory(runtime, metadata)
-      state = runtime.strategy.state.to_dict()
-      account = (
-        runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+      try:
+        self._sync_dynamic_holding_inventory(runtime, metadata)
+        state = runtime.strategy.state.to_dict()
+        account = (
+          runtime.state_manager.get_account_quota() if runtime.state_manager else {}
+        )
+        positions = (
+          runtime.state_manager.get_all_positions() if runtime.state_manager else {}
+        )
+        reconcile_input = StrategyInput(
+          run_id=runtime.run_id,
+          strategy_id=str(runtime.strategy_id),
+          timestamp=self._runtime_now(runtime),
+          cadence=StrategyCadence.RECONCILE,
+          instrument_code="",
+          event={
+            "added": membership_added,
+            "removed": membership_removed,
+            "instruments": desired,
+            "instrument_metadata": metadata,
+          },
+          portfolio_state={"account": account, "positions": positions},
+          strategy_state=state,
+          parameters=dict(runtime.context.parameters or {}),
+        )
+        output = await runtime.strategy.step(reconcile_input)
+        await self._process_strategy_output(runtime, output, reconcile_input)
+        await self._board_replay_report_barrier(runtime)
+      except Exception:
+        if self._uses_t_trade_opportunity_runtime(runtime):
+          self._clear_t_trade_intent_emission_snapshot(runtime)
+        raise
+
+    if staged_emission is not None:
+      self._publish_t_trade_intent_emission_snapshot(runtime, staged_emission)
+    if self._uses_t_trade_opportunity_runtime(runtime):
+      self._prune_t_trade_opportunity_profile_cache(
+        runtime,
+        removed_instruments=membership_removed,
       )
-      positions = (
-        runtime.state_manager.get_all_positions() if runtime.state_manager else {}
-      )
-      reconcile_input = StrategyInput(
-        run_id=runtime.run_id,
-        strategy_id=str(runtime.strategy_id),
-        timestamp=self._runtime_now(runtime),
-        cadence=StrategyCadence.RECONCILE,
-        instrument_code="",
-        event={
-          "added": membership_added,
-          "removed": membership_removed,
-          "instruments": desired,
-          "instrument_metadata": metadata,
-        },
-        portfolio_state={"account": account, "positions": positions},
-        strategy_state=state,
-        parameters=dict(runtime.context.parameters or {}),
-      )
-      output = await runtime.strategy.step(reconcile_input)
-      await self._process_strategy_output(runtime, output, reconcile_input)
-      await self._board_replay_report_barrier(runtime)
 
     return {
       "added": membership_added,
@@ -8877,9 +13526,7 @@ class StrategyExecutor:
       "radar_is_stale": bool(state.get("radar_is_stale", False)),
       "promotion_eligible": bool(state.get("promotion_eligible", False)),
       "promotion_score": float(state.get("promotion_score", 0.0) or 0.0),
-      "promotion_snapshot_version": str(
-        state.get("promotion_snapshot_version") or ""
-      ),
+      "promotion_snapshot_version": str(state.get("promotion_snapshot_version") or ""),
       "promotion_model_version": str(state.get("promotion_model_version") or ""),
       "exit_policy_version": str(state.get("exit_policy_version") or ""),
       "board_segment": str(state.get("board_segment") or ""),

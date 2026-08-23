@@ -38,6 +38,16 @@ Prefect API 由 `PREFECT_API_URL` 指定，默认使用
 现仓冒充目标日收盘持仓；若需要交易审计，还应另行冻结“日初持仓、日末持仓、
 当日委托和成交标的”的并集。
 
+工作日 15:50 的 `t-trade-instrument-profile` 在 Tick 归档完成后，为当前做 T
+策略运行中的标的生成账户无关、不可变的 D 日画像，供 D+1 机会引擎读取。
+未传 `stock_list` 时，Flow 只解析关联做 T 全局配置 `enabled=true` 且
+`StrategyRun.status=RUNNING` 的运行标的；传入 `stock_list` 则按显式标的补算。
+画像只选取截止 `as_of` 的最近 20 个完整交易日；不足 10 日、上下半场覆盖不足、
+累计成交额回退或盘口覆盖不足时不生成画像，策略因此保持 `INSUFFICIENT`。
+画像阈值、分时成交基线、数据清单和 SHA-256 指纹写入 PostgreSQL；追加
+`as_of` 之后的 Tick 不得改变既有画像。Flow 可用 `stock_list` 和 `as_of_date`
+显式补算，但 point-in-time 查询仍严格选择评估交易日之前的最新兼容版本。
+
 历史行情传输采用唯一的 `bar_summary` 契约：每个请求
 `code × period` 必须恰好有一条摘要，声明行数、最小/最大源时间、规范键 SHA-256
 和显式无数据原因。Worker 第一遍在任何 InfluxDB 写入前校验请求集合、日期、

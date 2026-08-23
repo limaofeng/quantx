@@ -4,7 +4,7 @@
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import md5
 from typing import Any, Dict, List, Optional
 
@@ -18,11 +18,32 @@ from quantx_infrastructure.models.broker_position_snapshot import BrokerPosition
 from quantx_infrastructure.models.position import Position
 from quantx_infrastructure.repositories import InstrumentRepository
 from quantx_infrastructure.repositories.position_repository import PositionRepository
+from quantx_infrastructure.services.account_snapshot_contract import (
+  ACCOUNT_SNAPSHOT_MAX_AGE,
+  ACCOUNT_SNAPSHOT_STALE_CODE,
+)
 from quantx_infrastructure.services.closed_position_cycle_service import (
   ClosedPositionCycleService,
 )
 
 logger = logging.getLogger(__name__)
+
+_RESUMABLE_FULL_SNAPSHOT_FAILURE_MARKERS = (
+  "SNAPSHOT_APPLY_IN_PROGRESS",
+  "SNAPSHOT_APPLY_FAILED",
+  "SNAPSHOT_AUTHORITY_INVALIDATION_FAILED",
+)
+
+
+def _is_resumable_full_snapshot_attempt(status: Any) -> bool:
+  return bool(
+    status is not None
+    and not bool(status.is_complete)
+    and any(
+      str(status.last_error or "").startswith(marker)
+      for marker in _RESUMABLE_FULL_SNAPSHOT_FAILURE_MARKERS
+    )
+  )
 
 
 class PositionService:
@@ -127,11 +148,106 @@ class PositionService:
     async for db in get_async_db():
       snapshot = await db.get(BrokerPositionSnapshot, account_id)
       if snapshot is None:
-        raise RuntimeError("尚未收到该账户的 QMT Agent 完整持仓快照")
+        raise RuntimeError(
+          f"{ACCOUNT_SNAPSHOT_STALE_CODE}:"
+          "尚未收到该账户的 QMT Agent 完整持仓快照"
+        )
+      self._validate_agent_snapshot(snapshot)
       return {**snapshot.to_dict(), "applied": False, "reason": "AGENT_OWNED"}
-    raise RuntimeError("持仓数据库不可用")
+    raise RuntimeError(f"{ACCOUNT_SNAPSHOT_STALE_CODE}:持仓数据库不可用")
 
-  async def apply_full_snapshot(
+  async def read_validated_snapshot_and_positions(
+    self, account_id: str
+  ) -> tuple[Dict[str, Any], List[Position]]:
+    """Read positions only while the validated broker snapshot generation is stable.
+
+    Agent report processing deliberately does not take the Engine account
+    coordination lock.  Therefore reconciliation validates the snapshot on
+    both sides of the position read and refuses to use a mixed-generation
+    position set when a report/failure is committed in between.
+    """
+
+    first_snapshot = await self.read_agent_snapshot(account_id)
+    positions = await self.get_positions(account_id=account_id)
+    second_snapshot = await self.read_agent_snapshot(account_id)
+    if self._snapshot_generation_token(first_snapshot) != (
+      self._snapshot_generation_token(second_snapshot)
+    ):
+      raise RuntimeError(
+        f"{ACCOUNT_SNAPSHOT_STALE_CODE}:"
+        "持仓快照在读取持仓期间发生变化"
+      )
+    return second_snapshot, positions
+
+  async def begin_full_snapshot_attempt(
+    self,
+    *,
+    account_id: str,
+    sequence: int,
+    reported_at: datetime,
+    source: str,
+  ) -> Dict[str, Any]:
+    """CAS a full-report generation into durable incomplete/in-progress state.
+
+    This boundary advances the observed generation before any order/trade
+    convergence.  A later lower generation can therefore never restore the
+    old complete snapshot after the attempted newer report fails.
+    """
+
+    normalized_account = str(account_id or "").strip()
+    if not normalized_account:
+      raise ValueError("持仓快照缺少账户")
+    incoming_sequence = int(sequence)
+    if incoming_sequence <= 0:
+      raise ValueError("持仓快照序列无效")
+    normalized_reported_at = to_naive_utc(reported_at)
+
+    async for db in get_async_db():
+      status = await db.get(
+        BrokerPositionSnapshot,
+        normalized_account,
+        with_for_update=True,
+      )
+      if status is not None:
+        stored_sequence = int(status.sequence or 0)
+        if incoming_sequence < stored_sequence:
+          return {
+            **status.to_dict(),
+            "applied": False,
+            "reason": "STALE_SEQUENCE",
+          }
+        if (
+          incoming_sequence == stored_sequence
+          and not _is_resumable_full_snapshot_attempt(status)
+        ):
+          return {
+            **status.to_dict(),
+            "applied": False,
+            "reason": "STALE_SEQUENCE",
+          }
+
+      snapshot = status or BrokerPositionSnapshot(
+        account_id=normalized_account,
+        sequence=0,
+        source="MINIQMT",
+        is_complete=False,
+      )
+      snapshot.sequence = incoming_sequence
+      snapshot.source = str(source or "MINIQMT")
+      snapshot.reported_at = normalized_reported_at
+      snapshot.received_at = utcnow()
+      snapshot.is_complete = False
+      snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
+      await db.merge(snapshot)
+      await db.commit()
+      return {
+        **snapshot.to_dict(),
+        "applied": True,
+        "reason": "STARTED",
+      }
+    raise RuntimeError("持仓快照数据库不可用")
+
+  async def prepare_full_snapshot(
     self,
     *,
     account_id: str,
@@ -139,11 +255,15 @@ class PositionService:
     sequence: int,
     reported_at: datetime,
     source: str,
-    is_complete: bool,
   ) -> Dict[str, Any]:
-    """Apply only a complete, monotonic snapshot; a confirmed [] means empty."""
-    if not is_complete:
-      raise ValueError("不完整持仓结果不能覆盖当前快照")
+    """Materialize positions while keeping the broker snapshot incomplete.
+
+    This is the first phase of the full-report linearization boundary.  The
+    position rows and the ``APPLY_IN_PROGRESS`` snapshot marker commit
+    together, so a process crash before rollout reconciliation cannot leave a
+    newly complete snapshot paired with an old READY rollout.
+    """
+
     normalized_account = str(account_id or "").strip()
     if not normalized_account:
       raise ValueError("持仓快照缺少账户")
@@ -157,8 +277,22 @@ class PositionService:
 
     async for db in get_async_db():
       status = await db.get(BrokerPositionSnapshot, normalized_account)
-      if status and int(sequence) <= int(status.sequence or 0):
-        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+      if status:
+        stored_sequence = int(status.sequence or 0)
+        incoming_sequence = int(sequence)
+        if incoming_sequence < stored_sequence:
+          return {
+            **status.to_dict(),
+            "applied": False,
+            "reason": "STALE_SEQUENCE",
+          }
+        if incoming_sequence == stored_sequence:
+          if not _is_resumable_full_snapshot_attempt(status):
+            return {
+              **status.to_dict(),
+              "applied": False,
+              "reason": "STALE_SEQUENCE",
+            }
       result = await db.execute(
         select(Position).where(Position.account_id == normalized_account)
       )
@@ -181,17 +315,74 @@ class PositionService:
       snapshot.reported_at = normalized_reported_at
       snapshot.received_at = utcnow()
       snapshot.position_count = len(incoming)
-      snapshot.is_complete = True
-      snapshot.last_error = None
+      snapshot.is_complete = False
+      snapshot.last_error = "SNAPSHOT_APPLY_IN_PROGRESS"
       await db.merge(snapshot)
       await db.commit()
-      return {**snapshot.to_dict(), "applied": True, "reason": "APPLIED"}
+      return {
+        **snapshot.to_dict(),
+        "applied": True,
+        "reason": "PREPARED",
+      }
+    raise RuntimeError("持仓快照数据库不可用")
+
+  async def finalize_full_snapshot(
+    self,
+    *,
+    account_id: str,
+    sequence: int,
+    reported_at: datetime,
+    source: str,
+  ) -> Dict[str, Any]:
+    """Promote a prepared full snapshot to complete after reconciliation."""
+
+    normalized_account = str(account_id or "").strip()
+    if not normalized_account:
+      raise ValueError("持仓快照缺少账户")
+    normalized_reported_at = to_naive_utc(reported_at)
+    async for db in get_async_db():
+      status = await db.get(BrokerPositionSnapshot, normalized_account)
+      if status is None or int(status.sequence or 0) != int(sequence):
+        if status is None:
+          return {
+            "account_id": normalized_account,
+            "applied": False,
+            "reason": "STALE_SEQUENCE",
+          }
+        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+      if (
+        status.is_complete
+        or str(status.last_error or "") != "SNAPSHOT_APPLY_IN_PROGRESS"
+      ):
+        return {**status.to_dict(), "applied": False, "reason": "STALE_SEQUENCE"}
+      status.source = str(source or status.source or "MINIQMT")
+      status.reported_at = normalized_reported_at
+      status.received_at = utcnow()
+      status.is_complete = True
+      status.last_error = None
+      await db.merge(status)
+      await db.commit()
+      return {**status.to_dict(), "applied": True, "reason": "APPLIED"}
     raise RuntimeError("持仓快照数据库不可用")
 
   async def apply_position_delta(self, position: Any, account_id: str) -> None:
-    """Persist an Agent position delta without pretending it is a full snapshot."""
+    """Persist an Agent position delta and invalidate the full-snapshot gate.
+
+    A delta can update the materialized ``positions`` rows without proving the
+    complete account set. Keep that write atomic with invalidating the prior
+    ``BrokerPositionSnapshot`` so reconciliation can never pair the changed
+    rows with the old complete-snapshot token.
+    """
     item = self._position_from_broker(position, account_id)
     async for db in get_async_db():
+      snapshot = await db.get(BrokerPositionSnapshot, account_id)
+      if snapshot is None:
+        snapshot = BrokerPositionSnapshot(
+          account_id=account_id,
+          sequence=0,
+          source="QMT_AGENT",
+          is_complete=False,
+        )
       existing = await db.get(Position, item.id)
       if int(item.volume or 0) <= 0:
         if existing:
@@ -204,6 +395,11 @@ class PositionService:
           await db.delete(existing)
       else:
         await db.merge(item)
+      snapshot.is_complete = False
+      snapshot.last_error = (
+        f"{ACCOUNT_SNAPSHOT_STALE_CODE}:持仓增量未形成完整账户快照"
+      )
+      await db.merge(snapshot)
       await db.commit()
       return
 
@@ -225,10 +421,67 @@ class PositionService:
           source="MINIQMT",
           is_complete=False,
         )
+      # A failure must invalidate the prior complete snapshot immediately;
+      # otherwise callers could mistake the retained sequence/timestamps for
+      # a currently usable broker truth while the error is being investigated.
+      status.is_complete = False
       status.last_error = str(error or "")[:2000]
       await db.merge(status)
       await db.commit()
       return
+
+  @staticmethod
+  def _validate_agent_snapshot(snapshot: BrokerPositionSnapshot) -> None:
+    """Require the same complete/fresh snapshot contract used by EntryPlan."""
+
+    if not bool(snapshot.is_complete):
+      raise RuntimeError(
+        f"{ACCOUNT_SNAPSHOT_STALE_CODE}:持仓快照不完整"
+      )
+    if int(snapshot.sequence or 0) <= 0:
+      raise RuntimeError(
+        f"{ACCOUNT_SNAPSHOT_STALE_CODE}:持仓快照序列无效"
+      )
+    if str(snapshot.last_error or "").strip():
+      raise RuntimeError(
+        f"{ACCOUNT_SNAPSHOT_STALE_CODE}:持仓快照包含错误"
+      )
+    # BrokerPositionSnapshot persists both timestamps as naive UTC.  Normalize
+    # aware inputs to the same UTC convention before applying the shared
+    # freshness window; treating naive UTC as Shanghai would add eight hours.
+    checked_at = utcnow()
+    for value, label in (
+      (snapshot.reported_at, "券商持仓报告时间"),
+      (snapshot.received_at, "券商持仓接收时间"),
+    ):
+      if not isinstance(value, datetime):
+        raise RuntimeError(
+          f"{ACCOUNT_SNAPSHOT_STALE_CODE}:{label}不可用"
+        )
+      snapshot_at = to_naive_utc(value)
+      age = checked_at - snapshot_at
+      if age < timedelta(0) or age > ACCOUNT_SNAPSHOT_MAX_AGE:
+        raise RuntimeError(
+          f"{ACCOUNT_SNAPSHOT_STALE_CODE}:{label}已过期"
+        )
+
+  @staticmethod
+  def _snapshot_generation_token(snapshot: Dict[str, Any]) -> tuple[Any, ...]:
+    """Return the persisted generation fields that define one broker truth."""
+
+    def timestamp_token(value: Any) -> Any:
+      return value.isoformat() if isinstance(value, datetime) else value
+
+    return (
+      str(snapshot.get("account_id") or ""),
+      int(snapshot.get("sequence", 0) or 0),
+      str(snapshot.get("source") or ""),
+      timestamp_token(snapshot.get("reported_at")),
+      timestamp_token(snapshot.get("received_at")),
+      int(snapshot.get("position_count", 0) or 0),
+      bool(snapshot.get("is_complete")),
+      str(snapshot.get("last_error") or ""),
+    )
 
   @staticmethod
   def _position_from_broker(value: Any, account_id: str) -> Position:

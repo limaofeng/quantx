@@ -8,9 +8,9 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
 from quantx_domain import clock as time_utils
 from quantx_domain.enums import (
@@ -33,6 +33,62 @@ class StrategyCadence(str, Enum):
   ORDER = "ORDER"
   TRADE = "TRADE"
   RECONCILE = "RECONCILE"
+
+
+class MarketDataSession(str, Enum):
+  """Engine-classified A-share market session for one causal input."""
+
+  UNKNOWN = "UNKNOWN"
+  PRE_OPEN = "PRE_OPEN"
+  OPENING_AUCTION = "OPENING_AUCTION"
+  CONTINUOUS_AM = "CONTINUOUS_AM"
+  LUNCH_BREAK = "LUNCH_BREAK"
+  CONTINUOUS_PM = "CONTINUOUS_PM"
+  CLOSING_AUCTION = "CLOSING_AUCTION"
+  CLOSED = "CLOSED"
+
+  @property
+  def is_continuous(self) -> bool:
+    return self in {self.CONTINUOUS_AM, self.CONTINUOUS_PM}
+
+
+@dataclass(frozen=True)
+class MarketDataContext:
+  """Causal identity and continuity facts for one market-data input.
+
+  The Engine owns stream continuity.  Strategies may use these facts to
+  invalidate an observation state, but must never infer a transport outage
+  merely because one instrument traded sparsely.
+  """
+
+  source: str = "CONTROL"
+  stream_id: str = ""
+  continuity_generation: int = 0
+  source_sequence: int = 0
+  source_time_ms: int = 0
+  tick_ordinal: int = 0
+  received_at_ms: int = 0
+  quote_stale: bool = False
+  session: MarketDataSession = MarketDataSession.UNKNOWN
+  trade_date: date = date.min
+
+  def __post_init__(self) -> None:
+    if isinstance(self.session, str):
+      object.__setattr__(self, "session", MarketDataSession(self.session))
+    if isinstance(self.trade_date, datetime):
+      object.__setattr__(self, "trade_date", self.trade_date.date())
+    elif isinstance(self.trade_date, str):
+      object.__setattr__(self, "trade_date", date.fromisoformat(self.trade_date))
+
+  @property
+  def source_identity(self) -> tuple[int, int, int]:
+    """Stable causal identity; transport sequence and stream id are diagnostic."""
+
+    return (
+      self.continuity_generation,
+      self.source_time_ms,
+      self.tick_ordinal,
+    )
 
 
 class TradeIntentDirection(str, Enum):
@@ -80,6 +136,12 @@ FORBIDDEN_RUNTIME_STATE_FIELDS = {
   "available_volume",
   "frozen_volume",
   "today_buy_volume",
+  "position_shares",
+  "position_available_shares",
+  "available_shares",
+  "sellable_volume",
+  "requested_entry_volume",
+  "final_volume",
 }
 
 
@@ -92,10 +154,91 @@ class RuntimeStatePatch:
   append_events: List[Dict[str, Any]] = field(default_factory=list)
 
   def __post_init__(self) -> None:
-    forbidden = FORBIDDEN_RUNTIME_STATE_FIELDS.intersection(self.set.keys())
-    if forbidden:
-      names = ", ".join(sorted(forbidden))
-      raise ValueError(f"RuntimeStatePatch cannot mutate account fields: {names}")
+    validate_runtime_state_patch_contents(
+      set_values=self.set,
+      append_events=self.append_events,
+    )
+
+
+def validate_runtime_state_patch_contents(
+  *,
+  set_values: Any,
+  append_events: Any,
+) -> None:
+  """Reject account truth anywhere in a strategy-owned state patch.
+
+  This validator is public so the execution boundary can validate the exact
+  payload it is about to apply.  That second check is required because callers
+  may supply a duck-typed patch or mutate a dataclass instance after creation.
+  """
+
+  if set_values is None:
+    set_values = {}
+  if not isinstance(set_values, Mapping):
+    raise ValueError("RuntimeStatePatch.set must be a mapping")
+  if append_events is None:
+    append_events = []
+  if not isinstance(append_events, (list, tuple)):
+    raise ValueError("RuntimeStatePatch.append_events must be a list")
+  if any(not isinstance(event, Mapping) for event in append_events):
+    raise ValueError("RuntimeStatePatch.append_events items must be mappings")
+
+  forbidden_paths = _forbidden_runtime_state_paths(set_values)
+  event_paths = _forbidden_runtime_state_paths(append_events)
+  forbidden_paths.extend(
+    f"$.append_events{path[1:]}" for path in event_paths
+  )
+  if forbidden_paths:
+    names = ", ".join(sorted(set(forbidden_paths)))
+    raise ValueError(f"RuntimeStatePatch cannot mutate account fields: {names}")
+
+
+def _forbidden_runtime_state_paths(value: Any) -> List[str]:
+  """Return every forbidden account-truth key in a JSON-like state tree."""
+
+  found: set[str] = set()
+  stack: List[tuple[str, Any]] = [("$", value)]
+  visited: set[int] = set()
+  while stack:
+    path, current = stack.pop()
+    if isinstance(current, Mapping):
+      identity = id(current)
+      if identity in visited:
+        continue
+      visited.add(identity)
+      for raw_key, child in current.items():
+        key = str(raw_key)
+        child_path = f"{path}.{key}"
+        if key.strip().lower() in FORBIDDEN_RUNTIME_STATE_FIELDS:
+          found.add(child_path)
+        stack.append((child_path, child))
+    elif isinstance(current, (list, tuple)):
+      identity = id(current)
+      if identity in visited:
+        continue
+      visited.add(identity)
+      for index, child in enumerate(current):
+        stack.append((f"{path}[{index}]", child))
+  return sorted(found)
+
+
+@dataclass(frozen=True)
+class ManualApprovalRecoveryCandidate:
+  """Read-only strategy projection used for startup crash convergence.
+
+  The execution layer may inspect this identity before normal strategy routing
+  starts.  State mutation still has to flow through :class:`OrderStateEvent`;
+  this projection is not an alternate decision or state-write path.
+  """
+
+  instrument_code: str
+  candidate_id: str
+  candidate_fingerprint: str
+  candidate_state_version: int
+  candidate_status: str
+  pending_intent_id: str
+  order_status: str
+  source_time_ms: int
 
 
 @dataclass
@@ -179,6 +322,7 @@ class StrategyInput:
   input_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   market_data: Any = None
+  market_data_context: MarketDataContext = field(default_factory=MarketDataContext)
   event: Any = None
   portfolio_state: Dict[str, Any] = field(default_factory=dict)
   bucket_ledger: Dict[str, Any] = field(default_factory=dict)
@@ -615,6 +759,18 @@ class StrategyBase(ABC):
   def invalidated_manual_intent_ids(self) -> List[str]:
     """Return restored manual intents invalidated during strategy initialization."""
     return []
+
+  def manual_approval_recovery_candidates(
+    self,
+  ) -> Optional[List[ManualApprovalRecoveryCandidate]]:
+    """Project candidate/intent linkage that needs startup crash convergence.
+
+    ``None`` means the strategy does not implement the stateful manual-candidate
+    protocol.  An empty list means it does implement the protocol and currently
+    has no latched or awaiting candidate.
+    """
+
+    return None
 
   def validate_manual_approval(
     self, intent: TradeIntent, market_data: Any

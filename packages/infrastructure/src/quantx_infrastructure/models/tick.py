@@ -75,6 +75,14 @@ class Tick(BaseModel):
   """XTData 原始毫秒时间戳"""
   tick_ordinal: int = 0
   """同一原始毫秒内的稳定序号"""
+  continuity_generation: int = 0
+  """WholeQuoteHub 验证过的行情连续性代际"""
+  market_stream_id: str = ""
+  """权威全市场行情流身份"""
+  market_stream_sequence: int = 0
+  """该 Tick 所在权威行情批次的序号"""
+  market_stream_reset: bool = False
+  """该批次是 Hub 在无法证明连续性后的重同步快照"""
 
   def __init__(self, **kwargs):
     super().__init__()
@@ -148,4 +156,12 @@ class Tick(BaseModel):
       bid_price=tick.get("bidPrice", [0] * 5)[:5],
       ask_vol=tick.get("askVol", [0] * 5)[:5],
       bid_vol=tick.get("bidVol", [0] * 5)[:5],
+      source_time_ms=int(tick.get("source_time_ms", 0) or 0),
+      tick_ordinal=int(tick.get("tick_ordinal", 0) or 0),
+      continuity_generation=int(tick.get("continuity_generation", 0) or 0),
+      market_stream_id=str(tick.get("market_stream_id", "") or ""),
+      market_stream_sequence=int(
+        tick.get("market_stream_sequence", 0) or 0
+      ),
+      market_stream_reset=bool(tick.get("market_stream_reset", False)),
     )

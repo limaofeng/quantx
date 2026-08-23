@@ -417,6 +417,7 @@ async def test_fake_xtdata_flows_through_market_websocket_redis_and_engine(
     assert store.state_history[1].sequence == 1
     assert store.state_history[2].sequence == 2
     assert store.engine_watermark["sequence"] == 3
+    assert store.engine_watermark["generation"] == 1
   finally:
     await hub.stop()
     streamer.unsubscribe_whole_market()

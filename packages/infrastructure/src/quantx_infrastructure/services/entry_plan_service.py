@@ -68,6 +68,9 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
 from quantx_infrastructure.repositories.strategy_run_state_repository import (
   StrategyRunStateRepository,
 )
+from quantx_infrastructure.services.account_snapshot_contract import (
+  ACCOUNT_SNAPSHOT_MAX_AGE,
+)
 from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationScope,
   EntryPlanAuthorizationService,
@@ -102,7 +105,6 @@ _WORKING_ORDER_STATUSES = {
   "RECONCILE_REQUIRED",
   "CANCEL_REQUESTED",
 }
-_MAX_ACCOUNT_SNAPSHOT_AGE = timedelta(seconds=90)
 _MAX_LIVE_ROLLOUT_SNAPSHOT_AGE = timedelta(seconds=90)
 _MAX_INSTRUMENT_SNAPSHOT_AGE = timedelta(days=7)
 # Engine owns one command consumer and one StrategyManager lease.  A process
@@ -838,7 +840,7 @@ class EntryPlanService:
     self._require_fresh_timestamp(
       getattr(account, "updated_at", None),
       now=now,
-      max_age=_MAX_ACCOUNT_SNAPSHOT_AGE,
+      max_age=ACCOUNT_SNAPSHOT_MAX_AGE,
       code="ENTRY_ACCOUNT_SNAPSHOT_STALE",
       message="交易账户快照已过期",
     )
@@ -857,14 +859,14 @@ class EntryPlanService:
     self._require_fresh_timestamp(
       position_snapshot.reported_at,
       now=now,
-      max_age=_MAX_ACCOUNT_SNAPSHOT_AGE,
+      max_age=ACCOUNT_SNAPSHOT_MAX_AGE,
       code="ENTRY_POSITION_SNAPSHOT_STALE",
       message="券商持仓报告时间已过期",
     )
     self._require_fresh_timestamp(
       position_snapshot.received_at,
       now=now,
-      max_age=_MAX_ACCOUNT_SNAPSHOT_AGE,
+      max_age=ACCOUNT_SNAPSHOT_MAX_AGE,
       code="ENTRY_POSITION_SNAPSHOT_STALE",
       message="券商持仓接收时间已过期",
     )
@@ -887,7 +889,7 @@ class EntryPlanService:
       self._require_fresh_timestamp(
         getattr(position, "updated_at", None),
         now=now,
-        max_age=_MAX_ACCOUNT_SNAPSHOT_AGE,
+        max_age=ACCOUNT_SNAPSHOT_MAX_AGE,
         code="ENTRY_POSITION_SNAPSHOT_STALE",
         message="持仓快照已过期",
       )

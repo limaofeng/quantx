@@ -215,6 +215,12 @@ class StrategyRuntimeEvent(Base):
       "created_at",
       "event_id",
     ),
+    Index(
+      "ix_strategy_runtime_event_run_created",
+      "strategy_run_id",
+      "created_at",
+      "event_id",
+    ),
   )
 
   event_id = Column(String(36), primary_key=True)
@@ -315,7 +321,10 @@ class AccountTradingRolloutEvent(Base):
     ),
   )
 
-  event_id = Column(String(36), primary_key=True)
+  # Operation markers are namespaced client idempotency keys (not UUIDs).
+  # Keep room for the fixed ``t-trade:<operation>:<sha256>`` identity while
+  # retaining compatibility with the historical UUID audit rows.
+  event_id = Column(String(128), primary_key=True)
   account_id = Column(String(50), nullable=False, index=True)
   event_type = Column(String(64), nullable=False)
   actor_user_id = Column(String(36), nullable=True)

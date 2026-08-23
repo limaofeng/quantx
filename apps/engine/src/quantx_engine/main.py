@@ -21,6 +21,9 @@ from quantx_infrastructure.database.relational_connection import (
 )
 from quantx_infrastructure.models.agent_runtime import RuntimeComponentHeartbeat
 from quantx_infrastructure.services.limit_up_radar import limit_up_radar_monitor
+from quantx_infrastructure.services.t_trade_monitor_projection_service import (
+  t_trade_monitor_projection_service,
+)
 from sqlalchemy import text
 
 from .command_processor import run_command_consumer
@@ -34,6 +37,7 @@ from .subscription_bridge import (
   run_market_query_bridge,
   run_subscription_bridge,
 )
+from .t_trade_observability import t_trade_runtime_observability
 from .t_trade_runtime import t_trade_global_monitor
 from .warm_cache import intraday_warm_cache
 
@@ -50,7 +54,12 @@ ENGINE_RESTART_MAX_DELAY_SECONDS = 30.0
 async def _write_heartbeat_once(instance_id: str) -> None:
   async with AsyncSessionLocal() as db:
     heartbeat = await db.get(RuntimeComponentHeartbeat, "engine")
-    details = {"pid": os.getpid(), "host": socket.gethostname()}
+    details = {
+      "pid": os.getpid(),
+      "host": socket.gethostname(),
+      "tTradeV3": t_trade_runtime_observability.snapshot(),
+      "tTradeProjection": t_trade_monitor_projection_service.metrics_snapshot(),
+    }
     if heartbeat is None:
       db.add(
         RuntimeComponentHeartbeat(

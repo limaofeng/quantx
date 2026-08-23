@@ -3592,19 +3592,16 @@ type Mutation {
   saveTTradeGlobalMonitor(input: TTradeGlobalSettingsInput!): TTradeGlobalMutationResult!
 
   """立即重新同步全局做 T 持仓"""
-  reconcileTTradeGlobalMonitor(accountId: String!): TTradeGlobalMutationResult!
-
-  """启动持仓做 T 会话"""
-  startTTradeSession(input: TTradeStartInput!): TTradeMutationResult!
+  reconcileTTradeGlobalMonitor(accountId: String!, idempotencyKey: String!): TTradeGlobalMutationResult!
 
   """确认做 T 买入信号"""
-  approveTTradeEntry(runId: String!, intentId: String!, expectedSignalVersion: Int! = 0, idempotencyKey: String! = ""): TTradeMutationResult!
+  approveTTradeEntry(runId: String!, intentId: String!, expectation: TTradeCandidateApprovalExpectationInput!, idempotencyKey: String!): TTradeMutationResult!
 
   """生成一次做 T 买入确认的短时设备绑定预览"""
   previewTTradeEntryApproval(runId: String!, intentId: String!): TradeApprovalPreviewResult!
 
   """消费短时凭据并确认一个做 T 买入信号"""
-  confirmTTradeEntryApproval(runId: String!, intentId: String!, confirmationToken: String!): TradeApprovalConfirmationResult!
+  confirmTTradeEntryApproval(runId: String!, intentId: String!, confirmationToken: String!, expectation: TTradeCandidateApprovalExpectationInput!): TradeApprovalConfirmationResult!
 
   """生成一次绑定设备、主账户与安全快照的做 T 控制确认"""
   previewTTradeControl(input: TTradeControlPreviewInput!): TTradeControlPreviewResult!
@@ -3613,16 +3610,16 @@ type Mutation {
   confirmTTradeControl(input: TTradeControlConfirmationInput!): TTradeControlConfirmationResult!
 
   """基于最新完整快照建立账户实盘窗口"""
-  beginTTradeControlledWindow(accountId: String!, snapshotId: String!): TTradeOperationsMutationResult!
+  beginTTradeControlledWindow(accountId: String!, policyVersion: Int!, snapshotId: String!, idempotencyKey: String!): TTradeOperationsMutationResult!
 
   """完成门禁检查并启用 Canary 或开发环境正式 LIVE"""
-  activateTTradeLive(accountId: String!, policyVersion: Int!, targetStage: TTradeRolloutTarget! = CANARY, confirmation: String! = ""): TTradeOperationsMutationResult!
+  activateTTradeLive(accountId: String!, policyVersion: Int!, snapshotId: String!, idempotencyKey: String!, targetStage: TTradeRolloutTarget! = CANARY, confirmation: String! = ""): TTradeOperationsMutationResult!
 
   """停止做 T 新买入，继续保护已有批次"""
   pauseTTradeEntries(accountId: String!, reason: String! = "manual pause"): TTradeOperationsMutationResult!
 
   """触发做 T 紧急停止并转人工处置"""
-  triggerTTradeKillSwitch(accountId: String!, reason: String!): TTradeOperationsMutationResult!
+  triggerTTradeKillSwitch(accountId: String!, reason: String!, idempotencyKey: String!): TTradeOperationsMutationResult!
 
   """撤销当前仍可撤的做 T 委托"""
   cancelTTradeOrder(accountId: String!, clientOrderId: String!): TTradeOperationsMutationResult!
@@ -4569,8 +4566,14 @@ type Query {
   """游标分页查询做 T 委托和成交事件"""
   tTradeBatchEventsPage(accountId: String!, batchId: String = null, first: Int! = 30, after: String = null): TTradeBatchEventPage!
 
-  """游标分页查询做 T 信号历史"""
-  tTradeSignalHistoryPage(accountId: String!, first: Int! = 30, after: String = null): TTradeSignalHistoryPage!
+  """查询 V3 做 T 信号评估证据，默认只返回 MATERIAL"""
+  tTradeSignalEvaluations(accountId: String!, stockCode: String = null, eventKinds: [TTradeSignalEvaluationKind!] = null, startTime: DateTime = null, endTime: DateTime = null, first: Int! = 30, after: String = null): TTradeSignalEvaluationPage!
+
+  """按候选标识追溯评估、意图、委托、成交与退出计划"""
+  tTradeCandidateTrace(accountId: String!, strategyRunId: String!, candidateId: String!): TTradeCandidateTrace
+
+  """查询 V3 做 T 信号诊断聚合及其统计口径"""
+  tTradeSignalDiagnostics(accountId: String!, startTime: DateTime!, endTime: DateTime!, stockCode: String = null, mergeVersions: Boolean! = false): TTradeSignalDiagnostics!
 
   """查询做 T 生产就绪和灰度状态"""
   validateTTradeLiveReadiness(accountId: String!): TTradeLiveReadiness!
@@ -4592,9 +4595,6 @@ type Query {
 
   """查询账户级全局持仓做 T 监控"""
   tTradeGlobalMonitor(accountId: String!): TTradeGlobalMonitor!
-
-  """查询账户最近的做 T 买入确认信号历史"""
-  tTradeSignalHistory(accountId: String!, limit: Int! = 50): [TTradeSignalHistoryEntry!]!
 
   """查询单个做 T 会话"""
   tTradeSession(runId: String!, stockCode: String = null): TTradeSession
@@ -6311,6 +6311,129 @@ type TTradeBatchPage {
   pageInfo: PageInfo!
 }
 
+"""确认 V3 做 T 候选时客户端观察到的 CAS 身份"""
+input TTradeCandidateApprovalExpectationInput {
+  signalVersion: Int!
+  candidateId: ID!
+  candidateFingerprint: String!
+  candidateStateVersion: Int!
+  configVersion: Int!
+  policyVersion: String!
+}
+
+"""做 T 候选生命周期结果"""
+type TTradeCandidateOutcomeAggregate {
+  code: String!
+  label: String!
+  count: Int!
+}
+
+"""做 T 候选生命周期"""
+enum TTradeCandidateStatus {
+  NONE
+  LATCHED
+  AWAITING_APPROVAL
+  SUPPRESSED
+  REARMING
+}
+
+"""账户内单个做 T 候选的端到端持久化事实时间线"""
+type TTradeCandidateTrace {
+  accountId: String!
+  candidateId: String!
+  strategyRunId: String!
+  instrumentCode: String!
+  sourceEvaluationId: String!
+  sourceIdentity: TTradeCandidateTraceSourceIdentity!
+  integrityStatus: TTradeCandidateTraceIntegrityStatus!
+  missingReasons: [TTradeCandidateTraceMissingReason!]!
+  links: TTradeCandidateTraceLinks!
+  events: [TTradeCandidateTraceEvent!]!
+}
+
+"""做 T 候选从评估到退出计划的单个持久化事实"""
+type TTradeCandidateTraceEvent {
+  stage: String!
+  eventType: String!
+  entityId: String!
+  occurredAt: DateTime!
+  status: String
+  relatedIds: JSON!
+  details: JSON!
+}
+
+"""做 T 候选全链路完整性"""
+enum TTradeCandidateTraceIntegrityStatus {
+  COMPLETE
+  IN_PROGRESS
+  BROKEN
+}
+
+"""做 T 候选关联的持久化实体标识"""
+type TTradeCandidateTraceLinks {
+  evaluationIds: [String!]!
+  intentIds: [String!]!
+  clientOrderIds: [String!]!
+  correlationIds: [String!]!
+  brokerOrderIds: [String!]!
+  orderIds: [String!]!
+  tradeIds: [String!]!
+  batchIds: [String!]!
+  exitPlanIds: [String!]!
+  exitPlanEventIds: [String!]!
+}
+
+"""做 T 候选追踪中缺失或尚未发生的链路节点"""
+type TTradeCandidateTraceMissingReason {
+  code: String!
+  stage: String!
+  expected: Boolean!
+  detail: String!
+}
+
+"""做 T 候选的因果行情源身份"""
+type TTradeCandidateTraceSourceIdentity {
+  sourceTimeMs: String
+  tickOrdinal: String
+  continuityGeneration: String
+  tradeDate: String
+  candidateFingerprint: String
+  policyVersion: String
+  featureSchemaVersion: String
+  profileVersion: String
+}
+
+"""做 T V3 客户端低基数遥测事件"""
+enum TTradeClientTelemetryEvent {
+  REFRESH_SUCCESS
+  REFRESH_FAILURE
+  SUBSCRIPTION_RECONNECTED
+}
+
+"""上报做 T V3 客户端低基数遥测"""
+input TTradeClientTelemetryInput {
+  accountId: String!
+  platform: TTradeClientTelemetryPlatform!
+  event: TTradeClientTelemetryEvent!
+  surface: TTradeClientTelemetrySurface!
+}
+
+"""做 T V3 客户端遥测平台"""
+enum TTradeClientTelemetryPlatform {
+  WEB
+  IOS
+}
+
+"""做 T V3 客户端遥测接收结果"""
+type TTradeClientTelemetryResult {
+  accepted: Boolean!
+}
+
+"""做 T V3 客户端遥测固定界面"""
+enum TTradeClientTelemetrySurface {
+  T_TRADE_SIGNAL_V3
+}
+
 """原生端两阶段做 T 安全控制动作"""
 enum TTradeControlAction {
   BEGIN_CONTROLLED_WINDOW
@@ -6378,29 +6501,22 @@ type TTradeControlPreviewResult {
   preview: TTradeControlPreview
 }
 
-"""做 T 单标的最新策略评估遥测"""
-type TTradeEvaluationTelemetry {
-  phase: String!
-  lastTickAt: DateTime!
-  processedTickCount: Int!
-  windowSampleCount: Int!
-  windowCoverageSeconds: Float!
-  triggered: Boolean!
-  reason: String!
-  signalType: String!
-  signalPrice: Float!
-  windowHigh: Float
-  windowLow: Float
-  pullbackPct: Float
-  reboundPct: Float
-  vwap: Float
-  vwapPremiumPct: Float
-  spreadTicks: Float
-  spreadPct: Float
-  momentumRisePct: Float
-  momentumMoveSeconds: Float
-  momentumAmountVelocityRatio: Float
-  momentumBaselineCoverageSeconds: Float
+"""做 T 列表压缩展示的主导阶段"""
+enum TTradeDominantPhase {
+  NONE
+  PULLBACK_OBSERVING
+  PULLBACK_FORMING
+  PULLBACK_LOW_STABILIZING
+  PULLBACK_REBOUND_CONFIRMING
+  PULLBACK_CANDIDATE_LATCHED
+  PULLBACK_SUPPRESSED
+  MOMENTUM_OBSERVING
+  MOMENTUM_BASELINING
+  MOMENTUM_BUILDING
+  MOMENTUM_ACCELERATING
+  MOMENTUM_OVEREXTENDED
+  MOMENTUM_CANDIDATE_LATCHED
+  MOMENTUM_SUPPRESSED
 }
 
 """导入外部已成交的做 T 买入批次"""
@@ -6408,6 +6524,13 @@ input TTradeExternalEntryInput {
   runId: String!
   accountId: String!
   orderId: String!
+}
+
+"""做 T 固定窗口费用后收益聚合"""
+type TTradeFixedWindowReturnAggregate {
+  windowSeconds: Int!
+  sampleCount: Int!
+  averageNetReturnPct: Float
 }
 
 """全局做 T 监控中的单只持仓"""
@@ -6438,23 +6561,7 @@ type TTradeGlobalMonitor {
   maxTradeAmount: Float!
   maxConcurrentBatches: Int!
   maxTotalTExposurePct: Float!
-  signalLookbackSeconds: Int!
-  stabilizationSeconds: Int!
-  pullbackThresholdPct: Float!
-  reboundThresholdPct: Float!
-  maxSpreadTicks: Int!
-  momentumEnabled: Boolean!
-  momentumWindowSeconds: Int!
-  momentumMinRisePct: Float!
-  momentumMinMoveSeconds: Int!
-  momentumBaselineSeconds: Int!
-  momentumMinAmountVelocityRatio: Float!
-  momentumMinVwapPremiumPct: Float!
-  momentumMaxVwapPremiumPct: Float!
-  momentumHighToleranceTicks: Int!
-  momentumMaxSpreadTicks: Int!
-  momentumMaxSpreadPct: Float!
-  approvalTtlSeconds: Int!
+  signalPolicy: TTradeSignalPolicy!
   maxPriceDeviationPct: Float!
   maxExitSlippageBps: Float!
   targetProfitPct: Float!
@@ -6520,6 +6627,8 @@ type TTradeGlobalMutationResult {
 """保存全局持仓做 T 监控设置"""
 input TTradeGlobalSettingsInput {
   accountId: String!
+  expectedConfigVersion: Int!
+  signalPolicy: TTradeSignalPolicyInput!
   enabled: Boolean! = false
   mode: String! = "paper"
   autoExitAcknowledged: Boolean! = false
@@ -6528,23 +6637,6 @@ input TTradeGlobalSettingsInput {
   maxTradeAmount: Float! = 12000
   maxConcurrentBatches: Int! = 3
   maxTotalTExposurePct: Float! = 0.1
-  signalLookbackSeconds: Int! = 300
-  stabilizationSeconds: Int! = 15
-  pullbackThresholdPct: Float! = 0.8
-  reboundThresholdPct: Float! = 0.2
-  maxSpreadTicks: Int! = 3
-  momentumEnabled: Boolean! = true
-  momentumWindowSeconds: Int! = 60
-  momentumMinRisePct: Float! = 0.8
-  momentumMinMoveSeconds: Int! = 15
-  momentumBaselineSeconds: Int! = 300
-  momentumMinAmountVelocityRatio: Float! = 2
-  momentumMinVwapPremiumPct: Float! = 2
-  momentumMaxVwapPremiumPct: Float! = 3.5
-  momentumHighToleranceTicks: Int! = 1
-  momentumMaxSpreadTicks: Int! = 10
-  momentumMaxSpreadPct: Float! = 0.3
-  approvalTtlSeconds: Int! = 30
   maxPriceDeviationPct: Float! = 0.3
   targetProfitPct: Float! = 2
   baseFloorPct: Float! = 0.5
@@ -6626,6 +6718,28 @@ type TTradeLiveReadiness {
   checkedAt: DateTime!
 }
 
+"""做 T 动量加速分支阶段"""
+enum TTradeMomentumPhase {
+  OBSERVING
+  BASELINING
+  MOMENTUM_BUILDING
+  ACCELERATING
+  OVEREXTENDED
+  CANDIDATE_LATCHED
+  SUPPRESSED
+}
+
+"""做 T 动量加速分支的服务端评估"""
+type TTradeMomentumSignalBranch {
+  phase: TTradeMomentumPhase!
+  score: Float
+  preview: Boolean!
+  candidateReady: Boolean!
+  hardGates: [TTradeSignalGate!]!
+  scoreContributions: [TTradeScoreContribution!]!
+  blockers: [TTradeSignalBlocker!]!
+}
+
 """持仓做 T 操作结果"""
 type TTradeMutationResult {
   success: Boolean!
@@ -6640,6 +6754,39 @@ type TTradeOperationsMutationResult {
   code: String!
   message: String!
   readiness: TTradeLiveReadiness
+}
+
+"""做 T 成交后费用化机会表现；数据不足时明确不可用"""
+type TTradePostCandidatePerformance {
+  available: Boolean!
+  reasonCode: String
+  reason: String
+  sampleCount: Int!
+  netMfePct: Float
+  netMaePct: Float
+  fixedWindowReturns: [TTradeFixedWindowReturnAggregate!]!
+  requiredDataCodes: [String!]!
+}
+
+"""做 T 回撤反弹分支阶段"""
+enum TTradePullbackPhase {
+  OBSERVING
+  PULLBACK_FORMING
+  LOW_STABILIZING
+  REBOUND_CONFIRMING
+  CANDIDATE_LATCHED
+  SUPPRESSED
+}
+
+"""做 T 回撤反弹分支的服务端评估"""
+type TTradePullbackSignalBranch {
+  phase: TTradePullbackPhase!
+  score: Float
+  preview: Boolean!
+  candidateReady: Boolean!
+  hardGates: [TTradeSignalGate!]!
+  scoreContributions: [TTradeScoreContribution!]!
+  blockers: [TTradeSignalBlocker!]!
 }
 
 """做 T 生产就绪检查项"""
@@ -6797,6 +6944,7 @@ input TTradeReplayStartInput {
   idempotencyKey: String!
   startTime: DateTime!
   endTime: DateTime!
+  signalPolicy: TTradeSignalPolicyInput!
   initialPortfolioAsOf: DateTime = null
   initialCash: Float = null
   initialTotalAsset: Float = null
@@ -6805,23 +6953,6 @@ input TTradeReplayStartInput {
   maxTradeAmount: Float! = 12000
   maxConcurrentBatches: Int! = 3
   maxTotalTExposurePct: Float! = 0.1
-  signalLookbackSeconds: Int! = 300
-  stabilizationSeconds: Int! = 15
-  pullbackThresholdPct: Float! = 0.8
-  reboundThresholdPct: Float! = 0.2
-  maxSpreadTicks: Int! = 3
-  momentumEnabled: Boolean! = true
-  momentumWindowSeconds: Int! = 60
-  momentumMinRisePct: Float! = 0.8
-  momentumMinMoveSeconds: Int! = 15
-  momentumBaselineSeconds: Int! = 300
-  momentumMinAmountVelocityRatio: Float! = 2
-  momentumMinVwapPremiumPct: Float! = 2
-  momentumMaxVwapPremiumPct: Float! = 3.5
-  momentumHighToleranceTicks: Int! = 1
-  momentumMaxSpreadTicks: Int! = 10
-  momentumMaxSpreadPct: Float! = 0.3
-  approvalTtlSeconds: Int! = 30
   maxPriceDeviationPct: Float! = 0.3
   targetProfitPct: Float! = 2
   baseFloorPct: Float! = 0.5
@@ -6905,6 +7036,17 @@ enum TTradeRolloutTarget {
   LIVE
 }
 
+"""做 T 机会分贡献"""
+type TTradeScoreContribution {
+  code: String!
+  label: String!
+  points: Float!
+  maxPoints: Float!
+  observedValue: Float
+  targetValue: Float
+  detail: String!
+}
+
 """持仓做 T 会话"""
 type TTradeSession {
   runId: String!
@@ -6913,11 +7055,9 @@ type TTradeSession {
   mode: String!
   runStatus: String!
   status: String!
-  positionShares: Int!
-  positionAvailableShares: Int!
   targetTradeAmount: Float!
   maxTradeAmount: Float!
-  plannedEntryVolume: Int!
+  plannedEntryAmount: Float!
   targetProfitPct: Float!
   baseFloorPct: Float!
   hardStopEnabled: Boolean!
@@ -6925,7 +7065,7 @@ type TTradeSession {
   timeExitMode: TTradeTimeExitMode!
   timeExitTime: String!
   maxHoldingTradingDays: Int!
-  currentSignal: JSON!
+  signalSnapshot: TTradeSignalSnapshot
   pendingEntryIntentId: String
   pendingExitIntentId: String
   entryOrderStatus: String!
@@ -6949,79 +7089,489 @@ type TTradeSession {
   updatedAt: DateTime
   globalMonitorId: String
   globalConfigVersion: Int!
-  latestEvaluation: TTradeEvaluationTelemetry
 }
 
-"""做 T 买入确认信号历史"""
-type TTradeSignalHistoryEntry {
-  intentId: String!
-  runId: String!
+"""做 T 信号阻断原因"""
+type TTradeSignalBlocker {
+  code: String!
+  label: String!
+  detail: String!
+}
+
+"""做 T 信号诊断 blocker 排名"""
+type TTradeSignalBlockerAggregate {
+  blocker: TTradeSignalBlocker!
+  count: Int!
+  rate: Float
+  denominatorCode: String!
+  denominatorValue: Float!
+}
+
+"""做 T 机会引擎数据健康"""
+enum TTradeSignalDataHealth {
+  WARMING
+  READY
+  DEGRADED
+  STALE
+  CONTINUITY_LOST
+  INSUFFICIENT
+}
+
+"""做 T 信号诊断统计口径"""
+type TTradeSignalDiagnosticDenominator {
+  code: String!
+  label: String!
+  readyInstrumentSeconds: Float!
+}
+
+"""按 policy/feature/profile 唯一版本坐标隔离的诊断分区"""
+type TTradeSignalDiagnosticPartition {
+  policyVersion: String!
+  featureSchemaVersion: String!
+  profileVersion: String
+  denominator: TTradeSignalDiagnosticDenominator!
+  funnel: [TTradeSignalFunnelStage!]!
+  blockers: [TTradeSignalBlockerAggregate!]!
+  scoreDistribution: [TTradeSignalScoreBucket!]!
+  fsmDwell: [TTradeSignalFsmDwell!]!
+  fsmTransitions: [TTradeSignalFsmTransition!]!
+  candidateOutcomes: [TTradeCandidateOutcomeAggregate!]!
+  postCandidatePerformance: TTradePostCandidatePerformance!
+}
+
+"""做 T 信号诊断聚合；不可用时明确 fail-closed"""
+type TTradeSignalDiagnostics {
+  available: Boolean!
+  reasonCode: String
+  reason: String
+  accountId: String!
+  stockCode: String
+  startTime: DateTime!
+  endTime: DateTime!
+  mergedVersions: Boolean!
+  warnings: [String!]!
+  partitions: [TTradeSignalDiagnosticPartition!]!
+  versionGroups: [TTradeSignalVersionGroup!]!
+}
+
+"""持久化做 T 信号评估证据"""
+type TTradeSignalEvaluation {
+  id: ID!
+  accountId: String!
+  runId: ID!
   stockCode: String!
-  status: String!
-  statusReason: String!
-  signalPrice: Float!
-  pullbackPct: Float!
-  reboundPct: Float!
-  requestedVolume: Int!
-  createdAt: DateTime
-  expiresAt: DateTime
-  updatedAt: DateTime
+  eventKind: TTradeSignalEvaluationKind!
+  eventType: String!
+  evaluatedAt: DateTime!
+  windowStartedAt: DateTime
+  windowEndedAt: DateTime
+  coalescedCount: Int!
+  policyVersion: String!
+  schemaVersion: String!
+  contentFingerprint: String!
+  signalSnapshot: TTradeSignalSnapshot
 }
 
-"""做 T 信号历史游标分页"""
-type TTradeSignalHistoryPage {
-  items: [TTradeSignalHistoryEntry!]!
+"""做 T 信号评估持久化种类"""
+enum TTradeSignalEvaluationKind {
+  MATERIAL
+  COALESCED_DIAGNOSTIC
+}
+
+"""做 T 信号评估稳定游标分页"""
+type TTradeSignalEvaluationPage {
+  items: [TTradeSignalEvaluation!]!
   pageInfo: PageInfo!
 }
 
-"""启动持仓做 T 会话"""
-input TTradeStartInput {
+"""做 T 因果特征快照；不可计算值保持 null"""
+type TTradeSignalFeatures {
+  sampleCount: Int!
+  coverageSeconds: Float
+  maxGapSeconds: Float
+  price: Float
+  priceTick: Float
+  bidPrice: Float
+  askPrice: Float
+  spreadTicks: Float
+  spreadPct: Float
+  bookImbalance: Float
+  sessionVwap: Float
+  vwapPremiumPct: Float
+  return5sPct: Float
+  return15sPct: Float
+  return30sPct: Float
+  return60sPct: Float
+  return300sPct: Float
+  priceSlope60sPctPerSecond: Float
+  priceAccelerationPctPerSecond2: Float
+  realizedVolatility60sPct: Float
+  realizedVolatility300sPct: Float
+  windowHigh: Float
+  windowLow: Float
+  pullbackPct: Float
+  reboundPct: Float
+  secondsSinceLow: Float
+  reboundSlopePctPerSecond: Float
+  rangePosition: Float
+  amountVelocityRatio15s60s: Float
+  momentumRisePct: Float
+  momentumMoveSeconds: Float
+  momentumWindowHigh: Float
+  momentumRangePosition: Float
+  momentumBaselineCoverageSeconds: Float
+  momentumAmountVelocityRatio: Float
+}
+
+"""做 T 双 FSM 停留时间"""
+type TTradeSignalFsmDwell {
+  branch: String!
+  phase: String!
+  durationSeconds: Float!
+  transitionCount: Int!
+}
+
+"""做 T 双 FSM from-to 转移边"""
+type TTradeSignalFsmTransition {
+  branch: String!
+  fromPhase: String!
+  toPhase: String!
+  count: Int!
+}
+
+"""做 T 信号诊断漏斗阶段"""
+type TTradeSignalFunnelStage {
+  code: String!
+  label: String!
+  unitCode: String!
+  denominatorCode: String
+  count: Int!
+  conversionRate: Float
+}
+
+"""做 T 信号硬门禁"""
+type TTradeSignalGate {
+  code: String!
+  label: String!
+  passed: Boolean!
+  observedValue: Float
+  requiredValue: Float
+  detail: String!
+}
+
+"""做 T 信号路径"""
+enum TTradeSignalPath {
+  PULLBACK_REBOUND
+  MOMENTUM_ACCELERATION
+}
+
+"""V3 做 T 机会引擎规范化规则参数"""
+type TTradeSignalPolicy {
+  policyVersion: String!
+  featureSchemaVersion: String!
+  maxSamples: Int!
+  maxQuoteAgeMs: Int!
+  pullbackMinSamples: Int!
+  pullbackMinCoverageSeconds: Int!
+  momentumMinSamples: Int!
+  momentumMinCoverageSeconds: Int!
+  sparseDegradedGapSeconds: Int!
+  pullbackRequiredFields: [String!]!
+  momentumRequiredFields: [String!]!
+  allowedSessionCodes: [String!]!
+  continuousAmStartTime: String!
+  continuousAmEndTime: String!
+  continuousPmStartTime: String!
+  continuousPmEndTime: String!
+  closeProtectionSeconds: Int!
+  pullbackLookbackSeconds: Int!
+  pullbackStabilizationSeconds: Int!
+  pullbackThresholdPct: Float!
+  pullbackFormationThresholdMultiplier: Float!
+  pullbackReboundThresholdPct: Float!
+  pullbackMaxSpreadTicks: Int!
+  pullbackVolumeShortWindowSeconds: Int!
+  pullbackVolumeBaselineWindowSeconds: Int!
+  momentumEnabled: Boolean!
+  momentumWindowSeconds: Int!
+  momentumMinRisePct: Float!
+  momentumFormationThresholdMultiplier: Float!
+  momentumMinMoveSeconds: Int!
+  momentumBaselineSeconds: Int!
+  momentumBaselineCoverageRatio: Float!
+  momentumMinAmountVelocityRatio: Float!
+  momentumMinVwapPremiumPct: Float!
+  momentumMaxVwapPremiumPct: Float!
+  momentumHighToleranceTicks: Int!
+  momentumMaxSpreadTicks: Int!
+  momentumMaxSpreadPct: Float!
+  profilePullbackThresholdMinMultiplier: Float!
+  profilePullbackThresholdMaxMultiplier: Float!
+  profileMomentumRiseMinMultiplier: Float!
+  profileMomentumRiseMaxMultiplier: Float!
+  profileMomentumVelocityMinRatio: Float!
+  profileMomentumVelocityMaxRatio: Float!
+  pullbackDepthWeight: Float!
+  pullbackReboundWeight: Float!
+  pullbackStabilizationWeight: Float!
+  pullbackTurnSlopeWeight: Float!
+  pullbackVwapWeight: Float!
+  pullbackLiquidityWeight: Float!
+  pullbackVolumeWeight: Float!
+  momentumRiseWeight: Float!
+  momentumTurnoverWeight: Float!
+  momentumSlopeWeight: Float!
+  momentumPersistenceWeight: Float!
+  momentumVwapWeight: Float!
+  momentumLiquidityWeight: Float!
+  momentumBookImbalanceWeight: Float!
+  pullbackDepthScoreMinPct: Float!
+  pullbackDepthScoreTargetMultiplier: Float!
+  pullbackReboundScoreMinPct: Float!
+  pullbackReboundScoreMaxPct: Float!
+  pullbackStabilizationScoreMinSeconds: Float!
+  pullbackStabilizationScoreMaxSeconds: Float!
+  pullbackTurnSlopeScoreMinPctPerSecond: Float!
+  pullbackTurnSlopeScoreMaxPctPerSecond: Float!
+  pullbackVwapFullScoreMaxPremiumPct: Float!
+  pullbackVwapZeroScorePremiumPct: Float!
+  pullbackLiquidityFullScoreSpreadTicks: Float!
+  pullbackLiquidityZeroScoreSpreadTicks: Float!
+  pullbackVolumeScoreMinRatio: Float!
+  pullbackVolumeScoreMaxRatio: Float!
+  momentumRiseScoreMinPct: Float!
+  momentumRiseScoreTargetMultiplier: Float!
+  momentumTurnoverScoreMinRatio: Float!
+  momentumTurnoverScoreTargetMultiplier: Float!
+  momentumSlopeScoreMinPctPerSecond: Float!
+  momentumSlopeScoreTargetMultiplier: Float!
+  momentumPersistenceScoreMinRatio: Float!
+  momentumPersistenceScoreMaxRatio: Float!
+  momentumVwapZeroScoreMinPremiumPct: Float!
+  momentumVwapZeroScoreMaxPremiumPct: Float!
+  momentumLiquidityFullScoreSpreadTicks: Float!
+  momentumLiquidityZeroScoreSpreadTicks: Float!
+  momentumBookImbalanceScoreMinRatio: Float!
+  momentumBookImbalanceScoreMaxRatio: Float!
+  pullbackDataQualityPenaltyPoints: Float!
+  pullbackChasePenaltyStartPremiumPct: Float!
+  pullbackChasePenaltyFullPremiumPct: Float!
+  pullbackChasePenaltyPoints: Float!
+  momentumDataQualityPenaltyPoints: Float!
+  momentumOverextensionPenaltyStartPremiumPct: Float!
+  momentumOverextensionPenaltyFullPremiumPct: Float!
+  momentumOverextensionPenaltyPoints: Float!
+  previewScore: Float!
+  candidateScore: Float!
+  revalidateScore: Float!
+  rearmScore: Float!
+  candidateConfirmSeconds: Int!
+  candidateConfirmTicks: Int!
+  candidateTtlSeconds: Int!
+  rearmSeconds: Int!
+}
+
+"""V3 做 T 机会引擎规则参数"""
+input TTradeSignalPolicyInput {
+  maxSamples: Int!
+  maxQuoteAgeMs: Int!
+  pullbackMinSamples: Int!
+  pullbackMinCoverageSeconds: Int!
+  momentumMinSamples: Int!
+  momentumMinCoverageSeconds: Int!
+  sparseDegradedGapSeconds: Int!
+  pullbackRequiredFields: [String!]!
+  momentumRequiredFields: [String!]!
+  allowedSessionCodes: [String!]!
+  continuousAmStartTime: String!
+  continuousAmEndTime: String!
+  continuousPmStartTime: String!
+  continuousPmEndTime: String!
+  closeProtectionSeconds: Int!
+  pullbackLookbackSeconds: Int!
+  pullbackStabilizationSeconds: Int!
+  pullbackThresholdPct: Float!
+  pullbackFormationThresholdMultiplier: Float!
+  pullbackReboundThresholdPct: Float!
+  pullbackMaxSpreadTicks: Int!
+  pullbackVolumeShortWindowSeconds: Int!
+  pullbackVolumeBaselineWindowSeconds: Int!
+  momentumEnabled: Boolean!
+  momentumWindowSeconds: Int!
+  momentumMinRisePct: Float!
+  momentumFormationThresholdMultiplier: Float!
+  momentumMinMoveSeconds: Int!
+  momentumBaselineSeconds: Int!
+  momentumBaselineCoverageRatio: Float!
+  momentumMinAmountVelocityRatio: Float!
+  momentumMinVwapPremiumPct: Float!
+  momentumMaxVwapPremiumPct: Float!
+  momentumHighToleranceTicks: Int!
+  momentumMaxSpreadTicks: Int!
+  momentumMaxSpreadPct: Float!
+  profilePullbackThresholdMinMultiplier: Float!
+  profilePullbackThresholdMaxMultiplier: Float!
+  profileMomentumRiseMinMultiplier: Float!
+  profileMomentumRiseMaxMultiplier: Float!
+  profileMomentumVelocityMinRatio: Float!
+  profileMomentumVelocityMaxRatio: Float!
+  pullbackDepthWeight: Float!
+  pullbackReboundWeight: Float!
+  pullbackStabilizationWeight: Float!
+  pullbackTurnSlopeWeight: Float!
+  pullbackVwapWeight: Float!
+  pullbackLiquidityWeight: Float!
+  pullbackVolumeWeight: Float!
+  momentumRiseWeight: Float!
+  momentumTurnoverWeight: Float!
+  momentumSlopeWeight: Float!
+  momentumPersistenceWeight: Float!
+  momentumVwapWeight: Float!
+  momentumLiquidityWeight: Float!
+  momentumBookImbalanceWeight: Float!
+  pullbackDepthScoreMinPct: Float!
+  pullbackDepthScoreTargetMultiplier: Float!
+  pullbackReboundScoreMinPct: Float!
+  pullbackReboundScoreMaxPct: Float!
+  pullbackStabilizationScoreMinSeconds: Float!
+  pullbackStabilizationScoreMaxSeconds: Float!
+  pullbackTurnSlopeScoreMinPctPerSecond: Float!
+  pullbackTurnSlopeScoreMaxPctPerSecond: Float!
+  pullbackVwapFullScoreMaxPremiumPct: Float!
+  pullbackVwapZeroScorePremiumPct: Float!
+  pullbackLiquidityFullScoreSpreadTicks: Float!
+  pullbackLiquidityZeroScoreSpreadTicks: Float!
+  pullbackVolumeScoreMinRatio: Float!
+  pullbackVolumeScoreMaxRatio: Float!
+  momentumRiseScoreMinPct: Float!
+  momentumRiseScoreTargetMultiplier: Float!
+  momentumTurnoverScoreMinRatio: Float!
+  momentumTurnoverScoreTargetMultiplier: Float!
+  momentumSlopeScoreMinPctPerSecond: Float!
+  momentumSlopeScoreTargetMultiplier: Float!
+  momentumPersistenceScoreMinRatio: Float!
+  momentumPersistenceScoreMaxRatio: Float!
+  momentumVwapZeroScoreMinPremiumPct: Float!
+  momentumVwapZeroScoreMaxPremiumPct: Float!
+  momentumLiquidityFullScoreSpreadTicks: Float!
+  momentumLiquidityZeroScoreSpreadTicks: Float!
+  momentumBookImbalanceScoreMinRatio: Float!
+  momentumBookImbalanceScoreMaxRatio: Float!
+  pullbackDataQualityPenaltyPoints: Float!
+  pullbackChasePenaltyStartPremiumPct: Float!
+  pullbackChasePenaltyFullPremiumPct: Float!
+  pullbackChasePenaltyPoints: Float!
+  momentumDataQualityPenaltyPoints: Float!
+  momentumOverextensionPenaltyStartPremiumPct: Float!
+  momentumOverextensionPenaltyFullPremiumPct: Float!
+  momentumOverextensionPenaltyPoints: Float!
+  previewScore: Float!
+  candidateScore: Float!
+  revalidateScore: Float!
+  rearmScore: Float!
+  candidateConfirmSeconds: Int!
+  candidateConfirmTicks: Int!
+  rearmSeconds: Int!
+  candidateTtlSeconds: Int!
+}
+
+"""做 T 信号规则校验问题"""
+type TTradeSignalPolicyIssue {
+  code: String!
+  message: String!
+  field: String
+}
+
+"""纯校验做 T 信号规则，不写入运行配置"""
+input TTradeSignalPolicyPreviewInput {
   accountId: String!
-  stockCode: String!
-  mode: String! = "live"
-  autoExitAcknowledged: Boolean! = false
-  targetTradeAmount: Float! = 10000
-  maxTradeAmount: Float! = 12000
-  maxConcurrentBatches: Int! = 3
-  maxTotalTExposurePct: Float! = 0.1
-  signalLookbackSeconds: Int! = 300
-  stabilizationSeconds: Int! = 15
-  pullbackThresholdPct: Float! = 0.8
-  reboundThresholdPct: Float! = 0.2
-  maxSpreadTicks: Int! = 3
-  momentumEnabled: Boolean! = true
-  momentumWindowSeconds: Int! = 60
-  momentumMinRisePct: Float! = 0.8
-  momentumMinMoveSeconds: Int! = 15
-  momentumBaselineSeconds: Int! = 300
-  momentumMinAmountVelocityRatio: Float! = 2
-  momentumMinVwapPremiumPct: Float! = 2
-  momentumMaxVwapPremiumPct: Float! = 3.5
-  momentumHighToleranceTicks: Int! = 1
-  momentumMaxSpreadTicks: Int! = 10
-  momentumMaxSpreadPct: Float! = 0.3
-  approvalTtlSeconds: Int! = 30
-  maxPriceDeviationPct: Float! = 0.3
-  targetProfitPct: Float! = 2
-  baseFloorPct: Float! = 0.5
-  initialGapPct: Float! = 1.5
-  trailingGapSlope: Float! = 0.25
-  maxGapPct: Float! = 3
-  highProfitLockEnabled: Boolean! = true
-  highProfitArmPct: Float! = 4
-  highProfitMaxDrawdownPct: Float! = 1.2
-  rapidReversalEnabled: Boolean! = true
-  rapidReversalWindowSeconds: Int! = 15
-  rapidReversalDrawdownPct: Float! = 0.8
-  rapidReversalConfirmTicks: Int! = 2
-  limitUpTouchExitEnabled: Boolean! = true
-  limitUpTouchToleranceTicks: Int! = 0
-  hardStopEnabled: Boolean! = false
-  hardStopPct: Float! = -0.8
-  timeExitMode: TTradeTimeExitMode! = UNLIMITED
-  timeExitTime: String! = "14:50"
-  maxHoldingTradingDays: Int! = 5
-  cooldownSeconds: Int! = 300
+  expectedConfigVersion: Int!
+  signalPolicy: TTradeSignalPolicyInput!
+}
+
+"""做 T 信号规则纯校验结果"""
+type TTradeSignalPolicyPreviewResult {
+  valid: Boolean!
+  configVersion: Int!
+  errors: [TTradeSignalPolicyIssue!]!
+  warnings: [TTradeSignalPolicyIssue!]!
+  normalizedPolicy: TTradeSignalPolicy
+  changedFields: [String!]!
+  requiresRewarm: Boolean!
+}
+
+"""做 T 数据健康原因"""
+type TTradeSignalReason {
+  code: String!
+  label: String!
+  detail: String!
+}
+
+"""做 T 信号分数分布区间"""
+type TTradeSignalScoreBucket {
+  policyVersion: String!
+  featureSchemaVersion: String!
+  profileVersion: String
+  path: TTradeSignalPath
+  lowerBound: Float!
+  upperBound: Float!
+  count: Int!
+}
+
+"""做 T 单标的权威 V3 信号快照"""
+type TTradeSignalSnapshot {
+  instrumentCode: String!
+  tradeDate: String!
+  evaluatedAt: DateTime!
+  sourceAt: DateTime!
+  sourceTimeMs: String!
+  tickOrdinal: String!
+  continuityGeneration: String!
+  dataAgeMs: Int
+  windowCoverageSeconds: Int
+  sampleCount: Int!
+  dataHealth: TTradeSignalDataHealth!
+  dataHealthReasons: [TTradeSignalReason!]!
+  pullbackPhase: TTradePullbackPhase!
+  momentumPhase: TTradeMomentumPhase!
+  dominantPhase: TTradeDominantPhase!
+  selectedPath: TTradeSignalPath
+  pullbackScore: Float
+  momentumScore: Float
+  opportunityScore: Float
+  previewThreshold: Float!
+  candidateThreshold: Float!
+  revalidateThreshold: Float!
+  rearmThreshold: Float!
+  features: TTradeSignalFeatures!
+  pullback: TTradePullbackSignalBranch!
+  momentum: TTradeMomentumSignalBranch!
+  hardGates: [TTradeSignalGate!]!
+  scoreContributions: [TTradeScoreContribution!]!
+  topBlockers: [TTradeSignalBlocker!]!
+  episodeId: ID
+  candidateId: ID
+  candidateFingerprint: String
+  candidateStatus: TTradeCandidateStatus!
+  candidateCreatedAt: DateTime
+  candidateExpiresAt: DateTime
+  pendingEntryIntentId: ID
+  signalVersion: Int!
+  candidateStateVersion: Int!
+  stateSchemaVersion: String!
+  featureSchemaVersion: String!
+  policyVersion: String!
+  configVersion: Int!
+  profileVersion: String
+  profileFingerprint: String
+}
+
+"""做 T 信号诊断版本分组"""
+type TTradeSignalVersionGroup {
+  policyVersion: String!
+  featureSchemaVersion: String!
+  profileVersion: String
+  count: Int!
 }
 
 """T 批次时间退出模式"""

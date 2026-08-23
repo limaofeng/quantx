@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from math import isfinite
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 CAPITAL_UTILIZATION_REFERENCE_HOURS = 4.0
+OPPORTUNITY_DIAGNOSTICS_SCHEMA_VERSION = 2
+_READY_DENOMINATOR_CODE = "READY_INSTRUMENT_SECONDS"
+_EXCURSION_UNAVAILABLE_REASON = (
+  "当前持久化链缺少权威成交费用账本、成交后的完整因果行情路径和固定窗口交易时段策略，"
+  "不能可靠计算费用后 MFE、MAE 或固定窗口收益。"
+)
+_PERFORMANCE_REQUIRED_DATA_CODES = [
+  "AUTHORITATIVE_EXECUTION_FEE_LEDGER",
+  "COMPLETE_POST_FILL_CAUSAL_MARKET_PATH",
+  "FIXED_WINDOW_SESSION_POLICY",
+]
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -41,6 +53,438 @@ def _datetime(value: Any) -> Optional[datetime]:
     except ValueError:
       return None
   return None
+
+
+def _rollout_evidence(
+  parameters: Mapping[str, Any],
+  *,
+  trading_dates: Iterable[Any],
+  data_quality: str,
+  tick_read_audit: Mapping[str, Any],
+  skipped_instruments: Iterable[Any],
+) -> Dict[str, Any]:
+  """Return immutable replay facts consumed by the V3 execution gate.
+
+  The payload is intentionally derived only from the completed runtime's
+  persisted parameters and replay curve.  A generic replay cannot label
+  itself formal evidence: the replay service accepts ``V3_CAUSAL_20D`` only
+  for an exact SH 20-day window with an in-window declared abnormal day.
+  Missing or malformed facts remain present as explicit ``False`` values so
+  older results fail closed instead of being reinterpreted as acceptance.
+  """
+
+  actual_dates = sorted(
+    {
+      item.isoformat()
+      for item in trading_dates
+      if hasattr(item, "isoformat") and len(str(item.isoformat())) == 10
+    }
+  )
+  acceptance = str(parameters.get("replay_acceptance") or "").strip().upper()
+  raw_abnormal = parameters.get("replay_abnormal_dates")
+  actual_date_set = set(actual_dates)
+  abnormal_items = raw_abnormal if isinstance(raw_abnormal, list) else []
+  abnormal_dates = sorted(
+    {
+      str(item or "").strip()
+      for item in abnormal_items
+      if str(item or "").strip() in actual_date_set
+    }
+  )
+  normal_dates = sorted(set(actual_dates) - set(abnormal_dates))
+  issues = list(tick_read_audit.get("issues") or [])
+  strict_causal = (
+    acceptance == "V3_CAUSAL_20D"
+    and len(actual_dates) == 20
+    and bool(normal_dates)
+    and bool(abnormal_dates)
+    and str(data_quality).upper() == "OK"
+    and _integer(tick_read_audit.get("verified_windows")) > 0
+    and not issues
+    and not list(skipped_instruments)
+  )
+  return {
+    "schema_version": 1,
+    "strict_causal": strict_causal,
+    "trading_dates": actual_dates,
+    "market_scenario_coverage": {
+      "normal_trading_dates": normal_dates,
+      "abnormal_trading_dates": abnormal_dates,
+    },
+    "replay_acceptance": acceptance or None,
+    "tick_read_issues": len(issues),
+    "skipped_instrument_count": len(list(skipped_instruments)),
+  }
+
+
+def _opportunity_diagnostics_unavailable(
+  reason: str,
+  *,
+  reason_code: str,
+  strategy_run_id: Optional[str],
+) -> Dict[str, Any]:
+  return {
+    "schema_version": OPPORTUNITY_DIAGNOSTICS_SCHEMA_VERSION,
+    "available": False,
+    "reason_code": reason_code,
+    "reason": reason,
+    "scope": {
+      "strategy_run_id": strategy_run_id,
+      "stock_code": None,
+      "start_time": None,
+      "end_time": None,
+    },
+    "merged_versions": False,
+    "warnings": [],
+    "partitions": [],
+    "version_groups": [],
+  }
+
+
+def _normalize_opportunity_diagnostics(
+  diagnostics: Optional[Mapping[str, Any]],
+  *,
+  expected_strategy_run_id: Optional[str],
+  unavailable_reason: Optional[str],
+) -> Dict[str, Any]:
+  normalized_run_id = str(expected_strategy_run_id or "").strip() or None
+  if not isinstance(diagnostics, Mapping) or not diagnostics:
+    return _opportunity_diagnostics_unavailable(
+      unavailable_reason or "回放结果尚未附加按策略运行聚合的 V3 机会诊断。",
+      reason_code="NOT_ATTACHED",
+      strategy_run_id=normalized_run_id,
+    )
+  if diagnostics.get("available") is not True:
+    return _opportunity_diagnostics_unavailable(
+      str(diagnostics.get("reason") or unavailable_reason or "V3 机会诊断不可用。"),
+      reason_code=str(diagnostics.get("reason_code") or "DIAGNOSTICS_UNAVAILABLE"),
+      strategy_run_id=normalized_run_id,
+    )
+
+  scope = dict(diagnostics.get("scope") or {})
+  scoped_run_id = str(scope.get("strategy_run_id") or "").strip() or None
+  if normalized_run_id and scoped_run_id != normalized_run_id:
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断未绑定当前策略运行，已拒绝合并以避免跨回放污染。",
+      reason_code="STRATEGY_RUN_SCOPE_MISMATCH",
+      strategy_run_id=normalized_run_id,
+    )
+
+  merged_versions = diagnostics.get("merged_versions")
+  raw_warnings = diagnostics.get("warnings")
+  raw_partitions = diagnostics.get("partitions")
+  if (
+    not isinstance(merged_versions, bool)
+    or not isinstance(raw_warnings, list)
+    or not isinstance(raw_partitions, list)
+  ):
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断缺少版本分区契约，已拒绝按旧扁平口径混算。",
+      reason_code="VERSION_PARTITION_CONTRACT_MISSING",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+  partitions: list[dict[str, Any]] = []
+  for raw_partition in raw_partitions:
+    if not isinstance(raw_partition, Mapping):
+      return _opportunity_diagnostics_unavailable(
+        "V3 机会诊断版本分区格式无效。",
+        reason_code="INVALID_VERSION_PARTITION",
+        strategy_run_id=normalized_run_id or scoped_run_id,
+      )
+    partition = dict(raw_partition)
+    denominator = dict(partition.get("denominator") or {})
+    if str(denominator.get("code") or "") != _READY_DENOMINATOR_CODE:
+      return _opportunity_diagnostics_unavailable(
+        "V3 机会诊断分母不是 READY 标的时长，已拒绝使用原始 Tick 数等错误口径。",
+        reason_code="UNSUPPORTED_DENOMINATOR",
+        strategy_run_id=normalized_run_id or scoped_run_id,
+      )
+    ready_seconds = _number(denominator.get("ready_instrument_seconds"), -1.0)
+    if not isfinite(ready_seconds) or ready_seconds < 0.0:
+      return _opportunity_diagnostics_unavailable(
+        "V3 机会诊断缺少有效的 READY 标的时长。",
+        reason_code="INVALID_READY_DURATION",
+        strategy_run_id=normalized_run_id or scoped_run_id,
+      )
+    performance = dict(partition.get("post_candidate_performance") or {})
+    if performance.get("available") is not True:
+      performance = {
+        "available": False,
+        "reason_code": str(
+          performance.get("reason_code")
+          or "POST_FILL_CAUSAL_PATH_AND_COST_LEDGER_UNAVAILABLE"
+        ),
+        "reason": str(performance.get("reason") or _EXCURSION_UNAVAILABLE_REASON),
+        "sample_count": 0,
+        "net_mfe_pct": None,
+        "net_mae_pct": None,
+        "fixed_window_returns": [],
+        "required_data_codes": list(
+          performance.get("required_data_codes") or _PERFORMANCE_REQUIRED_DATA_CODES
+        ),
+      }
+    partitions.append(
+      {
+        "policy_version": str(partition.get("policy_version") or ""),
+        "feature_schema_version": str(partition.get("feature_schema_version") or ""),
+        "profile_version": partition.get("profile_version"),
+        "denominator": {
+          "code": _READY_DENOMINATOR_CODE,
+          "label": str(denominator.get("label") or "READY 标的时长（秒）"),
+          "ready_instrument_seconds": ready_seconds,
+        },
+        "funnel": [dict(item) for item in partition.get("funnel") or []],
+        "blockers": [dict(item) for item in partition.get("blockers") or []],
+        "score_distribution": [
+          dict(item) for item in partition.get("score_distribution") or []
+        ],
+        "fsm_dwell": [dict(item) for item in partition.get("fsm_dwell") or []],
+        "fsm_transitions": [
+          dict(item) for item in partition.get("fsm_transitions") or []
+        ],
+        "candidate_outcomes": [
+          dict(item) for item in partition.get("candidate_outcomes") or []
+        ],
+        "post_candidate_performance": performance,
+      }
+    )
+  raw_version_groups = diagnostics.get("version_groups")
+  if not isinstance(raw_version_groups, list):
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断缺少版本分组。",
+      reason_code="VERSION_GROUPS_MISSING",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+  partition_coordinates = {
+    (
+      item["policy_version"],
+      item["feature_schema_version"],
+      item["profile_version"],
+    )
+    for item in partitions
+  }
+  if any(
+    not item["policy_version"] or not item["feature_schema_version"]
+    for item in partitions
+  ):
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断版本坐标不完整。",
+      reason_code="INVALID_VERSION_COORDINATE",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+  if not merged_versions and (
+    len(partition_coordinates) != len(partitions)
+    or any(item["policy_version"] == "MIXED" for item in partitions)
+  ):
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断默认结果未按唯一版本坐标隔离。",
+      reason_code="VERSION_PARTITION_MIXED",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+  if merged_versions and len(partitions) > 1:
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断显式合并时返回了多个分区。",
+      reason_code="INVALID_MERGED_PARTITIONS",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+  if (
+    merged_versions
+    and len(raw_version_groups) > 1
+    and "MIXED_SIGNAL_VERSIONS_EXPLICITLY_MERGED" not in raw_warnings
+  ):
+    return _opportunity_diagnostics_unavailable(
+      "V3 机会诊断合并不同版本时缺少显式警告。",
+      reason_code="MIXED_VERSION_WARNING_MISSING",
+      strategy_run_id=normalized_run_id or scoped_run_id,
+    )
+
+  return {
+    "schema_version": OPPORTUNITY_DIAGNOSTICS_SCHEMA_VERSION,
+    "available": True,
+    "reason_code": None,
+    "reason": None,
+    "scope": {
+      "strategy_run_id": scoped_run_id or normalized_run_id,
+      "stock_code": scope.get("stock_code"),
+      "start_time": _timestamp(scope.get("start_time")),
+      "end_time": _timestamp(scope.get("end_time")),
+    },
+    "merged_versions": merged_versions,
+    "warnings": [str(item) for item in raw_warnings],
+    "partitions": partitions,
+    "version_groups": [dict(item) for item in raw_version_groups],
+  }
+
+
+def attach_t_trade_opportunity_diagnostics(
+  replay_metrics: Mapping[str, Any],
+  diagnostics: Optional[Mapping[str, Any]],
+  *,
+  expected_strategy_run_id: Optional[str] = None,
+  unavailable_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+  """Return replay metrics with a validated, run-scoped V3 diagnostics payload."""
+
+  result = dict(replay_metrics)
+  result["opportunity_diagnostics"] = _normalize_opportunity_diagnostics(
+    diagnostics,
+    expected_strategy_run_id=expected_strategy_run_id,
+    unavailable_reason=unavailable_reason,
+  )
+  return result
+
+
+def attach_t_trade_phase_one_baseline(
+  replay_metrics: Mapping[str, Any],
+  baseline: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+  """Attach the frozen AND-rule control without inventing unavailable results."""
+
+  result = dict(replay_metrics)
+  if not isinstance(baseline, Mapping) or baseline.get("available") is not True:
+    normalized_baseline: Dict[str, Any] = {
+      "schema_version": 1,
+      "available": False,
+      "reason_code": "PHASE_ONE_BASELINE_NOT_COLLECTED",
+      "reason": "本次回放未启用一期固定 AND 规则影子比较器。",
+    }
+  else:
+    normalized_baseline = dict(baseline)
+  result["phase_one_baseline"] = normalized_baseline
+
+  diagnostics = dict(result.get("opportunity_diagnostics") or {})
+  v3_ready_seconds = 0.0
+  v3_candidates = 0
+  v3_performance_samples = 0
+  v3_performance_available = False
+  if diagnostics.get("available") is True:
+    for partition in list(diagnostics.get("partitions") or []):
+      partition = dict(partition or {})
+      denominator = dict(partition.get("denominator") or {})
+      v3_ready_seconds += max(
+        0.0,
+        _number(denominator.get("ready_instrument_seconds")),
+      )
+      for stage in list(partition.get("funnel") or []):
+        if str(dict(stage or {}).get("code") or "") == "CANDIDATE":
+          v3_candidates += max(0, _integer(dict(stage or {}).get("count")))
+      performance = dict(partition.get("post_candidate_performance") or {})
+      if performance.get("available") is True:
+        v3_performance_available = True
+        v3_performance_samples += max(0, _integer(performance.get("sample_count")))
+
+  baseline_ready_seconds = 0.0
+  baseline_candidates = 0
+  baseline_reference_samples = 0
+  baseline_fee_available = False
+  common_ready_seconds = 0.0
+  common_v3_candidates = 0
+  common_phase_one_candidates = 0
+  common_comparison_available = False
+  if normalized_baseline.get("available") is True:
+    baseline_ready_seconds = max(
+      0.0,
+      _number(dict(normalized_baseline.get("denominator") or {}).get("value")),
+    )
+    baseline_candidates = sum(
+      max(0, _integer(value))
+      for value in dict(normalized_baseline.get("candidate_edges") or {}).values()
+    )
+    reference = dict(normalized_baseline.get("candidate_reference_performance") or {})
+    baseline_reference_samples = max(0, _integer(reference.get("candidate_count")))
+    baseline_fee_available = (
+      dict(normalized_baseline.get("fee_adjusted_performance") or {}).get("available")
+      is True
+    )
+    common = dict(normalized_baseline.get("common_ready_comparison") or {})
+    common_ready_seconds = max(
+      0.0,
+      _number(dict(common.get("denominator") or {}).get("value")),
+    )
+    common_v3_candidates = sum(
+      max(0, _integer(value))
+      for value in dict(common.get("v3_candidate_edges") or {}).values()
+    )
+    common_phase_one_candidates = sum(
+      max(0, _integer(value))
+      for value in dict(common.get("phase_one_candidate_edges") or {}).values()
+    )
+    common_comparison_available = bool(
+      common.get("available") is True and common_ready_seconds > 0
+    )
+  v3_own_rate = _candidate_rate_per_ready_hour(v3_candidates, v3_ready_seconds)
+  baseline_own_rate = _candidate_rate_per_ready_hour(
+    baseline_candidates,
+    baseline_ready_seconds,
+  )
+  common_v3_rate = _candidate_rate_per_ready_hour(
+    common_v3_candidates,
+    common_ready_seconds,
+  )
+  common_phase_one_rate = _candidate_rate_per_ready_hour(
+    common_phase_one_candidates,
+    common_ready_seconds,
+  )
+  result["v3_vs_phase_one"] = {
+    "available": bool(
+      diagnostics.get("available") is True
+      and normalized_baseline.get("available") is True
+    ),
+    "units": {
+      "ready_time": "INSTRUMENT_SECONDS",
+      "candidate": "RUN_SCOPED_CANDIDATES",
+    },
+    "v3": {
+      "ready_instrument_seconds": v3_ready_seconds,
+      "candidate_count": v3_candidates,
+      "candidate_rate_per_ready_instrument_hour": v3_own_rate,
+      "post_fill_performance_available": v3_performance_available,
+      "post_fill_performance_sample_count": v3_performance_samples,
+    },
+    "phase_one": {
+      "data_ready_instrument_seconds": baseline_ready_seconds,
+      "candidate_count": baseline_candidates,
+      "candidate_rate_per_ready_instrument_hour": baseline_own_rate,
+      "candidate_reference_sample_count": baseline_reference_samples,
+      "fee_adjusted_performance_available": baseline_fee_available,
+    },
+    "common_ready": {
+      "available": common_comparison_available,
+      "ready_instrument_seconds": common_ready_seconds,
+      "v3_candidate_count": common_v3_candidates,
+      "phase_one_candidate_count": common_phase_one_candidates,
+      "v3_candidate_rate_per_ready_instrument_hour": common_v3_rate,
+      "phase_one_candidate_rate_per_ready_instrument_hour": common_phase_one_rate,
+      "candidate_rate_delta_per_ready_instrument_hour": (
+        common_v3_rate - common_phase_one_rate
+        if common_v3_rate is not None and common_phase_one_rate is not None
+        else None
+      ),
+      "warning": (
+        None
+        if common_comparison_available
+        else "没有一期与 V3 同时 READY 的连续暴露时段，禁止比较候选频率。"
+      ),
+    },
+    "fee_adjusted_comparison_available": bool(
+      v3_performance_available and baseline_fee_available
+    ),
+    "warning": (
+      None
+      if v3_performance_available and baseline_fee_available
+      else "任一侧缺少权威费用后结果，禁止比较收益优劣。"
+    ),
+  }
+  return result
+
+
+def _candidate_rate_per_ready_hour(
+  candidate_count: int,
+  ready_seconds: float,
+) -> Optional[float]:
+  if ready_seconds <= 0:
+    return None
+  return max(0, int(candidate_count)) * 3600.0 / ready_seconds
 
 
 def _trade_payload(trade: Any) -> Dict[str, Any]:
@@ -220,7 +664,12 @@ def _capital_usage(
   }
 
 
-def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
+def build_t_trade_replay_metrics(
+  runtime: Any,
+  *,
+  opportunity_diagnostics: Optional[Mapping[str, Any]] = None,
+  diagnostics_unavailable_reason: Optional[str] = None,
+) -> Dict[str, Any]:
   """Build a compact, JSON-safe replay result from the completed runtime."""
 
   broker = getattr(runtime, "broker", None)
@@ -370,9 +819,7 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
   initial_equity = _number(
     getattr(broker, "initial_capital", None), reported_initial_equity
   )
-  configured_reconciliation = dict(
-    params.get("initial_asset_reconciliation") or {}
-  )
+  configured_reconciliation = dict(params.get("initial_asset_reconciliation") or {})
   broker_reconciliation = dict(
     getattr(broker, "initial_asset_reconciliation", {}) or {}
   )
@@ -504,12 +951,8 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
       f"{missing_limit_events} 个行情事件缺少可确认的涨跌停价，严格风控保持拒绝"
     )
   if tick_read_issues:
-    quality_messages.append(
-      f"{len(tick_read_issues)} 个 Tick 读取窗口未通过完整性校验"
-    )
-  non_trading_asset = max(
-    0.0, _number(asset_reconciliation.get("non_trading_asset"))
-  )
+    quality_messages.append(f"{len(tick_read_issues)} 个 Tick 读取窗口未通过完整性校验")
+  non_trading_asset = max(0.0, _number(asset_reconciliation.get("non_trading_asset")))
   raw_asset_residual = _number(asset_reconciliation.get("raw_residual"))
   if non_trading_asset > 0.01:
     quality_messages.append(
@@ -531,16 +974,22 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
     }
   ]
   if source_quality_flags:
-    quality_messages.append(
-      "初始资产快照质量标记：" + "、".join(source_quality_flags)
-    )
+    quality_messages.append("初始资产快照质量标记：" + "、".join(source_quality_flags))
   data_quality = "PARTIAL" if quality_messages else "OK"
-  return {
+  rollout_evidence = _rollout_evidence(
+    params,
+    trading_dates=trading_dates,
+    data_quality=data_quality,
+    tick_read_audit=tick_read_audit,
+    skipped_instruments=skipped,
+  )
+  metrics = {
     "data_quality": data_quality,
     "data_quality_message": "；".join(quality_messages)
     if quality_messages
     else "历史回放与期末清算完整",
     "skipped_stock_codes": [str(item.get("stock_code", "") or "") for item in skipped],
+    "rollout_evidence": rollout_evidence,
     "methodology": {
       "forced_liquidation": "回放结束时仅清算回放新增的 T 批次；合法性校验失败时不伪造成交",
       "capital_utilization": (
@@ -605,3 +1054,26 @@ def build_t_trade_replay_metrics(runtime: Any) -> Dict[str, Any]:
     "cycles": cycles,
     "liquidation": liquidation,
   }
+  metrics_with_diagnostics = attach_t_trade_opportunity_diagnostics(
+    metrics,
+    opportunity_diagnostics,
+    expected_strategy_run_id=str(getattr(runtime, "run_id", "") or "") or None,
+    unavailable_reason=diagnostics_unavailable_reason,
+  )
+  baseline_accumulator = getattr(runtime, "t_trade_phase_one_baseline", None)
+  baseline_snapshot = None
+  snapshot = getattr(baseline_accumulator, "snapshot", None)
+  if callable(snapshot):
+    baseline_snapshot = snapshot()
+  return attach_t_trade_phase_one_baseline(
+    metrics_with_diagnostics,
+    baseline_snapshot,
+  )
+
+
+__all__ = [
+  "OPPORTUNITY_DIAGNOSTICS_SCHEMA_VERSION",
+  "attach_t_trade_opportunity_diagnostics",
+  "attach_t_trade_phase_one_baseline",
+  "build_t_trade_replay_metrics",
+]

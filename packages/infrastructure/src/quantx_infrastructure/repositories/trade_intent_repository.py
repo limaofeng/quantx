@@ -1,18 +1,15 @@
 """交易意图仓储层 - 处理 TradeIntentRecord 相关操作。"""
 
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import asc, desc, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.database.relational_base import BaseRepository
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 
-_T_TRADE_ENTRY_REASONS = (
-  "T_TRADE_PULLBACK_REBOUND_ENTRY",
-  "T_TRADE_MOMENTUM_ACCELERATION_ENTRY",
-)
+_V3_MANUAL_RECOVERY_MAX_ROWS = 4096
 
 
 class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
@@ -69,63 +66,6 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     )
     return list(result.scalars().all())
 
-  async def find_recent_t_trade_entries(
-    self, strategy_run_ids: List[str], limit: int = 50
-  ) -> List[TradeIntentRecord]:
-    """获取一组做 T 策略运行最近产生的买入确认信号。"""
-    normalized_run_ids = [str(run_id) for run_id in strategy_run_ids if run_id]
-    if not normalized_run_ids:
-      return []
-    result = await self.db.execute(
-      select(TradeIntentRecord)
-      .filter(TradeIntentRecord.strategy_run_id.in_(normalized_run_ids))
-      .filter(TradeIntentRecord.direction == "BUY")
-      .filter(TradeIntentRecord.reason.in_(_T_TRADE_ENTRY_REASONS))
-      .order_by(desc(TradeIntentRecord.created_at))
-      .limit(max(1, min(int(limit or 50), 200)))
-    )
-    return list(result.scalars().all())
-
-  async def find_recent_t_trade_entries_page(
-    self,
-    strategy_run_ids: List[str],
-    *,
-    cursor_created_at: Optional[datetime] = None,
-    cursor_id: Optional[str] = None,
-    first: int = 30,
-  ) -> tuple[List[TradeIntentRecord], bool]:
-    normalized_run_ids = [str(run_id) for run_id in strategy_run_ids if run_id]
-    if not normalized_run_ids:
-      return [], False
-    safe_first = max(1, min(int(first or 30), 100))
-    stmt = (
-      select(TradeIntentRecord)
-      .filter(TradeIntentRecord.strategy_run_id.in_(normalized_run_ids))
-      .filter(TradeIntentRecord.direction == "BUY")
-      .filter(TradeIntentRecord.reason.in_(_T_TRADE_ENTRY_REASONS))
-    )
-    if cursor_created_at is not None and cursor_id:
-      stmt = stmt.filter(
-        or_(
-          TradeIntentRecord.created_at < cursor_created_at,
-          and_(
-            TradeIntentRecord.created_at == cursor_created_at,
-            TradeIntentRecord.id < cursor_id,
-          ),
-        )
-      )
-    rows = list(
-      (
-        await self.db.execute(
-          stmt.order_by(
-            TradeIntentRecord.created_at.desc(),
-            TradeIntentRecord.id.desc(),
-          ).limit(safe_first + 1)
-        )
-      ).scalars().all()
-    )
-    return rows[:safe_first], len(rows) > safe_first
-
   async def find_by_status(self, status: str) -> List[TradeIntentRecord]:
     """根据状态获取交易意图。"""
     result = await self.db.execute(
@@ -177,6 +117,76 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     )
     return list(result.scalars().all())
 
+  async def find_v3_manual_candidate_recovery_intents(
+    self,
+    strategy_run_id: str,
+    *,
+    linked_intent_ids: Optional[List[str]] = None,
+    max_rows: int = _V3_MANUAL_RECOVERY_MAX_ROWS,
+  ) -> List[TradeIntentRecord]:
+    """Return active V3 manual-entry rows for one exact strategy run.
+
+    Account ownership is deliberately validated by ``RuntimeStateManager``
+    against both the owning StrategyRun and each returned row.  This query is
+    run-scoped first so no startup recovery can inspect another runtime.
+    """
+
+    normalized_run_id = str(strategy_run_id or "").strip()
+    if not normalized_run_id:
+      raise ValueError("策略运行标识不能为空")
+    normalized_linked_ids = sorted(
+      {
+        str(intent_id or "").strip()
+        for intent_id in list(linked_intent_ids or [])
+        if str(intent_id or "").strip()
+      }
+    )
+    row_limit = max(1, min(int(max_rows or 1), _V3_MANUAL_RECOVERY_MAX_ROWS))
+    if len(normalized_linked_ids) > row_limit:
+      raise RuntimeError(
+        "V3 候选恢复关联意图超过有界上限: "
+        f"count={len(normalized_linked_ids)}, limit={row_limit}"
+      )
+    # Terminal recovery notes are historical audit, not an open-work index.
+    # A terminal row is relevant only when the current RuntimeState links its
+    # exact primary key; otherwise every restart would reload the run's full
+    # recovery history forever.
+    recovery_scope = [
+      TradeIntentRecord.status.in_(("PENDING", "AWAITING_APPROVAL")),
+    ]
+    if normalized_linked_ids:
+      recovery_scope.append(TradeIntentRecord.id.in_(normalized_linked_ids))
+    result = await self.db.execute(
+      select(TradeIntentRecord)
+      .filter(TradeIntentRecord.strategy_run_id == normalized_run_id)
+      .filter(TradeIntentRecord.direction == "BUY")
+      .filter(or_(*recovery_scope))
+      .order_by(asc(TradeIntentRecord.created_at), asc(TradeIntentRecord.id))
+      .limit(row_limit + 1)
+    )
+    rows = list(result.scalars().all())
+    if len(rows) > row_limit:
+      raise RuntimeError(
+        "V3 候选恢复查询超过有界上限: "
+        f"run_id={normalized_run_id}, limit={row_limit}"
+      )
+    candidates: List[TradeIntentRecord] = []
+    for row in rows:
+      metadata = dict(row.intent_metadata or {})
+      try:
+        schema_version = int(metadata.get("opportunity_schema_version") or 0)
+      except (TypeError, ValueError, OverflowError):
+        schema_version = 0
+      if (
+        schema_version >= 3
+        and str(metadata.get("t_trade_role") or "").strip().lower() == "entry"
+        and str(metadata.get("execution_mode") or "").strip().upper()
+        == "MANUAL_CONFIRM"
+        and str(metadata.get("candidate_id") or "").strip()
+      ):
+        candidates.append(row)
+    return candidates
+
   async def create_intent(self, intent_data: Dict[str, Any]) -> TradeIntentRecord:
     """创建交易意图记录。"""
     intent = TradeIntentRecord(**self._normalize_payload(intent_data))
@@ -184,6 +194,94 @@ class TradeIntentRepository(BaseRepository[TradeIntentRecord]):
     await self.db.commit()
     await self.db.refresh(intent)
     return intent
+
+  async def create_intent_idempotent(
+    self,
+    intent_data: Dict[str, Any],
+  ) -> TradeIntentRecord:
+    """Append an intent once without ever resetting an existing lifecycle.
+
+    Deterministic intent IDs are retry keys, not permission to upsert mutable
+    trading truth. An exact retry may reuse the existing initial record; a
+    cross-run collision, identity mismatch, or attempt to reset an advanced
+    status fails closed.
+    """
+
+    normalized = self._normalize_payload(intent_data)
+    intent_id = str(normalized.get("id") or "").strip()
+    if not intent_id:
+      raise ValueError("交易意图标识不能为空")
+    existing = await self.find_by_id(intent_id)
+    if existing is not None:
+      self._validate_idempotent_create(existing, normalized)
+      return existing
+
+    intent = TradeIntentRecord(**normalized)
+    self.db.add(intent)
+    try:
+      await self.db.commit()
+    except IntegrityError:
+      # A concurrent exact retry may win the unique-key race. Re-read and
+      # perform the same immutable identity/status validation.
+      await self.db.rollback()
+      existing = await self.find_by_id(intent_id)
+      if existing is None:
+        raise
+      self._validate_idempotent_create(existing, normalized)
+      return existing
+    await self.db.refresh(intent)
+    return intent
+
+  @staticmethod
+  def _validate_idempotent_create(
+    existing: TradeIntentRecord,
+    incoming: Dict[str, Any],
+  ) -> None:
+    immutable_fields = (
+      "strategy_run_id",
+      "account_id",
+      "strategy_id",
+      "instrument_code",
+      "direction",
+      "bucket",
+      "reason",
+    )
+    mismatched = [
+      field
+      for field in immutable_fields
+      if field in incoming
+      and str(getattr(existing, field, "") or "")
+      != str(incoming.get(field) or "")
+    ]
+    existing_metadata = dict(existing.intent_metadata or {})
+    incoming_metadata = dict(incoming.get("intent_metadata") or {})
+    try:
+      opportunity_schema_version = int(
+        incoming_metadata.get("opportunity_schema_version") or 0
+      )
+    except (TypeError, ValueError, OverflowError):
+      opportunity_schema_version = 0
+    if opportunity_schema_version >= 3:
+      for field in (
+        "candidate_id",
+        "candidate_fingerprint",
+        "candidate_state_version",
+        "config_version",
+        "policy_version",
+      ):
+        if str(existing_metadata.get(field) or "") != str(
+          incoming_metadata.get(field) or ""
+        ):
+          mismatched.append(f"metadata.{field}")
+    existing_status = str(existing.status or "").upper()
+    incoming_status = str(incoming.get("status") or "").upper()
+    if existing_status != incoming_status:
+      mismatched.append("status")
+    if mismatched:
+      raise ValueError(
+        "TRADE_INTENT_IDEMPOTENCY_CONFLICT: "
+        f"intent_id={existing.id}, fields={','.join(sorted(set(mismatched)))}"
+      )
 
   async def update_intent(
     self, intent_id: str, intent_data: Dict[str, Any]

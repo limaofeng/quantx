@@ -138,9 +138,14 @@ from .strategy_run_state import (
   StrategyRunPosition,
   StrategyRunState,
 )
+from .t_trade_candidate_outcome import TTradeCandidateOutcome
 from .t_trade_global_config import TTradeGlobalConfig
 from .t_trade_global_monitor_projection import TTradeGlobalMonitorProjection
 from .t_trade_imported_entry import TTradeImportedEntry
+from .t_trade_opportunity_intelligence import (
+  TTradeInstrumentProfile,
+  TTradeOpportunityEvaluation,
+)
 from .t_trade_replay_projection import TTradeReplayProjection
 from .table_comments import apply_table_comments
 from .tick import Tick
@@ -176,6 +181,8 @@ __all__ = [
   "TTradeGlobalConfig",
   "TTradeGlobalMonitorProjection",
   "TTradeImportedEntry",
+  "TTradeInstrumentProfile",
+  "TTradeOpportunityEvaluation",
   "TTradeReplayProjection",
   "WatchlistItem",
   "Account",
@@ -219,6 +226,7 @@ __all__ = [
   "StrategyOrderCorrelation",
   "StrategyRuntimeEvent",
   "TTradeBatch",
+  "TTradeCandidateOutcome",
   "TradeCommandOutbox",
   "Holiday",
   "Sector",

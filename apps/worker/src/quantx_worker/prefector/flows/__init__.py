@@ -21,6 +21,7 @@ _EXPORTS = {
   "instrument_request_flow": "durable_agent_flows",
   "ios_notification_projection_flow": "ios_notification_projection_flow",
   "market_universe_request_flow": "durable_agent_flows",
+  "t_trade_instrument_profile_flow": "t_trade_instrument_profile_flow",
 }
 
 __all__ = sorted(_EXPORTS)

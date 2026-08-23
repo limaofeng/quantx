@@ -1,3 +1,4 @@
+import type { DocumentNode } from 'graphql';
 import {
   Activity,
   AlertTriangle,
@@ -37,7 +38,13 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { useMutation, useQuery, useSubscription } from 'urql';
+import {
+  useClient,
+  useMutation,
+  useQuery,
+  useSubscription,
+  type OperationContext,
+} from 'urql';
 
 import {
   StudioWorkbench,
@@ -56,14 +63,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { useGraphqlWsStatus } from '@/core/graphql/ws-status';
+import {
+  useGraphqlWsStatus,
+  type GraphqlWsStatus,
+} from '@/core/graphql/ws-status';
 import { useTradingSafety } from '@/features/trading-safety';
+import { useFragment as readFragment } from '@/generated/gql';
 import {
   TTradeRolloutTarget,
   TTradeTimeExitMode,
   type TTradeBatch,
   type TTradeBatchEvent,
-  type TTradeSignalHistoryEntry,
 } from '@/generated/gql/graphql';
 import { useToast } from '@/hooks/use-toast';
 import { useTradingDays } from '@/hooks/useTradingDays';
@@ -71,12 +81,9 @@ import { tradingAccountConfig } from '@/shared/utils/env';
 import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
-import {
-  ApproveTTradeEntryMutation,
-  RejectTTradeEntryMutation,
-} from '../hooks/usePortfolio';
 import { useLatestMarketQuotes } from '../hooks/useRealTimeHoldings';
 import {
+  ApproveTTradeEntryV3Mutation,
   CancelTTradeReplayMutation,
   CancelTTradeOrderMutation,
   ActivateTTradeLiveMutation,
@@ -84,6 +91,9 @@ import {
   ImportTTradeExternalEntryMutation,
   ReconcileTTradeGlobalMonitorMutation,
   PauseTTradeEntriesMutation,
+  PreviewTTradeSignalPolicyMutation,
+  RecordTTradeClientTelemetryMutation,
+  RejectTTradeEntryV3Mutation,
   SaveTTradeGlobalMonitorMutation,
   StartTTradeReplayMutation,
   SyncTTradeSourceOrdersMutation,
@@ -96,12 +106,32 @@ import {
   TTradeReplayPreparationQuery,
   TTradeReplayQuery,
   TTradeReplayUpdatesSubscription,
-  TTradeSignalHistoryPageQuery,
+  TTradeCandidateTraceQuery,
+  TTradeSignalDiagnosticsQuery,
+  TTradeSignalEvaluationsQuery,
+  TTradeSignalPolicyFieldsFragment,
+  TTradeSignalSnapshotFieldsFragment,
   TTradeUpdatesSubscription,
   TTradeSourceOrdersQuery,
   TriggerTTradeKillSwitchMutation,
 } from '../hooks/useTTradeGlobal';
 
+import {
+  createRollingDiagnosticRange,
+  hasCandidateTraceIdentity,
+} from './t-trade-global/clientTrust';
+import {
+  canApproveSnapshot,
+  createSignalSnapshotRefreshCoordinator,
+  createTTradeClientTelemetryReporter,
+  type SignalSnapshot,
+} from './t-trade-global/monitoring';
+import {
+  clearPersistedOperation,
+  persistUncertainOperation,
+  readUncertainOperation,
+  type ClientOperationRef,
+} from './t-trade-global/operationPersistence';
 import { readinessStageLabel } from './t-trade-global/readiness';
 import {
   isNewerReplayRevision,
@@ -110,38 +140,59 @@ import {
   stableValueByKey,
 } from './t-trade-global/replaySync';
 import {
+  isAppliedTTradeGlobalSave,
+  tTradeGlobalSaveToastTitle,
+} from './t-trade-global/saveOutcome';
+import {
+  createTTradeServerTruthRefreshPolicy,
+  T_TRADE_SERVER_TRUTH_AUDIT_INTERVAL_MS,
+} from './t-trade-global/serverTruthRecovery';
+import {
+  defaultSignalPolicyForm,
+  localSignalPolicyErrors,
+  signalPolicyForm,
+  signalPolicyInput,
+  type SignalPolicyLike,
+} from './t-trade-global/signalPolicy';
+import {
   TTradeHealthConsole,
   TTradeLiveBoard,
+  type SignalEvaluationLike,
 } from './t-trade-global/TTradeLiveMonitor';
+import { TTradeSignalDiagnosticsPanel } from './t-trade-global/TTradeSignalDiagnostics';
+import {
+  TTradeSignalPolicyEditor,
+  type SignalPolicyPreviewLike,
+} from './t-trade-global/TTradeSignalPolicyEditor';
+import {
+  type CandidateTraceSelection,
+  TTradeSignalsView,
+} from './t-trade-global/TTradeSignalsView';
 import type {
   SettingsForm,
-  SignalHistoryFilter,
-  SignalPanelMode,
+  SignalPolicyForm,
+  SignalPolicyFormValue,
   TTradeStudioMode,
 } from './t-trade-global/types';
 import { useLiveQuoteHistory } from './t-trade-global/useLiveQuoteHistory';
 import {
   batchStatusLabels,
   formatNumber,
-  formatQuoteTime,
   formatSignedPercent,
   formatTime,
   hasInstrumentName,
   integerValue,
   numberValue,
-  quoteTone,
   replayDatePreset,
   replayIdempotencyKey,
   replayStatusLabel,
   resolveInstrumentName,
-  signalHistoryCategory,
-  signalReasonLabel,
-  signalStatusPresentation,
 } from './t-trade-global/utils';
 
 const tTradeModes: StudioMode[] = [
   { id: 'MONITOR', icon: Radar, label: '总览' },
   { id: 'SIGNALS', icon: Activity, label: '信号' },
+  { id: 'DIAGNOSTICS', icon: BarChart3, label: '诊断' },
   { id: 'POSITIONS', icon: WalletCards, label: '做T仓位' },
   { id: 'EVENTS', icon: ListChecks, label: '订单事件' },
   { id: 'SETTINGS', icon: Settings2, label: '参数' },
@@ -168,23 +219,7 @@ const defaultForm: SettingsForm = {
   rapidReversalConfirmTicks: '2',
   hardStopEnabled: false,
   hardStopPct: '-0.8',
-  signalLookbackSeconds: '300',
-  stabilizationSeconds: '15',
-  pullbackThresholdPct: '0.8',
-  reboundThresholdPct: '0.2',
-  maxSpreadTicks: '3',
-  momentumEnabled: true,
-  momentumWindowSeconds: '60',
-  momentumMinRisePct: '0.8',
-  momentumMinMoveSeconds: '15',
-  momentumBaselineSeconds: '300',
-  momentumMinAmountVelocityRatio: '2',
-  momentumMinVwapPremiumPct: '2',
-  momentumMaxVwapPremiumPct: '3.5',
-  momentumHighToleranceTicks: '1',
-  momentumMaxSpreadTicks: '10',
-  momentumMaxSpreadPct: '0.3',
-  approvalTtlSeconds: '30',
+  signalPolicy: defaultSignalPolicyForm,
   maxPriceDeviationPct: '0.3',
   limitUpTouchExitEnabled: true,
   limitUpTouchToleranceTicks: '0',
@@ -340,6 +375,10 @@ function TTradeReplayPanel({
   });
   const [startResult, startReplay] = useMutation(StartTTradeReplayMutation);
   const [cancelResult, cancelReplay] = useMutation(CancelTTradeReplayMutation);
+  const replayOperationRef = React.useRef<ClientOperationRef | null>(null);
+  React.useEffect(() => {
+    replayOperationRef.current = readUncertainOperation(`replay:${accountId}`);
+  }, [accountId]);
   const graphqlWsStatus = useGraphqlWsStatus();
   const [replayUpdateResult] = useSubscription({
     query: TTradeReplayUpdatesSubscription,
@@ -510,90 +549,108 @@ function TTradeReplayPanel({
   };
 
   const handleStart = async () => {
+    const input = {
+      accountId,
+      startTime,
+      endTime,
+      initialPositions: [],
+      targetTradeAmount: numberValue(form.targetTradeAmount, 10000),
+      maxTradeAmount: numberValue(form.maxTradeAmount, 12000),
+      maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
+      maxTotalTExposurePct: numberValue(form.maxTotalTExposurePct, 10) / 100,
+      signalPolicy: signalPolicyInput(form.signalPolicy),
+      maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
+      targetProfitPct: numberValue(form.targetProfitPct, 2),
+      baseFloorPct: numberValue(form.baseFloorPct, 0.5),
+      initialGapPct: numberValue(form.initialGapPct, 1.5),
+      trailingGapSlope: numberValue(form.trailingGapSlope, 0.25),
+      maxGapPct: numberValue(form.maxGapPct, 3),
+      highProfitLockEnabled: form.highProfitLockEnabled,
+      highProfitArmPct: numberValue(form.highProfitArmPct, 4),
+      highProfitMaxDrawdownPct: numberValue(form.highProfitMaxDrawdownPct, 1.2),
+      rapidReversalEnabled: form.rapidReversalEnabled,
+      rapidReversalWindowSeconds: integerValue(
+        form.rapidReversalWindowSeconds,
+        15
+      ),
+      rapidReversalDrawdownPct: numberValue(form.rapidReversalDrawdownPct, 0.8),
+      rapidReversalConfirmTicks: integerValue(
+        form.rapidReversalConfirmTicks,
+        2
+      ),
+      limitUpTouchExitEnabled: form.limitUpTouchExitEnabled,
+      limitUpTouchToleranceTicks: integerValue(
+        form.limitUpTouchToleranceTicks,
+        0
+      ),
+      hardStopEnabled: form.hardStopEnabled,
+      hardStopPct: numberValue(form.hardStopPct, -0.8),
+      timeExitMode: form.timeExitMode,
+      timeExitTime: form.timeExitTime,
+      maxHoldingTradingDays: integerValue(form.maxHoldingTradingDays, 5),
+      cooldownSeconds: integerValue(form.cooldownSeconds, 300),
+    };
+    const identity = JSON.stringify(input);
+    const previousOperation = replayOperationRef.current;
+    if (previousOperation?.blocked) {
+      toast({
+        title: '回放操作不可恢复',
+        description: '浏览器中的未决回放记录不可用，请清理后再发起操作。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      previousOperation?.uncertain &&
+      previousOperation.identity !== identity
+    ) {
+      toast({
+        title: '上一笔回放结果未知',
+        description: '请先恢复原回放结果，不能用新的参数重复启动。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const operation =
+      previousOperation?.identity === identity
+        ? previousOperation
+        : {
+            identity,
+            idempotencyKey: replayIdempotencyKey(),
+            uncertain: false,
+          };
+    const pendingOperation = { ...operation, uncertain: true };
+    if (!persistUncertainOperation(`replay:${accountId}`, pendingOperation)) {
+      replayOperationRef.current = { ...pendingOperation, blocked: true };
+      toast({
+        title: '无法安全记录回放操作',
+        description: '未写入浏览器未决记录，本次回放未发送。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    replayOperationRef.current = pendingOperation;
+    let responseReceived = false;
     try {
       const result = await startReplay({
-        input: {
-          accountId,
-          idempotencyKey: replayIdempotencyKey(),
-          startTime,
-          endTime,
-          initialPositions: [],
-          targetTradeAmount: numberValue(form.targetTradeAmount, 10000),
-          maxTradeAmount: numberValue(form.maxTradeAmount, 12000),
-          maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
-          maxTotalTExposurePct:
-            numberValue(form.maxTotalTExposurePct, 10) / 100,
-          signalLookbackSeconds: integerValue(form.signalLookbackSeconds, 300),
-          stabilizationSeconds: integerValue(form.stabilizationSeconds, 15),
-          pullbackThresholdPct: numberValue(form.pullbackThresholdPct, 0.8),
-          reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
-          maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
-          momentumEnabled: form.momentumEnabled,
-          momentumWindowSeconds: integerValue(form.momentumWindowSeconds, 60),
-          momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
-          momentumMinMoveSeconds: integerValue(form.momentumMinMoveSeconds, 15),
-          momentumBaselineSeconds: integerValue(
-            form.momentumBaselineSeconds,
-            300
-          ),
-          momentumMinAmountVelocityRatio: numberValue(
-            form.momentumMinAmountVelocityRatio,
-            2
-          ),
-          momentumMinVwapPremiumPct: numberValue(
-            form.momentumMinVwapPremiumPct,
-            2
-          ),
-          momentumMaxVwapPremiumPct: numberValue(
-            form.momentumMaxVwapPremiumPct,
-            3.5
-          ),
-          momentumHighToleranceTicks: integerValue(
-            form.momentumHighToleranceTicks,
-            1
-          ),
-          momentumMaxSpreadTicks: integerValue(form.momentumMaxSpreadTicks, 10),
-          momentumMaxSpreadPct: numberValue(form.momentumMaxSpreadPct, 0.3),
-          approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
-          maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
-          targetProfitPct: numberValue(form.targetProfitPct, 2),
-          baseFloorPct: numberValue(form.baseFloorPct, 0.5),
-          initialGapPct: numberValue(form.initialGapPct, 1.5),
-          trailingGapSlope: numberValue(form.trailingGapSlope, 0.25),
-          maxGapPct: numberValue(form.maxGapPct, 3),
-          highProfitLockEnabled: form.highProfitLockEnabled,
-          highProfitArmPct: numberValue(form.highProfitArmPct, 4),
-          highProfitMaxDrawdownPct: numberValue(
-            form.highProfitMaxDrawdownPct,
-            1.2
-          ),
-          rapidReversalEnabled: form.rapidReversalEnabled,
-          rapidReversalWindowSeconds: integerValue(
-            form.rapidReversalWindowSeconds,
-            15
-          ),
-          rapidReversalDrawdownPct: numberValue(
-            form.rapidReversalDrawdownPct,
-            0.8
-          ),
-          rapidReversalConfirmTicks: integerValue(
-            form.rapidReversalConfirmTicks,
-            2
-          ),
-          limitUpTouchExitEnabled: form.limitUpTouchExitEnabled,
-          limitUpTouchToleranceTicks: integerValue(
-            form.limitUpTouchToleranceTicks,
-            0
-          ),
-          hardStopEnabled: form.hardStopEnabled,
-          hardStopPct: numberValue(form.hardStopPct, -0.8),
-          timeExitMode: form.timeExitMode,
-          timeExitTime: form.timeExitTime,
-          maxHoldingTradingDays: integerValue(form.maxHoldingTradingDays, 5),
-          cooldownSeconds: integerValue(form.cooldownSeconds, 300),
-        },
+        input: { ...input, idempotencyKey: operation.idempotencyKey },
       });
+      responseReceived = true;
       const payload = result.data?.startTTradeReplay;
+      // Keep the operation key while the Engine outcome is unknown, including
+      // a transport error with no GraphQL payload. A terminal response marks
+      // the next click as a new user action.
+      const uncertain =
+        !payload ||
+        String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+        String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+      if (uncertain) {
+        replayOperationRef.current = pendingOperation;
+        persistUncertainOperation(`replay:${accountId}`, pendingOperation);
+      } else {
+        replayOperationRef.current = null;
+        clearPersistedOperation(`replay:${accountId}`);
+      }
       if (!payload?.success || !payload.replay?.runId) {
         throw new Error(
           payload?.message || result.error?.message || '启动失败'
@@ -603,6 +660,10 @@ function TTradeReplayPanel({
       toast({ title: '历史回放已启动', description: payload.message });
       refreshHistory({ requestPolicy: 'network-only' });
     } catch (error) {
+      if (!responseReceived) {
+        replayOperationRef.current = pendingOperation;
+        persistUncertainOperation(`replay:${accountId}`, pendingOperation);
+      }
       toast({
         title: '无法启动历史回放',
         description: error instanceof Error ? error.message : '请求失败',
@@ -733,7 +794,7 @@ function TTradeReplayPanel({
                 className="h-8 rounded-sm bg-cyan-500 px-3 text-[10px] font-black text-slate-950 hover:bg-cyan-400"
               >
                 {startResult.fetching ? (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                 ) : (
                   <Play className="mr-1.5 h-3.5 w-3.5" />
                 )}
@@ -751,7 +812,7 @@ function TTradeReplayPanel({
             )}
           >
             {preparationResult.fetching ? (
-              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+              <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
             ) : preparation?.requiresManualPortfolio ||
               preparationResult.error ? (
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -826,7 +887,7 @@ function TTradeReplayPanel({
                     className="h-8 rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-[10px] text-rose-200 hover:bg-rose-400/10"
                   >
                     {cancelResult.fetching ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                     ) : (
                       <Square className="mr-1.5 h-3 w-3" />
                     )}
@@ -1180,7 +1241,8 @@ function TTradeReplayPanel({
             <RefreshCw
               className={cn(
                 'h-3.5 w-3.5',
-                historyResult.fetching && 'animate-spin'
+                historyResult.fetching &&
+                  'animate-spin motion-reduce:animate-none'
               )}
             />
           </button>
@@ -1248,20 +1310,78 @@ export function TTradeGlobalPage() {
     : undefined;
   const [activeMode, setActiveMode] =
     React.useState<TTradeStudioMode>('MONITOR');
-  const [signalPanelMode, setSignalPanelMode] =
-    React.useState<SignalPanelMode>('PENDING');
-  const [signalHistoryFilter, setSignalHistoryFilter] =
-    React.useState<SignalHistoryFilter>('ALL');
   const [form, setForm] = React.useState<SettingsForm>(defaultForm);
   const [ignoredCodes, setIgnoredCodes] = React.useState<string[]>([]);
   const [ignoreInput, setIgnoreInput] = React.useState('');
   const [lastMonitorRefreshAt, setLastMonitorRefreshAt] =
     React.useState<Date | null>(null);
   const [manualRefreshPending, setManualRefreshPending] = React.useState(false);
+  const [draftDirty, setDraftDirty] = React.useState(false);
+  const [policyPreview, setPolicyPreview] =
+    React.useState<SignalPolicyPreviewLike | null>(null);
+  const [configConflictVersion, setConfigConflictVersion] = React.useState<
+    number | null
+  >(null);
+  const [configConflictPolicy, setConfigConflictPolicy] =
+    React.useState<SignalPolicyLike | null>(null);
   const hydratedVersionRef = React.useRef('');
+  const draftConfigVersionRef = React.useRef(0);
   const lastMonitorRefreshRequestRef = React.useRef(0);
   const autoSyncedSourceOrdersAccountRef = React.useRef('');
   const lastSourceOrdersSyncRequestRef = React.useRef(0);
+  const reconcileOperationRef = React.useRef<
+    (ClientOperationRef & { accountId: string }) | null
+  >(null);
+  const approveOperationRef = React.useRef(
+    new Map<string, ClientOperationRef>()
+  );
+  const controlledWindowOperationRef = React.useRef<ClientOperationRef | null>(
+    null
+  );
+  const activateLiveOperationRef = React.useRef<ClientOperationRef | null>(
+    null
+  );
+  const killSwitchOperationRef = React.useRef<ClientOperationRef | null>(null);
+  React.useEffect(() => {
+    const reconcile = readUncertainOperation(`reconcile:${accountId}`);
+    reconcileOperationRef.current = reconcile
+      ? { ...reconcile, accountId }
+      : null;
+    approveOperationRef.current.clear();
+    controlledWindowOperationRef.current = readUncertainOperation(
+      `begin-window:${accountId}`
+    );
+    // Keep one account-wide activation scope so a pending CANARY operation
+    // also blocks a second LIVE mutation after a refresh or stage change.
+    activateLiveOperationRef.current = readUncertainOperation(
+      `activate-live:${accountId}`
+    );
+    killSwitchOperationRef.current = readUncertainOperation(
+      `kill-switch:${accountId}`
+    );
+  }, [accountId]);
+  const subscriptionRefreshTimerRef = React.useRef<number | null>(null);
+  const graphqlWsStatus = useGraphqlWsStatus();
+  const client = useClient();
+  const previousWsStatusRef = React.useRef<GraphqlWsStatus | null>(null);
+  const wsStatusRef = React.useRef(graphqlWsStatus);
+  wsStatusRef.current = graphqlWsStatus;
+  const monitorRefreshSequenceRef = React.useRef(0);
+  const [signalSnapshotRefreshCoordinator] = React.useState(
+    createSignalSnapshotRefreshCoordinator
+  );
+  const [serverTruthRefreshPolicy] = React.useState(
+    createTTradeServerTruthRefreshPolicy
+  );
+  const [trustedSignalSnapshotEpoch, setTrustedSignalSnapshotEpoch] =
+    React.useState<number | null>(null);
+  const signalRefreshTelemetryRef = React.useRef<{
+    evaluationsPending: boolean;
+    evaluationsStarted: boolean;
+    diagnosticsPending: boolean;
+    diagnosticsStarted: boolean;
+    failed: boolean;
+  } | null>(null);
 
   const [monitorResult, refreshMonitor] = useQuery({
     query: TTradeGlobalMonitorQuery,
@@ -1269,7 +1389,115 @@ export function TTradeGlobalPage() {
     pause: !accountId || workspaceMode !== 'REALTIME',
     requestPolicy: 'network-only',
   });
-  const monitor = monitorResult.data?.tTradeGlobalMonitor;
+  const monitorPayload = monitorResult.data?.tTradeGlobalMonitor;
+  const monitorSignalPolicy = readFragment(
+    TTradeSignalPolicyFieldsFragment,
+    monitorPayload?.signalPolicy
+  );
+  const freshMonitor = React.useMemo(() => {
+    if (
+      !monitorPayload ||
+      monitorPayload.accountId !== accountId ||
+      !monitorSignalPolicy
+    ) {
+      return undefined;
+    }
+    return {
+      ...monitorPayload,
+      signalPolicy: monitorSignalPolicy,
+      holdings: monitorPayload.holdings.map(holding => ({
+        ...holding,
+        session: holding.session
+          ? {
+              ...holding.session,
+              signalSnapshot: readFragment(
+                TTradeSignalSnapshotFieldsFragment,
+                holding.session.signalSnapshot
+              ),
+            }
+          : null,
+      })),
+      sessions: monitorPayload.sessions.map(session => ({
+        ...session,
+        signalSnapshot: readFragment(
+          TTradeSignalSnapshotFieldsFragment,
+          session.signalSnapshot
+        ),
+      })),
+    };
+  }, [accountId, monitorPayload, monitorSignalPolicy]);
+  const runMonitorEpochRefresh = React.useCallback(
+    (epoch: number, expectedAccountId: string) => {
+      void signalSnapshotRefreshCoordinator
+        .refresh(epoch, expectedAccountId, async () => {
+          const requestInstance =
+            ++monitorRefreshSequenceRef.current as OperationContext['_instance'];
+          const result = await client
+            .query(
+              TTradeGlobalMonitorQuery as DocumentNode,
+              { accountId: expectedAccountId },
+              {
+                requestPolicy: 'network-only',
+                // URQL uses this internal identity to keep this epoch's
+                // promise from observing an older same-key result.
+                _instance: requestInstance,
+              }
+            )
+            .toPromise();
+          return Boolean(
+            result.data?.tTradeGlobalMonitor &&
+            result.data.tTradeGlobalMonitor.accountId === expectedAccountId &&
+            !result.error &&
+            wsStatusRef.current === 'connected'
+          );
+        })
+        .then(trusted => {
+          if (
+            trusted &&
+            wsStatusRef.current === 'connected' &&
+            signalSnapshotRefreshCoordinator.isTrusted(expectedAccountId)
+          ) {
+            setTrustedSignalSnapshotEpoch(epoch);
+          }
+        });
+    },
+    [client, signalSnapshotRefreshCoordinator]
+  );
+  const [lastTrustedMonitor, setLastTrustedMonitor] =
+    React.useState<typeof freshMonitor>();
+  React.useEffect(() => {
+    if (freshMonitor && !monitorResult.error) {
+      setLastTrustedMonitor(freshMonitor);
+    }
+  }, [freshMonitor, monitorResult.error]);
+  React.useEffect(() => {
+    setLastTrustedMonitor(undefined);
+  }, [accountId]);
+  React.useEffect(() => {
+    const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId);
+    setTrustedSignalSnapshotEpoch(null);
+    if (!accountId || workspaceMode !== 'REALTIME') return;
+    serverTruthRefreshPolicy.noteNetworkRequest(accountId, Date.now());
+    runMonitorEpochRefresh(epoch, accountId);
+  }, [
+    accountId,
+    runMonitorEpochRefresh,
+    signalSnapshotRefreshCoordinator,
+    serverTruthRefreshPolicy,
+    workspaceMode,
+  ]);
+  const monitor =
+    freshMonitor ||
+    (lastTrustedMonitor?.accountId === accountId
+      ? lastTrustedMonitor
+      : undefined);
+  const signalSnapshotTrusted =
+    graphqlWsStatus === 'connected' &&
+    !monitorResult.error &&
+    trustedSignalSnapshotEpoch != null &&
+    trustedSignalSnapshotEpoch ===
+      signalSnapshotRefreshCoordinator.currentEpoch() &&
+    signalSnapshotRefreshCoordinator.isTrusted(accountId);
   const positionNamesByCode = React.useMemo(() => {
     const names = new Map<string, string>();
     for (const holding of monitor?.holdings || []) {
@@ -1297,18 +1525,31 @@ export function TTradeGlobalPage() {
   const realTimeQuotesByCode = liveQuoteState.quotes;
   const quoteHistoryByCode = useLiveQuoteHistory(
     realTimeQuotesByCode,
-    workspaceMode === 'REALTIME' && activeMode === 'MONITOR'
+    workspaceMode === 'REALTIME' &&
+      (activeMode === 'MONITOR' || activeMode === 'SIGNALS')
   );
-  const graphqlWsStatus = useGraphqlWsStatus();
 
   const [batchAfter, setBatchAfter] = React.useState<string | null>(null);
   const [eventAfter, setEventAfter] = React.useState<string | null>(null);
   const [signalAfter, setSignalAfter] = React.useState<string | null>(null);
+  const [selectedTrace, setSelectedTrace] =
+    React.useState<CandidateTraceSelection | null>(null);
+  const selectedTraceForCurrentAccount =
+    selectedTrace?.accountId === accountId ? selectedTrace : null;
+  React.useEffect(() => {
+    setSelectedTrace(null);
+  }, [accountId]);
   const [batches, setBatches] = React.useState<TTradeBatch[]>([]);
   const [batchEvents, setBatchEvents] = React.useState<TTradeBatchEvent[]>([]);
-  const [signalHistoryRows, setSignalHistoryRows] = React.useState<
-    TTradeSignalHistoryEntry[]
+  const [signalEvaluations, setSignalEvaluations] = React.useState<
+    SignalEvaluationLike[]
   >([]);
+  const accountBoundSignalEvaluations = signalEvaluations.filter(
+    item => item.accountId === accountId
+  );
+  const [diagnosticRange, setDiagnosticRange] = React.useState(
+    createRollingDiagnosticRange
+  );
   const [batchesResult, refreshBatches] = useQuery({
     query: TTradeBatchesPageQuery,
     variables: {
@@ -1328,29 +1569,116 @@ export function TTradeGlobalPage() {
       !accountId || workspaceMode !== 'REALTIME' || activeMode !== 'EVENTS',
     requestPolicy: 'network-only',
   });
-  const [signalHistoryResult, refreshSignalHistory] = useQuery({
-    query: TTradeSignalHistoryPageQuery,
-    variables: { accountId, first: 30, after: signalAfter },
+  const [signalEvaluationsResult, refreshSignalEvaluations] = useQuery({
+    query: TTradeSignalEvaluationsQuery,
+    variables: {
+      accountId,
+      stockCode: null,
+      eventKinds: null,
+      startTime: diagnosticRange.startTime,
+      endTime: diagnosticRange.endTime,
+      first: 100,
+      after: signalAfter,
+    },
     pause:
       !accountId ||
       workspaceMode !== 'REALTIME' ||
-      activeMode !== 'SIGNALS' ||
-      signalPanelMode !== 'HISTORY',
+      !['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode),
     requestPolicy: 'network-only',
   });
+  const [signalDiagnosticsResult, refreshSignalDiagnostics] = useQuery({
+    query: TTradeSignalDiagnosticsQuery,
+    variables: {
+      accountId,
+      stockCode: null,
+      startTime: diagnosticRange.startTime,
+      endTime: diagnosticRange.endTime,
+      mergeVersions: false,
+    },
+    pause:
+      !accountId ||
+      workspaceMode !== 'REALTIME' ||
+      activeMode !== 'DIAGNOSTICS',
+    requestPolicy: 'network-only',
+  });
+  const [candidateTraceResult, refreshCandidateTrace] = useQuery({
+    query: TTradeCandidateTraceQuery,
+    variables: {
+      accountId: selectedTraceForCurrentAccount?.accountId || '',
+      strategyRunId: selectedTraceForCurrentAccount?.strategyRunId || '',
+      candidateId: selectedTraceForCurrentAccount?.candidateId || '',
+    },
+    pause:
+      !accountId ||
+      !selectedTraceForCurrentAccount ||
+      workspaceMode !== 'REALTIME' ||
+      activeMode !== 'SIGNALS',
+    requestPolicy: 'network-only',
+  });
+  const signalEvaluationsPage = React.useMemo(() => {
+    const page = signalEvaluationsResult.data?.tTradeSignalEvaluations;
+    if (!page || page.items.some(item => item.accountId !== accountId)) {
+      return undefined;
+    }
+    return page;
+  }, [accountId, signalEvaluationsResult.data?.tTradeSignalEvaluations]);
+  const diagnosticsPayload =
+    signalDiagnosticsResult.data?.tTradeSignalDiagnostics;
+  const diagnosticsForCurrentAccount =
+    diagnosticsPayload?.accountId === accountId
+      ? diagnosticsPayload
+      : undefined;
+  const candidateTracePayload = candidateTraceResult.data?.tTradeCandidateTrace;
+  const candidateTraceMatchesSelection = Boolean(
+    selectedTraceForCurrentAccount &&
+    candidateTracePayload &&
+    hasCandidateTraceIdentity(
+      candidateTracePayload,
+      selectedTraceForCurrentAccount
+    )
+  );
+  const candidateTraceForUi = candidateTraceMatchesSelection
+    ? candidateTracePayload
+    : undefined;
+  const candidateTraceIdentityMismatch = Boolean(
+    selectedTraceForCurrentAccount &&
+    candidateTracePayload &&
+    !candidateTraceMatchesSelection
+  );
   const [tTradeUpdateResult] = useSubscription({
     query: TTradeUpdatesSubscription,
     variables: { accountId },
     pause: !accountId || workspaceMode !== 'REALTIME',
   });
+  const [, recordClientTelemetry] = useMutation(
+    RecordTTradeClientTelemetryMutation
+  );
+  const reportClientTelemetry = React.useMemo(
+    () =>
+      createTTradeClientTelemetryReporter(event => {
+        if (!accountId) return;
+        return recordClientTelemetry({
+          accountId,
+          refreshSuccess: event === 'REFRESH_SUCCESS',
+          refreshFailure: event === 'REFRESH_FAILURE',
+          subscriptionReconnected: event === 'SUBSCRIPTION_RECONNECTED',
+        }).then(() => undefined);
+      }),
+    [accountId, recordClientTelemetry]
+  );
   const [saveResult, saveMonitor] = useMutation(
     SaveTTradeGlobalMonitorMutation
+  );
+  const [previewPolicyResult, previewSignalPolicy] = useMutation(
+    PreviewTTradeSignalPolicyMutation
   );
   const [reconcileResult, reconcileMonitor] = useMutation(
     ReconcileTTradeGlobalMonitorMutation
   );
-  const [approveResult, approveEntry] = useMutation(ApproveTTradeEntryMutation);
-  const [rejectResult, rejectEntry] = useMutation(RejectTTradeEntryMutation);
+  const [approveResult, approveEntry] = useMutation(
+    ApproveTTradeEntryV3Mutation
+  );
+  const [rejectResult, rejectEntry] = useMutation(RejectTTradeEntryV3Mutation);
   const [importResult, importExternalEntry] = useMutation(
     ImportTTradeExternalEntryMutation
   );
@@ -1417,19 +1745,27 @@ export function TTradeGlobalPage() {
     setSignalAfter(null);
     setBatches([]);
     setBatchEvents([]);
-    setSignalHistoryRows([]);
+    setSignalEvaluations([]);
+    setDiagnosticRange(createRollingDiagnosticRange());
+    signalRefreshTelemetryRef.current = null;
   }, [accountId]);
 
   React.useEffect(() => {
     const page = batchesResult.data?.tTradeBatchesPage;
     if (!page) return;
+    if (page.items.some(item => item.accountId !== accountId)) {
+      // Never render a page returned for a different account, even if a
+      // gateway or stale cache serves it under the current operation key.
+      setBatches([]);
+      return;
+    }
     setBatches(previous => {
       if (!batchAfter) return page.items;
       const byId = new Map(previous.map(item => [item.batchId, item]));
       for (const item of page.items) byId.set(item.batchId, item);
       return Array.from(byId.values());
     });
-  }, [batchAfter, batchesResult.data?.tTradeBatchesPage]);
+  }, [accountId, batchAfter, batchesResult.data?.tTradeBatchesPage]);
 
   React.useEffect(() => {
     const page = batchEventsResult.data?.tTradeBatchEventsPage;
@@ -1443,15 +1779,74 @@ export function TTradeGlobalPage() {
   }, [batchEventsResult.data?.tTradeBatchEventsPage, eventAfter]);
 
   React.useEffect(() => {
-    const page = signalHistoryResult.data?.tTradeSignalHistoryPage;
+    const page = signalEvaluationsResult.data?.tTradeSignalEvaluations;
     if (!page) return;
-    setSignalHistoryRows(previous => {
-      if (!signalAfter) return page.items;
-      const byId = new Map(previous.map(item => [item.intentId, item]));
-      for (const item of page.items) byId.set(item.intentId, item);
+    if (page.items.some(item => item.accountId !== accountId)) {
+      setSignalEvaluations([]);
+      return;
+    }
+    const items: SignalEvaluationLike[] = page.items.map(item => ({
+      ...item,
+      id: String(item.id),
+      signalSnapshot: readFragment(
+        TTradeSignalSnapshotFieldsFragment,
+        item.signalSnapshot
+      ),
+    }));
+    setSignalEvaluations(previous => {
+      if (!signalAfter) return items;
+      const byId = new Map(previous.map(item => [item.id, item]));
+      for (const item of items) byId.set(item.id, item);
       return Array.from(byId.values());
     });
-  }, [signalAfter, signalHistoryResult.data?.tTradeSignalHistoryPage]);
+  }, [
+    accountId,
+    signalAfter,
+    signalEvaluationsResult.data?.tTradeSignalEvaluations,
+  ]);
+
+  const finishSignalRefreshTelemetry = React.useCallback(() => {
+    const cycle = signalRefreshTelemetryRef.current;
+    if (!cycle || cycle.evaluationsPending || cycle.diagnosticsPending) {
+      return;
+    }
+    signalRefreshTelemetryRef.current = null;
+    reportClientTelemetry(cycle.failed ? 'REFRESH_FAILURE' : 'REFRESH_SUCCESS');
+  }, [reportClientTelemetry]);
+
+  React.useEffect(() => {
+    const cycle = signalRefreshTelemetryRef.current;
+    if (!cycle?.evaluationsPending) return;
+    if (signalEvaluationsResult.fetching) {
+      cycle.evaluationsStarted = true;
+      return;
+    }
+    if (!cycle.evaluationsStarted) return;
+    cycle.evaluationsPending = false;
+    cycle.failed ||= Boolean(signalEvaluationsResult.error);
+    finishSignalRefreshTelemetry();
+  }, [
+    finishSignalRefreshTelemetry,
+    signalEvaluationsResult.error,
+    signalEvaluationsResult.fetching,
+  ]);
+
+  React.useEffect(() => {
+    const cycle = signalRefreshTelemetryRef.current;
+    if (!cycle?.diagnosticsPending) return;
+    if (signalDiagnosticsResult.fetching) {
+      cycle.diagnosticsStarted = true;
+      return;
+    }
+    if (!cycle.diagnosticsStarted) return;
+    cycle.diagnosticsPending = false;
+    cycle.failed ||= Boolean(signalDiagnosticsResult.error);
+    finishSignalRefreshTelemetry();
+  }, [
+    finishSignalRefreshTelemetry,
+    signalDiagnosticsResult.error,
+    signalDiagnosticsResult.fetching,
+  ]);
 
   const refreshVisibleData = React.useCallback(() => {
     refreshMonitor({ requestPolicy: 'network-only' });
@@ -1463,9 +1858,24 @@ export function TTradeGlobalPage() {
       if (eventAfter) setEventAfter(null);
       else refreshBatchEvents({ requestPolicy: 'network-only' });
     }
-    if (activeMode === 'SIGNALS' && signalPanelMode === 'HISTORY') {
+    if (['MONITOR', 'SIGNALS', 'DIAGNOSTICS'].includes(activeMode)) {
+      const includeDiagnostics = activeMode === 'DIAGNOSTICS';
+      signalRefreshTelemetryRef.current = {
+        evaluationsPending: true,
+        evaluationsStarted: signalEvaluationsResult.fetching,
+        diagnosticsPending: includeDiagnostics,
+        diagnosticsStarted:
+          includeDiagnostics && signalDiagnosticsResult.fetching,
+        failed: false,
+      };
       if (signalAfter) setSignalAfter(null);
-      else refreshSignalHistory({ requestPolicy: 'network-only' });
+      else refreshSignalEvaluations({ requestPolicy: 'network-only' });
+      if (includeDiagnostics) {
+        refreshSignalDiagnostics({ requestPolicy: 'network-only' });
+      }
+      if (activeMode === 'SIGNALS' && selectedTraceForCurrentAccount) {
+        refreshCandidateTrace({ requestPolicy: 'network-only' });
+      }
     }
   }, [
     activeMode,
@@ -1473,10 +1883,30 @@ export function TTradeGlobalPage() {
     eventAfter,
     refreshBatchEvents,
     refreshBatches,
+    refreshCandidateTrace,
     refreshMonitor,
-    refreshSignalHistory,
+    refreshSignalDiagnostics,
+    refreshSignalEvaluations,
     signalAfter,
-    signalPanelMode,
+    signalDiagnosticsResult.fetching,
+    signalEvaluationsResult.fetching,
+    selectedTraceForCurrentAccount,
+  ]);
+
+  const requestAuthoritativeRefresh = React.useCallback(() => {
+    if (!accountId || workspaceMode !== 'REALTIME') return;
+    const epoch = signalSnapshotRefreshCoordinator.beginEpoch(accountId);
+    setTrustedSignalSnapshotEpoch(null);
+    serverTruthRefreshPolicy.noteNetworkRequest(accountId, Date.now());
+    refreshVisibleData();
+    runMonitorEpochRefresh(epoch, accountId);
+  }, [
+    accountId,
+    refreshVisibleData,
+    runMonitorEpochRefresh,
+    serverTruthRefreshPolicy,
+    signalSnapshotRefreshCoordinator,
+    workspaceMode,
   ]);
 
   const handleSourceOrdersRefresh = React.useCallback(
@@ -1519,9 +1949,115 @@ export function TTradeGlobalPage() {
   }, [accountId, handleSourceOrdersRefresh, showExternalEntry]);
 
   React.useEffect(() => {
-    if (!tTradeUpdateResult.data?.tTradeUpdates.version) return;
-    refreshVisibleData();
-  }, [refreshVisibleData, tTradeUpdateResult.data?.tTradeUpdates.version]);
+    const version = tTradeUpdateResult.data?.tTradeUpdates.version;
+    if (
+      !version ||
+      !serverTruthRefreshPolicy.shouldRefreshForSubscriptionVersion(
+        accountId,
+        version
+      )
+    ) {
+      return;
+    }
+    if (subscriptionRefreshTimerRef.current != null) {
+      window.clearTimeout(subscriptionRefreshTimerRef.current);
+    }
+    subscriptionRefreshTimerRef.current = window.setTimeout(() => {
+      subscriptionRefreshTimerRef.current = null;
+      requestAuthoritativeRefresh();
+    }, 250);
+    return () => {
+      if (subscriptionRefreshTimerRef.current != null) {
+        window.clearTimeout(subscriptionRefreshTimerRef.current);
+        subscriptionRefreshTimerRef.current = null;
+      }
+    };
+  }, [
+    accountId,
+    requestAuthoritativeRefresh,
+    serverTruthRefreshPolicy,
+    tTradeUpdateResult.data?.tTradeUpdates.version,
+  ]);
+
+  React.useEffect(() => {
+    const errorKey = tTradeUpdateResult.error?.message || null;
+    if (!errorKey) {
+      serverTruthRefreshPolicy.clearSubscriptionError(accountId);
+      return;
+    }
+    if (
+      serverTruthRefreshPolicy.shouldRefreshForSubscriptionError(
+        accountId,
+        errorKey
+      )
+    ) {
+      requestAuthoritativeRefresh();
+    }
+  }, [
+    accountId,
+    requestAuthoritativeRefresh,
+    serverTruthRefreshPolicy,
+    tTradeUpdateResult.error?.message,
+  ]);
+
+  React.useEffect(() => {
+    const previous = previousWsStatusRef.current;
+    previousWsStatusRef.current = graphqlWsStatus;
+    if (graphqlWsStatus !== 'connected') {
+      // A connected flag alone is not evidence that the monitor snapshot was
+      // refreshed after this transport interruption.
+      setTrustedSignalSnapshotEpoch(null);
+      serverTruthRefreshPolicy.resetForReconnect(accountId);
+      if (previous === 'connected') {
+        signalSnapshotRefreshCoordinator.beginEpoch(accountId);
+      }
+      return;
+    }
+    if (previous && previous !== 'connected') {
+      requestAuthoritativeRefresh();
+      reportClientTelemetry('SUBSCRIPTION_RECONNECTED');
+    }
+  }, [
+    accountId,
+    graphqlWsStatus,
+    reportClientTelemetry,
+    requestAuthoritativeRefresh,
+    serverTruthRefreshPolicy,
+    signalSnapshotRefreshCoordinator,
+  ]);
+
+  React.useEffect(() => {
+    if (
+      !accountId ||
+      workspaceMode !== 'REALTIME' ||
+      graphqlWsStatus !== 'connected'
+    ) {
+      return;
+    }
+    const auditServerTruth = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (
+        serverTruthRefreshPolicy.shouldRunAudit(
+          accountId,
+          graphqlWsStatus,
+          Date.now()
+        )
+      ) {
+        requestAuthoritativeRefresh();
+      }
+    };
+    const timer = window.setInterval(
+      auditServerTruth,
+      T_TRADE_SERVER_TRUTH_AUDIT_INTERVAL_MS
+    );
+    return () => window.clearInterval(timer);
+  }, [
+    accountId,
+    graphqlWsStatus,
+    requestAuthoritativeRefresh,
+    serverTruthRefreshPolicy,
+    workspaceMode,
+  ]);
 
   React.useEffect(() => {
     if (!accountId) return;
@@ -1530,18 +2066,20 @@ export function TTradeGlobalPage() {
       const now = Date.now();
       if (now - lastMonitorRefreshRequestRef.current < 5_000) return;
       lastMonitorRefreshRequestRef.current = now;
-      refreshVisibleData();
+      requestAuthoritativeRefresh();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') refreshIfVisible();
     };
     window.addEventListener('focus', refreshIfVisible);
+    window.addEventListener('online', refreshIfVisible);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('focus', refreshIfVisible);
+      window.removeEventListener('online', refreshIfVisible);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [accountId, refreshVisibleData]);
+  }, [accountId, requestAuthoritativeRefresh]);
 
   React.useEffect(() => {
     if (monitorResult.fetching) return;
@@ -1555,14 +2093,22 @@ export function TTradeGlobalPage() {
     if (!accountId) return;
     lastMonitorRefreshRequestRef.current = Date.now();
     setManualRefreshPending(true);
-    refreshVisibleData();
-  }, [accountId, refreshVisibleData]);
+    requestAuthoritativeRefresh();
+  }, [accountId, requestAuthoritativeRefresh]);
 
   React.useEffect(() => {
     if (!monitor) return;
     const hydrationKey = `${monitor.accountId}:${monitor.configVersion}`;
     if (hydratedVersionRef.current === hydrationKey) return;
+    if (
+      draftDirty &&
+      hydratedVersionRef.current.startsWith(`${monitor.accountId}:`)
+    ) {
+      setConfigConflictVersion(monitor.configVersion);
+      return;
+    }
     hydratedVersionRef.current = hydrationKey;
+    draftConfigVersionRef.current = monitor.configVersion;
     setForm({
       mode: monitor.mode === 'live' ? 'live' : 'paper',
       acknowledged: monitor.autoExitAcknowledged,
@@ -1584,25 +2130,7 @@ export function TTradeGlobalPage() {
       rapidReversalConfirmTicks: String(monitor.rapidReversalConfirmTicks),
       hardStopEnabled: monitor.hardStopEnabled,
       hardStopPct: String(monitor.hardStopPct),
-      signalLookbackSeconds: String(monitor.signalLookbackSeconds),
-      stabilizationSeconds: String(monitor.stabilizationSeconds),
-      pullbackThresholdPct: String(monitor.pullbackThresholdPct),
-      reboundThresholdPct: String(monitor.reboundThresholdPct),
-      maxSpreadTicks: String(monitor.maxSpreadTicks),
-      momentumEnabled: monitor.momentumEnabled,
-      momentumWindowSeconds: String(monitor.momentumWindowSeconds),
-      momentumMinRisePct: String(monitor.momentumMinRisePct),
-      momentumMinMoveSeconds: String(monitor.momentumMinMoveSeconds),
-      momentumBaselineSeconds: String(monitor.momentumBaselineSeconds),
-      momentumMinAmountVelocityRatio: String(
-        monitor.momentumMinAmountVelocityRatio
-      ),
-      momentumMinVwapPremiumPct: String(monitor.momentumMinVwapPremiumPct),
-      momentumMaxVwapPremiumPct: String(monitor.momentumMaxVwapPremiumPct),
-      momentumHighToleranceTicks: String(monitor.momentumHighToleranceTicks),
-      momentumMaxSpreadTicks: String(monitor.momentumMaxSpreadTicks),
-      momentumMaxSpreadPct: String(monitor.momentumMaxSpreadPct),
-      approvalTtlSeconds: String(monitor.approvalTtlSeconds),
+      signalPolicy: signalPolicyForm(monitor.signalPolicy),
       maxPriceDeviationPct: String(monitor.maxPriceDeviationPct),
       limitUpTouchExitEnabled: monitor.limitUpTouchExitEnabled,
       limitUpTouchToleranceTicks: String(monitor.limitUpTouchToleranceTicks),
@@ -1612,21 +2140,65 @@ export function TTradeGlobalPage() {
       cooldownSeconds: String(monitor.cooldownSeconds),
     });
     setIgnoredCodes([...monitor.ignoredStockCodes]);
-  }, [monitor]);
+    setDraftDirty(false);
+    setConfigConflictVersion(null);
+    setConfigConflictPolicy(null);
+    setPolicyPreview(null);
+  }, [draftDirty, monitor]);
 
   const setField = React.useCallback(
     <K extends keyof SettingsForm>(key: K, value: SettingsForm[K]) => {
       setForm(current => ({ ...current, [key]: value }));
+      setDraftDirty(true);
+      setPolicyPreview(null);
+    },
+    []
+  );
+
+  const setSignalPolicyField = React.useCallback(
+    (key: keyof SignalPolicyForm, value: SignalPolicyFormValue) => {
+      setForm(current => ({
+        ...current,
+        signalPolicy: { ...current.signalPolicy, [key]: value },
+      }));
+      setDraftDirty(true);
+      setPolicyPreview(null);
     },
     []
   );
 
   const persist = React.useCallback(
-    async (enabled: boolean, nextIgnored = ignoredCodes) => {
+    async (
+      enabled: boolean,
+      nextIgnored = ignoredCodes,
+      requirePolicyPreview = false
+    ) => {
       if (!accountId) return false;
+      if (draftDirty && !requirePolicyPreview) {
+        toast({
+          title: '当前有未保存草稿',
+          description: '请先在参数页验证并保存，避免运行控制隐式带入新规则。',
+          variant: 'destructive',
+        });
+        return false;
+      }
+      if (
+        requirePolicyPreview &&
+        (!policyPreview?.valid ||
+          policyPreview.configVersion !== draftConfigVersionRef.current)
+      ) {
+        toast({
+          title: '请先验证当前策略草稿',
+          description: '保存只接受同一配置版本下已通过服务端预览的参数。',
+          variant: 'destructive',
+        });
+        return false;
+      }
       const result = await saveMonitor({
         input: {
           accountId,
+          expectedConfigVersion: draftConfigVersionRef.current,
+          signalPolicy: signalPolicyInput(form.signalPolicy),
           enabled,
           mode: form.mode,
           autoExitAcknowledged:
@@ -1637,38 +2209,6 @@ export function TTradeGlobalPage() {
           maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
           maxTotalTExposurePct:
             numberValue(form.maxTotalTExposurePct, 10) / 100,
-          signalLookbackSeconds: integerValue(form.signalLookbackSeconds, 300),
-          stabilizationSeconds: integerValue(form.stabilizationSeconds, 15),
-          pullbackThresholdPct: numberValue(form.pullbackThresholdPct, 0.8),
-          reboundThresholdPct: numberValue(form.reboundThresholdPct, 0.2),
-          maxSpreadTicks: integerValue(form.maxSpreadTicks, 3),
-          momentumEnabled: form.momentumEnabled,
-          momentumWindowSeconds: integerValue(form.momentumWindowSeconds, 60),
-          momentumMinRisePct: numberValue(form.momentumMinRisePct, 0.8),
-          momentumMinMoveSeconds: integerValue(form.momentumMinMoveSeconds, 15),
-          momentumBaselineSeconds: integerValue(
-            form.momentumBaselineSeconds,
-            300
-          ),
-          momentumMinAmountVelocityRatio: numberValue(
-            form.momentumMinAmountVelocityRatio,
-            2
-          ),
-          momentumMinVwapPremiumPct: numberValue(
-            form.momentumMinVwapPremiumPct,
-            2
-          ),
-          momentumMaxVwapPremiumPct: numberValue(
-            form.momentumMaxVwapPremiumPct,
-            3.5
-          ),
-          momentumHighToleranceTicks: integerValue(
-            form.momentumHighToleranceTicks,
-            1
-          ),
-          momentumMaxSpreadTicks: integerValue(form.momentumMaxSpreadTicks, 10),
-          momentumMaxSpreadPct: numberValue(form.momentumMaxSpreadPct, 0.3),
-          approvalTtlSeconds: integerValue(form.approvalTtlSeconds, 30),
           maxPriceDeviationPct: numberValue(form.maxPriceDeviationPct, 0.3),
           targetProfitPct: numberValue(form.targetProfitPct, 2),
           baseFloorPct: numberValue(form.baseFloorPct, 0.5),
@@ -1708,17 +2248,94 @@ export function TTradeGlobalPage() {
         },
       });
       const payload = result.data?.saveTTradeGlobalMonitor;
-      const success = Boolean(payload?.success);
+      const success = isAppliedTTradeGlobalSave(payload);
+      if (payload?.code === 'CONFIG_VERSION_CONFLICT') {
+        setConfigConflictVersion(
+          payload.monitor?.configVersion ?? monitor?.configVersion ?? 0
+        );
+        setConfigConflictPolicy(
+          readFragment(
+            TTradeSignalPolicyFieldsFragment,
+            payload.monitor?.signalPolicy
+          ) || null
+        );
+      }
       toast({
-        title: success ? '全局做 T 设置已更新' : '设置未保存',
+        title: tTradeGlobalSaveToastTitle(payload),
         description: payload?.message || result.error?.message || '请求失败',
         variant: success ? 'default' : 'destructive',
       });
-      if (success) refreshMonitor({ requestPolicy: 'network-only' });
+      if (success) {
+        const savedVersion =
+          payload?.monitor?.configVersion ?? draftConfigVersionRef.current + 1;
+        draftConfigVersionRef.current = savedVersion;
+        hydratedVersionRef.current = `${accountId}:${savedVersion}`;
+        setDraftDirty(false);
+        setConfigConflictVersion(null);
+        setConfigConflictPolicy(null);
+        setPolicyPreview(null);
+        refreshMonitor({ requestPolicy: 'network-only' });
+      }
       return success;
     },
-    [accountId, form, ignoredCodes, refreshMonitor, saveMonitor, toast]
+    [
+      accountId,
+      draftDirty,
+      form,
+      ignoredCodes,
+      monitor?.configVersion,
+      policyPreview,
+      refreshMonitor,
+      saveMonitor,
+      toast,
+    ]
   );
+
+  const policyLocalErrors = React.useMemo(
+    () => localSignalPolicyErrors(form.signalPolicy),
+    [form.signalPolicy]
+  );
+
+  const handlePreviewPolicy = React.useCallback(async () => {
+    if (!accountId || policyLocalErrors.length > 0) return;
+    const expectedConfigVersion =
+      configConflictVersion ?? draftConfigVersionRef.current;
+    const result = await previewSignalPolicy({
+      input: {
+        accountId,
+        expectedConfigVersion,
+        signalPolicy: signalPolicyInput(form.signalPolicy),
+      },
+    });
+    const payload = result.data?.previewTTradeSignalPolicy;
+    if (!payload) {
+      toast({
+        title: '策略预览失败',
+        description: result.error?.message || '服务端未返回校验结果',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const normalizedPolicy = readFragment(
+      TTradeSignalPolicyFieldsFragment,
+      payload.normalizedPolicy
+    );
+    setPolicyPreview({
+      ...payload,
+      normalizedPolicy,
+    });
+    if (payload.configVersion === expectedConfigVersion) {
+      draftConfigVersionRef.current = expectedConfigVersion;
+      setConfigConflictVersion(null);
+    }
+  }, [
+    accountId,
+    configConflictVersion,
+    form.signalPolicy,
+    policyLocalErrors.length,
+    previewSignalPolicy,
+    toast,
+  ]);
 
   const handleIgnore = async (stockCode: string, ignored: boolean) => {
     const previous = ignoredCodes;
@@ -1745,8 +2362,82 @@ export function TTradeGlobalPage() {
 
   const handleReconcile = async () => {
     if (!accountId) return;
-    const result = await reconcileMonitor({ accountId });
+    if (reconcileOperationRef.current?.blocked) {
+      toast({
+        title: '同步记录不可恢复',
+        description: '浏览器中的未决同步记录已损坏，请清理后再发起操作。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!reconcileOperationRef.current) {
+      const persisted = readUncertainOperation(`reconcile:${accountId}`);
+      if (persisted) {
+        reconcileOperationRef.current = { ...persisted, accountId };
+      }
+    }
+    if (reconcileOperationRef.current?.blocked) {
+      toast({
+        title: '同步记录不可恢复',
+        description: '浏览器中的未决同步记录已损坏，请清理后再发起操作。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const activeOperation =
+      reconcileOperationRef.current?.accountId === accountId
+        ? reconcileOperationRef.current
+        : {
+            accountId,
+            idempotencyKey: replayIdempotencyKey(),
+            identity: accountId,
+            uncertain: false,
+          };
+    const pendingOperation = { ...activeOperation, uncertain: true };
+    if (
+      !persistUncertainOperation(`reconcile:${accountId}`, pendingOperation)
+    ) {
+      reconcileOperationRef.current = { ...pendingOperation, blocked: true };
+      toast({
+        title: '无法安全记录同步操作',
+        description: '未写入浏览器未决记录，本次同步未发送。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    reconcileOperationRef.current = pendingOperation;
+    let result;
+    try {
+      result = await reconcileMonitor({
+        accountId,
+        idempotencyKey: activeOperation.idempotencyKey,
+      });
+    } catch (error) {
+      reconcileOperationRef.current = pendingOperation;
+      persistUncertainOperation(`reconcile:${accountId}`, pendingOperation);
+      toast({
+        title: '同步结果未知',
+        description:
+          error instanceof Error ? error.message : '请求结果未知，请重试原同步',
+        variant: 'destructive',
+      });
+      refreshVisibleData();
+      return;
+    }
     const payload = result.data?.reconcileTTradeGlobalMonitor;
+    const uncertain =
+      !payload ||
+      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+    // Keep the same key only while the durable command outcome is unknown.
+    // A terminal response represents a new user-action boundary.
+    if (uncertain) {
+      reconcileOperationRef.current = pendingOperation;
+      persistUncertainOperation(`reconcile:${accountId}`, pendingOperation);
+    } else {
+      reconcileOperationRef.current = null;
+      clearPersistedOperation(`reconcile:${accountId}`);
+    }
     toast({
       title: payload?.success ? '持仓已同步' : '同步未完成',
       description: payload?.message || result.error?.message || '请求失败',
@@ -1758,14 +2449,135 @@ export function TTradeGlobalPage() {
   const handleSignal = async (
     action: 'approve' | 'reject',
     runId: string,
-    intentId: string
+    intentId: string,
+    snapshot?: SignalSnapshot | null
   ) => {
-    let payload: { message: string; success: boolean } | undefined;
+    let payload:
+      { code?: string; message: string; success: boolean } | undefined;
     let errorMessage = '';
     if (action === 'approve') {
-      const result = await approveEntry({ runId, intentId });
+      if (!signalSnapshotTrusted) {
+        toast({
+          title: '当前连接不可信，禁止确认',
+          description: '请等待查询成功且订阅重连后的全量刷新。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (!canApproveSnapshot(snapshot)) {
+        toast({
+          title: '当前快照不能确认',
+          description:
+            '候选已过期、身份不完整或协议版本未知。请等待服务端刷新；服务端会在确认时重新校验交易资格。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      const expectation = {
+        signalVersion: snapshot.signalVersion,
+        candidateId: snapshot.candidateId!,
+        candidateFingerprint: snapshot.candidateFingerprint!,
+        candidateStateVersion: snapshot.candidateStateVersion,
+        configVersion: snapshot.configVersion,
+        policyVersion: snapshot.policyVersion,
+      };
+      const approvalIdentity = JSON.stringify({
+        accountId,
+        runId,
+        intentId,
+        expectation,
+      });
+      const approvalKey = `${runId}:${intentId}`;
+      const existingOperation =
+        approveOperationRef.current.get(approvalKey) ||
+        readUncertainOperation(`approve:${accountId}:${approvalKey}`);
+      if (existingOperation?.blocked) {
+        toast({
+          title: '审批操作不可恢复',
+          description: '浏览器中的未决审批记录不可用，请清理后再发起操作。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      if (
+        existingOperation?.uncertain &&
+        existingOperation.identity !== approvalIdentity
+      ) {
+        toast({
+          title: '上一笔审批结果未知',
+          description: '请先恢复原审批结果，不能用新的候选身份重复确认。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      const operation =
+        existingOperation?.identity === approvalIdentity
+          ? existingOperation
+          : {
+              identity: approvalIdentity,
+              idempotencyKey: replayIdempotencyKey(),
+              uncertain: false,
+            };
+      approveOperationRef.current.set(approvalKey, operation);
+      const pendingOperation = { ...operation, uncertain: true };
+      if (
+        !persistUncertainOperation(
+          `approve:${accountId}:${approvalKey}`,
+          pendingOperation
+        )
+      ) {
+        approveOperationRef.current.set(approvalKey, {
+          ...pendingOperation,
+          blocked: true,
+        });
+        toast({
+          title: '无法安全记录审批操作',
+          description: '未写入浏览器未决记录，本次审批未发送。',
+          variant: 'destructive',
+        });
+        return;
+      }
+      approveOperationRef.current.set(approvalKey, pendingOperation);
+      let result;
+      try {
+        result = await approveEntry({
+          runId,
+          intentId,
+          idempotencyKey: operation.idempotencyKey,
+          expectation,
+        });
+      } catch (error) {
+        approveOperationRef.current.set(approvalKey, pendingOperation);
+        persistUncertainOperation(
+          `approve:${accountId}:${approvalKey}`,
+          pendingOperation
+        );
+        toast({
+          title: '审批结果未知',
+          description:
+            error instanceof Error
+              ? error.message
+              : '请求结果未知，请重试原审批',
+          variant: 'destructive',
+        });
+        return;
+      }
       payload = result.data?.approveTTradeEntry;
       errorMessage = result.error?.message || '';
+      const uncertain =
+        !payload ||
+        String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+        String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+      if (uncertain) {
+        approveOperationRef.current.set(approvalKey, pendingOperation);
+        persistUncertainOperation(
+          `approve:${accountId}:${approvalKey}`,
+          pendingOperation
+        );
+      } else {
+        approveOperationRef.current.delete(approvalKey);
+        clearPersistedOperation(`approve:${accountId}:${approvalKey}`);
+      }
     } else {
       const result = await rejectEntry({ runId, intentId });
       payload = result.data?.rejectTTradeEntry;
@@ -1817,11 +2629,87 @@ export function TTradeGlobalPage() {
       variant: 'warning',
     });
     if (!confirmed) return;
-    const result = await beginControlledWindow({
+    const identity = JSON.stringify({
       accountId,
       snapshotId: readiness.snapshotId,
+      policyVersion: readiness.policyVersion,
     });
+    const operationScope = `begin-window:${accountId}`;
+    const existingOperation =
+      controlledWindowOperationRef.current ||
+      readUncertainOperation(operationScope);
+    if (existingOperation?.blocked) {
+      toast({
+        title: '账户窗口操作不可恢复',
+        description: '浏览器中的未决窗口记录不可用，请清理后再发起操作。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      existingOperation?.uncertain &&
+      existingOperation.identity !== identity
+    ) {
+      toast({
+        title: '上一笔账户窗口结果未知',
+        description: '请先恢复原操作结果，不能用新的快照重复建立窗口。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const operation =
+      existingOperation?.identity === identity
+        ? existingOperation
+        : {
+            identity,
+            idempotencyKey: replayIdempotencyKey(),
+            uncertain: false,
+          };
+    const pendingOperation = { ...operation, uncertain: true };
+    if (!persistUncertainOperation(operationScope, pendingOperation)) {
+      controlledWindowOperationRef.current = {
+        ...pendingOperation,
+        blocked: true,
+      };
+      toast({
+        title: '无法安全记录账户窗口操作',
+        description: '未写入浏览器未决记录，本次账户窗口未发送。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    controlledWindowOperationRef.current = pendingOperation;
+    let result;
+    try {
+      result = await beginControlledWindow({
+        accountId,
+        policyVersion: readiness.policyVersion,
+        snapshotId: readiness.snapshotId,
+        idempotencyKey: operation.idempotencyKey,
+      });
+    } catch (error) {
+      controlledWindowOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+      toast({
+        title: '账户窗口结果未知',
+        description:
+          error instanceof Error ? error.message : '请求结果未知，请重试原操作',
+        variant: 'destructive',
+      });
+      return;
+    }
     const payload = result.data?.beginTTradeControlledWindow;
+    const retryable =
+      !payload ||
+      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+    if (retryable) {
+      controlledWindowOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+    } else {
+      controlledWindowOperationRef.current = null;
+      clearPersistedOperation(operationScope);
+    }
     toast({
       title: payload?.success ? '账户实盘窗口已建立' : '账户实盘窗口未建立',
       description: payload?.message || result.error?.message || '请求失败',
@@ -1831,7 +2719,13 @@ export function TTradeGlobalPage() {
   };
 
   const handleActivateLive = async (targetStage: TTradeRolloutTarget) => {
-    if (!accountId || !readiness?.canActivateLive) return;
+    if (
+      !accountId ||
+      !readiness?.canActivateLive ||
+      !readiness.snapshotId
+    ) {
+      return;
+    }
     let confirmation = '';
     if (targetStage === TTradeRolloutTarget.Live) {
       const expected = `LIVE:${accountId}`;
@@ -1860,13 +2754,90 @@ export function TTradeGlobalPage() {
       });
       if (!confirmed) return;
     }
-    const result = await activateLive({
+    const identity = JSON.stringify({
       accountId,
       policyVersion: readiness.policyVersion,
+      snapshotId: readiness.snapshotId,
       targetStage,
-      confirmation,
     });
+    const operationScope = `activate-live:${accountId}`;
+    const existingOperation =
+      activateLiveOperationRef.current ||
+      readUncertainOperation(operationScope);
+    if (existingOperation?.blocked) {
+      toast({
+        title: '实盘提升操作不可恢复',
+        description: '浏览器中的未决提升记录不可用，请清理后再发起操作。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      existingOperation?.uncertain &&
+      existingOperation.identity !== identity
+    ) {
+      toast({
+        title: '上一笔实盘提升结果未知',
+        description: '请先恢复原提升结果，不能用新的门禁或确认再次提升。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const operation =
+      existingOperation?.identity === identity
+        ? existingOperation
+        : {
+            identity,
+            idempotencyKey: replayIdempotencyKey(),
+            uncertain: false,
+          };
+    const pendingOperation = { ...operation, uncertain: true };
+    if (!persistUncertainOperation(operationScope, pendingOperation)) {
+      activateLiveOperationRef.current = {
+        ...pendingOperation,
+        blocked: true,
+      };
+      toast({
+        title: '无法安全记录实盘提升操作',
+        description: '未写入浏览器未决记录，本次实盘提升未发送。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    activateLiveOperationRef.current = pendingOperation;
+    let result;
+    try {
+      result = await activateLive({
+        accountId,
+        policyVersion: readiness.policyVersion,
+        snapshotId: readiness.snapshotId,
+        idempotencyKey: operation.idempotencyKey,
+        targetStage,
+        confirmation,
+      });
+    } catch (error) {
+      activateLiveOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+      toast({
+        title: '实盘提升结果未知',
+        description:
+          error instanceof Error ? error.message : '请求结果未知，请重试原操作',
+        variant: 'destructive',
+      });
+      return;
+    }
     const payload = result.data?.activateTTradeLive;
+    const retryable =
+      !payload ||
+      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+    if (retryable) {
+      activateLiveOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+    } else {
+      activateLiveOperationRef.current = null;
+      clearPersistedOperation(operationScope);
+    }
     toast({
       title: payload?.success
         ? targetStage === TTradeRolloutTarget.Live
@@ -1905,11 +2876,83 @@ export function TTradeGlobalPage() {
       variant: 'destructive',
     });
     if (!confirmed) return;
-    const result = await triggerKillSwitch({
-      accountId,
-      reason: '用户从做 T 工作台触发紧急停止',
-    });
+    const reason = '用户从做 T 工作台触发紧急停止';
+    const identity = JSON.stringify({ accountId, reason });
+    const operationScope = `kill-switch:${accountId}`;
+    const existingOperation =
+      killSwitchOperationRef.current || readUncertainOperation(operationScope);
+    if (existingOperation?.blocked) {
+      toast({
+        title: '紧急停止记录不可恢复',
+        description: '浏览器中的未决停止记录不可用，请保持页面并联系管理员。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (
+      existingOperation?.uncertain &&
+      existingOperation.identity !== identity
+    ) {
+      toast({
+        title: '上一笔紧急停止结果未知',
+        description: '请先恢复原紧急停止结果，不能重复发送新的停止命令。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const operation =
+      existingOperation?.identity === identity
+        ? existingOperation
+        : {
+            identity,
+            idempotencyKey: replayIdempotencyKey(),
+            uncertain: false,
+          };
+    const pendingOperation = { ...operation, uncertain: true };
+    // Kill is risk-reducing: if sessionStorage is unavailable, keep the
+    // in-memory key and still allow the emergency stop to be sent.
+    const journaled = persistUncertainOperation(
+      operationScope,
+      pendingOperation
+    );
+    killSwitchOperationRef.current = pendingOperation;
+    if (!journaled) {
+      toast({
+        title: '紧急停止记录不可持久化',
+        description: '仍将发送紧急停止；如结果未知，请保持当前页面重试。',
+        variant: 'destructive',
+      });
+    }
+    let result;
+    try {
+      result = await triggerKillSwitch({
+        accountId,
+        reason,
+        idempotencyKey: operation.idempotencyKey,
+      });
+    } catch (error) {
+      killSwitchOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+      toast({
+        title: '紧急停止结果未知',
+        description:
+          error instanceof Error ? error.message : '请求结果未知，请重试原操作',
+        variant: 'destructive',
+      });
+      return;
+    }
     const payload = result.data?.triggerTTradeKillSwitch;
+    const retryable =
+      !payload ||
+      String(payload.code || '').endsWith('_COMMAND_PENDING') ||
+      String(payload.code || '').endsWith('_OUTCOME_UNKNOWN');
+    if (retryable) {
+      killSwitchOperationRef.current = pendingOperation;
+      persistUncertainOperation(operationScope, pendingOperation);
+    } else {
+      killSwitchOperationRef.current = null;
+      clearPersistedOperation(operationScope);
+    }
     toast({
       title: payload?.success ? '紧急停止已触发' : '紧急停止失败',
       description: payload?.message || result.error?.message || '请求失败',
@@ -1931,23 +2974,9 @@ export function TTradeGlobalPage() {
   };
 
   const pendingSessions = (monitor?.sessions || []).filter(
-    session => session.pendingEntryIntentId
-  );
-  const signalHistory = React.useMemo(
-    () =>
-      signalHistoryRows.filter(
-        signal => signal.status.toUpperCase() !== 'AWAITING_APPROVAL'
-      ),
-    [signalHistoryRows]
-  );
-  const filteredSignalHistory = React.useMemo(
-    () =>
-      signalHistory.filter(
-        signal =>
-          signalHistoryFilter === 'ALL' ||
-          signalHistoryCategory(signal.status) === signalHistoryFilter
-      ),
-    [signalHistory, signalHistoryFilter]
+    session =>
+      session.signalSnapshot?.candidateStatus === 'AWAITING_APPROVAL' &&
+      session.signalSnapshot.pendingEntryIntentId
   );
   const actionLoading =
     saveResult.fetching ||
@@ -1960,7 +2989,8 @@ export function TTradeGlobalPage() {
     activateLiveResult.fetching ||
     pauseEntriesResult.fetching ||
     killSwitchResult.fetching ||
-    cancelOrderResult.fetching;
+    cancelOrderResult.fetching ||
+    previewPolicyResult.fetching;
   const openBatches = batches.filter(
     batch =>
       batch.activeVolume > 0 &&
@@ -1982,6 +3012,7 @@ export function TTradeGlobalPage() {
       accountId={accountId}
       actionLoading={actionLoading}
       isCurrentTradingDay={isCurrentTradingDay}
+      loading={monitorResult.fetching}
       monitor={monitor}
       onRefresh={handleMonitorRefresh}
       onReconcile={handleReconcile}
@@ -1990,8 +3021,10 @@ export function TTradeGlobalPage() {
       quoteError={liveQuoteState.error}
       quotes={realTimeQuotesByCode}
       refreshing={manualRefreshPending || monitorResult.fetching}
+      snapshotTrusted={signalSnapshotTrusted}
       toggleDisabled={
-        !monitor?.enabled && form.mode === 'live' && !form.acknowledged
+        draftDirty ||
+        (!monitor?.enabled && form.mode === 'live' && !form.acknowledged)
       }
       wsStatus={graphqlWsStatus}
     />
@@ -2043,7 +3076,7 @@ export function TTradeGlobalPage() {
   );
 
   const toolbar = (
-    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] px-4">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-4 custom-scrollbar">
       <nav
         className="flex h-full min-w-0 items-stretch"
         aria-label="做 T 工作区"
@@ -2304,7 +3337,7 @@ export function TTradeGlobalPage() {
             从已成委托选择
           </Button>
           {monitorResult.fetching && !monitor ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-red-300" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-red-300" />
           ) : lastMonitorRefreshAt ? (
             <span
               className="font-mono font-normal text-slate-700"
@@ -2382,7 +3415,7 @@ export function TTradeGlobalPage() {
                       'mr-1.5 h-3.5 w-3.5',
                       (syncSourceOrdersResult.fetching ||
                         sourceOrdersResult.fetching) &&
-                        'animate-spin'
+                        'animate-spin motion-reduce:animate-none'
                     )}
                   />
                   {syncSourceOrdersResult.fetching ? '同步中' : '同步并刷新'}
@@ -2517,7 +3550,7 @@ export function TTradeGlobalPage() {
                   onClick={handleImportExternalEntry}
                 >
                   {importResult.fetching && (
-                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   )}
                   纳入自动卖出
                 </Button>
@@ -2528,8 +3561,8 @@ export function TTradeGlobalPage() {
       )}
 
       <TTradeLiveBoard
+        evaluations={accountBoundSignalEvaluations}
         historyByCode={quoteHistoryByCode}
-        isCurrentTradingDay={isCurrentTradingDay}
         loading={monitorResult.fetching}
         monitor={monitor}
         onIgnore={handleIgnore}
@@ -2556,7 +3589,21 @@ export function TTradeGlobalPage() {
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
+          {batchesResult.fetching && rows.length === 0 ? (
+            <tr>
+              <td
+                colSpan={8}
+                className="px-4 py-12 text-center text-xs text-slate-600"
+                role="status"
+              >
+                <Loader2
+                  className="mr-2 inline-block h-4 w-4 animate-spin motion-reduce:animate-none"
+                  aria-hidden="true"
+                />
+                正在读取做 T 批次…
+              </td>
+            </tr>
+          ) : rows.length === 0 ? (
             <tr>
               <td
                 colSpan={8}
@@ -2677,6 +3724,36 @@ export function TTradeGlobalPage() {
 
   const positionsView = (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      {batchesResult.error && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+        >
+          <span>做 T 批次读取失败；仍显示上次成功读取的结果。</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 shrink-0 px-2 text-[9px] text-rose-100"
+            onClick={() => refreshBatches({ requestPolicy: 'network-only' })}
+          >
+            重试
+          </Button>
+        </div>
+      )}
+      {!batchesResult.error && batchesResult.fetching && batches.length > 0 && (
+        <div
+          role="status"
+          aria-busy="true"
+          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+        >
+          <Loader2
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          正在刷新做 T 批次，暂保留上次结果…
+        </div>
+      )}
       <div className="grid shrink-0 grid-cols-2 border-b border-white/[0.05]">
         <div className="border-r border-white/[0.05] px-4 py-3">
           <div className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-600">
@@ -2730,6 +3807,40 @@ export function TTradeGlobalPage() {
 
   const eventsView = (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      {batchEventsResult.error && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+        >
+          <span>订单事件读取失败；仍显示上次成功读取的事件。</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-6 shrink-0 px-2 text-[9px] text-rose-100"
+            onClick={() =>
+              refreshBatchEvents({ requestPolicy: 'network-only' })
+            }
+          >
+            重试
+          </Button>
+        </div>
+      )}
+      {!batchEventsResult.error &&
+        batchEventsResult.fetching &&
+        batchEvents.length > 0 && (
+          <div
+            role="status"
+            aria-busy="true"
+            className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+          >
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
+            正在刷新订单事件，暂保留上次结果…
+          </div>
+        )}
       <div className="shrink-0 border-b border-white/[0.05] px-4 py-3">
         <h2 className="text-sm font-black text-slate-100">
           真实委托与成交事件
@@ -2751,7 +3862,21 @@ export function TTradeGlobalPage() {
             </tr>
           </thead>
           <tbody>
-            {batchEvents.length === 0 ? (
+            {batchEventsResult.fetching && batchEvents.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-12 text-center text-slate-600"
+                  role="status"
+                >
+                  <Loader2
+                    className="mr-2 inline-block h-4 w-4 animate-spin motion-reduce:animate-none"
+                    aria-hidden="true"
+                  />
+                  正在读取订单事件…
+                </td>
+              </tr>
+            ) : batchEvents.length === 0 ? (
               <tr>
                 <td
                   colSpan={6}
@@ -2825,430 +3950,92 @@ export function TTradeGlobalPage() {
   );
 
   const signalsView = (
-    <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-3">
-        <div>
-          <h2 className="text-sm font-black text-slate-100">买入信号</h2>
-          <p className="mt-0.5 text-[10px] text-slate-600">
-            当前机会与处理历史均来自持久化交易意图审计记录
-          </p>
-        </div>
-        <div
-          role="tablist"
-          aria-label="买入信号视图"
-          className="flex border border-white/[0.07] bg-[#091322] p-0.5"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={signalPanelMode === 'PENDING'}
-            onClick={() => setSignalPanelMode('PENDING')}
-            className={cn(
-              'cursor-pointer px-3 py-1.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60',
-              signalPanelMode === 'PENDING'
-                ? 'bg-red-500/15 text-red-200'
-                : 'text-slate-600 hover:text-slate-300'
-            )}
-          >
-            待确认 {pendingSessions.length}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={signalPanelMode === 'HISTORY'}
-            onClick={() => setSignalPanelMode('HISTORY')}
-            className={cn(
-              'cursor-pointer px-3 py-1.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60',
-              signalPanelMode === 'HISTORY'
-                ? 'bg-red-500/15 text-red-200'
-                : 'text-slate-600 hover:text-slate-300'
-            )}
-          >
-            历史信号 {signalHistory.length}
-          </button>
-        </div>
-      </div>
-
-      {signalPanelMode === 'PENDING' ? (
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 custom-scrollbar">
-          {pendingSessions.length === 0 ? (
-            <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
-              <Activity className="h-10 w-10 text-slate-800" />
-              <div className="mt-3 text-sm font-bold text-slate-500">
-                当前没有待确认信号
-              </div>
-              <div className="mt-1 text-[10px] text-slate-700">
-                已产生并超时或被处理的信号仍可在历史信号中查看
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => setSignalPanelMode('HISTORY')}
-                className="mt-4 h-8 cursor-pointer rounded-sm border border-white/[0.07] px-3 text-[10px] text-slate-400 hover:text-slate-100"
-              >
-                <History className="mr-1.5 h-3.5 w-3.5" />
-                查看历史信号
-              </Button>
-            </div>
-          ) : (
-            <div className="grid gap-px overflow-hidden border border-white/[0.06] bg-white/[0.06] xl:grid-cols-2">
-              {pendingSessions.map(session => {
-                const signal = (session.currentSignal || {}) as Record<
-                  string,
-                  unknown
-                >;
-                const isMomentumSignal =
-                  String(signal.signal_type || '').toUpperCase() ===
-                  'MOMENTUM_ACCELERATION';
-                const monitorHolding = monitor?.holdings.find(
-                  holding => holding.stockCode === session.stockCode
-                );
-                const knownInstrumentName =
-                  positionNamesByCode.get(session.stockCode.toUpperCase()) ||
-                  monitorHolding?.instrumentName;
-                const realTimeQuote = realTimeQuotesByCode.get(
-                  session.stockCode.toUpperCase()
-                );
-                const hasRealTimeQuote = Boolean(
-                  realTimeQuote?.time &&
-                  Number(realTimeQuote.currentPrice || 0) > 0
-                );
-                const realTimePrice = hasRealTimeQuote
-                  ? Number(realTimeQuote?.currentPrice || 0)
-                  : null;
-                const changePercent = hasRealTimeQuote
-                  ? realTimeQuote?.changePercent
-                  : null;
-                return (
-                  <article
-                    key={`${session.runId}:${session.stockCode}`}
-                    className="flex min-h-40 flex-col justify-between bg-[#0b1628] p-4"
-                  >
-                    <div>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <InstrumentNameLabel
-                            stockCode={session.stockCode}
-                            knownName={knownInstrumentName}
-                            className="truncate text-sm font-black text-slate-100"
-                          />
-                          <div className="mt-0.5 font-mono text-[10px] text-slate-600">
-                            {session.stockCode}
-                          </div>
-                        </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <span className="hidden text-[9px] text-slate-600 sm:inline">
-                            {formatQuoteTime(realTimeQuote?.time)}
-                          </span>
-                          <span className="border border-amber-400/20 bg-amber-400/[0.08] px-2 py-0.5 text-[9px] font-black text-amber-200">
-                            等待确认
-                          </span>
-                        </div>
-                      </div>
-                      <div className="mt-3 grid grid-cols-2 gap-3 font-mono text-[10px] sm:grid-cols-3 xl:grid-cols-6">
-                        <div>
-                          <div className="flex items-center gap-1 text-slate-600">
-                            <span
-                              className={cn(
-                                'h-1.5 w-1.5 rounded-full',
-                                hasRealTimeQuote
-                                  ? 'bg-emerald-400'
-                                  : 'bg-slate-700'
-                              )}
-                              aria-hidden="true"
-                            />
-                            实时价
-                          </div>
-                          <div className="mt-1 text-xs font-black text-slate-100">
-                            {realTimePrice == null
-                              ? '--'
-                              : formatNumber(realTimePrice, 3)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">涨跌幅</div>
-                          <div
-                            className={cn(
-                              'mt-1 text-xs font-black',
-                              quoteTone(changePercent)
-                            )}
-                          >
-                            {formatSignedPercent(changePercent)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">信号价</div>
-                          <div className="mt-1 text-slate-300">
-                            {formatNumber(Number(signal.signal_price || 0), 3)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">
-                            {isMomentumSignal ? '快速拉升' : '回撤'}
-                          </div>
-                          <div
-                            className={cn(
-                              'mt-1',
-                              financialToneClass(
-                                isMomentumSignal ? 1 : -1,
-                                'holding'
-                              )
-                            )}
-                          >
-                            {formatNumber(
-                              Number(
-                                isMomentumSignal
-                                  ? signal.momentum_rise_pct || 0
-                                  : signal.pullback_pct || 0
-                              )
-                            )}
-                            %
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">
-                            {isMomentumSignal ? '成交加速' : '反弹'}
-                          </div>
-                          <div className="mt-1 text-red-300">
-                            {formatNumber(
-                              Number(
-                                isMomentumSignal
-                                  ? signal.momentum_amount_velocity_ratio || 0
-                                  : signal.rebound_pct || 0
-                              )
-                            )}
-                            {isMomentumSignal ? 'x' : '%'}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">计划数量</div>
-                          <div className="mt-1 text-slate-300">
-                            {session.plannedEntryVolume.toLocaleString()} 股
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-4 flex justify-end gap-2 border-t border-white/[0.05] pt-3">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="ghost"
-                        className="h-8 cursor-pointer rounded-sm text-[10px] text-slate-500 hover:text-slate-200"
-                        disabled={actionLoading}
-                        onClick={() =>
-                          handleSignal(
-                            'reject',
-                            session.runId,
-                            session.pendingEntryIntentId!
-                          )
-                        }
-                      >
-                        <X className="mr-1.5 h-3.5 w-3.5" />
-                        忽略本次
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-8 cursor-pointer rounded-sm bg-red-500 text-[10px] text-white hover:bg-red-400"
-                        disabled={
-                          actionLoading ||
-                          (session.mode === 'live' && !readiness?.canApprove)
-                        }
-                        onClick={() =>
-                          handleSignal(
-                            'approve',
-                            session.runId,
-                            session.pendingEntryIntentId!
-                          )
-                        }
-                      >
-                        <Check className="mr-1.5 h-3.5 w-3.5" />
-                        确认买入
-                      </Button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.05] px-4 py-2.5">
-            <div className="text-[10px] text-slate-600">
-              最近 {signalHistory.length} 条已处理信号
-            </div>
-            <div className="flex flex-wrap gap-1" aria-label="历史信号筛选">
-              {(
-                [
-                  ['ALL', '全部'],
-                  ['EXPIRED', '确认超时'],
-                  ['IGNORED', '忽略 / 撤销'],
-                  ['CONFIRMED', '已确认'],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={signalHistoryFilter === value}
-                  onClick={() => setSignalHistoryFilter(value)}
-                  className={cn(
-                    'cursor-pointer border px-2.5 py-1 text-[9px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60',
-                    signalHistoryFilter === value
-                      ? 'border-red-400/25 bg-red-400/10 text-red-200'
-                      : 'border-white/[0.06] text-slate-600 hover:border-white/10 hover:text-slate-300'
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4 custom-scrollbar">
-            {signalHistoryResult.fetching && signalHistory.length === 0 ? (
-              <div className="flex h-full min-h-64 items-center justify-center text-[11px] text-slate-600">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                正在读取信号历史
-              </div>
-            ) : signalHistory.length === 0 ? (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
-                <History className="h-10 w-10 text-slate-800" />
-                <div className="mt-3 text-sm font-bold text-slate-500">
-                  暂无历史信号
-                </div>
-                <div className="mt-1 text-[10px] text-slate-700">
-                  买入机会产生后会自动保留完整处理状态与原因
-                </div>
-              </div>
-            ) : filteredSignalHistory.length === 0 ? (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
-                <History className="h-10 w-10 text-slate-800" />
-                <div className="mt-3 text-sm font-bold text-slate-500">
-                  当前筛选条件下没有信号
-                </div>
-              </div>
-            ) : (
-              <div className="grid gap-2">
-                {filteredSignalHistory.map(signal => {
-                  const presentation = signalStatusPresentation(
-                    signal.status,
-                    signal.statusReason
-                  );
-                  const monitorName = monitor?.holdings.find(
-                    holding => holding.stockCode === signal.stockCode
-                  )?.instrumentName;
-                  const instrumentName = resolveInstrumentName(
-                    signal.stockCode,
-                    positionNamesByCode.get(signal.stockCode.toUpperCase()),
-                    monitorName
-                  );
-                  return (
-                    <article
-                      key={signal.intentId}
-                      className="border border-white/[0.06] bg-[#0b1628] p-4"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <div className="text-xs font-black text-slate-200">
-                            {instrumentName}
-                          </div>
-                          <div className="mt-0.5 font-mono text-[10px] text-slate-600">
-                            {signal.stockCode}
-                          </div>
-                        </div>
-                        <span
-                          className={cn(
-                            'shrink-0 border px-2 py-0.5 text-[9px] font-black',
-                            presentation.className
-                          )}
-                        >
-                          {presentation.label}
-                        </span>
-                      </div>
-                      <div className="mt-3 grid grid-cols-2 gap-3 font-mono text-[10px] sm:grid-cols-3 xl:grid-cols-6">
-                        <div>
-                          <div className="text-slate-600">信号价</div>
-                          <div className="mt-1 text-slate-300">
-                            {formatNumber(signal.signalPrice, 3)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">回撤 / 反弹</div>
-                          <div className="mt-1 text-slate-300">
-                            <span className="text-holding-down">
-                              {formatNumber(signal.pullbackPct)}%
-                            </span>
-                            <span className="mx-1 text-slate-700">/</span>
-                            <span className="text-market-up">
-                              {formatNumber(signal.reboundPct)}%
-                            </span>
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">计划数量</div>
-                          <div className="mt-1 text-slate-300">
-                            {signal.requestedVolume.toLocaleString()} 股
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">产生时间</div>
-                          <div className="mt-1 text-slate-400">
-                            {formatTime(signal.createdAt)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">处理时间</div>
-                          <div className="mt-1 text-slate-400">
-                            {formatTime(signal.updatedAt)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-slate-600">确认截止</div>
-                          <div className="mt-1 text-slate-400">
-                            {formatTime(signal.expiresAt)}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-3 flex items-start gap-2 border-t border-white/[0.05] pt-3 text-[10px] leading-4 text-slate-500">
-                        <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
-                        {signalReasonLabel(signal.statusReason, signal.status)}
-                      </div>
-                    </article>
-                  );
-                })}
-                {signalHistoryResult.data?.tTradeSignalHistoryPage.pageInfo
-                  .hasNextPage && (
-                  <div className="pt-2 text-center">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled={signalHistoryResult.fetching}
-                      onClick={() =>
-                        setSignalAfter(
-                          signalHistoryResult.data?.tTradeSignalHistoryPage
-                            .pageInfo.endCursor ?? null
-                        )
-                      }
-                      className="h-8 text-[10px] text-slate-400"
-                    >
-                      {signalHistoryResult.fetching
-                        ? '加载中…'
-                        : '加载更多信号'}
-                    </Button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
+    <TTradeSignalsView
+      actionLoading={actionLoading}
+      accountId={accountId}
+      canApproveAccount={Boolean(readiness?.canApprove)}
+      candidateTrace={candidateTraceForUi}
+      candidateTraceError={
+        candidateTraceIdentityMismatch
+          ? '候选追溯响应身份不一致，已阻止展示'
+          : candidateTraceResult.error
+            ? '候选追溯暂不可用，请稍后重试'
+            : undefined
+      }
+      candidateTraceLoading={candidateTraceResult.fetching}
+      dataTrusted={signalSnapshotTrusted}
+      evaluations={accountBoundSignalEvaluations}
+      evaluationsError={signalEvaluationsResult.error?.message}
+      historyByCode={quoteHistoryByCode}
+      hasMoreEvaluations={Boolean(signalEvaluationsPage?.pageInfo.hasNextPage)}
+      loadingEvaluations={signalEvaluationsResult.fetching}
+      loadingMonitor={monitorResult.fetching}
+      monitorError={monitorResult.error?.message || monitor?.lastError}
+      monitor={monitor}
+      onApprove={(session, snapshot) =>
+        void handleSignal(
+          'approve',
+          session.runId,
+          snapshot.pendingEntryIntentId!,
+          snapshot
+        )
+      }
+      onLoadMoreEvaluations={() =>
+        setSignalAfter(signalEvaluationsPage?.pageInfo.endCursor ?? null)
+      }
+      onRequestCandidateTrace={setSelectedTrace}
+      onReject={(session, snapshot) =>
+        void handleSignal(
+          'reject',
+          session.runId,
+          snapshot.pendingEntryIntentId!,
+          snapshot
+        )
+      }
+      quotes={realTimeQuotesByCode}
+      selectedTrace={selectedTraceForCurrentAccount}
+    />
   );
 
+  const diagnosticsView = (
+    <div className="studio-workspace-surface h-full min-h-0">
+      <TTradeSignalDiagnosticsPanel
+        diagnostics={diagnosticsForCurrentAccount}
+        evaluations={accountBoundSignalEvaluations}
+        error={signalDiagnosticsResult.error?.message}
+        loading={
+          signalDiagnosticsResult.fetching || signalEvaluationsResult.fetching
+        }
+      />
+    </div>
+  );
   const settingsView = (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
+      {monitorResult.error && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+        >
+          <AlertTriangle
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
+          配置读取失败；当前表单可能是上次成功读取的草稿，保存已暂停，请先刷新。
+        </div>
+      )}
+      {!monitorResult.error && monitorResult.fetching && (
+        <div
+          role="status"
+          aria-busy="true"
+          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+        >
+          <Loader2
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
+          正在刷新配置版本…
+        </div>
+      )}
       <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3">
         <div>
           <h2 className="text-sm font-black text-slate-100">全局策略参数</h2>
@@ -3263,7 +4050,7 @@ export function TTradeGlobalPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
         <div className="grid gap-px bg-white/[0.05] xl:grid-cols-2">
-          <section className="bg-[#0a1424] p-4">
+          <section className="bg-[#0a1424] p-4 xl:col-span-2">
             <div className="mb-4 border-b border-white/[0.05] pb-3">
               <div className="text-xs font-black text-slate-200">
                 运行与资金约束
@@ -3632,58 +4419,23 @@ export function TTradeGlobalPage() {
             </div>
           </section>
 
-          <section className="bg-[#0a1424] p-4">
-            <div className="mb-4 border-b border-white/[0.05] pb-3">
-              <div className="text-xs font-black text-slate-200">
-                Tick 信号与确认
+          <section className="bg-[#0a1424] p-4 xl:col-span-2">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.05] pb-3">
+              <div>
+                <div className="text-xs font-black text-slate-200">
+                  V3 有状态信号规则
+                </div>
+                <div className="mt-1 text-[10px] text-slate-600">
+                  因果窗口、双 FSM、可解释评分、硬门禁与 episode 防重复
+                </div>
               </div>
-              <div className="mt-1 text-[10px] text-slate-600">
-                分别定义回撤企稳与早期快速拉升机会，并控制确认有效期
+              <div className="font-mono text-[9px] text-slate-600">
+                {monitor?.signalPolicy.policyVersion || '等待策略版本'} ·
+                feature {monitor?.signalPolicy.featureSchemaVersion || '--'}
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
-              <NumericField
-                id="t-trade-lookback"
-                label="回看窗口"
-                suffix="秒"
-                value={form.signalLookbackSeconds}
-                onChange={value => setField('signalLookbackSeconds', value)}
-              />
-              <NumericField
-                id="t-trade-stable"
-                label="企稳时长"
-                suffix="秒"
-                value={form.stabilizationSeconds}
-                onChange={value => setField('stabilizationSeconds', value)}
-              />
-              <NumericField
-                id="t-trade-pullback"
-                label="最低回撤"
-                suffix="%"
-                value={form.pullbackThresholdPct}
-                onChange={value => setField('pullbackThresholdPct', value)}
-              />
-              <NumericField
-                id="t-trade-rebound"
-                label="最低反弹"
-                suffix="%"
-                value={form.reboundThresholdPct}
-                onChange={value => setField('reboundThresholdPct', value)}
-              />
-              <NumericField
-                id="t-trade-spread"
-                label="最大价差"
-                suffix="Tick"
-                value={form.maxSpreadTicks}
-                onChange={value => setField('maxSpreadTicks', value)}
-              />
-              <NumericField
-                id="t-trade-ttl"
-                label="确认有效期"
-                suffix="秒"
-                value={form.approvalTtlSeconds}
-                onChange={value => setField('approvalTtlSeconds', value)}
-              />
+
+            <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
               <NumericField
                 id="t-trade-deviation"
                 label="确认价偏离"
@@ -3693,125 +4445,24 @@ export function TTradeGlobalPage() {
               />
               <NumericField
                 id="t-trade-cooldown"
-                label="冷却时间"
+                label="批次冷却时间"
                 suffix="秒"
                 value={form.cooldownSeconds}
                 onChange={value => setField('cooldownSeconds', value)}
               />
             </div>
 
-            <div className="mt-5 border border-white/[0.07] bg-[#07111f]/60 p-3">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <Label
-                    htmlFor="t-trade-momentum-enabled"
-                    className="text-xs font-bold text-slate-300"
-                  >
-                    快速拉升动量买入
-                  </Label>
-                  <p className="mt-1 text-[10px] text-slate-600">
-                    捕捉成交加速的早期拉升；VWAP 上限用于阻止末端追涨
-                  </p>
-                </div>
-                <input
-                  id="t-trade-momentum-enabled"
-                  type="checkbox"
-                  checked={form.momentumEnabled}
-                  onChange={event =>
-                    setField('momentumEnabled', event.target.checked)
-                  }
-                  className="h-4 w-4 cursor-pointer accent-red-500 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                />
-              </div>
-              {form.momentumEnabled && (
-                <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/[0.05] pt-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
-                  <NumericField
-                    id="t-trade-momentum-window"
-                    label="动量窗口"
-                    suffix="秒"
-                    value={form.momentumWindowSeconds}
-                    onChange={value => setField('momentumWindowSeconds', value)}
-                  />
-                  <NumericField
-                    id="t-trade-momentum-rise"
-                    label="最低拉升"
-                    suffix="%"
-                    value={form.momentumMinRisePct}
-                    onChange={value => setField('momentumMinRisePct', value)}
-                  />
-                  <NumericField
-                    id="t-trade-momentum-duration"
-                    label="最短持续"
-                    suffix="秒"
-                    value={form.momentumMinMoveSeconds}
-                    onChange={value =>
-                      setField('momentumMinMoveSeconds', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-baseline"
-                    label="成交基线"
-                    suffix="秒"
-                    value={form.momentumBaselineSeconds}
-                    onChange={value =>
-                      setField('momentumBaselineSeconds', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-velocity"
-                    label="成交加速倍数"
-                    suffix="倍"
-                    value={form.momentumMinAmountVelocityRatio}
-                    onChange={value =>
-                      setField('momentumMinAmountVelocityRatio', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-min-vwap"
-                    label="VWAP 最低溢价"
-                    suffix="%"
-                    value={form.momentumMinVwapPremiumPct}
-                    onChange={value =>
-                      setField('momentumMinVwapPremiumPct', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-max-vwap"
-                    label="VWAP 追涨上限"
-                    suffix="%"
-                    value={form.momentumMaxVwapPremiumPct}
-                    onChange={value =>
-                      setField('momentumMaxVwapPremiumPct', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-high-tolerance"
-                    label="窗口高点容差"
-                    suffix="Tick"
-                    value={form.momentumHighToleranceTicks}
-                    onChange={value =>
-                      setField('momentumHighToleranceTicks', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-spread-ticks"
-                    label="动量最大价差"
-                    suffix="Tick"
-                    value={form.momentumMaxSpreadTicks}
-                    onChange={value =>
-                      setField('momentumMaxSpreadTicks', value)
-                    }
-                  />
-                  <NumericField
-                    id="t-trade-momentum-spread-pct"
-                    label="价差占比上限"
-                    suffix="%"
-                    value={form.momentumMaxSpreadPct}
-                    onChange={value => setField('momentumMaxSpreadPct', value)}
-                  />
-                </div>
-              )}
-            </div>
+            <TTradeSignalPolicyEditor
+              conflictPolicy={configConflictPolicy}
+              conflictVersion={configConflictVersion}
+              form={form.signalPolicy}
+              localErrors={policyLocalErrors}
+              onChange={setSignalPolicyField}
+              onPreview={() => void handlePreviewPolicy()}
+              preview={policyPreview}
+              previewLoading={previewPolicyResult.fetching}
+              serverConfigVersion={draftConfigVersionRef.current}
+            />
 
             <div className="mt-5 border-t border-white/[0.05] pt-4">
               <Label
@@ -3821,7 +4472,7 @@ export function TTradeGlobalPage() {
                 忽略股票代码
               </Label>
               <p className="mt-1 text-[10px] text-slate-600">
-                忽略名单优先于动态持仓范围，可随时恢复监控
+                忽略名单属于外部发意图门禁，不改变服务端三层信号状态。
               </p>
               <div className="mt-3 flex gap-2">
                 <Input
@@ -3861,7 +4512,7 @@ export function TTradeGlobalPage() {
                       disabled={actionLoading}
                       onClick={() => handleIgnore(code, false)}
                       className="inline-flex items-center gap-1 border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[10px] text-slate-400 outline-none transition-colors hover:border-rose-400/30 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-red-500/60"
-                      aria-label={`从忽略名单移除 ${code}`}
+                      aria-label={'从忽略名单移除 ' + code}
                     >
                       {code}
                       <X className="h-3 w-3" />
@@ -3896,13 +4547,18 @@ export function TTradeGlobalPage() {
           className="h-9 rounded-sm bg-red-500 px-5 text-xs text-white hover:bg-red-400"
           disabled={
             !accountId ||
+            !monitor ||
+            Boolean(monitorResult.error) ||
             actionLoading ||
+            !policyPreview?.valid ||
+            policyPreview.configVersion !== draftConfigVersionRef.current ||
+            policyLocalErrors.length > 0 ||
             (form.mode === 'live' && !form.acknowledged)
           }
-          onClick={() => persist(Boolean(monitor?.enabled))}
+          onClick={() => persist(Boolean(monitor?.enabled), ignoredCodes, true)}
         >
           {saveResult.fetching ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
           ) : (
             <Save className="mr-2 h-4 w-4" />
           )}
@@ -3922,6 +4578,8 @@ export function TTradeGlobalPage() {
           monitorView
         ) : activeMode === 'SIGNALS' ? (
           signalsView
+        ) : activeMode === 'DIAGNOSTICS' ? (
+          diagnosticsView
         ) : activeMode === 'POSITIONS' ? (
           positionsView
         ) : activeMode === 'EVENTS' ? (

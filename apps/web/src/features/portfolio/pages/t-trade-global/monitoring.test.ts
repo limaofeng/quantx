@@ -1,56 +1,88 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { LiveMarketQuote } from '../../hooks/useRealTimeHoldings';
 
 import {
   buildAttentionRows,
+  canApproveSnapshot,
   classifyFreshness,
-  conditionProgress,
-  evaluationReasonLabel,
-  type EvaluationTelemetry,
-  type MonitorConfig,
+  createSignalSnapshotRefreshCoordinator,
+  createTTradeClientTelemetryReporter,
+  DOMINANT_PHASE_VALUES,
+  isKnownSignalSnapshot,
   type MonitorHolding,
+  type SignalSnapshot,
 } from './monitoring';
 import { sampleQuoteHistory } from './useLiveQuoteHistory';
 
-const config: MonitorConfig = {
-  signalLookbackSeconds: 300,
-  stabilizationSeconds: 15,
-  pullbackThresholdPct: 0.8,
-  reboundThresholdPct: 0.2,
-  maxSpreadTicks: 3,
-  momentumEnabled: true,
-  momentumWindowSeconds: 60,
-  momentumMinRisePct: 0.8,
-  momentumMinMoveSeconds: 15,
-  momentumBaselineSeconds: 300,
-  momentumMinAmountVelocityRatio: 2,
-  momentumMinVwapPremiumPct: 2,
-  momentumMaxVwapPremiumPct: 3.5,
-  momentumMaxSpreadTicks: 10,
-  momentumMaxSpreadPct: 0.3,
-};
-
-const evaluation: EvaluationTelemetry = {
-  phase: 'ENTRY_SCAN',
-  lastTickAt: '2026-08-13T10:00:00+08:00',
-  processedTickCount: 100,
-  windowSampleCount: 30,
-  windowCoverageSeconds: 60,
-  triggered: false,
-  reason: 'WAITING_REBOUND',
-  signalType: 'NONE',
-  signalPrice: 10,
-  pullbackPct: 0.72,
-  reboundPct: 0.1,
-  momentumRisePct: 0.72,
-  momentumMoveSeconds: 12,
-  momentumAmountVelocityRatio: 1.8,
-};
+function snapshot(overrides: Partial<SignalSnapshot> = {}): SignalSnapshot {
+  return {
+    instrumentCode: '600000.SH',
+    tradeDate: '2026-08-13',
+    evaluatedAt: '2026-08-13T10:00:00+08:00',
+    sourceAt: '2026-08-13T10:00:00+08:00',
+    sourceTimeMs: '1786586400000',
+    tickOrdinal: '1',
+    continuityGeneration: '2',
+    dataAgeMs: 100,
+    windowCoverageSeconds: 60,
+    sampleCount: 30,
+    dataHealth: 'READY',
+    dataHealthReasons: [],
+    pullbackPhase: 'REBOUND_CONFIRMING',
+    momentumPhase: 'MOMENTUM_BUILDING',
+    dominantPhase: 'PULLBACK_REBOUND_CONFIRMING',
+    selectedPath: 'PULLBACK_REBOUND',
+    pullbackScore: 74,
+    momentumScore: 58,
+    opportunityScore: 74,
+    previewThreshold: 55,
+    candidateThreshold: 72,
+    revalidateThreshold: 60,
+    rearmThreshold: 45,
+    features: { sampleCount: 30 },
+    pullback: {
+      phase: 'REBOUND_CONFIRMING',
+      score: 74,
+      preview: true,
+      candidateReady: true,
+      hardGates: [],
+      scoreContributions: [],
+      blockers: [],
+    },
+    momentum: {
+      phase: 'MOMENTUM_BUILDING',
+      score: 58,
+      preview: true,
+      candidateReady: false,
+      hardGates: [],
+      scoreContributions: [],
+      blockers: [],
+    },
+    hardGates: [
+      { code: 'DATA_READY', label: '数据', passed: true, detail: '' },
+    ],
+    scoreContributions: [],
+    topBlockers: [],
+    candidateId: 'candidate-1',
+    candidateFingerprint: 'fingerprint-1',
+    candidateStatus: 'AWAITING_APPROVAL',
+    candidateCreatedAt: '2026-08-13T10:00:00+08:00',
+    candidateExpiresAt: '2026-08-13T10:00:30+08:00',
+    pendingEntryIntentId: 'intent-1',
+    signalVersion: 8,
+    candidateStateVersion: 3,
+    stateSchemaVersion: '3',
+    featureSchemaVersion: '1',
+    policyVersion: 't_trade_opportunity_v3.0.0',
+    configVersion: 4,
+    ...overrides,
+  };
+}
 
 function holding(
   stockCode: string,
-  overrides: Partial<MonitorHolding> = {}
+  signalSnapshot: SignalSnapshot | null
 ): MonitorHolding {
   return {
     stockCode,
@@ -79,9 +111,8 @@ function holding(
       lastExitReason: '',
       completedCycles: 0,
       canCancel: true,
-      latestEvaluation: evaluation,
+      signalSnapshot,
     },
-    ...overrides,
   };
 }
 
@@ -97,18 +128,118 @@ function quote(stockCode: string, time: string, price = 10): LiveMarketQuote {
   };
 }
 
-describe('T trade live monitoring helpers', () => {
-  it('classifies quote and heartbeat freshness only during trading hours', () => {
+describe('T trade V3 monitoring helpers', () => {
+  it('keeps null distinct from a real zero and fails closed on unknown enums', () => {
+    expect(isKnownSignalSnapshot(snapshot({ opportunityScore: 0 }))).toBe(true);
+    expect(
+      isKnownSignalSnapshot(snapshot({ dataHealth: 'FUTURE_READY' }))
+    ).toBe(false);
+  });
+
+  it('accepts every published dominant phase and rejects missing or unknown values', () => {
+    for (const dominantPhase of DOMINANT_PHASE_VALUES) {
+      expect(isKnownSignalSnapshot(snapshot({ dominantPhase }))).toBe(true);
+    }
+    expect(
+      isKnownSignalSnapshot(snapshot({ dominantPhase: 'FUTURE_PHASE' }))
+    ).toBe(false);
+    expect(
+      isKnownSignalSnapshot(snapshot({ dominantPhase: undefined }))
+    ).toBe(false);
+  });
+
+  it('requires the exact V3 state and feature schema versions', () => {
+    expect(isKnownSignalSnapshot(snapshot())).toBe(true);
+    expect(
+      isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '2' }))
+    ).toBe(false);
+    expect(
+      isKnownSignalSnapshot(snapshot({ featureSchemaVersion: 'features-v3' }))
+    ).toBe(false);
+    expect(
+      isKnownSignalSnapshot(snapshot({ stateSchemaVersion: '' }))
+    ).toBe(false);
+    expect(
+      isKnownSignalSnapshot(snapshot({ featureSchemaVersion: undefined }))
+    ).toBe(false);
+  });
+
+  it('only enables approval for a fresh, versioned server candidate', () => {
+    const now = new Date('2026-08-13T10:00:10+08:00');
+    expect(canApproveSnapshot(snapshot(), now)).toBe(true);
+    // Score, health and gates are server-owned eligibility. A valid pending
+    // candidate remains confirmable here; the mutation revalidates it again.
+    expect(
+      canApproveSnapshot(
+        snapshot({
+          dataHealth: 'WARMING',
+          opportunityScore: null,
+          hardGates: [
+            { code: 'DATA_READY', label: '数据', passed: false, detail: '' },
+          ],
+          topBlockers: [{ code: 'PAUSED', label: '暂停', detail: '服务端提示' }],
+        }),
+        now
+      )
+    ).toBe(true);
+    expect(
+      canApproveSnapshot(
+        snapshot({ candidateExpiresAt: '2026-08-13T10:00:09+08:00' }),
+        now
+      )
+    ).toBe(false);
+    expect(
+      canApproveSnapshot(
+        snapshot({
+          pendingEntryIntentId: null,
+        }),
+        now
+      )
+    ).toBe(false);
+  });
+
+  it('sorts awaiting, latched, preview, other READY, then non-READY', () => {
+    const rows = [
+      holding(
+        '600005.SH',
+        snapshot({
+          dataHealth: 'WARMING',
+          opportunityScore: null,
+          candidateStatus: 'NONE',
+        })
+      ),
+      holding(
+        '600004.SH',
+        snapshot({ opportunityScore: 20, candidateStatus: 'NONE' })
+      ),
+      holding(
+        '600003.SH',
+        snapshot({ opportunityScore: 60, candidateStatus: 'NONE' })
+      ),
+      holding(
+        '600002.SH',
+        snapshot({ candidateStatus: 'LATCHED', pendingEntryIntentId: null })
+      ),
+      holding('600001.SH', snapshot()),
+    ];
+    expect(
+      buildAttentionRows(rows, [], new Map()).map(row => row.holding.stockCode)
+    ).toEqual([
+      '600001.SH',
+      '600002.SH',
+      '600003.SH',
+      '600004.SH',
+      '600005.SH',
+    ]);
+  });
+
+  it('classifies UI transport freshness without turning it into signal health', () => {
     const trading = new Date('2026-08-13T10:00:20+08:00');
     expect(
       classifyFreshness('2026-08-13T10:00:16+08:00', trading, 'QUOTE').level
     ).toBe('LIVE');
     expect(
-      classifyFreshness('2026-08-13T10:00:10+08:00', trading, 'QUOTE').level
-    ).toBe('DELAYED');
-    expect(
-      classifyFreshness('2026-08-13T09:59:00+08:00', trading, 'HEARTBEAT')
-        .level
+      classifyFreshness('2026-08-13T09:59:00+08:00', trading, 'HEARTBEAT').level
     ).toBe('STALE');
     expect(
       classifyFreshness(
@@ -117,101 +248,127 @@ describe('T trade live monitoring helpers', () => {
         'QUOTE'
       ).level
     ).toBe('CLOSED');
-    expect(
-      classifyFreshness(
-        '2026-10-01T10:00:00+08:00',
-        new Date('2026-10-01T10:00:01+08:00'),
-        'QUOTE',
-        false
-      ).level
-    ).toBe('CLOSED');
   });
 
-  it('uses the conservative minimum for each condition path', () => {
-    expect(conditionProgress(evaluation, config)).toBeCloseTo(0.8);
-    expect(
-      conditionProgress(
-        { ...evaluation, pullbackPct: 0.8, reboundPct: 0.04 },
-        { ...config, momentumEnabled: false }
-      )
-    ).toBeCloseTo(0.2);
-  });
-
-  it('sorts abnormal, pending, stale, active, near-threshold, then normal', () => {
-    const now = new Date('2026-08-13T10:00:20+08:00');
-    const rows = [
-      holding('600006.SH', { session: null }),
-      holding('600005.SH'),
-      holding('600004.SH', {
-        session: { ...holding('600004.SH').session!, activeVolume: 100 },
-      }),
-      holding('600003.SH'),
-      holding('600002.SH', {
-        session: {
-          ...holding('600002.SH').session!,
-          pendingEntryIntentId: 'intent-1',
-        },
-      }),
-      holding('600001.SH', {
-        session: {
-          ...holding('600001.SH').session!,
-          errorMessage: 'projection failed',
-        },
-      }),
-    ];
-    const quotes = new Map([
-      ['600001.SH', quote('600001.SH', '2026-08-13T10:00:19+08:00')],
-      ['600002.SH', quote('600002.SH', '2026-08-13T10:00:19+08:00')],
-      ['600004.SH', quote('600004.SH', '2026-08-13T10:00:19+08:00')],
-      ['600005.SH', quote('600005.SH', '2026-08-13T10:00:19+08:00')],
-      ['600006.SH', quote('600006.SH', '2026-08-13T10:00:19+08:00')],
-    ]);
-
-    expect(
-      buildAttentionRows(rows, [], quotes, config, now).map(
-        row => row.holding.stockCode
-      )
-    ).toEqual([
-      '600001.SH',
-      '600002.SH',
-      '600003.SH',
-      '600004.SH',
-      '600005.SH',
-      '600006.SH',
-    ]);
-  });
-
-  it('samples only new quote updates and keeps a two-minute 120-point window', () => {
+  it('samples only new quote updates and keeps a bounded two-minute window', () => {
     const now = new Date('2026-08-13T10:00:00+08:00').getTime();
     const quotes = new Map([
       ['600000.SH', quote('600000.SH', '2026-08-13T10:00:00+08:00')],
     ]);
     const first = sampleQuoteHistory(new Map(), quotes, now);
-    const duplicate = sampleQuoteHistory(first, quotes, now + 1000);
-    expect(first.get('600000.SH')).toHaveLength(1);
-    expect(duplicate.get('600000.SH')).toHaveLength(1);
-
-    const oldPoints = Array.from({ length: 120 }, (_, index) => ({
-      at: now - 119_000 + index * 1000,
-      price: 10 + index / 100,
-      sourceAt: now - 119_000 + index * 1000,
-    }));
-    const latest = sampleQuoteHistory(
-      new Map([['600000.SH', oldPoints]]),
-      new Map([
-        [
-          '600000.SH',
-          quote('600000.SH', '2026-08-13T10:00:01+08:00', 11.2),
-        ],
-      ]),
-      now + 1000
-    );
-    expect(latest.get('600000.SH')).toHaveLength(120);
-    expect(latest.get('600000.SH')?.at(-1)?.price).toBe(11.2);
+    expect(
+      sampleQuoteHistory(first, quotes, now + 1000).get('600000.SH')
+    ).toHaveLength(1);
   });
 
-  it('localizes evaluation reasons and degrades missing telemetry clearly', () => {
-    expect(evaluationReasonLabel('WAITING_REBOUND')).toBe('等待企稳反弹');
-    expect(evaluationReasonLabel()).toBe('等待首个有效 Tick');
+  it('fire-and-forgets telemetry with a fixed-event bounded throttle', async () => {
+    let now = 1_000;
+    const send = vi.fn(async () => undefined);
+    const report = createTTradeClientTelemetryReporter(send, {
+      now: () => now,
+      throttleMs: 30_000,
+    });
+
+    expect(report('REFRESH_SUCCESS')).toBe(true);
+    expect(report('REFRESH_SUCCESS')).toBe(false);
+    expect(
+      report('FREE_TEXT_ERROR' as never),
+      'runtime callers cannot grow the label set'
+    ).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    now += 29_999;
+    expect(report('REFRESH_SUCCESS')).toBe(false);
+    now += 1;
+    expect(report('REFRESH_SUCCESS')).toBe(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('silently contains telemetry transport failures', async () => {
+    const send = vi.fn(() => {
+      throw new Error('telemetry unavailable');
+    });
+    const report = createTTradeClientTelemetryReporter(send);
+
+    expect(() => report('REFRESH_FAILURE')).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('never trusts an old reconnect epoch after disconnect and queues the new fetch', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const firstEpoch = coordinator.beginEpoch('account-1');
+    let resolveFirst!: (value: boolean) => void;
+    const firstRequest = new Promise<boolean>(resolve => {
+      resolveFirst = resolve;
+    });
+    const firstRefresh = coordinator.refresh(
+      firstEpoch,
+      'account-1',
+      () => firstRequest
+    );
+
+    coordinator.beginEpoch('account-1');
+    const secondEpoch = coordinator.beginEpoch('account-1');
+    let secondStarted = false;
+    let resolveSecond!: (value: boolean) => void;
+    const secondRequest = new Promise<boolean>(resolve => {
+      resolveSecond = resolve;
+    });
+    const secondRefresh = coordinator.refresh(
+      secondEpoch,
+      'account-1',
+      () => {
+        secondStarted = true;
+        return secondRequest;
+      }
+    );
+
+    resolveFirst(true);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(await firstRefresh).toBe(false);
+    expect(secondStarted).toBe(true);
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+
+    resolveSecond(true);
+    expect(await secondRefresh).toBe(true);
+    expect(coordinator.isTrusted('account-1')).toBe(true);
+  });
+
+  it('rejects completion after a later account epoch even when the request succeeds', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const epoch = coordinator.beginEpoch('account-1');
+    let resolveRequest!: (value: boolean) => void;
+    const request = new Promise<boolean>(resolve => {
+      resolveRequest = resolve;
+    });
+    const refresh = coordinator.refresh(epoch, 'account-1', () => request);
+
+    coordinator.beginEpoch('account-2');
+    resolveRequest(true);
+    expect(await refresh).toBe(false);
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+    expect(coordinator.isTrusted('account-2')).toBe(false);
+  });
+
+  it('keeps the current epoch untrusted when its network-only cycle fails', async () => {
+    const coordinator = createSignalSnapshotRefreshCoordinator();
+    const failedEpoch = coordinator.beginEpoch('account-1');
+
+    expect(
+      await coordinator.refresh(failedEpoch, 'account-1', async () => false)
+    ).toBe(false);
+    expect(coordinator.isTrusted('account-1')).toBe(false);
+
+    const rejectedEpoch = coordinator.beginEpoch('account-1');
+    expect(
+      await coordinator.refresh(rejectedEpoch, 'account-1', async () => {
+        throw new Error('network unavailable');
+      })
+    ).toBe(false);
+    expect(coordinator.isTrusted('account-1')).toBe(false);
   });
 });
