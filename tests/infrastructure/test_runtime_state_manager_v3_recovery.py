@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -116,15 +117,20 @@ def _durable_v3_intent_record() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("serialized_parameters", [False, True])
 async def test_v3_recovery_loader_validates_account_and_run_scope(
   monkeypatch: pytest.MonkeyPatch,
+  serialized_parameters: bool,
 ) -> None:
   record = _record()
   db = SimpleNamespace()
 
   async def get(_model, key):
     assert key == "run-1"
-    return SimpleNamespace(parameters={"account_id": "account-1"})
+    parameters = {"account_id": "account-1"}
+    return SimpleNamespace(
+      parameters=json.dumps(parameters) if serialized_parameters else parameters
+    )
 
   db.get = get
   monkeypatch.setattr(
@@ -199,6 +205,37 @@ async def test_v3_recovery_loader_fails_closed_on_ownership_mismatch(
   manager = RuntimeStateManager(run_id="run-1")
 
   with pytest.raises(RuntimeStateRestoreError, match="账户|所有权"):
+    await manager.restore_v3_manual_candidate_intents(account_id="account-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("raw_parameters", "message"),
+  [
+    ("{", "有效 JSON 对象"),
+    (json.dumps(["not", "an", "object"]), "不是 JSON 对象"),
+    (["not", "an", "object"], "不是 JSON 对象"),
+  ],
+)
+async def test_v3_recovery_loader_rejects_invalid_or_non_object_strategy_run_parameters(
+  monkeypatch: pytest.MonkeyPatch,
+  raw_parameters: object,
+  message: str,
+) -> None:
+  db = SimpleNamespace()
+
+  async def get(_model, _key):
+    return SimpleNamespace(parameters=raw_parameters)
+
+  db.get = get
+  monkeypatch.setattr(
+    "quantx_infrastructure.database.connection.get_async_db",
+    lambda: _single_session(db),
+  )
+
+  manager = RuntimeStateManager(run_id="run-1")
+
+  with pytest.raises(RuntimeStateRestoreError, match=message):
     await manager.restore_v3_manual_candidate_intents(account_id="account-1")
 
 

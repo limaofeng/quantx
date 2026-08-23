@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import math
 import re
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -26,9 +27,35 @@ class HistoricalTickPaginationError(ValueError):
   """Raised when a historical Tick stream cannot prove completeness."""
 
 
+def _identity_value_is_missing(value: object) -> bool:
+  """Recognize nulls introduced by supported historical-store codecs.
+
+  Influx Arrow returns an absent nullable ``int64`` field as ``None``.  Its
+  pandas bridge represents the same absence as ``float('nan')`` before the
+  row is constructed as a ``Tick``.  Neither value carries source identity;
+  it must be reported as missing rather than as a lossy numeric conversion.
+  """
+
+  if value is None or type(value).__name__ in {"NAType", "NaTType"}:
+    return True
+  if isinstance(value, str) and not value.strip():
+    return True
+  try:
+    return bool(math.isnan(value))
+  except (TypeError, ValueError, OverflowError):
+    return False
+
+
 def _strict_source_identity(tick: Tick) -> tuple[int, int]:
   source_value = getattr(tick, "source_time_ms", None)
   ordinal_value = getattr(tick, "tick_ordinal", None)
+  if (
+    _identity_value_is_missing(source_value)
+    or _identity_value_is_missing(ordinal_value)
+  ):
+    raise HistoricalTickPaginationError(
+      "historical Tick source identity is missing"
+    )
   if isinstance(source_value, bool) or isinstance(ordinal_value, bool):
     raise HistoricalTickPaginationError(
       "historical Tick source identity contains a boolean value"

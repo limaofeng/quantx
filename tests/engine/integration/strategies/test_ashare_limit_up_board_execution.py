@@ -18,7 +18,11 @@ from quantx_domain.strategies.base import (
 )
 from quantx_domain.trading.exit_plan import ExitPlanStatus, ExitT1Policy
 from quantx_domain.trading.market_rules import MarketDataSnapshot
-from quantx_engine.strategy_executor import StrategyExecutor, StrategyRuntime
+from quantx_engine.strategy_executor import (
+  ExecutionStatus,
+  StrategyExecutor,
+  StrategyRuntime,
+)
 from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.models import ExecutionMetrics
 
@@ -113,6 +117,7 @@ async def test_board_entry_to_t1_exit_uses_real_executor_and_backtest_broker():
   )
   await runtime.strategy.start()
   await runtime.broker.connect()
+  runtime.status = ExecutionStatus.RUNNING
 
   executor = StrategyExecutor()
   executor.runs[runtime.run_id] = runtime

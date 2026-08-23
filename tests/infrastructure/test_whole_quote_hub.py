@@ -44,6 +44,7 @@ class FakeStore:
       MarketStreamState(
         status="READY",
         stream_id="stream-1",
+        generation=1,
         sequence=1,
         captured_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
@@ -120,6 +121,7 @@ def set_authority(
     MarketStreamState(
       status=status,
       stream_id=stream_id,
+      generation=_state.generation,
       sequence=sequence,
       captured_at=observed_at,
       updated_at=datetime.now(timezone.utc),
@@ -142,7 +144,13 @@ async def test_hub_subscribes_before_hydrating_and_applies_delta() -> None:
   try:
     assert store.calls[:2] == ["subscribe", "snapshot"]
     assert hub.status is WholeQuoteStatus.READY
-    assert hub.latest("600000.SH")["lastPrice"] == 10.0
+    hydrated = hub.latest("600000.SH")
+    assert hydrated["lastPrice"] == 10.0
+    assert hydrated["continuity_generation"] == 1
+    assert hydrated["market_stream_id"] == "stream-1"
+    assert hydrated["market_stream_sequence"] == 1
+    assert hydrated["tick_ordinal"] == 1
+    assert hydrated["market_stream_reset"] is False
 
     delta = batch(
       2,
@@ -232,10 +240,17 @@ async def test_empty_ready_barrier_dispatches_buffered_snapshot() -> None:
       await asyncio.sleep(0)
 
     assert hub.status is WholeQuoteStatus.READY
-    assert batch_updates == [snapshot_data]
-    assert tick_updates == [
-      {"600000.SH": {"lastPrice": 10.0, "time": 2_000}}
-    ]
+    assert len(batch_updates) == 1
+    assert {
+      code: tick["lastPrice"] for code, tick in batch_updates[0].items()
+    } == {"600000.SH": 10.0, "000001.SZ": 12.0}
+    assert len(tick_updates) == 1
+    delivered = tick_updates[0]["600000.SH"]
+    assert delivered["lastPrice"] == 10.0
+    assert delivered["continuity_generation"] == 1
+    assert delivered["market_stream_id"] == "stream-1"
+    assert delivered["market_stream_sequence"] == 2
+    assert delivered["tick_ordinal"] == 2
   finally:
     await hub.unsubscribe(batch_handle)
     await hub.unsubscribe(tick_handle)
@@ -262,6 +277,7 @@ async def test_hub_rejects_source_time_regression_and_recovers_gap() -> None:
       MarketStreamState(
         status="READY",
         stream_id="stream-1",
+        generation=1,
         sequence=5,
         captured_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
@@ -278,7 +294,11 @@ async def test_hub_rejects_source_time_regression_and_recovers_gap() -> None:
     )
     assert hub.sequence_gaps == 1
     assert hub.sequence == 5
-    assert hub.latest("600000.SH")["lastPrice"] == 10.8
+    recovered = hub.latest("600000.SH")
+    assert recovered["lastPrice"] == 10.8
+    assert recovered["continuity_generation"] == 1
+    assert recovered["market_stream_sequence"] == 5
+    assert recovered["market_stream_reset"] is True
   finally:
     await hub.stop()
 
@@ -310,6 +330,7 @@ async def test_sequence_gap_invalidates_queued_delta_before_snapshot_recovery() 
       MarketStreamState(
         status="READY",
         stream_id="stream-1",
+        generation=1,
         sequence=4,
         captured_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
@@ -548,6 +569,7 @@ async def test_hub_marks_active_session_stale_and_recovers_on_next_batch() -> No
       MarketStreamState(
         status="OFFLINE",
         stream_id=ready_state.stream_id,
+        generation=ready_state.generation,
         sequence=hub.sequence,
         captured_at=hub.last_captured_at,
         updated_at=datetime.now(timezone.utc),
@@ -678,11 +700,23 @@ async def test_ready_hub_dispatches_ordered_batches_while_api_is_ahead() -> None
 
     assert hub.sequence == 4
     assert hub.status is WholeQuoteStatus.READY
-    assert received[1:] == [
-      {"600000.SH": {"lastPrice": 10.2, "time": 3_000}},
-      {"000001.SZ": {"lastPrice": 12.0, "time": 4_000}},
-      {"600000.SH": {"lastPrice": 10.4, "time": 5_000}},
+    assert [
+      (next(iter(item)), next(iter(item.values()))["lastPrice"])
+      for item in received[1:]
+    ] == [
+      ("600000.SH", 10.2),
+      ("000001.SZ", 12.0),
+      ("600000.SH", 10.4),
     ]
+    assert [next(iter(item.values()))["market_stream_sequence"] for item in received[1:]] == [
+      2,
+      3,
+      4,
+    ]
+    assert all(
+      next(iter(item.values()))["continuity_generation"] == 1
+      for item in received[1:]
+    )
   finally:
     await hub.unsubscribe(handle)
     await hub.stop()
@@ -696,6 +730,7 @@ async def test_active_session_rejects_stale_hydrated_snapshot() -> None:
     MarketStreamState(
       status="READY",
       stream_id=stale_state.stream_id,
+      generation=stale_state.generation,
       sequence=stale_state.sequence,
       captured_at=datetime.now(timezone.utc) - timedelta(seconds=20),
       updated_at=datetime.now(timezone.utc) - timedelta(seconds=20),
@@ -726,6 +761,7 @@ async def test_closed_session_accepts_old_hydrated_snapshot() -> None:
     MarketStreamState(
       status="READY",
       stream_id=stale_state.stream_id,
+      generation=stale_state.generation,
       sequence=stale_state.sequence,
       captured_at=datetime.now(timezone.utc) - timedelta(days=1),
       updated_at=datetime.now(timezone.utc) - timedelta(days=1),
@@ -742,7 +778,11 @@ async def test_closed_session_accepts_old_hydrated_snapshot() -> None:
   await hub.start()
   try:
     assert hub.status is WholeQuoteStatus.READY
-    assert hub.snapshot() == latest
+    hydrated_tick = hub.snapshot()["600000.SH"]
+    assert hydrated_tick["lastPrice"] == latest["600000.SH"]["lastPrice"]
+    assert hydrated_tick["continuity_generation"] == stale_state.generation
+    assert hydrated_tick["market_stream_id"] == stale_state.stream_id
+    assert hydrated_tick["market_stream_sequence"] == stale_state.sequence
     assert hub.last_batch_age_seconds >= 23 * 60 * 60
   finally:
     await hub.stop()
@@ -756,6 +796,7 @@ async def test_closed_session_still_rejects_future_capture_time() -> None:
     MarketStreamState(
       status="READY",
       stream_id=future_state.stream_id,
+      generation=future_state.generation,
       sequence=future_state.sequence,
       captured_at=datetime.now(timezone.utc) + timedelta(seconds=60),
       updated_at=datetime.now(timezone.utc),
@@ -785,6 +826,7 @@ async def test_hydration_freshness_uses_local_monotonic_receipt_time() -> None:
     MarketStreamState(
       status="READY",
       stream_id=state.stream_id,
+      generation=state.generation,
       sequence=state.sequence,
       captured_at=datetime.now(timezone.utc),
       updated_at=slow_update_clock,
@@ -842,6 +884,50 @@ async def test_persistent_api_lead_recovers_from_authoritative_snapshot() -> Non
     assert hub.sequence == 3
     assert hub.status is WholeQuoteStatus.READY
     assert prices == [10.0, 10.3]
+  finally:
+    await hub.unsubscribe(handle)
+
+
+@pytest.mark.asyncio
+async def test_authority_generation_change_rehydrates_with_reset_lineage() -> None:
+  store = FakeStore()
+  hub = WholeQuoteHub(store=store, trading_time_service=AlwaysClosed())
+  assert await hub._hydrate_from_store()
+  received: list[dict[str, dict]] = []
+  handle = await hub.subscribe_tick("600000.SH", received.append)
+  try:
+    await asyncio.sleep(0)
+    _state, _latest = store.snapshot
+    store.snapshot = (
+      MarketStreamState(
+        status="READY",
+        stream_id="stream-2",
+        generation=2,
+        sequence=3,
+        captured_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        instrument_count=1,
+      ),
+      {"600000.SH": {"lastPrice": 10.6, "time": 6_000}},
+    )
+    store.freshness = MarketStreamFreshnessLease(
+      stream_id="stream-2",
+      sequence=3,
+    )
+
+    await hub._check_freshness_once()
+    for _ in range(10):
+      if len(received) >= 2:
+        break
+      await asyncio.sleep(0)
+
+    recovered = received[-1]["600000.SH"]
+    assert hub.generation == 2
+    assert hub.stream_id == "stream-2"
+    assert recovered["continuity_generation"] == 2
+    assert recovered["market_stream_id"] == "stream-2"
+    assert recovered["market_stream_sequence"] == 3
+    assert recovered["market_stream_reset"] is True
   finally:
     await hub.unsubscribe(handle)
 

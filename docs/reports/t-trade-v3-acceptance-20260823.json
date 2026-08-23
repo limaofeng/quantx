@@ -85350,17 +85350,17 @@
     "status": "BLOCKED"
   },
   "full_pressure_attempt": {
-    "actual_ended_at": "2026-08-23T20:11:26.876867",
-    "actual_started_at": "2026-08-23T19:59:41.780453",
+    "actual_ended_at": "2026-08-23T22:22:56.725902",
+    "actual_started_at": "2026-08-23T21:52:35.430200",
     "cancellation_reason": "FULL_9600_TICK_SYNTHETIC_PRESSURE_EXCEEDED_REASONABLE_RUNTIME; operator-authorized cancellation of this isolated BACKTEST only",
     "evaluations": {
       "COALESCED_DIAGNOSTIC": {
-        "logical_events": 1448,
-        "rows": 1448
+        "logical_events": 4716,
+        "rows": 4716
       },
       "MATERIAL": {
-        "logical_events": 16,
-        "rows": 16
+        "logical_events": 552,
+        "rows": 552
       }
     },
     "fixture": {
@@ -85389,16 +85389,20 @@
       ]
     },
     "not_a_completed_slo": true,
-    "partial_materialization_logical_events_per_second": 2.076312,
-    "primary_observed_boundary": "production per-event RuntimeState checkpoint and post-CAS evaluation materialization; this full 9,600-Tick load made only partial progress within the allowed wall-time budget",
-    "processed_until": "2026-06-04T10:43:26",
-    "progress_pct": 4.148775894538606,
+    "partial_materialization_logical_events_per_second": 2.892446,
+    "primary_observed_boundary": "production evaluation/materialization path with a nonpersistent BACKTEST runtime-state checkpoint; this cancelled historical run did not exercise durable RuntimeState CAS/position writes and made only partial progress within the allowed wall-time budget",
+    "processed_until": "2026-06-05T09:56:29",
+    "progress_pct": 82.85216572504707,
     "replay_status": "CANCELLED",
     "requested_replay_end": "2026-06-05T15:00:00",
     "requested_replay_start": "2026-06-04T09:30:00",
-    "run_id": "ff6b8266-2fa1-45ac-9d44-3134dceb2cf9",
-    "run_sha256_16": "97adb614ffe4054c",
+    "run_id": "22d070d9-5333-4526-a3c8-3ae7cd2db75e",
+    "run_sha256_16": "f23f07439dfa8c3f",
     "run_status": "STOPPED",
+    "runtime_state_persistence": {
+      "enabled": false,
+      "evidence": "sealed V3 pressure runtime-state marker absent; this historical run did not exercise durable RuntimeState CAS/position writes"
+    },
     "status": "CANCELLED_BLOCKED_FULL_SYNTHETIC_PRESSURE",
     "unavailable_metrics": {
       "cas_conflict_rate": "N/A: in-memory counter lost at cancellation",
@@ -85406,9 +85410,9 @@
       "engine_tick_latency_p50_p95_p99": "N/A: process cancellation releases in-memory samples",
       "engine_tick_throughput": "N/A: completed Tick count was not durably checkpointed"
     },
-    "wall_elapsed_seconds": 705.096414
+    "wall_elapsed_seconds": 1821.295702
   },
-  "generated_at": "2026-08-23T20:42:54.624411+08:00",
+  "generated_at": "2026-08-23T23:37:20.699964+08:00",
   "historical_short_window_source_identity_preflight": {
     "engine_global_order_key": "(continuity_generation, source_time_ms, tick_ordinal, event_type, instrument_code, period)",
     "failure": {
@@ -85646,6 +85650,7 @@
     },
     "records_read": 0
   },
+  "nonpersistent_calibration_attempt": null,
   "performance_remediation_microbenchmark": {
     "batch_transaction_microtest": {
       "closed_diagnostics": 8,
@@ -85678,16 +85683,39 @@
     "status": "MICROBENCHMARK_NON_GATING"
   },
   "pressure_baseline": {
+    "cancellation": null,
     "cas": {
-      "checkpoint_attempts": null,
-      "conflict_rate": null,
-      "snapshot_conflicts": null,
-      "unavailable_reason": "N/A: CAS counters were process-local"
+      "checkpoint_attempts": 465,
+      "conflict_rate": 0.0,
+      "snapshot_conflicts": 0,
+      "state_upsert_attempts": 471,
+      "state_upsert_rejected": 0
     },
     "database_write_activity": {
-      "status": "N/A: commit/flush counters were process-local"
+      "commit_calls": 1118,
+      "dml_execute_calls": 474,
+      "flush_calls": 401,
+      "runtime_state": {
+        "position_replace_snapshot_calls": 1,
+        "position_rows_submitted": 8,
+        "position_snapshot_calls": 1,
+        "position_update_existing_snapshot_calls": 0,
+        "snapshot_save_calls": 500,
+        "snapshot_save_failures": 0,
+        "state_upsert_attempts": 471,
+        "state_upsert_rejected": 0
+      }
     },
     "diagnostic_non_gating": true,
+    "elapsed_seconds": 515.254802,
+    "execution_boundary": {
+      "broker_class": "BacktestBroker",
+      "paper_or_live_command": false,
+      "qmt_invocation": false,
+      "runtime_state_capability": "V3_PRESSURE_BASELINE_INTERNAL_ONLY",
+      "runtime_state_persist_enabled": true,
+      "strategy_run_mode": "BACKTEST"
+    },
     "fixture": {
       "fixture_sha256": "ea9cd304f06a17fd7c76c05ed5b10861b0d1d509e0431107ce2622f6ff90c442",
       "held_instruments": [
@@ -85715,21 +85743,64 @@
     },
     "frozen_local_slo": null,
     "isolated_backtest": true,
-    "latency": {},
+    "latency": {
+      "engine_tick": {
+        "dropped_samples": 0,
+        "max": 15325.3503,
+        "p50": 142.25395,
+        "p95": 5509.579435,
+        "p99": 9853.155481,
+        "quantiles_exact": true,
+        "sample_count": 464,
+        "unit": "milliseconds"
+      },
+      "state_checkpoint": {
+        "dropped_samples": 0,
+        "max": 14998.6052,
+        "p50": 121.0767,
+        "p95": 4016.9334,
+        "p99": 8627.784988,
+        "quantiles_exact": true,
+        "sample_count": 465,
+        "unit": "milliseconds"
+      },
+      "state_snapshot": {
+        "dropped_samples": 0,
+        "max": 14968.3673,
+        "p50": 85.90745,
+        "p95": 4289.245725,
+        "p99": 8921.623375,
+        "quantiles_exact": true,
+        "sample_count": 500,
+        "unit": "milliseconds"
+      },
+      "strategy_evaluation": {
+        "dropped_samples": 0,
+        "max": 31.0847,
+        "p50": 3.5759,
+        "p95": 10.88592,
+        "p99": 26.194444,
+        "quantiles_exact": true,
+        "sample_count": 465,
+        "unit": "milliseconds"
+      }
+    },
+    "market_data_supplement_attempts": 0,
+    "market_data_supplement_forbidden": true,
     "no_live_or_paper_broker": true,
     "non_gating": true,
     "not_a_completed_slo": true,
     "not_historical_replay": true,
     "production_path_coverage": {
       "post_cas_evaluation_materialization": true,
-      "runtime_state_checkpoint": "N/A: not durably measured",
+      "runtime_state_checkpoint": true,
       "strategy_evaluator": true,
-      "strategy_executor_global_source_order": "VERSION_STALE_NOT_REMEASURED: execution path was not re-instrumented"
+      "strategy_executor_global_source_order": true
     },
     "replay": {
       "account_id": "300000013250",
-      "backtest_id": "c06d7e88-e7ca-5064-b635-a5890c62d3d9",
-      "created_at": "2026-08-23T20:15:45.479229",
+      "backtest_id": "ba698623-81c6-5028-891a-64effa14d49c",
+      "created_at": "2026-08-23T23:08:50.204052",
       "curve": [
         {
           "equity": 550324.51,
@@ -86385,14 +86456,14 @@
       "report": {
         "conclusion": "本次回放没有可计量的 READY 标的时长，不能评价机会生成质量。",
         "conclusion_code": "INSUFFICIENT_READY_TIME",
-        "generated_at": "2026-08-23T20:20:09.915300",
+        "generated_at": "2026-08-23T23:17:20.748194",
         "html_artifact": "t-trade-report.html",
         "json_artifact": "t-trade-report.json",
         "schema_version": 2,
         "status": "GENERATED"
       },
-      "revision": "44",
-      "run_id": "8b8b0485-2e77-4414-bdcd-0bd5fd4ee225",
+      "revision": "59",
+      "run_id": "638f3579-b8de-41eb-b5f7-81d5d00e4043",
       "skipped_stock_codes": [],
       "snapshot_date": "2026-06-03",
       "snapshot_id": "d16389f227773af8d69b0bb91ffbccee",
@@ -86430,10 +86501,19 @@
         "win_rate_pct": 0.0,
         "winning_cycles": 0
       },
-      "updated_at": "2026-08-23T20:20:10.092453"
+      "updated_at": "2026-08-23T23:17:20.892430"
     },
     "resources": {
-      "status": "N/A: runner resource samples were process-local"
+      "cpu_count": 16,
+      "cpu_seconds_delta": 46.171875,
+      "cpu_seconds_end": 48.328125,
+      "cpu_seconds_start": 2.15625,
+      "platform": "Windows-11-10.0.26200-SP0",
+      "psutil_available": true,
+      "python": "3.13.9",
+      "rss_bytes_delta": 38604800,
+      "rss_bytes_end": 261447680,
+      "rss_bytes_start": 222842880
     },
     "run_evidence": {
       "error_message": null,
@@ -86458,6 +86538,7 @@
       "opportunity_feature_schema_version": 1,
       "opportunity_policy_version": "t_trade_opportunity_v3.0.0",
       "parameters": {
+        "_internal_v3_pressure_runtime_state_persistence": true,
         "account_id": "300000013250",
         "auto_approve_manual_intents": true,
         "auto_exit_acknowledged": false,
@@ -86963,20 +87044,24 @@
         "trailing_gap_slope": 0.25,
         "transfer_fee_rate": 1e-05
       },
-      "parameters_sha256": "c11674bd29fa9aac1b402cdcb53582576295a0a6d2b29c3d971c880d56513e02",
-      "run_id": "8b8b0485-2e77-4414-bdcd-0bd5fd4ee225",
+      "parameters_sha256": "1735a5b4928ee93011b6567cc72050f5eb4365a94d8480754f23242e48a21556",
+      "run_id": "638f3579-b8de-41eb-b5f7-81d5d00e4043",
       "status": "completed"
     },
-    "run_id": "8b8b0485-2e77-4414-bdcd-0bd5fd4ee225",
-    "run_sha256_16": "4e0160ba4d42c831",
     "schema_version": 1,
-    "status": "EXECUTED_DIAGNOSTIC_NON_GATING_VERSION_STALE",
-    "throughput": {
-      "engine_ticks_per_second": null,
-      "engine_ticks_processed": null,
-      "unavailable_reason": "N/A: completed Tick count/timing were process-local"
+    "status": "EXECUTED_DIAGNOSTIC_NON_GATING",
+    "terminal_convergence": {
+      "projection_repaired": false,
+      "replay_status": "COMPLETED",
+      "run_status": "COMPLETED",
+      "status": "TERMINAL"
     },
-    "version_stale_reason": "the diagnostic runner imported the pre-batch-diagnostics implementation; it completed before its process-local instrumentation could be persisted"
+    "throughput": {
+      "engine_ticks_per_second": 0.900525,
+      "engine_ticks_processed": 464
+    },
+    "timed_out": false,
+    "timeout_seconds": 600.0
   },
   "schema_version": 1,
   "scope": {

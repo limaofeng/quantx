@@ -14,7 +14,7 @@ StrategyExecutor 单元测试
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -174,6 +174,45 @@ def isolate_executor_tests_from_runtime_state_database():
     yield
 
 
+def test_runtime_state_persistence_scope_and_startup_checkpoint_invariants() -> None:
+  def runtime(mode: StrategyRunMode, parameters: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+      context=SimpleNamespace(mode=mode, parameters=parameters),
+    )
+
+  marker = {"_internal_v3_pressure_runtime_state_persistence": True}
+  ordinary_backtest = runtime(StrategyRunMode.BACKTEST, {})
+  forged_marker_only = runtime(StrategyRunMode.BACKTEST, marker)
+  sealed_pressure = runtime(
+    StrategyRunMode.BACKTEST,
+    {
+      **marker,
+      "t_trade_replay": True,
+      "replay_acceptance": "V3_PRESSURE_BASELINE",
+    },
+  )
+  paper = runtime(StrategyRunMode.PAPER, {})
+  live = runtime(StrategyRunMode.LIVE, {})
+
+  assert StrategyExecutor._runtime_state_persistence_enabled(ordinary_backtest) is False
+  assert StrategyExecutor._runtime_state_persistence_enabled(forged_marker_only) is False
+  assert StrategyExecutor._runtime_state_persistence_enabled(sealed_pressure) is True
+  assert StrategyExecutor._runtime_state_persistence_enabled(paper) is True
+  assert StrategyExecutor._runtime_state_persistence_enabled(live) is True
+
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
+    ordinary_backtest
+  ) is False
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
+    forged_marker_only
+  ) is False
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
+    sealed_pressure
+  ) is True
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(paper) is True
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(live) is True
+
+
 @pytest.mark.unit
 class TestStrategyExecutor:
   """StrategyExecutor 单元测试类"""
@@ -266,6 +305,137 @@ class TestStrategyExecutor:
     assert input_snapshot.risk_caps["risk_mode"] == "PANIC"
     assert input_snapshot.position_profile["profile"] == "DEFENSIVE"
 
+  def test_strategy_input_exposes_engine_owned_market_lineage(
+    self, strategy_executor
+  ):
+    run_id = "test-run-market-lineage"
+    timestamp = datetime(2024, 1, 2, 10, 0)
+    context = StrategyContext(
+      run_id=run_id,
+      mode=StrategyRunMode.BACKTEST,
+      instruments=["000001.SZ"],
+      parameters={},
+    )
+    runtime = strategy_executor.create(
+      run_id=run_id,
+      strategy_id=102,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+    runtime._market_continuity_generations["000001.SZ"] = 4
+    tick = SimpleNamespace(
+      stock_code="000001.SZ",
+      source_time_ms=1_704_160_800_123,
+      tick_ordinal=2,
+      source_sequence=19,
+      transaction_num=99,
+    )
+
+    input_snapshot = strategy_executor._build_strategy_input(
+      runtime,
+      cadence=StrategyCadence.TICK,
+      instrument_code="000001.SZ",
+      timestamp=timestamp,
+      event=tick,
+    )
+
+    lineage = input_snapshot.market_data_context
+    assert lineage.source == "REPLAY"
+    assert lineage.continuity_generation == 4
+    assert lineage.source_sequence == 19
+    assert lineage.source_time_ms == 1_704_160_800_123
+    assert lineage.tick_ordinal == 2
+    assert lineage.received_at_ms == lineage.source_time_ms
+    assert lineage.quote_stale is False
+    assert lineage.session.value == "CONTINUOUS_AM"
+    assert lineage.trade_date.isoformat() == "2024-01-02"
+
+  def test_live_strategy_input_uses_authoritative_transport_lineage(
+    self, strategy_executor
+  ):
+    timestamp = datetime(2024, 1, 2, 10, 0)
+    context = StrategyContext(
+      run_id="live-market-lineage",
+      mode=StrategyRunMode.LIVE,
+      instruments=["000001.SZ"],
+      parameters={},
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=103,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+    runtime._market_continuity_generations["000001.SZ"] = 99
+    tick = SimpleNamespace(
+      stock_code="000001.SZ",
+      source_time_ms=1_704_160_800_123,
+      tick_ordinal=42,
+      continuity_generation=7,
+      market_stream_id="authority-stream-7",
+      market_stream_sequence=42,
+    )
+
+    input_snapshot = strategy_executor._build_strategy_input(
+      runtime,
+      cadence=StrategyCadence.TICK,
+      instrument_code="000001.SZ",
+      timestamp=timestamp,
+      event=tick,
+    )
+
+    lineage = input_snapshot.market_data_context
+    assert lineage.source == "REALTIME"
+    assert lineage.continuity_generation == 7
+    assert lineage.stream_id == "authority-stream-7"
+    assert lineage.source_sequence == 42
+    assert lineage.tick_ordinal == 42
+
+  def test_live_context_does_not_apply_execution_quote_age_gate(
+    self, strategy_executor
+  ):
+    context = StrategyContext(
+      run_id="live-policy-owned-quote-age",
+      mode=StrategyRunMode.LIVE,
+      instruments=["000001.SZ"],
+      parameters={},
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=104,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+    source_time_ms = 1_704_160_800_123
+    tick = SimpleNamespace(
+      stock_code="000001.SZ",
+      source_time_ms=source_time_ms,
+      tick_ordinal=43,
+      continuity_generation=7,
+      market_stream_id="authority-stream-7",
+      market_stream_sequence=43,
+    )
+    received_at = datetime.fromtimestamp(
+      (source_time_ms + 4_000) / 1000,
+      timezone.utc,
+    )
+
+    with patch.object(
+      strategy_executor_module.time_utils,
+      "now",
+      return_value=received_at,
+    ):
+      lineage = strategy_executor._build_market_data_context(
+        runtime,
+        cadence=StrategyCadence.TICK,
+        instrument_code="000001.SZ",
+        timestamp=received_at,
+        event=tick,
+      )
+
+    assert lineage.received_at_ms - lineage.source_time_ms == 4_000
+    assert lineage.quote_stale is False
+
   @pytest.mark.asyncio
   async def test_strategy_order_and_trade_patches_are_consumed(self, strategy_executor):
     run_id = "test-run-callback-patch"
@@ -300,6 +470,73 @@ class TestStrategyExecutor:
 
     assert runtime.strategy.state.order_seen == "SUBMITTED"
     assert runtime.strategy.state.trade_seen == 300
+
+  @pytest.mark.parametrize(
+    "patch",
+    (
+      SimpleNamespace(
+        set={"safe_update": True, "nested": {"position_shares": 500}},
+        unset=["preserved"],
+        append_events=[],
+      ),
+      SimpleNamespace(
+        set={"safe_update": True},
+        unset=["preserved"],
+        append_events=[
+          {"event_type": "RISK", "payload": {"final_volume": 100}}
+        ],
+      ),
+    ),
+  )
+  def test_duck_typed_runtime_patch_rejects_account_truth_atomically(
+    self,
+    strategy_executor,
+    patch,
+  ):
+    context = StrategyContext(
+      run_id="test-run-duck-patch-guard",
+      mode=StrategyRunMode.BACKTEST,
+      instruments=["000001.SZ"],
+      parameters={},
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=103,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+    runtime.strategy = MockStrategy(context)
+    runtime.strategy.state.set("preserved", "before")
+
+    with pytest.raises(ValueError, match="cannot mutate account fields"):
+      strategy_executor._apply_runtime_state_patch(runtime, patch)
+
+    assert runtime.strategy.state.to_dict() == {"preserved": "before"}
+
+  def test_runtime_patch_revalidates_mutated_dataclass_before_applying(
+    self,
+    strategy_executor,
+  ):
+    context = StrategyContext(
+      run_id="test-run-mutated-patch-guard",
+      mode=StrategyRunMode.BACKTEST,
+      instruments=["000001.SZ"],
+      parameters={},
+    )
+    runtime = strategy_executor.create(
+      run_id=context.run_id,
+      strategy_id=104,
+      strategy_class=MockStrategy,
+      context=context,
+    )
+    runtime.strategy = MockStrategy(context)
+    guarded_patch = RuntimeStatePatch(set={"algorithm_phase": "READY"})
+    guarded_patch.set["payload"] = {"requested_entry_volume": 100}
+
+    with pytest.raises(ValueError, match="requested_entry_volume"):
+      strategy_executor._apply_runtime_state_patch(runtime, guarded_patch)
+
+    assert runtime.strategy.state.to_dict() == {}
 
   @pytest.mark.asyncio
   async def test_synthetic_reject_consumes_order_patch(self, strategy_executor):

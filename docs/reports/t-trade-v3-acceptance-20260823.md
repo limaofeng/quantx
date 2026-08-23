@@ -1,6 +1,6 @@
 # 做 T V3 历史回放与全持仓压力验收
 
-- 生成时间：`2026-08-23T20:42:54.624411+08:00`
+- 生成时间：`2026-08-23T23:37:20.699964+08:00`
 - 正式 20 交易日门禁：**BLOCKED**
 - 因果口径：D-1 账户日结快照；按 SH 真实交易日；所有正持仓均纳入，绝不自动剔除。
 - Tick 口径：Engine 同款严格连续交易时段检查；正式/压力执行前另以严格 source-identity keyset 分页验证。
@@ -39,24 +39,27 @@
 ## 9,600 Tick 全持仓合成压力尝试
 
 **CANCELLED_BLOCKED_FULL_SYNTHETIC_PRESSURE**：本轮全负载没有完成，SLO 判定为 **BLOCKED/FAIL**，不得以小样本替代。
-- runId=`ff6b8266-2fa1-45ac-9d44-3134dceb2cf9`；请求区间=2026-06-04T09:30:00~2026-06-05T15:00:00；处理至=2026-06-04T10:43:26；进度=4.148775894538606%。
-- 取消原因：FULL_9600_TICK_SYNTHETIC_PRESSURE_EXCEEDED_REASONABLE_RUNTIME; operator-authorized cancellation of this isolated BACKTEST only；局部 materialization logical events/s=2.076312。
+- runId=`22d070d9-5333-4526-a3c8-3ae7cd2db75e`；请求区间=2026-06-04T09:30:00~2026-06-05T15:00:00；处理至=2026-06-05T09:56:29；进度=82.85216572504707%。
+- 取消原因：FULL_9600_TICK_SYNTHETIC_PRESSURE_EXCEEDED_REASONABLE_RUNTIME; operator-authorized cancellation of this isolated BACKTEST only；局部 materialization logical events/s=2.892446。
 - fixture：`SYNTHETIC_NON_HISTORICAL`，sha256=c31da4d7c79f729335d80a25945cc56043ac0e39625a5b71d4691c40394d6603，9600 ticks，8 instruments，合法交易时段=Shanghai continuous sessions only: 09:30-11:30 and 13:00-15:00。
-- 观察到的主要耗时边界：production per-event RuntimeState checkpoint and post-CAS evaluation materialization; this full 9,600-Tick load made only partial progress within the allowed wall-time budget。
-- 未测项：{'engine_tick_latency_p50_p95_p99': 'N/A: process cancellation releases in-memory samples', 'engine_tick_throughput': 'N/A: completed Tick count was not durably checkpointed', 'cas_conflict_rate': 'N/A: in-memory counter lost at cancellation', 'database_commit_calls': 'N/A: in-process counter lost at cancellation'}。
+- 观察到的主要耗时边界：production evaluation/materialization path with a nonpersistent BACKTEST runtime-state checkpoint; this cancelled historical run did not exercise durable RuntimeState CAS/position writes and made only partial progress within the allowed wall-time budget。
+- 未测项：{'cas_conflict_rate': 'N/A: in-memory counter lost at cancellation', 'database_commit_calls': 'N/A: in-process counter lost at cancellation', 'engine_tick_latency_p50_p95_p99': 'N/A: process cancellation releases in-memory samples', 'engine_tick_throughput': 'N/A: completed Tick count was not durably checkpointed'}。
 
 ## 全持仓合成压力基线 / 首次本机 SLO
 
-**EXECUTED_DIAGNOSTIC_NON_GATING_VERSION_STALE**：此结果为合成负载，不是历史回放，且不替代 20 交易日门禁。
+**EXECUTED_DIAGNOSTIC_NON_GATING**：此结果为合成负载，不是历史回放，且不替代 20 交易日门禁。
 - fixture：sha256=ea9cd304f06a17fd7c76c05ed5b10861b0d1d509e0431107ce2622f6ff90c442, 480 ticks，8 instruments，合法交易时段=Shanghai continuous sessions only: 09:30-11:30 and 13:00-15:00。
-- 版本可比性：`VERSION_STALE`；the diagnostic runner imported the pre-batch-diagnostics implementation; it completed before its process-local instrumentation could be persisted。
-- Engine tick 延迟：无样本
-- 策略评估延迟：无样本
-- 吞吐：None engine ticks/s（None ticks）
-- CAS：None conflicts / None checkpoint attempts，rate=None
-- DB 写活动：{'status': 'N/A: commit/flush counters were process-local'}；评估：{'by_record_kind': {'MATERIAL': {'rows': 64, 'logical_events': 64}, 'COALESCED_DIAGNOSTIC': {'rows': 400, 'logical_events': 400}}, 'material_rows': 64, 'diagnostic_rows': 400, 'diagnostic_logical_events': 400, 'diagnostic_merge_ratio': 0.0}
-- 生产路径覆盖边界：{'strategy_executor_global_source_order': 'VERSION_STALE_NOT_REMEASURED: execution path was not re-instrumented', 'strategy_evaluator': True, 'runtime_state_checkpoint': 'N/A: not durably measured', 'post_cas_evaluation_materialization': True}。
-- 冻结 SLO：N/A（DIAGNOSTIC_NON_GATING 小样本不得冻结/判定 SLO）
+- Engine tick 延迟（ms）：p50=142.25395, p95=5509.579435, p99=9853.155481
+- 策略评估延迟（ms）：p50=3.5759, p95=10.88592, p99=26.194444
+- 吞吐：0.900525 engine ticks/s（464 ticks）
+- CAS：0 conflicts / 465 checkpoint attempts，rate=0.0
+- DB 写活动：{'commit_calls': 1118, 'dml_execute_calls': 474, 'flush_calls': 401, 'runtime_state': {'position_replace_snapshot_calls': 1, 'position_rows_submitted': 8, 'position_snapshot_calls': 1, 'position_update_existing_snapshot_calls': 0, 'snapshot_save_calls': 500, 'snapshot_save_failures': 0, 'state_upsert_attempts': 471, 'state_upsert_rejected': 0}}；评估：{'by_record_kind': {'COALESCED_DIAGNOSTIC': {'logical_events': 400, 'rows': 400}, 'MATERIAL': {'logical_events': 64, 'rows': 64}}, 'diagnostic_logical_events': 400, 'diagnostic_merge_ratio': 0.0, 'diagnostic_rows': 400, 'material_rows': 64}
+- 生产路径覆盖边界：{'post_cas_evaluation_materialization': True, 'runtime_state_checkpoint': True, 'strategy_evaluator': True, 'strategy_executor_global_source_order': True}。
+- 冻结 SLO：N/A（只有完成固定 9,600 Tick 全量夹具才可冻结/判定 SLO）
+- 隔离执行证据：runId=`638f3579-b8de-41eb-b5f7-81d5d00e4043`；terminal=TERMINAL；sealed durable RuntimeState=True；QMT=False，PAPER/LIVE command=False.
+- Durable RuntimeState latency（ms）：checkpoint p50/p95/p99=121.0767/4016.9334/8627.784988；snapshot p50/p95/p99=85.90745/4289.245725/8921.623375。
+- Position DB writes：replace=1，same-code update=0，rows=8；每 Tick 的 state CAS/upsert 仍保留（attempts=471）。
+- 性能判读（仅诊断）：strategy p95=10.88592ms，而 checkpoint/snapshot p95=4016.9334/4289.245725ms；长尾位于外部数据库持久化边界。未启动新的 9,600 Tick，SLO 继续 BLOCKED。
 
 ## 后续性能修复微基准（非压力验收）
 

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import hashlib
+import inspect
 import json
 import os
 import platform
@@ -59,11 +61,23 @@ from quantx_infrastructure.repositories.daily_asset_snapshot_repository import (
 from quantx_infrastructure.repositories.instrument_repository import (
   InstrumentRepository,
 )
+from quantx_infrastructure.repositories.strategy_run_state_repository import (
+  StrategyRunPositionRepository,
+  StrategyRunStateRepository,
+)
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
   HistoricalTickPaginationError,
 )
-from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
+from quantx_infrastructure.services.t_trade_replay_projection_service import (
+  TTradeReplayUpdateKind,
+  t_trade_replay_projection_service,
+)
+from quantx_infrastructure.services.t_trade_replay_service import (
+  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  TTradeReplayService,
+  _v3_pressure_runtime_state_persistence_capability,
+)
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +87,7 @@ from quantx_engine.strategy_manager import StrategyManager
 
 DEFAULT_TRADING_DAYS = 20
 DEFAULT_AUDIT_CONCURRENCY = 4
+DEFAULT_PRESSURE_TIMEOUT_SECONDS = 1_800.0
 REPORT_SCHEMA_VERSION = 1
 PRESSURE_BASELINE_SCHEMA_VERSION = 1
 
@@ -108,6 +123,42 @@ PERFORMANCE_REMEDIATION_MICROBENCHMARK = {
     "pressure run was performed after the patch, so it cannot pass/freeze SLO"
   ),
 }
+
+
+def _performance_remediation_evidence(
+  pressure_baseline: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+  """Describe whether the post-remediation full fixture really ran.
+
+  The microbenchmark is intentionally retained as historical context, but it
+  must never claim that its SQLite result is a substitute for the full Engine
+  load.  Only a completed, current 9,600-Tick fixture can change this evidence.
+  """
+
+  evidence = copy.deepcopy(PERFORMANCE_REMEDIATION_MICROBENCHMARK)
+  pressure = dict(pressure_baseline or {})
+  fixture = dict(pressure.get("fixture") or {})
+  full_completed = (
+    str(pressure.get("status") or "").upper()
+    == "EXECUTED_SYNTHETIC_NON_HISTORICAL"
+    and int(fixture.get("tick_count") or 0) == 9_600
+    and str(dict(pressure.get("replay") or {}).get("status") or "").upper()
+    == "COMPLETED"
+    and bool(
+      dict(pressure.get("execution_boundary") or {}).get(
+        "runtime_state_persist_enabled"
+      )
+    )
+  )
+  evidence["full_9600_replayed_after_patch"] = full_completed
+  if full_completed:
+    evidence["slo_status"] = "FROZEN_FIRST_LOCAL_SYNTHETIC_BASELINE"
+    evidence["scope_limit"] = (
+      "completed current-production-path 9,600-Tick synthetic baseline; it "
+      "freezes only this machine's local synthetic SLO and does not replace "
+      "the formal 20-day causal-replay gate"
+    )
+  return evidence
 
 
 class AcceptanceBlockedError(RuntimeError):
@@ -615,12 +666,78 @@ class DatabaseWriteCounters:
   commits: int = 0
   flushes: int = 0
   dml_executes: int = 0
+  commit_latency: LatencyAccumulator = field(default_factory=LatencyAccumulator)
+  flush_latency: LatencyAccumulator = field(default_factory=LatencyAccumulator)
+  dml_execute_latency: LatencyAccumulator = field(
+    default_factory=LatencyAccumulator
+  )
+  commit_call_sites: Counter[str] = field(default_factory=Counter)
+  flush_call_sites: Counter[str] = field(default_factory=Counter)
+  dml_execute_call_sites: Counter[str] = field(default_factory=Counter)
 
-  def to_dict(self) -> dict[str, int]:
+  def to_dict(self) -> dict[str, Any]:
     return {
       "commit_calls": self.commits,
       "flush_calls": self.flushes,
       "dml_execute_calls": self.dml_executes,
+      "latency": {
+        "commit": self.commit_latency.to_dict(),
+        "flush": self.flush_latency.to_dict(),
+        "dml_execute": self.dml_execute_latency.to_dict(),
+      },
+      "call_sites": {
+        "commit": dict(sorted(self.commit_call_sites.items())),
+        "flush": dict(sorted(self.flush_call_sites.items())),
+        "dml_execute": dict(sorted(self.dml_execute_call_sites.items())),
+      },
+    }
+
+
+@dataclass
+class RuntimeStateDatabaseCounters:
+  """Durable state/position operations observed in the pressure process."""
+
+  snapshot_save_calls: int = 0
+  snapshot_save_failures: int = 0
+  state_upsert_attempts: int = 0
+  state_upsert_rejected: int = 0
+  position_replace_snapshot_calls: int = 0
+  position_update_existing_snapshot_calls: int = 0
+  position_rows_submitted: int = 0
+  state_upsert_latency: LatencyAccumulator = field(
+    default_factory=LatencyAccumulator
+  )
+  position_replace_snapshot_latency: LatencyAccumulator = field(
+    default_factory=LatencyAccumulator
+  )
+  position_update_existing_snapshot_latency: LatencyAccumulator = field(
+    default_factory=LatencyAccumulator
+  )
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "snapshot_save_calls": self.snapshot_save_calls,
+      "snapshot_save_failures": self.snapshot_save_failures,
+      "state_upsert_attempts": self.state_upsert_attempts,
+      "state_upsert_rejected": self.state_upsert_rejected,
+      "position_replace_snapshot_calls": self.position_replace_snapshot_calls,
+      "position_update_existing_snapshot_calls": (
+        self.position_update_existing_snapshot_calls
+      ),
+      "position_snapshot_calls": (
+        self.position_replace_snapshot_calls
+        + self.position_update_existing_snapshot_calls
+      ),
+      "position_rows_submitted": self.position_rows_submitted,
+      "latency": {
+        "state_upsert": self.state_upsert_latency.to_dict(),
+        "position_replace_snapshot": (
+          self.position_replace_snapshot_latency.to_dict()
+        ),
+        "position_update_existing_snapshot": (
+          self.position_update_existing_snapshot_latency.to_dict()
+        ),
+      },
     }
 
 
@@ -631,13 +748,59 @@ class BenchmarkInstrumentation:
     self.engine_tick = LatencyAccumulator()
     self.strategy_evaluation = LatencyAccumulator()
     self.state_checkpoint = LatencyAccumulator()
+    self.state_snapshot = LatencyAccumulator()
     self.db_writes = DatabaseWriteCounters()
+    self.runtime_state_db = RuntimeStateDatabaseCounters()
     self._originals: dict[str, Any] = {}
+
+  @staticmethod
+  def _database_call_site() -> str:
+    """Return the nearest project call site without collecting full stacks.
+
+    This runs only inside the explicitly invoked offline acceptance process.
+    It gives bounded attribution for the otherwise opaque AsyncSession commit
+    fan-out without changing production control flow or persistence behavior.
+    """
+    frame = inspect.currentframe()
+    current = frame.f_back if frame is not None else None
+    try:
+      while current is not None:
+        filename = Path(current.f_code.co_filename)
+        function = current.f_code.co_name
+        path = filename.as_posix()
+        if (
+          filename.name == Path(__file__).name
+          and function
+          in {
+            "_database_call_site",
+            "commit_wrapper",
+            "flush_wrapper",
+            "execute_wrapper",
+          }
+        ):
+          current = current.f_back
+          continue
+        if "site-packages/sqlalchemy" in path.replace("\\", "/"):
+          current = current.f_back
+          continue
+        return f"{filename.name}:{function}"
+    finally:
+      del frame
+      del current
+    return "unknown"
 
   async def __aenter__(self) -> "BenchmarkInstrumentation":
     self._originals["process_tick"] = StrategyExecutor._process_tick
     self._originals["strategy_step"] = AshareIntradayTAssistantStrategy.step
     self._originals["checkpoint"] = RuntimeStateManager.checkpoint_strategy_state_changes
+    self._originals["save_snapshot"] = RuntimeStateManager.save_snapshot
+    self._originals["state_upsert"] = StrategyRunStateRepository.upsert_state
+    self._originals["position_replace"] = (
+      StrategyRunPositionRepository.replace_positions_snapshot
+    )
+    self._originals["position_update_existing"] = (
+      StrategyRunPositionRepository.update_existing_positions_snapshot
+    )
     self._originals["commit"] = AsyncSession.commit
     self._originals["flush"] = AsyncSession.flush
     self._originals["execute"] = AsyncSession.execute
@@ -645,6 +808,10 @@ class BenchmarkInstrumentation:
     original_process_tick = self._originals["process_tick"]
     original_strategy_step = self._originals["strategy_step"]
     original_checkpoint = self._originals["checkpoint"]
+    original_save_snapshot = self._originals["save_snapshot"]
+    original_state_upsert = self._originals["state_upsert"]
+    original_position_replace = self._originals["position_replace"]
+    original_position_update_existing = self._originals["position_update_existing"]
     original_commit = self._originals["commit"]
     original_flush = self._originals["flush"]
     original_execute = self._originals["execute"]
@@ -670,23 +837,116 @@ class BenchmarkInstrumentation:
       finally:
         self.state_checkpoint.observe(wall_clock.perf_counter_ns() - started)
 
+    async def save_snapshot_wrapper(state: Any, *args: Any, **kwargs: Any) -> Any:
+      self.runtime_state_db.snapshot_save_calls += 1
+      started = wall_clock.perf_counter_ns()
+      try:
+        result = await original_save_snapshot(state, *args, **kwargs)
+        if result is False:
+          self.runtime_state_db.snapshot_save_failures += 1
+        return result
+      finally:
+        self.state_snapshot.observe(wall_clock.perf_counter_ns() - started)
+
+    async def state_upsert_wrapper(repo: Any, *args: Any, **kwargs: Any) -> Any:
+      self.runtime_state_db.state_upsert_attempts += 1
+      started = wall_clock.perf_counter_ns()
+      try:
+        result = await original_state_upsert(repo, *args, **kwargs)
+        if result is False:
+          self.runtime_state_db.state_upsert_rejected += 1
+        return result
+      finally:
+        self.runtime_state_db.state_upsert_latency.observe(
+          wall_clock.perf_counter_ns() - started
+        )
+
+    def submitted_positions(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> int:
+      positions = kwargs.get("positions")
+      if positions is None and len(args) >= 2:
+        positions = args[1]
+      return len(dict(positions or {}))
+
+    async def position_replace_wrapper(repo: Any, *args: Any, **kwargs: Any) -> Any:
+      self.runtime_state_db.position_replace_snapshot_calls += 1
+      self.runtime_state_db.position_rows_submitted += submitted_positions(
+        args,
+        kwargs,
+      )
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_position_replace(repo, *args, **kwargs)
+      finally:
+        self.runtime_state_db.position_replace_snapshot_latency.observe(
+          wall_clock.perf_counter_ns() - started
+        )
+
+    async def position_update_existing_wrapper(
+      repo: Any,
+      *args: Any,
+      **kwargs: Any,
+    ) -> Any:
+      self.runtime_state_db.position_update_existing_snapshot_calls += 1
+      self.runtime_state_db.position_rows_submitted += submitted_positions(
+        args,
+        kwargs,
+      )
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_position_update_existing(repo, *args, **kwargs)
+      finally:
+        self.runtime_state_db.position_update_existing_snapshot_latency.observe(
+          wall_clock.perf_counter_ns() - started
+        )
+
     async def commit_wrapper(session: Any, *args: Any, **kwargs: Any) -> Any:
+      source = self._database_call_site()
       self.db_writes.commits += 1
-      return await original_commit(session, *args, **kwargs)
+      self.db_writes.commit_call_sites[source] += 1
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_commit(session, *args, **kwargs)
+      finally:
+        self.db_writes.commit_latency.observe(
+          wall_clock.perf_counter_ns() - started
+        )
 
     async def flush_wrapper(session: Any, *args: Any, **kwargs: Any) -> Any:
+      source = self._database_call_site()
       self.db_writes.flushes += 1
-      return await original_flush(session, *args, **kwargs)
+      self.db_writes.flush_call_sites[source] += 1
+      started = wall_clock.perf_counter_ns()
+      try:
+        return await original_flush(session, *args, **kwargs)
+      finally:
+        self.db_writes.flush_latency.observe(
+          wall_clock.perf_counter_ns() - started
+        )
 
     async def execute_wrapper(session: Any, statement: Any, *args: Any, **kwargs: Any) -> Any:
       is_dml = bool(getattr(statement, "is_dml", False))
       if is_dml:
+        source = self._database_call_site()
         self.db_writes.dml_executes += 1
+        self.db_writes.dml_execute_call_sites[source] += 1
+        started = wall_clock.perf_counter_ns()
+        try:
+          return await original_execute(session, statement, *args, **kwargs)
+        finally:
+          self.db_writes.dml_execute_latency.observe(
+            wall_clock.perf_counter_ns() - started
+          )
       return await original_execute(session, statement, *args, **kwargs)
 
     StrategyExecutor._process_tick = process_tick_wrapper
     AshareIntradayTAssistantStrategy.step = strategy_step_wrapper
     RuntimeStateManager.checkpoint_strategy_state_changes = checkpoint_wrapper
+    RuntimeStateManager.save_snapshot = save_snapshot_wrapper
+    StrategyRunStateRepository.upsert_state = state_upsert_wrapper
+    StrategyRunPositionRepository.replace_positions_snapshot = position_replace_wrapper
+    StrategyRunPositionRepository.update_existing_positions_snapshot = (
+      position_update_existing_wrapper
+    )
     AsyncSession.commit = commit_wrapper
     AsyncSession.flush = flush_wrapper
     AsyncSession.execute = execute_wrapper
@@ -697,6 +957,14 @@ class BenchmarkInstrumentation:
     AshareIntradayTAssistantStrategy.step = self._originals["strategy_step"]
     RuntimeStateManager.checkpoint_strategy_state_changes = self._originals[
       "checkpoint"
+    ]
+    RuntimeStateManager.save_snapshot = self._originals["save_snapshot"]
+    StrategyRunStateRepository.upsert_state = self._originals["state_upsert"]
+    StrategyRunPositionRepository.replace_positions_snapshot = self._originals[
+      "position_replace"
+    ]
+    StrategyRunPositionRepository.update_existing_positions_snapshot = self._originals[
+      "position_update_existing"
     ]
     AsyncSession.commit = self._originals["commit"]
     AsyncSession.flush = self._originals["flush"]
@@ -1098,6 +1366,85 @@ async def _load_run_evidence(run_id: str) -> dict[str, Any]:
   raise RuntimeError("DATABASE_SESSION_UNAVAILABLE")
 
 
+async def _await_synthetic_replay_terminal(
+  service: TTradeReplayService,
+  run_id: str,
+  *,
+  callback_grace_seconds: float = 5.0,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+  """Wait for the manager callback that owns replay terminal projection.
+
+  ``StrategyManager`` publishes run completion from a task done callback. A
+  short-lived CLI must keep its loop alive until that callback commits; two
+  ``sleep(0)`` turns are not sufficient when the callback is waiting on the
+  database. After the bounded grace period, this runner may repair only its
+  own proven-completed isolated BACKTEST projection from durable run truth.
+  It never marks an active, stopped, PAPER, or LIVE run complete.
+  """
+
+  if callback_grace_seconds < 0:
+    raise ValueError("CALLBACK_GRACE_SECONDS_MUST_NOT_BE_NEGATIVE")
+  deadline = wall_clock.perf_counter() + callback_grace_seconds
+  repaired = False
+  last_run_status = ""
+  last_replay_status = ""
+  while True:
+    replay = await service.get(run_id)
+    run_evidence = await _load_run_evidence(run_id)
+    last_run_status = str(run_evidence.get("status") or "").upper()
+    last_replay_status = str((replay or {}).get("status") or "").upper()
+    if last_replay_status in {"COMPLETED", "CANCELLED", "FAILED", "ERROR"}:
+      return (
+        dict(replay or {}),
+        run_evidence,
+        {
+          "status": "TERMINAL",
+          "projection_repaired": repaired,
+          "run_status": last_run_status,
+          "replay_status": last_replay_status,
+        },
+      )
+    if wall_clock.perf_counter() >= deadline:
+      # The callback normally performs this update. Repair is restricted to a
+      # durable completed V3 synthetic BACKTEST so a CLI shutdown can never
+      # strand its own completed replay as an active account-level replay.
+      parameters = _json_object(
+        run_evidence.get("parameters"),
+        context="SYNTHETIC_TERMINAL_PARAMETERS",
+      )
+      account_id = _value_as_str(parameters.get("account_id"))
+      if (
+        last_run_status == "COMPLETED"
+        and last_replay_status == "RUNNING"
+        and str(run_evidence.get("mode") or "").upper() == "BACKTEST"
+        and bool(parameters.get("t_trade_replay"))
+        and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
+        and account_id
+      ):
+        raw_end = parameters.get("replay_end_time")
+        try:
+          processed_until = datetime.fromisoformat(str(raw_end))
+        except (TypeError, ValueError) as exc:
+          raise RuntimeError(
+            "SYNTHETIC_COMPLETED_REPLAY_END_TIME_INVALID"
+          ) from exc
+        await t_trade_replay_projection_service.update(
+          run_id=run_id,
+          account_id=account_id,
+          status="COMPLETED",
+          progress_pct=100.0,
+          processed_until=processed_until,
+          kind=TTradeReplayUpdateKind.RESULT_READY,
+        )
+        repaired = True
+        continue
+      raise RuntimeError(
+        "SYNTHETIC_PRESSURE_TERMINAL_PROJECTION_NOT_CONVERGED: "
+        f"run={last_run_status or '-'} replay={last_replay_status or '-'}"
+      )
+    await asyncio.sleep(0.05)
+
+
 async def load_cancelled_full_pressure_attempt(
   run_id: str,
   *,
@@ -1113,6 +1460,9 @@ async def load_cancelled_full_pressure_attempt(
     parameters = _json_object(run.parameters, context="CANCELLED_BACKTEST_PARAMETERS")
     if str(parameters.get("replay_acceptance") or "") != "V3_PRESSURE_BASELINE":
       raise AcceptanceBlockedError("CANCELLED_RUN_IS_NOT_PRESSURE_BASELINE")
+    runtime_state_persisted = bool(
+      parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+    )
     backtest = (
       await db.execute(
         select(StrategyBacktest)
@@ -1167,6 +1517,14 @@ async def load_cancelled_full_pressure_attempt(
       "progress_pct": replay.get("progress_pct") if replay else None,
       "run_status": run_status,
       "replay_status": replay_status,
+      "runtime_state_persistence": {
+        "enabled": runtime_state_persisted,
+        "evidence": (
+          "sealed V3 pressure runtime-state marker present in durable run parameters"
+          if runtime_state_persisted
+          else "sealed V3 pressure runtime-state marker absent; this historical run did not exercise durable RuntimeState CAS/position writes"
+        ),
+      },
       "evaluations": evaluations,
       "partial_materialization_logical_events_per_second": (
         round(logical_events / elapsed_seconds, 6)
@@ -1180,8 +1538,9 @@ async def load_cancelled_full_pressure_attempt(
         "database_commit_calls": "N/A: in-process counter lost at cancellation",
       },
       "primary_observed_boundary": (
-        "production per-event RuntimeState checkpoint and post-CAS evaluation "
-        "materialization; this full 9,600-Tick load made only partial progress "
+        "production evaluation/materialization path with a nonpersistent BACKTEST "
+        "runtime-state checkpoint; this cancelled historical run did not exercise "
+        "durable RuntimeState CAS/position writes and made only partial progress "
         "within the allowed wall-time budget"
       ),
     }
@@ -1232,7 +1591,7 @@ async def load_completed_diagnostic_pressure_attempt(
   evaluations = dict(run_evidence.get("evaluations") or {})
   material_rows = int(evaluations.get("material_rows") or 0)
   diagnostic_rows = int(evaluations.get("diagnostic_rows") or 0)
-  return {
+  result = {
     "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
     "status": "EXECUTED_DIAGNOSTIC_NON_GATING_VERSION_STALE",
     "non_gating": True,
@@ -1246,6 +1605,16 @@ async def load_completed_diagnostic_pressure_attempt(
     "run_sha256_16": _digest(run_id),
     "replay": replay,
     "run_evidence": run_evidence,
+    "runtime_state_persistence": {
+      "enabled": bool(
+        parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+      ),
+      "evidence": (
+        "sealed V3 pressure runtime-state marker present in durable run parameters"
+        if parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+        else "sealed V3 pressure runtime-state marker absent from durable run parameters"
+      ),
+    },
     "version_stale_reason": (
       "the diagnostic runner imported the pre-batch-diagnostics implementation; "
       "it completed before its process-local instrumentation could be persisted"
@@ -1278,6 +1647,73 @@ async def load_completed_diagnostic_pressure_attempt(
     },
     "frozen_local_slo": None,
   }
+  return _normalize_nonpersistent_diagnostic_pressure_attempt(result)
+
+
+def _normalize_nonpersistent_diagnostic_pressure_attempt(
+  pressure_baseline: Optional[Mapping[str, Any]],
+) -> Optional[dict[str, Any]]:
+  """Label a completed pre-capability diagnostic as explicitly non-gating.
+
+  Earlier short runs had ``checkpoint`` call timings, but normal BACKTEST
+  intentionally had ``persist_enabled=False``.  Their latency is retained for
+  diagnosis only; the absence of the sealed durable marker prevents them from
+  being misread as CAS/position-path coverage.
+  """
+
+  if not isinstance(pressure_baseline, Mapping):
+    return None
+  normalized = copy.deepcopy(dict(pressure_baseline))
+  if not bool(normalized.get("diagnostic_non_gating")):
+    return normalized
+  run_evidence = dict(normalized.get("run_evidence") or {})
+  parameters = _json_object(
+    run_evidence.get("parameters"),
+    context="DIAGNOSTIC_PRESSURE_PARAMETERS",
+  )
+  if parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY):
+    return normalized
+  normalized["status"] = "EXECUTED_DIAGNOSTIC_NON_GATING_NONPERSISTENT"
+  normalized["non_gating"] = True
+  normalized["diagnostic_non_gating"] = True
+  normalized["not_a_completed_slo"] = True
+  normalized["runtime_state_persistence"] = {
+    "enabled": False,
+    "evidence": (
+      "sealed V3 pressure runtime-state marker absent from durable run "
+      "parameters; ordinary BACKTEST persist_enabled=False"
+    ),
+  }
+  coverage = dict(normalized.get("production_path_coverage") or {})
+  coverage["runtime_state_checkpoint"] = "NOT_PERSISTENT_NON_GATING"
+  coverage["runtime_state_cas_position"] = "NOT_PERSISTENT_NON_GATING"
+  normalized["production_path_coverage"] = coverage
+  return normalized
+
+
+def _is_nonpersistent_diagnostic_pressure_attempt(
+  pressure_baseline: Optional[Mapping[str, Any]],
+) -> bool:
+  """Return whether a retained diagnostic is truly the old non-durable path.
+
+  The report keeps this historical calibration separately so its timings cannot
+  be mistaken for the sealed CAS/position workload.  Do not infer the label
+  from the field name alone: an earlier report refresh could have left a later
+  sealed run in that slot.
+  """
+
+  if not isinstance(pressure_baseline, Mapping):
+    return False
+  if not bool(pressure_baseline.get("diagnostic_non_gating")):
+    return False
+  run_evidence = dict(pressure_baseline.get("run_evidence") or {})
+  parameters = _json_object(
+    run_evidence.get("parameters"),
+    context="RETAINED_DIAGNOSTIC_PRESSURE_PARAMETERS",
+  )
+  return not bool(
+    parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+  )
 
 
 def _resource_start() -> dict[str, Any]:
@@ -1505,6 +1941,7 @@ async def execute_synthetic_pressure_baseline(
   *,
   ticks_per_instrument_day: int = 600,
   diagnostic: bool = False,
+  timeout_seconds: float = DEFAULT_PRESSURE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
   """Exercise the production Engine with a deterministic non-historical load.
 
@@ -1513,6 +1950,9 @@ async def execute_synthetic_pressure_baseline(
   reads; strategy evaluation, post-CAS state checkpointing, and evaluation
   materialization remain the production code paths.
   """
+
+  if timeout_seconds <= 0:
+    raise ValueError("PRESSURE_TIMEOUT_SECONDS_MUST_BE_POSITIVE")
 
   fixture = build_synthetic_pressure_fixture(
     audit,
@@ -1566,26 +2006,100 @@ async def execute_synthetic_pressure_baseline(
   resource_start = _resource_start()
   started = wall_clock.perf_counter()
   runtime_state: Any = None
+  run_id = ""
+  timed_out = False
+  cancellation: Optional[dict[str, Any]] = None
+  terminal_convergence: Optional[dict[str, Any]] = None
+  execution_boundary: Optional[dict[str, Any]] = None
   try:
     async with BenchmarkInstrumentation() as instrumentation:
       service = TTradeReplayService(manager)
-      created = await service.start(payload, request_id=request_id)
+      created = await service.start(
+        payload,
+        request_id=request_id,
+        _runtime_state_persistence_capability=(
+          _v3_pressure_runtime_state_persistence_capability()
+        ),
+      )
       run_id = str(created["run_id"])
       runtime = manager.get_run(run_id)
       if runtime is None or runtime.task is None:
         raise RuntimeError("SYNTHETIC_PRESSURE_RUNTIME_TASK_NOT_CREATED")
+      runtime_state = runtime.state_manager
+      runtime_mode = str(
+        getattr(getattr(runtime, "context", None), "mode", "")
+      ).upper()
+      if runtime_mode.endswith(".BACKTEST"):
+        runtime_mode = "BACKTEST"
+      broker_class = type(getattr(runtime, "broker", None)).__name__
+      if (
+        runtime_mode != "BACKTEST"
+        or broker_class != "BacktestBroker"
+        or runtime_state is None
+        or not bool(getattr(runtime_state, "persist_enabled", False))
+      ):
+        # The task has already been created, so converge it through the
+        # service-owned isolated BACKTEST cancellation boundary before raising.
+        await service.cancel(run_id)
+        raise RuntimeError("SYNTHETIC_PRESSURE_EXECUTION_BOUNDARY_INVALID")
+      execution_boundary = {
+        "strategy_run_mode": runtime_mode,
+        "broker_class": broker_class,
+        "runtime_state_persist_enabled": True,
+        "runtime_state_capability": "V3_PRESSURE_BASELINE_INTERNAL_ONLY",
+        "qmt_invocation": False,
+        "paper_or_live_command": False,
+      }
       try:
-        await runtime.task
+        # Shield the task first: on deadline we must use the replay service's
+        # isolated BACKTEST cancellation path, which flushes durable evidence
+        # and marks the run terminal.  Letting wait_for cancel it directly
+        # would bypass that safety boundary and could strand an active replay.
+        await asyncio.wait_for(
+          asyncio.shield(runtime.task),
+          timeout=float(timeout_seconds),
+        )
+      except asyncio.TimeoutError:
+        timed_out = True
+        try:
+          cancelled = await service.cancel(run_id)
+          cancellation = {
+            "status": str(cancelled.get("status") or ""),
+            "progress_pct": cancelled.get("progress_pct"),
+            "processed_until": (
+              cancelled.get("processed_until").isoformat()
+              if isinstance(cancelled.get("processed_until"), datetime)
+              else cancelled.get("processed_until")
+            ),
+          }
+        except Exception as exc:
+          # A race with normal terminal completion is acceptable only when the
+          # authoritative projection already says terminal.  Anything still
+          # active remains an explicit failure rather than an orphaned run.
+          latest = await service.get(run_id)
+          latest_status = str((latest or {}).get("status") or "").upper()
+          if latest_status not in {"COMPLETED", "CANCELLED", "FAILED", "ERROR"}:
+            raise RuntimeError("PRESSURE_TIMEOUT_CANCELLATION_NOT_CONVERGED") from exc
+          cancellation = {
+            "status": latest_status,
+            "raced_terminal_state": True,
+            "cancel_error_type": type(exc).__name__,
+          }
+        try:
+          await asyncio.wait_for(asyncio.shield(runtime.task), timeout=10.0)
+        except asyncio.CancelledError:
+          # The service-owned cancellation is the expected terminal result.
+          pass
+        except asyncio.TimeoutError as exc:
+          raise RuntimeError("PRESSURE_TIMEOUT_RUNTIME_TASK_NOT_CONVERGED") from exc
       except asyncio.CancelledError:
         raise
       except Exception:
         # Preserve the terminal result and run-scoped DB evidence below.
         pass
-      await asyncio.sleep(0)
-      await asyncio.sleep(0)
-      runtime_state = runtime.state_manager
-      replay = await service.get(run_id)
-      run_evidence = await _load_run_evidence(run_id)
+      replay, run_evidence, terminal_convergence = (
+        await _await_synthetic_replay_terminal(service, run_id)
+      )
     elapsed_seconds = wall_clock.perf_counter() - started
   finally:
     manager._ensure_backtest_data_available = original_data_check
@@ -1609,37 +2123,77 @@ async def execute_synthetic_pressure_baseline(
   cas = {
     "snapshot_conflicts": cas_conflicts,
     "checkpoint_attempts": checkpoint_attempts,
+    "state_upsert_attempts": instrumentation.runtime_state_db.state_upsert_attempts,
+    "state_upsert_rejected": instrumentation.runtime_state_db.state_upsert_rejected,
     "conflict_rate": (
       round(cas_conflicts / cas_denominator, 8) if cas_denominator else None
     ),
   }
-  database_write_activity = instrumentation.db_writes.to_dict()
+  database_write_activity = {
+    **instrumentation.db_writes.to_dict(),
+    "runtime_state": instrumentation.runtime_state_db.to_dict(),
+  }
+  persisted_parameters = _json_object(
+    run_evidence.get("parameters"), context="SYNTHETIC_PRESSURE_PARAMETERS"
+  )
+  if (
+    persisted_parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
+    or not persisted_parameters.get("t_trade_replay")
+    or not persisted_parameters.get(
+      _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY
+    )
+  ):
+    raise RuntimeError("SYNTHETIC_PRESSURE_DURABLE_RUNTIME_STATE_NOT_PROVEN")
   latency = {
     "engine_tick": engine_tick_latency,
     "strategy_evaluation": instrumentation.strategy_evaluation.to_dict(),
     "state_checkpoint": checkpoint_latency,
+    "state_snapshot": instrumentation.state_snapshot.to_dict(),
   }
   completed = str(replay.get("status") or "").upper() == "COMPLETED"
+  # A short calibration is useful to predict the full-run duration, but it is
+  # not the fixed 8 holdings × 2 days × 600 Tick acceptance fixture. Keep its
+  # telemetry without allowing it to manufacture a local SLO baseline.
+  completed_full_slo_fixture = (
+    completed
+    and not diagnostic
+    and int(fixture.tick_count) == 9_600
+    and bool(
+      dict(execution_boundary or {}).get("runtime_state_persist_enabled")
+    )
+  )
+  if timed_out:
+    status = (
+      "CANCELLED_BLOCKED_FULL_SYNTHETIC_PRESSURE"
+      if str(replay.get("status") or "").upper() == "CANCELLED"
+      else "FAIL"
+    )
+  elif completed:
+    status = (
+      "EXECUTED_DIAGNOSTIC_NON_GATING"
+      if diagnostic
+      else "EXECUTED_SYNTHETIC_NON_HISTORICAL"
+    )
+  else:
+    status = "FAIL"
   return {
     "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
-    "status": (
-      (
-        "EXECUTED_DIAGNOSTIC_NON_GATING"
-        if diagnostic
-        else "EXECUTED_SYNTHETIC_NON_HISTORICAL"
-      )
-      if completed
-      else "FAIL"
-    ),
+    "status": status,
     "non_gating": True,
     "diagnostic_non_gating": diagnostic,
     "not_historical_replay": True,
+    "not_a_completed_slo": not completed_full_slo_fixture,
     "isolated_backtest": True,
     "no_live_or_paper_broker": True,
+    "execution_boundary": execution_boundary,
     "production_path_coverage": {
       "strategy_executor_global_source_order": True,
       "strategy_evaluator": ticks_processed > 0,
-      "runtime_state_checkpoint": checkpoint_attempts > 0,
+      "runtime_state_checkpoint": bool(
+        execution_boundary
+        and execution_boundary["runtime_state_persist_enabled"]
+        and checkpoint_attempts > 0
+      ),
       "post_cas_evaluation_materialization": bool(
         run_evidence["evaluations"]["material_rows"]
         or run_evidence["evaluations"]["diagnostic_rows"]
@@ -1648,6 +2202,10 @@ async def execute_synthetic_pressure_baseline(
     "fixture": fixture.to_dict(),
     "market_data_supplement_forbidden": True,
     "market_data_supplement_attempts": supplement_attempts,
+    "timeout_seconds": float(timeout_seconds),
+    "timed_out": timed_out,
+    "cancellation": cancellation,
+    "terminal_convergence": terminal_convergence,
     "elapsed_seconds": round(elapsed_seconds, 6),
     "throughput": throughput,
     "latency": latency,
@@ -1658,7 +2216,7 @@ async def execute_synthetic_pressure_baseline(
     "run_evidence": run_evidence,
     "frozen_local_slo": (
       None
-      if diagnostic
+      if not completed_full_slo_fixture
       else _freeze_first_local_slo(
         latency=latency,
         throughput=throughput,
@@ -1730,8 +2288,8 @@ def build_report_document(
       dict(full_pressure_attempt) if full_pressure_attempt else None
     ),
     "pressure_baseline": dict(pressure_baseline) if pressure_baseline else None,
-    "performance_remediation_microbenchmark": dict(
-      PERFORMANCE_REMEDIATION_MICROBENCHMARK
+    "performance_remediation_microbenchmark": _performance_remediation_evidence(
+      pressure_baseline
     ),
     "candidate_windows": [
       audit.to_dict(abnormal_dates=declared_abnormal) for audit in audits
@@ -1743,7 +2301,7 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
   """Render a concise human report; JSON retains every stock/day evidence row."""
 
   formal = dict(report["formal_20_trading_day"])
-  pressure = report.get("pressure_baseline")
+  pressure = dict(report.get("pressure_baseline") or {})
   lines = [
     "# 做 T V3 历史回放与全持仓压力验收",
     "",
@@ -1818,12 +2376,73 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
         ),
       ]
     )
+    raw_storage_audit = source.get("raw_storage_identity_audit")
+    if isinstance(raw_storage_audit, Mapping):
+      source_column = dict(raw_storage_audit.get("source_time_ms") or {})
+      ordinal_column = dict(raw_storage_audit.get("tick_ordinal") or {})
+      continuity = dict(raw_storage_audit.get("continuity_generation") or {})
+      storage_time = dict(raw_storage_audit.get("storage_time") or {})
+      lines.append(
+        "- 原始存储审计：{} 个 instrument-day / {} Tick；"
+        "source_time_ms={}（非空 {}/{}），tick_ordinal={}（非空 {}/{}）；"
+        "continuity_generation 字段存在={}; 存储 time 严格递增={}、重复={}; "
+        "结论={}。".format(
+          raw_storage_audit.get("instrument_day_count"),
+          raw_storage_audit.get("row_count"),
+          source_column.get("arrow_type"),
+          source_column.get("non_null_count"),
+          source_column.get("null_count"),
+          ordinal_column.get("arrow_type"),
+          ordinal_column.get("non_null_count"),
+          ordinal_column.get("null_count"),
+          continuity.get("field_present"),
+          storage_time.get("all_instrument_days_strictly_increasing"),
+          storage_time.get("duplicate_count"),
+          raw_storage_audit.get("conclusion"),
+        )
+      )
   else:
     lines.append("**NOT_RUN**：未选择真实短窗口进行 source identity 预检。")
 
   lines.extend(["", "## 9,600 Tick 全持仓合成压力尝试", ""])
   full_pressure_attempt = report.get("full_pressure_attempt")
-  if full_pressure_attempt:
+  pressure_fixture = dict(pressure.get("fixture") or {})
+  current_full_pressure = int(pressure_fixture.get("tick_count") or 0) == 9_600
+  if current_full_pressure:
+    replay = dict(pressure.get("replay") or {})
+    run_evidence = dict(pressure.get("run_evidence") or {})
+    lines.extend(
+      [
+        "**{}**：当前生产 Engine 路径已完成固定全持仓全量合成负载；"
+        "该结果只冻结本机合成 SLO，绝不替代 20 日历史回放。".format(
+          pressure.get("status")
+        ),
+        "- runId=`{}`；请求区间={}~{}；处理至={}；进度={}%；wall={}s。".format(
+          run_evidence.get("run_id"),
+          replay.get("start_time") or replay.get("replay_start_time"),
+          replay.get("end_time") or replay.get("replay_end_time"),
+          replay.get("processed_until"),
+          replay.get("progress_pct"),
+          pressure.get("elapsed_seconds"),
+        ),
+        "- fixture：`SYNTHETIC_NON_HISTORICAL`，sha256={}，{} ticks，{} instruments，合法交易时段={}。".format(
+          pressure_fixture.get("fixture_sha256"),
+          pressure_fixture.get("tick_count"),
+          len(list(pressure_fixture.get("held_instruments") or [])),
+          pressure_fixture.get("market_time_policy"),
+        ),
+        "- deadline：{}s；timed_out={}；隔离 BACKTEST cancellation={}".format(
+          pressure.get("timeout_seconds"),
+          pressure.get("timed_out"),
+          pressure.get("cancellation"),
+        ),
+      ]
+    )
+    if full_pressure_attempt:
+      lines.append(
+        "- 历史取消尝试保留在 JSON 的 `full_pressure_attempt`，不作为当前 SLO 结果。"
+      )
+  elif full_pressure_attempt:
     full_attempt = dict(full_pressure_attempt)
     full_fixture = dict(full_attempt.get("fixture") or {})
     lines.extend(
@@ -1858,6 +2477,7 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
     lines.append("**NOT_RUN**：未记录全 9,600 Tick 合成压力尝试。")
 
   lines.extend(["", "## 全持仓合成压力基线 / 首次本机 SLO", ""])
+  latency: dict[str, Any] = {}
   if not pressure:
     lines.append("**NOT_RUN**：未请求可选的合成压力基线。")
   else:
@@ -1914,10 +2534,81 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
         ),
         "- 冻结 SLO：{}".format(
           pressure.get("frozen_local_slo")
-          or "N/A（DIAGNOSTIC_NON_GATING 小样本不得冻结/判定 SLO）"
+          or "N/A（只有完成固定 9,600 Tick 全量夹具才可冻结/判定 SLO）"
         ),
     ]
   )
+  run_evidence = dict(pressure.get("run_evidence") or {})
+  execution_boundary = dict(pressure.get("execution_boundary") or {})
+  if run_evidence:
+    terminal = dict(pressure.get("terminal_convergence") or {})
+    lines.append(
+      "- 隔离执行证据：runId=`{}`；terminal={}；sealed durable RuntimeState={}；"
+      "QMT={}，PAPER/LIVE command={}.".format(
+        run_evidence.get("run_id") or pressure.get("run_id"),
+        terminal.get("status") or "N/A",
+        execution_boundary.get("runtime_state_persist_enabled"),
+        execution_boundary.get("qmt_invocation"),
+        execution_boundary.get("paper_or_live_command"),
+      )
+    )
+  state_checkpoint = dict(latency.get("state_checkpoint") or {})
+  state_snapshot = dict(latency.get("state_snapshot") or {})
+  if state_checkpoint or state_snapshot:
+    lines.append(
+      "- Durable RuntimeState latency（ms）：checkpoint p50/p95/p99={}/{}/{}；"
+      "snapshot p50/p95/p99={}/{}/{}。".format(
+        state_checkpoint.get("p50"),
+        state_checkpoint.get("p95"),
+        state_checkpoint.get("p99"),
+        state_snapshot.get("p50"),
+        state_snapshot.get("p95"),
+        state_snapshot.get("p99"),
+      )
+    )
+  runtime_state_writes = dict(
+    dict(pressure.get("database_write_activity") or {}).get("runtime_state")
+    or {}
+  )
+  if runtime_state_writes:
+    lines.append(
+      "- Position DB writes：replace={}，same-code update={}，rows={}；"
+      "每 Tick 的 state CAS/upsert 仍保留（attempts={}）。".format(
+        runtime_state_writes.get("position_replace_snapshot_calls"),
+        runtime_state_writes.get("position_update_existing_snapshot_calls"),
+        runtime_state_writes.get("position_rows_submitted"),
+        runtime_state_writes.get("state_upsert_attempts"),
+      )
+    )
+  if state_checkpoint and state_snapshot and latency.get("strategy_evaluation"):
+    strategy_latency = dict(latency.get("strategy_evaluation") or {})
+    lines.append(
+      "- 性能判读（仅诊断）：strategy p95={}ms，而 checkpoint/snapshot p95={}/{}ms；"
+      "长尾位于外部数据库持久化边界。未启动新的 9,600 Tick，SLO 继续 BLOCKED。".format(
+        strategy_latency.get("p95"),
+        state_checkpoint.get("p95"),
+        state_snapshot.get("p95"),
+      )
+    )
+  nonpersistent_calibration = report.get("nonpersistent_calibration_attempt")
+  if _is_nonpersistent_diagnostic_pressure_attempt(nonpersistent_calibration):
+    historical = dict(nonpersistent_calibration)
+    historical_run = dict(historical.get("run_evidence") or {})
+    persistence = dict(historical.get("runtime_state_persistence") or {})
+    lines.extend(
+      [
+        "",
+        "### 历史非持久 480 Tick 校准（NON_GATING）",
+        "",
+        "**{}**：runId=`{}`；sealed durable marker={}。该运行的普通 BACKTEST "
+        "`persist_enabled=False`，所以其 checkpoint/CAS/position 指标不可用于持久 "
+        "生产路径或 SLO。".format(
+          historical.get("status"),
+          historical_run.get("run_id") or historical.get("run_id"),
+          persistence.get("enabled"),
+        ),
+      ]
+    )
   performance_microbenchmark = report.get("performance_remediation_microbenchmark")
   if performance_microbenchmark:
     micro = dict(performance_microbenchmark)
@@ -1951,8 +2642,14 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
           ),
         ),
         "- 验证：{}。".format(micro.get("focused_validation")),
-        "- 门禁：**未重跑 9,600 Tick；SLO 仍为 {}。**".format(
-          micro.get("slo_status")
+        (
+          "- 门禁：**已使用性能补丁后的完整 9,600 Tick 运行；本机合成 SLO 为 {}。**".format(
+            micro.get("slo_status")
+          )
+          if micro.get("full_9600_replayed_after_patch")
+          else "- 门禁：**未重跑 9,600 Tick；SLO 仍为 {}。**".format(
+            micro.get("slo_status")
+          )
         ),
         "- 边界：{}。".format(micro.get("scope_limit")),
       ]
@@ -1993,6 +2690,16 @@ def _parse_date(value: str) -> date:
     return date.fromisoformat(value)
   except ValueError as exc:
     raise argparse.ArgumentTypeError("expected YYYY-MM-DD") from exc
+
+
+def _positive_seconds(value: str) -> float:
+  try:
+    seconds = float(value)
+  except ValueError as exc:
+    raise argparse.ArgumentTypeError("expected a positive number of seconds") from exc
+  if seconds <= 0:
+    raise argparse.ArgumentTypeError("expected a positive number of seconds")
+  return seconds
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2042,11 +2749,21 @@ def build_parser() -> argparse.ArgumentParser:
     help="deterministic synthetic load per held instrument and trading day",
   )
   parser.add_argument(
+    "--pressure-timeout-seconds",
+    type=_positive_seconds,
+    default=DEFAULT_PRESSURE_TIMEOUT_SECONDS,
+    help=(
+      "bounded wall-clock deadline for an isolated synthetic BACKTEST; on "
+      "expiry the runner cancels only that replay through its durable "
+      "BACKTEST cancellation path (default: 1800)"
+    ),
+  )
+  parser.add_argument(
     "--reuse-audit-report",
     type=Path,
     help=(
-      "reuse an existing JSON audit report for a post-cancellation diagnostic; "
-      "the historical coverage evidence is not recalculated"
+      "reuse an existing JSON audit report for a full or diagnostic synthetic "
+      "pressure rerun; the historical coverage evidence is not recalculated"
     ),
   )
   parser.add_argument(
@@ -2075,7 +2792,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-  """Append cancellation/diagnostic evidence without repeating a 17-window audit."""
+  """Rerun declared synthetic pressure without repeating the historical audit."""
 
   report_path = Path(args.reuse_audit_report)
   json_path = report_path.with_suffix(".json")
@@ -2089,9 +2806,9 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
     raise AcceptanceBlockedError("REUSE_AUDIT_REPORT_INVALID")
   if args.pressure_snapshot_date is None:
     raise ValueError("--reuse-audit-report requires --pressure-snapshot-date")
-  if args.synthetic_pressure:
+  if args.synthetic_pressure and args.diagnostic_synthetic_pressure:
     raise ValueError(
-      "--reuse-audit-report supports only --diagnostic-synthetic-pressure"
+      "--synthetic-pressure and --diagnostic-synthetic-pressure are mutually exclusive"
     )
   snapshots = await load_snapshot_portfolios(account_id=args.account_id)
   snapshot = next(
@@ -2150,7 +2867,7 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
     pressure_dates,
     ticks_per_instrument_day=600,
   )
-  full_pressure_attempt = None
+  full_pressure_attempt = existing.get("full_pressure_attempt")
   if args.cancelled_full_pressure_run_id:
     full_pressure_attempt = await load_cancelled_full_pressure_attempt(
       args.cancelled_full_pressure_run_id,
@@ -2162,8 +2879,26 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
     )
   # A later report refresh (for example, after locating a cancelled full run)
   # must not erase a completed diagnostic evidence block merely because this
-  # invocation does not request a second diagnostic execution.
-  pressure_baseline = existing.get("pressure_baseline")
+  # invocation does not request a second diagnostic execution.  In particular,
+  # retain older pre-capability 480 runs as explicit NON_GATING evidence rather
+  # than letting their checkpoint timings masquerade as durable CAS coverage.
+  previous_pressure = _normalize_nonpersistent_diagnostic_pressure_attempt(
+    existing.get("pressure_baseline")
+  )
+  retained_calibration = _normalize_nonpersistent_diagnostic_pressure_attempt(
+    existing.get("nonpersistent_calibration_attempt")
+  )
+  nonpersistent_calibration_attempt = (
+    retained_calibration
+    if _is_nonpersistent_diagnostic_pressure_attempt(retained_calibration)
+    else None
+  )
+  if (
+    isinstance(previous_pressure, Mapping)
+    and _is_nonpersistent_diagnostic_pressure_attempt(previous_pressure)
+  ):
+    nonpersistent_calibration_attempt = previous_pressure
+  pressure_baseline = previous_pressure
   if (
     args.diagnostic_synthetic_pressure
     and args.completed_diagnostic_pressure_run_id
@@ -2172,7 +2907,31 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
       "--diagnostic-synthetic-pressure and "
       "--completed-diagnostic-pressure-run-id are mutually exclusive"
     )
-  if args.completed_diagnostic_pressure_run_id:
+  if args.synthetic_pressure and args.completed_diagnostic_pressure_run_id:
+    raise ValueError(
+      "--synthetic-pressure and --completed-diagnostic-pressure-run-id are mutually exclusive"
+    )
+  if args.synthetic_pressure:
+    try:
+      pressure_baseline = await execute_synthetic_pressure_baseline(
+        audit,
+        pressure_dates,
+        ticks_per_instrument_day=args.synthetic_ticks_per_instrument_day,
+        timeout_seconds=args.pressure_timeout_seconds,
+      )
+    except Exception as exc:
+      pressure_baseline = {
+        "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+        "status": "FAIL",
+        "non_gating": True,
+        "not_historical_replay": True,
+        "isolated_backtest": True,
+        "no_live_or_paper_broker": True,
+        "timeout_seconds": args.pressure_timeout_seconds,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+      }
+  elif args.completed_diagnostic_pressure_run_id:
     diagnostic_fixture = build_synthetic_pressure_fixture(
       audit,
       pressure_dates,
@@ -2182,6 +2941,10 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
       args.completed_diagnostic_pressure_run_id,
       fixture=diagnostic_fixture,
     )
+    if not bool(
+      dict(pressure_baseline.get("runtime_state_persistence") or {}).get("enabled")
+    ):
+      nonpersistent_calibration_attempt = pressure_baseline
   elif args.diagnostic_synthetic_pressure:
     try:
       pressure_baseline = await execute_synthetic_pressure_baseline(
@@ -2189,6 +2952,7 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
         pressure_dates,
         ticks_per_instrument_day=args.diagnostic_ticks_per_instrument_day,
         diagnostic=True,
+        timeout_seconds=args.pressure_timeout_seconds,
       )
     except Exception as exc:
       pressure_baseline = {
@@ -2206,8 +2970,9 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
   existing["historical_short_window_source_identity_preflight"] = historical_preflight
   existing["full_pressure_attempt"] = full_pressure_attempt
   existing["pressure_baseline"] = pressure_baseline
-  existing["performance_remediation_microbenchmark"] = dict(
-    PERFORMANCE_REMEDIATION_MICROBENCHMARK
+  existing["nonpersistent_calibration_attempt"] = nonpersistent_calibration_attempt
+  existing["performance_remediation_microbenchmark"] = _performance_remediation_evidence(
+    pressure_baseline
   )
   formal_status = str(
     dict(existing.get("formal_20_trading_day") or {}).get("status") or "BLOCKED"
@@ -2258,6 +3023,7 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         pressure_audit,
         pressure_dates,
         ticks_per_instrument_day=args.synthetic_ticks_per_instrument_day,
+        timeout_seconds=args.pressure_timeout_seconds,
       )
     except Exception as exc:
       pressure_baseline = {

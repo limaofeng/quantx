@@ -5,9 +5,11 @@ from quantx_contracts import HISTORICAL_TICK_ORDINALS_PER_MILLISECOND
 from quantx_infrastructure.core.data.tick_identity import (
   merge_ticks_losslessly,
   normalize_ticks_losslessly,
+  tick_page_content_identity,
   tick_query_end_time,
   tick_snapshot_identity,
   tick_source_time_ms,
+  tick_storage_time,
 )
 from quantx_infrastructure.models.tick import Tick
 
@@ -108,6 +110,12 @@ def test_normalize_keeps_distinct_warm_snapshots_in_same_millisecond() -> None:
   assert {tick.source_time_ms for tick in normalized} == {SOURCE_TIME_MS}
 
 
+def test_tick_storage_time_is_the_reversible_authoritative_encoding() -> None:
+  assert tick_storage_time(SOURCE_TIME_MS, 7) == SOURCE_TIME + timedelta(
+    microseconds=7
+  )
+
+
 def test_tick_identity_ignores_storage_and_known_unstable_fields() -> None:
   first = _tick(transaction_num=1, last_price=10.0, tickvol=1.0)
   second = _tick(
@@ -121,6 +129,28 @@ def test_tick_identity_ignores_storage_and_known_unstable_fields() -> None:
   second.stock_status = -1
 
   assert tick_snapshot_identity(first) == tick_snapshot_identity(second)
+
+
+def test_tick_page_content_identity_includes_unstable_tick_fields() -> None:
+  first = _tick(transaction_num=1, last_price=10.0, tickvol=1.0)
+  second = _tick(transaction_num=1, last_price=10.0, tickvol=999.0)
+  second.pvolume = 1.0
+
+  assert tick_snapshot_identity(first) == tick_snapshot_identity(second)
+  assert tick_page_content_identity(first) != tick_page_content_identity(second)
+
+
+def test_tick_page_content_identity_normalizes_missing_and_zero_source_time() -> None:
+  missing = _tick(transaction_num=1, last_price=10.0, tickvol=1.0)
+  del missing.source_time_ms
+  zero = _tick(
+    transaction_num=1,
+    last_price=10.0,
+    tickvol=1.0,
+    source_time_ms=0,
+  )
+
+  assert tick_page_content_identity(missing) == tick_page_content_identity(zero)
 
 
 def test_tick_identity_matches_real_history_and_warm_codec_shapes() -> None:
@@ -176,9 +206,9 @@ def test_tick_source_time_ms_falls_back_for_mixed_schema_nan() -> None:
 
 @pytest.mark.parametrize(
   "source_time_ms",
-  [True, float("inf"), SOURCE_TIME_MS + 0.5, "invalid"],
+  [True, float("inf"), SOURCE_TIME_MS + 0.5, "invalid", -1],
 )
-def test_tick_source_time_ms_rejects_non_integer_values(source_time_ms) -> None:
+def test_tick_source_time_ms_rejects_invalid_values(source_time_ms) -> None:
   tick = _tick(transaction_num=1, last_price=10.0, tickvol=1.0)
   tick.source_time_ms = source_time_ms
 

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,7 +19,9 @@ from quantx_domain.strategies.ashare_intraday_t_assistant import (
   AshareIntradayTAssistantStrategy,
 )
 from quantx_domain.strategies.base import (
+  StrategyCadence,
   StrategyContext,
+  StrategyInput,
   StrategyOutput,
   TradeIntent,
   TradeIntentDirection,
@@ -36,8 +39,11 @@ from quantx_infrastructure.core.t_trade_replay_metrics import (
 from quantx_infrastructure.core.t_trade_replay_report import (
   write_t_trade_replay_report,
 )
+from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models import ExecutionMetrics
 from quantx_infrastructure.models.enums import StrategyRunMode
+
+_MISSING_SOURCE_TIME_MS = object()
 
 
 def _tick_book(timestamp: datetime, *, price: float = 10.0) -> MarketDataSnapshot:
@@ -466,6 +472,216 @@ async def test_multi_instrument_replay_reports_empty_window_as_processed(
 
 
 @pytest.mark.asyncio
+async def test_multi_instrument_t_trade_replay_consumes_global_source_identity_order(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A replay must feed the strategy one global source-identity timeline."""
+
+  class FakeHistoricalDataAdapter:
+    current_time = None
+
+  class FakeTradingDateHelper:
+    async def get_trading_calendar(self, **_kwargs):
+      return [datetime(2024, 1, 2).date()]
+
+  class RecordingState(dict):
+    def to_dict(self):
+      return dict(self)
+
+  class RecordingStrategy:
+    def __init__(self, consumed):
+      self.state = RecordingState()
+      self.consumed = consumed
+
+    async def step(self, input_snapshot):
+      self.consumed.append(input_snapshot)
+      return StrategyOutput()
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "HistoricalDataAdapter",
+    FakeHistoricalDataAdapter,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "TradingDateHelper",
+    FakeTradingDateHelper,
+  )
+
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  generation = 7
+
+  def source_time_ms(offset_ms: int) -> int:
+    return int(
+      time_utils.to_utc(start_time + timedelta(milliseconds=offset_ms)).timestamp()
+      * 1000
+    )
+
+  def replay_tick(
+    instrument_code: str,
+    *,
+    offset_ms: int,
+    tick_ordinal: int,
+    price: float,
+  ) -> SimpleNamespace:
+    source_ms = source_time_ms(offset_ms)
+    tick = _legacy_replay_tick(
+      start_time + timedelta(milliseconds=offset_ms),
+      price=price,
+      transaction_num=tick_ordinal,
+      source_time_ms=source_ms,
+    )
+    tick.stock_code = instrument_code
+    tick.tick_ordinal = tick_ordinal
+    tick.continuity_generation = generation
+    return tick
+
+  # Each per-instrument input is intentionally grouped by stock.  Only the
+  # Engine's global merge can produce the expected 600000, 000001, 000001,
+  # 600000 order.
+  ticks_by_instrument = {
+    "600000.SH": [
+      replay_tick("600000.SH", offset_ms=100, tick_ordinal=1, price=20.01),
+      replay_tick("600000.SH", offset_ms=300, tick_ordinal=3, price=20.03),
+    ],
+    "000001.SZ": [
+      replay_tick("000001.SZ", offset_ms=100, tick_ordinal=2, price=10.02),
+      replay_tick("000001.SZ", offset_ms=200, tick_ordinal=1, price=10.01),
+    ],
+  }
+
+  async def run_once(run_id: str):
+    consumed = []
+    executor = StrategyExecutor()
+    executor._run_backtest_warmup_klines = AsyncMock()
+    executor._report_t_trade_replay_progress = AsyncMock()
+    executor._process_auto_exit_plans = AsyncMock()
+    executor._ensure_t_trade_opportunity_profile = AsyncMock()
+    executor._process_strategy_output = AsyncMock()
+    executor._board_replay_report_barrier = AsyncMock()
+    executor._observe_t_trade_candidate_outcomes = AsyncMock()
+    executor._observe_t_trade_phase_one_baseline = lambda *_args, **_kwargs: None
+    executor._runtime_log = lambda *_args, **_kwargs: None
+
+    async def load_ticks(_runtime, _adapter, *, instrument_code, **_kwargs):
+      return [copy.copy(tick) for tick in ticks_by_instrument[instrument_code]]
+
+    executor._load_backtest_ticks = load_ticks
+    context = StrategyContext(
+      run_id=run_id,
+      mode=StrategyRunMode.BACKTEST,
+      instruments=list(ticks_by_instrument),
+      parameters={"t_trade_replay": True},
+      backtest_start_time=start_time,
+      backtest_end_time=end_time,
+    )
+    runtime = StrategyRuntime(
+      run_id=run_id,
+      name="global replay",
+      strategy_id=1,
+      strategy_class=object,
+      context=context,
+      data_adapter=FakeHistoricalDataAdapter(),
+      status=ExecutionStatus.RUNNING,
+    )
+    runtime.strategy = RecordingStrategy(consumed)
+
+    await executor._run_backtest_multi_instrument_timeline(
+      runtime,
+      context.instruments,
+      [],
+      start_time,
+      end_time,
+      use_tick_data=True,
+    )
+
+    return [
+      (
+        item.instrument_code,
+        item.market_data_context.source_identity,
+        item.event.time,
+      )
+      for item in consumed
+    ]
+
+  first_run = await run_once("global-replay-1")
+  second_run = await run_once("global-replay-2")
+  expected_identities = [
+    (generation, source_time_ms(100), 1),
+    (generation, source_time_ms(100), 2),
+    (generation, source_time_ms(200), 1),
+    (generation, source_time_ms(300), 3),
+  ]
+
+  assert [item[1] for item in first_run] == expected_identities
+  assert [item[0] for item in first_run] == [
+    "600000.SH",
+    "000001.SZ",
+    "000001.SZ",
+    "600000.SH",
+  ]
+  # Canonical source identity and replay event timestamps are stable across
+  # independent runs, even though the runtime IDs differ.
+  assert first_run == second_run
+
+
+def _legacy_replay_tick(
+  timestamp: datetime,
+  *,
+  price: float,
+  transaction_num: int,
+  source_time_ms: object = _MISSING_SOURCE_TIME_MS,
+) -> SimpleNamespace:
+  fields = {
+    "stock_code": "000001.SZ",
+    "period": "tick",
+    "time": timestamp,
+    "last_price": price,
+    "open": price,
+    "high": price,
+    "low": price,
+    "last_close": price,
+    "amount": 1_000.0 + transaction_num,
+    "volume": 100.0 + transaction_num,
+    "pvolume": 100.0 + transaction_num,
+    "tickvol": 1.0,
+    "stock_status": 0,
+    "open_int": 0,
+    "transaction_num": transaction_num,
+    "ask_price": [price + 0.01],
+    "bid_price": [price - 0.01],
+    "ask_vol": [100.0],
+    "bid_vol": [100.0],
+  }
+  if source_time_ms is not _MISSING_SOURCE_TIME_MS:
+    fields["source_time_ms"] = source_time_ms
+  return SimpleNamespace(**fields)
+
+
+def _replay_runtime_for(
+  run_id: str,
+  start_time: datetime,
+  end_time: datetime,
+) -> StrategyRuntime:
+  context = StrategyContext(
+    run_id=run_id,
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  return StrategyRuntime(
+    run_id=run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
   ("record_count", "expected_offsets", "expected_queries"),
   [
@@ -522,7 +738,11 @@ async def test_t_trade_tick_reader_probes_exact_limit_and_paginates_beyond_it(
     end_time=end_time,
   )
 
-  assert ticks == source
+  assert len(ticks) == record_count
+  assert all(int(getattr(tick, "source_time_ms", 0) or 0) > 0 for tick in ticks)
+  assert [int(getattr(tick, "tick_ordinal", -1)) for tick in ticks] == [
+    0
+  ] * record_count
   assert adapter.offsets == expected_offsets
   audit = context.parameters["replay_tick_read_audit"]
   assert audit["records_read"] == record_count
@@ -532,6 +752,397 @@ async def test_t_trade_tick_reader_probes_exact_limit_and_paginates_beyond_it(
     assert audit["boundary_probe_windows"] == 1
   else:
     assert audit["paginated_windows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_normalizes_legacy_identity_once_across_pages(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Legacy source fields must receive one ordinal sequence across offsets."""
+
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 3)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  same_source_time = datetime(2024, 1, 2, 9, 30, 0, 123456)
+  source = [
+    _legacy_replay_tick(
+      same_source_time,
+      price=10.01 + index / 100,
+      transaction_num=index + 1,
+      source_time_ms=(0 if index == 1 else _MISSING_SOURCE_TIME_MS),
+    )
+    for index in range(6)
+  ]
+
+  class PagedAdapter:
+    def __init__(self) -> None:
+      self.offsets: list[int] = []
+
+    async def get_ticks(self, **kwargs):
+      offset = kwargs["offset"]
+      limit = kwargs["limit"]
+      self.offsets.append(offset)
+      return source[offset : offset + limit]
+
+  context = StrategyContext(
+    run_id="replay-legacy-source-identity",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+  executor = StrategyExecutor()
+  adapter = PagedAdapter()
+
+  ticks = await executor._load_t_trade_replay_ticks_paginated(
+    runtime,
+    adapter,
+    instrument_code="000001.SZ",
+    start_time=start_time,
+    end_time=end_time,
+  )
+
+  expected_source_time_ms = int(time_utils.to_utc(same_source_time).timestamp() * 1000)
+  assert adapter.offsets == [0, 3, 6]
+  assert [tick.source_time_ms for tick in ticks] == [
+    expected_source_time_ms
+  ] * 6
+  assert [tick.tick_ordinal for tick in ticks] == [0, 1, 2, 3, 4, 5]
+  assert len({(tick.source_time_ms, tick.tick_ordinal) for tick in ticks}) == 6
+  assert len({tick.time for tick in ticks}) == 6
+
+  market_data_context = executor._build_market_data_context(
+    runtime,
+    cadence=StrategyCadence.TICK,
+    instrument_code="000001.SZ",
+    timestamp=ticks[0].time,
+    event=ticks[0],
+  )
+  assert market_data_context.source_time_ms == expected_source_time_ms
+  assert market_data_context.source_time_ms > 0
+  opportunity_input = StrategyInput(
+    run_id=runtime.run_id,
+    strategy_id=str(runtime.strategy_id),
+    timestamp=ticks[0].time,
+    cadence=StrategyCadence.TICK,
+    instrument_code="000001.SZ",
+    event=ticks[0],
+    market_data_context=market_data_context,
+    market_context={},
+  )
+  assert AshareIntradayTAssistantStrategy._opportunity_sample(opportunity_input)
+
+  audit = context.parameters["replay_tick_read_audit"]
+  assert audit["records_read"] == 6
+  assert audit["pages_read"] == 2
+  assert audit["queries"] == 3
+  assert audit["boundary_probe_windows"] == 1
+  assert audit["issues"] == []
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_keeps_existing_source_identity_deterministic(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 3)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  source_time_ms = 1_704_160_800_123
+  source = [
+    _legacy_replay_tick(
+      start_time,
+      price=10.02 - index / 100,
+      transaction_num=index + 1,
+      source_time_ms=source_time_ms,
+    )
+    for index in range(2)
+  ]
+
+  class PagedAdapter:
+    async def get_ticks(self, **kwargs):
+      return source[kwargs["offset"] : kwargs["offset"] + kwargs["limit"]]
+
+  def runtime_for(run_id: str) -> StrategyRuntime:
+    context = StrategyContext(
+      run_id=run_id,
+      mode=StrategyRunMode.BACKTEST,
+      instruments=["000001.SZ"],
+      parameters={"t_trade_replay": True},
+      backtest_start_time=start_time,
+      backtest_end_time=end_time,
+    )
+    return StrategyRuntime(
+      run_id=run_id,
+      name="replay",
+      strategy_id=1,
+      strategy_class=object,
+      context=context,
+    )
+
+  executor = StrategyExecutor()
+  first = await executor._load_t_trade_replay_ticks_paginated(
+    runtime_for("replay-existing-identity-1"),
+    PagedAdapter(),
+    instrument_code="000001.SZ",
+    start_time=start_time,
+    end_time=end_time,
+  )
+  second = await executor._load_t_trade_replay_ticks_paginated(
+    runtime_for("replay-existing-identity-2"),
+    PagedAdapter(),
+    instrument_code="000001.SZ",
+    start_time=start_time,
+    end_time=end_time,
+  )
+
+  first_identity = [
+    (tick.source_time_ms, tick.tick_ordinal, tick.time) for tick in first
+  ]
+  second_identity = [
+    (tick.source_time_ms, tick.tick_ordinal, tick.time) for tick in second
+  ]
+  assert first_identity == second_identity
+  assert [item[0] for item in first_identity] == [source_time_ms, source_time_ms]
+  assert [item[1] for item in first_identity] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_distinguishes_full_page_content(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 2)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  timestamp = start_time + timedelta(milliseconds=123)
+  first_page = [
+    _legacy_replay_tick(
+      timestamp,
+      price=10.01 + index / 100,
+      transaction_num=index + 1,
+    )
+    for index in range(2)
+  ]
+  second_page = [copy.copy(item) for item in first_page]
+  for index, item in enumerate(second_page):
+    item.tickvol = 20.0 + index
+    item.pvolume = 200.0 + index
+
+  class PagedAdapter:
+    def __init__(self) -> None:
+      self.offsets: list[int] = []
+
+    async def get_ticks(self, **kwargs):
+      offset = kwargs["offset"]
+      self.offsets.append(offset)
+      if offset == 0:
+        return first_page
+      if offset == 2:
+        return second_page
+      return []
+
+  runtime = _replay_runtime_for("replay-full-page-content", start_time, end_time)
+  adapter = PagedAdapter()
+
+  ticks = await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+    runtime,
+    adapter,
+    instrument_code="000001.SZ",
+    start_time=start_time,
+    end_time=end_time,
+  )
+
+  assert adapter.offsets == [0, 2, 4]
+  assert len(ticks) == 4
+  assert sorted(tick.tickvol for tick in ticks) == [1.0, 1.0, 20.0, 21.0]
+  assert sorted(tick.pvolume for tick in ticks) == [101.0, 102.0, 200.0, 201.0]
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_rejects_non_adjacent_repeated_page(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 2)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  timestamp = start_time + timedelta(milliseconds=123)
+  page_a = [
+    _legacy_replay_tick(
+      timestamp,
+      price=10.01 + index / 100,
+      transaction_num=index + 1,
+    )
+    for index in range(2)
+  ]
+  page_b = [copy.copy(item) for item in page_a]
+  for item in page_b:
+    item.tickvol = 20.0
+
+  class BrokenPagedAdapter:
+    def __init__(self) -> None:
+      self.offsets: list[int] = []
+
+    async def get_ticks(self, **kwargs):
+      offset = kwargs["offset"]
+      self.offsets.append(offset)
+      if offset in {0, 4}:
+        return page_a
+      if offset == 2:
+        return page_b
+      return []
+
+  runtime = _replay_runtime_for("replay-page-a-b-a", start_time, end_time)
+  adapter = BrokenPagedAdapter()
+
+  with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+    await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+      runtime,
+      adapter,
+      instrument_code="000001.SZ",
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  assert adapter.offsets == [0, 2, 4]
+  assert runtime.context.parameters["replay_tick_read_audit"]["issues"][0][
+    "reason_code"
+  ] == "TICK_PAGINATION_DID_NOT_ADVANCE"
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_rejects_negative_explicit_source_time(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 2)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  invalid_tick = _legacy_replay_tick(
+    start_time,
+    price=10.01,
+    transaction_num=1,
+    source_time_ms=-1,
+  )
+
+  class InvalidSourceAdapter:
+    async def get_ticks(self, **_kwargs):
+      return [invalid_tick]
+
+  runtime = _replay_runtime_for("replay-negative-source-time", start_time, end_time)
+
+  with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+    await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+      runtime,
+      InvalidSourceAdapter(),
+      instrument_code="000001.SZ",
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  assert runtime.context.parameters["replay_tick_read_audit"]["issues"][0][
+    "reason_code"
+  ] == "INVALID_TICK_SOURCE_TIME"
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_normalizes_missing_and_zero_source_time_for_repeats(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 1)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  timestamp = start_time + timedelta(milliseconds=123)
+  missing_source = _legacy_replay_tick(
+    timestamp,
+    price=10.01,
+    transaction_num=1,
+  )
+  zero_source = copy.copy(missing_source)
+  zero_source.source_time_ms = 0
+
+  class BrokenPagedAdapter:
+    def __init__(self) -> None:
+      self.offsets: list[int] = []
+
+    async def get_ticks(self, **kwargs):
+      offset = kwargs["offset"]
+      self.offsets.append(offset)
+      if offset == 0:
+        return [missing_source]
+      if offset == 1:
+        return [zero_source]
+      return []
+
+  runtime = _replay_runtime_for("replay-source-time-equivalence", start_time, end_time)
+  adapter = BrokenPagedAdapter()
+
+  with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+    await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+      runtime,
+      adapter,
+      instrument_code="000001.SZ",
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  assert adapter.offsets == [0, 1]
+  assert runtime.context.parameters["replay_tick_read_audit"]["issues"][0][
+    "reason_code"
+  ] == "TICK_PAGINATION_DID_NOT_ADVANCE"
+
+
+@pytest.mark.asyncio
+async def test_t_trade_tick_reader_fails_closed_when_identity_normalization_fails(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  monkeypatch.setattr(strategy_executor_module, "_T_TRADE_REPLAY_TICK_PAGE_SIZE", 3)
+  start_time = datetime(2024, 1, 2, 9, 30)
+  end_time = datetime(2024, 1, 2, 10, 0)
+  invalid_tick = _legacy_replay_tick(
+    start_time,
+    price=10.01,
+    transaction_num=1,
+    source_time_ms="not-an-integer",
+  )
+
+  class InvalidIdentityAdapter:
+    async def get_ticks(self, **_kwargs):
+      return [invalid_tick]
+
+  context = StrategyContext(
+    run_id="replay-identity-normalization-failure",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"t_trade_replay": True},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+
+  with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
+    await StrategyExecutor()._load_t_trade_replay_ticks_paginated(
+      runtime,
+      InvalidIdentityAdapter(),
+      instrument_code="000001.SZ",
+      start_time=start_time,
+      end_time=end_time,
+    )
+
+  audit = context.parameters["replay_tick_read_audit"]
+  assert audit["issues"][-1]["reason_code"] == "TICK_IDENTITY_NORMALIZATION_FAILED"
+  assert audit["issues"][-1]["details"]["error_type"] == "ValueError"
 
 
 @pytest.mark.asyncio
@@ -702,8 +1313,8 @@ async def test_replay_auto_confirms_manual_intent_through_executor(
   )
   approved = []
 
-  async def approve(run_id: str, intent_id: str):
-    approved.append((run_id, intent_id))
+  async def approve(run_id: str, intent_id: str, *, approval_expectation=None):
+    approved.append((run_id, intent_id, approval_expectation))
     return {"success": True, "code": "APPROVED"}
 
   monkeypatch.setattr(executor, "approve_trade_intent", approve)
@@ -714,7 +1325,7 @@ async def test_replay_auto_confirms_manual_intent_through_executor(
     StrategyOutput(trade_intents=[intent]),
   )
 
-  assert approved == [(context.run_id, intent.intent_id)]
+  assert approved == [(context.run_id, intent.intent_id, None)]
   assert runtime.pending_approvals[intent.intent_id] is intent
 
 
@@ -873,6 +1484,65 @@ def test_capital_utilization_falls_when_exit_wait_is_longer() -> None:
   )
 
 
+@pytest.mark.asyncio
+async def test_replay_opportunity_diagnostics_are_scoped_to_exact_run(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  start = datetime(2024, 1, 2, 9, 30)
+  end = datetime(2024, 1, 2, 15, 0)
+  context = StrategyContext(
+    run_id="replay-v3-run",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["000001.SZ"],
+    parameters={"account_id": "account-1", "t_trade_replay": True},
+    backtest_start_time=start,
+    backtest_end_time=end,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay-v3",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+  )
+  diagnostics = {
+    "available": True,
+    "scope": {"strategy_run_id": runtime.run_id},
+    "denominator": {
+      "code": "READY_INSTRUMENT_SECONDS",
+      "ready_instrument_seconds": 120.0,
+    },
+  }
+  service = SimpleNamespace(signal_diagnostics=AsyncMock(return_value=diagnostics))
+  db = object()
+
+  class SessionContext:
+    async def __aenter__(self):
+      return db
+
+    async def __aexit__(self, *_args):
+      return False
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "AsyncSessionLocal",
+    SessionContext,
+  )
+  executor = StrategyExecutor(opportunity_diagnostics_service=service)
+
+  result = await executor._load_t_trade_replay_opportunity_diagnostics(runtime)
+
+  assert result is diagnostics
+  service.signal_diagnostics.assert_awaited_once_with(
+    "account-1",
+    stock_code=None,
+    start_time=start,
+    end_time=end,
+    db=db,
+    strategy_run_id="replay-v3-run",
+  )
+
+
 def test_derived_price_limits_are_disclosed_as_partial_data_quality() -> None:
   runtime = _metrics_runtime(datetime(2024, 1, 2, 14, 0))
   runtime.context.parameters.update(
@@ -922,7 +1592,7 @@ def test_completed_replay_writes_versioned_html_and_json_report(tmp_path) -> Non
   )
 
   assert report["status"] == "GENERATED"
-  assert report["conclusion_code"] == "INSUFFICIENT_SAMPLE"
+  assert report["conclusion_code"] == "DIAGNOSTICS_UNAVAILABLE"
   assert (
     (run_dir / "t-trade-report.html")
     .read_text(encoding="utf-8")

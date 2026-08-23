@@ -18,6 +18,11 @@ from quantx_domain.strategies.base import (
   StrategyOutput,
   StrategyRunMode,
 )
+from quantx_domain.trading.t_trade_opportunity_engine import (
+  DataHealth,
+  OpportunitySample,
+  OpportunityState,
+)
 from quantx_engine.strategy_executor import (
   ExecutionStatus,
   RuntimeMarketEvent,
@@ -217,6 +222,39 @@ def _create_runtime(
   assert runtime.log_manager is not None
   runtime.log_manager.flush = AsyncMock()
   return runtime
+
+
+def _sampled_v3_opportunity() -> dict:
+  sample = OpportunitySample(
+    instrument_code="600000.SH",
+    trade_date="2026-08-20",
+    source_time_ms=1_000,
+    tick_ordinal=1,
+    price=10.0,
+    continuity_generation="1",
+    received_at_ms=1_000,
+    bid_price=9.99,
+    ask_price=10.0,
+    cumulative_amount=1_000.0,
+    cumulative_volume=100.0,
+  )
+  return OpportunityState(
+    instrument_code="600000.SH",
+    trade_date="2026-08-20",
+    continuity_generation="1",
+    data_health=DataHealth.WARMING,
+    samples=(sample,),
+  ).to_dict()
+
+
+def _v3_runtime_state_with_sample() -> dict:
+  state = AshareIntradayTAssistantStrategy._empty_instrument_state()
+  state["opportunity"] = _sampled_v3_opportunity()
+  return {
+    "state_schema_version": 3,
+    "instrument_states": {"600000.SH": state},
+    "universe_revision": 0,
+  }
 
 
 def _isolate_persistence(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
@@ -1002,6 +1040,8 @@ async def test_startup_replays_restored_continuity_gate_before_checkpoint(
     mode=StrategyRunMode.PAPER,
     strategy_class=strategy_class,
   )
+  if handled:
+    runtime.context.parameters["account_id"] = "account-1"
   broker = FakeBroker()
   adapter = FakeAdapter()
   _install_io(
@@ -1013,11 +1053,14 @@ async def test_startup_replays_restored_continuity_gate_before_checkpoint(
   checkpoint_snapshots: list[dict] = []
 
   async def restore(manager: RuntimeStateManager):
-    manager._state["custom"] = {
+    restored_custom = {
       MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY: {
         "600000.SH": "MARKET_EVENT_QUEUE_OVERFLOW",
       }
     }
+    if handled:
+      restored_custom.update(_v3_runtime_state_with_sample())
+    manager._state["custom"] = restored_custom
     return RuntimeStateRestoreResult(
       status=RuntimeStateRestoreStatus.RESTORED,
       state=manager._state,
@@ -1039,6 +1082,12 @@ async def test_startup_replays_restored_continuity_gate_before_checkpoint(
     checkpoint,
   )
   monkeypatch.setattr(RuntimeStateManager, "save_snapshot", save)
+  if handled:
+    monkeypatch.setattr(
+      RuntimeStateManager,
+      "restore_v3_manual_candidate_intents",
+      AsyncMock(return_value=[]),
+    )
 
   assert await executor.start(runtime.run_id) is True
 
@@ -1047,11 +1096,15 @@ async def test_startup_replays_restored_continuity_gate_before_checkpoint(
   durable_gates = manager.market_continuity_reconciliation()
   if handled:
     assert durable_gates == {}
-    rewarm = manager.get_custom("signal_window_rewarm")
-    assert rewarm["instruments"]["600000.SH"]["reason"] == (
-      "MARKET_EVENT_QUEUE_OVERFLOW"
-    )
-    assert checkpoint_snapshots[-1]["signal_window_rewarm"] == rewarm
+    opportunity = manager.get_custom("instrument_states")["600000.SH"][
+      "opportunity"
+    ]
+    assert opportunity["samples"] == []
+    assert opportunity["candidate"] is None
+    assert opportunity["continuity_generation"] == "invalidated:1"
+    assert checkpoint_snapshots[-1]["instrument_states"]["600000.SH"][
+      "opportunity"
+    ] == opportunity
     assert checkpoint_snapshots[-1].get(
       MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY,
       {},
@@ -1093,6 +1146,8 @@ async def test_runtime_continuity_gate_uses_two_phase_durable_clear(
   manager._running = True
   await manager.start_state_sync(strategy)
   runtime.state_manager = manager
+  strategy.state.update(_v3_runtime_state_with_sample())
+  await asyncio.wait_for(manager._state_queue.join(), timeout=1.0)
   save_attempts: list[dict] = []
   committed: list[dict] = []
   outcomes = iter((True, False))
@@ -1121,16 +1176,19 @@ async def test_runtime_continuity_gate_uses_two_phase_durable_clear(
   assert durable_custom[MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY] == {
     "600000.SH": "MARKET_EVENT_QUEUE_OVERFLOW",
   }
-  assert durable_custom["signal_window_rewarm"]["instruments"] == {
-    "600000.SH": {
-      "reason": "MARKET_EVENT_QUEUE_OVERFLOW",
-      "started_at_ms": 0,
-    }
-  }
+  durable_opportunity = durable_custom["instrument_states"]["600000.SH"][
+    "opportunity"
+  ]
+  assert durable_opportunity["samples"] == []
+  assert durable_opportunity["candidate"] is None
+  assert durable_opportunity["continuity_generation"] == "invalidated:1"
   assert save_attempts[1]["custom"].get(
     MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY,
     {},
   ) == {}
+  assert save_attempts[1]["custom"]["instrument_states"]["600000.SH"][
+    "opportunity"
+  ] == durable_opportunity
   assert runtime._market_fail_closed_codes == {
     "600000.SH": "MARKET_EVENT_QUEUE_OVERFLOW",
   }

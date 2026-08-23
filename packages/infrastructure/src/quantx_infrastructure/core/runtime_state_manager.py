@@ -10,6 +10,7 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Mapping, Optional
 
 from quantx_infrastructure.core.utils import time_utils
 
@@ -152,6 +153,24 @@ class RuntimeStateManager:
     _last_snapshot_attempt_revision: int = field(default=-1, repr=False)
     _snapshot_cas_conflicts: int = field(default=0, repr=False)
     _last_snapshot_failure_code: Optional[str] = field(default=None, repr=False)
+    # Structured-position persistence is intentionally separate from the
+    # generic runtime-state revision.  Candidate/custom state still uses a CAS
+    # checkpoint for every causally required tick, while this cache avoids
+    # rewriting a complete unchanged position projection on every such tick.
+    # The last successfully durable complete position-code set and structured
+    # projection fingerprint.  They are only round-trip optimizations: any
+    # restore, CAS conflict, or commit-unknown result forces the next snapshot
+    # to replace the complete durable position view before this cache is trusted
+    # again.
+    _persisted_position_codes: Optional[frozenset[str]] = field(
+        default=None,
+        repr=False,
+    )
+    _persisted_position_snapshot_fingerprint: Optional[str] = field(
+        default=None,
+        repr=False,
+    )
+    _force_position_snapshot: bool = field(default=True, repr=False)
 
     # 资金/持仓冻结索引；镜像到 custom state，供 Engine 重启恢复。
     _reservations: Dict[str, float] = field(default_factory=dict, repr=False)
@@ -464,6 +483,7 @@ class RuntimeStateManager:
         failures are never represented as an empty state because PAPER/LIVE
         callers must not continue from fabricated account and position facts.
         """
+        self._invalidate_position_snapshot_cache()
         if not self.persist_enabled:
             return RuntimeStateRestoreResult(
                 status=RuntimeStateRestoreStatus.PERSISTENCE_DISABLED,
@@ -517,6 +537,9 @@ class RuntimeStateManager:
                 self._state["positions"] = {
                     p.instrument_code: p.to_dict() for p in positions
                 }
+                self._adopt_durable_position_codes(
+                    self._state["positions"]
+                )
                 if restored_ledger:
                     reconcile_required, _ = self._adopt_restored_bucket_ledger(
                         self._state["positions"],
@@ -625,7 +648,24 @@ class RuntimeStateManager:
                 raise RuntimeStateRestoreError(
                     f"V3 候选恢复找不到策略运行: run_id={self.run_id}"
                 )
-            run_parameters = dict(strategy_run.parameters or {})
+            raw_run_parameters = strategy_run.parameters
+            if isinstance(raw_run_parameters, str):
+                try:
+                    raw_run_parameters = json.loads(raw_run_parameters)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeStateRestoreError(
+                        "V3 候选恢复策略运行参数不是有效 JSON 对象: "
+                        f"run_id={self.run_id}"
+                    ) from exc
+            if raw_run_parameters is None:
+                run_parameters = {}
+            elif isinstance(raw_run_parameters, Mapping):
+                run_parameters = dict(raw_run_parameters)
+            else:
+                raise RuntimeStateRestoreError(
+                    "V3 候选恢复策略运行参数不是 JSON 对象: "
+                    f"run_id={self.run_id}"
+                )
             run_account_id = str(run_parameters.get("account_id") or "").strip()
             if run_account_id != normalized_account_id:
                 raise RuntimeStateRestoreError(
@@ -854,6 +894,9 @@ class RuntimeStateManager:
                 positions = await StrategyRunPositionRepository(db).get_all_positions(
                     self.run_id
                 )
+                self._adopt_durable_position_codes(
+                    position.instrument_code for position in positions
+                )
                 self._state["version"] = int(state_record.version or 0)
                 if self._dirty_revision == self._last_snapshot_attempt_revision:
                     self._state["custom"] = custom_state
@@ -939,6 +982,9 @@ class RuntimeStateManager:
                             self.run_id
                         )
                     )
+                    self._adopt_durable_position_codes(
+                        position.instrument_code for position in positions
+                    )
                     self._state["version"] = authoritative_version
                     if self._dirty_revision == snapshot_revision:
                         self._state["custom"] = custom_state
@@ -1004,6 +1050,9 @@ class RuntimeStateManager:
                         await StrategyRunPositionRepository(db).get_all_positions(
                             self.run_id
                         )
+                    )
+                    self._adopt_durable_position_codes(
+                        position.instrument_code for position in positions
                     )
                     self._state["version"] = authoritative_version
                     self._state["custom"] = custom_state
@@ -1071,6 +1120,18 @@ class RuntimeStateManager:
                 )
                 account = copy.deepcopy(self._state.get("account", {}) or {})
                 positions = copy.deepcopy(self._state.get("positions", {}) or {})
+                position_projection = self._position_snapshot_projection(positions)
+                position_codes = frozenset(
+                    item["instrument_code"] for item in position_projection
+                )
+                position_fingerprint = self._position_snapshot_fingerprint(
+                    position_projection
+                )
+                position_snapshot_required = (
+                    self._force_position_snapshot
+                    or self._persisted_position_snapshot_fingerprint
+                    != position_fingerprint
+                )
                 self._last_snapshot_attempt_revision = snapshot_revision
 
                 async for db in get_async_db():
@@ -1083,6 +1144,7 @@ class RuntimeStateManager:
                         custom_state=custom_state,
                         expected_version=expected_version,
                         commit=False,
+                        flush=False,
                     )
                     if not saved:
                         self._snapshot_cas_conflicts += 1
@@ -1091,26 +1153,31 @@ class RuntimeStateManager:
                             "runtime state snapshot version conflict: "
                             f"run_id={self.run_id}, expected_version={expected_version}"
                         )
-                    pos_repo = StrategyRunPositionRepository(db)
-                    await pos_repo.delete_missing_positions(
-                        self.run_id,
-                        list(positions),
-                        commit=False,
-                    )
-                    for code, pos_data in positions.items():
-                        await pos_repo.update_position(
-                            run_id=self.run_id,
-                            instrument_code=code,
-                            long_volume=pos_data.get("long_volume", 0),
-                            short_volume=pos_data.get("short_volume", 0),
-                            long_avg_price=pos_data.get("long_avg_price", 0.0),
-                            short_avg_price=pos_data.get("short_avg_price", 0.0),
-                            market_value=pos_data.get("market_value", 0.0),
-                            pnl=pos_data.get("pnl", 0.0),
-                            last_price=pos_data.get("last_price", 0.0),
-                            commit=False,
-                        )
+                    if position_snapshot_required:
+                        pos_repo = StrategyRunPositionRepository(db)
+                        if (
+                            not self._force_position_snapshot
+                            and self._persisted_position_codes == position_codes
+                        ):
+                            await pos_repo.update_existing_positions_snapshot(
+                                self.run_id,
+                                positions,
+                                commit=False,
+                                flush=False,
+                            )
+                        else:
+                            await pos_repo.replace_positions_snapshot(
+                                self.run_id,
+                                positions,
+                                commit=False,
+                                flush=False,
+                            )
                     await db.commit()
+                    self._persisted_position_codes = position_codes
+                    self._persisted_position_snapshot_fingerprint = (
+                        position_fingerprint
+                    )
+                    self._force_position_snapshot = False
                     self._state["version"] = expected_version + 1
                     self._state.setdefault("custom", {})[
                         RUNTIME_SNAPSHOT_ATTEMPT_KEY
@@ -1123,6 +1190,7 @@ class RuntimeStateManager:
                     break
                 return True
             except Exception as e:
+                self._invalidate_position_snapshot_cache()
                 if self._last_snapshot_failure_code is None:
                     self._last_snapshot_failure_code = "PERSISTENCE_ERROR"
                 self.logger.error(f"保存快照失败: {e}")
@@ -1158,6 +1226,93 @@ class RuntimeStateManager:
         """标记状态已更改"""
         self._dirty_revision += 1
         self._dirty = True
+
+    def _mark_positions_dirty(self) -> None:
+        """Record a possible structured-position change plus the state change.
+
+        A position operation can update fields that live only in the bucket
+        ledger/custom state.  The final durable-table decision is made from
+        the normalized projection fingerprint in ``save_snapshot``; this
+        marker only ensures a snapshot is attempted.
+        """
+        self._mark_dirty()
+
+    @staticmethod
+    def _position_snapshot_projection(
+        positions: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Return exactly the ``StrategyRunPosition`` durable projection.
+
+        Keep this normalization aligned with
+        ``StrategyRunPositionRepository._normalize_snapshot_positions``.  The
+        repository owns the write itself; this local projection is used only to
+        prove that a no-write checkpoint has the same structured position truth
+        as the last known durable snapshot.
+        """
+        projection: list[dict[str, Any]] = []
+        seen_codes: set[str] = set()
+        for raw_code, raw_position in sorted(dict(positions or {}).items()):
+            code = str(raw_code or "").strip().upper()
+            if not code:
+                raise ValueError("runtime position snapshot contains empty code")
+            if code in seen_codes:
+                raise ValueError(
+                    "runtime position snapshot contains duplicate instrument code"
+                )
+            seen_codes.add(code)
+            position = dict(raw_position or {})
+            projection.append(
+                {
+                    "instrument_code": code,
+                    "long_volume": int(position.get("long_volume", 0) or 0),
+                    "short_volume": int(position.get("short_volume", 0) or 0),
+                    "long_avg_price": float(
+                        position.get("long_avg_price", 0.0) or 0.0
+                    ),
+                    "short_avg_price": float(
+                        position.get("short_avg_price", 0.0) or 0.0
+                    ),
+                    "market_value": float(
+                        position.get("market_value", 0.0) or 0.0
+                    ),
+                    "pnl": float(position.get("pnl", 0.0) or 0.0),
+                    "last_price": float(position.get("last_price", 0.0) or 0.0),
+                }
+            )
+        return projection
+
+    @staticmethod
+    def _position_snapshot_fingerprint(
+        projection: Iterable[Mapping[str, Any]],
+    ) -> str:
+        """Hash the normalized, durable structured-position projection."""
+        serialized = json.dumps(
+            list(projection),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _invalidate_position_snapshot_cache(self) -> None:
+        """Require a complete replacement after an indeterminate write path."""
+        self._persisted_position_codes = None
+        self._persisted_position_snapshot_fingerprint = None
+        self._force_position_snapshot = True
+
+    def _adopt_durable_position_codes(self, codes: Iterable[Any]) -> None:
+        """Remember durable codes but force the next checkpoint to verify them.
+
+        A restored/reconciled state is authoritative for recovery, but it did
+        not pass through this manager's current snapshot transaction.  The
+        next checkpoint must therefore issue a complete replacement, including
+        deletions, rather than taking the same-code incremental update path.
+        """
+        self._persisted_position_codes = frozenset(
+            str(code or "").strip().upper() for code in codes
+        )
+        self._persisted_position_snapshot_fingerprint = None
+        self._force_position_snapshot = True
 
     # ==================== 日志管理 (文件存储) ====================
 
@@ -1222,7 +1377,7 @@ class RuntimeStateManager:
         if self._bucket_ledger and not self.requires_bucket_reconciliation():
             self._bucket_ledger.sync_position(instrument_code, positions[instrument_code])
             self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
-        self._mark_dirty()
+        self._mark_positions_dirty()
 
     def get_position(self, instrument_code: str) -> Optional[Dict[str, Any]]:
         position = self._state.get("positions", {}).get(instrument_code)
@@ -1254,11 +1409,13 @@ class RuntimeStateManager:
 
         positions = self._state.get("positions", {})
         changed = False
+        positions_changed = False
         for code, position in list(positions.items()):
             settled = settle_position(position, trading_date)
             if settled != position:
                 positions[code] = settled
                 changed = True
+                positions_changed = True
         if self._bucket_ledger:
             self._bucket_ledger.settle_trading_day(trading_date)
             self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
@@ -1269,7 +1426,10 @@ class RuntimeStateManager:
                 for code, position in positions.items():
                     self._bucket_ledger.sync_position(code, position)
                 self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
-            self._mark_dirty()
+            if positions_changed:
+                self._mark_positions_dirty()
+            else:
+                self._mark_dirty()
 
     def get_available_volume(self, instrument_code: str) -> int:
         position = self.get_position(instrument_code) or {}
@@ -1376,7 +1536,7 @@ class RuntimeStateManager:
             applied_actions.append(action_id)
         self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
         self._recalculate_total_asset()
-        self._mark_dirty()
+        self._mark_positions_dirty()
         return patch.to_dict()
 
     # ==================== 账户管理 ====================
@@ -1599,7 +1759,7 @@ class RuntimeStateManager:
         reserved = self._position_reservations.setdefault(order_id, {})
         reserved[instrument_code] = reserved.get(instrument_code, 0) + volume
         self._sync_reservation_state()
-        self._mark_dirty()
+        self._mark_positions_dirty()
         return True
 
     def release_position(
@@ -1644,7 +1804,7 @@ class RuntimeStateManager:
         if changed:
             self._state["positions"] = positions
             self._sync_reservation_state()
-            self._mark_dirty()
+            self._mark_positions_dirty()
         return changed
 
     def consume_position_reservation(
@@ -1676,7 +1836,7 @@ class RuntimeStateManager:
             if not reserved and order_id in self._position_reservations:
                 self._position_reservations.pop(order_id, None)
             self._sync_reservation_state()
-            self._mark_dirty()
+            self._mark_positions_dirty()
         return max(0, volume - consumed)
 
     def release_order_resources(self, order_id: str) -> None:
@@ -2378,7 +2538,7 @@ class RuntimeStateManager:
         if self._bucket_ledger:
             self._bucket_ledger.apply_trade(trade, order_metadata)
             self._state["bucket_ledger"] = self.get_bucket_ledger_snapshot()
-        self._mark_dirty()
+        self._mark_positions_dirty()
 
     # ==================== 交易意图管理 ====================
 

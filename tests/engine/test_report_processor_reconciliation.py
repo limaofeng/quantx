@@ -180,13 +180,28 @@ async def test_new_external_activity_pauses_and_invalidates_controlled_window(
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
   monkeypatch.setattr(
     report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
+  monkeypatch.setattr(
+    report_processor,
     "_process_order_report",
     AsyncMock(),
   )
   monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
   position_service = SimpleNamespace(
-    apply_full_snapshot=AsyncMock(),
     apply_position_delta=AsyncMock(),
+    get_snapshot_status=AsyncMock(return_value=None),
+    mark_snapshot_failure=AsyncMock(),
+    begin_full_snapshot_attempt=AsyncMock(
+      return_value={"applied": True, "reason": "STARTED"}
+    ),
+    prepare_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "PREPARED"}
+    ),
+    finalize_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "APPLIED"}
+    ),
   )
   monkeypatch.setattr(
     report_processor,
@@ -349,6 +364,11 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
     )
   sessions = async_sessionmaker(engine, expire_on_commit=False)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    AsyncMock(),
+  )
   monkeypatch.setattr(report_processor, "_process_order_report", AsyncMock())
   monkeypatch.setattr(report_processor, "_upsert_account", AsyncMock())
   monkeypatch.setattr(
@@ -363,8 +383,18 @@ async def test_ready_reconciliation_atomically_completes_agent_handover(
     ),
   )
   position_service = SimpleNamespace(
-    apply_full_snapshot=AsyncMock(),
     apply_position_delta=AsyncMock(),
+    get_snapshot_status=AsyncMock(return_value=None),
+    mark_snapshot_failure=AsyncMock(),
+    begin_full_snapshot_attempt=AsyncMock(
+      return_value={"applied": True, "reason": "STARTED"}
+    ),
+    prepare_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "PREPARED"}
+    ),
+    finalize_full_snapshot=AsyncMock(
+      return_value={"applied": True, "reason": "APPLIED"}
+    ),
   )
   monkeypatch.setattr(
     report_processor,
@@ -521,9 +551,19 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
     )
   sessions = async_sessionmaker(engine, expire_on_commit=False)
   monkeypatch.setattr(report_processor, "AsyncSessionLocal", sessions)
+  authority_invalidation = AsyncMock()
+  monkeypatch.setattr(
+    report_processor,
+    "_invalidate_t_trade_entry_authority_for_account",
+    authority_invalidation,
+  )
   position_service = SimpleNamespace(
-    apply_full_snapshot=AsyncMock(),
     apply_position_delta=AsyncMock(),
+    get_snapshot_status=AsyncMock(return_value=None),
+    mark_snapshot_failure=AsyncMock(),
+    begin_full_snapshot_attempt=AsyncMock(),
+    prepare_full_snapshot=AsyncMock(),
+    finalize_full_snapshot=AsyncMock(),
   )
   monkeypatch.setattr(
     report_processor,
@@ -625,8 +665,14 @@ async def test_invalid_full_snapshot_closes_gate_before_partial_sections(
   assert observed_gate_statuses == (
     [] if corrupt_hash else ["RECONCILE_REQUIRED"]
   )
-  position_service.apply_full_snapshot.assert_not_awaited()
+  position_service.prepare_full_snapshot.assert_not_awaited()
+  position_service.finalize_full_snapshot.assert_not_awaited()
   position_service.apply_position_delta.assert_not_awaited()
+  position_service.mark_snapshot_failure.assert_awaited_once_with(
+    "account-1",
+    f"{expected_kind}:{expected_reason}",
+  )
+  authority_invalidation.assert_awaited_once()
   report_processor._upsert_account.assert_not_awaited()
   async with sessions() as db:
     rollout = await db.get(AccountTradingRollout, "account-1")

@@ -1,9 +1,41 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
+from quantx_infrastructure.services.t_trade_replay_service import (
+  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  TTradeReplayService,
+  _v3_pressure_runtime_state_persistence_capability,
+)
+
+
+def test_v3_pressure_durable_state_switch_requires_opaque_capability() -> None:
+  parameters = {
+    _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY: True,
+  }
+
+  TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
+    parameters,
+    {"replay_acceptance": "V3_PRESSURE_BASELINE"},
+    object(),
+  )
+
+  assert _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY not in parameters
+
+  TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
+    parameters,
+    {"replay_acceptance": "V3_PRESSURE_BASELINE"},
+    _v3_pressure_runtime_state_persistence_capability(),
+  )
+
+  assert parameters[_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY] is True
+  with pytest.raises(ValueError, match="仅允许 V3_PRESSURE_BASELINE"):
+    TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
+      parameters,
+      {"replay_acceptance": "V3_CAUSAL_20D"},
+      _v3_pressure_runtime_state_persistence_capability(),
+    )
 
 
 @pytest.mark.asyncio
@@ -290,3 +322,30 @@ async def test_cancel_running_replay_forces_past_simulated_exit_plan_guard() -> 
   manager.stop_strategy.assert_awaited_once_with("replay-1", force=True)
   update_projection.assert_awaited_once()
   assert update_projection.await_args.kwargs["status"] == "CANCELLED"
+
+
+def test_formal_v3_replay_metadata_requires_an_exact_window_and_abnormal_day() -> None:
+  dates = [date(2026, 7, 1) + timedelta(days=index) for index in range(20)]
+
+  normalized = TTradeReplayService._normalize_rollout_evidence_request(
+    {
+      "replay_acceptance": "V3_CAUSAL_20D",
+      "replay_abnormal_dates": [dates[-1].isoformat(), dates[-1].isoformat()],
+    },
+    trading_dates=dates,
+  )
+
+  assert normalized == {
+    "replay_acceptance": "V3_CAUSAL_20D",
+    "replay_abnormal_dates": [dates[-1].isoformat()],
+  }
+  with pytest.raises(ValueError, match="恰好覆盖 20 个交易日"):
+    TTradeReplayService._normalize_rollout_evidence_request(
+      {"replay_acceptance": "V3_CAUSAL_20D", "replay_abnormal_dates": []},
+      trading_dates=dates[:-1],
+    )
+  with pytest.raises(ValueError, match="必须声明至少一个异常行情日"):
+    TTradeReplayService._normalize_rollout_evidence_request(
+      {"replay_acceptance": "V3_CAUSAL_20D", "replay_abnormal_dates": []},
+      trading_dates=dates,
+    )

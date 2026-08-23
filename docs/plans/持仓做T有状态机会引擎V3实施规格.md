@@ -968,12 +968,12 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 - [x] 最新列表使用读投影，不对每行执行独立历史查询；不存在 N+1。
 - [x] RuntimeState 和 evaluation 写入失败时不发布幽灵候选。
 - [x] Redis/订阅中断、静默丢通知、重复通知或订阅重连后，Web 桌面端将通知仅视作失效提示，并通过重连、前台/网络/可见性恢复及 30 秒审计的 `network-only` refetch 回拉数据库真源；重复版本和错误会合并，避免 refetch 风暴。iOS 对应验证留在后续 §18.6。
-- [ ] **BLOCKED（未达 SLO）**：交易时段全持仓压力试验下，Engine 延迟、CAS 冲突率和数据库写入量尚未满足或证明满足现有服务 SLO。固定 9,600 输入的全持仓负载在约 4.15% 完成度时因旧执行路径过慢而取消，未产生可验收的延迟、CAS 与写入量基线；必须完成性能补丁后重跑，才可冻结机器基线或判定 PASS。
+- [ ] **BLOCKED（未达 SLO）**：固定 9,600 输入尚未完成；旧路径的早期取消与后续隔离 BACKTEST 的 82.85% 日历进度取消都不能替代完整结果。最新 sealed persistent 480 Tick（8 标的、run `638f3579-b8de-41eb-b5f7-81d5d00e4043`）保留逐 Tick CAS/审计，持仓写降为 1 次完整 replace/8 行，但 Engine p95/p99 仍为 5509.579435/9853.155481 ms，checkpoint/snapshot p95 为 4016.9334/4289.245725 ms，长尾在外部数据库持久化边界；因此不冻结 SLO、不判 PASS，且未启动新的 9,600 Tick。
 
 ### 19.4 前端验收
 
-- [ ] 用户在一个屏幕内可回答“现在有没有信号、还差多少、被什么阻止、数据是否可信”。
-- [ ] 信号、待确认意图、订单、成交、批次在文案和视觉上不混淆。
+- [x] Windows Web 桌面端的总览、信号与诊断页可在一个工作区回答“现在有没有信号、还差多少、被什么阻止、数据是否可信”；已在 1920/1366 验证。当前账户没有实际候选明细，候选详情状态由既有 fixture/component tests 补足，未声称出现过真实候选。
+- [x] 信号、待确认意图、订单事件、成交与批次使用独立页面/文案；订单事件明确 `command_ack ≠ broker fill`。候选详情的区分由既有 fixture/component tests 覆盖，非当前账户实际候选数据。
 - [x] Web 1920/1366 px 桌面范围无核心信息横向溢出，键盘焦点、读屏语义与 reduced motion 可完成查看和配置预览；移动 Web 不额外扩展。
 - [ ] iOS Dynamic Type/VoiceOver 可读，网络失效时明确旧数据且不能误确认（后续 iOS 门禁，本轮 Windows 不计入）。
 - [x] 参数冲突不覆盖草稿，重热影响在保存前清楚呈现。
@@ -1107,7 +1107,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 | Web（当前仅桌面范围） | 六模式信息架构、信号 inspector、诊断、policy editor、冲突草稿、candidate trace、客户端 scope/版本信任边界与订阅 refetch 已落地。订阅通知只作失效提示；静默丢通知、重复通知、重连、前台/网络/可见性恢复以及 30 秒审计均触发受合并保护的 authoritative `network-only` 回拉。 | 已在 1920/1366 桌面检查总览/信号/诊断/参数纯预览/回放报告：无横向溢出、console 0 errors，键盘焦点、读屏语义与 reduced motion 通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展。 |
 | iOS（当前 Windows scope-waiver） | 本轮不开发、不生成 Apollo types、不运行 Xcode/SwiftUI 验证；已按 hunk 清理 V3 手写源码、GraphQL operations、V3 测试与缺失 generated symbol 引用；并行 watchlist 与用户原有 iOS 改动保留。 | Windows 无 Xcode；iOS codegen/xcodebuild、Dynamic Type、VoiceOver 与可编译原子性全部留待 Phase 4，且不属于当前 Windows 完成门禁。 |
 | 控制 / 迁移 / 文档质量 | TTrade 控制链路与文档构建已完成专项验证；开发库已按授权完成 `0028 → 0031`。 | 控制专项 `282 passed`；迁移专项 `6 passed`；迁移 `0029/0030/0031` 已增加对开发库预创建完整空表的严格 schema 验证与采用，局部或不匹配 `fail-closed`；迁移前自动备份记录于 `F:\Workspace\quantx\.runtime\backups\20260823T104409Z`，迁移后 schema head 为 `20260823_0031`。随后按 `full/live` 重启验收：9 个受管组件均 RUNNING，`liveTrading=ENABLED`，QMT Agent `ready`、协议 `1.1`，快照新鲜（<90s）。混合工作树 Alembic 唯一 head 为 `20260823_0031`；V3 可提交迁移链独立止于 `20260823_0030`，明确不纳入并行 watchlist `0031`；docs build passed；Ruff 对 146 个变更 Python 文件通过；`diff-check` 无 whitespace errors。 |
-| 回放 / 上线 | V3 漏斗、blocker/FSM/版本分组、成熟 cohort 结果口径、同源同 Tick READY 基线与因果诊断报告已落地；CANARY/LIVE rollout evidence 硬门禁已接入服务端。 | **BLOCKED**：现有 4 个闭环均为 `INSUFFICIENT_SAMPLE`，不算 V3 20 日验收；17 个 D-1 窗口、706 个唯一 `instrument-day` 审计未找到任一全持仓 `20/20` 数据窗口，正式严格因果回放为 `0/20`。PAPER 为 `0/5` 个连续交易日、`0/20` 生命周期；`operator_review=false`。固定 9,600 输入全持仓压力试验约运行至 4.15% 即因旧路径过慢取消，SLO 不得判 PASS。CANARY/LIVE 不得激活。 |
+| 回放 / 上线 | V3 漏斗、blocker/FSM/版本分组、成熟 cohort 结果口径、同源同 Tick READY 基线与因果诊断报告已落地；CANARY/LIVE rollout evidence 硬门禁已接入服务端。 | **BLOCKED**：现有 4 个闭环均为 `INSUFFICIENT_SAMPLE`，不算 V3 20 日验收；17 个 D-1 窗口、706 个唯一 `instrument-day` 审计未找到任一全持仓 `20/20` 数据窗口，正式严格因果回放为 `0/20`。PAPER 为 `0/5` 个连续交易日、`0/20` 生命周期；`operator_review=false`。完整 9,600 Tick 压力仍未跑完；最新 sealed persistent 480 Tick 虽保持逐 Tick CAS 并将 position 写缩至 1 次/8 行，仍出现外部 DB checkpoint/snapshot 长尾，故 SLO 不得判 PASS。CANARY/LIVE 不得激活。 |
 
 #### 未完成 / 阻塞门禁（不得声称完成）
 
@@ -1117,7 +1117,7 @@ V3 采用一次权威契约、分阶段实现、最终原子切换。不得长�
 - Web 桌面端已验证：Redis/GraphQL subscription 仅作失效提示；静默丢通知下也会以 30 秒 `network-only` 审计回拉服务端真源，重连与重复通知受到合并保护。1920/1366 无横向溢出，键盘焦点、读屏语义与 reduced motion 已通过；参数服务端纯校验通过，未执行任何写/交易动作。移动 Web 不额外扩展；iOS Apollo codegen/xcodebuild（Windows 无 Xcode，必须 macOS）及 Dynamic Type/VoiceOver 验证属于后续 Phase 4，未纳入当前门禁。
 - 正式 20 交易日严格因果回放为 **BLOCKED（`0/20`）**：17 个 D-1 窗口、706 个唯一 `instrument-day` 审计没有任何全持仓 `20/20` 可用窗口。诊断样本、固定负载或合成压力样本不得称作或替代历史回放。
 - PAPER 为 **BLOCKED（`0/5` 连续交易日、`0/20` 完成候选生命周期）**；其结果、重复/幽灵/未来数据质量和候选追溯不得提前声称验收。
-- 压力 SLO 为 **BLOCKED**：固定 9,600 输入全持仓负载在约 4.15% 时因旧执行路径过慢取消；性能补丁和完整重跑前，不得冻结基线或声明延迟、CAS 冲突率、数据库写入量达标。
+- 压力 SLO 为 **BLOCKED**：固定 9,600 输入尚未完成。最新 sealed persistent 480 Tick 是诊断证据而非替代：Engine p95/p99 为 `5509.579435/9853.155481 ms`，RuntimeState checkpoint/snapshot p95 为 `4016.9334/4289.245725 ms`，且无 CAS conflict；在完整重跑前不得冻结基线或声明延迟、CAS 冲突率、数据库写入量达标。
 - CANARY/LIVE 为 **BLOCKED**：服务端 rollout evidence 硬门禁已落地，当前正式回放/PAPER 不足且 `operator_review=false`；不得激活 CANARY 或 LIVE。
 
 机器学习仍保留为下一阶段，不计入本轮 V3 已完成范围。

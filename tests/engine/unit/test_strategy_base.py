@@ -7,6 +7,7 @@ from datetime import datetime
 
 import pytest
 from quantx_domain.strategies.base import (
+  MarketDataContext,
   RuntimeStatePatch,
   StrategyBase,
   StrategyCadence,
@@ -223,9 +224,107 @@ def test_trade_intent_infers_intent_type_and_strategy_input_trace_fields(strateg
   assert strategy_input.trade_date == "2024-01-02"
 
 
+def test_market_data_context_has_stable_causal_identity():
+  context = MarketDataContext(
+    source="REPLAY",
+    stream_id="run-1:replay",
+    continuity_generation=2,
+    source_sequence=17,
+    source_time_ms=1_704_186_000_123,
+    tick_ordinal=3,
+    received_at_ms=1_704_186_000_123,
+    session="CONTINUOUS_AM",
+    trade_date="2024-01-02",
+  )
+
+  assert context.source_identity == (2, 1_704_186_000_123, 3)
+  assert context.session.is_continuous is True
+  assert context.trade_date.isoformat() == "2024-01-02"
+
+
 def test_runtime_state_patch_rejects_account_fields():
   with pytest.raises(ValueError):
     RuntimeStatePatch(set={"available_cash": 1000})
+
+
+def test_runtime_state_patch_rejects_nested_account_fields_with_paths():
+  with pytest.raises(ValueError) as exc_info:
+    RuntimeStatePatch(
+      set={
+        "instrument_states": {
+          "600000.SH": {
+            "snapshots": [
+              {"algorithm_phase": "READY"},
+              {"available_volume": 100},
+            ]
+          }
+        }
+      }
+    )
+
+  assert "$.instrument_states.600000.SH.snapshots[1].available_volume" in str(
+    exc_info.value
+  )
+
+
+@pytest.mark.parametrize(
+  "field_name",
+  (
+    "position_shares",
+    "position_available_shares",
+    "available_shares",
+    "sellable_volume",
+    "requested_entry_volume",
+    "final_volume",
+  ),
+)
+def test_runtime_state_patch_rejects_v3_account_and_legal_volume_aliases(
+  field_name,
+):
+  with pytest.raises(ValueError) as exc_info:
+    RuntimeStatePatch(
+      set={"instrument_states": {"600000.SH": {field_name: 100}}}
+    )
+
+  assert f"$.instrument_states.600000.SH.{field_name}" in str(exc_info.value)
+
+
+def test_runtime_state_patch_rejects_account_fields_nested_in_append_events():
+  with pytest.raises(ValueError) as exc_info:
+    RuntimeStatePatch(
+      append_events=[
+        {
+          "event_type": "DECISION",
+          "payload": {"risk": [{"SeLlAbLe_VoLuMe": 100}]},
+        }
+      ]
+    )
+
+  assert "$.append_events[0].payload.risk[0].SeLlAbLe_VoLuMe" in str(
+    exc_info.value
+  )
+
+
+def test_runtime_state_patch_allows_algorithm_and_execution_projection_fields():
+  patch = RuntimeStatePatch(
+    set={
+      "instrument_states": {
+        "600000.SH": {
+          "active_volume": 100,
+          "entry_filled_volume": 100,
+          "opportunity": {"sample_count": 20},
+        }
+      }
+    },
+    append_events=[
+      {
+        "event_type": "EXECUTION_PROJECTION",
+        "payload": {"active_volume": 100, "entry_filled_volume": 100},
+      }
+    ],
+  )
+
+  assert patch.set["instrument_states"]["600000.SH"]["active_volume"] == 100
 
 
 @pytest.mark.asyncio

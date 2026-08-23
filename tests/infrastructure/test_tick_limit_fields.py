@@ -3,6 +3,7 @@
 from datetime import datetime
 
 import pytest
+from quantx_domain.market import Tick as DomainTick
 from quantx_domain.trading.instrument_master import InstrumentMaster
 from quantx_domain.trading.market_rules import MarketDataSnapshot
 from quantx_infrastructure.models.tick import Tick
@@ -55,6 +56,47 @@ def test_instrument_master_accepts_persisted_stop_price_field_names():
   assert snapshot.limit_up == pytest.approx(11.0)
   assert snapshot.limit_down == pytest.approx(9.0)
   assert snapshot.data_quality == "OK"
+
+
+def test_xtquant_tick_preserves_whole_quote_authority_lineage():
+  source_time_ms = int(datetime(2026, 7, 31, 10, 0).timestamp() * 1000)
+  tick = Tick.from_xtquant(
+    "000001.SZ",
+    {
+      "time": source_time_ms,
+      "lastPrice": 10.01,
+      "source_time_ms": source_time_ms,
+      "tick_ordinal": 123,
+      "continuity_generation": 9,
+      "market_stream_id": "stream-9",
+      "market_stream_sequence": 123,
+      "market_stream_reset": True,
+    },
+  )
+
+  assert tick.source_time_ms == source_time_ms
+  assert tick.tick_ordinal == 123
+  assert tick.continuity_generation == 9
+  assert tick.market_stream_id == "stream-9"
+  assert tick.market_stream_sequence == 123
+  assert tick.market_stream_reset is True
+
+  snapshot = DomainTick(
+    stock_code=tick.stock_code,
+    time=tick.time,
+    source_time_ms=tick.source_time_ms,
+    tick_ordinal=tick.tick_ordinal,
+    continuity_generation=tick.continuity_generation,
+    market_stream_id=tick.market_stream_id,
+    market_stream_sequence=tick.market_stream_sequence,
+    market_stream_reset=tick.market_stream_reset,
+  )
+  assert snapshot.source_time_ms == source_time_ms
+  assert snapshot.tick_ordinal == 123
+  assert snapshot.continuity_generation == 9
+  assert snapshot.market_stream_id == "stream-9"
+  assert snapshot.market_stream_sequence == 123
+  assert snapshot.market_stream_reset is True
 
 
 def test_limit_prices_are_derived_only_when_backtest_rate_is_explicit():

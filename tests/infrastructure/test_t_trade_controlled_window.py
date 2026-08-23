@@ -1,12 +1,16 @@
+import asyncio
 import hashlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 import quantx_infrastructure.services.t_trade_operations_service as operations_module
 from quantx_domain.clock import utcnow
 from quantx_infrastructure.services.t_trade_operations_service import (
   TTradeOperationsService,
+)
+from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
+  V3_ROLLOUT_GATE_CODES,
 )
 
 
@@ -31,6 +35,7 @@ def _rollout(**overrides):
     "paused_reason": None,
     "reconcile_status": "READY",
     "last_snapshot_id": "snapshot-1",
+    "last_snapshot_hash": "a" * 64,
     "last_snapshot_at": utcnow(),
     "controlled_window_active": False,
     "controlled_window_snapshot_id": None,
@@ -51,6 +56,7 @@ def _window_readiness(**overrides):
   values = {
     "automation_ready": True,
     "blocked_reasons": [],
+    "policy_version": 3,
     "controlled_window_active": True,
     "snapshot_id": "snapshot-1",
     "snapshot_hash": "a" * 64,
@@ -58,6 +64,58 @@ def _window_readiness(**overrides):
   }
   values.update(overrides)
   return values
+
+
+def _locked_v3_evidence(*, operator_review_confirmed: bool = False) -> dict:
+  return {
+    "checks": [
+      {
+        "code": code,
+        "passed": (
+          operator_review_confirmed if code == "V3_OPERATOR_REVIEW_CONFIRMED" else True
+        ),
+        "message": "" if code != "V3_OPERATOR_REVIEW_CONFIRMED" else "review pending",
+      }
+      for code in sorted(V3_ROLLOUT_GATE_CODES)
+    ],
+    "summary": {
+      "fingerprint": "locked-v3-evidence",
+      "operator_review": {
+        "review_evidence_fingerprint": "locked-review-evidence",
+      },
+    },
+  }
+
+
+def test_locked_v3_activation_summary_rejects_duplicate_gate_code() -> None:
+  evidence = _locked_v3_evidence()
+  # The old dict-comprehension behavior would let the succeeding passed value
+  # overwrite this failed proof and permit activation.  A duplicate must be a
+  # protocol/evidence integrity failure instead.
+  evidence["checks"].insert(
+    0,
+    {
+      "code": "V3_REPLAY_STRICT_CAUSAL",
+      "passed": False,
+      "message": "duplicate stale failure",
+    },
+  )
+
+  with pytest.raises(
+    ValueError,
+    match="V3 上线门禁存在重复检查项：V3_REPLAY_STRICT_CAUSAL",
+  ):
+    TTradeOperationsService._locked_v3_activation_summary(evidence)
+
+
+@pytest.fixture(autouse=True)
+def _stub_locked_v3_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+  evaluator = SimpleNamespace(evaluate=AsyncMock(return_value=_locked_v3_evidence()))
+  monkeypatch.setattr(
+    TTradeOperationsService,
+    "rollout_evidence_evaluator",
+    evaluator,
+  )
 
 
 @pytest.mark.asyncio
@@ -133,8 +191,7 @@ async def test_begin_controlled_window_requires_each_preparation_gate(
 
 
 @pytest.mark.asyncio
-async def test_begin_controlled_window_rejects_stale_page_snapshot(
-) -> None:
+async def test_begin_controlled_window_rejects_stale_page_snapshot() -> None:
   service = TTradeOperationsService()
   service.ensure_rollout = AsyncMock(return_value=_rollout())
   service.readiness = AsyncMock(
@@ -261,6 +318,8 @@ async def test_begin_controlled_window_records_terminal_history_as_baseline(
   assert rollout.controlled_window_external_trade_ids == ["trade-1"]
   assert rollout.stage == "SHADOW"
   assert rollout.paused_reason is None
+  event = db.add.call_args.args[0]
+  assert event.details["policyVersion"] == 3
   db.commit.assert_awaited_once()
   db.add.assert_called_once()
 
@@ -273,10 +332,17 @@ async def test_direct_live_requires_development_and_exact_confirmation(
     controlled_window_active=True,
     controlled_window_snapshot_id="snapshot-1",
   )
+
+  async def get(model, *_args, **_kwargs):
+    if model is operations_module.AccountTradingRolloutEvent:
+      return None
+    return rollout
+
   db = SimpleNamespace(
-    get=AsyncMock(return_value=rollout),
+    get=AsyncMock(side_effect=get),
     add=MagicMock(),
     commit=AsyncMock(),
+    rollback=AsyncMock(),
   )
   monkeypatch.setattr(
     operations_module,
@@ -303,11 +369,13 @@ async def test_direct_live_requires_development_and_exact_confirmation(
     acknowledged_policy_version=3,
     target_stage="LIVE",
     confirmation="LIVE:account-1",
+    operation_id="direct-live-activate-1",
   )
 
   assert rollout.stage == "LIVE"
   assert rollout.enabled is True
   assert rollout.activated_by_user_id == "user-1"
+  assert db.add.call_args.args[0].snapshot_id == "snapshot-1"
   db.commit.assert_awaited_once()
   db.add.assert_called_once()
 
@@ -372,6 +440,102 @@ async def test_direct_live_requires_all_readiness_and_controlled_window(
 
 
 @pytest.mark.asyncio
+async def test_activation_rejects_snapshot_changed_after_readiness_before_apply(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout(
+    controlled_window_active=True,
+    controlled_window_snapshot_id="snapshot-1",
+  )
+
+  async def locked_rollout(model, *args, **kwargs):
+    if model is operations_module.AccountTradingRolloutEvent:
+      return None
+    # Simulate a complete snapshot arriving after confirm consumed the
+    # challenge but before the apply transaction acquired its lock.
+    rollout.last_snapshot_id = "snapshot-2"
+    rollout.last_snapshot_hash = "b" * 64
+    return rollout
+
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=locked_rollout),
+    add=MagicMock(),
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  monkeypatch.setattr(operations_module.settings, "environment", "development")
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(return_value=_window_readiness())
+
+  with pytest.raises(ValueError, match="完整快照已经更新"):
+    await service.activate_rollout(
+      "account-1",
+      user_id="user-1",
+      acknowledged_policy_version=3,
+      target_stage="LIVE",
+      confirmation="LIVE:account-1",
+      expected_snapshot_id="snapshot-1",
+      operation_id="challenge-1",
+    )
+
+  assert rollout.stage == "SHADOW"
+  assert rollout.enabled is False
+  db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_begin_rejects_policy_changed_after_readiness_before_apply(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  rollout = _rollout()
+
+  async def locked_rollout(model, *args, **kwargs):
+    if model is operations_module.AccountTradingRolloutEvent:
+      return None
+    rollout.policy_version = 4
+    return rollout
+
+  db = SimpleNamespace(
+    get=AsyncMock(side_effect=locked_rollout),
+    add=MagicMock(),
+    commit=AsyncMock(),
+    rollback=AsyncMock(),
+  )
+  monkeypatch.setattr(
+    operations_module,
+    "AsyncSessionLocal",
+    _session_context(db),
+  )
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(
+    return_value=_window_readiness(controlled_window_active=False)
+  )
+  service._latest_full_snapshot = AsyncMock(return_value={"is_complete": True})
+  service._external_snapshot_activity = AsyncMock(
+    return_value={"orders": [], "trades": []}
+  )
+
+  with pytest.raises(ValueError, match="自动退出策略版本已过期"):
+    await service.begin_controlled_window(
+      "account-1",
+      user_id="user-1",
+      snapshot_id="snapshot-1",
+      expected_policy_version=3,
+      operation_id="challenge-1",
+    )
+
+  assert rollout.controlled_window_active is False
+  db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_direct_live_rechecks_locked_rollout_after_readiness(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,10 +543,17 @@ async def test_direct_live_rechecks_locked_rollout_after_readiness(
     controlled_window_active=False,
     controlled_window_snapshot_id=None,
   )
+
+  async def get(model, *_args, **_kwargs):
+    if model is operations_module.AccountTradingRolloutEvent:
+      return None
+    return rollout
+
   db = SimpleNamespace(
-    get=AsyncMock(return_value=rollout),
+    get=AsyncMock(side_effect=get),
     add=MagicMock(),
     commit=AsyncMock(),
+    rollback=AsyncMock(),
   )
   monkeypatch.setattr(
     operations_module,
@@ -401,12 +572,13 @@ async def test_direct_live_rechecks_locked_rollout_after_readiness(
       acknowledged_policy_version=3,
       target_stage="LIVE",
       confirmation="LIVE:account-1",
+      operation_id="window-required-1",
     )
 
-  db.get.assert_awaited_once_with(
-    operations_module.AccountTradingRollout,
-    "account-1",
-    with_for_update=True,
+  assert any(
+    call.args == (operations_module.AccountTradingRollout, "account-1")
+    and call.kwargs == {"with_for_update": True}
+    for call in db.get.await_args_list
   )
   db.commit.assert_not_awaited()
 
@@ -421,10 +593,17 @@ async def test_direct_live_only_promotes_shadow_and_canary_preserves_live(
     controlled_window_active=True,
     controlled_window_snapshot_id="snapshot-1",
   )
+
+  async def get(model, *_args, **_kwargs):
+    if model is operations_module.AccountTradingRolloutEvent:
+      return None
+    return rollout
+
   db = SimpleNamespace(
-    get=AsyncMock(return_value=rollout),
+    get=AsyncMock(side_effect=get),
     add=MagicMock(),
     commit=AsyncMock(),
+    rollback=AsyncMock(),
   )
   monkeypatch.setattr(
     operations_module,
@@ -443,6 +622,7 @@ async def test_direct_live_only_promotes_shadow_and_canary_preserves_live(
       acknowledged_policy_version=3,
       target_stage="LIVE",
       confirmation="LIVE:account-1",
+      operation_id="shadow-only-live-1",
     )
 
   rollout.stage = "LIVE"
@@ -451,6 +631,7 @@ async def test_direct_live_only_promotes_shadow_and_canary_preserves_live(
     user_id="user-1",
     acknowledged_policy_version=3,
     target_stage="CANARY",
+    operation_id="canary-preserves-live-1",
   )
 
   assert rollout.stage == "LIVE"
@@ -593,9 +774,7 @@ async def test_kill_scans_and_cancels_manual_order_committed_before_it(
 
   db = SimpleNamespace(
     get=AsyncMock(return_value=rollout),
-    execute=AsyncMock(
-      side_effect=[result([]), result([pending]), result([source])]
-    ),
+    execute=AsyncMock(side_effect=[result([]), result([pending]), result([source])]),
     add=MagicMock(),
     commit=AsyncMock(),
   )
@@ -676,9 +855,7 @@ async def test_kill_operation_id_replay_does_not_repeat_any_side_effect(
 
   db = SimpleNamespace(
     get=AsyncMock(side_effect=get),
-    execute=AsyncMock(
-      side_effect=[result([]), result([pending]), result([source])]
-    ),
+    execute=AsyncMock(side_effect=[result([]), result([pending]), result([source])]),
     add=MagicMock(side_effect=added.append),
     commit=AsyncMock(),
     rollback=AsyncMock(),
@@ -742,9 +919,12 @@ async def test_kill_operation_id_replay_does_not_repeat_any_side_effect(
   assert events[0].event_id == "kill-operation-1"
   assert len(cancel_commands) == 1
   assert len(emergency_commands) == 1
-  assert cancel_commands[0].idempotency_key == hashlib.sha256(
-    b"hard-kill-cancel:account-1:device-1:broker-order-idempotent:kill-operation-1"
-  ).hexdigest()
+  assert (
+    cancel_commands[0].idempotency_key
+    == hashlib.sha256(
+      b"hard-kill-cancel:account-1:device-1:broker-order-idempotent:kill-operation-1"
+    ).hexdigest()
+  )
 
 
 @pytest.mark.asyncio
@@ -760,7 +940,7 @@ async def test_begin_controlled_window_operation_id_replay_is_a_noop(
     if model is operations_module.AccountTradingRollout:
       return rollout
     marker_lookups += 1
-    if marker_lookups == 1:
+    if marker_lookups <= 2:
       return None
     return next(
       item
@@ -802,14 +982,14 @@ async def test_begin_controlled_window_operation_id_replay_is_a_noop(
     operation_id="begin-operation-1",
   )
 
-  assert marker_lookups == 2
+  assert marker_lookups == 3
   assert len(added) == 1
   assert added[0].event_id == "begin-operation-1"
   assert added[0].details["operationId"] == "begin-operation-1"
   service._latest_full_snapshot.assert_awaited_once()
   service._external_snapshot_activity.assert_awaited_once()
   db.commit.assert_awaited_once()
-  db.rollback.assert_awaited_once()
+  assert db.rollback.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -828,7 +1008,7 @@ async def test_activate_rollout_operation_id_replay_is_a_noop(
     if model is operations_module.AccountTradingRollout:
       return rollout
     marker_lookups += 1
-    if marker_lookups == 1:
+    if marker_lookups <= 2:
       return None
     return next(
       item
@@ -866,13 +1046,125 @@ async def test_activate_rollout_operation_id_replay_is_a_noop(
     operation_id="activate-operation-1",
   )
 
-  assert marker_lookups == 2
+  assert marker_lookups == 3
   assert len(added) == 1
   assert added[0].event_id == "activate-operation-1"
   assert added[0].details == {
     "operationId": "activate-operation-1",
     "policyVersion": 3,
+    "confirmation": "",
+    "v3EvidenceFingerprint": "locked-v3-evidence",
     "targetStage": "CANARY",
+    "operatorReview": {
+      "acknowledged": True,
+      "confirmation": "AUTHENTICATED_IDEMPOTENT_ACTIVATION",
+      "operationId": "activate-operation-1",
+      "policyVersion": 3,
+      "snapshotId": "snapshot-1",
+      "evidenceFingerprint": "locked-review-evidence",
+      "reviewPreviouslyConfirmed": False,
+      "userConfirmation": "",
+    },
   }
+  evaluator = TTradeOperationsService.rollout_evidence_evaluator
+  assert evaluator.evaluate.await_args_list == [
+    call(
+      db,
+      account_id="account-1",
+      rollout=rollout,
+      bypass_cache=True,
+    )
+  ]
   db.commit.assert_awaited_once()
-  db.rollback.assert_awaited_once()
+  assert db.rollback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_begin_controlled_window_concurrent_same_operation_has_one_transition(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """The second caller must see the marker after waiting for the row lock."""
+
+  rollout = _rollout()
+
+  class SharedState:
+    def __init__(self) -> None:
+      self.lock = asyncio.Lock()
+      self.event = None
+      self.event_adds = 0
+
+  state = SharedState()
+
+  class Session:
+    def __init__(self) -> None:
+      self.locked = False
+      self.pending_event = None
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+      if self.locked:
+        state.lock.release()
+        self.locked = False
+      return False
+
+    async def get(self, model, key, **kwargs):
+      if model is operations_module.AccountTradingRollout:
+        assert kwargs == {"with_for_update": True}
+        await state.lock.acquire()
+        self.locked = True
+        return rollout
+      assert model is operations_module.AccountTradingRolloutEvent
+      assert key == "begin-race-1"
+      return state.event
+
+    def add(self, value):
+      if isinstance(value, operations_module.AccountTradingRolloutEvent):
+        self.pending_event = value
+        state.event_adds += 1
+
+    async def commit(self):
+      if self.pending_event is not None:
+        state.event = self.pending_event
+      if self.locked:
+        state.lock.release()
+        self.locked = False
+
+    async def rollback(self):
+      if self.locked:
+        state.lock.release()
+        self.locked = False
+
+  monkeypatch.setattr(operations_module, "AsyncSessionLocal", Session)
+  service = TTradeOperationsService()
+  service.ensure_rollout = AsyncMock(return_value=rollout)
+  service.readiness = AsyncMock(
+    return_value=_window_readiness(controlled_window_active=False)
+  )
+  service._latest_full_snapshot = AsyncMock(return_value={"is_complete": True})
+  service._external_snapshot_activity = AsyncMock(
+    return_value={"orders": [], "trades": []}
+  )
+
+  results = await asyncio.gather(
+    service.begin_controlled_window(
+      "account-1",
+      user_id="user-1",
+      snapshot_id="snapshot-1",
+      operation_id="begin-race-1",
+    ),
+    service.begin_controlled_window(
+      "account-1",
+      user_id="user-1",
+      snapshot_id="snapshot-1",
+      operation_id="begin-race-1",
+    ),
+  )
+
+  assert results[0] == results[1]
+  assert state.event_adds == 1
+  assert state.event is not None
+  assert state.event.event_id == "begin-race-1"
+  service._latest_full_snapshot.assert_awaited_once()
+  service._external_snapshot_activity.assert_awaited_once()

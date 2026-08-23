@@ -85,7 +85,7 @@ async def test_stop_quiesces_current_event_before_snapshot_and_disconnect(
     await release_event.wait()
     await executor._process_strategy_output(
       runtime,
-      SimpleNamespace(trade_intents=[object()]),
+      StrategyOutput(trade_intents=[object()]),
     )
     calls.append("event-finished")
 

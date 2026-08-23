@@ -192,6 +192,9 @@ _T_TRADE_PROFILE_CACHE_MAX_ENTRIES = 4096
 # holding/session cache.  A single account does not need more entries than
 # this; rejecting a larger reconcile keeps the fail-closed boundary bounded.
 _T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS = 4096
+_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY = (
+  "_internal_v3_pressure_runtime_state_persistence"
+)
 
 
 class RuntimeConsumerUnavailable(RuntimeError):
@@ -887,6 +890,34 @@ class StrategyExecutor:
       if callable(clear_gate):
         clear_gate(code)
 
+  @staticmethod
+  def _runtime_state_persistence_enabled(runtime: StrategyRuntime) -> bool:
+    """Keep ordinary BACKTEST runs non-durable except the sealed V3 fixture.
+
+    The serialized marker is written only by ``TTradeReplayService`` after it
+    receives an opaque in-process capability from the offline pressure runner.
+    Requiring every invariant here makes a raw client parameter harmless and
+    keeps PAPER/LIVE's existing durable behavior unchanged.
+    """
+
+    if runtime.context.mode != StrategyRunMode.BACKTEST:
+      return True
+    parameters = dict(getattr(runtime.context, "parameters", {}) or {})
+    return bool(
+      parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+      and parameters.get("t_trade_replay")
+      and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
+    )
+
+  @staticmethod
+  def _requires_startup_runtime_state_checkpoint(runtime: StrategyRuntime) -> bool:
+    """Return the modes that must durably checkpoint before their loop starts."""
+
+    return bool(
+      runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}
+      or StrategyExecutor._runtime_state_persistence_enabled(runtime)
+    )
+
   async def start(self, run_id: str) -> bool:
     if run_id not in self.runs:
       self.logger.error(f"策略运行不存在: {run_id}")
@@ -964,7 +995,9 @@ class StrategyExecutor:
       # 创建策略对象
       runtime.strategy = runtime.strategy_class(runtime.context)
 
-      # 初始化状态管理器（回测模式不持久化，仅维护策略额度与状态）
+      # Ordinary BACKTESTs stay non-durable.  The isolated V3 pressure fixture
+      # explicitly exercises the same state/CAS path as production through a
+      # service-sealed internal marker.
       from quantx_infrastructure.core.runtime_state_manager import (
         RuntimeStateManager,
         RuntimeStateRestoreStatus,
@@ -973,7 +1006,7 @@ class StrategyExecutor:
       enable_reserve = bool(runtime.context.parameters.get("enable_reserve", True))
       runtime.state_manager = RuntimeStateManager(
         run_id=run_id,
-        persist_enabled=runtime.context.mode != StrategyRunMode.BACKTEST,
+        persist_enabled=self._runtime_state_persistence_enabled(runtime),
         log_dir=os.path.join("logs", "strategy", runtime.context.mode.value),
         enable_reserve=enable_reserve,
       )
@@ -1142,7 +1175,7 @@ class StrategyExecutor:
         # when the restore query itself fails.
         await runtime.state_manager.start()
         await runtime.state_manager.start_state_sync(runtime.strategy)
-        if runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+        if self._requires_startup_runtime_state_checkpoint(runtime):
           checkpointed = await runtime.state_manager.checkpoint_strategy_state_changes()
           if not checkpointed:
             raise RuntimeError("策略启动状态安全快照失败，拒绝进入实时执行循环")

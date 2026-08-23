@@ -27,6 +27,11 @@ from quantx_engine.strategy_executor import (
   StrategyRuntime,
 )
 from quantx_engine.strategy_manager import StrategyManager
+from quantx_infrastructure.core.runtime_state_manager import (
+  RuntimeStateManager,
+  RuntimeStateRestoreResult,
+  RuntimeStateRestoreStatus,
+)
 from quantx_infrastructure.models.enums import StrategyRunStatus
 
 
@@ -97,6 +102,30 @@ async def keep_running_loop(runtime):
   await asyncio.Event().wait()
 
 
+async def restore_runtime_state_without_database(manager):
+  """StrategyManager 单测不得读取共享的持久化运行状态。"""
+  status = (
+    RuntimeStateRestoreStatus.PERSISTENCE_DISABLED
+    if not manager.persist_enabled
+    else RuntimeStateRestoreStatus.NOT_FOUND
+  )
+  return RuntimeStateRestoreResult(status=status, state=manager._state)
+
+
+async def checkpoint_runtime_state_without_database(manager):
+  manager._dirty = False
+  return True
+
+
+async def save_runtime_state_without_database(manager):
+  manager._dirty = False
+  return True
+
+
+async def no_unapplied_runtime_event(_manager):
+  return None
+
+
 @pytest.mark.unit
 class TestStrategyManager:
   """StrategyManager 单元测试类"""
@@ -115,6 +144,26 @@ class TestStrategyManager:
       patch.object(manager, "_ensure_backtest_data_available", new_callable=AsyncMock),
       patch.object(manager.executor, "_setup_broker_and_data", new_callable=AsyncMock),
       patch.object(manager.executor, "_run_strategy_loop", side_effect=keep_running_loop),
+      patch.object(
+        RuntimeStateManager,
+        "restore",
+        restore_runtime_state_without_database,
+      ),
+      patch.object(
+        RuntimeStateManager,
+        "checkpoint_strategy_state_changes",
+        checkpoint_runtime_state_without_database,
+      ),
+      patch.object(
+        RuntimeStateManager,
+        "save_snapshot",
+        save_runtime_state_without_database,
+      ),
+      patch.object(
+        RuntimeStateManager,
+        "get_earliest_unapplied_runtime_event_key",
+        no_unapplied_runtime_event,
+      ),
       patch(
         "quantx_infrastructure.repositories.backtest_repository.BacktestRepository.create_backtest",
         new_callable=AsyncMock,

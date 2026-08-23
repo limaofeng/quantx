@@ -42,6 +42,20 @@ from quantx_infrastructure.services.trading_time_service import TradingDateHelpe
 
 _CANCELLABLE_REPLAY_STATUSES = frozenset({"PENDING", "RUNNING", "PAUSED"})
 
+# The persisted flag is intentionally not a request field.  Only the offline V3
+# pressure runner can supply this object by identity; arbitrary API/GraphQL
+# payloads cannot turn a normal BACKTEST into a durable runtime-state workload.
+_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY = (
+  "_internal_v3_pressure_runtime_state_persistence"
+)
+_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_CAPABILITY = object()
+
+
+def _v3_pressure_runtime_state_persistence_capability() -> object:
+  """Return the private capability used by the isolated V3 pressure runner."""
+
+  return _V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_CAPABILITY
+
 
 class TTradeReplayService:
   """Create, cancel, and project isolated BACKTEST runs for the T assistant."""
@@ -54,6 +68,21 @@ class TTradeReplayService:
     if self._runtime_manager is None:
       raise RuntimeError("该操作只能由 QuantX Engine 执行")
     return self._runtime_manager
+
+  @staticmethod
+  def _apply_v3_pressure_runtime_state_persistence(
+    parameters: Dict[str, Any],
+    rollout_evidence_request: Dict[str, Any],
+    capability: Any,
+  ) -> None:
+    """Seal the durable-state switch after all request fields are assembled."""
+
+    parameters.pop(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY, None)
+    if capability is not _V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_CAPABILITY:
+      return
+    if rollout_evidence_request.get("replay_acceptance") != "V3_PRESSURE_BASELINE":
+      raise ValueError("持久状态压测仅允许 V3_PRESSURE_BASELINE")
+    parameters[_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY] = True
 
   async def prepare(self, account_id: str, start_time: datetime) -> Dict[str, Any]:
     account_id = str(account_id or "").strip()
@@ -105,6 +134,7 @@ class TTradeReplayService:
     *,
     defer_start: bool = False,
     request_id: Optional[str] = None,
+    _runtime_state_persistence_capability: Any = None,
   ) -> Dict[str, Any]:
     account_id = str(payload.get("account_id", "") or "").strip()
     if not account_id:
@@ -320,6 +350,14 @@ class TTradeReplayService:
       "transfer_fee_rate": float(payload.get("transfer_fee_rate", 0.00001) or 0.0),
       "slippage_rate": float(payload.get("slippage_rate", 0.0001) or 0.0),
     }
+    # Never accept this runtime-only switch from the input payload or the
+    # generic settings builder.  The opaque capability is deliberately checked
+    # after all request-derived fields have been assembled.
+    self._apply_v3_pressure_runtime_state_persistence(
+      parameters,
+      rollout_evidence_request,
+      _runtime_state_persistence_capability,
+    )
     strategy_id = await self.t_trade_service._get_strategy_template_id()
     strategy_manager = self._require_runtime_manager()
     run_id = await strategy_manager.run_strategy(

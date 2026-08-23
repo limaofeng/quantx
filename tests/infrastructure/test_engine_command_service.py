@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -8,7 +9,10 @@ from quantx_engine import command_processor
 from quantx_infrastructure.database.relational_base import Base
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
 from quantx_infrastructure.services import engine_command_service as service_module
-from quantx_infrastructure.services.engine_command_service import EngineCommandService
+from quantx_infrastructure.services.engine_command_service import (
+  EngineCommandIdempotencyError,
+  EngineCommandService,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -66,6 +70,101 @@ async def test_engine_command_idempotency_is_database_enforced(
   )
 
   assert second.message_id == first.message_id
+  async with command_database() as db:
+    assert (
+      await db.scalar(select(func.count()).select_from(EngineCommandOutbox))
+      == 1
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("command_type", "aggregate_id", "payload"),
+  [
+    ("STRATEGY_START", "run-1", {"run_id": "run-1"}),
+    ("STRATEGY_STOP", "run-2", {"run_id": "run-1"}),
+    ("STRATEGY_STOP", "run-1", {"run_id": "run-2"}),
+  ],
+)
+async def test_engine_command_idempotency_key_is_bound_to_full_command(
+  command_database,
+  command_type: str,
+  aggregate_id: str,
+  payload: dict,
+) -> None:
+  service = EngineCommandService()
+  await service.enqueue(
+    "STRATEGY_STOP",
+    {"run_id": "run-1"},
+    aggregate_id="run-1",
+    idempotency_key="same-command-key",
+  )
+
+  with pytest.raises(EngineCommandIdempotencyError) as raised:
+    await service.enqueue(
+      command_type,
+      payload,
+      aggregate_id=aggregate_id,
+      idempotency_key="same-command-key",
+    )
+
+  assert raised.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+@pytest.mark.asyncio
+async def test_engine_command_idempotency_accepts_canonical_equivalent_payload(
+  command_database,
+) -> None:
+  service = EngineCommandService()
+  first = await service.enqueue(
+    "STRATEGY_STOP",
+    {
+      "run_id": "run-1",
+      "options": {"b": 2, "a": 1},
+      "tags": {"beta", "alpha"},
+    },
+    aggregate_id="run-1",
+    idempotency_key="canonical-command-key",
+  )
+  second = await service.enqueue(
+    "STRATEGY_STOP",
+    {
+      "options": {"a": 1, "b": 2},
+      "tags": frozenset({"alpha", "beta"}),
+      "run_id": "run-1",
+    },
+    aggregate_id="run-1",
+    idempotency_key="canonical-command-key",
+  )
+
+  assert second.message_id == first.message_id
+
+
+@pytest.mark.asyncio
+async def test_engine_command_idempotency_concurrent_retries_share_one_row(
+  command_database,
+) -> None:
+  service = EngineCommandService()
+  await service.enqueue(
+    "STRATEGY_STOP",
+    {"run_id": "run-concurrent"},
+    aggregate_id="run-concurrent",
+    idempotency_key="concurrent-command-key",
+  )
+
+  receipts = await asyncio.gather(
+    *(
+      service.enqueue(
+        "STRATEGY_STOP",
+        {"run_id": "run-concurrent"},
+        aggregate_id="run-concurrent",
+        idempotency_key="concurrent-command-key",
+      )
+      for _ in range(4)
+    )
+  )
+
+  assert len({receipt.message_id for receipt in receipts}) == 1
   async with command_database() as db:
     assert (
       await db.scalar(select(func.count()).select_from(EngineCommandOutbox))

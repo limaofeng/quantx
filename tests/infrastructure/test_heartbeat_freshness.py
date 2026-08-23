@@ -156,7 +156,7 @@ def test_blocked_qmt_launch_reason_is_stable_and_sanitized(
 
 
 @pytest.mark.asyncio
-async def test_readiness_uses_one_database_round_trip(
+async def test_readiness_uses_one_database_round_trip_for_heartbeat_snapshot(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   snapshot_result = MagicMock()
@@ -179,11 +179,41 @@ async def test_readiness_uses_one_database_round_trip(
     "AsyncSessionLocal",
     SessionContext,
   )
+  # The heartbeat/rollout snapshot remains one set-oriented query.  V3
+  # promotion evidence is deliberately a separate bounded proof loader (with
+  # its own no-N+1 contract in test_t_trade_rollout_evidence_service.py), so
+  # this test isolates the original heartbeat-readiness performance boundary
+  # rather than feeding its mock result into an unrelated query shape.
+  evidence_evaluator = SimpleNamespace(
+    evaluate=AsyncMock(
+      return_value={
+        "checks": [
+          {
+            "code": "V3_EVIDENCE_QUERY_AVAILABLE",
+            "passed": False,
+            "message": "V3 上线证据查询不可用，已拒绝执行阶段激活",
+            "scope": "AUTOMATION",
+          }
+        ]
+      }
+    )
+  )
+  monkeypatch.setattr(
+    TTradeOperationsService,
+    "rollout_evidence_evaluator",
+    evidence_evaluator,
+  )
 
   result = await TTradeOperationsService().readiness("TEST-ACCOUNT")
 
   assert db.execute.await_count == 1
-  assert len(result["checks"]) == 17
+  evidence_evaluator.evaluate.assert_awaited_once_with(
+    db,
+    account_id="TEST-ACCOUNT",
+    rollout=None,
+  )
+  assert len(result["checks"]) == 18
+  assert result["checks"][-1]["code"] == "V3_EVIDENCE_QUERY_AVAILABLE"
   assert result["ready"] is False
 
 
