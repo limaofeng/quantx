@@ -6,7 +6,9 @@
   `apps/docs/`，覆盖 QuantX Web、原生客户端和第三方 API，并标注公开稳定性。
 - [个人 A 股量化 iOS 产品文档](product/ios/README.md)：PRD、交互、设计系统、
   API/安全、验收、路线图与需求追踪矩阵。
-- [工程文档](engineering/README.md)：API、Engine、Worker、QMT Agent 与部署。
+- [Web UI/UX 设计系统](engineering/web/UI_UX_DESIGN_SYSTEM.md)：桌面 Studio 的
+  默认交互色、金融语义色与可访问性规则。
+- [工程文档](engineering/README.md)：Web、API、Engine、Worker、QMT Agent 与部署。
 - [系统架构设计](architecture/系统架构设计.md)
 - [A 股个人量化开发文档索引](trading/README.md)
 - [A 股三层协作与执行契约](trading/contracts/A股三层协作与执行契约.md)
@@ -18,7 +20,7 @@
 ```text
 docs/
 ├── product/ios/       # iOS 产品、交互、安全、路线与验收规格
-├── engineering/       # API、Engine、Worker、QMT Agent、部署
+├── engineering/       # Web、API、Engine、Worker、QMT Agent、部署
 ├── architecture/      # 系统级架构
 ├── trading/           # A 股公共契约与策略设计
 ├── research/          # 回测、进化和研究设计

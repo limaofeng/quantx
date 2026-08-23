@@ -2,6 +2,7 @@
 
 工程文档按独立运行单元组织：
 
+- [Web 前端](web/README.md)
 - [API](api/README.md)
 - [AI Runtime](ai-runtime/README.md)
 - [Engine](engine/README.md)

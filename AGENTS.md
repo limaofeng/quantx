@@ -198,6 +198,7 @@ API、测试或部署：
 
 前端：
 
-1. `apps/web/package.json`
-2. `apps/web/src/core/graphql/client.ts`
-3. 目标 feature 目录。
+1. `docs/engineering/web/UI_UX_DESIGN_SYSTEM.md`
+2. `apps/web/package.json`
+3. `apps/web/src/core/graphql/client.ts`
+4. 目标 feature 目录。
