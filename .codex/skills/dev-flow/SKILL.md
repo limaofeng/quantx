@@ -47,13 +47,13 @@ write the implementation itself.
    subagent. When a check fails because of the implementation, delegate the fix
    and repeat final review and verification.
 6. After final approval, spawn a dedicated commit subagent with
-   `model: "gpt-5.3-codex-spark"` and `fork_turns: "1"`. Give it the exact
+   `model: "gpt-5.6-luna"` and `fork_turns: "1"`. Give it the exact
    approved file set, verification results, repository commit rules, and desired
    scope. It may inspect status and diffs, stage only those files, create one
    appropriate commit, and report the commit hash. It must not edit code or
    absorb unrelated changes.
 7. Do not substitute another model for the commit. If the required
-   `gpt-5.3-codex-spark` model is unavailable or the account lacks access, report
+   `gpt-5.6-luna` model is unavailable or the account lacks access, report
    the commit blocker. If the commit agent finds a code problem, it must stop;
    delegate the fix to an implementation subagent, repeat final verification,
    and then retry the commit subagent.
