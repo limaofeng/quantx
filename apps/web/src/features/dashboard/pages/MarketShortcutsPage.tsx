@@ -194,10 +194,10 @@ function MarketIndexCard({
     <button
       aria-label={`查看${definition.name}行情`}
       aria-pressed={isSelected}
-      className={`group w-40 shrink-0 cursor-pointer rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:p-2 ${
+      className={`group w-40 shrink-0 cursor-pointer rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 xl:p-2 ${
         isSelected
-          ? 'border-red-400/40 bg-red-500/10'
-          : 'border-white/5 bg-white/5 hover:border-white/15 hover:bg-white/5'
+          ? 'border-blue-400/40 bg-blue-500/10'
+          : 'border-white/5 bg-white/5 hover:border-blue-400/30 hover:bg-blue-500/[0.06]'
       }`}
       data-testid={`market-index-${definition.code}`}
       onClick={onSelect}
@@ -213,7 +213,7 @@ function MarketIndexCard({
           </span>
         </span>
         {isSelected ? (
-          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-red-400" />
+          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
         ) : null}
       </span>
       <span className="mt-3 flex items-end justify-between gap-2 xl:mt-1.5">

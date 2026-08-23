@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 
 import { CORE_MARKET_INDICES } from '@/features/dashboard/marketWorkbench';
@@ -160,6 +160,48 @@ describe('MarketShortcutsPage realtime date guard', () => {
       'no-scrollbar'
     );
     expect(indexStrip).not.toHaveClass('lg:grid-cols-6', 'lg:overflow-visible');
+  });
+
+  it('uses blue interaction styling when changing the selected market index', () => {
+    mocks.market = createMarketState({
+      dataMode: 'live',
+      freshCoverage: CORE_MARKET_INDICES.length,
+      latestQuoteAt: '2026-08-13T10:30:10+08:00',
+      targetDateCoverage: CORE_MARKET_INDICES.length,
+    });
+
+    render(<MarketShortcutsPage />);
+
+    const firstCard = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[0].code}`
+    );
+    const nextCard = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[1].code}`
+    );
+
+    expect(firstCard).toHaveAttribute('aria-pressed', 'true');
+    expect(firstCard).toHaveClass(
+      'border-blue-400/40',
+      'bg-blue-500/10',
+      'focus-visible:ring-blue-400/70'
+    );
+    expect(firstCard).not.toHaveClass(
+      'border-red-400/40',
+      'bg-red-500/10',
+      'focus-visible:ring-red-500/70'
+    );
+    expect(firstCard.querySelector('.bg-blue-400')).toBeInTheDocument();
+    expect(nextCard).toHaveClass(
+      'hover:border-blue-400/30',
+      'hover:bg-blue-500/[0.06]'
+    );
+
+    fireEvent.click(nextCard);
+
+    expect(firstCard).toHaveAttribute('aria-pressed', 'false');
+    expect(nextCard).toHaveAttribute('aria-pressed', 'true');
+    expect(nextCard).toHaveClass('border-blue-400/40', 'bg-blue-500/10');
+    expect(nextCard.querySelector('.bg-blue-400')).toBeInTheDocument();
   });
 
   it('renders breadth advancers red and decliners green', () => {
