@@ -645,6 +645,7 @@ class AgentRuntime:
     self._market_requests: asyncio.Queue[AgentEnvelope] = asyncio.Queue(
       maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
     )
+    self._queued_market_data_requests: dict[str, str] = {}
     # A token refresh intentionally reconnects the WebSocket. Keep the exact
     # compressed bytes for in-flight requests so a redelivery reuses the same
     # chunk checksums instead of re-querying a still-changing XTData cache.
@@ -826,6 +827,7 @@ class AgentRuntime:
       self._market_requests = asyncio.Queue(
         maxsize=MAX_QUEUED_MARKET_DATA_REQUESTS
       )
+      self._queued_market_data_requests = {}
       self._market_event_overflow = asyncio.Event()
       await self._ensure_trading_ready()
       await self._queue_full_snapshot()
@@ -2253,14 +2255,54 @@ class AgentRuntime:
       # XTData requests may take tens of seconds. Keep the WebSocket receive
       # loop draining report acknowledgements and protocol pongs while one
       # dedicated worker performs requests serially.
+      request_id = str(envelope.payload.get("request_id") or "")
+      fingerprint = _market_data_payload_fingerprint(envelope.payload)
+      active_upload = self._market_upload_tasks.get(request_id)
+      existing_fingerprint = (
+        active_upload.fingerprint
+        if active_upload is not None
+        else self._queued_market_data_requests.get(request_id)
+      )
+      if existing_fingerprint is not None:
+        if existing_fingerprint != fingerprint:
+          error = RuntimeError("同一 market-data request_id 的重投参数不一致")
+          logger.warning(
+            "Rejected conflicting QMT market-data redelivery: request_id=%s",
+            request_id,
+          )
+          try:
+            await self._report_market_data_failure(request_id, error)
+          except Exception as report_exc:
+            logger.warning(
+              "Could not report conflicting QMT market-data redelivery: "
+              "request_id=%s error=%s: %s",
+              request_id,
+              report_exc.__class__.__name__,
+              report_exc,
+            )
+          return
+        logger.info(
+          "QMT market-data redelivery joined queued or active upload: request_id=%s",
+          request_id,
+        )
+        return
       try:
         self._market_requests.put_nowait(envelope)
+        self._queued_market_data_requests[request_id] = fingerprint
       except asyncio.QueueFull:
-        logger.warning("QMT market-data request queue is full")
-        if socket is not None:
-          await socket.close(
-            code=1013,
-            reason="market-data request queue full",
+        logger.warning(
+          "QMT market-data request queue is full: request_id=%s",
+          request_id,
+        )
+        try:
+          await self._report_market_data_busy(request_id)
+        except Exception as report_exc:
+          logger.warning(
+            "Could not report QMT market-data backpressure: request_id=%s "
+            "error=%s: %s",
+            request_id,
+            report_exc.__class__.__name__,
+            report_exc,
           )
       return
     if envelope.message_type is AgentMessageType.MARKET_RESET:
@@ -2857,6 +2899,8 @@ class AgentRuntime:
       self._market_upload_tombstones = {}
     if not hasattr(self, "_market_upload_tasks"):
       self._market_upload_tasks = {}
+    if not hasattr(self, "_queued_market_data_requests"):
+      self._queued_market_data_requests = {}
     if not hasattr(self, "_market_upload_cache_bytes"):
       self._market_upload_cache_bytes = 0
     if not hasattr(self, "_xtdata_access_lock"):
@@ -3016,6 +3060,7 @@ class AgentRuntime:
         "market-data uploads must stop before clearing their spool"
       )
     self._market_upload_tasks.clear()
+    self._queued_market_data_requests.clear()
     for request_id in list(self._market_upload_cache):
       self._drop_market_upload_cache_entry(request_id, cancel=True)
     self._market_upload_cache_bytes = 0
@@ -3040,6 +3085,7 @@ class AgentRuntime:
     while True:
       envelope = await self._market_requests.get()
       request_id = str(envelope.payload.get("request_id") or "")
+      self._queued_market_data_requests.pop(request_id, None)
       upload_task: asyncio.Task[None] | None = None
       try:
         try:
@@ -3109,6 +3155,20 @@ class AgentRuntime:
         ),
         headers={"Authorization": f"Bearer {self._access_token}"},
         json={"reason": reason},
+      )
+      response.raise_for_status()
+
+  async def _report_market_data_busy(self, request_id: str) -> None:
+    """Use the existing per-request failure endpoint for retryable backpressure."""
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+      response = await client.post(
+        (
+          f"{self.configuration.api_url}/agent/market-data/"
+          f"{request_id}/fail"
+        ),
+        headers={"Authorization": f"Bearer {self._access_token}"},
+        json={"reason": "MARKET_DATA_AGENT_BUSY"},
       )
       response.raise_for_status()
 

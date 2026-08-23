@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from quantx_infrastructure import runtime_store
@@ -346,6 +346,64 @@ async def test_market_data_request_scopes_repair_attempt_without_changing_payloa
 
 
 @pytest.mark.asyncio
+async def test_completed_tick_manifest_query_uses_only_newest_completed_coverage() -> None:
+  class CoverageRows:
+    def mappings(self):
+      return [
+        {
+          "trading_date": date(2026, 8, 3),
+          "point_count": 0,
+        }
+      ]
+
+  class CoverageConnection:
+    def __init__(self) -> None:
+      self.statement = ""
+      self.parameters: dict[str, object] = {}
+
+    async def execute(self, statement, parameters):
+      self.statement = str(statement)
+      self.parameters = parameters
+      return CoverageRows()
+
+  class CoverageEngine:
+    def __init__(self, connection) -> None:
+      self.connection = connection
+
+    @asynccontextmanager
+    async def connect(self):
+      yield self.connection
+
+  connection = CoverageConnection()
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = CoverageEngine(connection)
+
+  result = await store.completed_tick_day_coverage(
+    instrument_code="600000.SH",
+    trading_dates=[date(2026, 8, 3)],
+  )
+
+  assert result == [
+    {
+      "trading_date": date(2026, 8, 3),
+      "point_count": 0,
+    }
+  ]
+  assert "FROM market_data_request AS market_request" in connection.statement
+  assert "market_request.status = 'COMPLETED'" in connection.statement
+  assert "json_array_elements" in connection.statement
+  assert "market_request.completed_at DESC NULLS LAST" in connection.statement
+  assert "LIMIT :limit" in connection.statement
+  assert connection.parameters == {
+    "instrument_code": "600000.SH",
+    "trading_dates": ["2026-08-03"],
+    "limit": 1,
+  }
+
+
+@pytest.mark.asyncio
 async def test_market_data_request_requires_financial_protocol_capability() -> None:
   connection = _BoundDeviceConnection(["market-data", "data-only"])
   store = runtime_store.DurableRuntimeStore.__new__(
@@ -386,6 +444,45 @@ async def test_claim_market_data_request_uses_precomputed_stale_cutoff(
     "claim_token": "claim-token-1",
     "updated_at": now,
     "stale_before": now - timedelta(minutes=5),
+  }
+
+
+@pytest.mark.asyncio
+async def test_recoverable_market_data_requests_include_uploaded_and_stale_processing(
+  monkeypatch,
+) -> None:
+  now = datetime(2026, 8, 24, 8, 0, 0)
+  monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
+
+  class Result:
+    def scalars(self):
+      return ["uploaded-request", "stale-processing-request"]
+
+  class Connection:
+    def __init__(self) -> None:
+      self.statement = ""
+      self.parameters = {}
+
+    async def execute(self, statement, parameters):
+      self.statement = str(statement)
+      self.parameters = parameters
+      return Result()
+
+  connection = Connection()
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = _ConnectEngine(connection)
+
+  recovered = await store.recoverable_market_data_request_ids(limit=2)
+
+  assert recovered == ["uploaded-request", "stale-processing-request"]
+  assert "status = 'UPLOADED'" in connection.statement
+  assert "status = 'PROCESSING'" in connection.statement
+  assert "updated_at < :stale_before" in connection.statement
+  assert connection.parameters == {
+    "stale_before": now - timedelta(minutes=5),
+    "limit": 2,
   }
 
 

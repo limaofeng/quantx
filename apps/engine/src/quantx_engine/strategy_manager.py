@@ -46,6 +46,7 @@ from quantx_infrastructure.services.limit_up_board_replay_projection_service imp
 )
 from quantx_infrastructure.services.market_data_request_service import (
   build_sync_lock_key,
+  load_completed_empty_tick_days,
   queue_market_data_sync,
   request_market_data_sync,
 )
@@ -1402,7 +1403,10 @@ class StrategyManager:
     window_start = dates[0]
     window_end = dates[0]
     for current_date in dates[1:]:
-      if (current_date - window_start).days + 1 > max_span_days:
+      if (
+        (current_date - window_end).days > 1
+        or (current_date - window_start).days + 1 > max_span_days
+      ):
         windows.append((window_start, window_end))
         window_start = current_date
       window_end = current_date
@@ -1508,6 +1512,7 @@ class StrategyManager:
       missing_periods: Set[str] = set()
       tick_missing_any = False
       quality_issues: List[Dict[str, Any]] = []
+      confirmed_empty_tick_dates: Set[date] | None = None
 
       for trading_date in trading_dates:
         day_missing = False
@@ -1523,9 +1528,28 @@ class StrategyManager:
               trading_date,
             )
             if not inspection["complete"]:
-              tick_missing_any = True
-              day_missing = True
-              quality_issues.append(inspection)
+              confirmed_empty = False
+              if (
+                str(inspection.get("classification") or "").upper() == "MISSING"
+              ):
+                if confirmed_empty_tick_dates is None:
+                  try:
+                    confirmed_empty_tick_dates = await load_completed_empty_tick_days(
+                      instrument_code=instrument,
+                      trading_dates=trading_dates,
+                    )
+                  except Exception as exc:
+                    self.logger.warning(
+                      "读取已确认空 Tick 覆盖失败: instrument=%s, error=%s",
+                      instrument,
+                      exc,
+                    )
+                    confirmed_empty_tick_dates = set()
+                confirmed_empty = trading_date in confirmed_empty_tick_dates
+              if not confirmed_empty:
+                tick_missing_any = True
+                day_missing = True
+                quality_issues.append(inspection)
           elif not await asyncio.to_thread(
             self._has_tick_data, service, instrument, day_start, day_end
           ):

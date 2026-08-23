@@ -365,6 +365,48 @@ async def test_interrupted_market_ingestion_is_reclaimed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monkeypatch) -> None:
+  store = SimpleNamespace(
+    recoverable_market_data_request_ids=AsyncMock(
+      return_value=["uploaded-request", "stale-processing-request"]
+    ),
+    close=AsyncMock(),
+  )
+  converge = AsyncMock(
+    side_effect=[
+      {"status": "completed", "request_id": "uploaded-request"},
+      {"status": "retryable", "request_id": "stale-processing-request"},
+    ]
+  )
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+  monkeypatch.setattr(
+    durable_agent_flows,
+    "claim_ingest_and_finish_market_data_request",
+    converge,
+  )
+
+  result = await durable_agent_flows.recover_market_data_ingestion_flow.fn(limit=2)
+
+  store.recoverable_market_data_request_ids.assert_awaited_once_with(limit=2)
+  assert [call.args[1] for call in converge.await_args_list] == [
+    "uploaded-request",
+    "stale-processing-request",
+  ]
+  assert all(
+    call.kwargs["ingest_request"] is durable_agent_flows._ingest_uploaded_request
+    for call in converge.await_args_list
+  )
+  assert result == {
+    "status": "completed",
+    "scanned": 2,
+    "completed_request_ids": ["uploaded-request"],
+    "retryable_request_ids": ["stale-processing-request"],
+    "unclaimed_request_ids": [],
+  }
+  store.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_explicit_reprocess_claims_uploaded_request(monkeypatch) -> None:
   store = SimpleNamespace(
     market_data_request_status=AsyncMock(return_value="UPLOADED"),

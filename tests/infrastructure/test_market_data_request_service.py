@@ -1,3 +1,5 @@
+import asyncio
+from datetime import date, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,9 +10,15 @@ from quantx_infrastructure.services import market_data_request_service
 async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> None:
   captured = {}
 
-  async def fake_request_agent_market_data(*, payload, timeout_seconds):
+  async def fake_request_agent_market_data(
+    *,
+    payload,
+    timeout_seconds,
+    idempotency_scope,
+  ):
     captured["payload"] = payload
     captured["timeout_seconds"] = timeout_seconds
+    captured["idempotency_scope"] = idempotency_scope
     return {"status": "success", "request_id": "request-1"}
 
   monkeypatch.setattr(
@@ -38,7 +46,121 @@ async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> No
       "periods": ["tick"],
     },
     "timeout_seconds": 120,
+    "idempotency_scope": "t-trade-replay-supplement-v1",
   }
+
+
+@pytest.mark.asyncio
+async def test_load_completed_empty_tick_days_converts_only_zero_point_rows(
+  monkeypatch,
+) -> None:
+  class FakeStore:
+    def __init__(self) -> None:
+      self.close = AsyncMock()
+
+    async def completed_tick_day_coverage(
+      self,
+      *,
+      instrument_code,
+      trading_dates,
+    ):
+      assert instrument_code == "600887.SH"
+      assert trading_dates == [date(2026, 8, 3), date(2026, 8, 4)]
+      return [
+        {
+          "trading_date": datetime(2026, 8, 3, 0, 0),
+          "point_count": 0,
+        },
+        {
+          "trading_date": "2026-08-04",
+          "point_count": "1",
+        },
+      ]
+
+  store = FakeStore()
+  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
+
+  empty_days = await market_data_request_service.load_completed_empty_tick_days(
+    instrument_code="600887.SH",
+    trading_dates=[date(2026, 8, 4), date(2026, 8, 3)],
+  )
+
+  assert empty_days == {date(2026, 8, 3)}
+  store.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_replay_waiter_rejoins_equivalent_nonterminal_request(
+  monkeypatch,
+) -> None:
+  class FakeStore:
+    def __init__(self) -> None:
+      self.create = AsyncMock(return_value="shared-request")
+      self.close = AsyncMock()
+      self.first_read = asyncio.Event()
+      self.read_count = 0
+
+    async def create_market_data_request(self, payload, **kwargs):
+      return await self.create(payload, **kwargs)
+
+    async def market_data_request(self, request_id):
+      assert request_id == "shared-request"
+      self.read_count += 1
+      if self.read_count == 1:
+        self.first_read.set()
+        return {"status": "QUEUED"}
+      return {
+        "status": "COMPLETED",
+        "ingestion_result": {"records_saved": 1},
+      }
+
+  store = FakeStore()
+  monkeypatch.setattr(market_data_request_service, "DurableRuntimeStore", lambda: store)
+  request = {
+    "stock_list": ["600887.SH"],
+    "start_time": "20260803",
+    "end_time": "20260803",
+    "periods": ["tick"],
+  }
+
+  first = asyncio.create_task(
+    market_data_request_service.request_market_data_sync(
+      **request,
+      timeout_seconds=60,
+    )
+  )
+  await store.first_read.wait()
+  first.cancel()
+  with pytest.raises(asyncio.CancelledError):
+    await first
+
+  restarted = await market_data_request_service.request_market_data_sync(
+    **request,
+    timeout_seconds=1,
+  )
+
+  assert restarted == {
+    "status": "success",
+    "request_id": "shared-request",
+    "records_saved": 1,
+  }
+  assert [call.kwargs["idempotency_scope"] for call in store.create.await_args_list] == [
+    "t-trade-replay-supplement-v1",
+    "t-trade-replay-supplement-v1",
+  ]
+  assert [call.args[0] for call in store.create.await_args_list] == [
+    {
+      "operation": "bars",
+      "download": True,
+      **request,
+    },
+    {
+      "operation": "bars",
+      "download": True,
+      **request,
+    },
+  ]
+  assert store.close.await_count == 2
 
 
 @pytest.mark.asyncio

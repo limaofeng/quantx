@@ -12,7 +12,7 @@ import math
 import re
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -130,6 +130,8 @@ class _BarsRequestScope:
   groups: tuple[tuple[str, str], ...]
   start_text: str
   end_text: str
+  start_date: date
+  end_date: date
   start_ms: int
   daily_end_ms: int
   end_exclusive_ms: int
@@ -211,6 +213,8 @@ def _parse_bars_request(payload: dict[str, Any]) -> _BarsRequestScope:
     groups=groups,
     start_text=start_text,
     end_text=end_text,
+    start_date=start_local.date(),
+    end_date=end_local.date(),
     start_ms=int(start_local.timestamp() * 1000),
     daily_end_ms=int(end_local.timestamp() * 1000),
     end_exclusive_ms=int((end_local + timedelta(days=1)).timestamp() * 1000),
@@ -892,7 +896,14 @@ async def _persist_validated_records(
   expected_audit: dict[str, Any],
   save_period: SaveMarketData,
 ) -> dict[str, Any]:
-  validator = _BarTransferValidator(_parse_bars_request(payload))
+  scope = _parse_bars_request(payload)
+  validator = _BarTransferValidator(scope)
+  daily_counts: dict[tuple[str, str, date], int] = {}
+  for period, code in scope.groups:
+    current_day = scope.start_date
+    while current_day <= scope.end_date:
+      daily_counts[(code, period, current_day)] = 0
+      current_day += timedelta(days=1)
   batch: list[dict[str, Any]] = []
   batch_bytes = 0
   batch_group: tuple[str, str] | None = None
@@ -927,6 +938,12 @@ async def _persist_validated_records(
       if "record_type" in record:
         await flush()
         continue
+      record_day = datetime.fromtimestamp(
+        int(record["time"]) / 1000,
+        _MARKET_DATA_REQUEST_TIMEZONE,
+      ).date()
+      coverage_key = (str(record["code"]), str(record["period"]), record_day)
+      daily_counts[coverage_key] = daily_counts.get(coverage_key, 0) + 1
       group = (str(record["period"]), str(record["code"]))
       encoded_size = _encoded_record_size(record)
       if encoded_size > MARKET_DATA_WRITE_BATCH_BYTES:
@@ -956,6 +973,15 @@ async def _persist_validated_records(
     **expected_audit,
     "records_saved": accepted,
     "rows_accepted": accepted,
+    "day_coverage": [
+      {
+        "instrument_code": code,
+        "period": period,
+        "trading_date": trading_date.isoformat(),
+        "point_count": point_count,
+      }
+      for (code, period, trading_date), point_count in sorted(daily_counts.items())
+    ],
   }
 
 

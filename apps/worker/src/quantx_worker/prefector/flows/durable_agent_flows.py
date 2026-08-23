@@ -58,6 +58,7 @@ _FINANCIAL_LOOKBACK_DAYS = 1095
 _ARCHIVE_SNAPSHOT_MAX_AGE_SECONDS = 90.0
 _ARCHIVE_REQUEST_TIMEOUT_SECONDS = 30 * 60
 _ARCHIVE_FAILED_RETRY_HOPS = 3
+_MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE = 20
 
 
 async def _persisted_instrument_codes() -> list[str]:
@@ -545,6 +546,43 @@ async def reprocess_uploaded_market_data_request(
         f"status={convergence.get('status')} reason={convergence.get('reason')}"
       )
     return convergence
+  finally:
+    await store.close()
+
+
+@flow(name="QMT Agent 行情摄取恢复")
+async def recover_market_data_ingestion_flow(
+  limit: int = _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE,
+) -> dict[str, Any]:
+  """Durably converge uploads even when their original caller has gone away."""
+
+  if isinstance(limit, bool) or int(limit) < 1:
+    raise ValueError("market-data recovery limit must be positive")
+  store = DurableRuntimeStore()
+  try:
+    request_ids = await store.recoverable_market_data_request_ids(limit=int(limit))
+    completed_request_ids: list[str] = []
+    retryable_request_ids: list[str] = []
+    unclaimed_request_ids: list[str] = []
+    for request_id in request_ids:
+      convergence = await claim_ingest_and_finish_market_data_request(
+        store,
+        request_id,
+        ingest_request=_ingest_uploaded_request,
+      )
+      if convergence is None:
+        unclaimed_request_ids.append(request_id)
+      elif convergence.get("status") == "completed":
+        completed_request_ids.append(request_id)
+      else:
+        retryable_request_ids.append(request_id)
+    return {
+      "status": "completed",
+      "scanned": len(request_ids),
+      "completed_request_ids": completed_request_ids,
+      "retryable_request_ids": retryable_request_ids,
+      "unclaimed_request_ids": unclaimed_request_ids,
+    }
   finally:
     await store.close()
 

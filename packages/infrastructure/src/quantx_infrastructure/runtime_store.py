@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -342,6 +342,98 @@ class DurableRuntimeStore:
         )
       ).mappings()
       return [dict(value) for value in values]
+
+  async def completed_tick_day_coverage(
+    self,
+    *,
+    instrument_code: str,
+    trading_dates: list[date],
+  ) -> list[dict[str, Any]]:
+    """Read newest completed Tick manifests for a bounded set of dates.
+
+    ``ingestion_result`` is written atomically with the COMPLETED transition, so
+    no manifest from a queued, uploading, or interrupted request can prove a
+    suspended/empty Tick day.
+    """
+
+    normalized_code = str(instrument_code or "").strip().upper()
+    normalized_dates = sorted(set(trading_dates))
+    if not normalized_code or not normalized_dates:
+      return []
+    normalized_date_strings = [value.isoformat() for value in normalized_dates]
+    bounded_limit = max(1, min(len(normalized_dates), 100))
+    async with self.engine.connect() as connection:
+      values = (
+        await connection.execute(
+          text(
+            """
+            SELECT DISTINCT ON (coverage.value ->> 'trading_date')
+              coverage.value ->> 'trading_date' AS trading_date,
+              coverage.value ->> 'point_count' AS point_count
+            FROM market_data_request AS market_request
+            CROSS JOIN LATERAL json_array_elements(
+              COALESCE(
+                market_request.ingestion_result -> 'day_coverage',
+                '[]'::json
+              )
+            ) AS coverage(value)
+            WHERE market_request.status = 'COMPLETED'
+              AND coverage.value ->> 'instrument_code' = :instrument_code
+              AND LOWER(COALESCE(coverage.value ->> 'period', '')) = 'tick'
+              AND coverage.value ->> 'trading_date' IN :trading_dates
+            ORDER BY
+              coverage.value ->> 'trading_date',
+              market_request.completed_at DESC NULLS LAST,
+              market_request.updated_at DESC,
+              market_request.request_id DESC
+            LIMIT :limit
+            """
+          ).bindparams(
+            bindparam("trading_dates", expanding=True),
+          ),
+          {
+            "instrument_code": normalized_code,
+            "trading_dates": normalized_date_strings,
+            "limit": bounded_limit,
+          },
+        )
+      ).mappings()
+      return [dict(value) for value in values]
+
+  async def recoverable_market_data_request_ids(
+    self,
+    *,
+    limit: int = 20,
+  ) -> list[str]:
+    """Return immutable uploads and expired ingestion leases for Worker recovery.
+
+    Claiming remains a separate compare-and-set transition. This read is only a
+    bounded discovery pass, so concurrent Workers can safely observe the same
+    row while exactly one claim succeeds.
+    """
+
+    bounded_limit = max(1, min(int(limit), 100))
+    stale_before = _utcnow() - timedelta(minutes=5)
+    async with self.engine.connect() as connection:
+      values = (
+        await connection.execute(
+          text(
+            """
+            SELECT request_id
+            FROM market_data_request
+            WHERE status = 'UPLOADED'
+               OR (status = 'PROCESSING' AND updated_at < :stale_before)
+            ORDER BY updated_at ASC, created_at ASC
+            LIMIT :limit
+            """
+          ),
+          {
+            "stale_before": stale_before,
+            "limit": bounded_limit,
+          },
+        )
+      ).scalars()
+      return [str(value) for value in values if value]
 
   async def finish_market_data_request(
     self,

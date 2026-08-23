@@ -104,6 +104,18 @@ deployments:
           skip_download: false
           compute_daily_signals: true
     version: "0.2.0"
+  - name: market-data-ingestion-recovery
+    entrypoint: apps/worker/src/quantx_worker/prefector/flows/durable_agent_flows.py:recover_market_data_ingestion_flow
+    work_pool: *quantx_process_pool
+    description: 持久化恢复已上传或过期处理中行情传输的 Influx 摄取
+    concurrency_limit:
+      limit: 1
+      collision_strategy: CANCEL_NEW
+      grace_period_seconds: 120
+    schedules:
+      - cron: "* * * * *"
+        timezone: Asia/Shanghai
+    version: "0.1.0"
   - name: core-index-intraday-repair
     entrypoint: apps/worker/src/quantx_worker/prefector/flows/core_index_intraday_repair_flow.py:core_index_intraday_repair_flow
     work_pool: *quantx_process_pool

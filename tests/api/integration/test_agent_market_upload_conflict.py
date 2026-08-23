@@ -54,6 +54,15 @@ async def _market_data_database():
     await connection.execute(
       text(
         """
+        CREATE TABLE agent_devices (
+          id VARCHAR(36) PRIMARY KEY
+        )
+        """
+      )
+    )
+    await connection.execute(
+      text(
+        """
         CREATE TABLE market_data_request (
           request_id VARCHAR(36) PRIMARY KEY,
           device_id VARCHAR(36) NOT NULL,
@@ -140,6 +149,31 @@ async def _seed_request(
     await db.commit()
 
 
+async def _seed_dispatch_request(
+  sessions,
+  *,
+  request_id: str,
+  status: str,
+  now: datetime,
+) -> None:
+  async with sessions() as db:
+    db.add(
+      MarketDataRequest(
+        request_id=request_id,
+        device_id=DEVICE_ID,
+        idempotency_key=f"dispatch-{request_id}",
+        request_payload={"operation": "bars", "stock_list": ["600000.SH"]},
+        status=status,
+        expected_chunks=None,
+        received_chunks=0,
+        completed_at=None,
+        created_at=now,
+        updated_at=now,
+      )
+    )
+    await db.commit()
+
+
 async def _upload(
   body: bytes,
   *,
@@ -163,6 +197,133 @@ def _configure_api(monkeypatch, sessions, market_data_root) -> None:
   monkeypatch.setattr(agent_api, "AgentAuthService", _AgentAuthService)
   monkeypatch.setattr(agent_api, "MARKET_DATA_ROOT", market_data_root)
   monkeypatch.setattr(agent_api, "MIN_MARKET_DATA_STAGING_FREE_BYTES", 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.parametrize(
+  "active_status",
+  ["DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"],
+)
+async def test_dispatch_keeps_one_active_market_request_per_device(
+  active_status: str,
+  monkeypatch,
+) -> None:
+  active_request_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  queued_request_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  now = datetime(2026, 8, 24, 8, 0, 0)
+  async with _market_data_database() as (_, sessions):
+    monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
+    async with sessions() as db:
+      await db.execute(
+        text("INSERT INTO agent_devices (id) VALUES (:id)"),
+        {"id": DEVICE_ID},
+      )
+      await db.commit()
+    await _seed_dispatch_request(
+      sessions,
+      request_id=active_request_id,
+      status=active_status,
+      now=now,
+    )
+    await _seed_dispatch_request(
+      sessions,
+      request_id=queued_request_id,
+      status="QUEUED",
+      now=now + timedelta(seconds=1),
+    )
+
+    assert await agent_api._next_market_data_request(DEVICE_ID) is None
+    async with sessions() as db:
+      queued = await db.get(MarketDataRequest, queued_request_id)
+      active = await db.get(MarketDataRequest, active_request_id)
+      assert queued is not None and queued.status == "QUEUED"
+      assert active is not None
+      active.status = "FAILED"
+      active.completed_at = now
+      await db.commit()
+
+    dispatched = await agent_api._next_market_data_request(DEVICE_ID)
+    assert dispatched is not None
+    assert dispatched.message_id == queued_request_id
+    async with sessions() as db:
+      queued = await db.get(MarketDataRequest, queued_request_id)
+    assert queued is not None and queued.status == "DELIVERED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_reconnect_requeues_only_expired_delivery_leases(monkeypatch) -> None:
+  stale_delivered = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  fresh_receiving = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  uploaded = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  processing = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+  now = datetime(2026, 8, 24, 8, 0, 0)
+  async with _market_data_database() as (_, sessions):
+    monkeypatch.setattr(agent_api, "AsyncSessionLocal", sessions)
+    await _seed_dispatch_request(
+      sessions,
+      request_id=stale_delivered,
+      status="DELIVERED",
+      now=now - timedelta(seconds=agent_api.MARKET_DATA_RECONNECT_STALE_SECONDS + 1),
+    )
+    await _seed_dispatch_request(
+      sessions,
+      request_id=fresh_receiving,
+      status="RECEIVING",
+      now=now - timedelta(seconds=1),
+    )
+    await _seed_dispatch_request(
+      sessions,
+      request_id=uploaded,
+      status="UPLOADED",
+      now=now - timedelta(days=1),
+    )
+    await _seed_dispatch_request(
+      sessions,
+      request_id=processing,
+      status="PROCESSING",
+      now=now - timedelta(days=1),
+    )
+
+    await agent_api._requeue_incomplete_market_requests(DEVICE_ID, now=now)
+
+    async with sessions() as db:
+      statuses = {
+        request_id: (await db.get(MarketDataRequest, request_id)).status
+        for request_id in (stale_delivered, fresh_receiving, uploaded, processing)
+      }
+    assert statuses == {
+      stale_delivered: "QUEUED",
+      fresh_receiving: "RECEIVING",
+      uploaded: "UPLOADED",
+      processing: "PROCESSING",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_agent_busy_requeues_dispatched_market_request_without_failing_it(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  digest = hashlib.sha256(b"original chunk").hexdigest()
+  async with _market_data_database() as (_, sessions):
+    await _seed_request(sessions, checksum=digest, status="DELIVERED")
+    _configure_api(monkeypatch, sessions, tmp_path / "market-data")
+
+    result = await agent_api.fail_market_data_request(
+      request_id=REQUEST_ID,
+      request=_Request(b'{"reason":"MARKET_DATA_AGENT_BUSY"}'),
+    )
+
+    assert result == {"accepted": True, "retryable": True}
+    async with sessions() as db:
+      request = await db.get(MarketDataRequest, REQUEST_ID)
+    assert request is not None
+    assert request.status == "QUEUED"
+    assert request.completed_at is None
+    assert request.processing_error == "Agent busy: market-data request queue full"
 
 
 @pytest.mark.asyncio

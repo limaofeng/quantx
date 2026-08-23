@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pandas as pd
@@ -1462,7 +1463,7 @@ async def test_fatal_rejects_new_xtdata_control_entry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_market_request_queue_closes_without_blocking() -> None:
+async def test_full_market_request_queue_reports_busy_without_closing_socket() -> None:
   runtime = object.__new__(AgentRuntime)
   runtime._ensure_market_upload_state()
   runtime._market_requests = asyncio.Queue(maxsize=1)
@@ -1481,6 +1482,8 @@ async def test_full_market_request_queue_closes_without_blocking() -> None:
       self.closed.append(kwargs)
 
   socket = Socket()
+  busy = AsyncMock()
+  runtime._report_market_data_busy = busy
   incoming = AgentEnvelope(
     message_type=AgentMessageType.MARKET_DATA_REQUEST,
     payload={"request_id": "overflow"},
@@ -1491,7 +1494,28 @@ async def test_full_market_request_queue_closes_without_blocking() -> None:
   )
 
   assert runtime._market_requests.qsize() == 1
-  assert socket.closed == [{"code": 1013, "reason": "market-data request queue full"}]
+  assert socket.closed == []
+  busy.assert_awaited_once_with("overflow")
+  runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_market_request_joins_queued_work_without_consuming_capacity() -> None:
+  runtime = object.__new__(AgentRuntime)
+  runtime._ensure_market_upload_state()
+  runtime._market_requests = asyncio.Queue(maxsize=1)
+  envelope = AgentEnvelope(
+    message_type=AgentMessageType.MARKET_DATA_REQUEST,
+    payload={"request_id": "same-request"},
+  )
+
+  await runtime._handle_message(None, envelope.model_dump_json())
+  await runtime._handle_message(None, envelope.model_dump_json())
+
+  assert runtime._market_requests.qsize() == 1
+  queued = runtime._market_requests.get_nowait()
+  assert queued.payload["request_id"] == "same-request"
+  runtime._market_requests.task_done()
   runtime.stop()
 
 

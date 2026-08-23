@@ -132,6 +132,11 @@ _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset(
 _MARKET_DATA_FROZEN_MANIFEST_STATUSES = frozenset(
   {"UPLOADED", "PROCESSING", "COMPLETED"}
 )
+_MARKET_DATA_ACTIVE_DISPATCH_STATUSES = frozenset(
+  {"DELIVERED", "RECEIVING", "UPLOADED", "PROCESSING"}
+)
+MARKET_DATA_RECONNECT_STALE_SECONDS = 5 * 60
+_MARKET_DATA_AGENT_BUSY_REASON = "MARKET_DATA_AGENT_BUSY"
 _market_data_staging_lock = asyncio.Lock()
 _market_data_staging_sweep_lock = asyncio.Lock()
 
@@ -1198,6 +1203,26 @@ async def _next_market_data_request(
   protocol_version: str = PROTOCOL_VERSION,
 ) -> Optional[AgentEnvelope]:
   async with AsyncSessionLocal() as db:
+    # Lock the device row before inspecting or dispatching requests. Locking only
+    # a QUEUED row lets two concurrent websocket loops each observe no active
+    # delivery and dispatch separate rows for the same serial QMT worker.
+    device = await db.scalar(
+      select(AgentDevice.id)
+      .where(AgentDevice.id == device_id)
+      .with_for_update()
+    )
+    if device is None:
+      return None
+    active_request_id = await db.scalar(
+      select(MarketDataRequest.request_id)
+      .where(
+        MarketDataRequest.device_id == device_id,
+        MarketDataRequest.status.in_(_MARKET_DATA_ACTIVE_DISPATCH_STATUSES),
+      )
+      .limit(1)
+    )
+    if active_request_id is not None:
+      return None
     result = await db.execute(
       select(MarketDataRequest)
       .where(
@@ -1212,6 +1237,7 @@ async def _next_market_data_request(
     if request is None:
       return None
     request.status = "DELIVERED"
+    request.updated_at = utcnow()
     await db.commit()
     return AgentEnvelope(
       protocol_version=protocol_version,
@@ -1225,16 +1251,32 @@ async def _next_market_data_request(
     )
 
 
-async def _requeue_incomplete_market_requests(device_id: str) -> None:
-  """Resume interrupted transfers once, immediately after Agent reconnect."""
+async def _requeue_incomplete_market_requests(
+  device_id: str,
+  *,
+  now: datetime | None = None,
+) -> None:
+  """Recover only expired delivery leases after an Agent reconnect.
+
+  ``updated_at`` advances on dispatch and every accepted upload chunk. A fresh
+  DELIVERED/RECEIVING request is therefore an active upload lease, not reconnect
+  debris. UPLOADED and PROCESSING belong to durable ingestion and are never
+  eligible for websocket redispatch.
+  """
+
+  reference_time = now or utcnow()
+  stale_before = reference_time - timedelta(
+    seconds=MARKET_DATA_RECONNECT_STALE_SECONDS
+  )
   async with AsyncSessionLocal() as db:
     await db.execute(
       update(MarketDataRequest)
       .where(
         MarketDataRequest.device_id == device_id,
         MarketDataRequest.status.in_(("DELIVERED", "RECEIVING")),
+        MarketDataRequest.updated_at < stale_before,
       )
-      .values(status="QUEUED")
+      .values(status="QUEUED", updated_at=reference_time)
     )
     await db.commit()
 
@@ -2087,6 +2129,31 @@ async def _fail_market_data_upload(
     )
 
 
+async def _requeue_busy_market_data_request(
+  *,
+  request_id: str,
+  device_id: str,
+) -> bool:
+  """Return an undispatched request to the durable queue after Agent backpressure."""
+
+  async with AsyncSessionLocal() as db:
+    market_request = await db.scalar(
+      select(MarketDataRequest)
+      .where(
+        MarketDataRequest.request_id == request_id,
+        MarketDataRequest.device_id == device_id,
+      )
+      .with_for_update()
+    )
+    if market_request is None or str(market_request.status or "").upper() != "DELIVERED":
+      return False
+    market_request.status = "QUEUED"
+    market_request.processing_error = "Agent busy: market-data request queue full"
+    market_request.updated_at = utcnow()
+    await db.commit()
+    return True
+
+
 @agent_router.post(
   "/agent/market-data/{request_id}/fail",
   status_code=202,
@@ -2095,7 +2162,7 @@ async def fail_market_data_request(
   request_id: str,
   request: Request,
 ):
-  """Let an authenticated Agent terminate a request it cannot execute."""
+  """Accept an Agent terminal rejection or a retryable queue-busy outcome."""
   try:
     normalized_request_id = str(uuid.UUID(request_id))
   except ValueError as exc:
@@ -2121,6 +2188,12 @@ async def fail_market_data_request(
   reason = str(payload.get("reason") or "").strip()
   if not reason:
     raise HTTPException(status_code=400, detail="失败原因不能为空")
+  if reason == _MARKET_DATA_AGENT_BUSY_REASON:
+    retryable = await _requeue_busy_market_data_request(
+      request_id=normalized_request_id,
+      device_id=authenticated_device_id,
+    )
+    return {"accepted": True, "retryable": retryable}
   await _fail_market_data_upload(
     request_id=normalized_request_id,
     device_id=authenticated_device_id,

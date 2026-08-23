@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime
 from typing import Any
 
 from quantx_infrastructure.runtime_store import DurableRuntimeStore
@@ -66,6 +67,45 @@ def build_sync_lock_key(complete_key: str) -> str:
   return f"market-data-request-lock:{complete_key}"
 
 
+async def load_completed_empty_tick_days(
+  *,
+  instrument_code: str,
+  trading_dates: list[date],
+) -> set[date]:
+  """Return explicitly empty Tick days from completed, verified ingestion only."""
+
+  normalized_dates = sorted(set(trading_dates))
+  if not normalized_dates:
+    return set()
+  store = DurableRuntimeStore()
+  try:
+    rows = await store.completed_tick_day_coverage(
+      instrument_code=instrument_code,
+      trading_dates=normalized_dates,
+    )
+  finally:
+    await store.close()
+  empty_days: set[date] = set()
+  for row in rows:
+    raw_point_count = row.get("point_count")
+    if isinstance(raw_point_count, bool):
+      continue
+    try:
+      point_count = int(raw_point_count)
+    except (TypeError, ValueError):
+      continue
+    if point_count != 0:
+      continue
+    raw_day = row.get("trading_date")
+    if isinstance(raw_day, datetime):
+      empty_days.add(raw_day.date())
+    elif isinstance(raw_day, date):
+      empty_days.add(raw_day)
+    elif isinstance(raw_day, str):
+      empty_days.add(date.fromisoformat(raw_day))
+  return empty_days
+
+
 async def request_market_data_sync(
   *,
   stock_list: list[str],
@@ -85,6 +125,7 @@ async def request_market_data_sync(
   return await request_agent_market_data(
     payload=payload,
     timeout_seconds=timeout_seconds,
+    idempotency_scope=_T_TRADE_REPLAY_SUPPLEMENT_SCOPE,
   )
 
 
@@ -234,11 +275,15 @@ async def request_agent_market_data(
   *,
   payload: dict[str, Any],
   timeout_seconds: float = 600,
+  idempotency_scope: str = "",
 ) -> dict[str, Any]:
   """Request, ingest, and terminally converge one idempotent XTData transfer."""
   store = DurableRuntimeStore()
   try:
-    request_id = await store.create_market_data_request(payload)
+    create_kwargs: dict[str, Any] = {}
+    if idempotency_scope:
+      create_kwargs["idempotency_scope"] = idempotency_scope
+    request_id = await store.create_market_data_request(payload, **create_kwargs)
     reopen_attempted: set[str] = set()
     retry_hops = 0
     newly_queued_retry_ids: set[str] = set()

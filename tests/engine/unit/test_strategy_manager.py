@@ -910,6 +910,185 @@ class TestStrategyManager:
     StrategyManager._instance = None
 
   @pytest.mark.asyncio
+  async def test_sync_missing_tick_data_requests_only_the_one_day_gap(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    sync_request = AsyncMock(return_value={"status": "success"})
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.request_market_data_sync",
+      sync_request,
+    )
+    monkeypatch.setattr(manager, "_clear_market_data_sync_cache", lambda **_: None)
+    missing_day = date(2026, 8, 5)
+
+    await manager._sync_missing_backtest_data(
+      runtime=SimpleNamespace(run_id="replay-run"),
+      missing={
+        "600887.SH": {
+          "dates": {missing_day},
+          "klines": set(),
+          "tick": True,
+        }
+      },
+      sync_periods={"tick"},
+    )
+
+    sync_request.assert_awaited_once_with(
+      stock_list=["600887.SH"],
+      start_time="20260805",
+      end_time="20260805",
+      periods=["tick"],
+    )
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_twenty_complete_tick_days_issue_zero_qmt_requests(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_dates = []
+    current = date(2026, 7, 20)
+    while len(trading_dates) < 20:
+      if current.weekday() < 5:
+        trading_dates.append(current)
+      current += timedelta(days=1)
+
+    def complete_tick_times(trading_day):
+      morning = [
+        datetime.combine(trading_day, datetime.min.time()).replace(
+          hour=9,
+          minute=25,
+        )
+        + timedelta(minutes=index)
+        for index in range(126)
+      ]
+      afternoon = [
+        datetime.combine(trading_day, datetime.min.time()).replace(
+          hour=13,
+          minute=0,
+        )
+        + timedelta(minutes=index)
+        for index in range(121)
+      ]
+      return morning + afternoon
+
+    tick_repo = SimpleNamespace(
+      find_all=lambda **kwargs: [
+        SimpleNamespace(time=value)
+        for value in complete_tick_times(kwargs["start_time"].date())
+      ]
+    )
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=trading_dates)
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper",
+      lambda: calendar,
+    )
+
+    missing = await manager._find_missing_backtest_data(
+      service=SimpleNamespace(tick_repo=tick_repo),
+      instruments=["600887.SH"],
+      start_time=datetime(2026, 7, 20, 9, 30),
+      end_time=datetime(2026, 8, 14, 15, 0),
+      required_kline_periods=set(),
+      require_tick=True,
+      strict_tick_quality=True,
+    )
+    sync_request = AsyncMock(return_value={"status": "success"})
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.request_market_data_sync",
+      sync_request,
+    )
+
+    await manager._sync_missing_backtest_data(
+      runtime=SimpleNamespace(run_id="replay-run"),
+      missing=missing,
+      sync_periods={"tick"},
+    )
+
+    assert missing == {}
+    sync_request.assert_not_awaited()
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_confirmed_empty_tick_day_requires_completed_coverage(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_day = date(2026, 8, 3)
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=[trading_day])
+    )
+    confirmed_empty = AsyncMock(return_value={trading_day})
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper",
+      lambda: calendar,
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.load_completed_empty_tick_days",
+      confirmed_empty,
+    )
+
+    missing = await manager._find_missing_backtest_data(
+      service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
+      instruments=["600887.SH"],
+      start_time=datetime(2026, 8, 3, 9, 30),
+      end_time=datetime(2026, 8, 3, 15, 0),
+      required_kline_periods=set(),
+      require_tick=True,
+      strict_tick_quality=True,
+    )
+
+    assert missing == {}
+    confirmed_empty.assert_awaited_once_with(
+      instrument_code="600887.SH",
+      trading_dates=[trading_day],
+    )
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
+  async def test_empty_tick_day_without_completed_coverage_remains_missing(
+    self,
+    monkeypatch,
+  ):
+    StrategyManager._instance = None
+    manager = StrategyManager()
+    trading_day = date(2026, 8, 3)
+    calendar = SimpleNamespace(
+      get_trading_calendar=AsyncMock(return_value=[trading_day])
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.TradingDateHelper",
+      lambda: calendar,
+    )
+    monkeypatch.setattr(
+      "quantx_engine.strategy_manager.load_completed_empty_tick_days",
+      AsyncMock(return_value=set()),
+    )
+
+    missing = await manager._find_missing_backtest_data(
+      service=SimpleNamespace(tick_repo=SimpleNamespace(find_all=lambda **_: [])),
+      instruments=["600887.SH"],
+      start_time=datetime(2026, 8, 3, 9, 30),
+      end_time=datetime(2026, 8, 3, 15, 0),
+      required_kline_periods=set(),
+      require_tick=True,
+      strict_tick_quality=True,
+    )
+
+    assert missing["600887.SH"]["dates"] == {trading_day}
+    assert missing["600887.SH"]["quality_issues"][0]["classification"] == "MISSING"
+    StrategyManager._instance = None
+
+  @pytest.mark.asyncio
   async def test_t_trade_replay_partial_tick_day_is_not_treated_as_complete(
     self,
     monkeypatch,
