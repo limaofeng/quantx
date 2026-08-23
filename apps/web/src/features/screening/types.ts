@@ -1,11 +1,7 @@
 export type StockScreenUniverse = 'STOCK' | 'ETF' | 'STOCK_AND_ETF';
 export type ScreeningMode = 'DAILY' | 'INTRADAY';
 export type RoeQualityStatus =
-  | 'VALID'
-  | 'STALE'
-  | 'SUSPICIOUS'
-  | 'INVALID'
-  | 'UNVERIFIED';
+  'VALID' | 'STALE' | 'SUSPICIOUS' | 'INVALID' | 'UNVERIFIED';
 
 export interface ScreeningCriteria {
   // --- Universe ---
@@ -33,11 +29,8 @@ export interface ScreeningCriteria {
 
   // --- Technical Parameters ---
   priceDropMin?: number; // 跌幅最小值
-  rsiPeriod?: number; // Default 12
   rsiOversoldThreshold?: number; // Default 30
   rsiStrongThreshold?: number; // Default 70
-  maShort?: number; // Default 5
-  maLong?: number; // Default 10
   volumeRatioMin?: number;
   volumeRatioMax?: number;
   volumeRatio5Min?: number;
@@ -48,8 +41,6 @@ export interface ScreeningCriteria {
   intradayLast5mVolumeRatioMin?: number;
   intradayTurnoverRateMin?: number;
   intradayDepthImbalanceMin?: number;
-  bollingerUpperProximity?: number; // Default 0.95
-  bollingerLowerProximity?: number; // Default 1.0
   requireFresh?: boolean;
 }
 
@@ -143,6 +134,7 @@ export interface StockScreeningResult {
 
 export interface StockScreeningMeta {
   total: number;
+  loadedCount?: number;
   snapshotDate?: string | null;
   expectedSnapshotDate?: string | null;
   missingSnapshotDates: string[];
@@ -154,6 +146,9 @@ export interface StockScreeningMeta {
   isComplete: boolean;
   warnings: string[];
   financialHealth?: StockScreenFinancialHealth | null;
+  intradayScannerRunning?: boolean;
+  intradayUpdatedAt?: string | null;
+  intradayStaleRowCount?: number;
 }
 
 export interface StockScreenFinancialHealth {

@@ -4,6 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { ScreeningResults } from '@/features/screening/components/ScreeningResults';
 import { type StockScreeningResult } from '@/features/screening/types';
 
+vi.mock('@/features/watchlist/hooks', () => ({
+  useWatchlistWorkspace: () => ({
+    saveItem: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
+  }),
+}));
+
 const baseStock: StockScreeningResult = {
   avgVolume20: 1000,
   changePct: 6.07,
@@ -329,5 +335,96 @@ describe('ScreeningResults', () => {
       'title',
       expect.stringContaining('营收累计同比: 22.1%')
     );
+  });
+
+  it('uses an intraday-only column group without daily placeholder fields', () => {
+    render(
+      <ScreeningResults
+        activeMode="INTRADAY"
+        screeningLoading={false}
+        results={[
+          {
+            ...baseStock,
+            amountPaceRatio: 1.9,
+            depthImbalance5: 0.31,
+            intradayTurnoverRatePct: 2.87,
+            isStale: true,
+            last5mVolumeRatio: 3.21,
+            volumePaceRatio: 2.86,
+          },
+        ]}
+        meta={{
+          hasStaleData: false,
+          intradayScannerRunning: true,
+          intradayStaleRowCount: 1,
+          intradayUpdatedAt: '2026-08-23T14:05:27',
+          isComplete: true,
+          missingSnapshotDates: [],
+          total: 200,
+          warnings: [],
+        }}
+      />
+    );
+
+    const headers = screen
+      .getAllByRole('columnheader')
+      .map(header => header.textContent?.replace(/\s+/g, ' ').trim() || '');
+    expect(headers.join('|')).toContain('量速');
+    expect(headers.join('|')).toContain('额速');
+    expect(headers.join('|')).toContain('盘中换手');
+    expect(headers.join('|')).toContain('买盘失衡');
+    expect(headers.join('|')).not.toContain('KDJ');
+    expect(headers.join('|')).not.toContain('ROE');
+    expect(screen.getByText('数据延迟')).toBeInTheDocument();
+    expect(screen.getByText('已加载 1 / 共 200')).toBeInTheDocument();
+  });
+
+  it('keeps GraphQL errors distinct from a successful empty result', () => {
+    const retry = vi.fn();
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[]}
+        meta={{
+          hasStaleData: false,
+          isComplete: false,
+          missingSnapshotDates: [],
+          total: 0,
+          warnings: [],
+        }}
+        error="GraphQL 请求失败"
+        onRetry={retry}
+      />
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('GraphQL 请求失败');
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(screen.queryByText('未找到符合条件的股票')).not.toBeInTheDocument();
+  });
+
+  it('does not render an empty notice value when there are no warnings', () => {
+    render(
+      <ScreeningResults
+        screeningLoading={false}
+        results={[]}
+        meta={{
+          hasStaleData: false,
+          isComplete: true,
+          missingSnapshotDates: [],
+          total: 0,
+          warnings: [],
+        }}
+      />
+    );
+
+    expect(screen.getByText('已加载 0 / 共 0')).toBeInTheDocument();
+    expect(screen.queryByText('0')).not.toBeInTheDocument();
+  });
+
+  it('exposes a keyboard-accessible detail action for each stock', () => {
+    renderResults();
+
+    expect(screen.getByRole('button', { name: '浙能电力 详情' })).toBeVisible();
   });
 });

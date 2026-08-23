@@ -168,13 +168,8 @@ const DEFAULT_CRITERIA: ScreeningCriteria = {
   enableRSIOversold: false,
   enableRSIStrong: false,
 
-  rsiPeriod: 12,
   rsiOversoldThreshold: 30,
   rsiStrongThreshold: 70,
-  maShort: 5,
-  maLong: 10,
-  bollingerUpperProximity: 0.98,
-  bollingerLowerProximity: 1.02,
   requireFresh: false,
 };
 
@@ -392,7 +387,6 @@ function buildIntradayVolumeScreenInput(criteria: ScreeningCriteria) {
       supportsStockOnlyFilters && criteria.excludeIndustries?.length
         ? criteria.excludeIndustries
         : null,
-    excludeSt: criteria.excludeST !== false,
     minVolumePaceRatio: activePositiveThreshold(criteria.intradayVolumePaceMin),
     minAmountPaceRatio: activePositiveThreshold(criteria.intradayAmountPaceMin),
     minLast5mVolumeRatio: activePositiveThreshold(
@@ -446,7 +440,7 @@ function getSortValue(
     case 'VOLUME_PERCENTILE_60':
       return stock.volumePercentile60 ?? 0;
     case 'VOLUME_RATIO':
-      return stock.volumePaceRatio ?? stock.volumeRatio;
+      return stock.volumeRatio;
     case 'VOLUME_RATIO_5':
       return stock.volumeRatio5 ?? stock.last5mVolumeRatio ?? 0;
     case 'YOY_GROWTH':
@@ -657,8 +651,10 @@ export function useStockScreening() {
   const meta = useMemo<StockScreeningMeta>(() => {
     if (isIntradayMode) {
       const page = intradayVolumeResult.data?.intradayVolumeScreen;
+      const intradayItems = page?.items ?? [];
       return {
         total: page?.total ?? 0,
+        loadedCount: intradayItems.length,
         snapshotDate: null,
         expectedSnapshotDate: null,
         missingSnapshotDates: [],
@@ -667,9 +663,15 @@ export function useStockScreening() {
         signalVersion: 'xtquant-whole-quote',
         calculatedAt: page?.updatedAt ?? null,
         hasStaleData: false,
-        isComplete: Boolean(page?.isScannerRunning),
+        // Scanner availability is intentionally exposed separately; a running
+        // scanner does not mean the result set is complete.
+        isComplete: false,
         warnings: page?.warnings ?? [],
         financialHealth: null,
+        intradayScannerRunning: Boolean(page?.isScannerRunning),
+        intradayUpdatedAt: page?.updatedAt ?? null,
+        intradayStaleRowCount: intradayItems.filter(item => item.isStale)
+          .length,
       };
     }
 
@@ -677,6 +679,7 @@ export function useStockScreening() {
     const status = snapshotStatusResult.status;
     return {
       total: page?.total ?? 0,
+      loadedCount: page?.items?.length ?? 0,
       snapshotDate: status?.latestSnapshotDate ?? page?.snapshotDate ?? null,
       expectedSnapshotDate: status?.expectedSnapshotDate ?? null,
       missingSnapshotDates: status?.missingSnapshotDates ?? [],
@@ -731,9 +734,18 @@ export function useStockScreening() {
     reexecuteStockScreen({ requestPolicy: 'network-only' });
   }, [reexecuteStockScreen, snapshotStatusResult]);
 
+  const retry = useCallback(() => {
+    if (isIntradayMode) {
+      reexecuteIntradayVolume({ requestPolicy: 'network-only' });
+      return;
+    }
+    reexecuteStockScreen({ requestPolicy: 'network-only' });
+  }, [isIntradayMode, reexecuteIntradayVolume, reexecuteStockScreen]);
+
   return {
     screeningCriteria,
     setScreeningCriteria,
+    activeMode,
     results,
     meta,
     sort,
@@ -749,5 +761,6 @@ export function useStockScreening() {
     availableIndustries,
     refreshDailyData,
     isSnapshotStatusLoading: snapshotStatusResult.fetching,
+    retry,
   };
 }
