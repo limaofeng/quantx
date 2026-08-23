@@ -11,7 +11,7 @@ write the implementation itself.
 
 ## Role Separation
 
-- Spawn every implementation subagent with `model: "gpt-5.6-luna"` and
+- Spawn every implementation subagent with `model: "gpt-5.6-terra"` and
   `reasoning_effort: "max"` and `fork_turns: "1"`. Include the complete task,
   constraints, relevant paths, and acceptance criteria in the subagent message
   because model overrides cannot use a full-history fork.
@@ -26,7 +26,7 @@ write the implementation itself.
 - If a delegated implementation fails review, send the evidence and required
   correction back to an implementation subagent with `followup_task`; do not
   fix it in the primary agent.
-- If delegation or the required `gpt-5.6-luna` model is unavailable, report the
+- If delegation or the required `gpt-5.6-terra` model is unavailable, report the
   blocker instead of silently switching to primary-agent implementation.
 
 ## Workflow
