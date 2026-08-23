@@ -13,6 +13,7 @@ import type React from 'react';
 import { useEffect, useRef, useState } from 'react';
 
 import type { IntradayTrendBar } from '@/hooks/useIntradayTrendData';
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
 
 import {
   getTradingRange,
@@ -238,8 +239,8 @@ export function useChartData(
           value: item.volume,
           color:
             item.close >= previousPrice
-              ? 'rgba(239, 68, 68, 0.58)'
-              : 'rgba(34, 197, 94, 0.58)',
+              ? `${FINANCIAL_CHART_COLORS.up}94`
+              : `${FINANCIAL_CHART_COLORS.down}94`,
         });
       });
 
@@ -379,8 +380,8 @@ export function useChartData(
           value: item.volume,
           color:
             item.close >= item.open
-              ? 'rgba(239, 68, 68, 0.5)'
-              : 'rgba(34, 197, 94, 0.5)',
+              ? `${FINANCIAL_CHART_COLORS.up}80`
+              : `${FINANCIAL_CHART_COLORS.down}80`,
         });
       });
       candlestickData.sort((a, b) => (a.time as number) - (b.time as number));

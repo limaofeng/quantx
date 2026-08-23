@@ -68,8 +68,8 @@ export function SortableGridLevelRow({
               isDisabled
                 ? 'bg-slate-600/40'
                 : isSell
-                  ? 'bg-emerald-400/55'
-                  : 'bg-rose-400/55'
+                  ? 'bg-market-down/55'
+                  : 'bg-market-up/55'
             }`}
           />
           <div
@@ -77,8 +77,8 @@ export function SortableGridLevelRow({
               isDisabled
                 ? 'border-slate-600/35 text-slate-500 shadow-none dark:text-slate-500'
                 : isSell
-                  ? 'border-emerald-400/25 text-emerald-700 dark:text-emerald-200'
-                  : 'border-rose-400/25 text-rose-700 dark:text-rose-200'
+                  ? 'border-market-down/25 text-market-down'
+                  : 'border-market-up/25 text-market-up'
             }`}
           >
             <div className="font-mono text-[11px] font-black leading-none">

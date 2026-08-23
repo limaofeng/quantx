@@ -962,7 +962,7 @@ export function LiquidationPage() {
             type="button"
             aria-label="返回全部卖出计划"
             onClick={handleShowAllExitPlans}
-            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-red-400/35 bg-red-500/10 px-3 text-xs font-black text-red-200 transition-colors duration-200 hover:border-red-400/60 hover:bg-red-500/15 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1120]"
+            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/35 bg-primary/10 px-3 text-xs font-black text-primary transition-colors duration-200 hover:border-primary/60 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1120]"
           >
             <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
             全部卖出计划
@@ -981,7 +981,7 @@ export function LiquidationPage() {
         <button
           type="button"
           onClick={handleRefresh}
-          className="flex h-8 items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
+          className="flex h-8 items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-primary/40 hover:text-primary"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           刷新数据
@@ -1026,7 +1026,7 @@ export function LiquidationPage() {
             className={cn(
               'flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-black transition-colors',
               selected
-                ? 'border-red-400/35 bg-red-500/10 text-red-200'
+                ? 'border-primary/35 bg-primary/10 text-primary'
                 : 'border-transparent text-slate-500 hover:border-white/10 hover:text-slate-200'
             )}
             key={mode.id}
@@ -1118,7 +1118,7 @@ export function LiquidationPage() {
       statusBarLeft={
         <>
           <span className="inline-flex items-center gap-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+            <span className="h-1.5 w-1.5 rounded-full bg-market-down" />
             卖出管理
           </span>
           <span className="text-slate-700">|</span>
@@ -1130,7 +1130,7 @@ export function LiquidationPage() {
       statusBarRight={
         <>
           <span className="inline-flex items-center gap-2">
-            <BarChart3 className="h-3 w-3 text-red-400" />
+            <BarChart3 className="h-3 w-3 text-market-down" />
             {selectedStockCode || '账户级卖出'}
           </span>
           <span className="text-slate-700">|</span>

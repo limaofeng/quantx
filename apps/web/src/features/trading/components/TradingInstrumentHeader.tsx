@@ -663,7 +663,7 @@ export function TradingInstrumentHeader({
         <div className="grid min-w-0 flex-1 grid-cols-[repeat(auto-fit,minmax(74px,1fr))] gap-x-4 gap-y-1.5">
           <HeaderMetric
             label="高"
-            tone="text-red-400"
+            tone="text-market-up"
             value={formatPrice(
               firstPositiveNumber(
                 tick?.high,
@@ -674,7 +674,7 @@ export function TradingInstrumentHeader({
           />
           <HeaderMetric
             label="低"
-            tone="text-emerald-400"
+            tone="text-market-down"
             value={formatPrice(
               firstPositiveNumber(
                 tick?.low,

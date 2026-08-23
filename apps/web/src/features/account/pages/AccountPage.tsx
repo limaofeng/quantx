@@ -685,8 +685,8 @@ export function AccountPage() {
                         <p
                           className={
                             String(order.type) === 'BUY'
-                              ? 'text-red-400'
-                              : 'text-emerald-400'
+                              ? 'text-market-up'
+                              : 'text-market-down'
                           }
                         >
                           {String(order.type) === 'BUY' ? '买入' : '卖出'}{' '}
@@ -733,8 +733,8 @@ export function AccountPage() {
                         <p
                           className={
                             Number(trade.orderType) === 23
-                              ? 'text-red-400'
-                              : 'text-emerald-400'
+                              ? 'text-market-up'
+                              : 'text-market-down'
                           }
                         >
                           {Number(trade.orderType) === 23 ? '买入' : '卖出'}{' '}
@@ -924,8 +924,8 @@ export function AccountPage() {
                           <td
                             className={
                               String(order.type) === 'BUY'
-                                ? 'text-red-400'
-                                : 'text-emerald-400'
+                                ? 'text-market-up'
+                                : 'text-market-down'
                             }
                           >
                             {String(order.type) === 'BUY' ? '买入' : '卖出'}
@@ -999,8 +999,8 @@ export function AccountPage() {
                         <td
                           className={
                             Number(trade.orderType) === 23
-                              ? 'text-red-400'
-                              : 'text-emerald-400'
+                              ? 'text-market-up'
+                              : 'text-market-down'
                           }
                         >
                           {Number(trade.orderType) === 23 ? '买入' : '卖出'}
@@ -1124,8 +1124,8 @@ export function AccountPage() {
                             className={cn(
                               'absolute top-1/2 h-2 -translate-y-1/2 rounded',
                               value >= 0
-                                ? 'left-1/2 bg-red-400/70'
-                                : 'right-1/2 bg-emerald-400/70'
+                                ? 'left-1/2 bg-market-up/70'
+                                : 'right-1/2 bg-market-down/70'
                             )}
                             style={{
                               width: `${Math.max(1, (Math.abs(value) / pnlStats.maxAbs) * 50)}%`,

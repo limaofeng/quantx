@@ -1,10 +1,20 @@
 import React, { useMemo } from 'react';
 import { AreaChart, Area, ResponsiveContainer } from 'recharts';
 
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
+
 // --- Types ---
 export type SparklinePattern = 'stable' | 'volatile' | 'rising' | 'flat';
 export type DashboardTheme =
-  'emerald' | 'amber' | 'rose' | 'sky' | 'indigo' | 'blue' | 'violet';
+  | 'emerald'
+  | 'amber'
+  | 'rose'
+  | 'sky'
+  | 'indigo'
+  | 'blue'
+  | 'violet'
+  | 'market-up'
+  | 'holding-down';
 export type SparklinePoint = number | { v: number };
 
 // --- Sub-components ---
@@ -23,6 +33,14 @@ export const MiniSparkline: React.FC<{
     indigo: { stroke: '#6366f1', fill: 'url(#sparkGradientIndigo)' },
     blue: { stroke: '#3b82f6', fill: 'url(#sparkGradientBlue)' },
     violet: { stroke: '#8b5cf6', fill: 'url(#sparkGradientViolet)' },
+    'market-up': {
+      stroke: FINANCIAL_CHART_COLORS.up,
+      fill: 'url(#sparkGradientMarket-up)',
+    },
+    'holding-down': {
+      stroke: FINANCIAL_CHART_COLORS.holdingDown,
+      fill: 'url(#sparkGradientHolding-down)',
+    },
   };
 
   const data = useMemo(() => {
@@ -164,6 +182,8 @@ export const InsightTile: React.FC<{
     indigo: 'bg-indigo-500/10 text-indigo-500',
     blue: 'bg-blue-500/10 text-blue-500',
     violet: 'bg-violet-500/10 text-violet-500',
+    'market-up': 'bg-market-up/10 text-market-up',
+    'holding-down': 'bg-holding-down/10 text-holding-down',
   };
 
   const statusColors: Record<DashboardTheme, string> = {
@@ -174,6 +194,8 @@ export const InsightTile: React.FC<{
     indigo: 'text-indigo-400 bg-indigo-500/20',
     blue: 'text-blue-400 bg-blue-500/20',
     violet: 'text-violet-400 bg-violet-500/20',
+    'market-up': 'bg-market-up/20 text-market-up',
+    'holding-down': 'bg-holding-down/20 text-holding-down',
   };
 
   return (

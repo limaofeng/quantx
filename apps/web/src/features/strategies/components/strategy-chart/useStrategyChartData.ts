@@ -2,6 +2,7 @@ import type { Time } from 'lightweight-charts';
 import { useMemo } from 'react';
 
 import { useInfiniteKLines } from '@/hooks';
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
 
 import { useBacktestKLines } from '../../hooks/useBacktestKLines';
 import { useBacktestTicks } from '../../hooks/useBacktestTicks';
@@ -116,8 +117,8 @@ export function useStrategyChartData({
           value: item.volume || 0,
           color:
             item.close >= item.open
-              ? 'rgba(239, 68, 68, 0.35)'
-              : 'rgba(34, 197, 94, 0.35)',
+              ? `${FINANCIAL_CHART_COLORS.up}59`
+              : `${FINANCIAL_CHART_COLORS.down}59`,
         }))
         .filter(item => item.value >= 0),
     [period, rawKlines]

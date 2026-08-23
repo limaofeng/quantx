@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 
 import { parseMarketDate } from '@/components/trading-chart/utils/time-utils';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 interface IntradayBarLike {
@@ -115,9 +116,7 @@ export function IntradayInfoBar({ bars }: IntradayInfoBarProps) {
   const trendClass =
     info.change === null
       ? 'text-slate-400'
-      : info.change >= 0
-        ? 'text-red-400'
-        : 'text-emerald-400';
+      : financialToneClass(info.change);
 
   return (
     <div className="pointer-events-none absolute left-4 right-20 top-12 z-10 flex min-h-7 flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-semibold text-slate-300">

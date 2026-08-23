@@ -10,6 +10,8 @@ import {
 
 describe('A-share financial colors', () => {
   it('uses red for rises and green for falls in market data', () => {
+    expect(FINANCIAL_CHART_COLORS.up).toBe('#EF4444');
+    expect(FINANCIAL_CHART_COLORS.down).toBe('#22C55E');
     expect(financialDirection(1.2)).toBe('up');
     expect(financialToneClass(1.2)).toBe('text-market-up');
     expect(financialToneClass(-1.2)).toBe('text-market-down');
@@ -18,6 +20,7 @@ describe('A-share financial colors', () => {
   });
 
   it('uses light blue for falls inside a holding context', () => {
+    expect(FINANCIAL_CHART_COLORS.holdingDown).toBe('#60A5FA');
     expect(financialToneClass(-1.2, 'holding')).toBe('text-holding-down');
     expect(financialToneBadgeClass(-1.2, 'holding')).toContain(
       'text-holding-down'

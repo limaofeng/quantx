@@ -105,6 +105,22 @@ describe('TradingCard', () => {
     expect(screen.getByPlaceholderText('100')).toHaveValue(420);
   });
 
+  it('uses the financial buy and sell action colors', () => {
+    setupTradingCard();
+
+    expect(screen.getByRole('button', { name: '确认买入' })).toHaveClass(
+      'bg-market-buy-cta',
+      'text-white'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '平仓' }));
+
+    expect(screen.getByRole('button', { name: '确认平仓' })).toHaveClass(
+      'bg-market-down',
+      'text-white'
+    );
+  });
+
   it('does not rehydrate an unchanged zero-price initial holding', () => {
     const position = makePosition({ lastPrice: 0 });
     const selectedStock = {

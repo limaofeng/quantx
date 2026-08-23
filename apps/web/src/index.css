@@ -10,8 +10,8 @@
   --card-foreground: hsl(222, 47%, 11%);
   --popover: hsl(0, 0%, 100%);
   --popover-foreground: hsl(222, 47%, 11%);
-  --primary: hsl(221, 83%, 53%);
-  /* Trust Blue */
+  --primary: #3B82F6;
+  /* Studio interaction blue */
   --primary-foreground: hsl(210, 40%, 98%);
   --secondary: hsl(210, 40%, 96%);
   --secondary-foreground: hsl(222, 47%, 11%);
@@ -23,14 +23,16 @@
   --destructive-foreground: hsl(210, 40%, 98%);
   --border: hsl(214, 32%, 91%);
   --input: hsl(214, 32%, 91%);
-  --ring: hsl(221, 83%, 53%);
+  --ring: #3B82F6;
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
   /* A 股行情语义色：红涨、绿跌；持仓下跌使用淡蓝色。 */
-  --market-up: 220 38 38;
+  /* Light values are darkened for legible text on white surfaces. */
+  --market-up: 185 28 28;
   --market-down: 21 128 61;
-  --holding-down: 2 132 199;
+  --holding-down: 29 78 216;
   --market-flat: 71 85 105;
+  --market-buy-cta: 220 38 38;
   /* Amber/Gold */
   --font-sans: Inter, system-ui, sans-serif;
   --font-serif: Georgia, serif;
@@ -43,8 +45,8 @@
   --shadow-emerald: 0 4px 12px rgba(16, 185, 129, 0.15);
   --shadow-amber: 0 4px 12px rgba(245, 158, 11, 0.15);
   --shadow-rose: 0 4px 12px rgba(244, 63, 94, 0.15);
-  --button-primary: #2563eb;
-  --button-primary-hover: #3b82f6;
+  --button-primary: #3B82F6;
+  --button-primary-hover: #2563EB;
   --button-primary-shadow: rgba(37, 99, 235, 0.2);
 
   --scrollbar-size: 8px;
@@ -59,55 +61,56 @@
   --skeleton-highlight: rgba(255, 255, 255, 0.42);
 
   /* Studio Workbench tokens */
-  --studio-workspace-surface: #08101d;
-  --studio-bg: #0b1120;
-  --studio-panel: #0f172a;
-  --studio-panel-muted: #09111f;
+  --studio-workspace-surface: #050B16;
+  --studio-bg: #050B16;
+  --studio-panel: #0B1728;
+  --studio-panel-muted: #0F1D30;
   --studio-border: rgba(255, 255, 255, 0.07);
   --studio-text: #f8fafc;
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #2563eb;
-  --studio-primary-soft: rgba(37, 99, 235, 0.14);
+  --studio-primary: #3B82F6;
+  --studio-primary-soft: rgba(59, 130, 246, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
   --studio-warning: #f59e0b;
 }
 
 .dark {
-  --background: hsl(222, 47%, 2%);
-  /* OLED Black */
+  --background: #050B16;
+  /* Studio base */
   --foreground: hsl(213, 31%, 91%);
-  --card: hsl(222, 47%, 4%);
+  --card: #0B1728;
   --card-foreground: hsl(213, 31%, 91%);
-  --popover: hsl(222, 47%, 4%);
+  --popover: #0B1728;
   --popover-foreground: hsl(213, 31%, 91%);
-  --primary: hsl(210, 100%, 66%);
-  /* Modern primary */
+  --primary: #3B82F6;
+  /* Studio interaction blue */
   --primary-foreground: hsl(222, 47%, 1%);
-  --secondary: hsl(217, 32%, 12%);
+  --secondary: #0F1D30;
   --secondary-foreground: hsl(213, 31%, 91%);
-  --muted: hsl(217, 32%, 12%);
+  --muted: #0F1D30;
   --muted-foreground: hsl(215, 20%, 65%);
-  --accent: hsl(217, 32%, 15%);
+  --accent: #0F1D30;
   --accent-foreground: hsl(210, 40%, 98%);
   --destructive: hsl(0, 84%, 40%);
   --destructive-foreground: hsl(210, 40%, 98%);
   --border: hsl(217, 32%, 17%);
   --input: hsl(217, 32%, 17%);
-  --ring: hsl(210, 100%, 66%);
+  --ring: #3B82F6;
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
-  --market-up: 248 113 113;
-  --market-down: 74 222 128;
-  --holding-down: 125 211 252;
+  --market-up: 239 68 68;
+  --market-down: 34 197 94;
+  --holding-down: 96 165 250;
   --market-flat: 148 163 184;
+  --market-buy-cta: 220 38 38;
 
   --shadow-blue: 0 0 15px rgba(37, 99, 235, 0.1);
   --shadow-blue-lg: 0 0 30px rgba(37, 99, 235, 0.2);
-  --button-primary: #2563eb;
-  --button-primary-hover: #3b82f6;
+  --button-primary: #3B82F6;
+  --button-primary-hover: #2563EB;
   --button-primary-shadow: rgba(37, 99, 235, 0.2);
   --scrollbar-track: rgba(15, 23, 42, 0.42);
   --scrollbar-thumb: rgba(71, 85, 105, 0.58);
@@ -119,16 +122,17 @@
   --skeleton-base: rgba(148, 163, 184, 0.07);
   --skeleton-highlight: rgba(226, 232, 240, 0.075);
 
-  --studio-bg: #0b1120;
-  --studio-panel: #0f172a;
-  --studio-panel-muted: #09111f;
+  --studio-workspace-surface: #050B16;
+  --studio-bg: #050B16;
+  --studio-panel: #0B1728;
+  --studio-panel-muted: #0F1D30;
   --studio-border: rgba(255, 255, 255, 0.07);
   --studio-text: #f8fafc;
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #2563eb;
-  --studio-primary-soft: rgba(37, 99, 235, 0.14);
+  --studio-primary: #3B82F6;
+  --studio-primary-soft: rgba(59, 130, 246, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
   --studio-warning: #f59e0b;

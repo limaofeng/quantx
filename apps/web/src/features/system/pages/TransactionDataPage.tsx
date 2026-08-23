@@ -211,14 +211,14 @@ export function TransactionDataPage() {
           </Card>
 
           <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+            <div className="p-3 rounded-xl bg-market-up/10 text-market-up">
               <TrendingUp className="w-6 h-6" />
             </div>
             <div>
               <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 平均收益率
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-2xl font-black text-market-up mt-1">
                 +8.5%
               </p>
             </div>
@@ -364,8 +364,8 @@ export function TransactionDataPage() {
                           className={cn(
                             'font-medium border-0',
                             item.type === '买入'
-                              ? 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400'
-                              : 'bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400'
+                              ? 'bg-market-up/10 text-market-up dark:bg-market-up/15'
+                              : 'bg-market-down/10 text-market-down dark:bg-market-down/15'
                           )}
                         >
                           {item.type}

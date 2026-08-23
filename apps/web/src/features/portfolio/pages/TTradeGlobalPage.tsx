@@ -261,12 +261,21 @@ function MetricCard({
 }: {
   icon: React.ElementType;
   label: string;
-  tone?: 'amber' | 'emerald' | 'red' | 'sky' | 'slate';
+  tone?:
+    | 'amber'
+    | 'emerald'
+    | 'marketDown'
+    | 'marketUp'
+    | 'red'
+    | 'sky'
+    | 'slate';
   value: string | number;
 }) {
   const tones = {
     amber: 'border-amber-400/15 bg-amber-400/[0.06] text-amber-200',
     emerald: 'border-emerald-400/15 bg-emerald-400/[0.06] text-emerald-200',
+    marketDown: 'border-market-down/15 bg-market-down/[0.06] text-market-down',
+    marketUp: 'border-market-up/15 bg-market-up/[0.06] text-market-up',
     red: 'border-red-400/15 bg-red-400/[0.06] text-red-200',
     sky: 'border-sky-300/15 bg-sky-300/[0.06] text-sky-200',
     slate: 'border-white/[0.07] bg-white/[0.025] text-slate-200',
@@ -907,7 +916,11 @@ function TTradeReplayPanel({
               <MetricCard
                 icon={CircleDollarSign}
                 label="做 T 税费后增量"
-                tone={(replay.summary?.tNetProfit || 0) >= 0 ? 'red' : 'sky'}
+                tone={
+                  (replay.summary?.tNetProfit || 0) >= 0
+                    ? 'marketUp'
+                    : 'marketDown'
+                }
                 value={
                   replay.summary
                     ? `¥${formatNumber(replay.summary.tNetProfit)}`
@@ -918,7 +931,9 @@ function TTradeReplayPanel({
                 icon={TrendingUp}
                 label="相对不做 T 超额"
                 tone={
-                  (replay.summary?.excessReturnPct || 0) >= 0 ? 'red' : 'sky'
+                  (replay.summary?.excessReturnPct || 0) >= 0
+                    ? 'marketUp'
+                    : 'marketDown'
                 }
                 value={
                   replay.summary
@@ -1176,9 +1191,7 @@ function TTradeReplayPanel({
                         <td
                           className={cn(
                             'px-3 py-2 text-right font-mono font-bold',
-                            cycle.netProfit >= 0
-                              ? 'text-red-300'
-                              : 'text-emerald-300'
+                            financialToneClass(cycle.netProfit)
                           )}
                         >
                           ¥{formatNumber(cycle.netProfit)}
@@ -1272,9 +1285,7 @@ function TTradeReplayPanel({
               <span>{item.runId.slice(0, 8)}</span>
               <span
                 className={
-                  (item.summary?.tNetProfit || 0) >= 0
-                    ? 'text-red-300'
-                    : 'text-emerald-300'
+                  financialToneClass(item.summary?.tNetProfit)
                 }
               >
                 {item.summary
@@ -3372,7 +3383,7 @@ export function TTradeGlobalPage() {
               <Button
                 type="button"
                 size="sm"
-                className="h-8 shrink-0 rounded-sm bg-red-500 px-3 text-[10px] font-black text-white hover:bg-red-400"
+                className="h-8 shrink-0 rounded-sm bg-primary px-3 text-[10px] font-black text-white hover:bg-primary/90"
                 disabled={
                   actionLoading || (form.mode === 'live' && !form.acknowledged)
                 }
@@ -4357,7 +4368,7 @@ export function TTradeGlobalPage() {
                 >
                   <SelectTrigger
                     id="t-trade-time-exit-mode"
-                    className="mt-3 h-9 rounded-sm border-white/10 bg-[#07111f] text-xs focus:ring-red-500/60"
+                    className="mt-3 h-9 rounded-sm border-white/10 bg-[#07111f] text-xs focus:ring-primary/60"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -4402,7 +4413,7 @@ export function TTradeGlobalPage() {
                         onChange={event =>
                           setField('timeExitTime', event.target.value)
                         }
-                        className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-xs focus-visible:ring-red-500/60"
+                        className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-xs focus-visible:ring-primary/60"
                       />
                     </div>
                   </div>

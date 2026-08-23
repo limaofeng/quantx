@@ -123,7 +123,7 @@ export function MarketOverview() {
                     >
                       <div className="flex items-center gap-3">
                         <div
-                          className={`w-1 h-8 rounded-full ${idx.pct.startsWith('+') ? 'bg-red-500' : 'bg-emerald-500'}`}
+                          className={`w-1 h-8 rounded-full ${idx.pct.startsWith('+') ? 'bg-market-up' : 'bg-market-down'}`}
                         />
                         <div>
                           <div className="font-bold text-sm text-slate-700 dark:text-slate-200">
@@ -139,7 +139,7 @@ export function MarketOverview() {
                           {idx.close}
                         </div>
                         <div
-                          className={`text-xs font-bold ${idx.pct.startsWith('+') ? 'text-red-500' : 'text-emerald-500'}`}
+                          className={`text-xs font-bold ${idx.pct.startsWith('+') ? 'text-market-up' : 'text-market-down'}`}
                         >
                           {idx.pct}
                         </div>

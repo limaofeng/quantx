@@ -1219,7 +1219,7 @@ export default function MarketShortcutsPage() {
                 <div className="overflow-hidden rounded-xl border border-white/10 bg-slate-900">
                   <div className="flex items-center justify-between gap-3 border-b border-white/5 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <ListOrdered className="h-3.5 w-3.5 shrink-0 text-red-300" />
+                      <ListOrdered className="h-3.5 w-3.5 shrink-0 text-primary" />
                       <h2 className="text-xs font-black text-slate-100">
                         股票排行
                       </h2>

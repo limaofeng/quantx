@@ -27,20 +27,20 @@ function markerBadgeClass(marker: StrategyChartMarker) {
   }
   if (marker.tradeSide === 'SELL') {
     return marker.eventType === 'signal'
-      ? 'border-sky-300/70 bg-sky-400/20 text-sky-100'
-      : 'border-sky-300/70 bg-sky-500 text-white';
+      ? 'border-market-down/70 bg-market-down/20 text-market-down'
+      : 'border-market-down/70 bg-market-down text-white';
   }
   if (marker.tradeSide === 'BUY') {
     return marker.eventType === 'signal'
-      ? 'border-red-300/70 bg-red-400/20 text-red-100'
-      : 'border-red-300/70 bg-red-500 text-white';
+      ? 'border-market-up/70 bg-market-up/20 text-market-up'
+      : 'border-market-up/70 bg-market-up text-white';
   }
   return 'border-slate-300/60 bg-slate-500 text-white';
 }
 
 function detailToneClass(tone?: StrategyChartMarkerDetail['tone']) {
-  if (tone === 'buy') return 'text-red-300';
-  if (tone === 'sell') return 'text-sky-300';
+  if (tone === 'buy') return 'text-market-up';
+  if (tone === 'sell') return 'text-market-down';
   if (tone === 'success') return 'text-emerald-300';
   if (tone === 'warning') return 'text-amber-300';
   if (tone === 'muted') return 'text-slate-400';
@@ -133,11 +133,11 @@ function HoverPanel({ hover }: { hover: StrategyChartHoverData }) {
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-slate-500">最高</span>
-              <span className="text-red-400">{hover.high?.toFixed(2)}</span>
+              <span className="text-market-up">{hover.high?.toFixed(2)}</span>
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-slate-500">最低</span>
-              <span className="text-green-400">{hover.low?.toFixed(2)}</span>
+              <span className="text-market-down">{hover.low?.toFixed(2)}</span>
             </div>
             <div className="flex justify-between gap-3">
               <span className="text-slate-500">收盘</span>
@@ -150,7 +150,9 @@ function HoverPanel({ hover }: { hover: StrategyChartHoverData }) {
                 <span className="text-slate-500">涨跌</span>
                 <span
                   className={
-                    (hover.change || 0) >= 0 ? 'text-red-400' : 'text-green-400'
+                    (hover.change || 0) >= 0
+                      ? 'text-market-up'
+                      : 'text-market-down'
                   }
                 >
                   {(hover.change || 0) >= 0 ? '+' : ''}

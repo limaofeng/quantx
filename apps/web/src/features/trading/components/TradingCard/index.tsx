@@ -346,8 +346,8 @@ export function TradingCard({
             className={cn(
               'absolute top-0.5 bottom-0.5 w-[calc(50%-2px)] transition-all duration-300 ease-spring rounded-md shadow-sm ring-1 ring-black/5',
               tradeType === 'buy'
-                ? 'left-0.5 bg-rose-500'
-                : 'left-[calc(50%+0.5px)] bg-emerald-500'
+                ? 'left-0.5 bg-market-up'
+                : 'left-[calc(50%+0.5px)] bg-market-down'
             )}
           />
           <button
@@ -595,8 +595,8 @@ export function TradingCard({
             className={cn(
               'w-full h-10 text-[10px] font-black uppercase tracking-[0.2em] rounded-xl shadow-lg transition-all duration-300 active:scale-[0.98]',
               tradeType === 'buy'
-                ? 'bg-rose-500 hover:bg-rose-600 shadow-rose-500/20 hover:shadow-rose-500/40'
-                : 'bg-emerald-500 hover:bg-emerald-600 shadow-emerald-500/20 hover:shadow-emerald-500/40'
+                ? 'bg-market-buy-cta text-white hover:bg-market-buy-cta/90 shadow-market-buy-cta/20 hover:shadow-market-buy-cta/40'
+                : 'bg-market-down text-white hover:bg-market-down/90 shadow-market-down/20 hover:shadow-market-down/40'
             )}
             disabled={
               !selectedStock ||

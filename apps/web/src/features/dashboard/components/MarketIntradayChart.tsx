@@ -115,7 +115,7 @@ export function MarketIntradayChart({
     return (
       <div className="flex h-[210px] items-center justify-center xl:h-[150px]">
         <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-          <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-red-400" />
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-primary" />
           正在加载分钟行情…
         </div>
       </div>

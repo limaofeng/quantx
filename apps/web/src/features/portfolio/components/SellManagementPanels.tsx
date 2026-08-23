@@ -1380,7 +1380,7 @@ function ChoiceCard({
       className={cn(
         'flex cursor-pointer gap-2 rounded-md border p-3 transition-colors',
         checked
-          ? 'border-red-400/40 bg-red-500/10'
+          ? 'border-primary/40 bg-primary/10'
           : 'border-white/8 bg-white/[0.02] hover:border-white/20'
       )}
     >
@@ -1670,14 +1670,14 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
     <div className="grid min-h-0 flex-1 gap-3 overflow-hidden p-3 xl:grid-cols-[360px_minmax(0,1fr)]">
       <section className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 custom-scrollbar">
         <div className="sticky top-0 flex items-center gap-2 border-b border-white/5 bg-[#0b1120] p-3 text-xs font-black text-slate-200">
-          <History className="h-4 w-4 text-red-300" />
+          <History className="h-4 w-4 text-market-down" />
           卖出计划
         </div>
         <div className="divide-y divide-white/5">
           {allPlans.map(plan => (
             <button
               className={cn(
-                'w-full px-3 py-3 text-left hover:bg-white/[0.03] focus:outline-none focus:ring-1 focus:ring-inset focus:ring-red-400/40',
+                'w-full px-3 py-3 text-left hover:bg-white/[0.03] focus:outline-none focus:ring-1 focus:ring-inset focus:ring-primary/40',
                 activePlanId === plan.planId && 'bg-white/[0.05]'
               )}
               key={plan.planId}

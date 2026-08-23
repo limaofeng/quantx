@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
 import {
   generateIntradayData,
   generateHistoricalData,
@@ -161,11 +162,11 @@ export default function StockChart({
         const candleData = generateHistoricalData(currentPrice, timePeriod);
 
         const candlestickSeries = chart.addSeries(CandlestickSeries, {
-          upColor: '#ef4444',
-          downColor: '#22c55e',
+          upColor: FINANCIAL_CHART_COLORS.up,
+          downColor: FINANCIAL_CHART_COLORS.down,
           borderVisible: false,
-          wickUpColor: '#ef4444',
-          wickDownColor: '#22c55e',
+          wickUpColor: FINANCIAL_CHART_COLORS.up,
+          wickDownColor: FINANCIAL_CHART_COLORS.down,
         });
 
         candlestickSeries.setData(

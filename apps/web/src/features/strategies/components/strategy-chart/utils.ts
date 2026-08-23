@@ -1,5 +1,7 @@
 import type { Time } from 'lightweight-charts';
 
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
+
 import type {
   ExecutionTraceView,
   StrategyDecision,
@@ -240,12 +242,14 @@ function executionEventPrice(
 
 function resultMarkerColor(trace: ExecutionTraceView, side: string) {
   if (isRejectedTrace(trace)) return '#f59e0b';
-  return side === 'SELL' ? '#3b82f6' : '#ef4444';
+  return side === 'SELL'
+    ? FINANCIAL_CHART_COLORS.down
+    : FINANCIAL_CHART_COLORS.up;
 }
 
 function signalMarkerColor(side: string) {
-  if (side === 'SELL') return '#93c5fd';
-  if (side === 'BUY') return '#fca5a5';
+  if (side === 'SELL') return FINANCIAL_CHART_COLORS.down;
+  if (side === 'BUY') return FINANCIAL_CHART_COLORS.up;
   return '#94a3b8';
 }
 

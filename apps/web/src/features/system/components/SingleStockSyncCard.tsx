@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { gql } from '@/generated/gql';
 import { useToast } from '@/hooks/use-toast';
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 const SEARCH_DATA_PORTAL_INSTRUMENTS = gql(`
@@ -167,9 +168,7 @@ export function StockDataQueryCard() {
                       <div
                         className={cn(
                           'font-mono text-[10px]',
-                          (item.quote?.changePercent ?? 0) >= 0
-                            ? 'text-red-500'
-                            : 'text-emerald-500'
+                          financialToneClass(item.quote?.changePercent)
                         )}
                       >
                         {item.quote?.changePercent == null

@@ -116,8 +116,8 @@ const GridTable: React.FC<Props> = ({ result }) => {
                 className={cn(
                   'hover:bg-slate-100/50 dark:hover:bg-slate-800/50 transition-colors group',
                   level.side === 'SELL'
-                    ? 'bg-green-500/[0.02]'
-                    : 'bg-red-500/[0.02]'
+                    ? 'bg-market-down/[0.02]'
+                    : 'bg-market-up/[0.02]'
                 )}
               >
                 <td className="px-3 py-1.5 font-medium flex items-center gap-2">
@@ -125,8 +125,8 @@ const GridTable: React.FC<Props> = ({ result }) => {
                     className={cn(
                       'px-1.5 py-0.5 rounded-[4px] text-[10px] flex items-center w-10 justify-center font-bold tracking-tight',
                       level.side === 'SELL'
-                        ? 'bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20'
-                        : 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20'
+                        ? 'border border-market-down/20 bg-market-down/10 text-market-down'
+                        : 'border border-market-up/20 bg-market-up/10 text-market-up'
                     )}
                   >
                     {level.side === 'SELL' ? '卖出' : '买入'}

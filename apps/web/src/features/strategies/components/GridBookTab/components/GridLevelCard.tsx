@@ -107,8 +107,8 @@ export function GridLevelCard({
             isDisabled
               ? 'border-slate-700/45 bg-[linear-gradient(90deg,rgba(51,65,85,0.12),rgba(15,23,42,0.34))] shadow-none hover:border-slate-600/55'
               : isSell
-                ? 'border-emerald-500/25 bg-[linear-gradient(90deg,rgba(16,185,129,0.09),rgba(16,185,129,0.035))] hover:border-emerald-400/30'
-                : 'border-rose-500/25 bg-[linear-gradient(90deg,rgba(244,63,94,0.09),rgba(244,63,94,0.035))] hover:border-rose-400/30'
+                ? 'border-market-down/25 bg-market-down/[0.07] hover:border-market-down/35'
+                : 'border-market-up/25 bg-market-up/[0.07] hover:border-market-up/35'
           } ${isDraggingLevel ? 'shadow-xl ring-2 ring-blue-400/35' : ''}`}
         >
           <div className="grid grid-cols-[22px_minmax(122px,0.72fr)_minmax(148px,0.42fr)_minmax(190px,0.96fr)] items-center gap-3 text-[10px] font-bold">
@@ -121,8 +121,8 @@ export function GridLevelCard({
                     isDisabled
                       ? 'text-slate-400'
                       : isSell
-                        ? 'text-emerald-200'
-                        : 'text-rose-200'
+                        ? 'text-market-down'
+                        : 'text-market-up'
                   }`}
                 >
                   {levelTitle}
@@ -215,8 +215,8 @@ export function GridLevelCard({
                     isDisabled
                       ? 'text-slate-500'
                       : isSell
-                        ? 'text-emerald-300'
-                        : 'text-rose-300'
+                        ? 'text-market-down'
+                        : 'text-market-up'
                   }`}
                 >
                   {secondaryMetric}

@@ -14,6 +14,7 @@ import { Loader2 } from 'lucide-react';
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 
 import { useInfiniteKLines } from '@/hooks';
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
 
 import { type GridResult } from '../types';
 
@@ -188,11 +189,11 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
     }
 
     const newSeries = chartInstance.addSeries(CandlestickSeries, {
-      upColor: '#ef4444', // Red for up (A-share style)
-      downColor: '#22c55e', // Green for down
+      upColor: FINANCIAL_CHART_COLORS.up,
+      downColor: FINANCIAL_CHART_COLORS.down,
       borderVisible: false,
-      wickUpColor: '#ef4444',
-      wickDownColor: '#22c55e',
+      wickUpColor: FINANCIAL_CHART_COLORS.up,
+      wickDownColor: FINANCIAL_CHART_COLORS.down,
       priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
       lastValueVisible,
       autoscaleInfoProvider: () => ({
@@ -211,8 +212,8 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
         price: level.price,
         color:
           level.side === 'BUY'
-            ? 'rgba(239, 68, 68, 0.6)' // Red for BUY
-            : 'rgba(34, 197, 94, 0.6)', // Green for SELL
+            ? `${FINANCIAL_CHART_COLORS.up}99`
+            : `${FINANCIAL_CHART_COLORS.down}99`,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
@@ -376,11 +377,13 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-slate-400">最高</span>
-              <span className="text-red-400">{hoverData.high.toFixed(2)}</span>
+              <span className="text-market-up">
+                {hoverData.high.toFixed(2)}
+              </span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-slate-400">最低</span>
-              <span className="text-green-400">{hoverData.low.toFixed(2)}</span>
+              <span className="text-market-down">{hoverData.low.toFixed(2)}</span>
             </div>
             <div className="flex justify-between gap-4">
               <span className="text-slate-400">收盘</span>
@@ -393,7 +396,9 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
                 <span className="text-slate-400">涨跌</span>
                 <span
                   className={
-                    hoverData.change >= 0 ? 'text-red-400' : 'text-green-400'
+                    hoverData.change >= 0
+                      ? 'text-market-up'
+                      : 'text-market-down'
                   }
                 >
                   {hoverData.change >= 0 ? '+' : ''}
@@ -405,8 +410,8 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
                 <span
                   className={
                     hoverData.changePercent >= 0
-                      ? 'text-red-400'
-                      : 'text-green-400'
+                      ? 'text-market-up'
+                      : 'text-market-down'
                   }
                 >
                   {hoverData.changePercent >= 0 ? '+' : ''}
@@ -422,13 +427,13 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
       <div className="shrink-0 px-4 py-2 z-10 flex items-center justify-end">
         <div className="flex gap-3 pr-2">
           <div className="flex items-center gap-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-500/50" />
+            <div className="w-1.5 h-1.5 rounded-full bg-market-up/50" />
             <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               盈利区
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-red-500/50" />
+            <div className="w-1.5 h-1.5 rounded-full bg-market-down/50" />
             <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
               防御区
             </span>

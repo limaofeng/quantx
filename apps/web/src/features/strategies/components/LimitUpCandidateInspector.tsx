@@ -1,6 +1,7 @@
 import { ExternalLink } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { financialToneClass } from '@/shared/utils/financialColors';
 
 import type { RadarCandidate } from '../hooks/useLimitUpRadar';
 
@@ -47,11 +48,7 @@ export function LimitUpCandidateInspector({
           <InspectorMetric
             detail={`CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
             label="净期望"
-            tone={
-              candidate.expectedNetReturnPct >= 0
-                ? 'text-red-300'
-                : 'text-emerald-300'
-            }
+            tone={financialToneClass(candidate.expectedNetReturnPct)}
             value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
           />
         </section>

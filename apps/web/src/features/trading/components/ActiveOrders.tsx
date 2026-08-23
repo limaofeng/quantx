@@ -102,8 +102,8 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
             className={cn(
               'group relative flex flex-col p-2 rounded-lg bg-white/40 dark:bg-slate-900/40 border border-slate-200/30 dark:border-slate-800/30 transition-all duration-300 hover:bg-white/60 dark:hover:bg-slate-800/60 overflow-hidden',
               order.type === OrderType.Buy
-                ? 'border-l-2 border-l-rose-500'
-                : 'border-l-2 border-l-emerald-500'
+                ? 'border-l-2 border-l-market-up'
+                : 'border-l-2 border-l-market-down'
             )}
           >
             <div className="flex items-center justify-between mb-1">
@@ -149,8 +149,8 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
                   className={cn(
                     'font-black uppercase tracking-widest text-[8px]',
                     order.type === OrderType.Buy
-                      ? 'text-rose-500'
-                      : 'text-emerald-500'
+                      ? 'text-market-up'
+                      : 'text-market-down'
                   )}
                 >
                   {order.type === OrderType.Buy ? '买入' : '卖出'}

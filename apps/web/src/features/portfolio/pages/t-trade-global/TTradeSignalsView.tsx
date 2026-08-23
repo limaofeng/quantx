@@ -572,7 +572,7 @@ export function TTradeSignalsView({
                     <Button
                       type="button"
                       size="sm"
-                      className="h-8 rounded-sm bg-red-500 text-[10px] text-white hover:bg-red-400"
+                      className="h-8 rounded-sm bg-market-buy-cta text-[10px] text-white hover:bg-market-buy-cta/90"
                       disabled={actionLoading || !approveAllowed}
                       onClick={() => onApprove(session, snapshot)}
                     >

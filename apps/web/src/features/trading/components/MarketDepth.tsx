@@ -6,6 +6,11 @@ import { useLocation } from 'wouter';
 import { StudioMenu, useStudioMenu } from '@/components/studio-workbench';
 import { Card } from '@/components/ui/card';
 import { gql } from '@/generated/gql';
+import {
+  financialDirection,
+  financialToneBadgeClass,
+  financialToneClass,
+} from '@/shared/utils/financialColors';
 
 import {
   type DepthLevel,
@@ -122,14 +127,14 @@ export function MarketDepth({
     selectedStock,
     tick: marketTick,
   });
-  const priceToneClass =
-    changePercent !== null && changePercent < 0
-      ? 'text-success'
-      : 'text-destructive';
-  const priceBadgeClass =
-    changePercent !== null && changePercent < 0
-      ? 'bg-emerald-500/10 text-success'
-      : 'bg-rose-500/10 text-destructive/90';
+  const priceToneClass = financialToneClass(changePercent);
+  const priceBadgeClass = financialToneBadgeClass(changePercent);
+  const priceIndicatorClass =
+    financialDirection(changePercent) === 'up'
+      ? 'bg-market-up'
+      : financialDirection(changePercent) === 'down'
+        ? 'bg-market-down'
+        : 'bg-market-flat';
   const maxVol = Math.max(
     1,
     ...asks.map(level => level.volume || 0),
@@ -190,7 +195,7 @@ export function MarketDepth({
             return (
               <div
                 key={`sell-${level}`}
-                className="relative flex h-5.5 cursor-pointer items-center justify-between px-2 transition-colors duration-200 hover:bg-success/5"
+                className="relative flex h-5.5 cursor-pointer items-center justify-between px-2 transition-colors duration-200 hover:bg-market-down/5"
                 onClick={() => handlePriceSelect(order?.price)}
                 onContextMenu={event =>
                   openDepthMenu(event, {
@@ -203,7 +208,7 @@ export function MarketDepth({
                 }
               >
                 <div
-                  className="absolute right-0 h-[80%] my-auto bg-gradient-to-l from-emerald-500/20 to-transparent transition-all duration-700 rounded-l-sm"
+                  className="absolute right-0 h-[80%] my-auto bg-gradient-to-l from-market-down/20 to-transparent transition-all duration-700 rounded-l-sm"
                   style={{ width: `${(volume / maxVol) * 70}%` }}
                 />
 
@@ -213,7 +218,7 @@ export function MarketDepth({
                   </span>
                 </div>
 
-                <span className="text-success font-bold z-10 w-1/3 text-right tabular-nums">
+                <span className="text-market-down font-bold z-10 w-1/3 text-right tabular-nums">
                   {formatPrice(order?.price)}
                 </span>
 
@@ -254,7 +259,9 @@ export function MarketDepth({
             <span className="text-[9px] text-muted-foreground/60 font-bold uppercase tracking-tighter">
               最新价
             </span>
-            <div className="w-1 h-1 bg-destructive rounded-full mt-0.5 animate-pulse" />
+            <div
+              className={`w-1 h-1 ${priceIndicatorClass} rounded-full mt-0.5 animate-pulse`}
+            />
           </div>
         </div>
 
@@ -266,7 +273,7 @@ export function MarketDepth({
             return (
               <div
                 key={`buy-${level}`}
-                className="relative flex h-5.5 cursor-pointer items-center justify-between px-2 transition-colors duration-200 hover:bg-destructive/5"
+                className="relative flex h-5.5 cursor-pointer items-center justify-between px-2 transition-colors duration-200 hover:bg-market-up/5"
                 onClick={() => handlePriceSelect(order?.price)}
                 onContextMenu={event =>
                   openDepthMenu(event, {
@@ -279,7 +286,7 @@ export function MarketDepth({
                 }
               >
                 <div
-                  className="absolute right-0 h-[80%] my-auto bg-gradient-to-l from-rose-500/20 to-transparent transition-all duration-700 rounded-l-sm"
+                  className="absolute right-0 h-[80%] my-auto bg-gradient-to-l from-market-up/20 to-transparent transition-all duration-700 rounded-l-sm"
                   style={{ width: `${(volume / maxVol) * 70}%` }}
                 />
                 <div className="flex items-center gap-2 z-10 w-1/4">
@@ -288,7 +295,7 @@ export function MarketDepth({
                   </span>
                 </div>
 
-                <span className="text-destructive font-bold z-10 w-1/3 text-right tabular-nums">
+                <span className="text-market-up font-bold z-10 w-1/3 text-right tabular-nums">
                   {formatPrice(order?.price)}
                 </span>
 

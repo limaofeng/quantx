@@ -12,6 +12,10 @@ import {
   StrategyRunMode,
   StrategyRunStatus,
 } from '@/generated/gql/graphql';
+import {
+  FINANCIAL_CHART_COLORS,
+  financialToneClass,
+} from '@/shared/utils/financialColors';
 
 import type {
   ExecutionTraceView,
@@ -126,8 +130,8 @@ export default function StrategyMonitor({
               price: Number(level.price),
               color:
                 level.side === 'BUY'
-                  ? 'rgba(239, 68, 68, 0.4)'
-                  : 'rgba(34, 197, 94, 0.4)',
+                  ? `${FINANCIAL_CHART_COLORS.up}66`
+                  : `${FINANCIAL_CHART_COLORS.down}66`,
               title: level.side === 'BUY' ? '买' : '卖',
               lineStyle: 'dashed',
               lineWidth: 1,
@@ -204,13 +208,9 @@ export default function StrategyMonitor({
                       最新价
                     </span>
                     <span
-                      className={`text-sm font-bold font-mono ${
-                        latestTick.lastPrice > (latestTick.preClose || 0)
-                          ? 'text-red-400'
-                          : latestTick.lastPrice < (latestTick.preClose || 0)
-                            ? 'text-green-400'
-                            : 'text-slate-200'
-                      }`}
+                      className={`text-sm font-bold font-mono ${financialToneClass(
+                        latestTick.lastPrice - (latestTick.preClose || 0)
+                      )}`}
                     >
                       {latestTick.lastPrice.toFixed(2)}
                     </span>
@@ -219,11 +219,9 @@ export default function StrategyMonitor({
                     <div className="flex items-center justify-between gap-3">
                       <span className="text-[9px] text-slate-500">涨跌幅</span>
                       <span
-                        className={`text-[10px] font-mono ${
-                          latestTick.lastPrice - latestTick.preClose >= 0
-                            ? 'text-red-400'
-                            : 'text-green-400'
-                        }`}
+                      className={`text-[10px] font-mono ${financialToneClass(
+                        latestTick.lastPrice - latestTick.preClose
+                      )}`}
                       >
                         {latestTick.lastPrice - latestTick.preClose >= 0
                           ? '+'

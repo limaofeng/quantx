@@ -177,7 +177,7 @@ function PendingSignalCard({
           size="sm"
           disabled={busy || countdown.expired || !canApprove}
           onClick={onApprove}
-          className="h-8 bg-red-500 text-[11px] font-black text-white hover:bg-red-400"
+          className="h-8 bg-market-buy-cta text-[11px] font-black text-white hover:bg-market-buy-cta/90"
           title={
             !canApprove
               ? '账户执行门禁尚未通过'
@@ -272,7 +272,7 @@ function ExitPlanCard({
           <div
             className={cn(
               'font-mono text-sm font-black',
-              plan.lastNetProfitPct >= 0 ? 'text-red-300' : 'text-emerald-300'
+              financialToneClass(plan.lastNetProfitPct, 'holding')
             )}
           >
             {plan.lastNetProfitPct >= 0 ? '+' : ''}

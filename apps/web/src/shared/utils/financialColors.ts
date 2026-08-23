@@ -2,10 +2,10 @@ export type FinancialColorContext = 'market' | 'holding';
 export type FinancialDirection = 'up' | 'down' | 'flat';
 
 export const FINANCIAL_CHART_COLORS = {
-  up: '#ef4444',
-  down: '#22c55e',
-  holdingDown: '#7dd3fc',
-  flat: '#94a3b8',
+  up: '#EF4444',
+  down: '#22C55E',
+  holdingDown: '#60A5FA',
+  flat: '#94A3B8',
 } as const;
 
 export function financialDirection(value: unknown): FinancialDirection {

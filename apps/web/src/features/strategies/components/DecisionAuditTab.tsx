@@ -221,8 +221,8 @@ export default function DecisionAuditTab({
                           variant="outline"
                           className={`rounded-full text-[8px] font-black ${
                             intent.side === 'BUY'
-                              ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500'
-                              : 'border-rose-500/30 bg-rose-500/5 text-rose-500'
+                              ? 'border-market-up/30 bg-market-up/5 text-market-up'
+                              : 'border-market-down/30 bg-market-down/5 text-market-down'
                           }`}
                         >
                           {intent.side === 'BUY'

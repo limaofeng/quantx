@@ -129,13 +129,13 @@ function getConditionalOrderStatus(
 ) {
   if (!order) return { label: '未配置', tone: 'text-slate-400' };
   if (order.status === 'SUBMITTED') {
-    return { label: '委托待成交', tone: 'text-emerald-300' };
+    return { label: '委托待成交', tone: 'text-market-down' };
   }
   if (order.status === 'PARTIALLY_EXITED') {
     return { label: '部分成交后跟踪', tone: 'text-blue-200' };
   }
   if (order.status === 'COMPLETED') {
-    return { label: '保护数量已卖出', tone: 'text-emerald-300' };
+    return { label: '保护数量已卖出', tone: 'text-market-down' };
   }
   if (order.status === 'FAILED') {
     return { label: '提交失败', tone: 'text-rose-300' };
@@ -439,7 +439,7 @@ export function TakeProfitPlanPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/5 px-3 py-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <ShieldCheck className="h-3.5 w-3.5 text-red-300" />
+            <ShieldCheck className="h-3.5 w-3.5 text-market-up" />
             <h3 className="truncate text-xs font-black text-slate-100">
               止盈计划
             </h3>
@@ -558,7 +558,7 @@ export function TakeProfitPlanPanel({
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-8 shrink-0 gap-1 border border-white/10 bg-white/[0.025] px-2 text-[10px] font-black text-slate-300 hover:border-red-500/25 hover:bg-red-500/10 hover:text-red-100"
+                className="h-8 shrink-0 gap-1 border border-white/10 bg-white/[0.025] px-2 text-[10px] font-black text-slate-300 hover:border-primary/25 hover:bg-primary/10 hover:text-primary"
                 onClick={() => setStrategyPickerOpen(open => !open)}
                 aria-expanded={strategyPickerOpen}
               >
@@ -589,8 +589,8 @@ export function TakeProfitPlanPanel({
                         className={cn(
                           'min-h-[86px] rounded-md border px-3 py-2 text-left transition-colors',
                           selected
-                            ? 'border-red-400/40 bg-red-500/10 text-red-100'
-                            : 'border-white/5 bg-white/[0.025] text-slate-300 hover:border-red-500/25 hover:bg-red-500/10',
+                            ? 'border-primary/40 bg-primary/10 text-primary'
+                            : 'border-white/5 bg-white/[0.025] text-slate-300 hover:border-primary/25 hover:bg-primary/10',
                           !supported &&
                             'cursor-not-allowed border-white/5 bg-white/[0.015] text-slate-600 hover:border-white/5 hover:bg-white/[0.015]'
                         )}
@@ -638,8 +638,8 @@ export function TakeProfitPlanPanel({
                   className={cn(
                     'h-8 rounded-md border px-3 text-[10px] font-black transition-colors',
                     triggerMode === mode
-                      ? 'border-red-400/35 bg-red-500/10 text-red-100'
-                      : 'border-white/10 bg-white/[0.025] text-slate-500 hover:border-red-500/25 hover:text-red-200'
+                      ? 'border-primary/35 bg-primary/10 text-primary'
+                      : 'border-white/10 bg-white/[0.025] text-slate-500 hover:border-primary/25 hover:text-primary'
                   )}
                 >
                   {label}
@@ -711,7 +711,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('10', 'PERCENT_AVAILABLE', '30')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-red-500/25 hover:bg-red-500/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">轻仓止盈</div>
                 +10% / 卖30%
@@ -719,7 +719,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('15', 'PERCENT_AVAILABLE', '50')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-red-500/25 hover:bg-red-500/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">标准止盈</div>
                 +15% / 卖50%
@@ -727,7 +727,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('20', 'ALL_AVAILABLE')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-red-500/25 hover:bg-red-500/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">全部止盈</div>
                 +20% / 全部
@@ -800,7 +800,7 @@ export function TakeProfitPlanPanel({
         </div>
 
         {strategyId === 'PARTIAL_TRAILING' && (
-          <div className="grid gap-3 rounded-md border border-emerald-400/15 bg-emerald-500/[0.06] p-3 md:grid-cols-2">
+          <div className="grid gap-3 rounded-md border border-market-down/15 bg-market-down/[0.06] p-3 md:grid-cols-2">
             <div className="grid gap-1.5">
               <Label
                 htmlFor="take-profit-execution-mode"
@@ -826,7 +826,7 @@ export function TakeProfitPlanPanel({
                 type="checkbox"
                 checked={autoExitAuthorized}
                 onChange={event => setAutoExitAuthorized(event.target.checked)}
-                className="h-3.5 w-3.5 accent-emerald-500"
+                className="h-3.5 w-3.5 accent-market-down"
               />
               明确授权达到动态退出条件后自动提交卖单
             </label>
@@ -922,7 +922,7 @@ export function TakeProfitPlanPanel({
               size="sm"
               disabled={!canOperate || isLoading || !isSaveSupported}
               onClick={() => handleSave(true)}
-              className="h-8 bg-red-600 px-4 text-[10px] font-black text-white hover:bg-red-500"
+              className="h-8 bg-market-down px-4 text-[10px] font-black text-white hover:bg-market-down/90"
             >
               {isLoading ? (
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />

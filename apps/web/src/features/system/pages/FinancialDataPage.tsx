@@ -991,7 +991,11 @@ export function FinancialDataPage() {
                               className={cn(
                                 'h-8 rounded-lg border text-xs font-bold transition-colors cursor-pointer',
                                 profitFilter === value
-                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300'
+                                  ? value === 'profit'
+                                    ? 'border-market-up/40 bg-market-up/10 text-market-up'
+                                    : value === 'loss'
+                                      ? 'border-market-down/40 bg-market-down/10 text-market-down'
+                                      : 'border-primary/40 bg-primary/10 text-primary'
                                   : 'border-slate-200 text-slate-500 hover:bg-slate-50 dark:border-slate-800 dark:text-slate-400 dark:hover:bg-slate-900'
                               )}
                               onClick={() =>

@@ -70,6 +70,7 @@ import {
   KLinePeriod,
 } from '@/generated/gql/graphql';
 import { useDeploymentSync } from '@/hooks/useDeploymentSync';
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 import { DataStudioPageFrame } from '../components/DataStudioPageFrame';
@@ -598,7 +599,9 @@ export function StockDataDetailPage() {
             value={formatMoney(instrument?.quote?.lastPrice)}
             subValue={formatPercent(instrument?.quote?.changePercent)}
             tone={
-              (instrument?.quote?.changePercent ?? 0) >= 0 ? 'red' : 'green'
+              (instrument?.quote?.changePercent ?? 0) >= 0
+                ? 'marketUp'
+                : 'marketDown'
             }
           />
           <MetricTile
@@ -1334,7 +1337,7 @@ function MetricTile({
   label: string;
   value: string;
   subValue?: string;
-  tone?: 'amber' | 'blue' | 'red' | 'green';
+  tone?: 'amber' | 'blue' | 'red' | 'green' | 'marketUp' | 'marketDown';
 }) {
   return (
     <Card className="border-slate-200/70 p-4 shadow-sm dark:border-slate-800/70">
@@ -1349,6 +1352,8 @@ function MetricTile({
           <div
             className={cn(
               'truncate text-lg font-black text-slate-900 dark:text-white',
+              tone === 'marketUp' && 'text-market-up',
+              tone === 'marketDown' && 'text-market-down',
               tone === 'red' && 'text-red-600 dark:text-red-400',
               tone === 'green' && 'text-emerald-600 dark:text-emerald-400',
               tone === 'amber' && 'text-amber-600 dark:text-amber-400',
@@ -1524,11 +1529,11 @@ function KLinePreviewChart({
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#ef4444',
-      downColor: '#10b981',
+      upColor: FINANCIAL_CHART_COLORS.up,
+      downColor: FINANCIAL_CHART_COLORS.down,
       borderVisible: false,
-      wickUpColor: '#ef4444',
-      wickDownColor: '#10b981',
+      wickUpColor: FINANCIAL_CHART_COLORS.up,
+      wickDownColor: FINANCIAL_CHART_COLORS.down,
     });
     const volumeSeries = chart.addSeries(HistogramSeries, {
       color: '#94a3b8',
@@ -1549,7 +1554,10 @@ function KLinePreviewChart({
     const volumeData: HistogramData<UTCTimestamp>[] = data.map(item => ({
       time: toChartTime(item.time),
       value: item.volume,
-      color: item.close >= item.open ? '#ef444433' : '#10b98133',
+      color:
+        item.close >= item.open
+          ? `${FINANCIAL_CHART_COLORS.up}33`
+          : `${FINANCIAL_CHART_COLORS.down}33`,
     }));
 
     candleSeries.setData(candleData);
@@ -1628,10 +1636,10 @@ function KLineTable({
             <TableCell className="py-2 text-right font-mono text-xs">
               {formatNumber(item.open, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs text-red-500">
+            <TableCell className="py-2 text-right font-mono text-xs text-market-up">
               {formatNumber(item.high, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs text-emerald-500">
+            <TableCell className="py-2 text-right font-mono text-xs text-market-down">
               {formatNumber(item.low, 2)}
             </TableCell>
             <TableCell className="py-2 text-right font-mono text-xs">

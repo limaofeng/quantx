@@ -75,9 +75,9 @@ export function TradeRecords({
 
   const getTypeBadge = (type: string) => {
     return type === 'buy' ? (
-      <span className="text-[10px] text-success font-bold">买入</span>
+      <span className="text-[10px] text-market-up font-bold">买入</span>
     ) : (
-      <span className="text-[10px] text-destructive font-bold">卖出</span>
+      <span className="text-[10px] text-market-down font-bold">卖出</span>
     );
   };
 

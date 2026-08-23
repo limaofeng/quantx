@@ -283,8 +283,8 @@ export function OrderRecords({
                       className={cn(
                         'px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-tighter shrink-0',
                         order.type === OrderType.Buy
-                          ? 'bg-rose-500/10 text-destructive'
-                          : 'bg-emerald-500/10 text-success'
+                          ? 'bg-market-up/10 text-market-up'
+                          : 'bg-market-down/10 text-market-down'
                       )}
                     >
                       {order.type === OrderType.Buy ? '买入' : '卖出'}
@@ -362,8 +362,8 @@ export function OrderRecords({
             className={cn(
               'relative flex items-center justify-between p-2.5 rounded-xl bg-card dark:bg-slate-900 border border-slate-200/40 dark:border-slate-800/40 text-xs shadow-sm hover:shadow hover:bg-card/90 dark:hover:bg-slate-800 transition-all duration-300 group overflow-hidden pl-3',
               order.type === OrderType.Buy
-                ? 'border-l-4 border-l-destructive shadow-rose-500/5'
-                : 'border-l-4 border-l-success shadow-emerald-500/5'
+                ? 'border-l-4 border-l-market-up shadow-market-up/5'
+                : 'border-l-4 border-l-market-down shadow-market-down/5'
             )}
           >
             <div className="flex flex-col gap-2 z-10 w-full">
@@ -373,8 +373,8 @@ export function OrderRecords({
                     className={cn(
                       'px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-tighter shrink-0',
                       order.type === OrderType.Buy
-                        ? 'bg-rose-500/10 text-destructive'
-                        : 'bg-emerald-500/10 text-success'
+                        ? 'bg-market-up/10 text-market-up'
+                        : 'bg-market-down/10 text-market-down'
                     )}
                   >
                     {order.type === OrderType.Buy ? '买入' : '卖出'}

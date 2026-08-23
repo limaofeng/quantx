@@ -212,7 +212,7 @@ function ApprovalCard({
             size="sm"
             disabled={busy || countdown.expired}
             onClick={onApprove}
-            className="rounded-lg bg-red-600 text-white hover:bg-red-500"
+            className="rounded-lg bg-market-buy-cta text-white hover:bg-market-buy-cta/90"
           >
             {busy ? (
               <RefreshCw className="mr-1.5 h-3.5 w-3.5 animate-spin" />

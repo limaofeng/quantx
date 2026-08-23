@@ -10,6 +10,8 @@ import {
 import type React from 'react';
 import { useEffect, useRef } from 'react';
 
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
+
 import {
   type MainIndicatorType,
   type SubIndicatorType,
@@ -219,7 +221,7 @@ export function useChartIndicators(
         });
         const sMacd = chart.addSeries(HistogramSeries, {
           title: 'MACD',
-          color: '#ef4444',
+          color: FINANCIAL_CHART_COLORS.up,
         });
         const sDiff = chart.addSeries(LineSeries, {
           color: '#ffffff',

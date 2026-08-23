@@ -16,7 +16,7 @@ export function MarketStockSearch() {
       <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
       <input
         aria-label="搜索股票或指数"
-        className="h-9 w-full rounded-lg border border-white/10 bg-black/20 pl-9 pr-9 text-xs font-medium text-slate-200 outline-none transition-colors placeholder:text-slate-600 hover:border-white/15 focus:border-red-400/50 focus:ring-2 focus:ring-red-500/10"
+        className="h-9 w-full rounded-lg border border-white/10 bg-black/20 pl-9 pr-9 text-xs font-medium text-slate-200 outline-none transition-colors placeholder:text-slate-600 hover:border-white/15 focus:border-primary/50 focus:ring-2 focus:ring-primary/10"
         onChange={event => setSearchQuery(event.target.value)}
         placeholder="搜代码 / 名称，直达个股…"
         value={searchQuery}
@@ -26,7 +26,7 @@ export function MarketStockSearch() {
       ) : searchQuery ? (
         <button
           aria-label="清空搜索"
-          className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-600 transition-colors hover:bg-white/5 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+          className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-600 transition-colors hover:bg-white/5 hover:text-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
           onClick={() => setSearchQuery('')}
           type="button"
         >
@@ -44,7 +44,7 @@ export function MarketStockSearch() {
                 return (
                   <Link
                     key={code}
-                    className="flex cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+                    className="flex cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
                     href={`/stock/${encodeURIComponent(code)}`}
                     onClick={() => setSearchQuery('')}
                   >

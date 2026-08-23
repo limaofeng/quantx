@@ -7,6 +7,8 @@ import {
 } from 'lightweight-charts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
+
 import { getCommonOptions } from '../utils/options';
 
 export function useChartInit(
@@ -80,11 +82,11 @@ export function useChartInit(
     });
 
     const candlestickSeries = mainChart.addSeries(CandlestickSeries, {
-      upColor: '#ef4444',
-      downColor: '#22c55e',
+      upColor: FINANCIAL_CHART_COLORS.up,
+      downColor: FINANCIAL_CHART_COLORS.down,
       borderVisible: false,
-      wickUpColor: '#ef4444',
-      wickDownColor: '#22c55e',
+      wickUpColor: FINANCIAL_CHART_COLORS.up,
+      wickDownColor: FINANCIAL_CHART_COLORS.down,
       visible: !isTimeMode,
       lastValueVisible: false,
       priceLineVisible: true,

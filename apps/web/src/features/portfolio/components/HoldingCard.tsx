@@ -206,7 +206,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
               openStudioTab(`/holdings?symbol=${holding.stockCode}`);
             }}
           >
-            <LayoutGrid size={12} className="text-red-400" />
+            <LayoutGrid size={12} className="text-primary" />
             快速交易
           </Button>
           <Button

@@ -4,6 +4,8 @@ import {
   type LineData,
 } from 'lightweight-charts';
 
+import { FINANCIAL_CHART_COLORS } from '@/shared/utils/financialColors';
+
 export type MainIndicatorType = 'MA' | 'EMA' | 'BOLL' | 'SAR';
 export type SubIndicatorType = 'VOL' | 'MACD' | 'KDJ' | 'RSI';
 
@@ -189,7 +191,8 @@ export function calculateMACD(
   const macdData: HistogramData[] = [];
   for (let i = 0; i < diffData.length; i++) {
     const val = 2 * (diffData[i].value - deaData[i].value);
-    const color = val >= 0 ? '#ef4444' : '#22c55e'; // Red for up (MACD usually follows price action color conventions in China: Red=Up)
+    const color =
+      val >= 0 ? FINANCIAL_CHART_COLORS.up : FINANCIAL_CHART_COLORS.down;
     // Wait, standard MACD: positive is usually bullish (Red in CN), negative bearish (Green in CN).
     macdData.push({ time: diffData[i].time, value: val, color });
   }

@@ -451,25 +451,25 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
                   value={config.stepPctDown}
                   onChange={v => handleChange('stepPctDown', v)}
                   prefix={
-                    <span className="text-green-600 dark:text-green-400 font-bold">
+                    <span className="text-market-up font-bold">
                       {config.gridType === GridType.ARITHMETIC ? '买¥' : '买'}
                     </span>
                   }
                   suffix={config.gridType === GridType.GEOMETRIC ? '%' : ''}
                   step={config.gridType === GridType.GEOMETRIC ? '0.1' : '0.01'}
-                  className="border-green-500/20 focus-within:border-green-500/50 focus-within:ring-green-500/20 flex-1 min-w-0"
+                  className="border-market-up/20 focus-within:border-market-up/50 focus-within:ring-market-up/20 flex-1 min-w-0"
                 />
                 <NumberInput
                   value={config.stepPctUp}
                   onChange={v => handleChange('stepPctUp', v)}
                   prefix={
-                    <span className="text-red-600 dark:text-red-400 font-bold">
+                    <span className="text-market-down font-bold">
                       {config.gridType === GridType.ARITHMETIC ? '卖¥' : '卖'}
                     </span>
                   }
                   suffix={config.gridType === GridType.GEOMETRIC ? '%' : ''}
                   step={config.gridType === GridType.GEOMETRIC ? '0.1' : '0.01'}
-                  className="border-red-500/20 focus-within:border-red-500/50 focus-within:ring-red-500/20 flex-1 min-w-0"
+                  className="border-market-down/20 focus-within:border-market-down/50 focus-within:ring-market-down/20 flex-1 min-w-0"
                 />
               </div>
             )}
@@ -494,7 +494,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
                     else handleChange('nUp', config.nUp - 1);
                   }
                 }}
-                className="w-8 h-full flex items-center justify-center text-muted-foreground hover:text-red-500 transition-colors"
+                className="w-8 h-full flex items-center justify-center text-muted-foreground hover:text-primary transition-colors"
               >
                 -
               </button>
@@ -536,7 +536,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               />
               <button
                 onClick={() => handleChange('nDown', config.nDown + 1)}
-                className="w-8 h-full flex items-center justify-center text-muted-foreground hover:text-green-500 transition-colors"
+                className="w-8 h-full flex items-center justify-center text-muted-foreground hover:text-primary transition-colors"
               >
                 +
               </button>
@@ -546,11 +546,11 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
 
         <div className="pt-2">
           <div className="flex justify-between items-end mb-2">
-            <div className="text-[10px] font-bold text-green-600 dark:text-green-400 flex items-center gap-1">
+            <div className="text-[10px] font-bold text-market-up flex items-center gap-1">
               <ArrowDownRight className="w-3 h-3" />
               买入 {config.nDown}
             </div>
-            <div className="text-[10px] font-bold text-red-600 dark:text-red-400 flex items-center gap-1">
+            <div className="text-[10px] font-bold text-market-down flex items-center gap-1">
               卖出 {config.nUp}
               <ArrowUpRight className="w-3 h-3" />
             </div>
@@ -570,7 +570,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-10"
             />
             <div
-              className="h-full bg-green-500/80 transition-all duration-300 relative rounded-l-full"
+              className="h-full bg-market-up/80 transition-all duration-300 relative rounded-l-full"
               style={{
                 width: `${(config.nDown / (config.nUp + config.nDown || 1)) * 100}%`,
               }}
@@ -581,7 +581,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               </div>
             </div>
             <div
-              className="absolute top-0 right-0 bottom-0 bg-red-500/80 transition-all duration-300 rounded-r-full"
+              className="absolute top-0 right-0 bottom-0 bg-market-down/80 transition-all duration-300 rounded-r-full"
               style={{
                 width: `${(config.nUp / (config.nUp + config.nDown || 1)) * 100}%`,
               }}

@@ -114,12 +114,12 @@ export function GridBookSummaryCard({
         <InventoryTile
           label="买入档"
           value={summary.buySlotCount || 0}
-          className="border-red-500/20 bg-red-500/5 text-red-400"
+          className="border-market-up/20 bg-market-up/5 text-market-up"
         />
         <InventoryTile
           label="卖出档"
           value={summary.sellWaterlineCount || 0}
-          className="border-red-600/20 bg-red-600/5 text-red-500"
+          className="border-market-down/20 bg-market-down/5 text-market-down"
         />
         <InventoryTile
           label="可用库存"

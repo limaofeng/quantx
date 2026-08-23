@@ -275,28 +275,28 @@ export function ReverseRepoDataPage() {
           </Card>
 
           {/* Card 3: Earnings */}
-          <Card className="col-span-1 md:col-span-2 relative overflow-hidden border-emerald-100 dark:border-emerald-500/10 shadow-sm bg-gradient-to-br from-emerald-50/50 via-white to-white dark:from-emerald-950/20 dark:via-slate-900/40 dark:to-slate-900/40">
+          <Card className="col-span-1 md:col-span-2 relative overflow-hidden border-market-up/20 shadow-sm bg-gradient-to-br from-market-up/10 via-white to-white dark:from-market-up/10 dark:via-slate-900/40 dark:to-slate-900/40">
             <div className="absolute -right-4 -bottom-4 opacity-[0.03]">
-              <Wallet className="w-32 h-32 text-emerald-600 dark:text-emerald-400 rotate-12" />
+              <Wallet className="w-32 h-32 text-market-up rotate-12" />
             </div>
             <CardContent className="p-3 h-full flex items-center justify-between">
               <div className="flex flex-col justify-between h-full">
                 <div className="flex items-center gap-2">
-                  <div className="p-1 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                  <div className="p-1 rounded-md bg-market-up/10 text-market-up">
                     <CreditCard className="w-3 h-3" />
                   </div>
-                  <span className="text-[10px] font-bold text-emerald-900/60 dark:text-emerald-200/60 uppercase tracking-wider">
+                  <span className="text-[10px] font-bold text-market-up/70 uppercase tracking-wider">
                     累计收益
                   </span>
                 </div>
                 <div className="mt-2">
-                  <div className="text-2xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums tracking-tight">
+                  <div className="text-2xl font-black text-market-up tabular-nums tracking-tight">
                     ¥
                     {earnings.total.toLocaleString('en-US', {
                       minimumFractionDigits: 2,
                     })}
                   </div>
-                  <div className="text-[10px] font-medium text-emerald-600/60 dark:text-emerald-400/60 mt-0.5">
+                  <div className="text-[10px] font-medium text-market-up/70 mt-0.5">
                     本月 +¥{earnings.month.toFixed(2)}
                   </div>
                 </div>
@@ -306,7 +306,7 @@ export function ReverseRepoDataPage() {
               <div className="flex flex-col gap-2">
                 <Button
                   size="sm"
-                  className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 shadow-sm shadow-emerald-200 dark:shadow-emerald-900/20 px-3"
+                  className="h-7 px-3 text-xs bg-primary hover:bg-primary/90 shadow-sm shadow-primary/20"
                 >
                   资金详情
                 </Button>
@@ -384,7 +384,7 @@ export function ReverseRepoDataPage() {
                         <div className="col-span-2 text-right font-mono text-sm font-bold text-rose-500 tabular-nums bg-rose-50/0 group-hover:bg-rose-50/50 dark:group-hover:bg-rose-900/10 rounded px-1 -mr-1 transition-colors">
                           {item.rate}%
                         </div>
-                        <div className="col-span-2 text-right font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                        <div className="col-span-2 text-right font-mono text-xs font-bold text-market-up tabular-nums">
                           {item.earningsPer10k}
                         </div>
                         <div className="col-span-3 text-right flex flex-col items-end">

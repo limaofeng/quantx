@@ -116,7 +116,7 @@ export function MarketShortcuts() {
               key={item.label}
               href={item.href}
               aria-label={item.label}
-              className="group min-h-[104px] rounded-lg border border-white/5 bg-white/[0.025] p-3 transition-colors hover:border-white/15 hover:bg-white/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70"
+              className="group min-h-[104px] rounded-lg border border-white/5 bg-white/[0.025] p-3 transition-colors hover:border-white/15 hover:bg-white/[0.045] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
               data-testid={item.testId}
             >
               <span className="flex h-full flex-col justify-between gap-3">

@@ -1,6 +1,7 @@
 import { AlertCircle } from 'lucide-react';
 import React from 'react';
 
+import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 
 interface IndexDataCardProps {
@@ -23,7 +24,7 @@ export function IndexDataCard({
   status = 'normal',
   lastSync = 'End of Day',
 }: IndexDataCardProps) {
-  const isPositive = parseFloat(change) >= 0;
+  const changeValue = parseFloat(change);
 
   return (
     <div
@@ -65,7 +66,7 @@ export function IndexDataCard({
           <span
             className={cn(
               'text-xs font-semibold',
-              isPositive ? 'text-red-500' : 'text-green-500'
+              financialToneClass(changeValue)
             )}
           >
             {changePercent}

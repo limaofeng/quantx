@@ -59,6 +59,7 @@ export default {
           up: 'rgb(var(--market-up) / <alpha-value>)',
           down: 'rgb(var(--market-down) / <alpha-value>)',
           flat: 'rgb(var(--market-flat) / <alpha-value>)',
+          'buy-cta': 'rgb(var(--market-buy-cta) / <alpha-value>)',
         },
         holding: {
           down: 'rgb(var(--holding-down) / <alpha-value>)',

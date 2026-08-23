@@ -157,7 +157,7 @@ export function gridStateDisplay(
   if (!isSell && allocation.shares > 0) {
     return {
       label: allocation.reservedShares > 0 ? '卖出中' : '等待卖出',
-      className: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+      className: 'border-market-down/30 bg-market-down/10 text-market-down',
     };
   }
 
@@ -166,7 +166,7 @@ export function gridStateDisplay(
     return {
       label: hasInventory ? '等待卖出' : '等待库存',
       className: hasInventory
-        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+        ? 'border-market-down/30 bg-market-down/10 text-market-down'
         : 'border-amber-500/30 bg-amber-500/10 text-amber-300',
     };
   }

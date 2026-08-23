@@ -99,7 +99,7 @@ export function GridLevelsPanel({
       </div>
 
       <div className="relative px-5 py-6 sm:px-6">
-        <div className="pointer-events-none absolute bottom-6 left-[54px] top-6 w-px -translate-x-1/2 bg-gradient-to-b from-emerald-500/35 via-blue-500/55 to-rose-500/35 sm:left-[58px]" />
+        <div className="pointer-events-none absolute bottom-6 left-[54px] top-6 w-px -translate-x-1/2 bg-gradient-to-b from-market-down/35 via-primary/55 to-market-up/35 sm:left-[58px]" />
 
         {displayLevels.length === 0 ? (
           <div className="px-6 py-12 text-center text-xs font-bold text-slate-400">
