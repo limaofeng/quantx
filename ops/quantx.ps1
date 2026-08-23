@@ -3075,6 +3075,123 @@ function Invoke-Backup {
   Write-Host "Backup completed: $destination" -ForegroundColor Green
 }
 
+function Test-RestoreVerificationScratchDatabaseName {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  return $Name -cmatch "^quantx_restore_verify_[0-9a-f]{16}$"
+}
+
+function Get-RestoreVerificationSchemaStatus {
+  param([Parameter(Mandatory = $true)][string]$Python)
+
+  [array]$statusOutput = @(
+    & $Python -m quantx_infrastructure.database.schema_control status
+  )
+  if ($LASTEXITCODE -ne 0) {
+    throw "Restored database schema revision inspection failed."
+  }
+  $statusPayload = [string]::Join(
+    [Environment]::NewLine,
+    @($statusOutput | ForEach-Object { [string]$_ })
+  )
+  if (-not $statusPayload.Trim()) {
+    throw "Restored database schema revision inspection returned no status."
+  }
+  try {
+    $parsed = @($statusPayload | ConvertFrom-Json -ErrorAction Stop)
+  } catch {
+    throw "Restored database schema revision inspection returned invalid JSON."
+  }
+  if ($parsed.Count -ne 1 -or $null -eq $parsed[0]) {
+    throw "Restored database schema revision inspection returned an invalid status."
+  }
+  $status = $parsed[0]
+  $relationProperty = $status.PSObject.Properties["revision_relation"]
+  if (
+    $null -eq $relationProperty -or
+    $relationProperty.Value -isnot [string] -or
+    -not ([string]$relationProperty.Value).Trim()
+  ) {
+    throw "Restored database schema revision inspection omitted revision_relation."
+  }
+  return $status
+}
+
+function Invoke-RestoreVerificationSchemaGate {
+  param(
+    [Parameter(Mandatory = $true)][string]$Python,
+    [Parameter(Mandatory = $true)][string]$ApplicationRoot
+  )
+
+  $status = Get-RestoreVerificationSchemaStatus -Python $Python
+  $relation = [string]$status.revision_relation
+  switch -CaseSensitive ($relation) {
+    "current" {
+      Write-Host "Restored database schema is already at this release's head."
+      break
+    }
+    "behind" {
+      Write-Host (
+        "Restored database schema is behind this release; upgrading only " +
+        "the isolated verification database."
+      )
+      & $Python -m alembic `
+        -c (Join-Path $ApplicationRoot "alembic.ini") upgrade head
+      if ($LASTEXITCODE -ne 0) {
+        throw (
+          "Isolated restored database Alembic upgrade failed; the " +
+          "production database was not modified."
+        )
+      }
+      break
+    }
+    default {
+      throw (
+        "Restored database revision relation '$relation' is not eligible " +
+        "for forward restore verification; only current or behind revisions " +
+        "are allowed."
+      )
+    }
+  }
+
+  & $Python -m quantx_infrastructure.database.schema_control check
+  if ($LASTEXITCODE -ne 0) {
+    throw "Restored database does not match this release's Alembic head."
+  }
+}
+
+function Remove-RestoreVerificationScratchDatabase {
+  param(
+    [Parameter(Mandatory = $true)][string]$DropDatabase,
+    [Parameter(Mandatory = $true)][psobject]$Connection,
+    [Parameter(Mandatory = $true)][string]$ScratchDatabase,
+    [Parameter(Mandatory = $true)][bool]$ScratchCreated
+  )
+
+  if (-not $ScratchCreated) {
+    return
+  }
+  if (-not (Test-RestoreVerificationScratchDatabaseName -Name $ScratchDatabase)) {
+    Write-Warning (
+      "Refusing to remove restore verification database with unsafe name: " +
+      "$ScratchDatabase"
+    )
+    return
+  }
+  & $DropDatabase `
+    --host $Connection.Host `
+    --port ([string]$Connection.Port) `
+    --username $Connection.User `
+    --if-exists `
+    $ScratchDatabase
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warning (
+      "Could not remove isolated verification database " +
+      "$ScratchDatabase; remove it manually."
+    )
+  }
+}
+
 function Invoke-RestoreVerify {
   Import-QuantXEnvironment
   if (-not $BackupPath.Trim()) {
@@ -3116,7 +3233,7 @@ function Invoke-RestoreVerify {
   $scratchDatabase = "quantx_restore_verify_$(
     [guid]::NewGuid().ToString('N').Substring(0, 16)
   )"
-  if ($scratchDatabase -cnotmatch "^quantx_restore_verify_[0-9a-f]{16}$") {
+  if (-not (Test-RestoreVerificationScratchDatabaseName -Name $scratchDatabase)) {
     throw "Generated restore verification database name is unsafe."
   }
   $python = Resolve-Python
@@ -3185,28 +3302,18 @@ function Invoke-RestoreVerify {
       Get-WorkspacePythonPath
     }
     $env:QUANTX_ROOT = $applicationRoot
-    & $python -m quantx_infrastructure.database.schema_control check
-    if ($LASTEXITCODE -ne 0) {
-      throw "Restored database does not match this release's Alembic head."
-    }
+    Invoke-RestoreVerificationSchemaGate `
+      -Python $python `
+      -ApplicationRoot $applicationRoot
   } finally {
     $env:DATABASE_URL = $previousDatabaseUrl
     $env:PYTHONPATH = $previousPythonPath
     $env:QUANTX_ROOT = $previousRoot
-    if ($scratchCreated) {
-      & $dropdb `
-        --host $connection.Host `
-        --port ([string]$connection.Port) `
-        --username $connection.User `
-        --if-exists `
-        $scratchDatabase
-      if ($LASTEXITCODE -ne 0) {
-        Write-Warning (
-          "Could not remove isolated verification database " +
-          "$scratchDatabase; remove it manually."
-        )
-      }
-    }
+    Remove-RestoreVerificationScratchDatabase `
+      -DropDatabase $dropdb `
+      -Connection $connection `
+      -ScratchDatabase $scratchDatabase `
+      -ScratchCreated $scratchCreated
     $env:PGPASSWORD = $previousPassword
   }
 

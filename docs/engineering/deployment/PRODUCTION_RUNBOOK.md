@@ -59,6 +59,13 @@ PostgreSQL、Redis、InfluxDB 和精确的 loopback HTTPS 配置后重试。安�
 downgrade。每月至少把最近备份复制到隔离环境，完成一次真实
 `pg_restore`、Agent journal 完整性检查和只读启动验证。
 
+`restore-verify` 始终只在随机命名、严格校验名称的隔离数据库中工作。恢复后会先
+读取备份的 Alembic revision：仅接受本发布已知的 `current` 或 `behind`；未知、超前、
+不兼容或未版本化 revision 一律失败关闭。`behind` 备份只会在该隔离库中由当前发布的
+Alembic 链前向升级到 `head`，再执行 schema check；它不会调用普通 `migrate`、创建或
+登记生产备份，也绝不自动执行 downgrade。无论升级或检查成功与否，脚本只会清理本次
+已创建且名称通过严格格式验证的隔离库，随后才继续校验 QMT Agent journal 完整性。
+
 ### 0016 会话迁移
 
 `20260815_0016` 为原生会话增加唯一主账户、设备权限和成对约束。由于旧数据
