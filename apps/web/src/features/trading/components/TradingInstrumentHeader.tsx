@@ -1,14 +1,26 @@
-import { useEffect } from 'react';
+import { Check, LoaderCircle, Plus, Star, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { gql as urqlGql, useQuery, useSubscription } from 'urql';
+import { Link } from 'wouter';
 
+import { useAppDialog } from '@/components/ui/app-dialog-context';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Input } from '@/components/ui/input';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import type {
   PortfolioSummaryData,
   Position,
 } from '@/features/portfolio/types';
+import { useWatchlistWorkspace } from '@/features/watchlist/hooks';
 import type { Stock } from '@/shared/types';
 import { cn } from '@/utils/cn';
 
 interface TradingInstrumentHeaderProps {
+  accountId?: string;
   accountCash?: number | null;
   holdings: Position[];
   onInstrumentNameChange?: (name: string) => void;
@@ -231,6 +243,7 @@ function HeaderMetric({
 }
 
 export function TradingInstrumentHeader({
+  accountId,
   accountCash,
   holdings,
   onInstrumentNameChange,
@@ -313,6 +326,106 @@ export function TradingInstrumentHeader({
     normalizedStockCode ||
     '未选择标的';
 
+  const watchlist = useWatchlistWorkspace(accountId);
+  const { confirm: confirmDialog } = useAppDialog();
+  const watchlistItem = useMemo(
+    () =>
+      watchlist.items.find(
+        item => normalizeStockCode(item.stockCode) === normalizedStockCode
+      ) || null,
+    [normalizedStockCode, watchlist.items]
+  );
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [pickerMessage, setPickerMessage] = useState<string | null>(null);
+  const [pickerSaving, setPickerSaving] = useState(false);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    setSelectedGroupIds(watchlistItem?.groups.map(group => group.id) || []);
+    setNewGroupName('');
+    setPickerMessage(null);
+  }, [pickerOpen, watchlistItem]);
+
+  const toggleGroup = (groupId: string) => {
+    setSelectedGroupIds(current =>
+      current.includes(groupId)
+        ? current.filter(id => id !== groupId)
+        : [...current, groupId]
+    );
+  };
+
+  const saveWatchlistSelection = async () => {
+    if (!normalizedStockCode) return;
+    setPickerSaving(true);
+    setPickerMessage(null);
+    try {
+      await watchlist.saveItem({
+        accountId,
+        groupIds: selectedGroupIds,
+        instrumentName: stockName,
+        stockCode: normalizedStockCode,
+      });
+      setPickerMessage('已保存自选分组');
+    } catch (error) {
+      setPickerMessage(
+        error instanceof Error ? error.message : '保存失败，请重试'
+      );
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  const createAndAddGroup = async () => {
+    const name = newGroupName.trim();
+    if (!name || !normalizedStockCode) return;
+    setPickerSaving(true);
+    setPickerMessage(null);
+    try {
+      await watchlist.createGroup({
+        accountId,
+        initialStockCodes: [normalizedStockCode],
+        name,
+      });
+      setNewGroupName('');
+      setPickerMessage(`已创建“${name}”并加入`);
+    } catch (error) {
+      setPickerMessage(
+        error instanceof Error ? error.message : '创建分组失败，请重试'
+      );
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
+  const removeFromWatchlist = async () => {
+    if (!normalizedStockCode) return;
+    const groupCount = watchlistItem?.groups.length || 0;
+    const confirmed = await confirmDialog({
+      confirmText: '移出总自选',
+      description: `移出总自选后将同时清除${groupCount ? ` ${groupCount} 个分组` : ''}归属。`,
+      title: '确认移出总自选',
+      variant: 'destructive',
+    });
+    if (!confirmed) {
+      return;
+    }
+    setPickerSaving(true);
+    setPickerMessage(null);
+    try {
+      await watchlist.removeItem(normalizedStockCode);
+      setPickerMessage('已移出总自选');
+      setPickerOpen(false);
+    } catch (error) {
+      setPickerMessage(
+        error instanceof Error ? error.message : '移出失败，请重试'
+      );
+    } finally {
+      setPickerSaving(false);
+    }
+  };
+
   useEffect(() => {
     onInstrumentNameChange?.(stockName);
   }, [onInstrumentNameChange, stockName]);
@@ -371,6 +484,159 @@ export function TradingInstrumentHeader({
             <span className="truncate text-sm font-black text-slate-100">
               {stockName}
             </span>
+            {normalizedStockCode && (
+              <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={
+                      watchlistItem
+                        ? `已自选 · ${watchlistItem.groups.length}组`
+                        : '未自选'
+                    }
+                    className={cn(
+                      'inline-flex h-7 shrink-0 items-center gap-1 rounded border px-2 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                      watchlistItem
+                        ? 'border-amber-400/35 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15'
+                        : 'border-white/10 text-slate-500 hover:border-amber-400/35 hover:text-amber-200'
+                    )}
+                    title={
+                      watchlistItem
+                        ? `已自选 · ${watchlistItem.groups.length}组`
+                        : '未自选'
+                    }
+                  >
+                    <Star
+                      className="h-3.5 w-3.5"
+                      fill={watchlistItem ? 'currentColor' : 'none'}
+                    />
+                    <span className="hidden xl:inline">
+                      {watchlistItem
+                        ? `已自选 · ${watchlistItem.groups.length}组`
+                        : '未自选'}
+                    </span>
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  className="w-[300px] border-[#263b53] bg-[#0b1627] p-3 text-slate-200 shadow-2xl shadow-black/50"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-black text-slate-100">
+                        自选分组
+                      </div>
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        {watchlistItem
+                          ? `已自选 · ${watchlistItem.groups.length}组`
+                          : '未自选 · 保存后加入总自选'}
+                      </div>
+                    </div>
+                    <Link
+                      href={`/watchlist?collection=all&symbol=${encodeURIComponent(normalizedStockCode)}`}
+                      className="text-[10px] font-bold text-blue-300 hover:text-blue-100"
+                      onClick={() => setPickerOpen(false)}
+                    >
+                      查看自选
+                    </Link>
+                  </div>
+
+                  <div className="mt-3 max-h-44 space-y-1 overflow-y-auto pr-1 custom-scrollbar">
+                    {watchlist.groups.length === 0 ? (
+                      <div className="border border-dashed border-white/10 px-3 py-4 text-center text-[10px] text-slate-500">
+                        暂无自定义分组
+                      </div>
+                    ) : (
+                      watchlist.groups.map(group => {
+                        const checked = selectedGroupIds.includes(group.id);
+                        return (
+                          <label
+                            key={group.id}
+                            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-[11px] text-slate-300 hover:bg-white/5"
+                          >
+                            <Checkbox
+                              checked={checked}
+                              onCheckedChange={() => toggleGroup(group.id)}
+                              aria-label={`加入分组 ${group.name}`}
+                            />
+                            <span className="min-w-0 flex-1 truncate">
+                              {group.name}
+                            </span>
+                            <span className="font-mono text-[10px] text-slate-600">
+                              {group.itemCount}
+                            </span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex items-center gap-1.5">
+                    <Input
+                      value={newGroupName}
+                      onChange={event => setNewGroupName(event.target.value)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter') void createAndAddGroup();
+                      }}
+                      placeholder="新建分组并加入"
+                      maxLength={80}
+                      className="h-7 border-white/10 bg-white/[0.03] text-[10px]"
+                      aria-label="新建分组名称"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void createAndAddGroup()}
+                      disabled={!newGroupName.trim() || pickerSaving}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border border-blue-500/30 text-blue-300 hover:bg-blue-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+                      aria-label="创建分组并加入"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  {pickerMessage && (
+                    <div
+                      className="mt-2 text-[10px] text-amber-200"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {pickerMessage}
+                    </div>
+                  )}
+
+                  <div className="mt-3 flex items-center justify-between gap-2 border-t border-white/5 pt-3">
+                    {watchlistItem ? (
+                      <button
+                        type="button"
+                        onClick={() => void removeFromWatchlist()}
+                        disabled={pickerSaving}
+                        className="inline-flex h-7 items-center gap-1 rounded border border-rose-400/25 px-2 text-[10px] font-bold text-rose-300 hover:bg-rose-400/10 disabled:opacity-40"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        移出总自选
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-slate-600">
+                        保存空分组也会加入总自选
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void saveWatchlistSelection()}
+                      disabled={pickerSaving}
+                      className="inline-flex h-7 items-center gap-1 rounded bg-blue-600 px-2.5 text-[10px] font-black text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {pickerSaving ? (
+                        <LoaderCircle className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Check className="h-3 w-3" />
+                      )}
+                      保存
+                    </button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
             <span className="rounded border border-red-500/25 bg-red-500/10 px-1.5 py-0.5 text-[9px] font-black text-red-300">
               {marketType}
             </span>

@@ -418,12 +418,12 @@ describe('StudioWorkspace', () => {
       within(workspaceTabList)
         .getAllByRole('tab')
         .map(tab => tab.textContent)
-    ).toEqual(['工作台', '自选股']);
+    ).toEqual(['工作台', '选股']);
     expect(
       screen.queryByRole('button', { name: '关闭 行情工作台' })
     ).not.toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '自选股' })).toBeVisible();
-    expect(screen.getByRole('button', { name: '关闭 自选股' })).toBeVisible();
+    expect(screen.getByRole('tab', { name: '选股' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '关闭 选股' })).toBeVisible();
   });
 
   it('selects the home tab after closing the last closable tab', async () => {

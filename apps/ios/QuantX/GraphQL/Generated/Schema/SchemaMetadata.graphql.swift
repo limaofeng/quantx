@@ -94,6 +94,7 @@ extension QuantXAPI {
       "TradeApprovalPreview": QuantXAPI.Objects.TradeApprovalPreview,
       "TradeApprovalPreviewResult": QuantXAPI.Objects.TradeApprovalPreviewResult,
       "UnregisterPushDeviceResult": QuantXAPI.Objects.UnregisterPushDeviceResult,
+      "WatchlistGroup": QuantXAPI.Objects.WatchlistGroup,
       "WatchlistItem": QuantXAPI.Objects.WatchlistItem,
       "WatchlistMutationResult": QuantXAPI.Objects.WatchlistMutationResult
     ]

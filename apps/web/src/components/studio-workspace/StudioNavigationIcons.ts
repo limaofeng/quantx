@@ -15,6 +15,7 @@ export {
   SlidersVertical as StrategyManagementIcon,
   ChartNoAxesCombined as MarketResearchIcon,
   ScanSearch as StockScreeningIcon,
+  Star as WatchlistIcon,
   Database as MarketDataIcon,
   Settings as ControlSettingsIcon,
 } from 'lucide-react';

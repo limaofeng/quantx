@@ -26,6 +26,11 @@ import {
   type StudioDataTableApi,
 } from '@/components/studio-workbench';
 import { Badge } from '@/components/ui/badge';
+import {
+  normalizeWatchlistCode,
+  useWatchlistWorkspace,
+} from '@/features/watchlist/hooks';
+import { mergeWatchlistGroupIds } from '@/features/watchlist/utils';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/utils/cn';
 
@@ -334,6 +339,7 @@ export function ScreeningResults({
   const [warningsExpanded, setWarningsExpanded] = useState(false);
   const { toast } = useToast();
   const [, setLocation] = useLocation();
+  const watchlist = useWatchlistWorkspace();
   const {
     closeMenu,
     menu: rowMenu,
@@ -363,10 +369,24 @@ export function ScreeningResults({
   };
 
   const handleAddWatchlist = async (stock: StockScreeningResult) => {
-    const result = await addWatchlistItem({
-      stockCode: stock.code,
-      instrumentName: stock.name,
-    });
+    let result: { message?: string | null; success: boolean };
+    try {
+      const existingItem = watchlist.items.find(
+        item =>
+          normalizeWatchlistCode(item.stockCode) ===
+          normalizeWatchlistCode(stock.code)
+      );
+      result = await watchlist.saveItem({
+        groupIds: mergeWatchlistGroupIds(existingItem),
+        instrumentName: stock.name,
+        stockCode: stock.code,
+      });
+    } catch (error) {
+      result = {
+        message: error instanceof Error ? error.message : '请求失败',
+        success: false,
+      };
+    }
 
     toast({
       title: result?.success ? '已加入自选' : '加入自选失败',
@@ -1518,34 +1538,4 @@ export function ScreeningResults({
       }
     />
   );
-}
-async function addWatchlistItem(input: {
-  instrumentName?: string | null;
-  stockCode: string;
-}) {
-  try {
-    const response = await fetch('/graphql', {
-      body: JSON.stringify({
-        query: `
-          mutation Screening_AddWatchlistItem($input: AddWatchlistItemInput!) {
-            addWatchlistItem(input: $input) {
-              success
-              message
-            }
-          }
-        `,
-        variables: { input },
-      }),
-      headers: { 'Content-Type': 'application/json' },
-      method: 'POST',
-    });
-    const payload = await response.json();
-    return payload?.data?.addWatchlistItem as
-      { message?: string | null; success: boolean } | undefined;
-  } catch (error) {
-    return {
-      success: false,
-      message: error instanceof Error ? error.message : '请求失败',
-    };
-  }
 }

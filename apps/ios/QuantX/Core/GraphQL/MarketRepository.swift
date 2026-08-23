@@ -12,11 +12,10 @@ protocol MarketDataLoading: AnyObject {
     stockCode: String,
     period: MarketPeriod
   ) async throws -> MarketInstrumentSnapshot?
-  func addWatchlistItem(
+  func saveWatchlistItem(
     accountID: String,
     stockCode: String,
     instrumentName: String?,
-    displayOrder: Int,
     authorizedAccountIDs: Set<String>
   ) async throws -> MarketWatchItem
   func removeWatchlistItem(
@@ -24,9 +23,9 @@ protocol MarketDataLoading: AnyObject {
     stockCode: String,
     authorizedAccountIDs: Set<String>
   ) async throws
-  func reorderWatchlist(
+  func reorderWatchlistItems(
     accountID: String,
-    stockCodes: [String],
+    itemIDs: [String],
     authorizedAccountIDs: Set<String>
   ) async throws -> [MarketWatchItem]
   func quoteUpdates(stockCode: String) throws -> AsyncThrowingStream<MarketLiveQuote, any Error>
@@ -77,7 +76,6 @@ final class MarketRepository: MarketDataLoading {
           stockCode: item.stockCode,
           instrumentName: item.instrumentName,
           displayOrder: item.displayOrder,
-          groupName: item.groupName,
           note: item.note,
           updatedAt: item.updatedAt.flatMap(PortfolioDateParser.parse),
           quote: nil
@@ -93,7 +91,6 @@ final class MarketRepository: MarketDataLoading {
           stockCode: item.stockCode,
           instrumentName: item.instrumentName,
           displayOrder: item.displayOrder,
-          groupName: item.groupName,
           note: item.note,
           updatedAt: item.updatedAt,
           quote: quotesByCode[item.stockCode]
@@ -142,11 +139,10 @@ final class MarketRepository: MarketDataLoading {
     }
   }
 
-  func addWatchlistItem(
+  func saveWatchlistItem(
     accountID: String,
     stockCode: String,
     instrumentName: String?,
-    displayOrder: Int,
     authorizedAccountIDs: Set<String>
   ) async throws -> MarketWatchItem {
     do {
@@ -155,23 +151,21 @@ final class MarketRepository: MarketDataLoading {
         authorizedAccountIDs: authorizedAccountIDs
       )
       let normalizedCode = try Self.normalizedAStockCode(stockCode)
-      guard displayOrder >= 0, displayOrder <= Int(Int32.max) else {
-        throw WatchlistMutationError.invalidRequest("自选排序超出有效范围")
-      }
       let normalizedName = instrumentName.flatMap(Self.nonempty)
       let response = try await client.perform(
-        mutation: QuantXAPI.IOSAddWatchlistItemMutation(
-          input: QuantXAPI.AddWatchlistItemInput(
+        mutation: QuantXAPI.IOSSaveWatchlistItemMutation(
+          input: QuantXAPI.SaveWatchlistItemInput(
             stockCode: normalizedCode,
+            groupIds: [],
             accountId: .some(accountID),
             instrumentName: normalizedName.map(GraphQLNullable.some) ?? .null,
-            displayOrder: .some(Int32(displayOrder))
+            note: .null
           )
         ),
         requestConfiguration: noCache
       )
       try ApolloReadOnlyResponseValidator.validate(response.errors)
-      guard let result = response.data?.addWatchlistItem else {
+      guard let result = response.data?.saveWatchlistItem else {
         throw WatchlistMutationError.invalidResponse
       }
       guard result.success, let item = result.item else {
@@ -183,7 +177,6 @@ final class MarketRepository: MarketDataLoading {
         stockCode: item.stockCode,
         instrumentName: item.instrumentName,
         displayOrder: item.displayOrder,
-        groupName: item.groupName,
         note: item.note,
         updatedAt: item.updatedAt,
         expectedAccountID: accountID,
@@ -208,7 +201,7 @@ final class MarketRepository: MarketDataLoading {
       let response = try await client.perform(
         mutation: QuantXAPI.IOSRemoveWatchlistItemMutation(
           stockCode: normalizedCode,
-          accountId: accountID
+          accountId: .some(accountID)
         ),
         requestConfiguration: noCache
       )
@@ -224,9 +217,9 @@ final class MarketRepository: MarketDataLoading {
     }
   }
 
-  func reorderWatchlist(
+  func reorderWatchlistItems(
     accountID: String,
-    stockCodes: [String],
+    itemIDs: [String],
     authorizedAccountIDs: Set<String>
   ) async throws -> [MarketWatchItem] {
     do {
@@ -234,18 +227,20 @@ final class MarketRepository: MarketDataLoading {
         accountID,
         authorizedAccountIDs: authorizedAccountIDs
       )
-      let normalizedCodes = try Self.validateReorderStockCodes(stockCodes)
+      guard !itemIDs.isEmpty, Set(itemIDs).count == itemIDs.count else {
+        throw WatchlistMutationError.invalidRequest("自选排序不能包含重复证券")
+      }
       let response = try await client.perform(
-        mutation: QuantXAPI.IOSReorderWatchlistMutation(
-          input: QuantXAPI.ReorderWatchlistInput(
-            symbols: normalizedCodes,
+        mutation: QuantXAPI.IOSReorderWatchlistItemsMutation(
+          input: QuantXAPI.ReorderWatchlistItemsInput(
+            itemIds: itemIDs,
             accountId: .some(accountID)
           )
         ),
         requestConfiguration: noCache
       )
       try ApolloReadOnlyResponseValidator.validate(response.errors)
-      guard let result = response.data?.reorderWatchlist else {
+      guard let result = response.data?.reorderWatchlistItems else {
         throw WatchlistMutationError.invalidResponse
       }
       guard result.success else {
@@ -258,7 +253,6 @@ final class MarketRepository: MarketDataLoading {
           stockCode: item.stockCode,
           instrumentName: item.instrumentName,
           displayOrder: item.displayOrder,
-          groupName: item.groupName,
           note: item.note,
           updatedAt: item.updatedAt,
           expectedAccountID: accountID,
@@ -267,7 +261,7 @@ final class MarketRepository: MarketDataLoading {
       }
       return try Self.validateAuthoritativeReorder(
         items,
-        requestedStockCodes: normalizedCodes
+        requestedItemIDs: itemIDs
       )
     } catch {
       throw map(error)
@@ -634,7 +628,6 @@ final class MarketRepository: MarketDataLoading {
     stockCode: String,
     instrumentName: String?,
     displayOrder: Int,
-    groupName: String?,
     note: String?,
     updatedAt: String?,
     expectedAccountID: String,
@@ -660,7 +653,6 @@ final class MarketRepository: MarketDataLoading {
       stockCode: normalizedCode,
       instrumentName: instrumentName,
       displayOrder: displayOrder,
-      groupName: groupName,
       note: note,
       updatedAt: parsedUpdatedAt,
       quote: nil
@@ -676,6 +668,22 @@ final class MarketRepository: MarketDataLoading {
       returnedCodes.count == requestedStockCodes.count,
       Set(returnedCodes).count == returnedCodes.count,
       Set(returnedCodes) == Set(requestedStockCodes),
+      zip(items, items.dropFirst()).allSatisfy({ $0.displayOrder < $1.displayOrder })
+    else {
+      throw WatchlistMutationError.contextMismatch
+    }
+    return items
+  }
+
+  static func validateAuthoritativeReorder(
+    _ items: [MarketWatchItem],
+    requestedItemIDs: [String]
+  ) throws -> [MarketWatchItem] {
+    let returnedIDs = items.map(\.id)
+    guard
+      returnedIDs.count == requestedItemIDs.count,
+      Set(returnedIDs).count == returnedIDs.count,
+      Set(returnedIDs) == Set(requestedItemIDs),
       zip(items, items.dropFirst()).allSatisfy({ $0.displayOrder < $1.displayOrder })
     else {
       throw WatchlistMutationError.contextMismatch

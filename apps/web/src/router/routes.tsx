@@ -7,6 +7,7 @@ import {
   MarketResearchIcon,
   MarketWorkbenchIcon,
   PortfolioHoldingsIcon,
+  WatchlistIcon,
   SellManagementIcon,
   StockScreeningIcon,
   StrategyManagementIcon,
@@ -113,6 +114,22 @@ export const appRoutes: AppRouteConfig[] = [
       'MarketWorkbenchRedirect'
     ),
     skeleton: 'default',
+  }),
+  route({
+    path: '/watchlist',
+    title: '自选',
+    importer: toDefaultExport(
+      () => import('@/features/watchlist'),
+      'WatchlistPage'
+    ),
+    skeleton: 'table',
+    preload: true,
+    nav: {
+      label: '自选',
+      icon: WatchlistIcon,
+      group: MAIN_GROUP,
+      order: 15,
+    },
   }),
   route({
     path: '/holdings',
@@ -284,14 +301,14 @@ export const appRoutes: AppRouteConfig[] = [
   }),
   route({
     path: '/screening',
-    title: '股票筛选器',
+    title: '选股',
     importer: toDefaultExport(
       () => import('@/features/screening'),
       'StockScreeningPage'
     ),
     skeleton: 'table',
     nav: {
-      label: '股票筛选',
+      label: '选股',
       icon: StockScreeningIcon,
       group: MAIN_GROUP,
       order: 60,

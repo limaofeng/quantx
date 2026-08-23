@@ -74,7 +74,6 @@ struct MarketWatchItem: Equatable, Hashable, Identifiable, Sendable {
   let stockCode: String
   let instrumentName: String?
   let displayOrder: Int
-  let groupName: String?
   let note: String?
   let updatedAt: Date?
   let quote: MarketQuote?
@@ -95,7 +94,6 @@ struct MarketWatchItem: Equatable, Hashable, Identifiable, Sendable {
       stockCode: stockCode,
       instrumentName: instrumentName,
       displayOrder: displayOrder,
-      groupName: groupName,
       note: note,
       updatedAt: updatedAt,
       quote: quote
@@ -109,7 +107,6 @@ struct MarketWatchItem: Equatable, Hashable, Identifiable, Sendable {
       stockCode: stockCode,
       instrumentName: instrumentName,
       displayOrder: displayOrder,
-      groupName: groupName,
       note: note,
       updatedAt: updatedAt,
       quote: quote

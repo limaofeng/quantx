@@ -6,6 +6,7 @@ from hashlib import md5
 from typing import Optional
 
 from sqlalchemy import Column, Index, Integer, String, UniqueConstraint
+from sqlalchemy.orm import relationship
 
 from quantx_infrastructure.database.relational_base import Base, TimestampMixin
 
@@ -24,8 +25,23 @@ class WatchlistItem(Base, TimestampMixin):
   stock_code = Column(String(20), nullable=False, comment="证券代码")
   instrument_name = Column(String(80), nullable=True, comment="证券名称")
   display_order = Column(Integer, nullable=False, default=0, comment="展示排序")
-  group_name = Column(String(80), nullable=True, comment="分组")
   note = Column(String(300), nullable=True, comment="备注")
+
+  group_memberships = relationship(
+    "WatchlistGroupMembership",
+    back_populates="watchlist_item",
+    cascade="all, delete-orphan",
+    passive_deletes=True,
+    order_by="WatchlistGroupMembership.display_order",
+    lazy="selectin",
+  )
+  groups = relationship(
+    "WatchlistGroup",
+    secondary="watchlist_group_memberships",
+    back_populates="items",
+    viewonly=True,
+    lazy="selectin",
+  )
 
   @staticmethod
   def make_id(account_id: str, stock_code: str) -> str:
@@ -39,7 +55,6 @@ class WatchlistItem(Base, TimestampMixin):
     stock_code: str,
     instrument_name: Optional[str] = None,
     display_order: int = 0,
-    group_name: Optional[str] = None,
     note: Optional[str] = None,
   ) -> "WatchlistItem":
     normalized_code = stock_code.strip().upper()
@@ -49,6 +64,5 @@ class WatchlistItem(Base, TimestampMixin):
       stock_code=normalized_code,
       instrument_name=instrument_name,
       display_order=max(0, int(display_order or 0)),
-      group_name=group_name,
       note=note,
     )

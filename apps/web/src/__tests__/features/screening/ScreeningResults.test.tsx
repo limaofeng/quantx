@@ -1,13 +1,23 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ScreeningResults } from '@/features/screening/components/ScreeningResults';
 import { type StockScreeningResult } from '@/features/screening/types';
 
+const watchlistSaveItem = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ success: true, message: 'ok' })
+);
+const watchlistItems = vi.hoisted(() => [] as Array<{
+  groups: Array<{ id: string }>;
+  stockCode: string;
+}>);
+
 vi.mock('@/features/watchlist/hooks', () => ({
   useWatchlistWorkspace: () => ({
-    saveItem: vi.fn().mockResolvedValue({ success: true, message: 'ok' }),
+    items: watchlistItems,
+    saveItem: watchlistSaveItem,
   }),
+  normalizeWatchlistCode: (value: string) => value.trim().toUpperCase(),
 }));
 
 const baseStock: StockScreeningResult = {
@@ -426,5 +436,24 @@ describe('ScreeningResults', () => {
     renderResults();
 
     expect(screen.getByRole('button', { name: '浙能电力 详情' })).toBeVisible();
+  });
+
+  it('preserves existing watchlist groups when screening adds a stock', async () => {
+    watchlistItems.splice(0, watchlistItems.length, {
+      groups: [{ id: 'group-a' }, { id: 'group-b' }],
+      stockCode: '600023.SH',
+    });
+
+    renderResults();
+    fireEvent.click(screen.getByRole('button', { name: '浙能电力 操作' }));
+    fireEvent.click(screen.getByText('加入自选'));
+
+    await waitFor(() => {
+      expect(watchlistSaveItem).toHaveBeenCalledWith({
+        groupIds: ['group-a', 'group-b'],
+        instrumentName: '浙能电力',
+        stockCode: '600023.SH',
+      });
+    });
   });
 });

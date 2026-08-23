@@ -5,14 +5,19 @@ query IOSMarketWatchlist($accountId: String) {
     stockCode
     instrumentName
     displayOrder
-    groupName
     note
     updatedAt
+    groups {
+      id
+      name
+      displayOrder
+      itemCount
+    }
   }
 }
 
-mutation IOSAddWatchlistItem($input: AddWatchlistItemInput!) {
-  addWatchlistItem(input: $input) {
+mutation IOSSaveWatchlistItem($input: SaveWatchlistItemInput!) {
+  saveWatchlistItem(input: $input) {
     success
     message
     item {
@@ -21,22 +26,27 @@ mutation IOSAddWatchlistItem($input: AddWatchlistItemInput!) {
       stockCode
       instrumentName
       displayOrder
-      groupName
       note
       updatedAt
+      groups {
+        id
+        name
+        displayOrder
+        itemCount
+      }
     }
   }
 }
 
-mutation IOSRemoveWatchlistItem($stockCode: String!, $accountId: String!) {
+mutation IOSRemoveWatchlistItem($stockCode: String!, $accountId: String) {
   removeWatchlistItem(stockCode: $stockCode, accountId: $accountId) {
     success
     message
   }
 }
 
-mutation IOSReorderWatchlist($input: ReorderWatchlistInput!) {
-  reorderWatchlist(input: $input) {
+mutation IOSReorderWatchlistItems($input: ReorderWatchlistItemsInput!) {
+  reorderWatchlistItems(input: $input) {
     success
     message
     items {
@@ -45,9 +55,14 @@ mutation IOSReorderWatchlist($input: ReorderWatchlistInput!) {
       stockCode
       instrumentName
       displayOrder
-      groupName
       note
       updatedAt
+      groups {
+        id
+        name
+        displayOrder
+        itemCount
+      }
     }
   }
 }

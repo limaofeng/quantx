@@ -143,7 +143,6 @@ final class MarketModelsTests: XCTestCase {
       stockCode: code,
       instrumentName: nil,
       displayOrder: Int(id) ?? 0,
-      groupName: nil,
       note: nil,
       updatedAt: nil,
       quote: quote

@@ -29,7 +29,7 @@ final class AppModelWatchlistTests: XCTestCase {
     } catch {
       XCTFail("收到意外错误：\(error)")
     }
-    XCTAssertEqual(loader.addCount, 0)
+    XCTAssertEqual(loader.saveCount, 0)
     XCTAssertEqual(model.marketState.snapshot, initial)
   }
 
@@ -43,7 +43,7 @@ final class AppModelWatchlistTests: XCTestCase {
     let mutation = Task { @MainActor in
       try await model.addToWatchlist(makeInstrument("000001.SZ"))
     }
-    await waitUntil { loader.addCount == 1 }
+    await waitUntil { loader.saveCount == 1 }
 
     XCTAssertEqual(
       model.marketState.snapshot?.watchlist.map(\.stockCode),
@@ -53,7 +53,7 @@ final class AppModelWatchlistTests: XCTestCase {
     XCTAssertEqual(loader.lastMutationAccountID, "ACCOUNT-1")
     XCTAssertEqual(loader.lastAuthorizedAccountIDs, ["ACCOUNT-1"])
 
-    loader.succeedAdd(makeItem("000001.SZ", displayOrder: 2))
+    loader.succeedSave(makeItem("000001.SZ", displayOrder: 2))
     do {
       try await mutation.value
     } catch {
@@ -182,7 +182,6 @@ final class AppModelWatchlistTests: XCTestCase {
       stockCode: stockCode,
       instrumentName: stockCode,
       displayOrder: displayOrder,
-      groupName: nil,
       note: nil,
       updatedAt: Date(timeIntervalSince1970: 1_786_752_000),
       quote: nil
@@ -254,12 +253,12 @@ final class AppModelWatchlistTests: XCTestCase {
 private final class WatchlistLoaderSpy: MarketDataLoading {
   private var loadSnapshots: [MarketWorkspaceSnapshot]
   private var lastSnapshot: MarketWorkspaceSnapshot
-  private var addContinuation: CheckedContinuation<MarketWatchItem, any Error>?
+  private var saveContinuation: CheckedContinuation<MarketWatchItem, any Error>?
   private var removeContinuation: CheckedContinuation<Void, any Error>?
   private var reorderContinuation: CheckedContinuation<[MarketWatchItem], any Error>?
 
   private(set) var loadCount = 0
-  private(set) var addCount = 0
+  private(set) var saveCount = 0
   private(set) var removeCount = 0
   private(set) var reorderCount = 0
   private(set) var lastMutationAccountID: String?
@@ -292,18 +291,17 @@ private final class WatchlistLoaderSpy: MarketDataLoading {
     period _: MarketPeriod
   ) async throws -> MarketInstrumentSnapshot? { nil }
 
-  func addWatchlistItem(
+  func saveWatchlistItem(
     accountID: String,
     stockCode _: String,
     instrumentName _: String?,
-    displayOrder _: Int,
     authorizedAccountIDs: Set<String>
   ) async throws -> MarketWatchItem {
-    addCount += 1
+    saveCount += 1
     lastMutationAccountID = accountID
     lastAuthorizedAccountIDs = authorizedAccountIDs
     return try await withCheckedThrowingContinuation { continuation in
-      addContinuation = continuation
+      saveContinuation = continuation
     }
   }
 
@@ -320,15 +318,17 @@ private final class WatchlistLoaderSpy: MarketDataLoading {
     }
   }
 
-  func reorderWatchlist(
+  func reorderWatchlistItems(
     accountID: String,
-    stockCodes: [String],
+    itemIDs: [String],
     authorizedAccountIDs: Set<String>
   ) async throws -> [MarketWatchItem] {
     reorderCount += 1
     lastMutationAccountID = accountID
     lastAuthorizedAccountIDs = authorizedAccountIDs
-    lastReorderCodes = stockCodes
+    lastReorderCodes = itemIDs.compactMap { itemID in
+      lastSnapshot.watchlist.first(where: { $0.id == itemID })?.stockCode
+    }
     return try await withCheckedThrowingContinuation { continuation in
       reorderContinuation = continuation
     }
@@ -346,9 +346,9 @@ private final class WatchlistLoaderSpy: MarketDataLoading {
     AsyncThrowingStream { $0.finish() }
   }
 
-  func succeedAdd(_ item: MarketWatchItem) {
-    let continuation = addContinuation
-    addContinuation = nil
+  func succeedSave(_ item: MarketWatchItem) {
+    let continuation = saveContinuation
+    saveContinuation = nil
     continuation?.resume(returning: item)
   }
 

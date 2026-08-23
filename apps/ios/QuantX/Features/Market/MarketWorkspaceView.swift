@@ -453,11 +453,6 @@ private struct MarketWatchlistRowContent: View {
           .font(.caption)
           .foregroundStyle(QuantXTheme.secondaryText)
           .monospacedDigit()
-        if let groupName = item.groupName, !groupName.isEmpty {
-          Text(groupName)
-            .font(.caption2)
-            .foregroundStyle(QuantXTheme.secondaryText)
-        }
       }
       Spacer(minLength: 8)
       if let quote = item.quote {

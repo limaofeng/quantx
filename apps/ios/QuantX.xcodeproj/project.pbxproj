@@ -23,7 +23,11 @@
 		0E699659A31517128C7BD1E3 /* Market.graphql in Resources */ = {isa = PBXBuildFile; fileRef = D19391FB94114BA52C6D42E3 /* Market.graphql */; };
 		0F4013F68D5834494B7BB4F8 /* Dashboard.graphql in Resources */ = {isa = PBXBuildFile; fileRef = 3378A3901FD27069A7FB434C /* Dashboard.graphql */; };
 		10E4518B771B9600F644D81B /* ExitPlanAuthorizationPositionSnapshot.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 513D4E08AAB1D49522CF73CB /* ExitPlanAuthorizationPositionSnapshot.graphql.swift */; };
-		11A2CAF4FFDF81A5DBE29E25 /* ReorderWatchlistInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 455FEAA9BBA7A6C2C106EC44 /* ReorderWatchlistInput.graphql.swift */; };
+		A10000000000000000000001 /* IOSSaveWatchlistItemMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* IOSSaveWatchlistItemMutation.graphql.swift */; };
+		A10000000000000000000002 /* IOSReorderWatchlistItemsMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* IOSReorderWatchlistItemsMutation.graphql.swift */; };
+		A10000000000000000000003 /* SaveWatchlistItemInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* SaveWatchlistItemInput.graphql.swift */; };
+		A10000000000000000000004 /* ReorderWatchlistItemsInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* ReorderWatchlistItemsInput.graphql.swift */; };
+		A10000000000000000000005 /* WatchlistGroup.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* WatchlistGroup.graphql.swift */; };
 		12A6AF7CD8904BC9E6513012 /* TTradeBatchPage.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E501CFE3DF46084F2A748D4 /* TTradeBatchPage.graphql.swift */; };
 		14A1E3A1C9BE1F805F52C1A6 /* ConfigurationFailureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7381A0E566E542F699AA03D /* ConfigurationFailureView.swift */; };
 		167F16E9297C192B410E6859 /* IOSPreviewManualOrderMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB1A0C6D55D28DE22C5EC6E3 /* IOSPreviewManualOrderMutation.graphql.swift */; };
@@ -95,7 +99,6 @@
 		5A3AB61E2943341D9861AB66 /* IOSPreviewTTradeEntryApprovalMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = F53B09ADDB093F5D0350731D /* IOSPreviewTTradeEntryApprovalMutation.graphql.swift */; };
 		5B35EA26F8C7A617F2D35367 /* Position.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6A2E80E79E195A91C22F354 /* Position.graphql.swift */; };
 		5C576E04E9ABBAD36F17D3F6 /* ExitPlanCapacityConflict.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4F6EE19661C9C5CD77E9276 /* ExitPlanCapacityConflict.graphql.swift */; };
-		5DE0EF307653F545A7CBB363 /* IOSReorderWatchlistMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04725B701EE94BC485D528E9 /* IOSReorderWatchlistMutation.graphql.swift */; };
 		5E52E7F143C41136B927D0BC /* StrategyControlPreviewInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EBE5CA4A2235B7AEAB86742 /* StrategyControlPreviewInput.graphql.swift */; };
 		5EB2960AF8F37AA521427C25 /* ManualOrderModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95EEF89F84E9F8748483909F /* ManualOrderModels.swift */; };
 		5F32F3713B39E3ECD31A712E /* CancelOrderInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0CD75BF6ACE4A4A9905A2E /* CancelOrderInput.graphql.swift */; };
@@ -172,7 +175,6 @@
 		9671CE9AB7317DE2E5B01E90 /* Liquidations.graphql in Resources */ = {isa = PBXBuildFile; fileRef = 2D8E6DE8E20CDF09BB11259F /* Liquidations.graphql */; };
 		9683C6FEF4FAC2B6BF132CD8 /* OrderType.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C8965C278EA89C2C0318311 /* OrderType.graphql.swift */; };
 		9702EDB2C5639847A13A3E1F /* QuantXTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88AD3D0177CACB6D42DDC67A /* QuantXTheme.swift */; };
-		9745103CBDF804699F137A48 /* IOSAddWatchlistItemMutation.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9FB729656049999FE8AE12D /* IOSAddWatchlistItemMutation.graphql.swift */; };
 		97BF4A54F5F2F634AD8D9096 /* LiquidationConfirmationSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21392FAACCE8719D0E8FC5FA /* LiquidationConfirmationSheet.swift */; };
 		97BF5580E47C3088241E6ECF /* HealthSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE17EA1BD2475CB61900B9A5 /* HealthSnapshotTests.swift */; };
 		984985C30D2788C59AFBD2AE /* Order.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3BC77B9130A4F1788EDAA05 /* Order.graphql.swift */; };
@@ -265,7 +267,6 @@
 		EAD64C5F3687E4FADE332865 /* OrderCancellationRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DBF91378FC0C3BD5518D001 /* OrderCancellationRepositoryTests.swift */; };
 		EB2421783E3ABC8214AFDF9C /* ExitPlanWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A586099C2D6ECFADC0620BF9 /* ExitPlanWorkspace.swift */; };
 		EC96F10595FF07DBFC663B19 /* TTradeControlConfirmationResult.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B67A8D68C4E1C90B6D87665 /* TTradeControlConfirmationResult.graphql.swift */; };
-		EC9AE05DEF9F8D35E5B9F2DE /* AddWatchlistItemInput.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = E490B5056010D7BC623848A1 /* AddWatchlistItemInput.graphql.swift */; };
 		EEF72C50FF197DD381291F9A /* PortfolioModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BC443C8CB0682468DA3643 /* PortfolioModelsTests.swift */; };
 		EF0D28DD54CF36059C0F13D5 /* ReadOnlyModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8F60D01A85EF9714EECAAD /* ReadOnlyModelsTests.swift */; };
 		F267F88460DF8BA6F1A6FB7F /* StrategyRunStatus.graphql.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8C33C2C2E67C5DB49F83146 /* StrategyRunStatus.graphql.swift */; };
@@ -311,7 +312,8 @@
 		0070500392321A940929FD4D /* IOSRegisterPushDeviceMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSRegisterPushDeviceMutation.graphql.swift; sourceTree = "<group>"; };
 		0120E212EB0AC5786C33D32A /* LiquidationConflictPreview.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidationConflictPreview.graphql.swift; sourceTree = "<group>"; };
 		01A207352DF0B6448F000CC2 /* TTradeRolloutTarget.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTradeRolloutTarget.graphql.swift; sourceTree = "<group>"; };
-		04725B701EE94BC485D528E9 /* IOSReorderWatchlistMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSReorderWatchlistMutation.graphql.swift; sourceTree = "<group>"; };
+		B10000000000000000000001 /* IOSSaveWatchlistItemMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSSaveWatchlistItemMutation.graphql.swift; sourceTree = "<group>"; };
+		B10000000000000000000002 /* IOSReorderWatchlistItemsMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSReorderWatchlistItemsMutation.graphql.swift; sourceTree = "<group>"; };
 		066F63EAFCC59B562F281079 /* IOSPauseTTradeEntriesMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPauseTTradeEntriesMutation.graphql.swift; sourceTree = "<group>"; };
 		087123971BBC2FDA21B813B4 /* TTradeControlRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTradeControlRepository.swift; sourceTree = "<group>"; };
 		088F3121668B3A0A09ED7AD8 /* QuantWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantWorkspaceView.swift; sourceTree = "<group>"; };
@@ -378,7 +380,8 @@
 		43EB6351A727843284966149 /* IOSNotificationEventRouteQuery.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSNotificationEventRouteQuery.graphql.swift; sourceTree = "<group>"; };
 		44C2D208C30D243ED55BED9C /* ManualOrderPriceType.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualOrderPriceType.graphql.swift; sourceTree = "<group>"; };
 		45408B1D2BC36D5966E85BA1 /* TradeWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeWorkspaceView.swift; sourceTree = "<group>"; };
-		455FEAA9BBA7A6C2C106EC44 /* ReorderWatchlistInput.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReorderWatchlistInput.graphql.swift; sourceTree = "<group>"; };
+		B10000000000000000000003 /* SaveWatchlistItemInput.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveWatchlistItemInput.graphql.swift; sourceTree = "<group>"; };
+		B10000000000000000000004 /* ReorderWatchlistItemsInput.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReorderWatchlistItemsInput.graphql.swift; sourceTree = "<group>"; };
 		456101D1A973E7C2250DAE1B /* ExitPlanWorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExitPlanWorkspaceTests.swift; sourceTree = "<group>"; };
 		45FCC9D8111E545C7BEBE39A /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		466E2605EC4F5AF6F7DD4ED1 /* Assistants.graphql */ = {isa = PBXFileReference; path = Assistants.graphql; sourceTree = "<group>"; };
@@ -552,7 +555,7 @@
 		D951E724A554425C01A0F237 /* IOSHistoryOrdersQuery.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSHistoryOrdersQuery.graphql.swift; sourceTree = "<group>"; };
 		DBA4D2B2EA156CA4966A95E4 /* QuantXApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantXApp.swift; sourceTree = "<group>"; };
 		DFBE34295245EFD02879AA87 /* IOSPreviewLiquidationMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPreviewLiquidationMutation.graphql.swift; sourceTree = "<group>"; };
-		E490B5056010D7BC623848A1 /* AddWatchlistItemInput.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddWatchlistItemInput.graphql.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* WatchlistGroup.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchlistGroup.graphql.swift; sourceTree = "<group>"; };
 		E49DBBB404302A0681EF8BDD /* StrategiesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrategiesView.swift; sourceTree = "<group>"; };
 		E5C1E3D71D603993E89ADC4F /* ID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ID.swift; sourceTree = "<group>"; };
 		E8149B7C5FED6E7BB3E6EE46 /* IOSUpdateStrategyInstanceParametersMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSUpdateStrategyInstanceParametersMutation.graphql.swift; sourceTree = "<group>"; };
@@ -586,7 +589,6 @@
 		F6BAFDF60ABFE314957F4311 /* PushNotificationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationModels.swift; sourceTree = "<group>"; };
 		F7381A0E566E542F699AA03D /* ConfigurationFailureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationFailureView.swift; sourceTree = "<group>"; };
 		F88CD5B151A9E517AF7907E2 /* LiquidationRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidationRepositoryTests.swift; sourceTree = "<group>"; };
-		F9FB729656049999FE8AE12D /* IOSAddWatchlistItemMutation.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSAddWatchlistItemMutation.graphql.swift; sourceTree = "<group>"; };
 		FA20C3BD7C14C41EFDC85215 /* TTradeControlStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TTradeControlStore.swift; sourceTree = "<group>"; };
 		FAF31FB0AD6E44797E6923AF /* PortfolioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioModels.swift; sourceTree = "<group>"; };
 		FD0CD75BF6ACE4A4A9905A2E /* CancelOrderInput.graphql.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CancelOrderInput.graphql.swift; sourceTree = "<group>"; };
@@ -869,7 +871,7 @@
 		71F7415665C0F9CA7123408E /* Mutations */ = {
 			isa = PBXGroup;
 			children = (
-				F9FB729656049999FE8AE12D /* IOSAddWatchlistItemMutation.graphql.swift */,
+				B10000000000000000000001 /* IOSSaveWatchlistItemMutation.graphql.swift */,
 				57F0A7ECDB2C12CD4690C213 /* IOSCancelOrderMutation.graphql.swift */,
 				4D20B3017BD275A7BD25A04A /* IOSConfirmExitPlanAuthorizationMutation.graphql.swift */,
 				2257BEF031718DA784DB56D4 /* IOSConfirmLiquidationMutation.graphql.swift */,
@@ -889,7 +891,7 @@
 				F53B09ADDB093F5D0350731D /* IOSPreviewTTradeEntryApprovalMutation.graphql.swift */,
 				0070500392321A940929FD4D /* IOSRegisterPushDeviceMutation.graphql.swift */,
 				0BD2DE169D9DE56ABB007FBD /* IOSRemoveWatchlistItemMutation.graphql.swift */,
-				04725B701EE94BC485D528E9 /* IOSReorderWatchlistMutation.graphql.swift */,
+				B10000000000000000000002 /* IOSReorderWatchlistItemsMutation.graphql.swift */,
 				7D2D5D783890933AF10E06B8 /* IOSResumeStrategyInstanceMutation.graphql.swift */,
 				24C26ECA3F469E0C0990FD43 /* IOSUnregisterPushDeviceMutation.graphql.swift */,
 				F47CA3FD016A3B4A9CAEABD2 /* IOSUpdatePushPreferencesMutation.graphql.swift */,
@@ -1085,7 +1087,7 @@
 		D30E94FA5A11BAE05276D7D5 /* InputObjects */ = {
 			isa = PBXGroup;
 			children = (
-				E490B5056010D7BC623848A1 /* AddWatchlistItemInput.graphql.swift */,
+				B10000000000000000000003 /* SaveWatchlistItemInput.graphql.swift */,
 				FD0CD75BF6ACE4A4A9905A2E /* CancelOrderInput.graphql.swift */,
 				825AB0DF704EED0D3CFC360B /* ExitPlanAuthorizationConfirmationInput.graphql.swift */,
 				57E3E2E41550FC1E38E10088 /* ExitPlanAuthorizationPreviewInput.graphql.swift */,
@@ -1095,7 +1097,7 @@
 				79159F46BBB8B1D7D2773E78 /* ManualOrderPreviewInput.graphql.swift */,
 				36EBCAF85455E7F4290C96BC /* PushCategoryPreferenceInput.graphql.swift */,
 				CFB8430E805DBF595BD26571 /* RegisterPushDeviceInput.graphql.swift */,
-				455FEAA9BBA7A6C2C106EC44 /* ReorderWatchlistInput.graphql.swift */,
+				B10000000000000000000004 /* ReorderWatchlistItemsInput.graphql.swift */,
 				87210AAB2C2D3D0EC191B5E5 /* StrategyControlConfirmationInput.graphql.swift */,
 				5EBE5CA4A2235B7AEAB86742 /* StrategyControlPreviewInput.graphql.swift */,
 				1A0C138956AD894BC9963B96 /* StrategyInstanceParameterUpdateInput.graphql.swift */,
@@ -1209,6 +1211,7 @@
 				CA96614D98592D8B4A786069 /* TTradeSignalHistoryEntry.graphql.swift */,
 				75B872763B18B295502030D0 /* TTradeSignalHistoryPage.graphql.swift */,
 				D7FE45FF86B040649FA321D4 /* UnregisterPushDeviceResult.graphql.swift */,
+				B10000000000000000000005 /* WatchlistGroup.graphql.swift */,
 				341767BE19E05141460A70DA /* WatchlistItem.graphql.swift */,
 				ED83B478AC1C87195240128D /* WatchlistMutationResult.graphql.swift */,
 			);
@@ -1395,7 +1398,8 @@
 			files = (
 				322EC4B28722AA74574FC7DD /* APIConfiguration.swift in Sources */,
 				CD8AF4F6BD3AA90CE8D5AEF7 /* Account.graphql.swift in Sources */,
-				EC9AE05DEF9F8D35E5B9F2DE /* AddWatchlistItemInput.graphql.swift in Sources */,
+				A10000000000000000000003 /* SaveWatchlistItemInput.graphql.swift in Sources */,
+				A10000000000000000000004 /* ReorderWatchlistItemsInput.graphql.swift in Sources */,
 				32A64955AD0424FAFD821DD5 /* ApolloClientFactory.swift in Sources */,
 				B887897ED908194EDC3403C7 /* AppModel.swift in Sources */,
 				C2B067FFC64FABDD38D3595D /* AppRootView.swift in Sources */,
@@ -1431,7 +1435,7 @@
 				923A67D9A1E7B2EFACEFE7D5 /* HealthClient.swift in Sources */,
 				F3B7D01EBCC231015152EE03 /* HealthSnapshot.swift in Sources */,
 				F4C3494A7FA5343301B5CB99 /* ID.swift in Sources */,
-				9745103CBDF804699F137A48 /* IOSAddWatchlistItemMutation.graphql.swift in Sources */,
+				A10000000000000000000001 /* IOSSaveWatchlistItemMutation.graphql.swift in Sources */,
 				732894BF0B75751F5F3B0D3A /* IOSCancelOrderMutation.graphql.swift in Sources */,
 				890FAAB3CF3971B2614C8FEC /* IOSConfirmExitPlanAuthorizationMutation.graphql.swift in Sources */,
 				6D7A98C5812196EC9B44B919 /* IOSConfirmLiquidationMutation.graphql.swift in Sources */,
@@ -1468,7 +1472,7 @@
 				5A3AB61E2943341D9861AB66 /* IOSPreviewTTradeEntryApprovalMutation.graphql.swift in Sources */,
 				92D94E6B5F9C79394D4B5F8C /* IOSRegisterPushDeviceMutation.graphql.swift in Sources */,
 				2E14C5EBB37E01C1F5DDF15B /* IOSRemoveWatchlistItemMutation.graphql.swift in Sources */,
-				5DE0EF307653F545A7CBB363 /* IOSReorderWatchlistMutation.graphql.swift in Sources */,
+				A10000000000000000000002 /* IOSReorderWatchlistItemsMutation.graphql.swift in Sources */,
 				90249A181C487D40A6EF15EA /* IOSResumeStrategyInstanceMutation.graphql.swift in Sources */,
 				A6542E1C449BE890BE400BD9 /* IOSStrategyInstanceMobileParametersQuery.graphql.swift in Sources */,
 				93B7A44CE781C4AB4661776C /* IOSStrategyInstancesQuery.graphql.swift in Sources */,
@@ -1556,7 +1560,6 @@
 				5763B02ECA8029A194EC74F4 /* Query.graphql.swift in Sources */,
 				030735053ED62FDC842C8D3F /* RealTimePrice.graphql.swift in Sources */,
 				680FA20E93ADDC239B16962F /* RegisterPushDeviceInput.graphql.swift in Sources */,
-				11A2CAF4FFDF81A5DBE29E25 /* ReorderWatchlistInput.graphql.swift in Sources */,
 				557B9F274B72F406432E9BB4 /* SchemaConfiguration.swift in Sources */,
 				7F528252B32874305981BB1A /* SchemaMetadata.graphql.swift in Sources */,
 				CC65C721F704073563DE9814 /* ServiceStatusView.swift in Sources */,
@@ -1619,6 +1622,7 @@
 				C24BF528CD59839C9B8D99CC /* UnregisterPushDeviceInput.graphql.swift in Sources */,
 				5FBF9975EBF4710CB4078AC3 /* UnregisterPushDeviceResult.graphql.swift in Sources */,
 				1835806D2CBA56A03F63FA4E /* UpdatePushPreferencesInput.graphql.swift in Sources */,
+				A10000000000000000000005 /* WatchlistGroup.graphql.swift in Sources */,
 				65511C4A049EA9EA3BF75008 /* WatchlistItem.graphql.swift in Sources */,
 				296614E802AA6073ABA0E372 /* WatchlistMutationResult.graphql.swift in Sources */,
 			);

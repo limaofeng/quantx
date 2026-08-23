@@ -65,6 +65,7 @@ _register(
     "position",
     "positions",
     "watchlist",
+    "watchlistGroups",
   },
 )
 _register(
@@ -219,10 +220,14 @@ _register(
   "Mutation",
   "watchlist:write",
   {
-    "addWatchlistItem",
+    "saveWatchlistItem",
     "removeWatchlistItem",
-    "reorderWatchlist",
-    "replaceWatchlist",
+    "createWatchlistGroup",
+    "renameWatchlistGroup",
+    "deleteWatchlistGroup",
+    "reorderWatchlistItems",
+    "reorderWatchlistGroups",
+    "reorderWatchlistGroupItems",
   },
   risk="NON_TRADING_WRITE",
 )

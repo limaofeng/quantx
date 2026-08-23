@@ -110,6 +110,8 @@ TABLE_COMMENTS: dict[str, str] = {
   "trade_command_outbox": "QMT Agent 交易命令持久化发件箱",
   "trades": "券商成交记录",
   "watchlist_items": "账户自选证券",
+  "watchlist_groups": "账户自选分组",
+  "watchlist_group_memberships": "账户自选分组成员关系",
 }
 
 LATE_LOADED_TABLES = frozenset({"divid_factors"})

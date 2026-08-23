@@ -4,7 +4,7 @@
 @_spi(Internal) @_spi(Unsafe) import ApolloAPI
 
 extension QuantXAPI {
-  nonisolated struct AddWatchlistItemInput: InputObject {
+  nonisolated struct SaveWatchlistItemInput: InputObject {
     private(set) var __data: InputDict
 
     init(_ data: InputDict) {
@@ -13,18 +13,16 @@ extension QuantXAPI {
 
     init(
       stockCode: String,
+      groupIds: [ID],
       accountId: GraphQLNullable<String> = nil,
       instrumentName: GraphQLNullable<String> = nil,
-      displayOrder: GraphQLNullable<Int32> = nil,
-      groupName: GraphQLNullable<String> = nil,
       note: GraphQLNullable<String> = nil
     ) {
       __data = InputDict([
         "stockCode": stockCode,
+        "groupIds": groupIds,
         "accountId": accountId,
         "instrumentName": instrumentName,
-        "displayOrder": displayOrder,
-        "groupName": groupName,
         "note": note
       ])
     }
@@ -32,6 +30,11 @@ extension QuantXAPI {
     var stockCode: String {
       get { __data["stockCode"] }
       set { __data["stockCode"] = newValue }
+    }
+
+    var groupIds: [ID] {
+      get { __data["groupIds"] }
+      set { __data["groupIds"] = newValue }
     }
 
     var accountId: GraphQLNullable<String> {
@@ -42,16 +45,6 @@ extension QuantXAPI {
     var instrumentName: GraphQLNullable<String> {
       get { __data["instrumentName"] }
       set { __data["instrumentName"] = newValue }
-    }
-
-    var displayOrder: GraphQLNullable<Int32> {
-      get { __data["displayOrder"] }
-      set { __data["displayOrder"] = newValue }
-    }
-
-    var groupName: GraphQLNullable<String> {
-      get { __data["groupName"] }
-      set { __data["groupName"] = newValue }
     }
 
     var note: GraphQLNullable<String> {

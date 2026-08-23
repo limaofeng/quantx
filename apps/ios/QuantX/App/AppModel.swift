@@ -739,7 +739,6 @@ final class AppModel: ObservableObject {
       stockCode: normalizedCode,
       instrumentName: instrument.name,
       displayOrder: displayOrder,
-      groupName: nil,
       note: nil,
       updatedAt: Date(),
       quote: instrument.quote
@@ -755,11 +754,10 @@ final class AppModel: ObservableObject {
         context: context,
         optimisticSnapshot: optimisticSnapshot
       ) { repository, authorizedAccountIDs in
-        try await repository.addWatchlistItem(
+        try await repository.saveWatchlistItem(
           accountID: context.accountID,
           stockCode: normalizedCode,
           instrumentName: instrument.name,
-          displayOrder: displayOrder,
           authorizedAccountIDs: authorizedAccountIDs
         )
       }
@@ -839,6 +837,12 @@ final class AppModel: ObservableObject {
     let currentByCode = Dictionary(
       uniqueKeysWithValues: context.snapshot.watchlist.map { ($0.stockCode, $0) }
     )
+    let orderedItemIDs = normalizedCodes.compactMap { currentByCode[$0]?.id }
+    guard orderedItemIDs.count == normalizedCodes.count else {
+      let error = WatchlistMutationError.contextMismatch
+      failWatchlistPreparation(error)
+      throw error
+    }
     let optimisticItems = normalizedCodes.enumerated().compactMap { index, code in
       currentByCode[code]?.ordered(at: index + 1)
     }
@@ -851,9 +855,9 @@ final class AppModel: ObservableObject {
         context: context,
         optimisticSnapshot: optimisticSnapshot
       ) { repository, authorizedAccountIDs in
-        try await repository.reorderWatchlist(
+        try await repository.reorderWatchlistItems(
           accountID: context.accountID,
-          stockCodes: normalizedCodes,
+          itemIDs: orderedItemIDs,
           authorizedAccountIDs: authorizedAccountIDs
         )
       }
@@ -2164,7 +2168,6 @@ final class AppModel: ObservableObject {
               stockCode: "600519.SH",
               instrumentName: "贵州茅台",
               displayOrder: 1,
-              groupName: nil,
               note: nil,
               updatedAt: updatedAt,
               quote: MarketQuote(
@@ -2188,7 +2191,6 @@ final class AppModel: ObservableObject {
               stockCode: "000001.SZ",
               instrumentName: "平安银行",
               displayOrder: 2,
-              groupName: nil,
               note: nil,
               updatedAt: updatedAt,
               quote: nil

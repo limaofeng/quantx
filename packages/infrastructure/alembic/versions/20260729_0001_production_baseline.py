@@ -14,8 +14,10 @@ from alembic import op
 from quantx_infrastructure.database.relational_base import Base
 from sqlalchemy import (
   CheckConstraint,
+  Column,
   ForeignKeyConstraint,
   MetaData,
+  String,
   UniqueConstraint,
 )
 from sqlalchemy.dialects import postgresql
@@ -152,6 +154,19 @@ def _baseline_metadata() -> MetaData:
     for index in list(table.indexes):
       if index.name in index_names:
         table.indexes.remove(index)
+  # ``group_name`` was part of the immutable watchlist baseline.  It is
+  # intentionally absent from the live model after 20260823_0031, so restore
+  # this historical-only column in the clone used for the fingerprint check.
+  watchlist_items = metadata.tables["watchlist_items"]
+  if "group_name" not in watchlist_items.c:
+    watchlist_items.append_column(
+      Column("group_name", String(length=80), nullable=True, comment="分组")
+    )
+    columns = watchlist_items._columns._collection
+    group_entry = next(entry for entry in columns if entry[0] == "group_name")
+    columns.remove(group_entry)
+    note_index = next(index for index, entry in enumerate(columns) if entry[0] == "note")
+    columns.insert(note_index, group_entry)
   # Revision 20260813_0010 makes strategy ownership optional for plan-owned
   # intents; the immutable baseline still required a strategy run.
   metadata.tables["strategy_trade_intents"].c.strategy_run_id.nullable = False

@@ -9,15 +9,15 @@ extension QuantXAPI {
     static let operationName: String = "IOSRemoveWatchlistItem"
     static let operationDocument: ApolloAPI.OperationDocument = .init(
       definition: .init(
-        #"mutation IOSRemoveWatchlistItem($stockCode: String!, $accountId: String!) { removeWatchlistItem(stockCode: $stockCode, accountId: $accountId) { __typename success message } }"#
+        #"mutation IOSRemoveWatchlistItem($stockCode: String!, $accountId: String) { removeWatchlistItem(stockCode: $stockCode, accountId: $accountId) { __typename success message } }"#
       ))
 
     public var stockCode: String
-    public var accountId: String
+    public var accountId: GraphQLNullable<String>
 
     public init(
       stockCode: String,
-      accountId: String
+      accountId: GraphQLNullable<String>
     ) {
       self.stockCode = stockCode
       self.accountId = accountId

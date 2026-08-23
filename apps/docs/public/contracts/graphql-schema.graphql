@@ -74,27 +74,6 @@ type AccountExecutionSafetyCheck {
   scope: String!
 }
 
-"""添加自选股输入"""
-input AddWatchlistItemInput {
-  """证券代码"""
-  stockCode: String!
-
-  """资金账号"""
-  accountId: String = null
-
-  """证券名称"""
-  instrumentName: String = null
-
-  """排序"""
-  displayOrder: Int = null
-
-  """分组"""
-  groupName: String = null
-
-  """备注"""
-  note: String = null
-}
-
 """QMT Agent 设备操作结果"""
 type AgentDeviceMutationResult {
   success: Boolean!
@@ -681,6 +660,18 @@ input CreateManualExitPlanInput {
   remark: String = null
 }
 
+"""创建自选股分组输入"""
+input CreateWatchlistGroupInput {
+  """分组名称"""
+  name: String!
+
+  """资金账号"""
+  accountId: String = null
+
+  """创建时加入主自选的证券代码"""
+  initialStockCodes: [String!]! = []
+}
+
 """每日收盘资产快照"""
 type DailyAssetSnapshot {
   """快照ID"""
@@ -758,6 +749,15 @@ scalar Date
 
 """Date with time (isoformat)"""
 scalar DateTime
+
+"""删除自选股分组输入"""
+input DeleteWatchlistGroupInput {
+  """分组ID"""
+  groupId: ID!
+
+  """资金账号"""
+  accountId: String = null
+}
 
 """已部署的流程"""
 type DeploymentFlowRun {
@@ -3570,17 +3570,29 @@ type Mutation {
   """批量保存节假日（覆盖整年）"""
   bulkSaveHolidays(market: String!, year: Int!, holidays: [HolidayInput!]!): HolidayMutationResult!
 
-  """添加或更新自选股"""
-  addWatchlistItem(input: AddWatchlistItemInput!): WatchlistMutationResult!
+  """保存自选股并精确设置所属分组"""
+  saveWatchlistItem(input: SaveWatchlistItemInput!): WatchlistMutationResult!
 
-  """删除自选股"""
+  """删除主自选中的证券并清理全部分组关系"""
   removeWatchlistItem(stockCode: String!, accountId: String = null): WatchlistMutationResult!
 
-  """替换自选股列表"""
-  replaceWatchlist(symbols: [String!]!, accountId: String = null): WatchlistMutationResult!
+  """创建自选股分组"""
+  createWatchlistGroup(input: CreateWatchlistGroupInput!): WatchlistMutationResult!
 
-  """更新自选股排序"""
-  reorderWatchlist(input: ReorderWatchlistInput!): WatchlistMutationResult!
+  """重命名自选股分组"""
+  renameWatchlistGroup(input: RenameWatchlistGroupInput!): WatchlistMutationResult!
+
+  """删除自选股分组但保留主自选"""
+  deleteWatchlistGroup(input: DeleteWatchlistGroupInput!): WatchlistMutationResult!
+
+  """更新主自选完整排序"""
+  reorderWatchlistItems(input: ReorderWatchlistItemsInput!): WatchlistMutationResult!
+
+  """更新自选股分组完整排序"""
+  reorderWatchlistGroups(input: ReorderWatchlistGroupsInput!): WatchlistMutationResult!
+
+  """更新分组内自选股完整排序"""
+  reorderWatchlistGroupItems(input: ReorderWatchlistGroupItemsInput!): WatchlistMutationResult!
 
   """上报做 T V3 客户端固定低基数刷新遥测"""
   recordTTradeClientTelemetry(input: TTradeClientTelemetryInput!): TTradeClientTelemetryResult!
@@ -4563,8 +4575,11 @@ type Query {
   """获取可用日级信号及快照元信息"""
   stockSignalSnapshotMeta: [SignalMeta!]!
 
-  """获取自选股列表"""
+  """获取全部自选股列表"""
   watchlist(accountId: String = null): [WatchlistItem!]!
+
+  """获取自选股分组列表"""
+  watchlistGroups(accountId: String = null): [WatchlistGroup!]!
 
   """游标分页查询持久化做 T 批次"""
   tTradeBatchesPage(accountId: String!, statusGroup: String = null, first: Int! = 30, after: String = null): TTradeBatchPage!
@@ -4762,10 +4777,43 @@ input RegisterPushDeviceInput {
   deviceInstallId: String!
 }
 
-"""自选股排序输入"""
-input ReorderWatchlistInput {
-  """排序后的证券代码列表"""
-  symbols: [String!]!
+"""重命名自选股分组输入"""
+input RenameWatchlistGroupInput {
+  """分组ID"""
+  groupId: ID!
+
+  """新分组名称"""
+  name: String!
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""自选股分组内排序输入"""
+input ReorderWatchlistGroupItemsInput {
+  """分组ID"""
+  groupId: ID!
+
+  """完整排序后的自选记录ID"""
+  itemIds: [ID!]!
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""自选股分组排序输入"""
+input ReorderWatchlistGroupsInput {
+  """完整排序后的分组ID"""
+  groupIds: [ID!]!
+
+  """资金账号"""
+  accountId: String = null
+}
+
+"""自选股主集合排序输入"""
+input ReorderWatchlistItemsInput {
+  """完整排序后的自选记录ID"""
+  itemIds: [ID!]!
 
   """资金账号"""
   accountId: String = null
@@ -4881,6 +4929,24 @@ enum RoeQualityStatus {
   SUSPICIOUS
   INVALID
   UNVERIFIED
+}
+
+"""保存自选股输入"""
+input SaveWatchlistItemInput {
+  """证券代码"""
+  stockCode: String!
+
+  """精确设置的分组ID列表"""
+  groupIds: [ID!]!
+
+  """资金账号"""
+  accountId: String = null
+
+  """证券名称"""
+  instrumentName: String = null
+
+  """备注"""
+  note: String = null
 }
 
 """行业/概念板块"""
@@ -7823,10 +7889,43 @@ input UpdatePushPreferencesInput {
   preferences: [PushCategoryPreferenceInput!]!
 }
 
+"""自选股分组"""
+type WatchlistGroup {
+  """分组ID"""
+  id: ID!
+
+  """资金账号"""
+  accountId: String!
+
+  """分组名称"""
+  name: String!
+
+  """展示排序"""
+  displayOrder: Int!
+
+  """组内自选数量"""
+  itemCount: Int!
+
+  """创建时间"""
+  createdAt: DateTime
+
+  """更新时间"""
+  updatedAt: DateTime
+}
+
+"""自选股分组归属及组内排序"""
+type WatchlistGroupMembership {
+  """分组ID"""
+  groupId: ID!
+
+  """组内展示排序"""
+  displayOrder: Int!
+}
+
 """自选股"""
 type WatchlistItem {
   """自选记录ID"""
-  id: String!
+  id: ID!
 
   """资金账号"""
   accountId: String!
@@ -7840,8 +7939,11 @@ type WatchlistItem {
   """展示排序"""
   displayOrder: Int!
 
-  """分组"""
-  groupName: String
+  """所属分组"""
+  groups: [WatchlistGroup!]!
+
+  """所属分组及组内排序"""
+  groupMemberships: [WatchlistGroupMembership!]!
 
   """备注"""
   note: String
@@ -7866,4 +7968,10 @@ type WatchlistMutationResult {
 
   """自选股列表"""
   items: [WatchlistItem!]!
+
+  """单个分组"""
+  group: WatchlistGroup
+
+  """分组列表"""
+  groups: [WatchlistGroup!]!
 }

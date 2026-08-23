@@ -46,6 +46,7 @@ describe('router configuration', () => {
     expect(getPageTitle('/')).toBe('行情工作台');
     expect(getPageTitle('/market/indices')).toBe('全部指数');
     expect(getPageTitle('/holdings')).toBe('持仓');
+    expect(getPageTitle('/watchlist')).toBe('自选');
     expect(getPageTitle('/account')).toBe('账户概览');
     expect(getPageTitle('/entry-plans')).toBe('买入管理');
     expect(getPageTitle('/t-trade')).toBe('做T助手');
@@ -94,6 +95,7 @@ describe('router configuration', () => {
 
     expect(main?.items.map(item => item.href)).toEqual([
       '/',
+      '/watchlist',
       '/holdings',
       '/entry-plans',
       '/t-trade',

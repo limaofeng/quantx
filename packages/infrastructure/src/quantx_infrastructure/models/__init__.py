@@ -152,6 +152,8 @@ from .tick import Tick
 from .trade import Trade
 from .trade_confirmation_challenge import TradeConfirmationChallenge
 from .trade_intent_record import TradeIntentRecord
+from .watchlist_group import WatchlistGroup
+from .watchlist_group_membership import WatchlistGroupMembership
 from .watchlist_item import WatchlistItem
 
 apply_table_comments(Base.metadata)
@@ -185,6 +187,8 @@ __all__ = [
   "TTradeOpportunityEvaluation",
   "TTradeReplayProjection",
   "WatchlistItem",
+  "WatchlistGroup",
+  "WatchlistGroupMembership",
   "Account",
   "AutoExitPlanRecord",
   "AutoExitPlanEvent",

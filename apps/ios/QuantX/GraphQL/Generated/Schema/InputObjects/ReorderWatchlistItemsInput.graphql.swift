@@ -4,7 +4,7 @@
 @_spi(Internal) @_spi(Unsafe) import ApolloAPI
 
 extension QuantXAPI {
-  nonisolated struct ReorderWatchlistInput: InputObject {
+  nonisolated struct ReorderWatchlistItemsInput: InputObject {
     private(set) var __data: InputDict
 
     init(_ data: InputDict) {
@@ -12,18 +12,18 @@ extension QuantXAPI {
     }
 
     init(
-      symbols: [String],
+      itemIds: [ID],
       accountId: GraphQLNullable<String> = nil
     ) {
       __data = InputDict([
-        "symbols": symbols,
+        "itemIds": itemIds,
         "accountId": accountId
       ])
     }
 
-    var symbols: [String] {
-      get { __data["symbols"] }
-      set { __data["symbols"] = newValue }
+    var itemIds: [ID] {
+      get { __data["itemIds"] }
+      set { __data["itemIds"] = newValue }
     }
 
     var accountId: GraphQLNullable<String> {

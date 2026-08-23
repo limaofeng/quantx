@@ -9,10 +9,12 @@ from quantx_api.gqlapi.resolvers.watchlist import WatchlistResolver
 from quantx_api.gqlapi.schemas.watchlist_schema import WatchlistMutation
 from quantx_api.gqlapi.security import required_permission
 from quantx_api.gqlapi.types.watchlist_types import (
-  AddWatchlistItemInput,
-  ReorderWatchlistInput,
+  CreateWatchlistGroupInput,
+  ReorderWatchlistItemsInput,
+  SaveWatchlistItemInput,
   WatchlistMutationResult,
 )
+from quantx_infrastructure.services.watchlist_service import WatchlistService
 
 
 def _info(*, account_id: str = "ACCOUNT-1") -> SimpleNamespace:
@@ -32,10 +34,14 @@ def _info(*, account_id: str = "ACCOUNT-1") -> SimpleNamespace:
 @pytest.mark.parametrize(
   "field_name",
   [
-    "addWatchlistItem",
+    "saveWatchlistItem",
     "removeWatchlistItem",
-    "replaceWatchlist",
-    "reorderWatchlist",
+    "createWatchlistGroup",
+    "renameWatchlistGroup",
+    "deleteWatchlistGroup",
+    "reorderWatchlistItems",
+    "reorderWatchlistGroups",
+    "reorderWatchlistGroupItems",
   ],
 )
 def test_watchlist_mutations_require_dedicated_scope(field_name: str):
@@ -43,16 +49,16 @@ def test_watchlist_mutations_require_dedicated_scope(field_name: str):
 
 
 @pytest.mark.asyncio
-async def test_add_watchlist_uses_device_active_account_when_input_omits_it():
+async def test_save_watchlist_uses_device_active_account_when_input_omits_it():
   result = WatchlistMutationResult(success=True, message="ok")
   with patch.object(
     WatchlistResolver,
-    "add_watchlist_item",
+    "save_watchlist_item",
     new=AsyncMock(return_value=result),
   ) as resolver:
-    actual = await WatchlistMutation().add_watchlist_item(
+    actual = await WatchlistMutation().save_watchlist_item(
       _info(),
-      AddWatchlistItemInput(stock_code="600519.SH"),
+      SaveWatchlistItemInput(stock_code="600519.SH", group_ids=[]),
     )
 
   assert actual is result
@@ -72,18 +78,17 @@ async def test_add_watchlist_uses_device_active_account_when_input_omits_it():
       ),
     ),
     (
-      "replace_watchlist",
-      lambda mutation, info: mutation.replace_watchlist(
+      "create_watchlist_group",
+      lambda mutation, info: mutation.create_watchlist_group(
         info,
-        ["600519.SH"],
-        None,
+        CreateWatchlistGroupInput(name="核心"),
       ),
     ),
     (
-      "reorder_watchlist",
-      lambda mutation, info: mutation.reorder_watchlist(
+      "reorder_watchlist_items",
+      lambda mutation, info: mutation.reorder_watchlist_items(
         info,
-        ReorderWatchlistInput(symbols=["600519.SH"]),
+        ReorderWatchlistItemsInput(item_ids=[]),
       ),
     ),
   ],
@@ -122,3 +127,37 @@ async def test_watchlist_mutation_rejects_cross_account_before_resolver():
 
   assert caught.value.code == "FORBIDDEN"
   resolver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_watchlist_resolver_returns_business_error_for_value_error():
+  with patch.object(
+    WatchlistService,
+    "save_item",
+    new=AsyncMock(side_effect=ValueError("group name is required")),
+  ):
+    result = await WatchlistResolver.save_watchlist_item(
+      account_id="ACCOUNT-1", stock_code="600519.SH", group_ids=[]
+    )
+
+  assert result.success is False
+  assert result.message == "group name is required"
+
+
+@pytest.mark.asyncio
+async def test_watchlist_resolver_hides_unexpected_error_details():
+  with (
+    patch.object(
+      WatchlistService,
+      "save_item",
+      new=AsyncMock(side_effect=RuntimeError("database password leaked")),
+    ),
+    patch("quantx_api.gqlapi.resolvers.watchlist.logger.exception") as log_exception,
+  ):
+    result = await WatchlistResolver.save_watchlist_item(
+      account_id="ACCOUNT-1", stock_code="600519.SH", group_ids=[]
+    )
+
+  assert result.success is False
+  assert result.message == "自选操作失败"
+  log_exception.assert_called_once()

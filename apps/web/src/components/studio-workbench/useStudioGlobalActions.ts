@@ -36,6 +36,7 @@ const compactNavigationLabels: Record<string, string> = {
   研究中心: '研究',
   策略管理: '策略',
   股票筛选: '选股',
+  选股: '选股',
   系统设置: '设置',
 };
 

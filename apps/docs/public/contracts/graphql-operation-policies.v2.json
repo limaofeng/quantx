@@ -37,18 +37,6 @@
         "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
-      "addWatchlistItem": {
-        "audiences": [
-          "web",
-          "native",
-          "third-party"
-        ],
-        "requiredPermissions": [
-          "watchlist:write"
-        ],
-        "risk": "NON_TRADING_WRITE",
-        "stability": "supported"
-      },
       "approveStrategyTradeIntent": {
         "audiences": [
           "web",
@@ -459,6 +447,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "createWatchlistGroup": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
       "deleteAiAssistantThread": {
         "audiences": [
           "web",
@@ -504,6 +504,18 @@
           "strategy:write"
         ],
         "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "deleteWatchlistGroup": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
       "disarmLimitUpBoardCandidate": {
@@ -923,7 +935,7 @@
         "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
-      "reorderWatchlist": {
+      "renameWatchlistGroup": {
         "audiences": [
           "web",
           "native",
@@ -935,7 +947,31 @@
         "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
-      "replaceWatchlist": {
+      "reorderWatchlistGroupItems": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "reorderWatchlistGroups": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
+      "reorderWatchlistItems": {
         "audiences": [
           "web",
           "native",
@@ -1112,6 +1148,18 @@
           "t-trade:control"
         ],
         "risk": "TRADING_WRITE",
+        "stability": "supported"
+      },
+      "saveWatchlistItem": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "watchlist:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
         "stability": "supported"
       },
       "sendAiAssistantMessage": {
@@ -2799,6 +2847,18 @@
         "stability": "supported"
       },
       "watchlist": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "portfolio:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "watchlistGroups": {
         "audiences": [
           "web",
           "native",

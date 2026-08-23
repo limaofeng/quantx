@@ -122,10 +122,14 @@ def test_trade_approval_mutations_require_independent_permission(
 @pytest.mark.parametrize(
   ("field_name", "permission"),
   [
-    ("addWatchlistItem", "watchlist:write"),
+    ("saveWatchlistItem", "watchlist:write"),
     ("removeWatchlistItem", "watchlist:write"),
-    ("replaceWatchlist", "watchlist:write"),
-    ("reorderWatchlist", "watchlist:write"),
+    ("createWatchlistGroup", "watchlist:write"),
+    ("renameWatchlistGroup", "watchlist:write"),
+    ("deleteWatchlistGroup", "watchlist:write"),
+    ("reorderWatchlistItems", "watchlist:write"),
+    ("reorderWatchlistGroups", "watchlist:write"),
+    ("reorderWatchlistGroupItems", "watchlist:write"),
     ("pauseStrategyInstance", "strategy:control"),
     ("resumeStrategyInstance", "strategy:control"),
     ("rejectStrategyTradeIntent", "strategy:control"),

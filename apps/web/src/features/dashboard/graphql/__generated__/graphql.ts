@@ -22,22 +22,6 @@ export type Scalars = {
   JSON: { input: any; output: any; }
 };
 
-/** 添加自选股输入 */
-export type AddWatchlistItemInput = {
-  /** 资金账号 */
-  accountId?: InputMaybe<Scalars['String']['input']>;
-  /** 排序 */
-  displayOrder?: InputMaybe<Scalars['Int']['input']>;
-  /** 分组 */
-  groupName?: InputMaybe<Scalars['String']['input']>;
-  /** 证券名称 */
-  instrumentName?: InputMaybe<Scalars['String']['input']>;
-  /** 备注 */
-  note?: InputMaybe<Scalars['String']['input']>;
-  /** 证券代码 */
-  stockCode: Scalars['String']['input'];
-};
-
 export enum AiAssistantApprovalDecision {
   Approve = 'APPROVE',
   Reject = 'REJECT'
@@ -173,6 +157,24 @@ export type CreateManualExitPlanInput = {
   protectedVolume: Scalars['Int']['input'];
   remark?: InputMaybe<Scalars['String']['input']>;
   rules: Scalars['JSON']['input'];
+};
+
+/** 创建自选股分组输入 */
+export type CreateWatchlistGroupInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 创建时加入主自选的证券代码 */
+  initialStockCodes?: Array<Scalars['String']['input']>;
+  /** 分组名称 */
+  name: Scalars['String']['input'];
+};
+
+/** 删除自选股分组输入 */
+export type DeleteWatchlistGroupInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 分组ID */
+  groupId: Scalars['ID']['input'];
 };
 
 /** 复权类型 */
@@ -846,12 +848,40 @@ export type RegisterPushDeviceInput = {
   environment: PushEnvironment;
 };
 
-/** 自选股排序输入 */
-export type ReorderWatchlistInput = {
+/** 重命名自选股分组输入 */
+export type RenameWatchlistGroupInput = {
   /** 资金账号 */
   accountId?: InputMaybe<Scalars['String']['input']>;
-  /** 排序后的证券代码列表 */
-  symbols: Array<Scalars['String']['input']>;
+  /** 分组ID */
+  groupId: Scalars['ID']['input'];
+  /** 新分组名称 */
+  name: Scalars['String']['input'];
+};
+
+/** 自选股分组内排序输入 */
+export type ReorderWatchlistGroupItemsInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 分组ID */
+  groupId: Scalars['ID']['input'];
+  /** 完整排序后的自选记录ID */
+  itemIds: Array<Scalars['ID']['input']>;
+};
+
+/** 自选股分组排序输入 */
+export type ReorderWatchlistGroupsInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 完整排序后的分组ID */
+  groupIds: Array<Scalars['ID']['input']>;
+};
+
+/** 自选股主集合排序输入 */
+export type ReorderWatchlistItemsInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 完整排序后的自选记录ID */
+  itemIds: Array<Scalars['ID']['input']>;
 };
 
 export type ResolveAiAssistantApprovalInput = {
@@ -883,6 +913,20 @@ export enum RoeQualityStatus {
   Unverified = 'UNVERIFIED',
   Valid = 'VALID'
 }
+
+/** 保存自选股输入 */
+export type SaveWatchlistItemInput = {
+  /** 资金账号 */
+  accountId?: InputMaybe<Scalars['String']['input']>;
+  /** 精确设置的分组ID列表 */
+  groupIds: Array<Scalars['ID']['input']>;
+  /** 证券名称 */
+  instrumentName?: InputMaybe<Scalars['String']['input']>;
+  /** 备注 */
+  note?: InputMaybe<Scalars['String']['input']>;
+  /** 证券代码 */
+  stockCode: Scalars['String']['input'];
+};
 
 export type SendAiAssistantMessageInput = {
   clientMessageId: Scalars['String']['input'];

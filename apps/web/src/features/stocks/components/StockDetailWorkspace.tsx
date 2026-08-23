@@ -558,6 +558,7 @@ export function StockDetailWorkspace({
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       <TradingInstrumentHeader
+        accountId={accountId}
         accountCash={accountSummary?.cash}
         holdings={holdings}
         portfolioSummary={portfolioSummary}

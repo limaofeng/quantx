@@ -82,19 +82,51 @@ final class MarketRepositoryMutationTests: XCTestCase {
     }
   }
 
+  func testAuthoritativeItemReorderRequiresExactServerItemIDs() throws {
+    let serverItems = [
+      try makeItem(
+        id: "watchlist-1",
+        stockCode: "000001.SZ",
+        expectedStockCode: nil,
+        displayOrder: 1
+      ),
+      try makeItem(
+        id: "watchlist-2",
+        stockCode: "600519.SH",
+        expectedStockCode: nil,
+        displayOrder: 2
+      ),
+    ]
+
+    XCTAssertNoThrow(
+      try MarketRepository.validateAuthoritativeReorder(
+        serverItems,
+        requestedItemIDs: serverItems.map(\.id)
+      )
+    )
+    XCTAssertThrowsError(
+      try MarketRepository.validateAuthoritativeReorder(
+        serverItems,
+        requestedItemIDs: ["item-1", "item-2"]
+      )
+    ) { error in
+      XCTAssertEqual(error as? WatchlistMutationError, .contextMismatch)
+    }
+  }
+
   private func makeItem(
+    id: String = "watchlist-1",
     accountID: String = "ACCOUNT-1",
     stockCode: String = "600519.SH",
     expectedStockCode: String? = "600519.SH",
     displayOrder: Int = 1
   ) throws -> MarketWatchItem {
     try MarketRepository.mapMutationItem(
-      id: "watchlist-1",
+      id: id,
       accountID: accountID,
       stockCode: stockCode,
       instrumentName: "证券",
       displayOrder: displayOrder,
-      groupName: nil,
       note: nil,
       updatedAt: "2026-08-15T01:00:00Z",
       expectedAccountID: "ACCOUNT-1",

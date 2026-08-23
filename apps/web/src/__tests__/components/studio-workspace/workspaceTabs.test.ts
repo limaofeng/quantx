@@ -8,11 +8,24 @@ import {
 } from '@/components/studio-workspace';
 
 describe('studio workspace tabs', () => {
-  it('keeps the watchlist label when it joins the regular tab strip', () => {
+  it('labels the screening workspace as stock selection', () => {
     expect(buildStudioWorkspaceTab('/screening')).toMatchObject({
-      name: '自选股',
+      name: '选股',
       path: '/screening',
     });
+  });
+
+  it('keeps watchlist symbol switches in one stable studio tab', () => {
+    expect(
+      buildStudioWorkspaceTab('/watchlist?collection=all&symbol=000001.SZ')
+    ).toMatchObject({
+      id: 'watchlist',
+      name: '自选',
+      path: '/watchlist?collection=all&symbol=000001.SZ',
+    });
+    expect(
+      getStudioWorkspaceTabId('/watchlist?collection=holdings&symbol=600519.SH')
+    ).toBe('watchlist');
   });
 
   it('builds one holdings tab id regardless of selected symbol', () => {
