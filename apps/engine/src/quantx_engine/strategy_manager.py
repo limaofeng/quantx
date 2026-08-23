@@ -1108,43 +1108,38 @@ class StrategyManager:
     sync_periods = self._extract_supported_sync_periods(missing_before)
     unsupported_periods = self._collect_unsupported_periods(missing_before)
     if is_t_trade_replay:
-      self.logger.warning(
-        "做 T 回放本地历史数据不完整，将按 InfluxDB 已落库数据执行隔离降级: %s",
+      self.logger.info(
+        "做 T 回放本地历史数据不完整，将阻塞补齐并严格复核 InfluxDB: %s",
         missing_desc,
       )
-      supplement = {
-        "mode": "ASYNC_OPTIONAL",
-        "status": "UNSUPPORTED_PERIODS" if not sync_periods else "NOT_REQUESTED",
-        "queued_request_ids": [],
-        "completed_request_ids": [],
-        "failed_requests": [],
+      synchronization: Dict[str, Any] = {
+        "mode": "BLOCKING_REQUIRED",
+        "status": "UNSUPPORTED_PERIODS" if not sync_periods else "PENDING",
+        "requested_periods": sorted(sync_periods),
       }
-      if sync_periods and runtime.context.parameters.get(
-        "replay_queue_missing_data_supplement", True
-      ):
+      sync_error: Optional[Exception] = None
+      if sync_periods:
         try:
-          supplement = await self._queue_missing_backtest_data_supplement(
+          await self._sync_missing_backtest_data(
             runtime=runtime,
             missing=missing_before,
             sync_periods=sync_periods,
           )
         except Exception as exc:
-          supplement = {
-            **supplement,
-            "status": "QUEUE_FAILED",
-            "reason": str(exc),
-          }
-          self.logger.warning(
-            "做 T 回放可选历史数据补数排队失败；本次仍按本地数据降级: %s",
-            exc,
-            exc_info=True,
+          sync_error = exc
+          synchronization.update(
+            {
+              "status": "FAILED",
+              "reason": str(exc),
+            }
           )
-      elif sync_periods:
-        supplement["status"] = "DISABLED"
+          self.logger.warning(
+            "做 T 回放历史数据补齐失败，将严格复核已落库 InfluxDB 数据: %s",
+            exc,
+          )
+        else:
+          synchronization["status"] = "COMPLETED"
 
-      # The current run never waits for the optional Agent transfer. Re-read
-      # once to pick up data that may have completed concurrently, then make a
-      # deterministic decision from persisted InfluxDB only.
       missing_after = await self._find_missing_backtest_data(
         service=service,
         instruments=runtime.instruments,
@@ -1158,17 +1153,26 @@ class StrategyManager:
         runtime=runtime,
         missing=missing_after,
         missing_before=missing_before,
-        supplement=supplement,
+        synchronization=synchronization,
         unsupported_periods=unsupported_periods,
       )
-      if missing_after and not runtime.context.instruments:
+      if missing_after:
         error_code = (
           "DATA_PARTIAL"
           if self._contains_partial_market_data(missing_after)
           else "DATA_INSUFFICIENT"
         )
-        raise RuntimeError(
-          f"{error_code}: 回放区间内全部可回放持仓标的均缺少可证明完整的已落库历史数据"
+        error = RuntimeError(
+          f"{error_code}: 做 T 回放区间内仍存在缺少可证明完整的已落库历史数据的标的: "
+          f"{self._format_missing_data(missing_after)}"
+        )
+        if sync_error is not None:
+          raise error from sync_error
+        raise error
+      if sync_error is not None:
+        self.logger.warning(
+          "做 T 回放历史数据补齐返回失败，但严格 InfluxDB 复核已通过: %s",
+          sync_error,
         )
       return
 
@@ -1271,66 +1275,28 @@ class StrategyManager:
     runtime: StrategyRuntime,
     missing: Dict[str, Dict[str, Any]],
     missing_before: Dict[str, Dict[str, Any]],
-    supplement: Dict[str, Any],
+    synchronization: Dict[str, Any],
     unsupported_periods: Set[str],
   ) -> None:
-    """Persist the local-data decision and remove only unavailable symbols."""
+    """Persist the blocking replay-data decision without pruning instruments."""
 
     missing_codes = set(missing)
     available = [
       code for code in runtime.context.instruments if code not in missing_codes
     ]
-    metadata = dict(runtime.context.parameters.get("initial_instrument_metadata") or {})
-    skipped_by_code = {
-      str(item.get("stock_code") or ""): dict(item)
-      for item in list(
-        runtime.context.parameters.get("replay_skipped_instruments") or []
-      )
-      if str(item.get("stock_code") or "")
-    }
-    supplement_status = str(supplement.get("status") or "NOT_REQUESTED")
-    for code in sorted(missing_codes):
-      item = dict(metadata.get(code) or {})
-      local_detail = self._format_missing_data({code: missing[code]})
-      if supplement_status == "QUEUED_FOR_FUTURE_REPLAY":
-        suffix = "；在线 Agent 补数已异步排队，仅供后续回放使用"
-      elif supplement_status == "AGENT_UNAVAILABLE":
-        suffix = "；当前无在线行情 Agent，本次不等待外部链路"
-      elif supplement_status == "DISABLED":
-        suffix = "；可选 Agent 补数已禁用"
-      elif supplement_status == "UNSUPPORTED_PERIODS":
-        suffix = "；所需周期不支持 Agent 补数"
-      elif supplement_status in {"QUEUE_FAILED", "PARTIAL_QUEUE_FAILURE"}:
-        suffix = "；可选 Agent 补数排队失败，本次不等待外部链路"
-      else:
-        suffix = "；本次仅采用已落库 InfluxDB 数据"
-      skipped_by_code[code] = {
-        "stock_code": code,
-        "instrument_name": str(item.get("instrument_name", "") or ""),
-        "data_status": (
-          "DATA_PARTIAL"
-          if self._contains_partial_market_data({code: missing[code]})
-          else "DATA_INSUFFICIENT"
-        ),
-        "reason": f"本地历史数据不完整（{local_detail}）{suffix}",
-      }
-
-    runtime.context.instruments = available
-    runtime.context.parameters["initial_instrument_metadata"] = {
-      code: value for code, value in metadata.items() if code in available
-    }
-    runtime.context.parameters["replay_skipped_instruments"] = [
-      skipped_by_code[code] for code in sorted(skipped_by_code)
-    ]
     replay_data_preparation = {
-      "schema_version": 1,
-      "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SUPPLEMENT_NON_BLOCKING",
+      "schema_version": 3,
+      "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING",
       "local_authority": "INFLUXDB",
+      "blocking": True,
+      "required": True,
       "missing_before": sorted(missing_before),
       "missing_after": sorted(missing),
+      "required_instruments": list(runtime.context.instruments),
       "available_instruments": list(available),
+      "replay_start_allowed": not bool(missing),
       "unsupported_periods": sorted(unsupported_periods),
-      "supplement": supplement,
+      "synchronization": synchronization,
     }
     quality_issues_before = {
       code: list(info.get("quality_issues") or [])
@@ -1345,7 +1311,6 @@ class StrategyManager:
     if quality_issues_before or quality_issues_after:
       replay_data_preparation.update(
         {
-          "schema_version": 2,
           "quality_policy": "STRICT_DAILY_SESSION_COVERAGE",
           "quality_issues_before": quality_issues_before,
           "quality_issues_after": quality_issues_after,
@@ -1356,16 +1321,16 @@ class StrategyManager:
       await StrategyRunRepository(db).update_run(
         runtime.run_id,
         {
-          "instruments": available,
+          "instruments": list(runtime.context.instruments),
           "parameters": runtime.context.parameters,
         },
       )
       break
     if missing_codes:
       self.logger.warning(
-        "做 T 回放已按本地数据跳过历史数据不足标的: %s (supplement=%s)",
+        "做 T 回放历史数据严格复核后仍不完整，已阻止启动: %s (synchronization=%s)",
         ", ".join(sorted(missing_codes)),
-        supplement_status,
+        synchronization.get("status"),
       )
 
   async def _sync_missing_backtest_data(

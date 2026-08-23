@@ -1024,7 +1024,7 @@ class TestStrategyManager:
     StrategyManager._instance = None
 
   @pytest.mark.asyncio
-  async def test_t_trade_replay_skips_only_missing_local_symbol_when_agent_offline(
+  async def test_t_trade_replay_syncs_missing_local_data_then_rechecks(
     self,
     monkeypatch,
   ):
@@ -1041,17 +1041,12 @@ class TestStrategyManager:
     monkeypatch.setattr(
       manager,
       "_find_missing_backtest_data",
-      AsyncMock(side_effect=[missing, missing]),
+      AsyncMock(side_effect=[missing, {}]),
     )
-    queued = AsyncMock(
-      return_value={
-        "status": "skipped",
-        "reason": "market_data_agent_unavailable",
-      }
-    )
-    waited = AsyncMock()
+    sync = AsyncMock()
+    queued = AsyncMock()
+    monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
     monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
-    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
@@ -1069,39 +1064,36 @@ class TestStrategyManager:
 
     await manager._ensure_backtest_data_available(runtime)
 
-    queued.assert_awaited_once_with(
-      stock_list=["688552.SH"],
-      start_time="20260803",
-      end_time="20260803",
-      periods=["tick"],
+    sync.assert_awaited_once_with(
+      runtime=runtime,
+      missing=missing,
+      sync_periods={"tick"},
     )
-    waited.assert_not_awaited()
-    assert runtime.context.instruments == ["600887.SH"]
-    assert runtime.context.parameters["replay_data_preparation"] == {
-      "schema_version": 1,
-      "policy": "INFLUXDB_LOCAL_FIRST_AGENT_SUPPLEMENT_NON_BLOCKING",
-      "local_authority": "INFLUXDB",
-      "missing_before": ["688552.SH"],
-      "missing_after": ["688552.SH"],
-      "available_instruments": ["600887.SH"],
-      "unsupported_periods": [],
-      "supplement": {
-        "mode": "ASYNC_OPTIONAL",
-        "status": "AGENT_UNAVAILABLE",
-        "queued_request_ids": [],
-        "completed_request_ids": [],
-        "failed_requests": [],
-        "reason": "market_data_agent_unavailable",
-      },
+    queued.assert_not_awaited()
+    find_missing = manager._find_missing_backtest_data
+    assert find_missing.await_args_list[1].kwargs["strict_tick_quality"] is True
+    assert runtime.context.instruments == ["600887.SH", "688552.SH"]
+    preparation = runtime.context.parameters["replay_data_preparation"]
+    assert preparation["schema_version"] == 3
+    assert preparation["policy"] == "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING"
+    assert preparation["blocking"] is True
+    assert preparation["required"] is True
+    assert preparation["missing_before"] == ["688552.SH"]
+    assert preparation["missing_after"] == []
+    assert preparation["required_instruments"] == ["600887.SH", "688552.SH"]
+    assert preparation["available_instruments"] == ["600887.SH", "688552.SH"]
+    assert preparation["replay_start_allowed"] is True
+    assert preparation["synchronization"] == {
+      "mode": "BLOCKING_REQUIRED",
+      "status": "COMPLETED",
+      "requested_periods": ["tick"],
     }
-    skipped = runtime.context.parameters["replay_skipped_instruments"]
-    assert [item["stock_code"] for item in skipped] == ["688552.SH"]
-    assert "当前无在线行情 Agent" in skipped[0]["reason"]
+    assert runtime.context.parameters["replay_skipped_instruments"] == []
     repo.update_run.assert_awaited_once()
     StrategyManager._instance = None
 
   @pytest.mark.asyncio
-  async def test_t_trade_replay_all_partial_local_data_fails_closed_and_audits(
+  async def test_t_trade_replay_incomplete_sync_fails_closed_without_pruning(
     self,
     monkeypatch,
   ):
@@ -1132,17 +1124,10 @@ class TestStrategyManager:
       "_find_missing_backtest_data",
       AsyncMock(side_effect=[missing, missing]),
     )
-    monkeypatch.setattr(
-      "quantx_engine.strategy_manager.queue_market_data_sync",
-      AsyncMock(
-        return_value={
-          "status": "skipped",
-          "reason": "market_data_agent_unavailable",
-        }
-      ),
-    )
-    waited = AsyncMock()
-    monkeypatch.setattr("quantx_engine.strategy_manager.request_market_data_sync", waited)
+    sync = AsyncMock()
+    queued = AsyncMock()
+    monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
+    monkeypatch.setattr("quantx_engine.strategy_manager.queue_market_data_sync", queued)
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
@@ -1161,26 +1146,27 @@ class TestStrategyManager:
     with pytest.raises(RuntimeError, match="DATA_PARTIAL"):
       await manager._ensure_backtest_data_available(runtime)
 
-    waited.assert_not_awaited()
-    assert runtime.context.instruments == []
+    sync.assert_awaited_once_with(
+      runtime=runtime,
+      missing=missing,
+      sync_periods={"tick"},
+    )
+    queued.assert_not_awaited()
+    assert runtime.context.instruments == ["688552.SH"]
     assert runtime.context.parameters["replay_data_preparation"]["missing_after"] == [
       "688552.SH"
     ]
     preparation = runtime.context.parameters["replay_data_preparation"]
-    assert preparation["schema_version"] == 2
+    assert preparation["schema_version"] == 3
+    assert preparation["policy"] == "INFLUXDB_LOCAL_FIRST_AGENT_SYNC_BLOCKING"
+    assert preparation["replay_start_allowed"] is False
+    assert preparation["synchronization"]["mode"] == "BLOCKING_REQUIRED"
+    assert preparation["synchronization"]["status"] == "COMPLETED"
     assert preparation["quality_policy"] == "STRICT_DAILY_SESSION_COVERAGE"
     assert preparation["quality_issues_after"]["688552.SH"][0][
       "reason_codes"
     ] == ["SESSION_CLOSE_NOT_COVERED"]
-    assert runtime.context.parameters["replay_skipped_instruments"][0][
-      "stock_code"
-    ] == "688552.SH"
-    assert runtime.context.parameters["replay_skipped_instruments"][0][
-      "data_status"
-    ] == "DATA_PARTIAL"
-    assert "SESSION_CLOSE_NOT_COVERED" in runtime.context.parameters[
-      "replay_skipped_instruments"
-    ][0]["reason"]
+    assert runtime.context.parameters["replay_skipped_instruments"] == []
     repo.update_run.assert_awaited_once()
     StrategyManager._instance = None
 
@@ -1207,15 +1193,8 @@ class TestStrategyManager:
       "_find_missing_backtest_data",
       AsyncMock(side_effect=[missing, missing]),
     )
-    monkeypatch.setattr(
-      "quantx_engine.strategy_manager.queue_market_data_sync",
-      AsyncMock(
-        return_value={
-          "status": "skipped",
-          "reason": "market_data_agent_unavailable",
-        }
-      ),
-    )
+    sync = AsyncMock()
+    monkeypatch.setattr(manager, "_sync_missing_backtest_data", sync)
     monkeypatch.setattr(
       "quantx_engine.strategy_manager.HistoricalMarketDataService",
       lambda: SimpleNamespace(),
@@ -1249,7 +1228,12 @@ class TestStrategyManager:
 
     assert runtime.status == ExecutionStatus.ERROR
     assert runtime.error_message.startswith("DATA_INSUFFICIENT:")
-    assert runtime.context.instruments == []
+    assert runtime.context.instruments == ["688552.SH"]
+    sync.assert_awaited_once_with(
+      runtime=runtime,
+      missing=missing,
+      sync_periods={"tick"},
+    )
     broker_start.assert_not_awaited()
     assert len(update_status.await_args_list) == 2
     assert all(
@@ -1266,9 +1250,7 @@ class TestStrategyManager:
     assert runtime.context.parameters["replay_data_preparation"]["missing_after"] == [
       "688552.SH"
     ]
-    assert runtime.context.parameters["replay_skipped_instruments"][0][
-      "stock_code"
-    ] == "688552.SH"
+    assert runtime.context.parameters["replay_skipped_instruments"] == []
     assert runtime.run_id not in manager._deferred_start_tasks
     StrategyManager._instance = None
 
