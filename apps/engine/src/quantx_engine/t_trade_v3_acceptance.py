@@ -90,6 +90,26 @@ DEFAULT_AUDIT_CONCURRENCY = 4
 DEFAULT_PRESSURE_TIMEOUT_SECONDS = 1_800.0
 REPORT_SCHEMA_VERSION = 1
 PRESSURE_BASELINE_SCHEMA_VERSION = 1
+OPERATIONAL_EVIDENCE_SCHEMA_VERSION = 1
+
+_PRESSURE_REPLAY_REPORT_FIELDS = (
+  "status",
+  "progress_pct",
+  "processed_until",
+  "start_time",
+  "end_time",
+  "replay_start_time",
+  "replay_end_time",
+  "created_at",
+  "updated_at",
+)
+_PRESSURE_RUN_PARAMETER_FIELDS = (
+  "t_trade_replay",
+  "replay_acceptance",
+  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  "replay_start_time",
+  "replay_end_time",
+)
 
 PERFORMANCE_REMEDIATION_MICROBENCHMARK = {
   "status": "MICROBENCHMARK_NON_GATING",
@@ -138,17 +158,29 @@ def _performance_remediation_evidence(
   evidence = copy.deepcopy(PERFORMANCE_REMEDIATION_MICROBENCHMARK)
   pressure = dict(pressure_baseline or {})
   fixture = dict(pressure.get("fixture") or {})
+  boundary = dict(pressure.get("execution_boundary") or {})
+  terminal = dict(pressure.get("terminal_convergence") or {})
+  run_evidence = dict(pressure.get("run_evidence") or {})
+  parameters = _json_object(
+    run_evidence.get("parameters"), context="PRESSURE_REMEDIATION_PARAMETERS"
+  )
   full_completed = (
     str(pressure.get("status") or "").upper()
     == "EXECUTED_SYNTHETIC_NON_HISTORICAL"
     and int(fixture.get("tick_count") or 0) == 9_600
     and str(dict(pressure.get("replay") or {}).get("status") or "").upper()
     == "COMPLETED"
-    and bool(
-      dict(pressure.get("execution_boundary") or {}).get(
-        "runtime_state_persist_enabled"
-      )
-    )
+    and str(terminal.get("status") or "").upper() == "TERMINAL"
+    and bool(pressure.get("isolated_backtest"))
+    and bool(pressure.get("no_live_or_paper_broker"))
+    and str(boundary.get("strategy_run_mode") or "").upper() == "BACKTEST"
+    and bool(boundary.get("runtime_state_persist_enabled"))
+    and not bool(boundary.get("qmt_invocation"))
+    and not bool(boundary.get("paper_or_live_command"))
+    and str(run_evidence.get("mode") or "").upper() == "BACKTEST"
+    and str(run_evidence.get("status") or "").upper() == "COMPLETED"
+    and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
+    and bool(parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY))
   )
   evidence["full_9600_replayed_after_patch"] = full_completed
   if full_completed:
@@ -203,6 +235,271 @@ def _json_object(value: Any, *, context: str) -> dict[str, Any]:
   if not isinstance(parsed, Mapping):
     raise RuntimeError(f"{context}_NOT_JSON_OBJECT")
   return dict(parsed)
+
+
+def _safe_pressure_replay_evidence(replay: Mapping[str, Any]) -> dict[str, Any]:
+  """Return only report-safe replay facts, never account or portfolio data."""
+
+  return {
+    field: replay[field]
+    for field in _PRESSURE_REPLAY_REPORT_FIELDS
+    if field in replay
+  }
+
+
+def _safe_pressure_run_evidence(run_evidence: Mapping[str, Any]) -> dict[str, Any]:
+  """Keep the pressure proof while excluding account and position payloads."""
+
+  raw_parameters = _json_object(
+    run_evidence.get("parameters"), context="PRESSURE_REPORT_PARAMETERS"
+  )
+  safe_parameters = {
+    field: raw_parameters[field]
+    for field in _PRESSURE_RUN_PARAMETER_FIELDS
+    if field in raw_parameters
+  }
+  return {
+    "run_id": run_evidence.get("run_id"),
+    "mode": run_evidence.get("mode"),
+    "status": run_evidence.get("status"),
+    "parameters_sha256": run_evidence.get("parameters_sha256"),
+    "parameters": safe_parameters,
+    "opportunity_policy_version": run_evidence.get(
+      "opportunity_policy_version"
+    ),
+    "opportunity_feature_schema_version": run_evidence.get(
+      "opportunity_feature_schema_version"
+    ),
+    "evaluations": dict(run_evidence.get("evaluations") or {}),
+    "instrument_profiles": [
+      dict(item)
+      for item in list(run_evidence.get("instrument_profiles") or [])
+      if isinstance(item, Mapping)
+    ],
+  }
+
+
+def _sanitize_pressure_baseline_for_report(
+  pressure_baseline: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Strip runtime-only account facts before a pressure result enters a report."""
+
+  sanitized = copy.deepcopy(dict(pressure_baseline))
+  replay = sanitized.get("replay")
+  if isinstance(replay, Mapping):
+    sanitized["replay"] = _safe_pressure_replay_evidence(replay)
+  run_evidence = sanitized.get("run_evidence")
+  if isinstance(run_evidence, Mapping):
+    sanitized["run_evidence"] = _safe_pressure_run_evidence(run_evidence)
+  return sanitized
+
+
+def _require_mapping_field(
+  payload: Mapping[str, Any], *, field: str, context: str
+) -> dict[str, Any]:
+  value = payload.get(field)
+  if not isinstance(value, Mapping):
+    raise AcceptanceBlockedError(f"{context}_{field.upper()}_MISSING")
+  return dict(value)
+
+
+def _reject_sensitive_evidence_fields(value: Any) -> None:
+  """Do not let an operational addendum reintroduce account/device identifiers."""
+
+  if isinstance(value, Mapping):
+    for key, nested in value.items():
+      normalized = str(key).lower().replace("_", "").replace("-", "")
+      if normalized in {"accountid", "deviceid"}:
+        raise AcceptanceBlockedError("OPERATIONAL_EVIDENCE_SENSITIVE_IDENTIFIER")
+      _reject_sensitive_evidence_fields(nested)
+  elif isinstance(value, (list, tuple)):
+    for nested in value:
+      _reject_sensitive_evidence_fields(nested)
+
+
+def _load_operational_evidence(path: Path) -> dict[str, Any]:
+  """Load a bounded, report-safe operational-evidence addendum.
+
+  The acceptance runner cannot infer transfer and restore verification from a
+  synthetic replay.  This explicit artifact records those independently
+  verified facts while validating the minimum fail-closed rollout boundary.
+  """
+
+  try:
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    raise AcceptanceBlockedError("OPERATIONAL_EVIDENCE_UNREADABLE") from exc
+  if not isinstance(loaded, Mapping):
+    raise AcceptanceBlockedError("OPERATIONAL_EVIDENCE_NOT_OBJECT")
+  evidence = dict(loaded)
+  _reject_sensitive_evidence_fields(evidence)
+  if evidence.get("schema_version") != OPERATIONAL_EVIDENCE_SCHEMA_VERSION:
+    raise AcceptanceBlockedError("OPERATIONAL_EVIDENCE_SCHEMA_UNSUPPORTED")
+
+  transfer = _require_mapping_field(
+    evidence, field="historical_tick_transfer", context="OPERATIONAL_EVIDENCE"
+  )
+  cumulative = _require_mapping_field(
+    transfer, field="cumulative_records", context="HISTORICAL_TRANSFER"
+  )
+  counts = [
+    cumulative.get("received"),
+    cumulative.get("saved"),
+    cumulative.get("verified"),
+  ]
+  if (
+    any(not isinstance(value, int) or value < 0 for value in counts)
+    or len(set(counts)) != 1
+  ):
+    raise AcceptanceBlockedError("HISTORICAL_TRANSFER_COUNTS_INVALID")
+  coverage = _require_mapping_field(
+    transfer, field="strict_coverage", context="HISTORICAL_TRANSFER"
+  )
+  complete = coverage.get("complete_instrument_days")
+  expected = coverage.get("expected_instrument_days")
+  if (
+    not isinstance(complete, int)
+    or not isinstance(expected, int)
+    or complete < 0
+    or expected <= 0
+    or complete > expected
+  ):
+    raise AcceptanceBlockedError("HISTORICAL_TRANSFER_COVERAGE_INVALID")
+  identity = _require_mapping_field(
+    transfer, field="source_identity", context="HISTORICAL_TRANSFER"
+  )
+  failures = identity.get("failed_instrument_days")
+  if not isinstance(failures, int) or failures < 0:
+    raise AcceptanceBlockedError("HISTORICAL_TRANSFER_IDENTITY_INVALID")
+
+  formal = _require_mapping_field(
+    evidence, field="formal_causal_replay", context="OPERATIONAL_EVIDENCE"
+  )
+  completed_days = formal.get("completed_trading_days")
+  requested_days = formal.get("requested_trading_days")
+  if (
+    not isinstance(completed_days, int)
+    or not isinstance(requested_days, int)
+    or completed_days < 0
+    or requested_days <= 0
+    or completed_days > requested_days
+  ):
+    raise AcceptanceBlockedError("FORMAL_CAUSAL_REPLAY_COUNTS_INVALID")
+
+  restore = _require_mapping_field(
+    evidence, field="restore_verify", context="OPERATIONAL_EVIDENCE"
+  )
+  if (
+    str(restore.get("status") or "").upper() != "PASSED"
+    or restore.get("isolated_scratch_database") is not True
+    or restore.get("production_database_restored") is not False
+    or restore.get("forward_migration_only") is not True
+    or restore.get("scratch_cleanup_verified") is not True
+    or restore.get("qmt_journal_integrity_passed") is not True
+  ):
+    raise AcceptanceBlockedError("RESTORE_VERIFY_BOUNDARY_INVALID")
+
+  rollout = _require_mapping_field(
+    evidence, field="rollout", context="OPERATIONAL_EVIDENCE"
+  )
+  for stage in ("paper", "canary", "live"):
+    _require_mapping_field(rollout, field=stage, context="ROLLOUT")
+  return evidence
+
+
+def _load_completed_pressure_baseline(path: Path) -> dict[str, Any]:
+  """Import only a terminal full-fixture pressure result without rerunning it."""
+
+  try:
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    raise AcceptanceBlockedError("COMPLETED_PRESSURE_REPORT_UNREADABLE") from exc
+  if not isinstance(loaded, Mapping):
+    raise AcceptanceBlockedError("COMPLETED_PRESSURE_REPORT_NOT_OBJECT")
+  pressure = _require_mapping_field(
+    loaded, field="pressure_baseline", context="COMPLETED_PRESSURE_REPORT"
+  )
+  fixture = _require_mapping_field(
+    pressure, field="fixture", context="COMPLETED_PRESSURE"
+  )
+  replay = _require_mapping_field(
+    pressure, field="replay", context="COMPLETED_PRESSURE"
+  )
+  boundary = _require_mapping_field(
+    pressure, field="execution_boundary", context="COMPLETED_PRESSURE"
+  )
+  terminal = _require_mapping_field(
+    pressure, field="terminal_convergence", context="COMPLETED_PRESSURE"
+  )
+  throughput = _require_mapping_field(
+    pressure, field="throughput", context="COMPLETED_PRESSURE"
+  )
+  latency = _require_mapping_field(
+    pressure, field="latency", context="COMPLETED_PRESSURE"
+  )
+  cas = _require_mapping_field(pressure, field="cas", context="COMPLETED_PRESSURE")
+  database_writes = _require_mapping_field(
+    pressure, field="database_write_activity", context="COMPLETED_PRESSURE"
+  )
+  run_evidence = _require_mapping_field(
+    pressure, field="run_evidence", context="COMPLETED_PRESSURE"
+  )
+  parameters = _json_object(
+    run_evidence.get("parameters"), context="COMPLETED_PRESSURE_PARAMETERS"
+  )
+  effective_ticks = throughput.get("engine_ticks_processed")
+  checkpoint_attempts = cas.get("checkpoint_attempts")
+  raw_evaluation_counts = run_evidence.get("evaluations")
+  if not isinstance(raw_evaluation_counts, Mapping):
+    raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
+  evaluation_counts = dict(raw_evaluation_counts)
+  material_rows = evaluation_counts.get("material_rows")
+  diagnostic_logical_events = evaluation_counts.get(
+    "diagnostic_logical_events"
+  )
+  if any(
+    isinstance(value, bool) or not isinstance(value, int) or value < 0
+    for value in (material_rows, diagnostic_logical_events)
+  ):
+    raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
+  evaluation_logical_events = material_rows + diagnostic_logical_events
+  state_writes = _require_mapping_field(
+    database_writes, field="runtime_state", context="COMPLETED_PRESSURE"
+  )
+  tick_accounting = _pressure_tick_accounting(pressure)
+  if (
+    str(pressure.get("status") or "").upper()
+    != "EXECUTED_SYNTHETIC_NON_HISTORICAL"
+    or int(fixture.get("tick_count") or 0) != 9_600
+    or str(replay.get("status") or "").upper() != "COMPLETED"
+    or str(terminal.get("status") or "").upper() != "TERMINAL"
+    or str(run_evidence.get("mode") or "").upper() != "BACKTEST"
+    or str(run_evidence.get("status") or "").upper() != "COMPLETED"
+    or not bool(pressure.get("isolated_backtest"))
+    or not bool(pressure.get("no_live_or_paper_broker"))
+    or str(boundary.get("strategy_run_mode") or "").upper() != "BACKTEST"
+    or not bool(boundary.get("runtime_state_persist_enabled"))
+    or bool(boundary.get("qmt_invocation"))
+    or bool(boundary.get("paper_or_live_command"))
+    or parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
+    or not parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+    or not isinstance(effective_ticks, int)
+    or effective_ticks <= 0
+    or not isinstance(checkpoint_attempts, int)
+    or checkpoint_attempts <= 0
+    or not bool(tick_accounting.get("accounting_passed"))
+    or int(dict(latency.get("engine_tick") or {}).get("sample_count") or 0)
+    != effective_ticks
+    or evaluation_logical_events != effective_ticks
+    or not isinstance(state_writes.get("state_upsert_attempts"), int)
+    or state_writes["state_upsert_attempts"] <= 0
+    or int(state_writes.get("snapshot_save_failures") or 0) != 0
+    or not isinstance(latency.get("engine_tick"), Mapping)
+  ):
+    raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
+  imported = copy.deepcopy(pressure)
+  imported["tick_accounting"] = tick_accounting
+  return _sanitize_pressure_baseline_for_report(imported)
 
 
 def _value_as_str(value: Any) -> str:
@@ -611,6 +908,72 @@ def build_synthetic_pressure_fixture(
       code: tuple(items) for code, items in ticks_by_instrument.items()
     },
   )
+
+
+def _pressure_tick_accounting(pressure: Mapping[str, Any]) -> dict[str, Any]:
+  """Explain the deterministic close-window filter in a synthetic fixture.
+
+  The backtest executor permits the afternoon continuous session only while
+  ``local_time < 14:57``.  The fixture intentionally extends to 14:59:59 to
+  prove that boundary, so those closing points are policy-filtered rather than
+  silently treated as a dropped workload.
+  """
+
+  fixture = dict(pressure.get("fixture") or {})
+  requested_ticks = fixture.get("tick_count")
+  effective_ticks = dict(pressure.get("throughput") or {}).get(
+    "engine_ticks_processed"
+  )
+  tick_count_per_instrument_day = fixture.get("ticks_per_instrument_day")
+  raw_dates = list(fixture.get("trading_dates") or [])
+  instrument_count = len(list(fixture.get("held_instruments") or []))
+  if (
+    not isinstance(requested_ticks, int)
+    or not isinstance(effective_ticks, int)
+    or not isinstance(tick_count_per_instrument_day, int)
+    or tick_count_per_instrument_day < 2
+    or not raw_dates
+    or instrument_count <= 0
+  ):
+    return {}
+  try:
+    trading_dates = tuple(date.fromisoformat(str(item)) for item in raw_dates)
+  except ValueError:
+    return {}
+  policy_filtered_timestamps = [
+    timestamp
+    for timestamp in _synthetic_session_timestamps(
+      trading_dates[0], tick_count_per_instrument_day
+    )
+    if timestamp.timetz().replace(tzinfo=None) >= clock_time(14, 57)
+  ]
+  policy_filtered_per_instrument_day = len(policy_filtered_timestamps)
+  instrument_day_count = instrument_count * len(trading_dates)
+  expected_policy_filtered_ticks = (
+    policy_filtered_per_instrument_day * instrument_day_count
+  )
+  policy_filtered_ticks = requested_ticks - effective_ticks
+  return {
+    "requested_fixture_ticks": requested_ticks,
+    "engine_ticks_processed": effective_ticks,
+    "policy_filtered_ticks": policy_filtered_ticks,
+    "policy_filtered_per_instrument_day": policy_filtered_per_instrument_day,
+    "instrument_day_count": instrument_day_count,
+    "expected_policy_filtered_ticks": expected_policy_filtered_ticks,
+    "continuous_pm_policy": "13:00 <= local_time < 14:57",
+    "policy_filtered_time_range": (
+      "{}..{}".format(
+        policy_filtered_timestamps[0].strftime("%H:%M:%S"),
+        policy_filtered_timestamps[-1].strftime("%H:%M:%S"),
+      )
+      if policy_filtered_timestamps
+      else None
+    ),
+    "accounting_passed": (
+      requested_ticks == instrument_day_count * tick_count_per_instrument_day
+      and policy_filtered_ticks == expected_policy_filtered_ticks
+    ),
+  }
 
 
 @dataclass
@@ -2120,6 +2483,9 @@ async def execute_synthetic_pressure_baseline(
       round(ticks_processed / elapsed_seconds, 6) if elapsed_seconds > 0 else None
     ),
   }
+  tick_accounting = _pressure_tick_accounting(
+    {"fixture": fixture.to_dict(), "throughput": throughput}
+  )
   cas = {
     "snapshot_conflicts": cas_conflicts,
     "checkpoint_attempts": checkpoint_attempts,
@@ -2161,6 +2527,7 @@ async def execute_synthetic_pressure_baseline(
     and bool(
       dict(execution_boundary or {}).get("runtime_state_persist_enabled")
     )
+    and bool(tick_accounting.get("accounting_passed"))
   )
   if timed_out:
     status = (
@@ -2208,6 +2575,7 @@ async def execute_synthetic_pressure_baseline(
     "terminal_convergence": terminal_convergence,
     "elapsed_seconds": round(elapsed_seconds, 6),
     "throughput": throughput,
+    "tick_accounting": tick_accounting,
     "latency": latency,
     "cas": cas,
     "database_write_activity": database_write_activity,
@@ -2236,6 +2604,7 @@ def build_report_document(
   historical_short_window_preflight: Optional[Mapping[str, Any]] = None,
   full_pressure_attempt: Optional[Mapping[str, Any]] = None,
   pressure_baseline: Optional[Mapping[str, Any]] = None,
+  operational_evidence: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
   """Create a self-contained report object before rendering it to Markdown."""
 
@@ -2287,7 +2656,14 @@ def build_report_document(
     "full_pressure_attempt": (
       dict(full_pressure_attempt) if full_pressure_attempt else None
     ),
-    "pressure_baseline": dict(pressure_baseline) if pressure_baseline else None,
+    "pressure_baseline": (
+      _sanitize_pressure_baseline_for_report(pressure_baseline)
+      if pressure_baseline
+      else None
+    ),
+    "operational_evidence": (
+      dict(operational_evidence) if operational_evidence else None
+    ),
     "performance_remediation_microbenchmark": _performance_remediation_evidence(
       pressure_baseline
     ),
@@ -2295,6 +2671,75 @@ def build_report_document(
       audit.to_dict(abnormal_dates=declared_abnormal) for audit in audits
     ],
   }
+
+
+def _replace_reused_candidate_window(
+  report: dict[str, Any],
+  refreshed_audit: WindowAudit,
+  *,
+  abnormal_dates: Iterable[date] = (),
+) -> None:
+  """Atomically replace a stale reuse-report window with current audit facts."""
+
+  snapshot_date = refreshed_audit.window.snapshot.snapshot_date.isoformat()
+  refreshed = refreshed_audit.to_dict(abnormal_dates=abnormal_dates)
+  existing_windows = list(report.get("candidate_windows") or [])
+  matching_indexes = [
+    index
+    for index, item in enumerate(existing_windows)
+    if isinstance(item, Mapping)
+    and str(dict(item.get("snapshot") or {}).get("snapshot_date") or "")
+    == snapshot_date
+  ]
+  if len(matching_indexes) != 1:
+    raise AcceptanceBlockedError("REUSE_AUDIT_WINDOW_REPLACEMENT_AMBIGUOUS")
+  existing_windows[matching_indexes[0]] = refreshed
+  report["candidate_windows"] = existing_windows
+
+  # A one-window refresh can only prove that this candidate remains blocked;
+  # it must never promote the 20-day formal gate from stale sibling windows.
+  if refreshed_audit.blockers(abnormal_dates=abnormal_dates):
+    report["formal_20_trading_day"] = {
+      "status": "BLOCKED",
+      "selected_snapshot_date": None,
+      "execution": None,
+      "blocker": "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW",
+    }
+
+
+def _assert_operational_evidence_matches_refreshed_window(
+  operational_evidence: Mapping[str, Any],
+  refreshed_audit: WindowAudit,
+  source_identity: Mapping[str, Any],
+) -> None:
+  """Reject a report if its addendum disagrees with its refreshed candidate."""
+
+  transfer = _require_mapping_field(
+    operational_evidence,
+    field="historical_tick_transfer",
+    context="OPERATIONAL_EVIDENCE",
+  )
+  scope = _require_mapping_field(
+    transfer, field="scope", context="HISTORICAL_TRANSFER"
+  )
+  coverage = _require_mapping_field(
+    transfer, field="strict_coverage", context="HISTORICAL_TRANSFER"
+  )
+  identity = _require_mapping_field(
+    transfer, field="source_identity", context="HISTORICAL_TRANSFER"
+  )
+  if (
+    str(scope.get("snapshot_date") or "")
+    != refreshed_audit.window.snapshot.snapshot_date.isoformat()
+    or coverage.get("complete_instrument_days")
+    != refreshed_audit.completed_pair_count
+    or coverage.get("expected_instrument_days")
+    != refreshed_audit.expected_pair_count
+    or identity.get("failed_instrument_days") != 0
+    or not bool(source_identity.get("passed"))
+    or list(dict(source_identity.get("failure") or {}).get("failures") or [])
+  ):
+    raise AcceptanceBlockedError("OPERATIONAL_EVIDENCE_REFRESH_MISMATCH")
 
 
 def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
@@ -2404,13 +2849,78 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
   else:
     lines.append("**NOT_RUN**：未选择真实短窗口进行 source identity 预检。")
 
+  operational = report.get("operational_evidence")
+  if isinstance(operational, Mapping):
+    transfer = dict(operational.get("historical_tick_transfer") or {})
+    cumulative = dict(transfer.get("cumulative_records") or {})
+    strict_coverage = dict(transfer.get("strict_coverage") or {})
+    identity = dict(transfer.get("source_identity") or {})
+    formal_replay = dict(operational.get("formal_causal_replay") or {})
+    restore = dict(operational.get("restore_verify") or {})
+    rollout = dict(operational.get("rollout") or {})
+    paper = dict(rollout.get("paper") or {})
+    canary = dict(rollout.get("canary") or {})
+    live = dict(rollout.get("live") or {})
+    lines.extend(
+      [
+        "",
+        "## 本轮数据、恢复与上线门禁补充",
+        "",
+        "- 历史 Tick 传输：received/saved/verified={}/{}/{}；状态={}。".format(
+          cumulative.get("received"),
+          cumulative.get("saved"),
+          cumulative.get("verified"),
+          transfer.get("status"),
+        ),
+        "- 严格覆盖：{}/{} instrument-day；source identity 严格 keyset 失败={}。"
+        "该覆盖不足以启动正式 20 日回放。".format(
+          strict_coverage.get("complete_instrument_days"),
+          strict_coverage.get("expected_instrument_days"),
+          identity.get("failed_instrument_days"),
+        ),
+        "- 正式因果回放：{}/{}；stage={}；未以合成压力替代历史回放。".format(
+          formal_replay.get("completed_trading_days"),
+          formal_replay.get("requested_trading_days"),
+          formal_replay.get("stage"),
+        ),
+        "- restore-verify：{}；备份 schema {} 在隔离 scratch DB 前向升级到 {} 并通过；"
+        "production database restored={}。".format(
+          restore.get("status"),
+          restore.get("source_schema_revision"),
+          restore.get("target_schema_revision"),
+          restore.get("production_database_restored"),
+        ),
+        "- 上线门禁：PAPER {}（连续交易日 {}/{}，完成候选生命周期 {}/{}）；"
+        "CANARY={}；LIVE={}；operator_review={}。".format(
+          paper.get("status"),
+          paper.get("consecutive_trading_days"),
+          paper.get("required_consecutive_trading_days"),
+          paper.get("completed_candidate_lifecycles"),
+          paper.get("required_candidate_lifecycles"),
+          canary.get("status"),
+          live.get("status"),
+          rollout.get("operator_review"),
+        ),
+      ]
+    )
+
   lines.extend(["", "## 9,600 Tick 全持仓合成压力尝试", ""])
   full_pressure_attempt = report.get("full_pressure_attempt")
   pressure_fixture = dict(pressure.get("fixture") or {})
   current_full_pressure = int(pressure_fixture.get("tick_count") or 0) == 9_600
-  if current_full_pressure:
-    replay = dict(pressure.get("replay") or {})
-    run_evidence = dict(pressure.get("run_evidence") or {})
+  replay = dict(pressure.get("replay") or {})
+  run_evidence = dict(pressure.get("run_evidence") or {})
+  terminal_convergence = dict(pressure.get("terminal_convergence") or {})
+  completed_full_pressure = (
+    str(pressure.get("status") or "").upper()
+    == "EXECUTED_SYNTHETIC_NON_HISTORICAL"
+    and str(replay.get("status") or "").upper() == "COMPLETED"
+    and str(terminal_convergence.get("status") or "").upper() == "TERMINAL"
+  )
+  if current_full_pressure and completed_full_pressure:
+    throughput = dict(pressure.get("throughput") or {})
+    latency = dict(pressure.get("latency") or {})
+    tick_accounting = dict(pressure.get("tick_accounting") or {})
     lines.extend(
       [
         "**{}**：当前生产 Engine 路径已完成固定全持仓全量合成负载；"
@@ -2425,6 +2935,12 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
           replay.get("progress_pct"),
           pressure.get("elapsed_seconds"),
         ),
+        "- 请求/有效处理：{} / {} engine ticks；采样 engine tick={}，checkpoint={}。".format(
+          pressure_fixture.get("tick_count"),
+          throughput.get("engine_ticks_processed"),
+          dict(latency.get("engine_tick") or {}).get("sample_count"),
+          dict(latency.get("state_checkpoint") or {}).get("sample_count"),
+        ),
         "- fixture：`SYNTHETIC_NON_HISTORICAL`，sha256={}，{} ticks，{} instruments，合法交易时段={}。".format(
           pressure_fixture.get("fixture_sha256"),
           pressure_fixture.get("tick_count"),
@@ -2438,10 +2954,37 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
         ),
       ]
     )
+    if tick_accounting:
+      lines.append(
+        "- Tick 口径核对：请求={}，实际评估={}，策略过滤={}；{} 个 "
+        "instrument-day 每个过滤 {} 条（{}，{}），不是丢失或未处理 Tick。".format(
+          tick_accounting.get("requested_fixture_ticks"),
+          tick_accounting.get("engine_ticks_processed"),
+          tick_accounting.get("policy_filtered_ticks"),
+          tick_accounting.get("instrument_day_count"),
+          tick_accounting.get("policy_filtered_per_instrument_day"),
+          tick_accounting.get("continuous_pm_policy"),
+          tick_accounting.get("policy_filtered_time_range"),
+        )
+      )
     if full_pressure_attempt:
       lines.append(
         "- 历史取消尝试保留在 JSON 的 `full_pressure_attempt`，不作为当前 SLO 结果。"
       )
+  elif current_full_pressure:
+    lines.extend(
+      [
+        "**{}**：固定 9,600 Tick 合成压力未以可接受终态完成；SLO 仍为 "
+        "**BLOCKED/FAIL**。".format(pressure.get("status")),
+        "- replay={}；terminal={}；processed={}；progress={}%；wall={}s。".format(
+          replay.get("status"),
+          terminal_convergence.get("status"),
+          dict(pressure.get("throughput") or {}).get("engine_ticks_processed"),
+          replay.get("progress_pct"),
+          pressure.get("elapsed_seconds"),
+        ),
+      ]
+    )
   elif full_pressure_attempt:
     full_attempt = dict(full_pressure_attempt)
     full_fixture = dict(full_attempt.get("fixture") or {})
@@ -2582,12 +3125,24 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
     )
   if state_checkpoint and state_snapshot and latency.get("strategy_evaluation"):
     strategy_latency = dict(latency.get("strategy_evaluation") or {})
+    completed_slo = bool(
+      dict(report.get("performance_remediation_microbenchmark") or {}).get(
+        "full_9600_replayed_after_patch"
+      )
+    )
+    completion_note = (
+      "固定 9,600 Tick 已完成；本机合成 SLO 仅按本机和本工作负载冻结，"
+      "不改变正式 20 日历史门禁。"
+      if completed_slo
+      else "未完成固定 9,600 Tick，SLO 继续 BLOCKED。"
+    )
     lines.append(
       "- 性能判读（仅诊断）：strategy p95={}ms，而 checkpoint/snapshot p95={}/{}ms；"
-      "长尾位于外部数据库持久化边界。未启动新的 9,600 Tick，SLO 继续 BLOCKED。".format(
+      "长尾位于外部数据库持久化边界。{}".format(
         strategy_latency.get("p95"),
         state_checkpoint.get("p95"),
         state_snapshot.get("p95"),
+        completion_note,
       )
     )
   nonpersistent_calibration = report.get("nonpersistent_calibration_attempt")
@@ -2767,6 +3322,22 @@ def build_parser() -> argparse.ArgumentParser:
     ),
   )
   parser.add_argument(
+    "--completed-pressure-report",
+    type=Path,
+    help=(
+      "import one already-terminal, sealed 9,600-Tick pressure report without "
+      "starting another replay"
+    ),
+  )
+  parser.add_argument(
+    "--operational-evidence",
+    type=Path,
+    help=(
+      "bounded JSON addendum for independently verified historical transfer, "
+      "restore-verify, and rollout-gate facts"
+    ),
+  )
+  parser.add_argument(
     "--cancelled-full-pressure-run-id",
     help="terminal isolated full-pressure BACKTEST run id to preserve in report",
   )
@@ -2810,6 +3381,14 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
     raise ValueError(
       "--synthetic-pressure and --diagnostic-synthetic-pressure are mutually exclusive"
     )
+  if args.completed_pressure_report and (
+    args.synthetic_pressure
+    or args.diagnostic_synthetic_pressure
+    or args.completed_diagnostic_pressure_run_id
+  ):
+    raise ValueError(
+      "--completed-pressure-report cannot be combined with a pressure execution"
+    )
   snapshots = await load_snapshot_portfolios(account_id=args.account_id)
   snapshot = next(
     (
@@ -2838,37 +3417,62 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
   )
   if reported_codes != snapshot.instrument_codes:
     raise AcceptanceBlockedError("REUSE_AUDIT_HOLDINGS_MISMATCH")
-  raw_prefix = list(
-    dict(candidate.get("coverage") or {}).get("contiguous_shared_prefix_dates")
-    or []
-  )
-  try:
-    pressure_dates = tuple(date.fromisoformat(str(item)) for item in raw_prefix)
-  except ValueError as exc:
-    raise AcceptanceBlockedError("REUSE_AUDIT_PREFIX_INVALID") from exc
-  if len(pressure_dates) < 2:
-    raise AcceptanceBlockedError("REUSE_AUDIT_PRESSURE_PREFIX_TOO_SHORT")
-  audit = WindowAudit(
-    window=ReplayWindow(
-      snapshot=snapshot,
-      trading_dates=pressure_dates,
-      requested_trading_days=DEFAULT_TRADING_DAYS,
-    ),
-    inspections={},
-  )
-  reused_preflight = existing.get("historical_short_window_source_identity_preflight")
-  historical_preflight = (
-    dict(reused_preflight)
-    if isinstance(reused_preflight, Mapping)
-    else (await audit_source_identity(audit, pressure_dates)).to_dict()
-  )
-  full_fixture = build_synthetic_pressure_fixture(
-    audit,
-    pressure_dates,
-    ticks_per_instrument_day=600,
-  )
+  if args.completed_pressure_report:
+    # Importing a terminal full-pressure result must not retain a stale
+    # candidate window just because the former pressure execution reused it.
+    # Refresh this exact D-1 snapshot with the Engine's current strict audit,
+    # then page every refreshed instrument-day by source identity before the
+    # report is allowed to carry the new pressure evidence.
+    refreshed_windows = await build_replay_windows(
+      [snapshot], requested_trading_days=DEFAULT_TRADING_DAYS
+    )
+    if len(refreshed_windows) != 1:
+      raise AcceptanceBlockedError("REUSE_AUDIT_REFRESH_WINDOW_INVALID")
+    refreshed_audits = await audit_tick_coverage(
+      refreshed_windows, max_concurrency=args.max_concurrency
+    )
+    if len(refreshed_audits) != 1:
+      raise AcceptanceBlockedError("REUSE_AUDIT_REFRESH_AUDIT_INVALID")
+    audit = refreshed_audits[0]
+    pressure_dates = audit.window.trading_dates
+    historical_preflight = (
+      await audit_source_identity(audit, pressure_dates)
+    ).to_dict()
+    _replace_reused_candidate_window(existing, audit)
+  else:
+    raw_prefix = list(
+      dict(candidate.get("coverage") or {}).get(
+        "contiguous_shared_prefix_dates"
+      )
+      or []
+    )
+    try:
+      pressure_dates = tuple(date.fromisoformat(str(item)) for item in raw_prefix)
+    except ValueError as exc:
+      raise AcceptanceBlockedError("REUSE_AUDIT_PREFIX_INVALID") from exc
+    if len(pressure_dates) < 2:
+      raise AcceptanceBlockedError("REUSE_AUDIT_PRESSURE_PREFIX_TOO_SHORT")
+    audit = WindowAudit(
+      window=ReplayWindow(
+        snapshot=snapshot,
+        trading_dates=pressure_dates,
+        requested_trading_days=DEFAULT_TRADING_DAYS,
+      ),
+      inspections={},
+    )
+    reused_preflight = existing.get("historical_short_window_source_identity_preflight")
+    historical_preflight = (
+      dict(reused_preflight)
+      if isinstance(reused_preflight, Mapping)
+      else (await audit_source_identity(audit, pressure_dates)).to_dict()
+    )
   full_pressure_attempt = existing.get("full_pressure_attempt")
   if args.cancelled_full_pressure_run_id:
+    full_fixture = build_synthetic_pressure_fixture(
+      audit,
+      pressure_dates,
+      ticks_per_instrument_day=600,
+    )
     full_pressure_attempt = await load_cancelled_full_pressure_attempt(
       args.cancelled_full_pressure_run_id,
       cancellation_reason=(
@@ -2963,14 +3567,35 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
         "error_type": type(exc).__name__,
         "error_message": str(exc),
       }
+  elif args.completed_pressure_report:
+    pressure_baseline = _load_completed_pressure_baseline(
+      args.completed_pressure_report
+    )
+  if args.operational_evidence:
+    operational_evidence = _load_operational_evidence(args.operational_evidence)
+    if args.completed_pressure_report:
+      _assert_operational_evidence_matches_refreshed_window(
+        operational_evidence,
+        audit,
+        historical_preflight,
+      )
+    existing["operational_evidence"] = operational_evidence
   existing["generated_at"] = datetime.now().astimezone().isoformat()
   scope = dict(existing.get("scope") or {})
   scope["coverage_evidence_reused_from"] = str(json_path)
   existing["scope"] = scope
   existing["historical_short_window_source_identity_preflight"] = historical_preflight
   existing["full_pressure_attempt"] = full_pressure_attempt
-  existing["pressure_baseline"] = pressure_baseline
-  existing["nonpersistent_calibration_attempt"] = nonpersistent_calibration_attempt
+  existing["pressure_baseline"] = (
+    _sanitize_pressure_baseline_for_report(pressure_baseline)
+    if pressure_baseline
+    else None
+  )
+  existing["nonpersistent_calibration_attempt"] = (
+    _sanitize_pressure_baseline_for_report(nonpersistent_calibration_attempt)
+    if nonpersistent_calibration_attempt
+    else None
+  )
   existing["performance_remediation_microbenchmark"] = _performance_remediation_evidence(
     pressure_baseline
   )
@@ -2987,6 +3612,19 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     return await _run_reuse_audit_cli(args)
   if args.execute and args.synthetic_pressure:
     raise ValueError("--execute and --synthetic-pressure are mutually exclusive")
+  if args.completed_pressure_report and (
+    args.synthetic_pressure
+    or args.diagnostic_synthetic_pressure
+    or args.completed_diagnostic_pressure_run_id
+  ):
+    raise ValueError(
+      "--completed-pressure-report cannot be combined with a pressure execution"
+    )
+  if args.completed_pressure_report and args.pressure_snapshot_date is None:
+    raise ValueError(
+      "--completed-pressure-report requires --pressure-snapshot-date for "
+      "source-identity verification"
+    )
   if args.synthetic_pressure and args.pressure_snapshot_date is None:
     raise ValueError("--synthetic-pressure requires --pressure-snapshot-date")
 
@@ -3010,7 +3648,7 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       formal_gate=True,
       abnormal_dates=args.abnormal_date,
     )
-  if args.synthetic_pressure:
+  if args.synthetic_pressure or args.completed_pressure_report:
     pressure_audit, pressure_dates = select_pressure_window(
       audits,
       snapshot_date=args.pressure_snapshot_date,
@@ -3018,22 +3656,38 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     historical_short_window_preflight = (
       await audit_source_identity(pressure_audit, pressure_dates)
     ).to_dict()
-    try:
-      pressure_baseline = await execute_synthetic_pressure_baseline(
-        pressure_audit,
-        pressure_dates,
-        ticks_per_instrument_day=args.synthetic_ticks_per_instrument_day,
-        timeout_seconds=args.pressure_timeout_seconds,
+    if args.completed_pressure_report:
+      pressure_baseline = _load_completed_pressure_baseline(
+        args.completed_pressure_report
       )
-    except Exception as exc:
-      pressure_baseline = {
-        "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
-        "status": "FAIL",
-        "snapshot_date": args.pressure_snapshot_date.isoformat(),
-        "error_type": type(exc).__name__,
-        "error_message": str(exc),
-        "non_gating": True,
-      }
+    else:
+      try:
+        pressure_baseline = await execute_synthetic_pressure_baseline(
+          pressure_audit,
+          pressure_dates,
+          ticks_per_instrument_day=args.synthetic_ticks_per_instrument_day,
+          timeout_seconds=args.pressure_timeout_seconds,
+        )
+      except Exception as exc:
+        pressure_baseline = {
+          "schema_version": PRESSURE_BASELINE_SCHEMA_VERSION,
+          "status": "FAIL",
+          "snapshot_date": args.pressure_snapshot_date.isoformat(),
+          "error_type": type(exc).__name__,
+          "error_message": str(exc),
+          "non_gating": True,
+        }
+  operational_evidence = (
+    _load_operational_evidence(args.operational_evidence)
+    if args.operational_evidence
+    else None
+  )
+  if operational_evidence and args.completed_pressure_report:
+    _assert_operational_evidence_matches_refreshed_window(
+      operational_evidence,
+      pressure_audit,
+      historical_short_window_preflight,
+    )
   report = build_report_document(
     audits,
     requested_trading_days=args.trading_days,
@@ -3041,6 +3695,7 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     formal_execution=formal_execution,
     historical_short_window_preflight=historical_short_window_preflight,
     pressure_baseline=pressure_baseline,
+    operational_evidence=operational_evidence,
   )
   # Formal status governs the process exit: a short baseline never returns a
   # false-zero exit code for a blocked 20-day acceptance gate.

@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 from types import SimpleNamespace
 
@@ -76,6 +77,46 @@ def _audit(
     window=ReplayWindow(snapshot=snapshot, trading_dates=days),
     inspections=inspections,
   )
+
+
+def _operational_evidence() -> dict:
+  return {
+    "schema_version": 1,
+    "historical_tick_transfer": {
+      "status": "COMPLETED",
+      "scope": {"snapshot_date": "2026-06-01"},
+      "cumulative_records": {"received": 212_291, "saved": 212_291, "verified": 212_291},
+      "strict_coverage": {
+        "complete_instrument_days": 46,
+        "expected_instrument_days": 160,
+      },
+      "source_identity": {"failed_instrument_days": 0},
+    },
+    "formal_causal_replay": {
+      "completed_trading_days": 0,
+      "requested_trading_days": 20,
+      "stage": "SHADOW",
+    },
+    "restore_verify": {
+      "status": "PASSED",
+      "isolated_scratch_database": True,
+      "production_database_restored": False,
+      "forward_migration_only": True,
+      "scratch_cleanup_verified": True,
+      "qmt_journal_integrity_passed": True,
+    },
+    "rollout": {
+      "paper": {
+        "status": "BLOCKED",
+        "consecutive_trading_days": 0,
+        "required_consecutive_trading_days": 5,
+        "completed_candidate_lifecycles": 0,
+        "required_candidate_lifecycles": 20,
+      },
+      "canary": {"status": "NOT_EXECUTED"},
+      "live": {"status": "NOT_EXECUTED"},
+    },
+  }
 
 
 def test_formal_window_requires_all_holdings_all_days_and_abnormal_evidence() -> None:
@@ -259,12 +300,29 @@ def test_report_only_marks_remediation_full_after_completed_9600_fixture() -> No
       "market_time_policy": "TEST",
     },
     "replay": {"status": "COMPLETED", "progress_pct": 100.0},
-    "run_evidence": {"run_id": "full-run"},
     "elapsed_seconds": 12.5,
     "timeout_seconds": 1_800.0,
     "timed_out": False,
     "cancellation": None,
-    "execution_boundary": {"runtime_state_persist_enabled": True},
+    "isolated_backtest": True,
+    "no_live_or_paper_broker": True,
+    "execution_boundary": {
+      "strategy_run_mode": "BACKTEST",
+      "runtime_state_persist_enabled": True,
+      "qmt_invocation": False,
+      "paper_or_live_command": False,
+    },
+    "terminal_convergence": {"status": "TERMINAL"},
+    "run_evidence": {
+      "run_id": "full-run",
+      "mode": "backtest",
+      "status": "completed",
+      "parameters": {
+        "t_trade_replay": True,
+        "replay_acceptance": "V3_PRESSURE_BASELINE",
+        "_internal_v3_pressure_runtime_state_persistence": True,
+      },
+    },
     "frozen_local_slo": {"status": "FROZEN_FIRST_LOCAL_SYNTHETIC_BASELINE"},
   }
 
@@ -281,6 +339,337 @@ def test_report_only_marks_remediation_full_after_completed_9600_fixture() -> No
   assert microbenchmark["slo_status"] == "FROZEN_FIRST_LOCAL_SYNTHETIC_BASELINE"
   assert "当前生产 Engine 路径已完成固定全持仓全量合成负载" in markdown
   assert "已使用性能补丁后的完整 9,600 Tick 运行" in markdown
+
+
+def test_report_renders_operational_evidence_without_upgrading_rollout_gate() -> None:
+  audit = _audit(incomplete_pairs={("600000.SH", 1)})
+  evidence = _operational_evidence()
+  evidence["restore_verify"].update(
+    {
+      "source_schema_revision": "20260822_0028_qmt_agent_handover",
+      "target_schema_revision": "20260823_0031_watchlist_groups",
+    }
+  )
+
+  report = build_report_document(
+    [audit],
+    requested_trading_days=DEFAULT_TRADING_DAYS,
+    abnormal_dates=[audit.window.trading_dates[0]],
+    operational_evidence=evidence,
+  )
+  markdown = render_markdown(report, json_name="acceptance.json")
+
+  assert "received/saved/verified=212291/212291/212291" in markdown
+  assert "严格覆盖：46/160 instrument-day" in markdown
+  assert "source identity 严格 keyset 失败=0" in markdown
+  assert "正式因果回放：0/20；stage=SHADOW" in markdown
+  assert "production database restored=False" in markdown
+  assert "PAPER BLOCKED（连续交易日 0/5，完成候选生命周期 0/20）" in markdown
+  assert "CANARY=NOT_EXECUTED；LIVE=NOT_EXECUTED" in markdown
+  assert report["formal_20_trading_day"]["status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+  ("field", "invalid_value"),
+  [
+    ("status", "BLOCKED"),
+    ("isolated_scratch_database", False),
+    ("production_database_restored", True),
+    ("forward_migration_only", False),
+    ("scratch_cleanup_verified", False),
+    ("qmt_journal_integrity_passed", False),
+  ],
+)
+def test_operational_evidence_rejects_unverified_restore_boundary(
+  tmp_path,
+  field: str,
+  invalid_value: object,
+) -> None:
+  evidence = _operational_evidence()
+  evidence["restore_verify"][field] = invalid_value
+  path = tmp_path / "operational-evidence.json"
+  path.write_text(json.dumps(evidence), encoding="utf-8")
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="RESTORE_VERIFY_BOUNDARY_INVALID",
+  ):
+    acceptance_module._load_operational_evidence(path)
+
+
+def test_completed_pressure_reuse_replaces_stale_candidate_coverage() -> None:
+  stale = _audit(
+    day_count=2,
+    incomplete_pairs={("600000.SH", 1)},
+  )
+  refreshed = _audit(day_count=2)
+  report = {
+    "candidate_windows": [stale.to_dict()],
+    "formal_20_trading_day": {
+      "status": "BLOCKED",
+      "selected_snapshot_date": None,
+      "execution": None,
+      "blocker": "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW",
+    },
+  }
+
+  acceptance_module._replace_reused_candidate_window(report, refreshed)
+
+  current = report["candidate_windows"][0]
+  assert current["coverage"]["complete_instrument_days"] == 4
+  assert current["coverage"]["expected_instrument_days"] == 4
+  assert current["missing_instrument_days"] == []
+
+  evidence = _operational_evidence()
+  evidence["historical_tick_transfer"]["strict_coverage"] = {
+    "complete_instrument_days": 4,
+    "expected_instrument_days": 4,
+  }
+  acceptance_module._assert_operational_evidence_matches_refreshed_window(
+    evidence,
+    refreshed,
+    {"passed": True, "failure": None},
+  )
+
+  evidence["historical_tick_transfer"]["strict_coverage"][
+    "complete_instrument_days"
+  ] = 3
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="OPERATIONAL_EVIDENCE_REFRESH_MISMATCH",
+  ):
+    acceptance_module._assert_operational_evidence_matches_refreshed_window(
+      evidence,
+      refreshed,
+      {"passed": True, "failure": None},
+    )
+
+
+def _completed_pressure_report_payload() -> dict:
+  return {
+    "pressure_baseline": {
+      "status": "EXECUTED_SYNTHETIC_NON_HISTORICAL",
+      "fixture": {
+        "tick_count": 9_600,
+        "ticks_per_instrument_day": 600,
+        "trading_dates": ["2026-06-04", "2026-06-05"],
+        "held_instruments": [
+          "000001.SZ",
+          "000002.SZ",
+          "000003.SZ",
+          "000004.SZ",
+          "000005.SZ",
+          "000006.SZ",
+          "000007.SZ",
+          "000008.SZ",
+        ],
+      },
+      "replay": {
+        "status": "COMPLETED",
+        "account_id": "must-not-appear",
+        "progress_pct": 100.0,
+      },
+      "execution_boundary": {
+        "strategy_run_mode": "BACKTEST",
+        "runtime_state_persist_enabled": True,
+        "qmt_invocation": False,
+        "paper_or_live_command": False,
+      },
+      "terminal_convergence": {"status": "TERMINAL"},
+      "isolated_backtest": True,
+      "no_live_or_paper_broker": True,
+      "throughput": {"engine_ticks_processed": 9_472},
+      "latency": {"engine_tick": {"sample_count": 9_472}},
+      "cas": {"checkpoint_attempts": 9_473},
+      "database_write_activity": {
+        "runtime_state": {
+          "state_upsert_attempts": 9_503,
+          "snapshot_save_failures": 0,
+        }
+      },
+      "run_evidence": {
+        "run_id": "full-run",
+        "mode": "backtest",
+        "status": "completed",
+        "parameters_sha256": "fixture-proof",
+        "parameters": {
+          "account_id": "must-not-appear",
+          "t_trade_replay": True,
+          "replay_acceptance": "V3_PRESSURE_BASELINE",
+          "_internal_v3_pressure_runtime_state_persistence": True,
+        },
+        "evaluations": {
+          "material_rows": 1_072,
+          "diagnostic_logical_events": 8_400,
+        },
+      },
+    }
+  }
+
+
+def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
+  tmp_path,
+) -> None:
+  raw_pressure_report = _completed_pressure_report_payload()
+  path = tmp_path / "completed-pressure.json"
+  path.write_text(json.dumps(raw_pressure_report), encoding="utf-8")
+
+  imported = acceptance_module._load_completed_pressure_baseline(path)
+
+  assert imported["replay"] == {"status": "COMPLETED", "progress_pct": 100.0}
+  assert imported["run_evidence"]["parameters"] == {
+    "t_trade_replay": True,
+    "replay_acceptance": "V3_PRESSURE_BASELINE",
+    "_internal_v3_pressure_runtime_state_persistence": True,
+  }
+  assert imported["tick_accounting"] == {
+    "requested_fixture_ticks": 9_600,
+    "engine_ticks_processed": 9_472,
+    "policy_filtered_ticks": 128,
+    "policy_filtered_per_instrument_day": 8,
+    "instrument_day_count": 16,
+    "expected_policy_filtered_ticks": 128,
+    "continuous_pm_policy": "13:00 <= local_time < 14:57",
+    "policy_filtered_time_range": "14:57:10..14:59:59",
+    "accounting_passed": True,
+  }
+  assert "must-not-appear" not in json.dumps(imported)
+
+  raw_pressure_report["pressure_baseline"]["execution_boundary"][
+    "qmt_invocation"
+  ] = True
+  path.write_text(json.dumps(raw_pressure_report), encoding="utf-8")
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="COMPLETED_PRESSURE_EVIDENCE_INVALID",
+  ):
+    acceptance_module._load_completed_pressure_baseline(path)
+
+
+@pytest.mark.parametrize(
+  ("field_path", "invalid_value"),
+  [
+    (("pressure_baseline", "isolated_backtest"), False),
+    (("pressure_baseline", "no_live_or_paper_broker"), False),
+    (("pressure_baseline", "run_evidence", "mode"), "live"),
+    (("pressure_baseline", "execution_boundary", "strategy_run_mode"), "LIVE"),
+    (
+      (
+        "pressure_baseline",
+        "execution_boundary",
+        "runtime_state_persist_enabled",
+      ),
+      False,
+    ),
+    (("pressure_baseline", "execution_boundary", "paper_or_live_command"), True),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "evaluations",
+        "diagnostic_logical_events",
+      ),
+      8_399,
+    ),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "evaluations",
+        "material_rows",
+      ),
+      True,
+    ),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "evaluations",
+        "diagnostic_logical_events",
+      ),
+      [],
+    ),
+  ],
+)
+def test_completed_pressure_import_fails_closed_for_boundary_or_count_mismatch(
+  tmp_path,
+  field_path: tuple[str, ...],
+  invalid_value: object,
+) -> None:
+  raw_pressure_report = _completed_pressure_report_payload()
+  target: dict = raw_pressure_report
+  for field in field_path[:-1]:
+    target = target[field]
+  target[field_path[-1]] = invalid_value
+  path = tmp_path / "completed-pressure-invalid.json"
+  path.write_text(json.dumps(raw_pressure_report), encoding="utf-8")
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="COMPLETED_PRESSURE_EVIDENCE_INVALID",
+  ):
+    acceptance_module._load_completed_pressure_baseline(path)
+
+
+@pytest.mark.asyncio
+async def test_run_cli_completed_pressure_rejects_mismatched_operational_evidence(
+  monkeypatch,
+  tmp_path,
+) -> None:
+  audit = _audit()
+  pressure_path = tmp_path / "completed-pressure.json"
+  pressure_path.write_text(
+    json.dumps(_completed_pressure_report_payload()), encoding="utf-8"
+  )
+  operational_path = tmp_path / "operational-evidence.json"
+  # This addendum is structurally valid but its 46/160 transfer scope does
+  # not match this isolated two-holding audit's 40 instrument-days.
+  operational_path.write_text(
+    json.dumps(_operational_evidence()), encoding="utf-8"
+  )
+
+  async def fake_load_snapshots(*, account_id=None):
+    del account_id
+    return [audit.window.snapshot]
+
+  async def fake_build_windows(snapshots, *, requested_trading_days):
+    assert snapshots == [audit.window.snapshot]
+    assert requested_trading_days == DEFAULT_TRADING_DAYS
+    return [audit.window]
+
+  async def fake_audit_coverage(windows, *, max_concurrency):
+    assert windows == [audit.window]
+    assert max_concurrency == 4
+    return [audit]
+
+  async def fake_source_identity(_audit, _dates):
+    return SimpleNamespace(to_dict=lambda: {"passed": True, "failure": None})
+
+  monkeypatch.setenv("ENABLE_REAL_TRADING", "false")
+  monkeypatch.setattr(
+    acceptance_module, "load_snapshot_portfolios", fake_load_snapshots
+  )
+  monkeypatch.setattr(acceptance_module, "build_replay_windows", fake_build_windows)
+  monkeypatch.setattr(acceptance_module, "audit_tick_coverage", fake_audit_coverage)
+  monkeypatch.setattr(acceptance_module, "audit_source_identity", fake_source_identity)
+  args = acceptance_module.build_parser().parse_args(
+    [
+      "--completed-pressure-report",
+      str(pressure_path),
+      "--operational-evidence",
+      str(operational_path),
+      "--pressure-snapshot-date",
+      "2026-06-01",
+      "--report",
+      str(tmp_path / "acceptance.md"),
+    ]
+  )
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="OPERATIONAL_EVIDENCE_REFRESH_MISMATCH",
+  ):
+    await acceptance_module.run_cli(args)
 
 
 def test_completed_9600_without_durable_runtime_state_cannot_freeze_slo() -> None:

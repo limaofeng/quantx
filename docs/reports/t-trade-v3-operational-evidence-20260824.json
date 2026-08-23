@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-24",
+  "historical_tick_transfer": {
+    "status": "COMPLETED",
+    "scope": {
+      "snapshot_date": "2026-06-01",
+      "trading_window": "2026-06-02..2026-06-30",
+      "held_instruments": 8,
+      "transfer_batches": 10,
+      "execution_boundary": "historical XTData transfer and server-side persistence verification only; no PAPER/LIVE command"
+    },
+    "cumulative_records": {
+      "received": 212291,
+      "saved": 212291,
+      "verified": 212291
+    },
+    "strict_coverage": {
+      "complete_instrument_days": 46,
+      "expected_instrument_days": 160,
+      "incomplete_instrument_days": 114,
+      "missing_instrument_days": 108,
+      "partial_instrument_days": 6,
+      "full_shared_dates": [
+        "2026-06-02",
+        "2026-06-04",
+        "2026-06-05"
+      ],
+      "contiguous_shared_prefix_dates": [
+        "2026-06-02"
+      ],
+      "blocker": "ALL_HOLDINGS_TICK_COVERAGE_INCOMPLETE"
+    },
+    "source_identity": {
+      "strict_keyset_status": "PASSED",
+      "instrument_days_checked": 160,
+      "failed_instrument_days": 0,
+      "rows_checked": 212291,
+      "source_time_ms_arrow_type": "int64",
+      "tick_ordinal_arrow_type": "int64",
+      "source_identity_null_rows": 0,
+      "duplicate_market_keys": 0,
+      "out_of_range_rows": 0,
+      "storage_time_mapping_failures": 0
+    }
+  },
+  "formal_causal_replay": {
+    "requested_trading_days": 20,
+    "completed_trading_days": 0,
+    "stage": "SHADOW",
+    "formal_backtest_started": false,
+    "blocker": "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW"
+  },
+  "restore_verify": {
+    "status": "PASSED",
+    "backup_schema_revision": "20260822_0028_qmt_agent_handover",
+    "source_schema_revision": "20260822_0028_qmt_agent_handover",
+    "target_schema_revision": "20260823_0031_watchlist_groups",
+    "isolated_scratch_database": true,
+    "forward_migration_only": true,
+    "production_database_restored": false,
+    "scratch_cleanup_verified": true,
+    "qmt_journal_integrity_passed": true
+  },
+  "rollout": {
+    "paper": {
+      "status": "BLOCKED",
+      "consecutive_trading_days": 0,
+      "required_consecutive_trading_days": 5,
+      "completed_candidate_lifecycles": 0,
+      "required_candidate_lifecycles": 20
+    },
+    "canary": {
+      "status": "NOT_EXECUTED"
+    },
+    "live": {
+      "status": "NOT_EXECUTED"
+    },
+    "operator_review": false
+  }
+}
