@@ -213,6 +213,21 @@ const marketIndexSurfaceStyles: Record<FinancialDirection, CSSProperties> = {
   },
 };
 
+const marketIndexSelectedStyles: Record<FinancialDirection, CSSProperties> = {
+  up: {
+    outline: '1px solid rgb(var(--market-up) / 0.85)',
+    outlineOffset: '-1px',
+  },
+  down: {
+    outline: '1px solid rgb(var(--market-down) / 0.85)',
+    outlineOffset: '-1px',
+  },
+  flat: {
+    outline: '1px solid rgb(var(--market-flat) / 0.85)',
+    outlineOffset: '-1px',
+  },
+};
+
 const marketIndexRangeStyles: Record<FinancialDirection, CSSProperties> = {
   up: { backgroundColor: 'rgb(var(--market-up) / 0.80)' },
   down: { backgroundColor: 'rgb(var(--market-down) / 0.80)' },
@@ -238,13 +253,14 @@ function MarketIndexCard({
     <button
       aria-label={`查看${definition.name}行情`}
       aria-pressed={isSelected}
-      className={`group h-28 w-40 shrink-0 cursor-pointer rounded-lg border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 xl:p-2 ${
-        isSelected ? 'ring-1 ring-inset ring-blue-400/70' : ''
-      }`}
+      className="group h-28 w-40 shrink-0 cursor-pointer rounded-lg border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 xl:p-2"
       data-market-direction={direction}
       data-testid={`market-index-${definition.code}`}
       onClick={onSelect}
-      style={marketIndexSurfaceStyles[direction]}
+      style={{
+        ...marketIndexSurfaceStyles[direction],
+        ...(isSelected ? marketIndexSelectedStyles[direction] : {}),
+      }}
       type="button"
     >
       <span className="flex items-start justify-between gap-2">
@@ -252,12 +268,17 @@ function MarketIndexCard({
           <span className="block truncate text-xs font-black text-slate-100">
             {definition.name}
           </span>
-          <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-600">
+          <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-400">
             {definition.code} · {definition.group}
           </span>
         </span>
         {isSelected ? (
-          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+          <span
+            aria-hidden="true"
+            className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full"
+            data-testid={`market-index-selection-indicator-${definition.code}`}
+            style={marketIndexRangeStyles[direction]}
+          />
         ) : null}
       </span>
       <span

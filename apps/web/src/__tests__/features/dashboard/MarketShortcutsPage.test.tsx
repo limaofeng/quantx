@@ -162,47 +162,7 @@ describe('MarketShortcutsPage realtime date guard', () => {
     expect(indexStrip).not.toHaveClass('lg:grid-cols-6', 'lg:overflow-visible');
   });
 
-  it('uses blue interaction styling when changing the selected market index', () => {
-    mocks.market = createMarketState({
-      dataMode: 'live',
-      freshCoverage: CORE_MARKET_INDICES.length,
-      latestQuoteAt: '2026-08-13T10:30:10+08:00',
-      targetDateCoverage: CORE_MARKET_INDICES.length,
-    });
-
-    render(<MarketShortcutsPage />);
-
-    const firstCard = screen.getByTestId(
-      `market-index-${CORE_MARKET_INDICES[0].code}`
-    );
-    const nextCard = screen.getByTestId(
-      `market-index-${CORE_MARKET_INDICES[1].code}`
-    );
-
-    expect(firstCard).toHaveAttribute('aria-pressed', 'true');
-    expect(firstCard).toHaveClass(
-      'ring-1',
-      'ring-inset',
-      'ring-blue-400/70',
-      'focus-visible:ring-blue-400/70'
-    );
-    expect(firstCard).not.toHaveClass(
-      'border-red-400/40',
-      'bg-red-500/10',
-      'bg-blue-500/10'
-    );
-    expect(firstCard.querySelector('.bg-blue-400')).toBeInTheDocument();
-    expect(nextCard).not.toHaveClass('ring-1', 'ring-blue-400/70');
-
-    fireEvent.click(nextCard);
-
-    expect(firstCard).toHaveAttribute('aria-pressed', 'false');
-    expect(nextCard).toHaveAttribute('aria-pressed', 'true');
-    expect(nextCard).toHaveClass('ring-1', 'ring-blue-400/70');
-    expect(nextCard.querySelector('.bg-blue-400')).toBeInTheDocument();
-  });
-
-  it('renders directional index surfaces and both real change fields without inventing missing values', () => {
+  it('renders directional index surfaces, selection accents, and text hierarchy without inventing missing values', () => {
     const positiveQuote = {
       change: 68.48,
       changePercent: 1.87,
@@ -248,6 +208,25 @@ describe('MarketShortcutsPage realtime date guard', () => {
       `market-index-${CORE_MARKET_INDICES[2].code}`
     );
 
+    expect(risingCard).toHaveAttribute('aria-pressed', 'true');
+    expect(risingCard).toHaveClass('focus-visible:ring-blue-400/70');
+    expect(risingCard).not.toHaveClass('ring-1');
+    expect(risingCard).not.toHaveClass('ring-blue-400/70');
+    expect(risingCard.querySelector('.bg-blue-400')).toBeNull();
+    expect(risingCard.style.outline).toContain('--market-up');
+    expect(
+      screen
+        .getByTestId(
+          `market-index-selection-indicator-${CORE_MARKET_INDICES[0].code}`
+        )
+        .getAttribute('style')
+    ).toContain('--market-up');
+    expect(
+      within(risingCard).getByText(
+        `${CORE_MARKET_INDICES[0].code} · ${CORE_MARKET_INDICES[0].group}`
+      )
+    ).toHaveClass('text-slate-400');
+
     expect(risingCard).toHaveAttribute('data-market-direction', 'up');
     expect(risingCard.getAttribute('style')).toContain('--market-up');
     expect(fallingCard).toHaveAttribute('data-market-direction', 'down');
@@ -276,6 +255,32 @@ describe('MarketShortcutsPage realtime date guard', () => {
         element.classList.contains('text-market-flat')
       )
     ).toBe(true);
+
+    fireEvent.click(fallingCard);
+
+    expect(risingCard).toHaveAttribute('aria-pressed', 'false');
+    expect(fallingCard).toHaveAttribute('aria-pressed', 'true');
+    expect(fallingCard.style.outline).toContain('--market-down');
+    expect(
+      screen
+        .getByTestId(
+          `market-index-selection-indicator-${CORE_MARKET_INDICES[1].code}`
+        )
+        .getAttribute('style')
+    ).toContain('--market-down');
+
+    fireEvent.click(unavailableCard);
+
+    expect(fallingCard).toHaveAttribute('aria-pressed', 'false');
+    expect(unavailableCard).toHaveAttribute('aria-pressed', 'true');
+    expect(unavailableCard.style.outline).toContain('--market-flat');
+    expect(
+      screen
+        .getByTestId(
+          `market-index-selection-indicator-${CORE_MARKET_INDICES[2].code}`
+        )
+        .getAttribute('style')
+    ).toContain('--market-flat');
   });
 
   it('keeps the index-directory route as a compact terminal action tile', () => {
