@@ -19,7 +19,7 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'wouter';
 
 import { Button } from '@/components/ui/button';
@@ -30,10 +30,12 @@ import {
 } from '@/features/strategies/hooks/useLimitUpRadar';
 import { financialToneClass } from '@/shared/utils/financialColors';
 
+import { MarketIndexCustomizer } from '../components/MarketIndexCustomizer';
 import { MarketIntradayChart } from '../components/MarketIntradayChart';
 import { MarketStockSearch } from '../components/MarketStockSearch';
 import { MarketStudioShell } from '../components/MarketStudioShell';
 import { useAMarketSession } from '../hooks/useAMarketSession';
+import { useMarketIndexPreferences } from '../hooks/useMarketIndexPreferences';
 import { useMarketPulse } from '../hooks/useMarketPulse';
 import { useMarketWorkbench } from '../hooks/useMarketWorkbench';
 import {
@@ -192,10 +194,10 @@ function MarketIndexCard({
     <button
       aria-label={`查看${definition.name}行情`}
       aria-pressed={isSelected}
-      className={`group min-w-0 cursor-pointer rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:p-2 ${
+      className={`group w-40 shrink-0 cursor-pointer rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:p-2 ${
         isSelected
-          ? 'border-red-400/40 bg-red-500/[0.09]'
-          : 'border-white/[0.07] bg-white/[0.025] hover:border-white/15 hover:bg-white/[0.045]'
+          ? 'border-red-400/40 bg-red-500/10'
+          : 'border-white/5 bg-white/5 hover:border-white/15 hover:bg-white/5'
       }`}
       data-testid={`market-index-${definition.code}`}
       onClick={onSelect}
@@ -275,7 +277,7 @@ function ComparisonCard({
   value: ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-white/[0.06] bg-black/15 p-3 xl:p-2">
+    <div className="rounded-lg border border-white/5 bg-black/10 p-3 xl:p-2">
       <div className="text-[10px] font-bold text-slate-500">{label}</div>
       <div
         className={`mt-2 font-mono text-lg font-black xl:mt-1 xl:text-base ${tone}`}
@@ -291,7 +293,7 @@ function ComparisonCard({
 
 function EmptyState({ children }: { children: string }) {
   return (
-    <div className="flex min-h-36 items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-black/10 px-5 text-center text-[11px] leading-5 text-slate-600 xl:min-h-24 xl:px-3">
+    <div className="flex min-h-36 items-center justify-center rounded-lg border border-dashed border-white/10 bg-black/10 px-5 text-center text-[11px] leading-5 text-slate-600 xl:min-h-24 xl:px-3">
       {children}
     </div>
   );
@@ -309,7 +311,7 @@ function HotIndustryGrid({ industries }: { industries: RadarIndustryHeat[] }) {
       {industries.slice(0, 6).map(industry => (
         <div
           key={industry.industry}
-          className="rounded-lg border border-white/[0.06] bg-black/15 p-3 xl:p-2"
+          className="rounded-lg border border-white/5 bg-black/10 p-3 xl:p-2"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="truncate text-[11px] font-black text-slate-200">
@@ -348,7 +350,7 @@ function RadarCandidates({ candidates }: { candidates: RadarCandidate[] }) {
   }
 
   return (
-    <div className="divide-y divide-white/[0.05]">
+    <div className="divide-y divide-white/5">
       {candidates.slice(0, 6).map(candidate => (
         <Link
           key={candidate.code}
@@ -394,14 +396,14 @@ function IntradayMovers({
   }
 
   return (
-    <div className="divide-y divide-white/[0.05]">
+    <div className="divide-y divide-white/5">
       {items.slice(0, 6).map(item => (
         <Link
           key={item.code}
-          className="group grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 px-1 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:py-1.5"
+          className="group flex items-center gap-3 px-1 py-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:py-1.5"
           href={`/stock/${encodeURIComponent(item.code)}`}
         >
-          <span className="min-w-0">
+          <span className="min-w-0 flex-1">
             <span className="block truncate text-[11px] font-bold text-slate-200 group-hover:text-white">
               {item.name}
             </span>
@@ -446,10 +448,10 @@ function StockRankingList({
   return (
     <section
       aria-labelledby={headingId}
-      className="min-w-0 overflow-hidden bg-[#0e1628]"
+      className="min-w-0 overflow-hidden bg-slate-900"
       data-testid={`stock-ranking-${direction}`}
     >
-      <div className="grid grid-cols-[1.25rem_minmax(0,1fr)_3.5rem_3.5rem] items-center gap-1.5 border-b border-white/[0.06] bg-black/10 px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-slate-600 sm:grid-cols-[1.5rem_minmax(0,1fr)_4rem_4rem_3.5rem] sm:gap-2 sm:px-3">
+      <div className="grid grid-cols-4 items-center gap-1.5 border-b border-white/5 bg-black/10 px-2 py-1.5 text-[8px] font-bold uppercase tracking-wider text-slate-600 sm:grid-cols-5 sm:gap-2 sm:px-3">
         <span />
         <h3
           className="flex min-w-0 items-center gap-1.5 text-[10px] font-black normal-case tracking-normal text-slate-300"
@@ -470,12 +472,12 @@ function StockRankingList({
       {visibleRows.length === 0 ? (
         <EmptyState>全市场日线快照暂不可用，排行不会使用模拟数据。</EmptyState>
       ) : (
-        <ol className="divide-y divide-white/[0.045]">
+        <ol className="divide-y divide-white/5">
           {visibleRows.map((row, index) => (
             <li key={row.code}>
               <Link
                 aria-label={`${row.name} ${formatMarketPercent(row.changePct)}`}
-                className="group grid cursor-pointer grid-cols-[1.25rem_minmax(0,1fr)_3.5rem_3.5rem] items-center gap-1.5 px-2 py-1.5 transition-colors duration-200 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/70 sm:grid-cols-[1.5rem_minmax(0,1fr)_4rem_4rem_3.5rem] sm:gap-2 sm:px-3"
+                className="group grid cursor-pointer grid-cols-4 items-center gap-1.5 px-2 py-1.5 transition-colors duration-200 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/70 sm:grid-cols-5 sm:gap-2 sm:px-3"
                 href={`/stock/${encodeURIComponent(row.code)}`}
               >
                 <span
@@ -515,8 +517,11 @@ function StockRankingList({
 
 export default function MarketShortcutsPage() {
   const [selectedCode, setSelectedCode] = useState(CORE_MARKET_INDICES[0].code);
+  const preferences = useMarketIndexPreferences();
+  const visibleDefinitions = preferences.visibleDefinitions;
   const session = useAMarketSession();
   const market = useMarketWorkbench({
+    indexDefinitions: visibleDefinitions,
     now: session.now,
     phase: session.phase,
     targetTradingDate: session.targetTradingDate,
@@ -527,6 +532,14 @@ export default function MarketShortcutsPage() {
     targetTradingDate: session.targetTradingDate,
   });
   const radar = useLimitUpRadar(true);
+  useEffect(() => {
+    if (
+      visibleDefinitions.length > 0 &&
+      !visibleDefinitions.some(definition => definition.code === selectedCode)
+    ) {
+      setSelectedCode(visibleDefinitions[0].code);
+    }
+  }, [selectedCode, visibleDefinitions]);
   const selected =
     market.indices.find(item => item.definition.code === selectedCode) ||
     market.indices[0];
@@ -570,12 +583,14 @@ export default function MarketShortcutsPage() {
     market.error || pulse.error || radar.error || session.calendarError;
   const marketDateIsMissing = Boolean(
     session.targetTradingDate &&
-    market.targetDateCoverage < CORE_MARKET_INDICES.length
+    market.targetDateCoverage < market.indices.length
   );
+  const hasVisibleIndices = market.indices.length > 0;
   const realtimeMarketIsDelayed = Boolean(
     session.isOpen &&
+    hasVisibleIndices &&
     !marketDateIsMissing &&
-    (market.freshCoverage < CORE_MARKET_INDICES.length ||
+    (market.freshCoverage < market.indices.length ||
       !isMarketQuoteFreshForSession(
         market.latestQuoteAt,
         session.now,
@@ -619,24 +634,24 @@ export default function MarketShortcutsPage() {
     <MarketStudioShell
       content={
         <div className="studio-workspace-surface flex min-h-0 flex-1 flex-col overflow-hidden">
-          <header className="studio-workspace-surface flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-white/5 px-4 py-2 xl:min-h-11 xl:py-1">
+          <header className="studio-workspace-surface flex shrink-0 flex-col gap-2 border-b border-white/5 px-4 py-2 xl:flex-row xl:items-center xl:justify-between xl:gap-3 xl:py-1">
             <div className="flex min-w-0 items-center">
               <div className="min-w-0">
                 <div className="truncate text-xs font-black uppercase tracking-[0.18em] text-slate-100">
-                  A股行情工作台
+                  行情工作台
                 </div>
                 <div className="truncate text-[10px] font-medium text-slate-600">
-                  大盘全景 · 热点机会 · 个股排行
+                  A股全景 · 指数脉搏 · 机会雷达
                 </div>
               </div>
             </div>
 
-            <div className="w-full max-w-md">
+            <div className="w-full xl:max-w-md xl:flex-1">
               <MarketStockSearch />
             </div>
 
-            <div className="flex shrink-0 items-center gap-2">
-              <div className="hidden text-right sm:block">
+            <div className="flex w-full shrink-0 items-center justify-end gap-2 xl:w-auto">
+              <div className="min-w-0 flex-1 text-right sm:flex-none">
                 <div
                   className={`text-[10px] font-bold ${
                     combinedError || marketDataIsStale || pulseDataIsMissing
@@ -672,11 +687,11 @@ export default function MarketShortcutsPage() {
             </div>
           </header>
 
-          <main className="min-h-0 flex-1 overflow-y-auto scroll-smooth">
+          <main className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto scroll-smooth">
             <div className="mx-auto w-full max-w-[1800px] px-3 pb-10 pt-3 sm:px-4 lg:px-5 xl:px-3 xl:pt-2">
               <nav
                 aria-label="行情工作台分区"
-                className="sticky top-0 z-20 mb-3 flex items-center gap-1 overflow-x-auto rounded-lg border border-white/[0.06] bg-[#0b1120]/95 p-1 backdrop-blur xl:mb-2 xl:p-0.5"
+                className="sticky top-0 z-20 mb-3 flex items-center gap-1 overflow-x-auto rounded-lg border border-white/5 bg-slate-950/95 p-1 backdrop-blur xl:mb-2 xl:p-0.5"
               >
                 {sectionNavigation.map(({ icon: Icon, id, label }) => (
                   <button
@@ -692,8 +707,8 @@ export default function MarketShortcutsPage() {
               </nav>
 
               <section className="scroll-mt-14" id="market-overview">
-                <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0e1628]">
-                  <div className="flex flex-col justify-between gap-3 border-b border-white/[0.06] px-4 py-3 sm:flex-row sm:items-center xl:px-3 xl:py-2">
+                <div className="overflow-hidden rounded-xl border border-white/10 bg-slate-900">
+                  <div className="flex flex-col justify-between gap-3 border-b border-white/5 px-4 py-3 sm:flex-row sm:items-center xl:px-3 xl:py-2">
                     <div className="flex items-center gap-3">
                       <span
                         className={`flex h-9 w-9 items-center justify-center rounded-lg ${
@@ -735,8 +750,8 @@ export default function MarketShortcutsPage() {
                         <div className="mt-1 text-[10px] text-slate-600">
                           {session.detail} · 指数{' '}
                           {formatSnapshotDate(market.latestQuoteAt)} ·{' '}
-                          {market.targetDateCoverage}
-                          /6 核心指数
+                          {market.targetDateCoverage}/{market.indices.length}{' '}
+                          工作台指数
                           {pulse.snapshotAt
                             ? ` · 个股${pulse.snapshotMode === 'intraday' ? '盘中' : '收盘'} ${formatSnapshotDate(pulse.snapshotAt)}`
                             : session.targetTradingDate
@@ -770,20 +785,44 @@ export default function MarketShortcutsPage() {
                     </div>
                   </div>
 
-                  <div className="no-scrollbar grid grid-flow-col auto-cols-[minmax(150px,1fr)] gap-2 overflow-x-auto overscroll-x-contain p-3 xl:p-2">
-                    {market.indices.map(item => (
-                      <MarketIndexCard
-                        key={item.definition.code}
-                        definition={item.definition}
-                        isSelected={item.definition.code === selectedCode}
-                        onSelect={() => setSelectedCode(item.definition.code)}
-                        quote={item.quote}
-                      />
-                    ))}
+                  <div
+                    className="no-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain p-3 xl:p-2"
+                    data-testid="market-index-strip"
+                  >
+                    {market.indices.length > 0 ? (
+                      market.indices.map(item => (
+                        <MarketIndexCard
+                          key={item.definition.code}
+                          definition={item.definition}
+                          isSelected={item.definition.code === selectedCode}
+                          onSelect={() => setSelectedCode(item.definition.code)}
+                          quote={item.quote}
+                        />
+                      ))
+                    ) : (
+                      <div className="flex min-h-20 w-64 shrink-0 items-center rounded-lg border border-dashed border-white/10 px-4 text-xs text-slate-600">
+                        当前没有显示中的指数，请打开定制恢复或增补。
+                      </div>
+                    )}
+                    <MarketIndexCustomizer
+                      items={preferences.items}
+                      onSave={preferences.updateItems}
+                      storageStatus={preferences.storageStatus}
+                    />
+                    <Link
+                      aria-label="打开全部指数目录"
+                      className="flex min-h-20 w-40 shrink-0 flex-col justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-300 transition-colors hover:border-white/20 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                      href="/market/indices"
+                    >
+                      <span className="text-sm font-black">全部指数</span>
+                      <span className="text-[10px] text-slate-600">
+                        浏览完整目录
+                      </span>
+                    </Link>
                   </div>
 
-                  <div className="border-t border-white/[0.06] p-4 xl:p-3">
-                    <div className="xl:grid xl:grid-cols-[minmax(360px,1.6fr)_repeat(3,minmax(0,1fr))] xl:items-stretch xl:gap-2">
+                  <div className="border-t border-white/5 p-4 xl:p-3">
+                    <div className="xl:grid xl:grid-cols-4 xl:items-stretch xl:gap-2">
                       <div className="xl:flex xl:flex-col xl:justify-center xl:px-1">
                         <div className="flex items-end justify-between gap-3">
                           <div>
@@ -883,73 +922,83 @@ export default function MarketShortcutsPage() {
                   </div>
                 </div>
 
-                <div className="mt-3 grid gap-3 xl:mt-2 xl:grid-cols-[minmax(0,1.7fr)_minmax(300px,0.55fr)] xl:gap-2">
-                  <section className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0e1628]">
-                    <div className="flex flex-col justify-between gap-4 border-b border-white/[0.06] px-4 py-3 sm:flex-row sm:items-end xl:px-3 xl:py-2">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <Activity className="h-3.5 w-3.5 text-rose-300" />
-                          <h2 className="text-xs font-black text-slate-200">
-                            {selected?.definition.name || '指数详情'}
-                          </h2>
-                          <span className="font-mono text-[9px] text-slate-600">
-                            {selected?.definition.code}
-                          </span>
+                <div className="mt-3 grid gap-3 xl:mt-2 xl:grid-cols-2 xl:gap-2">
+                  <section className="overflow-hidden rounded-xl border border-white/10 bg-slate-900">
+                    {selected ? (
+                      <>
+                        <div className="flex flex-col justify-between gap-4 border-b border-white/5 px-4 py-3 sm:flex-row sm:items-end xl:px-3 xl:py-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <Activity className="h-3.5 w-3.5 text-rose-300" />
+                              <h2 className="text-xs font-black text-slate-200">
+                                {selected.definition.name}
+                              </h2>
+                              <span className="font-mono text-[9px] text-slate-600">
+                                {selected.definition.code}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex items-baseline gap-3">
+                              <span className="font-mono text-2xl font-black text-slate-100">
+                                {formatMarketPrice(selectedQuote?.currentPrice)}
+                              </span>
+                              <span
+                                className={`font-mono text-sm font-black ${quoteTone(selectedQuote?.changePercent)}`}
+                              >
+                                {formatMarketPercent(
+                                  selectedQuote?.changePercent
+                                )}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-4 gap-4 xl:gap-3">
+                            <Metric
+                              label="开盘"
+                              value={formatMarketPrice(selectedQuote?.open)}
+                            />
+                            <Metric
+                              label="最高"
+                              tone="text-rose-300"
+                              value={formatMarketPrice(selectedQuote?.high)}
+                            />
+                            <Metric
+                              label="最低"
+                              tone="text-emerald-300"
+                              value={formatMarketPrice(selectedQuote?.low)}
+                            />
+                            <Metric
+                              label="振幅"
+                              value={formatMarketPercent(amplitude)}
+                            />
+                          </div>
                         </div>
-                        <div className="mt-2 flex items-baseline gap-3">
-                          <span className="font-mono text-2xl font-black text-slate-100">
-                            {formatMarketPrice(selectedQuote?.currentPrice)}
-                          </span>
-                          <span
-                            className={`font-mono text-sm font-black ${quoteTone(selectedQuote?.changePercent)}`}
-                          >
-                            {formatMarketPercent(selectedQuote?.changePercent)}
-                          </span>
+                        <div className="px-2 pb-2 pt-1">
+                          <div className="flex items-center justify-between px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-600">
+                            <span>分钟走势</span>
+                            <span>1 MIN · SHANGHAI TIME</span>
+                          </div>
+                          <MarketIntradayChart
+                            changePercent={selectedQuote?.changePercent}
+                            preClose={selectedQuote?.preClose}
+                            stockCode={selected.definition.code}
+                            targetTradingDate={session.targetTradingDate}
+                          />
                         </div>
-                      </div>
-                      <div className="grid grid-cols-4 gap-4 xl:gap-3">
-                        <Metric
-                          label="开盘"
-                          value={formatMarketPrice(selectedQuote?.open)}
-                        />
-                        <Metric
-                          label="最高"
-                          tone="text-rose-300"
-                          value={formatMarketPrice(selectedQuote?.high)}
-                        />
-                        <Metric
-                          label="最低"
-                          tone="text-emerald-300"
-                          value={formatMarketPrice(selectedQuote?.low)}
-                        />
-                        <Metric
-                          label="振幅"
-                          value={formatMarketPercent(amplitude)}
-                        />
-                      </div>
-                    </div>
-                    <div className="px-2 pb-2 pt-1">
-                      <div className="flex items-center justify-between px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-slate-600">
-                        <span>分钟走势</span>
-                        <span>1 MIN · SHANGHAI TIME</span>
-                      </div>
-                      <MarketIntradayChart
-                        changePercent={selectedQuote?.changePercent}
-                        preClose={selectedQuote?.preClose}
-                        stockCode={selected?.definition.code || selectedCode}
-                        targetTradingDate={session.targetTradingDate}
-                      />
-                    </div>
+                      </>
+                    ) : (
+                      <EmptyState>
+                        当前没有显示中的指数，分钟走势暂不可用。
+                      </EmptyState>
+                    )}
                   </section>
 
-                  <section className="rounded-xl border border-white/[0.08] bg-[#0e1628] p-4 xl:p-3">
+                  <section className="rounded-xl border border-white/10 bg-slate-900 p-4 xl:p-3">
                     <div className="mb-3 flex items-center justify-between gap-2 xl:mb-1">
                       <div>
                         <h2 className="text-xs font-black text-slate-200">
                           指数强弱排行
                         </h2>
                         <p className="mt-1 text-[9px] text-slate-600">
-                          六大核心宽基横向比较
+                          工作台指数横向比较
                         </p>
                       </div>
                       <Gauge className="h-4 w-4 text-slate-600" />
@@ -1013,7 +1062,7 @@ export default function MarketShortcutsPage() {
                 </div>
 
                 <div className="grid gap-3 xl:grid-cols-3 xl:gap-2">
-                  <section className="rounded-xl border border-white/[0.08] bg-[#0e1628] p-4 xl:p-3">
+                  <section className="rounded-xl border border-white/10 bg-slate-900 p-4 xl:p-3">
                     <div className="mb-3 flex items-start justify-between gap-3 xl:mb-2">
                       <div>
                         <h3 className="text-xs font-black text-slate-200">
@@ -1043,7 +1092,7 @@ export default function MarketShortcutsPage() {
                     <HotIndustryGrid industries={radar.industries} />
                   </section>
 
-                  <section className="rounded-xl border border-white/[0.08] bg-[#0e1628] p-4 xl:p-3">
+                  <section className="rounded-xl border border-white/10 bg-slate-900 p-4 xl:p-3">
                     <div className="mb-1 flex items-start justify-between gap-3">
                       <div>
                         <h3 className="text-xs font-black text-slate-200">
@@ -1060,7 +1109,7 @@ export default function MarketShortcutsPage() {
                     <RadarCandidates candidates={radar.candidates} />
                   </section>
 
-                  <section className="rounded-xl border border-white/[0.08] bg-[#0e1628] p-4 xl:p-3">
+                  <section className="rounded-xl border border-white/10 bg-slate-900 p-4 xl:p-3">
                     <div className="mb-1 flex items-start justify-between gap-3">
                       <div>
                         <h3 className="text-xs font-black text-slate-200">
@@ -1097,8 +1146,8 @@ export default function MarketShortcutsPage() {
                 className="mt-5 scroll-mt-14 xl:mt-3"
                 id="market-rankings"
               >
-                <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0e1628]">
-                  <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-3 py-2">
+                <div className="overflow-hidden rounded-xl border border-white/10 bg-slate-900">
+                  <div className="flex items-center justify-between gap-3 border-b border-white/5 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <ListOrdered className="h-3.5 w-3.5 shrink-0 text-red-300" />
                       <h2 className="text-xs font-black text-slate-100">
@@ -1113,7 +1162,7 @@ export default function MarketShortcutsPage() {
                     </span>
                   </div>
                   <div
-                    className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-px bg-white/[0.06]"
+                    className="grid grid-cols-1 gap-px bg-white/5 sm:grid-cols-2"
                     data-testid="stock-ranking-grid"
                   >
                     <StockRankingList
@@ -1146,7 +1195,7 @@ export default function MarketShortcutsPage() {
                     return (
                       <Link
                         key={tool.label}
-                        className="group cursor-pointer rounded-xl border border-white/[0.07] bg-[#0e1628] p-3.5 transition-colors hover:border-white/15 hover:bg-[#111c31] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:p-2.5"
+                        className="group cursor-pointer rounded-xl border border-white/5 bg-slate-900 p-3.5 transition-colors hover:border-white/15 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/70 xl:p-2.5"
                         href={tool.href}
                       >
                         <span className="flex items-center justify-between gap-2">
@@ -1197,7 +1246,7 @@ export default function MarketShortcutsPage() {
                   : market.dataMode === 'intraday'
                     ? '实盘快照'
                     : '最近收盘'}{' '}
-            {market.targetDateCoverage}/6
+            {market.targetDateCoverage}/{market.indices.length}
           </span>
         </>
       }

@@ -44,6 +44,7 @@ describe('router configuration', () => {
 
   it('resolves titles from the unified route source', () => {
     expect(getPageTitle('/')).toBe('行情工作台');
+    expect(getPageTitle('/market/indices')).toBe('全部指数');
     expect(getPageTitle('/holdings')).toBe('持仓');
     expect(getPageTitle('/account')).toBe('账户概览');
     expect(getPageTitle('/entry-plans')).toBe('买入管理');
@@ -83,6 +84,7 @@ describe('router configuration', () => {
       indexOf('/settings/data/:stockCode')
     );
     expect(indexOf('/trading')).toBe(-1);
+    expect(indexOf('/market/indices')).toBeGreaterThanOrEqual(0);
   });
 
   it('builds Studio navigation groups from route metadata', () => {

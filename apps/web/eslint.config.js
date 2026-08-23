@@ -20,6 +20,7 @@ export default [
 
       // Codegen 生成的文件
       'src/generated/**',
+      'src/features/dashboard/graphql/__generated__/**',
       'src/features/*/hooks/api.ts',
 
       // 文档和旧代码

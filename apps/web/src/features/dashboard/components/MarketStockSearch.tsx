@@ -35,7 +35,7 @@ export function MarketStockSearch() {
       ) : null}
 
       {showResults ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-lg border border-white/10 bg-[#0b1120] shadow-2xl shadow-black/50">
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-lg border border-white/10 bg-slate-950 shadow-2xl shadow-black/50">
           {filteredStocks.length > 0 ? (
             <div className="max-h-72 overflow-y-auto p-1.5 custom-scrollbar">
               {filteredStocks.map(stock => {

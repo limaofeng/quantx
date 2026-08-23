@@ -97,7 +97,7 @@ const marketShortcuts: MarketShortcut[] = [
 
 export function MarketShortcuts() {
   return (
-    <Card className="rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
+    <Card className="rounded-lg border-white/10 bg-slate-900/70 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-300">
           行情快捷方式

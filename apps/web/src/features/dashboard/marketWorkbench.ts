@@ -10,6 +10,25 @@ export interface MarketIndexDefinition {
   shortName: string;
 }
 
+/** The browser-local index workspace has a deliberately small, versioned contract. */
+export const MARKET_INDEX_PREFERENCES_STORAGE_KEY = 'quantx_market_indices_v1';
+export const MARKET_INDEX_PREFERENCES_VERSION = 1 as const;
+export const MAX_MARKET_INDEXES = 100;
+
+export interface MarketIndexPreferenceItem extends MarketIndexDefinition {
+  visible: boolean;
+}
+
+export interface StoredMarketIndexPreferences {
+  items: MarketIndexPreferenceItem[];
+  version: typeof MARKET_INDEX_PREFERENCES_VERSION;
+}
+
+export type MarketIndexPreferenceReadResult = {
+  items: MarketIndexPreferenceItem[];
+  storageAvailable: boolean;
+};
+
 export interface MarketQuoteSnapshot {
   change?: number | null;
   changePercent?: number | null;
@@ -167,29 +186,199 @@ export const CORE_MARKET_INDICES: readonly MarketIndexDefinition[] = [
   },
   {
     code: '399006.SZ',
-    group: '成长',
+    group: '深市',
     name: '创业板指',
     shortName: '创业板',
   },
   {
+    code: '000680.SH',
+    group: '沪市',
+    name: '科创综指',
+    shortName: '科创综指',
+  },
+  {
+    code: '000688.SH',
+    group: '沪市',
+    name: '科创50',
+    shortName: '科创50',
+  },
+  {
+    code: '000510.SH',
+    group: '沪市',
+    name: '中证A500',
+    shortName: '中证A500',
+  },
+  {
     code: '000300.SH',
-    group: '大盘',
+    group: '沪市',
     name: '沪深300',
     shortName: '沪深300',
   },
   {
+    code: '000852.SH',
+    group: '沪市',
+    name: '中证1000',
+    shortName: '中证1000',
+  },
+  {
+    code: '000016.SH',
+    group: '沪市',
+    name: '上证50',
+    shortName: '上证50',
+  },
+  {
+    code: '399330.SZ',
+    group: '深市',
+    name: '深证100',
+    shortName: '深证100',
+  },
+  {
     code: '000905.SH',
-    group: '中盘',
+    group: '沪市',
     name: '中证500',
     shortName: '中证500',
   },
   {
-    code: '000852.SH',
-    group: '小盘',
-    name: '中证1000',
-    shortName: '中证1000',
+    code: '399673.SZ',
+    group: '深市',
+    name: '创业板50',
+    shortName: '创业板50',
+  },
+  {
+    code: '000698.SH',
+    group: '沪市',
+    name: '科创100',
+    shortName: '科创100',
   },
 ] as const;
+
+const defaultPreferenceItems = (): MarketIndexPreferenceItem[] =>
+  CORE_MARKET_INDICES.map(definition => ({ ...definition, visible: true }));
+
+const isMarketIndexDefinition = (
+  value: unknown
+): value is MarketIndexDefinition & { visible?: unknown } => {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.code === 'string' &&
+    candidate.code.trim().length > 0 &&
+    typeof candidate.name === 'string' &&
+    candidate.name.trim().length > 0 &&
+    typeof candidate.group === 'string' &&
+    candidate.group.trim().length > 0 &&
+    typeof candidate.shortName === 'string' &&
+    candidate.shortName.trim().length > 0
+  );
+};
+
+/**
+ * Normalize untrusted localStorage data. Unknown catalog entries are retained
+ * with their stored metadata so a valid directory selection survives reload;
+ * the UI only creates entries from real directory rows.
+ */
+export function normalizeMarketIndexPreferenceItems(
+  value: unknown,
+  allowedCodes?: ReadonlySet<string>
+): MarketIndexPreferenceItem[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: MarketIndexPreferenceItem[] = [];
+
+  for (const item of value) {
+    if (!isMarketIndexDefinition(item)) continue;
+    const code = item.code.trim().toUpperCase();
+    if (seen.has(code) || (allowedCodes && !allowedCodes.has(code))) continue;
+    seen.add(code);
+    normalized.push({
+      code,
+      group: item.group.trim(),
+      name: item.name.trim(),
+      shortName: item.shortName.trim(),
+      visible: typeof item.visible === 'boolean' ? item.visible : true,
+    });
+    if (normalized.length >= MAX_MARKET_INDEXES) break;
+  }
+
+  return normalized;
+}
+
+export function createDefaultMarketIndexPreferences(): StoredMarketIndexPreferences {
+  return {
+    items: defaultPreferenceItems(),
+    version: MARKET_INDEX_PREFERENCES_VERSION,
+  };
+}
+
+export function readMarketIndexPreferences(
+  storage: Pick<Storage, 'getItem'> | null | undefined = typeof window ===
+  'undefined'
+    ? undefined
+    : window.localStorage
+): MarketIndexPreferenceReadResult {
+  const fallback = createDefaultMarketIndexPreferences().items;
+  if (!storage) return { items: fallback, storageAvailable: false };
+
+  try {
+    const raw = storage.getItem(MARKET_INDEX_PREFERENCES_STORAGE_KEY);
+    if (!raw) return { items: fallback, storageAvailable: true };
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { items: fallback, storageAvailable: true };
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      return { items: fallback, storageAvailable: true };
+    }
+    const candidate = parsed as { items?: unknown; version?: unknown };
+    if (candidate.version !== MARKET_INDEX_PREFERENCES_VERSION) {
+      return { items: fallback, storageAvailable: true };
+    }
+    const items = normalizeMarketIndexPreferenceItems(candidate.items);
+    if (!Array.isArray(candidate.items)) {
+      return { items: fallback, storageAvailable: true };
+    }
+    return {
+      items,
+      storageAvailable: true,
+    };
+  } catch {
+    return { items: fallback, storageAvailable: false };
+  }
+}
+
+export function saveMarketIndexPreferences(
+  items: readonly MarketIndexPreferenceItem[],
+  storage: Pick<Storage, 'setItem'> | null | undefined = typeof window ===
+  'undefined'
+    ? undefined
+    : window.localStorage
+): boolean {
+  if (!storage) return false;
+  const normalized = normalizeMarketIndexPreferenceItems(items);
+  try {
+    storage.setItem(
+      MARKET_INDEX_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        items: normalized,
+        version: MARKET_INDEX_PREFERENCES_VERSION,
+      } satisfies StoredMarketIndexPreferences)
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function preferenceItemsToDefinitions(
+  items: readonly MarketIndexPreferenceItem[]
+): MarketIndexDefinition[] {
+  return items
+    .filter(item => item.visible)
+    .slice(0, MAX_MARKET_INDEXES)
+    .map(({ visible: _visible, ...definition }) => definition);
+}
 
 export interface RankedMarketIndex {
   definition: MarketIndexDefinition;

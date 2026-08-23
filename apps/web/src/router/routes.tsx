@@ -97,6 +97,15 @@ export const appRoutes: AppRouteConfig[] = [
     },
   }),
   route({
+    path: '/market/indices',
+    title: '全部指数',
+    importer: toDefaultExport(
+      () => import('@/features/dashboard'),
+      'MarketIndicesPage'
+    ),
+    skeleton: 'table',
+  }),
+  route({
     path: '/market-shortcuts',
     title: '行情工作台',
     importer: toDefaultExport(

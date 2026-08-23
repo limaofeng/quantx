@@ -14,7 +14,8 @@ from .market_data_types import StockQuote
 class InstrumentOrderField(Enum):
   """金融工具可排序字段"""
 
-  CODE = "code"
+  # The ORM exposes the database ``code`` column as its Python ``id`` key.
+  CODE = "id"
   NAME = "name"
   MARKET = "market"
   INSTRUMENT_TYPE = "instrument_type"

@@ -154,7 +154,7 @@ describe('MarketShortcutsPage realtime date guard', () => {
     ).parentElement;
     expect(indexStrip).not.toBeNull();
     expect(indexStrip).toHaveClass(
-      'grid-flow-col',
+      'flex',
       'overflow-x-auto',
       'overscroll-x-contain',
       'no-scrollbar'
@@ -218,7 +218,8 @@ describe('MarketShortcutsPage realtime date guard', () => {
     render(<MarketShortcutsPage />);
 
     expect(screen.getByTestId('stock-ranking-grid')).toHaveClass(
-      'grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))]',
+      'grid-cols-1',
+      'sm:grid-cols-2',
       'gap-px'
     );
     const gainers = screen.getByTestId('stock-ranking-gainers');

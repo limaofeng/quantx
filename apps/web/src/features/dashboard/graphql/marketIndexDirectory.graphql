@@ -1,0 +1,29 @@
+query Market_IndicesDirectory(
+  $first: Int!
+  $after: String
+  $where: InstrumentWhereInput
+  $orderBy: InstrumentOrder
+) {
+  instrumentsConnection(
+    first: $first
+    after: $after
+    where: $where
+    orderBy: $orderBy
+  ) {
+    totalCount
+    edges {
+      cursor
+      node {
+        id
+        instrumentId
+        name
+        market
+        type
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
