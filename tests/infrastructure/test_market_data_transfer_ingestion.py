@@ -292,6 +292,26 @@ def test_tick_preprocessing_preserves_source_key_and_optional_limit_fields() -> 
   assert reconstructed.tolist() == [row["time"]]
 
 
+@pytest.mark.asyncio
+async def test_unknown_tick_field_cannot_bypass_strict_ingestion_or_write_partially() -> None:
+  row = _tick_row()
+  row["pe"] = 18.2
+  records = [row, _summary([row])]
+  save_period = AsyncMock()
+
+  with pytest.raises(
+    ingestion.MarketDataValidationError,
+    match="tick record contains unsupported fields: .*pe",
+  ):
+    await ingestion.persist_bar_records(
+      records,
+      payload=_payload(),
+      save_period=save_period,
+    )
+
+  save_period.assert_not_awaited()
+
+
 def test_request_scope_uses_inclusive_shanghai_calendar_boundaries() -> None:
   rows = [
     _kline_row(time=SHANGHAI_DAY_START_MS),

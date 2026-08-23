@@ -21,9 +21,13 @@ import pandas as pd
 from pydantic import ValidationError
 from quantx_contracts import (
   HISTORICAL_BAR_SUMMARY_RECORD_TYPE,
+  HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS,
+  HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS,
+  HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS,
   HistoricalBarSummary,
   historical_bar_key,
 )
@@ -65,51 +69,10 @@ _INSTRUMENT_CODE_PATTERN = re.compile(r"^[A-Z0-9]{1,16}\.(?:SH|SZ|BJ)$")
 _SIGNED_INT64_MIN = -(2**63)
 _SIGNED_INT64_MAX = 2**63 - 1
 
-_TICK_REQUIRED_FIELDS = frozenset(
-  {
-    "code",
-    "period",
-    "time",
-    HISTORICAL_TICK_ORDINAL_FIELD,
-    "lastPrice",
-    "open",
-    "high",
-    "low",
-    "lastClose",
-    "amount",
-    "volume",
-    "pvolume",
-    "tickvol",
-    "stockStatus",
-    "openInt",
-    "lastSettlementPrice",
-    "settlementPrice",
-    "transactionNum",
-    "askPrice",
-    "bidPrice",
-    "askVol",
-    "bidVol",
-  }
-)
-_TICK_OPTIONAL_FIELDS = frozenset({"priceTick", "upperLimit", "lowerLimit"})
-_KLINE_REQUIRED_FIELDS = frozenset(
-  {
-    "code",
-    "period",
-    "time",
-    "open",
-    "high",
-    "low",
-    "close",
-    "preClose",
-    "volume",
-    "amount",
-    "suspendFlag",
-  }
-)
-_KLINE_VARIANT_FIELDS = frozenset(
-  {"settelementPrice", "settlementPrice", "openInterest", "openInt"}
-)
+_TICK_REQUIRED_FIELDS = frozenset(HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS)
+_TICK_OPTIONAL_FIELDS = frozenset(HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS)
+_KLINE_REQUIRED_FIELDS = frozenset(HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS)
+_KLINE_VARIANT_FIELDS = frozenset(HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS)
 
 
 class MarketDataValidationError(RuntimeError):

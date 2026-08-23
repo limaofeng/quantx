@@ -18,6 +18,84 @@ HISTORICAL_BAR_SUMMARY_RECORD_TYPE = "bar_summary"
 HISTORICAL_BAR_TRANSFER_SCHEMA_VERSION = 1
 HISTORICAL_BAR_NO_DATA_REASON = "XT_DATA_NO_ROWS"
 
+# Historical market-data uploads are deliberately a small, versioned wire
+# contract.  XTData may add vendor columns at any time; those columns must not
+# leak across the outbound Agent boundary or silently expand the durable data
+# schema.  Keep this definition in contracts because both the QMT Agent and the
+# server-side ingestion validator must agree on the exact payload shape.
+HISTORICAL_BAR_TRANSFER_PERIODS = frozenset({"tick", "1m", "1d"})
+HISTORICAL_BAR_TRANSFER_COMMON_FIELDS = ("code", "period", "time")
+HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS = (
+  *HISTORICAL_BAR_TRANSFER_COMMON_FIELDS,
+  HISTORICAL_TICK_ORDINAL_FIELD,
+  "lastPrice",
+  "open",
+  "high",
+  "low",
+  "lastClose",
+  "amount",
+  "volume",
+  "pvolume",
+  "tickvol",
+  "stockStatus",
+  "openInt",
+  "lastSettlementPrice",
+  "settlementPrice",
+  "transactionNum",
+  "askPrice",
+  "bidPrice",
+  "askVol",
+  "bidVol",
+)
+HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS = (
+  "priceTick",
+  "upperLimit",
+  "lowerLimit",
+)
+HISTORICAL_TICK_TRANSFER_FIELDS = (
+  *HISTORICAL_TICK_TRANSFER_REQUIRED_FIELDS,
+  *HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS,
+)
+HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS = (
+  *HISTORICAL_BAR_TRANSFER_COMMON_FIELDS,
+  "open",
+  "high",
+  "low",
+  "close",
+  "preClose",
+  "volume",
+  "amount",
+  "suspendFlag",
+)
+# XTData exposes these two values under one of two established spellings.
+# Both spellings are wire-compatible with the server, but exactly one of each
+# pair is required for a non-tick bar record.
+HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS = (
+  "settelementPrice",
+  "settlementPrice",
+  "openInterest",
+  "openInt",
+)
+HISTORICAL_KLINE_TRANSFER_FIELDS = (
+  *HISTORICAL_KLINE_TRANSFER_REQUIRED_FIELDS,
+  *HISTORICAL_KLINE_TRANSFER_VARIANT_FIELDS,
+)
+
+
+def historical_bar_transfer_fields(period: str) -> tuple[str, ...]:
+  """Return the ordered canonical wire fields for a historical bar period.
+
+  The order is part of the Agent's deterministic JSON projection.  It does not
+  validate that every required field is present; the durable server validator
+  remains fail-closed for incomplete or otherwise malformed records.
+  """
+
+  if period == "tick":
+    return HISTORICAL_TICK_TRANSFER_FIELDS
+  if period in {"1m", "1d"}:
+    return HISTORICAL_KLINE_TRANSFER_FIELDS
+  raise ValueError(f"unsupported historical bar period: {period}")
+
 
 def historical_bar_key(
   *,

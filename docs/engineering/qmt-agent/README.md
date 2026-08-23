@@ -85,6 +85,12 @@ Store 与 Engine Hub 共用 contracts 中的唯一解析器。个人单账户部
 历史 `tick` 上传保留 XTData 的原始毫秒时间戳 `time`，并为同一
 `code + time` 下的每条快照生成从 0 开始且连续的 `tick_ordinal`，
 取值范围为 0–999。Agent 不删除同毫秒快照，也不修改原始毫秒时间。
+在生成序号、摘要和上传分块之前，Agent 必须按
+`quantx_contracts.historical_bar_transfer_fields(period)` 投影 XTData 行；
+只转发版本化的公共历史 bar/tick 字段，保留已支持的可选字段，并丢弃供应商
+新增字段（例如 `pe`）。服务端对同一清单继续严格校验，未知字段、缺失必填字段
+或试图上传仅存储字段 `source_time_ms` 都 fail-closed；`source_time_ms` 仅由
+Worker 从原始 `time` 写入持久层。
 `tick` 的唯一键为
 `(code, period, time, tick_ordinal)`；非 `tick` 周期不携带该序号，
 仍要求 `(code, period, time)` 唯一。`tick_ordinal` 是根据稳定快照字段生成的

@@ -18,9 +18,12 @@ from quantx_contracts import (
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
+  HISTORICAL_TICK_TRANSFER_FIELDS,
+  HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS,
   AgentEnvelope,
   AgentMessageType,
 )
+from quantx_infrastructure.services import market_data_transfer_ingestion as ingestion
 from quantx_qmt_agent.broker import (
   _iter_market_data_records,
   _market_data_records,
@@ -2007,6 +2010,97 @@ def test_tick_records_preserve_same_millisecond_with_stable_ordinals() -> None:
   assert ordinal_by_snapshot(forward) == ordinal_by_snapshot(reversed_rows)
   assert _bar_summaries(forward_records) == _bar_summaries(reversed_records)
   assert _bar_summaries(forward_records)[0]["row_count"] == len(rows)
+
+
+@pytest.mark.asyncio
+async def test_historical_tick_projection_drops_vendor_fields_before_durable_ingestion() -> None:
+  source_time = _normalize_market_timestamp(datetime(2025, 1, 2, 9, 30))
+  payload = {
+    "operation": "bars",
+    "stock_list": ["601318.SH"],
+    "periods": ["tick"],
+    "start_time": "20250102",
+    "end_time": "20250102",
+    "download": False,
+  }
+
+  def tick(*, transaction_num: int, pe: float, vendor_extra: str) -> dict:
+    return {
+      "time": source_time,
+      "lastPrice": 10.0 + transaction_num / 100,
+      "open": 9.9,
+      "high": 10.2,
+      "low": 9.8,
+      "lastClose": 9.85,
+      "amount": 100_000.0 + transaction_num,
+      "volume": 10_000.0 + transaction_num,
+      "pvolume": 9_000.0 + transaction_num,
+      "tickvol": float(transaction_num),
+      "stockStatus": 0,
+      "openInt": 0,
+      "lastSettlementPrice": 0.0,
+      "settlementPrice": 0.0,
+      "transactionNum": transaction_num,
+      "askPrice": [10.1, 0.0, 0.0, 0.0, 0.0],
+      "bidPrice": [10.0, 0.0, 0.0, 0.0, 0.0],
+      "askVol": [100.0, 0.0, 0.0, 0.0, 0.0],
+      "bidVol": [90.0, 0.0, 0.0, 0.0, 0.0],
+      "priceTick": 0.01,
+      "upperLimit": 10.84,
+      "lowerLimit": 8.87,
+      "pe": pe,
+      "vendor_extra": vendor_extra,
+    }
+
+  class Manager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "601318.SH": pd.DataFrame(
+          [
+            tick(transaction_num=11, pe=18.2, vendor_extra="new-a"),
+            tick(transaction_num=10, pe=18.1, vendor_extra="new-b"),
+          ]
+        )
+      }
+
+  records = _market_data_records(Manager(), payload)
+  rows = _bar_rows(records)
+  assert len(rows) == 2
+  assert all(set(row) == set(HISTORICAL_TICK_TRANSFER_FIELDS) for row in rows)
+  assert all("pe" not in row and "vendor_extra" not in row for row in rows)
+  assert all(
+    field in row
+    for row in rows
+    for field in HISTORICAL_TICK_TRANSFER_OPTIONAL_FIELDS
+  )
+  assert [row[HISTORICAL_TICK_ORDINAL_FIELD] for row in rows] == [0, 1]
+  assert _bar_summaries(records)[0]["row_count"] == 2
+
+  captured = {}
+
+  async def save_period(*, period, market_data):
+    assert period == "tick"
+    normalized = ingestion.preprocess_market_data(period, market_data)
+    captured["normalized"] = normalized
+    return {
+      "saved_count": len(normalized),
+      "status": "success",
+    }
+
+  result = await ingestion.persist_bar_records(
+    records,
+    payload=payload,
+    save_period=save_period,
+  )
+
+  normalized = captured["normalized"]
+  assert result["records_saved"] == 2
+  assert normalized["source_time_ms"].tolist() == [source_time, source_time]
+  assert normalized[HISTORICAL_TICK_ORDINAL_FIELD].tolist() == [0, 1]
+  assert normalized["time"].dt.tz_convert("UTC").astype("int64").tolist() == [
+    source_time * 1_000_000,
+    source_time * 1_000_000 + 1_000,
+  ]
 
 
 def test_tick_same_millisecond_spool_is_cold_restart_stable(tmp_path) -> None:

@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from quantx_contracts import (
   HISTORICAL_BAR_NO_DATA_REASON,
+  HISTORICAL_BAR_TRANSFER_PERIODS,
   HISTORICAL_TICK_ORDINAL_FIELD,
   HISTORICAL_TICK_ORDINALS_PER_MILLISECOND,
   HISTORICAL_TICK_SOURCE_TIME_FIELD,
@@ -26,6 +27,7 @@ from quantx_contracts import (
   AgentMessageType,
   HistoricalBarSummary,
   historical_bar_key,
+  historical_bar_transfer_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,7 +72,7 @@ SUPPORTED_FINANCIAL_TABLES = (
   "CashFlow",
   "Capital",
 )
-SUPPORTED_HISTORICAL_BAR_PERIODS = frozenset({"tick", "1m", "1d"})
+SUPPORTED_HISTORICAL_BAR_PERIODS = HISTORICAL_BAR_TRANSFER_PERIODS
 MAX_BAR_DATE_SPAN_DAYS = {
   "tick": 7,
   "1m": 31,
@@ -235,6 +237,39 @@ def _tick_record_order_key(record: dict[str, Any]) -> tuple[Any, ...]:
     _canonical_tick_payload(record, excluded_fields=stable_exclusions),
     _canonical_tick_payload(record, excluded_fields=reserved_exclusions),
   )
+
+
+def _project_historical_bar_record(
+  row: dict[str, Any],
+  *,
+  code: str,
+  period: str,
+  source_time_ms: int,
+) -> dict[str, Any]:
+  """Project one XTData row to the shared historical transfer contract.
+
+  The QMT Agent is the vendor boundary.  It must not forward newly-added
+  XTData columns (for example ``pe``) into the durable transfer, because the
+  server intentionally validates this contract strictly.  ``time`` is the
+  original source millisecond after timestamp normalization; tick ordinals are
+  assigned later from the projected records in the same-millisecond group.
+  """
+
+  record: dict[str, Any] = {
+    "code": code,
+    "period": period,
+    "time": source_time_ms,
+  }
+  agent_managed = {
+    "code",
+    "period",
+    "time",
+    HISTORICAL_TICK_ORDINAL_FIELD,
+  }
+  for field in historical_bar_transfer_fields(period):
+    if field not in agent_managed and field in row:
+      record[field] = row[field]
+  return record
 
 
 def _object_payload(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -1661,10 +1696,12 @@ def _iter_market_data_records_unbounded(
       records: list[dict[str, Any]] = []
       for values_tuple in normalized.itertuples(index=False, name=None):
         row = dict(zip(columns, values_tuple, strict=True))
-        record = dict(row)
-        record["code"] = normalized_code
-        record["period"] = period
-        record["time"] = int(record.pop(_NORMALIZED_MARKET_TIME_COLUMN))
+        record = _project_historical_bar_record(
+          row,
+          code=normalized_code,
+          period=period,
+          source_time_ms=int(row[_NORMALIZED_MARKET_TIME_COLUMN]),
+        )
         if record["time"] < lower_bound or record["time"] > upper_bound:
           raise ValueError(
             "XTData returned bar time outside requested range: "
