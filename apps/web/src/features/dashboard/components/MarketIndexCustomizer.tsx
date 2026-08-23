@@ -23,6 +23,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Settings2,
   Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -303,15 +304,11 @@ export function MarketIndexCustomizer({
         <Button
           ref={triggerRef}
           aria-label="定制行情指数"
-          className="h-full min-h-20 w-40 rounded-lg border border-dashed border-blue-400/30 bg-blue-500/5 px-3 text-left text-blue-200 hover:border-blue-400/30 hover:bg-blue-500/10 focus-visible:ring-2 focus-visible:ring-blue-400/70"
+          className="group h-28 w-[5.75rem] shrink-0 flex-col gap-2 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-2 text-center text-slate-300 hover:border-blue-400/30 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:ring-2 focus-visible:ring-blue-400/70"
           variant="ghost"
         >
-          <span className="flex h-full flex-col justify-between gap-2 py-1">
-            <span className="text-sm font-black">定制</span>
-            <span className="text-[10px] font-medium text-blue-300">
-              隐藏 · 排序 · 增补
-            </span>
-          </span>
+          <Settings2 className="h-5 w-5 text-slate-400 transition-colors group-hover:text-blue-300" />
+          <span className="text-[11px] font-black">定制</span>
         </Button>
       </SheetTrigger>
       <SheetContent

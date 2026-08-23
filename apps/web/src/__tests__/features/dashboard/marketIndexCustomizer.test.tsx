@@ -14,6 +14,34 @@ const client = createClient({
 });
 
 describe('MarketIndexCustomizer', () => {
+  it('uses a compact terminal-style trigger without the rail explanatory copy', () => {
+    render(
+      <Provider value={client}>
+        <MarketIndexCustomizer
+          items={CORE_MARKET_INDICES.slice(0, 2).map(definition => ({
+            ...definition,
+            visible: true,
+          }))}
+          onSave={vi.fn(() => true)}
+          storageStatus="available"
+        />
+      </Provider>
+    );
+
+    const trigger = screen.getByRole('button', { name: '定制行情指数' });
+    expect(trigger).toHaveClass(
+      'h-28',
+      'w-[5.75rem]',
+      'flex-col',
+      'items-center',
+      'bg-slate-950/70',
+      'focus-visible:ring-blue-400/70'
+    );
+    expect(screen.getByText('定制')).toBeVisible();
+    expect(trigger.querySelector('svg')).toBeInTheDocument();
+    expect(screen.queryByText('隐藏 · 排序 · 增补')).not.toBeInTheDocument();
+  });
+
   it('supports keyboard-visible configuration changes and returns focus after save', async () => {
     const user = userEvent.setup();
     const items: MarketIndexPreferenceItem[] = CORE_MARKET_INDICES.slice(

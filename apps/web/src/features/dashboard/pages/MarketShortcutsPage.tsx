@@ -19,7 +19,13 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { Link } from 'wouter';
 
 import { Button } from '@/components/ui/button';
@@ -28,7 +34,11 @@ import {
   type RadarIndustryHeat,
   useLimitUpRadar,
 } from '@/features/strategies/hooks/useLimitUpRadar';
-import { financialToneClass } from '@/shared/utils/financialColors';
+import {
+  financialDirection,
+  financialToneClass,
+  type FinancialDirection,
+} from '@/shared/utils/financialColors';
 
 import { MarketIndexCustomizer } from '../components/MarketIndexCustomizer';
 import { MarketIntradayChart } from '../components/MarketIntradayChart';
@@ -132,11 +142,11 @@ const quoteTone = (value: number | null | undefined) =>
   financialToneClass(value);
 
 const toneClasses: Record<MarketTone, string> = {
-  strong: 'border-rose-400/30 bg-rose-500/10 text-rose-300',
-  positive: 'border-orange-400/30 bg-orange-500/10 text-orange-300',
+  strong: 'border-market-up/30 bg-market-up/10 text-market-up',
+  positive: 'border-market-up/30 bg-market-up/10 text-market-up',
   balanced: 'border-slate-400/20 bg-slate-500/10 text-slate-300',
-  negative: 'border-teal-400/30 bg-teal-500/10 text-teal-300',
-  weak: 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300',
+  negative: 'border-market-down/30 bg-market-down/10 text-market-down',
+  weak: 'border-market-down/30 bg-market-down/10 text-market-down',
   waiting: 'border-slate-500/20 bg-slate-500/5 text-slate-500',
 };
 
@@ -177,6 +187,38 @@ const formatSnapshotDate = (value: string | null | undefined) => {
 const formatTradingDateKey = (value: string | null | undefined) =>
   value ? value.slice(5).replace('-', '/') : '--';
 
+const formatMarketChange = (value: number | null | undefined) =>
+  typeof value === 'number' && Number.isFinite(value)
+    ? `${value > 0 ? '+' : ''}${value.toLocaleString('zh-CN', {
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 2,
+      })}`
+    : '--';
+
+const marketIndexSurfaceStyles: Record<FinancialDirection, CSSProperties> = {
+  up: {
+    backgroundImage:
+      'linear-gradient(135deg, rgb(var(--market-up) / 0.30) 0%, rgb(var(--market-up) / 0.10) 48%, rgb(2 6 23 / 0.80) 100%)',
+    borderColor: 'rgb(var(--market-up) / 0.30)',
+  },
+  down: {
+    backgroundImage:
+      'linear-gradient(135deg, rgb(var(--market-down) / 0.30) 0%, rgb(var(--market-down) / 0.10) 48%, rgb(2 6 23 / 0.80) 100%)',
+    borderColor: 'rgb(var(--market-down) / 0.30)',
+  },
+  flat: {
+    backgroundImage:
+      'linear-gradient(135deg, rgb(var(--market-flat) / 0.12) 0%, rgb(var(--market-flat) / 0.06) 48%, rgb(2 6 23 / 0.80) 100%)',
+    borderColor: 'rgb(var(--market-flat) / 0.22)',
+  },
+};
+
+const marketIndexRangeStyles: Record<FinancialDirection, CSSProperties> = {
+  up: { backgroundColor: 'rgb(var(--market-up) / 0.80)' },
+  down: { backgroundColor: 'rgb(var(--market-down) / 0.80)' },
+  flat: { backgroundColor: 'rgb(var(--market-flat) / 0.80)' },
+};
+
 function MarketIndexCard({
   definition,
   isSelected,
@@ -189,23 +231,25 @@ function MarketIndexCard({
   quote?: MarketQuoteSnapshot;
 }) {
   const rangePosition = getRangePosition(quote);
+  const movement = quote?.changePercent ?? quote?.change;
+  const direction = financialDirection(movement);
 
   return (
     <button
       aria-label={`查看${definition.name}行情`}
       aria-pressed={isSelected}
-      className={`group w-40 shrink-0 cursor-pointer rounded-lg border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 xl:p-2 ${
-        isSelected
-          ? 'border-blue-400/40 bg-blue-500/10'
-          : 'border-white/5 bg-white/5 hover:border-blue-400/30 hover:bg-blue-500/[0.06]'
+      className={`group h-28 w-40 shrink-0 cursor-pointer rounded-lg border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 xl:p-2 ${
+        isSelected ? 'ring-1 ring-inset ring-blue-400/70' : ''
       }`}
+      data-market-direction={direction}
       data-testid={`market-index-${definition.code}`}
       onClick={onSelect}
+      style={marketIndexSurfaceStyles[direction]}
       type="button"
     >
       <span className="flex items-start justify-between gap-2">
         <span className="min-w-0">
-          <span className="block truncate text-xs font-black text-slate-200">
+          <span className="block truncate text-xs font-black text-slate-100">
             {definition.name}
           </span>
           <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-600">
@@ -216,25 +260,29 @@ function MarketIndexCard({
           <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
         ) : null}
       </span>
-      <span className="mt-3 flex items-end justify-between gap-2 xl:mt-1.5">
-        <span className="font-mono text-base font-black tabular-nums text-slate-100">
-          {formatMarketPrice(quote?.currentPrice)}
-        </span>
+      <span
+        className={`mt-2 block font-mono text-2xl font-black leading-none tabular-nums ${quoteTone(movement)}`}
+      >
+        {formatMarketPrice(quote?.currentPrice)}
+      </span>
+      <span className="mt-1.5 flex items-center gap-2 text-[11px] font-black tabular-nums">
         <span
-          className={`shrink-0 font-mono text-xs font-black tabular-nums ${quoteTone(quote?.changePercent)}`}
+          className={`font-mono ${quoteTone(quote?.change)}`}
         >
+          {formatMarketChange(quote?.change)}
+        </span>
+        <span className={`font-mono ${quoteTone(quote?.changePercent)}`}>
           {formatMarketPercent(quote?.changePercent)}
         </span>
       </span>
       <span className="mt-2 block h-0.5 overflow-hidden rounded-full bg-white/[0.06] xl:mt-1.5">
         {rangePosition !== null ? (
           <span
-            className={`block h-full rounded-full ${
-              (quote?.changePercent || 0) >= 0
-                ? 'bg-rose-400/80'
-                : 'bg-emerald-400/80'
-            }`}
-            style={{ width: `${Math.max(3, rangePosition)}%` }}
+            className="block h-full rounded-full"
+            style={{
+              ...marketIndexRangeStyles[direction],
+              width: `${Math.max(3, rangePosition)}%`,
+            }}
           />
         ) : null}
       </span>
@@ -458,7 +506,7 @@ function StockRankingList({
           id={headingId}
         >
           <DirectionIcon
-            className={`h-3 w-3 ${isGainers ? 'text-rose-400' : 'text-emerald-400'}`}
+            className={`h-3 w-3 ${isGainers ? 'text-market-up' : 'text-market-down'}`}
           />
           <span>{isGainers ? '涨幅榜' : '跌幅榜'}</span>
           <span className="font-mono text-[8px] font-bold text-slate-600">
@@ -800,7 +848,7 @@ export default function MarketShortcutsPage() {
                         />
                       ))
                     ) : (
-                      <div className="flex min-h-20 w-64 shrink-0 items-center rounded-lg border border-dashed border-white/10 px-4 text-xs text-slate-600">
+                      <div className="flex min-h-28 w-64 shrink-0 items-center rounded-lg border border-dashed border-white/10 px-4 text-xs text-slate-600">
                         当前没有显示中的指数，请打开定制恢复或增补。
                       </div>
                     )}
@@ -811,13 +859,14 @@ export default function MarketShortcutsPage() {
                     />
                     <Link
                       aria-label="打开全部指数目录"
-                      className="flex min-h-20 w-40 shrink-0 flex-col justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-slate-300 transition-colors hover:border-white/20 hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                      className="group flex h-28 w-[5.75rem] shrink-0 flex-col items-center justify-center gap-2 rounded-lg border border-white/10 bg-slate-950/70 px-2 py-2 text-center text-slate-300 transition-colors hover:border-blue-400/30 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                       href="/market/indices"
                     >
-                      <span className="text-sm font-black">全部指数</span>
-                      <span className="text-[10px] text-slate-600">
-                        浏览完整目录
+                      <span className="flex flex-col text-[11px] font-black leading-[1.15] text-slate-200">
+                        <span>全部</span>
+                        <span>指数</span>
                       </span>
+                      <ChevronRight className="h-4 w-4 text-slate-600 transition-colors group-hover:text-blue-300" />
                     </Link>
                   </div>
 
@@ -834,13 +883,13 @@ export default function MarketShortcutsPage() {
                             </div>
                           </div>
                           <div className="flex items-center gap-4 font-mono text-[11px] font-black xl:gap-2.5">
-                            <span className="text-emerald-400">
+                            <span className="text-market-down">
                               跌 {breadthTotal ? pulse.breadth.decliners : '--'}
                             </span>
                             <span className="text-slate-500">
                               平 {breadthTotal ? pulse.breadth.flats : '--'}
                             </span>
-                            <span className="text-rose-400">
+                            <span className="text-market-up">
                               涨 {breadthTotal ? pulse.breadth.advancers : '--'}
                             </span>
                           </div>
@@ -850,7 +899,7 @@ export default function MarketShortcutsPage() {
                           className="mt-3 flex h-2 overflow-hidden rounded-full bg-white/[0.05] xl:mt-2"
                         >
                           <span
-                            className="h-full bg-emerald-400"
+                            className="h-full bg-market-down"
                             style={{ width: `${declinerWidth}%` }}
                           />
                           <span
@@ -858,7 +907,7 @@ export default function MarketShortcutsPage() {
                             style={{ width: `${flatWidth}%` }}
                           />
                           <span
-                            className="h-full bg-rose-400"
+                            className="h-full bg-market-up"
                             style={{ width: `${advancerWidth}%` }}
                           />
                         </div>
@@ -892,7 +941,7 @@ export default function MarketShortcutsPage() {
                               : '涨停雷达当前未运行'
                           }
                           label="封板 / 炸板"
-                          tone="text-rose-400"
+                          tone="text-market-up"
                           value={
                             radar.isScannerRunning
                               ? `${radar.summary.sealedCount} : ${radar.summary.brokenCount}`
@@ -957,12 +1006,12 @@ export default function MarketShortcutsPage() {
                             />
                             <Metric
                               label="最高"
-                              tone="text-rose-300"
+                              tone="text-market-up"
                               value={formatMarketPrice(selectedQuote?.high)}
                             />
                             <Metric
                               label="最低"
-                              tone="text-emerald-300"
+                              tone="text-market-down"
                               value={formatMarketPrice(selectedQuote?.low)}
                             />
                             <Metric
@@ -1017,9 +1066,9 @@ export default function MarketShortcutsPage() {
                             </span>
                             {typeof item.quote?.changePercent === 'number' &&
                             item.quote.changePercent >= 0 ? (
-                              <TrendingUp className="h-3 w-3 shrink-0 text-rose-400" />
+                              <TrendingUp className="h-3 w-3 shrink-0 text-market-up" />
                             ) : (
-                              <TrendingDown className="h-3 w-3 shrink-0 text-emerald-400" />
+                              <TrendingDown className="h-3 w-3 shrink-0 text-market-down" />
                             )}
                             <span className="truncate text-[11px] font-bold text-slate-300">
                               {item.definition.name}

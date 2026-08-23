@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 
 import { CORE_MARKET_INDICES } from '@/features/dashboard/marketWorkbench';
@@ -181,27 +181,129 @@ describe('MarketShortcutsPage realtime date guard', () => {
 
     expect(firstCard).toHaveAttribute('aria-pressed', 'true');
     expect(firstCard).toHaveClass(
-      'border-blue-400/40',
-      'bg-blue-500/10',
+      'ring-1',
+      'ring-inset',
+      'ring-blue-400/70',
       'focus-visible:ring-blue-400/70'
     );
     expect(firstCard).not.toHaveClass(
       'border-red-400/40',
       'bg-red-500/10',
-      'focus-visible:ring-red-500/70'
+      'bg-blue-500/10'
     );
     expect(firstCard.querySelector('.bg-blue-400')).toBeInTheDocument();
-    expect(nextCard).toHaveClass(
-      'hover:border-blue-400/30',
-      'hover:bg-blue-500/[0.06]'
-    );
+    expect(nextCard).not.toHaveClass('ring-1', 'ring-blue-400/70');
 
     fireEvent.click(nextCard);
 
     expect(firstCard).toHaveAttribute('aria-pressed', 'false');
     expect(nextCard).toHaveAttribute('aria-pressed', 'true');
-    expect(nextCard).toHaveClass('border-blue-400/40', 'bg-blue-500/10');
+    expect(nextCard).toHaveClass('ring-1', 'ring-blue-400/70');
     expect(nextCard.querySelector('.bg-blue-400')).toBeInTheDocument();
+  });
+
+  it('renders directional index surfaces and both real change fields without inventing missing values', () => {
+    const positiveQuote = {
+      change: 68.48,
+      changePercent: 1.87,
+      currentPrice: 3728.48,
+      high: 3750,
+      low: 3680,
+      open: 3700,
+      preClose: 3660,
+      stockCode: CORE_MARKET_INDICES[0].code,
+      time: '2026-08-13T10:30:10+08:00',
+      volume: 100,
+    };
+    const negativeQuote = {
+      ...positiveQuote,
+      change: -8.89,
+      changePercent: -0.46,
+      currentPrice: 1913.93,
+      stockCode: CORE_MARKET_INDICES[1].code,
+    };
+    mocks.market = {
+      ...createMarketState({
+        dataMode: 'live',
+        freshCoverage: CORE_MARKET_INDICES.length,
+        latestQuoteAt: '2026-08-13T10:30:10+08:00',
+        targetDateCoverage: CORE_MARKET_INDICES.length,
+      }),
+      indices: CORE_MARKET_INDICES.map((definition, index) => ({
+        definition,
+        quote:
+          index === 0 ? positiveQuote : index === 1 ? negativeQuote : null,
+      })),
+    };
+
+    render(<MarketShortcutsPage />);
+
+    const risingCard = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[0].code}`
+    );
+    const fallingCard = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[1].code}`
+    );
+    const unavailableCard = screen.getByTestId(
+      `market-index-${CORE_MARKET_INDICES[2].code}`
+    );
+
+    expect(risingCard).toHaveAttribute('data-market-direction', 'up');
+    expect(risingCard.getAttribute('style')).toContain('--market-up');
+    expect(fallingCard).toHaveAttribute('data-market-direction', 'down');
+    expect(fallingCard.getAttribute('style')).toContain('--market-down');
+    expect(unavailableCard).toHaveAttribute('data-market-direction', 'flat');
+    expect(unavailableCard.getAttribute('style')).toContain('--market-flat');
+    expect(within(risingCard).getByText('3,728.48')).toHaveClass(
+      'text-market-up'
+    );
+    expect(within(risingCard).getByText('+68.48')).toHaveClass('text-market-up');
+    expect(within(risingCard).getByText('+1.87%')).toHaveClass(
+      'text-market-up'
+    );
+    expect(within(fallingCard).getByText('1,913.93')).toHaveClass(
+      'text-market-down'
+    );
+    expect(within(fallingCard).getByText('-8.89')).toHaveClass(
+      'text-market-down'
+    );
+    expect(within(fallingCard).getByText('-0.46%')).toHaveClass(
+      'text-market-down'
+    );
+    expect(within(unavailableCard).getAllByText('--')).toHaveLength(3);
+    expect(
+      within(unavailableCard).getAllByText('--').every(element =>
+        element.classList.contains('text-market-flat')
+      )
+    ).toBe(true);
+  });
+
+  it('keeps the index-directory route as a compact terminal action tile', () => {
+    mocks.market = createMarketState({
+      dataMode: 'live',
+      freshCoverage: CORE_MARKET_INDICES.length,
+      latestQuoteAt: '2026-08-13T10:30:10+08:00',
+      targetDateCoverage: CORE_MARKET_INDICES.length,
+    });
+
+    render(<MarketShortcutsPage />);
+
+    const allIndices = screen.getByRole('link', {
+      name: '打开全部指数目录',
+    });
+    expect(allIndices).toHaveAttribute('href', '/market/indices');
+    expect(allIndices).toHaveClass(
+      'h-28',
+      'w-[5.75rem]',
+      'flex-col',
+      'items-center',
+      'bg-slate-950/70',
+      'focus-visible:ring-blue-400/70'
+    );
+    expect(within(allIndices).getByText('全部')).toBeVisible();
+    expect(within(allIndices).getByText('指数')).toBeVisible();
+    expect(allIndices.querySelector('svg')).toBeInTheDocument();
+    expect(screen.queryByText('浏览完整目录')).not.toBeInTheDocument();
   });
 
   it('renders breadth advancers red and decliners green', () => {
