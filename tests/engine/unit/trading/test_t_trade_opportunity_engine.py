@@ -153,6 +153,144 @@ def _generated_causal_samples(seed: int, *, count: int = 28):
   return samples
 
 
+# Hypothesis is not a declared project dependency.  These fixed seeds keep the
+# property corpus reproducible while exercising more than one price/feature
+# path on every run.
+_PROPERTY_SEEDS = (3, 11, 29, 47, 71, 101, 149)
+
+
+def _causal_output_snapshot(result):
+  """The complete observable decision for one source identity.
+
+  Keeping source identity and candidate decision explicit makes this a guard
+  against a future suffix rewriting an earlier output, even if the reducer
+  gains additional diagnostic fields later.
+  """
+
+  evaluation = result.evaluation
+  candidate = result.candidate_created
+  return {
+    "state": result.state.to_dict(),
+    "evaluation": evaluation.to_dict(),
+    "accepted": result.accepted,
+    "ignored": result.ignored,
+    "ignored_reason": result.ignored_reason,
+    "source_identity": (
+      evaluation.continuity_generation,
+      evaluation.source_time_ms,
+      evaluation.tick_ordinal,
+    ),
+    "candidate_decision": {
+      "candidate_id": evaluation.candidate_id,
+      "candidate_fingerprint": evaluation.candidate_fingerprint,
+      "candidate_status": evaluation.candidate_status.value,
+      "episode_id": evaluation.episode_id,
+      "created": candidate.to_dict() if candidate is not None else None,
+    },
+  }
+
+
+def _assert_all_prefixes_are_causally_invariant(samples):
+  _, full_results = _reduce_all(samples)
+  full_snapshots = [_causal_output_snapshot(result) for result in full_results]
+
+  for prefix_length in range(1, len(samples) + 1):
+    prefix_state, prefix_results = _reduce_all(samples[:prefix_length])
+    assert [
+      _causal_output_snapshot(result) for result in prefix_results
+    ] == full_snapshots[:prefix_length], f"prefix_length={prefix_length}"
+    assert prefix_state.to_dict() == full_results[prefix_length - 1].state.to_dict()
+
+
+def _property_pullback_cycle(
+  *,
+  trade_date: str,
+  generation: str,
+  base_price: float,
+  amount_base: float,
+  ordinal_base: int = 0,
+):
+  """Generate one robust pullback/rebound episode from a deterministic seed."""
+
+  low = round(base_price * 0.99, 4)
+  rows = (
+    (0, round(base_price, 4)),
+    (5, low),
+    (20, low),
+    (22, round(low * 1.003, 4)),
+    (24, round(low * 1.0032, 4)),
+  )
+  return [
+    _sample(
+      seconds,
+      price,
+      ordinal_base + index,
+      amount=amount_base + index * 50_000,
+      volume=10_000 + index * 500,
+      generation=generation,
+      trade_date=trade_date,
+    )
+    for index, (seconds, price) in enumerate(rows)
+  ]
+
+
+def _generated_episode_adversary_samples(seed: int):
+  """A seeded corpus spanning causal boundaries and invalid source events."""
+
+  random = Random(seed)
+  first = _property_pullback_cycle(
+    trade_date=TRADE_DATE,
+    generation=f"property-{seed}-generation-1",
+    base_price=100.0 + random.randrange(1, 50) / 100,
+    amount_base=1_000_000 + random.randrange(0, 100_000),
+  )
+  second = _property_pullback_cycle(
+    trade_date=TRADE_DATE,
+    generation=f"property-{seed}-generation-2",
+    base_price=100.0 + random.randrange(1, 50) / 100,
+    amount_base=1_100_000 + random.randrange(0, 100_000),
+  )
+  third = _property_pullback_cycle(
+    trade_date="2026-08-24",
+    generation=f"property-{seed}-generation-3",
+    base_price=100.0 + random.randrange(1, 50) / 100,
+    amount_base=1_200_000 + random.randrange(0, 100_000),
+  )
+  missing_fields = replace(
+    _sample(
+      30,
+      first[-1].price,
+      5,
+      generation=first[-1].continuity_generation,
+      trade_date=first[-1].trade_date,
+    ),
+    bid_price=None,
+    ask_price=None,
+    cumulative_amount=None,
+    cumulative_volume=None,
+  )
+  samples = [
+    *first,
+    first[-1],  # exact duplicate: must not advance the existing episode.
+    first[2],  # out of order: must not advance the existing episode.
+    missing_fields,  # accepted audit event, but must conservatively downgrade.
+    *second,  # explicit continuity-generation boundary.
+    second[-1],
+    second[2],
+    *third,  # trade-date boundary (and fresh continuity generation).
+  ]
+  return samples, {
+    "first_duplicate": 5,
+    "first_out_of_order": 6,
+    "missing_fields": 7,
+    "generation_boundary": 8,
+    "second_duplicate": 13,
+    "second_out_of_order": 14,
+    "trade_date_boundary": 15,
+    "candidate_indexes": (4, 12, 19),
+  }
+
+
 def test_pullback_fsm_latches_one_stable_candidate_per_episode():
   state, results = _reduce_all(_pullback_samples())
 
@@ -1019,27 +1157,75 @@ def test_every_deterministic_prefix_is_invariant_to_its_future_suffix():
     for result in _reduce_all(samples)[1]
   )
   for samples in sequences:
-    _, full_results = _reduce_all(samples)
-    full_snapshots = [result.to_dict() for result in full_results]
-    for prefix_length in range(1, len(samples) + 1):
-      prefix_state, prefix_results = _reduce_all(samples[:prefix_length])
+    _assert_all_prefixes_are_causally_invariant(samples)
 
-      assert [result.to_dict() for result in prefix_results] == full_snapshots[
-        :prefix_length
-      ]
-      assert prefix_state.to_dict() == full_results[prefix_length - 1].state.to_dict()
-      candidate_ids_by_episode = {}
-      for result in prefix_results:
-        candidate = result.candidate_created
-        if candidate is None:
-          continue
-        candidate_ids_by_episode.setdefault(candidate.episode_id, set()).add(
-          candidate.candidate_id
-        )
-      assert all(
-        len(candidate_ids) <= 1
-        for candidate_ids in candidate_ids_by_episode.values()
-      )
+
+@pytest.mark.parametrize("seed", _PROPERTY_SEEDS)
+def test_seeded_generated_prefixes_are_invariant_to_future_suffixes(seed):
+  """Future valid and invalid observations cannot rewrite an earlier decision."""
+
+  adversarial, _ = _generated_episode_adversary_samples(seed)
+  for samples in (
+    _generated_causal_samples(seed, count=36),
+    adversarial,
+  ):
+    _assert_all_prefixes_are_causally_invariant(samples)
+
+
+@pytest.mark.parametrize("seed", _PROPERTY_SEEDS)
+def test_seeded_episodes_emit_at_most_one_candidate_across_adversarial_inputs(seed):
+  """Duplicates, disorder, missing fields, and boundaries cannot relatch an episode."""
+
+  samples, markers = _generated_episode_adversary_samples(seed)
+  _, results = _reduce_all(samples)
+
+  created = [
+    (index, result.candidate_created)
+    for index, result in enumerate(results)
+    if result.candidate_created is not None
+  ]
+  assert tuple(index for index, _ in created) == markers["candidate_indexes"]
+  assert len(created) == 3
+  candidates_by_episode = {}
+  for _, candidate in created:
+    assert candidate is not None
+    candidates_by_episode.setdefault(candidate.episode_id, []).append(candidate)
+  assert all(
+    len(candidates) <= 1 for candidates in candidates_by_episode.values()
+  )
+  assert len(candidates_by_episode) == len(created)
+
+  for marker in ("first_duplicate", "second_duplicate"):
+    result = results[markers[marker]]
+    assert result.accepted is False
+    assert result.ignored is True
+    assert result.ignored_reason == "DUPLICATE_SOURCE_IDENTITY"
+    assert result.evaluation.data_health == DataHealth.DEGRADED
+    assert result.candidate_created is None
+
+  for marker in ("first_out_of_order", "second_out_of_order"):
+    result = results[markers[marker]]
+    assert result.accepted is False
+    assert result.ignored is True
+    assert result.ignored_reason == "OUT_OF_ORDER_SOURCE_IDENTITY"
+    assert result.evaluation.data_health == DataHealth.DEGRADED
+    assert result.candidate_created is None
+
+  missing = results[markers["missing_fields"]]
+  assert missing.accepted is True
+  assert missing.ignored is False
+  assert missing.evaluation.data_health == DataHealth.DEGRADED
+  assert missing.evaluation.data_health != DataHealth.READY
+  assert missing.evaluation.pullback.candidate_ready is False
+  assert "DATA_READY" in missing.evaluation.pullback.blockers
+  assert missing.candidate_created is None
+
+  generation_boundary = results[markers["generation_boundary"]]
+  assert generation_boundary.evaluation.data_health == DataHealth.CONTINUITY_LOST
+  assert generation_boundary.state.candidate is None
+  trade_date_boundary = results[markers["trade_date_boundary"]]
+  assert trade_date_boundary.state.trade_date == "2026-08-24"
+  assert trade_date_boundary.state.candidate is None
 
 
 def test_noncausal_reference_profile_is_a_hard_blocker():
