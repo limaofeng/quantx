@@ -28,6 +28,9 @@ _IMMUTABLE_TRACE_FIELDS = (
   "state_patch",
   "decision_trace",
 )
+# Eleven explicit trace columns × 256 stays well below PostgreSQL's 32767 bind
+# parameter ceiling while avoiding asyncpg executemany + RETURNING degradation.
+_TRACE_APPEND_INSERT_CHUNK_SIZE = 256
 
 
 def _normalize_decided_at(value: Any) -> Any:
@@ -135,12 +138,22 @@ class StrategyDecisionTraceRepository(BaseRepository[StrategyDecisionTraceRecord
     # stable UUID batch after reconciling the CAS winner.  PostgreSQL is the
     # authoritative relational store, so make that replay an idempotent no-op
     # rather than turning it into a permanent primary-key failure.
-    statement = insert(StrategyDecisionTraceRecord).values(payloads)
-    statement = statement.on_conflict_do_nothing(
-      index_elements=[StrategyDecisionTraceRecord.id]
-    ).returning(StrategyDecisionTraceRecord.id)
-    result = await self.db.execute(statement)
-    inserted_ids = {str(value) for value in result.scalars().all()}
+    inserted_ids: set[str] = set()
+    for start in range(0, len(payloads), _TRACE_APPEND_INSERT_CHUNK_SIZE):
+      chunk = payloads[start : start + _TRACE_APPEND_INSERT_CHUNK_SIZE]
+      # ``values(chunk)`` produces one bounded multi-row INSERT.  Passing the
+      # chunk as a second execute argument selects SQLAlchemy executemany,
+      # which asyncpg handles poorly together with RETURNING at day scale.
+      statement = (
+        insert(StrategyDecisionTraceRecord)
+        .values(chunk)
+        .on_conflict_do_nothing(
+          index_elements=[StrategyDecisionTraceRecord.id]
+        )
+        .returning(StrategyDecisionTraceRecord.id)
+      )
+      result = await self.db.execute(statement)
+      inserted_ids.update(str(value) for value in result.scalars().all())
     replayed_ids = set(trace_ids) - inserted_ids
     if replayed_ids:
       existing_result = await self.db.execute(

@@ -14,12 +14,17 @@ StrategyExecutor 单元测试
 """
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from collections import UserDict
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import quantx_engine.strategy_executor as strategy_executor_module
+from quantx_application.t_trade_v3 import MaterializeEvaluationAfterCAS
 from quantx_domain.brokers.base import (
   OrderRequest,
   OrderResponse,
@@ -28,6 +33,7 @@ from quantx_domain.brokers.base import (
   PriceType,
 )
 from quantx_domain.brokers.simulator import SimulatorBroker
+from quantx_domain.market import Tick
 from quantx_domain.strategies.base import (
   OrderStateEvent,
   RuntimeStatePatch,
@@ -174,43 +180,1152 @@ def isolate_executor_tests_from_runtime_state_database():
     yield
 
 
+@pytest.fixture
+async def strategy_executor():
+  executor = StrategyExecutor(max_workers=2)
+  yield executor
+  await executor.shutdown()
+
+
 def test_runtime_state_persistence_scope_and_startup_checkpoint_invariants() -> None:
   def runtime(mode: StrategyRunMode, parameters: dict) -> SimpleNamespace:
     return SimpleNamespace(
       context=SimpleNamespace(mode=mode, parameters=parameters),
     )
 
-  marker = {"_internal_v3_pressure_runtime_state_persistence": True}
   ordinary_backtest = runtime(StrategyRunMode.BACKTEST, {})
-  forged_marker_only = runtime(StrategyRunMode.BACKTEST, marker)
-  sealed_pressure = runtime(
+  replay_backtest = runtime(
     StrategyRunMode.BACKTEST,
-    {
-      **marker,
-      "t_trade_replay": True,
-      "replay_acceptance": "V3_PRESSURE_BASELINE",
-    },
+    {"t_trade_replay": True},
   )
   paper = runtime(StrategyRunMode.PAPER, {})
   live = runtime(StrategyRunMode.LIVE, {})
+  unsupported = runtime("UNSUPPORTED", {})
 
-  assert StrategyExecutor._runtime_state_persistence_enabled(ordinary_backtest) is False
-  assert StrategyExecutor._runtime_state_persistence_enabled(forged_marker_only) is False
-  assert StrategyExecutor._runtime_state_persistence_enabled(sealed_pressure) is True
+  assert StrategyExecutor._runtime_state_persistence_enabled(ordinary_backtest) is True
+  assert StrategyExecutor._runtime_state_persistence_enabled(replay_backtest) is True
   assert StrategyExecutor._runtime_state_persistence_enabled(paper) is True
   assert StrategyExecutor._runtime_state_persistence_enabled(live) is True
+  assert StrategyExecutor._runtime_state_persistence_enabled(unsupported) is False
+  assert (
+    StrategyExecutor._runtime_state_checkpoint_policy(ordinary_backtest)
+    == "DAY_BATCH"
+  )
+  assert (
+    StrategyExecutor._runtime_state_checkpoint_policy(paper)
+    == "SESSION_BOUNDARY"
+  )
 
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
     ordinary_backtest
-  ) is False
+  ) is True
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
-    forged_marker_only
-  ) is False
-  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(
-    sealed_pressure
+    replay_backtest
   ) is True
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(paper) is True
   assert StrategyExecutor._requires_startup_runtime_state_checkpoint(live) is True
+  assert StrategyExecutor._requires_startup_runtime_state_checkpoint(unsupported) is False
+
+
+def _session_checkpoint_runtime(
+  *,
+  mode: StrategyRunMode = StrategyRunMode.PAPER,
+) -> tuple[StrategyRuntime, SimpleNamespace]:
+  context = StrategyContext(
+    run_id="session-checkpoint-run",
+    mode=mode,
+    instruments=["600000.SH"],
+    parameters={},
+  )
+  diagnostic_outbox: dict[str, dict] = {}
+  prepared_holder: dict[str, SimpleNamespace | None] = {"value": None}
+
+  def enqueue(events: list[dict]) -> None:
+    for event in events:
+      event_key = str(event.get("event_key") or "").strip()
+      if event_key:
+        diagnostic_outbox.setdefault(event_key, dict(event))
+
+  def pending() -> list[dict]:
+    return [dict(event) for event in diagnostic_outbox.values()]
+
+  async def prepare(**kwargs) -> SimpleNamespace:
+    materialization_events = [
+      dict(event) for event in kwargs["materialization_events"]
+    ]
+    for event in materialization_events:
+      event_key = str(event.get("event_key") or "").strip()
+      if event_key:
+        diagnostic_outbox.setdefault(event_key, event)
+    checkpoint = SimpleNamespace(
+      checkpoint_id="prepared-1",
+      trade_date=kwargs["trade_date"].isoformat(),
+      session=kwargs["session"],
+      completeness={
+        **dict(kwargs["completeness"]),
+        "materialization_event_keys": list(
+          str(event.get("event_key") or "").strip()
+          for event in materialization_events
+          if str(event.get("event_key") or "").strip()
+        ),
+      },
+      processed_watermark=dict(kwargs["processed_watermark"]),
+    )
+    prepared_holder["value"] = checkpoint
+    return checkpoint
+
+  async def finalize(**kwargs) -> SimpleNamespace | None:
+    checkpoint = prepared_holder["value"]
+    if checkpoint is None or kwargs["prepared_checkpoint_id"] != checkpoint.checkpoint_id:
+      return None
+    for event_key in kwargs["materialization_event_keys"]:
+      diagnostic_outbox.pop(event_key, None)
+    prepared_holder["value"] = None
+    return SimpleNamespace(
+      checkpoint_id="checkpoint-1",
+      processed_watermark=dict(checkpoint.processed_watermark),
+    )
+
+  manager = SimpleNamespace(
+    persist_enabled=True,
+    _running=False,
+    _snapshot_task=None,
+    _state_sync_task=None,
+    _state_queue=None,
+    drain_strategy_state_changes=AsyncMock(return_value=True),
+    enqueue_t_trade_diagnostic_events=MagicMock(side_effect=enqueue),
+    pending_t_trade_diagnostic_events=MagicMock(side_effect=pending),
+    prepare_checkpoint=AsyncMock(side_effect=prepare),
+    finalize_prepared_checkpoint=AsyncMock(side_effect=finalize),
+    latest_prepared_checkpoint=MagicMock(
+      side_effect=lambda: prepared_holder["value"]
+    ),
+    has_prepared_checkpoint=MagicMock(
+      side_effect=lambda: prepared_holder["value"] is not None
+    ),
+    checkpoint_strategy_state_changes=AsyncMock(return_value=True),
+    force_save=AsyncMock(return_value=True),
+    stop_state_sync=AsyncMock(return_value=None),
+    stop=AsyncMock(return_value=None),
+    settle_trading_day=MagicMock(),
+    get_account_quota=MagicMock(return_value={}),
+    get_all_positions=MagicMock(return_value={}),
+    get_bucket_ledger_snapshot=MagicMock(return_value={}),
+    record_decision_trace=MagicMock(),
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="session-checkpoint",
+    strategy_id=1,
+    strategy_class=MockStrategy,
+    context=context,
+    status=ExecutionStatus.RUNNING,
+    state_manager=manager,
+  )
+  return runtime, manager
+
+
+def _whole_quote_checkpoint_status(
+  *,
+  captured_at: datetime,
+  sequence: int = 17,
+) -> dict:
+  return {
+    "status": "READY",
+    "stream_id": "whole-quote-stream",
+    "generation": 3,
+    "sequence": sequence,
+    "captured_at": captured_at,
+    "queue_depth": 0,
+    "lagging_consumers": 0,
+  }
+
+
+def _configure_terminal_hot_summary(
+  executor: StrategyExecutor,
+  runtime: StrategyRuntime,
+  *,
+  suffix: str,
+) -> tuple[dict, SimpleNamespace]:
+  runtime.context.parameters["account_id"] = "account-1"
+  source_time = datetime(2026, 8, 24, 15, 1, tzinfo=timezone(timedelta(hours=8)))
+  event = {
+    "event_key": f"{runtime.run_id}:600000.SH:{suffix}",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": int(source_time.timestamp() * 1000),
+    "signal_snapshot": {"source_time_ms": int(source_time.timestamp() * 1000)},
+  }
+  service = SimpleNamespace(
+    materialize_checkpoint_batch=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=(event["event_key"],))
+    ),
+    flush_diagnostics_with_receipt=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=())
+    ),
+  )
+  executor.opportunity_runtime_service = service
+  executor._evaluation_materializer = MaterializeEvaluationAfterCAS(service)
+  executor._defer_checkpoint_diagnostics(runtime, [event])
+  runtime._checkpoint_processed_watermark = {
+    "stream_id": "whole-quote-stream",
+    "generation": 3,
+    "sequence": 17,
+    "source_time_ms": int(source_time.timestamp() * 1000),
+  }
+  return event, service
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoint_uses_idle_timeout_boundary_and_global_fence(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime()
+  executor._trading_date_helper = SimpleNamespace(
+    is_trading_date=AsyncMock(return_value=True)
+  )
+  eligible_at = datetime(2026, 8, 24, 11, 35)
+  fence = _whole_quote_checkpoint_status(
+    captured_at=datetime(2026, 8, 24, 11, 31),
+  )
+
+  with patch.object(
+    strategy_executor_module.whole_quote_hub,
+    "status_snapshot",
+    side_effect=[dict(fence), dict(fence)],
+  ) as status_snapshot:
+    # The existing empty-queue timeout calls this coordinator; no fresh Tick
+    # is needed at 11:35 for it to attempt the AM boundary.
+    await executor._maybe_coordinate_session_checkpoints(
+      runtime,
+      now=datetime(2026, 8, 24, 11, 34),
+    )
+    await executor._maybe_coordinate_session_checkpoints(runtime, now=eligible_at)
+
+  manager.prepare_checkpoint.assert_awaited_once()
+  manager.finalize_prepared_checkpoint.assert_awaited_once()
+  assert status_snapshot.call_count == 2
+  assert (
+    manager.prepare_checkpoint.await_args.kwargs["processed_watermark"]
+    == {
+      "stream_id": "whole-quote-stream",
+      "generation": 3,
+      "sequence": 17,
+      "source_time_ms": int(fence["captured_at"].timestamp() * 1000),
+      "captured_at": fence["captured_at"].isoformat(),
+      "queue_depth": 0,
+      "lagging_consumers": 0,
+    }
+  )
+  # A sparse instrument has no per-symbol update requirement; audit state is
+  # deliberately not used as the completion predicate.
+  assert runtime._checkpoint_processed_watermark == {}
+  assert runtime.checkpoint_status["2026-08-24:AM"]["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoint_skips_non_trading_day_and_throttles_retry(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime()
+  trading_day = AsyncMock(return_value=False)
+  executor._trading_date_helper = SimpleNamespace(is_trading_date=trading_day)
+  eligible_at = datetime(2026, 8, 24, 15, 5)
+
+  with patch.object(
+    strategy_executor_module.whole_quote_hub,
+    "status_snapshot",
+  ) as status_snapshot:
+    await executor._maybe_coordinate_session_checkpoints(runtime, now=eligible_at)
+
+  trading_day.assert_awaited_once_with("SH", eligible_at.date())
+  status_snapshot.assert_not_called()
+  manager.prepare_checkpoint.assert_not_awaited()
+  assert {
+    key: status["status"]
+    for key, status in runtime.checkpoint_status.items()
+  } == {
+    "2026-08-24:AM": "SKIPPED",
+    "2026-08-24:PM": "SKIPPED",
+  }
+  assert all(
+    status["reason"] == "SH_NON_TRADING_DAY"
+    and "next_retry_at" not in status
+    for status in runtime.checkpoint_status.values()
+  )
+  await executor._maybe_coordinate_session_checkpoints(runtime, now=eligible_at)
+  trading_day.assert_awaited_once()
+
+  # Use a fresh run for the independently retryable trading-day checkpoint.
+  runtime, manager = _session_checkpoint_runtime()
+  trading_day = AsyncMock(return_value=True)
+  executor._trading_date_helper = SimpleNamespace(is_trading_date=trading_day)
+
+  retry_at = datetime(2026, 8, 24, 11, 35)
+  fence = _whole_quote_checkpoint_status(
+    captured_at=datetime(2026, 8, 24, 11, 31),
+  )
+  with (
+    patch.object(strategy_executor_module.time_utils, "now", return_value=retry_at),
+    patch.object(
+      strategy_executor_module.whole_quote_hub,
+      "status_snapshot",
+      side_effect=[{"status": "OFFLINE"}, dict(fence), dict(fence)],
+    ) as status_snapshot,
+  ):
+    await executor._maybe_coordinate_session_checkpoints(runtime, now=retry_at)
+    # The saved next_retry_at prevents a busy empty-queue loop from exhausting
+    # all retries before the five-second retry interval has elapsed.
+    await executor._maybe_coordinate_session_checkpoints(runtime, now=retry_at)
+    await executor._maybe_coordinate_session_checkpoints(
+      runtime,
+      now=retry_at + timedelta(seconds=6),
+    )
+
+  assert status_snapshot.call_count == 3
+  manager.prepare_checkpoint.assert_awaited_once()
+  manager.finalize_prepared_checkpoint.assert_awaited_once()
+  assert runtime.checkpoint_status["2026-08-24:AM"]["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "state_manager",
+  [None, SimpleNamespace(persist_enabled=False)],
+)
+async def test_session_checkpoint_skips_calendar_without_enabled_state_persistence(
+  strategy_executor: StrategyExecutor,
+  state_manager: object | None,
+) -> None:
+  runtime, _manager = _session_checkpoint_runtime()
+  runtime.state_manager = state_manager
+  trading_day = AsyncMock(return_value=True)
+  strategy_executor._trading_date_helper = SimpleNamespace(
+    is_trading_date=trading_day
+  )
+
+  await strategy_executor._maybe_coordinate_session_checkpoints(
+    runtime,
+    now=datetime(2026, 8, 24, 15, 5),
+  )
+
+  trading_day.assert_not_awaited()
+  assert runtime.checkpoint_status == {}
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoint_filters_terminal_and_exhausted_specs_before_calendar(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, _manager = _session_checkpoint_runtime()
+  current = datetime(2026, 8, 24, 15, 5)
+  runtime.checkpoint_status.update(
+    {
+      "2026-08-24:AM": {"status": "COMPLETE", "attempts": 1},
+      "2026-08-24:PM": {"status": "BLOCKED", "attempts": 60},
+    }
+  )
+  trading_day = AsyncMock(return_value=True)
+  strategy_executor._trading_date_helper = SimpleNamespace(
+    is_trading_date=trading_day
+  )
+
+  await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
+
+  trading_day.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_checkpoint_throttles_calendar_failure_before_retry(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, _manager = _session_checkpoint_runtime()
+  current = datetime(2026, 8, 24, 11, 35)
+  trading_day = AsyncMock(side_effect=RuntimeError("calendar unavailable"))
+  strategy_executor._trading_date_helper = SimpleNamespace(
+    is_trading_date=trading_day
+  )
+
+  await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
+  await strategy_executor._maybe_coordinate_session_checkpoints(runtime, now=current)
+
+  status = runtime.checkpoint_status["2026-08-24:AM"]
+  assert status["status"] == "BLOCKED"
+  assert status["reason"] == "SH_TRADING_CALENDAR_UNAVAILABLE:RuntimeError"
+  assert status["attempts"] == 1
+  assert status["next_retry_at"] == (
+    current + timedelta(seconds=5)
+  ).isoformat()
+  trading_day.assert_awaited_once_with("SH", current.date())
+
+  await strategy_executor._maybe_coordinate_session_checkpoints(
+    runtime,
+    now=current + timedelta(seconds=6),
+  )
+
+  assert trading_day.await_count == 2
+  assert runtime.checkpoint_status["2026-08-24:AM"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_hot_diagnostic_coalescing_does_not_touch_runtime_state_manager(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime()
+  event = {
+    "event_key": "run:600000.SH:diagnostic:1",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": 1_724_300_000_000,
+  }
+
+  executor._defer_checkpoint_diagnostics(runtime, [event])
+
+  assert set(runtime._checkpoint_diagnostic_summaries) == {"600000.SH"}
+  manager.checkpoint_strategy_state_changes.assert_not_awaited()
+  manager.force_save.assert_not_awaited()
+  manager.enqueue_t_trade_diagnostic_events.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_batch_materializes_pure_material_before_finalizing_seal(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.context.parameters["account_id"] = "account-1"
+  event = {
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "event_key": "session-checkpoint-run:600000.SH:material:1",
+    "record_kind": "MATERIAL",
+    "event_type": "STATE_TRANSITION",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": 1_724_300_000_001,
+    "signal_snapshot": {
+      "source_time_ms": 1_724_300_000_001,
+      "tick_ordinal": 1,
+    },
+  }
+  service = SimpleNamespace(
+    materialize_checkpoint_batch=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=(event["event_key"],))
+    ),
+    flush_diagnostics_with_receipt=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=())
+    ),
+  )
+  executor.opportunity_runtime_service = service
+  executor._evaluation_materializer = MaterializeEvaluationAfterCAS(service)
+  executor._defer_checkpoint_diagnostics(runtime, [event])
+
+  sealed = await executor._seal_runtime_checkpoint(
+    runtime,
+    trade_date=datetime(2026, 8, 24).date(),
+    session=None,
+    boundary_source_time=datetime(2026, 8, 24, 15, 0),
+    processed_watermark={
+      "stream_id": f"backtest:{runtime.run_id}",
+      "generation": 1,
+      "sequence": 1,
+      "source_time_ms": 1_724_300_000_001,
+    },
+    continuity_generation=1,
+    completeness={"complete": True, "reason": "SERIAL_REPLAY_DRAINED"},
+    force=True,
+  )
+
+  assert sealed is True
+  manager.prepare_checkpoint.assert_awaited_once()
+  manager.finalize_prepared_checkpoint.assert_awaited_once()
+  service.materialize_checkpoint_batch.assert_awaited_once()
+  requests = service.materialize_checkpoint_batch.await_args.kwargs["events"]
+  assert requests == [event]
+  service.flush_diagnostics_with_receipt.assert_awaited_once_with(
+    account_id="account-1",
+    strategy_run_id=runtime.run_id,
+  )
+  assert runtime._checkpoint_diagnostic_summaries == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_terminal_session_prefix_seals_hot_diagnostics_for_live_and_paper(
+  strategy_executor: StrategyExecutor,
+  mode: StrategyRunMode,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=mode)
+  runtime.context.parameters["account_id"] = "account-1"
+  source_time = datetime(2026, 8, 24, 15, 1, tzinfo=timezone(timedelta(hours=8)))
+  event = {
+    "event_key": f"session-checkpoint-run:600000.SH:{mode.value}:terminal",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": int(source_time.timestamp() * 1000),
+    "signal_snapshot": {"source_time_ms": int(source_time.timestamp() * 1000)},
+  }
+  service = SimpleNamespace(
+    materialize_checkpoint_batch=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=(event["event_key"],))
+    ),
+    flush_diagnostics_with_receipt=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=())
+    ),
+  )
+  executor.opportunity_runtime_service = service
+  executor._evaluation_materializer = MaterializeEvaluationAfterCAS(service)
+  executor._defer_checkpoint_diagnostics(runtime, [event])
+  runtime._checkpoint_processed_watermark = {
+    "stream_id": "whole-quote-stream",
+    "generation": 3,
+    "sequence": 17,
+    "source_time_ms": int(source_time.timestamp() * 1000),
+  }
+
+  await executor._coordinate_terminal_session_checkpoint(
+    runtime,
+    cause="COMPLETED",
+  )
+
+  manager.prepare_checkpoint.assert_awaited_once()
+  assert manager.prepare_checkpoint.await_args.kwargs["session"] == "TERMINAL"
+  assert manager.prepare_checkpoint.await_args.kwargs["completeness"]["terminal"] is True
+  manager.finalize_prepared_checkpoint.assert_awaited_once()
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  assert runtime.checkpoint_status["2026-08-24:TERMINAL"]["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_terminal_session_prefix_fails_closed_without_a_processed_watermark(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.PAPER)
+  strategy_executor._defer_checkpoint_diagnostics(
+    runtime,
+    [
+      {
+        "event_key": "session-checkpoint-run:600000.SH:terminal-unproven",
+        "record_kind": "COALESCED_DIAGNOSTIC",
+        "instrument_code": "600000.SH",
+        "evaluated_at_ms": 1,
+      }
+    ],
+  )
+
+  with pytest.raises(
+    RuntimeError,
+    match="TERMINAL_SESSION_CHECKPOINT_WATERMARK_UNPROVEN",
+  ):
+    await strategy_executor._coordinate_terminal_session_checkpoint(
+      runtime,
+      cause="ERROR",
+    )
+
+  manager.prepare_checkpoint.assert_not_awaited()
+  assert runtime._checkpoint_diagnostic_summaries
+
+
+@pytest.mark.asyncio
+async def test_backtest_day_checkpoint_excludes_acquired_first_event_of_next_day(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  """The serial replay queue seals each completed virtual day exactly once."""
+
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.strategy = MockStrategy(runtime.context)
+  first_tick = Tick(
+    stock_code="600000.SH",
+    time=datetime(2026, 8, 24, 14, 59),
+    last_price=10.0,
+    source_time_ms=1_724_508_000_000,
+    tick_ordinal=1,
+  )
+  second_tick = Tick(
+    stock_code="600000.SH",
+    time=datetime(2026, 8, 25, 9, 30),
+    last_price=10.1,
+    source_time_ms=1_724_574_600_000,
+    tick_ordinal=2,
+  )
+
+  with (
+    patch.object(
+      executor,
+      "_ensure_t_trade_opportunity_profile",
+      new_callable=AsyncMock,
+    ),
+    patch.object(executor, "_expire_pending_approvals", new_callable=AsyncMock),
+    patch.object(
+      executor,
+      "_cancel_expired_strategy_orders",
+      new_callable=AsyncMock,
+    ),
+    patch.object(
+      executor,
+      "_process_auto_exit_plans",
+      new_callable=AsyncMock,
+    ),
+    patch.object(
+      executor,
+      "_observe_t_trade_candidate_outcomes",
+      new_callable=AsyncMock,
+    ),
+    patch.object(
+      executor,
+      "_report_t_trade_replay_progress",
+      new_callable=AsyncMock,
+    ),
+  ):
+    consumer = asyncio.create_task(executor._process_event_queue(runtime))
+    executor._enqueue_runtime_market_event(runtime, "tick", first_tick)
+    executor._enqueue_runtime_market_event(runtime, "tick", second_tick)
+    await asyncio.wait_for(runtime.event_queue.join(), timeout=2.0)
+    await executor._coordinate_backtest_terminal_checkpoint(runtime, cause="TEST")
+    runtime.status = ExecutionStatus.COMPLETED
+    runtime._event_queue_wakeup.set()
+    await asyncio.wait_for(consumer, timeout=2.0)
+
+  assert manager.prepare_checkpoint.await_count == 2
+  assert manager.finalize_prepared_checkpoint.await_count == 2
+  assert [
+    call.kwargs["trade_date"] for call in manager.prepare_checkpoint.await_args_list
+  ] == [first_tick.time.date(), second_tick.time.date()]
+  assert [
+    call.kwargs["processed_watermark"]["sequence"]
+    for call in manager.prepare_checkpoint.await_args_list
+  ] == [1, 2]
+  assert all(
+    call.kwargs["session"] is None
+    for call in manager.prepare_checkpoint.await_args_list
+  )
+  assert (
+    runtime.checkpoint_status[f"{first_tick.time.date().isoformat()}:DAY"]["status"]
+    == "COMPLETE"
+  )
+  assert (
+    runtime.checkpoint_status[f"{second_tick.time.date().isoformat()}:DAY"]["status"]
+    == "COMPLETE"
+  )
+
+
+def test_backtest_day_checkpoint_never_admits_two_acquired_queue_items() -> None:
+  runtime, _manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.event_queue.put_nowait(("tick", object()))
+  runtime.market_event_queue.put_nowait(("tick", object()))
+  runtime.event_queue.get_nowait()
+  runtime.market_event_queue.get_nowait()
+  try:
+    assert (
+      StrategyExecutor._runtime_checkpoint_queues_drained(
+        runtime,
+        allow_current_market_event=True,
+      )
+      is False
+    )
+  finally:
+    runtime.event_queue.task_done()
+    runtime.market_event_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_damaged_prepared_checkpoint_restores_for_diagnosis_then_fails_closed(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  runtime = strategy_executor.create(
+    run_id="damaged-prepared-checkpoint",
+    strategy_id=1,
+    strategy_class=MockStrategy,
+    context=StrategyContext(
+      run_id="damaged-prepared-checkpoint",
+      mode=StrategyRunMode.BACKTEST,
+      instruments=["600000.SH"],
+      parameters={},
+    ),
+  )
+  fallback = SimpleNamespace(
+    checkpoint_id="last-complete-day",
+    trade_date="2026-08-24",
+    session=None,
+  )
+  with (
+    patch.object(RuntimeStateManager, "latest_prepared_checkpoint", return_value=None),
+    patch.object(RuntimeStateManager, "has_prepared_checkpoint", return_value=True),
+    patch.object(
+      RuntimeStateManager,
+      "restore_latest_complete_checkpoint",
+      new=AsyncMock(return_value=fallback),
+    ) as restore_complete,
+  ):
+    started = await strategy_executor.start(runtime.run_id)
+
+  assert started is False
+  restore_complete.assert_awaited_once()
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime.error_message == "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
+  checkpoint_status = runtime.checkpoint_status["2026-08-24:DAY"]
+  assert checkpoint_status["status"] == "BLOCKED"
+  assert checkpoint_status["reason"] == (
+    "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
+  )
+
+
+@pytest.mark.asyncio
+async def test_normal_backtest_stops_before_terminal_day_checkpoint(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.BACKTEST)
+  runtime.strategy = MockStrategy(runtime.context)
+  runtime._checkpoint_virtual_trade_date = datetime(2026, 8, 24).date()
+  runtime._checkpoint_virtual_sequence = 1
+  runtime._checkpoint_processed_watermark = {
+    "stream_id": f"backtest:{runtime.run_id}",
+    "generation": 1,
+    "sequence": 1,
+    "source_time_ms": 1,
+  }
+  ordering: list[str] = []
+
+  async def stop_strategy() -> None:
+    ordering.append("strategy_stop")
+
+  original_prepare = manager.prepare_checkpoint.side_effect
+
+  async def ordered_prepare(**kwargs):
+    ordering.append("prepare")
+    return await original_prepare(**kwargs)
+
+  runtime.strategy.stop = AsyncMock(side_effect=stop_strategy)
+  manager.prepare_checkpoint.side_effect = ordered_prepare
+  manager.get_latest_backtest_grid_book_snapshot = MagicMock(return_value=None)
+  manager.get_backtest_grid_book_snapshot_count = MagicMock(return_value=0)
+  manager.get_backtest_grid_book_observed_count = MagicMock(return_value=0)
+  manager.finalize_backtest = AsyncMock(return_value="backtest.json")
+
+  with (
+    patch.object(
+      executor,
+      "_initialize_backtest_dynamic_universe",
+      new_callable=AsyncMock,
+    ),
+    patch.object(executor, "_run_backtest_loop", new_callable=AsyncMock),
+    patch.object(executor, "_finalize_t_trade_replay", new_callable=AsyncMock),
+    patch.object(
+      executor,
+      "_finalize_t_trade_candidate_outcomes",
+      new_callable=AsyncMock,
+    ),
+    patch.object(
+      executor,
+      "_flush_t_trade_opportunity_diagnostics",
+      new_callable=AsyncMock,
+    ),
+  ):
+    await executor._run_strategy_loop(runtime)
+
+  assert runtime.status == ExecutionStatus.COMPLETED
+  runtime.strategy.stop.assert_awaited_once()
+  manager.prepare_checkpoint.assert_awaited_once()
+  assert ordering.index("strategy_stop") < ordering.index("prepare")
+
+
+@pytest.mark.asyncio
+async def test_normal_paper_completion_checkpoints_post_stop_state(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=StrategyRunMode.PAPER)
+  runtime.strategy = MockStrategy(runtime.context)
+  runtime.strategy.stop = AsyncMock()
+  runtime.context.parameters["account_id"] = "account-1"
+  source_time = datetime(2026, 8, 24, 15, 1, tzinfo=timezone(timedelta(hours=8)))
+  event = {
+    "event_key": "session-checkpoint-run:600000.SH:paper-normal-terminal",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": int(source_time.timestamp() * 1000),
+    "signal_snapshot": {"source_time_ms": int(source_time.timestamp() * 1000)},
+  }
+  service = SimpleNamespace(
+    materialize_checkpoint_batch=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=(event["event_key"],))
+    ),
+    flush_diagnostics_with_receipt=AsyncMock(
+      return_value=SimpleNamespace(persisted_event_keys=())
+    ),
+  )
+  executor.opportunity_runtime_service = service
+  executor._evaluation_materializer = MaterializeEvaluationAfterCAS(service)
+  executor._defer_checkpoint_diagnostics(runtime, [event])
+  runtime._checkpoint_processed_watermark = {
+    "stream_id": "whole-quote-stream",
+    "generation": 3,
+    "sequence": 17,
+    "source_time_ms": int(source_time.timestamp() * 1000),
+  }
+
+  with (
+    patch.object(
+      executor,
+      "_initialize_backtest_dynamic_universe",
+      new_callable=AsyncMock,
+    ),
+    patch.object(executor, "_run_realtime_loop", new_callable=AsyncMock),
+  ):
+    await executor._run_strategy_loop(runtime)
+
+  assert runtime.status == ExecutionStatus.COMPLETED
+  runtime.strategy.stop.assert_awaited_once()
+  manager.prepare_checkpoint.assert_awaited_once()
+  assert manager.prepare_checkpoint.await_args.kwargs["session"] == "TERMINAL"
+  manager.finalize_prepared_checkpoint.assert_awaited_once()
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  manager.checkpoint_strategy_state_changes.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_explicit_stop_finalizes_terminal_prefix_before_state_manager_stop(
+  strategy_executor: StrategyExecutor,
+  mode: StrategyRunMode,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=mode)
+  runtime.strategy = MockStrategy(runtime.context)
+  _event, _service = _configure_terminal_hot_summary(
+    executor,
+    runtime,
+    suffix=f"{mode.value}:explicit-stop",
+  )
+  ordering: list[str] = []
+  original_prepare = manager.prepare_checkpoint.side_effect
+  original_finalize = manager.finalize_prepared_checkpoint.side_effect
+
+  async def ordered_prepare(**kwargs):
+    ordering.append("prepare")
+    return await original_prepare(**kwargs)
+
+  async def ordered_finalize(**kwargs):
+    ordering.append("finalize")
+    return await original_finalize(**kwargs)
+
+  async def stop_state_sync(_strategy) -> None:
+    ordering.append("stop_state_sync")
+
+  async def stop_manager() -> None:
+    ordering.append("manager_stop")
+
+  manager.prepare_checkpoint.side_effect = ordered_prepare
+  manager.finalize_prepared_checkpoint.side_effect = ordered_finalize
+  manager.stop_state_sync.side_effect = stop_state_sync
+  manager.stop.side_effect = stop_manager
+  executor.runs[runtime.run_id] = runtime
+
+  stopped = await executor.stop(runtime.run_id, force=True)
+
+  assert stopped is True
+  assert runtime.status == ExecutionStatus.STOPPED
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  assert manager.prepare_checkpoint.await_args.kwargs["session"] == "TERMINAL"
+  assert ordering.index("prepare") < ordering.index("finalize")
+  assert ordering.index("finalize") < ordering.index("stop_state_sync")
+  assert ordering.index("stop_state_sync") < ordering.index("manager_stop")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_error_cleanup_finalizes_terminal_prefix_before_state_manager_stop(
+  strategy_executor: StrategyExecutor,
+  mode: StrategyRunMode,
+) -> None:
+  executor = strategy_executor
+  runtime, manager = _session_checkpoint_runtime(mode=mode)
+  runtime.strategy = MockStrategy(runtime.context)
+  _event, _service = _configure_terminal_hot_summary(
+    executor,
+    runtime,
+    suffix=f"{mode.value}:error-cleanup",
+  )
+  ordering: list[str] = []
+  original_prepare = manager.prepare_checkpoint.side_effect
+  original_finalize = manager.finalize_prepared_checkpoint.side_effect
+
+  async def ordered_prepare(**kwargs):
+    ordering.append("prepare")
+    return await original_prepare(**kwargs)
+
+  async def ordered_finalize(**kwargs):
+    ordering.append("finalize")
+    return await original_finalize(**kwargs)
+
+  async def stop_state_sync(_strategy) -> None:
+    ordering.append("stop_state_sync")
+
+  async def stop_manager() -> None:
+    ordering.append("manager_stop")
+
+  manager.prepare_checkpoint.side_effect = ordered_prepare
+  manager.finalize_prepared_checkpoint.side_effect = ordered_finalize
+  manager.stop_state_sync.side_effect = stop_state_sync
+  manager.stop.side_effect = stop_manager
+
+  await executor._cleanup_runtime_after_error(runtime)
+
+  assert runtime.status == ExecutionStatus.ERROR
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  assert manager.prepare_checkpoint.await_args.kwargs["session"] == "TERMINAL"
+  assert ordering.index("prepare") < ordering.index("finalize")
+  assert ordering.index("finalize") < ordering.index("stop_state_sync")
+  assert ordering.index("stop_state_sync") < ordering.index("manager_stop")
+
+
+def test_strategy_output_trace_content_addresses_hot_runtime_state(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  """A long hot run retains one bounded audit summary per evaluated output."""
+
+  context = StrategyContext(
+    run_id="trace-hot-state-run",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["600000.SH"],
+    parameters={},
+  )
+  runtime = strategy_executor.create(
+    run_id=context.run_id,
+    strategy_id=701,
+    strategy_class=MockStrategy,
+    context=context,
+  )
+  runtime.state_manager = RuntimeStateManager(
+    run_id=context.run_id,
+    persist_enabled=True,
+    is_backtest=True,
+  )
+  input_snapshot = StrategyInput(
+    run_id=context.run_id,
+    strategy_id="701",
+    timestamp=datetime(2026, 8, 24, 10, 0),
+    cadence=StrategyCadence.TICK,
+    instrument_code="600000.SH",
+  )
+  instrument_states = {
+    code: {
+      "samples": [
+        {"sequence": sequence, "marker": "hot-state-sentinel" * 8}
+        for sequence in range(48)
+      ]
+    }
+    for code in [
+      "600000.SH",
+      "000001.SZ",
+      "000002.SZ",
+      "000333.SZ",
+      "300750.SZ",
+      "601318.SH",
+      "601398.SH",
+      "601899.SH",
+    ]
+  }
+  event = {
+    "event_key": "trace-hot-state:600000.SH:1",
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "event_type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "signal_snapshot": {"marker": "event-payload-must-not-be-copied" * 32},
+  }
+  patch = RuntimeStatePatch(
+    set={
+      "algorithm_phase": "EVALUATED",
+      "instrument_states": instrument_states,
+    },
+    unset=["superseded_phase"],
+    append_events=[event],
+  )
+  output = StrategyOutput(
+    runtime_state_patch=patch,
+    decision_tags=["HOT_OUTPUT"],
+    trace_payload={"reason": "HOT_TICK"},
+  )
+
+  for index in range(1_000):
+    input_snapshot.trace_id = f"trace-hot-state-{index}"
+    strategy_executor._record_strategy_output_trace(
+      runtime,
+      output,
+      input_snapshot,
+    )
+
+  records = runtime.state_manager._pending_decision_trace_records
+  assert len(records) == 1_000
+  first_patch = records[0]["state_patch"]
+  assert first_patch["format"] == "CONTENT_ADDRESSED_RUNTIME_STATE_PATCH_V1"
+  assert first_patch["set_keys"] == ["algorithm_phase", "instrument_states"]
+  assert first_patch["set"]["algorithm_phase"]["value"] == "EVALUATED"
+  instrument_summary = first_patch["set"]["instrument_states"]
+  assert "value" not in instrument_summary
+  assert instrument_summary["current_instrument"]["instrument_code"] == "600000.SH"
+  assert "value" not in instrument_summary["current_instrument"]
+  assert first_patch["append_events"] == [
+    {
+      "event_key": "trace-hot-state:600000.SH:1",
+      "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+      "record_kind": "COALESCED_DIAGNOSTIC",
+      "event_type": "T_TRADE_OPPORTUNITY_EVALUATION",
+      "sha256": first_patch["append_events"][0]["sha256"],
+      "json_bytes": first_patch["append_events"][0]["json_bytes"],
+    }
+  ]
+  encoded_records = [
+    json.dumps(record, default=str, sort_keys=True, separators=(",", ":")).encode(
+      "utf-8"
+    )
+    for record in records
+  ]
+  assert max(len(record) for record in encoded_records) < 8_192
+  assert all(b"hot-state-sentinel" not in record for record in encoded_records)
+  assert all(
+    b"event-payload-must-not-be-copied" not in record
+    for record in encoded_records
+  )
+  assert all(
+    record["state_patch"]["full_patch_sha256"]
+    == first_patch["full_patch_sha256"]
+    for record in records
+  )
+
+  same_patch = RuntimeStatePatch(
+    set={
+      "instrument_states": {
+        code: instrument_states[code]
+        for code in reversed(list(instrument_states))
+      },
+      "algorithm_phase": "EVALUATED",
+    },
+    unset=["superseded_phase"],
+    append_events=[dict(reversed(list(event.items())))],
+  )
+  changed_patch = RuntimeStatePatch(
+    set={
+      "algorithm_phase": "EVALUATED",
+      "instrument_states": {
+        **instrument_states,
+        "600000.SH": {"samples": [{"sequence": 999, "marker": "changed"}]},
+      },
+    },
+    unset=["superseded_phase"],
+    append_events=[event],
+  )
+  same_summary = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    same_patch,
+    instrument_code="600000.SH",
+  )
+  changed_summary = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    changed_patch,
+    instrument_code="600000.SH",
+  )
+
+  assert same_summary["full_patch_sha256"] == first_patch["full_patch_sha256"]
+  assert changed_summary["full_patch_sha256"] != first_patch["full_patch_sha256"]
+  assert (
+    changed_summary["set"]["instrument_states"]["current_instrument"]["sha256"]
+    != instrument_summary["current_instrument"]["sha256"]
+  )
+
+
+def test_strategy_output_trace_compacts_decimal_deterministically() -> None:
+  patch = RuntimeStatePatch(set={"threshold": Decimal("1.2300")})
+
+  first = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    patch,
+    instrument_code="600000.SH",
+  )
+  second = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    patch,
+    instrument_code="600000.SH",
+  )
+
+  assert first["full_patch_sha256"] == second["full_patch_sha256"]
+  assert first["set"]["threshold"]["value"] == "1.2300"
+
+
+def test_strategy_output_trace_uses_json_encoder_for_standard_state_tree(
+  monkeypatch,
+) -> None:
+  class AuditPhase(Enum):
+    READY = "READY"
+
+  def normalized_tree_must_not_run(_value):
+    raise AssertionError("standard state tree must use the JSON encoder fast path")
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "_trace_audit_json_value",
+    normalized_tree_must_not_run,
+  )
+  patch = RuntimeStatePatch(
+    set={
+      "threshold": Decimal("1.2300"),
+      "as_of": datetime(2026, 8, 24, 10, 5, 1),
+      "trade_date": date(2026, 8, 24),
+      "phase": AuditPhase.READY,
+      "samples": [{"sequence": 1, "flags": ("A", "B")}],
+    },
+    append_events=[
+      {
+        "event_key": "json-fast-path:1",
+        "type": "EVALUATION",
+        "record_kind": "COALESCED_DIAGNOSTIC",
+        "event_type": "EVALUATION",
+      }
+    ],
+  )
+
+  summary = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    patch,
+    instrument_code="600000.SH",
+  )
+
+  assert summary["set"]["threshold"]["value"] == "1.2300"
+  assert summary["set"]["as_of"]["value"] == "2026-08-24T10:05:01"
+  assert summary["set"]["phase"]["value"] == "READY"
+  assert summary["append_events"][0]["event_key"] == "json-fast-path:1"
+  assert summary["full_patch_sha256"]
+
+
+def test_strategy_output_trace_normalizes_nonstandard_mapping_keys_deterministically():
+  first_patch = RuntimeStatePatch(
+    set=UserDict(
+      [
+        (10, Decimal("1.2300")),
+        (2, {"samples": (1, 2, 3)}),
+      ]
+    )
+  )
+  second_patch = RuntimeStatePatch(
+    set=UserDict(
+      [
+        (2, {"samples": (1, 2, 3)}),
+        (10, Decimal("1.2300")),
+      ]
+    )
+  )
+
+  first = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    first_patch,
+    instrument_code="600000.SH",
+  )
+  second = strategy_executor_module._compact_runtime_state_patch_for_audit(
+    second_patch,
+    instrument_code="600000.SH",
+  )
+
+  assert first["full_patch_sha256"] == second["full_patch_sha256"]
+  assert first["set_keys"] == ["10", "2"]
+  assert first["set"]["10"]["value"] == "1.2300"
 
 
 @pytest.mark.unit

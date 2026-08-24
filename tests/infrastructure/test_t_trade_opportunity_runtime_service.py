@@ -14,6 +14,9 @@ from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
     TTradeOpportunityEvaluation,
 )
+from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_repository import (
+    TTradeOpportunityEvaluationRepository,
+)
 from quantx_infrastructure.services.t_trade_opportunity_runtime_service import (
     TTradeOpportunityRuntimeService,
 )
@@ -164,6 +167,27 @@ def _diagnostic_event(
         ),
         "record_kind": "COALESCED_DIAGNOSTIC",
         "event_type": "HEARTBEAT",
+        "instrument_code": instrument_code,
+        "evaluated_at_ms": evaluated_at_ms,
+        "signal_snapshot": {
+            **_snapshot(),
+            "source_time_ms": source_time_ms,
+        },
+    }
+
+
+def _material_event(
+    instrument_code: str,
+    *,
+    evaluated_at_ms: int,
+    source_time_ms: int,
+    ordinal: int,
+) -> dict:
+    return {
+        "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+        "event_key": f"run-1:{instrument_code}:{evaluated_at_ms}:{ordinal}:MATERIAL",
+        "record_kind": "MATERIAL",
+        "event_type": "CANDIDATE_LATCHED",
         "instrument_code": instrument_code,
         "evaluated_at_ms": evaluated_at_ms,
         "signal_snapshot": {
@@ -363,17 +387,96 @@ async def test_flush_diagnostics_persists_final_open_window_once():
 
 
 @pytest.mark.asyncio
-async def test_closed_diagnostics_for_one_global_tick_are_committed_as_one_batch(
+async def test_checkpoint_batch_closes_its_own_segments_without_crossing_material(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Same-window diagnostics on either side of MATERIAL stay distinct."""
+
+    service = TTradeOpportunityRuntimeService()
+    persisted_batches: list[list[dict]] = []
+
+    async def persist(records):
+        persisted_batches.append([dict(record) for record in records])
+        return [SimpleNamespace(event_key=record["event_key"]) for record in records]
+
+    monkeypatch.setattr(service, "_persist_checkpoint_records", persist)
+    before = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_100,
+        source_time_ms=10_100,
+        ordinal=1,
+    )
+    material = _material_event(
+        "600000.SH",
+        evaluated_at_ms=10_500,
+        source_time_ms=10_500,
+        ordinal=2,
+    )
+    after = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_900,
+        source_time_ms=10_900,
+        ordinal=3,
+    )
+
+    receipt = await service.materialize_checkpoint_batch(
+        events=[before, material, after],
+        account_id="account-1",
+        strategy_run_id="run-1",
+    )
+
+    assert receipt.persisted_event_keys == (
+        before["event_key"],
+        material["event_key"],
+        after["event_key"],
+    )
+    assert len(persisted_batches) == 1
+    records = persisted_batches[0]
+    assert [record["record_kind"] for record in records] == [
+        "COALESCED_DIAGNOSTIC",
+        "MATERIAL",
+        "COALESCED_DIAGNOSTIC",
+    ]
+    assert [record["coalesced_count"] for record in records] == [1, 1, 1]
+    assert records[0]["event_key"] != records[2]["event_key"]
+    assert all(":SEGMENT:" in records[index]["event_key"] for index in (0, 2))
+    assert service._diagnostic_windows == {}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_batch_rejects_unsupported_kind_without_touching_windows():
+    service = TTradeOpportunityRuntimeService()
+    event = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_100,
+        source_time_ms=10_100,
+        ordinal=1,
+    )
+    event["record_kind"] = "ACTIONABLE"
+
+    with pytest.raises(ValueError, match="COALESCED_DIAGNOSTIC or MATERIAL"):
+        await service.materialize_checkpoint_batch(
+            events=[event],
+            account_id="account-1",
+            strategy_run_id="run-1",
+        )
+
+    assert service._diagnostic_windows == {}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_batch_mixes_diagnostics_and_material_in_one_commit_and_replays(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sparse global tick may close every held instrument's prior window.
-
-    The service must preserve every diagnostic row but avoid turning that one
-    causal boundary into one PostgreSQL transaction per instrument.
-    """
+    """A closed checkpoint is one ordered heterogeneous, idempotent UoW."""
 
     class CountingAsyncSession(AsyncSession):
         commit_calls = 0
+        execute_calls = 0
+
+        async def execute(self, *args, **kwargs):
+            type(self).execute_calls += 1
+            return await super().execute(*args, **kwargs)
 
         async def commit(self) -> None:
             type(self).commit_calls += 1
@@ -402,60 +505,64 @@ async def test_closed_diagnostics_for_one_global_tick_are_committed_as_one_batch
         fake_get_async_db,
     )
     service = TTradeOpportunityRuntimeService()
-    codes = (
+    before = _diagnostic_event(
         "600000.SH",
-        "600001.SH",
-        "600002.SH",
-        "000001.SZ",
-        "000002.SZ",
-        "000003.SZ",
-        "300001.SZ",
-        "300002.SZ",
+        evaluated_at_ms=10_100,
+        source_time_ms=10_100,
+        ordinal=1,
     )
+    material = _material_event(
+        "600000.SH",
+        evaluated_at_ms=10_500,
+        source_time_ms=10_500,
+        ordinal=2,
+    )
+    after = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_900,
+        source_time_ms=10_900,
+        ordinal=3,
+    )
+    events = [before, material, after]
     try:
-        # All streams begin in one source-time window. Nothing is durable yet:
-        # an open diagnostic is intentionally held for coalescing.
-        for ordinal, code in enumerate(codes):
-            await service.materialize_evaluation(
-                event=_diagnostic_event(
-                    code,
-                    evaluated_at_ms=10_000,
-                    source_time_ms=10_000,
-                    ordinal=ordinal,
-                ),
-                account_id="account-1",
-                strategy_run_id="run-1",
-            )
-
-        assert session_yields == 0
-        assert CountingAsyncSession.commit_calls == 0
-
-        # The next global source time closes all eight prior windows. They are
-        # appended atomically in one owned session/commit, not eight sessions.
-        await service.materialize_evaluation(
-            event=_diagnostic_event(
-                codes[0],
-                evaluated_at_ms=12_100,
-                source_time_ms=12_100,
-                ordinal=len(codes),
-            ),
+        receipt = await service.materialize_checkpoint_batch(
+            events=events,
             account_id="account-1",
             strategy_run_id="run-1",
         )
 
         assert session_yields == 1
         assert CountingAsyncSession.commit_calls == 1
+        assert CountingAsyncSession.execute_calls == 1
+        assert receipt.persisted_event_keys == tuple(event["event_key"] for event in events)
+        assert [row.record_kind for row in receipt.records] == [
+            "COALESCED_DIAGNOSTIC",
+            "MATERIAL",
+            "COALESCED_DIAGNOSTIC",
+        ]
+        first_keys = tuple(row.event_key for row in receipt.records)
         async with reader_sessions() as db:
-            assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 8
+            assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 3
+
+        replay_receipt = await service.materialize_checkpoint_batch(
+            events=events,
+            account_id="account-1",
+            strategy_run_id="run-1",
+        )
+
+        assert replay_receipt.persisted_event_keys == receipt.persisted_event_keys
+        assert tuple(row.event_key for row in replay_receipt.records) == first_keys
+        async with reader_sessions() as db:
+            assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 3
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_owned_diagnostic_batch_rolls_back_and_reinserts_every_window(
+async def test_checkpoint_batch_failure_has_no_partial_commit_and_retries_preaggregated_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed batch cannot leave a partial durable/retry split-brain."""
+    """A failed boundary retains source summaries for an exact retry."""
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -471,58 +578,68 @@ async def test_owned_diagnostic_batch_rolls_back_and_reinserts_every_window(
         "get_async_db",
         fake_get_async_db,
     )
-    original_append = TTradeOpportunityRuntimeService._append_evaluation
+    original_append_many = TTradeOpportunityEvaluationRepository.append_many
     append_calls = 0
 
-    async def fail_second_append(
-        repository: object,
-        event: dict,
-        *,
-        commit: bool = True,
+    async def fail_once_then_append(
+        repository: TTradeOpportunityEvaluationRepository,
+        records: object,
     ) -> object:
         nonlocal append_calls
         append_calls += 1
-        if append_calls == 2:
+        if append_calls == 1:
             raise RuntimeError("database unavailable")
-        return await original_append(repository, event, commit=commit)
+        return await original_append_many(repository, records)
 
-    monkeypatch.setattr(
-        TTradeOpportunityRuntimeService,
-        "_append_evaluation",
-        staticmethod(fail_second_append),
-    )
+    monkeypatch.setattr(TTradeOpportunityEvaluationRepository, "append_many", fail_once_then_append)
     service = TTradeOpportunityRuntimeService()
-    first_codes = ("600000.SH", "000001.SZ")
+    first = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_100,
+        source_time_ms=10_100,
+        ordinal=1,
+    )
+    first["coalesced_count"] = 7
+    second = _diagnostic_event(
+        "600000.SH",
+        evaluated_at_ms=10_900,
+        source_time_ms=10_900,
+        ordinal=2,
+    )
+    second["checkpoint_coalesced_count"] = 11
+    events = [first, second]
     try:
-        for ordinal, code in enumerate(first_codes):
-            await service.materialize_evaluation(
-                event=_diagnostic_event(
-                    code,
-                    evaluated_at_ms=10_000,
-                    source_time_ms=10_000,
-                    ordinal=ordinal,
-                ),
-                account_id="account-1",
-                strategy_run_id="run-1",
-            )
-
         with pytest.raises(RuntimeError, match="database unavailable"):
-            await service.materialize_evaluation(
-                event=_diagnostic_event(
-                    first_codes[0],
-                    evaluated_at_ms=12_100,
-                    source_time_ms=12_100,
-                    ordinal=2,
-                ),
+            await service.materialize_checkpoint_batch(
+                events=events,
                 account_id="account-1",
                 strategy_run_id="run-1",
             )
 
-        assert {
-            window.instrument_code for window in service._diagnostic_windows.values()
-        } == set(first_codes)
+        assert service._diagnostic_windows == {}
         async with sessions() as db:
             assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 0
+
+        receipt = await service.materialize_checkpoint_batch(
+            events=events,
+            account_id="account-1",
+            strategy_run_id="run-1",
+        )
+
+        assert receipt.persisted_event_keys == (first["event_key"], second["event_key"])
+        assert receipt.records[0].coalesced_count == 18
+        async with sessions() as db:
+            assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 1
+
+        replay_receipt = await service.materialize_checkpoint_batch(
+            events=events,
+            account_id="account-1",
+            strategy_run_id="run-1",
+        )
+
+        assert replay_receipt.records[0].coalesced_count == 18
+        async with sessions() as db:
+            assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 1
     finally:
         await engine.dispose()
 

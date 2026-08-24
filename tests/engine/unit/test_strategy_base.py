@@ -3,6 +3,7 @@ StrategyBase V2 contract tests.
 """
 
 import asyncio
+from collections import UserDict
 from datetime import datetime
 
 import pytest
@@ -124,6 +125,18 @@ def test_strategy_initialization(strategy):
   assert not strategy.is_initialized
   assert not strategy.is_running
   assert len(strategy.trade_intents) == 0
+
+
+def test_default_persistence_state_snapshot_matches_runtime_state(strategy):
+  strategy.state.set(
+    "instrument_states",
+    {"000001": {"hot_window": [{"price": 10.0}]}},
+  )
+
+  projection = strategy.persistence_state_snapshot()
+
+  assert projection == strategy.state.to_dict()
+  assert projection is not strategy.state.to_dict()
 
 
 def test_strategy_lifecycle(strategy):
@@ -303,6 +316,51 @@ def test_runtime_state_patch_rejects_account_fields_nested_in_append_events():
   assert "$.append_events[0].payload.risk[0].SeLlAbLe_VoLuMe" in str(
     exc_info.value
   )
+
+
+def test_runtime_state_patch_fast_walk_rejects_large_nested_forbidden_key():
+  forbidden_key = " \tReQuEsTeD_EnTrY_VoLuMe "
+  samples = [
+    {
+      "sequence": index,
+      "signal": {"score": index / 100, "labels": ("A", "B", "C")},
+    }
+    for index in range(512)
+  ]
+  samples[-1]["signal"]["payload"] = {
+    forbidden_key: 100,
+  }
+
+  with pytest.raises(ValueError) as exc_info:
+    RuntimeStatePatch(
+      set={
+        "instrument_states": {
+          "600000.SH": {"samples": samples},
+        }
+      }
+    )
+
+  assert (
+    f"$.instrument_states.600000.SH.samples[511].signal.payload.{forbidden_key}"
+    in str(exc_info.value)
+  )
+
+
+def test_runtime_state_patch_fast_walk_handles_mapping_cycle_and_path_evidence():
+  forbidden_key = "  FiNaL_VoLuMe\t"
+  cycle: dict[str, object] = {}
+  cycle["self"] = cycle
+  payload = UserDict(
+    {
+      "cycle": cycle,
+      "risk": [{forbidden_key: 100}],
+    }
+  )
+
+  with pytest.raises(ValueError) as exc_info:
+    RuntimeStatePatch(set={"payload": payload})
+
+  assert f"$.payload.risk[0].{forbidden_key}" in str(exc_info.value)
 
 
 def test_runtime_state_patch_allows_algorithm_and_execution_projection_fields():

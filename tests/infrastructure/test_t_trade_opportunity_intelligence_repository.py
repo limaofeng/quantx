@@ -13,7 +13,7 @@ from quantx_infrastructure.repositories.t_trade_opportunity_intelligence_reposit
   TTradeOpportunityEvaluationRepository,
 )
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 SHANGHAI = timezone(timedelta(hours=8))
 
@@ -46,6 +46,27 @@ def _evaluation_arguments(
     "schema_version": "evaluation-v1",
     "payload": payload or {"state": "CANDIDATE", "opportunity_score": 72.5},
     "metrics": {"tick_count": 1},
+  }
+
+
+def _diagnostic_batch_record(
+  at: datetime,
+  *,
+  event_key: str,
+  instrument_code: str = "600000.SH",
+  payload: dict | None = None,
+) -> dict:
+  return {
+    **_evaluation_arguments(
+      at,
+      event_key=event_key,
+      instrument_code=instrument_code,
+      payload=payload,
+    ),
+    "record_kind": T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+    "window_started_at": at - timedelta(seconds=2),
+    "window_ended_at": at,
+    "coalesced_count": 1,
   }
 
 
@@ -196,6 +217,156 @@ async def test_diagnostics_require_a_closed_point_in_time_window() -> None:
 
       assert diagnostic.record_kind == T_TRADE_EVALUATION_KIND_DIAGNOSTIC
       assert diagnostic.coalesced_count == 25
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_append_600_rows_uses_three_multi_values_executes_and_one_commit() -> None:
+  class CountingAsyncSession(AsyncSession):
+    execute_calls = 0
+    commit_calls = 0
+    execute_parameter_batches: list[object] = []
+
+    async def execute(self, *args, **kwargs):
+      type(self).execute_calls += 1
+      type(self).execute_parameter_batches.append(
+        args[1] if len(args) > 1 else kwargs.get("params")
+      )
+      return await super().execute(*args, **kwargs)
+
+    async def commit(self) -> None:
+      type(self).commit_calls += 1
+      await super().commit()
+
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(TTradeOpportunityEvaluation.__table__.create)
+  sessions = async_sessionmaker(
+    engine,
+    class_=CountingAsyncSession,
+    expire_on_commit=False,
+  )
+  reader_sessions = async_sessionmaker(engine, expire_on_commit=False)
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  records = [
+    _diagnostic_batch_record(
+      at + timedelta(seconds=index * 2),
+      event_key=f"diagnostic-batch-{index}",
+      instrument_code=f"{600000 + index:06d}.SH",
+    )
+    for index in range(600)
+  ]
+  try:
+    async with sessions() as db:
+      rows = await TTradeOpportunityEvaluationRepository(db).append_many(records)
+
+    assert len(rows) == len(records)
+    assert [row.event_key for row in rows] == [
+      record["event_key"] for record in records
+    ]
+    assert CountingAsyncSession.execute_calls == 3
+    assert CountingAsyncSession.execute_parameter_batches == [None, None, None]
+    assert CountingAsyncSession.commit_calls == 1
+    async with reader_sessions() as db:
+      assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 600
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_append_replay_is_idempotent_and_collision_fails_closed() -> None:
+  engine, sessions = await _create_repositories()
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  records = [
+    _diagnostic_batch_record(
+      at + timedelta(seconds=index * 2),
+      event_key=f"diagnostic-replay-{index}",
+      instrument_code=f"6001{index:02d}.SH",
+    )
+    for index in range(3)
+  ]
+  try:
+    async with sessions() as db:
+      repository = TTradeOpportunityEvaluationRepository(db)
+      first = await repository.append_many(records)
+      replayed = await repository.append_many(records)
+
+      assert [row.id for row in replayed] == [row.id for row in first]
+      assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 3
+
+      conflicting = [dict(record) for record in records]
+      conflicting[1]["payload"] = {"state": "BLOCKED"}
+      with pytest.raises(ValueError, match="事件键碰撞"):
+        await repository.append_many(conflicting)
+      assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 3
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_append_reconciles_a_commit_unknown_without_duplicates() -> None:
+  class CommitUnknownSession(AsyncSession):
+    raise_after_first_commit = True
+
+    async def commit(self) -> None:
+      await super().commit()
+      if type(self).raise_after_first_commit:
+        type(self).raise_after_first_commit = False
+        raise ConnectionError("commit result unavailable")
+
+  engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+  async with engine.begin() as connection:
+    await connection.run_sync(TTradeOpportunityEvaluation.__table__.create)
+  sessions = async_sessionmaker(
+    engine,
+    class_=CommitUnknownSession,
+    expire_on_commit=False,
+  )
+  reader_sessions = async_sessionmaker(engine, expire_on_commit=False)
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  records = [
+    _diagnostic_batch_record(
+      at + timedelta(seconds=index * 2),
+      event_key=f"diagnostic-commit-unknown-{index}",
+    )
+    for index in range(2)
+  ]
+  try:
+    async with sessions() as db:
+      rows = await TTradeOpportunityEvaluationRepository(db).append_many(records)
+      assert {row.event_key for row in rows} == {
+        "diagnostic-commit-unknown-0",
+        "diagnostic-commit-unknown-1",
+      }
+
+    async with reader_sessions() as db:
+      assert await db.scalar(select(func.count(TTradeOpportunityEvaluation.id))) == 2
+  finally:
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_batch_append_conflict_rolls_back_other_new_rows() -> None:
+  engine, sessions = await _create_repositories()
+  at = datetime(2026, 8, 23, 10, 0, tzinfo=SHANGHAI)
+  original = _diagnostic_batch_record(at, event_key="diagnostic-existing")
+  new_record = _diagnostic_batch_record(
+    at + timedelta(seconds=2),
+    event_key="diagnostic-must-roll-back",
+  )
+  try:
+    async with sessions() as db:
+      repository = TTradeOpportunityEvaluationRepository(db)
+      await repository.append_many([original])
+      conflicting = dict(original)
+      conflicting["payload"] = {"state": "CONFLICT"}
+
+      with pytest.raises(ValueError, match="事件键碰撞"):
+        await repository.append_many([conflicting, new_record])
+
+      rows = await repository.list_evaluations(account_id="account-1", limit=10)
+      assert [row.event_key for row in rows] == ["diagnostic-existing"]
   finally:
     await engine.dispose()
 

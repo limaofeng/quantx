@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -183,10 +182,20 @@ class _StateManager:
     self.last_snapshot_failure_code = snapshot_failure_code
     self.material_outbox: dict[str, dict[str, object]] = {}
     self.quota: dict[str, object] = {"total_asset": 100_000.0}
+    self.drain_capture_state: list[bool] = []
 
   async def checkpoint_strategy_state_changes(self) -> bool:
     self.calls.append("checkpoint")
     return self.checkpoints.pop(0)
+
+  async def drain_strategy_state_changes(
+    self,
+    *,
+    capture_state: bool = True,
+  ) -> bool:
+    self.drain_capture_state.append(capture_state)
+    self.calls.append("drain")
+    return True
 
   async def record_trade_intent_strict(
     self,
@@ -310,174 +319,6 @@ def _executor(service, update_service=None, outcome_facade=None) -> StrategyExec
   )
 
 
-class _AtomicTracePersistenceHarness:
-  """Strict transaction fake for the real RuntimeStateManager/Executor seam.
-
-  This intentionally models only the PostgreSQL transaction boundary: state and
-  trace rows become authoritative together at ``commit``.  It lets the test
-  exercise the real V3 executor and manager without writing into the shared
-  development database.
-  """
-
-  def __init__(self) -> None:
-    self.authoritative = SimpleNamespace(
-      version=0,
-      cash=0.0,
-      frozen_cash=0.0,
-      total_asset=0.0,
-      custom_state={},
-    )
-    self.commit_plan: list[str] = ["success"]
-    self.append_batches: list[list[dict[str, object]]] = []
-    self.committed_trace_records: list[dict[str, object]] = []
-    self.timeline: list[str] = []
-    self.force_cas_conflict = False
-    self.on_cas_conflict = None
-    self.read_failures = 0
-
-  def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-    from quantx_infrastructure.database import connection as connection_module
-    from quantx_infrastructure.repositories import (
-      strategy_decision_trace_repository as trace_repository_module,
-    )
-    from quantx_infrastructure.repositories import (
-      strategy_run_state_repository as state_repository_module,
-    )
-
-    harness = self
-
-    class FakeDb:
-      def __init__(self) -> None:
-        self.staged_state: dict[str, object] | None = None
-        self.staged_traces: list[dict[str, object]] = []
-
-      def _apply_commit(self) -> None:
-        assert self.staged_state is not None
-        state = dict(self.staged_state)
-        harness.authoritative = SimpleNamespace(
-          version=int(state["expected_version"]) + 1,
-          cash=state["cash"],
-          frozen_cash=state["frozen_cash"],
-          total_asset=state["total_asset"],
-          custom_state=copy.deepcopy(state["custom_state"]),
-        )
-        harness.committed_trace_records.extend(copy.deepcopy(self.staged_traces))
-
-      async def commit(self) -> None:
-        harness.timeline.append("commit")
-        outcome = harness.commit_plan.pop(0) if harness.commit_plan else "success"
-        if outcome == "success":
-          self._apply_commit()
-          return
-        if outcome == "unknown_committed":
-          self._apply_commit()
-          raise RuntimeError("connection lost after PostgreSQL commit")
-        if outcome == "unknown_not_committed":
-          raise RuntimeError("connection lost before commit status was known")
-        raise AssertionError(f"unsupported commit plan: {outcome}")
-
-    async def fake_get_async_db():
-      yield FakeDb()
-
-    class FakeStateRepository:
-      def __init__(self, db) -> None:
-        self.db = db
-
-      async def upsert_state(self, **kwargs) -> bool:
-        harness.timeline.append("state_cas")
-        if harness.force_cas_conflict:
-          harness.force_cas_conflict = False
-          harness.authoritative = SimpleNamespace(
-            version=int(kwargs["expected_version"]) + 1,
-            cash=0.0,
-            frozen_cash=0.0,
-            total_asset=0.0,
-            custom_state={"winner": "external"},
-          )
-          if harness.on_cas_conflict:
-            harness.on_cas_conflict()
-          return False
-        self.db.staged_state = dict(kwargs)
-        return True
-
-      async def get_state(self, _run_id):
-        if harness.read_failures:
-          harness.read_failures -= 1
-          raise RuntimeError("temporary reconciliation read failure")
-        return harness.authoritative
-
-    class FakePositionRepository:
-      def __init__(self, _db) -> None:
-        pass
-
-      async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
-        return None
-
-      async def update_existing_positions_snapshot(self, *_args, **_kwargs) -> None:
-        return None
-
-      async def get_all_positions(self, _run_id):
-        return []
-
-    class FakeTraceRepository:
-      def __init__(self, db) -> None:
-        self.db = db
-
-      async def append_traces(self, records, *, commit, flush):
-        assert commit is False
-        assert flush is False
-        batch = [copy.deepcopy(dict(record)) for record in records]
-        harness.timeline.append("trace_append")
-        harness.append_batches.append(batch)
-        self.db.staged_traces.extend(batch)
-        return []
-
-    monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
-    monkeypatch.setattr(
-      state_repository_module,
-      "StrategyRunStateRepository",
-      FakeStateRepository,
-    )
-    monkeypatch.setattr(
-      state_repository_module,
-      "StrategyRunPositionRepository",
-      FakePositionRepository,
-    )
-    monkeypatch.setattr(
-      trace_repository_module,
-      "StrategyDecisionTraceRepository",
-      FakeTraceRepository,
-    )
-
-
-async def _start_real_atomic_manager(
-  runtime: StrategyRuntime,
-  tmp_path,
-) -> tuple[RuntimeStateManager, list[dict[str, object]]]:
-  manager = RuntimeStateManager(
-    run_id=runtime.run_id,
-    persist_enabled=True,
-    snapshot_interval=3_600,
-    log_dir=str(tmp_path),
-  )
-  published_traces: list[dict[str, object]] = []
-  manager._backtest_storage = SimpleNamespace(
-    add_trace=lambda trace: published_traces.append(dict(trace))
-  )
-  runtime.state_manager = manager
-  await manager.start()
-  await manager.start_state_sync(runtime.strategy)
-  return manager, published_traces
-
-
-async def _stop_real_atomic_manager(
-  manager: RuntimeStateManager,
-  runtime: StrategyRuntime,
-) -> None:
-  await manager.stop_state_sync(runtime.strategy)
-  await manager.abort_without_final_snapshot()
-
-
 @pytest.mark.asyncio
 async def test_material_evaluation_is_seeded_only_after_durable_materialization():
   calls: list[str] = []
@@ -508,159 +349,31 @@ async def test_material_evaluation_is_seeded_only_after_durable_materialization(
 
 
 @pytest.mark.asyncio
-async def test_real_v3_executor_tick_commits_output_trace_with_initial_state_cas(
-  monkeypatch: pytest.MonkeyPatch,
+async def test_durable_runtime_never_starts_periodic_hot_state_snapshot(
   tmp_path,
 ) -> None:
-  """A real V3 Tick publishes its output audit only after the initial CAS."""
+  """Every policy is coordinated by explicit seals, never a timer CAS."""
 
-  harness = _AtomicTracePersistenceHarness()
-  # Initial output checkpoint, then the MATERIAL-outbox acknowledgement.
-  harness.commit_plan = ["success", "success"]
-  harness.install(monkeypatch)
-  calls: list[str] = []
-  runtime = _runtime(calls)
-  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
-  input_snapshot = _input()
-
-  async def materialize(**_kwargs: object) -> None:
-    harness.timeline.append("materialize")
-
-  executor = _executor(SimpleNamespace(materialize_evaluation=materialize))
-  try:
-    await executor._process_strategy_output(
-      runtime,
-      StrategyOutput(runtime_state_patch=_candidate_patch()),
-      input_snapshot,
-    )
-  finally:
-    await _stop_real_atomic_manager(manager, runtime)
-
-  assert harness.timeline[:3] == ["state_cas", "trace_append", "commit"]
-  assert harness.timeline.index("materialize") > harness.timeline.index("commit")
-  assert len(harness.committed_trace_records) == 1
-  assert harness.committed_trace_records[0]["trace_id"] == input_snapshot.trace_id
-  assert manager._pending_decision_trace_records == []
-  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
-    input_snapshot.trace_id
-  ]
-  assert [trace["trace_id"] for trace in published_traces] == [input_snapshot.trace_id]
-
-
-@pytest.mark.asyncio
-async def test_real_v3_executor_cas_loser_never_publishes_and_keeps_post_await_trace(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path,
-) -> None:
-  """CAS failure drops exactly the captured output, not a newer queued audit."""
-
-  from quantx_domain.trading.decision_trace import DecisionTrace
-
-  harness = _AtomicTracePersistenceHarness()
-  harness.force_cas_conflict = True
-  harness.install(monkeypatch)
-  runtime = _runtime([])
-  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
-  successor_trace_id = "trace-created-while-cas-awaiting"
-  harness.on_cas_conflict = lambda: manager.record_decision_trace(
-    DecisionTrace.from_decision(
-      run_id=runtime.run_id,
-      strategy_id="1",
-      instrument_code="000001.SZ",
-      trace_id=successor_trace_id,
-    )
+  durable_backtest = RuntimeStateManager(
+    run_id="run-durable-backtest-no-periodic-snapshot",
+    persist_enabled=True,
+    is_backtest=True,
+    log_dir=str(tmp_path),
   )
-  service = SimpleNamespace(materialize_evaluation=AsyncMock())
-  executor = _executor(service)
-  input_snapshot = _input()
-
-  try:
-    await executor._process_strategy_output(
-      runtime,
-      StrategyOutput(runtime_state_patch=_candidate_patch()),
-      input_snapshot,
-    )
-
-    assert runtime.status is ExecutionStatus.ERROR
-    assert manager.last_snapshot_failure_code == "CAS_CONFLICT"
-    assert harness.append_batches == []
-    assert manager._decision_trace_logger.records == []
-    assert published_traces == []
-    assert len(manager._pending_decision_trace_records) == 1
-    successor_id = manager._pending_decision_trace_records[0]["id"]
-    assert manager._pending_decision_trace_records[0]["trace_id"] == successor_trace_id
-
-    # The manager adopted the external winner.  A later snapshot can persist
-    # only the trace that arrived while the losing CAS was awaiting I/O.
-    assert await manager.save_snapshot() is True
-  finally:
-    await _stop_real_atomic_manager(manager, runtime)
-
-  assert [
-    record["id"]
-    for batch in harness.append_batches
-    for record in batch
-  ] == [successor_id]
-  assert all(
-    record["trace_id"] != input_snapshot.trace_id
-    for record in harness.committed_trace_records
+  normal_durable_runtime = RuntimeStateManager(
+    run_id="run-normal-durable-periodic-snapshot",
+    persist_enabled=True,
+    log_dir=str(tmp_path),
   )
-  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
-    successor_trace_id
-  ]
-  assert [trace["trace_id"] for trace in published_traces] == [successor_trace_id]
-  service.materialize_evaluation.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_real_v3_executor_commit_unknown_retries_same_trace_id_and_publishes_once(
-  monkeypatch: pytest.MonkeyPatch,
-  tmp_path,
-) -> None:
-  """An unresolved commit response retains the exact trace batch for retry."""
-
-  harness = _AtomicTracePersistenceHarness()
-  # The first response is indeterminate and its authoritative read is briefly
-  # unavailable.  The next read proves that PostgreSQL did not commit, so the
-  # real manager retries the same immutable UUID/content batch.
-  harness.commit_plan = ["unknown_not_committed", "success"]
-  harness.read_failures = 1
-  harness.install(monkeypatch)
-  runtime = _runtime([])
-  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
-  input_snapshot = _input()
-  executor = _executor(
-    SimpleNamespace(materialize_evaluation=AsyncMock())
-  )
-
   try:
-    await executor._process_strategy_output(
-      runtime,
-      StrategyOutput(runtime_state_patch=_candidate_patch()),
-      input_snapshot,
-    )
+    await durable_backtest.start()
+    await normal_durable_runtime.start()
 
-    assert manager._pending_trace_commit_unknown_attempts
-    assert len(harness.append_batches) == 1
-    first_batch = copy.deepcopy(harness.append_batches[0])
-    assert manager._decision_trace_logger.records == []
-    assert published_traces == []
-
-    assert await manager.save_snapshot() is True
+    assert durable_backtest._snapshot_task is None
+    assert normal_durable_runtime._snapshot_task is None
   finally:
-    await _stop_real_atomic_manager(manager, runtime)
-
-  assert len(harness.append_batches) == 2
-  assert harness.append_batches[1] == first_batch
-  assert [record["id"] for record in harness.append_batches[1]] == [
-    record["id"] for record in harness.append_batches[0]
-  ]
-  assert manager._pending_trace_commit_unknown_attempts == {}
-  assert manager._pending_decision_trace_records == []
-  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
-    input_snapshot.trace_id
-  ]
-  assert [trace["trace_id"] for trace in published_traces] == [input_snapshot.trace_id]
+    await durable_backtest.abort_without_final_snapshot()
+    await normal_durable_runtime.abort_without_final_snapshot()
 
 
 @pytest.mark.asyncio
@@ -775,6 +488,25 @@ def _assert_candidate_suppressed(
   assert runtime.strategy.state.entry_order_status in {"REJECTED", "EXPIRED"}
   assert runtime.strategy.state.awaiting == {}
   assert intent.intent_id not in runtime.pending_approvals
+
+
+def _batched_diagnostic_output(ordinal: int) -> StrategyOutput:
+  source_time_ms = 1_724_300_000_000 + ordinal
+  event = {
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "event_key": f"run-opportunity-v3:600000.SH:diagnostic:{ordinal}",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "event_type": "HEARTBEAT",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": source_time_ms,
+    "signal_snapshot": {
+      **_snapshot(),
+      "evaluated_at_ms": source_time_ms,
+      "source_time_ms": source_time_ms,
+      "tick_ordinal": ordinal,
+    },
+  }
+  return StrategyOutput(runtime_state_patch=RuntimeStatePatch(append_events=[event]))
 
 
 @pytest.mark.asyncio
@@ -1120,7 +852,10 @@ async def test_material_outbox_enqueue_failure_rolls_back_state_and_fail_stops_r
 
   await executor._process_strategy_output(
     runtime,
-    StrategyOutput(runtime_state_patch=_candidate_patch()),
+    StrategyOutput(
+      trade_intents=[_intent()],
+      runtime_state_patch=_candidate_patch(),
+    ),
     _input(),
   )
 
@@ -1231,8 +966,12 @@ async def test_material_outbox_replays_stable_events_once_after_restart() -> Non
     outcome_facade=SimpleNamespace(seed_material_event=seed),
   )
 
-  await restarted_executor._replay_pending_t_trade_material_events(restarted)
-  await restarted_executor._replay_pending_t_trade_material_events(restarted)
+  await restarted_executor._replay_pending_actionable_t_trade_material_events(
+    restarted
+  )
+  await restarted_executor._replay_pending_actionable_t_trade_material_events(
+    restarted
+  )
 
   assert materialized_keys == expected_event_keys
   assert seeded_keys == expected_event_keys
@@ -1406,6 +1145,7 @@ async def test_profile_is_loaded_once_per_instrument_trade_day_and_injected():
   profile_execute = AsyncMock(wraps=executor._d1_profile_reader.execute)
   executor._d1_profile_reader.execute = profile_execute
   runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
   first_time = datetime(2026, 8, 23, 9, 31)
 
   await executor._ensure_t_trade_opportunity_profile(
@@ -1464,7 +1204,11 @@ async def test_profile_is_loaded_once_per_instrument_trade_day_and_injected():
 
 
 @pytest.mark.asyncio
-async def test_profile_lookup_failure_retries_after_short_ttl_and_recovers():
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_profile_lookup_failure_retries_after_wall_clock_ttl_and_recovers(
+  monkeypatch: pytest.MonkeyPatch,
+  mode: StrategyRunMode,
+):
   profile = {
     "profile_version": "p-20260822",
     "profile_schema_version": 1,
@@ -1483,7 +1227,18 @@ async def test_profile_lookup_failure_retries_after_short_ttl_and_recovers():
   )
   executor = _executor(service)
   runtime = _runtime([])
+  runtime.context.mode = mode
+  failure_messages: list[str] = []
+  executor._runtime_log = lambda _runtime, _level, message: failure_messages.append(
+    message
+  )
   evaluated_at = datetime(2026, 8, 23, 9, 31)
+  retry_clock = iter((100.0, 129.9, 130.0))
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "monotonic",
+    lambda: next(retry_clock),
+  )
   await executor._ensure_t_trade_opportunity_profile(
     runtime,
     instrument_code="600000.SH",
@@ -1492,7 +1247,7 @@ async def test_profile_lookup_failure_retries_after_short_ttl_and_recovers():
   await executor._ensure_t_trade_opportunity_profile(
     runtime,
     instrument_code="600000.SH",
-    evaluated_at=evaluated_at,
+    evaluated_at=evaluated_at + timedelta(hours=5),
   )
   assert service.load_reference_profile.await_count == 1
   cache_key = ("600000.SH", "2026-08-23")
@@ -1504,13 +1259,206 @@ async def test_profile_lookup_failure_retries_after_short_ttl_and_recovers():
   await executor._ensure_t_trade_opportunity_profile(
     runtime,
     instrument_code="600000.SH",
-    evaluated_at=evaluated_at + timedelta(seconds=31),
+    evaluated_at=evaluated_at + timedelta(hours=5, seconds=1),
   )
 
   assert service.load_reference_profile.await_count == 2
   assert runtime._t_trade_opportunity_profiles[cache_key] == profile
   assert cache_key not in runtime._t_trade_opportunity_profile_errors
   assert cache_key not in runtime._t_trade_opportunity_profile_retry_after
+  assert "定时重试" in failure_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_backtest_failed_profile_is_read_once_per_trade_date_across_1000_ticks():
+  service = SimpleNamespace(
+    load_reference_profile=AsyncMock(
+      side_effect=RuntimeError("historical profile storage unavailable")
+    )
+  )
+  executor = _executor(service)
+  runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  failure_messages: list[str] = []
+  executor._runtime_log = lambda _runtime, _level, message: failure_messages.append(
+    message
+  )
+  first_tick = datetime(2026, 8, 23, 9, 30)
+
+  for ordinal in range(1_000):
+    await executor._ensure_t_trade_opportunity_profile(
+      runtime,
+      instrument_code="600000.SH",
+      evaluated_at=first_tick + timedelta(seconds=20 * ordinal),
+    )
+
+  cache_key = ("600000.SH", "2026-08-23")
+  assert service.load_reference_profile.await_count == 1
+  assert runtime._t_trade_opportunity_profiles[cache_key] is None
+  assert runtime._t_trade_opportunity_profile_errors[cache_key] == (
+    "PROFILE_LOOKUP_FAILED"
+  )
+  assert cache_key not in runtime._t_trade_opportunity_profile_retry_after
+  assert "本交易日固定失败关闭，不重试" in failure_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_backtest_not_found_profile_is_read_once_per_trade_date():
+  service = SimpleNamespace(load_reference_profile=AsyncMock(return_value=None))
+  executor = _executor(service)
+  runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  first_tick = datetime(2026, 8, 23, 9, 30)
+
+  for offset in (0, 3_600, 18_000):
+    await executor._ensure_t_trade_opportunity_profile(
+      runtime,
+      instrument_code="600000.SH",
+      evaluated_at=first_tick + timedelta(seconds=offset),
+    )
+
+  cache_key = ("600000.SH", "2026-08-23")
+  assert service.load_reference_profile.await_count == 1
+  assert runtime._t_trade_opportunity_profiles[cache_key] is None
+  assert cache_key not in runtime._t_trade_opportunity_profile_errors
+  assert cache_key not in runtime._t_trade_opportunity_profile_retry_after
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_not_found_profile_retries_on_wall_clock_not_source_time(
+  monkeypatch: pytest.MonkeyPatch,
+  mode: StrategyRunMode,
+):
+  service = SimpleNamespace(load_reference_profile=AsyncMock(return_value=None))
+  executor = _executor(service)
+  runtime = _runtime([])
+  runtime.context.mode = mode
+  retry_clock = iter((200.0, 229.9, 230.0, 230.0))
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "monotonic",
+    lambda: next(retry_clock),
+  )
+  first_tick = datetime(2026, 8, 23, 9, 30)
+
+  await executor._ensure_t_trade_opportunity_profile(
+    runtime,
+    instrument_code="600000.SH",
+    evaluated_at=first_tick,
+  )
+  await executor._ensure_t_trade_opportunity_profile(
+    runtime,
+    instrument_code="600000.SH",
+    evaluated_at=first_tick + timedelta(hours=5),
+  )
+  assert service.load_reference_profile.await_count == 1
+
+  await executor._ensure_t_trade_opportunity_profile(
+    runtime,
+    instrument_code="600000.SH",
+    evaluated_at=first_tick + timedelta(hours=5, seconds=1),
+  )
+
+  assert service.load_reference_profile.await_count == 2
+  assert runtime._t_trade_opportunity_profiles[("600000.SH", "2026-08-23")] is None
+
+
+@pytest.mark.asyncio
+async def test_backtest_tick_progress_never_writes_replay_projection(
+  monkeypatch: pytest.MonkeyPatch,
+):
+  executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))
+  runtime = _runtime([])
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.context.parameters["t_trade_replay"] = True
+  runtime.context.backtest_start_time = datetime(2026, 8, 23, 9, 30)
+  runtime.context.backtest_end_time = datetime(2026, 8, 23, 15, 0)
+  update = AsyncMock()
+  monkeypatch.setattr(
+    strategy_executor_module.t_trade_replay_projection_service,
+    "update",
+    update,
+  )
+
+  for ordinal in range(1_000):
+    runtime.context.current_time = (
+      runtime.context.backtest_start_time + timedelta(seconds=ordinal)
+    )
+    await executor._report_t_trade_replay_progress(runtime)
+
+  update.assert_not_awaited()
+  assert runtime._last_t_trade_replay_projection_trade_date is None
+
+
+@pytest.mark.asyncio
+async def test_backtest_day_boundary_projection_writes_once_per_day_across_windows(
+  monkeypatch: pytest.MonkeyPatch,
+):
+  class FakeHistoricalDataAdapter:
+    async def get_ticks(self, **_kwargs):
+      return []
+
+  class FakeTradingDateHelper:
+    async def get_trading_calendar(self, **_kwargs):
+      return [datetime(2026, 8, 23).date(), datetime(2026, 8, 24).date()]
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "HistoricalDataAdapter",
+    FakeHistoricalDataAdapter,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "TradingDateHelper",
+    FakeTradingDateHelper,
+  )
+  executor = _executor(SimpleNamespace(materialize_evaluation=AsyncMock()))
+  executor._run_backtest_warmup_klines = AsyncMock()
+  executor._runtime_log = lambda *_args, **_kwargs: None
+  executor._get_backtest_window_hours = lambda: 1
+  update = AsyncMock()
+  monkeypatch.setattr(
+    strategy_executor_module.t_trade_replay_projection_service,
+    "update",
+    update,
+  )
+  start_time = datetime(2026, 8, 23, 9, 30)
+  end_time = datetime(2026, 8, 24, 13, 45)
+  context = StrategyContext(
+    run_id="replay-day-boundary",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["600000.SH"],
+    parameters={"t_trade_replay": True, "account_id": "account-1"},
+    backtest_start_time=start_time,
+    backtest_end_time=end_time,
+  )
+  runtime = StrategyRuntime(
+    run_id=context.run_id,
+    name="replay-day-boundary",
+    strategy_id=1,
+    strategy_class=object,
+    context=context,
+    data_adapter=FakeHistoricalDataAdapter(),
+    status=ExecutionStatus.RUNNING,
+  )
+
+  await executor._run_backtest_multi_instrument_timeline(
+    runtime,
+    context.instruments,
+    [],
+    start_time,
+    end_time,
+    use_tick_data=True,
+  )
+
+  assert update.await_count == 2
+  assert [
+    call.kwargs["processed_until"] for call in update.await_args_list
+  ] == [
+    datetime(2026, 8, 23, 15, 30),
+    datetime(2026, 8, 24, 13, 45),
+  ]
 
 
 @pytest.mark.asyncio
@@ -1567,3 +1515,166 @@ async def test_profile_cache_is_globally_bounded_with_retry_metadata(monkeypatch
   assert evicted_key not in runtime._t_trade_opportunity_profile_errors
   assert evicted_key not in runtime._t_trade_opportunity_profile_retry_after
   assert ("000002.SZ", "2026-08-23") in runtime._t_trade_opportunity_profiles
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  "mode",
+  [StrategyRunMode.BACKTEST, StrategyRunMode.PAPER, StrategyRunMode.LIVE],
+)
+async def test_1000_hot_diagnostics_stay_memory_only_until_explicit_day_or_session_seal(mode):
+  calls: list[str] = []
+  service = SimpleNamespace(
+    materialize_evaluation=AsyncMock(),
+    materialize_checkpoint_batch=AsyncMock(),
+  )
+  executor = _executor(service)
+  runtime = _runtime(calls)
+  runtime.context.mode = mode
+  runtime.state_manager.persist_enabled = True
+  runtime.state_manager.checkpoint_strategy_state_changes = AsyncMock(
+    return_value=True
+  )
+  runtime.state_manager.force_save = AsyncMock(return_value=True)
+  runtime.state_manager.prepare_checkpoint = AsyncMock(return_value=None)
+  runtime.state_manager.finalize_prepared_checkpoint = AsyncMock(return_value=None)
+
+  for ordinal in range(1_000):
+    await executor._process_strategy_output(
+      runtime,
+      _batched_diagnostic_output(ordinal),
+      _input(),
+    )
+
+  assert calls == ["drain"] * 1_000
+  assert runtime.state_manager.drain_capture_state == [False] * 1_000
+  assert len(runtime._checkpoint_diagnostic_summaries) == 1
+  summary = runtime._checkpoint_diagnostic_summaries["600000.SH"]
+  assert summary["checkpoint_coalesced_count"] == 1_000
+  runtime.state_manager.checkpoint_strategy_state_changes.assert_not_awaited()
+  runtime.state_manager.force_save.assert_not_awaited()
+  runtime.state_manager.prepare_checkpoint.assert_not_awaited()
+  runtime.state_manager.finalize_prepared_checkpoint.assert_not_awaited()
+  service.materialize_evaluation.assert_not_awaited()
+  service.materialize_checkpoint_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actionless_material_evaluation_uses_the_same_memory_only_day_policy():
+  calls: list[str] = []
+  service = SimpleNamespace(
+    materialize_evaluation=AsyncMock(),
+    materialize_checkpoint_batch=AsyncMock(),
+  )
+  executor = _executor(service)
+  runtime = _runtime(calls)
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.state_manager.persist_enabled = True
+
+  await executor._process_strategy_output(
+    runtime,
+    StrategyOutput(runtime_state_patch=_candidate_patch()),
+    _input(),
+  )
+
+  assert calls == ["drain"]
+  assert set(runtime._checkpoint_diagnostic_summaries) == {
+    "MATERIAL:run-opportunity-v3:600000.SH:candidate-1:MATERIAL"
+  }
+  assert runtime.state_manager.material_outbox == {}
+  service.materialize_evaluation.assert_not_awaited()
+  service.materialize_checkpoint_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pure_material_closes_the_hot_diagnostic_segment_before_later_tick():
+  calls: list[str] = []
+  service = SimpleNamespace(
+    materialize_evaluation=AsyncMock(),
+    materialize_checkpoint_batch=AsyncMock(),
+  )
+  executor = _executor(service)
+  runtime = _runtime(calls)
+  runtime.context.mode = StrategyRunMode.BACKTEST
+  runtime.state_manager.persist_enabled = True
+
+  await executor._process_strategy_output(
+    runtime,
+    _batched_diagnostic_output(1),
+    _input(),
+  )
+  await executor._process_strategy_output(
+    runtime,
+    StrategyOutput(runtime_state_patch=_candidate_patch()),
+    _input(),
+  )
+  await executor._process_strategy_output(
+    runtime,
+    _batched_diagnostic_output(2),
+    _input(),
+  )
+
+  first_key = "run-opportunity-v3:600000.SH:diagnostic:1"
+  material_key = "run-opportunity-v3:600000.SH:candidate-1:MATERIAL"
+  assert set(runtime._checkpoint_diagnostic_summaries) == {
+    f"DIAGNOSTIC:{first_key}",
+    f"MATERIAL:{material_key}",
+    "600000.SH",
+  }
+  first_segment = runtime._checkpoint_diagnostic_summaries[f"DIAGNOSTIC:{first_key}"]
+  assert first_segment["checkpoint_segment_closed_by_event_key"] == material_key
+  assert first_segment["checkpoint_segment_boundary"] == "MATERIAL"
+  assert (
+    runtime._checkpoint_diagnostic_summaries["600000.SH"]["event_key"]
+    == "run-opportunity-v3:600000.SH:diagnostic:2"
+  )
+  assert calls == ["drain", "drain", "drain"]
+  service.materialize_evaluation.assert_not_awaited()
+  service.materialize_checkpoint_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actionable_output_does_not_block_on_hot_diagnostics_and_segments_them():
+  calls: list[str] = []
+  service = SimpleNamespace(
+    materialize_evaluation=AsyncMock(),
+    materialize_checkpoint_batch=AsyncMock(),
+  )
+  executor = _executor(service)
+  runtime = _runtime(calls)
+  runtime.state_manager.persist_enabled = True
+
+  await executor._process_strategy_output(
+    runtime,
+    _batched_diagnostic_output(1),
+    _input(),
+  )
+  assert calls == ["drain"]
+
+  intent = _intent()
+  await executor._process_strategy_output(
+    runtime,
+    StrategyOutput(
+      trade_intents=[intent],
+      runtime_state_patch=_candidate_patch(),
+    ),
+    _input(),
+  )
+  await executor._process_strategy_output(
+    runtime,
+    _batched_diagnostic_output(2),
+    _input(),
+  )
+
+  first_key = "run-opportunity-v3:600000.SH:diagnostic:1"
+  assert runtime.status == ExecutionStatus.RUNNING
+  assert runtime.error_message != "CHECKPOINT_DIAGNOSTIC_FINALIZATION_REQUIRED"
+  assert f"DIAGNOSTIC:{first_key}" in runtime._checkpoint_diagnostic_summaries
+  assert "600000.SH" in runtime._checkpoint_diagnostic_summaries
+  assert (
+    runtime._checkpoint_diagnostic_summaries["600000.SH"]["event_key"]
+    == "run-opportunity-v3:600000.SH:diagnostic:2"
+  )
+  service.materialize_evaluation.assert_awaited()
+  service.materialize_checkpoint_batch.assert_not_awaited()
+  assert "checkpoint" in calls

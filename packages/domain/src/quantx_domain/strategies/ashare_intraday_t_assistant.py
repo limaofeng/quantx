@@ -77,6 +77,18 @@ _OPPORTUNITY_EVENT_DIAGNOSTIC = "COALESCED_DIAGNOSTIC"
 _DIAGNOSTIC_COALESCE_MS = 2_000
 _PROFILE_CONTEXT_KEY = "t_trade_instrument_profile"
 _EMISSION_CONTEXT_KEY = "t_trade_intent_emission"
+_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION = 1
+_OPPORTUNITY_SAMPLE_WINDOW_PERSISTED_KEY = "sample_window_persisted"
+_OPPORTUNITY_SAMPLE_WINDOW_RESTORE_REQUIRED_KEY = (
+  "sample_window_restore_required"
+)
+_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY = (
+  "sample_window_projection_version"
+)
+_OPPORTUNITY_SAMPLE_WINDOW_SAMPLE_COUNT_KEY = "sample_window_sample_count"
+_OPPORTUNITY_SAMPLE_WINDOW_LAST_SOURCE_IDENTITY_KEY = (
+  "sample_window_last_source_identity"
+)
 
 
 class TTradeStatus:
@@ -327,6 +339,77 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "universe_revision": int(snapshot.get("universe_revision", 0) or 0),
       }
     )
+
+  def persistence_state_snapshot(self) -> Dict[str, Any]:
+    """Project only reconstructible market samples out of durable state.
+
+    Opportunity samples are a short-lived hot window.  They have no safe
+    continuity proof after a PAPER/LIVE restart and BACKTEST must rebuild them
+    causally from the next input, so retaining the price/book/amount/volume
+    sequence in RuntimeState only increases a checkpoint without improving
+    recoverability.  The in-memory strategy state remains untouched.
+    """
+
+    snapshot = self.state.to_dict()
+    raw_states = snapshot.get("instrument_states")
+    if not isinstance(raw_states, Mapping):
+      return snapshot
+
+    projected_states: Dict[str, Any] = {}
+    for raw_code, raw_state in raw_states.items():
+      if not isinstance(raw_state, Mapping):
+        projected_states[str(raw_code)] = raw_state
+        continue
+      projected_state = dict(raw_state)
+      raw_opportunity = raw_state.get("opportunity")
+      if isinstance(raw_opportunity, Mapping):
+        projected_state["opportunity"] = self._compact_opportunity_for_persistence(
+          raw_opportunity
+        )
+      projected_states[str(raw_code)] = projected_state
+    snapshot["instrument_states"] = projected_states
+    return snapshot
+
+  @classmethod
+  def _compact_opportunity_for_persistence(
+    cls,
+    opportunity: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    """Remove the volatile sample sequence while retaining tiny audit facts."""
+
+    projected = dict(opportunity)
+    raw_samples = projected.pop("samples", ())
+    samples = raw_samples if isinstance(raw_samples, (list, tuple)) else ()
+    projected[_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY] = (
+      _OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION
+    )
+    projected[_OPPORTUNITY_SAMPLE_WINDOW_PERSISTED_KEY] = False
+    projected[_OPPORTUNITY_SAMPLE_WINDOW_RESTORE_REQUIRED_KEY] = True
+    projected[_OPPORTUNITY_SAMPLE_WINDOW_SAMPLE_COUNT_KEY] = len(samples)
+    projected[_OPPORTUNITY_SAMPLE_WINDOW_LAST_SOURCE_IDENTITY_KEY] = (
+      cls._opportunity_sample_source_identity(samples[-1]) if samples else None
+    )
+    return projected
+
+  @staticmethod
+  def _opportunity_sample_source_identity(sample: Any) -> Optional[Dict[str, Any]]:
+    """Keep only causal scalar identity; quote/book fields never persist here."""
+
+    if not isinstance(sample, Mapping):
+      return None
+    try:
+      source_time_ms = int(sample.get("source_time_ms", 0) or 0)
+      tick_ordinal = int(sample.get("tick_ordinal", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+      return None
+    continuity_generation = str(sample.get("continuity_generation") or "").strip()
+    if source_time_ms < 0 or tick_ordinal < 0 or not continuity_generation:
+      return None
+    return {
+      "continuity_generation": continuity_generation,
+      "source_time_ms": source_time_ms,
+      "tick_ordinal": tick_ordinal,
+    }
 
   def pending_manual_intent_ids(self) -> List[str]:
     pending = []
@@ -1546,6 +1629,14 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         instrument_code=instrument_code,
         trade_date=trade_date,
       )
+    if self._compact_opportunity_requires_rewarm(opportunity):
+      # A compact durable projection intentionally omitted its market window.
+      # Never reuse READY branches or candidate confirmation from that window;
+      # the next causal Tick rebuilds the reducer from WARMING instead.
+      return OpportunityState.initial(
+        instrument_code=instrument_code,
+        trade_date=trade_date,
+      )
     compatible = (
       int(opportunity.get("schema_version", 0) or 0) == OPPORTUNITY_STATE_SCHEMA_VERSION
       and int(opportunity.get("feature_schema_version", 0) or 0)
@@ -1569,6 +1660,13 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     if restored.instrument_code and restored.instrument_code != instrument_code:
       raise ValueError("opportunity state instrument mismatch")
     return restored
+
+  @staticmethod
+  def _compact_opportunity_requires_rewarm(opportunity: Mapping[str, Any]) -> bool:
+    return (
+      opportunity.get(_OPPORTUNITY_SAMPLE_WINDOW_PERSISTED_KEY) is False
+      or opportunity.get(_OPPORTUNITY_SAMPLE_WINDOW_RESTORE_REQUIRED_KEY) is True
+    )
 
   @staticmethod
   def _candidate_lifecycle(state: OpportunityState) -> tuple[Any, ...]:

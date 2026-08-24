@@ -236,9 +236,28 @@ sequence 1 全量快照和 sequence 2 切换前连续性屏障均保持
 使用保留亚秒精度的券商源时间；非法、超前或积压过期的批次不得
 刷新 `READY` 或 freshness lease。
 
-需要跨重启识别形态的策略，必须把有界、因果的滑动观察窗写入
-PAPER/LIVE RuntimeState；恢复样本必须再按当前 tick 过滤到
-`[current - lookback, current]`，禁止使用未来样本。BACKTEST 不持久化该窗口。
+PAPER/LIVE 的有界、因果滑动观察窗是内存热状态：普通 tick、窗口、评分、指标与
+诊断不得逐 tick 持久化。只在 `11:35`（上午 `11:30` 边界）和 `15:05`（下午
+`15:00` 边界）尝试 `SESSION` checkpoint；每 `5` 秒重试一次，最多 `60` 次（约
+`5` 分钟），到期仍保持 `BLOCKED`/fail-closed，禁止标记完成。完成前必须同时证明
+`WholeQuoteHub` 全局 `stream_id + committed sequence` 就绪围栏、event/control/market
+队列排空，且不存在待处理 invalidation 或 `LAGGING`。检查点必须记录交易日、会话/
+边界、全局水位与连续性、状态指纹和完整性；逐标的源水位只作审计。恢复使用最近完整
+检查点加权威 tick 重放，缺口 fail-closed。
+
+PAPER/LIVE 的 `TERMINAL` 已处理前缀不等同 AM/PM session boundary。只有队列
+quiesced、连续性完整，且 processed watermark/source prefix 已被证明时，才能
+`PREPARED → receipt → FINALIZE`；任一证明缺失都保持 fail-closed。正常完成、停止和
+错误/取消必须强制 flush 当前热诊断并 seal 已处理前缀，随后仍按上述证明链收口。审批、
+TradeIntent、命令 outbox、订单/成交 inbox 与回报、冻结/订单状态和用户可操作候选等
+外部交易事实仍须在发生时原子持久化，不得等候 `SESSION` checkpoint。
+
+所有 BACKTEST 对普通策略热状态、逐 tick trace、诊断及不伴随 `TradeIntent` 的纯
+`MATERIAL` 评估一律采用 `DAY_BATCH`：每个虚拟交易日作为一个日级 UOW 持久化，普通
+tick 循环无数据库 I/O；错误或取消 seal 已处理前缀与当日部分终态证据。真正可执行
+候选、`TradeIntent` 与模拟成交生命周期是即时幂等交易事实，不得因回测性能而延后；
+性能验收须单独计数该类业务写入，不能混同普通热路径。BACKTEST 恢复也只允许从完整
+日检查点加权威 tick 重放，连续性缺口必须 fail-closed。
 
 对当前双仓策略：
 

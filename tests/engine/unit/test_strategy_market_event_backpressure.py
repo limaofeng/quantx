@@ -619,6 +619,7 @@ async def test_invalidation_is_durable_before_market_gate_reopens() -> None:
   state["opportunity"] = _sampled_v3_opportunity()
   strategy.state.set("instrument_states", {"600000.SH": state})
   await asyncio.wait_for(manager._state_queue.join(), timeout=1.0)
+  assert await manager.drain_strategy_state_changes()
   assert await manager.save_snapshot() is True
   persisted = durable_snapshots[-1]["custom"]["instrument_states"][
     "600000.SH"
@@ -1198,6 +1199,70 @@ async def test_realtime_restart_preserves_v3_window_for_engine_authority_check()
   assert executor._restored_causal_market_window_codes(runtime) == {
     "600000.SH"
   }
+  executor.thread_pool.shutdown(wait=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [StrategyRunMode.PAPER, StrategyRunMode.LIVE])
+async def test_compact_restored_window_is_invalidated_before_live_or_paper_tick(
+  mode: StrategyRunMode,
+) -> None:
+  context = StrategyContext(
+    run_id=f"compact-restart-{mode.value.lower()}",
+    mode=mode,
+    instruments=["600000.SH"],
+    parameters={"signal_policy": OpportunityPolicy().to_dict()},
+  )
+  strategy = AshareIntradayTAssistantStrategy(context)
+  intent, state = _v3_pending_candidate(context.run_id)
+  compact_opportunity = state["opportunity"]
+  compact_opportunity.update(
+    {
+      "samples": [],
+      "sample_window_projection_version": 1,
+      "sample_window_persisted": False,
+      "sample_window_restore_required": True,
+      "sample_window_sample_count": 1_000,
+      "sample_window_last_source_identity": {
+        "continuity_generation": "1",
+        "source_time_ms": 1_000,
+        "tick_ordinal": 1,
+      },
+    }
+  )
+  strategy.apply_state_snapshot(
+    {
+      "state_schema_version": 3,
+      "instrument_states": {"600000.SH": state},
+    }
+  )
+  await strategy.initialize()
+
+  # The compact snapshot still exposes the durable candidate/approval link
+  # before the Engine installs its transport-continuity invalidation.
+  assert strategy.pending_manual_intent_ids() == [intent.intent_id]
+  runtime = _runtime(context.run_id)
+  runtime.context.mode = mode
+  runtime.strategy = strategy
+  executor = StrategyExecutor()
+  runtime._restored_market_windows_unverified = (
+    executor._restored_causal_market_window_codes(runtime)
+  )
+
+  assert runtime._restored_market_windows_unverified == {"600000.SH"}
+  assert executor._observe_runtime_market_transport(
+    runtime,
+    _transport_event(generation=1, sequence=1),
+  )
+  assert runtime._pending_market_invalidations == {
+    "600000.SH": "RUNTIME_RESTART_CONTINUITY_UNPROVEN"
+  }
+  await executor._apply_pending_runtime_market_invalidations(runtime)
+
+  invalidated = strategy.state["instrument_states"]["600000.SH"]["opportunity"]
+  assert invalidated["samples"] == []
+  assert invalidated["candidate"] is None
+  assert invalidated["data_health"] == DataHealth.WARMING.value
   executor.thread_pool.shutdown(wait=False)
 
 

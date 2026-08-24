@@ -43,10 +43,29 @@ RuntimeState 版本更新使用数据库原子 CAS。每次 Engine 快照带 man
 token；提交结果不确定时以数据库 token 和版本为准采纳已提交结果，外部写入赢得
 CAS 时只合并其归属字段并保留 Engine dirty state，随后基于新版本继续保存。
 
-PAPER/LIVE 做 T 策略把有界的因果 tick 观察窗作为策略 RuntimeState
-的一部分，最多每 3 秒提交一次完整窗口，正常停止和实际移除标的时
-强制刷盘。恢复后每个新 tick 都会同时裁掉超出 lookback 的旧样本和
-晚于当前 tick 的未来样本。BACKTEST 保持确定性回放，不持久化该窗口。
+PAPER/LIVE 做 T 策略把有界、因果 tick 观察窗保留在内存热路径；普通 tick、
+滚动窗口、评分、指标和诊断不得逐 tick 写数据库。策略 RuntimeState 只在上午
+`11:35`（覆盖 `11:30` 边界）和下午 `15:05`（覆盖 `15:00` 边界）尝试 `SESSION`
+checkpoint：每 `5` 秒重试一次，最多 `60` 次（约 `5` 分钟）；超时仍保持 `BLOCKED` /
+fail-closed，绝不能把该边界伪造为完成。必须已证明 `WholeQuoteHub` 的全局
+`stream_id + committed sequence` 就绪围栏，且 event/control/market 队列已排空、没有
+待处理 invalidation 和 `LAGGING` 消费者，才可 seal 完整检查点。检查点记录交易日、
+会话/边界、全局水位与连续性、状态指纹和完整性；逐标的源水位仅作审计，不能代替全局
+围栏。恢复只能从最近完整检查点加权威 tick 重放，缺口立即 fail-closed。
+
+PAPER/LIVE 的 `TERMINAL` 已处理前缀不等同于上午/下午 session boundary。只有队列
+quiesced、连续性完整，并已证明 processed watermark/source prefix 时，才可执行
+`PREPARED → receipt → FINALIZE`；缺任一证明仍 fail-closed。正常完成、停止和错误/
+取消都必须强制 flush 当前热诊断并 seal 已处理前缀，随后仍按这条证明链收口。审批、
+TradeIntent、命令 outbox、订单/成交 inbox 与回报、冻结/订单状态及用户可操作候选等
+外部交易事实仍在事件发生时原子持久化，不等待 `SESSION` checkpoint。
+
+所有 BACKTEST 对普通热状态、逐 tick trace、诊断和不伴随 `TradeIntent` 的纯
+`MATERIAL` 评估采用 `DAY_BATCH`：每个虚拟交易日作为一个日级 UOW 持久化，普通
+tick 循环不执行数据库 I/O；错误或取消必须 seal 已处理前缀及当日部分终态证据。
+真正可执行的候选、`TradeIntent` 与模拟成交生命周期仍是即时幂等交易事实，不能为
+压测而延后。性能证据必须将这些不可消除的业务写入与普通热路径写入分开统计；恢复
+同样依赖最近完整日检查点加权威 tick，任何连续性缺口均 fail-closed。
 
 完整账户快照的对账按灰度阶段处理。`SHADOW` 是手工交易共存的准备阶段：QMT
 客户端产生且没有 QuantX 关联 ID 的委托/成交会作为外部活动持久化并计数，

@@ -17,6 +17,7 @@ import asyncio
 import copy
 import hashlib
 import inspect
+import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -110,6 +111,7 @@ from quantx_infrastructure.core.data import (
   DataAdapter,
   HistoricalDataAdapter,
   adapter_manager,
+  whole_quote_hub,
 )
 from quantx_infrastructure.core.data.tick_identity import (
   normalize_ticks_losslessly,
@@ -184,6 +186,22 @@ _DURABLE_EVENT_APPLY_TIMEOUT_SECONDS = 10.0
 _RUNTIME_MARKET_EVENT_QUEUE_CAPACITY = 256
 _T_TRADE_DEFAULT_EXECUTION_QUOTE_MAX_AGE_SECONDS = 3.0
 _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS = 30.0
+# Runtime-state persistence is intentionally policy-driven rather than tied to
+# one replay/benchmark capability.  BACKTEST seals once per virtual day;
+# PAPER/LIVE seal only at proven session boundaries.  Broker reports, orders,
+# fills, approvals, and material candidates retain their explicit immediate
+# durability boundaries below.
+RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH = "DAY_BATCH"
+RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY = "SESSION_BOUNDARY"
+_SESSION_CHECKPOINT_MAX_RETRIES = 60
+_SESSION_CHECKPOINT_RETRY_SECONDS = 5.0
+_SESSION_CHECKPOINT_SPECS = (
+  ("AM", time(11, 30), time(11, 35)),
+  ("PM", time(15, 0), time(15, 5)),
+)
+_CHECKPOINT_EVALUATION_OUTBOX_MAX_EVENTS = 8192
+_TRACE_AUDIT_PATCH_FORMAT = "CONTENT_ADDRESSED_RUNTIME_STATE_PATCH_V1"
+_TRACE_AUDIT_INLINE_STRING_MAX_BYTES = 256
 # Profile snapshots are process-local decision inputs.  Keep their cardinality
 # bounded independently from the eligibility snapshot so a long-running
 # account-level runtime cannot grow forever as its universe rotates.
@@ -192,9 +210,290 @@ _T_TRADE_PROFILE_CACHE_MAX_ENTRIES = 4096
 # holding/session cache.  A single account does not need more entries than
 # this; rejecting a larger reconcile keeps the fail-closed boundary bounded.
 _T_TRADE_INTENT_EMISSION_MAX_INSTRUMENTS = 4096
-_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY = (
-  "_internal_v3_pressure_runtime_state_persistence"
+
+_TRACE_AUDIT_JSON_SCALAR_TYPES = frozenset(
+  {type(None), bool, int, float, str}
 )
+
+
+def _trace_audit_json_default(value: Any) -> Any:
+  """Encode the small non-JSON values accepted in strategy state patches."""
+
+  if isinstance(value, Decimal):
+    return format(value, "f")
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  if isinstance(value, Enum):
+    enum_value = value.value
+    if _trace_audit_requires_normalization(enum_value):
+      return _trace_audit_json_value(enum_value)
+    return enum_value
+  if isinstance(value, tuple):
+    return list(value)
+  if isinstance(value, Mapping):
+    return _trace_audit_json_value(value)
+  raise TypeError(
+    f"Object of type {type(value).__name__} is not JSON serializable"
+  )
+
+
+def _trace_audit_requires_normalization(value: Any) -> bool:
+  """Return whether JSON needs the deterministic Mapping/key fallback.
+
+  The hot path consists of exact ``dict``/``list``/``tuple`` containers with
+  string keys.  Scan that graph without allocating a normalized copy; the C
+  JSON encoder then traverses and serializes it.  An arbitrary Mapping or a
+  non-string key keeps the historic string-key normalization fallback.
+  """
+
+  value_type = type(value)
+  if value_type in _TRACE_AUDIT_JSON_SCALAR_TYPES:
+    return False
+  if (
+    value_type is not dict
+    and value_type is not list
+    and value_type is not tuple
+  ):
+    return isinstance(value, Mapping)
+
+  stack = [value]
+  visited: set[int] = set()
+  while stack:
+    current = stack.pop()
+    current_type = type(current)
+    if current_type is dict:
+      identity = id(current)
+      if identity in visited:
+        continue
+      visited.add(identity)
+      for key, child in current.items():
+        if type(key) is not str:
+          return True
+        child_type = type(child)
+        if (
+          child_type is dict
+          or child_type is list
+          or child_type is tuple
+        ):
+          stack.append(child)
+        elif (
+          child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES
+          and isinstance(child, Mapping)
+        ):
+          return True
+    elif current_type is list or current_type is tuple:
+      identity = id(current)
+      if identity in visited:
+        continue
+      visited.add(identity)
+      for child in current:
+        child_type = type(child)
+        if (
+          child_type is dict
+          or child_type is list
+          or child_type is tuple
+        ):
+          stack.append(child)
+        elif (
+          child_type not in _TRACE_AUDIT_JSON_SCALAR_TYPES
+          and isinstance(child, Mapping)
+        ):
+          return True
+    elif isinstance(current, Mapping):
+      return True
+  return False
+
+
+def _trace_audit_scalar_value(value: Any) -> Any:
+  """Return the JSON scalar representation without normalizing containers."""
+
+  if isinstance(value, Decimal):
+    return format(value, "f")
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  if isinstance(value, Enum):
+    return _trace_audit_scalar_value(value.value)
+  return value
+
+
+def _trace_audit_json_value(value: Any) -> Any:
+  """Normalize non-standard mapping/key payloads for deterministic JSON."""
+
+  if isinstance(value, Mapping):
+    return {
+      str(key): _trace_audit_json_value(item)
+      for key, item in value.items()
+    }
+  if isinstance(value, (list, tuple)):
+    return [_trace_audit_json_value(item) for item in value]
+  if isinstance(value, (datetime, date)):
+    return value.isoformat()
+  if isinstance(value, Decimal):
+    return format(value, "f")
+  if isinstance(value, Enum):
+    return _trace_audit_json_value(value.value)
+  return value
+
+
+def _canonical_trace_audit_bytes(
+  value: Any,
+  *,
+  requires_normalization: Optional[bool] = None,
+) -> bytes:
+  """Return the single stable byte representation used by audit hashes."""
+
+  if requires_normalization is None:
+    requires_normalization = _trace_audit_requires_normalization(value)
+  if requires_normalization:
+    value = _trace_audit_json_value(value)
+  return json.dumps(
+    value,
+    ensure_ascii=True,
+    sort_keys=True,
+    separators=(",", ":"),
+    allow_nan=False,
+    default=_trace_audit_json_default,
+  ).encode("utf-8")
+
+
+def _trace_audit_value_type(value: Any) -> str:
+  value = _trace_audit_scalar_value(value)
+  if value is None:
+    return "null"
+  if isinstance(value, bool):
+    return "boolean"
+  if isinstance(value, (int, float)):
+    return "number"
+  if isinstance(value, str):
+    return "string"
+  if isinstance(value, Mapping):
+    return "object"
+  if isinstance(value, (list, tuple)):
+    return "array"
+  return type(value).__name__
+
+
+def _trace_audit_value_summary(
+  value: Any,
+  *,
+  requires_normalization: Optional[bool] = None,
+) -> Dict[str, Any]:
+  """Describe one patch value without retaining its possibly hot payload."""
+
+  serialized = _canonical_trace_audit_bytes(
+    value,
+    requires_normalization=requires_normalization,
+  )
+  scalar_value = _trace_audit_scalar_value(value)
+  summary: Dict[str, Any] = {
+    "sha256": hashlib.sha256(serialized).hexdigest(),
+    "json_bytes": len(serialized),
+    "type": _trace_audit_value_type(scalar_value),
+    "cardinality": (
+      len(scalar_value)
+      if isinstance(scalar_value, (Mapping, list, tuple, str))
+      else None
+    ),
+  }
+  if scalar_value is None or isinstance(scalar_value, (bool, int, float)):
+    summary["value"] = scalar_value
+  elif (
+    isinstance(scalar_value, str)
+    and len(scalar_value.encode("utf-8")) <= _TRACE_AUDIT_INLINE_STRING_MAX_BYTES
+  ):
+    summary["value"] = scalar_value
+  return summary
+
+
+def _trace_audit_event_identity_value(value: Any) -> Any:
+  """Keep only scalar event identity fields in an audit summary."""
+
+  scalar_value = _trace_audit_scalar_value(value)
+  if scalar_value is None or isinstance(scalar_value, (bool, int, float, str)):
+    return scalar_value
+  return None
+
+
+def _compact_runtime_state_patch_for_audit(
+  patch: Any,
+  *,
+  instrument_code: str,
+) -> Dict[str, Any]:
+  """Content-address a strategy patch without duplicating runtime hot state."""
+
+  raw_patch = {
+    "set": getattr(patch, "set", {}) or {},
+    "unset": getattr(patch, "unset", []) or [],
+    "append_events": getattr(patch, "append_events", []) or [],
+  }
+  requires_normalization = _trace_audit_requires_normalization(raw_patch)
+  audit_patch = (
+    _trace_audit_json_value(raw_patch)
+    if requires_normalization
+    else raw_patch
+  )
+  set_values = audit_patch["set"] or {}
+  append_events = audit_patch["append_events"] or []
+  full_patch = _canonical_trace_audit_bytes(
+    audit_patch,
+    requires_normalization=False,
+  )
+  set_summary = {
+    key: _trace_audit_value_summary(
+      set_values[key],
+      requires_normalization=False,
+    )
+    for key in sorted(set_values)
+  }
+
+  instrument_states = set_values.get("instrument_states")
+  if isinstance(instrument_states, Mapping):
+    current_instrument = str(instrument_code or "")
+    current_branch = {
+      "instrument_code": current_instrument,
+      "present": current_instrument in instrument_states,
+    }
+    current_branch.update(
+      _trace_audit_value_summary(
+        instrument_states.get(current_instrument),
+        requires_normalization=False,
+      )
+    )
+    set_summary["instrument_states"]["current_instrument"] = current_branch
+
+  event_summaries = []
+  for event in append_events:
+    event_payload = _canonical_trace_audit_bytes(
+      event,
+      requires_normalization=False,
+    )
+    event_mapping = event if isinstance(event, Mapping) else {}
+    event_summaries.append(
+      {
+        "event_key": _trace_audit_event_identity_value(
+          event_mapping.get("event_key")
+        ),
+        "type": _trace_audit_event_identity_value(event_mapping.get("type")),
+        "record_kind": _trace_audit_event_identity_value(
+          event_mapping.get("record_kind")
+        ),
+        "event_type": _trace_audit_event_identity_value(
+          event_mapping.get("event_type")
+        ),
+        "sha256": hashlib.sha256(event_payload).hexdigest(),
+        "json_bytes": len(event_payload),
+      }
+    )
+
+  return {
+    "format": _TRACE_AUDIT_PATCH_FORMAT,
+    "set_keys": sorted(set_values),
+    "set": set_summary,
+    "unset": list(audit_patch["unset"] or []),
+    "append_events": event_summaries,
+    "full_patch_sha256": hashlib.sha256(full_patch).hexdigest(),
+    "full_patch_json_bytes": len(full_patch),
+  }
 
 
 class RuntimeConsumerUnavailable(RuntimeError):
@@ -317,6 +616,32 @@ class StrategyRuntime:
   market_event_overflows: int = 0
   market_window_invalidations: int = 0
   market_queue_high_watermark: int = 0
+  #: Last successfully processed WholeQuoteHub authority watermark.  Its
+  #: per-instrument entries are audit data only; session completeness is proved
+  #: against the hub's global stream/generation/sequence fence.
+  _checkpoint_processed_watermark: Dict[str, Any] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _checkpoint_instrument_watermarks: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  #: In-memory-only coalesced diagnostics.  These never create a hot-path DB
+  #: write; a complete session/day/terminal seal supplies them as one batch.
+  _checkpoint_diagnostic_summaries: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict,
+    repr=False,
+  )
+  _checkpoint_virtual_trade_date: Optional[date] = field(default=None, repr=False)
+  _checkpoint_virtual_sequence: int = field(default=0, repr=False)
+  #: Publicly observable coordinator state keyed by ``YYYY-MM-DD:AM|PM|TERMINAL``
+  #: or ``YYYY-MM-DD:DAY``.  It deliberately remains process-local until a
+  #: manager-owned complete checkpoint has been sealed.
+  checkpoint_status: Dict[str, Dict[str, Any]] = field(
+    default_factory=dict,
+    repr=False,
+  )
   #: Durable report whose effects exist only in memory until checkpoint retry.
   durable_event_barrier_key: Optional[str] = field(default=None, repr=False)
   #: DB-backlog barriers are released only after every event row is APPLIED.
@@ -389,6 +714,10 @@ class StrategyRuntime:
   exit_plan_book: ExitPlanBook = field(default_factory=ExitPlanBook, repr=False)
   _last_replay_projection_at: float = field(default=0.0, repr=False)
   _last_replay_progress_pct: float = field(default=0.0, repr=False)
+  _last_t_trade_replay_projection_trade_date: Optional[str] = field(
+    default=None,
+    repr=False,
+  )
   #: Engine-owned, bounded point-in-time eligibility authority for V3 entry
   #: emission.  Values are stamped with the runtime/account scope so a stale
   #: or accidentally shared snapshot can never authorize a Tick.
@@ -614,6 +943,7 @@ class StrategyExecutor:
     self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
     self.logger = logging.getLogger("StrategyExecutor")
     self._shutdown_event = asyncio.Event()
+    self._trading_date_helper = TradingDateHelper()
     self.log_manager = RuntimeLogManager()
     self.market_data_manager = MarketDataManager()
     self.exit_strategy_registry = (
@@ -806,6 +1136,12 @@ class StrategyExecutor:
     runtime._processing_market_events.clear()
     runtime._market_invalidation_checkpoints.clear()
     runtime._handled_market_invalidations.clear()
+    runtime._checkpoint_processed_watermark.clear()
+    runtime._checkpoint_instrument_watermarks.clear()
+    runtime._checkpoint_diagnostic_summaries.clear()
+    runtime._checkpoint_virtual_trade_date = None
+    runtime._checkpoint_virtual_sequence = 0
+    runtime.checkpoint_status.clear()
     runtime._t_trade_opportunity_profiles.clear()
     runtime._t_trade_opportunity_profile_errors.clear()
     runtime._t_trade_opportunity_profile_retry_after.clear()
@@ -833,7 +1169,15 @@ class StrategyExecutor:
     for raw_code, raw_state in states.items():
       state = dict(raw_state) if isinstance(raw_state, Mapping) else {}
       opportunity = dict(state.get("opportunity") or {})
-      if opportunity.get("samples") or opportunity.get("candidate"):
+      compact_window_requires_rewarm = (
+        opportunity.get("sample_window_persisted") is False
+        or opportunity.get("sample_window_restore_required") is True
+      )
+      if (
+        opportunity.get("samples")
+        or opportunity.get("candidate")
+        or compact_window_requires_rewarm
+      ):
         code = str(raw_code or "").strip().upper()
         if code:
           restored.add(code)
@@ -892,31 +1236,1191 @@ class StrategyExecutor:
 
   @staticmethod
   def _runtime_state_persistence_enabled(runtime: StrategyRuntime) -> bool:
-    """Keep ordinary BACKTEST runs non-durable except the sealed V3 fixture.
+    """Enable persistence only for one of the two authoritative policies."""
 
-    The serialized marker is written only by ``TTradeReplayService`` after it
-    receives an opaque in-process capability from the offline pressure runner.
-    Requiring every invariant here makes a raw client parameter harmless and
-    keeps PAPER/LIVE's existing durable behavior unchanged.
-    """
+    return StrategyExecutor._runtime_state_checkpoint_policy(runtime) in {
+      RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH,
+      RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY,
+    }
 
-    if runtime.context.mode != StrategyRunMode.BACKTEST:
-      return True
-    parameters = dict(getattr(runtime.context, "parameters", {}) or {})
-    return bool(
-      parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
-      and parameters.get("t_trade_replay")
-      and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
-    )
+  @staticmethod
+  def _runtime_state_checkpoint_policy(runtime: StrategyRuntime) -> str:
+    """Return the sole authoritative hot-state persistence policy for a run."""
+
+    if runtime.context.mode == StrategyRunMode.BACKTEST:
+      return RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    if runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
+      return RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY
+    return ""
 
   @staticmethod
   def _requires_startup_runtime_state_checkpoint(runtime: StrategyRuntime) -> bool:
     """Return the modes that must durably checkpoint before their loop starts."""
 
-    return bool(
-      runtime.context.mode in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}
-      or StrategyExecutor._runtime_state_persistence_enabled(runtime)
+    return StrategyExecutor._runtime_state_persistence_enabled(runtime)
+
+  @staticmethod
+  def _checkpoint_status_key(
+    trade_date: date,
+    session: Optional[str],
+  ) -> str:
+    return f"{trade_date.isoformat()}:{session or 'DAY'}"
+
+  @staticmethod
+  def _checkpoint_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+      return value
+    if isinstance(value, str):
+      try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+      except ValueError:
+        return None
+    return None
+
+  @staticmethod
+  def _checkpoint_local_time(value: datetime) -> datetime:
+    return time_utils.to_shanghai(value) if value.tzinfo else value
+
+  def _set_checkpoint_status(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    trade_date: date,
+    session: Optional[str],
+    status: str,
+    reason: str,
+    attempts: Optional[int] = None,
+    **details: Any,
+  ) -> Dict[str, Any]:
+    key = self._checkpoint_status_key(trade_date, session)
+    previous = dict(runtime.checkpoint_status.get(key) or {})
+    record = {
+      "policy": self._runtime_state_checkpoint_policy(runtime),
+      "trade_date": trade_date.isoformat(),
+      "session": session,
+      "status": status,
+      "reason": reason,
+      "attempts": int(
+        attempts if attempts is not None else previous.get("attempts", 0) or 0
+      ),
+      "updated_at": time_utils.now().isoformat(),
+      **details,
+    }
+    if status not in {"COMPLETE", "SKIPPED"}:
+      retry_at = record.get("next_retry_at")
+      if retry_at is None:
+        retry_at = time_utils.now() + timedelta(
+          seconds=_SESSION_CHECKPOINT_RETRY_SECONDS
+        )
+      if isinstance(retry_at, datetime):
+        retry_at = self._checkpoint_local_time(retry_at).isoformat()
+      record["next_retry_at"] = str(retry_at)
+    runtime.checkpoint_status[key] = record
+    return record
+
+  @staticmethod
+  def _runtime_checkpoint_queues_drained(
+    runtime: StrategyRuntime,
+    *,
+    allow_current_market_event: bool = False,
+  ) -> bool:
+    """Return whether no pre-boundary work remains in either runtime queue.
+
+    Virtual-day sealing is invoked before processing the first event of the
+    next day.  Historical replay delivers that acquired event through the
+    serial control queue, while a real-time market event uses the market
+    queue.  It is explicitly outside the prior-day fence; permitting exactly
+    one acquired item avoids assigning it to the wrong day without admitting
+    any additional queued or in-flight work.
+    """
+
+    event_unfinished = int(
+      getattr(runtime.event_queue, "_unfinished_tasks", 0) or 0
     )
+    if (
+      not runtime.event_queue.empty()
+      or not runtime.market_event_queue.empty()
+    ):
+      return False
+    market_unfinished = int(
+      getattr(runtime.market_event_queue, "_unfinished_tasks", 0) or 0
+    )
+    active_market_events = len(runtime._processing_market_events)
+    if allow_current_market_event:
+      return (
+        event_unfinished + market_unfinished <= 1
+        and active_market_events <= 1
+      )
+    return (
+      event_unfinished == 0
+      and market_unfinished == 0
+      and active_market_events == 0
+    )
+
+  @staticmethod
+  def _checkpoint_source_time_ms(value: Any) -> int:
+    if isinstance(value, datetime):
+      return int(value.timestamp() * 1000)
+    try:
+      return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+      return 0
+
+  def _whole_quote_checkpoint_fence(
+    self,
+    *,
+    boundary_source_time: datetime,
+  ) -> tuple[Optional[Dict[str, Any]], str]:
+    """Read a global, ready WholeQuoteHub fence; never infer one from a clock."""
+
+    try:
+      snapshot = dict(whole_quote_hub.status_snapshot() or {})
+    except Exception as exc:
+      return None, f"WHOLE_QUOTE_FENCE_UNAVAILABLE:{exc.__class__.__name__}"
+    if str(snapshot.get("status") or "").upper() != "READY":
+      return None, "WHOLE_QUOTE_NOT_READY"
+    stream_id = str(snapshot.get("stream_id") or "").strip()
+    try:
+      generation = int(snapshot.get("generation") or 0)
+      sequence = int(snapshot.get("sequence") or 0)
+      queue_depth = int(snapshot.get("queue_depth") or 0)
+      lagging_consumers = int(snapshot.get("lagging_consumers") or 0)
+    except (TypeError, ValueError, OverflowError):
+      return None, "WHOLE_QUOTE_INVALID_FENCE"
+    captured_at = self._checkpoint_datetime(snapshot.get("captured_at"))
+    if not stream_id or generation <= 0 or sequence <= 0 or captured_at is None:
+      return None, "WHOLE_QUOTE_INCOMPLETE_FENCE"
+    captured_local = self._checkpoint_local_time(captured_at)
+    boundary_local = self._checkpoint_local_time(boundary_source_time)
+    if captured_local < boundary_local:
+      return None, "WHOLE_QUOTE_FENCE_BEFORE_BOUNDARY"
+    if queue_depth != 0:
+      return None, "WHOLE_QUOTE_QUEUE_NOT_DRAINED"
+    if lagging_consumers != 0:
+      return None, "WHOLE_QUOTE_CONSUMER_LAGGING"
+    return {
+      "stream_id": stream_id,
+      "generation": generation,
+      "sequence": sequence,
+      "source_time_ms": self._checkpoint_source_time_ms(captured_at),
+      "captured_at": captured_at.isoformat(),
+      "queue_depth": queue_depth,
+      "lagging_consumers": lagging_consumers,
+    }, ""
+
+  def _record_processed_market_watermark(
+    self,
+    runtime: StrategyRuntime,
+    event: Any,
+    *,
+    instrument_code: str,
+  ) -> None:
+    """Advance only after a serial consumer has fully processed a market event."""
+
+    code = str(instrument_code or "").strip().upper()
+    stream_id = str(self._get_value(event, "market_stream_id") or "").strip()
+    generation = self._safe_non_negative_int(
+      self._get_value(event, "continuity_generation"),
+      default=0,
+    )
+    sequence = self._safe_non_negative_int(
+      self._get_value(event, "market_stream_sequence"),
+      default=0,
+    )
+    event_time = self._get_value(event, "time")
+    source_time_ms = self._safe_non_negative_int(
+      self._get_value(event, "source_time_ms"),
+      default=self._checkpoint_source_time_ms(event_time),
+    )
+    if not stream_id or generation <= 0 or sequence <= 0:
+      return
+    current = dict(runtime._checkpoint_processed_watermark or {})
+    same_lineage = (
+      current.get("stream_id") == stream_id
+      and int(current.get("generation") or 0) == generation
+    )
+    if not same_lineage or sequence >= int(current.get("sequence") or 0):
+      runtime._checkpoint_processed_watermark = {
+        "stream_id": stream_id,
+        "generation": generation,
+        "sequence": sequence,
+        "source_time_ms": source_time_ms,
+      }
+    if code:
+      runtime._checkpoint_instrument_watermarks[code] = {
+        "stream_id": stream_id,
+        "generation": generation,
+        "sequence": sequence,
+        "source_time_ms": source_time_ms,
+      }
+
+  def _record_backtest_market_watermark(
+    self,
+    runtime: StrategyRuntime,
+    event: Any,
+    *,
+    instrument_code: str,
+  ) -> None:
+    timestamp = self._get_value(event, "time")
+    if not isinstance(timestamp, datetime):
+      return
+    local_time = self._checkpoint_local_time(timestamp)
+    runtime._checkpoint_virtual_sequence += 1
+    runtime._checkpoint_virtual_trade_date = local_time.date()
+    runtime._checkpoint_processed_watermark = {
+      "stream_id": f"backtest:{runtime.run_id}",
+      "generation": 1,
+      "sequence": runtime._checkpoint_virtual_sequence,
+      "source_time_ms": self._checkpoint_source_time_ms(timestamp),
+    }
+    code = str(instrument_code or "").strip().upper()
+    if code:
+      runtime._checkpoint_instrument_watermarks[code] = dict(
+        runtime._checkpoint_processed_watermark
+      )
+
+  def _freeze_checkpoint_diagnostic_segments(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    instrument_codes: Iterable[str],
+    boundary_event_key: str,
+    boundary_kind: str,
+  ) -> None:
+    """Close active diagnostic aggregates before a MATERIAL/action boundary.
+
+    A hot diagnostic aggregate represents a contiguous source-time segment.
+    It must not absorb a later diagnostic after a pure MATERIAL transition or
+    an immediately durable action.  The frozen event keeps its original
+    identity; only its in-memory map key changes, so the explicit checkpoint
+    still hands one idempotent event to the durable outbox.
+    """
+
+    normalized_codes = {
+      str(code or "").strip().upper()
+      for code in instrument_codes
+      if str(code or "").strip()
+    }
+    summaries = runtime._checkpoint_diagnostic_summaries
+    if normalized_codes:
+      candidate_keys = [code for code in normalized_codes if code in summaries]
+    else:
+      # A non-evaluation action without an instrument binding is unusual, but
+      # it still cannot leave an open aggregate spanning its source-time
+      # boundary.  Freeze every currently-open diagnostic rather than silently
+      # coalescing across the fact.
+      candidate_keys = [
+        key
+        for key, event in summaries.items()
+        if not key.startswith(("MATERIAL:", "DIAGNOSTIC:"))
+        and str(event.get("record_kind") or "").upper()
+        == "COALESCED_DIAGNOSTIC"
+      ]
+
+    normalized_boundary_key = str(boundary_event_key or "").strip()
+    if not normalized_boundary_key:
+      raise RuntimeError("做 T 诊断分段缺少稳定边界键")
+    for key in candidate_keys:
+      current = summaries.get(key)
+      if current is None:
+        continue
+      if str(current.get("record_kind") or "").upper() != "COALESCED_DIAGNOSTIC":
+        continue
+      event_key = str(current.get("event_key") or "").strip()
+      if not event_key:
+        raise RuntimeError("做 T 诊断分段缺少稳定 event_key")
+      frozen_key = f"DIAGNOSTIC:{event_key}"
+      frozen = dict(current)
+      frozen["checkpoint_segment_closed_by_event_key"] = normalized_boundary_key
+      frozen["checkpoint_segment_boundary"] = str(boundary_kind or "MATERIAL")
+      existing = summaries.get(frozen_key)
+      if existing is not None and existing != frozen:
+        raise RuntimeError("做 T 诊断分段 event_key 冲突")
+      summaries.pop(key, None)
+      summaries.setdefault(frozen_key, frozen)
+
+  def _defer_checkpoint_diagnostics(
+    self,
+    runtime: StrategyRuntime,
+    events: Iterable[Mapping[str, Any]],
+  ) -> None:
+    """Keep deferred evaluations in memory until their explicit boundary.
+
+    Coalesced diagnostics retain one aggregate per instrument.  A pure
+    MATERIAL state transition is not interchangeable with a heartbeat, so it
+    retains its stable event key separately and is never silently collapsed.
+    The shared manager outbox has an 8192-item daily safety limit; matching it here
+    fails closed before a later PREPARED handoff could overflow.
+    """
+
+    for raw_event in events:
+      event = dict(raw_event)
+      code = str(event.get("instrument_code") or "").strip().upper()
+      event_key = str(event.get("event_key") or "").strip()
+      if not code and not event_key:
+        raise RuntimeError("做 T 诊断事件缺少证券代码或稳定键")
+      if str(event.get("record_kind") or "").upper() == "MATERIAL":
+        if not event_key:
+          raise RuntimeError("做 T MATERIAL 状态评估缺少稳定 event_key")
+        # A pure MATERIAL evaluation is source-order significant.  Freeze the
+        # preceding aggregate for this instrument before retaining the
+        # MATERIAL separately; diagnostics after it will open a new segment.
+        self._freeze_checkpoint_diagnostic_segments(
+          runtime,
+          instrument_codes=[code],
+          boundary_event_key=event_key,
+          boundary_kind="MATERIAL",
+        )
+        key = f"MATERIAL:{event_key}"
+        previous = runtime._checkpoint_diagnostic_summaries.get(key)
+        if previous is not None and previous != event:
+          raise RuntimeError("做 T MATERIAL 状态评估 event_key 冲突")
+        runtime._checkpoint_diagnostic_summaries.setdefault(key, event)
+        continue
+      key = code or event_key
+      previous = runtime._checkpoint_diagnostic_summaries.get(key)
+      try:
+        count = int(event.get("coalesced_count") or 1)
+      except (TypeError, ValueError, OverflowError):
+        count = 1
+      if previous is not None:
+        count += int(previous.get("checkpoint_coalesced_count") or 0)
+        event["checkpoint_window_started_at_ms"] = previous.get(
+          "checkpoint_window_started_at_ms",
+          previous.get("window_started_at_ms"),
+        )
+      else:
+        event["checkpoint_window_started_at_ms"] = event.get(
+          "window_started_at_ms",
+          event.get("evaluated_at_ms"),
+        )
+      event["checkpoint_window_ended_at_ms"] = event.get("evaluated_at_ms")
+      event["checkpoint_coalesced_count"] = max(1, count)
+      event["coalesced_count"] = max(1, count)
+      runtime._checkpoint_diagnostic_summaries[key] = event
+    if (
+      len(runtime._checkpoint_diagnostic_summaries)
+      > _CHECKPOINT_EVALUATION_OUTBOX_MAX_EVENTS
+    ):
+      raise RuntimeError("做 T 诊断内存汇总超过安全标的上限")
+
+  async def _flush_checkpoint_diagnostic_summaries(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    captured_events: Mapping[str, Mapping[str, Any]],
+  ) -> set[str]:
+    """Materialize exactly the summaries captured by the preceding seal."""
+
+    if not captured_events:
+      return set()
+    account_id = str(runtime.context.parameters.get("account_id") or "").strip()
+    if not account_id:
+      raise RuntimeError("做 T 诊断批量缺少唯一证券账户绑定")
+    events = self._ordered_t_trade_diagnostic_events(captured_events.values())
+    materialized = await self._materialize_t_trade_checkpoint_batch_with_retry(
+      events=events,
+      account_id=account_id,
+      strategy_run_id=runtime.run_id,
+    )
+    flush_with_receipt = getattr(
+      self.opportunity_runtime_service,
+      "flush_diagnostics_with_receipt",
+      None,
+    )
+    if not callable(flush_with_receipt):
+      raise RuntimeError("做 T 诊断批量缺少终态 receipt 边界")
+    receipt = await flush_with_receipt(
+      account_id=account_id,
+      strategy_run_id=runtime.run_id,
+    )
+    expected = set(captured_events)
+    receipt_keys = {
+      str(item or "").strip()
+      for item in getattr(receipt, "persisted_event_keys", ())
+      if str(item or "").strip()
+    }
+    confirmed = expected & (set(materialized) | receipt_keys)
+    if confirmed != expected:
+      raise RuntimeError("做 T 诊断批量 receipt 未覆盖当前检查点摘要")
+    return confirmed
+
+  def _capture_checkpoint_diagnostic_summaries(
+    self,
+    runtime: StrategyRuntime,
+  ) -> Dict[str, Dict[str, Any]]:
+    """Capture bounded hot summaries; the manager stages them atomically.
+
+    ``prepare_checkpoint`` owns the only durable outbox mutation.  Keeping
+    this method pure is important: a failed PREPARED CAS must not leave an
+    executor-side enqueue that no immutable checkpoint owns.
+    """
+
+    captured: Dict[str, Dict[str, Any]] = {}
+    for summary in runtime._checkpoint_diagnostic_summaries.values():
+      event = dict(summary)
+      event_key = str(event.get("event_key") or "").strip()
+      if not event_key:
+        raise RuntimeError("做 T 诊断检查点摘要缺少稳定 event_key")
+      existing = captured.get(event_key)
+      if existing is not None and existing != event:
+        raise RuntimeError("做 T 诊断检查点摘要 event_key 冲突")
+      captured.setdefault(event_key, event)
+    return captured
+
+  async def _finalize_prepared_runtime_checkpoint(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    prepared: Any,
+    trade_date: date,
+    session: Optional[str],
+    attempts: int,
+  ) -> bool:
+    """Materialize one immutable PREPARED outbox then atomically finalize it."""
+
+    manager = runtime.state_manager
+    checkpoint_id = str(getattr(prepared, "checkpoint_id", "") or "").strip()
+    completeness = dict(getattr(prepared, "completeness", {}) or {})
+    expected_keys = {
+      str(key or "").strip()
+      for key in completeness.get("materialization_event_keys", ())
+      if str(key or "").strip()
+    }
+    pending_loader = getattr(manager, "pending_t_trade_diagnostic_events", None)
+    finalize = getattr(manager, "finalize_prepared_checkpoint", None)
+    if not checkpoint_id or not callable(pending_loader) or not callable(finalize):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="PREPARED_CHECKPOINT_PROTOCOL_UNAVAILABLE",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+      )
+      return False
+    try:
+      pending_by_key = {
+        str(event.get("event_key") or "").strip(): dict(event)
+        for event in list(pending_loader() or [])
+        if str(event.get("event_key") or "").strip()
+      }
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason=f"PREPARED_OUTBOX_INSPECTION_FAILED:{exc.__class__.__name__}",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+      )
+      return False
+    if not expected_keys.issubset(pending_by_key):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="PREPARED_OUTBOX_MISSING",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+        expected_event_keys=sorted(expected_keys),
+      )
+      return False
+    captured_events = {
+      key: pending_by_key[key] for key in sorted(expected_keys)
+    }
+    try:
+      confirmed_keys = await self._flush_checkpoint_diagnostic_summaries(
+        runtime,
+        captured_events=captured_events,
+      )
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="PREPARED",
+        reason="DIAGNOSTIC_MATERIALIZATION_BLOCKED",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+        diagnostic_error=exc.__class__.__name__,
+      )
+      return False
+    if set(confirmed_keys) != expected_keys:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="PREPARED",
+        reason="DIAGNOSTIC_RECEIPT_MISMATCH",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+        expected_event_keys=sorted(expected_keys),
+        confirmed_event_keys=sorted(confirmed_keys),
+      )
+      return False
+    try:
+      finalized = finalize(
+        prepared_checkpoint_id=checkpoint_id,
+        materialization_event_keys=sorted(expected_keys),
+      )
+      if inspect.isawaitable(finalized):
+        finalized = await finalized
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="PREPARED",
+        reason=f"PREPARED_FINALIZE_FAILED:{exc.__class__.__name__}",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+      )
+      return False
+    if finalized is None:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="PREPARED",
+        reason="PREPARED_FINALIZE_REJECTED",
+        attempts=attempts,
+        prepared_checkpoint_id=checkpoint_id,
+      )
+      return False
+    for summary_key, event in list(runtime._checkpoint_diagnostic_summaries.items()):
+      if str(event.get("event_key") or "").strip() in expected_keys:
+        runtime._checkpoint_diagnostic_summaries.pop(summary_key, None)
+    self._set_checkpoint_status(
+      runtime,
+      trade_date=trade_date,
+      session=session,
+      status="COMPLETE",
+      reason="SEALED",
+      attempts=attempts,
+      checkpoint_id=str(getattr(finalized, "checkpoint_id", "") or ""),
+      processed_watermark=copy.deepcopy(
+        getattr(finalized, "processed_watermark", {}) or {}
+      ),
+    )
+    return True
+
+  async def _seal_runtime_checkpoint(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    trade_date: date,
+    session: Optional[str],
+    boundary_source_time: datetime,
+    processed_watermark: Mapping[str, Any],
+    continuity_generation: str | int,
+    completeness: Mapping[str, Any],
+    force: bool = False,
+    allow_current_market_event: bool = False,
+  ) -> bool:
+    """Run the only legal PREPARED -> materialize -> FINALIZE checkpoint flow."""
+
+    key = self._checkpoint_status_key(trade_date, session)
+    previous = dict(runtime.checkpoint_status.get(key) or {})
+    if previous.get("status") == "COMPLETE":
+      return True
+    attempts = int(previous.get("attempts", 0) or 0)
+    if not force and attempts >= _SESSION_CHECKPOINT_MAX_RETRIES:
+      return False
+    if not self._runtime_checkpoint_queues_drained(
+      runtime,
+      allow_current_market_event=allow_current_market_event,
+    ):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="DELAYED",
+        reason="RUNTIME_QUEUES_NOT_DRAINED",
+        attempts=attempts + 1,
+      )
+      return False
+    manager = runtime.state_manager
+    prepare = getattr(manager, "prepare_checkpoint", None)
+    latest_prepared = getattr(manager, "latest_prepared_checkpoint", None)
+    has_prepared = getattr(manager, "has_prepared_checkpoint", None)
+    if not callable(prepare) or not callable(latest_prepared):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="PREPARED_CHECKPOINT_PROTOCOL_UNAVAILABLE",
+        attempts=attempts + 1,
+      )
+      return False
+    drain = getattr(manager, "drain_strategy_state_changes", None)
+    if callable(drain):
+      try:
+        # Queue proof here must not eagerly clone the complete strategy state.
+        # ``prepare_checkpoint`` performs the single authoritative capture
+        # immediately before its CAS.
+        drained = drain(capture_state=False)
+        if inspect.isawaitable(drained):
+          drained = await drained
+      except Exception as exc:
+        drained = False
+        drain_reason = f"STATE_DRAIN_FAILED:{exc.__class__.__name__}"
+      else:
+        drain_reason = "STATE_DRAIN_REJECTED"
+      if not drained:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="DELAYED",
+          reason=drain_reason,
+          attempts=attempts + 1,
+        )
+        return False
+    if not self._runtime_checkpoint_queues_drained(
+      runtime,
+      allow_current_market_event=allow_current_market_event,
+    ):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="DELAYED",
+        reason="RUNTIME_QUEUES_ARRIVED_DURING_DRAIN",
+        attempts=attempts + 1,
+    )
+      return False
+    complete = dict(completeness)
+    complete["complete"] = bool(complete.get("complete") is True)
+    if not complete["complete"]:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason=str(complete.get("reason") or "COMPLETENESS_UNPROVEN"),
+        attempts=attempts + 1,
+      )
+      return False
+    try:
+      prepared = latest_prepared()
+      if inspect.isawaitable(prepared):
+        prepared = await prepared
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason=f"PREPARED_CHECKPOINT_INSPECTION_FAILED:{exc.__class__.__name__}",
+        attempts=attempts + 1,
+      )
+      return False
+    if prepared is not None:
+      try:
+        prepared_trade_date = date.fromisoformat(
+          str(getattr(prepared, "trade_date", "") or "")
+        )
+      except ValueError:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason="PREPARED_CHECKPOINT_INVALID_TRADE_DATE",
+          attempts=attempts + 1,
+          prepared_checkpoint_id=str(
+            getattr(prepared, "checkpoint_id", "") or ""
+          ),
+        )
+        return False
+      prepared_session = getattr(prepared, "session", None)
+      return await self._finalize_prepared_runtime_checkpoint(
+        runtime,
+        prepared=prepared,
+        trade_date=prepared_trade_date,
+        session=(str(prepared_session) if prepared_session is not None else None),
+        attempts=attempts + 1,
+      )
+    if callable(has_prepared):
+      try:
+        prepared_exists = has_prepared()
+        if inspect.isawaitable(prepared_exists):
+          prepared_exists = await prepared_exists
+      except Exception as exc:
+        prepared_exists = True
+        prepared_reason = f"PREPARED_CHECKPOINT_INSPECTION_FAILED:{exc.__class__.__name__}"
+      else:
+        prepared_reason = "PREPARED_CHECKPOINT_CORRUPT"
+      if prepared_exists:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason=prepared_reason,
+          attempts=attempts + 1,
+        )
+        return False
+    pending_diagnostics = getattr(manager, "pending_t_trade_diagnostic_events", None)
+    if not callable(pending_diagnostics):
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="DIAGNOSTIC_OUTBOX_UNAVAILABLE",
+        attempts=attempts + 1,
+      )
+      return False
+    try:
+      pending_count = len(list(pending_diagnostics() or []))
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason=f"DIAGNOSTIC_OUTBOX_INSPECTION_FAILED:{exc.__class__.__name__}",
+        attempts=attempts + 1,
+      )
+      return False
+    if pending_count:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="ORPHAN_DIAGNOSTIC_OUTBOX",
+        attempts=attempts + 1,
+        durable_diagnostic_count=pending_count,
+      )
+      return False
+    try:
+      captured_events = self._capture_checkpoint_diagnostic_summaries(runtime)
+      prepared = prepare(
+        trade_date=trade_date,
+        session=session,
+        boundary_source_time=boundary_source_time,
+        processed_watermark=dict(processed_watermark),
+        continuity_generation=continuity_generation,
+        completeness=complete,
+        materialization_events=self._ordered_t_trade_diagnostic_events(
+          captured_events.values()
+        ),
+      )
+      if inspect.isawaitable(prepared):
+        prepared = await prepared
+    except Exception as exc:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason=f"CHECKPOINT_PREPARE_FAILED:{exc.__class__.__name__}",
+        attempts=attempts + 1,
+      )
+      return False
+    if prepared is None:
+      self._set_checkpoint_status(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        status="BLOCKED",
+        reason="CHECKPOINT_PREPARE_REJECTED",
+        attempts=attempts + 1,
+      )
+      return False
+    self._set_checkpoint_status(
+      runtime,
+      trade_date=trade_date,
+      session=session,
+      status="PREPARED",
+      reason="PREPARED",
+      attempts=attempts + 1,
+      prepared_checkpoint_id=str(getattr(prepared, "checkpoint_id", "") or ""),
+    )
+    return await self._finalize_prepared_runtime_checkpoint(
+      runtime,
+      prepared=prepared,
+      trade_date=trade_date,
+      session=session,
+      attempts=attempts + 1,
+    )
+
+  async def _maybe_coordinate_session_checkpoints(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    now: Optional[datetime] = None,
+  ) -> None:
+    if self._runtime_state_checkpoint_policy(runtime) != (
+      RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY
+    ):
+      return
+    state_manager = getattr(runtime, "state_manager", None)
+    if state_manager is None or not bool(
+      getattr(state_manager, "persist_enabled", False)
+    ):
+      return
+    current = self._checkpoint_local_time(now or time_utils.now())
+    eligible_specs = [
+      spec
+      for spec in _SESSION_CHECKPOINT_SPECS
+      if current.time() >= spec[2]
+    ]
+    if not eligible_specs:
+      return
+    trade_date = current.date()
+
+    # This runs from the event-loop finally block.  Most ticks after a
+    # completed/temporarily blocked boundary must not touch the trading-day
+    # calendar (which can be a database-backed service).
+    due_specs: list[tuple[str, time, time, Dict[str, Any]]] = []
+    for session, boundary_time, eligible_time in eligible_specs:
+      previous = dict(
+        runtime.checkpoint_status.get(
+          self._checkpoint_status_key(trade_date, session)
+        )
+        or {}
+      )
+      if previous.get("status") in {"COMPLETE", "SKIPPED"}:
+        continue
+      if int(previous.get("attempts", 0) or 0) >= _SESSION_CHECKPOINT_MAX_RETRIES:
+        continue
+      next_retry_at = self._checkpoint_datetime(previous.get("next_retry_at"))
+      if next_retry_at is not None and self._checkpoint_local_time(
+        next_retry_at
+      ) > current:
+        continue
+      due_specs.append((session, boundary_time, eligible_time, previous))
+    if not due_specs:
+      return
+
+    try:
+      trading_date = self._trading_date_helper.is_trading_date("SH", trade_date)
+      if inspect.isawaitable(trading_date):
+        trading_date = await trading_date
+    except Exception as exc:
+      for session, _boundary_time, _eligible_time, previous in due_specs:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason=f"SH_TRADING_CALENDAR_UNAVAILABLE:{exc.__class__.__name__}",
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          next_retry_at=current + timedelta(
+            seconds=_SESSION_CHECKPOINT_RETRY_SECONDS
+          ),
+        )
+      return
+    if not trading_date:
+      for session, _boundary_time, _eligible_time, previous in due_specs:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="SKIPPED",
+          reason="SH_NON_TRADING_DAY",
+          attempts=int(previous.get("attempts", 0) or 0),
+        )
+      return
+
+    for session, boundary_time, _eligible_time, previous in due_specs:
+      boundary = datetime.combine(trade_date, boundary_time)
+      first_fence, reason = self._whole_quote_checkpoint_fence(
+        boundary_source_time=boundary
+      )
+      if first_fence is None:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason=reason,
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+        )
+        continue
+      if not self._runtime_checkpoint_queues_drained(runtime):
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="DELAYED",
+          reason="RUNTIME_QUEUES_NOT_DRAINED",
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          fence=first_fence,
+        )
+        continue
+      drain = getattr(runtime.state_manager, "drain_strategy_state_changes", None)
+      if not callable(drain):
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason="CHECKPOINT_STATE_DRAIN_UNAVAILABLE",
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          fence=first_fence,
+        )
+        continue
+      try:
+        # This pre-fence drain only establishes quiescence.  The subsequent
+        # coordinator prepare captures the full strategy state exactly once.
+        drained = drain(capture_state=False)
+        if inspect.isawaitable(drained):
+          drained = await drained
+      except Exception as exc:
+        drained = False
+        drain_reason = f"STATE_DRAIN_FAILED:{exc.__class__.__name__}"
+      else:
+        drain_reason = "STATE_DRAIN_REJECTED"
+      if not drained or not self._runtime_checkpoint_queues_drained(runtime):
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="DELAYED",
+          reason=(
+            drain_reason
+            if not drained
+            else "RUNTIME_QUEUES_ARRIVED_DURING_DRAIN"
+          ),
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          fence=first_fence,
+        )
+        continue
+      second_fence, reason = self._whole_quote_checkpoint_fence(
+        boundary_source_time=boundary
+      )
+      if second_fence is None:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason=reason,
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          fence=first_fence,
+        )
+        continue
+      if any(
+        first_fence[field] != second_fence[field]
+        for field in ("stream_id", "generation", "sequence")
+      ):
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="DELAYED",
+          reason="WHOLE_QUOTE_FENCE_CHANGED_DURING_DRAIN",
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          first_fence=first_fence,
+          second_fence=second_fence,
+        )
+        continue
+      continuity_ok = not (
+        runtime._pending_market_invalidations
+        or runtime._active_market_continuity_losses
+        or runtime._market_fail_closed_codes
+        or runtime._processing_market_events
+      )
+      if not continuity_ok or not self._runtime_checkpoint_queues_drained(runtime):
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED" if not continuity_ok else "DELAYED",
+          reason=(
+            "MARKET_CONTINUITY_UNPROVEN"
+            if not continuity_ok
+            else "RUNTIME_QUEUES_ARRIVED_AFTER_FENCE"
+          ),
+          attempts=int(previous.get("attempts", 0) or 0) + 1,
+          fence=second_fence,
+        )
+        continue
+      await self._seal_runtime_checkpoint(
+        runtime,
+        trade_date=trade_date,
+        session=session,
+        boundary_source_time=boundary,
+        # The global, drained WholeQuoteHub fence is the completion watermark.
+        # Per-instrument watermarks remain audit information only.
+        processed_watermark=second_fence,
+        continuity_generation=(
+          f"{second_fence['stream_id']}:{second_fence['generation']}"
+        ),
+        completeness={
+          "complete": True,
+          "event_queue_drained": True,
+          "market_queue_drained": True,
+          "whole_quote_fence": second_fence,
+          "instrument_watermarks_audit": dict(
+            runtime._checkpoint_instrument_watermarks
+          ),
+        },
+      )
+
+  async def _coordinate_terminal_session_checkpoint(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    cause: str,
+  ) -> None:
+    """Seal remaining P/L hot diagnostics before terminal state persistence.
+
+    ``TERMINAL`` is deliberately distinct from an official AM/PM boundary.
+    It never invents a WholeQuoteHub fence or wall-clock session completion:
+    the executor proves only that its serial queues are quiesced, market
+    continuity remains intact, and a previously processed stream watermark
+    identifies the final source-time prefix.  The normal PREPARED -> receipt
+    -> FINALIZE protocol then transfers the remaining bounded hot summaries.
+    """
+
+    if self._runtime_state_checkpoint_policy(runtime) != (
+      RUNTIME_STATE_CHECKPOINT_POLICY_SESSION_BOUNDARY
+    ):
+      return
+    if not runtime._checkpoint_diagnostic_summaries:
+      return
+    watermark = dict(runtime._checkpoint_processed_watermark or {})
+    stream_id = str(watermark.get("stream_id") or "").strip()
+    generation = self._safe_non_negative_int(watermark.get("generation"), default=0)
+    sequence = self._safe_non_negative_int(watermark.get("sequence"), default=0)
+    source_time_ms = self._safe_non_negative_int(
+      watermark.get("source_time_ms"),
+      default=0,
+    )
+    if not stream_id or generation <= 0 or sequence <= 0 or source_time_ms <= 0:
+      raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_WATERMARK_UNPROVEN")
+    if not self._runtime_checkpoint_queues_drained(runtime):
+      raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_QUEUES_NOT_DRAINED")
+    continuity_failures = {
+      "pending_invalidations": sorted(runtime._pending_market_invalidations),
+      "active_losses": sorted(runtime._active_market_continuity_losses),
+      "fail_closed": sorted(runtime._market_fail_closed_codes),
+    }
+    if any(continuity_failures.values()):
+      raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_CONTINUITY_UNPROVEN")
+    try:
+      boundary = self._checkpoint_local_time(
+        datetime.fromtimestamp(source_time_ms / 1000.0, tz=timezone.utc)
+      )
+    except (OverflowError, OSError, ValueError) as exc:
+      raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_SOURCE_TIME_INVALID") from exc
+    trade_date = boundary.date()
+    sealed = await self._seal_runtime_checkpoint(
+      runtime,
+      trade_date=trade_date,
+      session="TERMINAL",
+      boundary_source_time=boundary,
+      processed_watermark=watermark,
+      continuity_generation=f"{stream_id}:{generation}",
+      completeness={
+        "complete": True,
+        "terminal": True,
+        "terminal_cause": str(cause or "TERMINAL"),
+        "event_queue_drained": True,
+        "market_queue_drained": True,
+        "continuity_failures": continuity_failures,
+      },
+      force=True,
+    )
+    terminal_key = self._checkpoint_status_key(trade_date, "TERMINAL")
+    terminal_complete = (
+      runtime.checkpoint_status.get(terminal_key, {}).get("status") == "COMPLETE"
+    )
+    # A previously durable PREPARED checkpoint can be finalized first.  If it
+    # contained the exact hot summaries, they are already safe and no terminal
+    # prefix is needed; otherwise refuse to let the later generic stop snapshot
+    # overwrite unsealed diagnostics.
+    if terminal_complete or (sealed and not runtime._checkpoint_diagnostic_summaries):
+      return
+    raise RuntimeError("TERMINAL_SESSION_CHECKPOINT_BLOCKED")
+
+  async def _coordinate_backtest_virtual_day_before_event(
+    self,
+    runtime: StrategyRuntime,
+    timestamp: Any,
+  ) -> None:
+    if self._runtime_state_checkpoint_policy(runtime) != (
+      RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    ) or not isinstance(timestamp, datetime):
+      return
+    event_date = self._checkpoint_local_time(timestamp).date()
+    previous_date = runtime._checkpoint_virtual_trade_date
+    if previous_date is None or event_date <= previous_date:
+      return
+    watermark = dict(runtime._checkpoint_processed_watermark or {})
+    sealed = await self._seal_runtime_checkpoint(
+      runtime,
+      trade_date=previous_date,
+      session=None,
+      boundary_source_time=datetime.combine(previous_date, time.max),
+      processed_watermark=watermark,
+      continuity_generation=runtime._checkpoint_virtual_sequence,
+      completeness={
+        "complete": self._runtime_checkpoint_queues_drained(
+          runtime,
+          allow_current_market_event=True,
+        ),
+        "reason": "VIRTUAL_DAY_QUEUE_NOT_DRAINED",
+        "virtual_day_transition_to": event_date.isoformat(),
+      },
+      allow_current_market_event=True,
+    )
+    if not sealed:
+      raise RuntimeError("BACKTEST_VIRTUAL_DAY_CHECKPOINT_BLOCKED")
+
+  async def _coordinate_backtest_terminal_checkpoint(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    cause: str,
+  ) -> None:
+    if self._runtime_state_checkpoint_policy(runtime) != (
+      RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    ):
+      return
+    # A never-started BACKTEST has neither mutable runtime state nor a
+    # manager-owned durable boundary to seal.  Its cancellation must not turn
+    # a harmless lifecycle cleanup into a synthetic failed day checkpoint.
+    if runtime.state_manager is None:
+      return
+    trade_date = runtime._checkpoint_virtual_trade_date
+    if trade_date is None:
+      # There is no virtual business day until a replay market event advances
+      # the serial watermark.  Do not invent one from wall clock during a
+      # start/stop-only BACKTEST lifecycle.
+      return
+    current_time = runtime.context.current_time or datetime.combine(trade_date, time.max)
+    boundary = (
+      current_time
+      if isinstance(current_time, datetime)
+      else datetime.combine(trade_date, time.max)
+    )
+    sealed = await self._seal_runtime_checkpoint(
+      runtime,
+      trade_date=trade_date,
+      session=None,
+      boundary_source_time=boundary,
+      processed_watermark=dict(runtime._checkpoint_processed_watermark or {}),
+      continuity_generation=runtime._checkpoint_virtual_sequence,
+      completeness={
+        "complete": self._runtime_checkpoint_queues_drained(runtime),
+        "reason": f"TERMINAL_QUEUES_NOT_DRAINED:{cause}",
+        "terminal_cause": cause,
+      },
+      force=True,
+    )
+    if not sealed:
+      raise RuntimeError(f"BACKTEST_TERMINAL_CHECKPOINT_BLOCKED:{cause}")
 
   async def start(
     self,
@@ -1008,9 +2512,9 @@ class StrategyExecutor:
       # 创建策略对象
       runtime.strategy = runtime.strategy_class(runtime.context)
 
-      # Ordinary BACKTESTs stay non-durable.  The isolated V3 pressure fixture
-      # explicitly exercises the same state/CAS path as production through a
-      # service-sealed internal marker.
+      # Every run has one durable policy.  BACKTEST is explicitly marked here
+      # even without a Backtest row so RuntimeStateManager can enforce its
+      # day-boundary contract and never start a periodic hot-state writer.
       from quantx_infrastructure.core.runtime_state_manager import (
         RuntimeStateManager,
         RuntimeStateRestoreStatus,
@@ -1022,6 +2526,7 @@ class StrategyExecutor:
         persist_enabled=self._runtime_state_persistence_enabled(runtime),
         log_dir=os.path.join("logs", "strategy", runtime.context.mode.value),
         enable_reserve=enable_reserve,
+        is_backtest=(runtime.context.mode == StrategyRunMode.BACKTEST),
       )
 
       if runtime.context.mode == StrategyRunMode.BACKTEST:
@@ -1060,6 +2565,82 @@ class StrategyExecutor:
       restored_state = restore_result.state
       if restore_result.status == RuntimeStateRestoreStatus.NOT_FOUND:
         self.logger.info("未找到持久化运行状态，按新运行初始化: %s", run_id)
+      latest_prepared = getattr(
+        runtime.state_manager,
+        "latest_prepared_checkpoint",
+        None,
+      )
+      has_prepared = getattr(
+        runtime.state_manager,
+        "has_prepared_checkpoint",
+        None,
+      )
+      if not callable(latest_prepared) or not callable(has_prepared):
+        raise RuntimeError("运行状态管理器缺少 PREPARED 检查点恢复协议")
+      prepared_checkpoint = latest_prepared()
+      if inspect.isawaitable(prepared_checkpoint):
+        prepared_checkpoint = await prepared_checkpoint
+      prepared_exists = has_prepared()
+      if inspect.isawaitable(prepared_exists):
+        prepared_exists = await prepared_exists
+      if prepared_checkpoint is None and prepared_exists:
+        restore_complete = getattr(
+          runtime.state_manager,
+          "restore_latest_complete_checkpoint",
+          None,
+        )
+        if not callable(restore_complete):
+          raise RuntimeError("损坏 PREPARED 检查点缺少完整边界恢复协议")
+        fallback = restore_complete()
+        if inspect.isawaitable(fallback):
+          fallback = await fallback
+        if fallback is None:
+          raise RuntimeError("PREPARED_CHECKPOINT_CORRUPT_NO_COMPLETE_FALLBACK")
+        try:
+          fallback_trade_date = date.fromisoformat(
+            str(getattr(fallback, "trade_date", "") or "")
+          )
+        except ValueError:
+          fallback_trade_date = self._checkpoint_local_time(time_utils.now()).date()
+        fallback_session = getattr(fallback, "session", None)
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=fallback_trade_date,
+          session=(
+            str(fallback_session) if fallback_session is not None else None
+          ),
+          status="BLOCKED",
+          reason="PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED",
+          attempts=1,
+          fallback_checkpoint_id=str(getattr(fallback, "checkpoint_id", "") or ""),
+        )
+        self.logger.warning(
+          "PREPARED 检查点损坏，已恢复最近完整边界供诊断: "
+          "run_id=%s checkpoint_id=%s",
+          run_id,
+          getattr(fallback, "checkpoint_id", ""),
+        )
+        raise RuntimeError(
+          "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
+        )
+      elif prepared_checkpoint is not None:
+        try:
+          prepared_trade_date = date.fromisoformat(
+            str(getattr(prepared_checkpoint, "trade_date", "") or "")
+          )
+        except ValueError as exc:
+          raise RuntimeError("PREPARED_CHECKPOINT_INVALID_TRADE_DATE") from exc
+        prepared_session = getattr(prepared_checkpoint, "session", None)
+        finalized = await self._finalize_prepared_runtime_checkpoint(
+          runtime,
+          prepared=prepared_checkpoint,
+          trade_date=prepared_trade_date,
+          session=(str(prepared_session) if prepared_session is not None else None),
+          attempts=1,
+        )
+        if not finalized:
+          raise RuntimeError("PREPARED_CHECKPOINT_FINALIZATION_BLOCKED")
+        restored_state = copy.deepcopy(runtime.state_manager._state)
       runtime.exit_plan_book = ExitPlanBook.from_dict(
         (restored_state.get("custom") or {}).get(EXIT_PLAN_BOOK_STATE_KEY)
         if restored_state
@@ -2407,21 +3988,35 @@ class StrategyExecutor:
         final_snapshot_ready = False
         self.logger.error("异常终止停止策略失败: %s, %s", runtime.run_id, exc)
       try:
+        await self._coordinate_terminal_session_checkpoint(
+          runtime,
+          cause="ERROR",
+        )
+        await self._coordinate_backtest_terminal_checkpoint(
+          runtime,
+          cause="ERROR",
+        )
+        await self._flush_t_trade_opportunity_diagnostics(runtime)
+      except Exception as exc:
+        cleanup_errors.append("t_trade_opportunity_diagnostics")
+        # Do not release the runtime or let a later generic final snapshot
+        # imply success when a durable diagnostic batch could not cross its
+        # commit -> materialize -> acknowledgement boundary.
+        final_snapshot_ready = False
+        self.logger.error(
+          "异常终止刷新做 T 机会诊断失败: %s, %s",
+          runtime.run_id,
+          exc,
+        )
+      try:
+        # The terminal diagnostic batch needs the sync consumer alive so its
+        # final CAS can include the last strategy state delta.
         if runtime.state_manager:
           await runtime.state_manager.stop_state_sync(runtime.strategy)
       except Exception as exc:
         cleanup_errors.append("state_sync")
         final_snapshot_ready = False
         self.logger.error("异常终止停止状态同步失败: %s, %s", runtime.run_id, exc)
-      try:
-        await self._flush_t_trade_opportunity_diagnostics(runtime)
-      except Exception as exc:
-        cleanup_errors.append("t_trade_opportunity_diagnostics")
-        self.logger.error(
-          "异常终止刷新做 T 机会诊断失败: %s, %s",
-          runtime.run_id,
-          exc,
-        )
       try:
         if runtime.performance_recorder:
           await runtime.performance_recorder.flush()
@@ -2608,11 +4203,20 @@ class StrategyExecutor:
           )
         await runtime.strategy.stop()
 
-      # 停止策略状态同步
+      await self._coordinate_terminal_session_checkpoint(
+        runtime,
+        cause="CANCELLED",
+      )
+      await self._coordinate_backtest_terminal_checkpoint(
+        runtime,
+        cause="CANCELLED",
+      )
+      await self._flush_t_trade_opportunity_diagnostics(runtime)
+
+      # The terminal diagnostic batch must drain the final strategy delta
+      # before the state-sync consumer is stopped.
       if runtime.state_manager:
         await runtime.state_manager.stop_state_sync(runtime.strategy)
-
-      await self._flush_t_trade_opportunity_diagnostics(runtime)
 
       # 更新指标
       if runtime.metrics and runtime.broker:
@@ -2687,23 +4291,36 @@ class StrategyExecutor:
   ) -> None:
     if not self._uses_t_trade_opportunity_runtime(runtime):
       return
+    # This is shared by normal completion, error cleanup, and explicit
+    # cancellation.  It may flush a service-local buffer, but it must never
+    # acknowledge the RuntimeState outbox: only coordinator FINALIZE does
+    # that atomically with the SEALED checkpoint.
     account_id = str(runtime.context.parameters.get("account_id") or "").strip()
     if not account_id:
       return
     errors: list[Exception] = []
-    flush_diagnostics = getattr(
-      self.opportunity_runtime_service,
-      "flush_diagnostics",
-      None,
-    )
-    if callable(flush_diagnostics):
-      try:
-        await flush_diagnostics(
-          account_id=account_id,
-          strategy_run_id=runtime.run_id,
+    if self._runtime_state_checkpoint_policy(runtime) != (
+      RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    ):
+      flush_diagnostics = getattr(
+        self.opportunity_runtime_service,
+        "flush_diagnostics",
+        None,
+      )
+      if not callable(flush_diagnostics):
+        flush_diagnostics = getattr(
+          self.opportunity_runtime_service,
+          "flush_diagnostics_with_receipt",
+          None,
         )
-      except Exception as exc:
-        errors.append(exc)
+      if callable(flush_diagnostics):
+        try:
+          await flush_diagnostics(
+            account_id=account_id,
+            strategy_run_id=runtime.run_id,
+          )
+        except Exception as exc:
+          errors.append(exc)
     flush_notices = getattr(
       self.opportunity_update_service,
       "flush_opportunity_notices",
@@ -3119,6 +4736,7 @@ class StrategyExecutor:
   async def _run_strategy_loop(self, runtime: StrategyRuntime) -> None:
     """策略运行循环"""
     strategy = runtime.strategy
+    strategy_stopped = False
 
     try:
       await self._initialize_backtest_dynamic_universe(runtime)
@@ -3138,6 +4756,41 @@ class StrategyExecutor:
 
       # 如果正常结束且未被停止，标记为完成
       if runtime.status == ExecutionStatus.RUNNING:
+        # A normal terminal mutation belongs inside the final explicit
+        # checkpoint, not in ``finally`` after it.  The DAY_BATCH coordinator
+        # therefore observes the post-stop StrategyState.
+        if strategy:
+          await strategy.stop()
+          strategy_stopped = True
+        if self._runtime_state_checkpoint_policy(runtime) == (
+          RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+        ):
+          if runtime._checkpoint_virtual_trade_date is None:
+            checkpoint = getattr(
+              runtime.state_manager,
+              "checkpoint_strategy_state_changes",
+              None,
+            )
+            if not callable(checkpoint) or not await checkpoint():
+              raise RuntimeError("BACKTEST_TERMINAL_STATE_CHECKPOINT_BLOCKED")
+          else:
+            await self._coordinate_backtest_terminal_checkpoint(
+              runtime,
+              cause="COMPLETED",
+            )
+          await self._flush_t_trade_opportunity_diagnostics(runtime)
+        elif runtime.state_manager:
+          await self._coordinate_terminal_session_checkpoint(
+            runtime,
+            cause="COMPLETED",
+          )
+          checkpoint = getattr(
+            runtime.state_manager,
+            "checkpoint_strategy_state_changes",
+            None,
+          )
+          if not callable(checkpoint) or not await checkpoint():
+            raise RuntimeError("RUNTIME_TERMINAL_STATE_CHECKPOINT_BLOCKED")
         runtime.status = ExecutionStatus.COMPLETED
         self._runtime_log(runtime, "SUCCESS", f"策略运行完成: {runtime.run_id}")
 
@@ -3324,7 +4977,11 @@ class StrategyExecutor:
             self.logger.error(f"绩效采样刷新失败: {e}")
         # Explicit stop owns the final lifecycle ordering: event consumer first,
         # then one strategy stop, state snapshot, and broker disconnect.
-        if strategy and runtime.status != ExecutionStatus.STOPPING:
+        if (
+          strategy
+          and not strategy_stopped
+          and runtime.status != ExecutionStatus.STOPPING
+        ):
           try:
             await strategy.stop()
           except Exception as e:
@@ -4109,12 +5766,12 @@ class StrategyExecutor:
           "INFO",
           f"多标的回测窗口完成: {window_start} -> {window_end}, events={len(events)}",
         )
-        if runtime.status == ExecutionStatus.RUNNING:
-          await self._report_t_trade_replay_progress(
-            runtime,
-            processed_until=window_end,
-            force=True,
-          )
+      if runtime.status == ExecutionStatus.RUNNING:
+        await self._report_t_trade_replay_progress(
+          runtime,
+          processed_until=day_end,
+          force=True,
+        )
     self._runtime_log(
       runtime,
       "SUCCESS",
@@ -5103,11 +6760,6 @@ class StrategyExecutor:
           self._runtime_log(
             runtime, "INFO", f"回测窗口无数据: {instrument_code}, {window_start.date()}"
           )
-          await self._report_t_trade_replay_progress(
-            runtime,
-            processed_until=window_end,
-            force=True,
-          )
           continue
 
         tick_idx = 0
@@ -5213,12 +6865,12 @@ class StrategyExecutor:
           f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
           f"tick={tick_idx}, kline={per_period_summary}",
         )
-        if runtime.status == ExecutionStatus.RUNNING:
-          await self._report_t_trade_replay_progress(
-            runtime,
-            processed_until=window_end,
-            force=True,
-          )
+      if runtime.status == ExecutionStatus.RUNNING:
+        await self._report_t_trade_replay_progress(
+          runtime,
+          processed_until=day_window_end,
+          force=True,
+        )
 
     total_klines = sum(total_klines_by_period.values())
     self._runtime_log(
@@ -5315,11 +6967,6 @@ class StrategyExecutor:
             "INFO",
             f"回测窗口无数据: {instrument_code}, {window_start} -> {window_end}",
           )
-          await self._report_t_trade_replay_progress(
-            runtime,
-            processed_until=window_end,
-            force=True,
-          )
           continue
 
         kline_indices = {period: 0 for period in periods}
@@ -5372,12 +7019,12 @@ class StrategyExecutor:
           f"回测窗口完成: {instrument_code}, {window_start} -> {window_end}, "
           f"kline={per_period_summary}",
         )
-        if runtime.status == ExecutionStatus.RUNNING:
-          await self._report_t_trade_replay_progress(
-            runtime,
-            processed_until=window_end,
-            force=True,
-          )
+      if runtime.status == ExecutionStatus.RUNNING:
+        await self._report_t_trade_replay_progress(
+          runtime,
+          processed_until=day_window_end,
+          force=True,
+        )
 
     total_klines = sum(total_klines_by_period.values())
     self._runtime_log(
@@ -5795,6 +7442,7 @@ class StrategyExecutor:
         completion = None
         next_event = await self._next_runtime_event(runtime)
         if next_event is None:
+          await self._maybe_coordinate_session_checkpoints(runtime)
           continue
         acquired_queue, event_type, data, enqueued_at = next_event
         market_event = acquired_queue is runtime.market_event_queue
@@ -5970,6 +7618,11 @@ class StrategyExecutor:
               == market_processing_context[1]
             ):
               runtime.market_events_processed += 1
+              self._record_processed_market_watermark(
+                runtime,
+                data,
+                instrument_code=market_event_code,
+              )
         elif event_type == "tick":
           await self._process_tick(runtime, data)
           if market_event:
@@ -5984,6 +7637,11 @@ class StrategyExecutor:
               == market_processing_context[1]
             ):
               runtime.market_events_processed += 1
+              self._record_processed_market_watermark(
+                runtime,
+                data,
+                instrument_code=market_event_code,
+              )
         elif event_type == "entry_plan_evaluate":
           await self._process_entry_plan_evaluate(runtime, data)
         elif event_type == "order":
@@ -6289,6 +7947,13 @@ class StrategyExecutor:
             runtime._processing_market_events.pop(code, None)
         if acquired_queue is not None:
           acquired_queue.task_done()
+        try:
+          await self._maybe_coordinate_session_checkpoints(runtime)
+        except Exception:
+          self.logger.exception(
+            "策略会话检查点协调器异常: run_id=%s",
+            runtime.run_id,
+          )
 
   async def apply_durable_order_report(
     self,
@@ -6405,6 +8070,10 @@ class StrategyExecutor:
     metrics = runtime.metrics
 
     try:
+      await self._coordinate_backtest_virtual_day_before_event(
+        runtime,
+        getattr(tick, "time", None),
+      )
       if tick.stock_code not in set(runtime.context.instruments or []):
         self.logger.debug("忽略已移出标的池的迟到 Tick: %s", tick.stock_code)
         return
@@ -6476,6 +8145,12 @@ class StrategyExecutor:
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "tick", tick)
       await self._report_t_trade_replay_progress(runtime)
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        self._record_backtest_market_watermark(
+          runtime,
+          tick,
+          instrument_code=tick.stock_code,
+        )
 
     except Exception as e:
       if metrics:
@@ -6520,6 +8195,10 @@ class StrategyExecutor:
     metrics = runtime.metrics
 
     try:
+      await self._coordinate_backtest_virtual_day_before_event(
+        runtime,
+        getattr(kline, "time", None),
+      )
       if kline.stock_code not in set(runtime.context.instruments or []):
         self.logger.debug("忽略已移出标的池的迟到 K 线: %s", kline.stock_code)
         return
@@ -6580,6 +8259,12 @@ class StrategyExecutor:
       if runtime.performance_recorder:
         await runtime.performance_recorder.record(runtime, "bar", kline)
       await self._report_t_trade_replay_progress(runtime)
+      if runtime.context.mode == StrategyRunMode.BACKTEST:
+        self._record_backtest_market_watermark(
+          runtime,
+          kline,
+          instrument_code=kline.stock_code,
+        )
 
     except Exception as e:
       if metrics:
@@ -6595,7 +8280,14 @@ class StrategyExecutor:
     processed_until: Optional[datetime] = None,
     force: bool = False,
   ) -> None:
-    """Persist monotonic replay progress at wall-time or window boundaries."""
+    """Persist replay progress only at explicit virtual-day boundaries."""
+
+    is_backtest = runtime.context.mode == StrategyRunMode.BACKTEST
+    if is_backtest and not force:
+      # Tick/Kline calls retain their in-memory replay progress but must not
+      # create a projection write. The owning day runner emits the one force
+      # call after every virtual trading day instead.
+      return
     parameters = dict(runtime.context.parameters or {})
     current_time = processed_until or runtime.context.current_time
     start_time = runtime.context.backtest_start_time
@@ -6613,9 +8305,15 @@ class StrategyExecutor:
     )
     start_time = time_utils.to_shanghai(start_time) if start_time.tzinfo else start_time
     end_time = time_utils.to_shanghai(end_time) if end_time.tzinfo else end_time
-    now = monotonic()
-    if not force and now - runtime._last_replay_projection_at < 1.0:
-      return
+    projection_trade_date = current_time.date().isoformat()
+    now = 0.0
+    if is_backtest:
+      if runtime._last_t_trade_replay_projection_trade_date == projection_trade_date:
+        return
+    else:
+      now = monotonic()
+      if not force and now - runtime._last_replay_projection_at < 1.0:
+        return
     progress_pct = max(
       0.0,
       min(
@@ -6639,11 +8337,14 @@ class StrategyExecutor:
         processed_until=current_time,
         kind=TTradeReplayUpdateKind.PROGRESS,
       )
-      runtime._last_replay_projection_at = now
       runtime._last_replay_progress_pct = max(
         runtime._last_replay_progress_pct,
         progress_pct,
       )
+      if is_backtest:
+        runtime._last_t_trade_replay_projection_trade_date = projection_trade_date
+      else:
+        runtime._last_replay_projection_at = now
     except Exception:
       self.logger.exception("更新做 T 回放进度投影失败: %s", runtime.run_id)
 
@@ -6744,15 +8445,22 @@ class StrategyExecutor:
     code = str(instrument_code or "").strip().upper()
     source_evaluated_at = time_utils.to_shanghai(evaluated_at)
     trade_date = source_evaluated_at.date().isoformat()
-    profile_lookup_clock = source_evaluated_at.timestamp()
     cache_key = (code, trade_date)
+    is_backtest = runtime.context.mode == StrategyRunMode.BACKTEST
+    retry_policy = (
+      "本交易日固定失败关闭，不重试"
+      if is_backtest
+      else "短暂保守门禁并定时重试"
+    )
     if cache_key in runtime._t_trade_opportunity_profiles:
       cached = runtime._t_trade_opportunity_profiles[cache_key]
+      if is_backtest or cached is not None:
+        return
       retry_after = runtime._t_trade_opportunity_profile_retry_after.get(
         cache_key,
         0.0,
       )
-      if cached is not None or profile_lookup_clock < retry_after:
+      if monotonic() < retry_after:
         return
 
     required_version = (
@@ -6781,9 +8489,12 @@ class StrategyExecutor:
         copy.deepcopy(profile) if profile is not None else None
       )
       if profile is None:
-        runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
-          profile_lookup_clock + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
-        )
+        if is_backtest:
+          runtime._t_trade_opportunity_profile_retry_after.pop(cache_key, None)
+        else:
+          runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
+            monotonic() + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
+          )
       else:
         runtime._t_trade_opportunity_profile_retry_after.pop(cache_key, None)
       if profile_result.reason is D1ProfileReadReason.READ_FAILED:
@@ -6793,7 +8504,7 @@ class StrategyExecutor:
         self._runtime_log(
           runtime,
           "ERROR",
-          "做 T 标的画像读取失败，短暂保守门禁并定时重试: "
+          f"做 T 标的画像读取失败，{retry_policy}: "
           f"instrument={code} trade_date={trade_date} "
           f"error={profile_result.error_type or profile_result.reason.value}",
         )
@@ -6806,14 +8517,17 @@ class StrategyExecutor:
       # Storage unavailability is not permission to reuse yesterday's cached
       # value. The strategy receives None and therefore remains INSUFFICIENT.
       runtime._t_trade_opportunity_profiles[cache_key] = None
-      runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
-        profile_lookup_clock + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
-      )
+      if is_backtest:
+        runtime._t_trade_opportunity_profile_retry_after.pop(cache_key, None)
+      else:
+        runtime._t_trade_opportunity_profile_retry_after[cache_key] = (
+          monotonic() + _T_TRADE_PROFILE_LOOKUP_RETRY_SECONDS
+        )
       runtime._t_trade_opportunity_profile_errors[cache_key] = "PROFILE_LOOKUP_FAILED"
       self._runtime_log(
         runtime,
         "ERROR",
-        "做 T 标的画像读取失败，短暂保守门禁并定时重试: "
+        f"做 T 标的画像读取失败，{retry_policy}: "
         f"instrument={code} trade_date={trade_date} error={exc}",
       )
 
@@ -7582,6 +9296,43 @@ class StrategyExecutor:
       )
       return
     intents = output.trade_intents or []
+    if runtime._checkpoint_diagnostic_summaries and (
+      intents or output.runtime_state_patch or output.exit_plan_commands
+    ):
+      # Immediate facts are allowed to cross a hot diagnostic window.  Keep
+      # the earlier diagnostics deferred, but close their aggregates so a
+      # later diagnostic cannot be merged across the durable action.
+      source_time_ms = (
+        int(input_snapshot.market_data_context.source_time_ms)
+        if input_snapshot is not None
+        else 0
+      )
+      instrument_codes = [
+        str(intent.instrument_code or "").strip().upper() for intent in intents
+      ]
+      if input_snapshot is not None:
+        instrument_codes.append(
+          str(input_snapshot.instrument_code or "").strip().upper()
+        )
+      boundary_key = next(
+        (
+          f"INTENT:{intent.intent_id}"
+          for intent in intents
+          if str(intent.intent_id or "").strip()
+        ),
+        "",
+      )
+      if not boundary_key:
+        boundary_key = (
+          f"NON_EVALUATION:{source_time_ms}:"
+          f"{','.join(sorted(code for code in instrument_codes if code))}"
+        )
+      self._freeze_checkpoint_diagnostic_segments(
+        runtime,
+        instrument_codes=instrument_codes,
+        boundary_event_key=boundary_key,
+        boundary_kind="IMMEDIATE_ACTION",
+      )
     if not self._accepts_non_durable_output(runtime):
       self._runtime_log(
         runtime,
@@ -7788,6 +9539,136 @@ class StrategyExecutor:
         await asyncio.sleep(0.05 * (2 ** (attempt - 1)))
     raise RuntimeError("unreachable T-trade evaluation materialization retry state")
 
+  @staticmethod
+  def _uses_deferred_diagnostic_checkpointing(
+    runtime: StrategyRuntime,
+  ) -> bool:
+    return bool(
+      runtime.context.mode
+      in {StrategyRunMode.BACKTEST, StrategyRunMode.PAPER, StrategyRunMode.LIVE}
+      and runtime.state_manager is not None
+      and getattr(runtime.state_manager, "persist_enabled", False)
+    )
+
+  @classmethod
+  def _is_deferred_checkpoint_evaluation_output(
+    cls,
+    runtime: StrategyRuntime,
+    output: StrategyOutput,
+    *,
+    intents: List[TradeIntent],
+    opportunity_events: List[Dict[str, Any]],
+  ) -> bool:
+    """Return whether an evaluation has no immediate business consequence."""
+
+    return bool(
+      cls._uses_deferred_diagnostic_checkpointing(runtime)
+      and not intents
+      and not output.exit_plan_commands
+      and opportunity_events
+      and all(
+        str(event.get("record_kind") or "").upper()
+        in {"COALESCED_DIAGNOSTIC", "MATERIAL"}
+        for event in opportunity_events
+      )
+    )
+
+  @staticmethod
+  def _has_immediate_actionable_t_trade_output(
+    output: StrategyOutput,
+    *,
+    intents: List[TradeIntent],
+  ) -> bool:
+    """Identify the narrow P/L MATERIAL recovery boundary.
+
+    A MATERIAL evaluation alone is a state-transition audit and is transferred
+    only by the explicit day/session coordinator.  The legacy MATERIAL outbox
+    remains solely for an output that can immediately expose a candidate,
+    TradeIntent, or exit command in PAPER/LIVE.
+    """
+
+    return bool(intents or output.exit_plan_commands)
+
+  @staticmethod
+  def _ordered_t_trade_diagnostic_events(
+    events: Iterable[Mapping[str, Any]],
+  ) -> list[Dict[str, Any]]:
+    """Recover a deterministic source-time order from a durable outbox."""
+
+    def _int(value: Any) -> int:
+      try:
+        return int(value)
+      except (TypeError, ValueError, OverflowError):
+        return 0
+
+    def _key(event: Mapping[str, Any]) -> tuple[int, int, int, str]:
+      snapshot = event.get("signal_snapshot")
+      data = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+      return (
+        _int(event.get("evaluated_at_ms")),
+        _int(data.get("source_time_ms")),
+        _int(data.get("tick_ordinal")),
+        str(event.get("event_key") or ""),
+      )
+
+    return [dict(event) for event in sorted(events, key=_key)]
+
+  async def _materialize_t_trade_checkpoint_batch_with_retry(
+    self,
+    *,
+    events: List[Dict[str, Any]],
+    account_id: str,
+    strategy_run_id: str,
+  ) -> frozenset[str]:
+    """Append one committed diagnostic/pure-MATERIAL checkpoint batch."""
+
+    if not events:
+      return frozenset()
+    labels = self._t_trade_observability_labels(events)
+    requests = [
+      PostCasEvaluationInput(
+        event=event,
+        account_id=account_id,
+        strategy_run_id=strategy_run_id,
+        cas_committed=True,
+      )
+      for event in events
+    ]
+    maximum_attempts = 3
+    for attempt in range(1, maximum_attempts + 1):
+      try:
+        persisted_event_keys = await (
+          self._evaluation_materializer.execute_checkpoint_batch(requests)
+        )
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_attempts_total",
+          detail="BATCH_SUCCESS",
+          **labels,
+        )
+        return frozenset(persisted_event_keys)
+      except Exception as exc:
+        classification_error = (
+          exc.cause
+          if isinstance(exc, EvaluationMaterializationError)
+          else exc
+        )
+        transient = self._is_transient_evaluation_materialization_error(
+          classification_error
+        )
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_attempts_total",
+          detail=("BATCH_TRANSIENT_FAILURE" if transient else "BATCH_PERMANENT_FAILURE"),
+          **labels,
+        )
+        if not transient or attempt >= maximum_attempts:
+          raise classification_error
+        self.opportunity_observability.record_operation(
+          "evaluation_materialization_retries_total",
+          detail=f"BATCH_RETRY_{attempt}",
+          **labels,
+        )
+        await asyncio.sleep(0.05 * (2 ** (attempt - 1)))
+
   async def _seed_t_trade_candidate_outcome(
     self,
     runtime: StrategyRuntime,
@@ -7825,11 +9706,13 @@ class StrategyExecutor:
         raise
       return False
 
-  async def _acknowledge_t_trade_material_events(
+  async def _acknowledge_t_trade_actionable_material_events(
     self,
     runtime: StrategyRuntime,
     events: List[Mapping[str, Any]],
   ) -> None:
+    """Ack only PAPER/LIVE actionable MATERIAL recovery records."""
+
     if runtime.context.mode not in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
       return
     keys = [
@@ -7878,10 +9761,12 @@ class StrategyExecutor:
       raise RuntimeError("V3 做 T MATERIAL outbox 确认保存异常")
     raise RuntimeError("V3 做 T MATERIAL outbox 确认保存失败")
 
-  async def _replay_pending_t_trade_material_events(
+  async def _replay_pending_actionable_t_trade_material_events(
     self,
     runtime: StrategyRuntime,
   ) -> None:
+    """Recover the narrow P/L actionable-MATERIAL outbox after a restart."""
+
     if runtime.context.mode not in {StrategyRunMode.PAPER, StrategyRunMode.LIVE}:
       return
     pending_loader = getattr(
@@ -7916,7 +9801,7 @@ class StrategyExecutor:
       if not seeded:
         raise RuntimeError("V3 做 T MATERIAL outbox 候选结果初始化失败")
       acknowledged.append(event)
-    await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+    await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
 
   @staticmethod
   def _initialize_t_trade_phase_one_baseline(runtime: StrategyRuntime) -> None:
@@ -8733,31 +10618,74 @@ class StrategyExecutor:
         message="做 T 机会状态持久化边界不可用",
       )
       return
-    try:
-      await self._replay_pending_t_trade_material_events(runtime)
-    except Exception as exc:
-      cas_conflict = (
-        str(
-          getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
-        )
-        == "CAS_CONFLICT"
-      )
-      if cas_conflict:
-        runtime.status = ExecutionStatus.ERROR
-        runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
-      self._reject_t_trade_opportunity_output(
-        runtime,
-        instrument_code=instrument_code,
-        source_time_ms=source_time_ms,
+    deferred_diagnostic_batch = self._is_deferred_checkpoint_evaluation_output(
+      runtime,
+      output,
+      intents=intents,
+      opportunity_events=opportunity_events,
+    )
+    immediate_actionable_material = bool(
+      not deferred_diagnostic_batch
+      and self._has_immediate_actionable_t_trade_output(
+        output,
         intents=intents,
-        code=(
-          "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
-          if cas_conflict
-          else "T_TRADE_MATERIAL_OUTBOX_REPLAY_FAILED"
-        ),
-        message=f"做 T 待补审计事件尚未收敛: {exc}",
       )
-      return
+    )
+    if immediate_actionable_material and runtime._checkpoint_diagnostic_summaries:
+      # The actionable candidate/intent is durable immediately.  Its prior
+      # ordinary diagnostics remain hot until their official session/day seal,
+      # but must be frozen as an earlier segment so later diagnostics cannot
+      # collapse across this durable fact.
+      boundary_event_key = next(
+        (
+          str(event.get("event_key") or "").strip()
+          for event in opportunity_events
+          if str(event.get("record_kind") or "").upper() == "MATERIAL"
+          and str(event.get("event_key") or "").strip()
+        ),
+        "",
+      )
+      if not boundary_event_key:
+        boundary_event_key = next(
+          (
+            f"INTENT:{intent.intent_id}"
+            for intent in intents
+            if str(intent.intent_id or "").strip()
+          ),
+          f"ACTION:{instrument_code}:{source_time_ms}",
+        )
+      self._freeze_checkpoint_diagnostic_segments(
+        runtime,
+        instrument_codes=[instrument_code],
+        boundary_event_key=boundary_event_key,
+        boundary_kind="IMMEDIATE_ACTION",
+      )
+    if immediate_actionable_material:
+      try:
+        await self._replay_pending_actionable_t_trade_material_events(runtime)
+      except Exception as exc:
+        cas_conflict = (
+          str(
+            getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
+          )
+          == "CAS_CONFLICT"
+        )
+        if cas_conflict:
+          runtime.status = ExecutionStatus.ERROR
+          runtime.error_message = "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+        self._reject_t_trade_opportunity_output(
+          runtime,
+          instrument_code=instrument_code,
+          source_time_ms=source_time_ms,
+          intents=intents,
+          code=(
+            "T_TRADE_RUNTIME_STATE_CAS_CONFLICT"
+            if cas_conflict
+            else "T_TRADE_MATERIAL_OUTBOX_REPLAY_FAILED"
+          ),
+          message=f"做 T 待补审计事件尚未收敛: {exc}",
+        )
+        return
     reconciliation_failure = self._runtime_state_reconciliation_failure(runtime)
     if reconciliation_failure is not None and intents:
       self._reject_t_trade_opportunity_output(
@@ -8805,7 +10733,11 @@ class StrategyExecutor:
     checkpoint_failure_recorded = False
     try:
       if output.runtime_state_patch:
-        self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
+        self._apply_runtime_state_patch(
+          runtime,
+          output.runtime_state_patch,
+          stage_actionable_material_events=immediate_actionable_material,
+        )
       if output.exit_plan_commands:
         for command in output.exit_plan_commands:
           runtime.exit_plan_book.apply_command(command)
@@ -8816,6 +10748,24 @@ class StrategyExecutor:
       # commit-unknown snapshot, so it cannot be dropped merely to reduce
       # pressure-run database fan-out.
       self._record_strategy_output_trace(runtime, output, input_snapshot)
+      if deferred_diagnostic_batch:
+        drain = getattr(
+          runtime.state_manager,
+          "drain_strategy_state_changes",
+          None,
+        )
+        if not callable(drain):
+          raise RuntimeError("运行检查点缺少策略状态 drain 边界")
+        # Ordinary diagnostic ticks only need ordered in-memory staging.  A
+        # complete strategy snapshot is captured once at their explicit
+        # session/day/terminal checkpoint, not for every hot output.
+        if not await drain(capture_state=False):
+          raise RuntimeError("T_TRADE_DIAGNOSTIC_BATCH_STATE_DRAIN_FAILED")
+        # No generic checkpoint or outbox write occurs on a hot diagnostic
+        # Tick.  The session/day coordinator transfers this bounded summary to
+        # the durable outbox immediately before its proven seal.
+        self._defer_checkpoint_diagnostics(runtime, opportunity_events)
+        return
       if not await runtime.state_manager.checkpoint_strategy_state_changes():
         checkpoint_code = str(
           getattr(runtime.state_manager, "last_snapshot_failure_code", "")
@@ -8841,8 +10791,7 @@ class StrategyExecutor:
       )
     except Exception as exc:
       if (
-        checkpoint_failure_recorded
-        and str(
+        str(
           getattr(runtime.state_manager, "last_snapshot_failure_code", "") or ""
         )
         == "CAS_CONFLICT"
@@ -8944,7 +10893,7 @@ class StrategyExecutor:
       )
       return
     try:
-      await self._acknowledge_t_trade_material_events(
+      await self._acknowledge_t_trade_actionable_material_events(
         runtime,
         material_events_to_ack,
       )
@@ -9578,7 +11527,7 @@ class StrategyExecutor:
         if not seeded:
           raise RuntimeError("V3 做 T 候选结果初始化失败")
         acknowledged.append(event)
-      await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+      await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
     except Exception as exc:
       if (
         str(
@@ -9753,7 +11702,7 @@ class StrategyExecutor:
         if not seeded:
           raise RuntimeError("V3 做 T 抑制事件候选结果初始化失败")
         acknowledged.append(event)
-      await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+      await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
       result["evaluation_materialized"] = True
     except Exception as exc:
       # The durable suppressed state and its outbox item remain fail-closed;
@@ -10178,10 +12127,11 @@ class StrategyExecutor:
     if not runtime.strategy or not runtime.state_manager:
       return
     if self._uses_t_trade_opportunity_runtime(runtime):
-      # Recover V3 audit truth before inspecting candidate/intent pairs.
-      # MATERIAL events seed the outcome row that PAPER fill facts may
-      # reference. Unrelated manual-entry strategies do not own these outboxes.
-      await self._replay_pending_t_trade_material_events(runtime)
+      # An intact generic PREPARED handoff was finalized before strategy
+      # initialization.  What remains here is the separate, P/L-only
+      # actionable-candidate recovery boundary; pure MATERIAL audits never
+      # enter this outbox.
+      await self._replay_pending_actionable_t_trade_material_events(runtime)
       await self._replay_pending_t_trade_paper_fill_facts(runtime)
       await self._converge_v3_t_trade_startup_candidates(
         runtime,
@@ -10480,7 +12430,7 @@ class StrategyExecutor:
           if not seeded:
             raise RuntimeError("V3 候选启动抑制结果初始化失败")
           acknowledged.append(event)
-        await self._acknowledge_t_trade_material_events(runtime, acknowledged)
+        await self._acknowledge_t_trade_actionable_material_events(runtime, acknowledged)
         for instrument_code in sorted(suppressed_instruments):
           await self._notify_t_trade_opportunity_update(
             runtime,
@@ -12151,11 +14101,10 @@ class StrategyExecutor:
     patch = output.runtime_state_patch
     state_patch = {}
     if patch:
-      state_patch = {
-        "set": dict(getattr(patch, "set", {}) or {}),
-        "unset": list(getattr(patch, "unset", []) or []),
-        "append_events": list(getattr(patch, "append_events", []) or []),
-      }
+      state_patch = _compact_runtime_state_patch_for_audit(
+        patch,
+        instrument_code=input_snapshot.instrument_code,
+      )
     intents = [summarize_intent(intent) for intent in output.trade_intents or []]
     output_summary = {
       "trade_intent_count": len(intents),
@@ -12183,7 +14132,13 @@ class StrategyExecutor:
     )
     runtime.state_manager.record_decision_trace(trace)
 
-  def _apply_runtime_state_patch(self, runtime: StrategyRuntime, patch) -> None:
+  def _apply_runtime_state_patch(
+    self,
+    runtime: StrategyRuntime,
+    patch,
+    *,
+    stage_actionable_material_events: bool = True,
+  ) -> None:
     if not runtime.strategy or not patch:
       return
     raw_updates = getattr(patch, "set", None)
@@ -12215,16 +14170,19 @@ class StrategyExecutor:
       if event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
       and str(event.get("record_kind") or "").upper() == "MATERIAL"
     ]
-    if material_events and runtime.context.mode in {
-      StrategyRunMode.PAPER,
-      StrategyRunMode.LIVE,
-    }:
-      # Stage the manager-owned outbox before publishing any StrategyStateProxy
-      # delta.  This method does not await, so the periodic snapshot task cannot
-      # interleave between the outbox mutation and the state changes below.  If
-      # validation/capacity fails, no strategy delta has been emitted and the
-      # runtime is fail-stopped instead of leaving a ghost candidate that a
-      # later state-sync could persist without its MATERIAL evidence.
+    if (
+      stage_actionable_material_events
+      and material_events
+      and runtime.context.mode in {
+        StrategyRunMode.PAPER,
+        StrategyRunMode.LIVE,
+      }
+    ):
+      # Only a caller that is about to expose a candidate/intent/exit may stage
+      # this legacy P/L recovery outbox.  A pure MATERIAL evaluation passes
+      # ``False`` and remains in the session/day coordinator's hot memory.
+      # This method does not await, so no state delta can overtake its immediate
+      # business-fact recovery boundary.
       enqueue = getattr(
         runtime.state_manager,
         "enqueue_t_trade_material_events",
@@ -13728,6 +15686,10 @@ class StrategyExecutor:
           "window_invalidations": runtime.market_window_invalidations,
           "fail_closed_instruments": sorted(runtime._market_fail_closed_codes),
         }
+        for runtime in self.runs.values()
+      },
+      "runtime_checkpoints": {
+        runtime.run_id: copy.deepcopy(runtime.checkpoint_status)
         for runtime in self.runs.values()
       },
     }

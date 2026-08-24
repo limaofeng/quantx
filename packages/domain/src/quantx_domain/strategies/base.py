@@ -144,6 +144,13 @@ FORBIDDEN_RUNTIME_STATE_FIELDS = {
   "final_volume",
 }
 
+# These values cannot contain a nested account-truth key.  The state-patch
+# validator runs both when a patch is constructed and again at the executor
+# trust boundary, so skip them before the generic Mapping protocol path.
+_RUNTIME_STATE_JSON_SCALAR_TYPES = frozenset(
+  {type(None), bool, int, float, str}
+)
+
 
 @dataclass
 class RuntimeStatePatch:
@@ -196,29 +203,75 @@ def validate_runtime_state_patch_contents(
 def _forbidden_runtime_state_paths(value: Any) -> List[str]:
   """Return every forbidden account-truth key in a JSON-like state tree."""
 
+  value_type = type(value)
+  if value_type in _RUNTIME_STATE_JSON_SCALAR_TYPES:
+    return []
+  if (
+    value_type is not dict
+    and value_type is not list
+    and value_type is not tuple
+    and not isinstance(value, Mapping)
+  ):
+    return []
+
   found: set[str] = set()
   stack: List[tuple[str, Any]] = [("$", value)]
   visited: set[int] = set()
   while stack:
     path, current = stack.pop()
-    if isinstance(current, Mapping):
+    current_type = type(current)
+    if current_type is dict:
       identity = id(current)
       if identity in visited:
         continue
       visited.add(identity)
-      for raw_key, child in current.items():
-        key = str(raw_key)
-        child_path = f"{path}.{key}"
-        if key.strip().lower() in FORBIDDEN_RUNTIME_STATE_FIELDS:
-          found.add(child_path)
-        stack.append((child_path, child))
-    elif isinstance(current, (list, tuple)):
+      items = current.items()
+    elif current_type is list or current_type is tuple:
       identity = id(current)
       if identity in visited:
         continue
       visited.add(identity)
       for index, child in enumerate(current):
-        stack.append((f"{path}[{index}]", child))
+        child_type = type(child)
+        if (
+          child_type is dict
+          or child_type is list
+          or child_type is tuple
+          or (
+            child_type not in _RUNTIME_STATE_JSON_SCALAR_TYPES
+            and isinstance(child, Mapping)
+          )
+        ):
+          stack.append((f"{path}[{index}]", child))
+      continue
+    elif isinstance(current, Mapping):
+      identity = id(current)
+      if identity in visited:
+        continue
+      visited.add(identity)
+      items = current.items()
+    else:
+      continue
+
+    for raw_key, child in items:
+      key = raw_key if isinstance(raw_key, str) else str(raw_key)
+      if (
+        key in FORBIDDEN_RUNTIME_STATE_FIELDS
+        or key.strip().lower() in FORBIDDEN_RUNTIME_STATE_FIELDS
+      ):
+        found.add(f"{path}.{key}")
+
+      child_type = type(child)
+      if (
+        child_type is dict
+        or child_type is list
+        or child_type is tuple
+        or (
+          child_type not in _RUNTIME_STATE_JSON_SCALAR_TYPES
+          and isinstance(child, Mapping)
+        )
+      ):
+        stack.append((f"{path}.{key}", child))
   return sorted(found)
 
 
@@ -913,6 +966,18 @@ class StrategyBase(ABC):
     if state:
       defaults.update(state)
     self.state.replace(defaults, notify=False)
+
+  def persistence_state_snapshot(self) -> Dict[str, Any]:
+    """Return the strategy projection used at a durable runtime boundary.
+
+    The default deliberately preserves the ordinary complete strategy state.
+    A strategy that owns a high-rate, reconstructible in-memory market window
+    may override this hook to return a compact, fail-closed restore projection.
+    RuntimeStateManager validates and deep-copies the returned mapping only at
+    its authoritative durability boundary; this hook must not mutate ``state``.
+    """
+
+    return self.state.to_dict()
 
   def subscribe_state(self, maxsize: int = 200) -> asyncio.Queue:
     """订阅策略状态事件"""

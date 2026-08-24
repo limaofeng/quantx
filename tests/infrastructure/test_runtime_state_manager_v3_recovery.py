@@ -288,10 +288,10 @@ def test_v3_runtime_outboxes_reject_invalid_or_over_capacity_payloads() -> None:
         "event_key": f"material-{index}",
         "record_kind": "MATERIAL",
       }
-      for index in range(128)
+      for index in range(8_192)
     ]
   )
-  with pytest.raises(RuntimeError, match="128"):
+  with pytest.raises(RuntimeError, match="8192"):
     manager.enqueue_t_trade_material_events(
       [{"event_key": "material-overflow", "record_kind": "MATERIAL"}]
     )

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
@@ -103,7 +104,10 @@ class _PendingDiagnosticWindow:
     window_started_at_ms: int
     latest_event: dict[str, Any]
     latest_source_time_ms: int
-    event_keys: set[str] = field(default_factory=set)
+    # A receipt must acknowledge source events in their observed order.  A
+    # dictionary gives us an insertion-ordered de-duplication set without
+    # letting a later retry reshuffle the raw source identities.
+    event_keys: dict[str, None] = field(default_factory=dict)
     coalesced_count: int = 0
 
     @property
@@ -118,8 +122,8 @@ class _PendingDiagnosticWindow:
         if evaluated_at_ms < self.window_ended_at_ms:
             raise ValueError("做 T 合并诊断事件发生乱序")
         source_time_ms = _event_source_time_ms(event)
-        self.event_keys.add(event_key)
-        self.coalesced_count += 1
+        self.event_keys[event_key] = None
+        self.coalesced_count += _diagnostic_source_coalesced_count(event)
         self.latest_event = dict(event)
         self.latest_source_time_ms = max(self.latest_source_time_ms, source_time_ms)
 
@@ -138,6 +142,14 @@ class _PendingDiagnosticWindow:
             }
         )
         return event
+
+
+@dataclass(frozen=True)
+class CheckpointBatchReceipt:
+    """Exact source identities that crossed one durable checkpoint boundary."""
+
+    persisted_event_keys: tuple[str, ...]
+    records: tuple[Any, ...] = ()
 
 
 class TTradeOpportunityRuntimeService:
@@ -209,6 +221,138 @@ class TTradeOpportunityRuntimeService:
             )
         raise RuntimeError("做 T 机会评估数据库会话不可用")
 
+    async def materialize_checkpoint_batch(
+        self,
+        *,
+        events: Sequence[Mapping[str, Any]],
+        account_id: str,
+        strategy_run_id: str,
+    ) -> CheckpointBatchReceipt:
+        """Persist one closed checkpoint boundary with a single append-many UoW.
+
+        The batch is deliberately *boundary-owned*: its diagnostics coalesce
+        only with other sources supplied here, then every resulting window is
+        closed at the checkpoint and written beside any non-actionable
+        MATERIAL evidence.  It neither drains nor mutates the service's
+        long-lived diagnostic windows, so a failed owned transaction cannot
+        consume an unrelated stream or leave a local retry window half moved.
+        """
+
+        normalized_account = _required_text(account_id, "证券账户")
+        normalized_run = _required_text(strategy_run_id, "策略运行标识")
+        normalized_events = self._validated_checkpoint_events(
+            events,
+            account_id=normalized_account,
+            strategy_run_id=normalized_run,
+        )
+        if not normalized_events:
+            return CheckpointBatchReceipt(())
+
+        # ``first_source_index`` is the original source order, not a database
+        # ordering accident.  A MATERIAL event terminates only its own
+        # instrument's diagnostic segment before the MATERIAL itself.  That
+        # prevents diagnostics on the two sides of a MATERIAL transition from
+        # being coalesced, even when they share the same two-second window.
+        active_segments: dict[
+            tuple[str, str, str], tuple[_PendingDiagnosticWindow, int]
+        ] = {}
+        staged: list[tuple[int, dict[str, Any], tuple[str, ...]]] = []
+
+        def stage_diagnostic_segment(
+            pending: _PendingDiagnosticWindow,
+            first_source_index: int,
+        ) -> None:
+            staged.append(
+                (
+                    first_source_index,
+                    self._normalize_evaluation_event(
+                        _checkpoint_segment_materialization_event(pending),
+                        account_id=normalized_account,
+                        strategy_run_id=normalized_run,
+                    ),
+                    tuple(pending.event_keys),
+                )
+            )
+
+        for source_index, event in enumerate(normalized_events):
+            record_kind = str(event["record_kind"]).upper()
+            instrument_code = _required_text(
+                event.get("instrument_code"), "证券代码"
+            ).upper()
+            stream_key = (normalized_account, normalized_run, instrument_code)
+            if record_kind == T_TRADE_EVALUATION_KIND_MATERIAL:
+                existing = active_segments.pop(stream_key, None)
+                if existing is not None:
+                    stage_diagnostic_segment(*existing)
+                staged.append(
+                    (
+                        source_index,
+                        self._normalize_evaluation_event(
+                            event,
+                            account_id=normalized_account,
+                            strategy_run_id=normalized_run,
+                        ),
+                        (_required_text(event.get("event_key"), "评估事件键"),),
+                    )
+                )
+                continue
+
+            evaluated_at_ms = _positive_int(event.get("evaluated_at_ms"), "评估时间")
+            window_started_at_ms = (
+                evaluated_at_ms // T_TRADE_DIAGNOSTIC_WINDOW_MS
+            ) * T_TRADE_DIAGNOSTIC_WINDOW_MS
+            existing = active_segments.get(stream_key)
+            if existing is None:
+                pending = _PendingDiagnosticWindow(
+                    account_id=normalized_account,
+                    strategy_run_id=normalized_run,
+                    instrument_code=instrument_code,
+                    window_started_at_ms=window_started_at_ms,
+                    latest_event=dict(event),
+                    latest_source_time_ms=_event_source_time_ms(event),
+                )
+                pending.observe(event)
+                active_segments[stream_key] = (pending, source_index)
+            else:
+                pending, first_source_index = existing
+                if window_started_at_ms < pending.window_started_at_ms:
+                    raise ValueError("checkpoint diagnostics must retain source-time order")
+                if window_started_at_ms > pending.window_started_at_ms:
+                    stage_diagnostic_segment(pending, first_source_index)
+                    pending = _PendingDiagnosticWindow(
+                        account_id=normalized_account,
+                        strategy_run_id=normalized_run,
+                        instrument_code=instrument_code,
+                        window_started_at_ms=window_started_at_ms,
+                        latest_event=dict(event),
+                        latest_source_time_ms=_event_source_time_ms(event),
+                    )
+                    pending.observe(event)
+                    active_segments[stream_key] = (pending, source_index)
+                else:
+                    pending = _copy_diagnostic_window(pending)
+                    pending.observe(event)
+                    active_segments[stream_key] = (pending, first_source_index)
+
+        for pending, first_source_index in active_segments.values():
+            stage_diagnostic_segment(pending, first_source_index)
+        staged.sort(key=lambda item: item[0])
+        records = [record for _index, record, _source_keys in staged]
+        self._validate_checkpoint_record_keys(records)
+
+        # ``append_many`` is the only write path: one fresh multi-row INSERT
+        # and one repository-owned commit for diagnostic and MATERIAL records
+        # together.  A raise leaves no service-local checkpoint state to undo;
+        # callers retain their raw outbox and can retry the exact batch.
+        rows = await self._persist_checkpoint_records(records)
+        return CheckpointBatchReceipt(
+            persisted_event_keys=tuple(
+                _required_text(event.get("event_key"), "评估事件键")
+                for event in normalized_events
+            ),
+            records=tuple(rows),
+        )
+
     async def flush_diagnostics(
         self,
         *,
@@ -217,6 +361,22 @@ class TTradeOpportunityRuntimeService:
         repository: Optional[TTradeOpportunityEvaluationRepository] = None,
     ) -> list[Any]:
         """Flush the final open windows at a deterministic runtime boundary."""
+
+        receipt = await self.flush_diagnostics_with_receipt(
+            account_id=account_id,
+            strategy_run_id=strategy_run_id,
+            repository=repository,
+        )
+        return list(receipt.records)
+
+    async def flush_diagnostics_with_receipt(
+        self,
+        *,
+        account_id: str,
+        strategy_run_id: str,
+        repository: Optional[TTradeOpportunityEvaluationRepository] = None,
+    ) -> CheckpointBatchReceipt:
+        """Flush final windows and identify every raw event now durable."""
 
         normalized_account = _required_text(account_id, "证券账户")
         normalized_run = _required_text(strategy_run_id, "策略运行标识")
@@ -229,13 +389,17 @@ class TTradeOpportunityRuntimeService:
             pending = [self._diagnostic_windows.pop(key) for key in keys]
             if repository is None:
                 try:
-                    return await self._persist_pending_diagnostics(pending)
+                    rows = await self._persist_pending_diagnostics(pending)
                 except BaseException:
                     # The batch is one transaction.  Either every closed
                     # diagnostic is durable, or all of them remain available
                     # for the caller's retry/terminal cleanup path.
                     self._reinsert_diagnostic_windows(pending)
                     raise
+                return CheckpointBatchReceipt(
+                    persisted_event_keys=self._pending_diagnostic_event_keys(pending),
+                    records=tuple(rows),
+                )
             rows: list[Any] = []
             for index, window in enumerate(pending):
                 try:
@@ -248,7 +412,159 @@ class TTradeOpportunityRuntimeService:
                 except BaseException:
                     self._reinsert_diagnostic_windows(pending[index:])
                     raise
-            return rows
+            return CheckpointBatchReceipt(
+                persisted_event_keys=self._pending_diagnostic_event_keys(pending),
+                records=tuple(rows),
+            )
+
+    def _validated_checkpoint_events(
+        self,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        account_id: str,
+        strategy_run_id: str,
+    ) -> list[dict[str, Any]]:
+        """Validate every source before a checkpoint batch touches I/O/state."""
+
+        normalized: list[dict[str, Any]] = []
+        source_keys: set[str] = set()
+        for raw_event in events:
+            if not isinstance(raw_event, Mapping):
+                raise ValueError("checkpoint batch event must be a mapping")
+            event = dict(raw_event)
+            if event.get("type") != T_TRADE_OPPORTUNITY_EVALUATION_EVENT:
+                raise ValueError("不是可物化的做 T 机会评估事件")
+            event_key = _required_text(event.get("event_key"), "评估事件键")
+            if event_key in source_keys:
+                raise ValueError("checkpoint batch requires unique evaluation event_key values")
+            source_keys.add(event_key)
+            for source_field, expected, label in (
+                ("account_id", account_id, "证券账户"),
+                ("strategy_run_id", strategy_run_id, "策略运行标识"),
+            ):
+                if (
+                    source_field in event
+                    and _required_text(event.get(source_field), label) != expected
+                ):
+                    raise ValueError(
+                        f"checkpoint batch {source_field} does not match scope"
+                    )
+
+            record_kind = str(event.get("record_kind") or "").upper()
+            if record_kind not in {
+                T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+                T_TRADE_EVALUATION_KIND_MATERIAL,
+            }:
+                raise ValueError(
+                    "checkpoint batch requires COALESCED_DIAGNOSTIC or MATERIAL events"
+                )
+            if record_kind == T_TRADE_EVALUATION_KIND_DIAGNOSTIC:
+                evaluated_at_ms = _positive_int(event.get("evaluated_at_ms"), "评估时间")
+                preview = {
+                    **event,
+                    "record_kind": T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+                    "window_started_at_ms": (
+                        evaluated_at_ms // T_TRADE_DIAGNOSTIC_WINDOW_MS
+                    )
+                    * T_TRADE_DIAGNOSTIC_WINDOW_MS,
+                    "window_ended_at_ms": evaluated_at_ms,
+                    "coalesced_count": _diagnostic_source_coalesced_count(event),
+                }
+                self._normalize_evaluation_event(
+                    preview,
+                    account_id=account_id,
+                    strategy_run_id=strategy_run_id,
+                )
+            else:
+                self._normalize_evaluation_event(
+                    event,
+                    account_id=account_id,
+                    strategy_run_id=strategy_run_id,
+                )
+            normalized.append(event)
+        return normalized
+
+    @staticmethod
+    def _validate_checkpoint_record_keys(records: Sequence[Mapping[str, Any]]) -> None:
+        durable_keys = [
+            _required_text(record.get("event_key"), "评估事件键")
+            for record in records
+        ]
+        if len(set(durable_keys)) != len(durable_keys):
+            raise ValueError("checkpoint batch produces duplicate durable event_key values")
+
+    def _stage_diagnostic_event(
+        self,
+        *,
+        event: dict[str, Any],
+        account_id: str,
+        strategy_run_id: str,
+        windows: dict[tuple[str, str, str, int], _PendingDiagnosticWindow],
+        pending: list[_PendingDiagnosticWindow],
+    ) -> None:
+        """Apply one diagnostic to a staging map without crossing I/O."""
+
+        if not isinstance(event, dict) or event.get("type") != (
+            T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+        ):
+            raise ValueError("不是可物化的做 T 机会评估事件")
+        instrument_code = _required_text(event.get("instrument_code"), "证券代码").upper()
+        evaluated_at_ms = _positive_int(event.get("evaluated_at_ms"), "评估时间")
+        source_time_ms = _event_source_time_ms(event)
+        window_started_at_ms = (
+            evaluated_at_ms // T_TRADE_DIAGNOSTIC_WINDOW_MS
+        ) * T_TRADE_DIAGNOSTIC_WINDOW_MS
+        stream_prefix = (account_id, strategy_run_id, instrument_code)
+        window_key = (*stream_prefix, window_started_at_ms)
+        current = windows.get(window_key)
+        if current is None:
+            candidate = _PendingDiagnosticWindow(
+                account_id=account_id,
+                strategy_run_id=strategy_run_id,
+                instrument_code=instrument_code,
+                window_started_at_ms=window_started_at_ms,
+                latest_event=dict(event),
+                latest_source_time_ms=source_time_ms,
+            )
+            candidate.observe(event)
+        else:
+            candidate = _copy_diagnostic_window(current)
+            candidate.observe(event)
+
+        closed_keys = {
+            key
+            for key in windows
+            if key[:3] == stream_prefix and key[3] < window_started_at_ms
+        }
+        inactive_keys = {
+            key
+            for key, existing in windows.items()
+            if key != window_key
+            and source_time_ms - existing.latest_source_time_ms
+            >= self._diagnostic_idle_ms
+        }
+        keys_to_persist = closed_keys | inactive_keys
+        if window_key not in windows:
+            required = len(windows) + 1 - (
+                len(keys_to_persist) + self._max_diagnostic_windows
+            )
+            if required > 0:
+                available = [
+                    key
+                    for key in windows
+                    if key != window_key and key not in keys_to_persist
+                ]
+                available.sort(
+                    key=lambda key: self._diagnostic_window_sort_key(windows, key)
+                )
+                keys_to_persist.update(available[:required])
+
+        selected_keys = sorted(
+            keys_to_persist,
+            key=lambda key: self._diagnostic_window_sort_key(windows, key),
+        )
+        pending.extend(windows.pop(key) for key in selected_keys)
+        windows[window_key] = candidate
 
     async def load_reference_profile(
         self,
@@ -471,6 +787,18 @@ class TTradeOpportunityRuntimeService:
             key,
         )
 
+    @staticmethod
+    def _diagnostic_window_sort_key(
+        windows: Mapping[tuple[str, str, str, int], _PendingDiagnosticWindow],
+        key: tuple[str, str, str, int],
+    ) -> tuple[int, int, tuple[str, str, str, int]]:
+        pending = windows[key]
+        return (
+            pending.latest_source_time_ms,
+            pending.window_started_at_ms,
+            key,
+        )
+
     def _reinsert_diagnostic_windows(
         self,
         pending: list[_PendingDiagnosticWindow],
@@ -483,6 +811,30 @@ class TTradeOpportunityRuntimeService:
                 window.window_started_at_ms,
             )
             self._diagnostic_windows[key] = window
+
+    @staticmethod
+    def _pending_diagnostic_event_keys(
+        pending: Sequence[_PendingDiagnosticWindow],
+        *,
+        account_id: Optional[str] = None,
+        strategy_run_id: Optional[str] = None,
+    ) -> tuple[str, ...]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for window in pending:
+            if (
+                (account_id is not None and window.account_id != account_id)
+                or (
+                    strategy_run_id is not None
+                    and window.strategy_run_id != strategy_run_id
+                )
+            ):
+                continue
+            for event_key in window.event_keys:
+                if event_key and event_key not in seen:
+                    seen.add(event_key)
+                    ordered.append(event_key)
+        return tuple(ordered)
 
     async def _persist_pending_diagnostic(
         self,
@@ -513,43 +865,41 @@ class TTradeOpportunityRuntimeService:
 
         A single global source-time advance can close windows for every held
         instrument.  Persisting those independent, already-normalized rows in
-        separate sessions made one Tick fan out into N database transactions.
-        They have no MATERIAL transition between them, so a shared transaction
-        preserves their event keys, source-time windows, append-only semantics,
-        and retry behavior while avoiding that avoidable round-trip fan-out.
+        separate sessions made one Tick fan out into N database transactions
+        and N idempotency reads. They have no MATERIAL transition between
+        them, so one repository-owned batch transaction preserves event keys,
+        source-time windows, append-only semantics, and retry behavior without
+        that avoidable round-trip fan-out.
 
         This helper is intentionally used only when the service owns the
         database session.  A supplied repository may belong to a wider caller
         transaction and retains its existing one-by-one behavior.
         """
 
-        if not pending:
+        records = [
+            self._normalize_evaluation_event(
+                window.materialization_event(),
+                account_id=window.account_id,
+                strategy_run_id=window.strategy_run_id,
+            )
+            for window in pending
+        ]
+        return await self._persist_checkpoint_records(records)
+
+    async def _persist_checkpoint_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> list[Any]:
+        """Use exactly one repository-owned append-many transaction."""
+
+        if not records:
             return []
         async for db in get_async_db():
             repository = TTradeOpportunityEvaluationRepository(db)
-            rows: list[Any] = []
-            try:
-                for window in pending:
-                    event = window.materialization_event()
-                    normalized = self._normalize_evaluation_event(
-                        event,
-                        account_id=window.account_id,
-                        strategy_run_id=window.strategy_run_id,
-                    )
-                    rows.append(
-                        await self._append_evaluation(
-                            repository,
-                            normalized,
-                            commit=False,
-                        )
-                    )
-                await db.commit()
-            except BaseException:
-                # A failed flush/commit must never leave the in-memory retry
-                # state believing a partial diagnostic batch is durable.
-                await db.rollback()
-                raise
-            return rows
+            # ``append_many`` owns one all-or-nothing transaction and performs
+            # one bounded batch reconciliation only after a write uncertainty.
+            # Do not reintroduce per-record repository calls here.
+            return await repository.append_many(records)
         raise RuntimeError("做 T 机会评估数据库会话不可用")
 
     @staticmethod
@@ -670,8 +1020,47 @@ def _copy_diagnostic_window(
         window_started_at_ms=pending.window_started_at_ms,
         latest_event=dict(pending.latest_event),
         latest_source_time_ms=pending.latest_source_time_ms,
-        event_keys=set(pending.event_keys),
+        event_keys=dict(pending.event_keys),
         coalesced_count=pending.coalesced_count,
+    )
+
+
+def _checkpoint_segment_materialization_event(
+    pending: _PendingDiagnosticWindow,
+) -> dict[str, Any]:
+    """Give each checkpoint-local diagnostic segment a replay-stable key.
+
+    A MATERIAL transition can split one two-second source window in two.  The
+    legacy window-only diagnostic key would collide in that case, so the
+    ordered raw source identities are part of this boundary-specific key.
+    """
+
+    source_keys = tuple(pending.event_keys)
+    digest = hashlib.sha256("\x1f".join(source_keys).encode("utf-8")).hexdigest()[:16]
+    event = pending.materialization_event()
+    event["event_key"] = (
+        f"{pending.strategy_run_id}:{pending.instrument_code}:"
+        f"DIAGNOSTIC:{pending.window_started_at_ms}:SEGMENT:{digest}"
+    )
+    return event
+
+
+def _diagnostic_source_coalesced_count(event: Mapping[str, Any]) -> int:
+    """Read one checkpoint summary's represented diagnostic observation count."""
+
+    checkpoint_value = event.get("checkpoint_coalesced_count")
+    event_value = event.get("coalesced_count")
+    if checkpoint_value is None and event_value is None:
+        return 1
+    if checkpoint_value is not None and event_value is not None:
+        checkpoint_count = _positive_int(checkpoint_value, "checkpoint 诊断合并数量")
+        event_count = _positive_int(event_value, "诊断合并数量")
+        if checkpoint_count != event_count:
+            raise ValueError("checkpoint diagnostic coalesced counts disagree")
+        return checkpoint_count
+    return _positive_int(
+        checkpoint_value if checkpoint_value is not None else event_value,
+        "checkpoint 诊断合并数量",
     )
 
 

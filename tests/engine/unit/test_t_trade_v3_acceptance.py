@@ -555,34 +555,28 @@ def test_non_replayable_actual_holding_cannot_be_used_for_pressure_baseline() ->
     select_pressure_window([audit], snapshot_date=audit.window.snapshot.snapshot_date)
 
 
-def test_only_sealed_v3_pressure_backtest_enables_durable_runtime_state() -> None:
+def test_all_backtests_enable_generic_day_batch_runtime_state() -> None:
   def runtime(mode: StrategyRunMode, parameters: dict) -> SimpleNamespace:
     return SimpleNamespace(
       context=SimpleNamespace(mode=mode, parameters=parameters),
     )
 
-  marker = {"_internal_v3_pressure_runtime_state_persistence": True}
   assert StrategyExecutor._runtime_state_persistence_enabled(
     runtime(StrategyRunMode.BACKTEST, {})
-  ) is False
-  assert StrategyExecutor._runtime_state_persistence_enabled(
-    runtime(StrategyRunMode.BACKTEST, marker)
-  ) is False
+  ) is True
   assert StrategyExecutor._runtime_state_persistence_enabled(
     runtime(
       StrategyRunMode.BACKTEST,
       {
-        **marker,
         "t_trade_replay": True,
         "replay_acceptance": "V3_CAUSAL_20D",
       },
     )
-  ) is False
+  ) is True
   assert StrategyExecutor._runtime_state_persistence_enabled(
     runtime(
       StrategyRunMode.BACKTEST,
       {
-        **marker,
         "t_trade_replay": True,
         "replay_acceptance": "V3_PRESSURE_BASELINE",
       },
@@ -695,6 +689,7 @@ def test_report_only_marks_remediation_full_after_completed_9600_fixture() -> No
     "execution_boundary": {
       "strategy_run_mode": "BACKTEST",
       "runtime_state_persist_enabled": True,
+      "runtime_state_checkpoint_policy": "DAY_BATCH",
       "qmt_invocation": False,
       "paper_or_live_command": False,
     },
@@ -706,7 +701,7 @@ def test_report_only_marks_remediation_full_after_completed_9600_fixture() -> No
       "parameters": {
         "t_trade_replay": True,
         "replay_acceptance": "V3_PRESSURE_BASELINE",
-        "_internal_v3_pressure_runtime_state_persistence": True,
+        "runtime_state_checkpoint_policy": "DAY_BATCH",
       },
     },
     "frozen_local_slo": {"status": "FROZEN_FIRST_LOCAL_SYNTHETIC_BASELINE"},
@@ -858,6 +853,7 @@ def _completed_pressure_report_payload() -> dict:
       "execution_boundary": {
         "strategy_run_mode": "BACKTEST",
         "runtime_state_persist_enabled": True,
+        "runtime_state_checkpoint_policy": "DAY_BATCH",
         "qmt_invocation": False,
         "paper_or_live_command": False,
       },
@@ -882,7 +878,7 @@ def _completed_pressure_report_payload() -> dict:
           "account_id": "must-not-appear",
           "t_trade_replay": True,
           "replay_acceptance": "V3_PRESSURE_BASELINE",
-          "_internal_v3_pressure_runtime_state_persistence": True,
+          "runtime_state_checkpoint_policy": "DAY_BATCH",
         },
         "evaluations": {
           "material_rows": 1_072,
@@ -906,7 +902,7 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
   assert imported["run_evidence"]["parameters"] == {
     "t_trade_replay": True,
     "replay_acceptance": "V3_PRESSURE_BASELINE",
-    "_internal_v3_pressure_runtime_state_persistence": True,
+    "runtime_state_checkpoint_policy": "DAY_BATCH",
   }
   assert imported["tick_accounting"] == {
     "requested_fixture_ticks": 9_600,
@@ -946,6 +942,23 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
         "runtime_state_persist_enabled",
       ),
       False,
+    ),
+    (
+      (
+        "pressure_baseline",
+        "execution_boundary",
+        "runtime_state_checkpoint_policy",
+      ),
+      "SESSION_BOUNDARY",
+    ),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "parameters",
+        "runtime_state_checkpoint_policy",
+      ),
+      "SESSION_BOUNDARY",
     ),
     (("pressure_baseline", "execution_boundary", "paper_or_live_command"), True),
     (
@@ -1092,13 +1105,30 @@ async def test_run_cli_completed_pressure_rejects_mismatched_operational_evidenc
     await acceptance_module.run_cli(args)
 
 
-def test_completed_9600_without_durable_runtime_state_cannot_freeze_slo() -> None:
+def test_completed_9600_without_day_batch_policy_cannot_freeze_slo() -> None:
   evidence = acceptance_module._performance_remediation_evidence(
     {
       "status": "EXECUTED_SYNTHETIC_NON_HISTORICAL",
       "fixture": {"tick_count": 9_600},
       "replay": {"status": "COMPLETED"},
-      "execution_boundary": {"runtime_state_persist_enabled": False},
+      "terminal_convergence": {"status": "TERMINAL"},
+      "isolated_backtest": True,
+      "no_live_or_paper_broker": True,
+      "execution_boundary": {
+        "strategy_run_mode": "BACKTEST",
+        "runtime_state_persist_enabled": True,
+        "runtime_state_checkpoint_policy": "SESSION_BOUNDARY",
+        "qmt_invocation": False,
+        "paper_or_live_command": False,
+      },
+      "run_evidence": {
+        "mode": "BACKTEST",
+        "status": "COMPLETED",
+        "parameters": {
+          "replay_acceptance": "V3_PRESSURE_BASELINE",
+          "runtime_state_checkpoint_policy": "DAY_BATCH",
+        },
+      },
     }
   )
 
@@ -1129,14 +1159,14 @@ def test_nonpersistent_diagnostic_is_explicitly_non_gating() -> None:
   )
 
 
-def test_sealed_diagnostic_is_never_rendered_as_nonpersistent_calibration() -> None:
+def test_day_batch_diagnostic_is_never_rendered_as_nonpersistent_calibration() -> None:
   sealed = {
     "status": "EXECUTED_DIAGNOSTIC_NON_GATING",
     "diagnostic_non_gating": True,
     "run_evidence": {
       "run_id": "sealed-run",
       "parameters": {
-        "_internal_v3_pressure_runtime_state_persistence": True,
+        "runtime_state_checkpoint_policy": "DAY_BATCH",
         "t_trade_replay": True,
         "replay_acceptance": "V3_PRESSURE_BASELINE",
       },
@@ -1202,6 +1232,7 @@ async def test_completed_synthetic_replay_projection_is_repaired_after_callback_
         "account_id": "synthetic-account",
         "t_trade_replay": True,
         "replay_acceptance": "V3_PRESSURE_BASELINE",
+        "runtime_state_checkpoint_policy": "DAY_BATCH",
         "replay_end_time": "2026-06-05T15:00:00",
       },
     }
@@ -1411,6 +1442,82 @@ def test_database_write_counters_report_bounded_latency_and_call_sites() -> None
   assert runtime_summary["latency"]["state_upsert"]["p50"] == 5.0
 
 
+@pytest.mark.asyncio
+async def test_run_evidence_separates_durable_actionable_facts_from_material(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  class _Result:
+    def __init__(self, *, rows=(), one=None) -> None:
+      self._rows = list(rows)
+      self._one = one
+
+    def all(self):
+      return list(self._rows)
+
+    def one(self):
+      return self._one
+
+  class _Database:
+    def __init__(self) -> None:
+      self.execute_calls = 0
+
+    async def get(self, _model, _run_id):
+      return SimpleNamespace(
+        mode="BACKTEST",
+        status="COMPLETED",
+        error_message=None,
+        parameters={"t_trade_replay": True},
+        instruments=[],
+      )
+
+    async def execute(self, _statement):
+      self.execute_calls += 1
+      if self.execute_calls == 1:
+        return _Result(rows=[("MATERIAL", 11, 11)])
+      if self.execute_calls == 2:
+        return _Result(one=(7, 5))
+      if self.execute_calls == 3:
+        return _Result(one=(9, 3))
+      return _Result(rows=[])
+
+  database = _Database()
+
+  async def fake_get_async_db():
+    yield database
+
+  monkeypatch.setattr(acceptance_module, "get_async_db", fake_get_async_db)
+
+  evidence = await acceptance_module._load_run_evidence(
+    "run-1",
+    include_durable_actionable_fact_observation=True,
+  )
+
+  observation = evidence["durable_actionable_fact_observation"]
+  assert database.execute_calls == 4
+  assert observation["measurement_scope"] == (
+    "RUN_SCOPED_DURABLE_ROW_COUNTS_AT_OBSERVATION"
+  )
+  assert observation["trade_intent_rows"] == 7
+  assert observation["immediate_actionable_trade_intent_rows"] == 5
+  assert observation["candidate_lifecycle_rows"] == 9
+  assert observation["immediate_actionable_candidate_rows"] is None
+  assert "pure MATERIAL" in observation[
+    "immediate_actionable_candidate_rows_unavailable_reason"
+  ]
+  assert observation["candidate_lifecycle_rows_with_post_fill_status"] == 3
+  assert observation["simulated_fill_event_rows"] is None
+  assert "not a fill-event count" in observation[
+    "candidate_lifecycle_rows_with_post_fill_status_semantics"
+  ]
+  assert "MATERIAL without a TradeIntent" in observation[
+    "ordinary_material_evaluations"
+  ]
+  assert "not per-commit attribution" in observation["commit_attribution"]
+
+  safe = acceptance_module._safe_pressure_run_evidence(evidence)
+  assert safe["durable_actionable_fact_observation"] == observation
+
+
 def test_synthetic_fixture_is_deterministic_and_stays_inside_trade_sessions() -> None:
   audit = _audit(day_count=2)
 
@@ -1518,3 +1625,101 @@ async def test_synthetic_pressure_data_check_accepts_manager_archive_keyword(
   assert executor_calls == ["pressure-seam"]
   assert manager._ensure_backtest_data_available is original_data_check
   assert manager._queue_missing_backtest_data_supplement is original_supplement
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  (
+    "checkpoint_policy",
+    "expected_enabled",
+    "expected_evidence",
+    "expected_boundary",
+  ),
+  [
+    (
+      "DAY_BATCH",
+      True,
+      "DAY_BATCH BACKTEST runtime-state checkpoint policy present",
+      "sealed durable DAY_BATCH BACKTEST runtime-state checkpoint",
+    ),
+    (
+      None,
+      False,
+      "DAY_BATCH BACKTEST runtime-state checkpoint policy absent",
+      "without a DAY_BATCH BACKTEST runtime-state checkpoint",
+    ),
+  ],
+)
+async def test_cancelled_pressure_classifies_day_batch_persistence(
+  monkeypatch: pytest.MonkeyPatch,
+  checkpoint_policy: str | None,
+  expected_enabled: bool,
+  expected_evidence: str,
+  expected_boundary: str,
+) -> None:
+  """Cancelled evidence is durable only when its policy is ``DAY_BATCH``."""
+
+  started_at = acceptance_module.datetime(2026, 8, 20, 9, 30)
+  ended_at = acceptance_module.datetime(2026, 8, 20, 9, 31)
+  parameters = {"replay_acceptance": "V3_PRESSURE_BASELINE"}
+  if checkpoint_policy is not None:
+    parameters["runtime_state_checkpoint_policy"] = checkpoint_policy
+
+  class _Result:
+    def __init__(self, *, scalar=None, rows=()) -> None:
+      self._scalar = scalar
+      self._rows = list(rows)
+
+    def scalar_one_or_none(self):
+      return self._scalar
+
+    def all(self):
+      return list(self._rows)
+
+  class _Database:
+    def __init__(self) -> None:
+      self.execute_calls = 0
+
+    async def get(self, _model, _run_id):
+      return SimpleNamespace(
+        parameters=parameters,
+        status="STOPPED",
+        created_at=started_at,
+        updated_at=ended_at,
+      )
+
+    async def execute(self, _statement):
+      self.execute_calls += 1
+      if self.execute_calls == 1:
+        return _Result(
+          scalar=SimpleNamespace(start_time=started_at, end_time=ended_at)
+        )
+      return _Result(rows=[("COALESCED_DIAGNOSTIC", 1, 32)])
+
+  database = _Database()
+
+  async def fake_get_async_db():
+    yield database
+
+  class _ReplayService:
+    async def get(self, _run_id):
+      return {
+        "status": "CANCELLED",
+        "processed_until": ended_at,
+        "progress_pct": 25.0,
+      }
+
+  monkeypatch.setattr(acceptance_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(acceptance_module, "TTradeReplayService", _ReplayService)
+  fixture = SimpleNamespace(to_dict=lambda: {"tick_count": 9_600})
+
+  evidence = await acceptance_module.load_cancelled_full_pressure_attempt(
+    "cancelled-sealed-run",
+    cancellation_reason="operator authorized",
+    fixture=fixture,
+  )
+
+  persistence = evidence["runtime_state_persistence"]
+  assert persistence["enabled"] is expected_enabled
+  assert expected_evidence in persistence["evidence"]
+  assert expected_boundary in evidence["primary_observed_boundary"]

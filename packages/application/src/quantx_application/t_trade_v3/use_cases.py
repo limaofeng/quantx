@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OPPORTUNITY_FEATURE_SCHEMA_VERSION,
@@ -233,6 +233,75 @@ class MaterializeEvaluationAfterCAS:
       event_key=event_key,
       record=record,
     )
+
+  async def execute_checkpoint_batch(
+    self,
+    requests: Iterable[PostCasEvaluationInput],
+  ) -> tuple[str, ...]:
+    """Materialize one committed checkpoint batch through its owned port.
+
+    The checkpoint may contain coalesced diagnostics and non-actionable
+    MATERIAL evidence.  Actionability is classified by the Engine before it
+    reaches this generic boundary; this use case only enforces the committed,
+    single-account/run, stable-source-identity contract.
+    """
+
+    normalized = tuple(requests)
+    if not normalized:
+      return ()
+    event_keys = [
+      str(request.event.get("event_key") or "").strip()
+      for request in normalized
+    ]
+    if any(not event_key for event_key in event_keys):
+      raise ValueError("evaluation event_key is required")
+    if len(set(event_keys)) != len(event_keys):
+      raise ValueError("checkpoint batch requires unique evaluation event_key values")
+    if not all(request.cas_committed for request in normalized):
+      # The caller receives an empty durable receipt and must retain every
+      # outbox item.  Crucially, the infrastructure port is never invoked.
+      return ()
+    account_id = normalized[0].account_id
+    strategy_run_id = normalized[0].strategy_run_id
+    if any(
+      request.account_id != account_id
+      or request.strategy_run_id != strategy_run_id
+      for request in normalized
+    ):
+      raise ValueError("checkpoint batch must share account_id and strategy_run_id")
+    events = [dict(request.event) for request in normalized]
+    if any(
+      str(event.get("record_kind") or "").upper()
+      not in {"COALESCED_DIAGNOSTIC", "MATERIAL"}
+      for event in events
+    ):
+      raise ValueError(
+        "checkpoint batch requires COALESCED_DIAGNOSTIC or MATERIAL events"
+      )
+    try:
+      receipt = await self.port.materialize_checkpoint_batch(
+        events=events,
+        account_id=account_id,
+        strategy_run_id=strategy_run_id,
+      )
+    except Exception as exc:
+      raise EvaluationMaterializationError(event_keys[0], exc) from exc
+    raw_persisted_keys = getattr(receipt, "persisted_event_keys", receipt)
+    if isinstance(raw_persisted_keys, (str, bytes)):
+      raise ValueError("checkpoint batch receipt must contain event_key values")
+    try:
+      persisted_keys = tuple(
+        str(value or "").strip() for value in (raw_persisted_keys or ())
+      )
+    except TypeError as exc:
+      raise ValueError("checkpoint batch receipt must contain event_key values") from exc
+    if any(not event_key for event_key in persisted_keys):
+      raise ValueError("checkpoint batch receipt contains an empty event_key")
+    if len(set(persisted_keys)) != len(persisted_keys):
+      raise ValueError("checkpoint batch receipt contains duplicate event_key values")
+    if not set(persisted_keys).issubset(set(event_keys)):
+      raise ValueError("checkpoint batch receipt contains an unknown event_key")
+    return persisted_keys
 
 
 class EvaluateIntentEmissionGate:

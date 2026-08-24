@@ -8,7 +8,7 @@ implemented.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol, Sequence
 
 from quantx_domain.trading.t_trade_opportunity_engine import (
   OpportunityReferenceProfile,
@@ -38,6 +38,14 @@ class OpportunityEvaluationMaterializerPort(Protocol):
     self,
     *,
     event: Mapping[str, Any],
+    account_id: str,
+    strategy_run_id: str,
+  ) -> Any: ...
+
+  async def materialize_checkpoint_batch(
+    self,
+    *,
+    events: Sequence[Mapping[str, Any]],
     account_id: str,
     strategy_run_id: str,
   ) -> Any: ...

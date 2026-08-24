@@ -4,38 +4,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from quantx_infrastructure.services.t_trade_replay_service import (
-  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH,
+  RUNTIME_STATE_CHECKPOINT_POLICY_KEY,
   TTradeReplayService,
-  _v3_pressure_runtime_state_persistence_capability,
 )
-
-
-def test_v3_pressure_durable_state_switch_requires_opaque_capability() -> None:
-  parameters = {
-    _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY: True,
-  }
-
-  TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
-    parameters,
-    {"replay_acceptance": "V3_PRESSURE_BASELINE"},
-    object(),
-  )
-
-  assert _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY not in parameters
-
-  TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
-    parameters,
-    {"replay_acceptance": "V3_PRESSURE_BASELINE"},
-    _v3_pressure_runtime_state_persistence_capability(),
-  )
-
-  assert parameters[_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY] is True
-  with pytest.raises(ValueError, match="仅允许 V3_PRESSURE_BASELINE"):
-    TTradeReplayService._apply_v3_pressure_runtime_state_persistence(
-      parameters,
-      {"replay_acceptance": "V3_CAUSAL_20D"},
-      _v3_pressure_runtime_state_persistence_capability(),
-    )
 
 
 def test_formal_archive_request_is_persisted_only_with_exact_scope() -> None:
@@ -159,6 +131,9 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
   run_kwargs = manager.run_strategy.await_args.kwargs
   assert run_kwargs["run_id"] == request_id
   assert run_kwargs["auto_start"] is False
+  assert run_kwargs["parameters"][RUNTIME_STATE_CHECKPOINT_POLICY_KEY] == (
+    RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+  )
   assert run_kwargs["parameters"]["initial_instrument_metadata"]["600887.SH"] == {
     "instrument_name": "伊利股份",
     "instrument_status_as_of": None,

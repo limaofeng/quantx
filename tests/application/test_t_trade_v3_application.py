@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -194,6 +195,56 @@ async def test_materialization_failure_preserves_typed_retry_error():
     )
   assert captured.value.event_key == "event-1"
   assert isinstance(captured.value.cause, TimeoutError)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_batch_passes_mixed_committed_sources_and_preserves_receipt_order():
+  port = AsyncMock()
+  port.materialize_checkpoint_batch.return_value = SimpleNamespace(
+    persisted_event_keys=("diagnostic-1", "material-1")
+  )
+  requests = (
+    PostCasEvaluationInput(
+      event={
+        "event_key": "diagnostic-1",
+        "record_kind": "COALESCED_DIAGNOSTIC",
+      },
+      account_id="account-1",
+      strategy_run_id="run-1",
+      cas_committed=True,
+    ),
+    PostCasEvaluationInput(
+      event={"event_key": "material-1", "record_kind": "MATERIAL"},
+      account_id="account-1",
+      strategy_run_id="run-1",
+      cas_committed=True,
+    ),
+  )
+
+  receipt = await MaterializeEvaluationAfterCAS(port).execute_checkpoint_batch(requests)
+
+  assert receipt == ("diagnostic-1", "material-1")
+  port.materialize_checkpoint_batch.assert_awaited_once_with(
+    events=[dict(request.event) for request in requests],
+    account_id="account-1",
+    strategy_run_id="run-1",
+  )
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_batch_rejects_unknown_kind_before_calling_port():
+  port = AsyncMock()
+  request = PostCasEvaluationInput(
+    event={"event_key": "unsupported-1", "record_kind": "ACTIONABLE"},
+    account_id="account-1",
+    strategy_run_id="run-1",
+    cas_committed=True,
+  )
+
+  with pytest.raises(ValueError, match="COALESCED_DIAGNOSTIC or MATERIAL"):
+    await MaterializeEvaluationAfterCAS(port).execute_checkpoint_batch((request,))
+
+  port.materialize_checkpoint_batch.assert_not_awaited()
 
 
 @pytest.mark.parametrize("value", [0, 1, None, "true"])

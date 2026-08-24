@@ -47,6 +47,9 @@ from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 from quantx_infrastructure.database.connection import get_async_db
 from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
 from quantx_infrastructure.models.strategy_run import StrategyRun
+from quantx_infrastructure.models.t_trade_candidate_outcome import (
+  TTradeCandidateOutcome,
+)
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
   T_TRADE_EVALUATION_KIND_MATERIAL,
@@ -54,6 +57,7 @@ from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
   TTradeOpportunityEvaluation,
 )
 from quantx_infrastructure.models.tick import Tick
+from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.daily_asset_snapshot_repository import (
   DailyAssetPositionSnapshotRepository,
   DailyAssetSnapshotRepository,
@@ -82,12 +86,12 @@ from quantx_infrastructure.services.t_trade_replay_projection_service import (
   t_trade_replay_projection_service,
 )
 from quantx_infrastructure.services.t_trade_replay_service import (
-  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH,
+  RUNTIME_STATE_CHECKPOINT_POLICY_KEY,
   TTradeReplayService,
-  _v3_pressure_runtime_state_persistence_capability,
 )
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_engine.strategy_executor import StrategyExecutor
@@ -120,7 +124,7 @@ _PRESSURE_REPLAY_REPORT_FIELDS = (
 _PRESSURE_RUN_PARAMETER_FIELDS = (
   "t_trade_replay",
   "replay_acceptance",
-  _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY,
+  RUNTIME_STATE_CHECKPOINT_POLICY_KEY,
   "replay_start_time",
   "replay_end_time",
 )
@@ -194,7 +198,9 @@ def _performance_remediation_evidence(
     and str(run_evidence.get("mode") or "").upper() == "BACKTEST"
     and str(run_evidence.get("status") or "").upper() == "COMPLETED"
     and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
-    and bool(parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY))
+    and boundary.get(RUNTIME_STATE_CHECKPOINT_POLICY_KEY)
+    == RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    and _uses_day_batch_runtime_checkpoint(parameters)
   )
   evidence["full_9600_replayed_after_patch"] = full_completed
   if full_completed:
@@ -251,6 +257,15 @@ def _json_object(value: Any, *, context: str) -> dict[str, Any]:
   return dict(parsed)
 
 
+def _uses_day_batch_runtime_checkpoint(parameters: Mapping[str, Any]) -> bool:
+  """Return whether durable BACKTEST evidence names the sole checkpoint policy."""
+
+  return (
+    parameters.get(RUNTIME_STATE_CHECKPOINT_POLICY_KEY)
+    == RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+  )
+
+
 def _safe_pressure_replay_evidence(replay: Mapping[str, Any]) -> dict[str, Any]:
   """Return only report-safe replay facts, never account or portfolio data."""
 
@@ -285,6 +300,9 @@ def _safe_pressure_run_evidence(run_evidence: Mapping[str, Any]) -> dict[str, An
       "opportunity_feature_schema_version"
     ),
     "evaluations": dict(run_evidence.get("evaluations") or {}),
+    "durable_actionable_fact_observation": dict(
+      run_evidence.get("durable_actionable_fact_observation") or {}
+    ),
     "instrument_profiles": [
       dict(item)
       for item in list(run_evidence.get("instrument_profiles") or [])
@@ -496,7 +514,9 @@ def _load_completed_pressure_baseline(path: Path) -> dict[str, Any]:
     or bool(boundary.get("qmt_invocation"))
     or bool(boundary.get("paper_or_live_command"))
     or parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
-    or not parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
+    or boundary.get(RUNTIME_STATE_CHECKPOINT_POLICY_KEY)
+    != RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
+    or not _uses_day_batch_runtime_checkpoint(parameters)
     or not isinstance(effective_ticks, int)
     or effective_ticks <= 0
     or not isinstance(checkpoint_attempts, int)
@@ -1850,8 +1870,17 @@ async def audit_source_identity(
   )
 
 
-async def _load_run_evidence(run_id: str) -> dict[str, Any]:
-  """Read only run-scoped persisted evidence after an isolated BACKTEST."""
+async def _load_run_evidence(
+  run_id: str,
+  *,
+  include_durable_actionable_fact_observation: bool = False,
+) -> dict[str, Any]:
+  """Read only run-scoped persisted evidence after an isolated BACKTEST.
+
+  The opt-in actionable-fact query deliberately runs only after terminal
+  observation.  Polling terminal convergence must not add extra database work
+  to the replay's ordinary hot path.
+  """
 
   async for db in get_async_db():
     run = await db.get(StrategyRun, run_id)
@@ -1876,6 +1905,81 @@ async def _load_run_evidence(run_id: str) -> dict[str, Any]:
     )
     logical_events = int(diagnostic["logical_events"])
     diagnostic_rows = int(diagnostic["rows"])
+    durable_actionable_fact_observation: dict[str, Any] | None = None
+    if include_durable_actionable_fact_observation:
+      trade_intent_rows, actionable_trade_intent_rows = (
+        await db.execute(
+          select(
+            func.count(TradeIntentRecord.id),
+            func.coalesce(
+              func.sum(
+                case(
+                  (
+                    func.upper(TradeIntentRecord.direction).in_(("BUY", "SELL")),
+                    1,
+                  ),
+                  else_=0,
+                )
+              ),
+              0,
+            ),
+          ).where(TradeIntentRecord.strategy_run_id == run_id)
+        )
+      ).one()
+      candidate_lifecycle_rows, candidate_rows_with_post_fill_status = (
+        await db.execute(
+          select(
+            func.count(TTradeCandidateOutcome.id),
+            func.coalesce(
+              func.sum(
+                case(
+                  (
+                    TTradeCandidateOutcome.post_fill_status != "WAITING_ENTRY",
+                    1,
+                  ),
+                  else_=0,
+                )
+              ),
+              0,
+            ),
+          ).where(TTradeCandidateOutcome.strategy_run_id == run_id)
+        )
+      ).one()
+      durable_actionable_fact_observation = {
+        "measurement_scope": "RUN_SCOPED_DURABLE_ROW_COUNTS_AT_OBSERVATION",
+        "immediate_actionable_trade_intent_rows": int(
+          actionable_trade_intent_rows or 0
+        ),
+        "trade_intent_rows": int(trade_intent_rows or 0),
+        "candidate_lifecycle_rows": int(candidate_lifecycle_rows or 0),
+        "immediate_actionable_candidate_rows": None,
+        "immediate_actionable_candidate_rows_unavailable_reason": (
+          "candidate outcome rows include MATERIAL-derived lifecycle records; "
+          "the schema has no run-scoped row flag that distinguishes an actionable "
+          "candidate from pure MATERIAL"
+        ),
+        "candidate_lifecycle_rows_with_post_fill_status": int(
+          candidate_rows_with_post_fill_status or 0
+        ),
+        "candidate_lifecycle_rows_with_post_fill_status_semantics": (
+          "distinct durable candidate rows whose current post_fill_status is not "
+          "WAITING_ENTRY; this is not a fill-event count"
+        ),
+        "simulated_fill_event_rows": None,
+        "simulated_fill_event_rows_unavailable_reason": (
+          "no dedicated run-scoped durable simulated-fill event table; do not "
+          "infer a fill count from candidate rows"
+        ),
+        "ordinary_material_evaluations": (
+          "excluded from immediate-fact counts: MATERIAL without a TradeIntent "
+          "remains DAY_BATCH evidence"
+        ),
+        "commit_attribution": (
+          "UNAVAILABLE: durable row counts are not per-commit attribution; use "
+          "database_write_activity.commit_calls only as the aggregate benchmark "
+          "process counter"
+        ),
+      }
     profile_rows = await db.execute(
       select(
         TTradeInstrumentProfile.instrument_code,
@@ -1892,7 +1996,7 @@ async def _load_run_evidence(run_id: str) -> dict[str, Any]:
       )
     )
     parameters = _json_object(run.parameters, context="BACKTEST_PARAMETERS")
-    return {
+    evidence = {
       "run_id": run_id,
       "mode": str(getattr(run.mode, "value", run.mode) or ""),
       "status": str(getattr(run.status, "value", run.status) or ""),
@@ -1927,6 +2031,11 @@ async def _load_run_evidence(run_id: str) -> dict[str, Any]:
         for code, as_of, version, schema_version, fingerprint in profile_rows.all()
       ],
     }
+    if durable_actionable_fact_observation is not None:
+      evidence["durable_actionable_fact_observation"] = (
+        durable_actionable_fact_observation
+      )
+    return evidence
   raise RuntimeError("DATABASE_SESSION_UNAVAILABLE")
 
 
@@ -1983,6 +2092,7 @@ async def _await_synthetic_replay_terminal(
         and str(run_evidence.get("mode") or "").upper() == "BACKTEST"
         and bool(parameters.get("t_trade_replay"))
         and parameters.get("replay_acceptance") == "V3_PRESSURE_BASELINE"
+        and _uses_day_batch_runtime_checkpoint(parameters)
         and account_id
       ):
         raw_end = parameters.get("replay_end_time")
@@ -2024,9 +2134,7 @@ async def load_cancelled_full_pressure_attempt(
     parameters = _json_object(run.parameters, context="CANCELLED_BACKTEST_PARAMETERS")
     if str(parameters.get("replay_acceptance") or "") != "V3_PRESSURE_BASELINE":
       raise AcceptanceBlockedError("CANCELLED_RUN_IS_NOT_PRESSURE_BASELINE")
-    runtime_state_persisted = bool(
-      parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
-    )
+    runtime_state_persisted = _uses_day_batch_runtime_checkpoint(parameters)
     backtest = (
       await db.execute(
         select(StrategyBacktest)
@@ -2084,9 +2192,11 @@ async def load_cancelled_full_pressure_attempt(
       "runtime_state_persistence": {
         "enabled": runtime_state_persisted,
         "evidence": (
-          "sealed V3 pressure runtime-state marker present in durable run parameters"
+          "sealed DAY_BATCH BACKTEST runtime-state checkpoint policy present "
+          "in durable run parameters"
           if runtime_state_persisted
-          else "sealed V3 pressure runtime-state marker absent; this historical run did not exercise durable RuntimeState CAS/position writes"
+          else "DAY_BATCH BACKTEST runtime-state checkpoint policy absent; this "
+          "historical run has nonpersistent RuntimeState evidence"
         ),
       },
       "evaluations": evaluations,
@@ -2102,10 +2212,19 @@ async def load_cancelled_full_pressure_attempt(
         "database_commit_calls": "N/A: in-process counter lost at cancellation",
       },
       "primary_observed_boundary": (
-        "production evaluation/materialization path with a nonpersistent BACKTEST "
-        "runtime-state checkpoint; this cancelled historical run did not exercise "
-        "durable RuntimeState CAS/position writes and made only partial progress "
-        "within the allowed wall-time budget"
+        (
+          "production evaluation/materialization path with a sealed durable "
+          "DAY_BATCH BACKTEST runtime-state checkpoint; this cancelled historical run "
+          "exercised the durable RuntimeState CAS/position-write path and made "
+          "only partial progress within the allowed wall-time budget"
+        )
+        if runtime_state_persisted
+        else (
+          "production evaluation/materialization path without a DAY_BATCH "
+          "BACKTEST runtime-state checkpoint; this cancelled historical run did "
+          "not exercise durable RuntimeState CAS/position writes and made only "
+          "partial progress within the allowed wall-time budget"
+        )
       ),
     }
   raise RuntimeError("DATABASE_SESSION_UNAVAILABLE")
@@ -2170,13 +2289,13 @@ async def load_completed_diagnostic_pressure_attempt(
     "replay": replay,
     "run_evidence": run_evidence,
     "runtime_state_persistence": {
-      "enabled": bool(
-        parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
-      ),
+      "enabled": _uses_day_batch_runtime_checkpoint(parameters),
       "evidence": (
-        "sealed V3 pressure runtime-state marker present in durable run parameters"
-        if parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
-        else "sealed V3 pressure runtime-state marker absent from durable run parameters"
+        "sealed DAY_BATCH BACKTEST runtime-state checkpoint policy present "
+        "in durable run parameters"
+        if _uses_day_batch_runtime_checkpoint(parameters)
+        else "DAY_BATCH BACKTEST runtime-state checkpoint policy absent from "
+        "durable run parameters"
       ),
     },
     "version_stale_reason": (
@@ -2217,12 +2336,12 @@ async def load_completed_diagnostic_pressure_attempt(
 def _normalize_nonpersistent_diagnostic_pressure_attempt(
   pressure_baseline: Optional[Mapping[str, Any]],
 ) -> Optional[dict[str, Any]]:
-  """Label a completed pre-capability diagnostic as explicitly non-gating.
+  """Label a diagnostic without explicit ``DAY_BATCH`` proof as non-gating.
 
-  Earlier short runs had ``checkpoint`` call timings, but normal BACKTEST
-  intentionally had ``persist_enabled=False``.  Their latency is retained for
-  diagnosis only; the absence of the sealed durable marker prevents them from
-  being misread as CAS/position-path coverage.
+  A pressure fixture label identifies only its synthetic workload.  Durable
+  BACKTEST coverage is proven exclusively by the persisted generic checkpoint
+  policy, so a diagnostic without it cannot be read as day-batch CAS/position
+  coverage.
   """
 
   if not isinstance(pressure_baseline, Mapping):
@@ -2235,7 +2354,7 @@ def _normalize_nonpersistent_diagnostic_pressure_attempt(
     run_evidence.get("parameters"),
     context="DIAGNOSTIC_PRESSURE_PARAMETERS",
   )
-  if parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY):
+  if _uses_day_batch_runtime_checkpoint(parameters):
     return normalized
   normalized["status"] = "EXECUTED_DIAGNOSTIC_NON_GATING_NONPERSISTENT"
   normalized["non_gating"] = True
@@ -2244,8 +2363,8 @@ def _normalize_nonpersistent_diagnostic_pressure_attempt(
   normalized["runtime_state_persistence"] = {
     "enabled": False,
     "evidence": (
-      "sealed V3 pressure runtime-state marker absent from durable run "
-      "parameters; ordinary BACKTEST persist_enabled=False"
+      "DAY_BATCH BACKTEST runtime-state checkpoint policy absent from durable "
+      "run parameters"
     ),
   }
   coverage = dict(normalized.get("production_path_coverage") or {})
@@ -2258,12 +2377,11 @@ def _normalize_nonpersistent_diagnostic_pressure_attempt(
 def _is_nonpersistent_diagnostic_pressure_attempt(
   pressure_baseline: Optional[Mapping[str, Any]],
 ) -> bool:
-  """Return whether a retained diagnostic is truly the old non-durable path.
+  """Return whether a retained diagnostic lacks durable ``DAY_BATCH`` proof.
 
-  The report keeps this historical calibration separately so its timings cannot
-  be mistaken for the sealed CAS/position workload.  Do not infer the label
-  from the field name alone: an earlier report refresh could have left a later
-  sealed run in that slot.
+  The report keeps such calibration separately so its timings cannot be
+  mistaken for the generic day-batch CAS/position workload.  The pressure label
+  is deliberately irrelevant to this decision.
   """
 
   if not isinstance(pressure_baseline, Mapping):
@@ -2275,9 +2393,7 @@ def _is_nonpersistent_diagnostic_pressure_attempt(
     run_evidence.get("parameters"),
     context="RETAINED_DIAGNOSTIC_PRESSURE_PARAMETERS",
   )
-  return not bool(
-    parameters.get(_INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY)
-  )
+  return not _uses_day_batch_runtime_checkpoint(parameters)
 
 
 def _resource_start() -> dict[str, Any]:
@@ -2632,13 +2748,7 @@ async def execute_synthetic_pressure_baseline(
   try:
     async with BenchmarkInstrumentation() as instrumentation:
       service = TTradeReplayService(manager)
-      created = await service.start(
-        payload,
-        request_id=request_id,
-        _runtime_state_persistence_capability=(
-          _v3_pressure_runtime_state_persistence_capability()
-        ),
-      )
+      created = await service.start(payload, request_id=request_id)
       run_id = str(created["run_id"])
       runtime = manager.get_run(run_id)
       if runtime is None or runtime.task is None:
@@ -2650,11 +2760,19 @@ async def execute_synthetic_pressure_baseline(
       if runtime_mode.endswith(".BACKTEST"):
         runtime_mode = "BACKTEST"
       broker_class = type(getattr(runtime, "broker", None)).__name__
+      runtime_parameters = _json_object(
+        getattr(getattr(runtime, "context", None), "parameters", {}),
+        context="SYNTHETIC_PRESSURE_RUNTIME_PARAMETERS",
+      )
+      runtime_checkpoint_policy = runtime_parameters.get(
+        RUNTIME_STATE_CHECKPOINT_POLICY_KEY
+      )
       if (
         runtime_mode != "BACKTEST"
         or broker_class != "BacktestBroker"
         or runtime_state is None
         or not bool(getattr(runtime_state, "persist_enabled", False))
+        or runtime_checkpoint_policy != RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
       ):
         # The task has already been created, so converge it through the
         # service-owned isolated BACKTEST cancellation boundary before raising.
@@ -2664,7 +2782,7 @@ async def execute_synthetic_pressure_baseline(
         "strategy_run_mode": runtime_mode,
         "broker_class": broker_class,
         "runtime_state_persist_enabled": True,
-        "runtime_state_capability": "V3_PRESSURE_BASELINE_INTERNAL_ONLY",
+        RUNTIME_STATE_CHECKPOINT_POLICY_KEY: runtime_checkpoint_policy,
         "qmt_invocation": False,
         "paper_or_live_command": False,
       }
@@ -2719,6 +2837,10 @@ async def execute_synthetic_pressure_baseline(
         await _await_synthetic_replay_terminal(service, run_id)
       )
     elapsed_seconds = wall_clock.perf_counter() - started
+    run_evidence = await _load_run_evidence(
+      run_id,
+      include_durable_actionable_fact_observation=True,
+    )
   finally:
     manager._ensure_backtest_data_available = original_data_check
     manager._queue_missing_backtest_data_supplement = original_supplement
@@ -2750,9 +2872,17 @@ async def execute_synthetic_pressure_baseline(
       round(cas_conflicts / cas_denominator, 8) if cas_denominator else None
     ),
   }
+  raw_durable_actionable_fact_observation = run_evidence.get(
+    "durable_actionable_fact_observation"
+  )
+  if not isinstance(raw_durable_actionable_fact_observation, Mapping):
+    raise RuntimeError("SYNTHETIC_PRESSURE_ACTIONABLE_FACT_OBSERVATION_MISSING")
   database_write_activity = {
     **instrumentation.db_writes.to_dict(),
     "runtime_state": instrumentation.runtime_state_db.to_dict(),
+    "durable_actionable_fact_observation": dict(
+      raw_durable_actionable_fact_observation
+    ),
   }
   persisted_parameters = _json_object(
     run_evidence.get("parameters"), context="SYNTHETIC_PRESSURE_PARAMETERS"
@@ -2760,9 +2890,7 @@ async def execute_synthetic_pressure_baseline(
   if (
     persisted_parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
     or not persisted_parameters.get("t_trade_replay")
-    or not persisted_parameters.get(
-      _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY
-    )
+    or not _uses_day_batch_runtime_checkpoint(persisted_parameters)
   ):
     raise RuntimeError("SYNTHETIC_PRESSURE_DURABLE_RUNTIME_STATE_NOT_PROVEN")
   latency = {
@@ -2782,6 +2910,10 @@ async def execute_synthetic_pressure_baseline(
     and bool(
       dict(execution_boundary or {}).get("runtime_state_persist_enabled")
     )
+    and dict(execution_boundary or {}).get(
+      RUNTIME_STATE_CHECKPOINT_POLICY_KEY
+    )
+    == RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
     and bool(tick_accounting.get("accounting_passed"))
   )
   if timed_out:
@@ -2814,6 +2946,8 @@ async def execute_synthetic_pressure_baseline(
       "runtime_state_checkpoint": bool(
         execution_boundary
         and execution_boundary["runtime_state_persist_enabled"]
+        and execution_boundary.get(RUNTIME_STATE_CHECKPOINT_POLICY_KEY)
+        == RUNTIME_STATE_CHECKPOINT_POLICY_DAY_BATCH
         and checkpoint_attempts > 0
       ),
       "post_cas_evaluation_materialization": bool(
@@ -3479,10 +3613,11 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
   if run_evidence:
     terminal = dict(pressure.get("terminal_convergence") or {})
     lines.append(
-      "- 隔离执行证据：runId=`{}`；terminal={}；sealed durable RuntimeState={}；"
-      "QMT={}，PAPER/LIVE command={}.".format(
+      "- 隔离执行证据：runId=`{}`；terminal={}；RuntimeState policy={}；"
+      "persisted={}；QMT={}，PAPER/LIVE command={}.".format(
         run_evidence.get("run_id") or pressure.get("run_id"),
         terminal.get("status") or "N/A",
+        execution_boundary.get(RUNTIME_STATE_CHECKPOINT_POLICY_KEY),
         execution_boundary.get("runtime_state_persist_enabled"),
         execution_boundary.get("qmt_invocation"),
         execution_boundary.get("paper_or_live_command"),
@@ -3509,7 +3644,7 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
   if runtime_state_writes:
     lines.append(
       "- Position DB writes：replace={}，same-code update={}，rows={}；"
-      "每 Tick 的 state CAS/upsert 仍保留（attempts={}）。".format(
+      "BACKTEST DAY_BATCH state CAS/upsert（attempts={}）。".format(
         runtime_state_writes.get("position_replace_snapshot_calls"),
         runtime_state_writes.get("position_update_existing_snapshot_calls"),
         runtime_state_writes.get("position_rows_submitted"),
@@ -3548,8 +3683,8 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
         "",
         "### 历史非持久 480 Tick 校准（NON_GATING）",
         "",
-        "**{}**：runId=`{}`；sealed durable marker={}。该运行的普通 BACKTEST "
-        "`persist_enabled=False`，所以其 checkpoint/CAS/position 指标不可用于持久 "
+        "**{}**：runId=`{}`；RuntimeState checkpoint policy={}。该运行缺少 "
+        "显式 `DAY_BATCH` 证明，所以其 checkpoint/CAS/position 指标不可用于持久 "
         "生产路径或 SLO。".format(
           historical.get("status"),
           historical_run.get("run_id") or historical.get("run_id"),
@@ -3970,8 +4105,9 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
   # A later report refresh (for example, after locating a cancelled full run)
   # must not erase a completed diagnostic evidence block merely because this
   # invocation does not request a second diagnostic execution.  In particular,
-  # retain older pre-capability 480 runs as explicit NON_GATING evidence rather
-  # than letting their checkpoint timings masquerade as durable CAS coverage.
+  # retain older 480 runs without explicit DAY_BATCH proof as NON_GATING
+  # evidence rather than letting their checkpoint timings masquerade as durable
+  # CAS coverage.
   previous_pressure = _normalize_nonpersistent_diagnostic_pressure_attempt(
     existing.get("pressure_baseline")
   )

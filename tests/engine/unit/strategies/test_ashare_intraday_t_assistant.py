@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -1697,6 +1698,114 @@ async def test_policy_change_rewarms_opportunity_and_preserves_filled_batch_stat
 
   ordinary = await reconcile(strategy, {"600000.SH": {"eligible": True}})
   assert ordinary.runtime_state_patch.append_events == []
+
+
+@pytest.mark.asyncio
+async def test_compact_persistence_projection_omits_hot_samples_and_backtest_rewarms():
+  source = make_strategy(run_id="compact-opportunity", mode=StrategyRunMode.BACKTEST)
+  await source.initialize()
+  await reconcile(
+    source,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "policy_volume": 100,
+        "position_shares": 1_000,
+        "position_available_shares": 1_000,
+      }
+    },
+  )
+  start = datetime(2026, 7, 13, 9, 30)
+  intent = await latch_pullback_candidate(source, start)
+  approval_patch = source.mark_candidate_awaiting_approval(
+    "600000.SH",
+    intent.metadata["candidate_id"],
+    intent.intent_id,
+    source_time_ms=int((start + timedelta(seconds=83)).timestamp() * 1000),
+  )
+  source.state.update(approval_patch.set)
+
+  full_state = source.state["instrument_states"]["600000.SH"]
+  full_state.update(
+    {
+      "entry_filled_volume": 100,
+      "entry_avg_price": 99.31,
+      "batch_id": "active-batch",
+      "exit_plan_id": "exit-plan-1",
+      "status": TTradeStatus.MONITORING,
+    }
+  )
+  opportunity = full_state["opportunity"]
+  seed = dict(opportunity["samples"][-1])
+  opportunity["samples"] = [
+    {
+      **seed,
+      "source_time_ms": int(start.timestamp() * 1000) + ordinal,
+      "tick_ordinal": ordinal,
+      "sentinel": f"hot-sample-{ordinal}",
+    }
+    for ordinal in range(1, 1_001)
+  ]
+
+  projection = source.persistence_state_snapshot()
+  projected = projection["instrument_states"]["600000.SH"]
+  projected_opportunity = projected["opportunity"]
+  full_json_bytes = len(json.dumps(source.state.to_dict(), sort_keys=True).encode())
+  projected_json_bytes = len(json.dumps(projection, sort_keys=True).encode())
+
+  assert len(full_state["opportunity"]["samples"]) == 1_000
+  assert full_state["opportunity"]["samples"][0]["sentinel"] == "hot-sample-1"
+  assert "samples" not in projected_opportunity
+  assert "hot-sample-1" not in json.dumps(projection, sort_keys=True)
+  assert projected_opportunity["sample_window_persisted"] is False
+  assert projected_opportunity["sample_window_restore_required"] is True
+  assert projected_opportunity["sample_window_sample_count"] == 1_000
+  assert projected_opportunity["sample_window_last_source_identity"] == {
+    "continuity_generation": "1",
+    "source_time_ms": int(start.timestamp() * 1000) + 1_000,
+    "tick_ordinal": 1_000,
+  }
+  assert projected["entry_filled_volume"] == 100
+  assert projected["batch_id"] == "active-batch"
+  assert projected["pending_entry_intent_id"] == intent.intent_id
+  assert projected_opportunity["candidate"]["candidate_id"] == intent.metadata[
+    "candidate_id"
+  ]
+  assert projected_json_bytes * 20 < full_json_bytes
+
+  restored = make_strategy(
+    run_id="compact-opportunity-restored",
+    mode=StrategyRunMode.BACKTEST,
+  )
+  restored.apply_state_snapshot(projection)
+  await restored.initialize()
+  assert restored.pending_manual_intent_ids() == [intent.intent_id]
+  restored_state = restored.state["instrument_states"]["600000.SH"]
+  assert restored_state["entry_filled_volume"] == 100
+  assert restored_state["batch_id"] == "active-batch"
+  assert restored_state["opportunity"]["candidate"]["candidate_id"] == (
+    intent.metadata["candidate_id"]
+  )
+
+  await reconcile(restored, {"600000.SH": {"eligible": True}})
+  output = await process_tick(
+    restored,
+    make_input(
+      start + timedelta(minutes=10),
+      make_tick(start + timedelta(minutes=10), 100.0),
+      run_id=restored.context.run_id,
+      tick_ordinal=2_000,
+    ),
+  )
+
+  rebuilt = restored.state["instrument_states"]["600000.SH"]["opportunity"]
+  assert output.trade_intents == []
+  assert rebuilt["samples"]
+  assert len(rebuilt["samples"]) == 1
+  assert rebuilt["data_health"] == DataHealth.WARMING.value
+  assert rebuilt["candidate"] is None
+  assert "sample_window_persisted" not in rebuilt
+  assert "sample_window_restore_required" not in rebuilt
 
 
 @pytest.mark.asyncio
