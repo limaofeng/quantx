@@ -8,10 +8,13 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from quantx_infrastructure.services.t_trade_rollout_evidence_service import (
+  FORMAL_REPLAY_ACCEPTANCE,
+  MAX_EVIDENCE_ROWS,
   MAX_REPLAY_ROWS,
   V3_ROLLOUT_GATE_CODES,
   TTradeV3RolloutEvidenceEvaluator,
 )
+from sqlalchemy.dialects import postgresql
 
 _UNSET = object()
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -169,11 +172,17 @@ def _replay_row(
   run_id: str = "replay-run",
   version: int = 1,
   completed_at: datetime | None = None,
+  acceptance: str = FORMAL_REPLAY_ACCEPTANCE,
+  mode: str = "BACKTEST",
 ) -> tuple[SimpleNamespace, ...]:
   return (
     SimpleNamespace(
       id=run_id,
-      parameters={"t_trade_replay": True},
+      mode=mode,
+      parameters={
+        "t_trade_replay": True,
+        "replay_acceptance": acceptance,
+      },
       updated_at=completed_at,
     ),
     SimpleNamespace(status="COMPLETED"),
@@ -189,6 +198,7 @@ def _replay_row(
           "methodology": {"tick_read_audit": {"verified_windows": 20, "issues": []}},
           "rollout_evidence": {
             "strict_causal": True,
+            "replay_acceptance": acceptance,
             "trading_dates": [item.isoformat() for item in dates],
             "market_scenario_coverage": {
               "normal_trading_dates": [item.isoformat() for item in dates[:-1]],
@@ -248,12 +258,19 @@ def _evaluate(
   paper_outcomes: list[SimpleNamespace] | None = None,
   paper_intents: list[SimpleNamespace] | None = None,
   paper_calendar: list[date] | None = None,
+  paper_coverage_intervals: list[SimpleNamespace] | None = None,
+  paper_observed_dates: dict[str, list[date]] | None = None,
   replay_rows: list[tuple[SimpleNamespace, ...]] | None = None,
   replay_evaluations: list[SimpleNamespace] | None = None,
   replay_outcomes: list[SimpleNamespace] | None = None,
   replay_intents: list[SimpleNamespace] | None = None,
   paper_runs_truncated: bool = False,
   paper_evidence_truncated: bool = False,
+  paper_evidence_truncated_run_ids: tuple[str, ...] = (),
+  replay_rows_truncated: bool = False,
+  replay_evidence_truncated: bool = False,
+  replay_evidence_truncated_run_ids: tuple[str, ...] = (),
+  historical_replay_cutoff_date: date | None = None,
   rollout: SimpleNamespace | None | object = _UNSET,
   global_config: SimpleNamespace | None | object = _UNSET,
   live_run: SimpleNamespace | None | object = _UNSET,
@@ -280,19 +297,25 @@ def _evaluate(
     paper_outcomes=list(paper_outcomes or []),
     paper_intents=list(paper_intents or []),
     paper_calendar=paper_calendar,
-    replay_rows_truncated=False,
-    replay_evidence_truncated=False,
+    replay_rows_truncated=replay_rows_truncated,
+    replay_evidence_truncated=replay_evidence_truncated,
     paper_runs_truncated=paper_runs_truncated,
     paper_evidence_truncated=paper_evidence_truncated,
     review_events=list(review_events or []),
     review_events_truncated=review_events_truncated,
     query_available=True,
+    replay_evidence_truncated_run_ids=replay_evidence_truncated_run_ids,
+    paper_coverage_intervals=paper_coverage_intervals,
+    paper_observed_dates=paper_observed_dates,
+    paper_evidence_truncated_run_ids=paper_evidence_truncated_run_ids,
+    historical_replay_cutoff_date=historical_replay_cutoff_date,
   )
 
 
-def _complete_paper_evidence() -> tuple[
-  list[SimpleNamespace], list[SimpleNamespace], list[date]
-]:
+def _complete_paper_evidence(
+  *,
+  run_id: str = "paper-run",
+) -> tuple[list[SimpleNamespace], list[SimpleNamespace], list[date]]:
   paper_days = _weekdays(date(2026, 8, 3), 5)
   evaluations: list[SimpleNamespace] = []
   outcomes: list[SimpleNamespace] = []
@@ -300,12 +323,10 @@ def _complete_paper_evidence() -> tuple[
     for candidate_index in range(4):
       candidate_id = f"paper-{day_index}-{candidate_index}"
       evaluations.append(
-        _evaluation(candidate_id, run_id="paper-run", trade_date=trade_date)
+        _evaluation(candidate_id, run_id=run_id, trade_date=trade_date)
       )
-      outcomes.append(_outcome(candidate_id, run_id="paper-run", trade_date=trade_date))
-  evaluations.extend(
-    _coverage_evaluations(run_id="paper-run", trading_dates=paper_days)
-  )
+      outcomes.append(_outcome(candidate_id, run_id=run_id, trade_date=trade_date))
+  evaluations.extend(_coverage_evaluations(run_id=run_id, trading_dates=paper_days))
   return evaluations, outcomes, paper_days
 
 
@@ -450,6 +471,253 @@ def test_evaluator_fails_paper_day_gate_when_run_query_is_truncated() -> None:
   assert "\u622a\u65ad" in result["summary"]["paper"]["consecutive_days_message"]
 
 
+def test_evaluator_accepts_high_frequency_paper_coverage_when_compacted() -> None:
+  """Normal high-frequency diagnostics must not exhaust lifecycle evidence."""
+
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+  compact_coverage = _coverage_evaluations(
+    run_id="paper-run",
+    trading_dates=paper_days,
+  )
+  # This is deliberately larger than the historical global evidence cap.  The
+  # production loader returns minute envelopes for this relation; the pure
+  # evaluator only needs those compact intervals and must not equate their
+  # count with candidate-lifecycle truncation.
+  high_frequency_coverage = compact_coverage * (
+    MAX_EVIDENCE_ROWS // len(compact_coverage) + 2
+  )
+
+  result = _evaluate(
+    paper_evaluations=evaluations,
+    paper_outcomes=outcomes,
+    paper_calendar=paper_days,
+    paper_coverage_intervals=high_frequency_coverage,
+    paper_observed_dates={"paper-run": paper_days},
+  )
+
+  assert len(high_frequency_coverage) > MAX_EVIDENCE_ROWS
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is True
+  assert result["summary"]["paper"]["evidence_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_paper_cohort_loader_keeps_high_frequency_session_proof_compact() -> None:
+  """The DB-facing reader returns envelopes, not every diagnostic Tick."""
+
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+  candidate_evaluations = [row for row in evaluations if row.record_kind == "MATERIAL"]
+  compact_coverage = _coverage_evaluations(
+    run_id="paper-run",
+    trading_dates=paper_days,
+  )
+
+  class CohortDatabase:
+    def __init__(self) -> None:
+      self.statements: list[object] = []
+      self.results = [
+        _DatabaseResult(scalars=candidate_evaluations),
+        _DatabaseResult(scalars=outcomes),
+        _DatabaseResult(scalars=[]),
+        _DatabaseResult(
+          rows=[
+            (
+              row.strategy_run_id,
+              row.window_started_at,
+              row.window_ended_at,
+              True,
+            )
+            for row in compact_coverage
+          ]
+        ),
+      ]
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return self.results.pop(0)
+
+  evidence = await TTradeV3RolloutEvidenceEvaluator()._load_paper_cohort_evidence(
+    CohortDatabase(),
+    account_id="account-1",
+    run_id="paper-run",
+    trading_dates=paper_days,
+  )
+  result = _evaluate(
+    paper_evaluations=evidence["evaluations"],
+    paper_outcomes=evidence["outcomes"],
+    paper_intents=evidence["intents"],
+    paper_calendar=paper_days,
+    paper_coverage_intervals=evidence["coverage_intervals"],
+    paper_observed_dates={"paper-run": paper_days},
+  )
+
+  assert len(evidence["coverage_intervals"]) == len(compact_coverage)
+  assert len(evidence["coverage_intervals"]) < MAX_EVIDENCE_ROWS
+  assert evidence["truncated"] is False
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is True
+
+
+def test_paper_coverage_accepts_source_time_at_local_shanghai_evaluation_time() -> None:
+  """A Shanghai-naive persisted evaluation is causal at the same source instant."""
+
+  evaluator = TTradeV3RolloutEvidenceEvaluator()
+  window_started_at = datetime(2026, 8, 3, 9, 50)
+  evaluated_at = datetime(2026, 8, 3, 10, 0)
+  source_time_ms = int(evaluated_at.replace(tzinfo=_SHANGHAI).timestamp() * 1_000)
+  row = SimpleNamespace(
+    record_kind="COALESCED_DIAGNOSTIC",
+    evaluated_at=evaluated_at,
+    window_started_at=window_started_at,
+    window_ended_at=evaluated_at,
+    payload={"signal_snapshot": {"source_time_ms": source_time_ms}},
+  )
+
+  assert evaluator._paper_evidence_interval(row) == (window_started_at, evaluated_at)
+
+
+def test_paper_coverage_rejects_source_time_one_ms_after_evaluation() -> None:
+  """A UTC source timestamp one millisecond in the future cannot evidence PAPER."""
+
+  evaluator = TTradeV3RolloutEvidenceEvaluator()
+  window_started_at = datetime(2026, 8, 3, 9, 50)
+  evaluated_at = datetime(2026, 8, 3, 10, 0)
+  source_time_ms = int(evaluated_at.replace(tzinfo=_SHANGHAI).timestamp() * 1_000) + 1
+  row = SimpleNamespace(
+    record_kind="COALESCED_DIAGNOSTIC",
+    evaluated_at=evaluated_at,
+    window_started_at=window_started_at,
+    window_ended_at=evaluated_at,
+    payload={"signal_snapshot": {"source_time_ms": source_time_ms}},
+  )
+
+  assert evaluator._paper_evidence_interval(row) is None
+
+
+@pytest.mark.asyncio
+async def test_paper_coverage_query_attaches_shanghai_timezone_before_epoch_extract() -> (
+  None
+):
+  """PostgreSQL must not treat persisted Shanghai wall time as UTC."""
+
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+  candidate_evaluations = [row for row in evaluations if row.record_kind == "MATERIAL"]
+  compact_coverage = _coverage_evaluations(
+    run_id="paper-run",
+    trading_dates=paper_days,
+  )
+
+  class CohortDatabase:
+    def __init__(self) -> None:
+      self.statements: list[object] = []
+      self.results = [
+        _DatabaseResult(scalars=candidate_evaluations),
+        _DatabaseResult(scalars=outcomes),
+        _DatabaseResult(scalars=[]),
+        _DatabaseResult(
+          rows=[
+            (
+              row.strategy_run_id,
+              row.window_started_at,
+              row.window_ended_at,
+              True,
+            )
+            for row in compact_coverage
+          ]
+        ),
+      ]
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return self.results.pop(0)
+
+  db = CohortDatabase()
+  await TTradeV3RolloutEvidenceEvaluator()._load_paper_cohort_evidence(
+    db,
+    account_id="account-1",
+    run_id="paper-run",
+    trading_dates=paper_days,
+  )
+
+  compiled = str(
+    db.statements[-1].compile(
+      dialect=postgresql.dialect(),
+      compile_kwargs={"literal_binds": True},
+    )
+  )
+  assert "AT TIME ZONE 'Asia/Shanghai'" in compiled
+  assert "EXTRACT(epoch FROM" in compiled
+  # The time-zone correction applies only to the source/evaluation causal
+  # comparison.  Window comparisons remain in the persisted local domain.
+  assert "window_ended_at <= t_trade_opportunity_evaluations.evaluated_at" in compiled
+
+
+def test_evaluator_fails_closed_on_paper_coverage_gap_in_target_cohort() -> None:
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+  coverage = _coverage_evaluations(run_id="paper-run", trading_dates=paper_days)
+  first_day = paper_days[0]
+  gap_coverage = [
+    row
+    for row in coverage
+    if not (
+      row.window_started_at.date() == first_day
+      and time(10, 0) <= row.window_started_at.time() < time(10, 30)
+    )
+  ]
+
+  result = _evaluate(
+    paper_evaluations=evaluations,
+    paper_outcomes=outcomes,
+    paper_calendar=paper_days,
+    paper_coverage_intervals=gap_coverage,
+    paper_observed_dates={"paper-run": paper_days},
+  )
+
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is False
+  first_session = result["summary"]["paper"]["intraday_coverage"]["days"][0][
+    "sessions"
+  ][0]
+  assert first_session["max_gap_seconds"] > 15 * 60
+
+
+def test_evaluator_fails_closed_when_target_paper_cohort_is_truncated() -> None:
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+
+  result = _evaluate(
+    paper_evaluations=evaluations,
+    paper_outcomes=outcomes,
+    paper_calendar=paper_days,
+    paper_evidence_truncated_run_ids=("paper-run",),
+  )
+
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is False
+  assert _passed(result)["V3_PAPER_20_COMPLETED_CANDIDATE_LIFECYCLES"] is False
+  assert _passed(result)["V3_PAPER_CANDIDATE_TRACE_COMPLETE"] is False
+
+
+def test_evaluator_does_not_let_old_paper_cohort_truncation_poison_current_run() -> (
+  None
+):
+  current_evaluations, current_outcomes, paper_days = _complete_paper_evidence(
+    run_id="current-run"
+  )
+  old_evaluations, old_outcomes, _ = _complete_paper_evidence(run_id="old-run")
+
+  result = _evaluate(
+    paper_runs=[
+      _paper_run(paper_days, run_id="current-run"),
+      _paper_run(paper_days, run_id="old-run"),
+    ],
+    paper_evaluations=[*current_evaluations, *old_evaluations],
+    paper_outcomes=[*current_outcomes, *old_outcomes],
+    paper_calendar=paper_days,
+    paper_evidence_truncated_run_ids=("old-run",),
+  )
+
+  paper = result["summary"]["paper"]
+  assert paper["strategy_run_id"] == "current-run"
+  assert paper["evidence_truncated"] is False
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is True
+
+
 def test_evaluator_fails_trace_gate_for_multiple_intents_from_one_candidate() -> None:
   evaluations, outcomes, paper_days = _complete_paper_evidence()
   duplicate_intents = [
@@ -525,6 +793,214 @@ def test_evaluator_selects_single_replay_with_most_passing_gates() -> None:
   assert replay["run_id"] == "a-good-run"
   assert replay["selection_gate_pass_count"] == 6
   assert replay["future_data_violation_count"] == 0
+
+
+def test_evaluator_excludes_pressure_baseline_from_formal_replay_evidence() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  formal_evaluation = _evaluation(
+    "formal-candidate",
+    run_id="formal-run",
+    trade_date=replay_dates[0],
+  )
+  pressure_evaluation = _evaluation(
+    "pressure-candidate",
+    run_id="pressure-run",
+    trade_date=replay_dates[0],
+  )
+  result = _evaluate(
+    replay_rows=[
+      _replay_row(replay_dates, run_id="formal-run"),
+      _replay_row(
+        replay_dates,
+        run_id="pressure-run",
+        acceptance="V3_PRESSURE_BASELINE",
+      ),
+    ],
+    replay_evaluations=[formal_evaluation, pressure_evaluation],
+    replay_outcomes=[
+      _outcome("formal-candidate", run_id="formal-run", trade_date=replay_dates[0]),
+      _outcome(
+        "pressure-candidate",
+        run_id="pressure-run",
+        trade_date=replay_dates[0],
+      ),
+    ],
+  )
+
+  replay = result["summary"]["replay"]
+  assert replay["run_id"] == "formal-run"
+  assert replay["candidate_replay_count"] == 1
+  assert _passed(result)["V3_REPLAY_STRICT_CAUSAL"] is True
+
+
+def test_evaluator_requires_formal_result_proof_to_match_formal_run_marker() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  replay_row = _replay_row(replay_dates)
+  replay_row[2].metrics["t_trade_replay"]["rollout_evidence"]["replay_acceptance"] = (
+    "V3_PRESSURE_BASELINE"
+  )
+  evaluation = _evaluation(
+    "formal-candidate",
+    run_id="replay-run",
+    trade_date=replay_dates[0],
+  )
+
+  result = _evaluate(
+    replay_rows=[replay_row],
+    replay_evaluations=[evaluation],
+    replay_outcomes=[
+      _outcome("formal-candidate", run_id="replay-run", trade_date=replay_dates[0])
+    ],
+  )
+
+  assert _passed(result)["V3_REPLAY_STRICT_CAUSAL"] is False
+
+
+@pytest.mark.asyncio
+async def test_loader_filters_formal_run_ids_before_loading_replay_evidence() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  pressure_row = _replay_row(
+    replay_dates,
+    run_id="pressure-run",
+    acceptance="V3_PRESSURE_BASELINE",
+  )
+  formal_row = _replay_row(replay_dates, run_id="formal-run")
+
+  class EvidenceProbe(TTradeV3RolloutEvidenceEvaluator):
+    def __init__(self) -> None:
+      super().__init__()
+      self.formal_run_ids: tuple[str, ...] = ()
+
+    async def _load_formal_replay_evidence(self, _db, *, account_id, run_ids):
+      assert account_id == "account-1"
+      self.formal_run_ids = tuple(run_ids)
+      return {
+        "evaluations": [],
+        "outcomes": [],
+        "intents": [],
+        "truncated_run_ids": frozenset(),
+      }
+
+    async def _load_paper_observed_dates(self, _db, *, account_id, run_ids):
+      assert account_id == "account-1"
+      assert run_ids == ()
+      return {}
+
+  class ReadOnlyDatabase:
+    def __init__(self) -> None:
+      self.statements: list[object] = []
+      self.results = [
+        _DatabaseResult(rows=[pressure_row, formal_row]),
+        _DatabaseResult(scalars=[]),
+        _DatabaseResult(scalars=[]),
+      ]
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return self.results.pop(0)
+
+    async def get(self, *_args, **_kwargs):
+      return None
+
+  evaluator = EvidenceProbe()
+  db = ReadOnlyDatabase()
+  await evaluator._load(db, account_id="account-1")
+
+  assert evaluator.formal_run_ids == ("formal-run",)
+  formal_query = db.statements[0]
+  compiled = formal_query.compile()
+  assert FORMAL_REPLAY_ACCEPTANCE in compiled.params.values()
+  assert "replay_acceptance" in compiled.params.values()
+
+
+def test_evaluator_does_not_let_another_replay_cap_breach_poison_target() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  current_evaluation = _evaluation(
+    "current-candidate",
+    run_id="current-run",
+    trade_date=replay_dates[0],
+  )
+  old_evaluation = _evaluation(
+    "old-candidate",
+    run_id="old-run",
+    trade_date=replay_dates[0],
+  )
+  result = _evaluate(
+    replay_rows=[
+      _replay_row(
+        replay_dates, run_id="current-run", completed_at=datetime(2026, 8, 2)
+      ),
+      _replay_row(replay_dates, run_id="old-run", completed_at=datetime(2026, 8, 1)),
+    ],
+    replay_evaluations=[current_evaluation, old_evaluation],
+    replay_outcomes=[
+      _outcome("current-candidate", run_id="current-run", trade_date=replay_dates[0]),
+      _outcome("old-candidate", run_id="old-run", trade_date=replay_dates[0]),
+    ],
+    replay_rows_truncated=True,
+    replay_evidence_truncated_run_ids=("old-run",),
+  )
+
+  replay = result["summary"]["replay"]
+  assert replay["run_id"] == "current-run"
+  assert replay["evidence_truncated"] is False
+  assert _passed(result)["V3_REPLAY_EPISODE_DUPLICATES_ZERO"] is True
+
+
+def test_evaluator_fails_closed_when_selected_replay_evidence_is_truncated() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  evaluation = _evaluation(
+    "current-candidate",
+    run_id="replay-run",
+    trade_date=replay_dates[0],
+  )
+  result = _evaluate(
+    replay_evaluations=[evaluation],
+    replay_outcomes=[
+      _outcome("current-candidate", run_id="replay-run", trade_date=replay_dates[0])
+    ],
+    replay_evidence_truncated_run_ids=("replay-run",),
+  )
+
+  assert _passed(result)["V3_REPLAY_EPISODE_DUPLICATES_ZERO"] is False
+  assert _passed(result)["V3_REPLAY_GHOST_CANDIDATES_ZERO"] is False
+  assert _passed(result)["V3_REPLAY_FUTURE_DATA_ZERO"] is False
+
+
+def test_evaluator_rejects_formal_replay_that_includes_current_day() -> None:
+  replay_dates = _weekdays(date(2026, 7, 6), 20)
+  cutoff_date = replay_dates[-1]
+  evaluation = _evaluation(
+    "replay-candidate",
+    run_id="replay-run",
+    trade_date=replay_dates[0],
+  )
+  result = _evaluate(
+    replay_evaluations=[evaluation],
+    replay_outcomes=[
+      _outcome("replay-candidate", run_id="replay-run", trade_date=replay_dates[0])
+    ],
+    historical_replay_cutoff_date=cutoff_date,
+  )
+
+  replay = result["summary"]["replay"]
+  assert replay["historical_dates_closed"] is False
+  assert replay["historical_replay_cutoff_date"] == cutoff_date.isoformat()
+  assert _passed(result)["V3_REPLAY_STRICT_CAUSAL"] is False
+
+
+def test_current_day_exclusion_does_not_remove_live_paper_evidence() -> None:
+  evaluations, outcomes, paper_days = _complete_paper_evidence()
+  result = _evaluate(
+    paper_evaluations=evaluations,
+    paper_outcomes=outcomes,
+    paper_calendar=paper_days,
+    # Simulate that the fifth PAPER day is today.  PAPER is a real-time gate;
+    # only historical replay proof must exclude the unfinished current day.
+    historical_replay_cutoff_date=paper_days[-1],
+  )
+
+  assert _passed(result)["V3_PAPER_5_CONSECUTIVE_TRADING_DAYS"] is True
 
 
 def test_evaluator_breaks_equal_replay_quality_tie_by_completion_time() -> None:
@@ -681,16 +1157,20 @@ async def test_evaluator_uses_bounded_queries_not_one_query_per_run(
   """A maximal run set must use the same fixed statement plan as one run.
 
   The readiness heartbeat snapshot is intentionally one set-oriented query;
-  V3 promotion evidence needs distinct bounded relations (replay, PAPER,
-  outcomes, intents and review events).  This guards the complementary
-  contract: no statement is issued per replay/PAPER run.
+  V3 promotion evidence needs distinct bounded relations.  This guards the
+  complementary contract: formal replay evidence is partition-bounded in SQL,
+  never loaded with one statement per replay run.
   """
 
   replay_rows = [
     (
       SimpleNamespace(
         id=f"replay-{index}",
-        parameters={"t_trade_replay": True},
+        mode="BACKTEST",
+        parameters={
+          "t_trade_replay": True,
+          "replay_acceptance": FORMAL_REPLAY_ACCEPTANCE,
+        },
       ),
       SimpleNamespace(status="COMPLETED"),
       SimpleNamespace(
@@ -702,27 +1182,16 @@ async def test_evaluator_uses_bounded_queries_not_one_query_per_run(
     )
     for index in range(run_count)
   ]
-  paper_runs = [
-    SimpleNamespace(
-      id=f"paper-{index}",
-      parameters={"account_id": "account-1"},
-    )
-    for index in range(run_count)
-  ]
   db = SimpleNamespace(
-    # replay + its three evidence relations, PAPER + its three evidence
-    # relations, and bounded rollout-review events: nine executes regardless
-    # of the number of run ids carried by the IN predicates.
+    # Formal replay discovery + candidate material/outcome relations + PAPER
+    # discovery + bounded rollout-review events: the same fixed statement
+    # count regardless of the number of formal run ids in the window function.
     execute=AsyncMock(
       side_effect=[
         _DatabaseResult(rows=replay_rows),
         _DatabaseResult(),
         _DatabaseResult(),
-        _DatabaseResult(),
-        _DatabaseResult(scalars=paper_runs),
-        _DatabaseResult(),
-        _DatabaseResult(),
-        _DatabaseResult(),
+        _DatabaseResult(scalars=[]),
         _DatabaseResult(),
       ]
     ),
@@ -738,7 +1207,7 @@ async def test_evaluator_uses_bounded_queries_not_one_query_per_run(
   )
 
   assert _passed(result)["V3_EVIDENCE_QUERY_AVAILABLE"] is True
-  assert db.execute.await_count <= 9
+  assert db.execute.await_count <= 6
   assert db.get.await_count <= 1
   assert db.execute.await_count + db.get.await_count <= 10
 

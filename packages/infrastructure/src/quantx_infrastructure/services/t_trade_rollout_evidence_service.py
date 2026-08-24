@@ -18,11 +18,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import BigInteger, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from quantx_infrastructure.models.agent_runtime import (
@@ -37,6 +37,7 @@ from quantx_infrastructure.models.t_trade_candidate_outcome import (
 )
 from quantx_infrastructure.models.t_trade_global_config import TTradeGlobalConfig
 from quantx_infrastructure.models.t_trade_opportunity_intelligence import (
+  T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
   T_TRADE_EVALUATION_KIND_MATERIAL,
   TTradeOpportunityEvaluation,
 )
@@ -53,6 +54,26 @@ MIN_PAPER_COMPLETED_CANDIDATES = 20
 MAX_REPLAY_ROWS = 64
 MAX_EVIDENCE_ROWS = 2_000
 MAX_REVIEW_EVENT_ROWS = 64
+# A synthetic workload is intentionally not a rollout replay.  This marker is
+# written only by the replay service after it has validated an exact 20-day
+# request and an in-window abnormal date.  Keep the literal here rather than
+# accepting a fuzzy ``t_trade_replay`` flag: the latter is also used by
+# diagnostics and the sealed pressure baseline.
+FORMAL_REPLAY_ACCEPTANCE = "V3_CAUSAL_20D"
+# PAPER session health is read as a compact minute-envelope projection.  A
+# bucket can hide at most one minute of internal discontinuity, safely below
+# the 15-minute max-gap rule; raw high-frequency diagnostics never enter the
+# rollout query result.  The exact five-day cohort has at most this many local
+# calendar-minute buckets, so this is a structural bound, not a larger global
+# evidence allowance.
+PAPER_COVERAGE_BUCKET_MINUTES = 1
+MAX_PAPER_COVERAGE_BUCKETS = (
+  MIN_PAPER_TRADING_DAYS * 24 * 60 // PAPER_COVERAGE_BUCKET_MINUTES
+)
+# Run discovery is deliberately separate from evidence.  Retaining a bounded
+# recent-day index per run is enough to find a five-day cohort without loading
+# every Tick-derived diagnostic from a long-lived PAPER run.
+MAX_PAPER_OBSERVED_DAYS_PER_RUN = 64
 # Readiness is polled by the monitor and UI.  A blocked proof is safe to
 # reuse briefly: it can only delay a later promotion, never permit one.  A
 # query error has a smaller TTL so an operational recovery is surfaced soon.
@@ -70,6 +91,7 @@ PAPER_TRADING_SESSIONS = (
 
 logger = logging.getLogger(__name__)
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+_SHANGHAI_DATABASE_TIME_ZONE = "Asia/Shanghai"
 
 V3_ROLLOUT_GATE_CODES = frozenset(
   {
@@ -104,6 +126,16 @@ class _CandidateFacts:
   matured_count: int
   primary_blocker: str
   policy_versions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperCoverageInterval:
+  """A compact diagnostic-envelope row used only for PAPER session health."""
+
+  strategy_run_id: str
+  window_started_at: datetime
+  window_ended_at: datetime
+  evidence_valid: bool
 
 
 @dataclass(slots=True)
@@ -352,7 +384,6 @@ class TTradeV3RolloutEvidenceEvaluator:
 
     try:
       loaded = await self._load(db, account_id=account_id)
-      paper_calendar = await self._paper_calendar(loaded["paper_evaluations"])
       return self.evaluate_records(
         account_id=account_id,
         rollout=rollout,
@@ -366,7 +397,7 @@ class TTradeV3RolloutEvidenceEvaluator:
         paper_evaluations=loaded["paper_evaluations"],
         paper_outcomes=loaded["paper_outcomes"],
         paper_intents=loaded["paper_intents"],
-        paper_calendar=paper_calendar,
+        paper_calendar=loaded["paper_calendar"],
         replay_rows_truncated=loaded["replay_rows_truncated"],
         replay_evidence_truncated=loaded["replay_evidence_truncated"],
         paper_runs_truncated=loaded["paper_runs_truncated"],
@@ -374,6 +405,10 @@ class TTradeV3RolloutEvidenceEvaluator:
         review_events=loaded["review_events"],
         review_events_truncated=loaded["review_events_truncated"],
         query_available=True,
+        replay_evidence_truncated_run_ids=loaded["replay_evidence_truncated_run_ids"],
+        paper_coverage_intervals=loaded["paper_coverage_intervals"],
+        paper_observed_dates=loaded["paper_observed_dates"],
+        paper_evidence_truncated_run_ids=loaded["paper_evidence_truncated_run_ids"],
       )
     except Exception as exc:  # Readiness must describe an unavailable proof.
       logger.warning(
@@ -514,6 +549,14 @@ class TTradeV3RolloutEvidenceEvaluator:
           cache_state.in_flight.pop(key, None)
 
   async def _load(self, db: AsyncSession, *, account_id: str) -> dict[str, Any]:
+    """Load only evidence attributable to one formal replay or PAPER cohort.
+
+    The first queries identify eligible run ids.  Every subsequent evidence
+    read is either partition-bounded by *that* formal replay run, or scoped to
+    one exact five-trading-day PAPER cohort.  In particular, a durable 9,600
+    Tick pressure baseline cannot consume the candidate-evidence budget of a
+    future formal replay merely because it also has ``t_trade_replay=true``.
+    """
     replay_rows = list(
       (
         await db.execute(
@@ -526,7 +569,13 @@ class TTradeV3RolloutEvidenceEvaluator:
             StrategyBacktest,
             StrategyBacktest.strategy_run_id == StrategyRun.id,
           )
-          .where(TTradeReplayProjection.account_id == account_id)
+          .where(
+            TTradeReplayProjection.account_id == account_id,
+            StrategyRun.mode == StrategyRunMode.BACKTEST,
+            StrategyRun.parameters["t_trade_replay"].as_boolean().is_(True),
+            StrategyRun.parameters["replay_acceptance"].as_string()
+            == FORMAL_REPLAY_ACCEPTANCE,
+          )
           .order_by(
             StrategyBacktest.end_time.desc().nullslast(),
             StrategyBacktest.version.desc().nullslast(),
@@ -540,15 +589,10 @@ class TTradeV3RolloutEvidenceEvaluator:
     replay_rows = replay_rows[:MAX_REPLAY_ROWS]
     replay_run_ids = tuple(
       sorted(
-        {
-          _text(run.id)
-          for run, _, _ in replay_rows
-          if _text(run.id)
-          and bool(_mapping(getattr(run, "parameters", None)).get("t_trade_replay"))
-        }
+        {_text(run.id) for run, _, _ in replay_rows if self._is_formal_replay_run(run)}
       )
     )
-    replay_evidence = await self._load_scope_evidence(
+    replay_evidence = await self._load_formal_replay_evidence(
       db,
       account_id=account_id,
       run_ids=replay_run_ids,
@@ -582,11 +626,39 @@ class TTradeV3RolloutEvidenceEvaluator:
         }
       )
     )
-    paper_evidence = await self._load_scope_evidence(
+    paper_observed_dates = await self._load_paper_observed_dates(
       db,
       account_id=account_id,
       run_ids=paper_run_ids,
     )
+    paper_calendar = await self._paper_calendar(
+      [item for dates in paper_observed_dates.values() for item in dates]
+    )
+    paper_cohort = self._select_paper_cohort(
+      runs=paper_runs,
+      observed_dates=paper_observed_dates,
+      calendar=paper_calendar,
+    )
+    paper_evidence = self._empty_paper_evidence()
+    selected_paper_runs: Sequence[Any] = paper_runs
+    selected_observed_dates = paper_observed_dates
+    selected_paper_runs_truncated = paper_runs_truncated
+    if paper_cohort is not None:
+      paper_run, cohort_dates = paper_cohort
+      paper_evidence = await self._load_paper_cohort_evidence(
+        db,
+        account_id=account_id,
+        run_id=_text(getattr(paper_run, "id", None)),
+        trading_dates=cohort_dates,
+      )
+      # A discoverable target cohort is self-contained.  Older PAPER runs
+      # outside the selected cohort cannot turn its complete proof into a
+      # false negative merely because the discovery list is bounded.
+      selected_paper_runs = [paper_run]
+      selected_observed_dates = {
+        _text(getattr(paper_run, "id", None)): list(cohort_dates)
+      }
+      selected_paper_runs_truncated = False
     global_config = await db.get(TTradeGlobalConfig, account_id)
     live_run = None
     if global_config is not None and _text(global_config.strategy_run_id):
@@ -615,20 +687,99 @@ class TTradeV3RolloutEvidenceEvaluator:
       "replay_evaluations": replay_evidence["evaluations"],
       "replay_outcomes": replay_evidence["outcomes"],
       "replay_intents": replay_evidence["intents"],
-      "replay_evidence_truncated": replay_evidence["truncated"],
-      "paper_runs": paper_runs,
-      "paper_runs_truncated": paper_runs_truncated,
+      # A per-run set preserves the essential attribution: a legacy run that
+      # exceeded its own cap cannot poison the selected formal replay.
+      "replay_evidence_truncated": False,
+      "replay_evidence_truncated_run_ids": replay_evidence["truncated_run_ids"],
+      "paper_runs": selected_paper_runs,
+      "paper_runs_truncated": selected_paper_runs_truncated,
       "paper_evaluations": paper_evidence["evaluations"],
       "paper_outcomes": paper_evidence["outcomes"],
       "paper_intents": paper_evidence["intents"],
       "paper_evidence_truncated": paper_evidence["truncated"],
+      "paper_evidence_truncated_run_ids": paper_evidence["truncated_run_ids"],
+      "paper_coverage_intervals": paper_evidence["coverage_intervals"],
+      "paper_observed_dates": selected_observed_dates,
+      "paper_calendar": paper_calendar,
       "global_config": global_config,
       "live_run": live_run,
       "review_events": review_events[:MAX_REVIEW_EVENT_ROWS],
       "review_events_truncated": review_events_truncated,
     }
 
-  async def _load_scope_evidence(
+  @staticmethod
+  def _is_formal_replay_run(run: Any) -> bool:
+    parameters = _mapping(getattr(run, "parameters", None))
+    return bool(
+      _text(getattr(run, "id", None))
+      and _mode(getattr(run, "mode", None)) == "BACKTEST"
+      and parameters.get("t_trade_replay") is True
+      and _text(parameters.get("replay_acceptance")).upper() == FORMAL_REPLAY_ACCEPTANCE
+    )
+
+  @staticmethod
+  def _trim_rows_by_run(
+    rows: Sequence[Any],
+  ) -> tuple[list[Any], frozenset[str]]:
+    """Keep at most ``MAX_EVIDENCE_ROWS`` rows for each durable run.
+
+    The SQL query intentionally returns one extra row per partition.  That
+    lets this function report a cap breach for the affected run only, while
+    retaining all evidence for every other run in the same set-oriented read.
+    """
+
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for row in rows:
+      run_id = _text(getattr(row, "strategy_run_id", None))
+      if run_id:
+        grouped[run_id].append(row)
+    trimmed: list[Any] = []
+    truncated: set[str] = set()
+    for run_id in sorted(grouped):
+      values = grouped[run_id]
+      if len(values) > MAX_EVIDENCE_ROWS:
+        truncated.add(run_id)
+      trimmed.extend(values[:MAX_EVIDENCE_ROWS])
+    return trimmed, frozenset(truncated)
+
+  async def _load_per_run_bounded_rows(
+    self,
+    db: AsyncSession,
+    *,
+    model: Any,
+    run_column: Any,
+    id_column: Any,
+    ordering: Sequence[Any],
+    predicates: Sequence[Any],
+  ) -> tuple[list[Any], frozenset[str]]:
+    """Fetch one bounded proof slice per run without N+1 queries."""
+
+    ranked = (
+      select(
+        id_column.label("row_id"),
+        run_column.label("strategy_run_id"),
+        func.row_number()
+        .over(partition_by=run_column, order_by=tuple(ordering))
+        .label("row_number"),
+      )
+      .where(*predicates)
+      .subquery()
+    )
+    rows = list(
+      (
+        await db.execute(
+          select(model)
+          .join(ranked, ranked.c.row_id == id_column)
+          .where(ranked.c.row_number <= MAX_EVIDENCE_ROWS + 1)
+          .order_by(run_column, *ordering)
+        )
+      )
+      .scalars()
+      .all()
+    )
+    return self._trim_rows_by_run(rows)
+
+  async def _load_formal_replay_evidence(
     self,
     db: AsyncSession,
     *,
@@ -636,15 +787,221 @@ class TTradeV3RolloutEvidenceEvaluator:
     run_ids: Sequence[str],
   ) -> dict[str, Any]:
     if not run_ids:
-      return {"evaluations": [], "outcomes": [], "intents": [], "truncated": False}
+      return {
+        "evaluations": [],
+        "outcomes": [],
+        "intents": [],
+        "truncated_run_ids": frozenset(),
+      }
     run_filter = tuple(run_ids)
+    # Quality gates reason about candidate lifecycle facts.  Non-candidate
+    # MATERIAL Tick diagnostics and coalesced diagnostics cannot prove (or
+    # disprove) duplicate/ghost/future candidate facts, so never load them.
+    evaluations, evaluation_truncated = await self._load_per_run_bounded_rows(
+      db,
+      model=TTradeOpportunityEvaluation,
+      run_column=TTradeOpportunityEvaluation.strategy_run_id,
+      id_column=TTradeOpportunityEvaluation.id,
+      ordering=(
+        TTradeOpportunityEvaluation.evaluated_at.desc(),
+        TTradeOpportunityEvaluation.id.desc(),
+      ),
+      predicates=(
+        TTradeOpportunityEvaluation.account_id == account_id,
+        TTradeOpportunityEvaluation.strategy_run_id.in_(run_filter),
+        TTradeOpportunityEvaluation.record_kind == T_TRADE_EVALUATION_KIND_MATERIAL,
+        TTradeOpportunityEvaluation.candidate_id.is_not(None),
+      ),
+    )
+    outcomes, outcome_truncated = await self._load_per_run_bounded_rows(
+      db,
+      model=TTradeCandidateOutcome,
+      run_column=TTradeCandidateOutcome.strategy_run_id,
+      id_column=TTradeCandidateOutcome.id,
+      ordering=(
+        TTradeCandidateOutcome.candidate_at.desc(),
+        TTradeCandidateOutcome.id.desc(),
+      ),
+      predicates=(
+        TTradeCandidateOutcome.account_id == account_id,
+        TTradeCandidateOutcome.strategy_run_id.in_(run_filter),
+      ),
+    )
+    candidate_ids = tuple(
+      sorted(
+        {
+          _text(getattr(row, "candidate_id", None))
+          for row in evaluations
+          if _text(getattr(row, "candidate_id", None))
+        }
+      )
+    )
+    intents: list[Any] = []
+    intent_truncated: frozenset[str] = frozenset()
+    if candidate_ids:
+      intents, intent_truncated = await self._load_per_run_bounded_rows(
+        db,
+        model=TradeIntentRecord,
+        run_column=TradeIntentRecord.strategy_run_id,
+        id_column=TradeIntentRecord.id,
+        ordering=(TradeIntentRecord.created_at.desc(), TradeIntentRecord.id.desc()),
+        predicates=(
+          TradeIntentRecord.account_id == account_id,
+          TradeIntentRecord.strategy_run_id.in_(run_filter),
+          TradeIntentRecord.intent_metadata["candidate_id"]
+          .as_string()
+          .in_(candidate_ids),
+        ),
+      )
+    return {
+      "evaluations": evaluations,
+      "outcomes": outcomes,
+      "intents": intents,
+      "truncated_run_ids": frozenset(
+        evaluation_truncated | outcome_truncated | intent_truncated
+      ),
+    }
+
+  async def _load_paper_observed_dates(
+    self,
+    db: AsyncSession,
+    *,
+    account_id: str,
+    run_ids: Sequence[str],
+  ) -> dict[str, list[date]]:
+    """Return a bounded per-run day index, never raw PAPER diagnostics."""
+
+    if not run_ids:
+      return {}
+    run_filter = tuple(run_ids)
+    observed_date = func.date(TTradeOpportunityEvaluation.window_ended_at).label(
+      "trading_date"
+    )
+    distinct_days = (
+      select(
+        TTradeOpportunityEvaluation.strategy_run_id.label("strategy_run_id"),
+        observed_date,
+      )
+      .where(
+        TTradeOpportunityEvaluation.account_id == account_id,
+        TTradeOpportunityEvaluation.strategy_run_id.in_(run_filter),
+        TTradeOpportunityEvaluation.record_kind == T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+      )
+      .group_by(TTradeOpportunityEvaluation.strategy_run_id, observed_date)
+      .subquery()
+    )
+    ranked_days = select(
+      distinct_days.c.strategy_run_id,
+      distinct_days.c.trading_date,
+      func.row_number()
+      .over(
+        partition_by=distinct_days.c.strategy_run_id,
+        order_by=distinct_days.c.trading_date.desc(),
+      )
+      .label("day_rank"),
+    ).subquery()
+    rows = list(
+      (
+        await db.execute(
+          select(ranked_days.c.strategy_run_id, ranked_days.c.trading_date)
+          .where(ranked_days.c.day_rank <= MAX_PAPER_OBSERVED_DAYS_PER_RUN)
+          .order_by(
+            ranked_days.c.strategy_run_id,
+            ranked_days.c.trading_date.asc(),
+          )
+        )
+      ).all()
+    )
+    result: dict[str, list[date]] = defaultdict(list)
+    for row in rows:
+      run_id = _text(row[0])
+      value = row[1]
+      if isinstance(value, datetime):
+        value = value.date()
+      elif isinstance(value, str):
+        try:
+          value = date.fromisoformat(value)
+        except ValueError:
+          continue
+      if run_id and isinstance(value, date):
+        result[run_id].append(value)
+    return {key: sorted(set(values)) for key, values in result.items()}
+
+  @staticmethod
+  def _select_paper_cohort(
+    *,
+    runs: Sequence[Any],
+    observed_dates: Mapping[str, Sequence[date]],
+    calendar: Sequence[date] | None,
+  ) -> tuple[Any, tuple[date, ...]] | None:
+    """Choose one newest attributable five-day PAPER cohort.
+
+    The result is intentionally one run + one window.  Promotion proof must
+    not splice activity from several runs, and older runs outside this cohort
+    must not alter its truncation state.
+    """
+
+    for run in runs:
+      run_id = _text(getattr(run, "id", None))
+      if (
+        not run_id
+        or _mode(getattr(run, "mode", None)) != "PAPER"
+        or _mode(getattr(run, "status", None))
+        not in {"RUNNING", "COMPLETED", "STOPPED"}
+        or _text(getattr(run, "error_message", None))
+      ):
+        continue
+      windows = TTradeV3RolloutEvidenceEvaluator._consecutive_windows(
+        set(observed_dates.get(run_id, ())),
+        calendar,
+      )
+      if windows:
+        return run, windows[-1]
+    return None
+
+  @staticmethod
+  def _empty_paper_evidence() -> dict[str, Any]:
+    return {
+      "evaluations": [],
+      "outcomes": [],
+      "intents": [],
+      "coverage_intervals": [],
+      "truncated": False,
+      "truncated_run_ids": frozenset(),
+    }
+
+  async def _load_paper_cohort_evidence(
+    self,
+    db: AsyncSession,
+    *,
+    account_id: str,
+    run_id: str,
+    trading_dates: Sequence[date],
+  ) -> dict[str, Any]:
+    """Load a compact, exact five-day PAPER proof for one run.
+
+    Candidate MATERIAL rows, outcomes and candidate-linked intents form the
+    lifecycle proof.  Session continuity is a distinct minute-envelope query
+    over coalesced diagnostics.  This separation keeps normal high-frequency
+    PAPER operation readable without treating non-candidate Tick decisions as
+    candidate evidence.
+    """
+
+    if not run_id or len(trading_dates) != MIN_PAPER_TRADING_DAYS:
+      return self._empty_paper_evidence()
+    start_at = datetime.combine(min(trading_dates), time.min)
+    end_at = datetime.combine(max(trading_dates) + timedelta(days=1), time.min)
     evaluations = list(
       (
         await db.execute(
           select(TTradeOpportunityEvaluation)
           .where(
             TTradeOpportunityEvaluation.account_id == account_id,
-            TTradeOpportunityEvaluation.strategy_run_id.in_(run_filter),
+            TTradeOpportunityEvaluation.strategy_run_id == run_id,
+            TTradeOpportunityEvaluation.record_kind == T_TRADE_EVALUATION_KIND_MATERIAL,
+            TTradeOpportunityEvaluation.candidate_id.is_not(None),
+            TTradeOpportunityEvaluation.evaluated_at >= start_at,
+            TTradeOpportunityEvaluation.evaluated_at < end_at,
           )
           .order_by(
             TTradeOpportunityEvaluation.evaluated_at.desc(),
@@ -656,13 +1013,17 @@ class TTradeV3RolloutEvidenceEvaluator:
       .scalars()
       .all()
     )
+    evaluations_truncated = len(evaluations) > MAX_EVIDENCE_ROWS
+    evaluations = evaluations[:MAX_EVIDENCE_ROWS]
     outcomes = list(
       (
         await db.execute(
           select(TTradeCandidateOutcome)
           .where(
             TTradeCandidateOutcome.account_id == account_id,
-            TTradeCandidateOutcome.strategy_run_id.in_(run_filter),
+            TTradeCandidateOutcome.strategy_run_id == run_id,
+            TTradeCandidateOutcome.candidate_at >= start_at,
+            TTradeCandidateOutcome.candidate_at < end_at,
           )
           .order_by(
             TTradeCandidateOutcome.candidate_at.desc(),
@@ -674,36 +1035,142 @@ class TTradeV3RolloutEvidenceEvaluator:
       .scalars()
       .all()
     )
-    intents = list(
+    outcomes_truncated = len(outcomes) > MAX_EVIDENCE_ROWS
+    outcomes = outcomes[:MAX_EVIDENCE_ROWS]
+    candidate_ids = tuple(
+      sorted(
+        {
+          _text(getattr(row, "candidate_id", None))
+          for row in evaluations
+          if _text(getattr(row, "candidate_id", None))
+        }
+      )
+    )
+    intents: list[Any] = []
+    intents_truncated = False
+    if candidate_ids:
+      intents = list(
+        (
+          await db.execute(
+            select(TradeIntentRecord)
+            .where(
+              TradeIntentRecord.account_id == account_id,
+              TradeIntentRecord.strategy_run_id == run_id,
+              TradeIntentRecord.intent_metadata["candidate_id"]
+              .as_string()
+              .in_(candidate_ids),
+            )
+            .order_by(TradeIntentRecord.created_at.desc(), TradeIntentRecord.id.desc())
+            .limit(MAX_EVIDENCE_ROWS + 1)
+          )
+        )
+        .scalars()
+        .all()
+      )
+      intents_truncated = len(intents) > MAX_EVIDENCE_ROWS
+      intents = intents[:MAX_EVIDENCE_ROWS]
+
+    source_time_ms = cast(
+      TTradeOpportunityEvaluation.payload["signal_snapshot"][
+        "source_time_ms"
+      ].as_string(),
+      BigInteger,
+    )
+    # Runtime evidence persists local Shanghai naive datetimes.  PostgreSQL
+    # otherwise treats a ``timestamp without time zone`` as the connection
+    # timezone when extracting an epoch, which would shift this comparison by
+    # eight hours on a UTC connection.  Keep the stored values unchanged and
+    # attach their actual wall-clock timezone only for this causal check.
+    evaluated_at_shanghai = TTradeOpportunityEvaluation.evaluated_at.op(
+      "AT TIME ZONE"
+    )(_SHANGHAI_DATABASE_TIME_ZONE)
+    bucket = func.date_trunc(
+      "minute",
+      TTradeOpportunityEvaluation.window_started_at,
+    ).label("minute_bucket")
+    coverage_rows = list(
       (
         await db.execute(
-          select(TradeIntentRecord)
-          .where(
-            TradeIntentRecord.account_id == account_id,
-            TradeIntentRecord.strategy_run_id.in_(run_filter),
+          select(
+            TTradeOpportunityEvaluation.strategy_run_id,
+            func.min(TTradeOpportunityEvaluation.window_started_at).label(
+              "window_started_at"
+            ),
+            func.max(TTradeOpportunityEvaluation.window_ended_at).label(
+              "window_ended_at"
+            ),
+            func.bool_and(
+              and_(
+                source_time_ms.is_not(None),
+                source_time_ms
+                <= cast(
+                  func.extract("epoch", evaluated_at_shanghai) * 1_000,
+                  BigInteger,
+                ),
+                TTradeOpportunityEvaluation.window_ended_at
+                <= TTradeOpportunityEvaluation.evaluated_at,
+              )
+            ).label("evidence_valid"),
           )
-          .order_by(TradeIntentRecord.created_at.desc(), TradeIntentRecord.id.desc())
-          .limit(MAX_EVIDENCE_ROWS + 1)
+          .where(
+            TTradeOpportunityEvaluation.account_id == account_id,
+            TTradeOpportunityEvaluation.strategy_run_id == run_id,
+            TTradeOpportunityEvaluation.record_kind
+            == T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
+            TTradeOpportunityEvaluation.evaluated_at
+            >= start_at - PAPER_SESSION_EDGE_TOLERANCE,
+            TTradeOpportunityEvaluation.evaluated_at
+            <= end_at + PAPER_SESSION_EDGE_TOLERANCE,
+            TTradeOpportunityEvaluation.window_ended_at >= start_at,
+            TTradeOpportunityEvaluation.window_started_at < end_at,
+          )
+          .group_by(TTradeOpportunityEvaluation.strategy_run_id, bucket)
+          .order_by(bucket.asc())
+          .limit(MAX_PAPER_COVERAGE_BUCKETS + 1)
         )
-      )
-      .scalars()
-      .all()
+      ).all()
     )
-    truncated = any(
-      len(rows) > MAX_EVIDENCE_ROWS for rows in (evaluations, outcomes, intents)
+    coverage_truncated = len(coverage_rows) > MAX_PAPER_COVERAGE_BUCKETS
+    coverage_intervals: list[_PaperCoverageInterval] = []
+    for row in coverage_rows[:MAX_PAPER_COVERAGE_BUCKETS]:
+      row_run_id = _text(row[0])
+      window_started_at = self._local_naive(row[1])
+      window_ended_at = self._local_naive(row[2])
+      evidence_valid = row[3] is True
+      if (
+        row_run_id == run_id
+        and window_started_at is not None
+        and window_ended_at is not None
+        and window_started_at <= window_ended_at
+      ):
+        coverage_intervals.append(
+          _PaperCoverageInterval(
+            strategy_run_id=row_run_id,
+            window_started_at=window_started_at,
+            window_ended_at=window_ended_at,
+            evidence_valid=evidence_valid,
+          )
+        )
+    truncated = bool(
+      evaluations_truncated
+      or outcomes_truncated
+      or intents_truncated
+      or coverage_truncated
     )
     return {
-      "evaluations": evaluations[:MAX_EVIDENCE_ROWS],
-      "outcomes": outcomes[:MAX_EVIDENCE_ROWS],
-      "intents": intents[:MAX_EVIDENCE_ROWS],
+      "evaluations": evaluations,
+      "outcomes": outcomes,
+      "intents": intents,
+      "coverage_intervals": coverage_intervals,
       "truncated": truncated,
+      "truncated_run_ids": frozenset({run_id}) if truncated else frozenset(),
     }
 
   async def _paper_calendar(
     self,
-    evaluations: Sequence[Any],
+    observed_dates: Sequence[date],
   ) -> list[date] | None:
-    dates = sorted({_row_date(row) for row in evaluations if _row_date(row)})
+    dates = sorted(set(observed_dates))
     if not dates:
       return []
     try:
@@ -740,6 +1207,11 @@ class TTradeV3RolloutEvidenceEvaluator:
     review_events: Sequence[Any],
     review_events_truncated: bool,
     query_available: bool,
+    replay_evidence_truncated_run_ids: Collection[str] = (),
+    paper_coverage_intervals: Sequence[Any] | None = None,
+    paper_observed_dates: Mapping[str, Sequence[date]] | None = None,
+    paper_evidence_truncated_run_ids: Collection[str] = (),
+    historical_replay_cutoff_date: date | None = None,
   ) -> dict[str, Any]:
     """Pure evaluation seam used by focused tests and the read-only loader."""
 
@@ -750,6 +1222,10 @@ class TTradeV3RolloutEvidenceEvaluator:
       intents=replay_intents,
       rows_truncated=replay_rows_truncated,
       evidence_truncated=replay_evidence_truncated,
+      evidence_truncated_run_ids=replay_evidence_truncated_run_ids,
+      historical_replay_cutoff_date=(
+        historical_replay_cutoff_date or datetime.now(_SHANGHAI).date()
+      ),
     )
     paper = self._paper_summary(
       runs=paper_runs,
@@ -758,6 +1234,9 @@ class TTradeV3RolloutEvidenceEvaluator:
       intents=paper_intents,
       calendar=paper_calendar,
       evidence_truncated=bool(paper_runs_truncated or paper_evidence_truncated),
+      evidence_truncated_run_ids=paper_evidence_truncated_run_ids,
+      coverage_intervals=paper_coverage_intervals,
+      observed_dates=paper_observed_dates,
     )
     canary = self._canary_limits_summary(
       rollout=rollout,
@@ -839,7 +1318,8 @@ class TTradeV3RolloutEvidenceEvaluator:
       ),
       self._check(
         "V3_PAPER_20_COMPLETED_CANDIDATE_LIFECYCLES",
-        paper["matured_count"] >= MIN_PAPER_COMPLETED_CANDIDATES,
+        paper["matured_count"] >= MIN_PAPER_COMPLETED_CANDIDATES
+        and not paper["evidence_truncated"],
         "PAPER 完成的候选生命周期不足 20 个",
       ),
       self._check(
@@ -925,14 +1405,17 @@ class TTradeV3RolloutEvidenceEvaluator:
     intents: Sequence[Any],
     rows_truncated: bool,
     evidence_truncated: bool,
+    evidence_truncated_run_ids: Collection[str],
+    historical_replay_cutoff_date: date,
   ) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
+    truncated_run_ids = {
+      _text(item) for item in evidence_truncated_run_ids if _text(item)
+    }
     latest_backtests: dict[str, tuple[Any, Any, Any]] = {}
     for run, projection, backtest in replay_rows:
       run_id = _text(getattr(run, "id", None))
-      if not run_id or not bool(
-        _mapping(getattr(run, "parameters", None)).get("t_trade_replay")
-      ):
+      if not run_id or not self._is_formal_replay_run(run):
         continue
       previous = latest_backtests.get(run_id)
       if previous is None or _integer(
@@ -966,17 +1449,29 @@ class TTradeV3RolloutEvidenceEvaluator:
       tick_audit = _mapping(
         _mapping(replay_metrics.get("methodology")).get("tick_read_audit")
       )
+      historical_dates_closed = bool(dates) and all(
+        item < historical_replay_cutoff_date for item in dates
+      )
       strict_causal = (
         _text(getattr(projection, "status", None)).upper() == "COMPLETED"
         and _text(getattr(backtest, "status", None)).upper() == "COMPLETED"
+        and _text(proof.get("replay_acceptance")).upper() == FORMAL_REPLAY_ACCEPTANCE
         and proof.get("strict_causal") is True
+        and len(dates) == MIN_REPLAY_TRADING_DAYS
+        and historical_dates_closed
         and _text(replay_metrics.get("data_quality")).upper() == "OK"
         and _integer(tick_audit.get("verified_windows"), 0) > 0
         and not list(tick_audit.get("issues") or [])
       )
       normal_and_abnormal_covered = self._proof_covers_normal_and_abnormal(proof, dates)
       quality_evidence_available = bool(candidate_facts.candidate_count)
-      candidate_evidence_truncated = bool(rows_truncated or evidence_truncated)
+      # Discovery is bounded but independent formal runs are never merged.
+      # A 65th old run cannot invalidate a fully loaded selected run.  Only a
+      # cap breach for this exact run (or a legacy un-attributed bool from a
+      # direct pure-evaluation caller) blocks quality gates.
+      candidate_evidence_truncated = bool(
+        evidence_truncated or run_id in truncated_run_ids
+      )
       gate_passes = {
         "trading_days": len(dates) >= MIN_REPLAY_TRADING_DAYS,
         "strict_causal": strict_causal,
@@ -1001,6 +1496,8 @@ class TTradeV3RolloutEvidenceEvaluator:
           "run_updated_at": _datetime_text(getattr(run, "updated_at", None)),
           "trading_dates": [item.isoformat() for item in dates],
           "trading_day_count": len(dates),
+          "historical_replay_cutoff_date": historical_replay_cutoff_date.isoformat(),
+          "historical_dates_closed": historical_dates_closed,
           "strict_causal": strict_causal,
           "normal_and_abnormal_covered": normal_and_abnormal_covered,
           "duplicate_count": candidate_facts.duplicate_count,
@@ -1043,6 +1540,8 @@ class TTradeV3RolloutEvidenceEvaluator:
       "run_updated_at": "",
       "trading_dates": [],
       "trading_day_count": 0,
+      "historical_replay_cutoff_date": historical_replay_cutoff_date.isoformat(),
+      "historical_dates_closed": False,
       "strict_causal": False,
       "normal_and_abnormal_covered": False,
       "duplicate_count": 0,
@@ -1092,9 +1591,36 @@ class TTradeV3RolloutEvidenceEvaluator:
     intents: Sequence[Any],
     calendar: Sequence[date] | None,
     evidence_truncated: bool,
+    evidence_truncated_run_ids: Collection[str],
+    coverage_intervals: Sequence[Any] | None,
+    observed_dates: Mapping[str, Sequence[date]] | None,
   ) -> dict[str, Any]:
     v3_evaluations = [row for row in evaluations if _v3_evaluation(row)]
-    observed_dates = {_row_date(row) for row in v3_evaluations if _row_date(row)}
+    truncated_run_ids = {
+      _text(item) for item in evidence_truncated_run_ids if _text(item)
+    }
+    coverage_rows = (
+      list(coverage_intervals)
+      if coverage_intervals is not None
+      else list(v3_evaluations)
+    )
+    observed_by_run: dict[str, set[date]] = defaultdict(set)
+    if observed_dates is not None:
+      for run_id, values in observed_dates.items():
+        normalized_run_id = _text(run_id)
+        if normalized_run_id:
+          observed_by_run[normalized_run_id].update(
+            item for item in values if isinstance(item, date)
+          )
+    else:
+      for row in v3_evaluations:
+        run_id = _text(getattr(row, "strategy_run_id", None))
+        row_date = _row_date(row)
+        if run_id and row_date:
+          observed_by_run[run_id].add(row_date)
+    all_observed_dates = {
+      item for values in observed_by_run.values() for item in values
+    }
     candidates: list[dict[str, Any]] = []
     coverage_attempts: list[dict[str, Any]] = []
     for run in runs:
@@ -1106,11 +1632,11 @@ class TTradeV3RolloutEvidenceEvaluator:
         for row in v3_evaluations
         if _text(getattr(row, "strategy_run_id", None)) == run_id
       ]
-      run_dates = {_row_date(row) for row in run_rows if _row_date(row)}
+      run_dates = set(observed_by_run.get(run_id, set()))
       for window in self._consecutive_windows(run_dates, calendar):
         coverage = self._paper_window_coverage(
           run=run,
-          evaluations=run_rows,
+          coverage_rows=coverage_rows,
           trading_dates=window,
         )
         coverage_attempts.append(coverage)
@@ -1149,6 +1675,9 @@ class TTradeV3RolloutEvidenceEvaluator:
             "duplicate_intent_count": facts.duplicate_intent_count,
             "candidate_count": facts.candidate_count,
             "quality_evidence_available": bool(facts.candidate_count),
+            "evidence_truncated": bool(
+              evidence_truncated or run_id in truncated_run_ids
+            ),
             "primary_blocker": facts.primary_blocker,
             "policy_versions": list(facts.policy_versions),
           }
@@ -1157,6 +1686,7 @@ class TTradeV3RolloutEvidenceEvaluator:
       selected = max(
         candidates,
         key=lambda item: (
+          not item["evidence_truncated"],
           item["duplicate_count"] == 0
           and item["ghost_count"] == 0
           and item["future_data_violation_count"] == 0
@@ -1165,11 +1695,11 @@ class TTradeV3RolloutEvidenceEvaluator:
           item["trading_dates"],
         ),
       )
-      consecutive_days_ready = not evidence_truncated
+      consecutive_days_ready = not selected["evidence_truncated"]
       return {
         **selected,
         "consecutive_days_ready": consecutive_days_ready,
-        "evidence_truncated": bool(evidence_truncated),
+        "evidence_truncated": bool(selected["evidence_truncated"]),
         "consecutive_days_message": (
           ""
           if consecutive_days_ready
@@ -1208,7 +1738,7 @@ class TTradeV3RolloutEvidenceEvaluator:
       "run_status": _text(best_coverage.get("run_status")),
       "run_started_at": _text(best_coverage.get("run_started_at")),
       "run_stopped_at": _text(best_coverage.get("run_stopped_at")),
-      "trading_dates": sorted(item.isoformat() for item in observed_dates),
+      "trading_dates": sorted(item.isoformat() for item in all_observed_dates),
       "intraday_coverage": best_coverage,
       "consecutive_days_ready": False,
       "consecutive_days_message": reason,
@@ -1222,14 +1752,14 @@ class TTradeV3RolloutEvidenceEvaluator:
       "quality_evidence_available": bool(facts.candidate_count),
       "primary_blocker": facts.primary_blocker,
       "policy_versions": list(facts.policy_versions),
-      "evidence_truncated": bool(evidence_truncated),
+      "evidence_truncated": bool(evidence_truncated or truncated_run_ids),
     }
 
   def _paper_window_coverage(
     self,
     *,
     run: Any,
-    evaluations: Sequence[Any],
+    coverage_rows: Sequence[Any],
     trading_dates: Sequence[date],
   ) -> dict[str, Any]:
     run_id = _text(getattr(run, "id", None))
@@ -1258,10 +1788,14 @@ class TTradeV3RolloutEvidenceEvaluator:
     for trading_date in trading_dates:
       intervals = [
         interval
-        for row in evaluations
-        if _row_date(row) == trading_date
+        for row in coverage_rows
+        if _text(getattr(row, "strategy_run_id", None)) == run_id
         for interval in [self._paper_evidence_interval(row)]
-        if interval is not None
+        if (
+          interval is not None
+          and interval[1] >= datetime.combine(trading_date, time.min)
+          and interval[0] < datetime.combine(trading_date + timedelta(days=1), time.min)
+        )
       ]
       sessions: list[dict[str, Any]] = []
       for session_start, session_end in PAPER_TRADING_SESSIONS:
@@ -1342,6 +1876,10 @@ class TTradeV3RolloutEvidenceEvaluator:
     self,
     row: Any,
   ) -> tuple[datetime, datetime] | None:
+    if isinstance(row, _PaperCoverageInterval):
+      if not row.evidence_valid:
+        return None
+      return row.window_started_at, row.window_ended_at
     persisted_at = self._local_naive(getattr(row, "evaluated_at", None))
     source_at = self._source_time(_snapshot(row).get("source_time_ms"))
     if persisted_at is None or source_at is None or source_at > persisted_at:
@@ -1811,7 +2349,9 @@ class TTradeV3RolloutEvidenceEvaluator:
 
 
 __all__ = [
+  "FORMAL_REPLAY_ACCEPTANCE",
   "MAX_EVIDENCE_ROWS",
+  "MAX_PAPER_COVERAGE_BUCKETS",
   "MIN_PAPER_COMPLETED_CANDIDATES",
   "MIN_PAPER_TRADING_DAYS",
   "MIN_REPLAY_TRADING_DAYS",
