@@ -1,4 +1,7 @@
 interface:
   display_name: "Dev Flow"
-  short_description: "Delegate implementation, review, tests, and commits"
-  default_prompt: "Use $dev-flow to implement this feature through delegated development and final verification."
+  short_description: "Primary designs, delegates coding, and verifies results"
+  default_prompt: "Use $dev-flow to design and verify this feature while delegating only bounded implementation work."
+
+policy:
+  allow_implicit_invocation: false
