@@ -12,7 +12,9 @@ from quantx_infrastructure.services.market_data_transfer_ingestion import (
 )
 
 _MAX_FAILED_REQUEST_RETRY_HOPS = 32
-_T_TRADE_REPLAY_SUPPLEMENT_SCOPE = "t-trade-replay-supplement-v1"
+# v2 separates replay supplements from completed v1 transfers created before
+# the corrected QMT intraday download boundary was deployed.
+_T_TRADE_REPLAY_SUPPLEMENT_SCOPE = "t-trade-replay-supplement-v2"
 
 
 def _failed_request_retry_scope(request_id: str) -> str:
@@ -72,7 +74,14 @@ async def load_completed_empty_tick_days(
   instrument_code: str,
   trading_dates: list[date],
 ) -> set[date]:
-  """Return explicitly empty Tick days from completed, verified ingestion only."""
+  """Return only Tick days with dual strict-empty transfer proof.
+
+  The store query accepts a date only if its Tick and ``1d`` requests are both
+  completed, persistence-verified, exact-single-day ``XT_DATA_NO_ROWS``
+  transfers, and no completed exact-day ``1d`` audit contradicts that result.
+  This defensive parser intentionally accepts only canonical zero-count rows;
+  malformed rows cannot turn a missing Tick day into a replay exception.
+  """
 
   normalized_dates = sorted(set(trading_dates))
   if not normalized_dates:
@@ -85,24 +94,34 @@ async def load_completed_empty_tick_days(
     )
   finally:
     await store.close()
+  requested_dates = set(normalized_dates)
   empty_days: set[date] = set()
   for row in rows:
     raw_point_count = row.get("point_count")
     if isinstance(raw_point_count, bool):
       continue
-    try:
-      point_count = int(raw_point_count)
-    except (TypeError, ValueError):
-      continue
-    if point_count != 0:
+    if isinstance(raw_point_count, int):
+      point_count_is_zero = raw_point_count == 0
+    elif isinstance(raw_point_count, str):
+      point_count_is_zero = raw_point_count == "0"
+    else:
+      point_count_is_zero = False
+    if not point_count_is_zero:
       continue
     raw_day = row.get("trading_date")
     if isinstance(raw_day, datetime):
-      empty_days.add(raw_day.date())
+      parsed_day = raw_day.date()
     elif isinstance(raw_day, date):
-      empty_days.add(raw_day)
+      parsed_day = raw_day
     elif isinstance(raw_day, str):
-      empty_days.add(date.fromisoformat(raw_day))
+      try:
+        parsed_day = date.fromisoformat(raw_day)
+      except ValueError:
+        continue
+    else:
+      continue
+    if parsed_day in requested_dates:
+      empty_days.add(parsed_day)
   return empty_days
 
 

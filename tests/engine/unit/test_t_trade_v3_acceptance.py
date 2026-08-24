@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -54,6 +55,7 @@ def _snapshot(
 def _audit(
   *,
   day_count: int = DEFAULT_TRADING_DAYS,
+  requested_trading_days: int = DEFAULT_TRADING_DAYS,
   incomplete_pairs: set[tuple[str, int]] | None = None,
   replayable: bool = True,
 ) -> WindowAudit:
@@ -74,9 +76,113 @@ def _audit(
         statistics={"record_count": 240 if complete else 0},
       )
   return WindowAudit(
-    window=ReplayWindow(snapshot=snapshot, trading_dates=days),
+    window=ReplayWindow(
+      snapshot=snapshot,
+      trading_dates=days,
+      requested_trading_days=requested_trading_days,
+    ),
     inspections=inspections,
   )
+
+
+@pytest.mark.asyncio
+async def test_audit_tick_coverage_accepts_only_dual_single_day_empty_evidence(
+  monkeypatch,
+) -> None:
+  snapshot = _snapshot()
+  trading_day = date(2026, 6, 2)
+  window = ReplayWindow(
+    snapshot=snapshot,
+    trading_dates=(trading_day,),
+    requested_trading_days=1,
+  )
+
+  def missing_tick_day(_self, _service, _code, _day):
+    return {
+      "complete": False,
+      "classification": "MISSING",
+      "reason_codes": ["NO_TICK_DATA"],
+      "statistics": {"record_count": 0},
+      "message": "未找到 Tick 数据",
+    }
+
+  async def completed_empty(*, instrument_code, trading_dates):
+    assert trading_dates == [trading_day]
+    if instrument_code == "600000.SH":
+      # The shared query already proved both exact-day Tick and 1d zero-row
+      # audits. Formal acceptance must consume that authority instead of
+      # re-implementing a second exception path.
+      return {trading_day}
+    # A completed verified 1d day-coverage record with data (including one
+    # from a multi-day request) is a contradiction, so the shared query must
+    # return no empty proof.
+    return set()
+
+  monkeypatch.setattr(
+    acceptance_module.StrategyManager,
+    "_inspect_t_trade_replay_tick_day",
+    missing_tick_day,
+  )
+  monkeypatch.setattr(
+    acceptance_module,
+    "load_completed_empty_tick_days",
+    completed_empty,
+  )
+
+  audit = (await acceptance_module.audit_tick_coverage([window]))[0]
+  confirmed_empty = audit.inspections[("600000.SH", trading_day)]
+  daily_nonempty = audit.inspections[("000001.SZ", trading_day)]
+
+  assert confirmed_empty.complete is True
+  assert confirmed_empty.classification == "CONFIRMED_EMPTY"
+  assert confirmed_empty.reason_codes == ()
+  assert confirmed_empty.statistics["completed_empty_tick_day"] is True
+  assert confirmed_empty.statistics["completed_empty_daily_day"] is True
+  assert daily_nonempty.complete is False
+  assert daily_nonempty.classification == "MISSING"
+  assert daily_nonempty.reason_codes == ("NO_TICK_DATA",)
+
+
+@pytest.mark.asyncio
+async def test_audit_tick_coverage_fails_closed_when_empty_proof_lookup_fails(
+  monkeypatch,
+) -> None:
+  snapshot = _snapshot()
+  trading_day = date(2026, 6, 2)
+  window = ReplayWindow(
+    snapshot=snapshot,
+    trading_dates=(trading_day,),
+    requested_trading_days=1,
+  )
+
+  def missing_tick_day(_self, _service, _code, _day):
+    return {
+      "complete": False,
+      "classification": "MISSING",
+      "reason_codes": ["NO_TICK_DATA"],
+      "statistics": {"record_count": 0},
+      "message": "未找到 Tick 数据",
+    }
+
+  async def lookup_failure(**_kwargs):
+    raise RuntimeError("daily empty-proof lookup unavailable")
+
+  monkeypatch.setattr(
+    acceptance_module.StrategyManager,
+    "_inspect_t_trade_replay_tick_day",
+    missing_tick_day,
+  )
+  monkeypatch.setattr(
+    acceptance_module,
+    "load_completed_empty_tick_days",
+    lookup_failure,
+  )
+
+  audit = (await acceptance_module.audit_tick_coverage([window]))[0]
+  for inspection in audit.inspections.values():
+    assert inspection.complete is False
+    assert inspection.classification == "MISSING"
+    assert inspection.reason_codes == ("NO_TICK_DATA",)
 
 
 def _operational_evidence() -> dict:
@@ -129,6 +235,131 @@ def test_formal_window_requires_all_holdings_all_days_and_abnormal_evidence() ->
 
   assert selected is audit
   assert audit.blockers(abnormal_dates=[audit.window.trading_dates[3]]) == []
+
+
+def test_short_window_is_non_gating_diagnostic_and_blocks_formal_20_gate() -> None:
+  audit = _audit(day_count=5, requested_trading_days=5)
+  abnormal_dates = [audit.window.trading_dates[0]]
+
+  assert select_formal_window([audit], abnormal_dates=abnormal_dates) is None
+  report = build_report_document(
+    [audit],
+    requested_trading_days=5,
+    abnormal_dates=abnormal_dates,
+  )
+  formal = report["formal_20_trading_day"]
+  diagnostic = report["short_window_coverage_diagnostic"]
+  markdown = render_markdown(report, json_name="acceptance.json")
+
+  assert formal == {
+    "status": "BLOCKED",
+    "selected_snapshot_date": None,
+    "execution": None,
+    "blocker": "FORMAL_20_TRADING_DAYS_REQUIRED",
+  }
+  assert diagnostic["status"] == "COVERAGE_DIAGNOSTIC_NON_GATING"
+  assert diagnostic["requested_trading_days"] == 5
+  assert diagnostic["candidate_count"] == 1
+  assert diagnostic["complete_candidate_count"] == 1
+  assert "formal_gate_blockers" not in diagnostic["coverage_windows"][0]
+  diagnostic_json = json.dumps(diagnostic).upper()
+  for prohibited_term in ("FORMAL", "PAPER", "CANARY", "LIVE"):
+    assert prohibited_term not in diagnostic_json
+  diagnostic_section = markdown.split("## 短窗口覆盖诊断（NON_GATING）", 1)[1].split(
+    "## 真实短窗口 source identity 预检", 1
+  )[0]
+  assert "COVERAGE_DIAGNOSTIC_NON_GATING" in diagnostic_section
+  assert "不产生回放、审批或上线结论" in diagnostic_section
+  for prohibited_term in ("FORMAL", "PAPER", "CANARY", "LIVE"):
+    assert prohibited_term not in diagnostic_section.upper()
+  assert "READY_NOT_EXECUTED" not in markdown
+
+
+def test_twenty_day_report_retains_ready_and_pass_formal_behavior() -> None:
+  audit = _audit()
+  abnormal_dates = [audit.window.trading_dates[0]]
+
+  ready = build_report_document(
+    [audit],
+    requested_trading_days=DEFAULT_TRADING_DAYS,
+    abnormal_dates=abnormal_dates,
+  )
+  passed = build_report_document(
+    [audit],
+    requested_trading_days=DEFAULT_TRADING_DAYS,
+    abnormal_dates=abnormal_dates,
+    formal_execution={"replay": {"status": "COMPLETED"}},
+  )
+
+  assert ready["formal_20_trading_day"]["status"] == "READY_NOT_EXECUTED"
+  assert ready["formal_20_trading_day"]["selected_snapshot_date"] == "2026-06-01"
+  assert ready["short_window_coverage_diagnostic"] is None
+  assert passed["formal_20_trading_day"]["status"] == "PASS"
+  assert passed["formal_20_trading_day"]["execution"] == {
+    "replay": {"status": "COMPLETED"}
+  }
+
+
+def test_report_rejects_pseudo_formal_execution_without_ready_20_day_window() -> None:
+  formal_execution = {"replay": {"status": "COMPLETED"}}
+  no_abnormal_evidence = _audit()
+  incomplete_twenty_day_window = _audit(
+    day_count=19,
+    requested_trading_days=DEFAULT_TRADING_DAYS,
+  )
+  short_window = _audit(day_count=5, requested_trading_days=5)
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="FORMAL_EXECUTION_REQUIRES_READY_20_TRADING_DAY_WINDOW",
+  ):
+    build_report_document(
+      [no_abnormal_evidence],
+      requested_trading_days=DEFAULT_TRADING_DAYS,
+      formal_execution=formal_execution,
+    )
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="FORMAL_EXECUTION_REQUIRES_READY_20_TRADING_DAY_WINDOW",
+  ):
+    build_report_document(
+      [incomplete_twenty_day_window],
+      requested_trading_days=DEFAULT_TRADING_DAYS,
+      abnormal_dates=[incomplete_twenty_day_window.window.trading_dates[0]],
+      formal_execution=formal_execution,
+    )
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS",
+  ):
+    build_report_document(
+      [short_window],
+      requested_trading_days=5,
+      abnormal_dates=[short_window.window.trading_dates[0]],
+      formal_execution=formal_execution,
+    )
+
+
+def test_reused_short_window_report_cannot_retain_formal_20_claim() -> None:
+  report = {
+    "scope": {"requested_trading_days": 5},
+    "candidate_windows": [],
+    "formal_20_trading_day": {
+      "status": "PASS",
+      "selected_snapshot_date": "2026-06-01",
+      "execution": {"replay": {"status": "COMPLETED"}},
+      "blocker": None,
+    },
+  }
+
+  acceptance_module._fail_closed_reused_formal_gate(report)
+
+  assert report["formal_20_trading_day"] == {
+    "status": "BLOCKED",
+    "selected_snapshot_date": None,
+    "execution": None,
+    "blocker": "FORMAL_20_TRADING_DAYS_REQUIRED",
+  }
 
 
 def test_missing_one_stock_day_blocks_formal_replay_and_preserves_exact_evidence() -> None:
@@ -612,6 +843,40 @@ def test_completed_pressure_import_fails_closed_for_boundary_or_count_mismatch(
 
 
 @pytest.mark.asyncio
+async def test_run_cli_rejects_short_formal_execute_before_database_or_audit(
+  monkeypatch,
+) -> None:
+  calls: list[str] = []
+
+  async def unexpected_snapshot_load(*_args, **_kwargs):
+    calls.append("snapshot_load")
+    raise AssertionError("short formal execute must stop before database access")
+
+  async def unexpected_audit(*_args, **_kwargs):
+    calls.append("audit")
+    raise AssertionError("short formal execute must stop before audit")
+
+  monkeypatch.setenv("ENABLE_REAL_TRADING", "false")
+  monkeypatch.setattr(
+    acceptance_module,
+    "load_snapshot_portfolios",
+    unexpected_snapshot_load,
+  )
+  monkeypatch.setattr(acceptance_module, "audit_tick_coverage", unexpected_audit)
+  args = acceptance_module.build_parser().parse_args(
+    ["--execute", "--trading-days", "5"]
+  )
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS",
+  ):
+    await acceptance_module.run_cli(args)
+
+  assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_run_cli_completed_pressure_rejects_mismatched_operational_evidence(
   monkeypatch,
   tmp_path,
@@ -852,6 +1117,97 @@ async def test_terminal_projection_repair_rejects_non_backtest_run(monkeypatch) 
       "unsafe-run",
       callback_grace_seconds=0,
     )
+
+
+@pytest.mark.asyncio
+async def test_isolated_historical_acceptance_blocks_current_sync_backfill_path(
+  monkeypatch,
+) -> None:
+  audit = _audit(day_count=1)
+  sync_blocked = False
+
+  async def original_optional_supplement(*_args, **_kwargs):
+    raise AssertionError("old optional supplement path must not be used")
+
+  async def original_sync(*_args, **_kwargs):
+    raise AssertionError("current blocking sync path must be intercepted")
+
+  manager = SimpleNamespace(
+    _queue_missing_backtest_data_supplement=original_optional_supplement,
+    _sync_missing_backtest_data=original_sync,
+    get_run=lambda _run_id: runtime,
+  )
+  runtime = SimpleNamespace(
+    task=None,
+    state_manager=SimpleNamespace(snapshot_cas_conflicts=0),
+  )
+
+  class FakeReplayService:
+    def __init__(self, supplied_manager) -> None:
+      assert supplied_manager is manager
+
+    async def start(self, _payload, *, request_id):
+      assert request_id
+
+      async def race_with_missing_data() -> None:
+        nonlocal sync_blocked
+        with pytest.raises(
+          RuntimeError,
+          match="V3_ACCEPTANCE_FORBIDS_MARKET_DATA_SUPPLEMENT",
+        ):
+          await manager._sync_missing_backtest_data()
+        sync_blocked = True
+
+      runtime.task = asyncio.create_task(race_with_missing_data())
+      return {"run_id": "isolated-backtest"}
+
+    async def get(self, _run_id):
+      return {"status": "ERROR"}
+
+  class Counter:
+    def to_dict(self):
+      return {"sample_count": 0}
+
+  class Instrumentation:
+    def __init__(self) -> None:
+      self.engine_tick = Counter()
+      self.strategy_evaluation = Counter()
+      self.state_checkpoint = Counter()
+      self.db_writes = SimpleNamespace(to_dict=lambda: {})
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+  async def passed_identity(_audit, _trading_dates):
+    return SimpleNamespace(passed=True, to_dict=lambda: {"passed": True})
+
+  async def run_evidence(_run_id):
+    return {"mode": "BACKTEST", "status": "ERROR"}
+
+  monkeypatch.setattr(acceptance_module, "StrategyManager", lambda: manager)
+  monkeypatch.setattr(acceptance_module, "TTradeReplayService", FakeReplayService)
+  monkeypatch.setattr(acceptance_module, "BenchmarkInstrumentation", Instrumentation)
+  monkeypatch.setattr(acceptance_module, "audit_source_identity", passed_identity)
+  monkeypatch.setattr(acceptance_module, "_load_run_evidence", run_evidence)
+  original_sync_reference = manager._sync_missing_backtest_data
+  original_optional_reference = manager._queue_missing_backtest_data_supplement
+
+  result = await acceptance_module.execute_isolated_backtest(
+    audit,
+    audit.window.trading_dates,
+    formal_gate=True,
+  )
+
+  assert sync_blocked is True
+  assert result["market_data_supplement_attempts"] == 1
+  assert manager._sync_missing_backtest_data is original_sync_reference
+  assert (
+    manager._queue_missing_backtest_data_supplement
+    is original_optional_reference
+  )
 
 
 def test_latency_accumulator_reports_interpolated_quantiles_and_cap() -> None:

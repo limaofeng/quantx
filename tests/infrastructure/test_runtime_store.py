@@ -346,7 +346,8 @@ async def test_market_data_request_scopes_repair_attempt_without_changing_payloa
 
 
 @pytest.mark.asyncio
-async def test_completed_tick_manifest_query_uses_only_newest_completed_coverage() -> None:
+async def test_completed_tick_coverage_query_requires_dual_empty_proof_and_rejects_multiday_daily_rows(
+) -> None:
   class CoverageRows:
     def mappings(self):
       return [
@@ -391,11 +392,66 @@ async def test_completed_tick_manifest_query_uses_only_newest_completed_coverage
       "point_count": 0,
     }
   ]
-  assert "FROM market_data_request AS market_request" in connection.statement
-  assert "market_request.status = 'COMPLETED'" in connection.statement
-  assert "json_array_elements" in connection.statement
-  assert "market_request.completed_at DESC NULLS LAST" in connection.statement
-  assert "LIMIT :limit" in connection.statement
+  sql = " ".join(connection.statement.split())
+  assert "FROM market_data_request AS tick_request" in sql
+  assert "tick_request.status = 'COMPLETED'" in sql
+  assert "json_array_elements" in sql
+  assert "tick_coverage.value ->> 'point_count' = '0'" in sql
+  assert "tick_request.request_payload ->> 'start_time'" in sql
+  assert "tick_request.request_payload ->> 'end_time'" in sql
+  assert (
+    "REPLACE(tick_coverage.value ->> 'trading_date', '-', '')"
+    in sql
+  )
+  assert "tick_summary.value ->> 'row_count' = '0'" in sql
+  assert (
+    "tick_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'"
+    in sql
+  )
+  assert "persistence_verification' ->> 'status' = 'verified'" in sql
+  assert "FROM market_data_request AS daily_request" in sql
+  assert "daily_request.status = 'COMPLETED'" in sql
+  assert "daily_coverage.value ->> 'point_count' = '0'" in sql
+  assert (
+    "daily_coverage.value ->> 'trading_date' = "
+    "tick_coverage.value ->> 'trading_date'"
+  ) in sql
+  assert "daily_summary.value ->> 'row_count' = '0'" in sql
+  assert (
+    "daily_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'"
+    in sql
+  )
+  assert "AND NOT EXISTS" in sql
+  assert "FROM market_data_request AS daily_nonempty_request" in sql
+  assert "daily_nonempty_request.status = 'COMPLETED'" in sql
+  assert (
+    "daily_nonempty_request.ingestion_result "
+    "-> 'persistence_verification' ->> 'status' = 'verified'"
+  ) in sql
+  assert (
+    "daily_nonempty_coverage.value ->> 'trading_date' = "
+    "tick_coverage.value ->> 'trading_date'"
+  ) in sql
+  assert "daily_nonempty_coverage.value ->> 'point_count'" in sql
+  assert "daily_nonempty_summary.value ->> 'row_count'" in sql
+  assert "<> '0'" in sql
+  negative_clause = sql.split("AND NOT EXISTS (", 1)[1]
+  coverage_branch, exact_day_summary_branch = negative_clause.split("OR (", 1)
+  # A matching day_coverage has its own trading_date, so any completed,
+  # verified multi-day request with a nonzero/malformed count rejects it.
+  assert "daily_nonempty_request.request_payload" not in coverage_branch
+  # A code_summary lacks a trading-date key, so nonzero rows are a valid
+  # counterproof only when the request itself is exactly that trading day.
+  assert (
+    "daily_nonempty_request.request_payload ->> 'start_time' = "
+    "REPLACE(tick_coverage.value ->> 'trading_date', '-', '')"
+  ) in exact_day_summary_branch
+  assert (
+    "daily_nonempty_request.request_payload ->> 'end_time' = "
+    "REPLACE(tick_coverage.value ->> 'trading_date', '-', '')"
+  ) in exact_day_summary_branch
+  assert "tick_request.completed_at DESC NULLS LAST" in sql
+  assert "LIMIT :limit" in sql
   assert connection.parameters == {
     "instrument_code": "600000.SH",
     "trading_dates": ["2026-08-03"],
@@ -482,6 +538,46 @@ async def test_recoverable_market_data_requests_include_uploaded_and_stale_proce
   assert "updated_at < :stale_before" in connection.statement
   assert connection.parameters == {
     "stale_before": now - timedelta(minutes=5),
+    "limit": 2,
+  }
+
+
+@pytest.mark.asyncio
+async def test_expired_delivery_leases_are_requeued_with_a_bounded_row_lock(
+  monkeypatch,
+) -> None:
+  now = datetime(2026, 8, 24, 8, 0, 0)
+  monkeypatch.setattr(runtime_store, "_utcnow", lambda: now)
+
+  class Result:
+    def scalars(self):
+      return ["stale-receiving", "stale-delivered"]
+
+  class Connection:
+    def __init__(self) -> None:
+      self.statement = ""
+      self.parameters = {}
+
+    async def execute(self, statement, parameters):
+      self.statement = str(statement)
+      self.parameters = parameters
+      return Result()
+
+  connection = Connection()
+  store = runtime_store.DurableRuntimeStore.__new__(
+    runtime_store.DurableRuntimeStore
+  )
+  store.engine = _Engine(connection)
+
+  requeued = await store.requeue_expired_market_data_delivery_leases(limit=2)
+
+  assert requeued == ["stale-delivered", "stale-receiving"]
+  assert "status IN ('DELIVERED', 'RECEIVING')" in connection.statement
+  assert "FOR UPDATE SKIP LOCKED" in connection.statement
+  assert "SET status = 'QUEUED'" in connection.statement
+  assert connection.parameters == {
+    "stale_before": now - timedelta(minutes=5),
+    "requeued_at": now,
     "limit": 2,
   }
 

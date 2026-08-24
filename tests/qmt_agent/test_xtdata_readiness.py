@@ -221,6 +221,78 @@ def test_xtdata_manager_connects_only_to_discovered_explicit_endpoint(
   ]
 
 
+@pytest.mark.parametrize("period", ["tick", "1m"])
+def test_xtdata_manager_preserves_explicit_intraday_history_bounds(
+  monkeypatch,
+  period: str,
+) -> None:
+  pytest.importorskip(
+    "xtquant",
+    reason="miniQMT SDK is only available on the QMT host",
+  )
+  from quantx_qmt_agent.miniqmt.data import data_manager as module
+
+  download_calls: list[tuple[list[str], str, dict]] = []
+  query_calls: list[dict] = []
+
+  class Client:
+    @staticmethod
+    def is_connected() -> bool:
+      return True
+
+  def download_history_data2(codes, requested_period, **kwargs):
+    download_calls.append((codes, requested_period, kwargs))
+
+  def get_market_data_ex(**kwargs):
+    query_calls.append(kwargs)
+    return {}
+
+  monkeypatch.setattr(
+    module,
+    "discover_xtdata_endpoint",
+    lambda: XTDataEndpoint("127.0.0.1", 58600, "verified"),
+  )
+  monkeypatch.setattr(
+    module,
+    "xtdata",
+    SimpleNamespace(
+      connect=lambda **_kwargs: Client(),
+      download_history_data2=download_history_data2,
+      get_market_data_ex=get_market_data_ex,
+    ),
+  )
+  manager = module.XTDataManager()
+
+  manager.download_market_data(
+    ["600000.SH"],
+    period,
+    start_time="20260722000000",
+    end_time="20260723235959",
+    incrementally=False,
+  )
+  manager.get_market_data(
+    ["600000.SH"],
+    period,
+    start_time="20260722000000",
+    end_time="20260723235959",
+  )
+
+  assert download_calls == [
+    (
+      ["600000.SH"],
+      period,
+      {
+        "start_time": "20260722000000",
+        "end_time": "20260723235959",
+        "callback": None,
+        "incrementally": False,
+      },
+    )
+  ]
+  assert query_calls[0]["start_time"] == "20260722000000"
+  assert query_calls[0]["end_time"] == "20260723235959"
+
+
 def test_xtdata_manager_connection_failure_is_not_a_legal_empty_result(
   monkeypatch,
 ) -> None:

@@ -1706,6 +1706,218 @@ def test_bars_response_rejects_unrequested_code_and_out_of_range_time() -> None:
     _market_data_records(OutOfRangeManager(), payload)
 
 
+def test_tick_history_download_and_read_use_full_single_day_bounds() -> None:
+  calls: list[tuple[str, dict]] = []
+  auction_time = _normalize_market_timestamp(datetime(2026, 7, 22, 9, 15))
+  afternoon_time = _normalize_market_timestamp(datetime(2026, 7, 22, 13, 0))
+
+  class Manager:
+    def download_market_data(self, **kwargs):
+      calls.append(("download", kwargs))
+
+    def get_market_data(self, **kwargs):
+      calls.append(("read", kwargs))
+      return {
+        "600000.SH": pd.DataFrame(
+          [
+            {"time": auction_time, "lastPrice": 10.0},
+            {"time": afternoon_time, "lastPrice": 10.1},
+          ]
+        )
+      }
+
+  records = _market_data_records(
+    Manager(),
+    {
+      "operation": "bars",
+      "download": True,
+      "stock_list": ["600000.SH"],
+      "periods": ["tick"],
+      "start_time": "20260722",
+      "end_time": "20260722",
+    },
+  )
+
+  assert calls == [
+    (
+      "download",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "tick",
+        "start_time": "20260722000000",
+        "end_time": "20260722235959",
+        "incrementally": False,
+      },
+    ),
+    (
+      "read",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "tick",
+        "start_time": "20260722000000",
+        "end_time": "20260722235959",
+      },
+    ),
+  ]
+  assert [record["time"] for record in _bar_rows(records)] == [
+    auction_time,
+    afternoon_time,
+  ]
+  summary = _bar_summaries(records)[0]
+  assert summary["record_type"] == HISTORICAL_BAR_SUMMARY_RECORD_TYPE
+  assert summary["schema_version"] == 1
+  assert summary["code"] == "600000.SH"
+  assert summary["period"] == "tick"
+  assert summary["row_count"] == 2
+  assert summary["min_time"] == auction_time
+  assert summary["max_time"] == afternoon_time
+  assert len(summary["key_sha256"]) == 64
+  assert summary["no_data_reason"] is None
+
+
+def test_minute_history_download_and_read_use_full_multi_day_bounds() -> None:
+  calls: list[tuple[str, dict]] = []
+  first_time = _normalize_market_timestamp(datetime(2026, 7, 22, 9, 30))
+  last_time = _normalize_market_timestamp(datetime(2026, 7, 23, 15, 0))
+
+  class Manager:
+    def download_market_data(self, **kwargs):
+      calls.append(("download", kwargs))
+
+    def get_market_data(self, **kwargs):
+      calls.append(("read", kwargs))
+      return {
+        "600000.SH": pd.DataFrame(
+          [
+            {"time": first_time, "close": 10.0},
+            {"time": last_time, "close": 10.1},
+          ]
+        )
+      }
+
+  records = _market_data_records(
+    Manager(),
+    {
+      "operation": "bars",
+      "download": True,
+      "stock_list": ["600000.SH"],
+      "periods": ["1m"],
+      "start_time": "20260722",
+      "end_time": "20260723",
+    },
+  )
+
+  assert calls == [
+    (
+      "download",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "1m",
+        "start_time": "20260722000000",
+        "end_time": "20260723235959",
+        "incrementally": False,
+      },
+    ),
+    (
+      "read",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "1m",
+        "start_time": "20260722000000",
+        "end_time": "20260723235959",
+      },
+    ),
+  ]
+  summary = _bar_summaries(records)[0]
+  assert summary["row_count"] == 2
+  assert summary["min_time"] == first_time
+  assert summary["max_time"] == last_time
+  assert summary["no_data_reason"] is None
+
+
+def test_daily_history_download_and_read_keep_compact_date_bounds() -> None:
+  calls: list[tuple[str, dict]] = []
+
+  class Manager:
+    def download_market_data(self, **kwargs):
+      calls.append(("download", kwargs))
+
+    def get_market_data(self, **kwargs):
+      calls.append(("read", kwargs))
+      return {"600000.SH": pd.DataFrame([{"time": 20260722, "close": 10.0}])}
+
+  _market_data_records(
+    Manager(),
+    {
+      "operation": "bars",
+      "download": True,
+      "stock_list": ["600000.SH"],
+      "periods": ["1d"],
+      "start_time": "20260722",
+      "end_time": "20260723",
+    },
+  )
+
+  assert calls == [
+    (
+      "download",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "1d",
+        "start_time": "20260722",
+        "end_time": "20260723",
+        "incrementally": False,
+      },
+    ),
+    (
+      "read",
+      {
+        "stock_list": ["600000.SH"],
+        "period": "1d",
+        "start_time": "20260722",
+        "end_time": "20260723",
+      },
+    ),
+  ]
+
+
+def test_intraday_response_accepts_inclusive_day_end_and_rejects_next_day() -> None:
+  last_millisecond = _normalize_market_timestamp(
+    datetime(2026, 7, 22, 23, 59, 59, 999000)
+  )
+  next_day_start = _normalize_market_timestamp(datetime(2026, 7, 23))
+  payload = {
+    "operation": "bars",
+    "stock_list": ["600000.SH"],
+    "periods": ["tick"],
+    "start_time": "20260722",
+    "end_time": "20260722",
+  }
+
+  class InclusiveEndManager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "600000.SH": pd.DataFrame(
+          [{"time": last_millisecond, "lastPrice": 10.0}]
+        )
+      }
+
+  records = _market_data_records(InclusiveEndManager(), payload)
+  assert _bar_rows(records)[0]["time"] == last_millisecond
+  assert _bar_summaries(records)[0]["max_time"] == last_millisecond
+
+  class NextDayManager:
+    def get_market_data(self, **_kwargs):
+      return {
+        "600000.SH": pd.DataFrame(
+          [{"time": next_day_start, "lastPrice": 10.0}]
+        )
+      }
+
+  with pytest.raises(ValueError, match="outside requested range"):
+    _market_data_records(NextDayManager(), payload)
+
+
 def test_daily_keys_and_canonical_json_are_cold_restart_stable(
   tmp_path,
 ) -> None:

@@ -349,11 +349,18 @@ class DurableRuntimeStore:
     instrument_code: str,
     trading_dates: list[date],
   ) -> list[dict[str, Any]]:
-    """Read newest completed Tick manifests for a bounded set of dates.
+    """Read strictly confirmed empty Tick coverage for bounded dates.
 
-    ``ingestion_result`` is written atomically with the COMPLETED transition, so
-    no manifest from a queued, uploading, or interrupted request can prove a
-    suspended/empty Tick day.
+    ``ingestion_result`` is written atomically with the COMPLETED transition,
+    so no manifest from a queued, uploading, or interrupted request can prove
+    a suspended/empty Tick day. A missing Tick day is admissible only when
+    *both* Tick and ``1d`` have separate completed, persistence-verified,
+    exact-single-day ``XT_DATA_NO_ROWS`` proofs for the same code/date. A
+    completed, persistence-verified request with nonzero or malformed ``1d``
+    coverage for that code/date is contradictory and blocks the exception,
+    including a multi-day request. Because summaries have no per-day key, a
+    nonzero ``1d`` summary is contradictory only for an exact-day request.
+    Multi-day requests never supply either positive proof.
     """
 
     normalized_code = str(instrument_code or "").strip().upper()
@@ -367,25 +374,144 @@ class DurableRuntimeStore:
         await connection.execute(
           text(
             """
-            SELECT DISTINCT ON (coverage.value ->> 'trading_date')
-              coverage.value ->> 'trading_date' AS trading_date,
-              coverage.value ->> 'point_count' AS point_count
-            FROM market_data_request AS market_request
+            SELECT DISTINCT ON (tick_coverage.value ->> 'trading_date')
+              tick_coverage.value ->> 'trading_date' AS trading_date,
+              tick_coverage.value ->> 'point_count' AS point_count
+            FROM market_data_request AS tick_request
             CROSS JOIN LATERAL json_array_elements(
               COALESCE(
-                market_request.ingestion_result -> 'day_coverage',
+                tick_request.ingestion_result -> 'day_coverage',
                 '[]'::json
               )
-            ) AS coverage(value)
-            WHERE market_request.status = 'COMPLETED'
-              AND coverage.value ->> 'instrument_code' = :instrument_code
-              AND LOWER(COALESCE(coverage.value ->> 'period', '')) = 'tick'
-              AND coverage.value ->> 'trading_date' IN :trading_dates
+            ) AS tick_coverage(value)
+            WHERE tick_request.status = 'COMPLETED'
+              AND tick_request.ingestion_result
+                    -> 'persistence_verification' ->> 'status' = 'verified'
+              AND tick_coverage.value ->> 'instrument_code' = :instrument_code
+              AND LOWER(COALESCE(tick_coverage.value ->> 'period', '')) = 'tick'
+              AND tick_coverage.value ->> 'trading_date' IN :trading_dates
+              AND tick_coverage.value ->> 'point_count' = '0'
+              AND tick_request.request_payload ->> 'start_time' =
+                  REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+              AND tick_request.request_payload ->> 'end_time' =
+                  REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+              AND EXISTS (
+                SELECT 1
+                FROM json_array_elements(
+                  COALESCE(
+                    tick_request.ingestion_result -> 'code_summaries',
+                    '[]'::json
+                  )
+                ) AS tick_summary(value)
+                WHERE tick_summary.value ->> 'code' = :instrument_code
+                  AND LOWER(COALESCE(tick_summary.value ->> 'period', '')) = 'tick'
+                  AND tick_summary.value ->> 'row_count' = '0'
+                  AND tick_summary.value ->> 'no_data_reason' = 'XT_DATA_NO_ROWS'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM market_data_request AS daily_request
+                CROSS JOIN LATERAL json_array_elements(
+                  COALESCE(
+                    daily_request.ingestion_result -> 'day_coverage',
+                    '[]'::json
+                  )
+                ) AS daily_coverage(value)
+                WHERE daily_request.status = 'COMPLETED'
+                  AND daily_request.ingestion_result
+                        -> 'persistence_verification' ->> 'status' = 'verified'
+                  AND daily_request.request_payload ->> 'start_time' =
+                      REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+                  AND daily_request.request_payload ->> 'end_time' =
+                      REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+                  AND daily_coverage.value ->> 'instrument_code' = :instrument_code
+                  AND LOWER(COALESCE(daily_coverage.value ->> 'period', '')) = '1d'
+                  AND daily_coverage.value ->> 'trading_date' =
+                      tick_coverage.value ->> 'trading_date'
+                  AND daily_coverage.value ->> 'point_count' = '0'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM json_array_elements(
+                      COALESCE(
+                        daily_request.ingestion_result -> 'code_summaries',
+                        '[]'::json
+                      )
+                    ) AS daily_summary(value)
+                    WHERE daily_summary.value ->> 'code' = :instrument_code
+                      AND LOWER(
+                        COALESCE(daily_summary.value ->> 'period', '')
+                      ) = '1d'
+                      AND daily_summary.value ->> 'row_count' = '0'
+                      AND daily_summary.value ->> 'no_data_reason' =
+                          'XT_DATA_NO_ROWS'
+                  )
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM market_data_request AS daily_nonempty_request
+                WHERE daily_nonempty_request.status = 'COMPLETED'
+                  AND daily_nonempty_request.ingestion_result
+                        -> 'persistence_verification' ->> 'status' = 'verified'
+                  AND (
+                    EXISTS (
+                      SELECT 1
+                      FROM json_array_elements(
+                        COALESCE(
+                          daily_nonempty_request.ingestion_result
+                            -> 'day_coverage',
+                          '[]'::json
+                        )
+                      ) AS daily_nonempty_coverage(value)
+                      WHERE daily_nonempty_coverage.value ->> 'instrument_code' =
+                            :instrument_code
+                        AND LOWER(
+                          COALESCE(
+                            daily_nonempty_coverage.value ->> 'period',
+                            ''
+                          )
+                        ) = '1d'
+                        AND daily_nonempty_coverage.value ->> 'trading_date' =
+                            tick_coverage.value ->> 'trading_date'
+                        AND COALESCE(
+                          daily_nonempty_coverage.value ->> 'point_count',
+                          ''
+                        ) <> '0'
+                    )
+                    OR (
+                      daily_nonempty_request.request_payload ->> 'start_time' =
+                        REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+                      AND daily_nonempty_request.request_payload ->> 'end_time' =
+                        REPLACE(tick_coverage.value ->> 'trading_date', '-', '')
+                      AND EXISTS (
+                        SELECT 1
+                        FROM json_array_elements(
+                          COALESCE(
+                            daily_nonempty_request.ingestion_result
+                              -> 'code_summaries',
+                            '[]'::json
+                          )
+                        ) AS daily_nonempty_summary(value)
+                        WHERE daily_nonempty_summary.value ->> 'code' =
+                              :instrument_code
+                          AND LOWER(
+                            COALESCE(
+                              daily_nonempty_summary.value ->> 'period',
+                              ''
+                            )
+                          ) = '1d'
+                          AND COALESCE(
+                            daily_nonempty_summary.value ->> 'row_count',
+                            ''
+                          ) <> '0'
+                      )
+                    )
+                  )
+              )
             ORDER BY
-              coverage.value ->> 'trading_date',
-              market_request.completed_at DESC NULLS LAST,
-              market_request.updated_at DESC,
-              market_request.request_id DESC
+              tick_coverage.value ->> 'trading_date',
+              tick_request.completed_at DESC NULLS LAST,
+              tick_request.updated_at DESC,
+              tick_request.request_id DESC
             LIMIT :limit
             """
           ).bindparams(
@@ -434,6 +560,55 @@ class DurableRuntimeStore:
         )
       ).scalars()
       return [str(value) for value in values if value]
+
+  async def requeue_expired_market_data_delivery_leases(
+    self,
+    *,
+    limit: int = 20,
+  ) -> list[str]:
+    """Return abandoned Agent delivery leases to the durable request queue.
+
+    A WebSocket reconnect can discard an Agent's in-memory receive queue before
+    native preparation begins.  Reclaiming an expired ``DELIVERED`` or
+    ``RECEIVING`` lease from a Worker makes that loss recoverable even when the
+    Agent stays connected afterwards.  The update never touches immutable
+    uploads or an active ingestion claim, and the Agent's request-id
+    deduplication makes a stale active redelivery safe.
+    """
+
+    bounded_limit = max(1, min(int(limit), 100))
+    requeued_at = _utcnow()
+    stale_before = requeued_at - timedelta(minutes=5)
+    async with self.engine.begin() as connection:
+      values = (
+        await connection.execute(
+          text(
+            """
+            WITH expired AS (
+              SELECT request_id
+              FROM market_data_request
+              WHERE status IN ('DELIVERED', 'RECEIVING')
+                AND updated_at < :stale_before
+              ORDER BY updated_at ASC, created_at ASC
+              LIMIT :limit
+              FOR UPDATE SKIP LOCKED
+            )
+            UPDATE market_data_request AS market_request
+            SET status = 'QUEUED',
+                updated_at = :requeued_at
+            FROM expired
+            WHERE market_request.request_id = expired.request_id
+            RETURNING market_request.request_id
+            """
+          ),
+          {
+            "stale_before": stale_before,
+            "requeued_at": requeued_at,
+            "limit": bounded_limit,
+          },
+        )
+      ).scalars()
+      return sorted(str(value) for value in values if value)
 
   async def finish_market_data_request(
     self,

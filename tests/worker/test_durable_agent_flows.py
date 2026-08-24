@@ -367,6 +367,9 @@ async def test_interrupted_market_ingestion_is_reclaimed(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monkeypatch) -> None:
   store = SimpleNamespace(
+    requeue_expired_market_data_delivery_leases=AsyncMock(
+      return_value=["stale-delivered-request"]
+    ),
     recoverable_market_data_request_ids=AsyncMock(
       return_value=["uploaded-request", "stale-processing-request"]
     ),
@@ -387,6 +390,7 @@ async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monke
 
   result = await durable_agent_flows.recover_market_data_ingestion_flow.fn(limit=2)
 
+  store.requeue_expired_market_data_delivery_leases.assert_awaited_once_with(limit=2)
   store.recoverable_market_data_request_ids.assert_awaited_once_with(limit=2)
   assert [call.args[1] for call in converge.await_args_list] == [
     "uploaded-request",
@@ -398,6 +402,7 @@ async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monke
   )
   assert result == {
     "status": "completed",
+    "requeued_delivery_request_ids": ["stale-delivered-request"],
     "scanned": 2,
     "completed_request_ids": ["uploaded-request"],
     "retryable_request_ids": ["stale-processing-request"],

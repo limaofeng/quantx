@@ -55,6 +55,17 @@ Prefect API 由 `PREFECT_API_URL` 指定，默认使用
 最多 2,000 行或 8 MiB 分批写入。只有全部批次被接受，逐标的审计才和
 `COMPLETED` 在 PostgreSQL 原子保存；复用幂等请求时必须返回同一份审计。
 临时 InfluxDB 故障只释放处理租约回 `UPLOADED`，调用方超时也不终结业务请求。
+做 T 严格 Tick 回放不能仅凭 Tick 的零行摘要推断停牌或休市：只有同一
+`code × trading_date` 同时拥有已完成、持久化验证过、精确单日的 `tick` 与
+`1d` `XT_DATA_NO_ROWS` 审计（两者的 day coverage 和 summary 均为零），才会把
+缺失 Tick 标为 `CONFIRMED_EMPTY`。任意已完成且验证过的、同 `code × day` 的
+`1d` day coverage 非零或格式异常（包括多日请求）都会否决；无按日键的 summary
+仅在精确单日请求中以非零作为反证。缺少 `1d` 正证据、多日正证或查询失败都
+fail-closed；Engine 回放门禁与正式验收审计共用这一个持久化查询结论。
+每分钟的 `market-data-ingestion-recovery` 还会把超过五分钟没有更新的
+`DELIVERED` / `RECEIVING` Agent 投递租约原子退回 `QUEUED`；这只恢复持久化
+请求状态，不调用 QMT 或修改任何交易状态。随后在线 Agent 以原请求 ID 幂等续传，
+已上传或处理中数据仍只由摄取租约收敛。
 `ticks` 所在 InfluxDB database 必须按“完整历史”容量规划为无限 retention，并有
 独立备份与容量告警；API gzip staging 不是第二份长期归档，成功后立即清理，失败
 分片只保留 24 小时以支持受控重放。

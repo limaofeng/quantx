@@ -1614,19 +1614,20 @@ def _iter_market_data_records_unbounded(
   requested_codes = set(request.codes)
   for period in request.periods:
     lower_bound, upper_bound = _bar_time_bounds(request, period)
+    xtdata_start_time, xtdata_end_time = _xtdata_history_time_bounds(request, period)
     if bool(payload.get("download")):
       manager.download_market_data(
         stock_list=list(request.codes),
         period=period,
-        start_time=request.start_text,
-        end_time=request.end_text,
+        start_time=xtdata_start_time,
+        end_time=xtdata_end_time,
         incrementally=False,
       )
     values = manager.get_market_data(
       stock_list=list(request.codes),
       period=period,
-      start_time=request.start_text,
-      end_time=request.end_text,
+      start_time=xtdata_start_time,
+      end_time=xtdata_end_time,
     )
     if not isinstance(values, dict):
       raise ValueError("XTData returned a non-object market-data result")
@@ -2045,6 +2046,28 @@ def _bar_time_bounds(
     return start, _normalize_market_timestamp(request.end_local)
   end_exclusive = request.end_local + timedelta(days=1)
   return start, _normalize_market_timestamp(end_exclusive) - 1
+
+
+def _xtdata_history_time_bounds(
+  request: _ValidatedBarsRequest,
+  period: str,
+) -> tuple[str, str]:
+  """Return the authoritative XTData request window for one transfer period.
+
+  XTData accepts compact dates for daily bars, but its intraday history API
+  requires explicit seconds to fetch every requested calendar day.  Use the
+  complete local day rather than trading-session slices so collection auction
+  and both sides of the midday break remain in scope.  The end is inclusive;
+  querying the next day's midnight could silently include an out-of-window
+  record.
+  """
+
+  if period == "1d":
+    return request.start_text, request.end_text
+  return (
+    request.start_local.strftime("%Y%m%d000000"),
+    request.end_local.strftime("%Y%m%d235959"),
+  )
 
 
 def _normalize_market_timestamp(value: Any) -> int:

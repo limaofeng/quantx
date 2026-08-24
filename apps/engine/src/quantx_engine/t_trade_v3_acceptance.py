@@ -69,6 +69,9 @@ from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
   HistoricalTickPaginationError,
 )
+from quantx_infrastructure.services.market_data_request_service import (
+  load_completed_empty_tick_days,
+)
 from quantx_infrastructure.services.t_trade_replay_projection_service import (
   TTradeReplayUpdateKind,
   t_trade_replay_projection_service,
@@ -1512,6 +1515,36 @@ async def audit_tick_coverage(
         code,
         trading_date,
       )
+      # Keep formal acceptance aligned with StrategyManager's strict replay
+      # gate: a missing Tick day is usable only when completed, verified,
+      # *single-day* Tick and 1d XT_DATA_NO_ROWS transfers jointly prove it
+      # empty. Any lookup failure leaves the raw inspection incomplete, so the
+      # audit fails closed rather than treating absent ticks as a
+      # suspension/holiday.
+      if (
+        not raw.get("complete")
+        and str(raw.get("classification") or "").upper() == "MISSING"
+      ):
+        try:
+          confirmed_empty_dates = await load_completed_empty_tick_days(
+            instrument_code=code,
+            trading_dates=[trading_date],
+          )
+        except Exception:
+          confirmed_empty_dates = set()
+        if trading_date in confirmed_empty_dates:
+          raw = {
+            **raw,
+            "complete": True,
+            "classification": "CONFIRMED_EMPTY",
+            "reason_codes": [],
+            "statistics": {
+              **dict(raw.get("statistics") or {}),
+              "completed_empty_tick_day": True,
+              "completed_empty_daily_day": True,
+            },
+            "message": "已完成的单日 Tick 与 1d XT_DATA_NO_ROWS 传输共同证明该日为空",
+          }
     return (
       (code, trading_date),
       TickDayInspection.from_engine_result(
@@ -1547,7 +1580,11 @@ def select_formal_window(
   eligible = [
     audit
     for audit in audits
-    if not audit.blockers(abnormal_dates=declared_abnormal)
+    if (
+      audit.window.requested_trading_days == DEFAULT_TRADING_DAYS
+      and len(audit.window.trading_dates) == DEFAULT_TRADING_DAYS
+      and not audit.blockers(abnormal_dates=declared_abnormal)
+    )
   ]
   if not eligible:
     return None
@@ -2148,6 +2185,7 @@ async def execute_isolated_backtest(
 
   manager = StrategyManager()
   original_supplement = manager._queue_missing_backtest_data_supplement
+  original_sync = manager._sync_missing_backtest_data
   supplement_attempts = 0
 
   async def forbid_supplement(*_: Any, **__: Any) -> dict[str, Any]:
@@ -2159,6 +2197,7 @@ async def execute_isolated_backtest(
   # defense in depth: this offline runner must not command a QMT Agent even if
   # storage changes between preflight and the Engine's own data check.
   manager._queue_missing_backtest_data_supplement = forbid_supplement
+  manager._sync_missing_backtest_data = forbid_supplement
   request_id = str(uuid.uuid4())
   start_time = datetime.combine(trading_dates[0], clock_time(9, 30))
   end_time = datetime.combine(trading_dates[-1], clock_time(15, 0))
@@ -2198,6 +2237,7 @@ async def execute_isolated_backtest(
     elapsed_seconds = wall_clock.perf_counter() - started
   finally:
     manager._queue_missing_backtest_data_supplement = original_supplement
+    manager._sync_missing_backtest_data = original_sync
 
   cas_conflicts = int(
     getattr(runtime_state, "snapshot_cas_conflicts", 0) or 0
@@ -2595,6 +2635,30 @@ async def execute_synthetic_pressure_baseline(
   }
 
 
+def _short_window_coverage_diagnostic(
+  audits: Sequence[WindowAudit],
+  *,
+  requested_trading_days: int,
+) -> dict[str, Any]:
+  """Expose short-window coverage without borrowing formal-gate semantics."""
+
+  coverage_windows: list[dict[str, Any]] = []
+  for audit in audits:
+    coverage_window = audit.to_dict()
+    coverage_window.pop("formal_gate_blockers", None)
+    coverage_windows.append(coverage_window)
+  return {
+    "status": "COVERAGE_DIAGNOSTIC_NON_GATING",
+    "requested_trading_days": requested_trading_days,
+    "candidate_count": len(coverage_windows),
+    "complete_candidate_count": sum(
+      audit.coverage_complete for audit in audits
+    ),
+    "message": "仅展示覆盖完整性；不产生回放、审批或上线结论。",
+    "coverage_windows": coverage_windows,
+  }
+
+
 def build_report_document(
   audits: Sequence[WindowAudit],
   *,
@@ -2609,18 +2673,37 @@ def build_report_document(
   """Create a self-contained report object before rendering it to Markdown."""
 
   declared_abnormal = tuple(sorted(set(abnormal_dates)))
-  formal_window = select_formal_window(audits, abnormal_dates=declared_abnormal)
-  if formal_execution:
+  is_formal_20_day_request = requested_trading_days == DEFAULT_TRADING_DAYS
+  if not is_formal_20_day_request and formal_execution is not None:
+    raise AcceptanceBlockedError(
+      "FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS"
+    )
+  formal_window = (
+    select_formal_window(audits, abnormal_dates=declared_abnormal)
+    if is_formal_20_day_request
+    else None
+  )
+  if formal_execution is not None and formal_window is None:
+    raise AcceptanceBlockedError(
+      "FORMAL_EXECUTION_REQUIRES_READY_20_TRADING_DAY_WINDOW"
+    )
+  if not is_formal_20_day_request:
+    formal_status = "BLOCKED"
+    formal_blocker = "FORMAL_20_TRADING_DAYS_REQUIRED"
+  elif formal_execution:
     formal_status = (
       "PASS"
       if str(formal_execution.get("replay", {}).get("status", "")).upper()
       == "COMPLETED"
       else "FAIL"
     )
+    formal_blocker = None
   elif formal_window is not None:
     formal_status = "READY_NOT_EXECUTED"
+    formal_blocker = None
   else:
     formal_status = "BLOCKED"
+    formal_blocker = "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW"
   return {
     "schema_version": REPORT_SCHEMA_VERSION,
     "generated_at": datetime.now().astimezone().isoformat(),
@@ -2641,13 +2724,21 @@ def build_report_document(
         if formal_window
         else None
       ),
-      "execution": dict(formal_execution) if formal_execution else None,
-      "blocker": (
-        "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW"
-        if formal_window is None
+      "execution": (
+        dict(formal_execution)
+        if is_formal_20_day_request and formal_execution
         else None
       ),
+      "blocker": formal_blocker,
     },
+    "short_window_coverage_diagnostic": (
+      None
+      if is_formal_20_day_request
+      else _short_window_coverage_diagnostic(
+        audits,
+        requested_trading_days=requested_trading_days,
+      )
+    ),
     "historical_short_window_source_identity_preflight": (
       dict(historical_short_window_preflight)
       if historical_short_window_preflight
@@ -2747,6 +2838,10 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
 
   formal = dict(report["formal_20_trading_day"])
   pressure = dict(report.get("pressure_baseline") or {})
+  diagnostic_raw = report.get("short_window_coverage_diagnostic")
+  short_diagnostic = (
+    dict(diagnostic_raw) if isinstance(diagnostic_raw, Mapping) else None
+  )
   lines = [
     "# 做 T V3 历史回放与全持仓压力验收",
     "",
@@ -2761,41 +2856,95 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
     "",
   ]
   if formal["status"] == "BLOCKED":
-    lines.extend(
-      [
-        "**BLOCKED**：没有任一 D-1 快照形成全持仓 20/20 Tick 完整窗口；因此没有启动正式回放。",
-        "",
-      ]
-    )
+    if short_diagnostic is not None:
+      lines.extend(
+        [
+          "**BLOCKED**：本次仅请求 {} 个交易日；20 日正式回放不具备输入，"
+          "因此没有启动。".format(
+            short_diagnostic.get("requested_trading_days")
+          ),
+          "",
+        ]
+      )
+    else:
+      lines.extend(
+        [
+          "**BLOCKED**：没有任一 D-1 快照形成全持仓 20/20 Tick 完整窗口；因此没有启动正式回放。",
+          "",
+        ]
+      )
   elif formal["status"] == "READY_NOT_EXECUTED":
     lines.extend(["**READY_NOT_EXECUTED**：覆盖已通过，等待显式 `--execute`。", ""])
   else:
     lines.extend([f"**{formal['status']}**：详见 JSON 的 execution。", ""])
 
-  lines.extend(
-    [
-      "| D-1 快照 | 持仓 | 窗口 | 完整 instrument-day | 共同完整日 | 连续共同前缀 | 门禁阻塞 |",
-      "| --- | ---: | --- | ---: | --- | --- | --- |",
+  if short_diagnostic is not None:
+    coverage_windows = [
+      dict(candidate)
+      for candidate in list(short_diagnostic.get("coverage_windows") or [])
+      if isinstance(candidate, Mapping)
     ]
-  )
-  for candidate in report["candidate_windows"]:
-    snapshot = candidate["snapshot"]
-    coverage = candidate["coverage"]
-    dates = candidate["trading_dates"]
-    blockers = candidate["formal_gate_blockers"]
-    window = f"{dates[0]}~{dates[-1]}" if dates else "-"
-    lines.append(
-      "| {snapshot} | {holdings} | {window} | {complete}/{expected} | {shared} | {prefix} | {blockers} |".format(
-        snapshot=snapshot["snapshot_date"],
-        holdings=snapshot["holding_count"],
-        window=window,
-        complete=coverage["complete_instrument_days"],
-        expected=coverage["expected_instrument_days"],
-        shared=",".join(coverage["full_shared_dates"]) or "-",
-        prefix=",".join(coverage["contiguous_shared_prefix_dates"]) or "-",
-        blockers=",".join(blockers) or "-",
-      )
+    lines.extend(
+      [
+        "## 短窗口覆盖诊断（NON_GATING）",
+        "",
+        "**{}**：请求 {} 个交易日；候选窗口 {} 个，完整覆盖 {} 个。".format(
+          short_diagnostic.get("status"),
+          short_diagnostic.get("requested_trading_days"),
+          short_diagnostic.get("candidate_count"),
+          short_diagnostic.get("complete_candidate_count"),
+        ),
+        "- {}".format(short_diagnostic.get("message")),
+        "",
+        "| D-1 快照 | 持仓 | 窗口 | 完整 instrument-day | 共同完整日 | 连续共同前缀 | 缺失 instrument-day |",
+        "| --- | ---: | --- | ---: | --- | --- | ---: |",
+      ]
     )
+    for candidate in coverage_windows:
+      snapshot = dict(candidate.get("snapshot") or {})
+      coverage = dict(candidate.get("coverage") or {})
+      dates = list(candidate.get("trading_dates") or [])
+      window = f"{dates[0]}~{dates[-1]}" if dates else "-"
+      lines.append(
+        "| {snapshot} | {holdings} | {window} | {complete}/{expected} | {shared} | {prefix} | {missing} |".format(
+          snapshot=snapshot.get("snapshot_date"),
+          holdings=snapshot.get("holding_count"),
+          window=window,
+          complete=coverage.get("complete_instrument_days"),
+          expected=coverage.get("expected_instrument_days"),
+          shared=",".join(coverage.get("full_shared_dates") or []) or "-",
+          prefix=(
+            ",".join(coverage.get("contiguous_shared_prefix_dates") or [])
+            or "-"
+          ),
+          missing=len(list(candidate.get("missing_instrument_days") or [])),
+        )
+      )
+  else:
+    lines.extend(
+      [
+        "| D-1 快照 | 持仓 | 窗口 | 完整 instrument-day | 共同完整日 | 连续共同前缀 | 门禁阻塞 |",
+        "| --- | ---: | --- | ---: | --- | --- | --- |",
+      ]
+    )
+    for candidate in report["candidate_windows"]:
+      snapshot = candidate["snapshot"]
+      coverage = candidate["coverage"]
+      dates = candidate["trading_dates"]
+      blockers = candidate["formal_gate_blockers"]
+      window = f"{dates[0]}~{dates[-1]}" if dates else "-"
+      lines.append(
+        "| {snapshot} | {holdings} | {window} | {complete}/{expected} | {shared} | {prefix} | {blockers} |".format(
+          snapshot=snapshot["snapshot_date"],
+          holdings=snapshot["holding_count"],
+          window=window,
+          complete=coverage["complete_instrument_days"],
+          expected=coverage["expected_instrument_days"],
+          shared=",".join(coverage["full_shared_dates"]) or "-",
+          prefix=",".join(coverage["contiguous_shared_prefix_dates"]) or "-",
+          blockers=",".join(blockers) or "-",
+        )
+      )
 
   lines.extend(["", "## 真实短窗口 source identity 预检（非 20 日门禁）", ""])
   historical_preflight = report.get("historical_short_window_source_identity_preflight")
@@ -3267,7 +3416,11 @@ def build_parser() -> argparse.ArgumentParser:
     help="Markdown report path; matching JSON evidence is written beside it",
   )
   parser.add_argument(
-    "--trading-days", type=int, default=DEFAULT_TRADING_DAYS, choices=range(1, 21)
+    "--trading-days",
+    type=int,
+    default=DEFAULT_TRADING_DAYS,
+    choices=range(1, 21),
+    help="1-19 only produce a non-gating coverage diagnostic; 20 is required for formal execution",
   )
   parser.add_argument(
     "--abnormal-date",
@@ -3362,6 +3515,70 @@ def build_parser() -> argparse.ArgumentParser:
   return parser
 
 
+def _reused_report_has_authoritative_formal_20_window(
+  report: Mapping[str, Any],
+) -> bool:
+  """Require an exact 20-day selected window before retaining a reused claim."""
+
+  scope = report.get("scope")
+  if not isinstance(scope, Mapping):
+    return False
+  requested_days = scope.get("requested_trading_days")
+  if type(requested_days) is not int or requested_days != DEFAULT_TRADING_DAYS:
+    return False
+  formal = report.get("formal_20_trading_day")
+  if not isinstance(formal, Mapping):
+    return False
+  selected_snapshot_date = str(formal.get("selected_snapshot_date") or "")
+  if not selected_snapshot_date:
+    return False
+  for candidate in list(report.get("candidate_windows") or []):
+    if not isinstance(candidate, Mapping):
+      continue
+    snapshot = candidate.get("snapshot")
+    if not isinstance(snapshot, Mapping):
+      continue
+    if str(snapshot.get("snapshot_date") or "") != selected_snapshot_date:
+      continue
+    candidate_requested_days = candidate.get("requested_trading_days")
+    candidate_dates = candidate.get("trading_dates")
+    if (
+      type(candidate_requested_days) is int
+      and candidate_requested_days == DEFAULT_TRADING_DAYS
+      and isinstance(candidate_dates, list)
+      and len(candidate_dates) == DEFAULT_TRADING_DAYS
+    ):
+      return True
+  return False
+
+
+def _fail_closed_reused_formal_gate(report: dict[str, Any]) -> None:
+  """Strip a stale short-window formal claim while retaining diagnostic reuse."""
+
+  formal = report.get("formal_20_trading_day")
+  formal_status = (
+    str(formal.get("status") or "").upper()
+    if isinstance(formal, Mapping)
+    else ""
+  )
+  scope = report.get("scope")
+  requested_days = scope.get("requested_trading_days") if isinstance(scope, Mapping) else None
+  if type(requested_days) is not int or requested_days != DEFAULT_TRADING_DAYS:
+    blocker = "FORMAL_20_TRADING_DAYS_REQUIRED"
+  elif formal_status == "BLOCKED":
+    return
+  elif _reused_report_has_authoritative_formal_20_window(report):
+    return
+  else:
+    blocker = "REUSE_AUDIT_FORMAL_20_SCOPE_UNVERIFIED"
+  report["formal_20_trading_day"] = {
+    "status": "BLOCKED",
+    "selected_snapshot_date": None,
+    "execution": None,
+    "blocker": blocker,
+  }
+
+
 async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   """Rerun declared synthetic pressure without repeating the historical audit."""
 
@@ -3375,6 +3592,7 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
     existing.get("candidate_windows"), list
   ):
     raise AcceptanceBlockedError("REUSE_AUDIT_REPORT_INVALID")
+  _fail_closed_reused_formal_gate(existing)
   if args.pressure_snapshot_date is None:
     raise ValueError("--reuse-audit-report requires --pressure-snapshot-date")
   if args.synthetic_pressure and args.diagnostic_synthetic_pressure:
@@ -3608,6 +3826,10 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
 async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   if bool(os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() == "true"):
     raise AcceptanceBlockedError("REAL_TRADING_ENVIRONMENT_NOT_ALLOWED")
+  if args.execute and args.trading_days != DEFAULT_TRADING_DAYS:
+    raise AcceptanceBlockedError(
+      "FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS"
+    )
   if args.reuse_audit_report:
     return await _run_reuse_audit_cli(args)
   if args.execute and args.synthetic_pressure:

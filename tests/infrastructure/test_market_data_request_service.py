@@ -46,12 +46,12 @@ async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> No
       "periods": ["tick"],
     },
     "timeout_seconds": 120,
-    "idempotency_scope": "t-trade-replay-supplement-v1",
+    "idempotency_scope": "t-trade-replay-supplement-v2",
   }
 
 
 @pytest.mark.asyncio
-async def test_load_completed_empty_tick_days_converts_only_zero_point_rows(
+async def test_load_completed_empty_tick_days_keeps_only_canonical_store_proofs(
   monkeypatch,
 ) -> None:
   class FakeStore:
@@ -75,6 +75,18 @@ async def test_load_completed_empty_tick_days_converts_only_zero_point_rows(
           "trading_date": "2026-08-04",
           "point_count": "1",
         },
+        {
+          "trading_date": "2026-08-04",
+          "point_count": "00",
+        },
+        {
+          "trading_date": "not-a-trading-day",
+          "point_count": "0",
+        },
+        {
+          "trading_date": "2026-08-05",
+          "point_count": "0",
+        },
       ]
 
   store = FakeStore()
@@ -86,6 +98,33 @@ async def test_load_completed_empty_tick_days_converts_only_zero_point_rows(
   )
 
   assert empty_days == {date(2026, 8, 3)}
+  store.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_load_completed_empty_tick_days_does_not_mask_query_failure(
+  monkeypatch,
+) -> None:
+  class FailingStore:
+    def __init__(self) -> None:
+      self.close = AsyncMock()
+
+    async def completed_tick_day_coverage(self, **_kwargs):
+      raise RuntimeError("daily empty-proof lookup unavailable")
+
+  store = FailingStore()
+  monkeypatch.setattr(
+    market_data_request_service,
+    "DurableRuntimeStore",
+    lambda: store,
+  )
+
+  with pytest.raises(RuntimeError, match="empty-proof lookup unavailable"):
+    await market_data_request_service.load_completed_empty_tick_days(
+      instrument_code="600887.SH",
+      trading_dates=[date(2026, 8, 3)],
+    )
+
   store.close.assert_awaited_once()
 
 
@@ -145,8 +184,8 @@ async def test_cancelled_replay_waiter_rejoins_equivalent_nonterminal_request(
     "records_saved": 1,
   }
   assert [call.kwargs["idempotency_scope"] for call in store.create.await_args_list] == [
-    "t-trade-replay-supplement-v1",
-    "t-trade-replay-supplement-v1",
+    "t-trade-replay-supplement-v2",
+    "t-trade-replay-supplement-v2",
   ]
   assert [call.args[0] for call in store.create.await_args_list] == [
     {
@@ -284,8 +323,8 @@ async def test_same_optional_gap_is_reused_and_ingested_on_next_replay(
   assert second["status"] == "success"
   assert second["records_saved"] == 10
   assert [call.kwargs["idempotency_scope"] for call in store.create.await_args_list] == [
-    "t-trade-replay-supplement-v1",
-    "t-trade-replay-supplement-v1",
+    "t-trade-replay-supplement-v2",
+    "t-trade-replay-supplement-v2",
   ]
   assert {call.args[0]["stock_list"][0] for call in store.create.await_args_list} == {
     "600887.SH"

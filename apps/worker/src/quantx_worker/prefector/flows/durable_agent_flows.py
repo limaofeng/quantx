@@ -554,12 +554,15 @@ async def reprocess_uploaded_market_data_request(
 async def recover_market_data_ingestion_flow(
   limit: int = _MARKET_DATA_INGESTION_RECOVERY_BATCH_SIZE,
 ) -> dict[str, Any]:
-  """Durably converge uploads even when their original caller has gone away."""
+  """Recover expired delivery leases and durably converge immutable uploads."""
 
   if isinstance(limit, bool) or int(limit) < 1:
     raise ValueError("market-data recovery limit must be positive")
   store = DurableRuntimeStore()
   try:
+    requeued_delivery_request_ids = (
+      await store.requeue_expired_market_data_delivery_leases(limit=int(limit))
+    )
     request_ids = await store.recoverable_market_data_request_ids(limit=int(limit))
     completed_request_ids: list[str] = []
     retryable_request_ids: list[str] = []
@@ -578,6 +581,7 @@ async def recover_market_data_ingestion_flow(
         retryable_request_ids.append(request_id)
     return {
       "status": "completed",
+      "requeued_delivery_request_ids": requeued_delivery_request_ids,
       "scanned": len(request_ids),
       "completed_request_ids": completed_request_ids,
       "retryable_request_ids": retryable_request_ids,
