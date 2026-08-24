@@ -4,10 +4,12 @@
 """
 
 import asyncio
+import contextvars
 import logging
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.enums import StrategyRunMode
@@ -16,6 +18,42 @@ from quantx_infrastructure.services.trading_time_service import TradingTimeServi
 from .adapter import DataAdapter
 from .historical import HistoricalDataAdapter
 from .realtime import RealtimeDataAdapter
+
+
+class IsolatedBacktestAdapterLease:
+  """Task-local ownership for one explicit, offline BACKTEST adapter.
+
+  It never mutates the singleton historical adapter.  The executor's existing
+  setup calls acquire/ensure/release on ``AdapterManager``; a context variable
+  lets that exact path select this lease while child runtime tasks inherit the
+  lease for terminal cleanup.
+  """
+
+  def __init__(self, adapter: DataAdapter):
+    self.adapter = adapter
+    self._released = False
+    self._lock = asyncio.Lock()
+
+  async def ensure_connected(self) -> bool:
+    async with self._lock:
+      if self._released:
+        raise RuntimeError("isolated backtest adapter lease already released")
+      if bool(getattr(self.adapter, "is_connected", False)):
+        return True
+      return bool(await self.adapter.connect())
+
+  async def release(self) -> None:
+    async with self._lock:
+      if self._released:
+        return
+      self._released = True
+      if bool(getattr(self.adapter, "is_connected", False)):
+        await self.adapter.disconnect()
+
+
+_isolated_backtest_adapter_lease: contextvars.ContextVar[
+  IsolatedBacktestAdapterLease | None
+] = contextvars.ContextVar("isolated_backtest_adapter_lease", default=None)
 
 
 class AdapterManager:
@@ -117,6 +155,12 @@ class AdapterManager:
     Returns:
         对应的数据适配器实例
     """
+    isolated_lease = _isolated_backtest_adapter_lease.get()
+    if mode == StrategyRunMode.BACKTEST and isolated_lease is not None:
+      if isolated_lease._released:
+        raise RuntimeError("isolated backtest adapter lease already released")
+      self.logger.info("acquiring task-local isolated BACKTEST adapter")
+      return isolated_lease.adapter
     if mode == StrategyRunMode.BACKTEST:
       adapter = self.historical_adapter
       adapter_type = "historical"
@@ -143,6 +187,11 @@ class AdapterManager:
   ) -> bool:
     """Serialize connection of the shared adapter selected for ``mode``."""
 
+    isolated_lease = _isolated_backtest_adapter_lease.get()
+    if mode == StrategyRunMode.BACKTEST and isolated_lease is not None:
+      if adapter is not isolated_lease.adapter:
+        raise RuntimeError("isolated backtest adapter identity mismatch")
+      return await isolated_lease.ensure_connected()
     if mode == StrategyRunMode.BACKTEST:
       adapter_type = "historical"
     elif mode in (StrategyRunMode.PAPER, StrategyRunMode.LIVE):
@@ -162,6 +211,10 @@ class AdapterManager:
     Args:
         mode: 策略模式 ('backtest', 'paper', 'live')
     """
+    isolated_lease = _isolated_backtest_adapter_lease.get()
+    if mode == "backtest" and isolated_lease is not None:
+      await isolated_lease.release()
+      return
     if mode == "backtest":
       adapter_type = "historical"
       adapter = self._historical_adapter
@@ -216,6 +269,29 @@ class AdapterManager:
     self._ref_counts.clear()
     self._lifecycle_locks.clear()
     self.logger.info("适配器管理器已重置")
+
+  @asynccontextmanager
+  async def isolated_backtest_adapter(
+    self,
+    adapter: HistoricalDataAdapter,
+  ) -> AsyncIterator[IsolatedBacktestAdapterLease]:
+    """Install one strict task-local BACKTEST adapter for executor startup.
+
+    This is intentionally not a global override.  A normal BACKTEST in any
+    other task still resolves the ordinary historical adapter, and a missing
+    or released lease is an error rather than a fallback to Influx.
+    """
+
+    if not isinstance(adapter, HistoricalDataAdapter):
+      raise TypeError("isolated adapter must be HistoricalDataAdapter")
+    if _isolated_backtest_adapter_lease.get() is not None:
+      raise RuntimeError("nested isolated backtest adapter lease is forbidden")
+    lease = IsolatedBacktestAdapterLease(adapter)
+    token = _isolated_backtest_adapter_lease.set(lease)
+    try:
+      yield lease
+    finally:
+      _isolated_backtest_adapter_lease.reset(token)
 
 
 # 全局适配器管理器实例

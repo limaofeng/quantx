@@ -86,6 +86,105 @@ def _audit(
 
 
 @pytest.mark.asyncio
+async def test_completed_trading_date_resolver_excludes_today_weekend_and_holiday() -> None:
+  # 2026-08-24 is an SH trading Monday.  It must be excluded even after the
+  # market close; the supplied official calendar also models a non-contiguous
+  # holiday/weekend gap before the five completed dates.
+  official_calendar = (
+    date(2026, 8, 12),
+    date(2026, 8, 13),
+    date(2026, 8, 14),
+    date(2026, 8, 18),
+    date(2026, 8, 19),
+    date(2026, 8, 20),
+    date(2026, 8, 21),
+    date(2026, 8, 24),
+  )
+
+  async def fetch_calendar(_start: date, _end: date):
+    return official_calendar
+
+  weekday_result = await acceptance_module.resolve_completed_trading_dates(
+    requested_days=5,
+    as_of_date=date(2026, 8, 24),
+    calendar_fetcher=fetch_calendar,
+  )
+  weekend_result = await acceptance_module.resolve_completed_trading_dates(
+    requested_days=5,
+    as_of_date=date(2026, 8, 23),
+    calendar_fetcher=fetch_calendar,
+  )
+
+  assert weekday_result == (
+    date(2026, 8, 14),
+    date(2026, 8, 18),
+    date(2026, 8, 19),
+    date(2026, 8, 20),
+    date(2026, 8, 21),
+  )
+  assert weekend_result == weekday_result
+  assert all(item < date(2026, 8, 24) for item in weekday_result)
+
+
+@pytest.mark.asyncio
+async def test_completed_trading_date_resolver_fails_closed_when_insufficient() -> None:
+  async def fetch_calendar(_start: date, _end: date):
+    return (date(2026, 8, 18), date(2026, 8, 19), date(2026, 8, 20))
+
+  with pytest.raises(
+    acceptance_module.AcceptanceBlockedError,
+    match="COMPLETED_TRADING_DAYS_INSUFFICIENT",
+  ):
+    await acceptance_module.resolve_completed_trading_dates(
+      requested_days=5,
+      as_of_date=date(2026, 8, 24),
+      calendar_fetcher=fetch_calendar,
+    )
+
+
+@pytest.mark.asyncio
+async def test_formal_d1_next20_window_uses_only_completed_calendar_dates(
+  monkeypatch,
+) -> None:
+  snapshot = _snapshot(snapshot_date=date(2026, 7, 20))
+  official_calendar = tuple(
+    day
+    for day in (
+      date(2026, 7, 21) + timedelta(days=index) for index in range(40)
+    )
+    if day.weekday() < 5
+  )
+
+  class CalendarHelper:
+    async def get_trading_calendar(self, *, market, start_date, end_date):
+      assert market == "SH"
+      return [item for item in official_calendar if start_date <= item <= end_date]
+
+  monkeypatch.setattr(acceptance_module, "TradingDateHelper", CalendarHelper)
+  windows = await acceptance_module.build_replay_windows(
+    [snapshot],
+    requested_trading_days=20,
+    as_of_date=date(2026, 8, 24),
+  )
+
+  assert len(windows) == 1
+  assert len(windows[0].trading_dates) == 20
+  assert windows[0].trading_dates == official_calendar[:20]
+  assert all(item < date(2026, 8, 24) for item in windows[0].trading_dates)
+
+
+def test_recent_completed_diagnostic_uses_separate_default_report_path() -> None:
+  args = acceptance_module.build_parser().parse_args(
+    ["--recent-completed-trading-days", "5"]
+  )
+
+  report = acceptance_module._apply_recent_completed_diagnostic_report_path(args)
+
+  assert report == acceptance_module.DEFAULT_RECENT_COMPLETED_DIAGNOSTIC_REPORT_PATH
+  assert args.report != acceptance_module.DEFAULT_FORMAL_REPORT_PATH
+
+
+@pytest.mark.asyncio
 async def test_audit_tick_coverage_accepts_only_dual_single_day_empty_evidence(
   monkeypatch,
 ) -> None:
@@ -141,6 +240,62 @@ async def test_audit_tick_coverage_accepts_only_dual_single_day_empty_evidence(
   assert daily_nonempty.complete is False
   assert daily_nonempty.classification == "MISSING"
   assert daily_nonempty.reason_codes == ("NO_TICK_DATA",)
+
+
+@pytest.mark.asyncio
+async def test_canonical_archive_audit_and_identity_never_construct_influx(
+  monkeypatch,
+) -> None:
+  snapshot = _snapshot()
+  trading_day = date(2026, 6, 2)
+  window = ReplayWindow(
+    snapshot=snapshot,
+    trading_dates=(trading_day,),
+    requested_trading_days=DEFAULT_TRADING_DAYS,
+  )
+
+  class Reader:
+    cutover = SimpleNamespace(
+      formal_scope=SimpleNamespace(
+        snapshot_date=snapshot.snapshot_date,
+        instrument_codes=snapshot.instrument_codes,
+        trading_dates=window.trading_dates,
+      )
+    )
+
+    @staticmethod
+    def inspect_tick_day(*, instrument_code, trading_date):
+      del instrument_code, trading_date
+      return {
+        "complete": True,
+        "classification": "COMPLETE",
+        "reason_codes": [],
+        "statistics": {"record_count": 240},
+      }
+
+    @staticmethod
+    def iter_tick_pages(**_kwargs):
+      return iter(((object(),),))
+
+  monkeypatch.setattr(
+    acceptance_module,
+    "HistoricalMarketDataService",
+    lambda: (_ for _ in ()).throw(AssertionError("Influx must not be constructed")),
+  )
+  reader = Reader()
+
+  audits = await acceptance_module.audit_canonical_tick_coverage(
+    [window], reader=reader
+  )
+  identity = await acceptance_module.audit_source_identity(
+    audits[0],
+    window.trading_dates,
+    archive_reader=reader,
+  )
+
+  assert audits[0].completed_pair_count == audits[0].expected_pair_count
+  assert identity.passed is True
+  assert identity.to_dict()["source"] == "IMMUTABLE_CANONICAL_TICK_ARCHIVE"
 
 
 @pytest.mark.asyncio
@@ -907,7 +1062,7 @@ async def test_run_cli_completed_pressure_rejects_mismatched_operational_evidenc
     assert max_concurrency == 4
     return [audit]
 
-  async def fake_source_identity(_audit, _dates):
+  async def fake_source_identity(_audit, _dates, **_kwargs):
     return SimpleNamespace(to_dict=lambda: {"passed": True, "failure": None})
 
   monkeypatch.setenv("ENABLE_REAL_TRADING", "false")
@@ -1181,7 +1336,7 @@ async def test_isolated_historical_acceptance_blocks_current_sync_backfill_path(
     async def __aexit__(self, *_args):
       return None
 
-  async def passed_identity(_audit, _trading_dates):
+  async def passed_identity(_audit, _trading_dates, **_kwargs):
     return SimpleNamespace(passed=True, to_dict=lambda: {"passed": True})
 
   async def run_evidence(_run_id):

@@ -38,6 +38,34 @@ def test_v3_pressure_durable_state_switch_requires_opaque_capability() -> None:
     )
 
 
+def test_formal_archive_request_is_persisted_only_with_exact_scope() -> None:
+  trading_dates = [date(2026, 7, 1) + timedelta(days=index) for index in range(20)]
+  archive = {
+    "schema_version": 1,
+    "archive_root": "F:\\verified\\canonical-ticks",
+    "cutover_token": "canonical-tick-v1-" + "a" * 64,
+    "manifest_fingerprint": "b" * 64,
+    "source_manifest_sha256": "c" * 64,
+    "formal_scope_fingerprint": "d" * 64,
+    "snapshot_date": "2026-06-30",
+    "instrument_codes": ["000001.SZ", "600000.SH"],
+    "trading_dates": [item.isoformat() for item in trading_dates],
+  }
+
+  normalized = TTradeReplayService._normalize_canonical_tick_archive_request(
+    archive,
+    trading_dates=trading_dates,
+  )
+
+  assert normalized == archive
+  archive["trading_dates"] = archive["trading_dates"][:-1]
+  with pytest.raises(ValueError, match="精确覆盖正式 20 日范围"):
+    TTradeReplayService._normalize_canonical_tick_archive_request(
+      archive,
+      trading_dates=trading_dates,
+    )
+
+
 @pytest.mark.asyncio
 async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> None:
   request_id = "00000000-0000-0000-0000-000000000126"

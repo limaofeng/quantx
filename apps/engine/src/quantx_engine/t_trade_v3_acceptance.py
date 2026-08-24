@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from quantx_domain.strategies.ashare_intraday_t_assistant import (
@@ -65,6 +65,11 @@ from quantx_infrastructure.repositories.strategy_run_state_repository import (
   StrategyRunPositionRepository,
   StrategyRunStateRepository,
 )
+from quantx_infrastructure.services.canonical_tick_archive import (
+  CanonicalTickArchive,
+  CanonicalTickArchiveError,
+  CanonicalTickArchiveReader,
+)
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
   HistoricalTickPaginationError,
@@ -91,9 +96,15 @@ from quantx_engine.strategy_manager import StrategyManager
 DEFAULT_TRADING_DAYS = 20
 DEFAULT_AUDIT_CONCURRENCY = 4
 DEFAULT_PRESSURE_TIMEOUT_SECONDS = 1_800.0
+DEFAULT_FORMAL_REPORT_PATH = Path("docs/reports/t-trade-v3-acceptance.md")
+DEFAULT_RECENT_COMPLETED_DIAGNOSTIC_REPORT_PATH = Path(
+  "docs/reports/t-trade-v3-recent-completed-diagnostic.md"
+)
 REPORT_SCHEMA_VERSION = 1
 PRESSURE_BASELINE_SCHEMA_VERSION = 1
 OPERATIONAL_EVIDENCE_SCHEMA_VERSION = 1
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_CALENDAR_MAX_DAYS_PER_REQUEST = 240
 
 _PRESSURE_REPLAY_REPORT_FIELDS = (
   "status",
@@ -726,6 +737,7 @@ class SourceIdentityAudit:
   pages_read: int
   per_instrument_day: Mapping[str, Mapping[str, Any]]
   failure: Optional[Mapping[str, Any]] = None
+  source: str = "HISTORICAL_MARKET_DATA_SERVICE"
 
   def to_dict(self) -> dict[str, Any]:
     return {
@@ -733,6 +745,7 @@ class SourceIdentityAudit:
       "records_read": self.records_read,
       "pages_read": self.pages_read,
       "pagination": "STRICT_SOURCE_IDENTITY_KEYSET",
+      "source": self.source,
       "engine_global_order_key": (
         "(continuity_generation, source_time_ms, tick_ordinal, "
         "event_type, instrument_code, period)"
@@ -1447,10 +1460,77 @@ async def load_snapshot_portfolios(
   raise AcceptanceBlockedError("DATABASE_SESSION_UNAVAILABLE")
 
 
+async def resolve_completed_trading_dates(
+  *,
+  requested_days: int,
+  end_date: Optional[date] = None,
+  start_after: Optional[date] = None,
+  as_of_date: Optional[date] = None,
+  require_exact: bool = True,
+  calendar_fetcher: Optional[
+    Callable[[date, date], Awaitable[Sequence[date]]]
+  ] = None,
+) -> tuple[date, ...]:
+  """Resolve only completed SH trading dates from one bounded calendar query.
+
+  ``as_of_date`` is always excluded, even if it is a trading day after the
+  close.  With ``start_after`` the function retains the first N completed
+  dates after a D-1 snapshot (the formal causal direction); otherwise it
+  retains the most recent N completed dates ending at ``end_date``.  The
+  latter is the shared rolling 5/20-day policy.
+  """
+
+  if type(requested_days) is not int or requested_days <= 0:
+    raise ValueError("requested_days must be positive")
+  current = as_of_date or datetime.now(_SHANGHAI).date()
+  if not isinstance(current, date) or isinstance(current, datetime):
+    raise ValueError("as_of_date must be a date")
+  upper = min(end_date or current, current - timedelta(days=1))
+  if start_after is not None:
+    if not isinstance(start_after, date) or isinstance(start_after, datetime):
+      raise ValueError("start_after must be a date")
+    lower = start_after + timedelta(days=1)
+    upper = min(upper, start_after + timedelta(days=_CALENDAR_MAX_DAYS_PER_REQUEST))
+  else:
+    lower = upper - timedelta(days=_CALENDAR_MAX_DAYS_PER_REQUEST)
+  if upper < lower:
+    selected: tuple[date, ...] = ()
+  else:
+    if calendar_fetcher is None:
+      helper = TradingDateHelper()
+
+      async def calendar_fetcher(start: date, end: date) -> Sequence[date]:
+        return await helper.get_trading_calendar(
+          market="SH", start_date=start, end_date=end
+        )
+
+    calendar = await calendar_fetcher(lower, upper)
+    completed = tuple(
+      sorted(
+        {
+          item
+          for item in calendar
+          if isinstance(item, date)
+          and not isinstance(item, datetime)
+          and lower <= item <= upper
+          and item < current
+          and (start_after is None or item > start_after)
+        }
+      )
+    )
+    selected = (
+      completed[:requested_days] if start_after is not None else completed[-requested_days:]
+    )
+  if require_exact and len(selected) != requested_days:
+    raise AcceptanceBlockedError("COMPLETED_TRADING_DAYS_INSUFFICIENT")
+  return selected
+
+
 async def build_replay_windows(
   snapshots: Sequence[SnapshotPortfolio],
   *,
   requested_trading_days: int = DEFAULT_TRADING_DAYS,
+  as_of_date: Optional[date] = None,
 ) -> list[ReplayWindow]:
   """Enumerate each D-1 snapshot's next up-to-N actual SH trading dates."""
 
@@ -1458,18 +1538,14 @@ async def build_replay_windows(
     raise ValueError("requested_trading_days must be positive")
   if not snapshots:
     return []
-  # 90 calendar days handles a normal 20-trading-day span plus Spring/Golden
-  # Week closures while keeping the historical calendar lookup bounded.
-  start = min(item.snapshot_date for item in snapshots) + timedelta(days=1)
-  end = max(item.snapshot_date for item in snapshots) + timedelta(days=90)
-  calendar = await TradingDateHelper().get_trading_calendar(
-    market="SH", start_date=start, end_date=end
-  )
   windows: list[ReplayWindow] = []
   for snapshot in snapshots:
-    future_dates = tuple(
-      item for item in calendar if item > snapshot.snapshot_date
-    )[:requested_trading_days]
+    future_dates = await resolve_completed_trading_dates(
+      requested_days=requested_trading_days,
+      start_after=snapshot.snapshot_date,
+      as_of_date=as_of_date,
+      require_exact=False,
+    )
     windows.append(
       ReplayWindow(
         snapshot=snapshot,
@@ -1569,6 +1645,61 @@ async def audit_tick_coverage(
   ]
 
 
+async def audit_canonical_tick_coverage(
+  windows: Sequence[ReplayWindow],
+  *,
+  reader: CanonicalTickArchiveReader,
+) -> list[WindowAudit]:
+  """Audit an explicit archive without constructing an Influx service.
+
+  Only the cutover's exact D-1/all-holdings/20-day scope is inspectable.
+  Other candidate snapshots remain visible as fail-closed coverage rows so a
+  token cannot be used to promote an arbitrary or partial window.
+  """
+
+  result: list[WindowAudit] = []
+  scope = reader.cutover.formal_scope
+  for window in windows:
+    matches_scope = (
+      window.snapshot.snapshot_date == scope.snapshot_date
+      and tuple(window.snapshot.instrument_codes) == scope.instrument_codes
+      and tuple(window.trading_dates) == scope.trading_dates
+      and window.requested_trading_days == DEFAULT_TRADING_DAYS
+    )
+    inspections: dict[tuple[str, date], TickDayInspection] = {}
+    for trading_date in window.trading_dates:
+      for code in window.snapshot.instrument_codes:
+        if not matches_scope:
+          raw = {
+            "complete": False,
+            "classification": "UNAVAILABLE",
+            "reason_codes": ["ARCHIVE_FORMAL_SCOPE_MISMATCH"],
+            "statistics": {},
+            "message": "selected canonical archive token does not cover this exact formal scope",
+          }
+        else:
+          try:
+            raw = reader.inspect_tick_day(
+              instrument_code=code,
+              trading_date=trading_date,
+            )
+          except CanonicalTickArchiveError as exc:
+            raw = {
+              "complete": False,
+              "classification": "UNAVAILABLE",
+              "reason_codes": ["ARCHIVE_OBJECT_VERIFICATION_FAILED"],
+              "statistics": {},
+              "message": str(exc),
+            }
+        inspections[(code, trading_date)] = TickDayInspection.from_engine_result(
+          instrument_code=code,
+          trading_date=trading_date,
+          result=raw,
+        )
+    result.append(WindowAudit(window=window, inspections=inspections))
+  return result
+
+
 def select_formal_window(
   audits: Sequence[WindowAudit],
   *,
@@ -1625,6 +1756,8 @@ def select_pressure_window(
 async def audit_source_identity(
   audit: WindowAudit,
   trading_dates: Sequence[date],
+  *,
+  archive_reader: Optional[CanonicalTickArchiveReader] = None,
 ) -> SourceIdentityAudit:
   """Fail closed unless every selected day is fully keyset-paginatable.
 
@@ -1633,7 +1766,7 @@ async def audit_source_identity(
   being mistaken for end-of-history.
   """
 
-  market_data = HistoricalMarketDataService()
+  market_data = None if archive_reader is not None else HistoricalMarketDataService()
   records_read = 0
   pages_read = 0
   details: dict[str, dict[str, Any]] = {}
@@ -1644,13 +1777,29 @@ async def audit_source_identity(
       day_records = 0
       day_pages = 0
       try:
-        async for page in market_data.iter_tick_pages(
-          stock_code=code,
-          start_time=datetime.combine(trading_date, clock_time(9, 25)),
-          end_time=datetime.combine(trading_date, clock_time(15, 5)),
-        ):
-          day_pages += 1
-          day_records += len(page)
+        start_time = datetime.combine(
+          trading_date, clock_time(9, 25), tzinfo=_SHANGHAI
+        )
+        end_time = datetime.combine(
+          trading_date, clock_time(15, 5), tzinfo=_SHANGHAI
+        )
+        if archive_reader is not None:
+          for page in archive_reader.iter_tick_pages(
+            instrument_code=code,
+            start_time=start_time,
+            end_time=end_time,
+          ):
+            day_pages += 1
+            day_records += len(page)
+        else:
+          assert market_data is not None
+          async for page in market_data.iter_tick_pages(
+            stock_code=code,
+            start_time=start_time,
+            end_time=end_time,
+          ):
+            day_pages += 1
+            day_records += len(page)
         details[key] = {
           "passed": True,
           "records": day_records,
@@ -1658,7 +1807,12 @@ async def audit_source_identity(
         }
         records_read += day_records
         pages_read += day_pages
-      except (HistoricalTickPaginationError, ValueError, RuntimeError) as exc:
+      except (
+        CanonicalTickArchiveError,
+        HistoricalTickPaginationError,
+        ValueError,
+        RuntimeError,
+      ) as exc:
         evidence = {
           "error_type": type(exc).__name__,
           "message": str(exc),
@@ -1677,12 +1831,22 @@ async def audit_source_identity(
       pages_read=pages_read,
       per_instrument_day=details,
       failure={"failures": failures},
+      source=(
+        "IMMUTABLE_CANONICAL_TICK_ARCHIVE"
+        if archive_reader is not None
+        else "HISTORICAL_MARKET_DATA_SERVICE"
+      ),
     )
   return SourceIdentityAudit(
     passed=True,
     records_read=records_read,
     pages_read=pages_read,
     per_instrument_day=details,
+    source=(
+      "IMMUTABLE_CANONICAL_TICK_ARCHIVE"
+      if archive_reader is not None
+      else "HISTORICAL_MARKET_DATA_SERVICE"
+    ),
   )
 
 
@@ -2163,6 +2327,8 @@ async def execute_isolated_backtest(
   *,
   formal_gate: bool,
   abnormal_dates: Iterable[date] = (),
+  archive_reader: Optional[CanonicalTickArchiveReader] = None,
+  archive_root: Optional[Path] = None,
 ) -> dict[str, Any]:
   """Run one preflighted isolated BACKTEST and capture a local SLO baseline.
 
@@ -2179,7 +2345,22 @@ async def execute_isolated_backtest(
   if audit.window.snapshot.non_replayable:
     raise AcceptanceBlockedError("BACKTEST_HELD_INSTRUMENT_NOT_REPLAYABLE")
 
-  identity = await audit_source_identity(audit, trading_dates)
+  if archive_reader is not None:
+    if not formal_gate or archive_root is None:
+      raise AcceptanceBlockedError("CANONICAL_ARCHIVE_FORMAL_EXECUTION_ONLY")
+    try:
+      archive_reader.validate_formal_scope(
+        snapshot_date=audit.window.snapshot.snapshot_date,
+        instrument_codes=audit.window.snapshot.instrument_codes,
+        trading_dates=trading_dates,
+      )
+    except CanonicalTickArchiveError as exc:
+      raise AcceptanceBlockedError("CANONICAL_ARCHIVE_FORMAL_SCOPE_MISMATCH") from exc
+  identity = await audit_source_identity(
+    audit,
+    trading_dates,
+    archive_reader=archive_reader,
+  )
   if not identity.passed:
     raise AcceptanceBlockedError("BACKTEST_SOURCE_IDENTITY_NOT_PROVEN")
 
@@ -2210,6 +2391,21 @@ async def execute_isolated_backtest(
       item.isoformat() for item in sorted(set(abnormal_dates)) if item in trading_dates
     ],
   }
+  archive_evidence: Optional[dict[str, Any]] = None
+  if archive_reader is not None:
+    scope = archive_reader.cutover.formal_scope
+    archive_evidence = {
+      "schema_version": 1,
+      "archive_root": str(archive_root.absolute()),
+      "cutover_token": archive_reader.cutover.token,
+      "manifest_fingerprint": archive_reader.cutover.manifest_fingerprint,
+      "source_manifest_sha256": archive_reader.source_manifest_sha256,
+      "formal_scope_fingerprint": scope.scope_fingerprint,
+      "snapshot_date": scope.snapshot_date.isoformat(),
+      "instrument_codes": list(scope.instrument_codes),
+      "trading_dates": [item.isoformat() for item in scope.trading_dates],
+    }
+    payload["canonical_tick_archive"] = archive_evidence
   resource_start = _resource_start()
   started = wall_clock.perf_counter()
   runtime_state: Any = None
@@ -2258,6 +2454,17 @@ async def execute_isolated_backtest(
     "trading_dates": [item.isoformat() for item in trading_dates],
     "held_instruments": list(audit.window.snapshot.instrument_codes),
     "source_identity": identity.to_dict(),
+    "canonical_tick_archive": (
+      {
+        "token": archive_reader.cutover.token,
+        "manifest_fingerprint": archive_reader.cutover.manifest_fingerprint,
+        "source_manifest_sha256": archive_reader.source_manifest_sha256,
+        "formal_scope_fingerprint": archive_reader.cutover.formal_scope.scope_fingerprint,
+        "execution_source": "CANONICAL_ARCHIVE_ONLY_NO_INFLUX_OR_QMT_FALLBACK",
+      }
+      if archive_reader is not None
+      else None
+    ),
     "elapsed_seconds": round(elapsed_seconds, 6),
     "throughput": {
       "engine_ticks_processed": int(instrumentation.engine_tick.to_dict()["sample_count"]),
@@ -2669,11 +2876,15 @@ def build_report_document(
   full_pressure_attempt: Optional[Mapping[str, Any]] = None,
   pressure_baseline: Optional[Mapping[str, Any]] = None,
   operational_evidence: Optional[Mapping[str, Any]] = None,
+  recent_completed_diagnostic: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
   """Create a self-contained report object before rendering it to Markdown."""
 
   declared_abnormal = tuple(sorted(set(abnormal_dates)))
-  is_formal_20_day_request = requested_trading_days == DEFAULT_TRADING_DAYS
+  is_formal_20_day_request = (
+    requested_trading_days == DEFAULT_TRADING_DAYS
+    and recent_completed_diagnostic is None
+  )
   if not is_formal_20_day_request and formal_execution is not None:
     raise AcceptanceBlockedError(
       "FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS"
@@ -2689,7 +2900,11 @@ def build_report_document(
     )
   if not is_formal_20_day_request:
     formal_status = "BLOCKED"
-    formal_blocker = "FORMAL_20_TRADING_DAYS_REQUIRED"
+    formal_blocker = (
+      "RECENT_COMPLETED_DIAGNOSTIC_NON_CAUSAL"
+      if recent_completed_diagnostic is not None
+      else "FORMAL_20_TRADING_DAYS_REQUIRED"
+    )
   elif formal_execution:
     formal_status = (
       "PASS"
@@ -2704,17 +2919,38 @@ def build_report_document(
   else:
     formal_status = "BLOCKED"
     formal_blocker = "NO_ALL_HOLDINGS_20_TRADING_DAY_WINDOW"
+  canonical_execution = bool(
+    formal_execution
+    and isinstance(formal_execution.get("canonical_tick_archive"), Mapping)
+  )
   return {
     "schema_version": REPORT_SCHEMA_VERSION,
     "generated_at": datetime.now().astimezone().isoformat(),
     "scope": {
       "requested_trading_days": requested_trading_days,
       "calendar": "SH via TradingDateHelper",
-      "causality": "D-1 snapshot only; no future account state",
+      "causality": (
+        "NON_GATING_NON_CAUSAL: current/latest holding snapshot projected over recent completed dates; never formal/PAPER evidence"
+        if recent_completed_diagnostic
+        else "D-1 snapshot only; no future account state"
+      ),
       "all_holdings_policy": "no stock/day is silently excluded",
-      "tick_quality": "StrategyManager._inspect_t_trade_replay_tick_day",
-      "source_identity": "HistoricalMarketDataService.iter_tick_pages",
+      "tick_quality": (
+        "CanonicalTickArchiveReader.inspect_tick_day"
+        if canonical_execution
+        else "StrategyManager._inspect_t_trade_replay_tick_day"
+      ),
+      "source_identity": (
+        "CanonicalTickArchiveReader.iter_tick_pages"
+        if canonical_execution
+        else "HistoricalMarketDataService.iter_tick_pages"
+      ),
       "execution": "isolated BACKTEST only; no QMT/PAPER/LIVE commands",
+      "recent_completed_diagnostic": (
+        dict(recent_completed_diagnostic)
+        if recent_completed_diagnostic
+        else None
+      ),
     },
     "declared_abnormal_dates": [item.isoformat() for item in declared_abnormal],
     "formal_20_trading_day": {
@@ -3412,7 +3648,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument(
     "--report",
     type=Path,
-    default=Path("docs/reports/t-trade-v3-acceptance.md"),
+    default=DEFAULT_FORMAL_REPORT_PATH,
     help="Markdown report path; matching JSON evidence is written beside it",
   )
   parser.add_argument(
@@ -3421,6 +3657,15 @@ def build_parser() -> argparse.ArgumentParser:
     default=DEFAULT_TRADING_DAYS,
     choices=range(1, 21),
     help="1-19 only produce a non-gating coverage diagnostic; 20 is required for formal execution",
+  )
+  parser.add_argument(
+    "--recent-completed-trading-days",
+    type=int,
+    choices=range(1, 21),
+    help=(
+      "non-gating/non-causal diagnostic: inspect the most recent N completed "
+      "SH trading days only (today is always excluded); cannot execute a replay"
+    ),
   )
   parser.add_argument(
     "--abnormal-date",
@@ -3436,6 +3681,21 @@ def build_parser() -> argparse.ArgumentParser:
     "--execute",
     action="store_true",
     help="execute only an already-complete formal causal window",
+  )
+  parser.add_argument(
+    "--canonical-tick-archive-root",
+    type=Path,
+    help=(
+      "absolute immutable canonical Tick archive root; requires "
+      "--canonical-tick-cutover-token and is formal-20d execute only"
+    ),
+  )
+  parser.add_argument(
+    "--canonical-tick-cutover-token",
+    help=(
+      "content-addressed canonical Tick cutover token; archive mode has no "
+      "Influx/QMT fallback"
+    ),
   )
   parser.add_argument(
     "--synthetic-pressure",
@@ -3823,12 +4083,66 @@ async def _run_reuse_audit_cli(args: argparse.Namespace) -> tuple[dict[str, Any]
   return existing, 0 if formal_status == "PASS" else 2
 
 
+def _open_canonical_archive_from_args(
+  args: argparse.Namespace,
+) -> tuple[Optional[CanonicalTickArchiveReader], Optional[Path]]:
+  root = getattr(args, "canonical_tick_archive_root", None)
+  token = getattr(args, "canonical_tick_cutover_token", None)
+  if (root is None) != (token is None):
+    raise ValueError(
+      "--canonical-tick-archive-root and --canonical-tick-cutover-token must be used together"
+    )
+  if root is None:
+    return None, None
+  if not bool(getattr(args, "execute", False)):
+    raise AcceptanceBlockedError("CANONICAL_ARCHIVE_REQUIRES_EXPLICIT_EXECUTE")
+  if int(getattr(args, "trading_days", 0)) != DEFAULT_TRADING_DAYS:
+    raise AcceptanceBlockedError("CANONICAL_ARCHIVE_REQUIRES_EXACTLY_20_TRADING_DAYS")
+  root_path = Path(root)
+  if not root_path.is_absolute():
+    raise ValueError("canonical Tick archive root must be an absolute path")
+  try:
+    reader = CanonicalTickArchive(root_path, create=False).open(str(token))
+  except CanonicalTickArchiveError as exc:
+    raise AcceptanceBlockedError("CANONICAL_ARCHIVE_OPEN_FAILED") from exc
+  return reader, root_path
+
+
+def _apply_recent_completed_diagnostic_report_path(args: argparse.Namespace) -> Path:
+  """Keep non-causal rolling diagnostics out of the formal acceptance report."""
+
+  report = Path(args.report)
+  if (
+    getattr(args, "recent_completed_trading_days", None) is not None
+    and report == DEFAULT_FORMAL_REPORT_PATH
+  ):
+    args.report = DEFAULT_RECENT_COMPLETED_DIAGNOSTIC_REPORT_PATH
+  return Path(args.report)
+
+
 async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+  recent_completed_days = getattr(args, "recent_completed_trading_days", None)
+  _apply_recent_completed_diagnostic_report_path(args)
   if bool(os.environ.get("ENABLE_REAL_TRADING", "").strip().lower() == "true"):
     raise AcceptanceBlockedError("REAL_TRADING_ENVIRONMENT_NOT_ALLOWED")
+  if recent_completed_days is not None and args.execute:
+    raise AcceptanceBlockedError("RECENT_COMPLETED_DIAGNOSTIC_CANNOT_EXECUTE")
   if args.execute and args.trading_days != DEFAULT_TRADING_DAYS:
     raise AcceptanceBlockedError(
       "FORMAL_EXECUTION_REQUIRES_EXACTLY_20_TRADING_DAYS"
+    )
+  archive_reader, archive_root = _open_canonical_archive_from_args(args)
+  if recent_completed_days is not None and archive_reader is not None:
+    raise AcceptanceBlockedError("RECENT_COMPLETED_DIAGNOSTIC_CANNOT_USE_ARCHIVE_EXECUTION")
+  if archive_reader is not None and (
+    args.reuse_audit_report
+    or args.synthetic_pressure
+    or args.diagnostic_synthetic_pressure
+    or args.completed_pressure_report
+    or args.completed_diagnostic_pressure_run_id
+  ):
+    raise ValueError(
+      "canonical Tick archive formal execution cannot be combined with reuse or pressure modes"
     )
   if args.reuse_audit_report:
     return await _run_reuse_audit_cli(args)
@@ -3849,18 +4163,65 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
   if args.synthetic_pressure and args.pressure_snapshot_date is None:
     raise ValueError("--synthetic-pressure requires --pressure-snapshot-date")
+  if recent_completed_days is not None and (
+    args.reuse_audit_report
+    or args.synthetic_pressure
+    or args.diagnostic_synthetic_pressure
+    or args.completed_pressure_report
+    or args.completed_diagnostic_pressure_run_id
+  ):
+    raise ValueError(
+      "recent completed trading-day diagnostic cannot be combined with reuse or pressure modes"
+    )
 
   snapshots = await load_snapshot_portfolios(account_id=args.account_id)
-  windows = await build_replay_windows(
-    snapshots, requested_trading_days=args.trading_days
+  recent_completed_diagnostic: Optional[dict[str, Any]] = None
+  if recent_completed_days is not None:
+    if not snapshots:
+      raise AcceptanceBlockedError("RECENT_COMPLETED_DIAGNOSTIC_SNAPSHOT_MISSING")
+    selected_snapshot = max(snapshots, key=lambda item: item.snapshot_date)
+    recent_dates = await resolve_completed_trading_dates(
+      requested_days=int(recent_completed_days),
+      require_exact=True,
+    )
+    windows = [
+      ReplayWindow(
+        snapshot=selected_snapshot,
+        trading_dates=recent_dates,
+        requested_trading_days=int(recent_completed_days),
+      )
+    ]
+    recent_completed_diagnostic = {
+      "status": "NON_GATING_NON_CAUSAL",
+      "policy": "MOST_RECENT_COMPLETED_SH_TRADING_DAYS_ONLY",
+      "as_of_date_excluded": datetime.now(_SHANGHAI).date().isoformat(),
+      "trading_dates": [item.isoformat() for item in recent_dates],
+      "snapshot_date": selected_snapshot.snapshot_date.isoformat(),
+      "formal_or_paper_evidence": False,
+    }
+    requested_trading_days = int(recent_completed_days)
+  else:
+    windows = await build_replay_windows(
+      snapshots, requested_trading_days=args.trading_days
+    )
+    requested_trading_days = args.trading_days
+  audits = (
+    await audit_canonical_tick_coverage(windows, reader=archive_reader)
+    if archive_reader is not None
+    else await audit_tick_coverage(windows, max_concurrency=args.max_concurrency)
   )
-  audits = await audit_tick_coverage(
-    windows, max_concurrency=args.max_concurrency
+  formal_window = (
+    None
+    if recent_completed_diagnostic is not None
+    else select_formal_window(audits, abnormal_dates=args.abnormal_date)
   )
-  formal_window = select_formal_window(audits, abnormal_dates=args.abnormal_date)
   formal_execution: Optional[dict[str, Any]] = None
   historical_short_window_preflight: Optional[dict[str, Any]] = None
   pressure_baseline: Optional[dict[str, Any]] = None
+  if recent_completed_diagnostic is not None:
+    historical_short_window_preflight = (
+      await audit_source_identity(audits[0], audits[0].window.trading_dates)
+    ).to_dict()
   if args.execute:
     if formal_window is None:
       raise AcceptanceBlockedError("FORMAL_20_TRADING_DAY_GATE_BLOCKED")
@@ -3869,6 +4230,8 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       formal_window.window.trading_dates,
       formal_gate=True,
       abnormal_dates=args.abnormal_date,
+      archive_reader=archive_reader,
+      archive_root=archive_root,
     )
   if args.synthetic_pressure or args.completed_pressure_report:
     pressure_audit, pressure_dates = select_pressure_window(
@@ -3912,12 +4275,13 @@ async def run_cli(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
   report = build_report_document(
     audits,
-    requested_trading_days=args.trading_days,
+    requested_trading_days=requested_trading_days,
     abnormal_dates=args.abnormal_date,
     formal_execution=formal_execution,
     historical_short_window_preflight=historical_short_window_preflight,
     pressure_baseline=pressure_baseline,
     operational_evidence=operational_evidence,
+    recent_completed_diagnostic=recent_completed_diagnostic,
   )
   # Formal status governs the process exit: a short baseline never returns a
   # false-zero exit code for a blocked 20-day acceptance gate.

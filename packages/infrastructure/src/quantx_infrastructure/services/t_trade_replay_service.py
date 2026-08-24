@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import uuid
 from collections import defaultdict
 from datetime import date, datetime
@@ -49,6 +51,8 @@ _INTERNAL_V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_KEY = (
   "_internal_v3_pressure_runtime_state_persistence"
 )
 _V3_PRESSURE_RUNTIME_STATE_PERSISTENCE_CAPABILITY = object()
+_CANONICAL_ARCHIVE_TOKEN_RE = re.compile(r"^canonical-tick-v1-[0-9a-f]{64}$")
+_CANONICAL_ARCHIVE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _v3_pressure_runtime_state_persistence_capability() -> object:
@@ -201,6 +205,8 @@ class TTradeReplayService:
       raise ValueError("回放区间内没有交易日")
     if len(trading_dates) > 20:
       raise ValueError("单次回放最多支持 20 个交易日")
+    if any(item >= time_utils.today() for item in trading_dates):
+      raise ValueError("历史回放只能使用当前日期之前已完成的交易日")
     rollout_evidence_request = self._normalize_rollout_evidence_request(
       payload,
       trading_dates=trading_dates,
@@ -649,8 +655,12 @@ class TTradeReplayService:
 
     acceptance = str(payload.get("replay_acceptance") or "").strip().upper()
     if not acceptance:
+      if payload.get("canonical_tick_archive") is not None:
+        raise ValueError("canonical Tick archive 必须显式请求正式 V3 因果回放")
       return {}
     if acceptance == "V3_PRESSURE_BASELINE":
+      if payload.get("canonical_tick_archive") is not None:
+        raise ValueError("canonical Tick archive 仅允许正式 V3 因果回放")
       return {"replay_acceptance": acceptance}
     if acceptance != "V3_CAUSAL_20D":
       raise ValueError("未知的回放验收类型")
@@ -670,9 +680,87 @@ class TTradeReplayService:
       if encoded not in allowed:
         raise ValueError("声明的异常行情日不在正式回放交易日窗口内")
       normalized.add(encoded)
-    return {
+    normalized_request = {
       "replay_acceptance": acceptance,
       "replay_abnormal_dates": sorted(normalized),
+    }
+    raw_archive = payload.get("canonical_tick_archive")
+    if raw_archive is not None:
+      normalized_request["canonical_tick_archive"] = (
+        TTradeReplayService._normalize_canonical_tick_archive_request(
+          raw_archive,
+          trading_dates=trading_dates,
+        )
+      )
+    return normalized_request
+
+  @staticmethod
+  def _normalize_canonical_tick_archive_request(
+    value: Any,
+    *,
+    trading_dates: List[date],
+  ) -> Dict[str, Any]:
+    """Persist a fully pinned formal archive selection, never a loose path."""
+
+    expected_fields = {
+      "schema_version",
+      "archive_root",
+      "cutover_token",
+      "manifest_fingerprint",
+      "source_manifest_sha256",
+      "formal_scope_fingerprint",
+      "snapshot_date",
+      "instrument_codes",
+      "trading_dates",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+      raise ValueError("canonical Tick archive 选择字段无效")
+    if value.get("schema_version") != 1:
+      raise ValueError("canonical Tick archive schema 不受支持")
+    root = str(value.get("archive_root") or "").strip()
+    if not root or not os.path.isabs(root):
+      raise ValueError("canonical Tick archive 必须使用绝对路径")
+    token = str(value.get("cutover_token") or "")
+    fingerprints = (
+      str(value.get("manifest_fingerprint") or ""),
+      str(value.get("source_manifest_sha256") or ""),
+      str(value.get("formal_scope_fingerprint") or ""),
+    )
+    if not _CANONICAL_ARCHIVE_TOKEN_RE.fullmatch(token) or not all(
+      _CANONICAL_ARCHIVE_SHA256_RE.fullmatch(item) for item in fingerprints
+    ):
+      raise ValueError("canonical Tick archive token 或 fingerprint 无效")
+    try:
+      snapshot_date = date.fromisoformat(str(value.get("snapshot_date") or ""))
+      archive_dates = tuple(
+        date.fromisoformat(str(item)) for item in list(value.get("trading_dates") or [])
+      )
+    except (TypeError, ValueError) as exc:
+      raise ValueError("canonical Tick archive 日期无效") from exc
+    raw_codes = value.get("instrument_codes")
+    if not isinstance(raw_codes, list):
+      raise ValueError("canonical Tick archive 标的无效")
+    codes = tuple(str(item or "").strip().upper() for item in raw_codes)
+    if not archive_dates or snapshot_date >= archive_dates[0]:
+      raise ValueError("canonical Tick archive D-1 快照日期无效")
+    if (
+      len(archive_dates) != 20
+      or tuple(trading_dates) != archive_dates
+      or not codes
+      or len(set(codes)) != len(codes)
+      or tuple(sorted(codes)) != codes
+    ):
+      raise ValueError("canonical Tick archive 必须精确覆盖正式 20 日范围")
+    return {
+      "schema_version": 1,
+      "archive_root": root,
+      "cutover_token": token,
+      "manifest_fingerprint": fingerprints[0],
+      "source_manifest_sha256": fingerprints[1],
+      "formal_scope_fingerprint": fingerprints[2],
+      "snapshot_date": snapshot_date.isoformat(),
+      "instrument_codes": list(codes),
+      "trading_dates": [item.isoformat() for item in archive_dates],
     }
 
   @staticmethod

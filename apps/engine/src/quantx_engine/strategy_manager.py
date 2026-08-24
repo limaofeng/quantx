@@ -28,6 +28,7 @@ from quantx_domain.strategies.base import (
   StrategyRunMode,
 )
 from quantx_infrastructure.core.config import COMMON_PARAMETER_SCHEMAS, ParameterManager
+from quantx_infrastructure.core.data import adapter_manager
 from quantx_infrastructure.core.strategy_reconciler import StrategyReconciler
 from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.core.utils import time_utils
@@ -38,6 +39,11 @@ from quantx_infrastructure.models.parameter_schema import (
   validate_strategy_configuration,
 )
 from quantx_infrastructure.repositories import StrategyRunRepository
+from quantx_infrastructure.services.canonical_tick_archive import (
+  CanonicalTickArchive,
+  CanonicalTickArchiveError,
+  CanonicalTickArchiveHistoricalAdapter,
+)
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
@@ -116,6 +122,12 @@ class StrategyManager:
       self._shutdown_in_progress = False
       self._executor_shutdown_task: Optional[asyncio.Task[None]] = None
       self._deferred_start_tasks: Dict[str, asyncio.Task] = {}
+      # An archive adapter is a run-scoped offline lease.  It is never stored
+      # in AdapterManager's shared historical slot, so ordinary backtests keep
+      # their existing Influx-backed behavior.
+      self._canonical_archive_adapters: Dict[
+        str, CanonicalTickArchiveHistoricalAdapter
+      ] = {}
 
       # 策略注册和协调组件
       self._registry = strategy_registry
@@ -149,6 +161,114 @@ class StrategyManager:
         return parsed
     parsed_fallback = self._coerce_positive_float(fallback)
     return parsed_fallback if parsed_fallback is not None else 1000000.0
+
+  async def _canonical_archive_adapter_for_runtime(
+    self,
+    runtime: StrategyRuntime,
+  ) -> Optional[CanonicalTickArchiveHistoricalAdapter]:
+    """Resolve only a persisted, exact formal archive selection.
+
+    Presence of ``canonical_tick_archive`` is a hard opt-in: malformed,
+    incomplete, altered, or non-formal metadata raises rather than allowing
+    the normal Influx path to take over.
+    """
+
+    raw = runtime.context.parameters.get("canonical_tick_archive")
+    if raw is None:
+      return None
+    if runtime.context.mode != StrategyRunMode.BACKTEST or not runtime.context.parameters.get(
+      "t_trade_replay"
+    ):
+      raise RuntimeError("CANONICAL_ARCHIVE_ONLY_SUPPORTS_T_TRADE_BACKTEST")
+    if not isinstance(raw, dict):
+      raise RuntimeError("CANONICAL_ARCHIVE_SELECTION_INVALID")
+    expected_fields = {
+      "schema_version",
+      "archive_root",
+      "cutover_token",
+      "manifest_fingerprint",
+      "source_manifest_sha256",
+      "formal_scope_fingerprint",
+      "snapshot_date",
+      "instrument_codes",
+      "trading_dates",
+    }
+    if set(raw) != expected_fields or raw.get("schema_version") != 1:
+      raise RuntimeError("CANONICAL_ARCHIVE_SELECTION_INVALID")
+    root = raw.get("archive_root")
+    token = raw.get("cutover_token")
+    if not isinstance(root, str) or not root.strip() or not isinstance(token, str):
+      raise RuntimeError("CANONICAL_ARCHIVE_SELECTION_INVALID")
+    try:
+      snapshot_date = date.fromisoformat(str(raw.get("snapshot_date") or ""))
+      configured_dates = tuple(
+        date.fromisoformat(str(item)) for item in list(raw.get("trading_dates") or [])
+      )
+      configured_codes = tuple(str(item or "").strip().upper() for item in list(raw.get("instrument_codes") or []))
+    except (TypeError, ValueError) as exc:
+      raise RuntimeError("CANONICAL_ARCHIVE_SELECTION_INVALID") from exc
+    if (
+      len(configured_dates) != 20
+      or len(set(configured_dates)) != 20
+      or tuple(sorted(configured_dates)) != configured_dates
+      or not configured_codes
+      or len(set(configured_codes)) != len(configured_codes)
+      or tuple(sorted(configured_codes)) != configured_codes
+      or tuple(sorted(str(item).upper() for item in runtime.instruments)) != configured_codes
+      or str(runtime.context.parameters.get("replay_acceptance") or "").upper()
+      != "V3_CAUSAL_20D"
+      or str(runtime.context.parameters.get("replay_snapshot_date") or "")
+      != snapshot_date.isoformat()
+    ):
+      raise RuntimeError("CANONICAL_ARCHIVE_FORMAL_SCOPE_INVALID")
+    try:
+      calendar = await TradingDateHelper().get_trading_calendar(
+        market="SH",
+        start_date=configured_dates[0],
+        end_date=configured_dates[-1],
+      )
+    except Exception as exc:
+      raise RuntimeError("CANONICAL_ARCHIVE_TRADING_CALENDAR_UNAVAILABLE") from exc
+    if tuple(calendar) != configured_dates or any(
+      item >= time_utils.today() for item in configured_dates
+    ):
+      raise RuntimeError("CANONICAL_ARCHIVE_COMPLETED_TRADING_DAYS_REQUIRED")
+    if runtime.context.backtest_start_time is None or runtime.context.backtest_end_time is None:
+      raise RuntimeError("CANONICAL_ARCHIVE_BACKTEST_WINDOW_MISSING")
+    try:
+      reader = CanonicalTickArchive(root.strip(), create=False).open(token)
+      if (
+        reader.cutover.manifest_fingerprint != raw.get("manifest_fingerprint")
+        or reader.source_manifest_sha256 != raw.get("source_manifest_sha256")
+        or reader.cutover.formal_scope.scope_fingerprint
+        != raw.get("formal_scope_fingerprint")
+      ):
+        raise CanonicalTickArchiveError("ARCHIVE_SELECTION_FINGERPRINT_MISMATCH")
+      reader.validate_formal_scope(
+        snapshot_date=snapshot_date,
+        instrument_codes=configured_codes,
+        trading_dates=configured_dates,
+      )
+      adapter = CanonicalTickArchiveHistoricalAdapter(reader)
+      adapter.validate_runtime_scope(
+        snapshot_date=snapshot_date,
+        instrument_codes=configured_codes,
+        trading_dates=configured_dates,
+        start_time=runtime.context.backtest_start_time,
+        end_time=runtime.context.backtest_end_time,
+      )
+    except (CanonicalTickArchiveError, OSError, ValueError) as exc:
+      raise RuntimeError(f"CANONICAL_ARCHIVE_UNAVAILABLE: {exc}") from exc
+    return adapter
+
+  async def _release_canonical_archive_adapter(self, run_id: str) -> None:
+    adapter = self._canonical_archive_adapters.pop(run_id, None)
+    if adapter is None:
+      return
+    try:
+      await adapter.disconnect()
+    except Exception:
+      self.logger.exception("关闭 canonical archive adapter 失败: %s", run_id)
 
   async def _mark_backtest_started_safely(self, backtest_id: str) -> None:
     """Best-effort persistence for backtest lifecycle state."""
@@ -883,9 +1003,16 @@ class StrategyManager:
       self.logger.error(f"未找到策略运行实例: {run_id}")
       return False
 
+    canonical_archive_adapter: Optional[CanonicalTickArchiveHistoricalAdapter] = None
     if runtime.context.mode == StrategyRunMode.BACKTEST:
       try:
-        await self._ensure_backtest_data_available(runtime)
+        canonical_archive_adapter = await self._canonical_archive_adapter_for_runtime(
+          runtime
+        )
+        await self._ensure_backtest_data_available(
+          runtime,
+          canonical_archive_adapter=canonical_archive_adapter,
+        )
       except RuntimeError as e:
         runtime.status = ExecutionStatus.ERROR
         runtime.error_message = str(e)
@@ -895,10 +1022,30 @@ class StrategyManager:
           await self._mark_backtest_error_safely(runtime.context.backtest_id, str(e))
         return False
 
-    success = await self.executor.start(
-      run_id,
-      t_trade_account_coordination_held=t_trade_account_coordination_held,
-    )
+    if canonical_archive_adapter is None:
+      success = await self.executor.start(
+        run_id,
+        t_trade_account_coordination_held=t_trade_account_coordination_held,
+      )
+    else:
+      # The executor continues to construct its own broker and asks
+      # AdapterManager for its historical adapter.  This task-local lease is
+      # the only supported interception point: no global historical adapter is
+      # swapped, and any missing/invalid lease fails instead of falling back to
+      # Influx/QMT.
+      async with adapter_manager.isolated_backtest_adapter(
+        canonical_archive_adapter
+      ):
+        success = await self.executor.start(
+          run_id,
+          t_trade_account_coordination_held=t_trade_account_coordination_held,
+        )
+        if success:
+          # Executor's generic release has no run-id argument.  Transfer
+          # ownership to StrategyManager before leaving the task-local context
+          # so an external stop cannot release the shared historical adapter.
+          runtime._adapter_ref_acquired = False
+          self._canonical_archive_adapters[run_id] = canonical_archive_adapter
 
     if success:
       if (
@@ -1060,7 +1207,12 @@ class StrategyManager:
       await asyncio.gather(*tasks, return_exceptions=True)
     self._deferred_start_tasks.clear()
 
-  async def _ensure_backtest_data_available(self, runtime: StrategyRuntime) -> None:
+  async def _ensure_backtest_data_available(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    canonical_archive_adapter: Optional[CanonicalTickArchiveHistoricalAdapter] = None,
+  ) -> None:
     """确保回测模式所需的历史数据已经准备就绪"""
     start_time = runtime.context.backtest_start_time
     if not start_time:
@@ -1070,6 +1222,22 @@ class StrategyManager:
     end_time = runtime.context.backtest_end_time or start_time
     if end_time < start_time:
       end_time = start_time
+
+    if canonical_archive_adapter is not None:
+      # The token/scope was already checked against the persisted formal
+      # request.  Do not instantiate HistoricalMarketDataService here: archive
+      # selection is strict and must not dual-read or supplement from Influx.
+      runtime.context.parameters["replay_data_preparation"] = {
+        "schema_version": 1,
+        "policy": "CANONICAL_TICK_ARCHIVE_EXACT_FORMAL_SCOPE",
+        "local_authority": "IMMUTABLE_CANONICAL_TICK_ARCHIVE",
+        "blocking": True,
+        "required": True,
+        "replay_start_allowed": True,
+        "cutover_token": canonical_archive_adapter.reader.cutover.token,
+        "manifest_fingerprint": canonical_archive_adapter.reader.cutover.manifest_fingerprint,
+      }
+      return
 
     service = HistoricalMarketDataService()
 
@@ -2144,7 +2312,13 @@ class StrategyManager:
       return False
 
     # 委托给 Executor 停止
-    success = await self.executor.stop(run_id, force=force)
+    try:
+      success = await self.executor.stop(run_id, force=force)
+    finally:
+      # The isolated archive adapter is owned by this manager rather than the
+      # shared AdapterManager ref-count.  Close it even when executor teardown
+      # raises or is interrupted; this cannot affect a normal backtest.
+      await self._release_canonical_archive_adapter(run_id)
 
     if success:
       # 获取最终指标并更新到数据库
@@ -2407,6 +2581,13 @@ class StrategyManager:
 
     except Exception as e:
       self.logger.error(f"处理策略运行任务结束回调失败: {run_id}, {e}")
+    finally:
+      # This manager owns the archive lease after successful startup.  Every
+      # terminal branch above (normal completion, ERROR, cancellation,
+      # shutdown/retired executor early return, or persistence-callback
+      # failure) must close it. ``pop`` in the releaser makes this safe to race
+      # with an explicit stop.
+      await self._release_canonical_archive_adapter(run_id)
 
   async def _save_runtime_to_db(
     self, runtime: StrategyRuntime, strategy_id: int, name: Optional[str] = None
