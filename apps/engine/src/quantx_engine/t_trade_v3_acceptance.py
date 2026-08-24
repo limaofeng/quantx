@@ -2575,9 +2575,17 @@ async def execute_synthetic_pressure_baseline(
   original_supplement = manager._queue_missing_backtest_data_supplement
   supplement_attempts = 0
 
-  async def synthetic_data_check(_: Any) -> None:
+  async def synthetic_data_check(
+    _: Any,
+    *,
+    canonical_archive_adapter: Any = None,
+  ) -> None:
     # Historical data is intentionally not consulted for this declared
-    # synthetic benchmark.  The loader below is the sole Tick source.
+    # synthetic benchmark.  The loader below is the sole Tick source.  This
+    # isolated pressure path also must never inherit the formal archive
+    # adapter/fallback selection used by V3 causal acceptance.
+    if canonical_archive_adapter is not None:
+      raise RuntimeError("V3_SYNTHETIC_PRESSURE_FORBIDS_CANONICAL_ARCHIVE")
     return None
 
   async def synthetic_loader(

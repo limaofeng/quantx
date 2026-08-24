@@ -1444,3 +1444,77 @@ def test_synthetic_fixture_is_deterministic_and_stays_inside_trade_sessions() ->
     and (date_time.hour, date_time.minute) <= (14, 59)
     for date_time in (tick.time for tick in ticks)
   )
+
+
+@pytest.mark.asyncio
+async def test_synthetic_pressure_data_check_accepts_manager_archive_keyword(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Exercise the real Manager start seam used by synthetic pressure.
+
+  ``StrategyManager.start_strategy`` now always supplies
+  ``canonical_archive_adapter=`` to its data preflight.  The synthetic
+  pressure override must accept that keyword, verify it is ``None``, and
+  continue to the synthetic executor loader rather than falling back to any
+  historical/archive adapter.
+  """
+
+  manager_class = acceptance_module.StrategyManager
+  manager = object.__new__(manager_class)
+  executor_calls: list[str] = []
+  runtime = SimpleNamespace(
+    context=SimpleNamespace(
+      mode=StrategyRunMode.BACKTEST,
+      parameters={"t_trade_replay": True},
+      backtest_id=None,
+    ),
+    status=None,
+    error_message=None,
+  )
+
+  async def original_data_check(*_args, **_kwargs) -> None:
+    return None
+
+  async def original_supplement(*_args, **_kwargs) -> dict[str, object]:
+    return {}
+
+  async def synthetic_executor_start(run_id: str, **_kwargs) -> bool:
+    executor_calls.append(run_id)
+    return False
+
+  manager.executor = SimpleNamespace(
+    get=lambda run_id: runtime if run_id == "pressure-seam" else None,
+    start=synthetic_executor_start,
+  )
+  manager._ensure_backtest_data_available = original_data_check
+  manager._queue_missing_backtest_data_supplement = original_supplement
+
+  class _StopAfterPressureStart(Exception):
+    pass
+
+  class PressureSeamReplayService:
+    def __init__(self, supplied_manager) -> None:
+      assert supplied_manager is manager
+
+    async def start(self, *_args, **_kwargs) -> dict[str, str]:
+      assert await manager.start_strategy("pressure-seam") is False
+      raise _StopAfterPressureStart()
+
+  monkeypatch.setattr(acceptance_module, "StrategyManager", lambda: manager)
+  monkeypatch.setattr(
+    acceptance_module,
+    "TTradeReplayService",
+    PressureSeamReplayService,
+  )
+
+  with pytest.raises(_StopAfterPressureStart):
+    await acceptance_module.execute_synthetic_pressure_baseline(
+      _audit(day_count=2),
+      _audit(day_count=2).window.trading_dates,
+      ticks_per_instrument_day=2,
+      timeout_seconds=1.0,
+    )
+
+  assert executor_calls == ["pressure-seam"]
+  assert manager._ensure_backtest_data_available is original_data_check
+  assert manager._queue_missing_backtest_data_supplement is original_supplement
