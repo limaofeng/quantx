@@ -153,6 +153,10 @@ class RuntimeStateManager:
     _last_snapshot_attempt_revision: int = field(default=-1, repr=False)
     _snapshot_cas_conflicts: int = field(default=0, repr=False)
     _last_snapshot_failure_code: Optional[str] = field(default=None, repr=False)
+    _last_snapshot_reconciliation_outcome: Optional[str] = field(
+        default=None,
+        repr=False,
+    )
     # Structured-position persistence is intentionally separate from the
     # generic runtime-state revision.  Candidate/custom state still uses a CAS
     # checkpoint for every causally required tick, while this cache avoids
@@ -179,6 +183,24 @@ class RuntimeStateManager:
     )
     _bucket_ledger: Any = field(default=None, repr=False)
     _decision_trace_logger: Any = field(default=None, repr=False)
+    # Decision traces are generated synchronously with a StrategyOutput, but
+    # historically every one spawned an independent session/commit task.  That
+    # created unbounded concurrent database work and competed directly with the
+    # causally-required RuntimeState CAS.  The records below retain their stable
+    # UUIDs until the next RuntimeState transaction durably commits both facts.
+    # A failed/unknown commit leaves the exact records queued for reconciliation
+    # or retry; they are never coalesced or dropped.
+    _pending_decision_trace_records: list[Dict[str, Any]] = field(
+        default_factory=list,
+        repr=False,
+    )
+    # A failing commit response is indeterminate: PostgreSQL may have already
+    # committed the RuntimeState CAS and trace append. Retain this exact token,
+    # version and UUID batch until an authoritative read resolves it.
+    _pending_trace_commit_unknown_attempts: Dict[str, Dict[str, Any]] = field(
+        default_factory=dict,
+        repr=False,
+    )
     _unpersisted_trade_intent_ids: set[str] = field(
         default_factory=set,
         repr=False,
@@ -961,6 +983,7 @@ class RuntimeStateManager:
         expected_version: int,
     ) -> bool:
         """Resolve commit-unknown and advance past a genuine external CAS win."""
+        self._last_snapshot_reconciliation_outcome = "UNAVAILABLE"
         try:
             from quantx_infrastructure.database.connection import get_async_db
             from quantx_infrastructure.repositories.strategy_run_state_repository import (
@@ -973,10 +996,12 @@ class RuntimeStateManager:
                     self.run_id
                 )
                 if state_record is None:
+                    self._last_snapshot_reconciliation_outcome = "NOT_COMMITTED"
                     return False
                 authoritative_version = int(state_record.version or 0)
                 custom_state = copy.deepcopy(state_record.custom_state or {})
                 if custom_state.get(RUNTIME_SNAPSHOT_ATTEMPT_KEY) == snapshot_token:
+                    self._last_snapshot_reconciliation_outcome = "COMMITTED"
                     positions = (
                         await StrategyRunPositionRepository(db).get_all_positions(
                             self.run_id
@@ -1040,6 +1065,7 @@ class RuntimeStateManager:
                     return True
 
                 if authoritative_version > expected_version:
+                    self._last_snapshot_reconciliation_outcome = "EXTERNAL_WINNER"
                     # A different writer won the CAS.  The local custom state
                     # was computed from an obsolete snapshot and must never be
                     # retried under the winner's version: doing so can overwrite
@@ -1083,6 +1109,8 @@ class RuntimeStateManager:
                             self._bucket_ledger.sync_position(code, position)
                     self._state["bucket_ledger"] = self._bucket_ledger.to_dict()
                     self._dirty = False
+                if self._last_snapshot_reconciliation_outcome == "UNAVAILABLE":
+                    self._last_snapshot_reconciliation_outcome = "NOT_COMMITTED"
                 return False
         except Exception as e:
             self.logger.error(
@@ -1093,19 +1121,94 @@ class RuntimeStateManager:
             )
         return False
 
+    async def _resolve_pending_trace_commit_unknown_attempts(self) -> bool:
+        """Resolve indeterminate trace/CAS commits before a later retry.
+
+        An uncertain batch cannot simply follow a newly adopted winner: if the
+        old token committed it is already durable, while an external winner
+        proves the captured StrategyOutput lost its causal CAS. Only a
+        successful read proving that the old token did not commit may retry the
+        same stable UUID batch normally.
+        """
+
+        for snapshot_token, attempt in list(
+            self._pending_trace_commit_unknown_attempts.items()
+        ):
+            trace_ids = tuple(str(item) for item in attempt["trace_ids"])
+            reconciled = await self._reconcile_snapshot_attempt(
+                snapshot_token,
+                snapshot_revision=int(attempt["snapshot_revision"]),
+                expected_version=int(attempt["expected_version"]),
+            )
+            outcome = self._last_snapshot_reconciliation_outcome
+            if reconciled:
+                self._acknowledge_pending_decision_trace_records(trace_ids)
+                self._pending_trace_commit_unknown_attempts.pop(
+                    snapshot_token,
+                    None,
+                )
+                continue
+            if outcome == "EXTERNAL_WINNER":
+                self._discard_pending_decision_trace_records(trace_ids)
+                self._pending_trace_commit_unknown_attempts.pop(
+                    snapshot_token,
+                    None,
+                )
+                continue
+            if outcome == "NOT_COMMITTED":
+                self._pending_trace_commit_unknown_attempts.pop(
+                    snapshot_token,
+                    None,
+                )
+                continue
+
+            self._last_snapshot_failure_code = "PERSISTENCE_ERROR"
+            return False
+        return True
+
     async def save_snapshot(self) -> bool:
         """保存状态快照到数据库"""
-        if not self.persist_enabled or not self._dirty:
+        if not self.persist_enabled or (
+            not self._dirty
+            and not self._pending_decision_trace_records
+            and not self._pending_trace_commit_unknown_attempts
+        ):
             return True
         async with self._snapshot_lock:
-            if not self._dirty:
+            if self._pending_trace_commit_unknown_attempts:
+                self._last_snapshot_failure_code = None
+                if not await self._resolve_pending_trace_commit_unknown_attempts():
+                    return False
+            if (
+                not self._dirty
+                and not self._pending_decision_trace_records
+                and not self._pending_trace_commit_unknown_attempts
+            ):
                 return True
             self._last_snapshot_failure_code = None
             snapshot_token = ""
             snapshot_revision = self._dirty_revision
             expected_version = int(self._state.get("version", 0) or 0)
+            commit_attempted = False
+            trace_batch = tuple(
+                copy.deepcopy(item)
+                for item in self._pending_decision_trace_records
+            )
+            trace_ids = tuple(
+                str(item.get("id") or "") for item in trace_batch
+            )
+            if any(not item for item in trace_ids):
+                self._last_snapshot_failure_code = "PERSISTENCE_ERROR"
+                self.logger.error(
+                    "决策审计缺少稳定记录标识，拒绝保存状态快照: run_id=%s",
+                    self.run_id,
+                )
+                return False
             try:
                 from quantx_infrastructure.database.connection import get_async_db
+                from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
+                    StrategyDecisionTraceRepository,
+                )
                 from quantx_infrastructure.repositories.strategy_run_state_repository import (
                     StrategyRunPositionRepository,
                     StrategyRunStateRepository,
@@ -1172,7 +1275,15 @@ class RuntimeStateManager:
                                 commit=False,
                                 flush=False,
                             )
+                    if trace_batch:
+                        await StrategyDecisionTraceRepository(db).append_traces(
+                            trace_batch,
+                            commit=False,
+                            flush=False,
+                        )
+                    commit_attempted = True
                     await db.commit()
+                    self._acknowledge_pending_decision_trace_records(trace_ids)
                     self._persisted_position_codes = position_codes
                     self._persisted_position_snapshot_fingerprint = (
                         position_fingerprint
@@ -1193,13 +1304,54 @@ class RuntimeStateManager:
                 self._invalidate_position_snapshot_cache()
                 if self._last_snapshot_failure_code is None:
                     self._last_snapshot_failure_code = "PERSISTENCE_ERROR"
+                if self._last_snapshot_failure_code == "CAS_CONFLICT":
+                    # ``upsert_state`` rejected the captured RuntimeState
+                    # version before this transaction could append any trace.
+                    # That StrategyOutput belongs to the losing generation and
+                    # must never be carried into a later winner CAS.  Filter
+                    # only the captured stable UUIDs: a trace recorded while
+                    # the await above yielded belongs to a later generation.
+                    self._discard_pending_decision_trace_records(trace_ids)
+                elif commit_attempted and trace_batch:
+                    self._pending_trace_commit_unknown_attempts[snapshot_token] = {
+                        "trace_ids": trace_ids,
+                        "snapshot_revision": snapshot_revision,
+                        "expected_version": expected_version,
+                    }
                 self.logger.error(f"保存快照失败: {e}")
                 if snapshot_token:
-                    return await self._reconcile_snapshot_attempt(
+                    reconciled = await self._reconcile_snapshot_attempt(
                         snapshot_token,
                         snapshot_revision=snapshot_revision,
                         expected_version=expected_version,
                     )
+                    if reconciled:
+                        # The durable snapshot token proves this exact
+                        # transaction committed, which also proves its trace
+                        # append committed.  Do not retry the stable UUIDs.
+                        self._acknowledge_pending_decision_trace_records(trace_ids)
+                        self._pending_trace_commit_unknown_attempts.pop(
+                            snapshot_token,
+                            None,
+                        )
+                    elif (
+                        self._last_snapshot_reconciliation_outcome
+                        == "EXTERNAL_WINNER"
+                    ):
+                        self._discard_pending_decision_trace_records(trace_ids)
+                        self._pending_trace_commit_unknown_attempts.pop(
+                            snapshot_token,
+                            None,
+                        )
+                    elif (
+                        self._last_snapshot_reconciliation_outcome
+                        == "NOT_COMMITTED"
+                    ):
+                        self._pending_trace_commit_unknown_attempts.pop(
+                            snapshot_token,
+                            None,
+                        )
+                    return reconciled
                 return False
 
     @property
@@ -1215,7 +1367,11 @@ class RuntimeStateManager:
         while self._running:
             try:
                 await asyncio.sleep(self.snapshot_interval)
-                if self._dirty:
+                if (
+                    self._dirty
+                    or self._pending_decision_trace_records
+                    or self._pending_trace_commit_unknown_attempts
+                ):
                     await self.save_snapshot()
             except asyncio.CancelledError:
                 break
@@ -2017,33 +2173,142 @@ class RuntimeStateManager:
     def record_decision_trace(self, trace) -> None:
         if not trace:
             return
+        if self.persist_enabled:
+            # Do not create one independent commit task per decision.  The
+            # next causal RuntimeState checkpoint (or final stop checkpoint)
+            # appends this immutable record in the same transaction as the CAS.
+            # Memory/backtest publication also waits for that same proof: a CAS
+            # loser must not leak into a JSONL manifest or in-memory audit.
+            self._pending_decision_trace_records.append(
+                self._decision_trace_record_data(trace)
+            )
+        else:
+            self._publish_non_durable_decision_trace(trace)
+        self._mark_dirty()
+
+    def _publish_non_durable_decision_trace(self, trace) -> None:
+        """Publish immediately only when no durable CAS boundary is enabled."""
+
         if self._decision_trace_logger:
             self._decision_trace_logger.record(trace)
             traces = self._decision_trace_logger.to_list()
             self._state["decision_traces"] = traces[-500:]
         if self._backtest_storage and hasattr(self._backtest_storage, "add_trace"):
             self._backtest_storage.add_trace(trace.to_dict())
-        if self.persist_enabled:
+
+    def _publish_durable_decision_trace_record(self, record: Mapping[str, Any]) -> None:
+        """Publish an audit only after its relational CAS transaction is proven."""
+
+        trace_payload = dict(record.get("decision_trace") or {})
+        if self._decision_trace_logger:
             try:
-                asyncio.create_task(self._persist_decision_trace_record(trace))
-            except RuntimeError:
-                self.logger.warning("决策审计持久化跳过：当前无线程事件循环")
-        self._mark_dirty()
+                from quantx_domain.trading.decision_trace import DecisionTrace
 
-    async def _persist_decision_trace_record(self, trace) -> None:
-        try:
-            from quantx_infrastructure.database.connection import get_async_db
-            from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
-                StrategyDecisionTraceRepository,
-            )
+                timestamp = trace_payload.get("timestamp")
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp)
+                if not isinstance(timestamp, datetime):
+                    timestamp = time_utils.now()
+                trace = DecisionTrace(
+                    trace_id=str(
+                        trace_payload.get("trace_id") or record.get("trace_id") or ""
+                    ),
+                    run_id=str(
+                        trace_payload.get("run_id")
+                        or record.get("strategy_run_id")
+                        or self.run_id
+                    ),
+                    strategy_id=str(trace_payload.get("strategy_id") or ""),
+                    instrument_code=str(
+                        trace_payload.get("instrument_code")
+                        or record.get("instrument_code")
+                        or ""
+                    ),
+                    timestamp=timestamp,
+                    input_summary=dict(trace_payload.get("input_summary") or {}),
+                    environment=dict(trace_payload.get("environment") or {}),
+                    risk_caps=dict(trace_payload.get("risk_caps") or {}),
+                    position_profile=dict(trace_payload.get("position_profile") or {}),
+                    execution_profile=dict(trace_payload.get("execution_profile") or {}),
+                    output_summary=dict(trace_payload.get("output_summary") or {}),
+                    state_patch=dict(trace_payload.get("state_patch") or {}),
+                    trade_intents=list(trace_payload.get("trade_intents") or []),
+                    order_draft=dict(trace_payload.get("order_draft") or {}),
+                    order_request=dict(trace_payload.get("order_request") or {}),
+                    risk_decision=dict(trace_payload.get("risk_decision") or {}),
+                    broker_report=dict(trace_payload.get("broker_report") or {}),
+                    tags=list(trace_payload.get("tags") or []),
+                    reason=str(trace_payload.get("reason") or ""),
+                )
+                self._decision_trace_logger.record(trace)
+                self._state["decision_traces"] = (
+                    self._decision_trace_logger.to_list()[-500:]
+                )
+            except Exception as exc:
+                self.logger.error(
+                    "已提交决策审计无法发布到内存日志: run_id=%s trace_id=%s error=%s",
+                    self.run_id,
+                    record.get("id"),
+                    exc,
+                )
+        if self._backtest_storage and hasattr(self._backtest_storage, "add_trace"):
+            try:
+                self._backtest_storage.add_trace(copy.deepcopy(trace_payload))
+            except Exception as exc:
+                self.logger.error(
+                    "已提交决策审计无法发布到回测存储: run_id=%s trace_id=%s error=%s",
+                    self.run_id,
+                    record.get("id"),
+                    exc,
+                )
 
-            payload = self._decision_trace_record_data(trace)
-            async for db in get_async_db():
-                repo = StrategyDecisionTraceRepository(db)
-                await repo.create_trace(payload)
-                break
-        except Exception as e:
-            self.logger.error(f"决策审计持久化失败: {e}")
+    def _acknowledge_pending_decision_trace_records(
+        self,
+        trace_ids: Iterable[str],
+    ) -> None:
+        """Remove only records proven durable by the owning transaction.
+
+        ``record_decision_trace`` can run while an async commit has yielded.
+        Filtering by the captured stable UUIDs therefore leaves any newer
+        trace queued for its own causal checkpoint.
+        """
+
+        persisted_ids = {str(item) for item in trace_ids if item}
+        if not persisted_ids:
+            return
+        records_to_publish = [
+            item
+            for item in self._pending_decision_trace_records
+            if str(item.get("id") or "") in persisted_ids
+        ]
+        for record in records_to_publish:
+            self._publish_durable_decision_trace_record(record)
+        self._pending_decision_trace_records = [
+            item
+            for item in self._pending_decision_trace_records
+            if str(item.get("id") or "") not in persisted_ids
+        ]
+
+    def _discard_pending_decision_trace_records(
+        self,
+        trace_ids: Iterable[str],
+    ) -> None:
+        """Drop records that belong to a rejected CAS generation only.
+
+        A CAS conflict occurs before ``append_traces`` is reached, so those
+        captured records have no durable counterpart and cannot be retried on
+        top of the concurrent winner.  UUID filtering preserves records added
+        while the failed snapshot yielded to the event loop.
+        """
+
+        discarded_ids = {str(item) for item in trace_ids if item}
+        if not discarded_ids:
+            return
+        self._pending_decision_trace_records = [
+            item
+            for item in self._pending_decision_trace_records
+            if str(item.get("id") or "") not in discarded_ids
+        ]
 
     def _decision_trace_record_data(self, trace) -> Dict[str, Any]:
         trace_dict = trace.to_dict() if hasattr(trace, "to_dict") else dict(trace or {})

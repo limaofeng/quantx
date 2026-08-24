@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -1053,3 +1054,656 @@ async def test_stop_state_sync_drains_latest_strategy_checkpoint():
   assert manager.get_custom("signal_sample_windows")["version"] == 1
   assert strategy.queue.empty()
   await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_commits_pending_decision_trace_with_tick_cas(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """One evaluated Tick keeps its CAS and audit in one transaction."""
+
+  from quantx_domain.trading.decision_trace import DecisionTrace
+  from quantx_infrastructure.database import connection as connection_module
+  from quantx_infrastructure.repositories import (
+    strategy_decision_trace_repository as trace_repository_module,
+  )
+  from quantx_infrastructure.repositories import (
+    strategy_run_state_repository as state_repository_module,
+  )
+
+  commits: list[str] = []
+  state_versions: list[int] = []
+  appended: list[dict] = []
+  published_traces: list[dict] = []
+
+  class FakeDb:
+    async def commit(self) -> None:
+      commits.append("commit")
+
+  async def fake_get_async_db():
+    yield FakeDb()
+
+  class FakeStateRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def upsert_state(self, **kwargs) -> bool:
+      state_versions.append(kwargs["expected_version"])
+      return True
+
+  class FakePositionRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
+      return None
+
+  class FakeTraceRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def append_traces(self, records, *, commit, flush):
+      assert commit is False
+      assert flush is False
+      appended.extend(dict(record) for record in records)
+      return []
+
+  monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunStateRepository",
+    FakeStateRepository,
+  )
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunPositionRepository",
+    FakePositionRepository,
+  )
+  monkeypatch.setattr(
+    trace_repository_module,
+    "StrategyDecisionTraceRepository",
+    FakeTraceRepository,
+  )
+
+  manager = RuntimeStateManager(run_id="run-trace-atomic", persist_enabled=True)
+  manager._backtest_storage = SimpleNamespace(
+    add_trace=lambda trace: published_traces.append(dict(trace))
+  )
+  manager.record_decision_trace(
+    DecisionTrace.from_decision(
+      run_id="run-trace-atomic",
+      strategy_id="ashare_intraday_t_assistant",
+      instrument_code="600000.SH",
+      trace_id="trace-atomic",
+    )
+  )
+
+  assert await manager.save_snapshot() is True
+  assert state_versions == [0]
+  assert commits == ["commit"]
+  assert len(appended) == 1
+  assert appended[0]["trace_id"] == "trace-atomic"
+  assert manager._pending_decision_trace_records == []
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    "trace-atomic"
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == ["trace-atomic"]
+
+
+@pytest.mark.asyncio
+async def test_failed_trace_append_keeps_exact_audit_for_snapshot_retry(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A trace failure rolls back the CAS boundary and never drops its audit."""
+
+  from quantx_domain.trading.decision_trace import DecisionTrace
+  from quantx_infrastructure.database import connection as connection_module
+  from quantx_infrastructure.repositories import (
+    strategy_decision_trace_repository as trace_repository_module,
+  )
+  from quantx_infrastructure.repositories import (
+    strategy_run_state_repository as state_repository_module,
+  )
+
+  attempts: list[str] = []
+  state_versions: list[int] = []
+  published_traces: list[dict] = []
+  failure = True
+
+  class FakeDb:
+    async def commit(self) -> None:
+      raise AssertionError("trace append failure must not commit CAS state")
+
+  async def fake_get_async_db():
+    yield FakeDb()
+
+  class FakeStateRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def upsert_state(self, **kwargs) -> bool:
+      state_versions.append(kwargs["expected_version"])
+      return True
+
+    async def get_state(self, _run_id):
+      return None
+
+  class FakePositionRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
+      return None
+
+  class FakeTraceRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def append_traces(self, records, *, commit, flush):
+      attempts.extend(str(record["id"]) for record in records)
+      if failure:
+        raise RuntimeError("trace storage unavailable")
+      return []
+
+  monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunStateRepository",
+    FakeStateRepository,
+  )
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunPositionRepository",
+    FakePositionRepository,
+  )
+  monkeypatch.setattr(
+    trace_repository_module,
+    "StrategyDecisionTraceRepository",
+    FakeTraceRepository,
+  )
+
+  manager = RuntimeStateManager(run_id="run-trace-retry", persist_enabled=True)
+  manager._backtest_storage = SimpleNamespace(
+    add_trace=lambda trace: published_traces.append(dict(trace))
+  )
+  manager.record_decision_trace(
+    DecisionTrace.from_decision(
+      run_id="run-trace-retry",
+      strategy_id="ashare_intraday_t_assistant",
+      instrument_code="600000.SH",
+      trace_id="trace-retry",
+    )
+  )
+  original_id = manager._pending_decision_trace_records[0]["id"]
+
+  assert await manager.save_snapshot() is False
+  assert manager.last_snapshot_failure_code == "PERSISTENCE_ERROR"
+  assert [item["id"] for item in manager._pending_decision_trace_records] == [
+    original_id
+  ]
+  assert state_versions == [0]
+  assert attempts == [original_id]
+  assert manager._decision_trace_logger.records == []
+  assert published_traces == []
+
+  failure = False
+  # A new DB implementation lets the retry commit; re-use a transaction that
+  # records the one final commit rather than weakening the previous failure.
+  class SucceedingDb:
+    async def commit(self) -> None:
+      return None
+
+  async def succeeding_get_async_db():
+    yield SucceedingDb()
+
+  monkeypatch.setattr(connection_module, "get_async_db", succeeding_get_async_db)
+  assert await manager.save_snapshot() is True
+  assert state_versions == [0, 0]
+  assert attempts == [original_id, original_id]
+  assert manager._pending_decision_trace_records == []
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    "trace-retry"
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == ["trace-retry"]
+
+
+@pytest.mark.asyncio
+async def test_commit_unknown_acknowledges_trace_only_after_snapshot_token_proves_commit(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A connection loss after commit does not duplicate stable trace UUIDs."""
+
+  from quantx_domain.trading.decision_trace import DecisionTrace
+  from quantx_infrastructure.database import connection as connection_module
+  from quantx_infrastructure.repositories import (
+    strategy_decision_trace_repository as trace_repository_module,
+  )
+  from quantx_infrastructure.repositories import (
+    strategy_run_state_repository as state_repository_module,
+  )
+
+  authoritative = SimpleNamespace(
+    version=0,
+    cash=0.0,
+    frozen_cash=0.0,
+    total_asset=0.0,
+    custom_state={},
+  )
+  appended: list[str] = []
+  published_traces: list[dict] = []
+
+  class CommitUnknownDb:
+    async def commit(self) -> None:
+      raise RuntimeError("connection lost after commit")
+
+  async def fake_get_async_db():
+    yield CommitUnknownDb()
+
+  class FakeStateRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def upsert_state(self, **kwargs) -> bool:
+      authoritative.version = int(kwargs["expected_version"]) + 1
+      authoritative.cash = kwargs["cash"]
+      authoritative.frozen_cash = kwargs["frozen_cash"]
+      authoritative.total_asset = kwargs["total_asset"]
+      authoritative.custom_state = dict(kwargs["custom_state"])
+      return True
+
+    async def get_state(self, _run_id):
+      return authoritative
+
+  class FakePositionRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
+      return None
+
+    async def get_all_positions(self, _run_id):
+      return []
+
+  class FakeTraceRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def append_traces(self, records, *, commit, flush):
+      assert commit is False
+      assert flush is False
+      appended.extend(str(record["id"]) for record in records)
+      return []
+
+  monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunStateRepository",
+    FakeStateRepository,
+  )
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunPositionRepository",
+    FakePositionRepository,
+  )
+  monkeypatch.setattr(
+    trace_repository_module,
+    "StrategyDecisionTraceRepository",
+    FakeTraceRepository,
+  )
+
+  manager = RuntimeStateManager(
+    run_id="run-trace-commit-unknown",
+    persist_enabled=True,
+  )
+  manager._backtest_storage = SimpleNamespace(
+    add_trace=lambda trace: published_traces.append(dict(trace))
+  )
+  manager.record_decision_trace(
+    DecisionTrace.from_decision(
+      run_id="run-trace-commit-unknown",
+      strategy_id="ashare_intraday_t_assistant",
+      instrument_code="600000.SH",
+      trace_id="trace-commit-unknown",
+    )
+  )
+  trace_id = manager._pending_decision_trace_records[0]["id"]
+
+  assert await manager.save_snapshot() is True
+  assert authoritative.version == 1
+  assert appended == [trace_id]
+  assert manager._pending_decision_trace_records == []
+  # A returned commit error is not publication permission.  The authoritative
+  # token reconciliation proves the same transaction committed, then publishes
+  # the trace exactly once to each non-authoritative sink.
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    "trace-commit-unknown"
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == [
+    "trace-commit-unknown"
+  ]
+
+
+@pytest.mark.asyncio
+async def test_cas_conflict_discards_only_captured_losing_trace_before_any_append(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A concurrent winner cannot make a losing output auditable later."""
+
+  from quantx_domain.trading.decision_trace import DecisionTrace
+  from quantx_infrastructure.database import connection as connection_module
+  from quantx_infrastructure.repositories import (
+    strategy_decision_trace_repository as trace_repository_module,
+  )
+  from quantx_infrastructure.repositories import (
+    strategy_run_state_repository as state_repository_module,
+  )
+
+  authoritative = SimpleNamespace(
+    version=1,
+    cash=0.0,
+    frozen_cash=0.0,
+    total_asset=0.0,
+    custom_state={"winner": "external"},
+  )
+  expected_versions: list[int] = []
+  appended_ids: list[str] = []
+  published_traces: list[dict] = []
+
+  class FakeDb:
+    async def commit(self) -> None:
+      return None
+
+  async def fake_get_async_db():
+    yield FakeDb()
+
+  class FakeStateRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def upsert_state(self, **kwargs) -> bool:
+      expected_version = int(kwargs["expected_version"])
+      expected_versions.append(expected_version)
+      if expected_version == 0:
+        # The first save has already captured the losing record. Simulate a
+        # later output arriving while the failed CAS yielded to the loop.
+        manager.record_decision_trace(
+          DecisionTrace.from_decision(
+            run_id="run-trace-cas-conflict",
+            strategy_id="ashare_intraday_t_assistant",
+            instrument_code="000001.SZ",
+            trace_id="trace-created-after-cas-capture",
+          )
+        )
+        return False
+      assert expected_version == 1
+      authoritative.version = 2
+      authoritative.custom_state = dict(kwargs["custom_state"])
+      return True
+
+    async def get_state(self, _run_id):
+      return authoritative
+
+  class FakePositionRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
+      return None
+
+    async def get_all_positions(self, _run_id):
+      return []
+
+  class FakeTraceRepository:
+    def __init__(self, _db) -> None:
+      pass
+
+    async def append_traces(self, records, *, commit, flush):
+      assert commit is False
+      assert flush is False
+      appended_ids.extend(str(record["id"]) for record in records)
+      return []
+
+  monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunStateRepository",
+    FakeStateRepository,
+  )
+  monkeypatch.setattr(
+    state_repository_module,
+    "StrategyRunPositionRepository",
+    FakePositionRepository,
+  )
+  monkeypatch.setattr(
+    trace_repository_module,
+    "StrategyDecisionTraceRepository",
+    FakeTraceRepository,
+  )
+
+  manager = RuntimeStateManager(
+    run_id="run-trace-cas-conflict",
+    persist_enabled=True,
+  )
+  manager._backtest_storage = SimpleNamespace(
+    add_trace=lambda trace: published_traces.append(dict(trace))
+  )
+  manager.record_decision_trace(
+    DecisionTrace.from_decision(
+      run_id="run-trace-cas-conflict",
+      strategy_id="ashare_intraday_t_assistant",
+      instrument_code="600000.SH",
+      trace_id="trace-losing-cas-output",
+    )
+  )
+  losing_id = manager._pending_decision_trace_records[0]["id"]
+
+  assert await manager.save_snapshot() is False
+  assert manager.last_snapshot_failure_code == "CAS_CONFLICT"
+  assert appended_ids == []
+  assert manager._decision_trace_logger.records == []
+  assert published_traces == []
+  assert len(manager._pending_decision_trace_records) == 1
+  successor_id = manager._pending_decision_trace_records[0]["id"]
+  assert successor_id != losing_id
+
+  # The next snapshot is based on the adopted winner and writes only the
+  # output captured after the loser had already failed.
+  assert await manager.save_snapshot() is True
+  assert expected_versions == [0, 1]
+  assert appended_ids == [successor_id]
+  assert losing_id not in appended_ids
+  assert manager._pending_decision_trace_records == []
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    "trace-created-after-cas-capture"
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == [
+    "trace-created-after-cas-capture"
+  ]
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_idempotent_replay_accepts_identical_content() -> None:
+  """A UTC-aware input replays against the same PostgreSQL-naive value."""
+
+  from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
+    StrategyDecisionTraceRepository,
+  )
+
+  payload = {
+    "id": "trace-idempotent",
+    "trace_id": "source-trace-id",
+    "strategy_run_id": "run-idempotent",
+    "strategy_id": "ashare_intraday_t_assistant",
+    "instrument_code": "600000.SH",
+    "decided_at": datetime(
+      2026,
+      8,
+      24,
+      9,
+      30,
+      tzinfo=timezone(timedelta(hours=8)),
+    ),
+    "input_summary": {"price": 10.0},
+    "output_summary": {"decision": "HOLD"},
+    "trade_intents": [],
+    "state_patch": {"set": {"candidate_status": "NONE"}},
+    "decision_trace": {"reason": "NO_TRADE_INTENT"},
+  }
+
+  class ScalarResult:
+    def __init__(self, values) -> None:
+      self.values = values
+
+    def scalars(self):
+      return self
+
+    def all(self):
+      return list(self.values)
+
+  existing = SimpleNamespace(
+    **{
+      **payload,
+      # PostgreSQL's TIMESTAMP WITHOUT TIME ZONE restores UTC-naive values.
+      "decided_at": datetime(2026, 8, 24, 1, 30),
+    }
+  )
+
+  class FakeDb:
+    def __init__(self) -> None:
+      self.statements = []
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return ScalarResult([] if len(self.statements) == 1 else [existing])
+
+  db = FakeDb()
+  records = await StrategyDecisionTraceRepository(db).append_traces(
+    [payload],
+    commit=False,
+    flush=False,
+  )
+
+  assert [record.id for record in records] == [payload["id"]]
+  assert len(db.statements) == 2
+  from sqlalchemy.dialects import postgresql
+
+  sql = str(db.statements[0].compile(dialect=postgresql.dialect()))
+  assert "ON CONFLICT (id) DO NOTHING" in sql
+  assert "RETURNING strategy_decision_traces.id" in sql
+  params = db.statements[0].compile(dialect=postgresql.dialect()).params
+  assert datetime(2026, 8, 24, 1, 30) in params.values()
+  assert all(
+    not isinstance(value, datetime) or value.tzinfo is None
+    for value in params.values()
+  )
+
+
+@pytest.mark.asyncio
+async def test_create_trace_normalizes_aware_decided_at_at_repository_boundary() -> None:
+  """The legacy single-row entrypoint obeys the same timestamp contract."""
+
+  from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
+    StrategyDecisionTraceRepository,
+  )
+
+  payload = {
+    "id": "trace-aware-create",
+    "trace_id": "source-trace-aware-create",
+    "strategy_run_id": "run-aware-create",
+    "strategy_id": "ashare_intraday_t_assistant",
+    "instrument_code": "600000.SH",
+    "decided_at": datetime(
+      2026,
+      8,
+      24,
+      9,
+      30,
+      tzinfo=timezone(timedelta(hours=8)),
+    ),
+    "input_summary": {},
+    "output_summary": {},
+    "trade_intents": [],
+    "state_patch": {},
+    "decision_trace": {},
+  }
+
+  class FakeDb:
+    def add(self, record) -> None:
+      self.record = record
+
+    async def commit(self) -> None:
+      return None
+
+    async def refresh(self, _record) -> None:
+      return None
+
+  db = FakeDb()
+  record = await StrategyDecisionTraceRepository(db).create_trace(payload)
+
+  assert record.decided_at == datetime(2026, 8, 24, 1, 30)
+  assert record.decided_at.tzinfo is None
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_idempotent_replay_rejects_different_content() -> None:
+  """The same UUID with changed audit facts is a hard persistence failure."""
+
+  from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
+    StrategyDecisionTraceRepository,
+  )
+
+  payload = {
+    "id": "trace-conflict",
+    "trace_id": "source-trace-id",
+    "strategy_run_id": "run-conflict",
+    "strategy_id": "ashare_intraday_t_assistant",
+    "instrument_code": "600000.SH",
+    "decided_at": datetime(
+      2026,
+      8,
+      24,
+      9,
+      30,
+      tzinfo=timezone(timedelta(hours=8)),
+    ),
+    "input_summary": {"price": 10.0},
+    "output_summary": {"decision": "HOLD"},
+    "trade_intents": [],
+    "state_patch": {"set": {"candidate_status": "NONE"}},
+    "decision_trace": {"reason": "NO_TRADE_INTENT"},
+  }
+
+  class ScalarResult:
+    def __init__(self, values) -> None:
+      self.values = values
+
+    def scalars(self):
+      return self
+
+    def all(self):
+      return list(self.values)
+
+  existing = SimpleNamespace(
+    **{
+      **payload,
+      "decided_at": datetime(2026, 8, 24, 1, 30),
+      "decision_trace": {"reason": "DIFFERENT_AUDIT_FACT"},
+    }
+  )
+
+  class FakeDb:
+    def __init__(self) -> None:
+      self.statements = []
+
+    async def execute(self, statement):
+      self.statements.append(statement)
+      return ScalarResult([] if len(self.statements) == 1 else [existing])
+
+  db = FakeDb()
+  with pytest.raises(ValueError, match="idempotency conflict"):
+    await StrategyDecisionTraceRepository(db).append_traces(
+      [payload],
+      commit=False,
+      flush=False,
+    )
+  assert len(db.statements) == 2

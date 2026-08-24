@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -31,6 +32,7 @@ from quantx_engine.strategy_executor import (
   StrategyRuntime,
 )
 from quantx_engine.t_trade_coordination import t_trade_account_coordination_lock
+from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
 
 
 class _OpportunityStrategy(StrategyBase):
@@ -308,6 +310,174 @@ def _executor(service, update_service=None, outcome_facade=None) -> StrategyExec
   )
 
 
+class _AtomicTracePersistenceHarness:
+  """Strict transaction fake for the real RuntimeStateManager/Executor seam.
+
+  This intentionally models only the PostgreSQL transaction boundary: state and
+  trace rows become authoritative together at ``commit``.  It lets the test
+  exercise the real V3 executor and manager without writing into the shared
+  development database.
+  """
+
+  def __init__(self) -> None:
+    self.authoritative = SimpleNamespace(
+      version=0,
+      cash=0.0,
+      frozen_cash=0.0,
+      total_asset=0.0,
+      custom_state={},
+    )
+    self.commit_plan: list[str] = ["success"]
+    self.append_batches: list[list[dict[str, object]]] = []
+    self.committed_trace_records: list[dict[str, object]] = []
+    self.timeline: list[str] = []
+    self.force_cas_conflict = False
+    self.on_cas_conflict = None
+    self.read_failures = 0
+
+  def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    from quantx_infrastructure.database import connection as connection_module
+    from quantx_infrastructure.repositories import (
+      strategy_decision_trace_repository as trace_repository_module,
+    )
+    from quantx_infrastructure.repositories import (
+      strategy_run_state_repository as state_repository_module,
+    )
+
+    harness = self
+
+    class FakeDb:
+      def __init__(self) -> None:
+        self.staged_state: dict[str, object] | None = None
+        self.staged_traces: list[dict[str, object]] = []
+
+      def _apply_commit(self) -> None:
+        assert self.staged_state is not None
+        state = dict(self.staged_state)
+        harness.authoritative = SimpleNamespace(
+          version=int(state["expected_version"]) + 1,
+          cash=state["cash"],
+          frozen_cash=state["frozen_cash"],
+          total_asset=state["total_asset"],
+          custom_state=copy.deepcopy(state["custom_state"]),
+        )
+        harness.committed_trace_records.extend(copy.deepcopy(self.staged_traces))
+
+      async def commit(self) -> None:
+        harness.timeline.append("commit")
+        outcome = harness.commit_plan.pop(0) if harness.commit_plan else "success"
+        if outcome == "success":
+          self._apply_commit()
+          return
+        if outcome == "unknown_committed":
+          self._apply_commit()
+          raise RuntimeError("connection lost after PostgreSQL commit")
+        if outcome == "unknown_not_committed":
+          raise RuntimeError("connection lost before commit status was known")
+        raise AssertionError(f"unsupported commit plan: {outcome}")
+
+    async def fake_get_async_db():
+      yield FakeDb()
+
+    class FakeStateRepository:
+      def __init__(self, db) -> None:
+        self.db = db
+
+      async def upsert_state(self, **kwargs) -> bool:
+        harness.timeline.append("state_cas")
+        if harness.force_cas_conflict:
+          harness.force_cas_conflict = False
+          harness.authoritative = SimpleNamespace(
+            version=int(kwargs["expected_version"]) + 1,
+            cash=0.0,
+            frozen_cash=0.0,
+            total_asset=0.0,
+            custom_state={"winner": "external"},
+          )
+          if harness.on_cas_conflict:
+            harness.on_cas_conflict()
+          return False
+        self.db.staged_state = dict(kwargs)
+        return True
+
+      async def get_state(self, _run_id):
+        if harness.read_failures:
+          harness.read_failures -= 1
+          raise RuntimeError("temporary reconciliation read failure")
+        return harness.authoritative
+
+    class FakePositionRepository:
+      def __init__(self, _db) -> None:
+        pass
+
+      async def replace_positions_snapshot(self, *_args, **_kwargs) -> None:
+        return None
+
+      async def update_existing_positions_snapshot(self, *_args, **_kwargs) -> None:
+        return None
+
+      async def get_all_positions(self, _run_id):
+        return []
+
+    class FakeTraceRepository:
+      def __init__(self, db) -> None:
+        self.db = db
+
+      async def append_traces(self, records, *, commit, flush):
+        assert commit is False
+        assert flush is False
+        batch = [copy.deepcopy(dict(record)) for record in records]
+        harness.timeline.append("trace_append")
+        harness.append_batches.append(batch)
+        self.db.staged_traces.extend(batch)
+        return []
+
+    monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
+    monkeypatch.setattr(
+      state_repository_module,
+      "StrategyRunStateRepository",
+      FakeStateRepository,
+    )
+    monkeypatch.setattr(
+      state_repository_module,
+      "StrategyRunPositionRepository",
+      FakePositionRepository,
+    )
+    monkeypatch.setattr(
+      trace_repository_module,
+      "StrategyDecisionTraceRepository",
+      FakeTraceRepository,
+    )
+
+
+async def _start_real_atomic_manager(
+  runtime: StrategyRuntime,
+  tmp_path,
+) -> tuple[RuntimeStateManager, list[dict[str, object]]]:
+  manager = RuntimeStateManager(
+    run_id=runtime.run_id,
+    persist_enabled=True,
+    snapshot_interval=3_600,
+    log_dir=str(tmp_path),
+  )
+  published_traces: list[dict[str, object]] = []
+  manager._backtest_storage = SimpleNamespace(
+    add_trace=lambda trace: published_traces.append(dict(trace))
+  )
+  runtime.state_manager = manager
+  await manager.start()
+  await manager.start_state_sync(runtime.strategy)
+  return manager, published_traces
+
+
+async def _stop_real_atomic_manager(
+  manager: RuntimeStateManager,
+  runtime: StrategyRuntime,
+) -> None:
+  await manager.stop_state_sync(runtime.strategy)
+  await manager.abort_without_final_snapshot()
+
+
 @pytest.mark.asyncio
 async def test_material_evaluation_is_seeded_only_after_durable_materialization():
   calls: list[str] = []
@@ -335,6 +505,162 @@ async def test_material_evaluation_is_seeded_only_after_durable_materialization(
   assert isinstance(executor._evaluation_materializer, MaterializeEvaluationAfterCAS)
   materializer_execute.assert_awaited_once()
   assert materializer_execute.await_args.args[0].cas_committed is True
+
+
+@pytest.mark.asyncio
+async def test_real_v3_executor_tick_commits_output_trace_with_initial_state_cas(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  """A real V3 Tick publishes its output audit only after the initial CAS."""
+
+  harness = _AtomicTracePersistenceHarness()
+  # Initial output checkpoint, then the MATERIAL-outbox acknowledgement.
+  harness.commit_plan = ["success", "success"]
+  harness.install(monkeypatch)
+  calls: list[str] = []
+  runtime = _runtime(calls)
+  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
+  input_snapshot = _input()
+
+  async def materialize(**_kwargs: object) -> None:
+    harness.timeline.append("materialize")
+
+  executor = _executor(SimpleNamespace(materialize_evaluation=materialize))
+  try:
+    await executor._process_strategy_output(
+      runtime,
+      StrategyOutput(runtime_state_patch=_candidate_patch()),
+      input_snapshot,
+    )
+  finally:
+    await _stop_real_atomic_manager(manager, runtime)
+
+  assert harness.timeline[:3] == ["state_cas", "trace_append", "commit"]
+  assert harness.timeline.index("materialize") > harness.timeline.index("commit")
+  assert len(harness.committed_trace_records) == 1
+  assert harness.committed_trace_records[0]["trace_id"] == input_snapshot.trace_id
+  assert manager._pending_decision_trace_records == []
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    input_snapshot.trace_id
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == [input_snapshot.trace_id]
+
+
+@pytest.mark.asyncio
+async def test_real_v3_executor_cas_loser_never_publishes_and_keeps_post_await_trace(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  """CAS failure drops exactly the captured output, not a newer queued audit."""
+
+  from quantx_domain.trading.decision_trace import DecisionTrace
+
+  harness = _AtomicTracePersistenceHarness()
+  harness.force_cas_conflict = True
+  harness.install(monkeypatch)
+  runtime = _runtime([])
+  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
+  successor_trace_id = "trace-created-while-cas-awaiting"
+  harness.on_cas_conflict = lambda: manager.record_decision_trace(
+    DecisionTrace.from_decision(
+      run_id=runtime.run_id,
+      strategy_id="1",
+      instrument_code="000001.SZ",
+      trace_id=successor_trace_id,
+    )
+  )
+  service = SimpleNamespace(materialize_evaluation=AsyncMock())
+  executor = _executor(service)
+  input_snapshot = _input()
+
+  try:
+    await executor._process_strategy_output(
+      runtime,
+      StrategyOutput(runtime_state_patch=_candidate_patch()),
+      input_snapshot,
+    )
+
+    assert runtime.status is ExecutionStatus.ERROR
+    assert manager.last_snapshot_failure_code == "CAS_CONFLICT"
+    assert harness.append_batches == []
+    assert manager._decision_trace_logger.records == []
+    assert published_traces == []
+    assert len(manager._pending_decision_trace_records) == 1
+    successor_id = manager._pending_decision_trace_records[0]["id"]
+    assert manager._pending_decision_trace_records[0]["trace_id"] == successor_trace_id
+
+    # The manager adopted the external winner.  A later snapshot can persist
+    # only the trace that arrived while the losing CAS was awaiting I/O.
+    assert await manager.save_snapshot() is True
+  finally:
+    await _stop_real_atomic_manager(manager, runtime)
+
+  assert [
+    record["id"]
+    for batch in harness.append_batches
+    for record in batch
+  ] == [successor_id]
+  assert all(
+    record["trace_id"] != input_snapshot.trace_id
+    for record in harness.committed_trace_records
+  )
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    successor_trace_id
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == [successor_trace_id]
+  service.materialize_evaluation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_v3_executor_commit_unknown_retries_same_trace_id_and_publishes_once(
+  monkeypatch: pytest.MonkeyPatch,
+  tmp_path,
+) -> None:
+  """An unresolved commit response retains the exact trace batch for retry."""
+
+  harness = _AtomicTracePersistenceHarness()
+  # The first response is indeterminate and its authoritative read is briefly
+  # unavailable.  The next read proves that PostgreSQL did not commit, so the
+  # real manager retries the same immutable UUID/content batch.
+  harness.commit_plan = ["unknown_not_committed", "success"]
+  harness.read_failures = 1
+  harness.install(monkeypatch)
+  runtime = _runtime([])
+  manager, published_traces = await _start_real_atomic_manager(runtime, tmp_path)
+  input_snapshot = _input()
+  executor = _executor(
+    SimpleNamespace(materialize_evaluation=AsyncMock())
+  )
+
+  try:
+    await executor._process_strategy_output(
+      runtime,
+      StrategyOutput(runtime_state_patch=_candidate_patch()),
+      input_snapshot,
+    )
+
+    assert manager._pending_trace_commit_unknown_attempts
+    assert len(harness.append_batches) == 1
+    first_batch = copy.deepcopy(harness.append_batches[0])
+    assert manager._decision_trace_logger.records == []
+    assert published_traces == []
+
+    assert await manager.save_snapshot() is True
+  finally:
+    await _stop_real_atomic_manager(manager, runtime)
+
+  assert len(harness.append_batches) == 2
+  assert harness.append_batches[1] == first_batch
+  assert [record["id"] for record in harness.append_batches[1]] == [
+    record["id"] for record in harness.append_batches[0]
+  ]
+  assert manager._pending_trace_commit_unknown_attempts == {}
+  assert manager._pending_decision_trace_records == []
+  assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
+    input_snapshot.trace_id
+  ]
+  assert [trace["trace_id"] for trace in published_traces] == [input_snapshot.trace_id]
 
 
 @pytest.mark.asyncio

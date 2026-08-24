@@ -8810,6 +8810,12 @@ class StrategyExecutor:
         for command in output.exit_plan_commands:
           runtime.exit_plan_book.apply_command(command)
         self._persist_exit_plan_book(runtime)
+      # Keep the StrategyInput -> StrategyOutput audit in the same durable
+      # transaction as this causally-required RuntimeState CAS.  The runtime
+      # manager keeps the immutable trace pending through a failed or
+      # commit-unknown snapshot, so it cannot be dropped merely to reduce
+      # pressure-run database fan-out.
+      self._record_strategy_output_trace(runtime, output, input_snapshot)
       if not await runtime.state_manager.checkpoint_strategy_state_changes():
         checkpoint_code = str(
           getattr(runtime.state_manager, "last_snapshot_failure_code", "")
@@ -9134,7 +9140,6 @@ class StrategyExecutor:
       runtime.metrics.trade_intents_generated += len(intents)
     for intent in intents:
       runtime.strategy.record_trade_intent(intent)
-    self._record_strategy_output_trace(runtime, output, input_snapshot)
 
     for intent in v3_manual_intents:
       failure = await self._mark_t_trade_candidate_awaiting_approval(
@@ -9434,7 +9439,6 @@ class StrategyExecutor:
           runtime.metrics.trade_intents_generated += len(intents)
         for intent in intents:
           runtime.strategy.record_trade_intent(intent)
-        self._record_strategy_output_trace(runtime, output, input_snapshot)
 
         for intent in v3_manual_intents:
           failure = await self._mark_t_trade_candidate_awaiting_approval(
