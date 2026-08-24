@@ -71,6 +71,7 @@ apps/ios/Config/*.local.xcconfig
 .prefect/
 .prefect-test/
 .pytest-tmp*/
+/.pytest-codex-*/
 /.codex_pytest*/
 .playwright-mcp/
 .tmp-chrome-*/
@@ -86,13 +87,19 @@ quantx_service_runner.bat
 .agents/
 .shared/
 .codex_screenshots/
+/.codex_*.prof
 .codex_tmp/
+/.codex_tmp_*/
 .codex_staged_verify_*/
 .codex/*
 !.codex/skills/
 !.codex/skills/**
 .codex/skills/**/__pycache__/
 .codex/skills/**/*.py[cod]
+
+# Generated test and diagnostic reports
+/docs/reports/t-trade-v3-pressure-*
+/docs/reports/t-trade-v3-recent-completed-diagnostic-*
 
 # OS files
 .DS_Store
@@ -104,6 +111,7 @@ ehthumbs.db
 Thumbs.db
 
 # Temporary and backup files
+/_tmp_*.patch
 tmp/
 temp/
 .tmp/
