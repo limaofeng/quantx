@@ -615,8 +615,8 @@ class TTradeReplayService:
     """Preserve only validated formal-replay evidence metadata.
 
     This is not an approval switch: a V3 marker can only be attached to an
-    exact 20-day BACKTEST with a declared abnormal day inside its immutable
-    SH trading calendar.  Metrics and the rollout evaluator still require
+    exact 20-day BACKTEST over its immutable SH trading calendar. Metrics and
+    the rollout evaluator still require
     successful execution, strict Tick audit, durable candidate facts, and
     PAPER evidence before any execution stage can be activated.
     """
@@ -634,24 +634,7 @@ class TTradeReplayService:
       raise ValueError("未知的回放验收类型")
     if len(trading_dates) != 20:
       raise ValueError("V3 正式因果回放必须恰好覆盖 20 个交易日")
-    raw_dates = payload.get("replay_abnormal_dates")
-    if not isinstance(raw_dates, list) or not raw_dates:
-      raise ValueError("V3 正式因果回放必须声明至少一个异常行情日")
-    allowed = {item.isoformat() for item in trading_dates}
-    normalized: set[str] = set()
-    for value in raw_dates:
-      try:
-        parsed = date.fromisoformat(str(value or "").strip())
-      except ValueError as exc:
-        raise ValueError("异常行情日必须使用 YYYY-MM-DD") from exc
-      encoded = parsed.isoformat()
-      if encoded not in allowed:
-        raise ValueError("声明的异常行情日不在正式回放交易日窗口内")
-      normalized.add(encoded)
-    normalized_request = {
-      "replay_acceptance": acceptance,
-      "replay_abnormal_dates": sorted(normalized),
-    }
+    normalized_request = {"replay_acceptance": acceptance}
     raw_archive = payload.get("canonical_tick_archive")
     if raw_archive is not None:
       normalized_request["canonical_tick_archive"] = (

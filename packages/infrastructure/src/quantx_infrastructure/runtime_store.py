@@ -144,6 +144,31 @@ class DurableRuntimeStore:
           return str(row["id"])
     return None
 
+  async def blocked_market_data_ingestion(
+    self,
+    device_id: str,
+  ) -> Optional[dict[str, Any]]:
+    """Return a server-side ingestion failure that blocks new Agent dispatch."""
+
+    async with self.engine.connect() as connection:
+      row = (
+        await connection.execute(
+          text(
+            """
+            SELECT request_id, status, processing_error, updated_at
+            FROM market_data_request
+            WHERE device_id = :device_id
+              AND status IN ('UPLOADED', 'PROCESSING')
+              AND COALESCE(processing_error, '') <> ''
+            ORDER BY created_at
+            LIMIT 1
+            """
+          ),
+          {"device_id": device_id},
+        )
+      ).mappings().one_or_none()
+    return dict(row) if row is not None else None
+
   async def create_market_data_request(
     self,
     payload: dict[str, Any],

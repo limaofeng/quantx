@@ -51,6 +51,61 @@ async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_canonical_tick_sync_uses_scope_specific_durable_request(
+  monkeypatch,
+) -> None:
+  captured = {}
+
+  async def fake_request_agent_market_data(
+    *,
+    payload,
+    timeout_seconds,
+    idempotency_scope,
+  ):
+    captured.update(
+      payload=payload,
+      timeout_seconds=timeout_seconds,
+      idempotency_scope=idempotency_scope,
+    )
+    return {"status": "success", "request_id": "canonical-request"}
+
+  monkeypatch.setattr(
+    market_data_request_service,
+    "request_agent_market_data",
+    fake_request_agent_market_data,
+  )
+
+  result = await market_data_request_service.request_canonical_tick_sync(
+    stock_code="600887.SH",
+    start_time="20260722",
+    end_time="20260728",
+    preparation_id="b" * 64,
+    verification_pass=2,
+    timeout_seconds=321,
+  )
+
+  assert result == {"status": "success", "request_id": "canonical-request"}
+  assert captured == {
+    "payload": {
+      "operation": "bars",
+      "download": True,
+      "stock_list": ["600887.SH"],
+      "start_time": "20260722",
+      "end_time": "20260728",
+      "periods": ["tick"],
+      "destination": "canonical_tick_archive",
+      "canonical_preparation_id": "b" * 64,
+      "canonical_verification_pass": 2,
+    },
+    "timeout_seconds": 321,
+    "idempotency_scope": (
+      "canonical-tick-preparation:"
+      f"{'b' * 64}:2:600887.SH:20260722:20260728"
+    ),
+  }
+
+
+@pytest.mark.asyncio
 async def test_load_completed_empty_tick_days_keeps_only_canonical_store_proofs(
   monkeypatch,
 ) -> None:

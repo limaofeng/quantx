@@ -327,28 +327,17 @@ async def test_cancel_running_replay_forces_past_simulated_exit_plan_guard() -> 
   assert update_projection.await_args.kwargs["status"] == "CANCELLED"
 
 
-def test_formal_v3_replay_metadata_requires_an_exact_window_and_abnormal_day() -> None:
+def test_formal_v3_replay_metadata_requires_an_exact_window() -> None:
   dates = [date(2026, 7, 1) + timedelta(days=index) for index in range(20)]
 
   normalized = TTradeReplayService._normalize_rollout_evidence_request(
-    {
-      "replay_acceptance": "V3_CAUSAL_20D",
-      "replay_abnormal_dates": [dates[-1].isoformat(), dates[-1].isoformat()],
-    },
+    {"replay_acceptance": "V3_CAUSAL_20D"},
     trading_dates=dates,
   )
 
-  assert normalized == {
-    "replay_acceptance": "V3_CAUSAL_20D",
-    "replay_abnormal_dates": [dates[-1].isoformat()],
-  }
+  assert normalized == {"replay_acceptance": "V3_CAUSAL_20D"}
   with pytest.raises(ValueError, match="恰好覆盖 20 个交易日"):
     TTradeReplayService._normalize_rollout_evidence_request(
-      {"replay_acceptance": "V3_CAUSAL_20D", "replay_abnormal_dates": []},
+      {"replay_acceptance": "V3_CAUSAL_20D"},
       trading_dates=dates[:-1],
-    )
-  with pytest.raises(ValueError, match="必须声明至少一个异常行情日"):
-    TTradeReplayService._normalize_rollout_evidence_request(
-      {"replay_acceptance": "V3_CAUSAL_20D", "replay_abnormal_dates": []},
-      trading_dates=dates,
     )

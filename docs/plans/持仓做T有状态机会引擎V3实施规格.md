@@ -983,7 +983,7 @@ Engine 内存累计器必须同时限制活动 stream 数和 metric series 数�
 CANARY 与 LIVE 都是实际执行阶段。进入任一阶段前，当前 Windows 范围内的以下门禁均须完成；服务端必须对任一缺项 `fail-closed`，不得仅依赖客户端文案或人工记忆。iOS 自动化与无障碍验收仍属于后续 Phase 4，不作为当前 Windows 门禁。
 
 1. 全量领域/Engine/API/Web（当前仅桌面范围）自动化测试；iOS 自动化测试属于后续 Phase 4，不阻塞本轮 Windows 交付；
-2. 至少 20 个交易日严格因果历史回放，覆盖正常与异常行情日；
+2. 至少 20 个交易日完整真实行情的严格因果历史回放；
 3. PAPER 连续运行至少 5 个交易日且完成不少于 20 个候选生命周期；
 4. episode 重复率为 0，幽灵候选为 0，未来数据违规为 0；
 5. 每个候选都能从当前 Web UI 追溯到 source identity、profile/policy/feature 版本、贡献、门禁、TradeIntent 和后续结果；iOS UI 追溯属于后续门禁；

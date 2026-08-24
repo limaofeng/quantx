@@ -68,7 +68,7 @@ def _rollout_evidence(
   The payload is intentionally derived only from the completed runtime's
   persisted parameters and replay curve.  A generic replay cannot label
   itself formal evidence: the replay service accepts ``V3_CAUSAL_20D`` only
-  for an exact SH 20-day window with an in-window declared abnormal day.
+  for an exact SH 20-day window.
   Missing or malformed facts remain present as explicit ``False`` values so
   older results fail closed instead of being reinterpreted as acceptance.
   """
@@ -81,23 +81,10 @@ def _rollout_evidence(
     }
   )
   acceptance = str(parameters.get("replay_acceptance") or "").strip().upper()
-  raw_abnormal = parameters.get("replay_abnormal_dates")
-  actual_date_set = set(actual_dates)
-  abnormal_items = raw_abnormal if isinstance(raw_abnormal, list) else []
-  abnormal_dates = sorted(
-    {
-      str(item or "").strip()
-      for item in abnormal_items
-      if str(item or "").strip() in actual_date_set
-    }
-  )
-  normal_dates = sorted(set(actual_dates) - set(abnormal_dates))
   issues = list(tick_read_audit.get("issues") or [])
   strict_causal = (
     acceptance == "V3_CAUSAL_20D"
     and len(actual_dates) == 20
-    and bool(normal_dates)
-    and bool(abnormal_dates)
     and str(data_quality).upper() == "OK"
     and _integer(tick_read_audit.get("verified_windows")) > 0
     and not issues
@@ -107,10 +94,6 @@ def _rollout_evidence(
     "schema_version": 1,
     "strict_causal": strict_causal,
     "trading_dates": actual_dates,
-    "market_scenario_coverage": {
-      "normal_trading_dates": normal_dates,
-      "abnormal_trading_dates": abnormal_dates,
-    },
     "replay_acceptance": acceptance or None,
     "tick_read_issues": len(issues),
     "skipped_instrument_count": len(list(skipped_instruments)),

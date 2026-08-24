@@ -59,6 +59,27 @@ market_stream_reset
 
 ## 导入与不可变发布
 
+正式账户范围优先通过已登记 QMT Agent 准备。该命令只请求 XTData 历史 Tick，
+不会访问交易 Broker；它把每个标的拆成最多 7 个日历日的请求，对完整范围采集两
+遍并逐日比对记录数、内容 hash 与 source identity，全部一致且归档质量门通过后才
+输出 token：
+
+```powershell
+python -m quantx_engine.t_trade_v3_acceptance `
+  --account-id <account-id> `
+  --trading-days 20 `
+  --prepare-canonical-tick-archive `
+  --snapshot-date <D-1-snapshot-date> `
+  --canonical-tick-archive-root D:\quantx-canonical-ticks
+```
+
+若 Agent 不可用、设备串行队列被既有 ingestion 失败阻塞、任一 instrument-day
+缺失、两次采集不一致或 Tick 会话质量不合格，准备立即 fail-closed，不发布 token。
+Worker 恢复上传时也按请求声明的 destination 路由，canonical 输入不会写入普通
+Influx 路径。
+
+已经持有独立、可验证外部来源文件时，也可以使用底层显式发布入口：
+
 ```powershell
 python -m quantx_infrastructure.services.canonical_tick_archive publish `
   --archive-root D:\quantx-canonical-ticks `
@@ -81,7 +102,6 @@ Engine 的 legacy offset 接口由 archive adapter 的严格 query-key 顺序游
 python -m quantx_engine.t_trade_v3_acceptance `
   --account-id <account-id> `
   --trading-days 20 `
-  --abnormal-date 2026-08-10 `
   --execute `
   --canonical-tick-archive-root D:\quantx-canonical-ticks `
   --canonical-tick-cutover-token canonical-tick-v1-<manifest-sha256>
@@ -91,6 +111,7 @@ python -m quantx_engine.t_trade_v3_acceptance `
 
 - 打开并验证 token、manifest、source provenance 与 object 内容；
 - 要求 token scope 与 D-1 snapshot、全持仓、20 个已完成 SH trading dates 精确一致；
+- 对窗口内全部真实行情统一执行因果性、连续性和 source identity 门禁；
 - 用 archive 的流式 Tick completeness / source-identity 审计；
 - 在 task-local isolated adapter lease 中启动真实 `StrategyExecutor` BACKTEST；
 - 禁止 `HistoricalMarketDataService`、Influx、QMT 补数及任何 fallback/dual-read。

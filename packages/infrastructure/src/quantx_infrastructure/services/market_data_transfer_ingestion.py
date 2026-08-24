@@ -1061,6 +1061,35 @@ async def ingest_uploaded_bar_request(
   }
 
 
+async def ingest_uploaded_market_data_request(
+  store: MarketDataTransferStore,
+  request_id: str,
+) -> dict[str, Any]:
+  """Route a validated upload to its single declared persistence destination."""
+
+  request = await store.market_data_request(request_id)
+  if request is None:
+    raise _validation_error("market-data request disappeared before ingestion")
+  payload = request.get("request_payload") or {}
+  if isinstance(payload, str):
+    try:
+      payload = json.loads(payload, parse_constant=_reject_json_constant)
+    except (RecursionError, json.JSONDecodeError) as exc:
+      raise _validation_error("market-data request payload is invalid JSON") from exc
+  if not isinstance(payload, dict):
+    raise _validation_error("market-data request payload is not an object")
+  destination = str(payload.get("destination") or "influxdb").strip().lower()
+  if destination == "influxdb":
+    return await ingest_uploaded_bar_request(store, request_id)
+  if destination == "canonical_tick_archive":
+    from quantx_infrastructure.services.canonical_tick_preparation import (
+      ingest_uploaded_canonical_tick_request,
+    )
+
+    return await ingest_uploaded_canonical_tick_request(store, request_id)
+  raise _validation_error("market-data request destination is unsupported")
+
+
 def _cleanup_completed_staging(
   request_id: str,
   manifest: list[dict[str, Any]],
@@ -1116,7 +1145,7 @@ async def claim_ingest_and_finish_market_data_request(
   store: MarketDataTransferStore,
   request_id: str,
   *,
-  ingest_request: IngestRequest = ingest_uploaded_bar_request,
+  ingest_request: IngestRequest = ingest_uploaded_market_data_request,
 ) -> dict[str, Any] | None:
   """Claim one immutable transfer and converge validation/persistence durably."""
 

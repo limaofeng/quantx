@@ -200,10 +200,6 @@ def _replay_row(
             "strict_causal": True,
             "replay_acceptance": acceptance,
             "trading_dates": [item.isoformat() for item in dates],
-            "market_scenario_coverage": {
-              "normal_trading_dates": [item.isoformat() for item in dates[:-1]],
-              "abnormal_trading_dates": [dates[-1].isoformat()],
-            },
           },
           "summary": {"t_net_profit": 1.0, "total_fees": 0.1},
         }
@@ -791,7 +787,7 @@ def test_evaluator_selects_single_replay_with_most_passing_gates() -> None:
 
   replay = result["summary"]["replay"]
   assert replay["run_id"] == "a-good-run"
-  assert replay["selection_gate_pass_count"] == 6
+  assert replay["selection_gate_pass_count"] == 5
   assert replay["future_data_violation_count"] == 0
 
 

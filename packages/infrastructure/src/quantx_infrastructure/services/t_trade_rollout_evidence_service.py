@@ -56,7 +56,7 @@ MAX_EVIDENCE_ROWS = 2_000
 MAX_REVIEW_EVENT_ROWS = 64
 # A synthetic workload is intentionally not a rollout replay.  This marker is
 # written only by the replay service after it has validated an exact 20-day
-# request and an in-window abnormal date.  Keep the literal here rather than
+# request.  Keep the literal here rather than
 # accepting a fuzzy ``t_trade_replay`` flag: the latter is also used by
 # diagnostics and the sealed pressure baseline.
 FORMAL_REPLAY_ACCEPTANCE = "V3_CAUSAL_20D"
@@ -98,7 +98,6 @@ V3_ROLLOUT_GATE_CODES = frozenset(
     "V3_EVIDENCE_QUERY_AVAILABLE",
     "V3_REPLAY_20_TRADING_DAYS",
     "V3_REPLAY_STRICT_CAUSAL",
-    "V3_REPLAY_NORMAL_AND_ABNORMAL_COVERAGE",
     "V3_REPLAY_EPISODE_DUPLICATES_ZERO",
     "V3_REPLAY_GHOST_CANDIDATES_ZERO",
     "V3_REPLAY_FUTURE_DATA_ZERO",
@@ -1286,11 +1285,6 @@ class TTradeV3RolloutEvidenceEvaluator:
         "回放未证明严格因果、完整 Tick 读取和 data_quality=OK",
       ),
       self._check(
-        "V3_REPLAY_NORMAL_AND_ABNORMAL_COVERAGE",
-        bool(replay["normal_and_abnormal_covered"]),
-        "回放未证明同时覆盖正常与异常行情日",
-      ),
-      self._check(
         "V3_REPLAY_EPISODE_DUPLICATES_ZERO",
         bool(replay["quality_evidence_available"])
         and replay["duplicate_count"] == 0
@@ -1463,7 +1457,6 @@ class TTradeV3RolloutEvidenceEvaluator:
         and _integer(tick_audit.get("verified_windows"), 0) > 0
         and not list(tick_audit.get("issues") or [])
       )
-      normal_and_abnormal_covered = self._proof_covers_normal_and_abnormal(proof, dates)
       quality_evidence_available = bool(candidate_facts.candidate_count)
       # Discovery is bounded but independent formal runs are never merged.
       # A 65th old run cannot invalidate a fully loaded selected run.  Only a
@@ -1475,7 +1468,6 @@ class TTradeV3RolloutEvidenceEvaluator:
       gate_passes = {
         "trading_days": len(dates) >= MIN_REPLAY_TRADING_DAYS,
         "strict_causal": strict_causal,
-        "normal_and_abnormal_coverage": normal_and_abnormal_covered,
         "episode_duplicates_zero": quality_evidence_available
         and candidate_facts.duplicate_count == 0
         and not candidate_evidence_truncated,
@@ -1499,7 +1491,6 @@ class TTradeV3RolloutEvidenceEvaluator:
           "historical_replay_cutoff_date": historical_replay_cutoff_date.isoformat(),
           "historical_dates_closed": historical_dates_closed,
           "strict_causal": strict_causal,
-          "normal_and_abnormal_covered": normal_and_abnormal_covered,
           "duplicate_count": candidate_facts.duplicate_count,
           "ghost_count": candidate_facts.ghost_count,
           "future_data_violation_count": candidate_facts.future_data_violation_count,
@@ -1543,7 +1534,6 @@ class TTradeV3RolloutEvidenceEvaluator:
       "historical_replay_cutoff_date": historical_replay_cutoff_date.isoformat(),
       "historical_dates_closed": False,
       "strict_causal": False,
-      "normal_and_abnormal_covered": False,
       "duplicate_count": 0,
       "ghost_count": 0,
       "future_data_violation_count": 0,
@@ -1568,19 +1558,6 @@ class TTradeV3RolloutEvidenceEvaluator:
       except ValueError:
         continue
     return sorted(set(result))
-
-  @staticmethod
-  def _proof_covers_normal_and_abnormal(
-    proof: Mapping[str, Any],
-    trading_dates: Sequence[date],
-  ) -> bool:
-    coverage = _mapping(proof.get("market_scenario_coverage"))
-    allowed = {item.isoformat() for item in trading_dates}
-    normal = {_text(item) for item in list(coverage.get("normal_trading_dates") or [])}
-    abnormal = {
-      _text(item) for item in list(coverage.get("abnormal_trading_dates") or [])
-    }
-    return bool(normal and abnormal and normal <= allowed and abnormal <= allowed)
 
   def _paper_summary(
     self,

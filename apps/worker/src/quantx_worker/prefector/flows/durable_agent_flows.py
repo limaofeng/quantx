@@ -30,6 +30,7 @@ from quantx_infrastructure.services.market_data_request_service import (
 from quantx_infrastructure.services.market_data_transfer_ingestion import (
   claim_ingest_and_finish_market_data_request,
   ingest_uploaded_bar_request,
+  ingest_uploaded_market_data_request,
   load_uploaded_request_manifest,
   load_uploaded_request_records,
 )
@@ -287,6 +288,9 @@ async def _ingest_uploaded_request(
   saved = 0
   replacement_audit: dict[str, Any] | None = None
   if operation == "bars":
+    destination = str(payload.get("destination") or "influxdb").strip().lower()
+    if destination != "influxdb":
+      return await ingest_uploaded_market_data_request(store, request_id)
     return await ingest_uploaded_bar_request(
       store,
       request_id,

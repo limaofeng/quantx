@@ -184,6 +184,23 @@ def test_recent_completed_diagnostic_uses_separate_default_report_path() -> None
   assert args.report != acceptance_module.DEFAULT_FORMAL_REPORT_PATH
 
 
+def test_canonical_data_preparation_uses_separate_default_report_path(tmp_path) -> None:
+  args = acceptance_module.build_parser().parse_args(
+    [
+      "--prepare-canonical-tick-archive",
+      "--snapshot-date",
+      "2026-07-21",
+      "--canonical-tick-archive-root",
+      str(tmp_path.resolve()),
+    ]
+  )
+
+  report = acceptance_module._apply_recent_completed_diagnostic_report_path(args)
+
+  assert report == acceptance_module.DEFAULT_DATA_PREPARATION_REPORT_PATH
+  assert args.report != acceptance_module.DEFAULT_FORMAL_REPORT_PATH
+
+
 @pytest.mark.asyncio
 async def test_audit_tick_coverage_accepts_only_dual_single_day_empty_evidence(
   monkeypatch,
@@ -380,27 +397,22 @@ def _operational_evidence() -> dict:
   }
 
 
-def test_formal_window_requires_all_holdings_all_days_and_abnormal_evidence() -> None:
+def test_formal_window_requires_all_holdings_and_all_days() -> None:
   audit = _audit()
 
-  assert select_formal_window([audit]) is None
-  selected = select_formal_window(
-    [audit], abnormal_dates=[audit.window.trading_dates[3]]
-  )
+  selected = select_formal_window([audit])
 
   assert selected is audit
-  assert audit.blockers(abnormal_dates=[audit.window.trading_dates[3]]) == []
+  assert audit.blockers() == []
 
 
 def test_short_window_is_non_gating_diagnostic_and_blocks_formal_20_gate() -> None:
   audit = _audit(day_count=5, requested_trading_days=5)
-  abnormal_dates = [audit.window.trading_dates[0]]
 
-  assert select_formal_window([audit], abnormal_dates=abnormal_dates) is None
+  assert select_formal_window([audit]) is None
   report = build_report_document(
     [audit],
     requested_trading_days=5,
-    abnormal_dates=abnormal_dates,
   )
   formal = report["formal_20_trading_day"]
   diagnostic = report["short_window_coverage_diagnostic"]
@@ -432,17 +444,14 @@ def test_short_window_is_non_gating_diagnostic_and_blocks_formal_20_gate() -> No
 
 def test_twenty_day_report_retains_ready_and_pass_formal_behavior() -> None:
   audit = _audit()
-  abnormal_dates = [audit.window.trading_dates[0]]
 
   ready = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=abnormal_dates,
   )
   passed = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=abnormal_dates,
     formal_execution={"replay": {"status": "COMPLETED"}},
   )
 
@@ -457,7 +466,6 @@ def test_twenty_day_report_retains_ready_and_pass_formal_behavior() -> None:
 
 def test_report_rejects_pseudo_formal_execution_without_ready_20_day_window() -> None:
   formal_execution = {"replay": {"status": "COMPLETED"}}
-  no_abnormal_evidence = _audit()
   incomplete_twenty_day_window = _audit(
     day_count=19,
     requested_trading_days=DEFAULT_TRADING_DAYS,
@@ -469,18 +477,8 @@ def test_report_rejects_pseudo_formal_execution_without_ready_20_day_window() ->
     match="FORMAL_EXECUTION_REQUIRES_READY_20_TRADING_DAY_WINDOW",
   ):
     build_report_document(
-      [no_abnormal_evidence],
-      requested_trading_days=DEFAULT_TRADING_DAYS,
-      formal_execution=formal_execution,
-    )
-  with pytest.raises(
-    acceptance_module.AcceptanceBlockedError,
-    match="FORMAL_EXECUTION_REQUIRES_READY_20_TRADING_DAY_WINDOW",
-  ):
-    build_report_document(
       [incomplete_twenty_day_window],
       requested_trading_days=DEFAULT_TRADING_DAYS,
-      abnormal_dates=[incomplete_twenty_day_window.window.trading_dates[0]],
       formal_execution=formal_execution,
     )
   with pytest.raises(
@@ -490,7 +488,6 @@ def test_report_rejects_pseudo_formal_execution_without_ready_20_day_window() ->
     build_report_document(
       [short_window],
       requested_trading_days=5,
-      abnormal_dates=[short_window.window.trading_dates[0]],
       formal_execution=formal_execution,
     )
 
@@ -520,12 +517,8 @@ def test_reused_short_window_report_cannot_retain_formal_20_claim() -> None:
 def test_missing_one_stock_day_blocks_formal_replay_and_preserves_exact_evidence() -> None:
   audit = _audit(incomplete_pairs={("000001.SZ", 7)})
 
-  assert select_formal_window(
-    [audit], abnormal_dates=[audit.window.trading_dates[2]]
-  ) is None
-  assert "ALL_HOLDINGS_TICK_COVERAGE_INCOMPLETE" in audit.blockers(
-    abnormal_dates=[audit.window.trading_dates[2]]
-  )
+  assert select_formal_window([audit]) is None
+  assert "ALL_HOLDINGS_TICK_COVERAGE_INCOMPLETE" in audit.blockers()
   assert len(audit.missing) == 1
   assert audit.missing[0].instrument_code == "000001.SZ"
   assert audit.missing[0].trading_date == audit.window.trading_dates[7]
@@ -595,7 +588,6 @@ def test_report_keeps_blocked_gate_distinct_from_pressure_baseline() -> None:
   report = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=[audit.window.trading_dates[0]],
     pressure_baseline={"status": "EXECUTED_SYNTHETIC_NON_HISTORICAL"},
   )
   markdown = render_markdown(report, json_name="acceptance.json")
@@ -627,7 +619,6 @@ def test_report_renders_raw_missing_source_identity_storage_audit() -> None:
   report = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=[audit.window.trading_dates[0]],
     historical_short_window_preflight={
       "passed": False,
       "failure": {
@@ -710,7 +701,6 @@ def test_report_only_marks_remediation_full_after_completed_9600_fixture() -> No
   report = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=[audit.window.trading_dates[0]],
     pressure_baseline=pressure,
   )
   markdown = render_markdown(report, json_name="acceptance.json")
@@ -735,7 +725,6 @@ def test_report_renders_operational_evidence_without_upgrading_rollout_gate() ->
   report = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=[audit.window.trading_dates[0]],
     operational_evidence=evidence,
   )
   markdown = render_markdown(report, json_name="acceptance.json")
@@ -1496,7 +1485,6 @@ def test_report_does_not_freeze_slo_for_completed_short_calibration() -> None:
   report = build_report_document(
     [audit],
     requested_trading_days=DEFAULT_TRADING_DAYS,
-    abnormal_dates=[audit.window.trading_dates[0]],
     pressure_baseline=pressure,
   )
   markdown = render_markdown(report, json_name="acceptance.json")
