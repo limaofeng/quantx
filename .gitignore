@@ -30,6 +30,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+/.venv/
 .ruff_cache/
 .mypy_cache/
 .hypothesis/
@@ -70,6 +71,7 @@ apps/ios/Config/*.local.xcconfig
 .prefect/
 .prefect-test/
 .pytest-tmp*/
+/.codex_pytest*/
 .playwright-mcp/
 .tmp-chrome-*/
 .quantx-dev/
