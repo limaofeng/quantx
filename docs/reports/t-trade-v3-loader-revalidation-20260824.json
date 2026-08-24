@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "report_date": "2026-08-24",
+  "report_type": "t_trade_v3_loader_revalidation",
+  "formal_disposition": {
+    "status": "BLOCKED",
+    "formal_20_trading_day_replay_started": false,
+    "paper_equivalence": false,
+    "reason": "tick coverage and source-identity evidence are incomplete"
+  },
+  "loader_corrections": {
+    "intraday_qmt_bounds": {
+      "periods": [
+        "tick",
+        "1m"
+      ],
+      "download_and_read_bounds": "YYYYMMDD000000..YYYYMMDD235959",
+      "daily_period_bounds": "unchanged date format"
+    },
+    "empty_tick_gate": {
+      "require_exact_day_completed_verified_tick_no_rows": true,
+      "require_exact_day_completed_verified_1d_no_rows": true,
+      "same_day_nonzero_or_abnormal_1d_is_counterevidence": true,
+      "suspension_inference_from_empty_tick_alone": false
+    },
+    "replay_supplement": {
+      "scope_version": "v2",
+      "formal_offline_execution_all_current_and_legacy_supplement_paths_forbidden": true
+    },
+    "durable_transfer_recovery": {
+      "states": [
+        "DELIVERED",
+        "RECEIVING"
+      ],
+      "expiration_minutes": 5,
+      "recovery_enabled": true
+    }
+  },
+  "verification": {
+    "primary_focused_pytest": "all passed",
+    "scoped_ruff": "passed",
+    "git_diff_check": "passed",
+    "qmt_agent_subverification": {
+      "passed_groups": [
+        97,
+        12
+      ],
+      "summary": "97 + 12 passed"
+    }
+  },
+  "operations": {
+    "stale_backtest": {
+      "run_id": "c4c24454-9de9-4db9-885f-4a3cf11377b8",
+      "prior_status": "RUNNING",
+      "prior_progress_percent": 4.0622075,
+      "prior_processed_until": "2026-07-28 10:05:48",
+      "cancellation_path": "TTradeReplayService.cancel",
+      "terminal_status": "CANCELLED",
+      "direct_database_mutation": false
+    },
+    "standard_full_live_restart": {
+      "initial_restart_result": "success",
+      "initial_account_snapshot_age_seconds": 2.756,
+      "initial_reconciling_devices": 0,
+      "agent_status": "ready",
+      "initial_market_data_status": "syncing",
+      "market_data_later_reached": "ready",
+      "continuous_health_accepted": false,
+      "later_observation": "background financial synchronization showed syncing/reconciling and an older snapshot"
+    }
+  },
+  "single_point_v2_revalidation": {
+    "instrument_code": "605499.SH",
+    "same_day_1d_exists": true,
+    "empty_tick_is_suspension": false,
+    "results": [
+      {
+        "trading_date": "2026-07-22",
+        "request_id_prefix": "a64709f6...",
+        "rows": 0,
+        "verified": true,
+        "result": "XT_DATA_NO_ROWS"
+      },
+      {
+        "trading_date": "2026-07-23",
+        "request_id_prefix": "12da8ca3...",
+        "rows": 0,
+        "verified": true,
+        "result": "XT_DATA_NO_ROWS"
+      },
+      {
+        "trading_date": "2026-07-24",
+        "request_id_prefix": "85639671...",
+        "rows": 4911,
+        "saved": true,
+        "verified": true,
+        "source_time_ms_min": 1784855702000,
+        "source_time_ms_max": 1784878257001,
+        "checksum_prefix_suffix": "ac6b...f6d"
+      }
+    ],
+    "conclusion": "consistent with the current provider/QMT downloadable-history cutoff (inference); not an intraday-boundary-code failure",
+    "provider_documented_retention_policy": false
+  },
+  "twenty_trading_day_read_only_audit": {
+    "snapshot_date": "2026-07-21",
+    "held_instruments": 9,
+    "trading_window": "2026-07-22..2026-08-18",
+    "complete_instrument_days": 171,
+    "expected_instrument_days": 180,
+    "missing_instrument_days": 9,
+    "missing": [
+      {
+        "instrument_code": "002027.SZ",
+        "trading_dates": [
+          "2026-07-22"
+        ]
+      },
+      {
+        "instrument_code": "605499.SH",
+        "trading_dates": [
+          "2026-07-22",
+          "2026-07-23"
+        ]
+      },
+      {
+        "instrument_code": "688552.SH",
+        "trading_dates": [
+          "2026-07-22",
+          "2026-07-23"
+        ]
+      },
+      {
+        "instrument_code": "688577.SH",
+        "trading_dates": [
+          "2026-07-22",
+          "2026-07-23"
+        ]
+      },
+      {
+        "instrument_code": "689009.SH",
+        "trading_dates": [
+          "2026-07-22",
+          "2026-07-23"
+        ]
+      }
+    ],
+    "formal_execution": "not executed",
+    "status": "BLOCKED"
+  },
+  "source_identity_full_audit": {
+    "pair_scope": 180,
+    "records_read": 440979,
+    "pages_read": 104,
+    "failed_instrument_days": 67,
+    "failure": "HistoricalTickPaginationError: missing identity",
+    "primary_affected_ranges": [
+      "002594.SZ through 2026-08-14",
+      "300917.SZ through 2026-08-14",
+      "302132.SZ through 2026-08-14",
+      "601318.SH through 2026-08-07"
+    ],
+    "coverage_171_of_180_is_formally_executable": false,
+    "reason": "legacy rows lack source_time_ms/tick_ordinal"
+  },
+  "five_trading_day_read_only_diagnostic": {
+    "best_raw": {
+      "snapshot_date": "2026-07-22",
+      "complete_instrument_days": 41,
+      "expected_instrument_days": 50,
+      "additional_blocker": "HELD_INSTRUMENT_NOT_REPLAYABLE (787825.SH)",
+      "missing_instrument_days": 9
+    },
+    "best_replayable": {
+      "snapshot_date": "2026-07-21",
+      "complete_instrument_days": 36,
+      "expected_instrument_days": 45,
+      "missing_instrument_days": 9
+    },
+    "equivalent_to_paper": false,
+    "formal_gate_passed": false
+  },
+  "influx_history_blocker": {
+    "primary_key": "time + tagset",
+    "relevant_tags": [
+      "stock_code",
+      "period"
+    ],
+    "supported_row_delete": false,
+    "same_key_duplicate_write_outcome": "non-deterministic overwrite",
+    "broad_delete_or_in_place_hydration_allowed": false,
+    "safe_alternative_requires_separate_authorization": {
+      "storage": "independent canonical archive/database/table",
+      "write_policy": "verified canonical transfers only",
+      "cutover": "atomic reader/writer cutover after strict full audit",
+      "dual_read": false,
+      "legacy_fallback": false
+    },
+    "provider_nine_gaps": "require an independent historical source or backup"
+  },
+  "execution_exclusions": {
+    "paper_orders_executed": false,
+    "canary_orders_executed": false,
+    "live_orders_executed": false,
+    "real_trading_executed": false,
+    "ios_development_or_validation": false,
+    "environment_scope": "Windows"
+  }
+}
