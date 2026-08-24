@@ -579,8 +579,8 @@ async def test_missing_prior_profile_fails_closed_with_complete_v3_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_invalid_last_price_reaches_reducer_and_publishes_material_insufficient_snapshot():
-  """Invalid prices must replace, rather than leave, an older actionable view."""
+async def test_initial_invalid_last_price_establishes_baseline_without_material_event():
+  """An initial ordinary health observation must not create MATERIAL truth."""
   strategy = make_strategy()
   await strategy.initialize()
   await reconcile(strategy, {"600000.SH": {"eligible": True}})
@@ -598,12 +598,157 @@ async def test_invalid_last_price_reaches_reducer_and_publishes_material_insuffi
   assert evaluation["data_health"] == DataHealth.INSUFFICIENT.value
   assert "INVALID_PRICE" in evaluation["data_health_reasons"]
   assert evaluation["candidate_status"] != "AWAITING_APPROVAL"
+  assert output.runtime_state_patch is not None
+  assert output.runtime_state_patch.append_events == []
+  cursor = strategy.state["instrument_states"]["600000.SH"]["opportunity"][
+    "event_cursor"
+  ]
+  assert cursor["baseline_established"] is True
+  assert "material_signature" not in cursor
+
+
+@pytest.mark.asyncio
+async def test_ordinary_health_coverage_and_execution_blockers_never_emit_material():
+  """Replayable observation changes cannot become MATERIAL merely by changing."""
+
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(strategy, {"600000.SH": {"eligible": True}})
+  start = datetime(2026, 7, 13, 9, 30)
+  observations = [
+    # Establish the ordinary cursor with an insufficient/profile-missing view.
+    (
+      start,
+      make_tick(start, 100.0, amount=100.0, volume=100.0),
+      {"profile": None},
+    ),
+    # Cumulative counters roll back and coverage stays insufficient.
+    (
+      start + timedelta(seconds=1),
+      make_tick(
+        start + timedelta(seconds=1),
+        99.9,
+        amount=10.0,
+        volume=10.0,
+      ),
+      {"profile": None},
+    ),
+    # Entry cutoff and an external execution blocker are not business/FSM
+    # identities; both remain replayable ordinary observations.
+    (
+      datetime(2026, 7, 13, 14, 50),
+      make_tick(datetime(2026, 7, 13, 14, 50), 99.8, amount=20.0, volume=20.0),
+      {"profile": None, "emission_allowed": False},
+    ),
+  ]
+  evaluations = []
+  for ordinal, (observed_at, tick, options) in enumerate(observations, start=1):
+    output = await process_tick(
+      strategy,
+      make_input(
+        observed_at,
+        tick,
+        tick_ordinal=ordinal,
+        **options,
+      ),
+    )
+    assert output.trade_intents == []
+    assert output.runtime_state_patch is not None
+    assert output.runtime_state_patch.append_events == []
+    evaluations.append(
+      strategy.state["instrument_states"]["600000.SH"]["opportunity"][
+        "latest_evaluation"
+      ]
+    )
+
   assert any(
-    event["record_kind"] == "MATERIAL"
-    and event["signal_snapshot"]["data_health"] == DataHealth.INSUFFICIENT.value
-    and "INVALID_PRICE" in event["signal_snapshot"]["data_health_reasons"]
-    for event in output.runtime_state_patch.append_events
+    evaluation["data_health_reasons"] for evaluation in evaluations
   )
+  assert any(
+    "ENTRY_CUTOFF_REACHED" in evaluation["external_blockers"]
+    for evaluation in evaluations
+  )
+  assert any(
+    "TEST_EMISSION_BLOCKED" in evaluation["external_blockers"]
+    for evaluation in evaluations
+  )
+  assert "material_signature" not in strategy.state["instrument_states"][
+    "600000.SH"
+  ]["opportunity"]["event_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_fsm_candidate_and_continuity_transitions_remain_material():
+  strategy = make_strategy()
+  await strategy.initialize()
+  await reconcile(
+    strategy,
+    {
+      "600000.SH": {
+        "eligible": True,
+        "policy_volume": 100,
+        "position_shares": 1_000,
+        "position_available_shares": 1_000,
+      }
+    },
+  )
+  start = datetime(2026, 7, 13, 9, 30)
+  outputs = []
+  for ordinal, (seconds, price, amount, volume) in enumerate(
+    (
+      (0, 100.0, 0.0, 0.0),
+      (60, 99.0, 0.0, 0.0),
+      (80, 99.3, 995_000.0, 10_000.0),
+      (83, 99.31, 1_000_000.0, 10_100.0),
+    ),
+    start=1,
+  ):
+    observed_at = start + timedelta(seconds=seconds)
+    outputs.append(
+      await process_tick(
+        strategy,
+        make_input(
+          observed_at,
+          make_tick(observed_at, price, amount=amount, volume=volume),
+          tick_ordinal=ordinal,
+        ),
+      )
+    )
+
+  assert outputs[0].runtime_state_patch.append_events == []
+  assert [event["event_type"] for event in outputs[1].runtime_state_patch.append_events] == [
+    "FSM_TRANSITION"
+  ]
+  assert [event["event_type"] for event in outputs[-1].runtime_state_patch.append_events] == [
+    "CANDIDATE_LATCHED"
+  ]
+
+  continuity_strategy = make_strategy(run_id="continuity-material")
+  await continuity_strategy.initialize()
+  await reconcile(continuity_strategy, {"600000.SH": {"eligible": True}})
+  await process_tick(
+    continuity_strategy,
+    make_input(
+      start,
+      make_tick(start, 100.0),
+      profile=None,
+      tick_ordinal=1,
+    ),
+  )
+  changed_at = start + timedelta(seconds=1)
+  continuity = await process_tick(
+    continuity_strategy,
+    make_input(
+      changed_at,
+      make_tick(changed_at, 100.0),
+      profile=None,
+      continuity_generation=2,
+      tick_ordinal=2,
+    ),
+  )
+  assert [
+    event["event_type"] for event in continuity.runtime_state_patch.append_events
+  ] == ["CONTINUITY_GENERATION_CHANGED"]
 
 
 @pytest.mark.asyncio
@@ -1746,6 +1891,37 @@ async def test_compact_persistence_projection_omits_hot_samples_and_backtest_rew
     }
     for ordinal in range(1, 1_001)
   ]
+  source.state.update(
+    {
+      "runtime_events": [
+        {
+          "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+          "event_key": "tto:compact-runtime-event",
+          "record_kind": "MATERIAL",
+          "event_type": "CANDIDATE_LATCHED",
+          "instrument_code": "600000.SH",
+          "evaluated_at_ms": int(start.timestamp() * 1000),
+          "signal_snapshot": {
+            "source_time_ms": int(start.timestamp() * 1000),
+            "tick_ordinal": 1_000,
+            "continuity_generation": "1",
+            "candidate_status": "NONE",
+            "blockers": ["DATA_READY"],
+            "full_diagnostic_payload": "hot-runtime-event" * 10_000,
+          },
+          "metrics": {"opportunity_score": 71.5, "sample_count": 1_000},
+        },
+        {
+          "type": "T_TRADE_EXTERNAL_ENTRY_IMPORTED",
+          "instrument_code": "600000.SH",
+          "batch_id": "active-batch",
+          "volume": 100,
+          "price": 99.31,
+          "source_trade_id": "source-trade-1",
+        },
+      ]
+    }
+  )
 
   projection = source.persistence_state_snapshot()
   projected = projection["instrument_states"]["600000.SH"]
@@ -1771,6 +1947,20 @@ async def test_compact_persistence_projection_omits_hot_samples_and_backtest_rew
   assert projected_opportunity["candidate"]["candidate_id"] == intent.metadata[
     "candidate_id"
   ]
+  assert source.state["runtime_events"][0]["signal_snapshot"][
+    "full_diagnostic_payload"
+  ] == "hot-runtime-event" * 10_000
+  # Neither ordinary nor MATERIAL T evaluation has a durable event-ring
+  # surrogate. Only the external execution fact remains; replay uses the
+  # watermark + source identity plus dedicated evaluation evidence.
+  projected_runtime_events = projection["runtime_events"]
+  assert len(projected_runtime_events) == 1
+  assert projected_runtime_events[0]["source_trade_id"] == "source-trade-1"
+  assert "hot-runtime-event" not in json.dumps(projection, sort_keys=True)
+  assert "signal-diagnostic-must-not-be-copied" not in json.dumps(
+    projection,
+    sort_keys=True,
+  )
   assert projected_json_bytes * 20 < full_json_bytes
 
   restored = make_strategy(
@@ -1806,6 +1996,43 @@ async def test_compact_persistence_projection_omits_hot_samples_and_backtest_rew
   assert rebuilt["candidate"] is None
   assert "sample_window_persisted" not in rebuilt
   assert "sample_window_restore_required" not in rebuilt
+
+
+def test_compact_persistence_projection_keeps_the_strategy_root_keyset() -> None:
+  strategy = make_strategy(run_id="compact-opportunity-empty-event-ring")
+
+  source_snapshot = strategy.state.to_dict()
+  projection = strategy.persistence_state_snapshot()
+
+  assert "runtime_events" not in source_snapshot
+  assert set(projection) == set(source_snapshot)
+
+
+def test_compact_persistence_projection_bounds_runtime_event_audit_markers() -> None:
+  strategy = make_strategy(run_id="compact-opportunity-event-marker-bound")
+  strategy.state.update(
+    {
+      "runtime_events": [
+        {
+          "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+          "event_key": f"tto:{ordinal}",
+          "record_kind": "COALESCED_DIAGNOSTIC",
+          "signal_snapshot": {
+            "source_time_ms": ordinal,
+            "tick_ordinal": ordinal,
+            "continuity_generation": "generation-1",
+            "discarded_diagnostic": {
+              "unbounded": "hot-runtime-event" * 1_000,
+            },
+          },
+        }
+        for ordinal in range(40)
+      ],
+    }
+  )
+
+  projection = strategy.persistence_state_snapshot()
+  assert "runtime_events" not in projection
 
 
 @pytest.mark.asyncio

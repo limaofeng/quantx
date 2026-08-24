@@ -6,6 +6,28 @@ import pytest
 from quantx_infrastructure.core.backtest_result_storage import BacktestResultStorage
 
 
+def test_compact_trace_payload_preserves_t_trade_signal_marker() -> None:
+    marker = {
+        "format": "T_TRADE_SIGNAL_SNAPSHOT_MARKER_V1",
+        "source_time_ms": 1_787_518_800_000,
+        "candidate_id": "candidate-1",
+        "evaluation_event_keys": ["tto:event-1"],
+        "full_signal_snapshot": {"sha256": "a" * 64, "json_bytes": 6_144},
+    }
+
+    compact = BacktestResultStorage._compact_trace_payload(
+        {
+            "reason": "T_TRADE_OPPORTUNITY_CANDIDATE_LATCHED",
+            "signal_marker": marker,
+            "signal_snapshot": {"must_not_survive": "full diagnostic"},
+        }
+    )
+
+    assert compact["reason"] == "T_TRADE_OPPORTUNITY_CANDIDATE_LATCHED"
+    assert compact["signal_marker"] == marker
+    assert "signal_snapshot" not in compact
+
+
 @pytest.mark.asyncio
 async def test_load_latest_grid_book_snapshot_returns_last_snapshot(tmp_path):
     result_path = tmp_path / "backtest.jsonl"

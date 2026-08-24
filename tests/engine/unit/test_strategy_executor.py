@@ -19,6 +19,7 @@ from collections import UserDict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,7 +35,12 @@ from quantx_domain.brokers.base import (
 )
 from quantx_domain.brokers.simulator import SimulatorBroker
 from quantx_domain.market import Tick
+from quantx_domain.strategies.ashare_intraday_t_assistant import (
+  AshareIntradayTAssistantStrategy,
+)
 from quantx_domain.strategies.base import (
+  MarketDataContext,
+  MarketDataSession,
   OrderStateEvent,
   RuntimeStatePatch,
   StrategyBase,
@@ -249,6 +255,12 @@ def _session_checkpoint_runtime(
   def pending() -> list[dict]:
     return [dict(event) for event in diagnostic_outbox.values()]
 
+  def prepared_events(checkpoint_id: str) -> list[dict] | None:
+    checkpoint = prepared_holder["value"]
+    if checkpoint is None or checkpoint.checkpoint_id != checkpoint_id:
+      return None
+    return pending()
+
   async def prepare(**kwargs) -> SimpleNamespace:
     materialization_events = [
       dict(event) for event in kwargs["materialization_events"]
@@ -295,6 +307,7 @@ def _session_checkpoint_runtime(
     drain_strategy_state_changes=AsyncMock(return_value=True),
     enqueue_t_trade_diagnostic_events=MagicMock(side_effect=enqueue),
     pending_t_trade_diagnostic_events=MagicMock(side_effect=pending),
+    prepared_t_trade_diagnostic_events=MagicMock(side_effect=prepared_events),
     prepare_checkpoint=AsyncMock(side_effect=prepare),
     finalize_prepared_checkpoint=AsyncMock(side_effect=finalize),
     latest_prepared_checkpoint=MagicMock(
@@ -798,6 +811,10 @@ async def test_backtest_day_checkpoint_excludes_acquired_first_event_of_next_day
     call.kwargs["processed_watermark"]["sequence"]
     for call in manager.prepare_checkpoint.await_args_list
   ] == [1, 2]
+  assert [
+    call.kwargs["processed_watermark"]["processed_tick_count"]
+    for call in manager.prepare_checkpoint.await_args_list
+  ] == [1, 2]
   assert all(
     call.kwargs["session"] is None
     for call in manager.prepare_checkpoint.await_args_list
@@ -832,7 +849,7 @@ def test_backtest_day_checkpoint_never_admits_two_acquired_queue_items() -> None
 
 
 @pytest.mark.asyncio
-async def test_damaged_prepared_checkpoint_restores_for_diagnosis_then_fails_closed(
+async def test_damaged_prepared_checkpoint_fails_closed_without_payload_rollback(
   strategy_executor: StrategyExecutor,
 ) -> None:
   runtime = strategy_executor.create(
@@ -846,24 +863,18 @@ async def test_damaged_prepared_checkpoint_restores_for_diagnosis_then_fails_clo
       parameters={},
     ),
   )
-  fallback = SimpleNamespace(
-    checkpoint_id="last-complete-day",
-    trade_date="2026-08-24",
-    session=None,
-  )
   with (
+    patch.object(
+      strategy_executor_module.time_utils,
+      "now",
+      return_value=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+    ),
     patch.object(RuntimeStateManager, "latest_prepared_checkpoint", return_value=None),
     patch.object(RuntimeStateManager, "has_prepared_checkpoint", return_value=True),
-    patch.object(
-      RuntimeStateManager,
-      "restore_latest_complete_checkpoint",
-      new=AsyncMock(return_value=fallback),
-    ) as restore_complete,
   ):
     started = await strategy_executor.start(runtime.run_id)
 
   assert started is False
-  restore_complete.assert_awaited_once()
   assert runtime.status == ExecutionStatus.ERROR
   assert runtime.error_message == "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
   checkpoint_status = runtime.checkpoint_status["2026-08-24:DAY"]
@@ -1234,6 +1245,504 @@ def test_strategy_output_trace_content_addresses_hot_runtime_state(
     changed_summary["set"]["instrument_states"]["current_instrument"]["sha256"]
     != instrument_summary["current_instrument"]["sha256"]
   )
+
+
+def _t_trade_trace_fixture(
+  strategy_executor: StrategyExecutor,
+) -> tuple[StrategyRuntime, StrategyInput, StrategyOutput, dict]:
+  """Build one T output with deliberately large roots outside the index."""
+
+  context = StrategyContext(
+    run_id="trace-t-trade-projection-run",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["600000.SH"],
+    parameters={},
+  )
+  runtime = strategy_executor.create(
+    run_id=context.run_id,
+    strategy_id=802,
+    strategy_class=AshareIntradayTAssistantStrategy,
+    context=context,
+  )
+  runtime.strategy = AshareIntradayTAssistantStrategy(context)
+  runtime.state_manager = RuntimeStateManager(
+    run_id=context.run_id,
+    persist_enabled=True,
+    is_backtest=True,
+  )
+  input_snapshot = StrategyInput(
+    run_id=context.run_id,
+    strategy_id="802",
+    trace_id="trace-t-trade-projection",
+    timestamp=datetime(2026, 8, 24, 10, 0),
+    cadence=StrategyCadence.TICK,
+    instrument_code="600000.SH",
+    market_data_context=MarketDataContext(
+      source="BACKTEST",
+      stream_id="synthetic:600000.SH",
+      continuity_generation=1,
+      source_sequence=17,
+      source_time_ms=1_787_518_800_000,
+      tick_ordinal=17,
+      session=MarketDataSession.CONTINUOUS_AM,
+      trade_date=date(2026, 8, 24),
+    ),
+    market_context={
+      "data_quality": "OK",
+      "last_price": 10.2,
+      "metadata": {"sentinel": "repeated-environment-root" * 64},
+    },
+    risk_caps={
+      "risk_mode": "NORMAL",
+      "risk_tags": ["risk_normal"],
+      "metadata": {"sentinel": "repeated-risk-root" * 64},
+    },
+    position_profile={
+      "metadata": {"sentinel": "repeated-position-root" * 64},
+    },
+    execution_profile={
+      "day_state": {"sentinel": "repeated-execution-root" * 64},
+    },
+  )
+  signal_snapshot = {
+    "data_health": "READY",
+    "opportunity_score": 0.82,
+    "selected_path": "MOMENTUM",
+    "candidate_status": "REVALIDATE",
+    "candidate_id": "candidate-1",
+    "candidate_fingerprint": "candidate-fingerprint-1",
+    "candidate_state_version": 5,
+    "continuity_generation": "1",
+    "source_time_ms": 1_787_518_800_000,
+    "tick_ordinal": 17,
+    "features": {
+      "hot_diagnostic": "signal-diagnostic-must-not-be-copied" * 128,
+      "samples": ["hot-sample-must-not-be-copied" * 128],
+    },
+    "momentum": {
+      "phase": "REVALIDATE",
+      "score": 0.82,
+      "preview": True,
+      "candidate_ready": False,
+      "hard_gates": [{"detail": "verbose" * 128}],
+    },
+  }
+  event = {
+    "event_key": "tto:trace-t-trade-projection",
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "record_kind": "MATERIAL",
+    "event_type": "FSM_TRANSITION",
+    "instrument_code": "600000.SH",
+    "evaluated_at_ms": 1_787_518_800_000,
+    "signal_snapshot": signal_snapshot,
+    "metrics": {"sentinel": "event-detail-must-not-be-copied" * 128},
+  }
+  instrument_state = {
+    "status": "OBSERVING",
+    "pending_entry_intent_id": "intent-t-trade-projection",
+    "cooldown_until_ms": 1_787_519_000_000,
+    "opportunity": {
+      "schema_version": 1,
+      "data_health": "READY",
+      "state_version": 5,
+      "candidate_status": "REVALIDATE",
+      "candidate_suppressed": False,
+      "candidate_awaiting_approval": False,
+      "samples": ["runtime-hot-sample-must-not-be-copied" * 128],
+      "latest_evaluation": signal_snapshot,
+      "candidate": {
+        "candidate_id": "candidate-1",
+        "fingerprint": "candidate-fingerprint-1",
+        "path": "MOMENTUM",
+        "score": 0.82,
+        "source_time_ms": 1_787_518_800_000,
+        "tick_ordinal": 17,
+      },
+    },
+  }
+  output = StrategyOutput(
+    runtime_state_patch=RuntimeStatePatch(
+      set={"instrument_states": {"600000.SH": instrument_state}},
+      append_events=[event],
+    ),
+    trade_intents=[
+      TradeIntent(
+        strategy_id="802",
+        run_id=context.run_id,
+        instrument_code="600000.SH",
+        direction=TradeIntentDirection.BUY,
+        bucket="swing",
+        reason="T_TRADE_OPPORTUNITY_CANDIDATE",
+        target_amount=10_000.0,
+        trace_id=input_snapshot.trace_id,
+        intent_id="intent-t-trade-projection",
+        metadata={
+          "t_trade_role": "entry",
+          "candidate_id": "candidate-1",
+          "candidate_fingerprint": "candidate-fingerprint-1",
+          "exit_plan_template": {
+            "sentinel": "intent-template-must-not-be-copied" * 128,
+          },
+        },
+      )
+    ],
+    decision_tags=["t_trade_opportunity_candidate"],
+    trace_payload={
+      "reason": "T_TRADE_OPPORTUNITY_CANDIDATE_LATCHED",
+      "candidate_id": "candidate-1",
+      "candidate_fingerprint": "candidate-fingerprint-1",
+      "signal_snapshot": signal_snapshot,
+    },
+  )
+  return runtime, input_snapshot, output, signal_snapshot
+
+
+def test_t_trade_material_trace_uses_minimal_causal_index_without_full_roots(
+  strategy_executor: StrategyExecutor,
+  monkeypatch,
+) -> None:
+  """T trace retains causal identities while omitting repeated hot evidence."""
+
+  runtime, input_snapshot, output, signal_snapshot = _t_trade_trace_fixture(
+    strategy_executor
+  )
+
+  def generic_path_must_not_run(*_args, **_kwargs):
+    raise AssertionError("T trace must not serialize or hash generic roots")
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "_canonical_trace_audit_bytes",
+    generic_path_must_not_run,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "summarize_strategy_input",
+    generic_path_must_not_run,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "summarize_intent",
+    generic_path_must_not_run,
+  )
+
+  strategy_executor._record_strategy_output_trace(runtime, output, input_snapshot)
+
+  [record] = runtime.state_manager._pending_decision_trace_records
+  state_marker = record["state_patch"]["current_state"]
+  encoded = json.dumps(record, default=str, sort_keys=True).encode("utf-8")
+
+  assert record["trace_id"] == input_snapshot.trace_id
+  assert record["strategy_run_id"] == runtime.run_id
+  assert record["strategy_id"] == "802"
+  assert record["instrument_code"] == "600000.SH"
+  assert record["input_summary"]["cadence"] == "TICK"
+  assert record["input_summary"]["source_identity"] == {
+    "continuity_generation": 1,
+    "source_time_ms": 1_787_518_800_000,
+    "tick_ordinal": 17,
+  }
+  assert record["output_summary"] == {
+    "format": strategy_executor_module._T_TRADE_TRACE_PROJECTION_FORMAT,
+    "record_kind": "MATERIAL",
+    "evaluation_references": [
+      {
+        "record_kind": "MATERIAL",
+        "event_type": "FSM_TRANSITION",
+        "evaluation_event_key": "tto:trace-t-trade-projection",
+      }
+    ],
+  }
+  assert state_marker["execution"]["status"] == "OBSERVING"
+  assert state_marker["opportunity"] == {
+    "state_version": 5,
+    "candidate_status": "REVALIDATE",
+    "candidate_suppressed": False,
+    "candidate_awaiting_approval": False,
+  }
+  assert record["trade_intents"][0]["intent_id"] == "intent-t-trade-projection"
+  assert "trace_id" not in record["trade_intents"][0]
+  assert "instrument_code" not in record["trade_intents"][0]
+  assert record["trade_intents"][0]["metadata"] == {
+    "candidate_fingerprint": "candidate-fingerprint-1",
+    "candidate_id": "candidate-1",
+    "t_trade_role": "entry",
+  }
+  assert "exit_plan_template" not in record["trade_intents"][0].get("metadata", {})
+  assert record["decision_trace"]["environment"] == {}
+  assert record["decision_trace"]["risk_caps"] == {}
+  assert record["decision_trace"]["position_profile"] == {}
+  assert record["decision_trace"]["execution_profile"] == {}
+  assert record["decision_trace"]["tags"] == [
+    "strategy_output",
+    "t_trade_opportunity_candidate",
+  ]
+  assert record["decision_trace"]["reason"] == "T_TRADE_OPPORTUNITY_CANDIDATE_LATCHED"
+  for forbidden in (
+    b"signal-diagnostic-must-not-be-copied",
+    b"hot-sample-must-not-be-copied",
+    b"runtime-hot-sample-must-not-be-copied",
+    b"repeated-environment-root",
+    b"repeated-risk-root",
+    b"repeated-position-root",
+    b"repeated-execution-root",
+    b"event-detail-must-not-be-copied",
+    b"intent-template-must-not-be-copied",
+  ):
+    assert forbidden not in encoded
+
+
+def test_t_trade_material_trace_projects_top_level_opportunity_without_hot_roots(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  """Legacy top-level T state remains materializable without copying its tree."""
+
+  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(
+    strategy_executor
+  )
+  top_level_sample = "top-level-hot-sample-must-not-be-copied" * 128
+  output.runtime_state_patch = RuntimeStatePatch(
+    set={
+      "opportunity": {
+        "candidate_status": "LATCHED",
+        "candidate": {"candidate_id": "candidate-top-level"},
+        "samples": [top_level_sample],
+        "latest_evaluation": {"sentinel": top_level_sample},
+      },
+      "pending_entry_intent_id": "intent-t-trade-projection",
+      "entry_order_status": "AWAITING_APPROVAL",
+      "awaiting": {
+        "instrument_code": "600000.SH",
+        "candidate_id": "candidate-top-level",
+        "intent_id": "intent-t-trade-projection",
+        "source_time_ms": 1_787_518_800_000,
+      },
+    },
+    append_events=list(output.runtime_state_patch.append_events),
+  )
+
+  strategy_executor._record_strategy_output_trace(runtime, output, input_snapshot)
+
+  [record] = runtime.state_manager._pending_decision_trace_records
+  assert record["state_patch"] == {
+    "opportunity": {"candidate_status": "LATCHED"},
+    "set": {
+      "pending_entry_intent_id": "intent-t-trade-projection",
+      "entry_order_status": "AWAITING_APPROVAL",
+    },
+    "awaiting": {
+      "candidate_id": "candidate-top-level",
+      "instrument_code": "600000.SH",
+      "intent_id": "intent-t-trade-projection",
+      "source_time_ms": 1_787_518_800_000,
+    },
+  }
+  assert top_level_sample.encode("utf-8") not in json.dumps(
+    record,
+    default=str,
+    sort_keys=True,
+  ).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+  "bad_output",
+  [
+    "trace_payload",
+    "state_patch",
+    "top_level_opportunity",
+  ],
+)
+def test_t_trade_trace_rejects_unknown_complex_roots(
+  strategy_executor: StrategyExecutor,
+  bad_output: str,
+) -> None:
+  """A newly introduced complex root fails closed instead of leaking JSON."""
+
+  runtime, input_snapshot, output, _signal = _t_trade_trace_fixture(
+    strategy_executor
+  )
+  if bad_output == "trace_payload":
+    output.trace_payload = {
+      **output.trace_payload,
+      "unprojectable_context": {"samples": ["must-not-leak"]},
+    }
+    match = "trace_payload contains unprojectable fields"
+  elif bad_output == "state_patch":
+    output.runtime_state_patch = RuntimeStatePatch(
+      set={"unprojectable_context": {"samples": ["must-not-leak"]}},
+      append_events=list(output.runtime_state_patch.append_events),
+    )
+    match = "patch.set contains unprojectable field"
+  else:
+    output.runtime_state_patch = RuntimeStatePatch(
+      set={
+        "opportunity": {
+          "candidate_status": "LATCHED",
+          "unprojectable_context": {"samples": ["must-not-leak"]},
+        }
+      },
+      append_events=list(output.runtime_state_patch.append_events),
+    )
+    match = "state_patch.opportunity contains unprojectable fields"
+
+  with pytest.raises(ValueError, match=match):
+    strategy_executor._record_strategy_output_trace(runtime, output, input_snapshot)
+
+  assert runtime.state_manager._pending_decision_trace_records == []
+
+
+def test_non_t_trade_trace_keeps_generic_projection_contract(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  """The T specialization must not alter ordinary StrategyOutput tracing."""
+
+  context = StrategyContext(
+    run_id="trace-generic-projection-run",
+    mode=StrategyRunMode.BACKTEST,
+    instruments=["600000.SH"],
+    parameters={},
+  )
+  runtime = strategy_executor.create(
+    run_id=context.run_id,
+    strategy_id=803,
+    strategy_class=MockStrategy,
+    context=context,
+  )
+  runtime.state_manager = RuntimeStateManager(
+    run_id=context.run_id,
+    persist_enabled=True,
+    is_backtest=True,
+  )
+  input_snapshot = StrategyInput(
+    run_id=context.run_id,
+    strategy_id="803",
+    trace_id="trace-generic-projection",
+    timestamp=datetime(2026, 8, 24, 10, 0),
+    cadence=StrategyCadence.TICK,
+    instrument_code="600000.SH",
+    market_context={"data_quality": "OK"},
+  )
+  output = StrategyOutput(
+    runtime_state_patch=RuntimeStatePatch(set={"phase": "EVALUATED"}),
+    decision_tags=["generic_output"],
+    trace_payload={"reason": "GENERIC_TRACE", "detail": {"kept": True}},
+  )
+
+  strategy_executor._record_strategy_output_trace(runtime, output, input_snapshot)
+
+  [record] = runtime.state_manager._pending_decision_trace_records
+  assert record["state_patch"]["format"] == "CONTENT_ADDRESSED_RUNTIME_STATE_PATCH_V1"
+  assert record["input_summary"]["market_context"] == {"data_quality": "OK"}
+  assert record["output_summary"]["trace_payload"] == {
+    "reason": "GENERIC_TRACE",
+    "detail": {"kept": True},
+  }
+  assert record["decision_trace"]["reason"] == "GENERIC_TRACE"
+
+
+def test_t_trade_ordinary_ticks_skip_trace_construction_and_persistence(
+  strategy_executor: StrategyExecutor,
+  monkeypatch,
+) -> None:
+  """The 4,201 normal fixture ticks have no alternate audit JSON row."""
+
+  runtime, input_snapshot, material_output, _signal_snapshot = _t_trade_trace_fixture(
+    strategy_executor
+  )
+  ordinary_output = StrategyOutput(
+    runtime_state_patch=RuntimeStatePatch(
+      set=material_output.runtime_state_patch.set,
+    ),
+    decision_tags=["opportunity_observed", "no_trade"],
+    trace_payload={
+      "reason": "OPPORTUNITY_OBSERVED",
+      "signal_snapshot": {"full_root": "ordinary-root-sentinel" * 256},
+    },
+  )
+
+  def trace_must_not_be_built(*_args, **_kwargs):
+    raise AssertionError("ordinary T Tick must not construct a DecisionTrace")
+
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "_build_t_trade_decision_trace_projection",
+    trace_must_not_be_built,
+  )
+  monkeypatch.setattr(
+    strategy_executor_module,
+    "_canonical_trace_audit_bytes",
+    trace_must_not_be_built,
+  )
+
+  for ordinal in range(4_201):
+    input_snapshot.trace_id = f"ordinary-{ordinal}"
+    strategy_executor._record_strategy_output_trace(
+      runtime,
+      ordinary_output,
+      input_snapshot,
+    )
+
+  assert runtime.state_manager._pending_decision_trace_records == []
+
+
+def test_t_trade_trace_day_batch_microbenchmark(
+  strategy_executor: StrategyExecutor,
+) -> None:
+  """Measure the exact in-memory record construction and JSON batch shape."""
+
+  runtime, input_snapshot, material_output, _signal = _t_trade_trace_fixture(
+    strategy_executor
+  )
+  ordinary_output = StrategyOutput(
+    runtime_state_patch=RuntimeStatePatch(
+      set=material_output.runtime_state_patch.set,
+    ),
+    decision_tags=["opportunity_observed", "no_trade"],
+    trace_payload={"reason": "OPPORTUNITY_OBSERVED"},
+  )
+  row_count = 4_737
+  material_row_count = 0
+  ordinary_tick_seconds: list[float] = []
+  construction_started_at = perf_counter()
+  for index in range(row_count):
+    input_snapshot.trace_id = f"trace-t-trade-benchmark-{index}"
+    tick_started_at = perf_counter()
+    strategy_executor._record_strategy_output_trace(
+      runtime,
+      ordinary_output,
+      input_snapshot,
+    )
+    elapsed = perf_counter() - tick_started_at
+    ordinary_tick_seconds.append(elapsed)
+  construction_seconds = perf_counter() - construction_started_at
+  records = runtime.state_manager._pending_decision_trace_records
+
+  json_started_at = perf_counter()
+  encoded_batch = json.dumps(
+    records,
+    default=str,
+    ensure_ascii=True,
+    sort_keys=True,
+    separators=(",", ":"),
+  ).encode("utf-8")
+  json_seconds = perf_counter() - json_started_at
+  ordinary_tick_p95_seconds = sorted(ordinary_tick_seconds)[
+    int((len(ordinary_tick_seconds) - 1) * 0.95)
+  ]
+  total_seconds = construction_seconds + json_seconds
+  total_mib = len(encoded_batch) / (1024 * 1024)
+
+  print(
+    "T-trade ordinary trace microbenchmark: "
+    f"source_ticks={row_count}, material_rows={material_row_count}, "
+    f"total_mib={total_mib:.3f}, construction_seconds={construction_seconds:.6f}, "
+    f"json_seconds={json_seconds:.6f}, total_seconds={total_seconds:.6f}, "
+    f"p95_ordinary_tick_ms={ordinary_tick_p95_seconds * 1000:.4f}"
+  )
+  assert len(records) == material_row_count
+  assert encoded_batch == b"[]"
+  assert total_seconds <= 1.0
+  assert ordinary_tick_p95_seconds <= 0.00025
 
 
 def test_strategy_output_trace_compacts_decimal_deterministically() -> None:

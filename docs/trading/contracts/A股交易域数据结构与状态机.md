@@ -782,7 +782,9 @@ expected_grid_profit_pct
 
 ## 16. DecisionTrace
 
-每次决策必须保存完整审计快照。
+通用策略的每次决策必须保存完整审计快照；`USES_T_TRADE_OPPORTUNITY_PROFILE`
+是受限例外。T 助手的普通 Tick 不是独立业务事实，不能为了“每次不买可审计”
+把同一份行情、环境、风控、仓位和热样本再次内联到 `DecisionTrace`。
 
 ```text
 DecisionTrace
@@ -819,6 +821,48 @@ DecisionTrace
 - 订单状态版本。
 - 参数包版本。
 - 环境快照版本。
+
+### 16.2 T 助手的最小因果索引
+
+权威行情缓存/历史行情存储是行情和回放数据的单一真源。对
+`USES_T_TRADE_OPPORTUNITY_PROFILE`，下列是唯一可产生 T `MATERIAL` 行、
+`DecisionTrace` 或专用机会 evaluation 的业务事实：
+
+1. 候选的 `id`、fingerprint 或 status 创建/变化；
+2. 算法 FSM 的 pullback/momentum phase 真实迁移；
+3. continuity generation 变化；
+4. policy、config 或 profile 的版本/fingerprint 变化；
+5. 已有显式 callback 标记为材料的事实，例如 `TradeIntent`、`INTENT_LINKED`、
+   `CANDIDATE_SUPPRESSED`、信号创建/失效，或带稳定业务键的外部入场/退出政策动作。
+
+材料 trace 只保留顶层未覆盖的 source identity、版本、原因/标签、意图摘要、
+材料评估 `event_key` 引用及当前标的的紧凑状态变更索引；不复制完整
+`MarketContextSnapshot`、`RiskContextCaps`、position/execution roots、全量标的
+状态、`signal_snapshot` 或 `samples`。专用 evaluation/material opportunity 表是详细
+信号、特征与机会证据的权威位置；trace 与 evaluation 仅对上述材料 `event_key`
+精确一一对账，T 机会 evaluation 不再复制进 RuntimeState `runtime_events`。
+
+普通 T Tick 与普通诊断不创建 `DecisionTrace`、evaluation、`COALESCED_DIAGNOSTIC`、
+RuntimeState event ring 或替代观察 JSON。data health/reasons、coverage、阈值带、
+hard gate、score、交易时段、entry cutoff 与普通/外部 blocker 都是可从行情重放的
+观察诊断，不能通过改名为 `MATERIAL` 而持久化。首次普通状态只建立内存 event cursor
+baseline；其后的同类变化也不得计算完整根快照的 canonical JSON/SHA。
+
+其“未交易”审计由以下可验证证据组合完成：权威行情缓存/历史行情存储中的
+source identity、持久化检查点的 processed watermark/count、版本化策略/配置/政策，
+以及按相同输入的确定性重放。完整审计的含义是“可验证并可重建证据”，不是每个
+Tick 内联一份完整快照。此规则不要求新增 GraphQL 或数据库 schema。
+
+### 16.3 T 助手的单份状态检查点
+
+RuntimeState 的顶层 compact state 是唯一可恢复状态副本；`runtime_checkpoints` 只保留
+一个有界 metadata checkpoint，不得嵌套 `state_payload` 或 `payload_fingerprint`。
+`PREPARED` 以顶层 material outbox 和有界 manifest 证明待物化集合，并用当前顶层
+state fingerprint 校验该边界；materialize receipt 后 `FINALIZE` 清空该 outbox 并以
+`SEALED` metadata 的 state fingerprint 证明同一顶层状态。恢复时，`PREPARED` 必须
+验证当前顶层 state + outbox/manifest 后幂等物化；`SEALED` 必须直接验证当前顶层
+compact state fingerprint。任何损坏、不匹配或缺失都必须 fail-closed，进入既有
+continuity/warming 路径，绝不能回滚到旧的嵌套检查点载荷。
 
 ---
 

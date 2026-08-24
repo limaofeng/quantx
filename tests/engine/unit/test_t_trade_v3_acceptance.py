@@ -881,8 +881,32 @@ def _completed_pressure_report_payload() -> dict:
           "runtime_state_checkpoint_policy": "DAY_BATCH",
         },
         "evaluations": {
-          "material_rows": 1_072,
-          "diagnostic_logical_events": 8_400,
+          # The fixed synthetic fixture contains only replayable ordinary
+          # observations. It must prove tick accounting via watermark/count,
+          # not manufacture MATERIAL evidence rows.
+          "material_rows": 0,
+          "diagnostic_rows": 0,
+          "material_logical_events": 0,
+          "diagnostic_logical_events": 0,
+        },
+        "checkpoint_progress": {
+          "status": "AVAILABLE",
+          "checkpoint_id": "checkpoint-final",
+          "checkpoint_status": "SEALED",
+          "processed_tick_count": 9_472,
+          "source_identity": {
+            "stream_id": "backtest:full-run",
+            "generation": 1,
+            "sequence": 9_472,
+            "source_time_ms": 1780450619999,
+          },
+        },
+        "material_trace_evaluation_keys": {
+          "evaluation_material_rows": 0,
+          "trace_rows_with_evaluation_references": 0,
+          "duplicate_evaluation_event_keys": 0,
+          "duplicate_trace_event_keys": 0,
+          "exact_key_match": True,
         },
       },
     }
@@ -904,13 +928,20 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
     "replay_acceptance": "V3_PRESSURE_BASELINE",
     "runtime_state_checkpoint_policy": "DAY_BATCH",
   }
+  assert imported["run_evidence"]["evaluations"] == {
+    "material_rows": 0,
+    "diagnostic_rows": 0,
+    "material_logical_events": 0,
+    "diagnostic_logical_events": 0,
+  }
   assert imported["tick_accounting"] == {
     "requested_fixture_ticks": 9_600,
     "engine_ticks_processed": 9_472,
-    "policy_filtered_ticks": 128,
+    "fixture_policy_filtered_ticks": 128,
     "policy_filtered_per_instrument_day": 8,
     "instrument_day_count": 16,
-    "expected_policy_filtered_ticks": 128,
+    "expected_engine_ticks": 9_472,
+    "unprocessed_engine_ticks": 0,
     "continuous_pm_policy": "13:00 <= local_time < 14:57",
     "policy_filtered_time_range": "14:57:10..14:59:59",
     "accounting_passed": True,
@@ -926,6 +957,251 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
     match="COMPLETED_PRESSURE_EVIDENCE_INVALID",
   ):
     acceptance_module._load_completed_pressure_baseline(path)
+
+
+def test_pressure_tick_accounting_separates_timeout_from_fixture_filtering() -> None:
+  accounting = acceptance_module._pressure_tick_accounting(
+    {
+      "fixture": {
+        "tick_count": 9_600,
+        "ticks_per_instrument_day": 600,
+        "trading_dates": ["2026-06-04", "2026-06-05"],
+        "held_instruments": [
+          "000001.SZ",
+          "000002.SZ",
+          "000003.SZ",
+          "000004.SZ",
+          "000005.SZ",
+          "000006.SZ",
+          "000007.SZ",
+          "000008.SZ",
+        ],
+      },
+      "throughput": {"engine_ticks_processed": 4_737},
+    }
+  )
+
+  assert accounting["fixture_policy_filtered_ticks"] == 128
+  assert accounting["expected_engine_ticks"] == 9_472
+  assert accounting["unprocessed_engine_ticks"] == 4_735
+  assert accounting["accounting_passed"] is False
+
+
+def test_durable_pressure_tick_accounting_preserves_timeout_progress() -> None:
+  accounting = acceptance_module._durable_pressure_tick_accounting(
+    {
+      "fixture": {
+        "tick_count": 9_600,
+        "ticks_per_instrument_day": 600,
+        "trading_dates": ["2026-06-04", "2026-06-05"],
+        "held_instruments": [
+          "000001.SZ",
+          "000002.SZ",
+          "000003.SZ",
+          "000004.SZ",
+          "000005.SZ",
+          "000006.SZ",
+          "000007.SZ",
+          "000008.SZ",
+        ],
+      },
+      "throughput": {"engine_ticks_processed": 4_737},
+      "run_evidence": {
+        "evaluations": {
+          "material_rows": 536,
+          "material_logical_events": 536,
+          "diagnostic_rows": 0,
+          "diagnostic_logical_events": 0,
+        },
+        "checkpoint_progress": {
+          "status": "AVAILABLE",
+          "processed_tick_count": 4_737,
+          "source_identity": {
+            "stream_id": "backtest:pressure",
+            "generation": 1,
+            "sequence": 4_737,
+          },
+        },
+        "material_trace_evaluation_keys": {
+          "exact_key_match": True,
+        }
+      },
+    }
+  )
+
+  assert accounting["status"] == "ENGINE_WATERMARK_MATERIAL_FACT_ACCOUNTING"
+  assert accounting["durable_processed_synthetic_ticks"] == 4_737
+  assert accounting["expected_accepted_synthetic_ticks"] == 9_472
+  assert accounting["durable_unprocessed_accepted_synthetic_ticks"] == 4_735
+  assert accounting["instrumentation_matches_durable"] is True
+  assert accounting["durable_accounting_passed"] is False
+  assert accounting["ordinary_tick_durable_rows"] == 0
+
+
+def test_material_trace_evaluation_key_accounting_is_exact_without_tick_rows() -> None:
+  event_keys = [f"tto:material:{ordinal}" for ordinal in range(536)]
+  trace_summaries = [
+    {
+      "format": "T_TRADE_DECISION_TRACE_CAUSAL_INDEX_V3",
+      "record_kind": "MATERIAL",
+      "evaluation_references": [
+        {
+          "record_kind": "MATERIAL",
+          "evaluation_event_key": event_key,
+        }
+      ],
+    }
+    for event_key in event_keys
+  ]
+
+  accounting = acceptance_module._material_trace_evaluation_key_accounting(
+    evaluation_event_keys=event_keys,
+    trace_output_summaries=trace_summaries,
+  )
+
+  assert accounting["evaluation_material_rows"] == 536
+  assert accounting["trace_rows_with_evaluation_references"] == 536
+  assert accounting["exact_key_match"] is True
+  assert accounting["duplicate_trace_event_keys"] == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovery_discards_closed_pool_before_fresh_cancel(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  operations: list[str] = []
+  evidence_calls = 0
+
+  class OriginalManager:
+    async def stop_strategy(self, _run_id, *, force: bool) -> bool:
+      assert force is True
+      operations.append("best-effort-runtime-stop")
+      return False
+
+    async def _stop_persisted_strategy(self, _run_id) -> bool:
+      operations.append("persisted-stop")
+      return True
+
+  class OriginalReplayService:
+    async def cancel(self, _run_id):
+      operations.append("fresh-session-service-retry")
+      raise RuntimeError("closed connection")
+
+  class FreshReplayService:
+    def __init__(self, manager) -> None:
+      assert isinstance(
+        manager,
+        acceptance_module._PersistedOnlyPressureRunManager,
+      )
+      assert manager.get_run("isolated-pressure-run") is None
+      operations.append("fresh-service")
+
+    async def get(self, _run_id):
+      operations.append("fresh-get")
+      return {"status": "RUNNING"}
+
+    async def cancel(self, _run_id):
+      operations.append("fresh-cancel")
+      return {"status": "CANCELLED", "progress_pct": 20.0}
+
+  async def dispose() -> None:
+    operations.append("dispose-idle-pool")
+
+  initial_evidence = {
+    "mode": "BACKTEST",
+    "status": "RUNNING",
+    "parameters": {
+      "account_id": "synthetic-account",
+      "t_trade_replay": True,
+      "replay_acceptance": "V3_PRESSURE_BASELINE",
+      "runtime_state_checkpoint_policy": "DAY_BATCH",
+    },
+  }
+  final_evidence = {**initial_evidence, "status": "STOPPED"}
+
+  async def load_evidence(_run_id):
+    nonlocal evidence_calls
+    evidence_calls += 1
+    assert operations and operations[0] == "dispose-idle-pool"
+    operations.append(
+      "initial-evidence" if evidence_calls == 1 else "final-evidence"
+    )
+    return initial_evidence if evidence_calls == 1 else final_evidence
+
+  async def pending() -> None:
+    await asyncio.Event().wait()
+
+  task = asyncio.create_task(pending())
+  await asyncio.sleep(0)
+
+  monkeypatch.setattr(
+    acceptance_module,
+    "relational_engine",
+    SimpleNamespace(dispose=dispose),
+  )
+  monkeypatch.setattr(
+    acceptance_module,
+    "TTradeReplayService",
+    FreshReplayService,
+  )
+  monkeypatch.setattr(acceptance_module, "_load_run_evidence", load_evidence)
+
+  cancellation, _service, replay, evidence, convergence = (
+    await acceptance_module._recover_timed_out_synthetic_pressure_run(
+      manager=OriginalManager(),
+      service=OriginalReplayService(),
+      runtime=SimpleNamespace(task=task),
+      run_id="isolated-pressure-run",
+      cancellation_error=RuntimeError("connection closed"),
+    )
+  )
+
+  assert operations == [
+    "dispose-idle-pool",
+    "initial-evidence",
+    "fresh-session-service-retry",
+    "dispose-idle-pool",
+    "best-effort-runtime-stop",
+    "dispose-idle-pool",
+    "fresh-service",
+    "fresh-get",
+    "fresh-cancel",
+    "final-evidence",
+  ]
+  assert evidence_calls == 2
+  assert cancellation["fresh_persisted_only_recovery"] is True
+  assert cancellation["direct_cancel_error_type"] == "RuntimeError"
+  assert cancellation["fresh_session_retry_error_type"] == "RuntimeError"
+  assert cancellation["forced_runtime_task_cancel"] is True
+  assert task.cancelled() is True
+  assert replay["status"] == "CANCELLED"
+  assert evidence["status"] == "STOPPED"
+  assert convergence["status"] == "TERMINAL"
+  assert convergence["timeout_recovery"] == (
+    "FRESH_PERSISTED_ONLY_AFTER_POOL_DISPOSE"
+  )
+
+
+@pytest.mark.parametrize(
+  "mode, checkpoint_policy",
+  [("PAPER", "DAY_BATCH"), ("BACKTEST", "SESSION_BOUNDARY")],
+)
+def test_timeout_fallback_rejects_any_run_outside_owned_pressure_boundary(
+  mode: str,
+  checkpoint_policy: str,
+) -> None:
+  with pytest.raises(RuntimeError, match="FALLBACK_RUN_NOT_OWNED"):
+    acceptance_module._assert_owned_synthetic_pressure_backtest(
+      {
+        "mode": mode,
+        "parameters": {
+          "account_id": "synthetic-account",
+          "t_trade_replay": True,
+          "replay_acceptance": "V3_PRESSURE_BASELINE",
+          "runtime_state_checkpoint_policy": checkpoint_policy,
+        },
+      }
+    )
 
 
 @pytest.mark.parametrize(
@@ -966,7 +1242,7 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
         "pressure_baseline",
         "run_evidence",
         "evaluations",
-        "diagnostic_logical_events",
+        "diagnostic_rows",
       ),
       8_399,
     ),
@@ -984,9 +1260,27 @@ def test_completed_pressure_import_requires_sealed_backtest_and_redacts_account(
         "pressure_baseline",
         "run_evidence",
         "evaluations",
-        "diagnostic_logical_events",
+        "diagnostic_rows",
       ),
       [],
+    ),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "checkpoint_progress",
+        "processed_tick_count",
+      ),
+      9_471,
+    ),
+    (
+      (
+        "pressure_baseline",
+        "run_evidence",
+        "checkpoint_progress",
+        "source_identity",
+      ),
+      {},
     ),
   ],
 )
@@ -1460,8 +1754,11 @@ async def test_run_evidence_separates_durable_actionable_facts_from_material(
   class _Database:
     def __init__(self) -> None:
       self.execute_calls = 0
+      self.get_calls: list[tuple[object, str]] = []
 
-    async def get(self, _model, _run_id):
+    async def get(self, model, run_id):
+      self.get_calls.append((model, run_id))
+      assert model is acceptance_module.StrategyRun
       return SimpleNamespace(
         mode="BACKTEST",
         status="COMPLETED",
@@ -1475,17 +1772,66 @@ async def test_run_evidence_separates_durable_actionable_facts_from_material(
       if self.execute_calls == 1:
         return _Result(rows=[("MATERIAL", 11, 11)])
       if self.execute_calls == 2:
-        return _Result(one=(7, 5))
+        return _Result(rows=[(f"tto:{ordinal}",) for ordinal in range(11)])
       if self.execute_calls == 3:
+        return _Result(
+          rows=[
+            (
+              {
+                "format": "T_TRADE_DECISION_TRACE_CAUSAL_INDEX_V3",
+                "evaluation_references": [
+                  {
+                    "record_kind": "MATERIAL",
+                    "evaluation_event_key": f"tto:{ordinal}",
+                  }
+                ],
+              },
+            )
+            for ordinal in range(11)
+          ]
+        )
+      if self.execute_calls == 4:
+        return _Result(one=(7, 5))
+      if self.execute_calls == 5:
         return _Result(one=(9, 3))
       return _Result(rows=[])
 
   database = _Database()
+  state_repository_run_ids: list[str] = []
+
+  class _StateRepository:
+    def __init__(self, db) -> None:
+      assert db is database
+
+    async def get_state(self, run_id: str):
+      state_repository_run_ids.append(run_id)
+      return SimpleNamespace(
+        custom_state={
+          "runtime_checkpoints": [
+            {
+              "checkpoint_id": "checkpoint-1",
+              "status": "SEALED",
+              "completeness": {"complete": True},
+              "processed_watermark": {
+                "stream_id": "backtest:run-1",
+                "generation": 1,
+                "sequence": 11,
+                "processed_tick_count": 11,
+              },
+            }
+          ]
+        }
+      )
 
   async def fake_get_async_db():
     yield database
 
   monkeypatch.setattr(acceptance_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    acceptance_module,
+    "StrategyRunStateRepository",
+    _StateRepository,
+  )
 
   evidence = await acceptance_module._load_run_evidence(
     "run-1",
@@ -1493,7 +1839,9 @@ async def test_run_evidence_separates_durable_actionable_facts_from_material(
   )
 
   observation = evidence["durable_actionable_fact_observation"]
-  assert database.execute_calls == 4
+  assert database.execute_calls == 6
+  assert database.get_calls == [(acceptance_module.StrategyRun, "run-1")]
+  assert state_repository_run_ids == ["run-1"]
   assert observation["measurement_scope"] == (
     "RUN_SCOPED_DURABLE_ROW_COUNTS_AT_OBSERVATION"
   )
@@ -1513,6 +1861,10 @@ async def test_run_evidence_separates_durable_actionable_facts_from_material(
     "ordinary_material_evaluations"
   ]
   assert "not per-commit attribution" in observation["commit_attribution"]
+  assert evidence["evaluations"]["material_logical_events"] == 11
+  assert evidence["evaluations"]["total_logical_events"] == 11
+  assert evidence["checkpoint_progress"]["processed_tick_count"] == 11
+  assert evidence["material_trace_evaluation_keys"]["exact_key_match"] is True
 
   safe = acceptance_module._safe_pressure_run_evidence(evidence)
   assert safe["durable_actionable_fact_observation"] == observation
@@ -1679,8 +2031,11 @@ async def test_cancelled_pressure_classifies_day_batch_persistence(
   class _Database:
     def __init__(self) -> None:
       self.execute_calls = 0
+      self.get_calls: list[tuple[object, str]] = []
 
-    async def get(self, _model, _run_id):
+    async def get(self, model, run_id):
+      self.get_calls.append((model, run_id))
+      assert model is acceptance_module.StrategyRun
       return SimpleNamespace(
         parameters=parameters,
         status="STOPPED",
@@ -1697,6 +2052,31 @@ async def test_cancelled_pressure_classifies_day_batch_persistence(
       return _Result(rows=[("COALESCED_DIAGNOSTIC", 1, 32)])
 
   database = _Database()
+  state_repository_run_ids: list[str] = []
+
+  class _StateRepository:
+    def __init__(self, db) -> None:
+      assert db is database
+
+    async def get_state(self, run_id: str):
+      state_repository_run_ids.append(run_id)
+      return SimpleNamespace(
+        custom_state={
+          "runtime_checkpoints": [
+            {
+              "checkpoint_id": "cancelled-checkpoint",
+              "status": "SEALED",
+              "completeness": {"complete": True},
+              "processed_watermark": {
+                "stream_id": f"backtest:{run_id}",
+                "generation": 1,
+                "sequence": 123,
+                "processed_tick_count": 123,
+              },
+            }
+          ]
+        }
+      )
 
   async def fake_get_async_db():
     yield database
@@ -1710,6 +2090,11 @@ async def test_cancelled_pressure_classifies_day_batch_persistence(
       }
 
   monkeypatch.setattr(acceptance_module, "get_async_db", fake_get_async_db)
+  monkeypatch.setattr(
+    acceptance_module,
+    "StrategyRunStateRepository",
+    _StateRepository,
+  )
   monkeypatch.setattr(acceptance_module, "TTradeReplayService", _ReplayService)
   fixture = SimpleNamespace(to_dict=lambda: {"tick_count": 9_600})
 
@@ -1723,3 +2108,8 @@ async def test_cancelled_pressure_classifies_day_batch_persistence(
   assert persistence["enabled"] is expected_enabled
   assert expected_evidence in persistence["evidence"]
   assert expected_boundary in evidence["primary_observed_boundary"]
+  assert database.get_calls == [
+    (acceptance_module.StrategyRun, "cancelled-sealed-run")
+  ]
+  assert state_repository_run_ids == ["cancelled-sealed-run"]
+  assert evidence["checkpoint_progress"]["processed_tick_count"] == 123

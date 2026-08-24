@@ -53,6 +53,8 @@ MARKET_CONTINUITY_RECONCILE_REQUIRED_KEY = (
 T_TRADE_MATERIAL_EVENT_OUTBOX_KEY = "t_trade_material_event_outbox"
 T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY = "t_trade_diagnostic_event_outbox"
 T_TRADE_PAPER_FILL_OUTBOX_KEY = "t_trade_paper_fill_outbox"
+_T_TRADE_OPPORTUNITY_EVALUATION_EVENT = "T_TRADE_OPPORTUNITY_EVALUATION"
+_PREPARED_DIAGNOSTIC_OUTBOX_MANIFEST_KEY = "materialization_outbox_manifest"
 _MAX_APPLIED_RUNTIME_EVENT_KEYS = 2_000
 # A single personal-account BACKTEST day can contain roughly 4,800 exact
 # non-coalescible MATERIAL evaluations in the fixed 9,600-Tick workload.
@@ -62,8 +64,6 @@ _MAX_T_TRADE_MATERIAL_OUTBOX_EVENTS = 8_192
 _MAX_T_TRADE_DIAGNOSTIC_OUTBOX_EVENTS = 8_192
 _MAX_T_TRADE_PAPER_FILL_OUTBOX_FACTS = 128
 _MAX_TERMINAL_TRADE_INTENT_CACHE_ENTRIES = 512
-_MAX_RUNTIME_COMPLETE_CHECKPOINTS = 4
-_MAX_RUNTIME_INCOMPLETE_CHECKPOINTS = 4
 _DECISION_TRACE_SUPPLEMENTAL_FORMAT = "DECISION_TRACE_SUPPLEMENTAL_V1"
 _TERMINAL_TRADE_INTENT_STATUSES = frozenset(
     {
@@ -133,9 +133,10 @@ class RuntimeCheckpoint:
     """One coordinator-owned, durably sealed runtime boundary.
 
     ``DAY_BATCH`` is the BACKTEST policy and ``SESSION_BOUNDARY`` is the
-    LIVE/PAPER policy.  A sealed checkpoint carries an immutable complete
-    runtime payload, so a later prepared (but incomplete) CAS cannot erase the
-    last recoverable state boundary.
+    LIVE/PAPER policy.  The atomic RuntimeState row is the one authoritative
+    resume image.  A checkpoint carries only bounded proof that the current
+    top-level compact state is that boundary; it deliberately never embeds a
+    second rollback payload.
     """
 
     checkpoint_id: str
@@ -146,8 +147,6 @@ class RuntimeCheckpoint:
     processed_watermark: Dict[str, Any]
     continuity_generation: Any
     state_fingerprint: str
-    state_payload: Dict[str, Any]
-    payload_fingerprint: str
     completeness: Dict[str, Any]
     sealed_at: Optional[str]
     status: str
@@ -184,8 +183,6 @@ class RuntimeCheckpoint:
             "processed_watermark": copy.deepcopy(self.processed_watermark),
             "continuity_generation": copy.deepcopy(self.continuity_generation),
             "state_fingerprint": self.state_fingerprint,
-            "state_payload": copy.deepcopy(self.state_payload),
-            "payload_fingerprint": self.payload_fingerprint,
             "completeness": copy.deepcopy(self.completeness),
             "sealed_at": self.sealed_at,
             "status": self.status,
@@ -656,10 +653,48 @@ class RuntimeStateManager:
             self._state_sync_has_captured = False
             self._mark_dirty()
 
+    def capture_strategy_state_for_persistence(self, strategy: Any) -> None:
+        """Capture one compact strategy projection before a durable write.
+
+        Startup recovery can change strategy state before ``start_state_sync``
+        subscribes to its notifications.  Those changes still need the same
+        persistence projection as an ordinary checkpoint; accepting a raw
+        ``state.to_dict()`` there would allow a V3 T-trade hot sample window
+        back into RuntimeState.
+        """
+
+        self._capture_strategy_state_projection(strategy)
+
     def _capture_bound_strategy_state(self) -> None:
         """Replace strategy-owned state from one authoritative source snapshot."""
 
         strategy = self._state_sync_strategy
+        current_strategy_keys = {
+            key
+            for key in dict(self._state.get("custom", {}) or {})
+            if key not in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
+        }
+        captured_keys = (
+            current_strategy_keys
+            | self._state_sync_initial_strategy_keys
+            | set(self._state_sync_pending_deltas)
+        )
+        captured_strategy_keys = self._capture_strategy_state_projection(
+            strategy,
+            captured_keys=captured_keys,
+        )
+        self._state_sync_captured_strategy_keys = captured_strategy_keys
+        self._state_sync_pending_deltas.clear()
+        self._state_sync_has_captured = True
+
+    def _capture_strategy_state_projection(
+        self,
+        strategy: Any,
+        *,
+        captured_keys: Optional[set[str]] = None,
+    ) -> set[str]:
+        """Capture full memory state plus the only permitted durable image."""
+
         state = getattr(strategy, "state", None)
         to_dict = getattr(state, "to_dict", None)
         if not callable(to_dict):
@@ -683,34 +718,27 @@ class RuntimeStateManager:
         # Filter first, then make exactly one deep copy of strategy-owned
         # state.  Manager-owned gates/outboxes/grid-book objects retain their
         # current authority and are never copied on every hot Tick.
-        current_strategy_keys = {
-            key
-            for key in dict(self._state.get("custom", {}) or {})
-            if key not in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
-        }
-        captured_keys = (
-            current_strategy_keys
-            | self._state_sync_initial_strategy_keys
-            | set(self._state_sync_pending_deltas)
-        )
         strategy_snapshot = {
             str(key): value
             for key, value in source_snapshot.items()
             if str(key or "")
             and str(key) not in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
-            and str(key) in captured_keys
+            and (captured_keys is None or str(key) in captured_keys)
         }
         durable_strategy_snapshot = {
             str(key): value
             for key, value in durable_source_snapshot.items()
             if str(key or "")
             and str(key) not in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
-            and str(key) in captured_keys
+            and (captured_keys is None or str(key) in captured_keys)
         }
         if set(durable_strategy_snapshot) != set(strategy_snapshot):
             raise RuntimeError(
                 "策略持久化状态投影根键与权威状态不一致"
             )
+        self._ensure_compact_t_trade_durable_custom_state(
+            durable_strategy_snapshot
+        )
         captured_snapshot = copy.deepcopy(strategy_snapshot)
         durable_captured_snapshot = copy.deepcopy(durable_strategy_snapshot)
         current_custom = dict(self._state.get("custom", {}) or {})
@@ -720,13 +748,15 @@ class RuntimeStateManager:
             if key in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
         }
         next_custom = {**preserved_custom, **captured_snapshot}
-        if current_custom != next_custom:
+        if (
+            current_custom != next_custom
+            or self._state_sync_durable_strategy_snapshot
+            != durable_captured_snapshot
+        ):
             self._state["custom"] = next_custom
             self._mark_dirty()
-        self._state_sync_captured_strategy_keys = set(captured_snapshot)
         self._state_sync_durable_strategy_snapshot = durable_captured_snapshot
-        self._state_sync_pending_deltas.clear()
-        self._state_sync_has_captured = True
+        return set(captured_snapshot)
 
     async def drain_strategy_state_changes(
         self,
@@ -922,13 +952,7 @@ class RuntimeStateManager:
                     )
                 )
 
-            state_payload = self._checkpoint_state_payload()
-            state_fingerprint = self._checkpoint_state_fingerprint_from_payload(
-                state_payload
-            )
-            payload_fingerprint = self._checkpoint_payload_fingerprint(
-                state_payload
-            )
+            state_fingerprint = self._checkpoint_state_fingerprint()
             checkpoint = self._build_runtime_checkpoint(
                 checkpoint_kind=checkpoint_kind,
                 trade_date=normalized_trade_date,
@@ -937,8 +961,6 @@ class RuntimeStateManager:
                 processed_watermark=normalized_watermark,
                 continuity_generation=normalized_generation,
                 state_fingerprint=state_fingerprint,
-                state_payload=state_payload,
-                payload_fingerprint=payload_fingerprint,
                 completeness=normalized_completeness,
                 sealed=not blockers,
             )
@@ -1019,6 +1041,7 @@ class RuntimeStateManager:
             materialization_events,
             identity_key="event_key",
         )
+        self._ensure_t_trade_materialization_events(normalized_events)
         normalized_event_keys = tuple(identity for identity, _ in normalized_events)
         if not self.persist_enabled:
             self._last_snapshot_failure_code = "PERSISTENCE_DISABLED"
@@ -1071,14 +1094,16 @@ class RuntimeStateManager:
                 self._dirty_revision = previous_revision
                 self._last_snapshot_failure_code = "PREPARED_OUTBOX_MISSING"
                 return None
-            normalized_completeness["materialization_event_keys"] = list(
-                normalized_event_keys
+            # The exact event payloads are durably owned by the top-level
+            # outbox.  The checkpoint stores only a bounded manifest proving
+            # the precise set and immutable content which FINALIZE must
+            # acknowledge.
+            normalized_completeness.pop("materialization_event_keys", None)
+            normalized_completeness[_PREPARED_DIAGNOSTIC_OUTBOX_MANIFEST_KEY] = (
+                self._diagnostic_outbox_manifest(normalized_events)
             )
 
-            state_payload = self._checkpoint_state_payload()
-            state_fingerprint = self._checkpoint_state_fingerprint_from_payload(
-                state_payload
-            )
+            state_fingerprint = self._checkpoint_state_fingerprint()
             checkpoint = self._build_runtime_checkpoint(
                 checkpoint_kind=checkpoint_kind,
                 trade_date=normalized_trade_date,
@@ -1087,10 +1112,6 @@ class RuntimeStateManager:
                 processed_watermark=normalized_watermark,
                 continuity_generation=normalized_generation,
                 state_fingerprint=state_fingerprint,
-                state_payload=state_payload,
-                payload_fingerprint=self._checkpoint_payload_fingerprint(
-                    state_payload
-                ),
                 completeness=normalized_completeness,
                 sealed=False,
                 prepared=True,
@@ -1123,8 +1144,10 @@ class RuntimeStateManager:
         The final CAS intentionally happens only after the materializer has
         returned a receipt for *this* prepared outbox subset.  It removes that
         subset and the PREPARED record in the same RuntimeState transaction as
-        the immutable COMPLETE payload.  A failed final CAS leaves the durable
-        PREPARED row and its outbox replayable.
+        the replacement SEALED metadata.  The top-level compact RuntimeState
+        remains the single resume image; the SEALED record contains only its
+        bounded boundary proof and state fingerprint.  A failed final CAS
+        leaves the durable PREPARED metadata and top-level outbox replayable.
         """
 
         normalized_id = str(prepared_checkpoint_id or "").strip()
@@ -1140,8 +1163,12 @@ class RuntimeStateManager:
             if prepared is None or not prepared.prepared:
                 self._last_snapshot_failure_code = "PREPARED_CHECKPOINT_MISSING"
                 return None
+            pending_events = self._prepared_diagnostic_outbox_events(prepared)
+            if pending_events is None:
+                self._last_snapshot_failure_code = "PREPARED_OUTBOX_MISMATCH"
+                return None
             expected_keys = self._normalize_checkpoint_event_keys(
-                prepared.completeness.get("materialization_event_keys", ())
+                event.get("event_key") for event in pending_events
             )
             if receipt_keys != expected_keys:
                 self._last_snapshot_failure_code = "PREPARED_RECEIPT_MISMATCH"
@@ -1151,21 +1178,11 @@ class RuntimeStateManager:
                 # materialization into an older receipt boundary.
                 self._last_snapshot_failure_code = "PREPARED_STATE_ADVANCED"
                 return None
-            pending = {
-                str(event.get("event_key") or "").strip()
-                for event in self.pending_t_trade_diagnostic_events()
-                if str(event.get("event_key") or "").strip()
-            }
-            if not set(receipt_keys).issubset(pending):
-                self._last_snapshot_failure_code = "PREPARED_OUTBOX_MISSING"
-                return None
-
             previous_custom = copy.deepcopy(self._state.get("custom", {}) or {})
             previous_dirty = self._dirty
             previous_revision = self._dirty_revision
             previous_version = int(self._state.get("version", 0) or 0)
             self.acknowledge_t_trade_diagnostic_events(receipt_keys)
-            final_payload = self._checkpoint_state_payload()
             final_checkpoint = self._build_runtime_checkpoint(
                 checkpoint_kind=prepared.checkpoint_kind,
                 trade_date=prepared.trade_date,
@@ -1173,13 +1190,7 @@ class RuntimeStateManager:
                 boundary_source_time=prepared.boundary_source_time,
                 processed_watermark=prepared.processed_watermark,
                 continuity_generation=prepared.continuity_generation,
-                state_fingerprint=self._checkpoint_state_fingerprint_from_payload(
-                    final_payload
-                ),
-                state_payload=final_payload,
-                payload_fingerprint=self._checkpoint_payload_fingerprint(
-                    final_payload
-                ),
+                state_fingerprint=self._checkpoint_state_fingerprint(),
                 completeness=copy.deepcopy(prepared.completeness),
                 sealed=True,
             )
@@ -1212,12 +1223,119 @@ class RuntimeStateManager:
             )
         )
 
+    @staticmethod
+    def _canonical_json_sha256(value: Any) -> str:
+        """Hash one finite JSON value with the project's canonical encoding."""
+
+        encoded = json.dumps(
+            _json_safe(value),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _diagnostic_outbox_manifest(
+        cls,
+        events: Iterable[tuple[str, Mapping[str, Any]]],
+    ) -> Dict[str, Any]:
+        """Return a bounded proof for the one PREPARED diagnostic handoff.
+
+        The outbox remains the one recoverable source of event payload truth;
+        this manifest proves its exact ordered identity and immutable content
+        without retaining another per-event copy in checkpoint metadata.
+        """
+
+        normalized: list[tuple[str, Dict[str, Any]]] = []
+        seen: set[str] = set()
+        for raw_identity, raw_payload in events:
+            identity = str(raw_identity or "").strip()
+            if not identity or identity in seen or not isinstance(raw_payload, Mapping):
+                raise ValueError("做 T 诊断检查点发件箱清单无效")
+            payload = copy.deepcopy(dict(raw_payload))
+            if str(payload.get("event_key") or "").strip() != identity:
+                raise ValueError("做 T 诊断检查点发件箱身份不匹配")
+            seen.add(identity)
+            normalized.append((identity, payload))
+        normalized.sort(key=lambda item: item[0])
+        ordered_keys = [identity for identity, _payload in normalized]
+        return {
+            "event_count": len(ordered_keys),
+            "ordered_event_keys_sha256": cls._canonical_json_sha256(ordered_keys),
+            "payload_sha256": cls._canonical_json_sha256(
+                [
+                    {"event_key": identity, "payload": payload}
+                    for identity, payload in normalized
+                ]
+            ),
+        }
+
+    @classmethod
+    def _prepared_diagnostic_outbox_manifest_valid(cls, value: Any) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        count = value.get("event_count")
+        keys_digest = str(value.get("ordered_event_keys_sha256") or "").strip()
+        payload_digest = str(value.get("payload_sha256") or "").strip()
+        return bool(
+            isinstance(count, int)
+            and count >= 0
+            and len(keys_digest) == 64
+            and len(payload_digest) == 64
+            and all(character in "0123456789abcdef" for character in keys_digest)
+            and all(character in "0123456789abcdef" for character in payload_digest)
+        )
+
+    def _current_diagnostic_outbox_items(
+        self,
+    ) -> Optional[list[tuple[str, Dict[str, Any]]]]:
+        raw_outbox = self.get_custom(T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY, {})
+        if not isinstance(raw_outbox, Mapping):
+            return None
+        items: list[tuple[str, Dict[str, Any]]] = []
+        for raw_identity, raw_event in raw_outbox.items():
+            identity = str(raw_identity or "").strip()
+            if not identity or not isinstance(raw_event, Mapping):
+                return None
+            event = copy.deepcopy(dict(raw_event))
+            if str(event.get("event_key") or "").strip() != identity:
+                return None
+            items.append((identity, event))
+        return items
+
+    def _prepared_diagnostic_outbox_events(
+        self,
+        prepared: RuntimeCheckpoint,
+    ) -> Optional[list[Dict[str, Any]]]:
+        """Validate and return the single outbox exactly staged by PREPARED."""
+
+        expected = prepared.completeness.get(
+            _PREPARED_DIAGNOSTIC_OUTBOX_MANIFEST_KEY
+        )
+        if not self._prepared_diagnostic_outbox_manifest_valid(expected):
+            return None
+        items = self._current_diagnostic_outbox_items()
+        if items is None:
+            return None
+        try:
+            actual = self._diagnostic_outbox_manifest(items)
+        except (TypeError, ValueError):
+            return None
+        if _json_safe(dict(expected)) != actual:
+            return None
+        return [copy.deepcopy(event) for _identity, event in sorted(items)]
+
     def has_prepared_checkpoint(self) -> bool:
         """Return whether restored metadata claims an unfinished handoff.
 
         This deliberately inspects the raw status too: malformed PREPARED
         metadata is itself recovery evidence and must route startup to the
-        explicit complete-checkpoint fallback instead of being ignored.
+        fail-closed continuity/warming path instead of being ignored.  It
+        never restores a prior checkpoint or an embedded payload: the current
+        top-level compact state and one metadata record are the only
+        authoritative representation.
         """
 
         raw_records = self._state.get("custom", {}).get(RUNTIME_CHECKPOINTS_KEY, [])
@@ -1250,9 +1368,36 @@ class RuntimeStateManager:
                 return (
                     checkpoint
                     if checkpoint.state_fingerprint == current_fingerprint
+                    and self._prepared_diagnostic_outbox_events(checkpoint) is not None
                     else None
                 )
         return None
+
+    def prepared_t_trade_diagnostic_events(
+        self,
+        prepared_checkpoint_id: str,
+    ) -> Optional[list[Dict[str, Any]]]:
+        """Return exactly one intact PREPARED outbox, or fail closed.
+
+        The checkpoint stores only a count and content-addressed manifest; the
+        complete events live once in the top-level durable outbox.  This method
+        is the Engine's handoff boundary: it prevents a materializer from
+        touching a changed, missing, or extra event before FINALIZE verifies
+        the same manifest again.
+        """
+
+        checkpoint_id = str(prepared_checkpoint_id or "").strip()
+        if not checkpoint_id:
+            self._last_snapshot_failure_code = "PREPARED_CHECKPOINT_MISSING"
+            return None
+        prepared = self._checkpoint_by_id(checkpoint_id)
+        if prepared is None or not prepared.prepared:
+            self._last_snapshot_failure_code = "PREPARED_CHECKPOINT_MISSING"
+            return None
+        events = self._prepared_diagnostic_outbox_events(prepared)
+        if events is None:
+            self._last_snapshot_failure_code = "PREPARED_OUTBOX_MISMATCH"
+        return events
 
     def latest_complete_checkpoint(
         self,
@@ -1260,7 +1405,13 @@ class RuntimeStateManager:
         trade_date: date | datetime | str | None = None,
         session: Optional[str] = None,
     ) -> Optional[RuntimeCheckpoint]:
-        """Return the latest immutable complete checkpoint for explicit fallback."""
+        """Return the current SEALED boundary only when top-level state matches.
+
+        RuntimeState and its positions are committed atomically with this
+        metadata.  A fingerprint mismatch is therefore corruption or an
+        interrupted/non-authoritative handoff, never an invitation to roll back
+        to an embedded historical payload.
+        """
 
         normalized_trade_date = (
             self._normalize_checkpoint_trade_date(trade_date)
@@ -1289,12 +1440,14 @@ class RuntimeStateManager:
             if session is not None and checkpoint.session != normalized_session:
                 continue
             if checkpoint.state_fingerprint != current_fingerprint:
-                self.logger.info(
-                    "显式恢复请求选择早于当前 RuntimeState 的完整检查点: "
+                self._last_snapshot_failure_code = "COMPLETE_CHECKPOINT_STATE_MISMATCH"
+                self.logger.error(
+                    "完整检查点与当前 RuntimeState 指纹不一致，拒绝恢复: "
                     "run_id=%s checkpoint_id=%s",
                     self.run_id,
                     checkpoint.checkpoint_id,
                 )
+                return None
             return checkpoint
         return None
 
@@ -1304,7 +1457,7 @@ class RuntimeStateManager:
         trade_date: date | datetime | str | None = None,
         session: Optional[str] = None,
     ) -> Optional[RuntimeCheckpoint]:
-        """Restore durable RuntimeState, then return its usable checkpoint."""
+        """Restore durable RuntimeState, then validate its SEALED metadata."""
 
         restore_result = await self.restore()
         if restore_result.status == RuntimeStateRestoreStatus.PERSISTENCE_DISABLED:
@@ -1315,75 +1468,7 @@ class RuntimeStateManager:
         )
         if checkpoint is None:
             return None
-        if not self._restore_complete_checkpoint_payload(checkpoint):
-            self.logger.error(
-                "运行时检查点完整载荷恢复失败，拒绝继续: run_id=%s checkpoint_id=%s",
-                self.run_id,
-                checkpoint.checkpoint_id,
-            )
-            return None
         return checkpoint
-
-    def _restore_complete_checkpoint_payload(
-        self,
-        checkpoint: RuntimeCheckpoint,
-    ) -> bool:
-        """Replace prepared hot state with one verified immutable completion."""
-
-        if not checkpoint.complete:
-            return False
-        payload = copy.deepcopy(checkpoint.state_payload)
-        try:
-            if self._checkpoint_payload_fingerprint(payload) != (
-                checkpoint.payload_fingerprint
-            ):
-                return False
-            if self._checkpoint_state_fingerprint_from_payload(payload) != (
-                checkpoint.state_fingerprint
-            ):
-                return False
-            current_version = int(self._state.get("version", 0) or 0)
-            current_custom = copy.deepcopy(self._state.get("custom", {}) or {})
-            checkpoint_records = copy.deepcopy(
-                current_custom.get(RUNTIME_CHECKPOINTS_KEY, [])
-            )
-            snapshot_attempt = current_custom.get(RUNTIME_SNAPSHOT_ATTEMPT_KEY)
-            custom_state = copy.deepcopy(dict(payload["custom"]))
-            if RUNTIME_CHECKPOINTS_KEY in custom_state:
-                return False
-            if RUNTIME_SNAPSHOT_ATTEMPT_KEY in custom_state:
-                return False
-            custom_state[RUNTIME_CHECKPOINTS_KEY] = checkpoint_records
-            if snapshot_attempt:
-                custom_state[RUNTIME_SNAPSHOT_ATTEMPT_KEY] = snapshot_attempt
-            self._state["account"] = copy.deepcopy(dict(payload["account"]))
-            self._state["positions"] = copy.deepcopy(dict(payload["positions"]))
-            self._state["custom"] = custom_state
-            # A restored checkpoint payload is already the durable compact
-            # truth.  It must not be overlaid by a projection captured from a
-            # former, now-detached in-memory strategy source.
-            self._state_sync_durable_strategy_snapshot = None
-            self._state["version"] = current_version
-            self._restore_reservation_state()
-            from quantx_domain.trading.bucket_ledger import BucketLedger
-
-            ledger_snapshot = custom_state.get(BUCKET_LEDGER_CUSTOM_STATE_KEY)
-            if ledger_snapshot:
-                self._bucket_ledger = BucketLedger.from_dict(ledger_snapshot)
-                if not self._bucket_ledger.run_id:
-                    self._bucket_ledger.run_id = self.run_id
-            else:
-                self._bucket_ledger = BucketLedger(run_id=self.run_id)
-                for code, position in self._state["positions"].items():
-                    self._bucket_ledger.sync_position(code, position)
-            self._state["bucket_ledger"] = copy.deepcopy(payload["bucket_ledger"])
-            if self._checkpoint_state_fingerprint() != checkpoint.state_fingerprint:
-                return False
-            self._dirty = False
-            self._invalidate_position_snapshot_cache()
-            return True
-        except (TypeError, ValueError, KeyError):
-            return False
 
     async def _drain_checkpoint_state_changes(self) -> bool:
         """Drain the manager-owned subscriber only when one is attached."""
@@ -1452,8 +1537,6 @@ class RuntimeStateManager:
         processed_watermark: Dict[str, Any],
         continuity_generation: Any,
         state_fingerprint: str,
-        state_payload: Dict[str, Any],
-        payload_fingerprint: str,
         completeness: Dict[str, Any],
         sealed: bool,
         prepared: bool = False,
@@ -1468,7 +1551,6 @@ class RuntimeStateManager:
             "processed_watermark": processed_watermark,
             "continuity_generation": continuity_generation,
             "state_fingerprint": state_fingerprint,
-            "payload_fingerprint": payload_fingerprint,
             "completeness": completeness,
             "status": status,
         }
@@ -1491,8 +1573,6 @@ class RuntimeStateManager:
             processed_watermark=copy.deepcopy(processed_watermark),
             continuity_generation=copy.deepcopy(continuity_generation),
             state_fingerprint=state_fingerprint,
-            state_payload=copy.deepcopy(state_payload),
-            payload_fingerprint=payload_fingerprint,
             completeness=copy.deepcopy(completeness),
             sealed_at=time_utils.now().isoformat() if status == "SEALED" else None,
             status=status,
@@ -1519,6 +1599,97 @@ class RuntimeStateManager:
             BUCKET_LEDGER_CUSTOM_STATE_KEY
         ] = copy.deepcopy(snapshot)
         return snapshot
+
+    @staticmethod
+    def _ensure_compact_t_trade_durable_custom_state(
+        custom_state: Mapping[str, Any],
+    ) -> None:
+        """Reject a durable V3 opportunity image that still owns hot samples.
+
+        The strategy owns the exact compact representation because it also owns
+        the reducer schema.  RuntimeStateManager nevertheless enforces the
+        non-negotiable boundary here: a caller without that projection must
+        fail closed instead of serializing a tick window through an unusual
+        pre-subscription, final-save, or recovery write path.
+        """
+
+        raw_checkpoints = custom_state.get(RUNTIME_CHECKPOINTS_KEY)
+        if raw_checkpoints is not None:
+            if not isinstance(raw_checkpoints, list) or len(raw_checkpoints) > 1:
+                raise RuntimeError("运行时检查点必须只保留一个当前边界")
+            for raw_checkpoint in raw_checkpoints:
+                if not isinstance(raw_checkpoint, Mapping):
+                    raise RuntimeError("运行时检查点元数据无效")
+                if {
+                    "state_payload",
+                    "payload_fingerprint",
+                }.intersection(raw_checkpoint):
+                    raise RuntimeError("运行时检查点禁止嵌套状态载荷")
+                if RuntimeStateManager._runtime_checkpoint_from_dict(raw_checkpoint) is None:
+                    raise RuntimeError("运行时检查点元数据无效")
+
+        raw_states = custom_state.get("instrument_states")
+        if not isinstance(raw_states, Mapping):
+            return
+        for raw_code, raw_state in raw_states.items():
+            if not isinstance(raw_state, Mapping):
+                continue
+            opportunity = raw_state.get("opportunity")
+            if not isinstance(opportunity, Mapping):
+                continue
+            if "samples" in opportunity:
+                raise RuntimeError(
+                    "做 T 持久化投影仍包含内存行情样本: "
+                    f"run_id={custom_state.get('run_id', '-')}, "
+                    "location=custom, "
+                    f"instrument={str(raw_code or '').strip() or '-'}"
+                )
+
+    @staticmethod
+    def _ensure_t_trade_materialization_events(
+        events: Iterable[tuple[str, Mapping[str, Any]]],
+    ) -> None:
+        """Allow the legacy checkpoint outbox to carry MATERIAL facts only."""
+
+        for _event_key, payload in events:
+            event_type = payload.get("type")
+            if event_type is None:
+                # RuntimeStateManager is shared by non-T strategies. A
+                # caller with no T event discriminator remains outside this
+                # specialized guard; a discriminated T event is fail-closed.
+                continue
+            if (
+                event_type != _T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+                or str(payload.get("record_kind") or "").upper() != "MATERIAL"
+            ):
+                raise ValueError(
+                    "做 T 检查点物化发件箱禁止普通诊断或未知事件"
+                )
+
+    @staticmethod
+    def _drop_t_trade_opportunity_runtime_events(
+        custom_state: Dict[str, Any],
+    ) -> None:
+        """Remove all T opportunity evaluations from durable RuntimeState.
+
+        MATERIAL evaluation truth is owned by its dedicated evaluation/trace
+        records and, while PREPARED, the top-level materialization outbox.  An
+        event ring is neither a recovery source nor a second audit store.
+        """
+
+        raw_events = custom_state.get("runtime_events")
+        if not isinstance(raw_events, (list, tuple)):
+            return
+        retained = [
+            copy.deepcopy(dict(event))
+            for event in raw_events
+            if isinstance(event, Mapping)
+            and event.get("type") != _T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+        ]
+        if retained:
+            custom_state["runtime_events"] = retained
+        else:
+            custom_state.pop("runtime_events", None)
 
     def _durable_custom_state_projection(
         self,
@@ -1547,17 +1718,25 @@ class RuntimeStateManager:
                 if key in _STATE_SYNC_PRESERVED_CUSTOM_STATE_KEYS
             }
             projected.update(durable_strategy_snapshot)
+        self._drop_t_trade_opportunity_runtime_events(projected)
         if exclude_checkpoint_metadata:
             projected.pop(RUNTIME_CHECKPOINTS_KEY, None)
             projected.pop(RUNTIME_SNAPSHOT_ATTEMPT_KEY, None)
         return copy.deepcopy(projected)
 
-    def _checkpoint_state_payload(self) -> Dict[str, Any]:
-        """Capture the complete resumable state without checkpoint recursion."""
+    def _checkpoint_state_projection(self) -> Dict[str, Any]:
+        """Capture the current resume truth solely for its state fingerprint.
+
+        This projection is never serialized inside ``runtime_checkpoints``.
+        The top-level RuntimeState row is the single durable copy; a PREPARED
+        materialization outbox stays top-level and is verified by its compact
+        manifest instead of by a recursive checkpoint payload.
+        """
 
         custom_state = self._durable_custom_state_projection(
             exclude_checkpoint_metadata=True,
         )
+        custom_state.pop(T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY, None)
         bucket_ledger = self._current_bucket_ledger_snapshot()
         custom_state[BUCKET_LEDGER_CUSTOM_STATE_KEY] = copy.deepcopy(bucket_ledger)
         return {
@@ -1568,38 +1747,27 @@ class RuntimeStateManager:
         }
 
     @staticmethod
-    def _checkpoint_payload_fingerprint(payload: Mapping[str, Any]) -> str:
-        serialized = json.dumps(
-            _json_safe(dict(payload)),
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _checkpoint_state_fingerprint_from_payload(
-        payload: Mapping[str, Any],
+    def _checkpoint_state_fingerprint_from_projection(
+        projection: Mapping[str, Any],
     ) -> str:
         """Hash canonical resume truth while allowing raw position restoration."""
 
-        account = payload.get("account")
-        positions = payload.get("positions")
-        custom_state = payload.get("custom")
-        bucket_ledger = payload.get("bucket_ledger")
+        account = projection.get("account")
+        positions = projection.get("positions")
+        custom_state = projection.get("custom")
+        bucket_ledger = projection.get("bucket_ledger")
         if not isinstance(account, Mapping):
-            raise ValueError("checkpoint state payload account is invalid")
+            raise ValueError("checkpoint state projection account is invalid")
         if not isinstance(positions, Mapping):
-            raise ValueError("checkpoint state payload positions is invalid")
+            raise ValueError("checkpoint state projection positions is invalid")
         if not isinstance(custom_state, Mapping):
-            raise ValueError("checkpoint state payload custom state is invalid")
+            raise ValueError("checkpoint state projection custom state is invalid")
         if not isinstance(bucket_ledger, Mapping):
-            raise ValueError("checkpoint state payload bucket ledger is invalid")
+            raise ValueError("checkpoint state projection bucket ledger is invalid")
         if _json_safe(custom_state.get(BUCKET_LEDGER_CUSTOM_STATE_KEY)) != _json_safe(
             bucket_ledger
         ):
-            raise ValueError("checkpoint state payload bucket ledger is inconsistent")
+            raise ValueError("checkpoint state projection bucket ledger is inconsistent")
         canonical = {
             "account": copy.deepcopy(dict(account)),
             "positions": RuntimeStateManager._position_snapshot_projection(
@@ -1619,8 +1787,8 @@ class RuntimeStateManager:
     def _checkpoint_state_fingerprint(self) -> str:
         """Hash current runtime truth without self-referential checkpoint data."""
 
-        return self._checkpoint_state_fingerprint_from_payload(
-            self._checkpoint_state_payload()
+        return self._checkpoint_state_fingerprint_from_projection(
+            self._checkpoint_state_projection()
         )
 
     def _runtime_checkpoint_records(self) -> list[RuntimeCheckpoint]:
@@ -1632,6 +1800,8 @@ class RuntimeStateManager:
             return []
         if not isinstance(raw_records, list):
             raise ValueError("runtime checkpoints must be a list")
+        if len(raw_records) > 1:
+            raise ValueError("runtime checkpoints must retain one current boundary")
         checkpoints: list[RuntimeCheckpoint] = []
         for raw in raw_records:
             checkpoint = self._runtime_checkpoint_from_dict(raw)
@@ -1650,38 +1820,15 @@ class RuntimeStateManager:
         return None
 
     def _store_runtime_checkpoint(self, checkpoint: RuntimeCheckpoint) -> None:
-        records = self._runtime_checkpoint_records()
-        records = [
-            item for item in records if item.checkpoint_id != checkpoint.checkpoint_id
-        ]
-        records.append(checkpoint)
+        # One RuntimeState CAS owns both the top-level resume state and this
+        # boundary.  Retaining an older SEALED row cannot restore anything that
+        # the current row does not already contain; it only duplicates metadata
+        # and obscures a corrupt PREPARED handoff.
+        self._runtime_checkpoint_records()
         self._state.setdefault("custom", {})[RUNTIME_CHECKPOINTS_KEY] = [
-            item.to_dict()
-            for item in self._bounded_runtime_checkpoint_records(records)
+            checkpoint.to_dict()
         ]
         self._mark_dirty()
-
-    @staticmethod
-    def _bounded_runtime_checkpoint_records(
-        records: Iterable[RuntimeCheckpoint],
-    ) -> list[RuntimeCheckpoint]:
-        """Keep recent complete recovery points plus current incomplete evidence."""
-
-        ordered = list(records)
-        complete_ids = {
-            item.checkpoint_id
-            for item in [entry for entry in ordered if entry.complete][
-                -_MAX_RUNTIME_COMPLETE_CHECKPOINTS:
-            ]
-        }
-        incomplete_ids = {
-            item.checkpoint_id
-            for item in [entry for entry in ordered if not entry.complete][
-                -_MAX_RUNTIME_INCOMPLETE_CHECKPOINTS:
-            ]
-        }
-        retained_ids = complete_ids | incomplete_ids
-        return [item for item in ordered if item.checkpoint_id in retained_ids]
 
     def _remove_runtime_checkpoint(self, checkpoint_id: str) -> None:
         try:
@@ -1705,6 +1852,25 @@ class RuntimeStateManager:
     @staticmethod
     def _runtime_checkpoint_from_dict(raw: Any) -> Optional[RuntimeCheckpoint]:
         if not isinstance(raw, Mapping):
+            return None
+        required_keys = {
+            "checkpoint_id",
+            "checkpoint_kind",
+            "trade_date",
+            "session",
+            "boundary_source_time",
+            "processed_watermark",
+            "continuity_generation",
+            "state_fingerprint",
+            "completeness",
+            "sealed_at",
+            "status",
+        }
+        # This is intentionally an atomic schema cutover.  A historical nested
+        # state payload cannot be safely reconciled with the current top-level
+        # RuntimeState and must fail closed rather than become an implicit
+        # compatibility format.
+        if set(raw) != required_keys:
             return None
         try:
             checkpoint_id = str(raw.get("checkpoint_id") or "").strip()
@@ -1731,13 +1897,6 @@ class RuntimeStateManager:
                 field_name="continuity_generation",
             )
             state_fingerprint = str(raw.get("state_fingerprint") or "").strip()
-            state_payload_raw = raw.get("state_payload")
-            if not isinstance(state_payload_raw, Mapping):
-                return None
-            state_payload = copy.deepcopy(dict(state_payload_raw))
-            payload_fingerprint = str(
-                raw.get("payload_fingerprint") or ""
-            ).strip()
             sealed_at = raw.get("sealed_at")
             if sealed_at is not None:
                 sealed_at = RuntimeStateManager._normalize_checkpoint_boundary_time(
@@ -1750,7 +1909,11 @@ class RuntimeStateManager:
         if (
             len(checkpoint_id) != 64
             or len(state_fingerprint) != 64
-            or len(payload_fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in checkpoint_id)
+            or any(
+                character not in "0123456789abcdef"
+                for character in state_fingerprint
+            )
             or checkpoint_kind not in {"DAY_BATCH", "SESSION_BOUNDARY"}
             or status not in {"SEALED", "PREPARED", "BLOCKED"}
             or completeness.get("complete") not in {True, False}
@@ -1784,20 +1947,13 @@ class RuntimeStateManager:
             or completeness.get("complete") is not True
         ):
             return None
-        custom_state = state_payload.get("custom")
-        if (
-            not isinstance(state_payload.get("account"), Mapping)
-            or not isinstance(state_payload.get("positions"), Mapping)
-            or not isinstance(custom_state, Mapping)
-            or not isinstance(state_payload.get("bucket_ledger"), Mapping)
-            or RUNTIME_CHECKPOINTS_KEY in custom_state
-            or RUNTIME_SNAPSHOT_ATTEMPT_KEY in custom_state
-            or RuntimeStateManager._checkpoint_payload_fingerprint(state_payload)
-            != payload_fingerprint
-            or RuntimeStateManager._checkpoint_state_fingerprint_from_payload(
-                state_payload
-            )
-            != state_fingerprint
+        manifest = completeness.get(_PREPARED_DIAGNOSTIC_OUTBOX_MANIFEST_KEY)
+        if status == "PREPARED" and not RuntimeStateManager._prepared_diagnostic_outbox_manifest_valid(
+            manifest
+        ):
+            return None
+        if manifest is not None and not RuntimeStateManager._prepared_diagnostic_outbox_manifest_valid(
+            manifest
         ):
             return None
         return RuntimeCheckpoint(
@@ -1809,8 +1965,6 @@ class RuntimeStateManager:
             processed_watermark=processed_watermark,
             continuity_generation=continuity_generation,
             state_fingerprint=state_fingerprint,
-            state_payload=state_payload,
-            payload_fingerprint=payload_fingerprint,
             completeness=completeness,
             sealed_at=sealed_at,
             status=status,
@@ -2679,6 +2833,7 @@ class RuntimeStateManager:
 
                 self._state["last_updated"] = time_utils.now().isoformat()
                 custom_state = self._durable_custom_state_projection()
+                self._ensure_compact_t_trade_durable_custom_state(custom_state)
                 snapshot_token = str(uuid.uuid4())
                 custom_state[RUNTIME_SNAPSHOT_ATTEMPT_KEY] = snapshot_token
                 custom_state[BUCKET_LEDGER_CUSTOM_STATE_KEY] = copy.deepcopy(
@@ -4447,6 +4602,7 @@ class RuntimeStateManager:
             events,
             identity_key="event_key",
         )
+        self._ensure_t_trade_materialization_events(normalized)
         if not normalized:
             return
         current = dict(

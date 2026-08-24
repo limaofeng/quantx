@@ -539,6 +539,7 @@ async def test_candidate_is_exposed_only_after_checkpoint_evaluation_intent_and_
   ]
   assert runtime.pending_approvals == {intent.intent_id: intent}
   assert runtime.strategy.state.awaiting["intent_id"] == intent.intent_id
+  assert runtime.strategy.state.get("runtime_events") in (None, [])
   assert service.materialize_evaluation is materialize
   executor.opportunity_update_service.notify_opportunity.assert_awaited_once()
   assert runtime.state_manager.material_outbox == {}
@@ -714,7 +715,7 @@ async def test_entry_authority_invalidation_keeps_exit_state_and_reservations():
 
 
 @pytest.mark.asyncio
-async def test_durable_diagnostic_uses_coalesced_client_wakeup():
+async def test_ordinary_diagnostic_is_not_durable_or_notified():
   calls: list[str] = []
   service = SimpleNamespace(materialize_evaluation=AsyncMock())
   executor = _executor(service)
@@ -732,12 +733,57 @@ async def test_durable_diagnostic_uses_coalesced_client_wakeup():
     _input(),
   )
 
-  assert calls == ["checkpoint"]
-  service.materialize_evaluation.assert_awaited_once()
-  executor.opportunity_update_service.notify_opportunity.assert_awaited_once()
-  notice = executor.opportunity_update_service.notify_opportunity.await_args.kwargs
-  assert notice["immediate"] is False
-  assert notice["version"].endswith(":8")
+  assert calls == []
+  service.materialize_evaluation.assert_not_awaited()
+  executor.opportunity_update_service.notify_opportunity.assert_not_awaited()
+  assert runtime.strategy.state.opportunity == {"state_version": 8}
+  assert runtime.strategy.state.get("runtime_events") in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_ordinary_state_mutation_skips_trace_evaluation_and_outbox():
+  """A diagnostic-only reducer update has no alternate durable audit row."""
+
+  calls: list[str] = []
+  service = SimpleNamespace(materialize_evaluation=AsyncMock())
+  executor = _executor(service)
+  runtime = _runtime(calls)
+  traces: list[object] = []
+  runtime.state_manager.record_decision_trace = traces.append
+
+  await executor._process_strategy_output(
+    runtime,
+    StrategyOutput(
+      decision_tags=["opportunity_observed", "no_trade"],
+      trace_payload={
+        "reason": "MINIMUM_COVERAGE_NOT_REACHED",
+        "signal_snapshot": {
+          "data_health_reasons": ["CUMULATIVE_COUNTER_ROLLBACK"],
+          "blockers": ["ENTRY_CUTOFF_REACHED", "TEST_EMISSION_BLOCKED"],
+          "samples": ["must-not-be-hashed-or-persisted"] * 128,
+        },
+      },
+      runtime_state_patch=RuntimeStatePatch(
+        set={
+          "opportunity": {
+            "candidate_status": "NONE",
+            "latest_evaluation": {
+              "data_health_reasons": ["CUMULATIVE_COUNTER_ROLLBACK"],
+              "blockers": ["ENTRY_CUTOFF_REACHED"],
+            },
+          }
+        }
+      ),
+    ),
+    _input(),
+  )
+
+  assert calls == []
+  service.materialize_evaluation.assert_not_awaited()
+  executor.opportunity_update_service.notify_opportunity.assert_not_awaited()
+  assert traces == []
+  assert runtime.state_manager.material_outbox == {}
+  assert runtime.strategy.state.get("runtime_events") in (None, [])
 
 
 @pytest.mark.asyncio
@@ -1522,7 +1568,7 @@ async def test_profile_cache_is_globally_bounded_with_retry_metadata(monkeypatch
   "mode",
   [StrategyRunMode.BACKTEST, StrategyRunMode.PAPER, StrategyRunMode.LIVE],
 )
-async def test_1000_hot_diagnostics_stay_memory_only_until_explicit_day_or_session_seal(mode):
+async def test_1000_ordinary_diagnostics_are_not_staged_or_persisted(mode):
   calls: list[str] = []
   service = SimpleNamespace(
     materialize_evaluation=AsyncMock(),
@@ -1546,11 +1592,10 @@ async def test_1000_hot_diagnostics_stay_memory_only_until_explicit_day_or_sessi
       _input(),
     )
 
-  assert calls == ["drain"] * 1_000
-  assert runtime.state_manager.drain_capture_state == [False] * 1_000
-  assert len(runtime._checkpoint_diagnostic_summaries) == 1
-  summary = runtime._checkpoint_diagnostic_summaries["600000.SH"]
-  assert summary["checkpoint_coalesced_count"] == 1_000
+  assert calls == []
+  assert runtime.state_manager.drain_capture_state == []
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  assert runtime.strategy.state.get("runtime_events") in (None, [])
   runtime.state_manager.checkpoint_strategy_state_changes.assert_not_awaited()
   runtime.state_manager.force_save.assert_not_awaited()
   runtime.state_manager.prepare_checkpoint.assert_not_awaited()
@@ -1587,7 +1632,7 @@ async def test_actionless_material_evaluation_uses_the_same_memory_only_day_poli
 
 
 @pytest.mark.asyncio
-async def test_pure_material_closes_the_hot_diagnostic_segment_before_later_tick():
+async def test_pure_material_does_not_need_an_ordinary_diagnostic_segment():
   calls: list[str] = []
   service = SimpleNamespace(
     materialize_evaluation=AsyncMock(),
@@ -1614,27 +1659,17 @@ async def test_pure_material_closes_the_hot_diagnostic_segment_before_later_tick
     _input(),
   )
 
-  first_key = "run-opportunity-v3:600000.SH:diagnostic:1"
   material_key = "run-opportunity-v3:600000.SH:candidate-1:MATERIAL"
   assert set(runtime._checkpoint_diagnostic_summaries) == {
-    f"DIAGNOSTIC:{first_key}",
     f"MATERIAL:{material_key}",
-    "600000.SH",
   }
-  first_segment = runtime._checkpoint_diagnostic_summaries[f"DIAGNOSTIC:{first_key}"]
-  assert first_segment["checkpoint_segment_closed_by_event_key"] == material_key
-  assert first_segment["checkpoint_segment_boundary"] == "MATERIAL"
-  assert (
-    runtime._checkpoint_diagnostic_summaries["600000.SH"]["event_key"]
-    == "run-opportunity-v3:600000.SH:diagnostic:2"
-  )
-  assert calls == ["drain", "drain", "drain"]
+  assert calls == ["drain"]
   service.materialize_evaluation.assert_not_awaited()
   service.materialize_checkpoint_batch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_actionable_output_does_not_block_on_hot_diagnostics_and_segments_them():
+async def test_actionable_output_does_not_depend_on_ordinary_diagnostic_segments():
   calls: list[str] = []
   service = SimpleNamespace(
     materialize_evaluation=AsyncMock(),
@@ -1649,7 +1684,7 @@ async def test_actionable_output_does_not_block_on_hot_diagnostics_and_segments_
     _batched_diagnostic_output(1),
     _input(),
   )
-  assert calls == ["drain"]
+  assert calls == []
 
   intent = _intent()
   await executor._process_strategy_output(
@@ -1666,14 +1701,12 @@ async def test_actionable_output_does_not_block_on_hot_diagnostics_and_segments_
     _input(),
   )
 
-  first_key = "run-opportunity-v3:600000.SH:diagnostic:1"
   assert runtime.status == ExecutionStatus.RUNNING
   assert runtime.error_message != "CHECKPOINT_DIAGNOSTIC_FINALIZATION_REQUIRED"
-  assert f"DIAGNOSTIC:{first_key}" in runtime._checkpoint_diagnostic_summaries
-  assert "600000.SH" in runtime._checkpoint_diagnostic_summaries
-  assert (
-    runtime._checkpoint_diagnostic_summaries["600000.SH"]["event_key"]
-    == "run-opportunity-v3:600000.SH:diagnostic:2"
+  assert runtime._checkpoint_diagnostic_summaries == {}
+  assert all(
+    event.get("type") != "T_TRADE_OPPORTUNITY_EVALUATION"
+    for event in (runtime.strategy.state.get("runtime_events") or [])
   )
   service.materialize_evaluation.assert_awaited()
   service.materialize_checkpoint_batch.assert_not_awaited()

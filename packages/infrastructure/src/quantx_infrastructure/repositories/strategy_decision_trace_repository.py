@@ -4,9 +4,9 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,9 +28,62 @@ _IMMUTABLE_TRACE_FIELDS = (
   "state_patch",
   "decision_trace",
 )
-# Eleven explicit trace columns × 256 stays well below PostgreSQL's 32767 bind
-# parameter ceiling while avoiding asyncpg executemany + RETURNING degradation.
-_TRACE_APPEND_INSERT_CHUNK_SIZE = 256
+# A day batch has at most 600 evaluations per instrument in the fixed pressure
+# fixture.  PostgreSQL receives a single JSONB bind for each bounded 1,024-row
+# chunk, so the batch no longer expands to eleven bind parameters per trace or
+# requires a remote INSERT round trip every 256 records.
+_TRACE_APPEND_POSTGRESQL_RECORDSET_CHUNK_SIZE = 1_024
+# Production relational storage is PostgreSQL-only.  Keep the pre-existing
+# Core multi-values path exclusively for SQLite-backed test sessions.
+_TRACE_APPEND_TEST_VALUES_CHUNK_SIZE = 256
+_TRACE_APPEND_POSTGRESQL_RECORDSET = text(
+  """
+  INSERT INTO strategy_decision_traces (
+    id,
+    trace_id,
+    strategy_run_id,
+    strategy_id,
+    instrument_code,
+    decided_at,
+    input_summary,
+    output_summary,
+    trade_intents,
+    state_patch,
+    decision_trace,
+    created_at,
+    updated_at
+  )
+  SELECT
+    trace.id,
+    trace.trace_id,
+    trace.strategy_run_id,
+    trace.strategy_id,
+    trace.instrument_code,
+    trace.decided_at,
+    trace.input_summary::json,
+    trace.output_summary::json,
+    trace.trade_intents::json,
+    trace.state_patch::json,
+    trace.decision_trace::json,
+    now(),
+    now()
+  FROM jsonb_to_recordset(CAST(:trace_payload AS jsonb)) AS trace(
+    id text,
+    trace_id text,
+    strategy_run_id text,
+    strategy_id text,
+    instrument_code text,
+    decided_at timestamp without time zone,
+    input_summary jsonb,
+    output_summary jsonb,
+    trade_intents jsonb,
+    state_patch jsonb,
+    decision_trace jsonb
+  )
+  ON CONFLICT (id) DO NOTHING
+  RETURNING id
+  """
+)
 
 
 def _normalize_decided_at(value: Any) -> Any:
@@ -55,6 +108,36 @@ def _normalized_trace_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
   if "decided_at" in normalized:
     normalized["decided_at"] = _normalize_decided_at(normalized["decided_at"])
   return normalized
+
+
+def _trace_recordset_json(payloads: Sequence[Mapping[str, Any]]) -> str:
+  """Serialize one PostgreSQL recordset bind without changing trace facts."""
+
+  rows: list[Dict[str, Any]] = []
+  for payload in payloads:
+    row = dict(payload)
+    decided_at = row.get("decided_at")
+    if isinstance(decided_at, datetime):
+      row["decided_at"] = decided_at.isoformat()
+    rows.append(row)
+  return json.dumps(
+    rows,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    allow_nan=False,
+  )
+
+
+def _uses_postgresql_jsonb_recordset(db_session: Any) -> bool:
+  """Select the production insert path; SQLite exists only for test isolation."""
+
+  bind = getattr(db_session, "bind", None)
+  dialect = getattr(bind, "dialect", None)
+  dialect_name = getattr(dialect, "name", None)
+  # Lightweight repository fakes intentionally omit a bind and exercise the
+  # PostgreSQL statement shape.  Real production sessions are asyncpg-backed;
+  # an explicit SQLite bind retains the small test-only Core fallback.
+  return dialect_name in {None, "postgresql"}
 
 
 def _canonical_trace_value(value: Any) -> Any:
@@ -139,20 +222,36 @@ class StrategyDecisionTraceRepository(BaseRepository[StrategyDecisionTraceRecord
     # authoritative relational store, so make that replay an idempotent no-op
     # rather than turning it into a permanent primary-key failure.
     inserted_ids: set[str] = set()
-    for start in range(0, len(payloads), _TRACE_APPEND_INSERT_CHUNK_SIZE):
-      chunk = payloads[start : start + _TRACE_APPEND_INSERT_CHUNK_SIZE]
-      # ``values(chunk)`` produces one bounded multi-row INSERT.  Passing the
-      # chunk as a second execute argument selects SQLAlchemy executemany,
-      # which asyncpg handles poorly together with RETURNING at day scale.
-      statement = (
-        insert(StrategyDecisionTraceRecord)
-        .values(chunk)
-        .on_conflict_do_nothing(
-          index_elements=[StrategyDecisionTraceRecord.id]
+    use_postgresql_recordset = _uses_postgresql_jsonb_recordset(self.db)
+    chunk_size = (
+      _TRACE_APPEND_POSTGRESQL_RECORDSET_CHUNK_SIZE
+      if use_postgresql_recordset
+      else _TRACE_APPEND_TEST_VALUES_CHUNK_SIZE
+    )
+    for start in range(0, len(payloads), chunk_size):
+      chunk = payloads[start : start + chunk_size]
+      if use_postgresql_recordset:
+        # One JSONB bind preserves every trace row and lets PostgreSQL expand
+        # the recordset server-side.  This is materially cheaper than a
+        # multi-values statement with thousands of JSON bind parameters over a
+        # remote asyncpg connection, while preserving the surrounding CAS
+        # transaction and stable-ID idempotency proof.
+        result = await self.db.execute(
+          _TRACE_APPEND_POSTGRESQL_RECORDSET,
+          {"trace_payload": _trace_recordset_json(chunk)},
         )
-        .returning(StrategyDecisionTraceRecord.id)
-      )
-      result = await self.db.execute(statement)
+      else:
+        # SQLite is not a runtime relational backend.  Keep this limited
+        # fallback for isolated repository tests that construct SQLite sessions.
+        statement = (
+          insert(StrategyDecisionTraceRecord)
+          .values(chunk)
+          .on_conflict_do_nothing(
+            index_elements=[StrategyDecisionTraceRecord.id]
+          )
+          .returning(StrategyDecisionTraceRecord.id)
+        )
+        result = await self.db.execute(statement)
       inserted_ids.update(str(value) for value in result.scalars().all())
     replayed_ids = set(trace_ids) - inserted_ids
     if replayed_ids:

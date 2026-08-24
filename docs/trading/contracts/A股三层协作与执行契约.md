@@ -248,7 +248,7 @@ PAPER/LIVE 的有界、因果滑动观察窗是内存热状态：普通 tick、�
 PAPER/LIVE 的 `TERMINAL` 已处理前缀不等同 AM/PM session boundary。只有队列
 quiesced、连续性完整，且 processed watermark/source prefix 已被证明时，才能
 `PREPARED → receipt → FINALIZE`；任一证明缺失都保持 fail-closed。正常完成、停止和
-错误/取消必须强制 flush 当前热诊断并 seal 已处理前缀，随后仍按上述证明链收口。审批、
+错误/取消必须强制收敛当前应持久化的事实 outbox 并 seal 已处理前缀，随后仍按上述证明链收口。审批、
 TradeIntent、命令 outbox、订单/成交 inbox 与回报、冻结/订单状态和用户可操作候选等
 外部交易事实仍须在发生时原子持久化，不得等候 `SESSION` checkpoint。
 
@@ -473,6 +473,46 @@ RuntimeStateManager 职责：
 
 RuntimeStateManager 是交易事实收敛中心。
 
+### 3.10 T 助手行情真源与普通 Tick 持久化边界
+
+权威行情缓存/历史行情存储是行情与回放数据的唯一真源。QMT Agent 只负责采集、
+上报实时行情与 broker 回报；BACKTEST 只读服务端已有的权威行情缓存/历史行情
+存储，LIVE Engine 消费已接入的实时流/热缓存，二者都不得直接通过 QMT Agent
+取得历史行情。
+
+`USES_T_TRADE_OPPORTUNITY_PROFILE` 的普通 Tick 只推进内存热窗口和策略 reducer，
+不写 `DecisionTrace`、普通 evaluation 行、`COALESCED_DIAGNOSTIC`、RuntimeState
+event ring 或另一种 observation JSON。普通 data health/reasons、coverage、阈值带、
+hard gate、score、trading session、entry cutoff 和普通/外部 blocker 都是可由权威
+source identity 重放的观察诊断；首次普通状态只建立内存 event cursor baseline，
+此后同类变化也不得触发完整 root canonical JSON/SHA 或 durable 写入。
+
+T `MATERIAL` 是严格白名单：候选 `id`/fingerprint/status 的创建或变化、算法
+pullback/momentum FSM phase 的真实迁移、continuity generation 变化、policy/config/profile
+版本或 fingerprint 变化，以及已有显式 callback 标记的材料事实（例如
+`TradeIntent`、`INTENT_LINKED`、`CANDIDATE_SUPPRESSED`、信号创建/失效或有稳定业务键的
+外部入场/退出政策动作）。其他普通观察不得以 `DIAGNOSTIC_STATE_CHANGED` 或任何
+替代事件名进入材料链。
+
+RuntimeState 的边界投影只保留可恢复的 FSM/候选订单关联/cooldown、source
+dataset/archive identity、processed watermark 与精确 processed tick count、continuity
+generation 和策略/配置/政策/schema 版本。`samples`、完整行情 roots 和完整评估 roots
+均不得跨越该持久化边界。顶层 compact RuntimeState 是唯一状态副本；
+`runtime_checkpoints` 只能有一个有界 metadata checkpoint，禁止嵌套
+`state_payload` 或 `payload_fingerprint`。`PREPARED` 使用顶层 material outbox +
+manifest 进行幂等物化并校验当前顶层 state fingerprint；receipt 后 `FINALIZE` 清空
+outbox，`SEALED` 只用 metadata state fingerprint 验证当前顶层 compact state。任一
+损坏、缺失或不匹配必须走 continuity/warming 的 fail-closed 路径，不能回滚旧载荷。
+
+材料事实仍走原有事实链。材料 trace 仅保存 output/关联索引，详细信号证据由专用
+evaluation/material opportunity 表保存；T `T_TRADE_OPPORTUNITY_EVALUATION` 不进入
+RuntimeState `runtime_events`，PREPARED 恢复仅依赖顶层 outbox/manifest，FINALIZE 后
+outbox 必须为空。
+
+完成运行以 Engine instrumentation 与 fixture source policy 对账；超时或恢复以
+持久 watermark/count 与权威 source range 对账。evaluation/trace 只对材料
+`event_key` 做精确一一对账，绝不能再把它们的行数等同于 Tick 数。
+
 ---
 
 ## 4. 公共策略接入契约
@@ -583,6 +623,7 @@ TradeIntent
 | `BucketLedger` | 成交归因账本 | RuntimeStateManager | 否 | 策略只能请求 bucket |
 | `OrderState` | broker 事件状态流 | RuntimeStateManager | 否 | 下单、撤单、成交、拒单 |
 | `DecisionTrace` | 审计系统 | 各层追加 | 否 | 只追加，不覆盖 |
+| T 普通 Tick | 权威行情缓存/历史行情存储 | 行情接入层 | 否 | 不复制到 Engine durable state；以 source identity + checkpoint + 重放审计 |
 | `ParamPack` | 基因库 / 实例配置 | Instance / Evolution | 否 | 策略读取参数 |
 
 ---

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from quantx_infrastructure.core.runtime_state_manager import (
   GRID_BOOK_CUSTOM_STATE_KEY,
+  RUNTIME_CHECKPOINTS_KEY,
   RUNTIME_RECONCILIATION_STATUS_KEY,
   T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY,
   RuntimeStateManager,
@@ -1046,7 +1048,8 @@ async def test_prepared_checkpoint_crash_boundaries_preserve_replayable_state(
   )
 
   assert checkpoint is not None
-  complete_payload = copy.deepcopy(checkpoint.state_payload)
+  assert "state_payload" not in checkpoint.to_dict()
+  assert "payload_fingerprint" not in checkpoint.to_dict()
   # An immediate account/position fact after the last COMPLETE checkpoint must
   # survive a later prepared handoff.  The intact prepared state is recovery
   # truth; startup replays its outbox and only then FINALIZEs it.
@@ -1108,7 +1111,7 @@ async def test_prepared_checkpoint_crash_boundaries_preserve_replayable_state(
 
   assert recovered is not None
   assert recovered.checkpoint_id == prepared.checkpoint_id
-  assert restored._checkpoint_state_payload() != complete_payload
+  assert "state_payload" not in recovered.to_dict()
   assert restored._state["account"]["cash"] == 900.0
   assert restored._state["positions"]["600000.SH"]["long_volume"] == 120
   assert restored.pending_t_trade_diagnostic_events() == [
@@ -1133,7 +1136,7 @@ async def test_prepared_checkpoint_crash_boundaries_preserve_replayable_state(
 
 
 @pytest.mark.asyncio
-async def test_damaged_prepared_checkpoint_uses_explicit_complete_fallback(
+async def test_damaged_prepared_checkpoint_never_rolls_back_to_old_complete(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
   manager = RuntimeStateManager(
@@ -1188,9 +1191,14 @@ async def test_damaged_prepared_checkpoint_uses_explicit_complete_fallback(
   assert restored.latest_prepared_checkpoint() is None
   recovered = await restored.restore_latest_complete_checkpoint()
 
-  assert recovered is not None
-  assert recovered.checkpoint_id == complete.checkpoint_id
-  assert restored._checkpoint_state_payload() == complete.state_payload
+  # The unique current PREPARED boundary replaces the old SEALED metadata.
+  # Its mismatched top-level state is fail-closed; no nested historical state
+  # is retained or restored as a fallback.
+  assert recovered is None
+  assert len(restored._runtime_checkpoint_records()) == 1
+  assert restored._runtime_checkpoint_records()[0].checkpoint_id == prepared.checkpoint_id
+  assert restored._state["custom"]["strategy_window"] == {"corrupt": True}
+  assert complete.checkpoint_id != prepared.checkpoint_id
 
 
 @pytest.mark.asyncio
@@ -1412,6 +1420,172 @@ async def test_day_checkpoint_outbox_covers_9600_fixture_worst_case_and_caps() -
     capped.enqueue_t_trade_diagnostic_events(
       [{"event_key": "diagnostic:cap:overflow"}]
     )
+
+
+@pytest.mark.asyncio
+async def test_prepared_checkpoint_keeps_large_diagnostic_payload_once_and_validates_manifest() -> None:
+  """A day batch owns full diagnostics only in its retryable top-level outbox."""
+
+  manager = RuntimeStateManager(
+    run_id="run-checkpoint-large-outbox-projection",
+    persist_enabled=True,
+    is_backtest=True,
+  )
+
+  async def fake_save_snapshot() -> bool:
+    manager._dirty = False
+    manager._state["version"] += 1
+    return True
+
+  manager.save_snapshot = fake_save_snapshot  # type: ignore[method-assign]
+  events = [
+    {
+      "event_key": f"diagnostic:large:{index:04d}",
+      "signal_snapshot": {
+        "source_time_ms": 1_780_000_000_000 + index,
+        "full_diagnostic_sentinel": "diagnostic-payload-" + "x" * 2_048,
+      },
+    }
+    for index in range(744)
+  ]
+  prepared = await manager.prepare_checkpoint(
+    trade_date="2026-08-21",
+    session=None,
+    boundary_source_time=datetime(2026, 8, 21, 15, 0),
+    processed_watermark={"stream_id": "backtest", "sequence": 4_736},
+    continuity_generation=1,
+    completeness={"complete": True},
+    materialization_events=events,
+  )
+
+  assert prepared is not None
+  outbox = manager.get_custom(T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY)
+  assert isinstance(outbox, dict) and len(outbox) == len(events)
+  assert "state_payload" not in prepared.to_dict()
+  assert "payload_fingerprint" not in prepared.to_dict()
+  assert "full_diagnostic_sentinel" not in repr(prepared.to_dict())
+  assert "diagnostic:large:0000" not in repr(prepared.completeness)
+  serialized_outbox = json.dumps(outbox, sort_keys=True)
+  serialized_checkpoint = json.dumps(prepared.to_dict(), sort_keys=True)
+  assert len(serialized_checkpoint) * 20 < len(serialized_outbox)
+
+  staged = manager.prepared_t_trade_diagnostic_events(prepared.checkpoint_id)
+  assert staged is not None
+  assert [event["event_key"] for event in staged] == [
+    event["event_key"] for event in events
+  ]
+
+  # An outbox payload mutation with an unchanged event key is still a corrupt
+  # handoff, not a safe retry of the earlier PREPARED boundary.
+  outbox["diagnostic:large:0000"]["signal_snapshot"][
+    "full_diagnostic_sentinel"
+  ] = "mutated"
+  assert manager.prepared_t_trade_diagnostic_events(prepared.checkpoint_id) is None
+  assert manager.latest_prepared_checkpoint() is None
+
+
+@pytest.mark.asyncio
+async def test_twenty_day_boundaries_keep_one_compact_metadata_checkpoint() -> None:
+  """Checkpoint metadata stays bounded independently of completed days."""
+
+  manager = RuntimeStateManager(
+    run_id="run-single-boundary-metadata",
+    persist_enabled=True,
+    is_backtest=True,
+  )
+  persisted_custom_states: list[dict[str, object]] = []
+
+  async def fake_save_snapshot() -> bool:
+    # Capture the exact durable projection that a real atomic upsert receives,
+    # rather than inspecting the deliberately richer in-memory hot state.
+    persisted_custom_states.append(
+      copy.deepcopy(manager._durable_custom_state_projection())
+    )
+    manager._dirty = False
+    manager._state["version"] += 1
+    return True
+
+  manager.save_snapshot = fake_save_snapshot  # type: ignore[method-assign]
+  manager.update_account(cash=100_000.0, frozen_cash=0.0, total_asset=100_000.0)
+  manager.update_custom_state(
+    {
+      "state_schema_version": 3,
+      "instrument_states": {
+        f"60{ordinal:04d}.SH": {
+          "status": "MONITORING",
+          "cooldown_until_ms": 1_724_300_000_000 + ordinal,
+          "pending_entry_intent_id": None,
+          "opportunity": {
+            "schema_version": 3,
+            "instrument_code": f"60{ordinal:04d}.SH",
+            "candidate_status": "NONE",
+            "state_version": ordinal,
+            "sample_window_persisted": False,
+            "sample_window_restore_required": True,
+            "sample_window_sample_count": 600,
+          },
+        }
+        for ordinal in range(8)
+      },
+      # Both ordinary and material opportunity evaluations are authoritative
+      # in their dedicated evaluation/material tables.  They must never bloat
+      # the RuntimeState event ring, including at a day-boundary snapshot.
+      "runtime_events": [
+        {
+          "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+          "record_kind": "ORDINARY",
+          "event_key": "tto:ordinary:must-not-persist",
+          "signal_snapshot": {"samples": ["ordinary-sentinel"] * 128},
+        },
+        {
+          "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+          "record_kind": "MATERIAL",
+          "event_key": "tto:material:must-not-persist",
+          "signal_snapshot": {"samples": ["material-sentinel"] * 128},
+        },
+      ],
+    }
+  )
+
+  custom_state_sizes: list[int] = []
+  for day_offset in range(20):
+    boundary = datetime(2026, 8, 1, 15, 0) + timedelta(days=day_offset)
+    checkpoint = await manager.seal_checkpoint(
+      trade_date=boundary.date(),
+      session=None,
+      boundary_source_time=boundary,
+      processed_watermark={
+        "stream_id": "backtest",
+        "sequence": (day_offset + 1) * 4_736,
+        "processed_tick_count": (day_offset + 1) * 4_736,
+      },
+      continuity_generation=day_offset + 1,
+      completeness={"complete": True},
+    )
+
+    assert checkpoint is not None and checkpoint.complete
+    records = manager._state["custom"][RUNTIME_CHECKPOINTS_KEY]
+    assert isinstance(records, list) and len(records) == 1
+    assert records[0] == checkpoint.to_dict()
+    assert "state_payload" not in records[0]
+    assert "payload_fingerprint" not in records[0]
+    persisted_custom = persisted_custom_states[-1]
+    assert "runtime_events" not in persisted_custom
+    serialized_custom = json.dumps(
+      persisted_custom,
+      ensure_ascii=True,
+      sort_keys=True,
+      separators=(",", ":"),
+    )
+    assert "T_TRADE_OPPORTUNITY_EVALUATION" not in serialized_custom
+    assert "ordinary-sentinel" not in serialized_custom
+    assert "material-sentinel" not in serialized_custom
+    custom_state_sizes.append(len(serialized_custom.encode("utf-8")))
+
+  # The one metadata record changes fixed-size hashes/watermarks only; it must
+  # not retain every prior day or recursively copy the compact state.
+  assert max(custom_state_sizes) - min(custom_state_sizes) < 2_048
+  assert custom_state_sizes[-1] < 64 * 1024, custom_state_sizes[-1]
 
 
 @pytest.mark.asyncio
@@ -1736,6 +1910,99 @@ async def test_state_sync_persistence_projection_failure_is_fail_closed(
   assert manager._state_sync_durable_strategy_snapshot is None
 
 
+def test_pre_subscription_capture_uses_compact_projection_and_rejects_raw_hot_window() -> None:
+  class FakeState:
+    def __init__(self) -> None:
+      self.values: dict[str, object] = {
+        "state_schema_version": 3,
+        "instrument_states": {
+          "600000.SH": {
+            "opportunity": {
+              "samples": [{"sentinel": "startup-hot-sample"}],
+              "candidate": {"candidate_id": "candidate-1"},
+            },
+            "pending_entry_intent_id": "intent-1",
+            "cooldown_until_ms": 123,
+          }
+        },
+      }
+
+    def to_dict(self) -> dict[str, object]:
+      return copy.deepcopy(self.values)
+
+  class FakeStrategy:
+    def __init__(self) -> None:
+      self.state = FakeState()
+
+    def persistence_state_snapshot(self) -> dict[str, object]:
+      snapshot = self.state.to_dict()
+      instrument_states = dict(snapshot["instrument_states"])
+      instrument_state = dict(instrument_states["600000.SH"])
+      opportunity = dict(instrument_state["opportunity"])
+      opportunity.pop("samples")
+      opportunity.update(
+        {
+          "sample_window_persisted": False,
+          "sample_window_restore_required": True,
+          "sample_window_sample_count": 1,
+        }
+      )
+      instrument_state["opportunity"] = opportunity
+      instrument_states["600000.SH"] = instrument_state
+      snapshot["instrument_states"] = instrument_states
+      return snapshot
+
+  strategy = FakeStrategy()
+  manager = RuntimeStateManager(
+    run_id="run-pre-subscription-projection",
+    persist_enabled=False,
+  )
+
+  manager.capture_strategy_state_for_persistence(strategy)
+
+  assert manager._state["custom"]["instrument_states"]["600000.SH"][
+    "opportunity"
+  ]["samples"] == [{"sentinel": "startup-hot-sample"}]
+  projection = manager._checkpoint_state_projection()
+  durable_opportunity = projection["custom"]["instrument_states"]["600000.SH"][
+    "opportunity"
+  ]
+  assert "samples" not in durable_opportunity
+  assert durable_opportunity["candidate"] == {"candidate_id": "candidate-1"}
+  assert durable_opportunity["sample_window_restore_required"] is True
+
+  raw_manager = RuntimeStateManager(
+    run_id="run-raw-pre-subscription-projection",
+    persist_enabled=True,
+  )
+  raw_manager.update_strategy_custom_state(
+    strategy.state.to_dict(),
+    full_snapshot=True,
+  )
+  raw_manager._mark_dirty()
+  assert asyncio.run(raw_manager.save_snapshot()) is False
+  assert raw_manager.last_snapshot_failure_code == "PERSISTENCE_ERROR"
+
+  nested_raw_manager = RuntimeStateManager(
+    run_id="run-raw-checkpoint-projection",
+    persist_enabled=True,
+  )
+  nested_raw_manager.update_strategy_custom_state(
+    strategy.persistence_state_snapshot(),
+    full_snapshot=True,
+  )
+  nested_raw_manager.set_custom(
+    "runtime_checkpoints",
+    [{"state_payload": {"custom": strategy.state.to_dict()}}],
+  )
+  with pytest.raises(RuntimeError, match="禁止嵌套状态载荷"):
+    nested_raw_manager._ensure_compact_t_trade_durable_custom_state(
+      nested_raw_manager._durable_custom_state_projection()
+    )
+  assert asyncio.run(nested_raw_manager.save_snapshot()) is False
+  assert nested_raw_manager.last_snapshot_failure_code == "PERSISTENCE_ERROR"
+
+
 @pytest.mark.asyncio
 async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoint_paths(
   monkeypatch: pytest.MonkeyPatch,
@@ -1773,6 +2040,12 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
             "entry_filled_volume": 100,
           }
         },
+        "runtime_events": [
+          {
+            "event_key": "runtime-marker-1",
+            "signal_snapshot": {"sentinel": "volatile-runtime-event"},
+          }
+        ],
         "state_schema_version": 3,
       }
 
@@ -1806,6 +2079,7 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
       raw_state["opportunity"] = opportunity
       raw_states["600000.SH"] = raw_state
       snapshot["instrument_states"] = raw_states
+      snapshot["runtime_events"] = [{"event_key": "runtime-marker-1"}]
       return snapshot
 
   saved_custom_states: list[dict] = []
@@ -1855,7 +2129,13 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   )
   manager.set_custom(
     T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY,
-    {"diagnostic:existing": {"event_key": "diagnostic:existing"}},
+    {
+      "material:existing": {
+        "event_key": "material:existing",
+        "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+        "record_kind": "MATERIAL",
+      }
+    },
   )
   await manager.start()
   await manager.start_state_sync(strategy)
@@ -1872,25 +2152,32 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   full_opportunity = manager._state["custom"]["instrument_states"][
     "600000.SH"
   ]["opportunity"]
-  payload = manager._checkpoint_state_payload()
-  durable_opportunity = payload["custom"]["instrument_states"]["600000.SH"][
+  projection = manager._checkpoint_state_projection()
+  durable_opportunity = projection["custom"]["instrument_states"]["600000.SH"][
     "opportunity"
   ]
 
   assert len(full_opportunity["samples"]) == 1_000
   assert full_opportunity["samples"][0]["sentinel"] == "volatile-sample-1"
-  assert "samples" not in durable_opportunity
-  assert "volatile-sample-1" not in repr(payload)
-  assert durable_opportunity["sample_window_sample_count"] == 1_000
-  assert payload["custom"][T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY] == {
-    "diagnostic:existing": {"event_key": "diagnostic:existing"}
+  assert manager._state["custom"]["runtime_events"][0]["signal_snapshot"] == {
+    "sentinel": "volatile-runtime-event"
   }
+  assert "samples" not in durable_opportunity
+  assert "volatile-sample-1" not in repr(projection)
+  assert projection["custom"]["runtime_events"] == [{"event_key": "runtime-marker-1"}]
+  assert "volatile-runtime-event" not in repr(projection)
+  assert durable_opportunity["sample_window_sample_count"] == 1_000
+  assert T_TRADE_DIAGNOSTIC_EVENT_OUTBOX_KEY not in projection["custom"]
 
   assert await manager.save_snapshot() is True
   assert "samples" not in saved_custom_states[-1]["instrument_states"][
     "600000.SH"
   ]["opportunity"]
   assert "volatile-sample-1" not in repr(saved_custom_states[-1])
+  assert saved_custom_states[-1]["runtime_events"] == [
+    {"event_key": "runtime-marker-1"}
+  ]
+  assert "volatile-runtime-event" not in repr(saved_custom_states[-1])
   assert len(manager._state["custom"]["instrument_states"]["600000.SH"]["opportunity"]["samples"]) == 1_000
 
   # A normal terminal teardown removes the source but deliberately retains the
@@ -1912,14 +2199,28 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
     continuity_generation="stream:1",
     completeness={"complete": True},
     materialization_events=[
-      {"event_key": "diagnostic:existing"},
-      {"event_key": "diagnostic:new"},
+      {
+        "event_key": "material:existing",
+        "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+        "record_kind": "MATERIAL",
+      },
+      {
+        "event_key": "material:new",
+        "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+        "record_kind": "MATERIAL",
+      },
     ],
   )
   assert prepared is not None
-  assert "samples" not in prepared.state_payload["custom"]["instrument_states"][
-    "600000.SH"
-  ]["opportunity"]
+  assert "state_payload" not in prepared.to_dict()
+  assert "payload_fingerprint" not in prepared.to_dict()
+  manifest = prepared.completeness["materialization_outbox_manifest"]
+  assert manifest["event_count"] == 2
+  assert len(manifest["ordered_event_keys_sha256"]) == 64
+  assert len(manifest["payload_sha256"]) == 64
+  assert "material:existing" not in repr(prepared.completeness)
+  assert "material:new" not in repr(prepared.completeness)
+  assert "volatile-runtime-event" not in repr(prepared.to_dict())
   assert manager._checkpoint_state_fingerprint() == prepared.state_fingerprint
 
   prepared_restore = RuntimeStateManager(
@@ -1936,12 +2237,12 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
 
   finalized = await manager.finalize_prepared_checkpoint(
     prepared_checkpoint_id=prepared.checkpoint_id,
-    materialization_event_keys=["diagnostic:existing", "diagnostic:new"],
+    materialization_event_keys=["material:existing", "material:new"],
   )
   assert finalized is not None and finalized.complete
-  assert "samples" not in finalized.state_payload["custom"]["instrument_states"][
-    "600000.SH"
-  ]["opportunity"]
+  assert "state_payload" not in finalized.to_dict()
+  assert "payload_fingerprint" not in finalized.to_dict()
+  assert "volatile-runtime-event" not in repr(finalized.to_dict())
 
   restored = RuntimeStateManager(
     run_id=manager.run_id,
@@ -1954,8 +2255,7 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   restored._state["custom"] = copy.deepcopy(saved_custom_states[-1])
   restored._state["version"] = manager._state["version"]
   assert restored.latest_complete_checkpoint() == finalized
-  assert restored._restore_complete_checkpoint_payload(finalized)
-  assert "samples" not in restored._checkpoint_state_payload()["custom"][
+  assert "samples" not in restored._checkpoint_state_projection()["custom"][
     "instrument_states"
   ]["600000.SH"]["opportunity"]
 
@@ -1963,7 +2263,7 @@ async def test_compact_projection_keeps_hot_memory_and_unifies_durable_checkpoin
   assert manager._state_sync_durable_strategy_snapshot is None
 
 
-def test_checkpoint_payload_filters_checkpoint_history_before_deepcopy() -> None:
+def test_checkpoint_state_projection_filters_checkpoint_metadata_before_deepcopy() -> None:
   class MustNotCopy:
     def __deepcopy__(self, _memo):
       raise AssertionError("checkpoint history must be filtered before deepcopy")
@@ -1975,11 +2275,41 @@ def test_checkpoint_payload_filters_checkpoint_history_before_deepcopy() -> None
     "runtime_snapshot_attempt": MustNotCopy(),
   }
 
-  payload = manager._checkpoint_state_payload()
+  projection = manager._checkpoint_state_projection()
 
-  assert payload["custom"]["strategy_window"] == {"samples": [1, 2, 3]}
-  assert "runtime_checkpoints" not in payload["custom"]
-  assert "runtime_snapshot_attempt" not in payload["custom"]
+  assert projection["custom"]["strategy_window"] == {"samples": [1, 2, 3]}
+  assert "runtime_checkpoints" not in projection["custom"]
+  assert "runtime_snapshot_attempt" not in projection["custom"]
+
+
+def test_durable_projection_drops_all_t_trade_opportunity_runtime_events() -> None:
+  manager = RuntimeStateManager(
+    run_id="run-ordinary-t-event-filter",
+    persist_enabled=False,
+    is_backtest=True,
+  )
+  ordinary_event = {
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "event_key": "tto:ordinary",
+    "record_kind": "COALESCED_DIAGNOSTIC",
+    "signal_snapshot": {
+      "samples": ["must-not-cross-runtime-state" * 256],
+    },
+  }
+  material_event = {
+    "type": "T_TRADE_OPPORTUNITY_EVALUATION",
+    "event_key": "tto:material",
+    "record_kind": "MATERIAL",
+  }
+  manager._state["custom"] = {
+    "runtime_events": [ordinary_event, material_event],
+  }
+
+  projected = manager._durable_custom_state_projection()
+
+  assert manager._state["custom"]["runtime_events"][0] == ordinary_event
+  assert "runtime_events" not in projected
+  assert "must-not-cross-runtime-state" not in repr(projected)
 
 
 def test_durable_trace_record_keeps_only_supplemental_and_rebuilds_publish_shape() -> None:
@@ -2054,10 +2384,10 @@ def test_durable_trace_record_keeps_only_supplemental_and_rebuilds_publish_shape
 
 
 @pytest.mark.asyncio
-async def test_snapshot_commits_pending_decision_trace_with_tick_cas(
+async def test_snapshot_commits_full_day_trace_batch_with_tick_cas(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  """One evaluated Tick keeps its CAS and audit in one transaction."""
+  """One day-batch appends every Tick audit in the owning CAS transaction."""
 
   from quantx_domain.trading.decision_trace import DecisionTrace
   from quantx_infrastructure.database import connection as connection_module
@@ -2071,6 +2401,7 @@ async def test_snapshot_commits_pending_decision_trace_with_tick_cas(
   commits: list[str] = []
   state_versions: list[int] = []
   appended: list[dict] = []
+  append_batches: list[list[dict]] = []
   published_traces: list[dict] = []
 
   class FakeDb:
@@ -2102,7 +2433,9 @@ async def test_snapshot_commits_pending_decision_trace_with_tick_cas(
     async def append_traces(self, records, *, commit, flush):
       assert commit is False
       assert flush is False
-      appended.extend(dict(record) for record in records)
+      batch = [dict(record) for record in records]
+      append_batches.append(batch)
+      appended.extend(batch)
       return []
 
   monkeypatch.setattr(connection_module, "get_async_db", fake_get_async_db)
@@ -2126,25 +2459,31 @@ async def test_snapshot_commits_pending_decision_trace_with_tick_cas(
   manager._backtest_storage = SimpleNamespace(
     add_trace=lambda trace: published_traces.append(dict(trace))
   )
-  manager.record_decision_trace(
-    DecisionTrace.from_decision(
-      run_id="run-trace-atomic",
-      strategy_id="ashare_intraday_t_assistant",
-      instrument_code="600000.SH",
-      trace_id="trace-atomic",
+  for ordinal in range(600):
+    manager.record_decision_trace(
+      DecisionTrace.from_decision(
+        run_id="run-trace-atomic",
+        strategy_id="ashare_intraday_t_assistant",
+        instrument_code="600000.SH",
+        trace_id=f"trace-atomic-{ordinal}",
+      )
     )
-  )
 
   assert await manager.save_snapshot() is True
   assert state_versions == [0]
   assert commits == ["commit"]
-  assert len(appended) == 1
-  assert appended[0]["trace_id"] == "trace-atomic"
+  assert len(append_batches) == 1
+  assert len(appended) == 600
+  assert [record["trace_id"] for record in appended] == [
+    f"trace-atomic-{ordinal}" for ordinal in range(600)
+  ]
   assert manager._pending_decision_trace_records == []
   assert [trace.trace_id for trace in manager._decision_trace_logger.records] == [
-    "trace-atomic"
+    f"trace-atomic-{ordinal}" for ordinal in range(600)
   ]
-  assert [trace["trace_id"] for trace in published_traces] == ["trace-atomic"]
+  assert [trace["trace_id"] for trace in published_traces] == [
+    f"trace-atomic-{ordinal}" for ordinal in range(600)
+  ]
 
 
 @pytest.mark.asyncio
@@ -2587,17 +2926,23 @@ async def test_decision_trace_idempotent_replay_accepts_identical_content() -> N
   statement, parameter_batch = db.calls[0]
   sql = str(statement.compile(dialect=postgresql.dialect()))
   assert "ON CONFLICT (id) DO NOTHING" in sql
-  assert "RETURNING strategy_decision_traces.id" in sql
-  assert parameter_batch is None
-  assert "VALUES (" in sql
+  assert "RETURNING id" in sql
+  assert "jsonb_to_recordset" in sql
+  assert "VALUES (" not in sql
+  assert json.loads(parameter_batch["trace_payload"]) == [
+    {
+      **payload,
+      "decided_at": "2026-08-24T01:30:00",
+    }
+  ]
   assert "trace-idempotent" not in sql
   replay_sql = str(db.calls[1][0].compile(dialect=postgresql.dialect()))
   assert replay_sql.startswith("SELECT ")
 
 
 @pytest.mark.asyncio
-async def test_decision_trace_append_fresh_batch_uses_one_multi_values_execute() -> None:
-  """Fresh trace batches bind one multi-values INSERT without executemany."""
+async def test_decision_trace_append_fresh_batch_uses_one_jsonb_recordset_execute() -> None:
+  """Fresh trace batches bind one PostgreSQL JSONB recordset without executemany."""
 
   from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
     StrategyDecisionTraceRepository,
@@ -2655,20 +3000,89 @@ async def test_decision_trace_append_fresh_batch_uses_one_multi_values_execute()
   assert [record.id for record in records] == [item["id"] for item in payloads]
   assert len(db.calls) == 1
   statement, parameter_batch = db.calls[0]
-  assert parameter_batch is None
+  assert set(parameter_batch) == {"trace_payload"}
+  assert json.loads(parameter_batch["trace_payload"]) == [
+    {
+      **item,
+      "decided_at": item["decided_at"].astimezone(timezone.utc)
+      .replace(tzinfo=None)
+      .isoformat(),
+    }
+    for item in payloads
+  ]
 
   from sqlalchemy.dialects import postgresql
 
   sql = str(statement.compile(dialect=postgresql.dialect()))
-  assert sql.count("VALUES (") == 1
-  assert sql.count("), (") == len(payloads) - 1
+  assert "jsonb_to_recordset" in sql
+  assert "VALUES (" not in sql
   assert "trace-parameterized-0" not in sql
   assert "ON CONFLICT (id) DO NOTHING" in sql
-  assert "RETURNING strategy_decision_traces.id" in sql
+  assert "RETURNING id" in sql
 
 
 @pytest.mark.asyncio
-async def test_decision_trace_append_600_rows_chunks_without_intermediate_commit() -> None:
+async def test_decision_trace_append_sqlite_test_session_uses_values_fallback() -> None:
+  """SQLite remains an isolated-test fallback, never the production path."""
+
+  from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
+    StrategyDecisionTraceRepository,
+  )
+
+  payloads = [
+    {
+      "id": f"trace-sqlite-test-{index}",
+      "trace_id": f"source-sqlite-test-{index}",
+      "strategy_run_id": "run-sqlite-test",
+      "strategy_id": "ashare_intraday_t_assistant",
+      "instrument_code": "600000.SH",
+      "decided_at": datetime(2026, 8, 24, 9, 30),
+      "input_summary": {"ordinal": index},
+      "output_summary": {"decision": "HOLD"},
+      "trade_intents": [],
+      "state_patch": {},
+      "decision_trace": {"reason": "TEST_ONLY"},
+    }
+    for index in range(3)
+  ]
+
+  class ScalarResult:
+    def scalars(self):
+      return self
+
+    def all(self):
+      return [item["id"] for item in payloads]
+
+  class FakeDb:
+    bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    def __init__(self) -> None:
+      self.calls = []
+
+    async def execute(self, statement, params=None):
+      self.calls.append((statement, params))
+      return ScalarResult()
+
+  db = FakeDb()
+  records = await StrategyDecisionTraceRepository(db).append_traces(
+    payloads,
+    commit=False,
+    flush=False,
+  )
+
+  assert [record.id for record in records] == [item["id"] for item in payloads]
+  assert len(db.calls) == 1
+  statement, params = db.calls[0]
+  assert params is None
+  from sqlalchemy.dialects import postgresql
+
+  sql = str(statement.compile(dialect=postgresql.dialect()))
+  assert "jsonb_to_recordset" not in sql
+  assert "VALUES (" in sql
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_append_600_rows_uses_one_recordset_without_intermediate_commit() -> None:
   from quantx_infrastructure.repositories.strategy_decision_trace_repository import (
     StrategyDecisionTraceRepository,
   )
@@ -2708,11 +3122,7 @@ async def test_decision_trace_append_600_rows_chunks_without_intermediate_commit
 
     async def execute(self, statement, params=None):
       self.calls.append((statement, params))
-      chunk_index = len(self.calls) - 1
-      start = chunk_index * 256
-      return ScalarResult(
-        [item["id"] for item in payloads[start : start + 256]]
-      )
+      return ScalarResult([item["id"] for item in payloads])
 
     async def commit(self) -> None:
       self.commit_calls += 1
@@ -2724,8 +3134,8 @@ async def test_decision_trace_append_600_rows_chunks_without_intermediate_commit
   records = await StrategyDecisionTraceRepository(db).append_traces(payloads)
 
   assert [record.id for record in records] == [item["id"] for item in payloads]
-  assert len(db.calls) == 3
-  assert [params for _statement, params in db.calls] == [None, None, None]
+  assert len(db.calls) == 1
+  assert len(json.loads(db.calls[0][1]["trace_payload"])) == 600
   assert db.commit_calls == 1
   assert db.flush_calls == 0
 
@@ -2750,11 +3160,11 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
       "state_patch": {"set": {"ordinal": index}},
       "decision_trace": {"reason": "NO_TRADE_INTENT"},
     }
-    for index in range(600)
+    for index in range(1_100)
   ]
   replayed = [
     SimpleNamespace(**payload)
-    for payload in payloads[256:512]
+    for payload in payloads[1_024:]
   ]
 
   class ScalarResult:
@@ -2776,11 +3186,11 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
       call_index = len(self.calls) - 1
       if call_index == 1:
         return ScalarResult([])
-      if call_index == 3:
+      if call_index == 2:
         return ScalarResult(replayed)
-      start = call_index * 256
+      start = call_index * 1_024
       return ScalarResult(
-        [item["id"] for item in payloads[start : start + 256]]
+        [item["id"] for item in payloads[start : start + 1_024]]
       )
 
   db = FakeDb()
@@ -2791,21 +3201,19 @@ async def test_decision_trace_replay_across_chunks_uses_one_final_select() -> No
   )
 
   assert [record.id for record in records] == [item["id"] for item in payloads]
-  assert len(db.calls) == 4
-  assert [params for _statement, params in db.calls] == [
-    None,
-    None,
-    None,
-    None,
+  assert len(db.calls) == 3
+  assert [set(params) for _statement, params in db.calls[:2]] == [
+    {"trace_payload"},
+    {"trace_payload"},
   ]
   from sqlalchemy.dialects import postgresql
 
   assert all(
-    "INSERT INTO strategy_decision_traces"
+    "jsonb_to_recordset"
     in str(statement.compile(dialect=postgresql.dialect()))
-    for statement, _params in db.calls[:3]
+    for statement, _params in db.calls[:2]
   )
-  assert str(db.calls[3][0].compile(dialect=postgresql.dialect())).startswith(
+  assert str(db.calls[2][0].compile(dialect=postgresql.dialect())).startswith(
     "SELECT "
   )
 
@@ -2919,9 +3327,12 @@ async def test_decision_trace_idempotent_replay_rejects_different_content() -> N
       flush=False,
     )
   assert len(db.calls) == 2
-  assert db.calls[0][1] is None
+  assert set(db.calls[0][1]) == {"trace_payload"}
   from sqlalchemy.dialects import postgresql
 
+  assert "jsonb_to_recordset" in str(
+    db.calls[0][0].compile(dialect=postgresql.dialect())
+  )
   assert str(db.calls[1][0].compile(dialect=postgresql.dialect())).startswith(
     "SELECT "
   )

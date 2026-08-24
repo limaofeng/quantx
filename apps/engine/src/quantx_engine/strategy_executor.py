@@ -202,6 +202,191 @@ _SESSION_CHECKPOINT_SPECS = (
 _CHECKPOINT_EVALUATION_OUTBOX_MAX_EVENTS = 8192
 _TRACE_AUDIT_PATCH_FORMAT = "CONTENT_ADDRESSED_RUNTIME_STATE_PATCH_V1"
 _TRACE_AUDIT_INLINE_STRING_MAX_BYTES = 256
+_T_TRADE_TRACE_PROJECTION_FORMAT = "T_TRADE_DECISION_TRACE_CAUSAL_INDEX_V3"
+_T_TRADE_TRACE_MARKER_LIST_LIMIT = 32
+_T_TRADE_TRACE_SCALAR_MAX_BYTES = 256
+_T_TRADE_EVALUATION_VERSION_KEYS = (
+  "config_version",
+  "policy_version",
+  "feature_schema_version",
+  "state_schema_version",
+  "profile_version",
+  "profile_fingerprint",
+)
+_T_TRADE_TRACE_PAYLOAD_KEYS = frozenset(
+  {
+    "reason",
+    "candidate_id",
+    "candidate_fingerprint",
+    "accepted",
+    "ignored",
+    "active_volume",
+    "exit_plan_id",
+    "exit_plan_status",
+    "net_profit_pct",
+    "peak_net_profit_pct",
+    "trailing_floor_pct",
+    "time_exit_mode",
+    "holding_trading_days",
+    "instrument_count",
+    "rewarmed_instrument_count",
+    "signal_snapshot",
+    "source_identity",
+    "added",
+    "removed",
+  }
+)
+_T_TRADE_TRACE_PAYLOAD_SCALAR_KEYS = tuple(
+  sorted(
+    _T_TRADE_TRACE_PAYLOAD_KEYS
+    - {"signal_snapshot", "source_identity", "added", "removed"}
+  )
+)
+_T_TRADE_EXECUTION_STATE_SCALAR_KEYS = (
+  "status",
+  "draining",
+  "pending_entry_intent_id",
+  "pending_exit_intent_id",
+  "entry_order_status",
+  "exit_order_status",
+  "entry_terminal_order_status",
+  "exit_terminal_order_status",
+  "entry_filled_volume",
+  "exit_filled_volume",
+  "profit_armed",
+  "cooldown_until_ms",
+  "batch_id",
+  "exit_plan_id",
+  "reconciliation_reason",
+)
+_T_TRADE_TOP_LEVEL_AWAITING_KEYS = frozenset(
+  {"instrument_code", "candidate_id", "intent_id", "source_time_ms"}
+)
+_T_TRADE_STATE_PATCH_ROOT_KEYS = frozenset(
+  {
+    "instrument_states",
+    "universe_revision",
+    "opportunity",
+    "awaiting",
+    *_T_TRADE_EXECUTION_STATE_SCALAR_KEYS,
+  }
+)
+_T_TRADE_INSTRUMENT_STATE_KEYS = frozenset(
+  {
+    "status",
+    "requested_entry_amount",
+    "draining",
+    "opportunity",
+    "pending_entry_intent_id",
+    "pending_exit_intent_id",
+    "entry_order_status",
+    "exit_order_status",
+    "entry_terminal_order_status",
+    "exit_terminal_order_status",
+    "entry_expected_fill_volume",
+    "exit_expected_fill_volume",
+    "entry_pending_fill_base",
+    "exit_pending_fill_base",
+    "entry_filled_volume",
+    "entry_avg_price",
+    "exit_filled_volume",
+    "exit_avg_price",
+    "last_price",
+    "last_net_profit_pct",
+    "peak_net_profit_pct",
+    "trailing_floor_pct",
+    "profit_armed",
+    "last_exit_reason",
+    "cooldown_until_ms",
+    "completed_cycles",
+    "batch_id",
+    "exit_plan_id",
+    "batch_started_trade_date",
+    "last_holding_trade_date",
+    "holding_trading_days",
+    "exit_policy_snapshot",
+    "reconciliation_reason",
+  }
+)
+_T_TRADE_OPPORTUNITY_STATE_KEYS = frozenset(
+  {
+    "schema_version",
+    "instrument_code",
+    "trade_date",
+    "continuity_generation",
+    "data_health",
+    "health_reasons",
+    "samples",
+    "pullback",
+    "momentum",
+    "candidate",
+    "candidate_status",
+    "candidate_suppressed",
+    "candidate_awaiting_approval",
+    "rearm_started_at_ms",
+    "latest_evaluation",
+    "preview_score",
+    "candidate_score",
+    "revalidate_score",
+    "rearm_score",
+    "thresholds",
+    "state_version",
+    "feature_schema_version",
+    "policy_version",
+    "config_version",
+    "profile_fingerprint",
+    "event_cursor",
+    "last_policy_rewarm_identity",
+  }
+)
+_T_TRADE_CANDIDATE_STATE_KEYS = frozenset(
+  {
+    "candidate_id",
+    "fingerprint",
+    "episode_id",
+    "path",
+    "latched_at_ms",
+    "expires_at_ms",
+    "source_time_ms",
+    "tick_ordinal",
+    "price",
+    "score",
+    "policy_version",
+    "feature_schema_version",
+    "reference_profile_version",
+    "reference_profile_schema_version",
+  }
+)
+_T_TRADE_INTENT_METADATA_SCALAR_KEYS = frozenset(
+  {
+    "t_trade_role",
+    "account_id",
+    "strategy_run_id",
+    "instrument_code",
+    "opportunity_schema_version",
+    "signal_version",
+    "candidate_id",
+    "candidate_fingerprint",
+    "candidate_state_version",
+    "candidate_status",
+    "config_version",
+    "policy_version",
+    "feature_schema_version",
+    "profile_version",
+    "profile_fingerprint",
+    "source_time_ms",
+    "tick_ordinal",
+    "continuity_generation",
+    "opportunity_score",
+    "requested_entry_amount",
+    "target_trade_amount",
+    "max_trade_amount",
+    "t_batch_id",
+    "exit_plan_id",
+    "global_monitor_id",
+  }
+)
+_T_TRADE_INTENT_METADATA_REFERENCE_KEYS = frozenset({"exit_plan_template"})
 # Profile snapshots are process-local decision inputs.  Keep their cardinality
 # bounded independently from the eligibility snapshot so a long-running
 # account-level runtime cannot grow forever as its universe rotates.
@@ -496,6 +681,749 @@ def _compact_runtime_state_patch_for_audit(
   }
 
 
+def _t_trade_trace_bounded_scalar(value: Any, *, field_name: str) -> Any:
+  """Return one finite, bounded scalar for the T-trade causal index.
+
+  Unlike the former content-addressed trace projection, this function must
+  never traverse or hash an arbitrary subtree.  A new structured field is
+  therefore either explicitly projected below or rejected before the output
+  can cross the durable audit boundary.
+  """
+
+  scalar = _trace_audit_scalar_value(value)
+  if scalar is None or isinstance(scalar, bool) or isinstance(scalar, int):
+    return scalar
+  if isinstance(scalar, float):
+    if not isfinite(scalar):
+      raise ValueError(f"T-trade trace {field_name} contains a non-finite float")
+    return scalar
+  if isinstance(scalar, str):
+    if len(scalar.encode("utf-8")) > _T_TRADE_TRACE_SCALAR_MAX_BYTES:
+      raise ValueError(f"T-trade trace {field_name} exceeds scalar size limit")
+    return scalar
+  raise ValueError(f"T-trade trace {field_name} must be a scalar")
+
+
+def _t_trade_trace_require_allowed_keys(
+  source: Mapping[str, Any],
+  *,
+  allowed_keys: frozenset[str],
+  field_name: str,
+) -> None:
+  """Reject a new structured root before it can reach durable trace JSON.
+
+  T-trade's detailed evaluation is retained once by its dedicated evidence
+  records.  The per-Tick trace is intentionally an allow-listed causal index,
+  so accepting a new object here would silently recreate the repeated-root
+  write that this projection removes.
+  """
+
+  invalid_keys = [key for key in source if not isinstance(key, str) or not key]
+  if invalid_keys:
+    raise ValueError(f"T-trade trace {field_name} has an invalid key")
+  unknown_keys = sorted(set(source) - allowed_keys)
+  if unknown_keys:
+    raise ValueError(
+      f"T-trade trace {field_name} contains unprojectable fields: "
+      + ",".join(unknown_keys)
+    )
+
+
+def _t_trade_trace_scalar_marker(
+  source: Mapping[str, Any],
+  keys: Iterable[str],
+  *,
+  include_none: bool = False,
+  field_name: str = "marker",
+) -> Dict[str, Any]:
+  """Copy only explicitly allowed, bounded scalar decision facts."""
+
+  marker: Dict[str, Any] = {}
+  for key in keys:
+    if key not in source:
+      continue
+    value = _t_trade_trace_bounded_scalar(
+      source[key],
+      field_name=f"{field_name}.{key}",
+    )
+    if value is None and not include_none:
+      continue
+    marker[key] = value
+  return marker
+
+
+def _t_trade_trace_text_marker_list(value: Any, *, field_name: str) -> List[str]:
+  """Keep a bounded, order-stable list of auditable reason/tag strings."""
+
+  if value is None:
+    return []
+  if not isinstance(value, (list, tuple)):
+    raise ValueError(f"T-trade trace {field_name} must be a string list")
+  if len(value) > _T_TRADE_TRACE_MARKER_LIST_LIMIT:
+    raise ValueError(f"T-trade trace {field_name} exceeds list size limit")
+  values: List[str] = []
+  seen: set[str] = set()
+  for index, raw_value in enumerate(value):
+    item = _t_trade_trace_bounded_scalar(
+      raw_value,
+      field_name=f"{field_name}[{index}]",
+    )
+    if item is None:
+      continue
+    if not isinstance(item, str):
+      raise ValueError(f"T-trade trace {field_name} must contain strings")
+    normalized = item.strip()
+    if normalized and normalized not in seen:
+      seen.add(normalized)
+      values.append(normalized)
+  return values
+
+
+def _t_trade_trace_source_identity_marker(
+  input_snapshot: StrategyInput,
+) -> Dict[str, Any]:
+  """Return only source identity not already present in relational columns."""
+
+  context = getattr(input_snapshot, "market_data_context", None)
+  if context is None:
+    return {}
+  raw = {
+    "continuity_generation": getattr(context, "continuity_generation", None),
+    "source_time_ms": getattr(context, "source_time_ms", None),
+    "tick_ordinal": getattr(context, "tick_ordinal", None),
+  }
+  return _t_trade_trace_scalar_marker(
+    raw,
+    raw.keys(),
+    field_name="source_identity",
+  )
+
+
+def _t_trade_trace_evidence_reference(event: Mapping[str, Any]) -> Dict[str, Any]:
+  """Return the authority reference for one known T-trade durable event.
+
+  The event/outbox and opportunity-evaluation relations own the detailed
+  payload. The per-Tick decision trace carries only the stable reference that
+  permits audit reconstruction, never a second candidate/FSM/signal tree.
+  """
+
+  event_type = _t_trade_trace_bounded_scalar(
+    event.get("type"),
+    field_name="append_event.type",
+  )
+  if not isinstance(event_type, str) or not event_type:
+    raise ValueError("T-trade trace append event requires a type")
+  if event_type == T_TRADE_OPPORTUNITY_EVALUATION_EVENT:
+    _t_trade_trace_require_allowed_keys(
+      event,
+      allowed_keys=frozenset(
+        {
+          "type",
+          "event_key",
+          "record_kind",
+          "event_type",
+          "instrument_code",
+          "evaluated_at_ms",
+          "signal_snapshot",
+          "transition",
+          "intent_link",
+          "external_blockers",
+          "metrics",
+          "window_started_at_ms",
+          "window_ended_at_ms",
+          "coalesced_count",
+        }
+      ),
+      field_name="append_event",
+    )
+    event_key = _t_trade_trace_bounded_scalar(
+      event.get("event_key"),
+      field_name="append_event.event_key",
+    )
+    if not isinstance(event_key, str) or not event_key:
+      raise ValueError("T-trade opportunity event requires an event_key")
+    record_kind = _t_trade_trace_bounded_scalar(
+      event.get("record_kind"),
+      field_name="append_event.record_kind",
+    )
+    if record_kind != "MATERIAL":
+      raise ValueError("T-trade trace only permits MATERIAL opportunity events")
+    snapshot = event.get("signal_snapshot")
+    if not isinstance(snapshot, Mapping):
+      raise ValueError("T-trade opportunity event requires a signal_snapshot")
+    marker = _t_trade_trace_scalar_marker(
+      event,
+      ("record_kind", "event_type"),
+      field_name="append_event",
+    )
+    marker["evaluation_event_key"] = event_key
+    return marker
+  if event_type == "T_TRADE_EXTERNAL_ENTRY_IMPORTED":
+    _t_trade_trace_require_allowed_keys(
+      event,
+      allowed_keys=frozenset(
+        {
+          "type",
+          "instrument_code",
+          "batch_id",
+          "volume",
+          "price",
+          "source_trade_id",
+        }
+      ),
+      field_name="append_event.external_entry",
+    )
+    return _t_trade_trace_scalar_marker(
+      event,
+      (
+        "type",
+        "batch_id",
+        "source_trade_id",
+      ),
+      field_name="append_event.external_entry",
+    )
+  if event_type == "T_TRADE_EXIT_POLICY_UPDATED":
+    _t_trade_trace_require_allowed_keys(
+      event,
+      allowed_keys=frozenset(
+        {
+          "type",
+          "instrument_code",
+          "batch_id",
+          "changed_at",
+          "previous_config_version",
+          "config_version",
+          "previous_policy",
+          "policy",
+          "previous_time_exit_mode",
+          "time_exit_mode",
+          "previous_hard_stop_enabled",
+          "hard_stop_enabled",
+        }
+      ),
+      field_name="append_event.exit_policy",
+    )
+    return _t_trade_trace_scalar_marker(
+      event,
+      (
+        "type",
+        "batch_id",
+        "config_version",
+      ),
+      field_name="append_event.exit_policy",
+    )
+  raise ValueError(f"T-trade trace append event type is not projectable: {event_type}")
+
+
+def _t_trade_trace_state_marker(
+  state: Mapping[str, Any],
+) -> Dict[str, Any]:
+  """Index a material durable mutation without copying evaluation state."""
+
+  _t_trade_trace_require_allowed_keys(
+    state,
+    allowed_keys=_T_TRADE_INSTRUMENT_STATE_KEYS,
+    field_name="state_patch.instrument_state",
+  )
+  marker: Dict[str, Any] = {}
+  execution = _t_trade_trace_scalar_marker(
+    state,
+    _T_TRADE_EXECUTION_STATE_SCALAR_KEYS,
+    field_name="state_patch.instrument_state",
+  )
+  if execution:
+    marker["execution"] = execution
+  opportunity = state.get("opportunity")
+  if opportunity is None:
+    return marker
+  opportunity_marker = _t_trade_trace_opportunity_marker(opportunity)
+  if opportunity_marker:
+    marker["opportunity"] = opportunity_marker
+  return marker
+
+
+def _t_trade_trace_opportunity_marker(opportunity: Any) -> Dict[str, Any]:
+  """Project one material opportunity mutation without walking hot roots."""
+
+  if not isinstance(opportunity, Mapping):
+    raise ValueError("T-trade instrument opportunity state must be a mapping")
+  _t_trade_trace_require_allowed_keys(
+    opportunity,
+    allowed_keys=_T_TRADE_OPPORTUNITY_STATE_KEYS,
+    field_name="state_patch.opportunity",
+  )
+  candidate = opportunity.get("candidate")
+  if candidate is not None:
+    if not isinstance(candidate, Mapping):
+      raise ValueError("T-trade candidate state must be a mapping")
+    _t_trade_trace_require_allowed_keys(
+      candidate,
+      allowed_keys=_T_TRADE_CANDIDATE_STATE_KEYS,
+      field_name="state_patch.opportunity.candidate",
+    )
+  opportunity_marker = _t_trade_trace_scalar_marker(
+    opportunity,
+    (
+      "state_version",
+      "candidate_status",
+      "candidate_suppressed",
+      "candidate_awaiting_approval",
+    ),
+    include_none=True,
+    field_name="state_patch.opportunity",
+  )
+  if opportunity_marker:
+    return opportunity_marker
+  return {}
+
+
+def _t_trade_trace_awaiting_marker(awaiting: Any) -> Dict[str, Any]:
+  """Index the small approval hand-off state used by top-level T strategies."""
+
+  if not isinstance(awaiting, Mapping):
+    raise ValueError("T-trade awaiting state must be a mapping")
+  _t_trade_trace_require_allowed_keys(
+    awaiting,
+    allowed_keys=_T_TRADE_TOP_LEVEL_AWAITING_KEYS,
+    field_name="state_patch.awaiting",
+  )
+  if not awaiting:
+    return {"cleared": True}
+  return _t_trade_trace_scalar_marker(
+    awaiting,
+    sorted(_T_TRADE_TOP_LEVEL_AWAITING_KEYS),
+    field_name="state_patch.awaiting",
+  )
+
+
+def _compact_t_trade_runtime_state_patch_for_audit(
+  patch: Any,
+  *,
+  instrument_code: str,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+  """Return a material mutation index plus authority evidence references.
+
+  Ordinary T ticks update hot observation state only. Their trace index is
+  deliberately empty after validation; a material event is the boundary that
+  earns a compact durable mutation marker.
+  """
+
+  raw_set = getattr(patch, "set", {}) or {}
+  raw_unset = getattr(patch, "unset", []) or []
+  raw_events = getattr(patch, "append_events", []) or []
+  if not isinstance(raw_set, Mapping):
+    raise ValueError("T-trade trace patch.set must be a mapping")
+  if not isinstance(raw_unset, (list, tuple)):
+    raise ValueError("T-trade trace patch.unset must be a list")
+  if not isinstance(raw_events, (list, tuple)):
+    raise ValueError("T-trade trace patch.append_events must be a list")
+  if len(raw_unset) > _T_TRADE_TRACE_MARKER_LIST_LIMIT:
+    raise ValueError("T-trade trace patch.unset exceeds list size limit")
+  if len(raw_events) > _T_TRADE_TRACE_MARKER_LIST_LIMIT:
+    raise ValueError("T-trade trace patch.append_events exceeds list size limit")
+
+  normalized_code = str(instrument_code or "").strip().upper()
+  scalar_set: Dict[str, Any] = {}
+  current_state_marker: Optional[Dict[str, Any]] = None
+  top_level_opportunity_marker: Optional[Dict[str, Any]] = None
+  top_level_awaiting_marker: Optional[Dict[str, Any]] = None
+  for raw_key, raw_value in raw_set.items():
+    if not isinstance(raw_key, str) or not raw_key:
+      raise ValueError("T-trade trace patch.set has an invalid key")
+    if raw_key not in _T_TRADE_STATE_PATCH_ROOT_KEYS:
+      raise ValueError(
+        f"T-trade trace patch.set contains unprojectable field: {raw_key}"
+      )
+    if raw_key == "instrument_states":
+      if not isinstance(raw_value, Mapping):
+        raise ValueError("T-trade trace instrument_states must be a mapping")
+      if normalized_code and normalized_code in raw_value:
+        current_state = raw_value[normalized_code]
+        if not isinstance(current_state, Mapping):
+          raise ValueError("T-trade current instrument state must be a mapping")
+        # Validate the recognized state shape even for ordinary ticks. This
+        # remains scalar-only and never traverses samples/evaluation roots.
+        current_state_marker = _t_trade_trace_state_marker(current_state)
+      continue
+    if raw_key == "opportunity":
+      top_level_opportunity_marker = _t_trade_trace_opportunity_marker(raw_value)
+      continue
+    if raw_key == "awaiting":
+      top_level_awaiting_marker = _t_trade_trace_awaiting_marker(raw_value)
+      continue
+    scalar_set[raw_key] = _t_trade_trace_bounded_scalar(
+      raw_value,
+      field_name=f"state_patch.set.{raw_key}",
+    )
+
+  unset = []
+  for index, raw_key in enumerate(raw_unset):
+    value = _t_trade_trace_bounded_scalar(
+      raw_key,
+      field_name=f"state_patch.unset[{index}]",
+    )
+    if not isinstance(value, str) or not value:
+      raise ValueError("T-trade trace patch.unset requires non-empty strings")
+    unset.append(value)
+  evidence_references: List[Dict[str, Any]] = []
+  for index, raw_event in enumerate(raw_events):
+    if not isinstance(raw_event, Mapping):
+      raise ValueError(f"T-trade trace append_events[{index}] must be a mapping")
+    evidence_references.append(_t_trade_trace_evidence_reference(raw_event))
+
+  # This helper is reached only after the caller has decided that an output is
+  # material.  A diagnostic evaluation is forbidden at that boundary rather
+  # than being turned into another durable observation format.
+  if any(
+    reference.get("record_kind") == "COALESCED_DIAGNOSTIC"
+    for reference in evidence_references
+  ):
+    raise ValueError("T-trade ordinary diagnostic must not enter a trace")
+
+  mutation: Dict[str, Any] = {}
+  if current_state_marker:
+    mutation["current_state"] = current_state_marker
+  if top_level_opportunity_marker:
+    mutation["opportunity"] = top_level_opportunity_marker
+  if top_level_awaiting_marker:
+    mutation["awaiting"] = top_level_awaiting_marker
+  if scalar_set:
+    mutation["set"] = scalar_set
+  if unset:
+    mutation["unset"] = unset
+  return mutation, evidence_references
+
+
+def _t_trade_evaluation_snapshot_for_trace(
+  trace_payload: Mapping[str, Any],
+  *,
+  patch: Any,
+  instrument_code: str,
+) -> Optional[Mapping[str, Any]]:
+  """Read declared version scalars without serializing an evaluation root."""
+
+  raw_snapshot = trace_payload.get("signal_snapshot")
+  if raw_snapshot is not None:
+    if not isinstance(raw_snapshot, Mapping):
+      raise ValueError("T-trade trace signal_snapshot must be a mapping")
+    return raw_snapshot
+  if patch is None:
+    return None
+  raw_set = getattr(patch, "set", {}) or {}
+  if not isinstance(raw_set, Mapping):
+    raise ValueError("T-trade trace patch.set must be a mapping")
+  states = raw_set.get("instrument_states")
+  if states is None:
+    return None
+  if not isinstance(states, Mapping):
+    raise ValueError("T-trade trace instrument_states must be a mapping")
+  state = states.get(str(instrument_code or "").strip().upper())
+  if state is None:
+    return None
+  if not isinstance(state, Mapping):
+    raise ValueError("T-trade current instrument state must be a mapping")
+  opportunity = state.get("opportunity")
+  if opportunity is None:
+    return None
+  if not isinstance(opportunity, Mapping):
+    raise ValueError("T-trade instrument opportunity state must be a mapping")
+  snapshot = opportunity.get("latest_evaluation")
+  if snapshot is None:
+    return None
+  if not isinstance(snapshot, Mapping):
+    raise ValueError("T-trade latest_evaluation must be a mapping")
+  return snapshot
+
+
+def _t_trade_trace_versions(
+  trace_payload: Mapping[str, Any],
+  *,
+  patch: Any,
+  instrument_code: str,
+) -> Dict[str, Any]:
+  """Return version facts needed to replay a source identity deterministically."""
+
+  snapshot = _t_trade_evaluation_snapshot_for_trace(
+    trace_payload,
+    patch=patch,
+    instrument_code=instrument_code,
+  )
+  if snapshot is None:
+    return {}
+  return _t_trade_trace_scalar_marker(
+    snapshot,
+    _T_TRADE_EVALUATION_VERSION_KEYS,
+    field_name="signal_snapshot.versions",
+  )
+
+
+def _validate_t_trade_trace_payload(trace_payload: Mapping[str, Any]) -> None:
+  """Fail closed for undeclared payload roots without copying known evidence."""
+
+  _t_trade_trace_require_allowed_keys(
+    trace_payload,
+    allowed_keys=_T_TRADE_TRACE_PAYLOAD_KEYS,
+    field_name="trace_payload",
+  )
+  for key in _T_TRADE_TRACE_PAYLOAD_SCALAR_KEYS:
+    if key in trace_payload:
+      _t_trade_trace_bounded_scalar(
+        trace_payload[key],
+        field_name=f"trace_payload.{key}",
+      )
+  for key in ("added", "removed"):
+    if key in trace_payload:
+      _t_trade_trace_text_marker_list(
+        trace_payload[key],
+        field_name=f"trace_payload.{key}",
+      )
+  raw_identity = trace_payload.get("source_identity")
+  if raw_identity is not None:
+    if not isinstance(raw_identity, Mapping):
+      raise ValueError("T-trade trace payload source_identity must be a mapping")
+    _t_trade_trace_require_allowed_keys(
+      raw_identity,
+      allowed_keys=frozenset(
+        {"continuity_generation", "source_time_ms", "tick_ordinal"}
+      ),
+      field_name="trace_payload.source_identity",
+    )
+    _t_trade_trace_scalar_marker(
+      raw_identity,
+      ("continuity_generation", "source_time_ms", "tick_ordinal"),
+      field_name="trace_payload.source_identity",
+    )
+
+
+def _summarize_t_trade_strategy_input_for_audit(
+  input_snapshot: StrategyInput,
+) -> Dict[str, Any]:
+  """Build a T-trade causal input index without copying input roots."""
+
+  compact = _t_trade_trace_scalar_marker(
+    {
+      "input_id": getattr(input_snapshot, "input_id", None),
+      "cadence": getattr(
+        getattr(input_snapshot, "cadence", None),
+        "value",
+        getattr(input_snapshot, "cadence", None),
+      ),
+    },
+    ("input_id", "cadence"),
+    field_name="input_summary",
+  )
+  source_identity = _t_trade_trace_source_identity_marker(input_snapshot)
+  if source_identity:
+    compact["source_identity"] = source_identity
+  return compact
+
+
+def _t_trade_trace_reason(
+  trace_payload: Mapping[str, Any],
+  *,
+  trade_intent_count: int,
+) -> str:
+  """Return the one durable reason field for the immutable trace header."""
+
+  raw_reason = trace_payload.get("reason")
+  if raw_reason is not None:
+    reason = _t_trade_trace_bounded_scalar(
+      raw_reason,
+      field_name="trace_payload.reason",
+    )
+    if not isinstance(reason, str):
+      raise ValueError("T-trade trace reason must be a string")
+    if reason:
+      return reason
+  return "TRADE_INTENT_GENERATED" if trade_intent_count else "NO_TRADE_INTENT"
+
+
+def _summarize_t_trade_intent_for_audit(intent: TradeIntent) -> Dict[str, Any]:
+  """Keep the causal intent fields and reference the authoritative intent row.
+
+  The intent lifecycle owns its complete immutable metadata.  A trace carries
+  its stable intent ID plus decision-relevant scalar metadata only, never an
+  embedded exit-plan template or arbitrary metadata tree.
+  """
+
+  raw_intent_id = _t_trade_trace_bounded_scalar(
+    getattr(intent, "intent_id", None),
+    field_name="trade_intent.intent_id",
+  )
+  if not isinstance(raw_intent_id, str) or not raw_intent_id:
+    raise ValueError("T-trade trace intent requires an intent_id")
+  raw = {
+    "direction": getattr(intent, "direction", None),
+    "bucket": getattr(intent, "bucket", None),
+    "reason": getattr(intent, "reason", None),
+    "priority": getattr(intent, "priority", None),
+    "target_amount": getattr(intent, "target_amount", None),
+    "target_position_pct": getattr(intent, "target_position_pct", None),
+    "target_volume": getattr(intent, "target_volume", None),
+    "limit_price_hint": getattr(intent, "limit_price_hint", None),
+    "execution_mode": getattr(intent, "execution_mode", None),
+    "approval_ttl_ms": getattr(intent, "approval_ttl_ms", None),
+    "max_price_deviation_bps": getattr(intent, "max_price_deviation_bps", None),
+  }
+  summary = {"intent_id": raw_intent_id}
+  summary.update(
+    _t_trade_trace_scalar_marker(
+      raw,
+      raw.keys(),
+      field_name="trade_intent",
+    )
+  )
+  metadata = getattr(intent, "metadata", None) or {}
+  if not isinstance(metadata, Mapping):
+    raise ValueError("T-trade trace intent metadata must be a mapping")
+  invalid_metadata_keys = [
+    key for key in metadata if not isinstance(key, str) or not key
+  ]
+  if invalid_metadata_keys:
+    raise ValueError("T-trade trace intent metadata has an invalid key")
+  unknown_metadata_keys = sorted(
+    set(metadata)
+    - _T_TRADE_INTENT_METADATA_SCALAR_KEYS
+    - _T_TRADE_INTENT_METADATA_REFERENCE_KEYS
+  )
+  if unknown_metadata_keys:
+    raise ValueError(
+      "T-trade trace intent metadata contains unprojectable fields: "
+      + ",".join(unknown_metadata_keys)
+    )
+  for key in _T_TRADE_INTENT_METADATA_REFERENCE_KEYS:
+    if key in metadata and metadata[key] is not None and not isinstance(
+      metadata[key], Mapping
+    ):
+      raise ValueError(f"T-trade trace intent metadata.{key} must be a mapping")
+  metadata_marker = _t_trade_trace_scalar_marker(
+    metadata,
+    sorted(_T_TRADE_INTENT_METADATA_SCALAR_KEYS),
+    field_name="trade_intent.metadata",
+  )
+  if metadata_marker:
+    summary["metadata"] = metadata_marker
+  return summary
+
+
+def _build_t_trade_decision_trace_projection(
+  *,
+  input_snapshot: StrategyInput,
+  output: StrategyOutput,
+) -> Dict[str, Any]:
+  """Build the complete minimal causal index for one T-trade output.
+
+  The generic path intentionally remains unchanged. This branch must never
+  call generic input/intent summarizers or content-address arbitrary roots:
+  those operations would serialize repeated hot state on every Tick.
+  """
+
+  raw_payload = output.trace_payload or {}
+  if not isinstance(raw_payload, Mapping):
+    raise ValueError("T-trade trace payload must be a mapping")
+  _t_trade_trace_require_allowed_keys(
+    raw_payload,
+    allowed_keys=_T_TRADE_TRACE_PAYLOAD_KEYS,
+    field_name="trace_payload",
+  )
+  raw_tags = output.decision_tags or []
+  tags = _t_trade_trace_text_marker_list(
+    raw_tags,
+    field_name="decision_tags",
+  )
+  raw_intents = output.trade_intents or []
+  if not isinstance(raw_intents, (list, tuple)):
+    raise ValueError("T-trade trace trade_intents must be a list")
+  if len(raw_intents) > _T_TRADE_TRACE_MARKER_LIST_LIMIT:
+    raise ValueError("T-trade trace trade_intents exceeds list size limit")
+  intents = [
+    _summarize_t_trade_intent_for_audit(intent)
+    for intent in raw_intents
+  ]
+  state_patch, evidence_references = (
+    _compact_t_trade_runtime_state_patch_for_audit(
+      output.runtime_state_patch,
+      instrument_code=input_snapshot.instrument_code,
+    )
+    if output.runtime_state_patch
+    else ({}, [])
+  )
+  versions = _t_trade_trace_versions(
+    raw_payload,
+    patch=output.runtime_state_patch,
+    instrument_code=input_snapshot.instrument_code,
+  )
+  input_summary = _summarize_t_trade_strategy_input_for_audit(input_snapshot)
+  if versions:
+    input_summary["versions"] = versions
+  output_summary: Dict[str, Any] = {
+    "format": _T_TRADE_TRACE_PROJECTION_FORMAT,
+    "record_kind": "MATERIAL",
+  }
+  if evidence_references:
+    output_summary["evaluation_references"] = evidence_references
+  return {
+    "input_summary": input_summary,
+    # Detailed roots are materialized by T opportunity evidence, not copied
+    # into the supplemental decision-trace JSON for every Tick.
+    "environment": {},
+    "risk_caps": {},
+    "position_profile": {},
+    "execution_profile": {},
+    "output_summary": output_summary,
+    "state_patch": state_patch,
+    "trade_intents": intents,
+    "tags": ["strategy_output", *tags],
+    "reason": _t_trade_trace_reason(
+      raw_payload,
+      trade_intent_count=len(intents),
+    ),
+  }
+
+
+def _t_trade_output_requires_material_trace(output: StrategyOutput) -> bool:
+  """Return whether a T output has a durable fact that earns one trace row.
+
+  Ordinary observations deliberately have no substitute trace/outbox payload:
+  their audit path is the authoritative market source identity, processed
+  checkpoint watermark, and versioned deterministic replay.  Unknown event
+  shapes are rejected so a plugin cannot silently reintroduce a large durable
+  per-Tick tree.
+  """
+
+  intents = output.trade_intents or []
+  if intents:
+    return True
+  if output.exit_plan_commands:
+    return True
+  patch = output.runtime_state_patch
+  if patch is None:
+    return False
+  events = getattr(patch, "append_events", []) or []
+  if not isinstance(events, (list, tuple)):
+    raise ValueError("T-trade trace patch.append_events must be a list")
+  for raw_event in events:
+    if not isinstance(raw_event, Mapping):
+      raise ValueError("T-trade trace append event must be a mapping")
+    event_type = str(raw_event.get("type") or "").strip()
+    if event_type == T_TRADE_OPPORTUNITY_EVALUATION_EVENT:
+      record_kind = str(raw_event.get("record_kind") or "").upper()
+      if record_kind == "MATERIAL":
+        return True
+      if record_kind == "COALESCED_DIAGNOSTIC":
+        continue
+      raise ValueError("T-trade opportunity event requires MATERIAL record_kind")
+    if event_type in {
+      "T_TRADE_EXTERNAL_ENTRY_IMPORTED",
+      "T_TRADE_EXIT_POLICY_UPDATED",
+    }:
+      return True
+    raise ValueError(
+      "T-trade durable event type is not a material fact: " + (event_type or "-")
+    )
+  return False
+
+
 class RuntimeConsumerUnavailable(RuntimeError):
   """A durable report cannot currently reach a live serial consumer."""
 
@@ -635,6 +1563,10 @@ class StrategyRuntime:
   )
   _checkpoint_virtual_trade_date: Optional[date] = field(default=None, repr=False)
   _checkpoint_virtual_sequence: int = field(default=0, repr=False)
+  #: Exact accepted market-event count for the current runtime generation.
+  #: This is persisted next to the authority watermark at checkpoint seals;
+  #: it is not derived from DecisionTrace/evaluation row counts.
+  _checkpoint_processed_tick_count: int = field(default=0, repr=False)
   #: Publicly observable coordinator state keyed by ``YYYY-MM-DD:AM|PM|TERMINAL``
   #: or ``YYYY-MM-DD:DAY``.  It deliberately remains process-local until a
   #: manager-owned complete checkpoint has been sealed.
@@ -1141,6 +2073,7 @@ class StrategyExecutor:
     runtime._checkpoint_diagnostic_summaries.clear()
     runtime._checkpoint_virtual_trade_date = None
     runtime._checkpoint_virtual_sequence = 0
+    runtime._checkpoint_processed_tick_count = 0
     runtime.checkpoint_status.clear()
     runtime._t_trade_opportunity_profiles.clear()
     runtime._t_trade_opportunity_profile_errors.clear()
@@ -1227,10 +2160,7 @@ class StrategyExecutor:
       # No snapshot task exists during startup.  Merge the invalidated window
       # first, then clear the manager-owned gate; the first startup checkpoint
       # persists both changes atomically before RUNNING.
-      state_manager.update_strategy_custom_state(
-        strategy.state.to_dict(),
-        full_snapshot=True,
-      )
+      self._checkpoint_restored_strategy_state(runtime)
       if callable(clear_gate):
         clear_gate(code)
 
@@ -1417,6 +2347,7 @@ class StrategyExecutor:
   ) -> None:
     """Advance only after a serial consumer has fully processed a market event."""
 
+    runtime._checkpoint_processed_tick_count += 1
     code = str(instrument_code or "").strip().upper()
     stream_id = str(self._get_value(event, "market_stream_id") or "").strip()
     generation = self._safe_non_negative_int(
@@ -1445,13 +2376,20 @@ class StrategyExecutor:
         "generation": generation,
         "sequence": sequence,
         "source_time_ms": source_time_ms,
+        "processed_tick_count": runtime._checkpoint_processed_tick_count,
       }
+    elif current:
+      # The authority fence remains the highest observed sequence, while the
+      # accepted-consumer count still advances for this fully processed event.
+      current["processed_tick_count"] = runtime._checkpoint_processed_tick_count
+      runtime._checkpoint_processed_watermark = current
     if code:
       runtime._checkpoint_instrument_watermarks[code] = {
         "stream_id": stream_id,
         "generation": generation,
         "sequence": sequence,
         "source_time_ms": source_time_ms,
+        "processed_tick_count": runtime._checkpoint_processed_tick_count,
       }
 
   def _record_backtest_market_watermark(
@@ -1466,12 +2404,14 @@ class StrategyExecutor:
       return
     local_time = self._checkpoint_local_time(timestamp)
     runtime._checkpoint_virtual_sequence += 1
+    runtime._checkpoint_processed_tick_count += 1
     runtime._checkpoint_virtual_trade_date = local_time.date()
     runtime._checkpoint_processed_watermark = {
       "stream_id": f"backtest:{runtime.run_id}",
       "generation": 1,
       "sequence": runtime._checkpoint_virtual_sequence,
       "source_time_ms": self._checkpoint_source_time_ms(timestamp),
+      "processed_tick_count": runtime._checkpoint_processed_tick_count,
     }
     code = str(instrument_code or "").strip().upper()
     if code:
@@ -1681,15 +2621,17 @@ class StrategyExecutor:
 
     manager = runtime.state_manager
     checkpoint_id = str(getattr(prepared, "checkpoint_id", "") or "").strip()
-    completeness = dict(getattr(prepared, "completeness", {}) or {})
-    expected_keys = {
-      str(key or "").strip()
-      for key in completeness.get("materialization_event_keys", ())
-      if str(key or "").strip()
-    }
-    pending_loader = getattr(manager, "pending_t_trade_diagnostic_events", None)
+    prepared_events_loader = getattr(
+      manager,
+      "prepared_t_trade_diagnostic_events",
+      None,
+    )
     finalize = getattr(manager, "finalize_prepared_checkpoint", None)
-    if not checkpoint_id or not callable(pending_loader) or not callable(finalize):
+    if (
+      not checkpoint_id
+      or not callable(prepared_events_loader)
+      or not callable(finalize)
+    ):
       self._set_checkpoint_status(
         runtime,
         trade_date=trade_date,
@@ -1701,9 +2643,21 @@ class StrategyExecutor:
       )
       return False
     try:
+      prepared_events = prepared_events_loader(checkpoint_id)
+      if prepared_events is None:
+        self._set_checkpoint_status(
+          runtime,
+          trade_date=trade_date,
+          session=session,
+          status="BLOCKED",
+          reason="PREPARED_OUTBOX_MISMATCH",
+          attempts=attempts,
+          prepared_checkpoint_id=checkpoint_id,
+        )
+        return False
       pending_by_key = {
         str(event.get("event_key") or "").strip(): dict(event)
-        for event in list(pending_loader() or [])
+        for event in list(prepared_events)
         if str(event.get("event_key") or "").strip()
       }
     except Exception as exc:
@@ -1717,18 +2671,7 @@ class StrategyExecutor:
         prepared_checkpoint_id=checkpoint_id,
       )
       return False
-    if not expected_keys.issubset(pending_by_key):
-      self._set_checkpoint_status(
-        runtime,
-        trade_date=trade_date,
-        session=session,
-        status="BLOCKED",
-        reason="PREPARED_OUTBOX_MISSING",
-        attempts=attempts,
-        prepared_checkpoint_id=checkpoint_id,
-        expected_event_keys=sorted(expected_keys),
-      )
-      return False
+    expected_keys = set(pending_by_key)
     captured_events = {
       key: pending_by_key[key] for key in sorted(expected_keys)
     }
@@ -2516,6 +3459,7 @@ class StrategyExecutor:
       # even without a Backtest row so RuntimeStateManager can enforce its
       # day-boundary contract and never start a periodic hot-state writer.
       from quantx_infrastructure.core.runtime_state_manager import (
+        RUNTIME_CHECKPOINTS_KEY,
         RuntimeStateManager,
         RuntimeStateRestoreStatus,
       )
@@ -2584,41 +3528,18 @@ class StrategyExecutor:
       if inspect.isawaitable(prepared_exists):
         prepared_exists = await prepared_exists
       if prepared_checkpoint is None and prepared_exists:
-        restore_complete = getattr(
-          runtime.state_manager,
-          "restore_latest_complete_checkpoint",
-          None,
-        )
-        if not callable(restore_complete):
-          raise RuntimeError("损坏 PREPARED 检查点缺少完整边界恢复协议")
-        fallback = restore_complete()
-        if inspect.isawaitable(fallback):
-          fallback = await fallback
-        if fallback is None:
-          raise RuntimeError("PREPARED_CHECKPOINT_CORRUPT_NO_COMPLETE_FALLBACK")
-        try:
-          fallback_trade_date = date.fromisoformat(
-            str(getattr(fallback, "trade_date", "") or "")
-          )
-        except ValueError:
-          fallback_trade_date = self._checkpoint_local_time(time_utils.now()).date()
-        fallback_session = getattr(fallback, "session", None)
+        corrupt_trade_date = self._checkpoint_local_time(time_utils.now()).date()
         self._set_checkpoint_status(
           runtime,
-          trade_date=fallback_trade_date,
-          session=(
-            str(fallback_session) if fallback_session is not None else None
-          ),
+          trade_date=corrupt_trade_date,
+          session=None,
           status="BLOCKED",
           reason="PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED",
           attempts=1,
-          fallback_checkpoint_id=str(getattr(fallback, "checkpoint_id", "") or ""),
         )
         self.logger.warning(
-          "PREPARED 检查点损坏，已恢复最近完整边界供诊断: "
-          "run_id=%s checkpoint_id=%s",
+          "PREPARED 检查点损坏，拒绝恢复当前运行状态: run_id=%s",
           run_id,
-          getattr(fallback, "checkpoint_id", ""),
         )
         raise RuntimeError(
           "PREPARED_CHECKPOINT_CORRUPT_RECONCILIATION_REQUIRED"
@@ -2641,6 +3562,31 @@ class StrategyExecutor:
         if not finalized:
           raise RuntimeError("PREPARED_CHECKPOINT_FINALIZATION_BLOCKED")
         restored_state = copy.deepcopy(runtime.state_manager._state)
+      raw_checkpoint_metadata = (runtime.state_manager._state.get("custom") or {}).get(
+        RUNTIME_CHECKPOINTS_KEY
+      )
+      if raw_checkpoint_metadata is not None:
+        latest_complete = getattr(
+          runtime.state_manager,
+          "latest_complete_checkpoint",
+          None,
+        )
+        if not callable(latest_complete):
+          raise RuntimeError("运行状态管理器缺少 SEALED 检查点恢复协议")
+        complete_checkpoint = latest_complete()
+        if inspect.isawaitable(complete_checkpoint):
+          complete_checkpoint = await complete_checkpoint
+        if complete_checkpoint is None:
+          checkpoint_trade_date = self._checkpoint_local_time(time_utils.now()).date()
+          self._set_checkpoint_status(
+            runtime,
+            trade_date=checkpoint_trade_date,
+            session=None,
+            status="BLOCKED",
+            reason="COMPLETE_CHECKPOINT_STATE_MISMATCH",
+            attempts=1,
+          )
+          raise RuntimeError("COMPLETE_CHECKPOINT_STATE_MISMATCH")
       runtime.exit_plan_book = ExitPlanBook.from_dict(
         (restored_state.get("custom") or {}).get(EXIT_PLAN_BOOK_STATE_KEY)
         if restored_state
@@ -2750,10 +3696,7 @@ class StrategyExecutor:
           message="恢复的行情观察窗无法验证连续性，旧信号已失效",
         )
       await runtime.strategy.start()
-      runtime.state_manager.update_strategy_custom_state(
-        runtime.strategy.state.to_dict(),
-        full_snapshot=True,
-      )
+      self._checkpoint_restored_strategy_state(runtime)
 
       # 根据模式创建 Broker 和 DataAdapter
       await self._setup_broker_and_data(runtime)
@@ -9441,12 +10384,24 @@ class StrategyExecutor:
     if patch is None:
       return []
     events = list(getattr(patch, "append_events", []) or [])
-    return [
-      dict(event)
-      for event in events
-      if isinstance(event, Mapping)
-      and event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
-    ]
+    material_events: List[Dict[str, Any]] = []
+    for raw_event in events:
+      if not isinstance(raw_event, Mapping):
+        continue
+      if raw_event.get("type") != T_TRADE_OPPORTUNITY_EVALUATION_EVENT:
+        continue
+      record_kind = str(raw_event.get("record_kind") or "").upper()
+      if record_kind == "MATERIAL":
+        material_events.append(dict(raw_event))
+        continue
+      if record_kind == "COALESCED_DIAGNOSTIC":
+        # Legacy normal-observation output is deliberately handled by the
+        # generic no-op state path below, where it is also stripped from the
+        # durable RuntimeState ring.  It must not enter checkpoint staging or
+        # evaluation materialization.
+        continue
+      raise ValueError("T-trade opportunity event requires MATERIAL record_kind")
+    return material_events
 
   @staticmethod
   def _t_trade_observability_labels(
@@ -13049,6 +14004,18 @@ class StrategyExecutor:
 
     if not runtime.strategy or not runtime.state_manager:
       return
+    capture_for_persistence = getattr(
+      runtime.state_manager,
+      "capture_strategy_state_for_persistence",
+      None,
+    )
+    if callable(capture_for_persistence):
+      # The pre-subscription startup path is still a durable boundary.  The
+      # manager must retain the full in-memory source and separately stage the
+      # compact projection, otherwise a recovery callback can reintroduce the
+      # T-trade hot sample window before normal state sync starts.
+      capture_for_persistence(runtime.strategy)
+      return
     snapshot = runtime.strategy.state.to_dict()
     update_strategy_custom_state = getattr(
       runtime.state_manager,
@@ -14099,36 +15066,73 @@ class StrategyExecutor:
     if not runtime.state_manager or input_snapshot is None:
       return
     patch = output.runtime_state_patch
-    state_patch = {}
-    if patch:
-      state_patch = _compact_runtime_state_patch_for_audit(
-        patch,
-        instrument_code=input_snapshot.instrument_code,
+    is_t_trade_opportunity = bool(
+      getattr(runtime.strategy, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)
+    )
+    if is_t_trade_opportunity:
+      if not _t_trade_output_requires_material_trace(output):
+        # A normal T Tick is reconstructible from the authoritative market
+        # cache/history source plus the durable processed watermark.  Do not
+        # create a DecisionTrace, canonical JSON, hash, or alternate diagnostic
+        # payload for it.
+        return
+      # T opportunity evidence has a dedicated relational materialization
+      # path. Build its bounded causal index directly; do not construct the
+      # generic full-root summaries or content hashes first.
+      projected_trace = _build_t_trade_decision_trace_projection(
+        input_snapshot=input_snapshot,
+        output=output,
       )
-    intents = [summarize_intent(intent) for intent in output.trade_intents or []]
-    output_summary = {
-      "trade_intent_count": len(intents),
-      "decision_tags": list(output.decision_tags or []),
-      "trace_payload": dict(output.trace_payload or {}),
-    }
+      input_summary = projected_trace["input_summary"]
+      environment = projected_trace["environment"]
+      risk_caps = projected_trace["risk_caps"]
+      position_profile = projected_trace["position_profile"]
+      execution_profile = projected_trace["execution_profile"]
+      output_summary = projected_trace["output_summary"]
+      state_patch = projected_trace["state_patch"]
+      intents = projected_trace["trade_intents"]
+      trace_tags = projected_trace["tags"]
+      trace_reason = projected_trace["reason"]
+    else:
+      state_patch = (
+        _compact_runtime_state_patch_for_audit(
+          patch,
+          instrument_code=input_snapshot.instrument_code,
+        )
+        if patch
+        else {}
+      )
+      intents = [summarize_intent(intent) for intent in output.trade_intents or []]
+      input_summary = summarize_strategy_input(input_snapshot)
+      environment = dict(input_snapshot.market_context or {})
+      risk_caps = dict(input_snapshot.risk_caps or {})
+      position_profile = dict(input_snapshot.position_profile or {})
+      execution_profile = dict(input_snapshot.execution_profile or {})
+      output_summary = {
+        "trade_intent_count": len(intents),
+        "decision_tags": list(output.decision_tags or []),
+        "trace_payload": dict(output.trace_payload or {}),
+      }
+      trace_tags = ["strategy_output", *list(output.decision_tags or [])]
+      trace_reason = (
+        str((output.trace_payload or {}).get("reason") or "")
+        or ("NO_TRADE_INTENT" if not intents else "TRADE_INTENT_GENERATED")
+      )
     trace = DecisionTrace.from_decision(
       run_id=runtime.run_id,
       strategy_id=str(runtime.strategy_id),
       instrument_code=input_snapshot.instrument_code,
-      input_summary=summarize_strategy_input(input_snapshot),
-      environment=dict(input_snapshot.market_context or {}),
-      risk_caps=dict(input_snapshot.risk_caps or {}),
-      position_profile=dict(input_snapshot.position_profile or {}),
-      execution_profile=dict(input_snapshot.execution_profile or {}),
+      input_summary=input_summary,
+      environment=environment,
+      risk_caps=risk_caps,
+      position_profile=position_profile,
+      execution_profile=execution_profile,
       output_summary=output_summary,
       state_patch=state_patch,
       trade_intents=intents,
       trace_id=input_snapshot.trace_id,
-      tags=["strategy_output", *list(output.decision_tags or [])],
-      reason=(
-        str((output.trace_payload or {}).get("reason") or "")
-        or ("NO_TRADE_INTENT" if not intents else "TRADE_INTENT_GENERATED")
-      ),
+      tags=trace_tags,
+      reason=trace_reason,
     )
     runtime.state_manager.record_decision_trace(trace)
 
@@ -14170,6 +15174,15 @@ class StrategyExecutor:
       if event.get("type") == T_TRADE_OPPORTUNITY_EVALUATION_EVENT
       and str(event.get("record_kind") or "").upper() == "MATERIAL"
     ]
+    if bool(getattr(runtime.strategy, "USES_T_TRADE_OPPORTUNITY_PROFILE", False)):
+      # Dedicated evaluation/trace records and the PREPARED material outbox own
+      # every opportunity evaluation.  Keep neither ordinary nor MATERIAL
+      # evaluation payloads in the RuntimeState event ring.
+      events = [
+        event
+        for event in events
+        if event.get("type") != T_TRADE_OPPORTUNITY_EVALUATION_EVENT
+      ]
     if (
       stage_actionable_material_events
       and material_events

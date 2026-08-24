@@ -10,12 +10,13 @@
 
 本轮已经完成的代码设计与实现边界如下；它们不等同于下文所有长时、外部环境和实盘验收均已通过。
 
-1. **内存状态与持久化投影分离**：`RuntimeState` 在进程内保留策略运行所需的全量状态；T 助手的行情窗口和样本只保留在内存。边界持久化使用紧凑投影，不再把行情窗口当作可恢复数据库状态写入。
-2. **按运行模式的检查点策略**：PAPER/LIVE 的普通热路径不写数据库，在 11:35、15:05 的边界进行持久化；BACKTEST 以交易日为批次持久化。即时可审计的事实仍按原有事实链路持久化，不能因热状态内存化而丢失。
-3. **可恢复边界协议**：使用 `PREPARED → materialize → FINALIZE`，并通过可识别的完成收据和恢复逻辑处理边界中断，避免将未完整物化的检查点误判为完成。
-4. **热路径减负**：状态同步采用根增量与边界全量捕获；机会读投影、trace 与评估事件使用相应的紧凑/物化路径；SQL 写入采用分块批量操作。
+1. **行情真源、内存状态与持久化投影分离**：权威行情缓存/历史行情存储只保存一次行情；QMT Agent 只采集/上报实时行情和回报。BACKTEST 只读服务端已有缓存/历史存储，LIVE Engine 消费已接入实时流/热缓存。`RuntimeState` 在进程内保留策略运行所需的全量状态；T 助手的行情窗口和样本只保留在内存。边界持久化使用紧凑投影，不再把行情窗口当作可恢复数据库状态写入。
+2. **普通 Tick 零持久化、材料事实保留**：`USES_T_TRADE_OPPORTUNITY_PROFILE` 的普通 Tick 不生成 `DecisionTrace`、普通 evaluation、`COALESCED_DIAGNOSTIC` 或 observation JSON。候选/FSM 转换、信号创建/失效、连续性/策略/kill switch、外部入场、退出策略与 `TradeIntent` 等材料事实仍按原有事实链路持久化，不能因热状态内存化而丢失。
+3. **按运行模式的检查点策略**：PAPER/LIVE 的普通热路径不写数据库，在 11:35、15:05 的边界进行持久化；BACKTEST 以交易日为批次持久化。顶层 compact RuntimeState 只保留一份，`runtime_checkpoints` 只保留一个有界元数据记录；其中 `PREPARED` 以顶层 material outbox + manifest 物化，`SEALED` 以顶层状态 fingerprint 验证。不保留 samples、完整输入 roots 或嵌套 state payload。
+4. **可恢复边界协议**：使用 `PREPARED → materialize → FINALIZE`，并通过可识别的完成收据和恢复逻辑处理边界中断。`PREPARED` 必须校验当前顶层状态和 outbox/manifest；`SEALED` 必须校验当前顶层紧凑状态 fingerprint；损坏或不匹配一律进入 continuity/warming 的 fail-closed 路径，不能回滚到嵌套 payload。
+5. **热路径减负**：状态同步采用根增量与边界全量捕获；材料 trace 与评估事件使用紧凑索引/物化路径；SQL 写入采用分块批量操作。完整审计是“trace index + 权威 material evidence + source archive”的可验证、可重建证据，不是每个 Tick 内联完整快照。
 
-这些实现仍须经过本文件列出的回归与压力门槛，才能成为可宣称的生产验收结果。
+除本节已明确记录为完成的门槛外，其余回归、外部数据覆盖和实盘验收仍须完成，才能成为可宣称的生产验收结果。
 
 ### 1.1 本轮已完成验证
 
@@ -26,39 +27,49 @@
 3. `tests/engine/unit/test_strategy_executor.py -k session_checkpoint` 的 6 项通过。
 4. 本轮 Python 白名单的 Ruff 检查通过，`git diff --check` 无错误。
 5. 会话协调器已经修复在检查状态或重试窗口之前查询交易日数据库的问题，避免该查询进入普通热路径。
+6. 主审最终扩大回归已通过 **13 个文件、410 项**（原 11 个目标文件，加 `test_backtest_result_storage.py` 与 `test_strategy_market_event_backpressure.py`）。
 
-上述结果只覆盖本轮代码回归与静态检查，不替代固定规模压力、真实历史数据覆盖、完整根边界套件或实盘验收。
+上述结果只覆盖本轮代码回归与静态检查，不替代尚未完成的真实历史数据覆盖、完整根边界套件或实盘验收。
+
+### 1.2 已完成：固定 9,600 Tick 语义压力验收
+
+本机忽略的证据文件为
+`docs/reports/t-trade-v3-pressure-semantic-final-9600-20260824.{md,json}`，不作为本轮
+提交物。该次合成非历史压力运行状态为
+`EXECUTED_SYNTHETIC_NON_HISTORICAL`：`timed_out=false`、回放 `COMPLETED`、耗时
+`94.812122s`；请求 `9,600` Tick，实际有效处理 `9,472` Tick，另有 `128` Tick 按
+`14:57` 政策过滤。Engine 与 durable accounting 均通过。
+
+该 fixture 没有 profile 或候选，因此其正确的普通路径语义为 `MATERIAL=0`、
+`DecisionTrace=0`、evaluation=`0`、ordinary diagnostic durable rows=`0`；这不是
+漏记，而是普通行情观察只保留 source identity、watermark/count 与版本化策略后可重放的
+契约。材料事实仍须在出现候选/FSM/连续性/政策/配置/profile 或显式 callback 时按
+`event_key` 精确对账。
+
+- Tick p50/p95/p99 为 `4.9641/7.31051/9.000282 ms`，吞吐为 `99.902837 Tick/s`，strategy p95 为 `3.22552 ms`。
+- state upsert p50/p95/max 为 `508.8617/1318.5096/1520.5289 ms`，snapshot max 为 `2722.2428 ms`；commit 仍有外部数据库同步长尾，max 为 `3232.9278 ms`，不再归因于大状态投影。
+- 实际数据库 `custom_state` 为 `29,320 B`，主要由 `instrument_states=23,854 B`、bucket=`4,389 B`、checkpoint=`893 B` 构成；无 `samples`、`state_payload`、`runtime_events` 或 pending outbox。
+
+若同一 formal runner 的整体退出码为 `1`，其原因是 `formal20day` 仍为 `BLOCKED`；不得将其误写为上述固定 9,600 Tick 压力失败。
 
 ## 2. 未完成项与验收目标
 
 | 优先级 | 未完成项 | 当前事实 | 必须达成的验证目标 |
 | --- | --- | --- | --- |
-| P0 | 固定 9,600 Tick 全量合成压力验收 | 最近一次旧实测在双投影补丁前：120 秒超时，已处理 4,889 Tick，p50 约 14.56 ms，`state upsert max` 约 26.77 s，`snapshot max` 约 33.99 s。 | 在双投影补丁后重跑固定 9,600 Tick 场景；命令自然完成、`timed_out=false`、`accounting_passed=true`、回放为 `COMPLETED`，并对事件、trace、evaluation 做精确对账。小样本或截断跑不能替代此门槛。 |
 | P0 | 20 个已完成交易日严格因果历史回放 | 先前盘点仅有 46/160 个完整 `instrument-day`，尚无一个覆盖全部持仓的连续 20 日窗口。 | 从 D-1 持仓快照出发，排除当前交易日，选择前 20 个上交所已完成交易日；全持仓均需有完整、连续且可标识的数据覆盖。回放不得读取未来数据，缺失必须保守阻断并使验收失败。 |
 | P0 | 最近 5 个已完成交易日回放（替代 PAPER） | 用户已同意以历史数据回放替代本轮 PAPER 连续运行；该替代验收尚未完成。 | 排除当前交易日后，完成最近 5 个已完成交易日的因果回放，达到 5/5 数据与结果对账；若验收工具仍保留该门槛，还须至少覆盖 20 个候选生命周期。该结果是 **PAPER 的替代验收**，不得表述为实际 PAPER 连续运行。 |
 | P1 | 根边界与外部服务环境复验 | 本轮聚焦回归已完成，但 `python -m pytest tests/` 根边界套件尚未作为收口门槛完整执行。部分依赖外部服务的套件在 PostgreSQL 未配置时可能无法建立运行条件。 | 在 PostgreSQL 等外部服务配置完整的环境中运行根边界套件并复验受影响项，分别记录基础设施不可用与真实测试失败；不得将环境失败静默计为跳过或通过。 |
 | P1 | Dev `full/live` 最终重启验收 | 本轮按收口指令不执行完整 Dev 重启，也不启动真实交易验收。 | 未来经授权后，用统一运维入口启动并检查状态：`profile=full`、`agentMode=live`、`liveTrading=ENABLED`、唯一账户、QMT Agent `ready`、协议 `1.1`、行情快照新鲜度小于 90 秒。若运行时预检失败，只能报告 `DEGRADED / BLOCKED` 与 `liveTrading=DISABLED`，不得伪装为 `ready`。 |
 | P0（外部授权） | LIVE 灰度 | 尚未执行。 | 必须由用户重新明确授权真实交易后才可开始。灰度前须满足 QMT `ready`、协议 `1.1`、唯一允许账户、账户与风控白名单、订单/成交回报由 QMT Agent 持久化 inbox 后收敛为唯一真源；`command_ack` 不能被当作成交。 |
 
-## 3. 推荐执行命令与记录方式
+## 3. 完成记录与后续验证
 
-以下命令仅作为后续验证入口。本轮收口不运行长时压力、Dev `full/live` 或真实交易命令。
+### 3.1 固定 9,600 Tick 压力验收（已完成）
 
-### 3.1 固定 9,600 Tick 压力验收
-
-在已有可用审计基线和数据库环境中执行固定规模压力回放，并将报告另存为新的日期命名文件：
-
-```powershell
-uv run python -m quantx_engine.t_trade_v3_acceptance `
-  --reuse-audit-report docs/reports/t-trade-v3-pressure-postpatch-20260824.md `
-  --pressure-snapshot-date 2026-06-03 `
-  --synthetic-pressure `
-  --synthetic-ticks-per-instrument-day 600 `
-  --pressure-timeout-seconds 120 `
-  --report docs/reports/t-trade-v3-pressure-9600-<YYYYMMDD>.md
-```
-
-验收记录必须同时保存机器可读结果，并记录请求 Tick 数、实际有效 Tick 数、过滤原因、吞吐/延迟、状态写入与快照耗时，以及事件、trace、evaluation 对账结果。不得用 480 Tick 等小基准替代本项。
+固定规模验收已经按第 1.2 节完成。记录必须以请求/有效 Tick、过滤原因、Engine
+instrumentation、durable watermark/count、source identity/range 为 Tick 账本，并只对
+实际材料 `event_key` 做 trace/evaluation 精确对账；普通 T Tick 的零行 trace/evaluation
+不得被误判为漏记，也不得用 480 Tick 等小基准替代该已完成的固定规模结果。
 
 ### 3.2 已完成的聚焦回归与未来根边界测试
 
@@ -118,10 +129,10 @@ python -m pytest tests/
 
 1. **Web 与 iOS**：本轮未开发 Web 或 iOS 功能。iOS 受 Windows 环境和用户明确要求排除；不运行 Xcode、SwiftUI、Apollo iOS 或移动端验证。当前未发生 API/GraphQL 契约变更，因此无须为本轮执行前端 codegen；这不表示前端功能已实现。
 2. **真实交易**：本轮不执行 LIVE 灰度、下单、成交验证或任何真实交易动作；该项必须以未来的明确授权为前提。
-3. **长时运行**：本轮不继续调优或重跑 9,600 Tick 压力、20 日历史回放、5 日替代 PAPER 回放，避免把当前开发收口再次变成长时间任务。
+3. **尚未完成的长时/外部验证**：固定 9,600 Tick 压力已完成，不再作为本轮待办；20 日历史回放、5 日替代 PAPER 与其外部数据前置条件仍未完成，不能因本次压力通过而省略。
 4. **数据库迁移**：0028 → 0031 已在此前处理完成，不列为本轮未完成项，也不因本文件重复迁移。
 5. **无关工作区改动**：本轮提交只应包含状态化规则引擎和本文件对应的已审核改动；不得吸收 iOS、Web、QMT、迁移基线、临时报告或其他用户工作。
 
 ## 5. 收口结论
 
-在第 2 节的 P0 门槛、外部数据覆盖和用户授权的 LIVE 门槛完成前，**不能宣称原始生产验收已经完成**。本文件的作用是结束当前开发迭代并保留可重复执行的后续验收清单；本次提交仅提交已经实现且已审核的代码与文档，不替代上述未完成验证。
+固定 9,600 Tick 压力门槛已经完成；但在第 2 节剩余 P0 门槛、外部数据覆盖和用户授权的 LIVE 门槛完成前，**仍不能宣称原始生产验收已经完成**。本文件保留可重复执行的后续验收清单；本次提交仅提交已经实现且已审核的代码与文档，不替代上述未完成验证。

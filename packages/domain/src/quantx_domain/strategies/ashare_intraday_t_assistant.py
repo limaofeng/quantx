@@ -73,8 +73,6 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
 _RUNTIME_STATE_SCHEMA_VERSION = 3
 _OPPORTUNITY_EVENT_TYPE = "T_TRADE_OPPORTUNITY_EVALUATION"
 _OPPORTUNITY_EVENT_MATERIAL = "MATERIAL"
-_OPPORTUNITY_EVENT_DIAGNOSTIC = "COALESCED_DIAGNOSTIC"
-_DIAGNOSTIC_COALESCE_MS = 2_000
 _PROFILE_CONTEXT_KEY = "t_trade_instrument_profile"
 _EMISSION_CONTEXT_KEY = "t_trade_intent_emission"
 _OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION = 1
@@ -88,6 +86,60 @@ _OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY = (
 _OPPORTUNITY_SAMPLE_WINDOW_SAMPLE_COUNT_KEY = "sample_window_sample_count"
 _OPPORTUNITY_SAMPLE_WINDOW_LAST_SOURCE_IDENTITY_KEY = (
   "sample_window_last_source_identity"
+)
+_RUNTIME_EVENT_PERSISTENCE_MARKER_LIMIT = 32
+_RUNTIME_EVENT_MARKER_SCALAR_KEYS = (
+  "type",
+  "event_key",
+  "record_kind",
+  "event_type",
+  "instrument_code",
+  "evaluated_at_ms",
+  "window_started_at_ms",
+  "window_ended_at_ms",
+  "coalesced_count",
+  "source_trade_id",
+  "batch_id",
+  "intent_id",
+  "order_id",
+  "trade_id",
+  "volume",
+  "price",
+)
+_RUNTIME_EVENT_SIGNAL_MARKER_SCALAR_KEYS = (
+  "source_time_ms",
+  "tick_ordinal",
+  "continuity_generation",
+  "data_health",
+  "candidate_status",
+  "candidate_id",
+  "candidate_fingerprint",
+  "candidate_state_version",
+  "signal_version",
+  "pending_entry_intent_id",
+  "opportunity_score",
+)
+_RUNTIME_EVENT_TRANSITION_MARKER_SCALAR_KEYS = (
+  "from",
+  "to",
+  "candidate_id",
+  "candidate_fingerprint",
+  "intent_id",
+)
+_RUNTIME_EVENT_INTENT_LINK_MARKER_SCALAR_KEYS = (
+  "candidate_id",
+  "candidate_fingerprint",
+  "intent_id",
+)
+_RUNTIME_EVENT_METRIC_MARKER_SCALAR_KEYS = (
+  "opportunity_score",
+  "sample_count",
+)
+_RUNTIME_EVENT_MARKER_LIST_LIMIT = 32
+_RUNTIME_EVENT_SIGNAL_MARKER_LIST_KEYS = (
+  "data_health_reasons",
+  "blockers",
+  "top_blockers",
 )
 
 
@@ -368,18 +420,220 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         )
       projected_states[str(raw_code)] = projected_state
     snapshot["instrument_states"] = projected_states
+    if "runtime_events" in snapshot:
+      durable_events = self._compact_runtime_events_for_persistence(
+        snapshot.get("runtime_events")
+      )
+      if durable_events:
+        snapshot["runtime_events"] = durable_events
+      else:
+        snapshot.pop("runtime_events", None)
     return snapshot
+
+  @classmethod
+  def _compact_runtime_events_for_persistence(
+    cls,
+    raw_events: Any,
+  ) -> List[Dict[str, Any]]:
+    """Keep non-evaluation recovery/audit markers, never evaluation payloads.
+
+    ``runtime_events`` is an in-memory ring used for short-lived strategy
+    bookkeeping.  Every V3 opportunity evaluation has a dedicated Engine
+    evaluation/trace evidence path; it must not become a second durable event
+    store regardless of whether it is ordinary or MATERIAL.  RuntimeState
+    retains its source watermark and compact FSM state instead.
+    """
+
+    if not isinstance(raw_events, (list, tuple)):
+      return []
+    markers: List[Dict[str, Any]] = []
+    for raw_event in raw_events[-_RUNTIME_EVENT_PERSISTENCE_MARKER_LIMIT:]:
+      if not isinstance(raw_event, Mapping):
+        continue
+      if raw_event.get("type") == _OPPORTUNITY_EVENT_TYPE:
+        # Ordinary observations belong only to the authoritative market source;
+        # MATERIAL evaluation truth belongs to the dedicated evidence tables
+        # and PREPARED outbox.  Neither belongs in RuntimeState.
+        continue
+      markers.append(cls._compact_runtime_event_for_persistence(raw_event))
+    return markers
+
+  @classmethod
+  def _compact_runtime_event_for_persistence(
+    cls,
+    event: Mapping[str, Any],
+  ) -> Dict[str, Any]:
+    """Project one event ring entry to its bounded durable marker."""
+
+    marker = cls._runtime_event_scalar_marker(
+      event,
+      _RUNTIME_EVENT_MARKER_SCALAR_KEYS,
+    )
+    signal_snapshot = event.get("signal_snapshot")
+    if isinstance(signal_snapshot, Mapping):
+      signal_marker = cls._runtime_event_scalar_marker(
+        signal_snapshot,
+        _RUNTIME_EVENT_SIGNAL_MARKER_SCALAR_KEYS,
+      )
+      for key in _RUNTIME_EVENT_SIGNAL_MARKER_LIST_KEYS:
+        values = cls._runtime_event_text_marker_list(signal_snapshot.get(key))
+        if values:
+          signal_marker[key] = values
+      if signal_marker:
+        marker["signal_marker"] = signal_marker
+
+    transition = event.get("transition")
+    if isinstance(transition, Mapping):
+      transition_marker = cls._runtime_event_scalar_marker(
+        transition,
+        _RUNTIME_EVENT_TRANSITION_MARKER_SCALAR_KEYS,
+      )
+      if transition_marker:
+        marker["transition"] = transition_marker
+
+    intent_link = event.get("intent_link")
+    if isinstance(intent_link, Mapping):
+      intent_link_marker = cls._runtime_event_scalar_marker(
+        intent_link,
+        _RUNTIME_EVENT_INTENT_LINK_MARKER_SCALAR_KEYS,
+      )
+      if intent_link_marker:
+        marker["intent_link"] = intent_link_marker
+
+    metrics = event.get("metrics")
+    if isinstance(metrics, Mapping):
+      metric_marker = cls._runtime_event_scalar_marker(
+        metrics,
+        _RUNTIME_EVENT_METRIC_MARKER_SCALAR_KEYS,
+      )
+      if metric_marker:
+        marker["metrics"] = metric_marker
+
+    external_blockers = cls._runtime_event_text_marker_list(
+      event.get("external_blockers")
+    )
+    if external_blockers:
+      marker["external_blockers"] = external_blockers
+    return marker
+
+  @staticmethod
+  def _runtime_event_scalar_marker(
+    source: Mapping[str, Any],
+    keys: Sequence[str],
+  ) -> Dict[str, Any]:
+    return {
+      key: source[key]
+      for key in keys
+      if key in source
+      and (
+        source[key] is None
+        or isinstance(source[key], (bool, float, int, str))
+      )
+    }
+
+  @staticmethod
+  def _runtime_event_text_marker_list(value: Any) -> List[str]:
+    if not isinstance(value, (list, tuple)):
+      return []
+    return list(
+      dict.fromkeys(
+        str(item).strip()
+        for item in value
+        if str(item).strip()
+      )
+    )[:_RUNTIME_EVENT_MARKER_LIST_LIMIT]
 
   @classmethod
   def _compact_opportunity_for_persistence(
     cls,
     opportunity: Mapping[str, Any],
   ) -> Dict[str, Any]:
-    """Remove the volatile sample sequence while retaining tiny audit facts."""
+    """Persist only recovery state, not a repeated evaluation/root snapshot."""
 
-    projected = dict(opportunity)
-    raw_samples = projected.pop("samples", ())
+    raw_samples = opportunity.get("samples", ())
     samples = raw_samples if isinstance(raw_samples, (list, tuple)) else ()
+    projected: Dict[str, Any] = {
+      key: opportunity[key]
+      for key in (
+        "schema_version",
+        "instrument_code",
+        "trade_date",
+        "continuity_generation",
+        "data_health",
+        "health_reasons",
+        # These are reducer/FSM state, not hot market samples. They are needed
+        # to restore a valid OpportunityState before the explicit rewarm gate.
+        "pullback",
+        "momentum",
+        "candidate",
+        "candidate_status",
+        "candidate_suppressed",
+        "candidate_awaiting_approval",
+        "rearm_started_at_ms",
+        # Compact recovery/audit identity.
+        "state_version",
+        "feature_schema_version",
+        "policy_version",
+        "config_version",
+        "profile_fingerprint",
+        "last_policy_rewarm_identity",
+      )
+      if key in opportunity
+    }
+    cursor = opportunity.get("event_cursor")
+    if isinstance(cursor, Mapping):
+      projected["event_cursor"] = {
+        key: cursor[key]
+        for key in (
+          "baseline_established",
+          "material_signature",
+          "last_emitted_source_time_ms",
+        )
+        if key in cursor
+        and (
+          cursor[key] is None
+          or isinstance(cursor[key], (bool, float, int, str))
+        )
+      }
+    evaluation = opportunity.get("latest_evaluation")
+    if isinstance(evaluation, Mapping):
+      compact_evaluation = {
+        key: evaluation[key]
+        for key in (
+          "instrument_code",
+          "trade_date",
+          "evaluated_at_ms",
+          "source_time_ms",
+          "tick_ordinal",
+          "continuity_generation",
+          "data_health",
+          "candidate_status",
+          "candidate_id",
+          "candidate_fingerprint",
+          "candidate_created_at_ms",
+          "candidate_expires_at_ms",
+          "candidate_state_version",
+          "pending_entry_intent_id",
+          "signal_version",
+          "selected_path",
+          "policy_version",
+          "config_version",
+          "feature_schema_version",
+          "profile_version",
+          "profile_fingerprint",
+        )
+        if key in evaluation
+        and (
+          evaluation[key] is None
+          or isinstance(evaluation[key], (bool, float, int, str))
+        )
+      }
+      for key in ("blockers", "external_blockers", "data_health_reasons"):
+        values = cls._runtime_event_text_marker_list(evaluation.get(key))
+        if values:
+          compact_evaluation[key] = values
+      if compact_evaluation:
+        projected["latest_evaluation"] = compact_evaluation
     projected[_OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION_KEY] = (
       _OPPORTUNITY_SAMPLE_WINDOW_PROJECTION_VERSION
     )
@@ -787,16 +1041,12 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "latest_evaluation": evaluation,
       }
     )
-    projection = self._material_projection(
-      opportunity,
-      list(evaluation.get("external_blockers") or []),
-    )
+    projection = self._material_projection(opportunity)
     signature = self._stable_fingerprint(projection)
     opportunity["event_cursor"] = {
+      "baseline_established": True,
       "material_signature": signature,
       "last_emitted_source_time_ms": int(source_time_ms),
-      "diagnostic_window_started_at_ms": int(source_time_ms),
-      "coalesced_count": 0,
     }
     state.update(
       {
@@ -1526,13 +1776,12 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         },
       }
     )
-    signature = self._stable_fingerprint(self._material_projection(opportunity, ()))
+    signature = self._stable_fingerprint(self._material_projection(opportunity))
     opportunity["event_cursor"] = {
+      "baseline_established": True,
       "material_signature": signature,
       # A RECONCILE control event has no authoritative market source identity.
       "last_emitted_source_time_ms": 0,
-      "diagnostic_window_started_at_ms": 0,
-      "coalesced_count": 0,
     }
     event_key = self._stable_fingerprint(
       {
@@ -1924,56 +2173,90 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     return payload
 
   @staticmethod
-  def _threshold_band(score: Any, policy: Mapping[str, Any]) -> str:
-    if score is None:
-      return "UNAVAILABLE"
-    normalized = float(score)
-    if normalized < float(policy["rearm"]):
-      return "BELOW_REARM"
-    if normalized < float(policy["preview"]):
-      return "BELOW_PREVIEW"
-    if normalized < float(policy["revalidate"]):
-      return "PREVIEW"
-    if normalized < float(policy["candidate"]):
-      return "REVALIDATE"
-    return "CANDIDATE"
+  def _material_projection_scalar(value: Any, *, field_name: str) -> Any:
+    """Accept only bounded scalar identities at the MATERIAL boundary."""
+
+    if value is None or isinstance(value, (bool, float, int, str)):
+      return value
+    raise ValueError("做 T MATERIAL 投影字段必须为标量: " + field_name)
 
   def _material_projection(
     self,
     opportunity: Mapping[str, Any],
-    external_blockers: Sequence[str],
   ) -> Dict[str, Any]:
-    evaluation = dict(opportunity.get("latest_evaluation") or {})
-    pullback = dict(evaluation.get("pullback") or {})
-    momentum = dict(evaluation.get("momentum") or {})
-    thresholds = dict(opportunity.get("thresholds") or {})
+    """Return the small business/FSM identity that can earn MATERIAL truth.
+
+    Health, coverage, score bands, gates and all blockers are ordinary market
+    observations. They remain reproducible from the authoritative source and
+    must never turn into a MATERIAL evaluation merely because they changed.
+    """
+
+    candidate = opportunity.get("candidate")
+    if candidate is None:
+      candidate_values: Mapping[str, Any] = {}
+    elif isinstance(candidate, Mapping):
+      candidate_values = candidate
+    else:
+      raise ValueError("做 T MATERIAL candidate 必须为映射")
+    pullback = opportunity.get("pullback")
+    if pullback is None:
+      pullback_values: Mapping[str, Any] = {}
+    elif isinstance(pullback, Mapping):
+      pullback_values = pullback
+    else:
+      raise ValueError("做 T MATERIAL pullback 必须为映射")
+    momentum = opportunity.get("momentum")
+    if momentum is None:
+      momentum_values: Mapping[str, Any] = {}
+    elif isinstance(momentum, Mapping):
+      momentum_values = momentum
+    else:
+      raise ValueError("做 T MATERIAL momentum 必须为映射")
+    evaluation = opportunity.get("latest_evaluation")
+    if evaluation is None:
+      evaluation_values: Mapping[str, Any] = {}
+    elif isinstance(evaluation, Mapping):
+      evaluation_values = evaluation
+    else:
+      raise ValueError("做 T MATERIAL latest_evaluation 必须为映射")
+    scalar = self._material_projection_scalar
     return {
-      "data_health": evaluation.get("data_health"),
-      "data_health_reasons": list(evaluation.get("data_health_reasons") or []),
-      "pullback_phase": pullback.get("phase"),
-      "momentum_phase": momentum.get("phase"),
-      "pullback_threshold_band": self._threshold_band(
-        pullback.get("score"), thresholds
+      "candidate_id": scalar(
+        candidate_values.get("candidate_id"), field_name="candidate_id"
       ),
-      "momentum_threshold_band": self._threshold_band(
-        momentum.get("score"), thresholds
+      "candidate_fingerprint": scalar(
+        candidate_values.get("fingerprint"), field_name="candidate_fingerprint"
       ),
-      "selected_threshold_band": self._threshold_band(
-        evaluation.get("opportunity_score"), thresholds
+      "candidate_status": scalar(
+        opportunity.get("candidate_status"), field_name="candidate_status"
       ),
-      "hard_gates": [
-        (str(item.get("code") or ""), item.get("passed") is True)
-        for item in list(evaluation.get("hard_gates") or [])
-        if isinstance(item, Mapping)
-      ],
-      "blockers": list(evaluation.get("blockers") or []),
-      "external_blockers": list(external_blockers),
-      "candidate_id": evaluation.get("candidate_id"),
-      "candidate_fingerprint": evaluation.get("candidate_fingerprint"),
-      "candidate_status": evaluation.get("candidate_status"),
-      "policy_version": opportunity.get("policy_version"),
-      "config_version": opportunity.get("config_version"),
-      "profile_fingerprint": opportunity.get("profile_fingerprint"),
+      "pullback_phase": scalar(
+        pullback_values.get("phase"), field_name="pullback_phase"
+      ),
+      "momentum_phase": scalar(
+        momentum_values.get("phase"), field_name="momentum_phase"
+      ),
+      "continuity_generation": scalar(
+        opportunity.get("continuity_generation"),
+        field_name="continuity_generation",
+      ),
+      "policy_version": scalar(
+        opportunity.get("policy_version"), field_name="policy_version"
+      ),
+      "config_version": scalar(
+        opportunity.get("config_version"), field_name="config_version"
+      ),
+      "feature_schema_version": scalar(
+        opportunity.get("feature_schema_version"),
+        field_name="feature_schema_version",
+      ),
+      "profile_version": scalar(
+        evaluation_values.get("profile_version"), field_name="profile_version"
+      ),
+      "profile_fingerprint": scalar(
+        opportunity.get("profile_fingerprint"),
+        field_name="profile_fingerprint",
+      ),
     }
 
   def _opportunity_events(
@@ -1986,37 +2269,52 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     candidate_created: Optional[OpportunityCandidate],
   ) -> List[Dict[str, Any]]:
     source_time_ms = int(input.market_data_context.source_time_ms)
-    current_projection = self._material_projection(opportunity, external_blockers)
-    material_signature = self._stable_fingerprint(current_projection)
+    current_projection = self._material_projection(opportunity)
     cursor = dict(previous_opportunity.get("event_cursor") or {})
     previous_signature = str(cursor.get("material_signature") or "")
-    material = material_signature != previous_signature
-    last_emitted_at = int(cursor.get("last_emitted_source_time_ms", 0) or 0)
-    window_started_at = int(
-      cursor.get("diagnostic_window_started_at_ms", source_time_ms) or source_time_ms
+    previous_projection = self._material_projection(previous_opportunity)
+    baseline_established = bool(cursor.get("baseline_established")) or bool(
+      previous_signature
     )
-    coalesced_count = int(cursor.get("coalesced_count", 0) or 0) + 1
-    if not material and source_time_ms - last_emitted_at < _DIAGNOSTIC_COALESCE_MS:
+    last_emitted_at = int(cursor.get("last_emitted_source_time_ms", 0) or 0)
+    # The first ordinary Tick establishes a cursor only. It has no prior
+    # business/FSM transition and must not create STATE_INITIALIZED evidence or
+    # hash an evaluation root merely for a baseline.
+    if not previous_opportunity and candidate_created is None:
       opportunity["event_cursor"] = {
-        "material_signature": material_signature,
+        "baseline_established": True,
         "last_emitted_source_time_ms": last_emitted_at,
-        "diagnostic_window_started_at_ms": window_started_at,
-        "coalesced_count": coalesced_count,
       }
       return []
 
-    event_kind = (
-      _OPPORTUNITY_EVENT_MATERIAL if material else _OPPORTUNITY_EVENT_DIAGNOSTIC
+    # Compare only the fixed scalar material identity. Ordinary changes to
+    # data health, coverage, score, gates, session/cutoff and external blockers
+    # cannot reach the canonical JSON/SHA boundary below.
+    material_changed = current_projection != previous_projection
+    if not material_changed:
+      opportunity["event_cursor"] = {
+        "baseline_established": baseline_established or bool(previous_opportunity),
+        **(
+          {"material_signature": previous_signature}
+          if previous_signature
+          else {}
+        ),
+        "last_emitted_source_time_ms": last_emitted_at,
+      }
+      return []
+
+    event_type = self._material_event_type(
+      previous_projection,
+      current_projection,
+      candidate_created=candidate_created,
     )
-    event_type = (
-      self._material_event_type(
-        previous_opportunity,
-        opportunity,
-        candidate_created=candidate_created,
-      )
-      if material
-      else "HEARTBEAT"
-    )
+    if event_type is None:
+      # The projection is deliberately exhaustive. A future added field must
+      # gain an explicit business event before it may cross this boundary;
+      # falling back to a DIAGNOSTIC MATERIAL row is forbidden.
+      raise ValueError("做 T MATERIAL 投影变化缺少业务事件类型")
+
+    material_signature = self._stable_fingerprint(current_projection)
     evaluation = dict(opportunity["latest_evaluation"])
     key_seed = {
       "run_id": input.run_id,
@@ -2024,7 +2322,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
       "continuity_generation": evaluation.get("continuity_generation"),
       "source_time_ms": source_time_ms,
       "tick_ordinal": evaluation.get("tick_ordinal"),
-      "record_kind": event_kind,
+      "record_kind": _OPPORTUNITY_EVENT_MATERIAL,
       "event_type": event_type,
       "material_signature": material_signature,
       "candidate_state_version": opportunity.get("state_version"),
@@ -2032,7 +2330,7 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     event: Dict[str, Any] = {
       "type": _OPPORTUNITY_EVENT_TYPE,
       "event_key": f"tto:{self._stable_fingerprint(key_seed)}",
-      "record_kind": event_kind,
+      "record_kind": _OPPORTUNITY_EVENT_MATERIAL,
       "event_type": event_type,
       "instrument_code": input.instrument_code,
       "evaluated_at_ms": int(evaluation.get("evaluated_at_ms") or source_time_ms),
@@ -2043,24 +2341,14 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "sample_count": dict(evaluation.get("features") or {}).get("sample_count"),
       },
     }
-    if material:
-      event["transition"] = {
-        "from": previous_signature or None,
-        "to": material_signature,
-      }
-    else:
-      event.update(
-        {
-          "window_started_at_ms": window_started_at,
-          "window_ended_at_ms": source_time_ms,
-          "coalesced_count": coalesced_count,
-        }
-      )
+    event["transition"] = {
+      "from": previous_signature or None,
+      "to": material_signature,
+    }
     opportunity["event_cursor"] = {
+      "baseline_established": True,
       "material_signature": material_signature,
       "last_emitted_source_time_ms": source_time_ms,
-      "diagnostic_window_started_at_ms": source_time_ms,
-      "coalesced_count": 0,
     }
     return [event]
 
@@ -2070,30 +2358,47 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
     current: Mapping[str, Any],
     *,
     candidate_created: Optional[OpportunityCandidate],
-  ) -> str:
+  ) -> Optional[str]:
+    """Map each allowed MATERIAL identity change to a business event."""
+
     if candidate_created is not None:
       if str(current.get("candidate_status") or "") == CandidateStatus.SUPPRESSED.value:
         return "CANDIDATE_SUPPRESSED"
       return "CANDIDATE_LATCHED"
-    before = dict(previous.get("latest_evaluation") or {})
-    after = dict(current.get("latest_evaluation") or {})
-    if not before:
-      return "STATE_INITIALIZED"
-    if before.get("candidate_status") != after.get("candidate_status"):
-      return f"CANDIDATE_{after.get('candidate_status') or 'CHANGED'}"
-    if before.get("data_health") != after.get("data_health"):
-      return f"DATA_HEALTH_{after.get('data_health') or 'CHANGED'}"
-    if dict(before.get("pullback") or {}).get("phase") != dict(
-      after.get("pullback") or {}
-    ).get("phase") or dict(before.get("momentum") or {}).get("phase") != dict(
-      after.get("momentum") or {}
-    ).get("phase"):
-      return "FSM_TRANSITION"
-    if previous.get("policy_version") != current.get("policy_version") or previous.get(
-      "config_version"
-    ) != current.get("config_version"):
+    candidate_identity_keys = (
+      "candidate_id",
+      "candidate_fingerprint",
+      "candidate_status",
+    )
+    if any(previous.get(key) != current.get(key) for key in candidate_identity_keys):
+      status = str(current.get("candidate_status") or "").upper()
+      return {
+        CandidateStatus.LATCHED.value: "CANDIDATE_LATCHED",
+        CandidateStatus.AWAITING_APPROVAL.value: "CANDIDATE_AWAITING_APPROVAL",
+        CandidateStatus.SUPPRESSED.value: "CANDIDATE_SUPPRESSED",
+        CandidateStatus.REARMING.value: "CANDIDATE_REARMING",
+        CandidateStatus.NONE.value: "CANDIDATE_CLEARED",
+      }.get(status, "CANDIDATE_STATE_CHANGED")
+    if previous.get("continuity_generation") != current.get(
+      "continuity_generation"
+    ):
+      return "CONTINUITY_GENERATION_CHANGED"
+    if any(
+      previous.get(key) != current.get(key)
+      for key in ("policy_version", "config_version", "feature_schema_version")
+    ):
       return "POLICY_CHANGED"
-    return "DIAGNOSTIC_STATE_CHANGED"
+    if any(
+      previous.get(key) != current.get(key)
+      for key in ("profile_version", "profile_fingerprint")
+    ):
+      return "PROFILE_CHANGED"
+    if (
+      previous.get("pullback_phase") != current.get("pullback_phase")
+      or previous.get("momentum_phase") != current.get("momentum_phase")
+    ):
+      return "FSM_TRANSITION"
+    return None
 
   @staticmethod
   def _entry_observation_reason(
@@ -2585,16 +2890,12 @@ class AshareIntradayTAssistantStrategy(StrategyBase):
         "latest_evaluation": evaluation,
       }
     )
-    projection = self._material_projection(
-      opportunity,
-      list(evaluation.get("external_blockers") or []),
-    )
+    projection = self._material_projection(opportunity)
     signature = self._stable_fingerprint(projection)
     opportunity["event_cursor"] = {
+      "baseline_established": True,
       "material_signature": signature,
       "last_emitted_source_time_ms": normalized_source_time_ms,
-      "diagnostic_window_started_at_ms": normalized_source_time_ms,
-      "coalesced_count": 0,
     }
     state["opportunity"] = opportunity
     event_key = self._stable_fingerprint(

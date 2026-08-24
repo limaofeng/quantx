@@ -43,9 +43,15 @@ from quantx_domain.trading.t_trade_opportunity_engine import (
   OPPORTUNITY_FEATURE_SCHEMA_VERSION,
   OPPORTUNITY_POLICY_VERSION,
 )
-from quantx_infrastructure.core.runtime_state_manager import RuntimeStateManager
-from quantx_infrastructure.database.connection import get_async_db
+from quantx_infrastructure.core.runtime_state_manager import (
+  RUNTIME_CHECKPOINTS_KEY,
+  RuntimeStateManager,
+)
+from quantx_infrastructure.database.connection import get_async_db, relational_engine
 from quantx_infrastructure.models.strategy_backtest import StrategyBacktest
+from quantx_infrastructure.models.strategy_decision_trace_record import (
+  StrategyDecisionTraceRecord,
+)
 from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.t_trade_candidate_outcome import (
   TTradeCandidateOutcome,
@@ -109,6 +115,13 @@ PRESSURE_BASELINE_SCHEMA_VERSION = 1
 OPERATIONAL_EVIDENCE_SCHEMA_VERSION = 1
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _CALENDAR_MAX_DAYS_PER_REQUEST = 240
+_PRESSURE_TERMINAL_RUN_STATUSES = frozenset(
+  {"STOPPED", "COMPLETED", "ERROR", "FAILED"}
+)
+_PRESSURE_TERMINAL_REPLAY_STATUSES = frozenset(
+  {"STOPPED", "COMPLETED", "CANCELLED", "ERROR", "FAILED"}
+)
+_PRESSURE_ACTIVE_REPLAY_STATUSES = frozenset({"PENDING", "RUNNING", "PAUSED"})
 
 _PRESSURE_REPLAY_REPORT_FIELDS = (
   "status",
@@ -300,6 +313,10 @@ def _safe_pressure_run_evidence(run_evidence: Mapping[str, Any]) -> dict[str, An
       "opportunity_feature_schema_version"
     ),
     "evaluations": dict(run_evidence.get("evaluations") or {}),
+    "checkpoint_progress": dict(run_evidence.get("checkpoint_progress") or {}),
+    "material_trace_evaluation_keys": dict(
+      run_evidence.get("material_trace_evaluation_keys") or {}
+    ),
     "durable_actionable_fact_observation": dict(
       run_evidence.get("durable_actionable_fact_observation") or {}
     ),
@@ -486,19 +503,17 @@ def _load_completed_pressure_baseline(path: Path) -> dict[str, Any]:
     raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
   evaluation_counts = dict(raw_evaluation_counts)
   material_rows = evaluation_counts.get("material_rows")
-  diagnostic_logical_events = evaluation_counts.get(
-    "diagnostic_logical_events"
-  )
+  diagnostic_rows = evaluation_counts.get("diagnostic_rows")
   if any(
     isinstance(value, bool) or not isinstance(value, int) or value < 0
-    for value in (material_rows, diagnostic_logical_events)
+    for value in (material_rows, diagnostic_rows)
   ):
     raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
-  evaluation_logical_events = material_rows + diagnostic_logical_events
   state_writes = _require_mapping_field(
     database_writes, field="runtime_state", context="COMPLETED_PRESSURE"
   )
   tick_accounting = _pressure_tick_accounting(pressure)
+  durable_tick_accounting = _durable_pressure_tick_accounting(pressure)
   if (
     str(pressure.get("status") or "").upper()
     != "EXECUTED_SYNTHETIC_NON_HISTORICAL"
@@ -524,7 +539,12 @@ def _load_completed_pressure_baseline(path: Path) -> dict[str, Any]:
     or not bool(tick_accounting.get("accounting_passed"))
     or int(dict(latency.get("engine_tick") or {}).get("sample_count") or 0)
     != effective_ticks
-    or evaluation_logical_events != effective_ticks
+    or diagnostic_rows != 0
+    or str(durable_tick_accounting.get("status") or "")
+    != "ENGINE_WATERMARK_MATERIAL_FACT_ACCOUNTING"
+    or not bool(durable_tick_accounting.get("durable_accounting_passed"))
+    or durable_tick_accounting.get("instrumentation_matches_durable") is not True
+    or durable_tick_accounting.get("material_trace_evaluation_keys_exact") is not True
     or not isinstance(state_writes.get("state_upsert_attempts"), int)
     or state_writes["state_upsert_attempts"] <= 0
     or int(state_writes.get("snapshot_save_failures") or 0) != 0
@@ -533,6 +553,7 @@ def _load_completed_pressure_baseline(path: Path) -> dict[str, Any]:
     raise AcceptanceBlockedError("COMPLETED_PRESSURE_EVIDENCE_INVALID")
   imported = copy.deepcopy(pressure)
   imported["tick_accounting"] = tick_accounting
+  imported["durable_tick_accounting"] = durable_tick_accounting
   return _sanitize_pressure_baseline_for_report(imported)
 
 
@@ -988,14 +1009,16 @@ def _pressure_tick_accounting(pressure: Mapping[str, Any]) -> dict[str, Any]:
   expected_policy_filtered_ticks = (
     policy_filtered_per_instrument_day * instrument_day_count
   )
-  policy_filtered_ticks = requested_ticks - effective_ticks
+  expected_engine_ticks = requested_ticks - expected_policy_filtered_ticks
+  unprocessed_engine_ticks = expected_engine_ticks - effective_ticks
   return {
     "requested_fixture_ticks": requested_ticks,
     "engine_ticks_processed": effective_ticks,
-    "policy_filtered_ticks": policy_filtered_ticks,
+    "fixture_policy_filtered_ticks": expected_policy_filtered_ticks,
     "policy_filtered_per_instrument_day": policy_filtered_per_instrument_day,
     "instrument_day_count": instrument_day_count,
-    "expected_policy_filtered_ticks": expected_policy_filtered_ticks,
+    "expected_engine_ticks": expected_engine_ticks,
+    "unprocessed_engine_ticks": unprocessed_engine_ticks,
     "continuous_pm_policy": "13:00 <= local_time < 14:57",
     "policy_filtered_time_range": (
       "{}..{}".format(
@@ -1007,7 +1030,227 @@ def _pressure_tick_accounting(pressure: Mapping[str, Any]) -> dict[str, Any]:
     ),
     "accounting_passed": (
       requested_ticks == instrument_day_count * tick_count_per_instrument_day
-      and policy_filtered_ticks == expected_policy_filtered_ticks
+      and unprocessed_engine_ticks == 0
+    ),
+  }
+
+
+def _checkpoint_progress_from_custom_state(custom_state: Any) -> dict[str, Any]:
+  """Read the latest durable source fence without inventing a row-count proxy."""
+
+  if not isinstance(custom_state, Mapping):
+    return {"status": "UNAVAILABLE", "reason": "RUNTIME_CUSTOM_STATE_MISSING"}
+  checkpoints = custom_state.get(RUNTIME_CHECKPOINTS_KEY)
+  if not isinstance(checkpoints, list):
+    return {"status": "UNAVAILABLE", "reason": "RUNTIME_CHECKPOINTS_MISSING"}
+  candidates = [item for item in checkpoints if isinstance(item, Mapping)]
+  if not candidates:
+    return {"status": "UNAVAILABLE", "reason": "RUNTIME_CHECKPOINTS_EMPTY"}
+  # A checkpoint id is deterministic for one boundary; persisted list order is
+  # the manager's newest-first retention order only incidentally. Prefer a
+  # complete seal, then the most recently appended prepared boundary.
+  checkpoint = next(
+    (
+      item
+      for item in reversed(candidates)
+      if str(item.get("status") or "").upper() == "SEALED"
+      and bool(dict(item.get("completeness") or {}).get("complete"))
+    ),
+    candidates[-1],
+  )
+  watermark = checkpoint.get("processed_watermark")
+  if not isinstance(watermark, Mapping):
+    return {"status": "UNAVAILABLE", "reason": "CHECKPOINT_WATERMARK_MISSING"}
+  count = watermark.get("processed_tick_count", watermark.get("sequence"))
+  if isinstance(count, bool):
+    count = None
+  try:
+    processed_tick_count = int(count)
+  except (TypeError, ValueError, OverflowError):
+    processed_tick_count = -1
+  if processed_tick_count < 0:
+    return {"status": "UNAVAILABLE", "reason": "CHECKPOINT_COUNT_INVALID"}
+  source_identity = {
+    key: watermark[key]
+    for key in ("stream_id", "generation", "sequence", "source_time_ms")
+    if key in watermark
+    and (
+      watermark[key] is None
+      or isinstance(watermark[key], (bool, float, int, str))
+    )
+  }
+  return {
+    "status": "AVAILABLE",
+    "checkpoint_id": str(checkpoint.get("checkpoint_id") or "") or None,
+    "checkpoint_status": str(checkpoint.get("status") or "").upper() or None,
+    "processed_tick_count": processed_tick_count,
+    "source_identity": source_identity,
+  }
+
+
+def _material_trace_evaluation_key_accounting(
+  *,
+  evaluation_event_keys: Iterable[Any],
+  trace_output_summaries: Iterable[Any],
+) -> dict[str, Any]:
+  """Prove one-to-one MATERIAL evidence references without counting Ticks."""
+
+  evaluation_keys = [
+    str(value or "").strip()
+    for value in evaluation_event_keys
+    if str(value or "").strip()
+  ]
+  trace_keys: list[str] = []
+  trace_rows_with_references = 0
+  for raw_summary in trace_output_summaries:
+    if not isinstance(raw_summary, Mapping):
+      continue
+    if str(raw_summary.get("format") or "") != (
+      "T_TRADE_DECISION_TRACE_CAUSAL_INDEX_V3"
+    ):
+      continue
+    references = raw_summary.get("evaluation_references")
+    if not isinstance(references, list):
+      continue
+    row_has_reference = False
+    for raw_reference in references:
+      if not isinstance(raw_reference, Mapping):
+        continue
+      if str(raw_reference.get("record_kind") or "").upper() != "MATERIAL":
+        continue
+      event_key = str(raw_reference.get("evaluation_event_key") or "").strip()
+      if event_key:
+        trace_keys.append(event_key)
+        row_has_reference = True
+    if row_has_reference:
+      trace_rows_with_references += 1
+  evaluation_set = set(evaluation_keys)
+  trace_set = set(trace_keys)
+  return {
+    "evaluation_material_rows": len(evaluation_keys),
+    "trace_rows_with_evaluation_references": trace_rows_with_references,
+    "evaluation_event_key_count": len(evaluation_set),
+    "trace_event_key_count": len(trace_set),
+    "duplicate_evaluation_event_keys": len(evaluation_keys) - len(evaluation_set),
+    "duplicate_trace_event_keys": len(trace_keys) - len(trace_set),
+    "exact_key_match": (
+      len(evaluation_keys) == len(evaluation_set)
+      and len(trace_keys) == len(trace_set)
+      and trace_set == evaluation_set
+    ),
+  }
+
+
+def _durable_pressure_tick_accounting(
+  pressure: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Account T source progress by Engine count + durable source watermark.
+
+  Ordinary T observations intentionally no longer create an evaluation or
+  DecisionTrace row. Their durable proof is the checkpointed processed count
+  and source identity; material evidence is verified separately by exact key.
+  """
+
+  run_evidence = pressure.get("run_evidence")
+  if not isinstance(run_evidence, Mapping):
+    return {
+      "status": "UNAVAILABLE",
+      "reason": "RUN_EVIDENCE_MISSING",
+    }
+  evaluations = run_evidence.get("evaluations")
+  checkpoint = run_evidence.get("checkpoint_progress")
+  material_keys = run_evidence.get("material_trace_evaluation_keys")
+  if not isinstance(evaluations, Mapping) or not isinstance(checkpoint, Mapping):
+    return {
+      "status": "UNAVAILABLE",
+      "reason": "CHECKPOINT_OR_EVALUATION_EVIDENCE_MISSING",
+    }
+  material_rows = evaluations.get("material_rows")
+  diagnostic_rows = evaluations.get("diagnostic_rows")
+  processed_tick_count = checkpoint.get("processed_tick_count")
+  source_identity = checkpoint.get("source_identity")
+  source_stream_id = (
+    str(source_identity.get("stream_id") or "").strip()
+    if isinstance(source_identity, Mapping)
+    else ""
+  )
+  source_generation = (
+    source_identity.get("generation")
+    if isinstance(source_identity, Mapping)
+    else None
+  )
+  source_sequence = (
+    source_identity.get("sequence")
+    if isinstance(source_identity, Mapping)
+    else None
+  )
+  if (
+    str(checkpoint.get("status") or "").upper() != "AVAILABLE"
+    or not isinstance(material_rows, int)
+    or not isinstance(diagnostic_rows, int)
+    or not isinstance(processed_tick_count, int)
+    or not source_stream_id
+    or isinstance(source_generation, bool)
+    or not isinstance(source_generation, int)
+    or source_generation <= 0
+    or isinstance(source_sequence, bool)
+    or not isinstance(source_sequence, int)
+    or source_sequence < 0
+    or material_rows < 0
+    or diagnostic_rows < 0
+    or processed_tick_count < 0
+  ):
+    return {
+      "status": "UNAVAILABLE",
+      "reason": "CHECKPOINT_SOURCE_OR_MATERIAL_COUNTS_INVALID",
+    }
+  source_accounting = _pressure_tick_accounting(
+    {
+      "fixture": dict(pressure.get("fixture") or {}),
+      "throughput": {"engine_ticks_processed": processed_tick_count},
+    }
+  )
+  if not source_accounting:
+    return {
+      "status": "UNAVAILABLE",
+      "reason": "FIXTURE_ACCOUNTING_INVALID",
+    }
+  instrumented_ticks = dict(pressure.get("throughput") or {}).get(
+    "engine_ticks_processed"
+  )
+  exact_material_key_match = (
+    bool(material_keys.get("exact_key_match"))
+    if isinstance(material_keys, Mapping)
+    else None
+  )
+  return {
+    "status": "ENGINE_WATERMARK_MATERIAL_FACT_ACCOUNTING",
+    "material_rows": material_rows,
+    "ordinary_diagnostic_rows": diagnostic_rows,
+    "ordinary_tick_durable_rows": diagnostic_rows,
+    "durable_processed_synthetic_ticks": processed_tick_count,
+    "expected_accepted_synthetic_ticks": source_accounting[
+      "expected_engine_ticks"
+    ],
+    "durable_unprocessed_accepted_synthetic_ticks": source_accounting[
+      "unprocessed_engine_ticks"
+    ],
+    "durable_accounting_passed": source_accounting["accounting_passed"],
+    "instrumentation_engine_ticks": (
+      instrumented_ticks if isinstance(instrumented_ticks, int) else None
+    ),
+    "instrumentation_matches_durable": (
+      instrumented_ticks == processed_tick_count
+      if isinstance(instrumented_ticks, int)
+      else None
+    ),
+    "material_trace_evaluation_keys_exact": exact_material_key_match,
+    "semantics": (
+      "Engine instrumentation counts accepted synthetic ticks for a completed "
+      "run; RuntimeState checkpoint processed_tick_count plus source identity "
+      "is the timeout/recovery proof. MATERIAL evaluation/trace references are "
+      "checked independently by exact event key, while ordinary T ticks create "
+      "no durable observation row."
     ),
   }
 
@@ -1899,12 +2142,45 @@ async def _load_run_evidence(
       str(kind): {"rows": int(row_count), "logical_events": int(logical_count)}
       for kind, row_count, logical_count in rows.all()
     }
+    material = evaluation_by_kind.get(
+      T_TRADE_EVALUATION_KIND_MATERIAL,
+      {"rows": 0, "logical_events": 0},
+    )
     diagnostic = evaluation_by_kind.get(
       T_TRADE_EVALUATION_KIND_DIAGNOSTIC,
       {"rows": 0, "logical_events": 0},
     )
+    material_logical_events = int(material["logical_events"])
     logical_events = int(diagnostic["logical_events"])
     diagnostic_rows = int(diagnostic["rows"])
+    material_event_rows = await db.execute(
+      select(TTradeOpportunityEvaluation.event_key)
+      .where(
+        TTradeOpportunityEvaluation.strategy_run_id == run_id,
+        TTradeOpportunityEvaluation.record_kind
+        == T_TRADE_EVALUATION_KIND_MATERIAL,
+      )
+      .order_by(TTradeOpportunityEvaluation.event_key.asc())
+    )
+    material_event_keys = [
+      str(row[0] or "").strip()
+      for row in material_event_rows.all()
+      if str(row[0] or "").strip()
+    ]
+    trace_rows = await db.execute(
+      select(StrategyDecisionTraceRecord.output_summary)
+      .where(StrategyDecisionTraceRecord.strategy_run_id == run_id)
+      .order_by(StrategyDecisionTraceRecord.id.asc())
+    )
+    trace_output_summaries = [row[0] for row in trace_rows.all()]
+    material_trace_evaluation_keys = _material_trace_evaluation_key_accounting(
+      evaluation_event_keys=material_event_keys,
+      trace_output_summaries=trace_output_summaries,
+    )
+    runtime_state = await StrategyRunStateRepository(db).get_state(run_id)
+    checkpoint_progress = _checkpoint_progress_from_custom_state(
+      getattr(runtime_state, "custom_state", None)
+    )
     durable_actionable_fact_observation: dict[str, Any] | None = None
     if include_durable_actionable_fact_observation:
       trade_intent_rows, actionable_trade_intent_rows = (
@@ -2007,19 +2283,19 @@ async def _load_run_evidence(
       "opportunity_feature_schema_version": OPPORTUNITY_FEATURE_SCHEMA_VERSION,
       "evaluations": {
         "by_record_kind": evaluation_by_kind,
-        "material_rows": int(
-          evaluation_by_kind.get(T_TRADE_EVALUATION_KIND_MATERIAL, {}).get(
-            "rows", 0
-          )
-        ),
+        "material_rows": int(material["rows"]),
+        "material_logical_events": material_logical_events,
         "diagnostic_rows": diagnostic_rows,
         "diagnostic_logical_events": logical_events,
+        "total_logical_events": material_logical_events + logical_events,
         "diagnostic_merge_ratio": (
           round((logical_events - diagnostic_rows) / logical_events, 8)
           if logical_events
           else None
         ),
       },
+      "checkpoint_progress": checkpoint_progress,
+      "material_trace_evaluation_keys": material_trace_evaluation_keys,
       "instrument_profiles": [
         {
           "instrument_code": str(code),
@@ -2119,6 +2395,258 @@ async def _await_synthetic_replay_terminal(
     await asyncio.sleep(0.05)
 
 
+def _assert_owned_synthetic_pressure_backtest(
+  run_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+  """Prove that a timeout fallback can touch only its own isolated run."""
+
+  parameters = _json_object(
+    run_evidence.get("parameters"),
+    context="SYNTHETIC_PRESSURE_TIMEOUT_PARAMETERS",
+  )
+  if (
+    str(run_evidence.get("mode") or "").upper() != "BACKTEST"
+    or not bool(parameters.get("t_trade_replay"))
+    or parameters.get("replay_acceptance") != "V3_PRESSURE_BASELINE"
+    or not _uses_day_batch_runtime_checkpoint(parameters)
+    or not _value_as_str(parameters.get("account_id"))
+  ):
+    raise RuntimeError("PRESSURE_TIMEOUT_FALLBACK_RUN_NOT_OWNED")
+  return parameters
+
+
+async def _await_timed_out_pressure_runtime_task(
+  runtime: Any,
+  *,
+  grace_seconds: float = 15.0,
+) -> dict[str, Any]:
+  """Require the original runtime task to stop before persisted-only repair."""
+
+  task = getattr(runtime, "task", None)
+  if task is None:
+    raise RuntimeError("PRESSURE_TIMEOUT_RUNTIME_TASK_MISSING")
+  if not task.done():
+    try:
+      await asyncio.wait_for(asyncio.shield(task), timeout=grace_seconds)
+    except asyncio.CancelledError:
+      current = asyncio.current_task()
+      if current is not None and current.cancelling():
+        raise
+    except Exception:
+      # A cancelled/failed runtime task is terminal for this purpose.  Its
+      # durable lifecycle is checked independently below.
+      pass
+  if not task.done():
+    raise RuntimeError("PRESSURE_TIMEOUT_RUNTIME_TASK_NOT_CONVERGED")
+  # The manager installs its terminal callback from the task done callback.
+  # Give that callback its scheduling turn before replacing idle pool members.
+  await asyncio.sleep(0)
+  await asyncio.sleep(0)
+  return {
+    "runtime_task_terminal": True,
+    "runtime_task_cancelled": bool(task.cancelled()),
+  }
+
+
+class _PersistedOnlyPressureRunManager:
+  """Expose only the no-runtime stop boundary to a recovery replay service."""
+
+  def __init__(self, owner: StrategyManager) -> None:
+    self._owner = owner
+
+  def get_run(self, _run_id: str) -> None:
+    # The original task was proven terminal before this proxy was created. A
+    # replay service must not rediscover and re-enter that retired runtime.
+    return None
+
+  async def cancel_deferred_start(self, _run_id: str) -> bool:
+    # A created runtime task has already crossed deferred-start scheduling.
+    # Do not let timeout recovery alter any manager-owned task registry.
+    return False
+
+  async def stop_strategy(self, run_id: str, *, force: bool = False) -> bool:
+    if not force:
+      return False
+    # This private manager boundary is deliberately used only after
+    # ``_assert_owned_synthetic_pressure_backtest`` proves the isolated V3
+    # BACKTEST identity. It writes only the durable StrategyRun row and cannot
+    # command an in-memory runtime.
+    return await self._owner._stop_persisted_strategy(run_id)
+
+
+async def _recover_timed_out_synthetic_pressure_run(
+  *,
+  manager: StrategyManager,
+  service: TTradeReplayService,
+  runtime: Any,
+  run_id: str,
+  cancellation_error: BaseException,
+) -> tuple[
+  dict[str, Any],
+  TTradeReplayService,
+  dict[str, Any],
+  dict[str, Any],
+  dict[str, Any],
+]:
+  """Converge a timed-out isolated pressure run without reusing its session.
+
+  Cancelling an in-flight asyncpg snapshot can leave the just-cancelled driver
+  connection closed while it is still an idle member of SQLAlchemy's pool.
+  This path first discards idle pool members and retries the normal
+  service-owned cancellation. Only if that fresh-session retry still fails
+  does it cancel the proven isolated task, wait for it to stop, and use a new
+  replay service behind a manager proxy for persisted-only convergence. It
+  deliberately cannot touch PAPER, LIVE, or an unproven replay run.
+  """
+
+  # ``dispose`` replaces only idle pooled connections. Checked-out work from a
+  # still-running task remains usable, while every following evidence/repair
+  # session is forced to establish a fresh asyncpg connection.
+  await relational_engine.dispose()
+  initial_evidence = await _load_run_evidence(run_id)
+  parameters = _assert_owned_synthetic_pressure_backtest(initial_evidence)
+
+  retry_error: BaseException | None = None
+  try:
+    retried_replay = await service.cancel(run_id)
+  except asyncio.CancelledError as exc:
+    current = asyncio.current_task()
+    if current is not None and current.cancelling():
+      raise
+    retried_replay = None
+    retry_error = exc
+  except Exception as exc:
+    retried_replay = None
+    retry_error = exc
+  else:
+    try:
+      task_convergence = await _await_timed_out_pressure_runtime_task(runtime)
+      # The successful retry may itself have cancelled an asyncpg query; read
+      # terminal evidence through another fresh session rather than assuming
+      # the repaired pool remains healthy.
+      await relational_engine.dispose()
+      run_evidence = await _load_run_evidence(run_id)
+      replay = await service.get(run_id)
+      run_status = str(run_evidence.get("status") or "").upper()
+      replay_status = str((replay or {}).get("status") or "").upper()
+      if (
+        run_status in _PRESSURE_TERMINAL_RUN_STATUSES
+        and replay_status in _PRESSURE_TERMINAL_REPLAY_STATUSES
+      ):
+        cancellation = {
+          "status": replay_status,
+          "fresh_session_retry": True,
+          "direct_cancel_error_type": type(cancellation_error).__name__,
+          **task_convergence,
+        }
+        terminal_convergence = {
+          "status": "TERMINAL",
+          "projection_repaired": False,
+          "run_status": run_status,
+          "replay_status": replay_status,
+          "timeout_recovery": "FRESH_SESSION_SERVICE_RETRY_AFTER_POOL_DISPOSE",
+          "account_id_present": bool(
+            _value_as_str(parameters.get("account_id"))
+          ),
+        }
+        return (
+          cancellation,
+          service,
+          dict(replay or retried_replay or {}),
+          run_evidence,
+          terminal_convergence,
+        )
+      retry_error = RuntimeError("PRESSURE_TIMEOUT_SERVICE_RETRY_NOT_TERMINAL")
+    except asyncio.CancelledError as exc:
+      current = asyncio.current_task()
+      if current is not None and current.cancelling():
+        raise
+      retry_error = exc
+    except Exception as exc:
+      retry_error = exc
+
+  task = getattr(runtime, "task", None)
+  if task is None:
+    raise RuntimeError("PRESSURE_TIMEOUT_RUNTIME_TASK_MISSING")
+  forced_task_cancel = False
+  if not task.done():
+    # The normal service-owned path has already failed after durable ownership
+    # proof. This is the final isolated BACKTEST safety brake: it prevents an
+    # active task from surviving a failed timeout report.
+    task.cancel()
+    forced_task_cancel = True
+  task_convergence = await _await_timed_out_pressure_runtime_task(runtime)
+
+  # Give the original executor one fresh-session chance to release resources
+  # now that its task is no longer active. Persisted-only convergence below is
+  # still authoritative even when this best-effort cleanup declines success.
+  try:
+    await relational_engine.dispose()
+    await manager.stop_strategy(run_id, force=True)
+  except asyncio.CancelledError:
+    current = asyncio.current_task()
+    if current is not None and current.cancelling():
+      raise
+  except Exception:
+    pass
+  # A stop/cleanup attempt can again invalidate its asyncpg connection. The
+  # persisted-only service must therefore start after a final pool reset.
+  await relational_engine.dispose()
+
+  persisted_only_manager = _PersistedOnlyPressureRunManager(manager)
+  fresh_service = TTradeReplayService(persisted_only_manager)
+  initial_replay = await fresh_service.get(run_id)
+  initial_replay_status = str(
+    (initial_replay or {}).get("status") or ""
+  ).upper()
+  initial_run_status = str(initial_evidence.get("status") or "").upper()
+
+  if initial_replay_status in _PRESSURE_ACTIVE_REPLAY_STATUSES:
+    replay = await fresh_service.cancel(run_id)
+  elif initial_run_status not in _PRESSURE_TERMINAL_RUN_STATUSES:
+    # A terminal replay projection cannot be transitioned by ``cancel``. The
+    # original runtime is already stopped, so the fresh manager may only close
+    # this persisted run; it has no in-memory runtime to command.
+    if not await persisted_only_manager.stop_strategy(run_id, force=True):
+      raise RuntimeError("PRESSURE_TIMEOUT_PERSISTED_STOP_FAILED")
+    replay = await fresh_service.get(run_id)
+  else:
+    replay = initial_replay
+
+  run_evidence = await _load_run_evidence(run_id)
+  replay = replay or await fresh_service.get(run_id)
+  run_status = str(run_evidence.get("status") or "").upper()
+  replay_status = str((replay or {}).get("status") or "").upper()
+  if (
+    run_status not in _PRESSURE_TERMINAL_RUN_STATUSES
+    or replay_status not in _PRESSURE_TERMINAL_REPLAY_STATUSES
+  ):
+    raise RuntimeError("PRESSURE_TIMEOUT_FRESH_CANCELLATION_NOT_TERMINAL")
+  cancellation = {
+    "status": replay_status,
+    "fresh_persisted_only_recovery": True,
+    "direct_cancel_error_type": type(cancellation_error).__name__,
+    "fresh_session_retry_error_type": type(retry_error).__name__,
+    "forced_runtime_task_cancel": forced_task_cancel,
+    **task_convergence,
+  }
+  terminal_convergence = {
+    "status": "TERMINAL",
+    "projection_repaired": False,
+    "run_status": run_status,
+    "replay_status": replay_status,
+    "timeout_recovery": "FRESH_PERSISTED_ONLY_AFTER_POOL_DISPOSE",
+    "account_id_present": bool(_value_as_str(parameters.get("account_id"))),
+  }
+  return (
+    cancellation,
+    fresh_service,
+    dict(replay or {}),
+    run_evidence,
+    terminal_convergence,
+  )
+
+
 async def load_cancelled_full_pressure_attempt(
   run_id: str,
   *,
@@ -2156,6 +2684,10 @@ async def load_cancelled_full_pressure_attempt(
       str(kind): {"rows": int(row_count), "logical_events": int(logical_count)}
       for kind, row_count, logical_count in evaluation_rows.all()
     }
+    runtime_state = await StrategyRunStateRepository(db).get_state(run_id)
+    checkpoint_progress = _checkpoint_progress_from_custom_state(
+      getattr(runtime_state, "custom_state", None)
+    )
     replay = await TTradeReplayService().get(run_id)
     run_status = str(getattr(run.status, "value", run.status) or "").upper()
     replay_status = str((replay or {}).get("status") or "").upper()
@@ -2191,6 +2723,7 @@ async def load_cancelled_full_pressure_attempt(
       "replay_status": replay_status,
       "runtime_state_persistence": {
         "enabled": runtime_state_persisted,
+        "checkpoint_progress": checkpoint_progress,
         "evidence": (
           "sealed DAY_BATCH BACKTEST runtime-state checkpoint policy present "
           "in durable run parameters"
@@ -2199,6 +2732,7 @@ async def load_cancelled_full_pressure_attempt(
           "historical run has nonpersistent RuntimeState evidence"
         ),
       },
+      "checkpoint_progress": checkpoint_progress,
       "evaluations": evaluations,
       "partial_materialization_logical_events_per_second": (
         round(logical_events / elapsed_seconds, 6)
@@ -2207,7 +2741,11 @@ async def load_cancelled_full_pressure_attempt(
       ),
       "unavailable_metrics": {
         "engine_tick_latency_p50_p95_p99": "N/A: process cancellation releases in-memory samples",
-        "engine_tick_throughput": "N/A: completed Tick count was not durably checkpointed",
+        "engine_tick_throughput": (
+          "checkpoint processed_tick_count + source identity retained"
+          if checkpoint_progress.get("status") == "AVAILABLE"
+          else "N/A: no durable RuntimeState checkpoint watermark/count"
+        ),
         "cas_conflict_rate": "N/A: in-memory counter lost at cancellation",
         "database_commit_calls": "N/A: in-process counter lost at cancellation",
       },
@@ -2808,39 +3346,130 @@ async def execute_synthetic_pressure_baseline(
               else cancelled.get("processed_until")
             ),
           }
+          cancellation.update(
+            await _await_timed_out_pressure_runtime_task(runtime)
+          )
+        except asyncio.CancelledError as exc:
+          current = asyncio.current_task()
+          if current is not None and current.cancelling():
+            raise
+          (
+            cancellation,
+            service,
+            replay,
+            run_evidence,
+            terminal_convergence,
+          ) = await _recover_timed_out_synthetic_pressure_run(
+            manager=manager,
+            service=service,
+            runtime=runtime,
+            run_id=run_id,
+            cancellation_error=exc,
+          )
         except Exception as exc:
-          # A race with normal terminal completion is acceptable only when the
-          # authoritative projection already says terminal.  Anything still
-          # active remains an explicit failure rather than an orphaned run.
-          latest = await service.get(run_id)
-          latest_status = str((latest or {}).get("status") or "").upper()
-          if latest_status not in {"COMPLETED", "CANCELLED", "FAILED", "ERROR"}:
-            raise RuntimeError("PRESSURE_TIMEOUT_CANCELLATION_NOT_CONVERGED") from exc
-          cancellation = {
-            "status": latest_status,
-            "raced_terminal_state": True,
-            "cancel_error_type": type(exc).__name__,
-          }
-        try:
-          await asyncio.wait_for(asyncio.shield(runtime.task), timeout=10.0)
-        except asyncio.CancelledError:
-          # The service-owned cancellation is the expected terminal result.
-          pass
-        except asyncio.TimeoutError as exc:
-          raise RuntimeError("PRESSURE_TIMEOUT_RUNTIME_TASK_NOT_CONVERGED") from exc
+          (
+            cancellation,
+            service,
+            replay,
+            run_evidence,
+            terminal_convergence,
+          ) = await _recover_timed_out_synthetic_pressure_run(
+            manager=manager,
+            service=service,
+            runtime=runtime,
+            run_id=run_id,
+            cancellation_error=exc,
+          )
       except asyncio.CancelledError:
         raise
       except Exception:
         # Preserve the terminal result and run-scoped DB evidence below.
         pass
-      replay, run_evidence, terminal_convergence = (
-        await _await_synthetic_replay_terminal(service, run_id)
-      )
+      if terminal_convergence is None:
+        try:
+          replay, run_evidence, terminal_convergence = (
+            await _await_synthetic_replay_terminal(service, run_id)
+          )
+        except asyncio.CancelledError as exc:
+          current = asyncio.current_task()
+          if not timed_out or (current is not None and current.cancelling()):
+            raise
+          (
+            cancellation,
+            service,
+            replay,
+            run_evidence,
+            terminal_convergence,
+          ) = await _recover_timed_out_synthetic_pressure_run(
+            manager=manager,
+            service=service,
+            runtime=runtime,
+            run_id=run_id,
+            cancellation_error=exc,
+          )
+        except Exception as exc:
+          if not timed_out:
+            raise
+          (
+            cancellation,
+            service,
+            replay,
+            run_evidence,
+            terminal_convergence,
+          ) = await _recover_timed_out_synthetic_pressure_run(
+            manager=manager,
+            service=service,
+            runtime=runtime,
+            run_id=run_id,
+            cancellation_error=exc,
+          )
     elapsed_seconds = wall_clock.perf_counter() - started
-    run_evidence = await _load_run_evidence(
-      run_id,
-      include_durable_actionable_fact_observation=True,
-    )
+    try:
+      run_evidence = await _load_run_evidence(
+        run_id,
+        include_durable_actionable_fact_observation=True,
+      )
+    except asyncio.CancelledError as exc:
+      current = asyncio.current_task()
+      if not timed_out or (current is not None and current.cancelling()):
+        raise
+      (
+        cancellation,
+        service,
+        replay,
+        run_evidence,
+        terminal_convergence,
+      ) = await _recover_timed_out_synthetic_pressure_run(
+        manager=manager,
+        service=service,
+        runtime=runtime,
+        run_id=run_id,
+        cancellation_error=exc,
+      )
+      run_evidence = await _load_run_evidence(
+        run_id,
+        include_durable_actionable_fact_observation=True,
+      )
+    except Exception as exc:
+      if not timed_out:
+        raise
+      (
+        cancellation,
+        service,
+        replay,
+        run_evidence,
+        terminal_convergence,
+      ) = await _recover_timed_out_synthetic_pressure_run(
+        manager=manager,
+        service=service,
+        runtime=runtime,
+        run_id=run_id,
+        cancellation_error=exc,
+      )
+      run_evidence = await _load_run_evidence(
+        run_id,
+        include_durable_actionable_fact_observation=True,
+      )
   finally:
     manager._ensure_backtest_data_available = original_data_check
     manager._queue_missing_backtest_data_supplement = original_supplement
@@ -2862,6 +3491,13 @@ async def execute_synthetic_pressure_baseline(
   }
   tick_accounting = _pressure_tick_accounting(
     {"fixture": fixture.to_dict(), "throughput": throughput}
+  )
+  durable_tick_accounting = _durable_pressure_tick_accounting(
+    {
+      "fixture": fixture.to_dict(),
+      "throughput": throughput,
+      "run_evidence": run_evidence,
+    }
   )
   cas = {
     "snapshot_conflicts": cas_conflicts,
@@ -2965,6 +3601,7 @@ async def execute_synthetic_pressure_baseline(
     "elapsed_seconds": round(elapsed_seconds, 6),
     "throughput": throughput,
     "tick_accounting": tick_accounting,
+    "durable_tick_accounting": durable_tick_accounting,
     "latency": latency,
     "cas": cas,
     "database_write_activity": database_write_activity,
@@ -3438,6 +4075,7 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
   replay = dict(pressure.get("replay") or {})
   run_evidence = dict(pressure.get("run_evidence") or {})
   terminal_convergence = dict(pressure.get("terminal_convergence") or {})
+  durable_tick_accounting = dict(pressure.get("durable_tick_accounting") or {})
   completed_full_pressure = (
     str(pressure.get("status") or "").upper()
     == "EXECUTED_SYNTHETIC_NON_HISTORICAL"
@@ -3483,11 +4121,13 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
     )
     if tick_accounting:
       lines.append(
-        "- Tick 口径核对：请求={}，实际评估={}，策略过滤={}；{} 个 "
-        "instrument-day 每个过滤 {} 条（{}，{}），不是丢失或未处理 Tick。".format(
+        "- Tick 口径核对：请求={}，实际评估={}，fixture 策略过滤={}，预期评估={}，"
+        "未处理={}；{} 个 instrument-day 每个固定过滤 {} 条（{}，{}）。".format(
           tick_accounting.get("requested_fixture_ticks"),
           tick_accounting.get("engine_ticks_processed"),
-          tick_accounting.get("policy_filtered_ticks"),
+          tick_accounting.get("fixture_policy_filtered_ticks"),
+          tick_accounting.get("expected_engine_ticks"),
+          tick_accounting.get("unprocessed_engine_ticks"),
           tick_accounting.get("instrument_day_count"),
           tick_accounting.get("policy_filtered_per_instrument_day"),
           tick_accounting.get("continuous_pm_policy"),
@@ -3512,6 +4152,19 @@ def render_markdown(report: Mapping[str, Any], *, json_name: str) -> str:
         ),
       ]
     )
+    if durable_tick_accounting:
+      lines.append(
+        "- durable 因果 tick 账本：status={}；accepted/expected={}/{}；"
+        "未处理={}；与进程采样一致={}。".format(
+          durable_tick_accounting.get("status"),
+          durable_tick_accounting.get("durable_accepted_synthetic_ticks"),
+          durable_tick_accounting.get("expected_accepted_synthetic_ticks"),
+          durable_tick_accounting.get(
+            "durable_unprocessed_accepted_synthetic_ticks"
+          ),
+          durable_tick_accounting.get("instrumentation_matches_durable"),
+        )
+      )
   elif full_pressure_attempt:
     full_attempt = dict(full_pressure_attempt)
     full_fixture = dict(full_attempt.get("fixture") or {})

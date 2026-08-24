@@ -937,6 +937,13 @@ class BacktestResultStorage:
                     "reason_tags",
                 ],
             )
+        signal_marker = dict(payload.get("signal_marker") or {})
+        if signal_marker:
+            # Engine already bounded this T-trade marker before it crossed the
+            # RuntimeState durability boundary. Preserve its source/candidate
+            # reconciliation facts in the backtest artifact instead of
+            # dropping the dedicated-evidence link during export compaction.
+            compact["signal_marker"] = signal_marker
         block_events = list(payload.get("block_events") or [])
         if block_events:
             compact["block_events"] = [
