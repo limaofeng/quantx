@@ -195,6 +195,53 @@ describe('TTradeLiveBoard V3 inspector', () => {
     expect(screen.getByText('等待快照')).toBeInTheDocument();
     expect(screen.getByText('订阅 / 真源')).toBeInTheDocument();
     expect(screen.getByText('订阅已连接 · 查询待复核')).toBeInTheDocument();
+
+    const eyebrow = screen.getByText('Stateful opportunity V3');
+    expect(eyebrow).toHaveClass('text-blue-300');
+    expect(eyebrow).not.toHaveClass('text-red-300');
+
+    const refreshButton = screen.getByRole('button', {
+      name: '刷新健康控制台',
+    });
+    expect(refreshButton).toHaveClass(
+      'hover:text-blue-200',
+      'focus-visible:ring-blue-400/70'
+    );
+    expect(refreshButton).not.toHaveClass(
+      'hover:text-red-200',
+      'focus-visible:ring-red-500/60'
+    );
+  });
+
+  it('uses the semantic primary action for starting a stopped monitor', () => {
+    render(
+      <TTradeHealthConsole
+        accountId="account-1"
+        actionLoading={false}
+        monitor={{ ...monitor, enabled: false }}
+        onReconcile={vi.fn()}
+        onRefresh={vi.fn()}
+        onToggleMonitoring={vi.fn()}
+        quoteConnected
+        quotes={quotes}
+        refreshing={false}
+        snapshotTrusted={false}
+        toggleDisabled={false}
+        wsStatus="connected"
+      />
+    );
+
+    const startButton = screen.getByRole('button', { name: '启动监控' });
+    expect(startButton).toHaveClass(
+      'bg-primary',
+      'text-primary-foreground',
+      'hover:bg-primary/90'
+    );
+    expect(startButton).not.toHaveClass(
+      'bg-red-500',
+      'text-white',
+      'hover:bg-red-400'
+    );
   });
 
   it('shows a loading state before the first monitor snapshot instead of an empty state', () => {

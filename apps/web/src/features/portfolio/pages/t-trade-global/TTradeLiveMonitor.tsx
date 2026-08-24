@@ -315,7 +315,7 @@ export function TTradeHealthConsole({
       <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.24em] text-red-300">
+            <div className="text-[9px] font-black uppercase tracking-[0.24em] text-blue-300">
               Stateful opportunity V3
             </div>
             <h1 className="mt-1 text-base font-black">健康控制台</h1>
@@ -326,7 +326,7 @@ export function TTradeHealthConsole({
           <button
             type="button"
             aria-label="刷新健康控制台"
-            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-white/[0.08] text-slate-500 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/60 disabled:opacity-40"
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-sm border border-white/[0.08] text-slate-500 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:opacity-40"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
@@ -575,7 +575,7 @@ export function TTradeHealthConsole({
             'h-9 w-full rounded-sm text-[10px] font-black',
             monitor?.enabled
               ? 'bg-slate-700 text-white hover:bg-slate-600'
-              : 'bg-red-500 text-white hover:bg-red-400'
+              : 'bg-primary text-primary-foreground hover:bg-primary/90'
           )}
           disabled={!accountId || actionLoading || toggleDisabled}
           onClick={onToggleMonitoring}
