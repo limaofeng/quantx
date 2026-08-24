@@ -832,7 +832,8 @@ async def test_reconcile_restores_paused_run_before_updating_universe():
   await service.reconcile_account("account-1")
 
   service.session_service.ensure_account_strategy_running.assert_awaited_once_with(
-    "run-global"
+    "run-global",
+    account_coordination_held=True,
   )
   service.session_service.update_account_strategy.assert_awaited_once()
   assert service._save_reconcile_config.await_args.args[1] == []

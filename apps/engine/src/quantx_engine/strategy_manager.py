@@ -862,7 +862,12 @@ class StrategyManager:
 
     return run_info["backtest_id"]
 
-  async def start_strategy(self, run_id: str) -> bool:
+  async def start_strategy(
+    self,
+    run_id: str,
+    *,
+    t_trade_account_coordination_held: bool = False,
+  ) -> bool:
     """
     启动策略运行（委托给 Executor）
 
@@ -890,7 +895,10 @@ class StrategyManager:
           await self._mark_backtest_error_safely(runtime.context.backtest_id, str(e))
         return False
 
-    success = await self.executor.start(run_id)
+    success = await self.executor.start(
+      run_id,
+      t_trade_account_coordination_held=t_trade_account_coordination_held,
+    )
 
     if success:
       if (

@@ -283,10 +283,16 @@ async def test_ensure_account_strategy_running_starts_restored_idle_runtime():
   )
   service = TTradeService(manager)
 
-  changed = await service.ensure_account_strategy_running("run-restored")
+  changed = await service.ensure_account_strategy_running(
+    "run-restored",
+    account_coordination_held=True,
+  )
 
   assert changed is True
-  manager.start_strategy.assert_awaited_once_with("run-restored")
+  manager.start_strategy.assert_awaited_once_with(
+    "run-restored",
+    t_trade_account_coordination_held=True,
+  )
   manager.resume_strategy.assert_not_awaited()
 
 

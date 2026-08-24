@@ -20,7 +20,7 @@ import inspect
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
@@ -918,7 +918,12 @@ class StrategyExecutor:
       or StrategyExecutor._runtime_state_persistence_enabled(runtime)
     )
 
-  async def start(self, run_id: str) -> bool:
+  async def start(
+    self,
+    run_id: str,
+    *,
+    t_trade_account_coordination_held: bool = False,
+  ) -> bool:
     if run_id not in self.runs:
       self.logger.error(f"策略运行不存在: {run_id}")
       return False
@@ -926,10 +931,18 @@ class StrategyExecutor:
     return await self._run_lifecycle_operation(
       runtime,
       "start",
-      lambda: self._start_runtime(run_id),
+      lambda: self._start_runtime(
+        run_id,
+        t_trade_account_coordination_held=t_trade_account_coordination_held,
+      ),
     )
 
-  async def _start_runtime(self, run_id: str) -> bool:
+  async def _start_runtime(
+    self,
+    run_id: str,
+    *,
+    t_trade_account_coordination_held: bool = False,
+  ) -> bool:
     """
     启动策略运行
 
@@ -1138,7 +1151,10 @@ class StrategyExecutor:
       # resources.
       await runtime.strategy.initialize()
       self._replay_restored_market_continuity_gates(runtime)
-      await self._restore_pending_manual_approvals(runtime)
+      await self._restore_pending_manual_approvals(
+        runtime,
+        t_trade_account_coordination_held=t_trade_account_coordination_held,
+      )
       self._restore_t_trade_entry_reservations(runtime)
       invalidated_intent_ids = set(runtime.strategy.invalidated_manual_intent_ids())
       for intent_id in invalidated_intent_ids:
@@ -10148,7 +10164,12 @@ class StrategyExecutor:
       return failure
     return None
 
-  async def _restore_pending_manual_approvals(self, runtime: StrategyRuntime) -> None:
+  async def _restore_pending_manual_approvals(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    t_trade_account_coordination_held: bool = False,
+  ) -> None:
     """Restore only strategy-declared manual intents, preserving TTL semantics."""
     if not runtime.strategy or not runtime.state_manager:
       return
@@ -10158,7 +10179,10 @@ class StrategyExecutor:
       # reference. Unrelated manual-entry strategies do not own these outboxes.
       await self._replay_pending_t_trade_material_events(runtime)
       await self._replay_pending_t_trade_paper_fill_facts(runtime)
-      await self._converge_v3_t_trade_startup_candidates(runtime)
+      await self._converge_v3_t_trade_startup_candidates(
+        runtime,
+        t_trade_account_coordination_held=t_trade_account_coordination_held,
+      )
     inspected_intent_ids: set[str] = set()
     for intent_id in runtime.strategy.pending_manual_intent_ids():
       inspected_intent_ids.add(intent_id)
@@ -10230,6 +10254,8 @@ class StrategyExecutor:
   async def _converge_v3_t_trade_startup_candidates(
     self,
     runtime: StrategyRuntime,
+    *,
+    t_trade_account_coordination_held: bool = False,
   ) -> None:
     """Fail closed across every V3 candidate persistence crash window.
 
@@ -10262,7 +10288,16 @@ class StrategyExecutor:
     if not callable(loader) or not callable(strict_updater) or not callable(force_save):
       raise RuntimeError("V3 候选启动收敛缺少严格持久化边界")
 
-    async with t_trade_account_coordination_lock(account_id):
+    # The global monitor owns this account lock across configuration
+    # reconciliation and delegates runtime startup to a lifecycle task.  That
+    # child task must not enqueue behind its awaiting parent.  Other startup
+    # paths still acquire the lock here and preserve the normal serialization.
+    coordination_context = (
+      nullcontext()
+      if t_trade_account_coordination_held
+      else t_trade_account_coordination_lock(account_id)
+    )
+    async with coordination_context:
       candidates = list(recovery_projection)
       durable_rows = list(
         await loader(

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -33,6 +34,7 @@ from quantx_engine.strategy_executor import (
   StrategyExecutor,
   StrategyRuntime,
 )
+from quantx_engine.t_trade_coordination import t_trade_account_coordination_lock
 from quantx_infrastructure.core.utils import time_utils
 
 _V3_POLICY = OpportunityPolicy()
@@ -770,6 +772,26 @@ async def test_startup_suppresses_latched_candidate_when_crash_precedes_intent()
   assert materialized["transition"]["reason"] == (
     "T_TRADE_STARTUP_ORPHAN_LATCHED_CANDIDATE"
   )
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_uses_global_monitor_delegated_account_lock():
+  runtime = make_v3_recovery_runtime(
+    "run-delegated-account-lock",
+    state={},
+  )
+  runtime.state_manager.recovery_records = []
+  executor = make_recovery_executor(AsyncMock(return_value=None))
+  lock = t_trade_account_coordination_lock("account-1")
+
+  async with lock:
+    await asyncio.wait_for(
+      executor._restore_pending_manual_approvals(
+        runtime,
+        t_trade_account_coordination_held=True,
+      ),
+      timeout=0.5,
+    )
 
 
 @pytest.mark.asyncio

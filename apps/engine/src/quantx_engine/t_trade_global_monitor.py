@@ -591,7 +591,8 @@ class TTradeGlobalMonitorService:
     if should_restore_run and not coordination_blocked:
       try:
         await self.session_service.ensure_account_strategy_running(
-          config.strategy_run_id
+          config.strategy_run_id,
+          account_coordination_held=True,
         )
         run_status = "running"
       except Exception as exc:
@@ -646,6 +647,7 @@ class TTradeGlobalMonitorService:
             payload,
             desired,
             metadata,
+            account_coordination_held=True,
           )
           config.universe_revision = int(config.universe_revision or 0) + 1
       except Exception as exc:

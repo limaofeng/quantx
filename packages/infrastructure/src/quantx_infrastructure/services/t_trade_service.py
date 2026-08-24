@@ -126,6 +126,8 @@ class TTradeService:
     payload: Dict[str, Any],
     instruments: List[str],
     instrument_metadata: Dict[str, Dict[str, Any]],
+    *,
+    account_coordination_held: bool = False,
   ) -> str:
     account_id = str(payload.get("account_id", "") or "").strip()
     if not account_id:
@@ -152,7 +154,10 @@ class TTradeService:
       name=f"动态持仓做T-{account_id}",
       auto_start=False,
     )
-    if not await strategy_manager.start_strategy(run_id):
+    if not await strategy_manager.start_strategy(
+      run_id,
+      t_trade_account_coordination_held=account_coordination_held,
+    ):
       raise ValueError("全局做 T 策略启动失败")
     await strategy_manager.reconcile_run_instruments(
       run_id,
@@ -464,7 +469,12 @@ class TTradeService:
       ]
     return []
 
-  async def ensure_account_strategy_running(self, run_id: str) -> bool:
+  async def ensure_account_strategy_running(
+    self,
+    run_id: str,
+    *,
+    account_coordination_held: bool = False,
+  ) -> bool:
     """Start a restored idle runtime or resume an in-process paused runtime."""
 
     strategy_manager = self._require_runtime_manager()
@@ -487,7 +497,10 @@ class TTradeService:
       # Restored PAUSED/PENDING runs are recreated with no task and a PENDING
       # in-memory status. They need the full start path to restore state,
       # connect the data adapter, and subscribe to realtime Tick data.
-      success = await strategy_manager.start_strategy(run_id)
+      success = await strategy_manager.start_strategy(
+        run_id,
+        t_trade_account_coordination_held=account_coordination_held,
+      )
 
     if not success:
       raise RuntimeError(f"做 T 策略运行恢复失败: {run_id}")
