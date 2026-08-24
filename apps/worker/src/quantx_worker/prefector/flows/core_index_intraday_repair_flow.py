@@ -9,6 +9,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
 from prefect import flow, get_run_logger
+from prefect.runtime import flow_run as flow_run_runtime
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.models.kline import KLine
 from quantx_infrastructure.repositories.kline_repository import KLineRepository
@@ -32,6 +33,19 @@ CORE_INDEX_SYMBOLS = (
 REPAIR_CUTOFF = time(15, 10)
 DEFAULT_LOOKBACK_TRADING_DAYS = 3
 MAX_LOOKBACK_TRADING_DAYS = 10
+
+
+def _repair_attempt_scope(scheduled: Optional[datetime]) -> str:
+  """Return a scope stable across retries of one Prefect flow run."""
+  try:
+    flow_run_id = str(flow_run_runtime.get_id() or "").strip()
+  except Exception:
+    flow_run_id = ""
+  if flow_run_id:
+    return f"run:{flow_run_id}"
+  if scheduled is not None:
+    return f"scheduled:{scheduled.replace(second=0, microsecond=0).isoformat()}"
+  return f"manual:{time_utils.now().replace(second=0, microsecond=0).isoformat()}"
 
 
 def _minute_slots(start: time, end: time) -> set[tuple[int, int]]:
@@ -204,7 +218,7 @@ async def core_index_intraday_repair_flow(
     lookback_trading_days=lookback_trading_days,
     reference=reference,
   )
-  attempt_scope = time_utils.now().replace(second=0, microsecond=0).isoformat()
+  attempt_scope = _repair_attempt_scope(scheduled)
   results: list[dict[str, Any]] = []
   failed_dates: list[str] = []
 
@@ -243,14 +257,16 @@ async def core_index_intraday_repair_flow(
         payload,
         agent_device_id=str(agent_device_id or "").strip(),
         idempotency_scope=(
-          f"core-index-intraday-repair:v1:{repair_date.isoformat()}:{attempt_scope}"
+          f"core-index-intraday-repair:v2:{repair_date.isoformat()}:{attempt_scope}"
         ),
       )
       if transfer.get("status") != "completed":
         raise RuntimeError(
           "QMT Agent 回补请求未完成: "
           f"request_id={transfer.get('request_id')} "
-          f"status={transfer.get('status')}"
+          f"status={transfer.get('status')} "
+          f"durable_status={transfer.get('durable_status', '')} "
+          f"reason={transfer.get('reason', '')}"
         )
       after = await asyncio.to_thread(audit_core_index_intraday, repair_date)
       status = "repaired" if after["complete"] else "incomplete"

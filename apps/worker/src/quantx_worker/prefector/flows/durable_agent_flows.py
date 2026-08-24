@@ -271,6 +271,7 @@ async def _request_and_wait(
     return {
       "status": "timeout",
       "request_id": request_id,
+      "durable_status": str((final or {}).get("status") or "MISSING").upper(),
       "reason": "wait attempt expired; durable request remains open",
     }
   finally:

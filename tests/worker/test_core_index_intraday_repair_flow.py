@@ -182,6 +182,11 @@ async def test_repair_flow_downloads_only_incomplete_codes_and_rechecks(
   monkeypatch.setattr(repair_flow, "_request_and_wait", request)
   monkeypatch.setattr(repair_flow, "get_run_logger", FakeLogger)
   monkeypatch.setattr(
+    repair_flow.flow_run_runtime,
+    "get_id",
+    lambda: "repair-flow-run-1",
+  )
+  monkeypatch.setattr(
     repair_flow,
     "_scheduled_start_time",
     lambda: datetime(2026, 8, 18, 8, 50),
@@ -207,7 +212,7 @@ async def test_repair_flow_downloads_only_incomplete_codes_and_rechecks(
     "end_time": "20260817",
   }
   assert request.await_args.kwargs["idempotency_scope"] == (
-    "core-index-intraday-repair:v1:2026-08-17:2026-08-18T08:51:00"
+    "core-index-intraday-repair:v2:2026-08-17:run:repair-flow-run-1"
   )
 
 

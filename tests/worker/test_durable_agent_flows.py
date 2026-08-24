@@ -365,6 +365,36 @@ async def test_interrupted_market_ingestion_is_reclaimed(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_market_data_wait_timeout_keeps_durable_status(monkeypatch) -> None:
+  class FakeStore:
+    async def create_market_data_request(self, payload):
+      assert payload == {"operation": "bars"}
+      return "request-timeout"
+
+    async def market_data_request(self, request_id):
+      assert request_id == "request-timeout"
+      return {"status": "QUEUED"}
+
+    async def close(self):
+      return None
+
+  store = FakeStore()
+  monkeypatch.setattr(durable_agent_flows, "DurableRuntimeStore", lambda: store)
+
+  result = await durable_agent_flows._request_and_wait(
+    {"operation": "bars"},
+    timeout_seconds=0,
+  )
+
+  assert result == {
+    "status": "timeout",
+    "request_id": "request-timeout",
+    "durable_status": "QUEUED",
+    "reason": "wait attempt expired; durable request remains open",
+  }
+
+
+@pytest.mark.asyncio
 async def test_recovery_flow_claims_uploaded_and_stale_processing_requests(monkeypatch) -> None:
   store = SimpleNamespace(
     requeue_expired_market_data_delivery_leases=AsyncMock(
