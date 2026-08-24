@@ -3104,7 +3104,7 @@ export function TTradeGlobalPage() {
                 active
                   ? mode === 'REPLAY'
                     ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
-                    : 'text-red-200 after:bg-red-400 focus-visible:ring-red-500/60'
+                    : 'text-blue-200 after:bg-blue-400 focus-visible:ring-blue-400/70'
                   : 'text-slate-600 hover:text-slate-200'
               )}
             >
@@ -3128,9 +3128,9 @@ export function TTradeGlobalPage() {
                   type="button"
                   onClick={() => setActiveMode(mode.id as TTradeStudioMode)}
                   className={cn(
-                    'relative h-full shrink-0 cursor-pointer px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60',
+                    'relative h-full shrink-0 cursor-pointer px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                     isActive
-                      ? 'text-red-200 after:bg-red-400'
+                      ? 'text-blue-200 after:bg-blue-400'
                       : 'text-slate-500 hover:text-slate-200'
                   )}
                 >
