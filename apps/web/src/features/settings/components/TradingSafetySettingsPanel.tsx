@@ -1,12 +1,13 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Clock3,
   OctagonX,
   PauseCircle,
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from 'urql';
 
 import {
@@ -18,6 +19,13 @@ import {
 import { AccountExecutionControlAction } from '@/generated/gql/graphql';
 import { cn } from '@/utils/cn';
 
+import {
+  getAccountExecutionGatePresentation,
+  getBackupFreshness,
+  getSnapshotFreshness,
+  type AccountExecutionGateFreshness,
+} from './accountExecutionGatePresentation';
+
 const actionLabels: Record<AccountExecutionControlAction, string> = {
   [AccountExecutionControlAction.BeginControlledWindow]: '建立账户实盘窗口',
   [AccountExecutionControlAction.EnableRiskIncrease]: '启用新增风险',
@@ -26,7 +34,64 @@ const actionLabels: Record<AccountExecutionControlAction, string> = {
   [AccountExecutionControlAction.ClearKillSwitch]: '清除紧急停止',
 };
 
+function useNow() {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return now;
+}
+
+function FreshnessIndicator({
+  freshness,
+}: {
+  freshness: AccountExecutionGateFreshness;
+}) {
+  const compactLabel = freshness.countdownLabel.replace('距过期 ', '剩 ');
+  return (
+    <div
+      className="w-24 shrink-0"
+      aria-label={`新鲜度：${freshness.countdownLabel}`}
+    >
+      <span
+        className={cn(
+          'block text-right font-mono text-[10px] font-medium leading-3 tabular-nums',
+          freshness.tone === 'fresh'
+            ? 'text-emerald-300'
+            : freshness.tone === 'warning'
+              ? 'text-warning'
+              : 'text-rose-300'
+        )}
+      >
+        {compactLabel}
+      </span>
+      <div
+        role="progressbar"
+        aria-label="剩余有效时间"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(freshness.progressPercent)}
+        className="mt-1 h-1 overflow-hidden rounded-full bg-slate-800"
+      >
+        <div
+          className={cn(
+            'h-full rounded-full transition-[width] duration-300 motion-reduce:transition-none',
+            freshness.tone === 'fresh'
+              ? 'bg-emerald-400'
+              : freshness.tone === 'warning'
+                ? 'bg-warning'
+                : 'bg-rose-400'
+          )}
+          style={{ width: `${freshness.progressPercent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function TradingSafetySettingsPanel() {
+  const now = useNow();
   const { accountId, refreshSafety } = useTradingSafety();
   const [{ data, fetching }, refresh] = useQuery({
     query: AccountExecutionSafetyQuery,
@@ -43,6 +108,7 @@ export function TradingSafetySettingsPanel() {
   const [reason, setReason] = useState('');
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showGateCodes, setShowGateCodes] = useState(false);
   const [pending, setPending] = useState<{
     action: AccountExecutionControlAction;
     challengeId: string;
@@ -53,6 +119,7 @@ export function TradingSafetySettingsPanel() {
     () => safety?.checks.filter(check => !check.passed) ?? [],
     [safety?.checks]
   );
+  const passedCheckCount = (safety?.checks.length ?? 0) - failedChecks.length;
 
   const reload = () => {
     refresh({ requestPolicy: 'network-only' });
@@ -284,30 +351,136 @@ export function TradingSafetySettingsPanel() {
       </section>
 
       <section className="rounded-xl border border-border bg-card p-5">
-        <h2 className="text-sm font-medium text-slate-100">账户级门禁</h2>
-        <div className="mt-3 grid gap-2 md:grid-cols-2">
-          {(safety?.checks ?? []).map(check => (
-            <div
-              key={check.code}
-              className="flex items-start gap-2 rounded-lg border border-border bg-muted px-3 py-2"
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium text-slate-100">
+              账户实盘准入检查
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              逐项确认账户是否具备实盘观察、风险控制和新增风险条件。
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {safety && (
+              <span className="rounded-full border border-border bg-muted px-2.5 py-1 text-xs text-slate-300">
+                {passedCheckCount}/{safety.checks.length} 已通过
+              </span>
+            )}
+            <button
+              type="button"
+              aria-pressed={showGateCodes}
+              onClick={() => setShowGateCodes(current => !current)}
+              className="cursor-pointer rounded-lg border border-border px-2.5 py-1 text-xs text-slate-400 transition-colors duration-200 hover:border-primary/40 hover:bg-primary/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
             >
-              {check.passed ? (
-                <CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-400" />
-              ) : (
-                <AlertTriangle className="mt-0.5 h-4 w-4 text-warning" />
-              )}
-              <div>
-                <p className="font-mono text-[11px] text-slate-300">
-                  {check.code}
-                </p>
-                {!check.passed && (
-                  <p className="mt-1 text-xs text-slate-500">{check.message}</p>
-                )}
-              </div>
-            </div>
-          ))}
+              {showGateCodes ? '隐藏技术标识' : '显示技术标识'}
+            </button>
+          </div>
         </div>
-        {!failedChecks.length && (
+        <div
+          data-testid="account-execution-gates"
+          className="mt-3 grid gap-2 md:grid-cols-2"
+        >
+          {(safety?.checks ?? []).map(check => {
+            const presentation = getAccountExecutionGatePresentation(
+              check.code
+            );
+            const freshness =
+              check.code === 'SNAPSHOT_FRESH'
+                ? getSnapshotFreshness(
+                    safety?.reconciliationAgeSeconds,
+                    safety?.checkedAt,
+                    now
+                  )
+                : check.code === 'RECENT_BACKUP'
+                  ? getBackupFreshness(safety?.lastBackupAt, now)
+                  : null;
+            return (
+              <div
+                key={check.code}
+                data-execution-gate={check.code}
+                className={cn(
+                  'flex h-[72px] items-start gap-3 overflow-hidden rounded-lg border px-3 py-2',
+                  freshness?.tone === 'expired'
+                    ? 'border-rose-400/30 bg-rose-400/5'
+                    : !check.passed || freshness?.tone === 'warning'
+                      ? 'border-warning/30 bg-warning/5'
+                      : 'border-border bg-muted'
+                )}
+              >
+                {freshness ? (
+                  <Clock3
+                    aria-hidden="true"
+                    className={cn(
+                      'mt-0.5 h-4 w-4 shrink-0',
+                      freshness.tone === 'fresh'
+                        ? 'text-emerald-400'
+                        : freshness.tone === 'warning'
+                          ? 'text-warning motion-safe:animate-pulse'
+                          : 'text-rose-400'
+                    )}
+                  />
+                ) : check.passed ? (
+                  <CheckCircle2
+                    aria-hidden="true"
+                    className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400"
+                  />
+                ) : (
+                  <AlertTriangle
+                    aria-hidden="true"
+                    className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-medium leading-4 text-slate-200">
+                      {presentation.label}
+                    </p>
+                    <span
+                      className={cn(
+                        'shrink-0 text-[11px] font-medium',
+                        freshness?.tone === 'expired'
+                          ? 'text-rose-300'
+                          : !check.passed || freshness?.tone === 'warning'
+                            ? 'text-warning'
+                            : 'text-emerald-300'
+                      )}
+                    >
+                      {freshness?.tone === 'expired' && check.passed
+                        ? '等待刷新'
+                        : freshness?.tone === 'warning' && check.passed
+                          ? '即将过期'
+                          : check.passed
+                            ? '已通过'
+                            : '需处理'}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex min-w-0 items-start gap-3">
+                    <p
+                      className={cn(
+                        'min-w-0 flex-1 text-xs leading-4',
+                        check.passed ? 'text-slate-500' : 'text-amber-200/80'
+                      )}
+                    >
+                      {check.passed
+                        ? presentation.passedDescription
+                        : check.message}
+                    </p>
+                    {freshness && <FreshnessIndicator freshness={freshness} />}
+                  </div>
+                  {showGateCodes && (
+                    <code
+                      title={check.code}
+                      className="mt-0.5 block break-all text-[10px] leading-3 text-slate-600"
+                    >
+                      {check.code}
+                    </code>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {safety && !failedChecks.length && (
           <p className="mt-3 text-xs text-emerald-300">
             所有账户事实门禁均已通过。
           </p>
