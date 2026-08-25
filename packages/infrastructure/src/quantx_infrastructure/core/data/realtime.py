@@ -777,24 +777,8 @@ class RealtimeDataAdapter(DataAdapter):
       # 取最新的K线数据
       latest_kline = kline_list[-1] if isinstance(kline_list, list) else kline_list
 
-      # 转换时间戳
-      timestamp = (
-        datetime.fromtimestamp(latest_kline.get("time", 0) / 1000)
-        if latest_kline.get("time")
-        else time_utils.now()
-      )
-
-      # 构建KLine对象
-      kline = KLine(
-        code=instrument_code,
-        time=timestamp,
-        open=latest_kline.get("open", 0),
-        high=latest_kline.get("high", 0),
-        low=latest_kline.get("low", 0),
-        close=latest_kline.get("close", 0),
-        volume=int(latest_kline.get("volume", 0)),
-        amount=latest_kline.get("amount", 0),
-      )
+      # 统一通过权威转换入口构造完整 KLine，避免遗留 code 字段或缺失 period。
+      kline = KLine.from_xtquant(instrument_code, period, latest_kline)
 
       # 分发给所有相关订阅
       for subscription_id, subscription in self.subscriptions.items():

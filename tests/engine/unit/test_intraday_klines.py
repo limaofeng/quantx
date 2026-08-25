@@ -146,6 +146,44 @@ async def test_subscribe_kline_rolls_back_when_underlying_subscription_fails():
 
 
 @pytest.mark.asyncio
+async def test_realtime_adapter_kline_callback_emits_canonical_model():
+  stock_code = "300917.SZ"
+  period = "1m"
+  adapter = RealtimeDataAdapter()
+  captured_callback = None
+
+  class FakeSubscriptionManager:
+    async def subscribe(self, **kwargs):
+      nonlocal captured_callback
+      captured_callback = kwargs["callback"]
+      return "manager-handle"
+
+  adapter.subscription_manager = FakeSubscriptionManager()
+  delivered = []
+
+  await adapter.subscribe_kline(stock_code, period, delivered.append)
+  raw_kline = _xt_kline(datetime(2026, 8, 26, 9, 31), 21.36)
+  assert captured_callback is not None
+  await captured_callback({stock_code: [raw_kline]})
+
+  assert len(delivered) == 1
+  kline = delivered[0]
+  assert kline.stock_code == stock_code
+  assert kline.period == period
+  assert kline.time == datetime(2026, 8, 26, 9, 31)
+  assert kline.open == pytest.approx(21.36)
+  assert kline.high == pytest.approx(21.46)
+  assert kline.low == pytest.approx(21.26)
+  assert kline.close == pytest.approx(21.36)
+  assert kline.pre_close == pytest.approx(21.16)
+  assert kline.volume == 100
+  assert kline.amount == pytest.approx(2136.0)
+  assert kline.settelement_price == 0
+  assert kline.open_interest == 0
+  assert kline.suspend_flag == 0
+
+
+@pytest.mark.asyncio
 async def test_previous_trading_day_1m_query_does_not_schedule_download_when_cache_empty(
   monkeypatch,
 ):

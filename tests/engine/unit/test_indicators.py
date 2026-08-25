@@ -20,7 +20,8 @@ class TestIndicatorBase:
 
     for i, price in enumerate(prices):
       bar = KLine(
-        code="000001",
+        stock_code="000001.SZ",
+        period="1d",
         time=datetime.now(),
         open=price - 0.1,
         high=price + 0.2,
@@ -304,7 +305,8 @@ class TestIndicatorIntegration:
     prices = [10, 11, 12, 11, 10, 9, 10, 11, 12, 13]
     for price in prices:
       bar = KLine(
-        code="000001",
+        stock_code="000001.SZ",
+        period="1d",
         time=datetime.now(),
         open=price,
         high=price,
