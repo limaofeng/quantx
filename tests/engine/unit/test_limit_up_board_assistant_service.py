@@ -23,13 +23,14 @@ def test_ignored_candidate_does_not_consume_top_five_slot() -> None:
   items = [_candidate(f"00000{index}.SZ", 100 - index) for index in range(6)]
   preferences = {"000000.SZ": SimpleNamespace(preference="IGNORE")}
 
-  _, desired = service._build_universe(
+  universe = service._resolve_universe_snapshot(
     config,
     {"items": items},
     [],
     runtime=None,
     preferences=preferences,
   )
+  desired = list(universe.instruments)
 
   assert "000000.SZ" not in desired
   assert len(desired) == 5
@@ -55,13 +56,14 @@ def test_preference_changes_attention_order_but_cannot_bypass_hard_veto() -> Non
     "000004.SZ": SimpleNamespace(preference="PREFER"),
   }
 
-  metadata, desired = service._build_universe(
+  universe = service._resolve_universe_snapshot(
     config,
     {"items": items},
     [],
     runtime=None,
     preferences=preferences,
   )
+  metadata, desired = universe.metadata, list(universe.instruments)
 
   assert desired == ["000001.SZ", "000003.SZ"]
   assert metadata["000003.SZ"]["source"] == "PREFERRED"
@@ -78,13 +80,14 @@ def test_candidate_metadata_carries_deterministic_liquidity_amount_cap() -> None
     },
   )
 
-  metadata, desired = service._build_universe(
+  universe = service._resolve_universe_snapshot(
     config,
     {"items": [_candidate("000001.SZ", 90, amount=2_000_000)]},
     [],
     runtime=None,
     preferences={},
   )
+  metadata, desired = universe.metadata, list(universe.instruments)
 
   assert desired == ["000001.SZ"]
   assert metadata["000001.SZ"]["liquidity_cap_amount"] == 10_000

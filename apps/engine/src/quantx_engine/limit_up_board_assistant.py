@@ -11,7 +11,6 @@ from quantx_domain.strategies import AshareLimitUpBoardAssistantStrategy
 from quantx_domain.trading.first_board_promotion import FIRST_BOARD_MODEL_VERSION
 from quantx_domain.trading.limit_up_board_universe import (
   liquidity_cap_amount,
-  select_limit_up_board_universe,
   target_position_pct,
 )
 from quantx_infrastructure.core.assistant_strategy_policy import (
@@ -43,6 +42,13 @@ from quantx_infrastructure.services.limit_up_board_assistant_projection_service 
   limit_up_board_assistant_projection_service,
 )
 from quantx_infrastructure.services.limit_up_radar import limit_up_radar_store
+
+from .instrument_universe_provider import (
+  InstrumentUniverseProviderRegistry,
+  InstrumentUniverseSnapshot,
+  RadarCandidatesUniverseRequest,
+  instrument_universe_provider_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +86,17 @@ ASSISTANT_DEFAULTS: Dict[str, Any] = {
 
 
 class LimitUpBoardAssistantService:
-  def __init__(self, runtime_manager: Any, interval_seconds: float = 1.0):
+  def __init__(
+    self,
+    runtime_manager: Any,
+    interval_seconds: float = 1.0,
+    universe_providers: Optional[InstrumentUniverseProviderRegistry] = None,
+  ):
     self.runtime_manager = runtime_manager
     self.interval_seconds = max(0.5, float(interval_seconds or 1.0))
+    self.universe_providers = (
+      universe_providers or instrument_universe_provider_registry
+    )
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
     self._account_locks: Dict[str, asyncio.Lock] = {}
@@ -305,9 +319,10 @@ class LimitUpBoardAssistantService:
       account_id,
       time_utils.to_shanghai(time_utils.now()).date(),
     )
-    metadata, desired = self._build_universe(
+    universe = self._resolve_universe_snapshot(
       config, radar, arms, runtime, preferences
     )
+    metadata, desired = universe.metadata, list(universe.instruments)
 
     if runtime and not config.enabled:
       for intent_id in list(runtime.pending_approvals):
@@ -320,9 +335,10 @@ class LimitUpBoardAssistantService:
         runtime.run_id,
         reason="BOARD_ASSISTANT_DISABLED",
       )
-      metadata, desired = self._build_universe(
+      universe = self._resolve_universe_snapshot(
         config, radar, [], runtime, preferences
       )
+      metadata, desired = universe.metadata, list(universe.instruments)
 
     if runtime and str(runtime.context.mode.value) != str(config.mode).lower():
       if self._runtime_has_open_work(runtime):
@@ -370,32 +386,39 @@ class LimitUpBoardAssistantService:
         await repo.save(current)
       break
 
-  def _build_universe(
+  def _resolve_universe_snapshot(
     self,
     config: LimitUpBoardAssistantConfig,
     radar: Dict[str, Any],
     arms: List[LimitUpBoardCandidateArm],
     runtime: Any,
     preferences: Optional[Dict[str, Any]] = None,
-  ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+  ) -> InstrumentUniverseSnapshot:
     preferences = preferences or {}
-    manual = {arm.instrument_code: arm for arm in arms if arm.armed}
+    manual = {
+      str(arm.instrument_code or "").upper(): arm
+      for arm in arms
+      if arm.armed and arm.instrument_code
+    }
     sticky = self._runtime_open_codes(runtime)
-    selection = select_limit_up_board_universe(
-      list(radar.get("items") or []),
+    request = RadarCandidatesUniverseRequest(
+      items=tuple(radar.get("items") or []),
       settings={**ASSISTANT_DEFAULTS, **dict(config.settings or {})},
       enabled=bool(config.enabled),
       preferences={
         str(code).upper(): str(getattr(value, "preference", "") or "")
         for code, value in preferences.items()
       },
-      sticky_codes=sorted(sticky),
-      force_preferred_codes=sorted(manual),
+      sticky_instruments=tuple(sorted(sticky)),
+      force_preferred_instruments=tuple(sorted(manual)),
       arm_versions={
         code: int(arm.arm_version or 0) for code, arm in manual.items()
       },
     )
-    return selection.metadata, list(selection.instruments)
+    return self.universe_providers.resolve(
+      AshareLimitUpBoardAssistantStrategy.INSTRUMENT_UNIVERSE_MODE,
+      request,
+    )
 
   async def _start_runtime(
     self, config: LimitUpBoardAssistantConfig, account_id: str

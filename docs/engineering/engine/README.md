@@ -14,6 +14,14 @@ whole-quote 订阅。每 3 秒把最新候选榜和通用盘中量能快照批�
 炸板和回封等阶段变化追加到 PostgreSQL `limit_up_radar_events`，用于 Engine
 重启后恢复当日轨迹；Redis 仍不是事件真源。
 
+Engine-owned 动态策略的标的范围由 `InstrumentUniverseProviderRegistry` 统一解析，
+并提供 `STATIC` 固定标的规范化实现。策略类以 `INSTRUMENT_UNIVERSE_MODE` 声明
+`ACCOUNT_HOLDINGS` 或 `RADAR_CANDIDATES` 后，协调器只提供账户持仓与未完成工作、
+雷达候选与偏好等时点事实，对应 Provider 生成规范化
+`InstrumentUniverseSnapshot`。动态快照的增删仍只通过运行时
+`reconcile_run_instruments` 串行进入
+`StrategyBase.step(RECONCILE)`；Provider 不订阅行情，策略也不读取账户或选池数据源。
+
 Engine 从 `engine_command_outbox` 和 `agent_report_inbox` 恢复消费：
 前者承载 API 发起的策略、做 T 和清仓控制命令，后者承载 Agent 上报的原始
 订单、成交、持仓与对账结果。进程重启后会恢复超时的 `PROCESSING` 消息，

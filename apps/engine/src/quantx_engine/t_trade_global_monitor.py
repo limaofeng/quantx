@@ -12,6 +12,7 @@ from quantx_application.t_trade_v3 import (
   SignalPolicyChangeRequest,
   SignalPolicyConfigSnapshot,
 )
+from quantx_domain.strategies import AshareIntradayTAssistantStrategy
 from quantx_domain.trading.t_trade_opportunity_engine import OpportunityPolicy
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.connection import get_async_db
@@ -32,6 +33,14 @@ from quantx_infrastructure.services.t_trade_operations_service import (
 )
 from quantx_infrastructure.services.t_trade_service import TTradeService
 
+from .instrument_universe_provider import (
+  AccountHoldingPosition,
+  AccountHoldingsUniverseRequest,
+  AccountInstrumentWork,
+  InstrumentUniverseProviderRegistry,
+  InstrumentUniverseSnapshot,
+  instrument_universe_provider_registry,
+)
 from .t_trade_coordination import t_trade_account_coordination_lock
 
 logger = logging.getLogger(__name__)
@@ -91,10 +100,14 @@ class TTradeGlobalMonitorService:
     self,
     runtime_manager: Any = None,
     interval_seconds: float = 10.0,
+    universe_providers: Optional[InstrumentUniverseProviderRegistry] = None,
   ):
     self.interval_seconds = max(2.0, float(interval_seconds or 10.0))
     self.session_service = TTradeService(runtime_manager)
     self.position_service = PositionService()
+    self.universe_providers = (
+      universe_providers or instrument_universe_provider_registry
+    )
     self._task: Optional[asyncio.Task] = None
     self._stopping = asyncio.Event()
 
@@ -545,12 +558,13 @@ class TTradeGlobalMonitorService:
 
     run_mode = str(sessions[0].get("mode", "") or "").lower() if sessions else ""
     mode_mismatch = bool(run_mode and run_mode != str(config.mode or "paper").lower())
-    metadata, desired = self._build_universe(
+    universe = self._resolve_universe_snapshot(
       config,
       positions,
       sessions,
       force_draining=mode_mismatch,
     )
+    metadata, desired = universe.metadata, list(universe.instruments)
     if config.strategy_run_id:
       try:
         await self._reject_stale_pending(
@@ -622,7 +636,8 @@ class TTradeGlobalMonitorService:
         coordination_blocked = False
         if stopped_for_rebuild and config.enabled:
           mode_mismatch = False
-          metadata, desired = self._build_universe(config, positions, [])
+          universe = self._resolve_universe_snapshot(config, positions, [])
+          metadata, desired = universe.metadata, list(universe.instruments)
       except Exception as exc:
         coordination_blocked = True
         errors.append(f"旧策略停止失败: {exc}")
@@ -741,69 +756,54 @@ class TTradeGlobalMonitorService:
       for item in sessions
     )
 
-  def _build_universe(
+  def _resolve_universe_snapshot(
     self,
     config: TTradeGlobalConfig,
     positions: List[Any],
     sessions: List[Dict[str, Any]],
     *,
     force_draining: bool = False,
-  ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    ignored = set(self._normalize_ignored_codes(config.ignored_stock_codes or []))
-    position_by_code = {
-      str(item.stock_code or "").upper(): item
-      for item in positions
-      if self._is_a_share_code(str(item.stock_code or "").upper())
-      and int(item.volume or 0) > 0
-    }
-    session_by_code = {item["stock_code"]: item for item in sessions}
-    desired = {
-      code
-      for code in position_by_code
-      if bool(config.enabled) and code not in ignored and not force_draining
-    }
-    desired.update(
-      code
-      for code, item in session_by_code.items()
-      if int(item.get("active_volume", 0) or 0) > 0
-      or bool(item.get("pending_entry_intent_id"))
-      or bool(item.get("pending_exit_intent_id"))
+  ) -> InstrumentUniverseSnapshot:
+    request = AccountHoldingsUniverseRequest(
+      enabled=bool(config.enabled),
+      ignored_instruments=self._normalize_ignored_codes(
+        config.ignored_stock_codes or []
+      ),
+      force_draining=force_draining,
+      positions=tuple(
+        AccountHoldingPosition(
+          instrument_code=str(getattr(item, "stock_code", "") or "").upper(),
+          instrument_name=str(
+            getattr(item, "instrument_name", "") or ""
+          ),
+          volume=int(getattr(item, "volume", 0) or 0),
+          available_volume=int(getattr(item, "can_use_volume", 0) or 0),
+          frozen_volume=int(getattr(item, "frozen_volume", 0) or 0),
+          average_price=float(
+            getattr(item, "avg_price", 0.0)
+            or getattr(item, "open_price", 0.0)
+            or 0.0
+          ),
+          market_value=float(getattr(item, "market_value", 0.0) or 0.0),
+        )
+        for item in positions
+      ),
+      instrument_work=tuple(
+        AccountInstrumentWork(
+          instrument_code=str(item.get("stock_code") or "").upper(),
+          active_volume=int(item.get("active_volume", 0) or 0),
+          pending_entry_intent_id=str(
+            item.get("pending_entry_intent_id") or ""
+          ),
+          pending_exit_intent_id=str(item.get("pending_exit_intent_id") or ""),
+        )
+        for item in sessions
+      ),
     )
-    metadata: Dict[str, Dict[str, Any]] = {}
-    for code in sorted(desired):
-      position = position_by_code.get(code)
-      volume = int(getattr(position, "volume", 0) or 0)
-      available = int(getattr(position, "can_use_volume", 0) or 0)
-      draining = (
-        force_draining
-        or not bool(config.enabled)
-        or code in ignored
-        or position is None
-      )
-      eligible = not draining and available >= 100
-      reason = "ELIGIBLE"
-      if draining:
-        reason = "DRAINING_EXISTING_T_BATCH"
-      elif available < 100:
-        reason = "AVAILABLE_VOLUME_BELOW_100"
-      metadata[code] = {
-        "eligible": eligible,
-        "reason": reason,
-        "draining": draining,
-        "instrument_name": str(getattr(position, "instrument_name", code) or code),
-        "position_shares": volume,
-        "position_available_shares": available,
-        "position_frozen_shares": max(
-          0, int(getattr(position, "frozen_volume", 0) or 0)
-        ),
-        "position_avg_price": float(
-          getattr(position, "avg_price", 0.0)
-          or getattr(position, "open_price", 0.0)
-          or 0.0
-        ),
-        "position_market_value": float(getattr(position, "market_value", 0.0) or 0.0),
-      }
-    return metadata, sorted(desired)
+    return self.universe_providers.resolve(
+      AshareIntradayTAssistantStrategy.INSTRUMENT_UNIVERSE_MODE,
+      request,
+    )
 
   async def _reject_stale_pending(
     self,
