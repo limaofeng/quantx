@@ -28,7 +28,7 @@ import {
 
 const actionLabels: Record<AccountExecutionControlAction, string> = {
   [AccountExecutionControlAction.BeginControlledWindow]: '建立账户实盘窗口',
-  [AccountExecutionControlAction.EnableRiskIncrease]: '允许买入',
+  [AccountExecutionControlAction.EnableRiskIncrease]: '启用买入权限',
   [AccountExecutionControlAction.PauseRiskIncrease]: '暂停买入权限',
   [AccountExecutionControlAction.KillSwitch]: '账户紧急停止',
   [AccountExecutionControlAction.ClearKillSwitch]: '清除紧急停止',
@@ -306,7 +306,7 @@ export function TradingSafetySettingsPanel() {
                 }
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-40"
               >
-                <CheckCircle2 className="h-4 w-4" /> 允许买入
+                <CheckCircle2 className="h-4 w-4" /> 启用买入权限
               </button>
             )}
           {safety?.authorizationState === 'ENABLED' && (
