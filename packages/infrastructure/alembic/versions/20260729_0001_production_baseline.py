@@ -15,8 +15,8 @@ from quantx_infrastructure.database.relational_base import Base
 from sqlalchemy import (
   Boolean,
   CheckConstraint,
-  DateTime,
   Column,
+  DateTime,
   ForeignKeyConstraint,
   MetaData,
   String,
