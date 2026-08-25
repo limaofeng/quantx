@@ -65,13 +65,13 @@ export function GridLevelsPanel({
   );
 
   return (
-    <Card className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-      <div className="flex items-center justify-between border-b border-slate-100 px-6 py-5 dark:border-white/5">
+    <Card className="overflow-hidden rounded-panel border border-slate-200 bg-white shadow-none dark:border-white/10 dark:bg-slate-900/60">
+      <div className="flex items-center justify-between border-b border-slate-100 px-ui-panel py-ui-section dark:border-white/5">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
+          <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
             网格档位
           </div>
-          <p className="mt-1 text-[10px] font-medium text-slate-500">
+          <p className="mt-1 text-ui-caption font-medium text-slate-500">
             参数版本 {book?.parameterVersion || '--'} · 网格簿 v
             {book?.version || 1} · 卖出区 / 买入区可拖拽排序
           </p>
@@ -80,14 +80,14 @@ export function GridLevelsPanel({
           <div className="flex gap-2">
             <Button
               variant="outline"
-              className="rounded-xl text-[10px] font-black uppercase tracking-widest"
+              className="rounded-panel text-ui-caption font-black uppercase tracking-widest"
               onClick={onAddLevel}
             >
               <Plus className="mr-2 h-4 w-4" />
               新增档位
             </Button>
             <Button
-              className="rounded-xl bg-blue-600 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-500"
+              className="rounded-panel bg-blue-600 text-ui-caption font-black uppercase tracking-widest text-white hover:bg-blue-500"
               disabled={!dirty}
               onClick={() => void onSave()}
             >
@@ -98,11 +98,11 @@ export function GridLevelsPanel({
         )}
       </div>
 
-      <div className="relative px-5 py-6 sm:px-6">
+      <div className="relative px-ui-section py-ui-panel sm:px-ui-panel">
         <div className="pointer-events-none absolute bottom-6 left-[54px] top-6 w-px -translate-x-1/2 bg-gradient-to-b from-market-down/35 via-primary/55 to-market-up/35 sm:left-[58px]" />
 
         {displayLevels.length === 0 ? (
-          <div className="px-6 py-12 text-center text-xs font-bold text-slate-400">
+          <div className="px-ui-panel py-ui-empty text-center text-ui-label font-bold text-slate-400">
             暂无网格档位。
           </div>
         ) : (

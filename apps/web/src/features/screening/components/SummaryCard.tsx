@@ -21,17 +21,17 @@ export function SummaryCard({
 }: SummaryCardProps) {
   return (
     <Card className="bg-white dark:bg-gray-800">
-      <CardContent className="p-6">
+      <CardContent className="p-ui-panel">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-medium text-gray-600 dark:text-gray-400">
+            <p className="text-ui-body font-medium text-gray-600 dark:text-gray-400">
               {title}
             </p>
-            <p className="text-2xl font-bold text-gray-900 dark:text-white">
+            <p className="text-ui-display font-bold text-gray-900 dark:text-white">
               {value}
             </p>
             {subtitle && (
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              <p className="text-ui-body text-gray-500 dark:text-gray-400 mt-1">
                 {subtitle}
               </p>
             )}
@@ -48,7 +48,7 @@ export function SummaryCard({
               <TrendingDown className="mr-1 h-4 w-4 text-market-down" />
             )}
             <span
-              className={`text-sm font-medium ${financialToneClass(trend)}`}
+              className={`text-ui-body font-medium ${financialToneClass(trend)}`}
             >
               {Math.abs(trend)}%
             </span>

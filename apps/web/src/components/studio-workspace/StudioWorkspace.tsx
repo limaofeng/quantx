@@ -107,12 +107,12 @@ function StudioChromeAction({
     <button
       type="button"
       aria-label={label}
-      className="group relative flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-40"
+      className="group relative flex h-control-compact w-control-compact items-center justify-center rounded-control text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-40"
       disabled={!onSelect}
       onClick={onSelect}
       title={label}
     >
-      <Icon className="h-[18px] w-[18px]" strokeWidth={2} />
+      <Icon className="h-4 w-4" strokeWidth={2} />
       {badge && (
         <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-rose-400 ring-2 ring-[#0b1120]" />
       )}
@@ -211,16 +211,16 @@ function StudioWorkspaceHeader({
             aria-haspopup="menu"
             aria-label="打开功能启动器"
             className={cn(
-              'flex h-9 w-9 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+              'flex h-control-compact w-control-compact items-center justify-center rounded-control text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
               isLauncherOpen && 'bg-white/5 text-slate-100'
             )}
             onClick={() => setIsLauncherOpen(value => !value)}
           >
-            <Grid2X2 className="h-[18px] w-[18px]" strokeWidth={2} />
+            <Grid2X2 className="h-4 w-4" strokeWidth={2} />
           </button>
           {isLauncherOpen && (
             <div
-              className="absolute right-0 grid grid-cols-3 gap-1 rounded-lg border border-white/10 p-2 shadow-2xl shadow-black/50"
+              className="absolute right-0 grid grid-cols-3 gap-1 rounded-lg border border-white/10 p-2 shadow-none shadow-black/50"
               role="menu"
               style={{
                 background: '#0b1627',
@@ -245,7 +245,7 @@ function StudioWorkspaceHeader({
                     aria-describedby={statusDescriptionId}
                     aria-label={displayLabel}
                     className={cn(
-                      'flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                      'flex min-w-0 items-center gap-2 rounded-control px-2.5 py-1.5 text-left text-ui-caption transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                       isCurrent
                         ? 'bg-blue-500/15 text-blue-100 ring-1 ring-inset ring-blue-400/35 hover:bg-blue-500/20'
                         : isOpen
@@ -277,7 +277,7 @@ function StudioWorkspaceHeader({
                         <span
                           aria-hidden="true"
                           className={cn(
-                            'shrink-0 rounded-sm px-1 py-0.5 text-[9px] font-semibold leading-none',
+                            'shrink-0 rounded-sm px-1 py-0.5 text-ui-micro font-semibold',
                             isCurrent
                               ? 'bg-blue-400/20 text-blue-200'
                               : 'border border-blue-400/30 text-blue-300'
@@ -311,7 +311,7 @@ function StudioWorkspaceHeader({
         <button
           type="button"
           onClick={onAccount}
-          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-[10px] font-semibold text-slate-200 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+          className="flex h-8 min-w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2 font-mono text-ui-caption font-semibold text-slate-200 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
           aria-label={`打开账户：${currentUserLabel}`}
           title={`当前用户：${currentUserLabel}`}
           style={{
@@ -473,7 +473,7 @@ function StudioAssistantDock({
     <div
       id={ASSISTANT_PANEL_ID}
       className={cn(
-        'absolute inset-y-0 right-0 z-40 flex h-full min-w-0 max-w-full shrink-0 flex-col shadow-2xl shadow-black/40 2xl:relative 2xl:inset-y-auto 2xl:right-auto 2xl:z-auto 2xl:max-w-none',
+        'absolute inset-y-0 right-0 z-40 flex h-full min-w-0 max-w-full shrink-0 flex-col shadow-none shadow-black/40 2xl:relative 2xl:inset-y-auto 2xl:right-auto 2xl:z-auto 2xl:max-w-none',
         !isResizingSidebar &&
           'transition-[width] duration-150 motion-reduce:transition-none'
       )}
@@ -846,7 +846,7 @@ export function StudioWorkspace({
               />
               <span
                 className={cn(
-                  'min-w-0 flex-1 truncate text-xs font-bold',
+                  'min-w-0 flex-1 truncate text-ui-label font-bold',
                   tab.isPreview && 'italic'
                 )}
               >

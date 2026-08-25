@@ -59,23 +59,25 @@ function formatDate(value?: string | null) {
 function QualityBadge({ run }: { run: ResearchRunListItem }) {
   if (run.artifactErrors.length > 0) {
     return (
-      <span className="text-[10px] font-bold text-rose-300">
+      <span className="text-ui-caption font-bold text-rose-300">
         产物异常 {run.artifactErrors.length}
       </span>
     );
   }
   if (!run.hasMetrics) {
     return (
-      <span className="text-[10px] font-bold text-amber-300">统计缺失</span>
+      <span className="text-ui-caption font-bold text-amber-300">统计缺失</span>
     );
   }
   if (isSmallSample(run.version, run.eventCount)) {
     return (
-      <span className="text-[10px] font-bold text-amber-200">小样本验证</span>
+      <span className="text-ui-caption font-bold text-amber-200">
+        小样本验证
+      </span>
     );
   }
   return (
-    <span className="text-[10px] font-bold text-emerald-300">产物完整</span>
+    <span className="text-ui-caption font-bold text-emerald-300">产物完整</span>
   );
 }
 
@@ -128,11 +130,11 @@ export function ResearchRunsView({
               key={item.label}
               className="rounded-md border border-white/[0.05] bg-white/[0.02] px-3 py-2.5"
             >
-              <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
+              <div className="flex items-center gap-2 text-ui-micro font-black uppercase tracking-wider text-slate-600">
                 <Icon className="h-3 w-3 text-blue-400" />
                 {item.label}
               </div>
-              <div className="mt-1.5 font-mono text-lg font-black tabular-nums text-slate-100">
+              <div className="mt-1.5 font-mono text-ui-heading font-black tabular-nums text-slate-100">
                 {item.value}
               </div>
             </div>
@@ -141,17 +143,17 @@ export function ResearchRunsView({
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="w-full min-w-[860px] text-left text-[11px]">
+        <table className="w-full min-w-[860px] text-left text-ui-caption">
           <caption className="sr-only">研究运行列表</caption>
-          <thead className="sticky top-0 z-10 bg-[#0b1423] text-[9px] uppercase tracking-wider text-slate-600">
+          <thead className="sticky top-0 z-10 bg-[#0b1423] text-ui-micro uppercase tracking-wider text-slate-600">
             <tr>
-              <th className="px-4 py-3">状态</th>
-              <th className="px-4 py-3">研究</th>
-              <th className="px-4 py-3">版本</th>
-              <th className="px-4 py-3">完成时间</th>
-              <th className="px-4 py-3 text-right">事件数</th>
-              <th className="px-4 py-3">质量</th>
-              <th className="w-12 px-4 py-3">
+              <th className="px-ui-section py-3">状态</th>
+              <th className="px-ui-section py-3">研究</th>
+              <th className="px-ui-section py-3">版本</th>
+              <th className="px-ui-section py-3">完成时间</th>
+              <th className="px-ui-section py-3 text-right">事件数</th>
+              <th className="px-ui-section py-3">质量</th>
+              <th className="w-12 px-ui-section py-3">
                 <span className="sr-only">操作</span>
               </th>
             </tr>
@@ -169,33 +171,33 @@ export function ResearchRunsView({
                   key={run.key}
                   className="group transition-colors hover:bg-white/[0.025]"
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-ui-section py-3">
                     <ResearchStatusBadge status={run.status} />
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-ui-section py-3">
                     <Link
                       href={href}
                       className="cursor-pointer font-bold text-slate-200 outline-none transition-colors hover:text-blue-300 focus-visible:rounded focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
                       {STUDY_LABELS[run.studyId] || run.studyId}
                     </Link>
-                    <div className="mt-0.5 max-w-64 truncate font-mono text-[9px] text-slate-600">
+                    <div className="mt-0.5 max-w-64 truncate font-mono text-ui-micro text-slate-600">
                       {run.runId}
                     </div>
                   </td>
-                  <td className="px-4 py-3 font-mono text-slate-400">
+                  <td className="px-ui-section py-3 font-mono text-slate-400">
                     {run.version}
                   </td>
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-500">
+                  <td className="whitespace-nowrap px-ui-section py-3 text-slate-500">
                     {formatDate(run.completedAt || run.startedAt)}
                   </td>
-                  <td className="px-4 py-3 text-right font-mono font-bold tabular-nums text-slate-300">
+                  <td className="px-ui-section py-3 text-right font-mono font-bold tabular-nums text-slate-300">
                     {run.eventCount?.toLocaleString() ?? '—'}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-ui-section py-3">
                     <QualityBadge run={run} />
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-ui-section py-3">
                     <Link
                       href={href}
                       aria-label={`查看 ${run.runId} 的研究结果`}
@@ -210,7 +212,7 @@ export function ResearchRunsView({
           </tbody>
         </table>
       </div>
-      <div className="shrink-0 border-t border-white/[0.05] px-4 py-2 text-right text-[9px] text-slate-600">
+      <div className="shrink-0 border-t border-white/[0.05] px-ui-section py-2 text-right text-ui-micro text-slate-600">
         当前展示最近 {runs.length.toLocaleString()} 次运行，单次最多加载 100 条
       </div>
     </>
@@ -223,13 +225,13 @@ export default function ResearchCenterPage() {
 
   return (
     <main className="studio-workspace-surface flex h-full min-h-0 flex-col overflow-hidden">
-      <header className="studio-workspace-surface flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.06] px-4 py-3">
+      <header className="studio-workspace-surface flex shrink-0 flex-wrap items-center gap-3 border-b border-white/[0.06] px-ui-section py-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <FlaskConical className="h-4 w-4 text-blue-400" />
-            <h1 className="text-sm font-black text-slate-100">研究中心</h1>
+            <h1 className="text-ui-body font-black text-slate-100">研究中心</h1>
           </div>
-          <p className="mt-1 text-[10px] text-slate-500">
+          <p className="mt-1 text-ui-caption text-slate-500">
             查看最近 100 次离线因子研究的可复现结果、样本质量与统计检验。
           </p>
         </div>
@@ -244,7 +246,7 @@ export default function ResearchCenterPage() {
               type="button"
               aria-pressed={status === filter.value}
               onClick={() => setStatus(filter.value)}
-              className={`h-8 cursor-pointer rounded px-3 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+              className={`h-8 cursor-pointer rounded px-3 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                 status === filter.value
                   ? 'bg-blue-500/15 text-blue-200'
                   : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
@@ -258,7 +260,7 @@ export default function ResearchCenterPage() {
           type="button"
           onClick={refresh}
           disabled={fetching}
-          className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
+          className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
         >
           <RefreshCw
             className={`h-3.5 w-3.5 ${fetching ? 'animate-spin motion-reduce:animate-none' : ''}`}

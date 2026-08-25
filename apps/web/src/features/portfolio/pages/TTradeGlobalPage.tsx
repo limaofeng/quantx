@@ -281,11 +281,11 @@ function MetricCard({
   };
   return (
     <div className={cn('border p-2.5', tones[tone])}>
-      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] opacity-70">
+      <div className="flex items-center gap-2 text-ui-caption font-bold uppercase tracking-[0.12em] opacity-70">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </div>
-      <div className="mt-1.5 font-mono text-lg font-black tabular-nums">
+      <div className="mt-1.5 font-mono text-ui-heading font-black tabular-nums">
         {value}
       </div>
     </div>
@@ -309,7 +309,7 @@ function NumericField({
 }) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id} className="text-xs font-bold text-slate-400">
+      <Label htmlFor={id} className="text-ui-label font-bold text-slate-400">
         {label}
       </Label>
       <div className="relative">
@@ -319,10 +319,10 @@ function NumericField({
           inputMode="decimal"
           value={value}
           onChange={event => onChange(event.target.value)}
-          className="h-9 rounded-sm border-white/10 bg-[#07111f] pr-10 font-mono text-xs focus-visible:ring-red-500/60 disabled:cursor-not-allowed disabled:opacity-50"
+          className="h-9 rounded-sm border-white/10 bg-[#07111f] pr-10 font-mono text-ui-label focus-visible:ring-red-500/60 disabled:cursor-not-allowed disabled:opacity-50"
         />
         {suffix && (
-          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-600">
+          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ui-caption font-bold text-slate-600">
             {suffix}
           </span>
         )}
@@ -818,16 +818,16 @@ function TTradeReplayPanel({
   return (
     <div className="studio-workspace-surface grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
       <div className="min-h-0 overflow-y-auto custom-scrollbar">
-        <section className="border-b border-white/[0.06] bg-[#0a1728] p-4">
-          <div className="flex flex-wrap items-end justify-between gap-4">
+        <section className="border-b border-white/[0.06] bg-[#0a1728] p-ui-section">
+          <div className="flex flex-wrap items-end justify-between gap-ui-section">
             <div>
-              <div className="flex items-center gap-2 text-sm font-black text-slate-100">
+              <div className="flex items-center gap-2 text-ui-body font-black text-slate-100">
                 <FlaskConical className="h-4 w-4 text-cyan-300" />
                 历史回放测试
                 <span
                   aria-live="polite"
                   className={cn(
-                    'border px-1.5 py-0.5 text-[9px] font-bold',
+                    'border px-1.5 py-0.5 text-ui-micro font-bold',
                     graphqlWsStatus === 'connected'
                       ? 'border-emerald-400/20 bg-emerald-400/[0.06] text-emerald-300'
                       : 'border-amber-400/20 bg-amber-400/[0.06] text-amber-300'
@@ -836,7 +836,7 @@ function TTradeReplayPanel({
                   {graphqlWsStatus === 'connected' ? '实时推送' : '轮询恢复'}
                 </span>
               </div>
-              <p className="mt-1 text-[11px] text-slate-500">
+              <p className="mt-1 text-ui-caption text-slate-500">
                 使用同一做 T
                 策略和交易风控；测试信号自动确认，不会提交实盘委托。
               </p>
@@ -845,7 +845,7 @@ function TTradeReplayPanel({
               <div>
                 <Label
                   htmlFor="replay-start"
-                  className="text-[10px] text-slate-500"
+                  className="text-ui-caption text-slate-500"
                 >
                   开始日期
                 </Label>
@@ -855,13 +855,13 @@ function TTradeReplayPanel({
                   value={startDate}
                   max={endDate}
                   onChange={event => setStartDate(event.target.value)}
-                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-xs"
+                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
                 />
               </div>
               <div>
                 <Label
                   htmlFor="replay-end"
-                  className="text-[10px] text-slate-500"
+                  className="text-ui-caption text-slate-500"
                 >
                   结束日期
                 </Label>
@@ -871,7 +871,7 @@ function TTradeReplayPanel({
                   value={endDate}
                   min={startDate}
                   onChange={event => setEndDate(event.target.value)}
-                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-xs"
+                  className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-label"
                 />
               </div>
               <div className="flex h-8 overflow-hidden border border-white/10">
@@ -880,7 +880,7 @@ function TTradeReplayPanel({
                     key={days}
                     type="button"
                     onClick={() => setPreset(days)}
-                    className="cursor-pointer border-r border-white/10 px-2.5 text-[10px] font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                    className="cursor-pointer border-r border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 transition-colors last:border-r-0 hover:bg-white/[0.06] hover:text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
                   >
                     {days}日
                   </button>
@@ -901,7 +901,7 @@ function TTradeReplayPanel({
                     ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
                   )
                 }
-                className="h-8 rounded-sm bg-cyan-500 px-3 text-[10px] font-black text-slate-950 hover:bg-cyan-400"
+                className="h-8 rounded-sm bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
               >
                 {startResult.fetching ? (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
@@ -915,7 +915,7 @@ function TTradeReplayPanel({
 
           <div
             className={cn(
-              'mt-3 flex items-start gap-2 border px-3 py-2 text-[11px]',
+              'mt-3 flex items-start gap-2 border px-3 py-2 text-ui-caption',
               preparation?.requiresManualPortfolio || preparationResult.error
                 ? 'border-amber-400/20 bg-amber-400/[0.06] text-amber-100'
                 : 'border-cyan-400/15 bg-cyan-400/[0.04] text-cyan-100'
@@ -946,10 +946,10 @@ function TTradeReplayPanel({
           <div className="mt-3 border border-white/[0.08] bg-[#07111f] p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-[11px] font-black text-slate-100">
+                <p className="text-ui-caption font-black text-slate-100">
                   初始回测账户
                 </p>
-                <p className="mt-0.5 text-[10px] text-slate-500">
+                <p className="mt-0.5 text-ui-caption text-slate-500">
                   组合冻结后，系统只为其中的股票准备历史行情。
                 </p>
               </div>
@@ -962,7 +962,7 @@ function TTradeReplayPanel({
                     setPortfolioDirty(true);
                   }}
                   className={cn(
-                    'cursor-pointer px-3 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
+                    'cursor-pointer px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
                     portfolioSource === 'SNAPSHOT'
                       ? 'bg-blue-500/15 text-blue-200'
                       : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
@@ -977,7 +977,7 @@ function TTradeReplayPanel({
                     setPortfolioDirty(true);
                   }}
                   className={cn(
-                    'cursor-pointer border-l border-white/10 px-3 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                    'cursor-pointer border-l border-white/10 px-3 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                     portfolioSource === 'MANUAL'
                       ? 'bg-blue-500/15 text-blue-200'
                       : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
@@ -991,12 +991,14 @@ function TTradeReplayPanel({
             {portfolioSource === 'SNAPSHOT' ? (
               <div className="mt-3 grid gap-3 lg:grid-cols-[180px_1fr_auto] lg:items-end">
                 <div>
-                  <Label className="text-[9px] text-slate-500">可用资金</Label>
-                  <div className="mt-1 font-mono text-sm font-black text-slate-100">
+                  <Label className="text-ui-micro text-slate-500">
+                    可用资金
+                  </Label>
+                  <div className="mt-1 font-mono text-ui-body font-black text-slate-100">
                     ¥{formatNumber(preparation?.initialCash || 0)}
                   </div>
                 </div>
-                <div className="text-[10px] leading-5 text-slate-500">
+                <div className="text-ui-caption leading-5 text-slate-500">
                   快照 {preparation?.snapshotDate || '--'} ·{' '}
                   {preparation?.positions.length || 0} 只持仓 · 可做 T{' '}
                   {preparation?.positions.filter(item => item.volume >= 100)
@@ -1011,7 +1013,7 @@ function TTradeReplayPanel({
                     setPortfolioSource('MANUAL');
                     setPortfolioDirty(true);
                   }}
-                  className="h-8 rounded-sm border-blue-400/25 text-[10px] text-blue-200 hover:bg-blue-500/10"
+                  className="h-8 rounded-sm border-blue-400/25 text-ui-caption text-blue-200 hover:bg-blue-500/10"
                 >
                   导入并编辑
                 </Button>
@@ -1022,7 +1024,7 @@ function TTradeReplayPanel({
                   <div>
                     <Label
                       htmlFor="replay-cash"
-                      className="text-[9px] text-slate-500"
+                      className="text-ui-micro text-slate-500"
                     >
                       可用资金
                     </Label>
@@ -1035,17 +1037,17 @@ function TTradeReplayPanel({
                         setManualCash(event.target.value);
                         setPortfolioDirty(true);
                       }}
-                      className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-xs focus-visible:ring-blue-400/70"
+                      className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-label focus-visible:ring-blue-400/70"
                     />
                   </div>
-                  <div className="text-[10px] leading-5 text-slate-500">
+                  <div className="text-ui-caption leading-5 text-slate-500">
                     组合时点 {previousTradingDate || '--'}{' '}
                     收盘；开盘前持仓全部按已结算库存处理。
                   </div>
                 </div>
 
                 <div className="overflow-hidden border border-white/[0.07]">
-                  <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600">
+                  <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600">
                     <span>股票</span>
                     <span>持仓股数</span>
                     <span>平均成本</span>
@@ -1057,10 +1059,10 @@ function TTradeReplayPanel({
                       className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] items-center gap-2 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0"
                     >
                       <div className="min-w-0">
-                        <div className="truncate text-[10px] font-bold text-slate-200">
+                        <div className="truncate text-ui-caption font-bold text-slate-200">
                           {item.instrumentName || item.stockCode}
                         </div>
-                        <div className="font-mono text-[9px] text-slate-600">
+                        <div className="font-mono text-ui-micro text-slate-600">
                           {item.stockCode}
                         </div>
                       </div>
@@ -1081,7 +1083,7 @@ function TTradeReplayPanel({
                           );
                           setPortfolioDirty(true);
                         }}
-                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-[10px] focus-visible:ring-blue-400/70"
+                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
                       />
                       <Input
                         aria-label={`${item.stockCode} 平均成本`}
@@ -1100,7 +1102,7 @@ function TTradeReplayPanel({
                           );
                           setPortfolioDirty(true);
                         }}
-                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-[10px] focus-visible:ring-blue-400/70"
+                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-ui-caption focus-visible:ring-blue-400/70"
                       />
                       <button
                         type="button"
@@ -1145,12 +1147,12 @@ function TTradeReplayPanel({
                         ]);
                         setPortfolioDirty(true);
                       }}
-                      inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-[10px]"
+                      inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-ui-caption"
                       placeholder="搜索股票代码或名称并加入持仓"
                     />
                   </div>
                 </div>
-                <div className="text-[10px] text-slate-500">
+                <div className="text-ui-caption text-slate-500">
                   {manualPositions.length} 只持仓 ·{' '}
                   {
                     manualPositions.filter(item => Number(item.volume) >= 100)
@@ -1165,10 +1167,10 @@ function TTradeReplayPanel({
           {preparation?.requiresManualPortfolio && (
             <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
               <div>
-                <p className="text-[11px] font-bold text-amber-100">
+                <p className="text-ui-caption font-bold text-amber-100">
                   缺少可审计的历史初始组合
                 </p>
-                <p className="mt-0.5 text-[10px] text-amber-200/55">
+                <p className="mt-0.5 text-ui-caption text-amber-200/55">
                   当前没有可采用的 D-1
                   日结快照，请使用上方手工组合配置回测账户。
                 </p>
@@ -1179,12 +1181,12 @@ function TTradeReplayPanel({
 
         {replay ? (
           <>
-            <section className="border-b border-white/[0.06] p-4">
+            <section className="border-b border-white/[0.06] p-ui-section">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <span
                     className={cn(
-                      'border px-2 py-1 text-[10px] font-black',
+                      'border px-2 py-1 text-ui-caption font-black',
                       replay.status === 'COMPLETED'
                         ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
                         : replay.status === 'ERROR'
@@ -1194,16 +1196,16 @@ function TTradeReplayPanel({
                   >
                     {replayStatusLabel(replay.status)}
                   </span>
-                  <span className="font-mono text-[10px] text-slate-500">
+                  <span className="font-mono text-ui-caption text-slate-500">
                     {replay.runId.slice(0, 8)} ·{' '}
                     {formatNumber(replay.progressPct, 1)}%
                   </span>
                   {replay.processedUntil && (
-                    <span className="font-mono text-[10px] text-slate-600">
+                    <span className="font-mono text-ui-caption text-slate-600">
                       已处理 {formatTime(replay.processedUntil)}
                     </span>
                   )}
-                  <span className="text-[10px] text-slate-600">
+                  <span className="text-ui-caption text-slate-600">
                     {replay.dataQualityMessage}
                   </span>
                 </div>
@@ -1214,7 +1216,7 @@ function TTradeReplayPanel({
                     variant="outline"
                     disabled={cancelResult.fetching}
                     onClick={handleCancel}
-                    className="h-8 rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-[10px] text-rose-200 hover:bg-rose-400/10"
+                    className="h-control-compact rounded-sm border-rose-400/20 bg-rose-400/[0.04] text-ui-caption text-rose-200 hover:bg-rose-400/10"
                   >
                     {cancelResult.fetching ? (
                       <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
@@ -1227,7 +1229,7 @@ function TTradeReplayPanel({
               </div>
               {replay.phase && (
                 <div className="mt-3 border border-cyan-400/15 bg-cyan-400/[0.035] px-3 py-2.5">
-                  <div className="flex items-center justify-between gap-3 text-[10px]">
+                  <div className="flex items-center justify-between gap-3 text-ui-caption">
                     <span className="font-black text-cyan-100">
                       {replayPhaseLabel(replay.phase)}
                     </span>
@@ -1239,7 +1241,7 @@ function TTradeReplayPanel({
                     value={replay.phaseProgressPct}
                     className="mt-2 h-1 bg-white/[0.06]"
                   />
-                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-ui-caption text-slate-500">
                     <span>{replay.phaseMessage || '正在准备回测任务'}</span>
                     {replay.dataPreparation?.currentInstrument && (
                       <span className="font-mono text-slate-600">
@@ -1256,14 +1258,14 @@ function TTradeReplayPanel({
                 </div>
               )}
               {replay.errorMessage && (
-                <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-[11px] text-rose-100">
+                <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-ui-caption text-rose-100">
                   <AlertTriangle className="h-3.5 w-3.5" />
                   {replay.errorMessage}
                 </div>
               )}
             </section>
 
-            <section className="grid gap-2 border-b border-white/[0.06] p-4 sm:grid-cols-2 xl:grid-cols-4">
+            <section className="grid gap-2 border-b border-white/[0.06] p-ui-section sm:grid-cols-2 xl:grid-cols-4">
               <MetricCard
                 icon={CircleDollarSign}
                 label="做 T 税费后增量"
@@ -1319,21 +1321,21 @@ function TTradeReplayPanel({
             </section>
 
             {replay.summary && (
-              <section className="border-b border-white/[0.06] p-4">
+              <section className="border-b border-white/[0.06] p-ui-section">
                 <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h3 className="flex items-center gap-2 text-xs font-black text-slate-200">
+                    <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                       <Gauge className="h-4 w-4 text-cyan-300" />
                       资金效率与期末清算
                     </h3>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       资金利用率按 4
                       小时交易日折算并按实际买入资金加权；卖出等待越久，利用率越低。
                     </p>
                   </div>
                   <span
                     className={cn(
-                      'border px-2 py-1 text-[10px] font-black',
+                      'border px-2 py-1 text-ui-caption font-black',
                       replay.summary.liquidationFailedCycles > 0
                         ? 'border-rose-400/25 bg-rose-400/10 text-rose-200'
                         : 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
@@ -1373,24 +1375,24 @@ function TTradeReplayPanel({
             )}
 
             {replay.report && (
-              <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-4">
+              <section className="border-b border-white/[0.06] bg-cyan-400/[0.025] p-ui-section">
                 <div className="flex items-start gap-3">
                   <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-xs font-black text-slate-100">
+                      <h3 className="text-ui-label font-black text-slate-100">
                         回放报告 · {replay.report.conclusionCode}
                       </h3>
-                      <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-[9px] font-black text-cyan-200">
+                      <span className="border border-cyan-400/20 bg-cyan-400/[0.08] px-1.5 py-0.5 text-ui-micro font-black text-cyan-200">
                         {replay.report.status === 'GENERATED'
                           ? 'HTML / JSON 已生成'
                           : '报告生成失败'}
                       </span>
                     </div>
-                    <p className="mt-1.5 text-[11px] leading-5 text-slate-400">
+                    <p className="mt-1.5 text-ui-caption leading-5 text-slate-400">
                       {replay.report.conclusion}
                     </p>
-                    <p className="mt-1 font-mono text-[9px] text-slate-700">
+                    <p className="mt-1 font-mono text-ui-micro text-slate-700">
                       {replay.report.generatedAt
                         ? formatTime(replay.report.generatedAt)
                         : '--'}{' '}
@@ -1402,14 +1404,14 @@ function TTradeReplayPanel({
               </section>
             )}
 
-            <section className="border-b border-white/[0.06] p-4">
+            <section className="border-b border-white/[0.06] p-ui-section">
               <div className="mb-3 flex items-center justify-between">
                 <div>
-                  <h3 className="flex items-center gap-2 text-xs font-black text-slate-200">
+                  <h3 className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                     <BarChart3 className="h-4 w-4 text-cyan-300" />
                     账户收益与不做 T 基准
                   </h3>
-                  <p className="mt-1 text-[10px] text-slate-600">
+                  <p className="mt-1 text-ui-caption text-slate-600">
                     同一初始现金和持仓按历史价格估值，差值为做 T 税费后增量。
                   </p>
                 </div>
@@ -1472,7 +1474,7 @@ function TTradeReplayPanel({
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div className="flex h-full flex-col items-center justify-center text-center text-[11px] text-slate-600">
+                  <div className="flex h-full flex-col items-center justify-center text-center text-ui-caption text-slate-600">
                     <History className="mb-2 h-6 w-6 text-slate-700" />
                     回放产生数据后显示收益曲线
                   </div>
@@ -1480,17 +1482,17 @@ function TTradeReplayPanel({
               </div>
             </section>
 
-            <section className="p-4">
+            <section className="p-ui-section">
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-xs font-black text-slate-200">
+                <h3 className="text-ui-label font-black text-slate-200">
                   T 批次明细
                 </h3>
-                <span className="font-mono text-[10px] text-slate-600">
+                <span className="font-mono text-ui-caption text-slate-600">
                   {cyclesPage?.total || 0} 批
                 </span>
               </div>
               <div className="overflow-x-auto border border-white/[0.06]">
-                <table className="w-full min-w-[1080px] text-left text-[10px]">
+                <table className="w-full min-w-[1080px] text-left text-ui-caption">
                   <thead className="bg-white/[0.025] text-slate-500">
                     <tr>
                       <th className="px-3 py-2">标的 / 批次</th>
@@ -1515,7 +1517,7 @@ function TTradeReplayPanel({
                           <div className="font-mono font-bold text-slate-200">
                             {cycle.stockCode}
                           </div>
-                          <div className="mt-0.5 font-mono text-[9px] text-slate-700">
+                          <div className="mt-0.5 font-mono text-ui-micro text-slate-700">
                             {cycle.batchId.slice(0, 12)}
                           </div>
                         </td>
@@ -1550,7 +1552,7 @@ function TTradeReplayPanel({
                         <td className="px-3 py-2">
                           {cycle.exitReason || '--'}
                           {cycle.forcedExit && (
-                            <span className="ml-1.5 border border-amber-400/20 bg-amber-400/[0.06] px-1 py-0.5 text-[8px] text-amber-200">
+                            <span className="ml-1.5 border border-amber-400/20 bg-amber-400/[0.06] px-1 py-0.5 text-ui-micro text-amber-200">
                               期末清算
                             </span>
                           )}
@@ -1561,7 +1563,7 @@ function TTradeReplayPanel({
                       <tr>
                         <td
                           colSpan={8}
-                          className="px-3 py-8 text-center text-slate-600"
+                          className="px-3 py-ui-panel text-center text-slate-600"
                         >
                           {cyclesResult.fetching
                             ? '正在读取成交批次…'
@@ -1575,12 +1577,12 @@ function TTradeReplayPanel({
             </section>
           </>
         ) : (
-          <div className="flex min-h-[360px] flex-col items-center justify-center px-6 text-center">
+          <div className="flex min-h-[360px] flex-col items-center justify-center px-ui-panel text-center">
             <FlaskConical className="h-10 w-10 text-slate-700" />
-            <h2 className="mt-4 text-sm font-black text-slate-300">
+            <h2 className="mt-4 text-ui-body font-black text-slate-300">
               选择日期并启动第一次回放
             </h2>
-            <p className="mt-2 max-w-md text-[11px] leading-5 text-slate-600">
+            <p className="mt-2 max-w-md text-ui-caption leading-5 text-slate-600">
               系统将读取开始日前最近的账户日结快照，并用历史 Tick
               数据按时间顺序重放全部合格持仓。
             </p>
@@ -1593,7 +1595,7 @@ function TTradeReplayPanel({
         className="min-h-0 overflow-y-auto border-l border-white/[0.06] bg-[#091523] custom-scrollbar"
       >
         <div className="flex h-11 items-center justify-between border-b border-white/[0.06] px-3">
-          <span className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-500">
+          <span className="text-ui-caption font-black uppercase tracking-[0.14em] text-slate-500">
             回放记录
           </span>
           <button
@@ -1624,15 +1626,15 @@ function TTradeReplayPanel({
             )}
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-300">
+              <span className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-300">
                 <CalendarDays className="h-3.5 w-3.5 text-slate-600" />
                 {String(item.startTime).slice(0, 10)}
               </span>
-              <span className="text-[9px] font-black text-cyan-300">
+              <span className="text-ui-micro font-black text-cyan-300">
                 {replayStatusLabel(item.status)}
               </span>
             </div>
-            <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-slate-600">
+            <div className="mt-2 flex items-center justify-between font-mono text-ui-caption text-slate-600">
               <span>{item.runId.slice(0, 8)}</span>
               <span className={financialToneClass(item.summary?.tNetProfit)}>
                 {item.summary
@@ -1643,7 +1645,7 @@ function TTradeReplayPanel({
           </button>
         ))}
         {history.length === 0 && (
-          <div className="px-4 py-12 text-center text-[11px] text-slate-600">
+          <div className="px-ui-section py-ui-empty text-center text-ui-caption text-slate-600">
             {historyResult.fetching ? '正在读取历史回放…' : '暂无历史回放'}
           </div>
         )}
@@ -3249,25 +3251,27 @@ export function TTradeGlobalPage() {
 
   const replaySidebar = (
     <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-4">
+      <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-ui-section">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">
+          <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-cyan-300">
             Replay Lab
           </div>
-          <h1 className="mt-1 text-base font-black text-slate-100">回放测试</h1>
+          <h1 className="mt-1 text-ui-title font-black text-slate-100">
+            回放测试
+          </h1>
         </div>
       </div>
-      <div className="border-b border-white/[0.05] p-4">
-        <div className="flex items-center gap-2 text-xs font-black text-cyan-100">
+      <div className="border-b border-white/[0.05] p-ui-section">
+        <div className="flex items-center gap-2 text-ui-label font-black text-cyan-100">
           <ShieldCheck className="h-4 w-4 text-cyan-300" />
           隔离回测环境
         </div>
-        <p className="mt-2 text-[10px] leading-5 text-slate-600">
+        <p className="mt-2 text-ui-caption leading-5 text-slate-600">
           回放使用 BACKTEST
           Broker，测试信号自动确认；实时监控保持原状态，不会提交实盘委托。
         </p>
       </div>
-      <div className="space-y-3 p-4 text-[10px] text-slate-500">
+      <div className="space-y-3 p-ui-section text-ui-caption text-slate-500">
         <div className="flex items-start gap-2">
           <History className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
           以开始日前最近日结快照作为初始现金和持仓。
@@ -3282,10 +3286,10 @@ export function TTradeGlobalPage() {
         </div>
       </div>
       <div className="mt-auto shrink-0 border-t border-white/[0.06] bg-[#091322] p-3">
-        <div className="mb-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600">
+        <div className="mb-1.5 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-600">
           默认回放账户
         </div>
-        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-xs text-slate-300">
+        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-ui-label text-slate-300">
           {accountId || '未配置'}
         </div>
       </div>
@@ -3293,7 +3297,7 @@ export function TTradeGlobalPage() {
   );
 
   const toolbar = (
-    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-4 custom-scrollbar">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar">
       <nav
         className="flex h-full min-w-0 items-stretch"
         aria-label="做 T 工作区"
@@ -3306,7 +3310,7 @@ export function TTradeGlobalPage() {
               type="button"
               onClick={() => setWorkspaceMode(mode)}
               className={cn(
-                'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                 active
                   ? mode === 'REPLAY'
                     ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
@@ -3334,7 +3338,7 @@ export function TTradeGlobalPage() {
                   type="button"
                   onClick={() => setActiveMode(mode.id as TTradeStudioMode)}
                   className={cn(
-                    'relative h-full shrink-0 cursor-pointer px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                    'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                     isActive
                       ? 'text-blue-200 after:bg-blue-400'
                       : 'text-slate-500 hover:text-slate-200'
@@ -3342,7 +3346,7 @@ export function TTradeGlobalPage() {
                 >
                   {mode.label}
                   {mode.id === 'SIGNALS' && Boolean(pendingSessions.length) && (
-                    <span className="ml-1.5 rounded-sm bg-amber-400/15 px-1.5 py-0.5 font-mono text-[9px] text-amber-200">
+                    <span className="ml-1.5 rounded-sm bg-amber-400/15 px-1.5 py-0.5 font-mono text-ui-micro text-amber-200">
                       {pendingSessions.length}
                     </span>
                   )}
@@ -3356,7 +3360,7 @@ export function TTradeGlobalPage() {
       <div className="flex shrink-0 items-center gap-2">
         {workspaceMode === 'REALTIME' && (
           <Button
-            className="h-7 px-2 text-[10px]"
+            className="h-control-compact px-2 text-ui-caption"
             onClick={() => openStudioTab('/liquidation')}
             size="sm"
             type="button"
@@ -3366,7 +3370,7 @@ export function TTradeGlobalPage() {
           </Button>
         )}
         {workspaceMode === 'REPLAY' ? (
-          <span className="hidden items-center gap-1.5 text-[10px] font-bold text-cyan-200 sm:inline-flex">
+          <span className="hidden items-center gap-1.5 text-ui-caption font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
             隔离回测 · 自动确认测试信号
           </span>
@@ -3374,7 +3378,7 @@ export function TTradeGlobalPage() {
           <>
             <span
               className={cn(
-                'hidden items-center gap-1.5 text-[10px] font-bold md:inline-flex',
+                'hidden items-center gap-1.5 text-ui-caption font-bold md:inline-flex',
                 monitor?.enabled ? 'text-emerald-300' : 'text-slate-600'
               )}
             >
@@ -3389,7 +3393,7 @@ export function TTradeGlobalPage() {
               {monitor?.enabled ? '全局监控运行中' : '全局监控已停止'}
             </span>
             <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
-            <span className="hidden font-mono text-[9px] text-slate-600 sm:inline">
+            <span className="hidden font-mono text-ui-micro text-slate-600 sm:inline">
               行情 WS {graphqlWsStatus} · 策略投影约 10s
             </span>
           </>
@@ -3401,13 +3405,13 @@ export function TTradeGlobalPage() {
   const monitorView = (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
       {!accountId && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-4 py-2.5 text-xs font-bold text-amber-100">
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-400/15 bg-amber-400/[0.07] px-ui-section py-2.5 text-ui-label font-bold text-amber-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           未配置默认交易账户，请设置环境变量 VITE_DEFAULT_ACCOUNT_ID。
         </div>
       )}
       {(monitorResult.error || monitor?.lastError) && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-rose-400/15 bg-rose-500/[0.07] px-4 py-2.5 text-xs text-rose-100">
+        <div className="flex shrink-0 items-center gap-2 border-b border-rose-400/15 bg-rose-500/[0.07] px-ui-section py-2.5 text-ui-label text-rose-100">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           <span>{monitorResult.error?.message || monitor?.lastError}</span>
         </div>
@@ -3416,7 +3420,7 @@ export function TTradeGlobalPage() {
         <section
           aria-live="polite"
           className={cn(
-            'flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-4 py-3',
+            'flex shrink-0 flex-wrap items-center justify-between gap-3 border-b px-ui-section py-3',
             readiness.canApprove
               ? 'border-emerald-400/15 bg-emerald-400/[0.05]'
               : readiness.preparationReady
@@ -3436,11 +3440,11 @@ export function TTradeGlobalPage() {
               <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
             )}
             <div>
-              <div className="text-xs font-black text-slate-100">
+              <div className="text-ui-label font-black text-slate-100">
                 {readinessStageLabel(readiness.status, readiness.stage)} ·
                 Engine {readiness.engineStatus} · Agent {readiness.agentStatus}
               </div>
-              <div className="mt-1 text-[10px] leading-4 text-slate-400">
+              <div className="mt-1 text-ui-caption leading-4 text-slate-400">
                 {readiness.preparationReady && !readiness.automationReady
                   ? `账户事实已收敛；做 T 自动执行仍关闭。账户实盘窗口${readiness.controlledWindowActive ? '已建立' : '未建立'}，当前快照识别手工委托 ${readiness.externalOrderCount} 笔、成交 ${readiness.externalTradeCount} 笔，窗口后新增 ${readiness.newExternalOrderCount + readiness.newExternalTradeCount} 笔，活动委托 ${readiness.workingExternalOrderCount} 笔。${readiness.blockedReasons[0] || ''}`
                   : readiness.automationReady && !readiness.canApprove
@@ -3459,7 +3463,7 @@ export function TTradeGlobalPage() {
                 variant="outline"
                 disabled={actionLoading}
                 onClick={handlePauseEntries}
-                className="h-8 rounded-sm border-amber-400/20 text-[10px] text-amber-200"
+                className="h-control-compact rounded-sm border-amber-400/20 text-ui-caption text-amber-200"
               >
                 暂停新买入
               </Button>
@@ -3470,7 +3474,7 @@ export function TTradeGlobalPage() {
                   size="sm"
                   variant="outline"
                   onClick={() => openStudioTab('/settings/trading-safety')}
-                  className="h-8 rounded-sm border-sky-400/20 text-[10px] text-sky-200"
+                  className="h-8 rounded-sm border-sky-400/20 text-ui-caption text-sky-200"
                 >
                   {readiness.controlledWindowActive
                     ? '查看账户交易安全'
@@ -3482,7 +3486,7 @@ export function TTradeGlobalPage() {
                   variant="outline"
                   disabled={!readiness.canActivateLive || actionLoading}
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Canary)}
-                  className="h-8 rounded-sm border-emerald-400/20 text-[10px] text-emerald-200"
+                  className="h-8 rounded-sm border-emerald-400/20 text-ui-caption text-emerald-200"
                 >
                   启用严格 Canary
                 </Button>
@@ -3491,7 +3495,7 @@ export function TTradeGlobalPage() {
                   size="sm"
                   disabled={!readiness.canActivateLive || actionLoading}
                   onClick={() => handleActivateLive(TTradeRolloutTarget.Live)}
-                  className="h-8 rounded-sm bg-emerald-500 px-3 text-[10px] font-black text-slate-950 hover:bg-emerald-400"
+                  className="h-8 rounded-sm bg-emerald-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-emerald-400"
                 >
                   启用正式 LIVE
                 </Button>
@@ -3502,7 +3506,7 @@ export function TTradeGlobalPage() {
               size="sm"
               variant="outline"
               onClick={() => openStudioTab('/settings/trading-safety')}
-              className="h-8 rounded-sm border-rose-400/20 text-[10px] text-rose-200"
+              className="h-8 rounded-sm border-rose-400/20 text-ui-caption text-rose-200"
             >
               账户紧急停止
             </Button>
@@ -3513,32 +3517,32 @@ export function TTradeGlobalPage() {
         <button
           type="button"
           onClick={() => setActiveMode('SIGNALS')}
-          className="flex shrink-0 items-center justify-between border-b border-amber-400/15 bg-amber-400/[0.05] px-4 py-2.5 text-left transition-colors hover:bg-amber-400/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400/50"
+          className="flex shrink-0 items-center justify-between border-b border-amber-400/15 bg-amber-400/[0.05] px-ui-section py-2.5 text-left transition-colors hover:bg-amber-400/[0.08] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-amber-400/50"
         >
-          <span className="inline-flex items-center gap-2 text-xs font-bold text-amber-100">
+          <span className="inline-flex items-center gap-2 text-ui-label font-bold text-amber-100">
             <Activity className="h-4 w-4" />有 {pendingSessions.length}{' '}
             个买入机会等待人工确认
           </span>
-          <span className="text-[10px] font-bold text-amber-300">
+          <span className="text-ui-caption font-bold text-amber-300">
             查看信号 →
           </span>
         </button>
       )}
 
-      <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3">
+      <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-sm font-black text-slate-100">实时作战表</h2>
-          <p className="mt-0.5 text-[10px] text-slate-600">
+          <h2 className="text-ui-body font-black text-slate-100">实时作战表</h2>
+          <p className="mt-0.5 text-ui-caption text-slate-600">
             行情流与策略流独立标时 · 默认按需要关注程度排序
           </p>
         </div>
-        <div className="flex items-center gap-3 text-[10px] font-bold text-slate-600">
+        <div className="flex items-center gap-3 text-ui-caption font-bold text-slate-600">
           <span>{monitor?.mode === 'live' ? '实盘执行' : '模拟观察'}</span>
           <Button
             type="button"
             size="sm"
             variant="outline"
-            className="h-8 rounded-sm border-white/10 px-2.5 text-[10px] text-slate-300"
+            className="h-control-compact rounded-sm border-white/10 px-2.5 text-ui-caption text-slate-300"
             disabled={!accountId || actionLoading}
             onClick={() => setShowExternalEntry(value => !value)}
           >
@@ -3563,16 +3567,16 @@ export function TTradeGlobalPage() {
       </div>
 
       {showExternalEntry && (
-        <section className="shrink-0 border-b border-amber-400/15 bg-[#0b1628] px-4 py-3">
+        <section className="shrink-0 border-b border-amber-400/15 bg-[#0b1628] px-ui-section py-3">
           {!monitor?.enabled || !monitor.strategyRunId ? (
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
                 <div>
-                  <div className="text-xs font-black text-amber-100">
+                  <div className="text-ui-label font-black text-amber-100">
                     请先启动全局监控
                   </div>
-                  <p className="mt-1 text-[10px] leading-4 text-slate-500">
+                  <p className="mt-1 text-ui-caption leading-4 text-slate-500">
                     外部成交需要加入一个正在运行的做 T
                     策略，才能持续读取行情并触发自动卖出。
                   </p>
@@ -3581,7 +3585,7 @@ export function TTradeGlobalPage() {
               <Button
                 type="button"
                 size="sm"
-                className="h-8 shrink-0 rounded-sm bg-primary px-3 text-[10px] font-black text-white hover:bg-primary/90"
+                className="h-control-compact shrink-0 rounded-sm bg-primary px-3 text-ui-caption font-black text-white hover:bg-primary/90"
                 disabled={
                   actionLoading || (form.mode === 'live' && !form.acknowledged)
                 }
@@ -3595,15 +3599,15 @@ export function TTradeGlobalPage() {
             <>
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <div className="text-xs font-black text-slate-100">
+                  <div className="text-ui-label font-black text-slate-100">
                     选择已成交买入委托
                   </div>
-                  <p className="mt-1 text-[10px] text-slate-500">
+                  <p className="mt-1 text-ui-caption text-slate-500">
                     先同步 miniQMT
                     当日委托，再读取委托表；每个已成委托只能建立一次自动卖出批次。
                   </p>
                   {sourceOrdersSyncedAt && !sourceOrdersSyncError && (
-                    <p className="mt-1 font-mono text-[9px] text-emerald-500/70">
+                    <p className="mt-1 font-mono text-ui-micro text-emerald-500/70">
                       当日委托已同步 ·{' '}
                       {sourceOrdersSyncedAt.toLocaleTimeString('zh-CN', {
                         hour12: false,
@@ -3615,7 +3619,7 @@ export function TTradeGlobalPage() {
                   type="button"
                   size="sm"
                   variant="ghost"
-                  className="h-8 text-[10px] text-slate-400"
+                  className="h-control-compact text-ui-caption text-slate-400"
                   disabled={syncSourceOrdersResult.fetching}
                   onClick={() => void handleSourceOrdersRefresh()}
                 >
@@ -3631,7 +3635,7 @@ export function TTradeGlobalPage() {
                 </Button>
               </div>
               {sourceOrdersSyncError && (
-                <div className="mt-3 flex items-start gap-2 border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-[10px] leading-4 text-red-200">
+                <div className="mt-3 flex items-start gap-2 border border-red-500/20 bg-red-500/[0.06] px-3 py-2 text-ui-caption leading-4 text-red-200">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
                   <span>
                     {sourceOrdersSyncError}。当前仍显示委托表中的已有记录。
@@ -3642,7 +3646,7 @@ export function TTradeGlobalPage() {
                 <div>
                   <Label
                     htmlFor="t-trade-source-start"
-                    className="text-[10px] text-slate-500"
+                    className="text-ui-caption text-slate-500"
                   >
                     开始日期
                   </Label>
@@ -3651,13 +3655,13 @@ export function TTradeGlobalPage() {
                     type="date"
                     value={sourceStartDate}
                     onChange={event => setSourceStartDate(event.target.value)}
-                    className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-[10px]"
+                    className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-caption"
                   />
                 </div>
                 <div>
                   <Label
                     htmlFor="t-trade-source-end"
-                    className="text-[10px] text-slate-500"
+                    className="text-ui-caption text-slate-500"
                   >
                     结束日期
                   </Label>
@@ -3666,7 +3670,7 @@ export function TTradeGlobalPage() {
                     type="date"
                     value={sourceEndDate}
                     onChange={event => setSourceEndDate(event.target.value)}
-                    className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-[10px]"
+                    className="mt-1 h-8 w-36 rounded-sm border-white/10 bg-[#07111f] text-ui-caption"
                   />
                 </div>
               </div>
@@ -3685,7 +3689,7 @@ export function TTradeGlobalPage() {
                     <label
                       key={order.id}
                       className={cn(
-                        'grid grid-cols-[24px_minmax(140px,1fr)_100px_100px_80px] items-center border-b border-white/[0.05] px-3 py-2 text-[10px] last:border-b-0',
+                        'grid grid-cols-[24px_minmax(140px,1fr)_100px_100px_80px] items-center border-b border-white/[0.05] px-3 py-2 text-ui-caption last:border-b-0',
                         unavailable
                           ? 'cursor-not-allowed opacity-45'
                           : 'cursor-pointer hover:bg-white/[0.03]'
@@ -3731,13 +3735,13 @@ export function TTradeGlobalPage() {
                 })}
                 {!sourceOrdersResult.fetching &&
                   sourceBuyOrders.length === 0 && (
-                    <div className="px-3 py-6 text-center text-[10px] text-slate-600">
+                    <div className="px-3 py-ui-panel text-center text-ui-caption text-slate-600">
                       所选日期范围内没有已成交买入委托
                     </div>
                   )}
               </div>
               <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <label className="flex cursor-pointer items-start gap-2 text-[10px] leading-4 text-amber-100">
+                <label className="flex cursor-pointer items-start gap-2 text-ui-caption leading-4 text-amber-100">
                   <input
                     type="checkbox"
                     checked={externalAcknowledged}
@@ -3750,7 +3754,7 @@ export function TTradeGlobalPage() {
                 </label>
                 <Button
                   type="button"
-                  className="h-9 rounded-sm bg-amber-500 px-4 text-xs font-black text-slate-950 hover:bg-amber-400"
+                  className="h-control-default rounded-sm bg-amber-500 px-ui-section text-ui-label font-black text-slate-950 hover:bg-amber-400"
                   disabled={
                     !selectedOrderId ||
                     !externalAcknowledged ||
@@ -3782,10 +3786,10 @@ export function TTradeGlobalPage() {
 
   const renderBatchTable = (rows: typeof batches, exitView: boolean) => (
     <div className="min-h-0 overflow-auto custom-scrollbar">
-      <table className="w-full min-w-[1040px] text-left text-xs">
-        <thead className="sticky top-0 z-10 bg-[#0b1628] text-[10px] font-black uppercase tracking-[0.08em] text-slate-600">
+      <table className="w-full min-w-[1040px] text-left text-ui-label">
+        <thead className="sticky top-0 z-10 bg-[#0b1628] text-ui-caption font-black uppercase tracking-[0.08em] text-slate-600">
           <tr>
-            <th className="px-4 py-2.5">标的 / 批次</th>
+            <th className="px-ui-section py-2.5">标的 / 批次</th>
             <th className="px-3 py-2.5">生命周期</th>
             <th className="px-3 py-2.5 text-right">买入成交</th>
             <th className="px-3 py-2.5 text-right">活跃仓</th>
@@ -3794,7 +3798,7 @@ export function TTradeGlobalPage() {
             <th className="px-3 py-2.5 text-right">
               {exitView ? '卖出成交 / 剩余' : '保护线'}
             </th>
-            <th className="px-4 py-2.5 text-right">委托 / 操作</th>
+            <th className="px-ui-section py-2.5 text-right">委托 / 操作</th>
           </tr>
         </thead>
         <tbody>
@@ -3802,7 +3806,7 @@ export function TTradeGlobalPage() {
             <tr>
               <td
                 colSpan={8}
-                className="px-4 py-12 text-center text-xs text-slate-600"
+                className="px-ui-section py-ui-empty text-center text-ui-label text-slate-600"
                 role="status"
               >
                 <Loader2
@@ -3816,7 +3820,7 @@ export function TTradeGlobalPage() {
             <tr>
               <td
                 colSpan={8}
-                className="px-4 py-12 text-center text-xs text-slate-600"
+                className="px-ui-section py-ui-empty text-center text-ui-label text-slate-600"
               >
                 {exitView
                   ? '当前没有待卖出或退出异常批次'
@@ -3846,7 +3850,7 @@ export function TTradeGlobalPage() {
                   key={`${exitView ? 'exit' : 'open'}-${batch.batchId}`}
                   className="border-b border-white/[0.04] hover:bg-white/[0.025]"
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-ui-section py-3">
                     <InstrumentNameLabel
                       stockCode={batch.stockCode}
                       knownName={positionNamesByCode.get(
@@ -3854,16 +3858,16 @@ export function TTradeGlobalPage() {
                       )}
                       className="font-black text-slate-100"
                     />
-                    <div className="mt-1 font-mono text-[9px] text-slate-600">
+                    <div className="mt-1 font-mono text-ui-micro text-slate-600">
                       {batch.batchId.slice(0, 12)}
                     </div>
                   </td>
                   <td className="px-3 py-3">
-                    <span className="inline-flex border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-bold text-slate-300">
+                    <span className="inline-flex border border-white/10 bg-white/[0.04] px-2 py-1 text-ui-caption font-bold text-slate-300">
                       {batchStatusLabels[batch.status] || batch.status}
                     </span>
                     {(batch.exitReason || batch.exceptionReason) && (
-                      <div className="mt-1 max-w-52 text-[9px] leading-4 text-amber-200/80">
+                      <div className="mt-1 max-w-52 text-ui-micro leading-4 text-amber-200/80">
                         {batch.exceptionReason || batch.exitReason}
                       </div>
                     )}
@@ -3887,7 +3891,7 @@ export function TTradeGlobalPage() {
                     )}
                   >
                     {formatSignedPercent(batch.lastNetProfitPct)}
-                    <div className="mt-1 text-[9px] text-slate-600">
+                    <div className="mt-1 text-ui-micro text-slate-600">
                       峰值 {formatSignedPercent(batch.peakNetProfitPct)}
                     </div>
                   </td>
@@ -3903,8 +3907,8 @@ export function TTradeGlobalPage() {
                       formatSignedPercent(batch.trailingFloorPct)
                     )}
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="font-mono text-[9px] text-slate-600">
+                  <td className="px-ui-section py-3 text-right">
+                    <div className="font-mono text-ui-micro text-slate-600">
                       {brokerOrderId ||
                         clientOrderId?.slice(0, 12) ||
                         '尚未委托'}
@@ -3916,7 +3920,7 @@ export function TTradeGlobalPage() {
                         variant="outline"
                         disabled={actionLoading}
                         onClick={() => handleCancelOrder(clientOrderId)}
-                        className="mt-1.5 h-7 rounded-sm border-white/10 px-2 text-[9px]"
+                        className="mt-1.5 h-7 rounded-sm border-white/10 px-2 text-ui-micro"
                       >
                         申请撤单
                       </Button>
@@ -3936,14 +3940,14 @@ export function TTradeGlobalPage() {
       {batchesResult.error && (
         <div
           role="alert"
-          className="flex shrink-0 items-start justify-between gap-3 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-rose-400/20 bg-rose-400/[0.06] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
           <span>做 T 批次读取失败；仍显示上次成功读取的结果。</span>
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            className="h-6 shrink-0 px-2 text-[9px] text-rose-100"
+            className="h-6 shrink-0 px-2 text-ui-micro text-rose-100"
             onClick={() => refreshBatches({ requestPolicy: 'network-only' })}
           >
             重试
@@ -3954,7 +3958,7 @@ export function TTradeGlobalPage() {
         <div
           role="status"
           aria-busy="true"
-          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-ui-section py-2 text-ui-micro text-cyan-100"
         >
           <Loader2
             className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
@@ -3964,31 +3968,31 @@ export function TTradeGlobalPage() {
         </div>
       )}
       <div className="grid shrink-0 grid-cols-2 border-b border-white/[0.05]">
-        <div className="border-r border-white/[0.05] px-4 py-3">
-          <div className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-600">
+        <div className="border-r border-white/[0.05] px-ui-section py-3">
+          <div className="text-ui-caption font-black uppercase tracking-[0.1em] text-slate-600">
             做 T 活跃仓位
           </div>
-          <div className="mt-1 font-mono text-xl font-black text-cyan-200">
+          <div className="mt-1 font-mono text-ui-page-title font-black text-cyan-200">
             {openBatches.length}
           </div>
         </div>
-        <div className="px-4 py-3">
-          <div className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-600">
+        <div className="px-ui-section py-3">
+          <div className="text-ui-caption font-black uppercase tracking-[0.1em] text-slate-600">
             待卖出 / 退出中
           </div>
-          <div className="mt-1 font-mono text-xl font-black text-amber-200">
+          <div className="mt-1 font-mono text-ui-page-title font-black text-amber-200">
             {exitingBatches.length}
           </div>
         </div>
       </div>
       <section className="flex min-h-0 flex-1 flex-col border-b border-white/[0.05]">
-        <h2 className="shrink-0 px-4 py-2.5 text-xs font-black text-slate-200">
+        <h2 className="shrink-0 px-ui-section py-2.5 text-ui-label font-black text-slate-200">
           做 T 仓位
         </h2>
         {renderBatchTable(openBatches, false)}
       </section>
       <section className="flex min-h-0 flex-1 flex-col">
-        <h2 className="shrink-0 px-4 py-2.5 text-xs font-black text-slate-200">
+        <h2 className="shrink-0 px-ui-section py-2.5 text-ui-label font-black text-slate-200">
           待卖出与退出异常
         </h2>
         {renderBatchTable(exitingBatches, true)}
@@ -4005,7 +4009,7 @@ export function TTradeGlobalPage() {
                 batchesResult.data?.tTradeBatchesPage.pageInfo.endCursor ?? null
               )
             }
-            className="h-8 text-[10px] text-slate-400"
+            className="h-8 text-ui-caption text-slate-400"
           >
             {batchesResult.fetching ? '加载中…' : '加载更多批次'}
           </Button>
@@ -4143,7 +4147,7 @@ export function TTradeGlobalPage() {
       {monitorResult.error && (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
           <AlertTriangle
             className="mt-0.5 h-3.5 w-3.5 shrink-0"
@@ -4156,7 +4160,7 @@ export function TTradeGlobalPage() {
         <div
           role="status"
           aria-busy="true"
-          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-ui-section py-2 text-ui-micro text-cyan-100"
         >
           <Loader2
             className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
@@ -4165,34 +4169,36 @@ export function TTradeGlobalPage() {
           正在刷新配置版本…
         </div>
       )}
-      <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-4 py-3">
+      <div className="flex shrink-0 items-center justify-between border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-sm font-black text-slate-100">全局策略参数</h2>
-          <p className="mt-0.5 text-[10px] text-slate-600">
+          <h2 className="text-ui-body font-black text-slate-100">
+            全局策略参数
+          </h2>
+          <p className="mt-0.5 text-ui-caption text-slate-600">
             对账户内所有未忽略的合格持仓统一生效
           </p>
         </div>
-        <span className="font-mono text-[10px] text-slate-600">
+        <span className="font-mono text-ui-caption text-slate-600">
           配置版本 v{monitor?.configVersion ?? 0}
         </span>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
         <div className="grid gap-px bg-white/[0.05] xl:grid-cols-2">
-          <section className="bg-[#0a1424] p-4 xl:col-span-2">
+          <section className="bg-[#0a1424] p-ui-section xl:col-span-2">
             <div className="mb-4 border-b border-white/[0.05] pb-3">
-              <div className="text-xs font-black text-slate-200">
+              <div className="text-ui-label font-black text-slate-200">
                 运行与资金约束
               </div>
-              <div className="mt-1 text-[10px] text-slate-600">
+              <div className="mt-1 text-ui-caption text-slate-600">
                 控制单次金额、全局并发与账户总暴露
               </div>
             </div>
-            <div className="space-y-4">
+            <div className="space-y-ui-section">
               <div className="space-y-1.5">
                 <Label
                   htmlFor="t-trade-mode"
-                  className="text-xs font-bold text-slate-400"
+                  className="text-ui-label font-bold text-slate-400"
                 >
                   运行模式
                 </Label>
@@ -4204,7 +4210,7 @@ export function TTradeGlobalPage() {
                 >
                   <SelectTrigger
                     id="t-trade-mode"
-                    className="h-9 rounded-sm border-white/10 bg-[#07111f] text-xs focus:ring-red-500/60"
+                    className="h-control-default rounded-sm border-white/10 bg-[#07111f] text-ui-label focus:ring-red-500/60"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -4248,7 +4254,7 @@ export function TTradeGlobalPage() {
               </div>
 
               <div className="border-t border-white/[0.05] pt-4">
-                <div className="mb-3 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600">
+                <div className="mb-3 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-600">
                   动态退出
                 </div>
                 <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-2 2xl:grid-cols-4">
@@ -4290,15 +4296,15 @@ export function TTradeGlobalPage() {
               </div>
 
               <div className="border border-emerald-400/15 bg-emerald-400/[0.03] p-3">
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center justify-between gap-ui-section">
                   <div>
                     <Label
                       htmlFor="t-trade-high-profit-lock-enabled"
-                      className="text-xs font-bold text-slate-300"
+                      className="text-ui-label font-bold text-slate-300"
                     >
                       高利润保护
                     </Label>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       按可执行买一计算峰值；进入高利润区后限制最大利润回吐
                     </p>
                   </div>
@@ -4335,15 +4341,15 @@ export function TTradeGlobalPage() {
               </div>
 
               <div className="border border-amber-400/15 bg-amber-400/[0.03] p-3">
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center justify-between gap-ui-section">
                   <div>
                     <Label
                       htmlFor="t-trade-rapid-reversal-enabled"
-                      className="text-xs font-bold text-slate-300"
+                      className="text-ui-label font-bold text-slate-300"
                     >
                       极速反转退出
                     </Label>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       高利润峰值形成后，短时间内连续确认买一收益快速回落即紧急退出
                     </p>
                   </div>
@@ -4391,15 +4397,15 @@ export function TTradeGlobalPage() {
               </div>
 
               <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center justify-between gap-ui-section">
                   <div>
                     <Label
                       htmlFor="t-trade-limit-up-touch-enabled"
-                      className="text-xs font-bold text-slate-300"
+                      className="text-ui-label font-bold text-slate-300"
                     >
                       涨停触达退出
                     </Label>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       活跃 T
                       批次的可执行买一达到涨停价时，用昨日老仓完成等量退出
                     </p>
@@ -4430,15 +4436,15 @@ export function TTradeGlobalPage() {
               </div>
 
               <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
-                <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center justify-between gap-ui-section">
                   <div>
                     <Label
                       htmlFor="t-trade-hard-stop-enabled"
-                      className="text-xs font-bold text-slate-300"
+                      className="text-ui-label font-bold text-slate-300"
                     >
                       硬止损保护
                     </Label>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       可选风险底线；关闭后不会因亏损比例自动卖出
                     </p>
                   </div>
@@ -4468,11 +4474,11 @@ export function TTradeGlobalPage() {
               <div className="border border-white/[0.07] bg-[#07111f]/60 p-3">
                 <Label
                   htmlFor="t-trade-time-exit-mode"
-                  className="text-xs font-bold text-slate-300"
+                  className="text-ui-label font-bold text-slate-300"
                 >
                   时间退出策略
                 </Label>
-                <p className="mt-1 text-[10px] text-slate-600">
+                <p className="mt-1 text-ui-caption text-slate-600">
                   默认无限期保护，仅在明确选择后按时间自动卖出
                 </p>
                 <Select
@@ -4486,7 +4492,7 @@ export function TTradeGlobalPage() {
                 >
                   <SelectTrigger
                     id="t-trade-time-exit-mode"
-                    className="mt-3 h-9 rounded-sm border-white/10 bg-[#07111f] text-xs focus:ring-primary/60"
+                    className="mt-3 h-control-default rounded-sm border-white/10 bg-[#07111f] text-ui-label focus:ring-primary/60"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -4520,7 +4526,7 @@ export function TTradeGlobalPage() {
                     <div className="space-y-1.5">
                       <Label
                         htmlFor="t-trade-time-exit-time"
-                        className="text-xs font-bold text-slate-400"
+                        className="text-ui-label font-bold text-slate-400"
                       >
                         退出时刻
                       </Label>
@@ -4531,7 +4537,7 @@ export function TTradeGlobalPage() {
                         onChange={event =>
                           setField('timeExitTime', event.target.value)
                         }
-                        className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-xs focus-visible:ring-primary/60"
+                        className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-primary/60"
                       />
                     </div>
                   </div>
@@ -4539,7 +4545,7 @@ export function TTradeGlobalPage() {
 
                 {!form.hardStopEnabled &&
                   form.timeExitMode === TTradeTimeExitMode.Unlimited && (
-                    <div className="mt-3 flex items-start gap-2 border-t border-amber-400/10 pt-3 text-[10px] leading-4 text-amber-200/80">
+                    <div className="mt-3 flex items-start gap-2 border-t border-amber-400/10 pt-3 text-ui-caption leading-4 text-amber-200/80">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       未达到收益武装线的批次可能长期持有，仍可通过人工操作结束。
                     </div>
@@ -4548,17 +4554,17 @@ export function TTradeGlobalPage() {
             </div>
           </section>
 
-          <section className="bg-[#0a1424] p-4 xl:col-span-2">
+          <section className="bg-[#0a1424] p-ui-section xl:col-span-2">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.05] pb-3">
               <div>
-                <div className="text-xs font-black text-slate-200">
+                <div className="text-ui-label font-black text-slate-200">
                   V3 有状态信号规则
                 </div>
-                <div className="mt-1 text-[10px] text-slate-600">
+                <div className="mt-1 text-ui-caption text-slate-600">
                   因果窗口、双 FSM、可解释评分、硬门禁与 episode 防重复
                 </div>
               </div>
-              <div className="font-mono text-[9px] text-slate-600">
+              <div className="font-mono text-ui-micro text-slate-600">
                 {monitor?.signalPolicy.policyVersion || '等待策略版本'} ·
                 feature {monitor?.signalPolicy.featureSchemaVersion || '--'}
               </div>
@@ -4596,11 +4602,11 @@ export function TTradeGlobalPage() {
             <div className="mt-5 border-t border-white/[0.05] pt-4">
               <Label
                 htmlFor="t-trade-ignore-code"
-                className="text-xs font-bold text-slate-300"
+                className="text-ui-label font-bold text-slate-300"
               >
                 忽略股票代码
               </Label>
-              <p className="mt-1 text-[10px] text-slate-600">
+              <p className="mt-1 text-ui-caption text-slate-600">
                 忽略名单属于外部发意图门禁，不改变服务端三层信号状态。
               </p>
               <div className="mt-3 flex gap-2">
@@ -4615,13 +4621,13 @@ export function TTradeGlobalPage() {
                     }
                   }}
                   placeholder="例如 600000 或 600000.SH"
-                  className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-xs focus-visible:ring-red-500/60"
+                  className="h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-red-500/60"
                 />
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  className="h-9 rounded-sm border-white/10"
+                  className="h-control-default rounded-sm border-white/10"
                   disabled={!ignoreInput.trim() || actionLoading}
                   onClick={handleAddIgnore}
                 >
@@ -4630,7 +4636,7 @@ export function TTradeGlobalPage() {
               </div>
               <div className="mt-3 flex min-h-8 flex-wrap gap-1.5">
                 {ignoredCodes.length === 0 ? (
-                  <span className="text-[10px] text-slate-700">
+                  <span className="text-ui-caption text-slate-700">
                     当前未忽略任何股票
                   </span>
                 ) : (
@@ -4640,7 +4646,7 @@ export function TTradeGlobalPage() {
                       type="button"
                       disabled={actionLoading}
                       onClick={() => handleIgnore(code, false)}
-                      className="inline-flex items-center gap-1 border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[10px] text-slate-400 outline-none transition-colors hover:border-rose-400/30 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-red-500/60"
+                      className="inline-flex items-center gap-1 border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-ui-caption text-slate-400 outline-none transition-colors hover:border-rose-400/30 hover:text-rose-200 focus-visible:ring-2 focus-visible:ring-red-500/60"
                       aria-label={'从忽略名单移除 ' + code}
                     >
                       {code}
@@ -4654,7 +4660,7 @@ export function TTradeGlobalPage() {
         </div>
 
         {form.mode === 'live' && (
-          <label className="flex cursor-pointer items-start gap-2.5 border-t border-amber-400/15 bg-amber-400/[0.06] px-4 py-3 text-xs font-bold leading-5 text-amber-100">
+          <label className="flex cursor-pointer items-start gap-2.5 border-t border-amber-400/15 bg-amber-400/[0.06] px-ui-section py-3 text-ui-label font-bold leading-5 text-amber-100">
             <input
               type="checkbox"
               checked={form.acknowledged}
@@ -4667,13 +4673,13 @@ export function TTradeGlobalPage() {
         )}
       </div>
 
-      <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] bg-[#091322] px-4 py-3">
-        <div className="text-[10px] text-slate-600">
+      <div className="flex shrink-0 items-center justify-between border-t border-white/[0.06] bg-[#091322] px-ui-section py-3">
+        <div className="text-ui-caption text-slate-600">
           保存后立即应用于当前账户的单一 T 策略运行
         </div>
         <Button
           type="button"
-          className="h-9 rounded-sm bg-red-500 px-5 text-xs text-white hover:bg-red-400"
+          className="h-control-default rounded-sm bg-red-500 px-ui-section text-ui-label text-white hover:bg-red-400"
           disabled={
             !accountId ||
             !monitor ||

@@ -143,12 +143,12 @@ function ParameterControl({
       <div className="flex items-start justify-between gap-3">
         <Label
           htmlFor={`board-${key}`}
-          className="text-[11px] font-bold text-slate-700 dark:text-slate-200"
+          className="text-ui-caption font-bold text-slate-700 dark:text-slate-200"
         >
           {label}
         </Label>
         {unit && (
-          <span className="shrink-0 font-mono text-[9px] text-slate-400">
+          <span className="shrink-0 font-mono text-ui-micro text-slate-400">
             {unit}
           </span>
         )}
@@ -156,7 +156,7 @@ function ParameterControl({
 
       {parameter.type === 'boolean' ? (
         <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 dark:border-white/10 dark:bg-white/[0.03]">
-          <span className="text-[10px] font-medium text-slate-500">
+          <span className="text-ui-caption font-medium text-slate-500">
             {resolved === true ? '已开启' : '已关闭'}
           </span>
           <Switch
@@ -170,7 +170,7 @@ function ParameterControl({
         <Select value={String(resolved ?? '')} onValueChange={onChange}>
           <SelectTrigger
             id={`board-${key}`}
-            className="h-10 rounded-lg border-slate-200 bg-slate-50 text-xs font-semibold dark:border-white/10 dark:bg-white/[0.03]"
+            className="h-control-large rounded-lg border-slate-200 bg-slate-50 text-ui-label font-semibold dark:border-white/10 dark:bg-white/[0.03]"
           >
             <SelectValue placeholder="请选择" />
           </SelectTrigger>
@@ -197,7 +197,7 @@ function ParameterControl({
               numberValue(event.target.value, parameter.type === 'integer')
             )
           }
-          className="h-10 rounded-lg border-slate-200 bg-slate-50 font-mono text-xs dark:border-white/10 dark:bg-white/[0.03]"
+          className="h-10 rounded-lg border-slate-200 bg-slate-50 font-mono text-ui-label dark:border-white/10 dark:bg-white/[0.03]"
         />
       ) : (
         <Input
@@ -205,12 +205,12 @@ function ParameterControl({
           type={key.endsWith('_time') ? 'time' : 'text'}
           value={String(resolved ?? '')}
           onChange={event => onChange(event.target.value)}
-          className="h-10 rounded-lg border-slate-200 bg-slate-50 font-mono text-xs dark:border-white/10 dark:bg-white/[0.03]"
+          className="h-10 rounded-lg border-slate-200 bg-slate-50 font-mono text-ui-label dark:border-white/10 dark:bg-white/[0.03]"
         />
       )}
 
       {parameter.description && (
-        <p className="text-[10px] leading-relaxed text-slate-500">
+        <p className="text-ui-caption leading-relaxed text-slate-500">
           {parameter.description}
         </p>
       )}
@@ -274,23 +274,23 @@ export function LimitUpBoardConfigPanel({
   };
 
   return (
-    <div className="space-y-5">
-      <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-xl dark:border-white/10 dark:bg-[#0d1425]">
-        <div className="border-b border-slate-200 bg-slate-950 px-5 py-4 dark:border-white/10">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div className="space-y-ui-section">
+      <Card className="overflow-hidden rounded-panel border-slate-200 bg-white shadow-none dark:border-white/10 dark:bg-[#0d1425]">
+        <div className="border-b border-slate-200 bg-slate-950 px-ui-section py-ui-section dark:border-white/10">
+          <div className="flex flex-col gap-ui-section lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.22em] text-red-400">
+              <div className="flex items-center gap-2 text-ui-caption font-black uppercase tracking-[0.22em] text-red-400">
                 <SlidersHorizontal className="h-3.5 w-3.5" />
                 Limit-up board controls
               </div>
-              <h2 className="mt-1 text-lg font-bold text-white">
+              <h2 className="mt-1 text-ui-heading font-bold text-white">
                 打板参数与安全门禁
               </h2>
-              <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-slate-400">
+              <p className="mt-1 max-w-2xl text-ui-caption leading-relaxed text-slate-400">
                 只在尚未封死且接近涨停时产生一次意图；订单、T+1、退出和成交均由统一状态流收敛。
               </p>
             </div>
-            <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-3">
+            <div className="grid grid-cols-2 gap-2 text-ui-caption sm:grid-cols-3">
               <div className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2">
                 <div className="text-slate-500">入场授权</div>
                 <div className="mt-1 font-bold text-slate-100">
@@ -318,9 +318,9 @@ export function LimitUpBoardConfigPanel({
           </div>
         </div>
 
-        <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid gap-ui-section p-ui-section lg:grid-cols-[minmax(0,1fr)_320px]">
           <div className="space-y-2">
-            <Label className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+            <Label className="text-ui-caption font-black uppercase tracking-[0.18em] text-slate-500">
               绑定标的
             </Label>
             <StrategyInstrumentSelector
@@ -328,14 +328,14 @@ export function LimitUpBoardConfigPanel({
               onChange={handleInstrumentChange}
               placeholder="搜索 A 股代码 / 名称 / 拼音"
             />
-            <p className="text-[10px] leading-relaxed text-slate-500">
+            <p className="text-ui-caption leading-relaxed text-slate-500">
               一个实例只绑定一个标的；已有持仓、未完成买单或活跃卖出计划时不会重复入场。
             </p>
           </div>
 
           <div
             className={cn(
-              'rounded-xl border px-4 py-3 text-[11px] leading-relaxed',
+              'rounded-panel border px-ui-section py-3 text-ui-caption leading-relaxed',
               runMode === StrategyRunMode.Live
                 ? 'border-rose-500/25 bg-rose-500/10 text-rose-700 dark:text-rose-200'
                 : 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-200'
@@ -367,17 +367,17 @@ export function LimitUpBoardConfigPanel({
         return (
           <Card
             key={group.id}
-            className="rounded-2xl border-slate-200 bg-white p-5 shadow-lg dark:border-white/10 dark:bg-[#0d1425]"
+            className="rounded-panel border-slate-200 bg-white p-ui-section shadow-lg dark:border-white/10 dark:bg-[#0d1425]"
           >
             <div className="mb-5 flex items-start gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
               <div className="rounded-lg bg-red-500/10 p-2 text-red-500">
                 <Icon className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                <h3 className="text-ui-body font-bold text-slate-900 dark:text-slate-100">
                   {group.title}
                 </h3>
-                <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                <p className="mt-1 text-ui-caption leading-relaxed text-slate-500">
                   {group.description}
                 </p>
               </div>
@@ -403,7 +403,7 @@ export function LimitUpBoardConfigPanel({
       })}
 
       {errors.length > 0 && (
-        <div className="rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-xs text-rose-700 dark:text-rose-200">
+        <div className="rounded-panel border border-rose-500/25 bg-rose-500/10 px-ui-section py-3 text-ui-label text-rose-700 dark:text-rose-200">
           {errors.join('；')}
         </div>
       )}
@@ -415,7 +415,7 @@ export function LimitUpBoardConfigPanel({
             variant="outline"
             onClick={onSave}
             disabled={saveDisabled || errors.length > 0 || !stockCodes.trim()}
-            className="h-11 min-w-36 rounded-xl"
+            className="h-11 min-w-36 rounded-panel"
           >
             <Save className="mr-2 h-4 w-4" />
             {saveLabel}
@@ -426,7 +426,7 @@ export function LimitUpBoardConfigPanel({
             type="button"
             onClick={onSubmit}
             disabled={submitDisabled || errors.length > 0 || !stockCodes.trim()}
-            className="h-11 min-w-40 rounded-xl bg-red-600 text-white hover:bg-red-500"
+            className="h-11 min-w-40 rounded-panel bg-red-600 text-white hover:bg-red-500"
           >
             <Play className="mr-2 h-4 w-4" />
             {submitLabel}

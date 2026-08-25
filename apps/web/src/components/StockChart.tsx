@@ -258,7 +258,10 @@ export default function StockChart({
     <Card className={`p-6 ${className}`}>
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-lg font-semibold" data-testid="chart-title">
+          <h3
+            className="text-ui-heading font-semibold"
+            data-testid="chart-title"
+          >
             {stockName} ({stockCode}) 走势图
           </h3>
           <div className="flex items-center gap-2 mt-2">
@@ -315,7 +318,6 @@ export default function StockChart({
               />
             </Button>
           </div>
-
         </div>
 
         {/* 桌面扩展选项 */}
@@ -343,7 +345,7 @@ export default function StockChart({
       <div className="relative">
         {isLoading && (
           <div className="absolute inset-0 bg-background/50 flex items-center justify-center z-10 rounded">
-            <div className="text-sm text-muted-foreground">
+            <div className="text-ui-body text-muted-foreground">
               加载图表数据中...
             </div>
           </div>
@@ -357,7 +359,7 @@ export default function StockChart({
       </div>
 
       {/* 图表说明 */}
-      <div className="mt-4 text-xs text-muted-foreground">
+      <div className="mt-4 text-ui-label text-muted-foreground">
         <div className="flex justify-between">
           <span>
             {useLineChart ? '分时走势' : 'K线走势'} ·

@@ -186,17 +186,17 @@ export function DeploymentRunMonitor({
   };
 
   return (
-    <div className="flex h-full min-h-[320px] flex-col rounded-xl border border-slate-200/60 bg-white/70 shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
-      <div className="flex items-center justify-between border-b border-slate-200/60 px-4 py-3 dark:border-white/5">
+    <div className="flex h-full min-h-[320px] flex-col rounded-panel border border-slate-200/60 bg-white/70 shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
+      <div className="flex items-center justify-between border-b border-slate-200/60 px-ui-section py-3 dark:border-white/5">
         <div className="flex min-w-0 items-center gap-2.5">
           <div className="rounded-lg bg-blue-500/10 p-2 text-blue-600 dark:text-blue-400">
             <Activity className="h-4 w-4" />
           </div>
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-black text-slate-900 dark:text-white">
+            <h2 className="truncate text-ui-body font-black text-slate-900 dark:text-white">
               {title}
             </h2>
-            <p className="truncate font-mono text-[10px] font-bold uppercase tracking-widest text-slate-400">
+            <p className="truncate font-mono text-ui-caption font-bold uppercase tracking-widest text-slate-400">
               {deploymentName}
             </p>
           </div>
@@ -204,7 +204,7 @@ export function DeploymentRunMonitor({
         <Button
           variant="ghost"
           size="sm"
-          className="h-8 gap-1.5 rounded-lg text-[10px] font-bold"
+          className="h-control-compact gap-1.5 rounded-lg text-ui-caption font-bold"
           disabled={!deploymentId || fetching}
           onClick={() => reexecute({ requestPolicy: 'network-only' })}
         >
@@ -215,13 +215,13 @@ export function DeploymentRunMonitor({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 custom-scrollbar">
+      <div className="min-h-0 flex-1 space-y-ui-section overflow-y-auto p-ui-section custom-scrollbar">
         {!deploymentId ? (
-          <div className="flex h-44 items-center justify-center rounded-lg border border-dashed border-slate-200 text-xs font-medium text-slate-400 dark:border-white/10">
+          <div className="flex h-44 items-center justify-center rounded-lg border border-dashed border-slate-200 text-ui-label font-medium text-slate-400 dark:border-white/10">
             未找到 deployment
           </div>
         ) : fetching && runs.length === 0 ? (
-          <div className="flex h-44 flex-col items-center justify-center gap-3 text-xs font-medium text-slate-400">
+          <div className="flex h-44 flex-col items-center justify-center gap-3 text-ui-label font-medium text-slate-400">
             <RefreshCw className="h-6 w-6 animate-spin text-blue-500" />
             正在加载运行记录
           </div>
@@ -229,19 +229,19 @@ export function DeploymentRunMonitor({
           <>
             <section className="space-y-2">
               <div className="flex items-center justify-between">
-                <h3 className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">
+                <h3 className="text-ui-caption font-black uppercase tracking-[0.22em] text-slate-500">
                   Active Runs
                 </h3>
                 <Badge
                   variant="outline"
-                  className="border-blue-500/20 bg-blue-500/10 text-[10px] text-blue-500"
+                  className="border-blue-500/20 bg-blue-500/10 text-ui-caption text-blue-500"
                 >
                   {activeRuns.length}
                 </Badge>
               </div>
 
               {activeRuns.length === 0 ? (
-                <div className="rounded-lg border border-slate-200/60 bg-slate-50/80 p-4 text-xs font-medium text-slate-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-slate-400">
+                <div className="rounded-lg border border-slate-200/60 bg-slate-50/80 p-ui-section text-ui-label font-medium text-slate-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-slate-400">
                   当前没有运行中或等待中的任务。
                 </div>
               ) : (
@@ -255,18 +255,18 @@ export function DeploymentRunMonitor({
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="h-2 w-2 rounded-full bg-blue-500" />
-                            <p className="truncate text-xs font-black text-slate-900 dark:text-white">
+                            <p className="truncate text-ui-label font-black text-slate-900 dark:text-white">
                               {run.flowName || deploymentName}
                             </p>
                           </div>
-                          <p className="mt-1 font-mono text-[10px] text-slate-500">
+                          <p className="mt-1 font-mono text-ui-caption text-slate-500">
                             {run.id}
                           </p>
                         </div>
                         <Badge
                           variant="outline"
                           className={cn(
-                            'shrink-0 text-[10px]',
+                            'shrink-0 text-ui-caption',
                             getStateStyle(run.state)
                           )}
                         >
@@ -274,7 +274,7 @@ export function DeploymentRunMonitor({
                         </Badge>
                       </div>
 
-                      <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-500 sm:grid-cols-3">
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-ui-caption text-slate-500 sm:grid-cols-3">
                         <span className="inline-flex items-center gap-1.5">
                           <Clock className="h-3 w-3" />
                           {formatDateTime(
@@ -292,7 +292,7 @@ export function DeploymentRunMonitor({
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-7 gap-1.5 rounded-lg text-[10px] font-bold"
+                          className="h-control-compact gap-1.5 rounded-lg text-ui-caption font-bold"
                           onClick={() =>
                             setLocation(`/system/flow-runs/${run.id}`)
                           }
@@ -303,7 +303,7 @@ export function DeploymentRunMonitor({
                         <Button
                           variant="destructive"
                           size="sm"
-                          className="h-7 gap-1.5 rounded-lg text-[10px] font-bold"
+                          className="h-control-compact gap-1.5 rounded-lg text-ui-caption font-bold"
                           disabled={cancelResult.fetching}
                           onClick={() => void handleCancel(run.id)}
                         >
@@ -318,11 +318,11 @@ export function DeploymentRunMonitor({
             </section>
 
             <section className="space-y-2">
-              <h3 className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">
+              <h3 className="text-ui-caption font-black uppercase tracking-[0.22em] text-slate-500">
                 Recent Runs
               </h3>
               {recentRuns.length === 0 ? (
-                <div className="rounded-lg border border-slate-200/60 bg-slate-50/80 p-4 text-xs font-medium text-slate-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-slate-400">
+                <div className="rounded-lg border border-slate-200/60 bg-slate-50/80 p-ui-section text-ui-label font-medium text-slate-500 dark:border-white/5 dark:bg-white/[0.02] dark:text-slate-400">
                   暂无最近完成记录。
                 </div>
               ) : (
@@ -335,17 +335,17 @@ export function DeploymentRunMonitor({
                       onClick={() => setLocation(`/system/flow-runs/${run.id}`)}
                     >
                       <div className="min-w-0">
-                        <p className="truncate text-xs font-bold text-slate-800 dark:text-slate-100">
+                        <p className="truncate text-ui-label font-bold text-slate-800 dark:text-slate-100">
                           {run.flowName || deploymentName}
                         </p>
-                        <p className="font-mono text-[10px] text-slate-500">
+                        <p className="font-mono text-ui-caption text-slate-500">
                           {formatDateTime(run.startedAt || run.created)}
                         </p>
                       </div>
                       <Badge
                         variant="outline"
                         className={cn(
-                          'shrink-0 text-[10px]',
+                          'shrink-0 text-ui-caption',
                           getStateStyle(run.state)
                         )}
                       >

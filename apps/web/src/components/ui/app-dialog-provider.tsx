@@ -181,7 +181,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
         {request && options && (
           <AlertDialogContent
             key={activeDialog.id}
-            className="w-[calc(100%-2rem)] gap-0 overflow-hidden rounded-2xl border-slate-200 bg-white p-0 text-slate-950 shadow-2xl shadow-black/30 motion-reduce:animate-none dark:border-white/10 dark:bg-slate-950 dark:text-slate-100 sm:max-w-[440px]"
+            className="w-[calc(100%-2rem)] gap-0 overflow-hidden rounded-dialog border-slate-200 bg-white p-0 text-slate-950 shadow-2xl shadow-black/30 motion-reduce:animate-none dark:border-white/10 dark:bg-slate-950 dark:text-slate-100 sm:max-w-[440px]"
             onOpenAutoFocus={event => {
               if (request.kind !== 'prompt') return;
               event.preventDefault();
@@ -189,7 +189,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
             }}
           >
             <form
-              className="grid max-h-[calc(100vh-2rem)] gap-5 overflow-y-auto p-5 sm:p-6"
+              className="grid max-h-[calc(100vh-2rem)] gap-3 overflow-y-auto p-ui-section sm:p-ui-section"
               onSubmit={event => {
                 event.preventDefault();
                 submitDialog();
@@ -198,7 +198,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
               <AlertDialogHeader className="space-y-4 text-left">
                 <div
                   className={cn(
-                    'flex h-10 w-10 items-center justify-center rounded-xl border',
+                    'flex h-control-default w-control-default items-center justify-center rounded-control border',
                     iconStylesByVariant[variant]
                   )}
                   aria-hidden="true"
@@ -206,11 +206,11 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
                   <DialogIcon className="h-5 w-5" />
                 </div>
                 <div className="space-y-2">
-                  <AlertDialogTitle className="text-lg font-semibold tracking-tight text-slate-950 dark:text-white">
+                  <AlertDialogTitle className="text-ui-heading font-semibold tracking-tight text-slate-950 dark:text-white">
                     {options.title}
                   </AlertDialogTitle>
                   <AlertDialogDescription asChild>
-                    <div className="text-sm leading-6 text-slate-600 dark:text-slate-300">
+                    <div className="text-ui-body leading-6 text-slate-600 dark:text-slate-300">
                       {options.description}
                     </div>
                   </AlertDialogDescription>
@@ -220,7 +220,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
               {request.kind === 'prompt' && (
                 <div className="space-y-2">
                   <label
-                    className="text-xs font-medium text-slate-700 dark:text-slate-300"
+                    className="text-ui-label font-medium text-slate-700 dark:text-slate-300"
                     htmlFor={`app-dialog-prompt-${activeDialog.id}`}
                   >
                     {request.options.inputLabel}
@@ -237,7 +237,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
                         : undefined
                     }
                     autoComplete="off"
-                    className="h-11 border-slate-300 bg-slate-50 font-mono text-slate-950 focus-visible:ring-cyan-500 dark:border-white/10 dark:bg-slate-900 dark:text-white"
+                    className="h-control-large border-slate-300 bg-slate-50 font-mono text-slate-950 focus-visible:ring-cyan-500 dark:border-white/10 dark:bg-slate-900 dark:text-white"
                     onChange={event => {
                       setPromptValue(event.target.value);
                       if (validationError) setValidationError(null);
@@ -246,7 +246,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
                   {validationError && (
                     <p
                       id={`app-dialog-error-${activeDialog.id}`}
-                      className="flex items-center gap-2 text-xs text-red-600 dark:text-red-300"
+                      className="flex items-center gap-2 text-ui-label text-red-600 dark:text-red-300"
                       role="alert"
                     >
                       <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
@@ -260,7 +260,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
                 {request.kind !== 'alert' && (
                   <AlertDialogCancel
                     type="button"
-                    className="mt-0 cursor-pointer rounded-xl border-slate-300 dark:border-white/10 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    className="mt-0 cursor-pointer rounded-control border-slate-300 dark:border-white/10 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                     onClick={event => {
                       event.preventDefault();
                       cancelDialog();
@@ -272,7 +272,7 @@ export function AppDialogProvider({ children }: { children: ReactNode }) {
                 <AlertDialogAction
                   type="button"
                   className={cn(
-                    'cursor-pointer rounded-xl',
+                    'cursor-pointer rounded-control',
                     variant === 'destructive' &&
                       buttonVariants({ variant: 'destructive' }),
                     variant === 'warning' &&

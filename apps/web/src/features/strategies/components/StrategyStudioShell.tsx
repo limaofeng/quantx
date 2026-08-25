@@ -45,9 +45,9 @@ export function StrategyStudioShell({
       showSidebar={showSidebar}
       sidebar={sidebar}
       sidebarSizing={{
-        defaultWidth: 304,
+        defaultWidth: 280,
         maxWidth: 420,
-        minWidth: 248,
+        minWidth: 220,
         storageScope: 'strategy-studio',
       }}
       statusBarLeft={statusBarLeft}

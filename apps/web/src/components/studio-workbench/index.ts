@@ -5,6 +5,7 @@ export {
   StudioStatusBarProvider,
 } from './StudioStatusBarProvider';
 export { StudioMenu } from './StudioMenu';
+export { StudioResourceSidebar } from './StudioResourceSidebar';
 export { StudioDataGrid } from './StudioDataGrid';
 export { StudioDataTable } from './StudioDataTable';
 export { StudioTabContextMenu } from './StudioTabContextMenu';
@@ -40,6 +41,7 @@ export type {
   StudioMenuSeparatorItem,
   StudioMenuState,
 } from './StudioMenu';
+export type { StudioResourceSidebarItem } from './StudioResourceSidebar';
 export type {
   StudioTabContextMenuAction,
   StudioTabContextMenuState,

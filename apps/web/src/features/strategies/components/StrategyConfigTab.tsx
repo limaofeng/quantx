@@ -149,36 +149,36 @@ export default function StrategyConfigTab({
     StrategyRunMode.Paper;
 
   return (
-    <div className="space-y-6 pb-12">
-      <Card className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="space-y-ui-section pb-12">
+      <Card className="rounded-panel border border-slate-200 bg-white p-ui-panel shadow-none dark:border-white/10 dark:bg-slate-900/60">
+        <div className="flex flex-col gap-ui-section md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.3em] text-blue-500">
+            <div className="text-ui-micro font-black uppercase tracking-[0.3em] text-blue-500">
               参数配置
             </div>
-            <h3 className="mt-1 text-lg font-black text-slate-900 dark:text-white">
+            <h3 className="mt-1 text-ui-heading font-black text-slate-900 dark:text-white">
               {instance?.displayName || '未选择策略实例'}
             </h3>
           </div>
-          <div className="grid grid-cols-1 gap-3 text-[10px] font-bold text-slate-500 sm:grid-cols-3">
-            <div className="rounded-xl border border-slate-200 px-3 py-2 dark:border-white/10">
-              <div className="text-[8px] font-black uppercase tracking-widest text-slate-400">
+          <div className="grid grid-cols-1 gap-3 text-ui-caption font-bold text-slate-500 sm:grid-cols-3">
+            <div className="rounded-panel border border-slate-200 px-3 py-2 dark:border-white/10">
+              <div className="text-ui-micro font-black uppercase tracking-widest text-slate-400">
                 绑定标的
               </div>
               <div className="mt-1 font-mono text-slate-700 dark:text-slate-200">
                 {instance?.instrumentCode || '--'}
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 px-3 py-2 dark:border-white/10">
-              <div className="text-[8px] font-black uppercase tracking-widest text-slate-400">
+            <div className="rounded-panel border border-slate-200 px-3 py-2 dark:border-white/10">
+              <div className="text-ui-micro font-black uppercase tracking-widest text-slate-400">
                 参数版本
               </div>
               <div className="mt-1 truncate font-mono text-slate-700 dark:text-slate-200">
                 {instance?.parameterVersion || '--'}
               </div>
             </div>
-            <div className="rounded-xl border border-slate-200 px-3 py-2 dark:border-white/10">
-              <div className="text-[8px] font-black uppercase tracking-widest text-slate-400">
+            <div className="rounded-panel border border-slate-200 px-3 py-2 dark:border-white/10">
+              <div className="text-ui-micro font-black uppercase tracking-widest text-slate-400">
                 编辑状态
               </div>
               <div
@@ -193,14 +193,14 @@ export default function StrategyConfigTab({
         </div>
 
         {!editable && (
-          <div className="mt-5 flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs font-medium leading-relaxed text-amber-600 dark:text-amber-300">
+          <div className="mt-5 flex items-start gap-2 rounded-panel border border-amber-500/20 bg-amber-500/10 px-ui-section py-3 text-ui-label font-medium leading-relaxed text-amber-600 dark:text-amber-300">
             <Lock className="mt-0.5 h-4 w-4 shrink-0" />
             运行中实例的参数不会直接热更新；请暂停实例后再应用更改，避免回测和实盘产生不同策略逻辑。
           </div>
         )}
 
         {saveError && (
-          <div className="mt-5 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-xs font-medium leading-relaxed text-rose-500">
+          <div className="mt-5 flex items-start gap-2 rounded-panel border border-rose-500/20 bg-rose-500/10 px-ui-section py-3 text-ui-label font-medium leading-relaxed text-rose-500">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             {saveError}
           </div>
@@ -225,35 +225,35 @@ export default function StrategyConfigTab({
         />
       ) : (
         <>
-          <Card className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-            <div className="border-b border-slate-100 px-6 py-5 dark:border-white/5">
+          <Card className="overflow-hidden rounded-panel border border-slate-200 bg-white shadow-none dark:border-white/10 dark:bg-slate-900/60">
+            <div className="border-b border-slate-100 px-ui-panel py-ui-section dark:border-white/5">
               <div className="flex items-center gap-3">
                 <Settings2 className="h-4 w-4 text-blue-500" />
-                <h3 className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
+                <h3 className="text-ui-caption font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
                   策略参数
                 </h3>
               </div>
             </div>
 
             {entries.length === 0 ? (
-              <div className="p-10 text-center text-xs font-medium text-slate-500">
+              <div className="p-ui-empty text-center text-ui-label font-medium text-slate-500">
                 后端暂未返回参数配置。
               </div>
             ) : (
-              <div className="grid grid-cols-1 gap-5 p-6 md:grid-cols-2">
+              <div className="grid grid-cols-1 gap-ui-section p-ui-panel md:grid-cols-2">
                 {entries.map(([key, value]) => {
                   const isObject = value !== null && typeof value === 'object';
                   return (
                     <div key={key} className={isObject ? 'md:col-span-2' : ''}>
                       <Label
                         htmlFor={key}
-                        className="mb-2 block text-[9px] font-black uppercase tracking-[0.2em] text-slate-400"
+                        className="mb-2 block text-ui-micro font-black uppercase tracking-[0.2em] text-slate-400"
                       >
                         {key}
                       </Label>
                       {typeof value === 'boolean' ? (
-                        <div className="flex h-10 items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-4 dark:border-white/10 dark:bg-white/[0.03]">
-                          <span className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                        <div className="flex h-10 items-center justify-between rounded-panel border border-slate-200 bg-slate-50 px-ui-section dark:border-white/10 dark:bg-white/[0.03]">
+                          <span className="text-ui-caption font-bold text-slate-600 dark:text-slate-300">
                             {value ? '开启' : '关闭'}
                           </span>
                           <Switch
@@ -265,7 +265,7 @@ export default function StrategyConfigTab({
                           />
                         </div>
                       ) : isObject ? (
-                        <pre className="max-h-56 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-4 text-[10px] font-medium leading-relaxed text-slate-500 dark:border-white/10 dark:bg-white/[0.03]">
+                        <pre className="max-h-56 overflow-auto rounded-panel border border-slate-200 bg-slate-50 p-ui-section text-ui-caption font-medium leading-relaxed text-slate-500 dark:border-white/10 dark:bg-white/[0.03]">
                           {formatParameterValue(value)}
                         </pre>
                       ) : (
@@ -281,7 +281,7 @@ export default function StrategyConfigTab({
                                 : event.target.value;
                             handleChange(key, nextValue);
                           }}
-                          className="h-10 rounded-xl border-slate-200 bg-slate-50 text-[11px] font-bold dark:border-white/10 dark:bg-white/[0.03]"
+                          className="h-10 rounded-panel border-slate-200 bg-slate-50 text-ui-caption font-bold dark:border-white/10 dark:bg-white/[0.03]"
                         />
                       )}
                     </div>
@@ -291,26 +291,26 @@ export default function StrategyConfigTab({
             )}
           </Card>
 
-          <Card className="flex flex-col gap-4 rounded-[2rem] border border-slate-200 bg-white p-5 shadow-xl dark:border-white/10 dark:bg-slate-900/60 sm:flex-row sm:items-center sm:justify-between">
+          <Card className="flex flex-col gap-ui-section rounded-panel border border-slate-200 bg-white p-ui-section shadow-none dark:border-white/10 dark:bg-slate-900/60 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div className="text-[9px] font-black uppercase tracking-[0.24em] text-slate-400">
+              <div className="text-ui-micro font-black uppercase tracking-[0.24em] text-slate-400">
                 参数状态
               </div>
-              <p className="mt-1 text-xs font-medium text-slate-500">
+              <p className="mt-1 text-ui-label font-medium text-slate-500">
                 {hasChanges ? '存在未应用的参数修改。' : '当前页面参数已同步。'}
               </p>
             </div>
             <div className="flex gap-3">
               <Button
                 variant="ghost"
-                className="rounded-xl text-[10px] font-black uppercase tracking-widest"
+                className="rounded-panel text-ui-caption font-black uppercase tracking-widest"
                 onClick={handleReset}
               >
                 <RotateCcw className="mr-2 h-4 w-4" />
                 重置
               </Button>
               <Button
-                className="rounded-xl bg-blue-600 px-6 text-[10px] font-black uppercase tracking-widest text-white hover:bg-blue-700"
+                className="rounded-panel bg-blue-600 px-ui-panel text-ui-caption font-black uppercase tracking-widest text-white hover:bg-blue-700"
                 onClick={handleSave}
                 disabled={!hasChanges || !editable || !runId}
               >

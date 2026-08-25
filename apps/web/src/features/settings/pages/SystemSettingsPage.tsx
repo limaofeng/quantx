@@ -11,6 +11,10 @@ import {
 import { useLocation } from 'wouter';
 
 import { useStudioNavigate } from '@/components/studio-workspace';
+import {
+  StudioPageFrame,
+  StudioPageStack,
+} from '@/components/ui/studio-layout';
 import { AgentManagementPanel } from '@/features/agents';
 import { SystemInsightCard } from '@/features/system/components/SystemInsightCard';
 import { cn } from '@/utils/cn';
@@ -101,13 +105,15 @@ function SettingsOverview({
   ];
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6">
+    <StudioPageStack className="space-y-ui-section">
       <header>
-        <p className="text-xs font-medium uppercase tracking-[0.22em] text-sky-400">
+        <p className="text-ui-label font-medium uppercase tracking-[0.22em] text-sky-400">
           Platform control plane
         </p>
-        <h1 className="mt-2 text-2xl font-semibold text-slate-100">系统概览</h1>
-        <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+        <h1 className="mt-2 text-ui-page-title font-semibold text-slate-100">
+          系统概览
+        </h1>
+        <p className="mt-2 max-w-3xl text-ui-body leading-6 text-slate-400">
           集中查看 QuantX 服务健康、执行网关和 AI
           Runtime；数据同步继续在独立工作台管理。
         </p>
@@ -123,9 +129,9 @@ function SettingsOverview({
               key={card.href}
               type="button"
               onClick={() => onNavigate(card.href)}
-              className="group cursor-pointer rounded-xl border border-white/10 bg-slate-950/40 p-5 text-left transition-colors duration-200 hover:border-white/20 hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70"
+              className="group cursor-pointer rounded-panel border border-white/10 bg-slate-950/40 p-ui-section text-left transition-colors duration-200 hover:border-white/20 hover:bg-slate-900/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70"
             >
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start justify-between gap-ui-section">
                 <span
                   className={cn(
                     'flex h-10 w-10 items-center justify-center rounded-lg border',
@@ -136,17 +142,17 @@ function SettingsOverview({
                 </span>
                 <ChevronRight className="h-4 w-4 text-slate-600 transition-colors group-hover:text-slate-300" />
               </div>
-              <h2 className="mt-4 text-sm font-medium text-slate-100">
+              <h2 className="mt-4 text-ui-body font-medium text-slate-100">
                 {card.title}
               </h2>
-              <p className="mt-2 text-xs leading-5 text-slate-500">
+              <p className="mt-2 text-ui-label leading-5 text-slate-500">
                 {card.description}
               </p>
             </button>
           );
         })}
       </section>
-    </div>
+    </StudioPageStack>
   );
 }
 
@@ -157,14 +163,14 @@ export function SystemSettingsPage() {
 
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-100 md:flex-row">
-      <aside className="hidden w-60 shrink-0 border-r border-white/5 bg-[#0b1120] p-4 md:block">
+      <aside className="hidden w-60 shrink-0 border-r border-white/5 bg-[#0b1120] p-ui-section md:block">
         <div className="mb-6 flex items-center gap-3 px-2">
           <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-sky-500/20 bg-sky-500/10 text-sky-300">
             <Settings className="h-5 w-5" />
           </span>
           <div>
-            <p className="text-sm font-semibold">系统设置</p>
-            <p className="text-[11px] text-slate-500">System settings</p>
+            <p className="text-ui-body font-semibold">系统设置</p>
+            <p className="text-ui-caption text-slate-500">System settings</p>
           </div>
         </div>
         <nav aria-label="系统设置导航" className="space-y-1">
@@ -186,10 +192,10 @@ export function SystemSettingsPage() {
               >
                 <Icon className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>
-                  <span className="block text-sm font-medium">
+                  <span className="block text-ui-body font-medium">
                     {item.label}
                   </span>
-                  <span className="mt-0.5 block text-[11px] text-slate-500">
+                  <span className="mt-0.5 block text-ui-caption text-slate-500">
                     {item.description}
                   </span>
                 </span>
@@ -213,7 +219,7 @@ export function SystemSettingsPage() {
               aria-current={active ? 'page' : undefined}
               onClick={() => navigate(item.href)}
               className={cn(
-                'flex shrink-0 cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70',
+                'flex shrink-0 cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-ui-label font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/70',
                 active
                   ? 'bg-sky-500/10 text-sky-200'
                   : 'text-slate-400 hover:bg-white/5 hover:text-slate-100'
@@ -226,11 +232,13 @@ export function SystemSettingsPage() {
         })}
       </nav>
 
-      <main className="custom-scrollbar min-h-0 flex-1 overflow-y-auto p-3 sm:p-5 lg:p-6">
-        {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
-        {section === 'trading-safety' && <TradingSafetySettingsPanel />}
-        {section === 'qmt' && <AgentManagementPanel />}
-        {section === 'ai-runtime' && <AiRuntimeSettingsPanel />}
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <StudioPageFrame>
+          {section === 'overview' && <SettingsOverview onNavigate={navigate} />}
+          {section === 'trading-safety' && <TradingSafetySettingsPanel />}
+          {section === 'qmt' && <AgentManagementPanel />}
+          {section === 'ai-runtime' && <AiRuntimeSettingsPanel />}
+        </StudioPageFrame>
       </main>
     </div>
   );

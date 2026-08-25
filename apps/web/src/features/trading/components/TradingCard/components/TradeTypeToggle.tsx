@@ -13,7 +13,7 @@ export function TradeTypeToggle({
   return (
     <div className="flex border-b border-border mb-6">
       <button
-        className={`px-4 py-2 font-medium border-b-2 transition-colors ${
+        className={`px-ui-section py-2 font-medium border-b-2 transition-colors ${
           tradeType === 'buy'
             ? 'border-primary text-primary'
             : 'border-transparent text-muted-foreground hover:text-foreground'
@@ -24,7 +24,7 @@ export function TradeTypeToggle({
         买入
       </button>
       <button
-        className={`px-4 py-2 font-medium border-b-2 transition-colors ${
+        className={`px-ui-section py-2 font-medium border-b-2 transition-colors ${
           tradeType === 'sell'
             ? 'border-primary text-primary'
             : 'border-transparent text-muted-foreground hover:text-foreground'

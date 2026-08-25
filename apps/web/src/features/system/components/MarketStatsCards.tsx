@@ -49,7 +49,7 @@ export function MarketStatsCards({ stats }: MarketStatsCardsProps) {
       {dynamicStats.map((stat, i) => (
         <Card
           key={i}
-          className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-slate-900/40 backdrop-blur-sm hover:shadow-md hover:shadow-slate-200/50 dark:hover:shadow-black/50 transition-all rounded-xl"
+          className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-slate-900/40 backdrop-blur-sm hover:shadow-md hover:shadow-slate-200/50 dark:hover:shadow-black/50 transition-all rounded-panel"
         >
           <CardContent className="p-3">
             <div className="flex items-center gap-2 mb-2">
@@ -58,15 +58,15 @@ export function MarketStatsCards({ stats }: MarketStatsCardsProps) {
               >
                 <stat.icon className="w-3.5 h-3.5" />
               </div>
-              <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
+              <p className="text-ui-caption font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
                 {stat.label}
               </p>
             </div>
             <div className="flex items-baseline gap-2">
-              <span className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">
+              <span className="text-ui-display font-black text-slate-900 dark:text-white tracking-tight">
                 {stat.value}
               </span>
-              <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
+              <span className="text-ui-caption font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded-full">
                 {stat.change}
               </span>
             </div>

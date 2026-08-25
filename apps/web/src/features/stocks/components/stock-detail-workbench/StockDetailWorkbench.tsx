@@ -36,19 +36,19 @@ function MetricCard({
 }) {
   return (
     <div className="min-w-0 border border-white/5 bg-white/[0.03] px-3 py-2.5">
-      <div className="truncate text-[10px] font-bold text-slate-500">
+      <div className="truncate text-ui-caption font-bold text-slate-500">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-sm font-black tabular-nums',
+          'mt-1 truncate font-mono text-ui-body font-black tabular-nums',
           toneValue === undefined ? 'text-slate-100' : getToneClass(toneValue)
         )}
       >
         {value}
       </div>
       {subValue && (
-        <div className="mt-1 truncate text-[10px] font-bold text-slate-600">
+        <div className="mt-1 truncate text-ui-caption font-bold text-slate-600">
           {subValue}
         </div>
       )}
@@ -69,7 +69,9 @@ function DetailPanel({
     <section className="min-w-0 border border-white/5 bg-[#0b1120]/70">
       <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3">
         <Icon className="h-3.5 w-3.5 text-blue-300" />
-        <h3 className="truncate text-xs font-black text-slate-200">{title}</h3>
+        <h3 className="truncate text-ui-label font-black text-slate-200">
+          {title}
+        </h3>
       </div>
       <div className="p-3">{children}</div>
     </section>
@@ -87,12 +89,12 @@ function MiniRow({
 }) {
   return (
     <div className="min-w-0 border border-white/5 bg-[#08101d]/80 px-3 py-2">
-      <div className="truncate text-[10px] font-bold text-slate-500">
+      <div className="truncate text-ui-caption font-bold text-slate-500">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-xs font-black',
+          'mt-1 truncate font-mono text-ui-label font-black',
           toneValue === undefined ? 'text-slate-200' : getToneClass(toneValue)
         )}
       >
@@ -242,23 +244,23 @@ export function StockDetailWorkbench({
   ];
 
   return (
-    <div className="border-t border-white/5 bg-[#08101d] px-4 py-4">
-      <div className="mx-auto flex max-w-[1480px] flex-col gap-4">
+    <div className="border-t border-white/5 bg-[#08101d] px-ui-section py-ui-section">
+      <div className="mx-auto flex max-w-[1480px] flex-col gap-ui-section">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-[10px] font-black uppercase text-blue-300">
+            <div className="text-ui-caption font-black uppercase text-blue-300">
               Detail
             </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-              <h2 className="truncate text-lg font-black text-slate-100">
+              <h2 className="truncate text-ui-heading font-black text-slate-100">
                 {displayName} 详情
               </h2>
-              <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[10px] font-bold text-slate-500">
+              <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-ui-caption font-bold text-slate-500">
                 {stockCode || '--'}
               </span>
               <span
                 className={cn(
-                  'rounded border px-2 py-1 text-[10px] font-black',
+                  'rounded border px-2 py-1 text-ui-caption font-black',
                   holding
                     ? 'border-blue-500/25 bg-blue-500/10 text-blue-200'
                     : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
@@ -271,7 +273,7 @@ export function StockDetailWorkbench({
 
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {sourceMessage && (
-              <span className="max-w-[360px] truncate text-[11px] font-bold text-slate-500">
+              <span className="max-w-[360px] truncate text-ui-caption font-bold text-slate-500">
                 {sourceMessage}
               </span>
             )}
@@ -279,7 +281,7 @@ export function StockDetailWorkbench({
               type="button"
               disabled={!stockCode || isRefreshing}
               onClick={() => void refresh()}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-bold text-slate-300 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-ui-label font-bold text-slate-300 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <RefreshCw
                 className={cn('h-3.5 w-3.5', isRefreshing && 'animate-spin')}
@@ -290,7 +292,7 @@ export function StockDetailWorkbench({
               type="button"
               disabled={!stockCode}
               onClick={onOpenStockInfo}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-xs font-bold text-slate-300 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-ui-label font-bold text-slate-300 transition-colors hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <BarChart3 className="h-3.5 w-3.5" />
               个股信息
@@ -335,7 +337,7 @@ export function StockDetailWorkbench({
               </div>
 
               <div className="mt-3 border-t border-white/5 pt-3">
-                <div className="flex items-center justify-between gap-3 text-[10px] font-bold text-slate-500">
+                <div className="flex items-center justify-between gap-3 text-ui-caption font-bold text-slate-500">
                   <span>可用库存</span>
                   <span className="font-mono text-slate-300">
                     {availablePercent.toFixed(0)}%
@@ -347,7 +349,7 @@ export function StockDetailWorkbench({
                     style={{ width: `${availablePercent}%` }}
                   />
                 </div>
-                <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold text-slate-600">
+                <div className="mt-2 flex items-center justify-between gap-3 text-ui-caption font-bold text-slate-600">
                   <span>冻结库存</span>
                   <span className="font-mono">{frozenPercent.toFixed(0)}%</span>
                 </div>

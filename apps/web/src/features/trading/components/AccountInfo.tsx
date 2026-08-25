@@ -22,33 +22,33 @@ export function AccountInfo({ summary }: AccountInfoProps) {
     <div className="p-1 h-full flex flex-col">
       <div className="space-y-2 max-w-sm">
         <div className="flex justify-between items-center px-1">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+          <span className="text-ui-caption text-muted-foreground uppercase tracking-wider">
             可用资金
           </span>
           <span
-            className="text-[12px] font-mono font-bold"
+            className="text-ui-label font-mono font-bold"
             data-testid="available-cash"
           >
             {displayCurrency(summary?.cash)}
           </span>
         </div>
         <div className="flex justify-between items-center px-1">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+          <span className="text-ui-caption text-muted-foreground uppercase tracking-wider">
             冻结资金
           </span>
           <span
-            className="text-[12px] font-mono text-muted-foreground"
+            className="text-ui-label font-mono text-muted-foreground"
             data-testid="frozen-funds"
           >
             {displayCurrency(summary?.frozenCash)}
           </span>
         </div>
         <div className="flex justify-between items-center px-1">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+          <span className="text-ui-caption text-muted-foreground uppercase tracking-wider">
             总资产
           </span>
           <span
-            className="text-[12px] font-mono font-bold text-primary"
+            className="text-ui-label font-mono font-bold text-primary"
             data-testid="account-total-assets"
           >
             {displayCurrency(summary?.totalAsset)}
@@ -58,11 +58,11 @@ export function AccountInfo({ summary }: AccountInfoProps) {
         <div className="h-px bg-border my-2" />
 
         <div className="flex justify-between items-center px-1 bg-muted/20 py-2 rounded">
-          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+          <span className="text-ui-caption font-bold text-muted-foreground uppercase tracking-wider">
             当前购买力
           </span>
           <span
-            className="text-[14px] font-mono font-black text-primary"
+            className="text-ui-title font-mono font-black text-primary"
             data-testid="buying-power"
           >
             {displayCurrency(summary?.cash)}
@@ -71,20 +71,20 @@ export function AccountInfo({ summary }: AccountInfoProps) {
 
         <div className="mt-4 grid grid-cols-2 gap-2">
           <div className="p-2 bg-muted/10 rounded flex flex-col gap-1">
-            <span className="text-[9px] text-muted-foreground uppercase">
+            <span className="text-ui-micro text-muted-foreground uppercase">
               持仓市值
             </span>
-            <span className="text-[11px] font-mono font-bold">
+            <span className="text-ui-caption font-mono font-bold">
               {displayCurrency(summary?.marketValue)}
             </span>
           </div>
           <div className="p-2 bg-muted/10 rounded flex flex-col gap-1">
-            <span className="text-[9px] text-muted-foreground uppercase">
+            <span className="text-ui-micro text-muted-foreground uppercase">
               总盈亏
             </span>
             <span
               className={cn(
-                'text-[11px] font-mono font-bold',
+                'text-ui-caption font-mono font-bold',
                 financialToneClass(summary?.totalProfitLoss, 'holding')
               )}
             >

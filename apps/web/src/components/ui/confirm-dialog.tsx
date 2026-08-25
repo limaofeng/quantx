@@ -104,14 +104,14 @@ export function ConfirmDialog({
 
   return (
     <AlertDialog open={open} onOpenChange={handleOpenChange}>
-      <AlertDialogContent className="sm:max-w-[425px] border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl">
+      <AlertDialogContent className="sm:max-w-[425px] border-slate-200 dark:border-white/10 bg-white dark:bg-slate-900 rounded-dialog shadow-2xl">
         <AlertDialogHeader>
-          <AlertDialogTitle className="text-lg font-bold text-slate-900 dark:text-white">
+          <AlertDialogTitle className="text-ui-heading font-bold text-slate-900 dark:text-white">
             {title}
           </AlertDialogTitle>
           <AlertDialogDescription
             asChild
-            className="text-sm text-slate-500 dark:text-slate-400"
+            className="text-ui-body text-slate-500 dark:text-slate-400"
           >
             <div>{description}</div>
           </AlertDialogDescription>
@@ -120,7 +120,7 @@ export function ConfirmDialog({
           <AlertDialogCancel
             onClick={handleCancel}
             disabled={isProcessing}
-            className="rounded-xl border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/5"
+            className="rounded-control border-slate-200 dark:border-white/10 hover:bg-slate-100 dark:hover:bg-white/5"
           >
             {cancelText}
           </AlertDialogCancel>
@@ -131,7 +131,7 @@ export function ConfirmDialog({
             }}
             disabled={isProcessing}
             className={cn(
-              'rounded-xl',
+              'rounded-control',
               variant === 'destructive' &&
                 buttonVariants({ variant: 'destructive' }),
               isProcessing && 'opacity-50 cursor-not-allowed'

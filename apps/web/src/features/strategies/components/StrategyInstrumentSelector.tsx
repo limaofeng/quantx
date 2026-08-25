@@ -2,6 +2,7 @@ import { Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { StockSelector } from '@/components/StockSelector';
+import { Input } from '@/components/ui/input';
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
 import { useStockSearch } from '@/hooks/useStockSearch';
 import type { Stock } from '@/shared/types';
@@ -73,7 +74,7 @@ export function StrategyInstrumentSelector({
       className={className}
     >
       <div className="relative group">
-        <input
+        <Input
           type="text"
           placeholder={placeholder}
           value={isSearching ? searchQuery : searchQuery || selectedLabel}
@@ -89,7 +90,7 @@ export function StrategyInstrumentSelector({
             setSearchQuery(event.target.value);
           }}
           className={cn(
-            'w-full h-11 rounded-xl bg-slate-50 font-mono text-[11px] font-bold shadow-inner transition-all focus:border-blue-500/50 focus:ring-blue-500/20 dark:border-white/5 dark:bg-white/[0.03]',
+            'w-full h-11 rounded-panel bg-slate-50 font-mono text-ui-caption font-bold shadow-inner transition-all focus:border-blue-500/50 focus:ring-blue-500/20 dark:border-white/5 dark:bg-white/[0.03]',
             'border px-3 pr-9 outline-none placeholder:text-slate-400',
             selectedInstrument &&
               !isSearching &&

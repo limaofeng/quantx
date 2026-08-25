@@ -210,25 +210,25 @@ function PerformanceTooltip({
     kind === 'drawdown' ? fmtPct(-Math.abs(point.value)) : fmtPct(point.value);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-xl dark:border-white/10 dark:bg-slate-950">
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-ui-label shadow-none dark:border-white/10 dark:bg-slate-950">
       <div className="mb-2 font-bold text-slate-900 dark:text-white">
         {formatExactDate(label)}
       </div>
       <div className="space-y-1 text-slate-600 dark:text-slate-300">
-        <div className="flex min-w-[180px] justify-between gap-4">
+        <div className="flex min-w-[180px] justify-between gap-ui-section">
           <span>{title}</span>
           <span className="font-mono font-bold text-slate-900 dark:text-white">
             {value}
           </span>
         </div>
-        <div className="flex min-w-[180px] justify-between gap-4">
+        <div className="flex min-w-[180px] justify-between gap-ui-section">
           <span>权益</span>
           <span className="font-mono font-bold text-slate-900 dark:text-white">
             {fmtMoney(point.equity)}
           </span>
         </div>
         {point.eventType && (
-          <div className="flex min-w-[180px] justify-between gap-4">
+          <div className="flex min-w-[180px] justify-between gap-ui-section">
             <span>事件</span>
             <span className="font-mono font-bold uppercase text-slate-900 dark:text-white">
               {point.eventType}
@@ -259,12 +259,16 @@ function MetricCard({
   }[tone];
 
   return (
-    <Card className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-slate-900/70">
+    <Card className="rounded-lg border border-slate-200 bg-white p-ui-section shadow-sm dark:border-white/10 dark:bg-slate-900/70">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <span className="text-[11px] font-bold text-slate-500">{label}</span>
+        <span className="text-ui-caption font-bold text-slate-500">
+          {label}
+        </span>
         <Icon className="h-4 w-4 text-slate-400" />
       </div>
-      <div className={cn('text-xl font-black tabular-nums', toneClass)}>
+      <div
+        className={cn('text-ui-page-title font-black tabular-nums', toneClass)}
+      >
         {value}
       </div>
     </Card>
@@ -273,9 +277,9 @@ function MetricCard({
 
 function EmptyState({ message }: { message: string }) {
   return (
-    <Card className="rounded-lg border border-dashed border-slate-300 bg-white p-10 text-center dark:border-white/10 dark:bg-slate-900/60">
+    <Card className="rounded-lg border border-dashed border-slate-300 bg-white p-ui-empty text-center dark:border-white/10 dark:bg-slate-900/60">
       <BarChart3 className="mx-auto mb-4 h-8 w-8 text-slate-400" />
-      <div className="text-sm font-bold text-slate-700 dark:text-slate-200">
+      <div className="text-ui-body font-bold text-slate-700 dark:text-slate-200">
         {message}
       </div>
     </Card>
@@ -451,11 +455,11 @@ export default function PerformanceTab({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white px-5 py-4 dark:border-white/10 dark:bg-slate-900/70 md:flex-row md:items-center md:justify-between">
+    <div className="space-y-ui-section">
+      <div className="flex flex-col gap-3 rounded-lg border border-slate-200 bg-white px-ui-section py-ui-section dark:border-white/10 dark:bg-slate-900/70 md:flex-row md:items-center md:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-black text-slate-900 dark:text-white">
+            <h2 className="text-ui-title font-black text-slate-900 dark:text-white">
               策略绩效
             </h2>
             <Badge className="rounded-md bg-blue-500/10 text-blue-500 hover:bg-blue-500/10">
@@ -478,7 +482,7 @@ export default function PerformanceTab({
               </Badge>
             )}
           </div>
-          <p className="mt-1 text-xs font-medium text-slate-500">
+          <p className="mt-1 text-ui-label font-medium text-slate-500">
             样本 {returnedSampleCount.toLocaleString('zh-CN')} /{' '}
             {sampleCount.toLocaleString('zh-CN')}
             {rawSampleCount > compressedSampleCount && (
@@ -491,7 +495,7 @@ export default function PerformanceTab({
             · 来源 {sourceLabel}
           </p>
         </div>
-        <div className="flex items-center gap-2 text-xs font-bold text-slate-500">
+        <div className="flex items-center gap-2 text-ui-label font-bold text-slate-500">
           {qualityWarning ? (
             <AlertCircle className="h-4 w-4 text-amber-500" />
           ) : (
@@ -501,7 +505,7 @@ export default function PerformanceTab({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-ui-section lg:grid-cols-6">
         <MetricCard
           label="累计收益"
           value={fmtPct(metric(summary, 'totalReturnPct'))}
@@ -538,14 +542,16 @@ export default function PerformanceTab({
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70 xl:col-span-2">
+      <div className="grid grid-cols-1 gap-ui-panel xl:grid-cols-3">
+        <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70 xl:col-span-2">
           <div className="mb-5 flex items-center justify-between">
             <div>
-              <h3 className="text-sm font-black text-slate-900 dark:text-white">
+              <h3 className="text-ui-body font-black text-slate-900 dark:text-white">
                 收益曲线
               </h3>
-              <p className="text-xs text-slate-500">与回撤曲线共享时间范围</p>
+              <p className="text-ui-label text-slate-500">
+                与回撤曲线共享时间范围
+              </p>
             </div>
             {benchmarkCodeValue && (
               <Badge variant="outline" className="rounded-md">
@@ -599,8 +605,8 @@ export default function PerformanceTab({
           </div>
         </Card>
 
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70">
-          <h3 className="mb-5 text-sm font-black text-slate-900 dark:text-white">
+        <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70">
+          <h3 className="mb-5 text-ui-body font-black text-slate-900 dark:text-white">
             回撤曲线
           </h3>
           <div className="h-[320px]">
@@ -638,13 +644,13 @@ export default function PerformanceTab({
           </div>
         </Card>
 
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70 xl:col-span-3">
+        <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70 xl:col-span-3">
           <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <h3 className="text-sm font-black text-slate-900 dark:text-white">
+              <h3 className="text-ui-body font-black text-slate-900 dark:text-white">
                 时间范围
               </h3>
-              <p className="mt-1 text-xs font-medium text-slate-500">
+              <p className="mt-1 text-ui-label font-medium text-slate-500">
                 {rangeLabel}
               </p>
             </div>
@@ -652,7 +658,7 @@ export default function PerformanceTab({
               type="button"
               onClick={resetRange}
               disabled={!isRangeFiltered}
-              className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 text-xs font-bold text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-slate-300 dark:hover:border-blue-500/40 dark:hover:text-blue-300"
+              className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 text-ui-label font-bold text-slate-600 transition-colors hover:border-blue-300 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/10 dark:text-slate-300 dark:hover:border-blue-500/40 dark:hover:text-blue-300"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               全量
@@ -700,9 +706,9 @@ export default function PerformanceTab({
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70">
-          <h3 className="mb-5 text-sm font-black text-slate-900 dark:text-white">
+      <div className="grid grid-cols-1 gap-ui-panel xl:grid-cols-2">
+        <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70">
+          <h3 className="mb-5 text-ui-body font-black text-slate-900 dark:text-white">
             月度收益
           </h3>
           <div className="h-[260px]">
@@ -741,8 +747,8 @@ export default function PerformanceTab({
           </div>
         </Card>
 
-        <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70">
-          <h3 className="mb-5 text-sm font-black text-slate-900 dark:text-white">
+        <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70">
+          <h3 className="mb-5 text-ui-body font-black text-slate-900 dark:text-white">
             成交与执行质量
           </h3>
           <div className="grid grid-cols-2 gap-3">
@@ -770,12 +776,12 @@ export default function PerformanceTab({
             ].map(([label, value]) => (
               <div
                 key={label}
-                className="rounded-lg border border-slate-100 bg-slate-50 p-4 dark:border-white/5 dark:bg-white/[0.03]"
+                className="rounded-lg border border-slate-100 bg-slate-50 p-ui-section dark:border-white/5 dark:bg-white/[0.03]"
               >
-                <div className="text-[11px] font-bold text-slate-500">
+                <div className="text-ui-caption font-bold text-slate-500">
                   {label}
                 </div>
-                <div className="mt-1 text-base font-black text-slate-900 dark:text-white">
+                <div className="mt-1 text-ui-title font-black text-slate-900 dark:text-white">
                   {value}
                 </div>
               </div>
@@ -784,11 +790,11 @@ export default function PerformanceTab({
         </Card>
       </div>
 
-      <Card className="rounded-lg border border-slate-200 bg-white p-5 dark:border-white/10 dark:bg-slate-900/70">
-        <h3 className="mb-5 text-sm font-black text-slate-900 dark:text-white">
+      <Card className="rounded-lg border border-slate-200 bg-white p-ui-section dark:border-white/10 dark:bg-slate-900/70">
+        <h3 className="mb-5 text-ui-body font-black text-slate-900 dark:text-white">
           风险指标
         </h3>
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-ui-section md:grid-cols-3 lg:grid-cols-6">
           {[
             ['年化收益', fmtPct(metric(risk, 'annualReturnPct'))],
             ['年化波动', fmtPct(metric(risk, 'annualVolatilityPct'))],
@@ -805,12 +811,12 @@ export default function PerformanceTab({
           ].map(([label, value]) => (
             <div
               key={label}
-              className="rounded-lg bg-slate-50 p-4 dark:bg-white/[0.03]"
+              className="rounded-lg bg-slate-50 p-ui-section dark:bg-white/[0.03]"
             >
-              <div className="text-[11px] font-bold text-slate-500">
+              <div className="text-ui-caption font-bold text-slate-500">
                 {label}
               </div>
-              <div className="mt-1 text-base font-black text-slate-900 dark:text-white">
+              <div className="mt-1 text-ui-title font-black text-slate-900 dark:text-white">
                 {value}
               </div>
             </div>

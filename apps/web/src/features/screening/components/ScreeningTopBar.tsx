@@ -11,6 +11,8 @@ import {
 } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
 
+import { Input } from '@/components/ui/input';
+
 import {
   type ScreeningCriteria,
   type ScreeningMode,
@@ -77,8 +79,11 @@ function Section({
   open?: boolean;
 }) {
   return (
-    <details open={open} className="group border-b border-white/[0.06] py-4">
-      <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-slate-200 outline-none marker:hidden focus-visible:rounded focus-visible:ring-2 focus-visible:ring-cyan-400/70 [&::-webkit-details-marker]:hidden">
+    <details
+      open={open}
+      className="group border-b border-white/[0.06] py-ui-section"
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between text-ui-body font-semibold text-slate-200 outline-none marker:hidden focus-visible:rounded focus-visible:ring-2 focus-visible:ring-cyan-400/70 [&::-webkit-details-marker]:hidden">
         <span>{label}</span>
         <ChevronDown className="h-4 w-4 text-slate-500 transition-transform group-open:rotate-180 motion-reduce:transition-none" />
       </summary>
@@ -104,11 +109,14 @@ function NumberField({
 }) {
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-xs font-medium text-slate-400">
+      <label
+        htmlFor={id}
+        className="block text-ui-label font-medium text-slate-400"
+      >
         {label}
       </label>
       <div className="relative">
-        <input
+        <Input
           id={id}
           type="number"
           inputMode="decimal"
@@ -119,10 +127,10 @@ function NumberField({
             const raw = event.target.value;
             onChange(raw === '' ? undefined : Number(raw));
           }}
-          className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] px-3 text-sm font-mono text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
+          className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] px-3 text-ui-body font-mono text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
         />
         {suffix && (
-          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-slate-500">
+          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-ui-label text-slate-500">
             {suffix}
           </span>
         )}
@@ -147,7 +155,7 @@ function ChoiceGroup({
   return (
     <div className="space-y-2">
       {label && (
-        <div className="text-xs font-medium text-slate-400">{label}</div>
+        <div className="text-ui-label font-medium text-slate-400">{label}</div>
       )}
       <div
         role="group"
@@ -162,7 +170,7 @@ function ChoiceGroup({
               type="button"
               aria-pressed={selected}
               onClick={() => onChange(option.value)}
-              className={`h-8 rounded px-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
+              className={`h-8 rounded px-2 text-ui-label font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
                 selected
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
@@ -294,18 +302,20 @@ export function ScreeningTopBar({
 
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 w-full shrink-0 flex-col border-r border-white/[0.07] bg-slate-900">
-      <header className="shrink-0 border-b border-white/[0.07] px-4 py-4">
+      <header className="shrink-0 border-b border-white/[0.07] px-ui-section py-ui-section">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
               <SlidersHorizontal className="h-4 w-4 text-blue-400" />
-              <h1 className="text-base font-bold tracking-tight text-white">
+              <h1 className="text-ui-title font-bold tracking-tight text-white">
                 选股
               </h1>
             </div>
-            <p className="mt-1 text-xs text-slate-500">构建条件，运行后应用</p>
+            <p className="mt-1 text-ui-label text-slate-500">
+              构建条件，运行后应用
+            </p>
           </div>
-          <span className="rounded border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 font-mono text-[10px] text-blue-300">
+          <span className="rounded border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 font-mono text-ui-caption text-blue-300">
             {activeConditions} 条条件
           </span>
         </div>
@@ -323,7 +333,7 @@ export function ScreeningTopBar({
                 data-testid={`screening-mode-${option.value}`}
                 aria-pressed={selected}
                 onClick={() => updateCriteria('screeningMode', option.value)}
-                className={`h-9 rounded text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
+                className={`h-9 rounded text-ui-body font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
                   selected
                     ? option.value === 'INTRADAY'
                       ? 'bg-cyan-500 text-slate-950'
@@ -339,7 +349,7 @@ export function ScreeningTopBar({
         {hasPendingChanges && (
           <div
             aria-live="polite"
-            className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-xs text-amber-200"
+            className="mt-3 flex items-center gap-2 rounded-md border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2 text-ui-label text-amber-200"
           >
             <Info className="h-3.5 w-3.5 shrink-0" />
             有未应用更改，点击运行后更新结果
@@ -347,7 +357,7 @@ export function ScreeningTopBar({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 custom-scrollbar">
+      <div className="min-h-0 flex-1 overflow-y-auto px-ui-section custom-scrollbar">
         <Section label="筛选范围">
           <ChoiceGroup
             ariaLabel="股票范围"
@@ -359,7 +369,7 @@ export function ScreeningTopBar({
           {!isIntradayMode && stockOnlyFiltersEnabled && (
             <label
               htmlFor="screening-exclude-st"
-              className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-xs text-slate-300 transition-colors hover:border-white/20 focus-within:ring-2 focus-within:ring-cyan-400/70"
+              className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-ui-label text-slate-300 transition-colors hover:border-white/20 focus-within:ring-2 focus-within:ring-cyan-400/70"
             >
               <input
                 id="screening-exclude-st"
@@ -378,18 +388,18 @@ export function ScreeningTopBar({
             <div className="space-y-2">
               <label
                 htmlFor="screening-industry-search"
-                className="block text-xs font-medium text-slate-400"
+                className="block text-ui-label font-medium text-slate-400"
               >
                 行业（包含）
               </label>
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-600" />
-                <input
+                <Input
                   id="screening-industry-search"
                   value={industrySearch}
                   onChange={event => setIndustrySearch(event.target.value)}
                   placeholder="搜索申万一级行业"
-                  className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] pl-9 pr-3 text-xs text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
+                  className="h-9 w-full rounded-md border border-white/[0.09] bg-[#09111f] pl-9 pr-3 text-ui-label text-slate-100 outline-none transition-colors placeholder:text-slate-600 focus:border-cyan-400/80 focus:ring-2 focus:ring-cyan-400/20"
                 />
               </div>
               {selectedIndustries.length > 0 && (
@@ -400,7 +410,7 @@ export function ScreeningTopBar({
                       type="button"
                       aria-label={`移除行业 ${industry}`}
                       onClick={() => toggleIndustry(industry)}
-                      className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                      className="inline-flex items-center gap-1 rounded border border-blue-400/30 bg-blue-500/10 px-2 py-1 text-ui-caption text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                     >
                       {industry} <span aria-hidden="true">×</span>
                     </button>
@@ -422,7 +432,7 @@ export function ScreeningTopBar({
                         role="checkbox"
                         aria-checked={selected}
                         onClick={() => toggleIndustry(industry)}
-                        className={`flex min-h-8 items-center justify-between rounded px-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
+                        className={`flex min-h-8 items-center justify-between rounded px-2 text-left text-ui-label transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 ${
                           selected
                             ? 'bg-blue-500/15 text-blue-200'
                             : 'text-slate-500 hover:bg-white/[0.06] hover:text-slate-200'
@@ -434,7 +444,7 @@ export function ScreeningTopBar({
                     );
                   })
                 ) : (
-                  <span className="col-span-2 px-2 py-3 text-center text-xs text-slate-600">
+                  <span className="col-span-2 px-2 py-3 text-center text-ui-label text-slate-600">
                     行业列表暂不可用
                   </span>
                 )}
@@ -574,7 +584,7 @@ export function ScreeningTopBar({
                     <label
                       key={strategy.id}
                       htmlFor={id}
-                      className={`flex min-h-9 cursor-pointer items-center gap-2 rounded-md border px-2 text-xs transition-colors focus-within:ring-2 focus-within:ring-cyan-400/80 ${
+                      className={`flex min-h-9 cursor-pointer items-center gap-2 rounded-md border px-2 text-ui-label transition-colors focus-within:ring-2 focus-within:ring-cyan-400/80 ${
                         checked
                           ? 'border-blue-400/40 bg-blue-500/10 text-blue-200'
                           : 'border-white/[0.08] bg-[#09111f] text-slate-500 hover:border-white/20 hover:text-slate-200'
@@ -597,7 +607,7 @@ export function ScreeningTopBar({
               {(screeningCriteria.enableRSIOversold ||
                 screeningCriteria.enableRSIStrong) && (
                 <div className="space-y-3 border-t border-white/[0.06] pt-3">
-                  <div className="text-xs font-medium text-slate-400">
+                  <div className="text-ui-label font-medium text-slate-400">
                     RSI 阈值
                   </div>
                   {screeningCriteria.enableRSIOversold && (
@@ -627,7 +637,7 @@ export function ScreeningTopBar({
             <Section label="数据健康">
               <label
                 htmlFor="screening-require-fresh"
-                className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-xs text-slate-300 focus-within:ring-2 focus-within:ring-cyan-400/70"
+                className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md border border-white/[0.08] bg-[#09111f] px-3 text-ui-label text-slate-300 focus-within:ring-2 focus-within:ring-cyan-400/70"
               >
                 <input
                   id="screening-require-fresh"
@@ -643,7 +653,7 @@ export function ScreeningTopBar({
 
               <div
                 aria-live="polite"
-                className="rounded-md border border-white/[0.07] bg-[#09111f] p-3 text-xs"
+                className="rounded-md border border-white/[0.07] bg-[#09111f] p-3 text-ui-label"
               >
                 <div className="flex items-center gap-2">
                   <span
@@ -654,7 +664,7 @@ export function ScreeningTopBar({
                   </span>
                 </div>
                 {meta.snapshotDate && (
-                  <div className="mt-2 font-mono text-[11px] text-slate-500">
+                  <div className="mt-2 font-mono text-ui-caption text-slate-500">
                     快照 {meta.snapshotDate}
                   </div>
                 )}
@@ -664,7 +674,7 @@ export function ScreeningTopBar({
                   </div>
                 )}
                 {!isIntradayMode && snapshotRunState && (
-                  <div className="mt-1 font-mono text-[11px] text-slate-500">
+                  <div className="mt-1 font-mono text-ui-caption text-slate-500">
                     Prefect · {snapshotRunState}
                   </div>
                 )}
@@ -676,7 +686,7 @@ export function ScreeningTopBar({
                     type="button"
                     onClick={onBackfillSnapshot}
                     disabled={snapshotBackfillLoading}
-                    className="inline-flex min-h-9 items-center gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex min-h-9 items-center gap-2 rounded-md border border-amber-400/30 bg-amber-500/10 px-3 text-ui-label font-semibold text-amber-200 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/80 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {snapshotBackfillLoading ? (
                       <RefreshCw className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
@@ -689,7 +699,7 @@ export function ScreeningTopBar({
                     <button
                       type="button"
                       onClick={onOpenSnapshotRun}
-                      className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-xs text-rose-300 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                      className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-ui-label text-rose-300 transition-colors hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
                       查看日志
@@ -698,7 +708,7 @@ export function ScreeningTopBar({
                   <button
                     type="button"
                     onClick={onOpenAdvancedData}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-xs text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                    className="inline-flex min-h-9 items-center gap-1 rounded-md px-2 text-ui-label text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                   >
                     <Settings2 className="h-3.5 w-3.5" />
                     高级补数
@@ -710,8 +720,8 @@ export function ScreeningTopBar({
         )}
       </div>
 
-      <footer className="sticky bottom-0 shrink-0 border-t border-white/[0.08] bg-slate-900 p-4 shadow-[0_-8px_20px_rgba(0,0,0,0.18)]">
-        <div className="mb-3 text-xs text-slate-500">
+      <footer className="sticky bottom-0 shrink-0 border-t border-white/[0.08] bg-slate-900 p-ui-section shadow-[0_-8px_20px_rgba(0,0,0,0.18)]">
+        <div className="mb-3 text-ui-label text-slate-500">
           <span>
             {hasPendingChanges
               ? `当前草稿 · ${activeConditions} 条，运行后应用`
@@ -722,7 +732,7 @@ export function ScreeningTopBar({
           <button
             type="button"
             onClick={onReset}
-            className="h-10 rounded-md border border-white/[0.12] bg-[#09111f] text-sm font-semibold text-slate-300 transition-colors hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+            className="h-10 rounded-md border border-white/[0.12] bg-[#09111f] text-ui-body font-semibold text-slate-300 transition-colors hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
           >
             重置
           </button>
@@ -730,7 +740,7 @@ export function ScreeningTopBar({
             type="button"
             onClick={onRunScreening}
             disabled={screeningLoading}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 text-sm font-semibold text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-blue-600 px-3 text-ui-body font-semibold text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {screeningLoading && (
               <RefreshCw className="h-4 w-4 animate-spin motion-reduce:animate-none" />

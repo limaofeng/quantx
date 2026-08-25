@@ -187,7 +187,7 @@ describe('TakeProfitPlanPanel', () => {
     });
 
     expect(screen.getByRole('button', { name: '任一条件触发' })).toHaveClass(
-      'text-red-100'
+      'text-primary'
     );
     expect(screen.getByLabelText('目标收益率 (%)')).toHaveValue(15);
     expect(screen.getByLabelText('目标价')).toHaveValue(83.23);

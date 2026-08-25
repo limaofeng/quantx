@@ -78,7 +78,7 @@ export function MarketDataSyncCard() {
     <button
       type="button"
       className={cn(
-        'group relative flex h-full min-h-[150px] cursor-pointer flex-col overflow-hidden rounded-xl border p-5 text-left shadow-sm transition-colors hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+        'group relative flex h-full min-h-[150px] cursor-pointer flex-col overflow-hidden rounded-panel border p-ui-section text-left shadow-sm transition-colors hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
         theme.bg,
         theme.border,
         theme.shadow
@@ -89,7 +89,7 @@ export function MarketDataSyncCard() {
         <div className="flex min-w-0 items-center gap-3">
           <div
             className={cn(
-              'rounded-xl p-2 ring-1 ring-inset ring-black/5 dark:ring-white/10',
+              'rounded-panel p-2 ring-1 ring-inset ring-black/5 dark:ring-white/10',
               theme.iconBg,
               theme.iconText
             )}
@@ -99,10 +99,10 @@ export function MarketDataSyncCard() {
             />
           </div>
           <div className="min-w-0">
-            <h3 className="truncate text-base font-bold text-slate-800 dark:text-slate-100">
+            <h3 className="truncate text-ui-title font-bold text-slate-800 dark:text-slate-100">
               K线批量同步
             </h3>
-            <p className="mt-0.5 text-[10px] font-medium text-slate-500 dark:text-slate-400">
+            <p className="mt-0.5 text-ui-caption font-medium text-slate-500 dark:text-slate-400">
               daily-market-data-sync
             </p>
           </div>
@@ -111,7 +111,7 @@ export function MarketDataSyncCard() {
         <Badge
           variant="outline"
           className={cn(
-            'shrink-0 gap-1 border-opacity-30 pr-2 text-[10px]',
+            'shrink-0 gap-1 border-opacity-30 pr-2 text-ui-caption',
             isSyncing
               ? isStale
                 ? 'border-red-500 bg-red-500/5 text-red-600'
@@ -140,21 +140,21 @@ export function MarketDataSyncCard() {
         </Badge>
       </div>
 
-      <p className="relative z-10 mt-4 max-w-[360px] text-xs font-medium leading-relaxed text-slate-600 dark:text-slate-400">
+      <p className="relative z-10 mt-4 max-w-[360px] text-ui-label font-medium leading-relaxed text-slate-600 dark:text-slate-400">
         独立管理 A 股、ETF、指数的 1d / 1m / tick
         历史行情下载，支持指定日期范围和指定标的列表。
       </p>
 
       <div className="relative z-10 mt-auto flex flex-wrap gap-2 pt-4">
-        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-[10px] font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
+        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-ui-caption font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
           <Layers className="h-3 w-3" />
           分片下载
         </span>
-        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-[10px] font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
+        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-ui-caption font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
           <Database className="h-3 w-3" />
           K线缓存
         </span>
-        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-[10px] font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
+        <span className="inline-flex items-center gap-1.5 rounded border border-slate-200/60 bg-white/50 px-2 py-1 text-ui-caption font-bold text-slate-500 dark:border-white/5 dark:bg-black/20">
           <Clock className="h-3 w-3" />
           {deployment?.lastRunTime
             ? formatDistanceToNow(new Date(deployment.lastRunTime), {
@@ -167,7 +167,7 @@ export function MarketDataSyncCard() {
 
       <div
         className={cn(
-          'relative z-10 mt-4 flex items-center gap-1 text-[10px] font-black opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100',
+          'relative z-10 mt-4 flex items-center gap-1 text-ui-caption font-black opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100',
           theme.accent
         )}
       >

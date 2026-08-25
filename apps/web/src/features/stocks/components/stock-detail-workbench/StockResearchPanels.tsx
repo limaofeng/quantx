@@ -87,7 +87,7 @@ function WorkspacePanel({
     >
       <div className="flex h-9 items-center gap-2 border-b border-white/5 px-3">
         <Icon className="h-3.5 w-3.5 text-blue-300" />
-        <h3 className="truncate text-[11px] font-black text-slate-200">
+        <h3 className="truncate text-ui-caption font-black text-slate-200">
           {title}
         </h3>
       </div>
@@ -127,12 +127,12 @@ export function StockHoldingSnapshot({
       <div className="grid grid-cols-2 gap-px bg-white/5 xl:grid-cols-4 2xl:grid-cols-2">
         {metrics.map(metric => (
           <div key={metric.label} className="min-w-0 bg-[#0b1120] px-3 py-2.5">
-            <div className="text-[10px] font-bold text-slate-500">
+            <div className="text-ui-caption font-bold text-slate-500">
               {metric.label}
             </div>
             <div
               className={cn(
-                'mt-1 truncate font-mono text-xs font-black tabular-nums text-slate-200',
+                'mt-1 truncate font-mono text-ui-label font-black tabular-nums text-slate-200',
                 metric.tone != null &&
                   Number(metric.tone) < 0 &&
                   'text-holding-down',
@@ -147,7 +147,7 @@ export function StockHoldingSnapshot({
         ))}
       </div>
       {!holding && (
-        <div className="border-t border-white/5 px-3 py-2 text-[10px] font-bold text-amber-200">
+        <div className="border-t border-white/5 px-3 py-2 text-ui-caption font-bold text-amber-200">
           当前标的未持仓，平仓操作不可用。
         </div>
       )}
@@ -174,8 +174,10 @@ function AnnouncementPreview({
           </div>
         ) : announcements.length === 0 ? (
           <div className="flex h-full min-h-24 flex-col items-center justify-center text-center">
-            <div className="text-xs font-bold text-slate-400">暂无公告</div>
-            <div className="mt-1 text-[10px] text-slate-600">
+            <div className="text-ui-label font-bold text-slate-400">
+              暂无公告
+            </div>
+            <div className="mt-1 text-ui-caption text-slate-600">
               {disclosure?.sourceMessage || '等待公告数据同步'}
             </div>
           </div>
@@ -195,10 +197,10 @@ function AnnouncementPreview({
                     : 'cursor-default'
                 )}
               >
-                <span className="font-mono text-[10px] font-bold text-slate-600">
+                <span className="font-mono text-ui-caption font-bold text-slate-600">
                   {formatDate(item.announceDate)}
                 </span>
-                <span className="truncate text-[11px] font-bold text-slate-300">
+                <span className="truncate text-ui-caption font-bold text-slate-300">
                   {item.title}
                 </span>
               </a>
@@ -242,8 +244,10 @@ function FinancialPreview({
       ) : (
         <div className="p-2">
           <div className="mb-2 flex items-center justify-between gap-3 px-1">
-            <span className="text-[10px] font-bold text-slate-600">报告期</span>
-            <span className="font-mono text-[10px] font-black text-slate-300">
+            <span className="text-ui-caption font-bold text-slate-600">
+              报告期
+            </span>
+            <span className="font-mono text-ui-caption font-black text-slate-300">
               {reportPeriod(summary?.latestReportDate)}
             </span>
           </div>
@@ -253,10 +257,10 @@ function FinancialPreview({
                 key={metric.label}
                 className="min-w-0 border border-white/5 bg-[#08101d]/70 px-2.5 py-2"
               >
-                <div className="truncate text-[9px] font-bold text-slate-600">
+                <div className="truncate text-ui-micro font-bold text-slate-600">
                   {metric.label}
                 </div>
-                <div className="mt-1 truncate font-mono text-xs font-black text-slate-200">
+                <div className="mt-1 truncate font-mono text-ui-label font-black text-slate-200">
                   {metric.value}
                 </div>
               </div>
@@ -361,7 +365,7 @@ export function StockFinancialRail({
           <div className="m-2 h-24 skeleton-shimmer" />
         ) : (
           <div className="space-y-2 p-3">
-            <div className="flex items-center justify-between text-[10px] font-bold">
+            <div className="flex items-center justify-between text-ui-caption font-bold">
               <span className="text-slate-500">最新报告</span>
               <span className="font-mono text-slate-300">
                 {reportPeriod(financialSummary?.latestReportDate)}
@@ -370,7 +374,7 @@ export function StockFinancialRail({
             {completeness.map(item => (
               <div
                 key={item.label}
-                className="flex items-center justify-between text-[10px] font-bold"
+                className="flex items-center justify-between text-ui-caption font-bold"
               >
                 <span className="text-slate-500">{item.label}</span>
                 <span
@@ -412,14 +416,14 @@ export function StockAnnouncementsPanel({
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col gap-2 overflow-y-auto p-2 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-2 border border-white/5 bg-[#0b1120]/80 px-3 py-2">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">
+          <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-blue-300">
             Disclosures
           </div>
           <div className="mt-1 flex items-center gap-2">
-            <h2 className="text-sm font-black text-slate-100">
+            <h2 className="text-ui-body font-black text-slate-100">
               公告与公司行动
             </h2>
-            <span className="font-mono text-[10px] font-bold text-slate-600">
+            <span className="font-mono text-ui-caption font-bold text-slate-600">
               {disclosure?.announcements.length ?? 0} 条
             </span>
           </div>
@@ -428,7 +432,7 @@ export function StockAnnouncementsPanel({
           type="button"
           size="sm"
           variant="outline"
-          className="h-8 border-white/10 bg-white/[0.03] text-xs text-slate-300"
+          className="h-control-compact border-white/10 bg-white/[0.03] text-ui-label text-slate-300"
           disabled={isRefreshing}
           onClick={onRefresh}
         >
@@ -441,7 +445,7 @@ export function StockAnnouncementsPanel({
       {error && (
         <div
           role="alert"
-          className="flex items-center gap-2 border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[11px] font-bold text-amber-200"
+          className="flex items-center gap-2 border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-ui-caption font-bold text-amber-200"
         >
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           {error.message}
@@ -487,20 +491,20 @@ export function StockSummaryStrip({
   return (
     <section className="min-h-0 border border-white/5 bg-[#0b1120]/80">
       <div className="flex h-9 items-center justify-between border-b border-white/5 px-3">
-        <h2 className="text-[11px] font-black text-slate-200">个股摘要</h2>
-        <span className="font-mono text-[9px] font-bold text-slate-600">
+        <h2 className="text-ui-caption font-black text-slate-200">个股摘要</h2>
+        <span className="font-mono text-ui-micro font-bold text-slate-600">
           {reportPeriod(financialSummary?.latestReportDate)}
         </span>
       </div>
       <div className="grid min-h-[118px] grid-cols-2 gap-px bg-white/5 md:grid-cols-4 xl:grid-cols-[repeat(3,minmax(112px,0.55fr))_minmax(260px,1.45fr)_minmax(250px,1.2fr)]">
         {metrics.map(metric => (
           <div key={metric.label} className="min-w-0 bg-[#0b1120] px-3 py-3">
-            <div className="text-[9px] font-bold text-slate-600">
+            <div className="text-ui-micro font-bold text-slate-600">
               {metric.label}
             </div>
             <div
               className={cn(
-                'mt-2 truncate font-mono text-sm font-black text-slate-100',
+                'mt-2 truncate font-mono text-ui-body font-black text-slate-100',
                 metric.tone != null &&
                   Number(metric.tone) < 0 &&
                   'text-holding-down',
@@ -514,28 +518,28 @@ export function StockSummaryStrip({
           </div>
         ))}
         <div className="min-w-0 bg-[#0b1120] px-3 py-3">
-          <div className="text-[9px] font-bold text-slate-600">最新公告</div>
+          <div className="text-ui-micro font-bold text-slate-600">最新公告</div>
           <div className="mt-2 space-y-1.5">
             {announcements.length > 0 ? (
               announcements.map(item => (
                 <div key={item.id} className="flex min-w-0 items-center gap-2">
-                  <span className="shrink-0 font-mono text-[9px] text-slate-600">
+                  <span className="shrink-0 font-mono text-ui-micro text-slate-600">
                     {formatDate(item.announceDate)}
                   </span>
-                  <span className="truncate text-[10px] font-bold text-slate-300">
+                  <span className="truncate text-ui-caption font-bold text-slate-300">
                     {item.title}
                   </span>
                 </div>
               ))
             ) : (
-              <span className="text-[10px] font-bold text-slate-600">
+              <span className="text-ui-caption font-bold text-slate-600">
                 暂无公告
               </span>
             )}
           </div>
         </div>
         <div className="min-w-0 bg-[#0b1120] px-3 py-3">
-          <div className="text-[9px] font-bold text-slate-600">财务快照</div>
+          <div className="text-ui-micro font-bold text-slate-600">财务快照</div>
           <div className="mt-2 grid grid-cols-3 gap-2">
             {[
               { label: '营收', value: financialSummary?.revenue },
@@ -546,10 +550,10 @@ export function StockSummaryStrip({
               { label: 'EPS', value: financialSummary?.epsBasic },
             ].map(item => (
               <div key={item.label} className="min-w-0">
-                <div className="truncate text-[9px] text-slate-600">
+                <div className="truncate text-ui-micro text-slate-600">
                   {item.label}
                 </div>
-                <div className="mt-1 truncate font-mono text-[10px] font-black text-slate-300">
+                <div className="mt-1 truncate font-mono text-ui-caption font-black text-slate-300">
                   {formatFinancialMetric(item.value)}
                 </div>
               </div>

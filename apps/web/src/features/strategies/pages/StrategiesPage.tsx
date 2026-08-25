@@ -180,29 +180,29 @@ function ModePlaceholder({
   const Icon = meta.icon;
 
   return (
-    <div className="studio-workspace-surface flex h-full min-h-0 items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-lg border border-dashed border-white/10 bg-white/[0.03] p-6 text-center">
+    <div className="studio-workspace-surface flex h-full min-h-0 items-center justify-center p-ui-panel">
+      <div className="w-full max-w-md rounded-lg border border-dashed border-white/10 bg-white/[0.03] p-ui-panel text-center">
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-lg border border-blue-500/20 bg-blue-500/10 text-blue-300">
           <Icon className="h-5 w-5" />
         </div>
-        <h2 className="mt-4 text-sm font-black uppercase tracking-[0.2em] text-slate-100">
+        <h2 className="mt-4 text-ui-body font-black uppercase tracking-[0.2em] text-slate-100">
           {meta.title}
         </h2>
-        <p className="mt-3 text-xs leading-relaxed text-slate-500">
+        <p className="mt-3 text-ui-label leading-relaxed text-slate-500">
           {meta.description}
         </p>
         <div className="mt-5 flex justify-center gap-2">
           <button
             type="button"
             onClick={onOpenRuns}
-            className="h-8 rounded-md border border-white/10 px-3 text-[10px] font-bold uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300"
+            className="h-8 rounded-md border border-white/10 px-3 text-ui-caption font-bold uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300"
           >
             查看实例
           </button>
           <button
             type="button"
             onClick={onCreate}
-            className="h-8 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500"
+            className="h-8 rounded-md bg-blue-600 px-3 text-ui-caption font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500"
           >
             新建实例
           </button>
@@ -249,15 +249,15 @@ function StrategyInstanceNavItem({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-xs font-bold">
+          <span className="truncate text-ui-label font-bold">
             {instance.displayName}
           </span>
           <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', tone.dot)} />
         </span>
-        <span className="mt-0.5 block truncate font-mono text-[10px] text-slate-500">
+        <span className="mt-0.5 block truncate font-mono text-ui-caption text-slate-500">
           {instance.instrumentCode}
         </span>
-        <span className="mt-1 flex items-center justify-between gap-2 text-[10px] text-slate-600">
+        <span className="mt-1 flex items-center justify-between gap-2 text-ui-caption text-slate-600">
           <span>
             {state.modeLabel} / {state.statusLabel}
           </span>
@@ -307,17 +307,17 @@ function StrategySidebar({
 
   return (
     <aside className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-white/5 px-4 py-3">
-        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
+      <div className="border-b border-white/5 px-ui-section py-3">
+        <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-blue-400">
           Strategy Studio
         </div>
-        <div className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
+        <div className="mt-1 text-ui-label font-medium leading-relaxed text-slate-500">
           策略实例、模板和运行状态集中管理。
         </div>
       </div>
 
       <div className="border-b border-white/5 p-2">
-        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+        <div className="mb-2 px-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
           Workspace
         </div>
         <div className="space-y-1">
@@ -339,10 +339,10 @@ function StrategySidebar({
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-bold">
+                  <span className="block truncate text-ui-label font-bold">
                     {item.label}
                   </span>
-                  <span className="block truncate text-[10px] font-medium text-slate-600">
+                  <span className="block truncate text-ui-caption font-medium text-slate-600">
                     {item.meta}
                   </span>
                 </span>
@@ -355,10 +355,10 @@ function StrategySidebar({
       <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
         <div className="mb-2 flex items-center justify-between px-2">
           <div>
-            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+            <div className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
               Strategy Instances
             </div>
-            <div className="mt-0.5 text-[10px] font-medium text-slate-600">
+            <div className="mt-0.5 text-ui-caption font-medium text-slate-600">
               {activeCount} 运行中 / {instances.length} 总实例
             </div>
           </div>
@@ -375,7 +375,7 @@ function StrategySidebar({
         </div>
 
         {error && (
-          <div className="mb-2 rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-[11px] font-medium leading-relaxed text-rose-300">
+          <div className="mb-2 rounded-md border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-ui-caption font-medium leading-relaxed text-rose-300">
             {error.message}
           </div>
         )}
@@ -390,12 +390,12 @@ function StrategySidebar({
             ))}
           </div>
         ) : instances.length === 0 ? (
-          <div className="rounded-md border border-dashed border-white/10 px-3 py-5 text-center">
+          <div className="rounded-md border border-dashed border-white/10 px-3 py-ui-section text-center">
             <Boxes className="mx-auto h-5 w-5 text-slate-600" />
-            <div className="mt-2 text-xs font-bold text-slate-400">
+            <div className="mt-2 text-ui-label font-bold text-slate-400">
               暂无策略实例
             </div>
-            <div className="mt-1 text-[10px] leading-relaxed text-slate-600">
+            <div className="mt-1 text-ui-caption leading-relaxed text-slate-600">
               等待创建新的单标的策略实例。
             </div>
           </div>
@@ -416,7 +416,7 @@ function StrategySidebar({
         <button
           type="button"
           onClick={onCreate}
-          className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-blue-600 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+          className="flex h-8 w-full items-center justify-center gap-2 rounded-md bg-blue-600 text-ui-caption font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
         >
           <Plus className="h-3.5 w-3.5" />
           新建策略实例
@@ -523,21 +523,21 @@ function StrategyDashboardHome({
   ];
 
   return (
-    <div className="studio-workspace-surface h-full overflow-y-auto p-4 custom-scrollbar">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
-        <section className="rounded-lg border border-white/5 bg-[#0b1120]/70 px-4 py-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div className="studio-workspace-surface h-full overflow-y-auto p-ui-section custom-scrollbar">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-ui-section">
+        <section className="rounded-lg border border-white/5 bg-[#0b1120]/70 px-ui-section py-ui-section">
+          <div className="flex flex-col gap-ui-section lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-blue-400" />
-                <span className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-300">
+                <span className="text-ui-caption font-black uppercase tracking-[0.24em] text-blue-300">
                   Strategy Dashboard
                 </span>
               </div>
-              <h1 className="mt-2 text-xl font-black tracking-tight text-slate-50">
+              <h1 className="mt-2 text-ui-page-title font-black tracking-tight text-slate-50">
                 策略运行态势
               </h1>
-              <p className="mt-1 max-w-2xl text-xs leading-relaxed text-slate-500">
+              <p className="mt-1 max-w-2xl text-ui-label leading-relaxed text-slate-500">
                 全实例运行状态、模式分布与近期决策活动。
               </p>
             </div>
@@ -545,7 +545,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onRefresh}
-                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
               >
                 <RefreshCw
                   className={cn('h-3.5 w-3.5', fetching && 'animate-spin')}
@@ -555,7 +555,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onOpenCatalog}
-                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                className="flex h-8 items-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-black uppercase tracking-wider text-slate-300 transition-colors hover:border-blue-500/40 hover:text-blue-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
               >
                 <BookOpen className="h-3.5 w-3.5" />
                 策略库
@@ -563,7 +563,7 @@ function StrategyDashboardHome({
               <button
                 type="button"
                 onClick={onCreate}
-                className="flex h-8 items-center gap-2 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                className="flex h-8 items-center gap-2 rounded-md bg-blue-600 px-3 text-ui-caption font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
               >
                 <Plus className="h-3.5 w-3.5" />
                 新建实例
@@ -573,7 +573,7 @@ function StrategyDashboardHome({
         </section>
 
         {error && (
-          <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-xs font-bold text-rose-300">
+          <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-ui-section py-3 text-ui-label font-bold text-rose-300">
             <AlertCircle className="mr-2 inline h-4 w-4 align-[-3px]" />
             {error.message}
           </div>
@@ -590,7 +590,7 @@ function StrategyDashboardHome({
                 className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-3"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-600">
+                  <span className="text-ui-caption font-black uppercase tracking-[0.18em] text-slate-600">
                     {kpi.label}
                   </span>
                   <span
@@ -604,7 +604,7 @@ function StrategyDashboardHome({
                     <Icon className="h-3.5 w-3.5" />
                   </span>
                 </div>
-                <div className="mt-4 font-mono text-2xl font-bold tabular-nums text-slate-50">
+                <div className="mt-4 font-mono text-ui-display font-bold tabular-nums text-slate-50">
                   {fetching && instances.length === 0 ? '--' : kpi.value}
                 </div>
               </div>
@@ -613,16 +613,18 @@ function StrategyDashboardHome({
         </section>
 
         <section className="grid min-h-[360px] grid-cols-1 gap-3 xl:grid-cols-[1.45fr_0.9fr]">
-          <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-4">
+          <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-ui-section">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-sm font-black text-slate-100">最近活动</h2>
-                <p className="mt-1 text-[11px] text-slate-600">
+                <h2 className="text-ui-body font-black text-slate-100">
+                  最近活动
+                </h2>
+                <p className="mt-1 text-ui-caption text-slate-600">
                   按最近更新时间展示可打开的策略实例。
                 </p>
               </div>
               {latestInstance && (
-                <div className="hidden text-right text-[10px] text-slate-600 sm:block">
+                <div className="hidden text-right text-ui-caption text-slate-600 sm:block">
                   最近更新
                   <div className="font-mono text-slate-400">
                     {formatCompactTime(
@@ -646,13 +648,13 @@ function StrategyDashboardHome({
               <div className="flex min-h-[220px] items-center justify-center rounded-lg border border-dashed border-white/10 text-center">
                 <div>
                   <BarChart3 className="mx-auto h-8 w-8 text-slate-600" />
-                  <div className="mt-3 text-sm font-bold text-slate-300">
+                  <div className="mt-3 text-ui-body font-bold text-slate-300">
                     还没有可打开的策略 dashboard
                   </div>
                   <button
                     type="button"
                     onClick={onCreate}
-                    className="mt-4 h-8 rounded-md bg-blue-600 px-3 text-[10px] font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                    className="mt-4 h-8 rounded-md bg-blue-600 px-3 text-ui-caption font-black uppercase tracking-wider text-white transition-colors hover:bg-blue-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
                   >
                     新建策略实例
                   </button>
@@ -686,20 +688,23 @@ function StrategyDashboardHome({
                         <ModeIcon className="h-4 w-4" />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-bold text-slate-200">
+                        <span className="block truncate text-ui-body font-bold text-slate-200">
                           {instance.displayName}
                         </span>
-                        <span className="mt-0.5 block truncate font-mono text-[10px] text-slate-600">
+                        <span className="mt-0.5 block truncate font-mono text-ui-caption text-slate-600">
                           {instance.instrumentCode} / {instance.id}
                         </span>
                       </span>
                       <span className="hidden shrink-0 text-right sm:block">
                         <span
-                          className={cn('block text-xs font-bold', tone.text)}
+                          className={cn(
+                            'block text-ui-label font-bold',
+                            tone.text
+                          )}
                         >
                           {state.statusLabel}
                         </span>
-                        <span className="mt-0.5 block text-[10px] text-slate-600">
+                        <span className="mt-0.5 block text-ui-caption text-slate-600">
                           {formatCompactTime(
                             instance.lastDecisionAt || instance.updatedAt
                           )}
@@ -714,8 +719,10 @@ function StrategyDashboardHome({
           </div>
 
           <div className="grid grid-cols-1 gap-3">
-            <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-4">
-              <h2 className="text-sm font-black text-slate-100">模式分布</h2>
+            <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-ui-section">
+              <h2 className="text-ui-body font-black text-slate-100">
+                模式分布
+              </h2>
               <div className="mt-3 space-y-2">
                 {modeRows.map(row => {
                   const Icon = row.icon;
@@ -728,11 +735,11 @@ function StrategyDashboardHome({
                   return (
                     <div key={row.label} className="space-y-1.5">
                       <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2 text-xs font-bold text-slate-300">
+                        <div className="flex items-center gap-2 text-ui-label font-bold text-slate-300">
                           <Icon className={cn('h-3.5 w-3.5', tone.text)} />
                           {row.label}
                         </div>
-                        <span className="font-mono text-xs text-slate-400">
+                        <span className="font-mono text-ui-label text-slate-400">
                           {row.value}
                         </span>
                       </div>
@@ -748,9 +755,11 @@ function StrategyDashboardHome({
               </div>
             </div>
 
-            <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-4">
-              <h2 className="text-sm font-black text-slate-100">执行边界</h2>
-              <div className="mt-3 space-y-2 text-[11px] leading-relaxed text-slate-500">
+            <div className="rounded-lg border border-white/5 bg-[#0b1120]/70 p-ui-section">
+              <h2 className="text-ui-body font-black text-slate-100">
+                执行边界
+              </h2>
+              <div className="mt-3 space-y-2 text-ui-caption leading-relaxed text-slate-500">
                 <div className="rounded-md border border-white/5 bg-white/[0.03] px-3 py-2">
                   策略输出保持为 TradeIntent 与状态补丁。
                 </div>
@@ -822,7 +831,7 @@ export default function StrategiesPage() {
 
     if (activeMode === 'CATALOG') {
       return (
-        <div className="studio-workspace-surface h-full overflow-y-auto p-4 custom-scrollbar">
+        <div className="studio-workspace-surface h-full overflow-y-auto p-ui-section custom-scrollbar">
           <AvailableStrategies compact />
         </div>
       );

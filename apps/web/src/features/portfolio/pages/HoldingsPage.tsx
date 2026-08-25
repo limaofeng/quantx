@@ -36,7 +36,7 @@ export function HoldingsPage() {
       <PortfolioStudioShell
         activeMode="HOLDINGS"
         content={
-          <div className="flex h-full items-center justify-center text-sm font-medium text-slate-500">
+          <div className="flex h-full items-center justify-center text-ui-body font-medium text-slate-500">
             加载持仓数据中...
           </div>
         }
@@ -52,12 +52,14 @@ export function HoldingsPage() {
       <PortfolioStudioShell
         activeMode="HOLDINGS"
         content={
-          <div className="flex h-full items-center justify-center p-8">
-            <div className="rounded-lg border border-rose-400/20 bg-rose-500/10 p-5 text-center">
-              <p className="mb-2 text-sm font-black text-rose-200">
+          <div className="flex h-full items-center justify-center p-ui-section">
+            <div className="rounded-lg border border-rose-400/20 bg-rose-500/10 p-ui-section text-center">
+              <p className="mb-2 text-ui-body font-black text-rose-200">
                 加载持仓数据失败
               </p>
-              <p className="mb-4 text-xs text-slate-500">{error.message}</p>
+              <p className="mb-4 text-ui-label text-slate-500">
+                {error.message}
+              </p>
               <Button size="sm" onClick={() => refetch()}>
                 重新加载
               </Button>
@@ -76,12 +78,12 @@ export function HoldingsPage() {
       activeMode="HOLDINGS"
       content={
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/5 bg-[#0b1120]/70 px-4">
+          <div className="flex h-12 shrink-0 items-center justify-between border-b border-white/5 bg-[#0b1120]/70 px-ui-section">
             <div className="min-w-0">
-              <div className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-200">
+              <div className="truncate text-ui-label font-black uppercase tracking-[0.2em] text-slate-200">
                 持仓
               </div>
-              <div className="truncate text-[10px] font-medium text-slate-600">
+              <div className="truncate text-ui-caption font-medium text-slate-600">
                 当前持仓、仓位分布、收益状态
               </div>
             </div>
@@ -89,7 +91,7 @@ export function HoldingsPage() {
               <Button
                 size="sm"
                 variant="outline"
-                className="h-8 border-white/10 bg-white/[0.03] text-xs text-slate-300 hover:bg-white/[0.06]"
+                className="h-control-compact border-white/10 bg-white/[0.03] text-ui-label text-slate-300 hover:bg-white/[0.06]"
                 data-testid="export-holdings"
               >
                 <Download className="mr-2 h-3.5 w-3.5" />
@@ -98,7 +100,7 @@ export function HoldingsPage() {
               <Link href="/holdings">
                 <Button
                   size="sm"
-                  className="h-8 text-xs"
+                  className="h-control-compact text-ui-label"
                   data-testid="buy-stocks"
                 >
                   <Plus className="mr-2 h-3.5 w-3.5" />
@@ -109,7 +111,7 @@ export function HoldingsPage() {
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
-            <div className="mb-2 flex items-center justify-end gap-1 text-[10px] text-slate-600">
+            <div className="mb-2 flex items-center justify-end gap-1 text-ui-caption text-slate-600">
               <span className="mr-1">资产趋势范围</span>
               {([60, 120, 180] as const).map(days => (
                 <Button
@@ -120,8 +122,8 @@ export function HoldingsPage() {
                   onClick={() => setHistoryDays(days)}
                   className={
                     historyDays === days
-                      ? 'h-6 bg-white/[0.08] px-2 text-[10px] text-slate-200'
-                      : 'h-6 px-2 text-[10px] text-slate-600'
+                      ? 'h-6 bg-white/[0.08] px-2 text-ui-caption text-slate-200'
+                      : 'h-6 px-2 text-ui-caption text-slate-600'
                   }
                 >
                   {days} 日
@@ -135,7 +137,7 @@ export function HoldingsPage() {
               />
             )}
             {(historyLoading || historyError || quoteError) && (
-              <div className="mb-3 flex flex-wrap items-center gap-3 text-[10px] text-slate-500">
+              <div className="mb-3 flex flex-wrap items-center gap-3 text-ui-caption text-slate-500">
                 {historyLoading && <span>资产曲线正在分步加载…</span>}
                 {historyError && (
                   <span className="inline-flex items-center gap-2 text-amber-300">
@@ -144,7 +146,7 @@ export function HoldingsPage() {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      className="h-6 px-2 text-[10px]"
+                      className="h-6 px-2 text-ui-caption"
                       onClick={refreshHistory}
                     >
                       重试曲线
@@ -158,7 +160,7 @@ export function HoldingsPage() {
                       type="button"
                       size="sm"
                       variant="ghost"
-                      className="h-6 px-2 text-[10px]"
+                      className="h-6 px-2 text-ui-caption"
                       onClick={refreshQuotes}
                     >
                       重试行情
@@ -169,8 +171,8 @@ export function HoldingsPage() {
             )}
 
             {holdingCount === 0 ? (
-              <Card className="border-white/10 bg-white/[0.03] p-8 text-center">
-                <p className="text-sm text-slate-500">暂无持仓数据</p>
+              <Card className="border-white/10 bg-white/[0.03] p-ui-section text-center">
+                <p className="text-ui-body text-slate-500">暂无持仓数据</p>
               </Card>
             ) : (
               <HoldingsList

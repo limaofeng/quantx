@@ -78,7 +78,7 @@ export function QuantXLogo({
 
       {showName && (
         <span
-          className="hidden min-w-0 truncate whitespace-nowrap text-[14px] leading-none md:block"
+          className="hidden min-w-0 truncate whitespace-nowrap text-ui-title leading-none md:block"
           data-testid="studio-brand-wordmark"
         >
           <span className="font-bold" style={{ color: palette.foreground }}>

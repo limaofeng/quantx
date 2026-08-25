@@ -16,6 +16,7 @@ import { Link } from 'wouter';
 
 import {
   StudioMenu,
+  StudioResourceSidebar,
   StudioWorkbench,
   TabBar,
   type StudioMode,
@@ -23,7 +24,6 @@ import {
   useStudioMenu,
 } from '@/components/studio-workbench';
 import { useStudioNavigate } from '@/components/studio-workspace';
-import { cn } from '@/utils/cn';
 
 export type StockStudioMode =
   'CHART' | 'FINANCIAL' | 'FLOWS' | 'QUOTE' | 'STRATEGIES';
@@ -131,88 +131,50 @@ export function StockStudioShell({
       modes={stockModes}
       onModeChange={mode => onModeChange(mode as StockStudioMode)}
       sidebar={
-        <aside className="flex h-full min-h-0 flex-col">
-          <div className="border-b border-white/5 px-4 py-3">
-            <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
-              Stock Studio
-            </div>
-            <div className="mt-2 rounded-md border border-blue-500/20 bg-blue-500/10 p-3">
-              <div className="truncate text-sm font-black text-blue-100">
-                {stockName || stockCode || '未选择标的'}
-              </div>
-              <div className="mt-1 font-mono text-xs font-bold text-blue-400/80">
-                {stockCode || 'N/A'}
-              </div>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <Link href="/holdings">
-                <button
-                  type="button"
-                  className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-100"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                  持仓
-                </button>
-              </Link>
-              <button
-                type="button"
-                onClick={() => openStudioTab(`/holdings?symbol=${stockCode}`)}
-                className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 text-[10px] font-black text-blue-100 transition-colors hover:bg-blue-500/15"
-              >
-                <DollarSign className="h-3.5 w-3.5" />
-                交易
-              </button>
-            </div>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
-            <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
-              Views
-            </div>
-            <div className="space-y-1">
-              {stockResources.map(resource => {
-                const Icon = resource.icon;
-                const isActive = resource.id === activeMode;
-
-                return (
+        <>
+          <StudioResourceSidebar
+            activeId={activeMode}
+            eyebrow="Stock Studio"
+            footerActionLabel="刷新个股"
+            headerExtra={
+              <>
+                <div className="mt-2 rounded-control border border-blue-500/20 bg-blue-500/10 p-ui-panel">
+                  <div className="truncate text-ui-body font-bold text-blue-100">
+                    {stockName || stockCode || '未选择标的'}
+                  </div>
+                  <div className="mt-1 font-mono text-ui-label font-semibold text-blue-400/80">
+                    {stockCode || 'N/A'}
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Link href="/holdings">
+                    <button
+                      type="button"
+                      className="flex h-control-compact w-full cursor-pointer items-center justify-center gap-2 rounded-control border border-white/10 text-ui-caption font-semibold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                    >
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                      持仓
+                    </button>
+                  </Link>
                   <button
-                    key={resource.id}
                     type="button"
-                    onClick={() => onModeChange(resource.id)}
-                    onContextMenu={event => openAtPointer(event, resource)}
-                    className={cn(
-                      'flex w-full items-center gap-3 rounded-md border px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
-                      isActive
-                        ? 'border-blue-500/30 bg-blue-500/10 text-blue-100'
-                        : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/[0.04] hover:text-slate-200'
-                    )}
+                    onClick={() =>
+                      openStudioTab(`/holdings?symbol=${stockCode}`)
+                    }
+                    className="flex h-control-compact w-full cursor-pointer items-center justify-center gap-2 rounded-control border border-blue-500/30 bg-blue-500/10 text-ui-caption font-semibold text-blue-100 transition-colors hover:bg-blue-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   >
-                    <Icon className="h-4 w-4 shrink-0" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-bold">
-                        {resource.label}
-                      </span>
-                      <span className="block truncate text-[10px] font-medium text-slate-600">
-                        {resource.description}
-                      </span>
-                    </span>
+                    <DollarSign className="h-3.5 w-3.5" />
+                    交易
                   </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="border-t border-white/5 p-3">
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-white/10 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-300"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              刷新个股
-            </button>
-          </div>
-
+                </div>
+              </>
+            }
+            items={stockResources}
+            onFooterAction={() => window.location.reload()}
+            onItemContextMenu={openAtPointer}
+            onItemSelect={onModeChange}
+            sectionLabel="Views"
+          />
           <StudioMenu
             ariaLabel="个股视图菜单"
             items={[
@@ -242,12 +204,12 @@ export function StockStudioShell({
             onClose={closeMenu}
             width={180}
           />
-        </aside>
+        </>
       }
       sidebarSizing={{
-        defaultWidth: 292,
+        defaultWidth: 280,
         maxWidth: 420,
-        minWidth: 248,
+        minWidth: 220,
         storageScope: 'stock-studio',
       }}
       statusBarLeft={

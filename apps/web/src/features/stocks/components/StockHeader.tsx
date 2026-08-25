@@ -37,12 +37,12 @@ export function StockHeader({ stock }: StockHeaderProps) {
         </Link>
         <div className="flex items-center">
           <div className="w-12 h-12 bg-primary/10 rounded-lg flex items-center justify-center mr-4">
-            <span className="text-primary text-lg font-medium">
+            <span className="text-primary text-ui-heading font-medium">
               {getStockIconText(stock.name!)}
             </span>
           </div>
           <div>
-            <h1 className="text-2xl font-bold" data-testid="stock-name">
+            <h1 className="text-ui-display font-bold" data-testid="stock-name">
               {stock.name} ({stock.id!})
             </h1>
             <p className="text-muted-foreground">{stock.market}</p>

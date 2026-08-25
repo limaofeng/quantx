@@ -143,8 +143,8 @@ export default function ResearchRunDetailPage() {
 
   return (
     <main className="studio-workspace-surface h-full overflow-y-auto text-slate-200">
-      <header className="studio-workspace-surface sticky top-0 z-20 border-b border-white/[0.06] px-4 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center gap-3">
+      <header className="studio-workspace-surface sticky top-0 z-20 border-b border-white/[0.06] px-ui-section py-3 backdrop-blur">
+        <div className="studio-content-width mx-auto flex flex-wrap items-center gap-3">
           <Link
             href="/research"
             aria-label="返回研究中心"
@@ -155,15 +155,15 @@ export default function ResearchRunDetailPage() {
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <FlaskConical className="h-4 w-4 text-blue-400" />
-              <h1 className="truncate text-sm font-black text-slate-100">
+              <h1 className="truncate text-ui-body font-black text-slate-100">
                 {STUDY_LABELS[summary.studyId] || summary.studyId}
               </h1>
               <ResearchStatusBadge status={summary.status} />
-              <span className="rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.5 font-mono text-[9px] text-slate-400">
+              <span className="rounded border border-white/10 bg-white/[0.03] px-1.5 py-0.5 font-mono text-ui-micro text-slate-400">
                 {summary.version}
               </span>
             </div>
-            <div className="mt-1 truncate font-mono text-[9px] text-slate-600">
+            <div className="mt-1 truncate font-mono text-ui-micro text-slate-600">
               {summary.studyId} / {summary.version} / {summary.runId}
             </div>
           </div>
@@ -171,7 +171,7 @@ export default function ResearchRunDetailPage() {
             type="button"
             onClick={refresh}
             disabled={fetching}
-            className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
+            className="flex h-8 cursor-pointer items-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-wait disabled:opacity-60"
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${fetching ? 'animate-spin motion-reduce:animate-none' : ''}`}
@@ -181,7 +181,7 @@ export default function ResearchRunDetailPage() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1500px] space-y-3 p-3 md:p-4">
+      <div className="studio-content-width mx-auto space-y-3 p-3 md:p-ui-section">
         {smallSample && (
           <WarningStrip>
             <strong>小样本 / Smoke 运行：</strong>
@@ -250,14 +250,14 @@ export default function ResearchRunDetailPage() {
                 key={item.label}
                 className="rounded-lg border border-white/[0.07] bg-[#0d1728]/80 p-3"
               >
-                <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
+                <div className="flex items-center gap-2 text-ui-micro font-black uppercase tracking-wider text-slate-600">
                   <Icon className="h-3 w-3 text-blue-400" />
                   {item.label}
                 </div>
-                <div className="mt-2 font-mono text-lg font-black tabular-nums text-slate-100">
+                <div className="mt-2 font-mono text-ui-heading font-black tabular-nums text-slate-100">
                   {item.value}
                 </div>
-                <div className="mt-1 text-[9px] text-slate-600">
+                <div className="mt-1 text-ui-micro text-slate-600">
                   {item.hint}
                 </div>
               </article>
@@ -276,7 +276,7 @@ export default function ResearchRunDetailPage() {
             title="数据质量警告"
             description={`${quality?.requested_start || '—'} 至 ${quality?.requested_end || '—'}`}
           >
-            <ul className="grid gap-2 p-3 text-[11px] leading-5 text-amber-100/80 sm:grid-cols-2">
+            <ul className="grid gap-2 p-3 text-ui-caption leading-5 text-amber-100/80 sm:grid-cols-2">
               {qualityWarnings.map(warning => (
                 <li key={warning} className="flex gap-2">
                   <AlertTriangle className="mt-1 h-3 w-3 shrink-0 text-amber-300" />
@@ -317,7 +317,7 @@ export default function ResearchRunDetailPage() {
             title="研究解释边界"
             description="以下限制随本次不可变运行结果一并保存。"
           >
-            <ul className="grid gap-x-6 gap-y-2 p-3 text-[11px] leading-5 text-slate-400 lg:grid-cols-2">
+            <ul className="grid gap-x-6 gap-y-2 p-3 text-ui-caption leading-5 text-slate-400 lg:grid-cols-2">
               {detail.warnings.map((warning: string) => (
                 <li key={warning} className="flex gap-2">
                   <span
@@ -331,7 +331,7 @@ export default function ResearchRunDetailPage() {
           </ResearchPanel>
         )}
 
-        <p className="pb-2 text-center text-[9px] leading-5 text-slate-700">
+        <p className="pb-2 text-center text-ui-micro leading-5 text-slate-700">
           页面直接渲染结构化研究产物，不嵌入离线
           HTML。历史相关性不构成因果证据或投资建议。
         </p>

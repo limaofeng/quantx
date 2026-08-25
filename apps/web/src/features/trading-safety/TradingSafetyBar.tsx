@@ -46,7 +46,7 @@ function SafetyMetric({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap text-[11px] normal-case tracking-normal text-slate-300',
+        'inline-flex items-center gap-1 whitespace-nowrap text-ui-caption normal-case tracking-normal text-slate-300',
         className
       )}
       title={`${label}：${value}`}
@@ -116,7 +116,7 @@ export function TradingSafetyBar({
             )}
             <span
               className={cn(
-                'shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold tracking-wider',
+                'shrink-0 rounded px-1.5 py-0.5 font-mono text-ui-caption font-bold tracking-wider',
                 canIncreaseRisk
                   ? 'bg-emerald-400/15 text-emerald-300'
                   : isKilled
@@ -171,7 +171,7 @@ export function TradingSafetyBar({
               label="死信/告警"
               value={`${safety?.deadLetterCount ?? 0}/${safety?.unresolvedCriticalAlertCount ?? 0}`}
             />
-            <span className="hidden font-mono text-[10px] text-slate-400 2xl:inline">
+            <span className="hidden font-mono text-ui-caption text-slate-400 2xl:inline">
               {accountId || 'NO ACCOUNT'}
             </span>
             <span className="hidden text-slate-700 sm:inline">|</span>

@@ -21,7 +21,7 @@ export function SortableGridZone({
   return (
     <div
       ref={setNodeRef}
-      className={`min-h-4 space-y-2 rounded-xl transition-colors ${
+      className={`min-h-4 space-y-2 rounded-panel transition-colors ${
         isOver ? 'bg-blue-500/[0.04]' : ''
       }`}
     >

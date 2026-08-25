@@ -355,16 +355,18 @@ export default function GridBookTab({
 
   if (!instance || !runId) {
     return (
-      <Card className="p-10 text-center">
-        <p className="text-sm font-bold text-slate-500">请先选择策略实例。</p>
+      <Card className="p-ui-empty text-center">
+        <p className="text-ui-body font-bold text-slate-500">
+          请先选择策略实例。
+        </p>
       </Card>
     );
   }
 
   if (fetching && !book) {
     return (
-      <Card className="rounded-[2rem] border border-slate-200 bg-white p-12 text-center shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-        <p className="text-xs font-black uppercase tracking-[0.24em] text-slate-400">
+      <Card className="rounded-panel border border-slate-200 bg-white p-ui-empty text-center shadow-none dark:border-white/10 dark:bg-slate-900/60">
+        <p className="text-ui-label font-black uppercase tracking-[0.24em] text-slate-400">
           正在加载网格簿...
         </p>
       </Card>
@@ -373,8 +375,8 @@ export default function GridBookTab({
 
   if (error) {
     return (
-      <Card className="rounded-[2rem] border border-rose-500/20 bg-rose-500/5 p-8 text-rose-400">
-        <div className="flex items-center gap-2 text-xs font-bold">
+      <Card className="rounded-panel border border-rose-500/20 bg-rose-500/5 p-ui-section text-rose-400">
+        <div className="flex items-center gap-2 text-ui-label font-bold">
           <AlertCircle className="h-4 w-4" />
           {error.message}
         </div>
@@ -383,7 +385,7 @@ export default function GridBookTab({
   }
 
   return (
-    <div className="space-y-5 pb-12">
+    <div className="space-y-ui-section pb-12">
       <GridBookSummaryCard
         instrumentCode={instance.instrumentCode}
         book={book}
@@ -393,7 +395,7 @@ export default function GridBookTab({
         saveError={saveError}
       />
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,0.9fr)]">
+      <div className="grid gap-ui-section xl:grid-cols-[minmax(0,1.55fr)_minmax(360px,0.9fr)]">
         <GridLevelsPanel
           book={book}
           editable={editable}

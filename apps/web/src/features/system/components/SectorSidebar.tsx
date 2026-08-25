@@ -56,20 +56,20 @@ export function SectorSidebar({
 
   return (
     <div className="w-full lg:w-64 shrink-0 flex flex-col gap-3">
-      <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-[24px] overflow-hidden shadow-sm flex flex-col min-h-0">
-        <div className="px-4 py-3 border-b border-slate-100/50 dark:border-white/5">
-          <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest flex items-center gap-2">
+      <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-panel overflow-hidden shadow-sm flex flex-col min-h-0">
+        <div className="px-ui-section py-3 border-b border-slate-100/50 dark:border-white/5">
+          <span className="text-ui-caption font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest flex items-center gap-2">
             <LayoutGrid size={10} />
             Categories
           </span>
         </div>
 
         <ScrollArea className="flex-1 px-2 py-2">
-          <div className="space-y-4">
+          <div className="space-y-ui-section">
             <Button
               variant={activeTab === 'all' ? 'secondary' : 'ghost'}
               className={cn(
-                'w-full justify-start gap-2 h-8 text-[11px] rounded-lg transition-all',
+                'w-full justify-start gap-2 h-control-compact text-ui-caption rounded-lg transition-all',
                 activeTab === 'all'
                   ? 'bg-blue-600/10 text-blue-600 dark:text-blue-400 font-bold'
                   : 'hover:bg-slate-100 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400'
@@ -78,14 +78,14 @@ export function SectorSidebar({
             >
               <BarChart2 className="w-3.5 h-3.5" />
               All Sectors
-              <span className="ml-auto text-[9px] font-mono opacity-50">
+              <span className="ml-auto text-ui-micro font-mono opacity-50">
                 {totalCount}
               </span>
             </Button>
 
             {CLASSIFICATION_GROUPS.map(group => (
               <div key={group.name} className="space-y-0.5">
-                <h3 className="px-2 mb-1 text-[9px] font-black text-slate-300 dark:text-slate-600 uppercase tracking-wider">
+                <h3 className="px-2 mb-1 text-ui-micro font-black text-slate-300 dark:text-slate-600 uppercase tracking-wider">
                   {group.name}
                 </h3>
                 {group.items.map(item => (
@@ -93,7 +93,7 @@ export function SectorSidebar({
                     key={item}
                     variant={activeTab === item ? 'secondary' : 'ghost'}
                     className={cn(
-                      'w-full justify-start gap-2 h-7 text-[11px] px-2 rounded-lg transition-all',
+                      'w-full justify-start gap-2 h-control-compact text-ui-caption px-2 rounded-lg transition-all',
                       activeTab === item
                         ? 'bg-blue-600/10 text-blue-600 dark:text-blue-400 font-bold'
                         : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-white/5'
@@ -112,7 +112,7 @@ export function SectorSidebar({
                       {CLASSIFICATION_LABELS[item] || item}
                     </span>
                     {statsCounts[item] > 0 && (
-                      <span className="text-[9px] font-mono opacity-40 tabular-nums">
+                      <span className="text-ui-micro font-mono opacity-40 tabular-nums">
                         {statsCounts[item]}
                       </span>
                     )}
@@ -125,13 +125,13 @@ export function SectorSidebar({
       </Card>
 
       {/* Quick Metrics (Compact) */}
-      <div className="relative group overflow-hidden rounded-[20px] bg-gradient-to-br from-blue-600 to-indigo-700 p-4 text-white shadow-lg shadow-blue-500/20">
+      <div className="relative group overflow-hidden rounded-panel bg-gradient-to-br from-blue-600 to-indigo-700 p-ui-section text-white shadow-lg shadow-blue-500/20">
         <div className="relative z-10 flex items-center justify-between">
           <div>
-            <p className="text-[9px] font-bold uppercase tracking-widest opacity-70 mb-0.5">
+            <p className="text-ui-micro font-bold uppercase tracking-widest opacity-70 mb-0.5">
               Total Count
             </p>
-            <p className="text-2xl font-black tracking-tighter">
+            <p className="text-ui-display font-black tracking-tighter">
               {totalCount.toLocaleString()}
             </p>
           </div>

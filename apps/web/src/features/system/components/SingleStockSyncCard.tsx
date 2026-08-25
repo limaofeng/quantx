@@ -82,12 +82,12 @@ export function StockDataQueryCard() {
   };
 
   return (
-    <div className="h-full flex flex-col rounded-xl border border-slate-200/40 dark:border-slate-800/40 bg-white/70 dark:bg-slate-900/40 backdrop-blur-sm overflow-hidden p-4">
+    <div className="h-full flex flex-col rounded-panel border border-slate-200/40 dark:border-slate-800/40 bg-white/70 dark:bg-slate-900/40 backdrop-blur-sm overflow-hidden p-ui-section">
       <div className="flex items-center gap-2 mb-3">
         <div className="p-1 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
           <Database className="w-3.5 h-3.5" />
         </div>
-        <h3 className="text-sm font-bold text-slate-700 dark:text-slate-200">
+        <h3 className="text-ui-body font-bold text-slate-700 dark:text-slate-200">
           标的数据查询
         </h3>
       </div>
@@ -97,7 +97,7 @@ export function StockDataQueryCard() {
           <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-500" />
           <Input
             placeholder="代码 (如 600519.SH)"
-            className="pl-8 h-8 text-xs bg-white dark:bg-black/20 border-slate-200 dark:border-slate-800"
+            className="pl-8 h-control-compact text-ui-label bg-white dark:bg-black/20 border-slate-200 dark:border-slate-800"
             value={searchQuery}
             onChange={e => {
               setSearchQuery(e.target.value);
@@ -110,7 +110,7 @@ export function StockDataQueryCard() {
           size="sm"
           onClick={handleViewDetails}
           disabled={fetching && !selectedInstrument}
-          className="h-8 px-3 text-xs font-bold"
+          className="h-control-compact px-3 text-ui-label font-bold"
         >
           {fetching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : '进入'}
         </Button>
@@ -118,12 +118,12 @@ export function StockDataQueryCard() {
 
       <div className="flex-1 min-h-0">
         {normalizedQuery.length < 2 ? (
-          <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs border-2 border-dashed border-slate-100 dark:border-slate-800/60 rounded-lg bg-slate-50/60 dark:bg-white/5">
+          <div className="h-full flex flex-col items-center justify-center text-slate-400 text-ui-label border-2 border-dashed border-slate-100 dark:border-slate-800/60 rounded-lg bg-slate-50/60 dark:bg-white/5">
             <Database className="w-8 h-8 mb-2 opacity-10" />
             <p className="opacity-70">请输入至少 2 位代码</p>
           </div>
         ) : instruments.length === 0 && !fetching ? (
-          <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs border-2 border-dashed border-slate-100 dark:border-slate-800/60 rounded-lg bg-slate-50/60 dark:bg-white/5">
+          <div className="h-full flex flex-col items-center justify-center text-slate-400 text-ui-label border-2 border-dashed border-slate-100 dark:border-slate-800/60 rounded-lg bg-slate-50/60 dark:bg-white/5">
             <Search className="w-8 h-8 mb-2 opacity-10" />
             <p className="opacity-70">未找到匹配标的</p>
           </div>
@@ -146,28 +146,28 @@ export function StockDataQueryCard() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-black">
+                      <div className="truncate text-ui-body font-black">
                         {item.name || item.id}
                       </div>
                       <div className="mt-1 flex items-center gap-1.5">
                         <Badge
                           variant="secondary"
-                          className="h-4 rounded-sm px-1 text-[10px] font-mono"
+                          className="h-4 rounded-sm px-1 text-ui-caption font-mono"
                         >
                           {item.id}
                         </Badge>
-                        <span className="text-[10px] text-slate-400">
+                        <span className="text-ui-caption text-slate-400">
                           {item.market || '--'} · {item.type || '--'}
                         </span>
                       </div>
                     </div>
                     <div className="text-right shrink-0">
-                      <div className="font-mono text-xs font-bold">
+                      <div className="font-mono text-ui-label font-bold">
                         {item.quote?.lastPrice?.toFixed(2) ?? '--'}
                       </div>
                       <div
                         className={cn(
-                          'font-mono text-[10px]',
+                          'font-mono text-ui-caption',
                           financialToneClass(item.quote?.changePercent)
                         )}
                       >
@@ -187,7 +187,7 @@ export function StockDataQueryCard() {
       <Button
         onClick={handleViewDetails}
         size="sm"
-        className="w-full mt-3 h-8 text-xs bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm"
+        className="w-full mt-3 h-control-compact text-ui-label bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm"
       >
         查看数据详情 <ArrowRight className="w-3 h-3 ml-1" />
       </Button>

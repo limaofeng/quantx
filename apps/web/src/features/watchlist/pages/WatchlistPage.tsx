@@ -41,10 +41,7 @@ import type {
   WatchlistGroupSummary,
   WatchlistItemRecord,
 } from '../types';
-import {
-  mergeWatchlistGroupIds,
-  sortWatchlistItemsForGroup,
-} from '../utils';
+import { mergeWatchlistGroupIds, sortWatchlistItemsForGroup } from '../utils';
 
 type SortField = 'custom' | 'change' | 'price' | 'name';
 
@@ -168,7 +165,7 @@ function CollectionTab({
         aria-current={active ? 'page' : undefined}
         onClick={onSelect}
         className={cn(
-          'inline-flex h-8 items-center gap-1.5 rounded px-2.5 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+          'inline-flex h-8 items-center gap-1.5 rounded px-2.5 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
           active
             ? 'bg-blue-500/15 text-blue-100 ring-1 ring-inset ring-blue-400/25'
             : 'text-slate-500 hover:bg-white/5 hover:text-slate-200'
@@ -177,7 +174,9 @@ function CollectionTab({
         <Icon className="h-3.5 w-3.5" />
         {collection.label}
         {typeof count === 'number' && (
-          <span className="font-mono text-[10px] text-slate-600">{count}</span>
+          <span className="font-mono text-ui-caption text-slate-600">
+            {count}
+          </span>
         )}
       </button>
       {collection.kind === 'group' && onMove && (
@@ -260,10 +259,10 @@ function SidebarRowView({
         )}
       />
       <div className="relative z-10 min-w-0 w-[72px] shrink-0 pointer-events-none">
-        <div className="truncate text-[12px] font-bold text-slate-200">
+        <div className="truncate text-ui-label font-bold text-slate-200">
           {row.name || row.code}
         </div>
-        <div className="mt-0.5 truncate font-mono text-[10px] text-slate-600">
+        <div className="mt-0.5 truncate font-mono text-ui-caption text-slate-600">
           {row.code}
         </div>
       </div>
@@ -279,25 +278,30 @@ function SidebarRowView({
       </div>
       <div className="relative z-10 w-[72px] shrink-0 text-right pointer-events-none">
         <div
-          className={cn('font-mono text-[12px] font-black tabular-nums', tone)}
+          className={cn(
+            'font-mono text-ui-label font-black tabular-nums',
+            tone
+          )}
         >
           {formatPrice(quote?.lastPrice ?? row.holding?.lastPrice)}
         </div>
-        <div className={cn('mt-0.5 font-mono text-[10px] tabular-nums', tone)}>
+        <div
+          className={cn('mt-0.5 font-mono text-ui-caption tabular-nums', tone)}
+        >
           {formatSigned(changePercent, '%')}
         </div>
         {stale && (
-          <div className="mt-0.5 text-[9px] text-amber-300">旧快照</div>
+          <div className="mt-0.5 text-ui-micro text-amber-300">旧快照</div>
         )}
       </div>
       {collection.kind === 'holdings' && (
         <div className="relative z-10 hidden w-[62px] shrink-0 text-right pointer-events-none 2xl:block">
-          <div className="font-mono text-[10px] text-slate-400">
+          <div className="font-mono text-ui-caption text-slate-400">
             {formatQuantity(row.holding?.volume)}
           </div>
           <div
             className={cn(
-              'mt-0.5 font-mono text-[10px]',
+              'mt-0.5 font-mono text-ui-caption',
               financialToneClass(row.holding?.profitLoss, 'holding')
             )}
           >
@@ -341,16 +345,16 @@ function SidebarState({
   title: string;
 }) {
   return (
-    <div className="flex min-h-[180px] flex-col items-center justify-center px-6 text-center">
-      <div className="text-xs font-bold text-slate-300">{title}</div>
-      <div className="mt-1 text-[10px] leading-5 text-slate-600">
+    <div className="flex min-h-[180px] flex-col items-center justify-center px-ui-panel text-center">
+      <div className="text-ui-label font-bold text-slate-300">{title}</div>
+      <div className="mt-1 text-ui-caption leading-5 text-slate-600">
         {description}
       </div>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2.5 text-[10px] font-bold text-slate-400 hover:border-blue-400/30 hover:text-blue-200"
+          className="mt-3 inline-flex h-7 items-center gap-1 rounded border border-white/10 px-2.5 text-ui-caption font-bold text-slate-400 hover:border-blue-400/30 hover:text-blue-200"
         >
           <RefreshCw className="h-3 w-3" />
           重试
@@ -369,7 +373,9 @@ function SearchResults({
 }) {
   if (results.length === 0) {
     return (
-      <div className="px-3 py-3 text-[10px] text-slate-600">未找到匹配标的</div>
+      <div className="px-3 py-3 text-ui-caption text-slate-600">
+        未找到匹配标的
+      </div>
     );
   }
   return (
@@ -382,10 +388,10 @@ function SearchResults({
           className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70"
         >
           <Search className="h-3 w-3 text-slate-600" />
-          <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-slate-200">
+          <span className="min-w-0 flex-1 truncate text-ui-caption font-bold text-slate-200">
             {stock.name}
           </span>
-          <span className="font-mono text-[10px] text-slate-500">
+          <span className="font-mono text-ui-caption text-slate-500">
             {stock.stockCode}
           </span>
         </button>
@@ -466,10 +472,10 @@ function WatchlistSidebar({
     >
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/5 px-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[12px] font-black text-slate-100">
+          <div className="text-ui-label font-black text-slate-100">
             自选浏览器
           </div>
-          <div className="mt-0.5 text-[9px] uppercase tracking-[0.18em] text-slate-600">
+          <div className="mt-0.5 text-ui-micro uppercase tracking-[0.18em] text-slate-600">
             Watchlist
           </div>
         </div>
@@ -518,7 +524,7 @@ function WatchlistSidebar({
             onChange={event => setSearchQuery(event.target.value)}
             placeholder="搜索股票代码 / 名称"
             aria-label="搜索并添加股票"
-            className="h-8 border-white/10 bg-white/[0.03] text-[11px] placeholder:text-slate-700"
+            className="h-8 border-white/10 bg-white/[0.03] text-ui-caption placeholder:text-slate-700"
           />
           {searchQuery && (
             <button
@@ -532,9 +538,9 @@ function WatchlistSidebar({
           )}
         </div>
         {searchQuery.length >= 2 && (
-          <div className="mt-1 overflow-hidden rounded border border-white/10 bg-[#0b1627] shadow-xl shadow-black/30">
+          <div className="mt-1 overflow-hidden rounded border border-white/10 bg-[#0b1627] shadow-none shadow-black/30">
             {searchLoading ? (
-              <div className="flex items-center gap-2 px-3 py-3 text-[10px] text-slate-500">
+              <div className="flex items-center gap-2 px-3 py-3 text-ui-caption text-slate-500">
                 <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> 搜索中…
               </div>
             ) : (
@@ -551,7 +557,7 @@ function WatchlistSidebar({
         groups.find(group => group.id === activeCollection.id) && (
           <div className="flex shrink-0 items-center gap-1 border-b border-white/5 px-2 py-1.5">
             <GripVertical className="h-3.5 w-3.5 text-slate-700" />
-            <span className="min-w-0 flex-1 truncate text-[10px] text-slate-500">
+            <span className="min-w-0 flex-1 truncate text-ui-caption text-slate-500">
               {activeCollection.label} · {rows.length}只
             </span>
             <WatchlistGroupPicker
@@ -565,7 +571,7 @@ function WatchlistSidebar({
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {quoteError && (
           <div
-            className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-400/15 bg-amber-400/[0.06] px-3 py-2 text-[10px] text-amber-200"
+            className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-400/15 bg-amber-400/[0.06] px-3 py-2 text-ui-caption text-amber-200"
             role="alert"
           >
             <span>行情部分不可用，保留最后快照。</span>
@@ -579,11 +585,11 @@ function WatchlistSidebar({
           </div>
         )}
         {stale && !quoteError && (
-          <div className="shrink-0 border-b border-amber-400/10 px-3 py-1 text-[9px] text-amber-300">
+          <div className="shrink-0 border-b border-amber-400/10 px-3 py-1 text-ui-micro text-amber-300">
             行情快照可能已过期
           </div>
         )}
-        <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-1.5 text-[9px] font-bold uppercase tracking-[0.12em] text-slate-700">
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/5 px-3 py-1.5 text-ui-micro font-bold uppercase tracking-[0.12em] text-slate-700">
           <span className="w-[88px]">标的</span>
           <span className="flex-1">走势</span>
           <span className="w-[72px] text-right">价格 / 涨跌</span>
@@ -651,7 +657,7 @@ function WatchlistSidebar({
             placeholder="新建自定义分组"
             maxLength={80}
             aria-label="新建自定义分组"
-            className="h-7 border-white/10 bg-white/[0.03] text-[10px]"
+            className="h-7 border-white/10 bg-white/[0.03] text-ui-caption"
           />
           <button
             type="button"
@@ -680,15 +686,17 @@ function DetailState({
   title: string;
 }) {
   return (
-    <div className="flex h-full min-h-[320px] items-center justify-center bg-[#08101d] p-8 text-center">
+    <div className="flex h-full min-h-[320px] items-center justify-center bg-[#08101d] p-ui-section text-center">
       <div>
         {loading ? (
           <LoaderCircle className="mx-auto h-6 w-6 animate-spin text-blue-300" />
         ) : (
           <BriefcaseBusiness className="mx-auto h-6 w-6 text-slate-600" />
         )}
-        <div className="mt-3 text-sm font-black text-slate-200">{title}</div>
-        <div className="mt-1 text-xs text-slate-600">{description}</div>
+        <div className="mt-3 text-ui-body font-black text-slate-200">
+          {title}
+        </div>
+        <div className="mt-1 text-ui-label text-slate-600">{description}</div>
         {onRetry && (
           <Button
             type="button"
@@ -893,12 +901,13 @@ export default function WatchlistPage() {
   );
   const groupRows = useMemo<SidebarRow[]>(() => {
     if (activeCollection.kind !== 'group') return [];
-    return sortWatchlistItemsForGroup(watchlist.items, activeCollection.id)
-      .map(item => ({
+    return sortWatchlistItemsForGroup(watchlist.items, activeCollection.id).map(
+      item => ({
         code: normalizeWatchlistCode(item.stockCode),
         item,
         name: item.instrumentName || item.stockCode,
-      }));
+      })
+    );
   }, [activeCollection, watchlist.items]);
   const baseRows =
     activeCollection.kind === 'holdings'
@@ -985,12 +994,13 @@ export default function WatchlistPage() {
           ? holdingsRows
           : collectionId === 'all'
             ? allRows
-            : sortWatchlistItemsForGroup(watchlist.items, collectionId)
-                .map(item => ({
+            : sortWatchlistItemsForGroup(watchlist.items, collectionId).map(
+                item => ({
                   code: normalizeWatchlistCode(item.stockCode),
                   item,
                   name: item.instrumentName || item.stockCode,
-                }));
+                })
+              );
       setLocation(makeRouteSearch(collectionId, nextRows[0]?.code));
     },
     [allRows, holdingsRows, setLocation, watchlist.items]
@@ -1124,7 +1134,10 @@ export default function WatchlistPage() {
         if (activeCollection.id === group.id) {
           setLocation(makeRouteSearch('all', allRows[0]?.code));
         }
-        setOperationMessage({ kind: 'success', text: `分组“${group.name}”已删除` });
+        setOperationMessage({
+          kind: 'success',
+          text: `分组“${group.name}”已删除`,
+        });
       } catch (error) {
         setOperationMessage({
           kind: 'error',
@@ -1185,12 +1198,12 @@ export default function WatchlistPage() {
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-white/5 bg-[#0b1120] px-3">
         <div className="flex min-w-0 items-center gap-2">
           <Star className="h-3.5 w-3.5 text-amber-300" />
-          <span className="text-[12px] font-black text-slate-100">自选</span>
-          <span className="hidden text-[10px] text-slate-600 sm:inline">
+          <span className="text-ui-label font-black text-slate-100">自选</span>
+          <span className="hidden text-ui-caption text-slate-600 sm:inline">
             主从工作区
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-slate-600">
+        <div className="flex items-center gap-2 text-ui-caption text-slate-600">
           {isSaving && (
             <LoaderCircle className="h-3 w-3 animate-spin text-blue-300" />
           )}
@@ -1215,7 +1228,7 @@ export default function WatchlistPage() {
       {operationMessage && (
         <div
           className={cn(
-            'shrink-0 border-b px-3 py-1.5 text-[10px]',
+            'shrink-0 border-b px-3 py-1.5 text-ui-caption',
             operationMessage.kind === 'error'
               ? 'border-rose-400/20 bg-rose-400/[0.06] text-rose-200'
               : 'border-emerald-400/15 bg-emerald-400/[0.05] text-emerald-200'
@@ -1280,7 +1293,7 @@ export default function WatchlistPage() {
             <button
               type="button"
               onClick={() => setCollapsed(false)}
-              className="absolute left-2 top-2 z-20 inline-flex h-8 items-center gap-1.5 rounded border border-blue-400/25 bg-[#0b1627] px-2 text-[10px] font-bold text-blue-200 shadow-lg shadow-black/30 hover:bg-blue-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+              className="absolute left-2 top-2 z-20 inline-flex h-8 items-center gap-1.5 rounded border border-blue-400/25 bg-[#0b1627] px-2 text-ui-caption font-bold text-blue-200 shadow-lg shadow-black/30 hover:bg-blue-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
             >
               <PanelLeftOpen className="h-3.5 w-3.5" />
               展开自选
@@ -1324,7 +1337,7 @@ export default function WatchlistPage() {
 
       {activeCollection.kind === 'holdings' && (
         <div className="absolute bottom-2 left-2 z-10 flex items-center gap-1 rounded border border-white/10 bg-[#0b1627]/95 p-1 shadow-lg shadow-black/20">
-          <span className="px-1.5 text-[9px] font-bold text-slate-600">
+          <span className="px-1.5 text-ui-micro font-bold text-slate-600">
             排序
           </span>
           {(
@@ -1340,7 +1353,7 @@ export default function WatchlistPage() {
               type="button"
               onClick={() => setSortField(value)}
               className={cn(
-                'rounded px-1.5 py-1 text-[9px] font-bold',
+                'rounded px-1.5 py-1 text-ui-micro font-bold',
                 sortField === value
                   ? 'bg-blue-500/15 text-blue-200'
                   : 'text-slate-600 hover:text-slate-300'

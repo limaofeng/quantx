@@ -1,6 +1,7 @@
 import { Loader2, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 
 import {
@@ -31,7 +32,7 @@ export function ExitPlanCostBasisSummary({
 }) {
   const basis = readCostBasis(value);
   return (
-    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold text-slate-400">
+    <div className="flex flex-wrap gap-x-4 gap-y-1 text-ui-caption font-bold text-slate-400">
       <span>成本依据：{costBasisModeLabel(basis.mode)}</span>
       <span>冻结成本 ¥{basis.unitCost.toFixed(4)}/股</span>
       {basis.basisVolume > 0 && (
@@ -64,7 +65,7 @@ export function ExitPlanCapacityBanner({
   return (
     <div
       className={cn(
-        'mt-3 flex flex-wrap items-center justify-between gap-2 rounded border px-3 py-2 text-[11px] font-bold',
+        'mt-3 flex flex-wrap items-center justify-between gap-2 rounded border px-3 py-2 text-ui-caption font-bold',
         requiresReconciliation
           ? 'border-amber-400/30 bg-amber-500/10 text-amber-100'
           : 'border-white/8 bg-black/10 text-slate-400'
@@ -120,7 +121,7 @@ export function ExitPlanCostBasisEditor({
   const selected = summarizeSelectedCostBasis(candidates, selectedOrderIds);
   return (
     <fieldset className="mt-3 rounded-md border border-white/8 bg-black/10 p-3">
-      <legend className="px-1 text-xs font-black text-slate-200">
+      <legend className="px-1 text-ui-label font-black text-slate-200">
         成本依据
       </legend>
       {editingCostBasis !== undefined ? (
@@ -136,7 +137,7 @@ export function ExitPlanCostBasisEditor({
                   : 'border-white/8 hover:border-white/20'
               )}
             >
-              <span className="flex items-center gap-2 text-xs font-black text-slate-200">
+              <span className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                 <input
                   checked={mode === 'BROKER_BUY_ORDERS'}
                   name="manual-plan-cost-basis"
@@ -145,7 +146,7 @@ export function ExitPlanCostBasisEditor({
                 />
                 使用已成交买入委托
               </span>
-              <span className="mt-1 block text-[10px] font-medium leading-4 text-slate-500">
+              <span className="mt-1 block text-ui-caption font-medium leading-4 text-slate-500">
                 服务端按所选成交额和估算买入费用计算，并在创建时冻结。
               </span>
             </label>
@@ -157,7 +158,7 @@ export function ExitPlanCostBasisEditor({
                   : 'border-white/8 hover:border-white/20'
               )}
             >
-              <span className="flex items-center gap-2 text-xs font-black text-slate-200">
+              <span className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                 <input
                   checked={mode === 'MANUAL_UNIT_COST'}
                   name="manual-plan-cost-basis"
@@ -166,7 +167,7 @@ export function ExitPlanCostBasisEditor({
                 />
                 手工填写每股全成本
               </span>
-              <span className="mt-1 block text-[10px] font-medium leading-4 text-slate-500">
+              <span className="mt-1 block text-ui-caption font-medium leading-4 text-slate-500">
                 适合历史委托不完整；输入值需已包含买入手续费。
               </span>
             </label>
@@ -175,12 +176,12 @@ export function ExitPlanCostBasisEditor({
             <div className="grid gap-2">
               <div className="max-h-48 overflow-y-auto rounded-md border border-white/8">
                 {candidatesFetching && candidates.length === 0 ? (
-                  <div className="flex items-center gap-2 p-3 text-xs text-slate-500">
+                  <div className="flex items-center gap-2 p-3 text-ui-label text-slate-500">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     正在读取已成交买入委托
                   </div>
                 ) : candidates.length === 0 ? (
-                  <div className="p-3 text-xs font-bold text-slate-500">
+                  <div className="p-3 text-ui-label font-bold text-slate-500">
                     没有可用的买入成交记录，请改用手工每股全成本。
                   </div>
                 ) : (
@@ -204,14 +205,14 @@ export function ExitPlanCostBasisEditor({
                         type="checkbox"
                       />
                       <span className="min-w-0 flex-1">
-                        <span className="flex flex-wrap justify-between gap-2 text-xs font-black text-slate-200">
+                        <span className="flex flex-wrap justify-between gap-2 text-ui-label font-black text-slate-200">
                           <span>委托 #{item.orderId}</span>
                           <span>
                             {item.tradedVolume.toLocaleString()} 股 × ¥
                             {item.tradedPrice.toFixed(3)}
                           </span>
                         </span>
-                        <span className="mt-1 block text-[10px] font-medium text-slate-500">
+                        <span className="mt-1 block text-ui-caption font-medium text-slate-500">
                           {formatDateTime(item.orderTime)} · 估算买入费 ¥
                           {item.estimatedBuyFeeCny.toFixed(2)}
                         </span>
@@ -222,7 +223,7 @@ export function ExitPlanCostBasisEditor({
               </div>
               <div
                 className={cn(
-                  'rounded border px-3 py-2 text-[11px] font-bold',
+                  'rounded border px-3 py-2 text-ui-caption font-bold',
                   selected.volume >= requestedVolume && selected.volume > 0
                     ? 'border-emerald-400/20 text-emerald-200'
                     : 'border-amber-400/25 text-amber-200'
@@ -244,18 +245,18 @@ export function ExitPlanCostBasisEditor({
                   </span>
                 )}
               </div>
-              <p className="text-[10px] font-medium leading-4 text-slate-500">
+              <p className="text-ui-caption font-medium leading-4 text-slate-500">
                 {historyWarning ||
                   '计划创建后成本依据冻结，后续买入不会改变该计划。'}{' '}
                 整笔买入委托只能作为一个有效卖出计划的成本依据。
               </p>
             </div>
           ) : (
-            <div className="grid gap-1 text-xs font-bold text-slate-400">
+            <div className="grid gap-1 text-ui-label font-bold text-slate-400">
               <label htmlFor="manual-plan-unit-cost">每股全成本（元）</label>
-              <input
+              <Input
                 aria-describedby="manual-plan-unit-cost-help"
-                className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
+                className="h-control-default rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
                 id="manual-plan-unit-cost"
                 min="0.0001"
                 onChange={event => onManualUnitCostChange(event.target.value)}
@@ -265,7 +266,7 @@ export function ExitPlanCostBasisEditor({
                 value={manualUnitCost}
               />
               <span
-                className="text-[10px] font-medium leading-4 text-slate-500"
+                className="text-ui-caption font-medium leading-4 text-slate-500"
                 id="manual-plan-unit-cost-help"
               >
                 必须包含买入手续费；系统只会另外估算卖出费用。

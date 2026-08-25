@@ -391,20 +391,20 @@ export function TaskHistory({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
-        className="w-[85vw] sm:max-w-[700px] flex flex-col p-0 border-l border-slate-200/50 dark:border-white/5 shadow-2xl bg-white dark:bg-slate-950"
+        className="w-[85vw] sm:max-w-[700px] flex flex-col p-0 border-l border-slate-200/50 dark:border-white/5 shadow-none bg-white dark:bg-slate-950"
       >
         {/* Header */}
         {/* Header - Glassmorphism */}
-        <SheetHeader className="sticky top-0 z-50 px-5 py-4 border-b border-slate-200/50 dark:border-white/5 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md">
+        <SheetHeader className="sticky top-0 z-50 px-ui-section py-ui-section border-b border-slate-200/50 dark:border-white/5 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg shadow-blue-500/20">
+            <div className="p-2 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-panel shadow-lg shadow-blue-500/20">
               <Activity size={16} className="text-white" />
             </div>
             <div>
-              <SheetTitle className="text-base font-bold text-slate-900 dark:text-white">
+              <SheetTitle className="text-ui-title font-bold text-slate-900 dark:text-white">
                 {selectedRunId ? '任务日志详情' : '任务历史记录'}
               </SheetTitle>
-              <SheetDescription className="text-slate-500 dark:text-slate-400 text-xs mt-0.5">
+              <SheetDescription className="text-slate-500 dark:text-slate-400 text-ui-label mt-0.5">
                 {selectedRunId
                   ? `${deploymentName} 的单次执行明细`
                   : `${deploymentName} 的执行历史`}
@@ -424,33 +424,33 @@ export function TaskHistory({
             {/* Content */}
             <ScrollArea className="flex-1 bg-slate-50/50 dark:bg-[#0A0B0E]">
               {fetchingHistory ? (
-                <div className="flex flex-col items-center justify-center p-12 space-y-4">
+                <div className="flex flex-col items-center justify-center p-ui-empty space-y-ui-section">
                   <div className="relative">
                     <div className="absolute inset-0 bg-blue-500/20 rounded-full blur-lg animate-pulse" />
                     <RefreshCw className="relative w-10 h-10 text-blue-500 animate-spin" />
                   </div>
                   <div className="text-center">
-                    <p className="text-sm font-medium text-slate-600 dark:text-slate-400">
+                    <p className="text-ui-body font-medium text-slate-600 dark:text-slate-400">
                       正在加载...
                     </p>
                   </div>
                 </div>
               ) : historyRuns.length === 0 ? (
-                <div className="flex flex-col items-center justify-center p-12 space-y-4">
-                  <div className="p-4 bg-slate-100 dark:bg-white/5 rounded-2xl">
+                <div className="flex flex-col items-center justify-center p-ui-empty space-y-ui-section">
+                  <div className="p-ui-section bg-slate-100 dark:bg-white/5 rounded-panel">
                     <Clock
                       size={32}
                       className="text-slate-400 dark:text-slate-600"
                     />
                   </div>
                   <div className="text-center">
-                    <p className="text-sm font-medium text-slate-600 dark:text-slate-400">
+                    <p className="text-ui-body font-medium text-slate-600 dark:text-slate-400">
                       暂无执行记录
                     </p>
                   </div>
                 </div>
               ) : (
-                <div className="p-4 space-y-4">
+                <div className="p-ui-section space-y-ui-section">
                   {/* Scheduled Tasks Section */}
                   {scheduledRuns.length > 0 && (
                     <div className="space-y-3">
@@ -460,7 +460,7 @@ export function TaskHistory({
                         onClick={() => setScheduledExpanded(!scheduledExpanded)}
                       >
                         <Sparkles size={14} className="text-purple-400" />
-                        <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        <h4 className="text-ui-label font-semibold text-slate-700 dark:text-slate-300">
                           即将运行
                         </h4>
                         <div className="h-px flex-1 bg-gradient-to-r from-purple-500/20 to-transparent" />
@@ -482,7 +482,7 @@ export function TaskHistory({
                           <div
                             key={run.id}
                             className={cn(
-                              'w-full bg-white dark:bg-slate-900 rounded-xl border border-purple-200 dark:border-purple-500/20 overflow-hidden transition-all duration-500 cursor-pointer',
+                              'w-full bg-white dark:bg-slate-900 rounded-panel border border-purple-200 dark:border-purple-500/20 overflow-hidden transition-all duration-500 cursor-pointer',
                               // Stack positioning logic: ALL relative now
                               'relative',
                               // Negative margin to pull items up into a stack
@@ -527,27 +527,27 @@ export function TaskHistory({
                                     />
                                   </div>
                                   <div>
-                                    <h5 className="font-semibold text-sm text-slate-900 dark:text-white">
+                                    <h5 className="font-semibold text-ui-body text-slate-900 dark:text-white">
                                       {run.flowName || 'Sector Data Sync'}
                                     </h5>
                                     <div className="flex items-center gap-1.5 mt-0.5">
-                                      <span className="text-[10px] font-mono text-slate-500">
+                                      <span className="text-ui-caption font-mono text-slate-500">
                                         {run.id.substring(0, 8)}
                                       </span>
                                     </div>
                                   </div>
                                 </div>
-                                <Badge className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20 px-2 py-0.5 text-[10px] font-semibold shadow-sm">
+                                <Badge className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20 px-2 py-0.5 text-ui-caption font-semibold shadow-sm">
                                   已调度
                                 </Badge>
                               </div>
 
-                              <div className="flex items-center gap-4">
+                              <div className="flex items-center gap-ui-section">
                                 <div className="flex items-center gap-2">
-                                  <p className="text-[9px] font-medium text-slate-500 uppercase tracking-wider">
+                                  <p className="text-ui-micro font-medium text-slate-500 uppercase tracking-wider">
                                     计划时间
                                   </p>
-                                  <p className="text-xs font-semibold text-slate-900 dark:text-white">
+                                  <p className="text-ui-label font-semibold text-slate-900 dark:text-white">
                                     {run.expectedStartTime
                                       ? format(
                                           new Date(run.expectedStartTime),
@@ -557,10 +557,10 @@ export function TaskHistory({
                                   </p>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <p className="text-[9px] font-medium text-slate-500 uppercase tracking-wider">
+                                  <p className="text-ui-micro font-medium text-slate-500 uppercase tracking-wider">
                                     距离开始
                                   </p>
-                                  <p className="text-xs font-semibold text-purple-600 dark:text-purple-400">
+                                  <p className="text-ui-label font-semibold text-purple-600 dark:text-purple-400">
                                     {safeFormatDistanceToNow(
                                       run.expectedStartTime
                                     )}
@@ -582,13 +582,13 @@ export function TaskHistory({
                     <div className="flex items-center justify-between px-1">
                       <div className="flex items-center gap-1.5">
                         <Clock size={14} className="text-blue-400" />
-                        <h4 className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        <h4 className="text-ui-label font-semibold text-slate-700 dark:text-slate-300">
                           历史运行
                         </h4>
                       </div>
                       <Badge
                         variant="outline"
-                        className="border-slate-200 dark:border-white/10 text-slate-500 text-[10px] bg-transparent"
+                        className="border-slate-200 dark:border-white/10 text-slate-500 text-ui-caption bg-transparent"
                       >
                         {pastRuns.length} 条记录
                       </Badge>
@@ -607,7 +607,7 @@ export function TaskHistory({
                         return (
                           <div
                             key={run.id}
-                            className="group relative bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-white/5 overflow-hidden transition-all duration-300"
+                            className="group relative bg-white dark:bg-slate-900 rounded-panel border border-slate-200 dark:border-white/5 overflow-hidden transition-all duration-300"
                           >
                             {/* Hover Gradient */}
                             <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
@@ -635,11 +635,11 @@ export function TaskHistory({
                                     <Icon size={14} className={config.text} />
                                   </div>
                                   <div>
-                                    <h5 className="font-semibold text-sm text-slate-900 dark:text-white">
+                                    <h5 className="font-semibold text-ui-body text-slate-900 dark:text-white">
                                       {run.flowName || 'Sector Data Sync'}
                                     </h5>
                                     <div className="flex items-center gap-1.5 mt-0.5">
-                                      <span className="text-[10px] font-mono text-slate-500">
+                                      <span className="text-ui-caption font-mono text-slate-500">
                                         {run.id.substring(0, 8)}
                                       </span>
                                     </div>
@@ -647,7 +647,7 @@ export function TaskHistory({
                                 </div>
                                 <Badge
                                   className={cn(
-                                    'flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold border shadow-sm',
+                                    'flex items-center gap-1 px-2 py-0.5 text-ui-caption font-semibold border shadow-sm',
                                     config.bg,
                                     config.text,
                                     config.border,
@@ -661,10 +661,10 @@ export function TaskHistory({
 
                               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-2.5">
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[10px] text-slate-500">
+                                  <span className="text-ui-caption text-slate-500">
                                     开始:
                                   </span>
-                                  <span className="text-[11px] font-medium text-slate-900 dark:text-white font-mono">
+                                  <span className="text-ui-caption font-medium text-slate-900 dark:text-white font-mono">
                                     {run.startedAt
                                       ? format(
                                           new Date(run.startedAt),
@@ -674,18 +674,18 @@ export function TaskHistory({
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[10px] text-slate-500">
+                                  <span className="text-ui-caption text-slate-500">
                                     时长:
                                   </span>
-                                  <span className="text-[11px] font-medium text-slate-900 dark:text-white font-mono">
+                                  <span className="text-ui-caption font-medium text-slate-900 dark:text-white font-mono">
                                     {formatDuration(run.totalRunTime)}
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[10px] text-slate-500">
+                                  <span className="text-ui-caption text-slate-500">
                                     参数:
                                   </span>
-                                  <span className="text-[11px] font-medium text-slate-900 dark:text-white font-mono">
+                                  <span className="text-ui-caption font-medium text-slate-900 dark:text-white font-mono">
                                     {getParameterCount(run.parameters)}
                                   </span>
                                 </div>
@@ -700,7 +700,7 @@ export function TaskHistory({
                                 } 的日志详情`}
                                 onClick={() => setSelectedRunId(run.id)}
                               >
-                                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
+                                <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
                                   <Box size={12} className="text-blue-500" />
                                   <span
                                     className="truncate max-w-[80px]"
@@ -709,7 +709,7 @@ export function TaskHistory({
                                     {deploymentName}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
+                                <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
                                   <Layers
                                     size={12}
                                     className="text-purple-500"
@@ -721,7 +721,7 @@ export function TaskHistory({
                                     {workPoolName}
                                   </span>
                                 </div>
-                                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
+                                <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-white/5 px-2 py-1 rounded-md">
                                   <List size={12} className="text-amber-500" />
                                   <span
                                     className="truncate max-w-[80px]"
@@ -747,8 +747,8 @@ export function TaskHistory({
             </ScrollArea>
 
             {/* Pagination Footer - Glassmorphism */}
-            <div className="sticky bottom-0 z-50 px-4 py-3 border-t border-slate-200 dark:border-white/5 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md flex items-center justify-between">
-              <div className="text-[10px] text-slate-500 dark:text-slate-400">
+            <div className="sticky bottom-0 z-50 px-ui-section py-3 border-t border-slate-200 dark:border-white/5 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md flex items-center justify-between">
+              <div className="text-ui-caption text-slate-500 dark:text-slate-400">
                 第{' '}
                 <span className="font-semibold text-slate-700 dark:text-slate-300">
                   {historyPage}
@@ -759,7 +759,7 @@ export function TaskHistory({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-[10px] border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-slate-300 transition-all"
+                  className="h-control-compact text-ui-caption border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-slate-300 transition-all"
                   disabled={historyPage === 1 || fetchingHistory}
                   onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
                 >
@@ -768,7 +768,7 @@ export function TaskHistory({
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-7 text-[10px] border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-slate-300 transition-all"
+                  className="h-control-compact text-ui-caption border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 hover:bg-slate-100 dark:hover:bg-white/10 text-slate-700 dark:text-slate-300 transition-all"
                   disabled={
                     historyRuns.length < historyPageSize || fetchingHistory
                   }
@@ -874,9 +874,9 @@ function FlowRunInlineDetail({
 
   if (detailFetching && !flowRun) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-4 bg-slate-50/50 p-12 dark:bg-[#0A0B0E]">
+      <div className="flex flex-1 flex-col items-center justify-center gap-ui-section bg-slate-50/50 p-ui-empty dark:bg-[#0A0B0E]">
         <RefreshCw className="h-9 w-9 animate-spin text-blue-500" />
-        <p className="text-sm font-medium text-slate-500 dark:text-slate-400">
+        <p className="text-ui-body font-medium text-slate-500 dark:text-slate-400">
           正在加载日志详情...
         </p>
       </div>
@@ -885,17 +885,17 @@ function FlowRunInlineDetail({
 
   if (error) {
     return (
-      <div className="flex flex-1 flex-col gap-4 bg-slate-50/50 p-4 dark:bg-[#0A0B0E]">
+      <div className="flex flex-1 flex-col gap-ui-section bg-slate-50/50 p-ui-section dark:bg-[#0A0B0E]">
         <Button
           variant="ghost"
           size="sm"
-          className="w-fit gap-1.5 text-xs"
+          className="w-fit gap-1.5 text-ui-label"
           onClick={onBack}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           返回历史
         </Button>
-        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400">
+        <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-ui-section text-ui-body text-red-400">
           日志详情加载失败：{error.message}
         </div>
       </div>
@@ -904,17 +904,17 @@ function FlowRunInlineDetail({
 
   if (!flowRun) {
     return (
-      <div className="flex flex-1 flex-col gap-4 bg-slate-50/50 p-4 dark:bg-[#0A0B0E]">
+      <div className="flex flex-1 flex-col gap-ui-section bg-slate-50/50 p-ui-section dark:bg-[#0A0B0E]">
         <Button
           variant="ghost"
           size="sm"
-          className="w-fit gap-1.5 text-xs"
+          className="w-fit gap-1.5 text-ui-label"
           onClick={onBack}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           返回历史
         </Button>
-        <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-500 dark:border-white/5 dark:bg-white/[0.03] dark:text-slate-400">
+        <div className="rounded-lg border border-slate-200 bg-white p-ui-section text-ui-body text-slate-500 dark:border-white/5 dark:bg-white/[0.03] dark:text-slate-400">
           未找到这次任务运行。
         </div>
       </div>
@@ -926,11 +926,11 @@ function FlowRunInlineDetail({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-slate-50/50 dark:bg-[#0A0B0E]">
-      <div className="border-b border-slate-200/60 bg-white/70 px-4 py-3 backdrop-blur dark:border-white/5 dark:bg-slate-950/70">
+      <div className="border-b border-slate-200/60 bg-white/70 px-ui-section py-3 backdrop-blur dark:border-white/5 dark:bg-slate-950/70">
         <Button
           variant="ghost"
           size="sm"
-          className="mb-3 h-7 gap-1.5 px-2 text-xs text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
+          className="mb-3 h-control-compact gap-1.5 px-2 text-ui-label text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
           onClick={onBack}
         >
           <ArrowLeft className="h-3.5 w-3.5" />
@@ -938,16 +938,16 @@ function FlowRunInlineDetail({
         </Button>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="truncate text-base font-black text-slate-900 dark:text-white">
+            <h3 className="truncate text-ui-title font-black text-slate-900 dark:text-white">
               {flowRun.flowName || deploymentName}
             </h3>
-            <p className="mt-1 break-all font-mono text-[10px] text-slate-500">
+            <p className="mt-1 break-all font-mono text-ui-caption text-slate-500">
               {flowRun.id}
             </p>
           </div>
           <Badge
             className={cn(
-              'shrink-0 items-center gap-1 border px-2 py-0.5 text-[10px] font-semibold shadow-sm',
+              'shrink-0 items-center gap-1 border px-2 py-0.5 text-ui-caption font-semibold shadow-sm',
               config.bg,
               config.text,
               config.border,
@@ -959,7 +959,7 @@ function FlowRunInlineDetail({
           </Badge>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-500 sm:grid-cols-3">
+        <div className="mt-3 grid grid-cols-2 gap-2 text-ui-caption text-slate-500 sm:grid-cols-3">
           <span className="inline-flex items-center gap-1.5">
             <Clock className="h-3 w-3" />
             {flowRun.startedAt
@@ -978,21 +978,21 @@ function FlowRunInlineDetail({
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="space-y-4 p-4">
-          <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-slate-900">
-            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-white/5">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+        <div className="space-y-ui-section p-ui-section">
+          <section className="overflow-hidden rounded-panel border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-slate-900">
+            <div className="flex items-center justify-between border-b border-slate-100 px-ui-section py-3 dark:border-white/5">
+              <h4 className="text-ui-label font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 任务执行
               </h4>
               <Badge
                 variant="outline"
-                className="border-slate-200 bg-transparent text-[10px] text-slate-500 dark:border-white/10"
+                className="border-slate-200 bg-transparent text-ui-caption text-slate-500 dark:border-white/10"
               >
                 {taskRuns.length} 个任务
               </Badge>
             </div>
             {taskRuns.length === 0 ? (
-              <div className="p-6 text-center text-xs text-slate-400">
+              <div className="p-ui-panel text-center text-ui-label text-slate-400">
                 暂无任务执行明细
               </div>
             ) : (
@@ -1002,26 +1002,26 @@ function FlowRunInlineDetail({
                   return (
                     <div
                       key={task.id}
-                      className="flex items-center justify-between gap-3 px-4 py-3"
+                      className="flex items-center justify-between gap-3 px-ui-section py-3"
                     >
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-semibold text-slate-900 dark:text-white">
+                        <p className="truncate text-ui-body font-semibold text-slate-900 dark:text-white">
                           {task.name || '未命名任务'}
                         </p>
-                        <p className="mt-1 font-mono text-[10px] text-slate-500">
+                        <p className="mt-1 font-mono text-ui-caption text-slate-500">
                           {task.startedAt
                             ? format(new Date(task.startedAt), 'HH:mm:ss')
                             : '-'}
                         </p>
                       </div>
                       <div className="flex shrink-0 items-center gap-2">
-                        <span className="font-mono text-[10px] text-slate-500">
+                        <span className="font-mono text-ui-caption text-slate-500">
                           {formatDuration(task.totalRunTime)}
                         </span>
                         <Badge
                           variant="outline"
                           className={cn(
-                            'border px-2 py-0.5 text-[10px] font-semibold',
+                            'border px-2 py-0.5 text-ui-caption font-semibold',
                             taskConfig.bg,
                             taskConfig.text,
                             taskConfig.border
@@ -1037,9 +1037,9 @@ function FlowRunInlineDetail({
             )}
           </section>
 
-          <section className="flex min-h-[320px] flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950 text-slate-200 shadow-sm">
-            <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-4 py-3">
-              <h4 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-400">
+          <section className="flex min-h-[320px] flex-col overflow-hidden rounded-panel border border-slate-800 bg-slate-950 text-slate-200 shadow-sm">
+            <div className="flex items-center justify-between border-b border-white/10 bg-white/5 px-ui-section py-3">
+              <h4 className="flex items-center gap-2 text-ui-label font-bold uppercase tracking-wider text-slate-400">
                 <Terminal className="h-3.5 w-3.5" />
                 运行日志
               </h4>
@@ -1047,7 +1047,7 @@ function FlowRunInlineDetail({
                 {(isLiveRun || logSubscriptionError) && (
                   <span
                     className={cn(
-                      'inline-flex h-5 items-center gap-1.5 rounded-full border px-2 text-[10px] font-semibold',
+                      'inline-flex h-5 items-center gap-1.5 rounded-full border px-2 text-ui-caption font-semibold',
                       logSubscriptionError
                         ? 'border-red-400/20 bg-red-400/10 text-red-300'
                         : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
@@ -1064,14 +1064,14 @@ function FlowRunInlineDetail({
                     {logSubscriptionError ? '实时断开' : '实时'}
                   </span>
                 )}
-                <Badge className="border border-white/10 bg-white/5 text-[10px] text-slate-400">
+                <Badge className="border border-white/10 bg-white/5 text-ui-caption text-slate-400">
                   {logs.length} 条
                 </Badge>
               </div>
             </div>
             <div
               ref={logViewportRef}
-              className="max-h-[420px] overflow-auto scroll-smooth p-4 font-mono text-xs"
+              className="max-h-[420px] overflow-auto scroll-smooth p-ui-section font-mono text-ui-label"
               aria-live={logSubscriptionFetching ? 'polite' : undefined}
               onScroll={handleLogScroll}
             >
@@ -1121,13 +1121,13 @@ function FlowRunInlineDetail({
             </div>
           </section>
 
-          <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-slate-900">
-            <div className="border-b border-slate-100 px-4 py-3 dark:border-white/5">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+          <section className="overflow-hidden rounded-panel border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-slate-900">
+            <div className="border-b border-slate-100 px-ui-section py-3 dark:border-white/5">
+              <h4 className="text-ui-label font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                 参数
               </h4>
             </div>
-            <pre className="max-h-64 overflow-auto p-4 text-xs text-slate-600 dark:text-slate-300">
+            <pre className="max-h-64 overflow-auto p-ui-section text-ui-label text-slate-600 dark:text-slate-300">
               {formatParameters(flowRun.parameters)}
             </pre>
           </section>

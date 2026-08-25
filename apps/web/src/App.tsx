@@ -123,8 +123,10 @@ function SessionStatusPage({
             <AlertTriangle className="h-5 w-5" />
           )}
         </div>
-        <h1 className="mt-5 text-lg font-semibold text-white">{title}</h1>
-        <p className="mt-2 text-sm leading-6 text-slate-400">{detail}</p>
+        <h1 className="mt-5 text-ui-heading font-semibold text-white">
+          {title}
+        </h1>
+        <p className="mt-2 text-ui-body leading-6 text-slate-400">{detail}</p>
         {actionLabel && onAction && (
           <Button
             type="button"

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import * as React from 'react';
 
+import { NativeSelect } from '@/components/ui/native-select';
 import { cn } from '@/utils/cn';
 
 import { matchesDiagnosticVersion } from './clientTrust';
@@ -100,7 +101,8 @@ export type SignalDiagnosticsLike = {
   }[];
 };
 
-type SignalDiagnosticVersionGroupLike = SignalDiagnosticsLike['versionGroups'][number];
+type SignalDiagnosticVersionGroupLike =
+  SignalDiagnosticsLike['versionGroups'][number];
 
 function sameVersionCoordinate(
   left: {
@@ -143,12 +145,12 @@ function duration(seconds?: number | null) {
 
 function EmptyDiagnostic({ reason }: { reason?: string | null }) {
   return (
-    <div className="flex h-full min-h-72 flex-col items-center justify-center p-8 text-center">
+    <div className="flex h-full min-h-72 flex-col items-center justify-center p-ui-section text-center">
       <Database className="h-10 w-10 text-slate-800" />
-      <div className="mt-3 text-sm font-bold text-slate-500">
+      <div className="mt-3 text-ui-body font-bold text-slate-500">
         诊断样本尚不可用
       </div>
-      <div className="mt-1 max-w-lg text-[10px] leading-5 text-slate-700">
+      <div className="mt-1 max-w-lg text-ui-caption leading-5 text-slate-700">
         {reason ||
           '等待服务端积累 MATERIAL 与合并诊断评估。不会用原始 Tick 数伪造分母。'}
       </div>
@@ -173,7 +175,7 @@ export function TTradeSignalDiagnosticsPanel({
       <div
         role="status"
         aria-busy="true"
-        className="flex h-full min-h-72 flex-col items-center justify-center p-8 text-center text-[10px] text-cyan-100"
+        className="flex h-full min-h-72 flex-col items-center justify-center p-ui-section text-center text-ui-caption text-cyan-100"
       >
         <Loader2
           className="h-7 w-7 animate-spin text-cyan-300 motion-reduce:animate-none"
@@ -189,9 +191,12 @@ export function TTradeSignalDiagnosticsPanel({
         {error && (
           <div
             role="alert"
-            className="flex items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+            className="flex items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
           >
-            <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <ShieldAlert
+              className="mt-0.5 h-3.5 w-3.5 shrink-0"
+              aria-hidden="true"
+            />
             诊断读取失败：{error}
           </div>
         )}
@@ -231,15 +236,18 @@ export function TTradeSignalDiagnosticsPanel({
 
   return (
     <div
-      className="h-full min-h-0 overflow-y-auto p-4 custom-scrollbar"
+      className="h-full min-h-0 overflow-y-auto p-ui-section custom-scrollbar"
       aria-busy={loading}
     >
       {error && (
         <div
           role="alert"
-          className="mb-3 flex items-start gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="mb-3 flex items-start gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2.5 text-ui-caption leading-4 text-rose-100"
         >
-          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <ShieldAlert
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
           诊断刷新失败；以下仍显示上次成功读取的近 20 日分区。
         </div>
       )}
@@ -247,30 +255,33 @@ export function TTradeSignalDiagnosticsPanel({
         <div
           role="status"
           aria-busy="true"
-          className="mb-3 flex items-center gap-2 border border-cyan-400/15 bg-cyan-400/[0.04] px-3 py-2 text-[9px] text-cyan-100"
+          className="mb-3 flex items-center gap-2 border border-cyan-400/15 bg-cyan-400/[0.04] px-3 py-2 text-ui-micro text-cyan-100"
         >
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          <Loader2
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
           正在刷新诊断，暂保留上次结果…
         </div>
       )}
-      <header className="mb-4 flex flex-wrap items-start justify-between gap-3 border border-white/[0.07] bg-[#0b1628] p-4">
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3 border border-white/[0.07] bg-[#0b1628] p-ui-section">
         <div>
-          <div className="text-[9px] font-black uppercase tracking-[0.16em] text-cyan-300">
+          <div className="text-ui-micro font-black uppercase tracking-[0.16em] text-cyan-300">
             Server-side diagnostics
           </div>
-          <h2 className="mt-1 text-sm font-black text-slate-100">
+          <h2 className="mt-1 text-ui-body font-black text-slate-100">
             机会引擎诊断
           </h2>
-          <p className="mt-1 text-[10px] text-slate-600">
+          <p className="mt-1 text-ui-caption text-slate-600">
             {formatTime(diagnostics.startTime)} —{' '}
             {formatTime(diagnostics.endTime)}
           </p>
         </div>
-        <div className="grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-2 text-ui-caption sm:grid-cols-3">
           {diagnostics.partitions.length > 1 && (
             <label className="col-span-2 border border-white/[0.06] px-3 py-2 sm:col-span-3">
               <span className="text-slate-600">版本分区</span>
-              <select
+              <NativeSelect
                 aria-label="诊断版本分区"
                 value={partitionKey(partition)}
                 onChange={event => setSelectedPartitionKey(event.target.value)}
@@ -285,7 +296,7 @@ export function TTradeSignalDiagnosticsPanel({
                       : '样本不可用'}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
           )}
           <div className="border border-white/[0.06] px-3 py-2">
@@ -310,14 +321,14 @@ export function TTradeSignalDiagnosticsPanel({
       </header>
 
       <section
-        className="mb-4 border border-white/[0.07] bg-[#0b1628] p-4"
+        className="mb-4 border border-white/[0.07] bg-[#0b1628] p-ui-section"
         aria-labelledby="t-trade-funnel-title"
       >
         <div className="mb-3 flex items-center gap-2">
           <BarChart3 className="h-4 w-4 text-cyan-300" />
           <h3
             id="t-trade-funnel-title"
-            className="text-xs font-black text-slate-200"
+            className="text-ui-label font-black text-slate-200"
           >
             机会漏斗
           </h3>
@@ -328,40 +339,42 @@ export function TTradeSignalDiagnosticsPanel({
               key={stage.code}
               className="relative border border-white/[0.06] p-3"
             >
-              <div className="text-[9px] text-slate-600">
+              <div className="text-ui-micro text-slate-600">
                 {index + 1}. {stage.label}
               </div>
-              <div className="mt-1 font-mono text-lg font-black text-slate-100">
+              <div className="mt-1 font-mono text-ui-heading font-black text-slate-100">
                 {stage.count}
               </div>
-              <div className="mt-1 text-[9px] text-slate-500">
+              <div className="mt-1 text-ui-micro text-slate-500">
                 相对 {stage.denominatorCode || '起点'} ·{' '}
                 {percentage(stage.conversionRate)}
               </div>
-              <div className="mt-1 font-mono text-[8px] text-slate-700">
+              <div className="mt-1 font-mono text-ui-micro text-slate-700">
                 单位 {stage.unitCode}
               </div>
             </div>
           ))}
         </div>
-        <p className="mt-3 text-[9px] text-slate-600">
+        <p className="mt-3 text-ui-micro text-slate-600">
           eligible → data ready → pattern → preview → candidate → TradeIntent →
-          confirmed → ordered → filled；漏斗只计 MATERIAL 证据，不展开合并
-          Tick 数。
+          confirmed → ordered → filled；漏斗只计 MATERIAL 证据，不展开合并 Tick
+          数。
         </p>
       </section>
 
-      <div className="grid gap-4 2xl:grid-cols-2">
-        <section className="border border-white/[0.07] bg-[#0b1628] p-4">
+      <div className="grid gap-ui-section 2xl:grid-cols-2">
+        <section className="border border-white/[0.07] bg-[#0b1628] p-ui-section">
           <div className="mb-3 flex items-center gap-2">
             <ShieldAlert className="h-4 w-4 text-amber-300" />
-            <h3 className="text-xs font-black text-slate-200">主要 blocker</h3>
+            <h3 className="text-ui-label font-black text-slate-200">
+              主要 blocker
+            </h3>
           </div>
           <div className="space-y-2">
             {partition.blockers.map(item => (
               <div
                 key={item.blocker.code}
-                className="border border-white/[0.06] p-2.5 text-[10px]"
+                className="border border-white/[0.06] p-2.5 text-ui-caption"
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-bold text-slate-200">
@@ -379,33 +392,35 @@ export function TTradeSignalDiagnosticsPanel({
                     }}
                   />
                 </div>
-                <div className="mt-1 text-[9px] text-slate-600">
+                <div className="mt-1 text-ui-micro text-slate-600">
                   {item.blocker.detail}
                 </div>
-                <div className="mt-1 font-mono text-[9px] text-slate-700">
+                <div className="mt-1 font-mono text-ui-micro text-slate-700">
                   分母 {item.denominatorCode} ={' '}
                   {formatNumber(item.denominatorValue, 0)}
                 </div>
               </div>
             ))}
             {partition.blockers.length === 0 && (
-              <div className="py-8 text-center text-[10px] text-slate-600">
+              <div className="py-ui-panel text-center text-ui-caption text-slate-600">
                 该时间范围没有 blocker
               </div>
             )}
           </div>
         </section>
 
-        <section className="border border-white/[0.07] bg-[#0b1628] p-4">
+        <section className="border border-white/[0.07] bg-[#0b1628] p-ui-section">
           <div className="mb-3 flex items-center gap-2">
             <BarChart3 className="h-4 w-4 text-violet-300" />
-            <h3 className="text-xs font-black text-slate-200">机会分分布</h3>
+            <h3 className="text-ui-label font-black text-slate-200">
+              机会分分布
+            </h3>
           </div>
           <div className="space-y-2">
             {partition.scoreDistribution.map((bucket, index) => (
               <div
                 key={`${bucket.path || 'NONE'}:${bucket.lowerBound}:${index}`}
-                className="grid grid-cols-[100px_1fr_42px] items-center gap-2 text-[9px]"
+                className="grid grid-cols-[100px_1fr_42px] items-center gap-2 text-ui-micro"
               >
                 <span className="font-mono text-slate-500">
                   {bucket.path || '未选路径'}
@@ -428,20 +443,22 @@ export function TTradeSignalDiagnosticsPanel({
               </div>
             ))}
             {partition.scoreDistribution.length === 0 && (
-              <div className="py-8 text-center text-[10px] text-slate-600">
+              <div className="py-ui-panel text-center text-ui-caption text-slate-600">
                 暂无可计算分数样本
               </div>
             )}
           </div>
         </section>
 
-        <section className="border border-white/[0.07] bg-[#0b1628] p-4">
+        <section className="border border-white/[0.07] bg-[#0b1628] p-ui-section">
           <div className="mb-3 flex items-center gap-2">
             <GitBranch className="h-4 w-4 text-emerald-300" />
-            <h3 className="text-xs font-black text-slate-200">双 FSM 停留</h3>
+            <h3 className="text-ui-label font-black text-slate-200">
+              双 FSM 停留
+            </h3>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[420px] text-left text-[10px]">
+            <table className="w-full min-w-[420px] text-left text-ui-caption">
               <thead className="text-slate-600">
                 <tr>
                   <th className="pb-2">分支</th>
@@ -468,10 +485,10 @@ export function TTradeSignalDiagnosticsPanel({
             </table>
           </div>
           <div className="mt-3 border-t border-white/[0.05] pt-3">
-            <div className="mb-2 text-[9px] font-bold text-slate-500">
+            <div className="mb-2 text-ui-micro font-bold text-slate-500">
               from → to 转移边
             </div>
-            <div className="space-y-1 text-[9px]">
+            <div className="space-y-1 text-ui-micro">
               {partition.fsmTransitions.map(item => (
                 <div
                   key={`${item.branch}:${item.fromPhase}:${item.toPhase}`}
@@ -490,16 +507,18 @@ export function TTradeSignalDiagnosticsPanel({
           </div>
         </section>
 
-        <section className="border border-white/[0.07] bg-[#0b1628] p-4">
+        <section className="border border-white/[0.07] bg-[#0b1628] p-ui-section">
           <div className="mb-3 flex items-center gap-2">
             <Clock3 className="h-4 w-4 text-rose-300" />
-            <h3 className="text-xs font-black text-slate-200">候选结果</h3>
+            <h3 className="text-ui-label font-black text-slate-200">
+              候选结果
+            </h3>
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {partition.candidateOutcomes.map(item => (
               <div key={item.code} className="border border-white/[0.06] p-3">
-                <div className="text-[9px] text-slate-600">{item.label}</div>
-                <div className="mt-1 font-mono text-lg font-black text-slate-100">
+                <div className="text-ui-micro text-slate-600">{item.label}</div>
+                <div className="mt-1 font-mono text-ui-heading font-black text-slate-100">
                   {item.count}
                 </div>
               </div>
@@ -508,15 +527,15 @@ export function TTradeSignalDiagnosticsPanel({
         </section>
       </div>
 
-      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-4">
+      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-ui-section">
         <div className="mb-3 flex items-center gap-2">
           <Clock3 className="h-4 w-4 text-cyan-300" />
-          <h3 className="text-xs font-black text-slate-200">
+          <h3 className="text-ui-label font-black text-slate-200">
             成交后费用化表现
           </h3>
         </div>
         {!partition.postCandidatePerformance.available ? (
-          <div className="border border-amber-400/15 bg-amber-400/[0.03] p-3 text-[10px]">
+          <div className="border border-amber-400/15 bg-amber-400/[0.03] p-3 text-ui-caption">
             <div className="font-bold text-amber-200">
               MFE / MAE / 固定窗口收益未计算
             </div>
@@ -524,18 +543,20 @@ export function TTradeSignalDiagnosticsPanel({
               {partition.postCandidatePerformance.reason}
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
-              {partition.postCandidatePerformance.requiredDataCodes.map(code => (
-                <code
-                  key={code}
-                  className="border border-white/[0.06] px-1.5 py-1 text-[8px] text-slate-600"
-                >
-                  {code}
-                </code>
-              ))}
+              {partition.postCandidatePerformance.requiredDataCodes.map(
+                code => (
+                  <code
+                    key={code}
+                    className="border border-white/[0.06] px-1.5 py-1 text-ui-micro text-slate-600"
+                  >
+                    {code}
+                  </code>
+                )
+              )}
             </div>
           </div>
         ) : (
-          <div className="grid gap-2 text-[10px] sm:grid-cols-3">
+          <div className="grid gap-2 text-ui-caption sm:grid-cols-3">
             <div className="border border-white/[0.06] p-3">
               净 MFE{' '}
               <span className="font-mono text-slate-200">
@@ -571,7 +592,7 @@ export function TTradeSignalDiagnosticsPanel({
                         key={item.windowSeconds}
                         className="border border-white/[0.05] px-2.5 py-2"
                       >
-                        <div className="flex items-center justify-between gap-2 text-[9px] text-slate-500">
+                        <div className="flex items-center justify-between gap-2 text-ui-micro text-slate-500">
                           <span>{duration(item.windowSeconds)}</span>
                           <span>{item.sampleCount} 样本</span>
                         </div>
@@ -590,10 +611,10 @@ export function TTradeSignalDiagnosticsPanel({
         )}
       </section>
 
-      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-4">
+      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-ui-section">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-xs font-black text-slate-200">版本分组</h3>
-          <span className="inline-flex items-center gap-1 text-[9px] text-amber-200">
+          <h3 className="text-ui-label font-black text-slate-200">版本分组</h3>
+          <span className="inline-flex items-center gap-1 text-ui-micro text-amber-200">
             <AlertTriangle className="h-3 w-3" />
             {diagnostics.mergedVersions
               ? '已显式合并不同规则版本'
@@ -601,12 +622,12 @@ export function TTradeSignalDiagnosticsPanel({
           </span>
         </div>
         {diagnostics.warnings.length > 0 && (
-          <div className="mb-3 border border-amber-400/15 px-3 py-2 font-mono text-[9px] text-amber-200">
+          <div className="mb-3 border border-amber-400/15 px-3 py-2 font-mono text-ui-micro text-amber-200">
             {diagnostics.warnings.join(' · ')}
           </div>
         )}
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[620px] text-left text-[10px]">
+          <table className="w-full min-w-[620px] text-left text-ui-caption">
             <thead className="text-slate-600">
               <tr>
                 <th className="pb-2">Policy</th>
@@ -637,15 +658,15 @@ export function TTradeSignalDiagnosticsPanel({
         </div>
       </section>
 
-      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-4">
-        <h3 className="mb-3 text-xs font-black text-slate-200">
+      <section className="mt-4 border border-white/[0.07] bg-[#0b1628] p-ui-section">
+        <h3 className="mb-3 text-ui-label font-black text-slate-200">
           单标的评估时间线
         </h3>
         <div className="space-y-1.5">
           {partitionEvaluations.slice(0, 50).map(item => (
             <article
               key={item.id}
-              className="grid gap-1 border border-white/[0.05] px-3 py-2 text-[9px] sm:grid-cols-[145px_100px_130px_1fr]"
+              className="grid gap-1 border border-white/[0.05] px-3 py-2 text-ui-micro sm:grid-cols-[145px_100px_130px_1fr]"
             >
               <time className="font-mono text-slate-500">
                 {formatTime(item.evaluatedAt)}
@@ -658,13 +679,13 @@ export function TTradeSignalDiagnosticsPanel({
                 {item.eventType} ·{' '}
                 {item.signalSnapshot?.topBlockers[0]?.label || '无首要 blocker'}{' '}
                 · policy {item.policyVersion} · feature{' '}
-                {item.signalSnapshot?.featureSchemaVersion || '不可用'} · profile{' '}
-                {item.signalSnapshot?.profileVersion || '无画像'}
+                {item.signalSnapshot?.featureSchemaVersion || '不可用'} ·
+                profile {item.signalSnapshot?.profileVersion || '无画像'}
               </span>
             </article>
           ))}
           {!loading && partitionEvaluations.length === 0 && (
-            <div className="py-8 text-center text-[10px] text-slate-600">
+            <div className="py-ui-panel text-center text-ui-caption text-slate-600">
               该范围暂无持久化评估事件
             </div>
           )}

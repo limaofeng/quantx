@@ -145,24 +145,24 @@ function ApprovalCard({
   const countdown = useCountdown(intent.approvalExpiresAt);
 
   return (
-    <Card className="overflow-hidden rounded-2xl border-amber-500/25 bg-amber-500/[0.06] shadow-lg">
-      <div className="flex flex-col gap-4 border-b border-amber-500/15 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+    <Card className="overflow-hidden rounded-panel border-amber-500/25 bg-amber-500/[0.06] shadow-lg">
+      <div className="flex flex-col gap-ui-section border-b border-amber-500/15 px-ui-section py-ui-section sm:flex-row sm:items-center sm:justify-between">
         <div>
           <div className="flex items-center gap-2">
             <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-600 hover:bg-amber-500/10 dark:text-amber-300">
               待人工确认
             </Badge>
-            <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-200">
+            <span className="font-mono text-ui-label font-bold text-slate-700 dark:text-slate-200">
               {intent.instrumentCode}
             </span>
           </div>
-          <p className="mt-2 text-xs font-medium leading-relaxed text-slate-600 dark:text-slate-300">
+          <p className="mt-2 text-ui-label font-medium leading-relaxed text-slate-600 dark:text-slate-300">
             {intent.reason}
           </p>
         </div>
         <div
           className={cn(
-            'flex items-center gap-2 rounded-xl border px-3 py-2 font-mono text-xs font-bold',
+            'flex items-center gap-2 rounded-panel border px-3 py-2 font-mono text-ui-label font-bold',
             countdown.expired
               ? 'border-rose-500/25 bg-rose-500/10 text-rose-500'
               : 'border-amber-500/25 bg-amber-500/10 text-amber-600 dark:text-amber-300'
@@ -181,19 +181,22 @@ function ApprovalCard({
           ['距涨停', `${formatNumber(intent.distanceToLimitTicks, 0)} 档`],
           ['目标仓位', formatPercent(intent.targetPositionPct)],
         ].map(([label, value]) => (
-          <div key={label} className="bg-white px-4 py-3 dark:bg-[#0d1425]">
-            <div className="text-[9px] font-black uppercase tracking-wider text-slate-400">
+          <div
+            key={label}
+            className="bg-white px-ui-section py-3 dark:bg-[#0d1425]"
+          >
+            <div className="text-ui-micro font-black uppercase tracking-wider text-slate-400">
               {label}
             </div>
-            <div className="mt-1 font-mono text-xs font-bold text-slate-800 dark:text-slate-100">
+            <div className="mt-1 font-mono text-ui-label font-bold text-slate-800 dark:text-slate-100">
               {value}
             </div>
           </div>
         ))}
       </div>
 
-      <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-[10px] text-slate-500">
+      <div className="flex flex-col gap-3 px-ui-section py-ui-section sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-ui-caption text-slate-500">
           置信度 {formatPercent(intent.confidence)} · 产生于{' '}
           {formatTime(intent.createdAt)}
         </div>
@@ -235,12 +238,12 @@ function EmptyState({
   description: string;
 }) {
   return (
-    <div className="rounded-2xl border border-dashed border-slate-300 px-6 py-10 text-center dark:border-white/10">
+    <div className="rounded-panel border border-dashed border-slate-300 px-ui-panel py-ui-empty text-center dark:border-white/10">
       <ShieldCheck className="mx-auto h-7 w-7 text-emerald-500" />
-      <div className="mt-3 text-sm font-bold text-slate-800 dark:text-slate-100">
+      <div className="mt-3 text-ui-body font-bold text-slate-800 dark:text-slate-100">
         {title}
       </div>
-      <p className="mx-auto mt-1 max-w-md text-[11px] leading-relaxed text-slate-500">
+      <p className="mx-auto mt-1 max-w-md text-ui-caption leading-relaxed text-slate-500">
         {description}
       </p>
     </div>
@@ -378,16 +381,18 @@ export default function LimitUpBoardWorkbench({
   }
 
   return (
-    <div className="space-y-5 pb-12">
-      <Card className="overflow-hidden rounded-2xl border-slate-200 bg-slate-950 text-white shadow-xl dark:border-white/10">
-        <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+    <div className="space-y-ui-section pb-12">
+      <Card className="overflow-hidden rounded-panel border-slate-200 bg-slate-950 text-white shadow-none dark:border-white/10">
+        <div className="grid gap-ui-section p-ui-section lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
           <div>
-            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+            <div className="flex items-center gap-2 text-ui-caption font-black uppercase tracking-[0.24em] text-red-400">
               <Gauge className="h-4 w-4" />
               Limit-up board workbench
             </div>
-            <h2 className="mt-2 text-xl font-black">打板执行工作台</h2>
-            <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-slate-400">
+            <h2 className="mt-2 text-ui-page-title font-black">
+              打板执行工作台
+            </h2>
+            <p className="mt-1 max-w-2xl text-ui-caption leading-relaxed text-slate-400">
               {instrumentCode || '--'} ·
               信号只负责表达交易意图，风控、整手、T+1、委托与成交回报由统一交易域处理。
             </p>
@@ -403,10 +408,12 @@ export default function LimitUpBoardWorkbench({
             ].map(([label, value]) => (
               <div
                 key={label}
-                className="min-w-20 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2"
+                className="min-w-20 rounded-panel border border-white/10 bg-white/[0.04] px-3 py-2"
               >
-                <div className="text-[9px] text-slate-500">{label}</div>
-                <div className="mt-1 font-mono text-xs font-bold">{value}</div>
+                <div className="text-ui-micro text-slate-500">{label}</div>
+                <div className="mt-1 font-mono text-ui-label font-bold">
+                  {value}
+                </div>
               </div>
             ))}
           </div>
@@ -441,8 +448,8 @@ export default function LimitUpBoardWorkbench({
               healthy: runStatus !== StrategyRunStatus.Error,
             },
           ].map(item => (
-            <div key={item.label} className="bg-slate-950 px-4 py-3">
-              <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-500">
+            <div key={item.label} className="bg-slate-950 px-ui-section py-3">
+              <div className="flex items-center gap-1.5 text-ui-micro font-bold text-slate-500">
                 {item.healthy ? (
                   <ShieldCheck className="h-3 w-3 text-emerald-400" />
                 ) : (
@@ -452,7 +459,7 @@ export default function LimitUpBoardWorkbench({
               </div>
               <div
                 className={cn(
-                  'mt-1 text-xs font-bold',
+                  'mt-1 text-ui-label font-bold',
                   item.healthy ? 'text-slate-200' : 'text-amber-300'
                 )}
               >
@@ -467,7 +474,7 @@ export default function LimitUpBoardWorkbench({
         <div
           role="status"
           className={cn(
-            'rounded-xl border px-4 py-3 text-xs',
+            'rounded-panel border px-ui-section py-3 text-ui-label',
             error || actionFailed
               ? 'border-rose-500/25 bg-rose-500/10 text-rose-600 dark:text-rose-300'
               : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
@@ -482,11 +489,11 @@ export default function LimitUpBoardWorkbench({
           <div>
             <h3
               id="board-approvals-title"
-              className="text-sm font-black text-slate-900 dark:text-white"
+              className="text-ui-body font-black text-slate-900 dark:text-white"
             >
               待确认入场
             </h3>
-            <p className="mt-1 text-[10px] text-slate-500">
+            <p className="mt-1 text-ui-caption text-slate-500">
               超过确认窗口的信号会自动失效，不能补确认。
             </p>
           </div>
@@ -518,11 +525,11 @@ export default function LimitUpBoardWorkbench({
         <div className="mb-3">
           <h3
             id="board-exit-title"
-            className="text-sm font-black text-slate-900 dark:text-white"
+            className="text-ui-body font-black text-slate-900 dark:text-white"
           >
             打板卖出计划
           </h3>
-          <p className="mt-1 text-[10px] text-slate-500">
+          <p className="mt-1 text-ui-caption text-slate-500">
             只有真实成交后才创建；可卖量不足时按 T+1 规则等待。
           </p>
         </div>
@@ -531,14 +538,14 @@ export default function LimitUpBoardWorkbench({
             {data.strategyExitPlans.map(plan => (
               <Card
                 key={plan.id}
-                className="rounded-2xl border-slate-200 bg-white p-5 shadow-lg dark:border-white/10 dark:bg-[#0d1425]"
+                className="rounded-panel border-slate-200 bg-white p-ui-section shadow-lg dark:border-white/10 dark:bg-[#0d1425]"
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="font-mono text-sm font-black text-slate-900 dark:text-white">
+                    <div className="font-mono text-ui-body font-black text-slate-900 dark:text-white">
                       {plan.instrumentCode}
                     </div>
-                    <div className="mt-1 text-[10px] text-slate-500">
+                    <div className="mt-1 text-ui-caption text-slate-500">
                       {plan.sourceType} · {plan.bucket}
                     </div>
                   </div>
@@ -557,14 +564,16 @@ export default function LimitUpBoardWorkbench({
                       key={label}
                       className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-white/[0.04]"
                     >
-                      <div className="text-[9px] text-slate-400">{label}</div>
-                      <div className="mt-1 font-mono text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                      <div className="text-ui-micro text-slate-400">
+                        {label}
+                      </div>
+                      <div className="mt-1 font-mono text-ui-caption font-bold text-slate-700 dark:text-slate-200">
                         {value}
                       </div>
                     </div>
                   ))}
                 </div>
-                <div className="mt-4 flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                <div className="mt-4 flex flex-wrap items-center gap-2 text-ui-caption text-slate-500">
                   <Badge
                     variant="outline"
                     className="border-slate-200 dark:border-white/10"
@@ -599,15 +608,15 @@ export default function LimitUpBoardWorkbench({
           <div className="mb-3">
             <h3
               id="board-backtest-title"
-              className="text-sm font-black text-slate-900 dark:text-white"
+              className="text-ui-body font-black text-slate-900 dark:text-white"
             >
               回测成交可信度
             </h3>
-            <p className="mt-1 text-[10px] text-slate-500">
+            <p className="mt-1 text-ui-caption text-slate-500">
               这些数字用于识别被涨跌停、盘口深度和订单时效挡掉的理想化成交。
             </p>
           </div>
-          <Card className="rounded-2xl border-slate-200 bg-white p-5 shadow-lg dark:border-white/10 dark:bg-[#0d1425]">
+          <Card className="rounded-panel border-slate-200 bg-white p-ui-section shadow-lg dark:border-white/10 dark:bg-[#0d1425]">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
               {[
                 {
@@ -655,20 +664,20 @@ export default function LimitUpBoardWorkbench({
                 return (
                   <div
                     key={item.label}
-                    className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/[0.03]"
+                    className="rounded-panel border border-slate-200 bg-slate-50 px-ui-section py-3 dark:border-white/10 dark:bg-white/[0.03]"
                   >
-                    <div className="flex items-center gap-2 text-[9px] font-bold text-slate-500">
+                    <div className="flex items-center gap-2 text-ui-micro font-bold text-slate-500">
                       <Icon className="h-3.5 w-3.5 text-red-500" />
                       {item.label}
                     </div>
-                    <div className="mt-2 font-mono text-lg font-black text-slate-900 dark:text-white">
+                    <div className="mt-2 font-mono text-ui-heading font-black text-slate-900 dark:text-white">
                       {item.value.toLocaleString('zh-CN')}
                     </div>
                   </div>
                 );
               })}
             </div>
-            <div className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-4 text-[10px] text-slate-500 dark:border-white/5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-4 text-ui-caption text-slate-500 dark:border-white/5 sm:flex-row sm:items-center sm:justify-between">
               <span>
                 数据质量：
                 {data?.strategyPerformance?.dataQuality.status || '--'}
@@ -690,28 +699,28 @@ export default function LimitUpBoardWorkbench({
         <div className="mb-3">
           <h3
             id="board-signals-title"
-            className="text-sm font-black text-slate-900 dark:text-white"
+            className="text-ui-body font-black text-slate-900 dark:text-white"
           >
             最近信号链路
           </h3>
         </div>
-        <Card className="overflow-hidden rounded-2xl border-slate-200 bg-white shadow-lg dark:border-white/10 dark:bg-[#0d1425]">
+        <Card className="overflow-hidden rounded-panel border-slate-200 bg-white shadow-lg dark:border-white/10 dark:bg-[#0d1425]">
           {latestSignals.length ? (
             latestSignals.map((signal, index) => (
               <div
                 key={`${signal.id}-${index}`}
-                className="grid gap-2 border-b border-slate-100 px-5 py-3 last:border-b-0 dark:border-white/5 sm:grid-cols-[150px_90px_minmax(0,1fr)_120px]"
+                className="grid gap-2 border-b border-slate-100 px-ui-section py-3 last:border-b-0 dark:border-white/5 sm:grid-cols-[150px_90px_minmax(0,1fr)_120px]"
               >
-                <span className="font-mono text-[10px] text-slate-500">
+                <span className="font-mono text-ui-caption text-slate-500">
                   {formatTime(signal.decidedAt)}
                 </span>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200">
+                <span className="text-ui-caption font-bold text-slate-700 dark:text-slate-200">
                   {signal.side} {signal.instrumentCode}
                 </span>
-                <span className="truncate text-[10px] text-slate-500">
+                <span className="truncate text-ui-caption text-slate-500">
                   {signal.reason || '--'}
                 </span>
-                <span className="text-right font-mono text-[10px] font-bold text-slate-700 dark:text-slate-200">
+                <span className="text-right font-mono text-ui-caption font-bold text-slate-700 dark:text-slate-200">
                   {signal.execution?.fillStatus ||
                     signal.execution?.orderStatus ||
                     signal.status ||
@@ -720,7 +729,7 @@ export default function LimitUpBoardWorkbench({
               </div>
             ))
           ) : (
-            <div className="px-6 py-10 text-center text-xs text-slate-500">
+            <div className="px-ui-panel py-ui-empty text-center text-ui-label text-slate-500">
               暂无已产生的交易意图。
             </div>
           )}

@@ -342,7 +342,7 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
               />
             </svg>
           </div>
-          <p className="text-sm font-medium text-muted-foreground">
+          <p className="text-ui-body font-medium text-muted-foreground">
             请选择股票以查看K线图
           </p>
         </div>
@@ -362,37 +362,39 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
       {/* K-Line Info Card - Top Left */}
       {hoverData && (
         <div className="absolute top-12 left-4 z-10 bg-slate-900/80 dark:bg-slate-950/90 backdrop-blur-sm rounded-lg border border-slate-700/50 p-3 min-w-[140px] shadow-lg">
-          <div className="space-y-1 text-xs font-mono">
-            <div className="flex justify-between gap-4">
+          <div className="space-y-1 text-ui-label font-mono">
+            <div className="flex justify-between gap-ui-section">
               <span className="text-slate-400">日期</span>
               <span className="text-slate-200 font-medium">
                 {hoverData.time}
               </span>
             </div>
-            <div className="flex justify-between gap-4">
+            <div className="flex justify-between gap-ui-section">
               <span className="text-slate-400">开盘</span>
               <span className="text-slate-200">
                 {hoverData.open.toFixed(2)}
               </span>
             </div>
-            <div className="flex justify-between gap-4">
+            <div className="flex justify-between gap-ui-section">
               <span className="text-slate-400">最高</span>
               <span className="text-market-up">
                 {hoverData.high.toFixed(2)}
               </span>
             </div>
-            <div className="flex justify-between gap-4">
+            <div className="flex justify-between gap-ui-section">
               <span className="text-slate-400">最低</span>
-              <span className="text-market-down">{hoverData.low.toFixed(2)}</span>
+              <span className="text-market-down">
+                {hoverData.low.toFixed(2)}
+              </span>
             </div>
-            <div className="flex justify-between gap-4">
+            <div className="flex justify-between gap-ui-section">
               <span className="text-slate-400">收盘</span>
               <span className="text-slate-200 font-medium">
                 {hoverData.close.toFixed(2)}
               </span>
             </div>
             <div className="border-t border-slate-700/50 pt-1 mt-1">
-              <div className="flex justify-between gap-4">
+              <div className="flex justify-between gap-ui-section">
                 <span className="text-slate-400">涨跌</span>
                 <span
                   className={
@@ -405,7 +407,7 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
                   {hoverData.change.toFixed(2)}
                 </span>
               </div>
-              <div className="flex justify-between gap-4">
+              <div className="flex justify-between gap-ui-section">
                 <span className="text-slate-400">涨跌幅</span>
                 <span
                   className={
@@ -424,17 +426,17 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
       )}
 
       {/* Toolbar - Legend Only */}
-      <div className="shrink-0 px-4 py-2 z-10 flex items-center justify-end">
+      <div className="shrink-0 px-ui-section py-2 z-10 flex items-center justify-end">
         <div className="flex gap-3 pr-2">
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 rounded-full bg-market-up/50" />
-            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
+            <span className="text-ui-caption font-bold text-muted-foreground uppercase tracking-widest">
               盈利区
             </span>
           </div>
           <div className="flex items-center gap-1.5">
             <div className="w-1.5 h-1.5 rounded-full bg-market-down/50" />
-            <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">
+            <span className="text-ui-caption font-bold text-muted-foreground uppercase tracking-widest">
               防御区
             </span>
           </div>
@@ -447,7 +449,7 @@ const GridChart: React.FC<Props> = ({ result, stockCode }) => {
       />
       {/* Watermark */}
       <div className="absolute bottom-4 left-4 pointer-events-none opacity-10">
-        <h4 className="text-xl font-black italic text-foreground tracking-tighter">
+        <h4 className="text-ui-page-title font-black italic text-foreground tracking-tighter">
           QUANTX PRO
         </h4>
       </div>

@@ -74,7 +74,7 @@ export function SectorStatsCards({
               <div className={cn('p-1 rounded-md', stat.bg)}>
                 <stat.icon className={cn('w-3.5 h-3.5', stat.color)} />
               </div>
-              <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+              <span className="text-ui-caption font-black text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                 {stat.label}
               </span>
             </div>
@@ -82,13 +82,13 @@ export function SectorStatsCards({
             <div className="flex items-baseline gap-1 relative z-10">
               <span
                 className={cn(
-                  'text-2xl font-black tracking-tighter tabular-nums',
+                  'text-ui-display font-black tracking-tighter tabular-nums',
                   stat.color
                 )}
               >
                 {stat.value.toLocaleString()}
               </span>
-              <span className="text-[10px] font-bold text-slate-400">
+              <span className="text-ui-caption font-bold text-slate-400">
                 items
               </span>
             </div>

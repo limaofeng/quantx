@@ -237,7 +237,7 @@ export function TabBar<T extends StudioTab>({
         className={cn(
           'flex h-full min-w-0 items-end gap-0.5',
           isWorkspaceVariant
-            ? 'overflow-hidden px-4'
+            ? 'overflow-hidden px-ui-section'
             : 'no-scrollbar overflow-x-auto overscroll-x-contain scroll-smooth px-1.5'
         )}
         role="tablist"
@@ -322,7 +322,7 @@ export function TabBar<T extends StudioTab>({
                     });
                   }}
                   className={cn(
-                    'group relative flex h-12 shrink-0 items-center border border-b-0 transition-colors duration-150',
+                    'group relative flex h-studio-tab shrink-0 items-center border border-b-0 transition-colors duration-150',
                     isActive
                       ? cn(
                           themeStyles.activeTab,
@@ -398,7 +398,7 @@ export function TabBar<T extends StudioTab>({
                           )}
                           <span
                             className={cn(
-                              'truncate text-xs font-bold',
+                              'truncate text-ui-label font-bold',
                               tab.isPreview && 'italic'
                             )}
                           >
@@ -534,9 +534,10 @@ export function TabBar<T extends StudioTab>({
                 type="button"
                 onClick={onTabCreate}
                 className={cn(
-                  'mb-1 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                  'mb-1 flex h-control-default w-control-default shrink-0 cursor-pointer items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-white/5 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                   themeStyles.focusRing,
-                  isWorkspaceVariant && 'mb-1.5 h-9 w-9'
+                  isWorkspaceVariant &&
+                    'mb-1 h-control-compact w-control-compact'
                 )}
                 title={createTooltip}
                 aria-label={createTooltip}

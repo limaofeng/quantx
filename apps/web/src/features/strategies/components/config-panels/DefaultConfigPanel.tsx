@@ -269,14 +269,14 @@ export function DefaultConfigPanel({
   };
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-ui-section">
       {/* 1. Bound Instrument */}
-      <Card className="p-6 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-[2rem] shadow-xl">
-        <div className="space-y-6">
+      <Card className="p-ui-panel bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-panel shadow-none">
+        <div className="space-y-ui-section">
           <div className="space-y-2">
             <Label
               htmlFor="stock-codes"
-              className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2"
+              className="text-ui-micro font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2"
             >
               <Shield size={10} className="text-blue-500" />
               绑定标的 *
@@ -286,7 +286,7 @@ export function DefaultConfigPanel({
               onChange={handleInstrumentChange}
               placeholder="搜索 A 股代码 / 名称 / 拼音"
             />
-            <div className="flex items-center gap-2 text-[9px] text-slate-500 italic font-medium px-2">
+            <div className="flex items-center gap-2 text-ui-micro text-slate-500 italic font-medium px-2">
               <span className="w-1 h-1 rounded-full bg-blue-500" />
               一个 A 股策略实例只绑定一个标的；换股请复制为新实例。
             </div>
@@ -295,10 +295,10 @@ export function DefaultConfigPanel({
       </Card>
 
       {/* 2. 运行时参数 */}
-      <Card className="p-6 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-[2rem] shadow-xl">
-        <div className="flex items-center gap-4 mb-6">
+      <Card className="p-ui-panel bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-panel shadow-none">
+        <div className="flex items-center gap-ui-section mb-6">
           <div className="w-1 h-5 bg-emerald-600 rounded-full" />
-          <h3 className="text-[11px] font-black text-slate-900 dark:text-white uppercase tracking-[0.2em] italic">
+          <h3 className="text-ui-caption font-black text-slate-900 dark:text-white uppercase tracking-[0.2em] italic">
             运行时参数
           </h3>
         </div>
@@ -309,7 +309,7 @@ export function DefaultConfigPanel({
               <div key={key} className="grid gap-3 group">
                 <Label
                   htmlFor={key}
-                  className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-400 flex items-center justify-between"
+                  className="text-ui-micro font-black uppercase tracking-[0.2em] text-slate-400 flex items-center justify-between"
                 >
                   <span className="group-hover:text-blue-500 transition-colors">
                     {formatParameterLabel(key, param)}
@@ -334,9 +334,9 @@ export function DefaultConfigPanel({
                               : parseFloat(e.target.value) || param.default,
                         }))
                       }
-                      className="rounded-lg h-9 bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 pr-10 pl-3 text-[11px] font-black tabular-nums transition-all"
+                      className="rounded-lg h-9 bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 pr-10 pl-3 text-ui-caption font-black tabular-nums transition-all"
                     />
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-400 uppercase tracking-widest pointer-events-none">
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ui-micro font-black text-slate-400 uppercase tracking-widest pointer-events-none">
                       {PARAMETER_DISPLAY_COPY[key]?.unit ||
                         param.unit ||
                         '单位'}
@@ -349,12 +349,12 @@ export function DefaultConfigPanel({
                       setStrategyConfig(prev => ({ ...prev, [key]: value }))
                     }
                   >
-                    <SelectTrigger className="rounded-lg h-9 bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 px-3 text-[11px] font-bold">
+                    <SelectTrigger className="rounded-lg h-control-default bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 px-3 text-ui-caption font-bold">
                       <SelectValue
                         placeholder={param.placeholder || '请选择'}
                       />
                     </SelectTrigger>
-                    <SelectContent className="rounded-2xl border-white/10 bg-slate-900 text-slate-200">
+                    <SelectContent className="rounded-panel border-white/10 bg-slate-900 text-slate-200">
                       {param.enum.map(option => (
                         <SelectItem key={option} value={option}>
                           {option}
@@ -370,14 +370,14 @@ export function DefaultConfigPanel({
                         [key]: !(strategyConfig[key] ?? param.default),
                       }))
                     }
-                    className={`flex items-center justify-between px-4 rounded-lg h-9 border cursor-pointer transition-all duration-300 ${
+                    className={`flex items-center justify-between px-ui-section rounded-lg h-9 border cursor-pointer transition-all duration-300 ${
                       (strategyConfig[key] ?? param.default)
                         ? 'bg-blue-600/10 border-blue-500/30'
                         : 'bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 opacity-60 hover:opacity-100'
                     }`}
                   >
                     <span
-                      className={`text-[10px] font-black uppercase tracking-widest ${(strategyConfig[key] ?? param.default) ? 'text-blue-500' : 'text-slate-500'}`}
+                      className={`text-ui-caption font-black uppercase tracking-widest ${(strategyConfig[key] ?? param.default) ? 'text-blue-500' : 'text-slate-500'}`}
                     >
                       {formatParameterLabel(key, param)}
                     </span>
@@ -400,11 +400,11 @@ export function DefaultConfigPanel({
                         [key]: e.target.value,
                       }))
                     }
-                    className="rounded-lg h-9 bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 px-3 text-[11px] font-bold"
+                    className="rounded-lg h-9 bg-slate-50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 px-3 text-ui-caption font-bold"
                   />
                 )}
                 {formatParameterDescription(key, param) && (
-                  <p className="text-[9px] text-slate-500 italic font-medium leading-relaxed px-1">
+                  <p className="text-ui-micro text-slate-500 italic font-medium leading-relaxed px-1">
                     {formatParameterDescription(key, param)}
                   </p>
                 )}
@@ -418,7 +418,7 @@ export function DefaultConfigPanel({
         <Button
           onClick={onSubmit}
           disabled={!stockCodes.trim()}
-          className="w-full h-12 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-[0.2em] text-[10px] shadow-lg shadow-blue-500/20 active:scale-95 transition-all group overflow-hidden"
+          className="w-full h-control-large rounded-panel bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-[0.2em] text-ui-caption shadow-lg shadow-blue-500/20 active:scale-95 transition-all group overflow-hidden"
         >
           <div className="absolute top-0 -left-[100%] w-full h-full bg-gradient-to-r from-transparent via-white/20 to-transparent group-hover:left-[100%] transition-all duration-1000" />
           <Play className="mr-3 h-3 w-3 fill-current" />

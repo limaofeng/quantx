@@ -40,7 +40,7 @@ export default function AvailableStrategies({
       <div
         className={cn(
           'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
-          compact ? 'gap-3' : 'gap-6'
+          compact ? 'gap-3' : 'gap-ui-panel'
         )}
       >
         {[1, 2, 3].map(i => (
@@ -48,13 +48,13 @@ export default function AvailableStrategies({
             key={i}
             className={cn(
               'animate-pulse',
-              compact ? 'rounded-lg p-4' : 'rounded-[2rem] p-6'
+              compact ? 'rounded-lg p-ui-section' : 'rounded-panel p-ui-panel'
             )}
           >
             <div
               className={cn(
                 'mb-4 bg-slate-200 dark:bg-slate-700',
-                compact ? 'h-9 w-9 rounded-lg' : 'h-12 w-12 rounded-2xl'
+                compact ? 'h-9 w-9 rounded-lg' : 'h-12 w-12 rounded-panel'
               )}
             />
             <div className="h-4 w-2/3 bg-slate-200 dark:bg-slate-700 rounded mb-2" />
@@ -70,10 +70,10 @@ export default function AvailableStrategies({
       <Card
         className={cn(
           'border-rose-500/20 bg-rose-500/5 text-center',
-          compact ? 'rounded-lg p-4' : 'rounded-[2rem] p-8'
+          compact ? 'rounded-lg p-ui-section' : 'rounded-panel p-ui-section'
         )}
       >
-        <p className="text-rose-500 font-black text-[10px] uppercase tracking-widest">
+        <p className="text-rose-500 font-black text-ui-caption uppercase tracking-widest">
           初始化失败: {error.message}
         </p>
       </Card>
@@ -85,14 +85,14 @@ export default function AvailableStrategies({
       <Card
         className={cn(
           'border-2 border-dashed border-slate-200 bg-slate-50/50 text-center dark:border-white/10 dark:bg-slate-900/20',
-          compact ? 'rounded-lg p-8' : 'rounded-[3rem] p-16'
+          compact ? 'rounded-lg p-ui-section' : 'rounded-panel p-16'
         )}
       >
         <Bot className="mx-auto h-12 w-12 text-slate-300 mb-6" />
-        <h3 className="text-xl font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">
+        <h3 className="text-ui-page-title font-black text-slate-900 dark:text-white mb-2 uppercase tracking-tight">
           未发现策略模板
         </h3>
-        <p className="text-slate-400 text-sm max-w-xs mx-auto">
+        <p className="text-slate-400 text-ui-body max-w-xs mx-auto">
           请检查后端策略目录配置。
         </p>
       </Card>
@@ -135,7 +135,7 @@ export default function AvailableStrategies({
     <div
       className={cn(
         'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3',
-        compact ? 'gap-3' : 'gap-6'
+        compact ? 'gap-3' : 'gap-ui-panel'
       )}
     >
       {strategies.map((definition: StrategyDefinition) => {
@@ -150,8 +150,8 @@ export default function AvailableStrategies({
               setLocation(`/strategies/${definition.strategyId}/run`)
             }
             className={cn(
-              'group relative cursor-pointer overflow-hidden border border-slate-200 bg-white transition-all duration-300 hover:border-primary/20 hover:shadow-xl hover:shadow-primary/5 dark:border-white/5 dark:bg-slate-900/40',
-              compact ? 'rounded-lg' : 'rounded-[2rem]'
+              'group relative cursor-pointer overflow-hidden border border-slate-200 bg-white transition-all duration-300 hover:border-primary/20 hover:shadow-none hover:shadow-primary/5 dark:border-white/5 dark:bg-slate-900/40',
+              compact ? 'rounded-lg' : 'rounded-panel'
             )}
           >
             {/* 渐变装饰背景 */}
@@ -164,7 +164,12 @@ export default function AvailableStrategies({
               className={`absolute top-0 left-8 right-8 h-0.5 bg-gradient-to-r ${gradient.replace('/20', '/40').replace('/5', '/20')} opacity-0 group-hover:opacity-100 transition-opacity duration-300`}
             />
 
-            <div className={cn('relative', compact ? 'p-4' : 'p-6')}>
+            <div
+              className={cn(
+                'relative',
+                compact ? 'p-ui-section' : 'p-ui-panel'
+              )}
+            >
               {/* 头部区域 */}
               <div className="flex items-start justify-between mb-5">
                 <div
@@ -172,7 +177,7 @@ export default function AvailableStrategies({
                     'flex shrink-0 items-center justify-center text-white shadow-lg transition-all duration-300 group-hover:scale-105',
                     compact
                       ? 'h-10 w-10 rounded-lg'
-                      : 'h-14 w-14 rounded-2xl group-hover:rotate-3',
+                      : 'h-14 w-14 rounded-panel group-hover:rotate-3',
                     iconColor
                   )}
                 >
@@ -180,7 +185,7 @@ export default function AvailableStrategies({
                 </div>
 
                 <div className="opacity-0 group-hover:opacity-100 transition-all duration-300 translate-x-2 group-hover:translate-x-0">
-                  <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center">
+                  <div className="w-8 h-8 rounded-panel bg-primary/10 flex items-center justify-center">
                     <ArrowUpRight size={16} className="text-primary" />
                   </div>
                 </div>
@@ -189,11 +194,11 @@ export default function AvailableStrategies({
               {/* 策略名称和描述 */}
               <div className={cn(compact ? 'mb-4' : 'mb-5')}>
                 <div className="flex items-center gap-2 mb-2">
-                  <h3 className="text-base font-black text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-primary transition-colors duration-300">
+                  <h3 className="text-ui-title font-black text-slate-900 dark:text-white uppercase tracking-tight group-hover:text-primary transition-colors duration-300">
                     {definition.displayName}
                   </h3>
                 </div>
-                <p className="text-[12px] text-slate-500 dark:text-slate-400 line-clamp-2 leading-relaxed">
+                <p className="text-ui-label text-slate-500 dark:text-slate-400 line-clamp-2 leading-relaxed">
                   {definition.description}
                 </p>
               </div>
@@ -204,7 +209,7 @@ export default function AvailableStrategies({
                   {/* 类型标签 */}
                   <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-white/5">
                     <BarChart3 size={12} className="text-slate-400" />
-                    <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase">
+                    <span className="text-ui-caption font-bold text-slate-500 dark:text-slate-400 uppercase">
                       {definition.market} · {definition.supportedInstruments[0]}
                     </span>
                   </div>
@@ -215,7 +220,7 @@ export default function AvailableStrategies({
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${getRiskLevelColor(definition.riskLevel)}`}
                 >
                   <Shield size={12} />
-                  <span className="text-[10px] font-black uppercase tracking-tight">
+                  <span className="text-ui-caption font-black uppercase tracking-tight">
                     {getRiskLevelName(definition.riskLevel)}
                   </span>
                 </div>

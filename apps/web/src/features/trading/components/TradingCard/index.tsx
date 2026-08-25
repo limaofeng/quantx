@@ -364,12 +364,12 @@ export function TradingCard({
       {/* 顶部标题与买卖切换 */}
       <div className="flex flex-col gap-3 mb-4 px-1">
         <div className="flex items-center justify-between">
-          <h4 className="text-[9px] font-bold uppercase tracking-[0.2em] text-muted-foreground/50">
+          <h4 className="text-ui-micro font-bold uppercase tracking-[0.2em] text-muted-foreground/50">
             交易控制台
           </h4>
           <div className="flex items-center gap-1.5 px-1.5 py-0.5 bg-blue-500/5 rounded-full border border-blue-500/10">
             <div className="w-1 h-1 bg-blue-500 rounded-full animate-pulse" />
-            <span className="text-[8px] font-bold text-blue-500/70 uppercase tracking-tighter">
+            <span className="text-ui-micro font-bold text-blue-500/70 uppercase tracking-tighter">
               Live
             </span>
           </div>
@@ -389,7 +389,7 @@ export function TradingCard({
             type="button"
             onClick={() => handleTradeTypeChange('buy')}
             className={cn(
-              'flex-1 relative z-10 py-1.5 text-[10px] font-black uppercase tracking-widest transition-colors duration-300',
+              'flex-1 relative z-10 py-1.5 text-ui-caption font-black uppercase tracking-widest transition-colors duration-300',
               tradeType === 'buy'
                 ? 'text-white'
                 : 'text-muted-foreground hover:text-foreground'
@@ -401,7 +401,7 @@ export function TradingCard({
             type="button"
             onClick={() => handleTradeTypeChange('sell')}
             className={cn(
-              'flex-1 relative z-10 py-1.5 text-[10px] font-black uppercase tracking-widest transition-colors duration-300',
+              'flex-1 relative z-10 py-1.5 text-ui-caption font-black uppercase tracking-widest transition-colors duration-300',
               tradeType === 'sell'
                 ? 'text-white'
                 : 'text-muted-foreground hover:text-foreground'
@@ -429,13 +429,13 @@ export function TradingCard({
         <ScrollArea className="flex-1 -mr-3">
           <div className="space-y-3 pr-3 pb-2">
             {/* 第一部分：标的选择 */}
-            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-xl border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
+            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-panel border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
               <div className="flex items-center justify-between mb-1.5 px-1">
-                <Label className="text-[8px] font-black text-muted-foreground/40 uppercase tracking-widest">
+                <Label className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest">
                   证券标的
                 </Label>
                 {selectedStock && (
-                  <span className="text-[8px] font-mono font-bold text-primary/60">
+                  <span className="text-ui-micro font-mono font-bold text-primary/60">
                     {selectedStock.stockCode}
                   </span>
                 )}
@@ -450,9 +450,9 @@ export function TradingCard({
             </div>
 
             {/* 第二部分：价格设置 */}
-            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-xl border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
+            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-panel border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
               <div className="flex items-center justify-between mb-1.5 px-1">
-                <Label className="text-[8px] font-black text-muted-foreground/40 uppercase tracking-widest">
+                <Label className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest">
                   价格设置
                 </Label>
                 <div className="flex gap-2">
@@ -470,7 +470,7 @@ export function TradingCard({
                       ).toFixed(2);
                       if (Number(p) > 0) setPrice(p);
                     }}
-                    className="text-[8px] font-black text-market-down/60 hover:text-market-down transition-colors uppercase"
+                    className="text-ui-micro font-black text-market-down/60 hover:text-market-down transition-colors uppercase"
                   >
                     跌停{' '}
                     {(
@@ -497,7 +497,7 @@ export function TradingCard({
                       ).toFixed(2);
                       if (Number(p) > 0) setPrice(p);
                     }}
-                    className="text-[8px] font-black text-market-up/60 hover:text-market-up transition-colors uppercase"
+                    className="text-ui-micro font-black text-market-up/60 hover:text-market-up transition-colors uppercase"
                   >
                     涨停{' '}
                     {(
@@ -515,7 +515,7 @@ export function TradingCard({
 
               <div className="flex items-center gap-2 bg-white/50 dark:bg-slate-950/50 p-1 rounded-lg border border-slate-200/40 dark:border-slate-800/40 focus-within:ring-1 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all">
                 <Select value={orderType} onValueChange={setOrderType}>
-                  <SelectTrigger className="w-[80px] h-7 text-[11px] border-none shadow-none bg-slate-100/50 dark:bg-slate-900/50 focus:ring-0 focus:ring-offset-0 ring-0 outline-none px-2 font-bold rounded-md transition-colors">
+                  <SelectTrigger className="w-[80px] h-control-compact text-ui-caption border-none shadow-none bg-slate-100/50 dark:bg-slate-900/50 focus:ring-0 focus:ring-offset-0 ring-0 outline-none px-2 font-bold rounded-md transition-colors">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="rounded-lg border-slate-200/40 dark:border-slate-800/40">
@@ -527,11 +527,11 @@ export function TradingCard({
                 <div className="h-4 w-px bg-border/20" />
 
                 <div className="flex-1 flex items-center justify-end gap-1 px-1">
-                  <span className="text-[9px] font-bold text-muted-foreground/30 font-mono">
+                  <span className="text-ui-micro font-bold text-muted-foreground/30 font-mono">
                     CNY
                   </span>
                   <Input
-                    className="w-full max-w-[80px] h-7 text-[13px] font-black font-mono bg-transparent border-none shadow-none focus-visible:ring-0 text-right p-0 no-spin placeholder:text-muted-foreground/20"
+                    className="w-full max-w-[80px] h-control-compact text-ui-body font-black font-mono bg-transparent border-none shadow-none focus-visible:ring-0 text-right p-0 no-spin placeholder:text-muted-foreground/20"
                     type="number"
                     step="0.01"
                     value={price}
@@ -543,12 +543,12 @@ export function TradingCard({
             </div>
 
             {/* 第三部分：委托数量 */}
-            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-xl border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
+            <div className="group/section bg-slate-50/30 dark:bg-slate-900/10 rounded-panel border border-slate-200/20 dark:border-slate-800/20 p-2 pb-2.5 hover:border-slate-300/40 dark:hover:border-slate-700/40 transition-all duration-300">
               <div className="flex items-center justify-between mb-1.5 px-1">
-                <Label className="text-[8px] font-black text-muted-foreground/40 uppercase tracking-widest">
+                <Label className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest">
                   委托数量
                 </Label>
-                <div className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-tighter">
+                <div className="flex items-center gap-1 text-ui-micro font-bold uppercase tracking-tighter">
                   <span className="text-muted-foreground/50">可用</span>
                   <span className="text-primary tabular-nums">
                     {availableQuantityLabel}
@@ -559,7 +559,7 @@ export function TradingCard({
 
               <div className="relative mb-2">
                 <Input
-                  className="h-9 text-[14px] font-black font-mono bg-white/50 dark:bg-slate-950/50 border border-slate-200/40 dark:border-slate-800/40 focus-visible:ring-1 focus-visible:ring-primary/20 focus-visible:border-primary/40 rounded-lg px-3 no-spin transition-all"
+                  className="h-control-default text-ui-title font-black font-mono bg-white/50 dark:bg-slate-950/50 border border-slate-200/40 dark:border-slate-800/40 focus-visible:ring-1 focus-visible:ring-primary/20 focus-visible:border-primary/40 rounded-lg px-3 no-spin transition-all"
                   type="number"
                   placeholder="100"
                   value={quantity}
@@ -568,7 +568,7 @@ export function TradingCard({
                   max={quantityMax}
                   step={quantityStep}
                 />
-                <div className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-bold text-muted-foreground/30 uppercase">
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 text-ui-micro font-bold text-muted-foreground/30 uppercase">
                   股
                 </div>
               </div>
@@ -604,7 +604,7 @@ export function TradingCard({
                           : `填入 ${quickQuantity.toLocaleString()} 股`
                       }
                       className={cn(
-                        'h-6 rounded-md border-slate-200/40 p-0 text-[9px] font-black text-muted-foreground transition-colors dark:border-slate-800/40',
+                        'h-6 rounded-md border-slate-200/40 p-0 text-ui-micro font-black text-muted-foreground transition-colors dark:border-slate-800/40',
                         isActive
                           ? 'border-primary/20 bg-primary/10 text-primary hover:border-primary/40 hover:bg-primary/20'
                           : 'bg-muted/10 hover:border-primary/40 hover:bg-muted/30'
@@ -624,18 +624,18 @@ export function TradingCard({
         <div className="space-y-3 pt-3 border-t border-slate-200/20 dark:border-slate-800/20 shrink-0">
           <div className="grid grid-cols-2 gap-3 px-1">
             <div className="flex flex-col gap-0.5">
-              <span className="text-[7px] font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
+              <span className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
                 预计总额
               </span>
-              <span className="text-[12px] font-black font-mono text-foreground tabular-nums drop-shadow-sm">
+              <span className="text-ui-label font-black font-mono text-foreground tabular-nums drop-shadow-sm">
                 {formatCurrency(estimatedAmount)}
               </span>
             </div>
             <div className="flex flex-col gap-0.5 text-right">
-              <span className="text-[7px] font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
+              <span className="text-ui-micro font-black text-muted-foreground/40 uppercase tracking-widest leading-none">
                 预计规费
               </span>
-              <span className="text-[12px] font-black font-mono text-muted-foreground/60 tabular-nums">
+              <span className="text-ui-label font-black font-mono text-muted-foreground/60 tabular-nums">
                 {formatCurrency(estimatedFees)}
               </span>
             </div>
@@ -644,7 +644,7 @@ export function TradingCard({
           <Button
             type="submit"
             className={cn(
-              'w-full h-10 text-[10px] font-black uppercase tracking-[0.2em] rounded-xl shadow-lg transition-all duration-300 active:scale-[0.98]',
+              'w-full h-control-large text-ui-caption font-black uppercase tracking-[0.2em] rounded-panel shadow-lg transition-all duration-300 active:scale-[0.98]',
               tradeType === 'buy'
                 ? 'bg-market-buy-cta text-white hover:bg-market-buy-cta/90 shadow-market-buy-cta/20 hover:shadow-market-buy-cta/40'
                 : 'bg-market-down text-white hover:bg-market-down/90 shadow-market-down/20 hover:shadow-market-down/40'

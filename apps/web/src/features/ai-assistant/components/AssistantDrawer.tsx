@@ -13,6 +13,7 @@ import { useMemo, useState } from 'react';
 
 import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
+import { NativeSelect } from '@/components/ui/native-select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -107,10 +108,10 @@ export function AssistantDrawer({
           <Bot className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-slate-100">
+          <div className="truncate text-ui-body font-semibold text-slate-100">
             {assistant.selectedThread?.title || 'QuantX AI Assistant'}
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-slate-500">
+          <div className="text-ui-caption uppercase tracking-wider text-slate-500">
             {statusLabel} · {assistant.capabilities?.model || 'model pending'}
           </div>
         </div>
@@ -118,7 +119,7 @@ export function AssistantDrawer({
           type="button"
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-slate-400"
+          className="h-control-compact w-8 text-slate-400"
           onClick={() => void runAction(assistant.createThread)}
           title="新建对话"
         >
@@ -128,7 +129,7 @@ export function AssistantDrawer({
           type="button"
           variant="ghost"
           size="icon"
-          className="h-8 w-8 text-slate-400"
+          className="h-control-compact w-8 text-slate-400"
           onClick={onClose}
           aria-label="关闭 AI 助手"
           title="关闭"
@@ -139,9 +140,9 @@ export function AssistantDrawer({
 
       {assistant.threads.length > 0 && (
         <div className="flex items-center gap-2 border-b border-white/5 px-3 py-2">
-          <select
+          <NativeSelect
             aria-label="选择 AI 对话"
-            className="min-w-0 flex-1 rounded-md border border-white/10 bg-slate-950 px-2 py-1.5 text-xs text-slate-300 outline-none focus:border-cyan-500/50"
+            className="min-w-0 flex-1 rounded-md border border-white/10 bg-slate-950 px-2 py-1.5 text-ui-label text-slate-300 outline-none focus:border-cyan-500/50"
             value={assistant.selectedThreadId || ''}
             onChange={event =>
               assistant.setSelectedThreadId(event.target.value || null)
@@ -152,12 +153,12 @@ export function AssistantDrawer({
                 {thread.title}
               </option>
             ))}
-          </select>
+          </NativeSelect>
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="h-8 w-8 text-slate-500 hover:text-rose-300"
+            className="h-control-compact w-8 text-slate-500 hover:text-rose-300"
             disabled={isRunning}
             onClick={() => void handleDelete()}
             title="永久删除当前对话"
@@ -168,20 +169,20 @@ export function AssistantDrawer({
       )}
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-4 p-4">
+        <div className="space-y-ui-section p-ui-section">
           {!assistant.capabilities?.enabled && (
-            <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-amber-200">
+            <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-ui-label leading-5 text-amber-200">
               AI Runtime 尚未配置。请在服务端设置 OPENAI_API_KEY；QuantX
               其他功能不受影响。
             </div>
           )}
           {assistant.messages.length === 0 && !assistant.streamingText && (
-            <div className="py-12 text-center">
+            <div className="py-ui-empty text-center">
               <Bot className="mx-auto h-8 w-8 text-slate-700" />
-              <p className="mt-3 text-sm text-slate-400">
+              <p className="mt-3 text-ui-body text-slate-400">
                 可以询问行情、持仓或回测结果
               </p>
-              <p className="mt-1 text-xs text-slate-600">
+              <p className="mt-1 text-ui-label text-slate-600">
                 当前页面路径会自动附加，账户数据需要手动授权
               </p>
             </div>
@@ -192,7 +193,7 @@ export function AssistantDrawer({
               <div
                 key={message.id}
                 className={cn(
-                  'max-w-[92%] rounded-xl px-3 py-2.5 text-sm leading-6',
+                  'max-w-[92%] rounded-panel px-3 py-2.5 text-ui-body leading-6',
                   message.role === 'USER'
                     ? 'ml-auto bg-cyan-500/15 text-cyan-50'
                     : 'border border-white/8 bg-white/[0.035] text-slate-200'
@@ -207,7 +208,7 @@ export function AssistantDrawer({
                     'url' in block ? (
                       <a
                         key={block.url}
-                        className="mt-2 block truncate text-xs text-cyan-400 hover:underline"
+                        className="mt-2 block truncate text-ui-label text-cyan-400 hover:underline"
                         href={block.url}
                         target="_blank"
                         rel="noreferrer"
@@ -220,7 +221,7 @@ export function AssistantDrawer({
             );
           })}
           {assistant.streamingText && (
-            <div className="max-w-[92%] rounded-xl border border-cyan-400/10 bg-white/[0.035] px-3 py-2.5 text-sm leading-6 text-slate-200">
+            <div className="max-w-[92%] rounded-panel border border-cyan-400/10 bg-white/[0.035] px-3 py-2.5 text-ui-body leading-6 text-slate-200">
               <div className="whitespace-pre-wrap break-words">
                 {assistant.streamingText}
               </div>
@@ -229,12 +230,12 @@ export function AssistantDrawer({
           {assistant.pendingApprovals.map(approval => (
             <div
               key={approval.toolCallId}
-              className="rounded-xl border border-amber-400/30 bg-amber-400/5 p-3"
+              className="rounded-panel border border-amber-400/30 bg-amber-400/5 p-3"
             >
-              <div className="text-xs font-semibold text-amber-200">
+              <div className="text-ui-label font-semibold text-amber-200">
                 需要批准：{approval.toolName}
               </div>
-              <p className="mt-1 text-xs leading-5 text-slate-400">
+              <p className="mt-1 text-ui-label leading-5 text-slate-400">
                 {approval.summary ||
                   '该操作会创建非实盘任务，不会发送交易委托。'}
               </p>
@@ -242,7 +243,7 @@ export function AssistantDrawer({
                 <Button
                   type="button"
                   size="sm"
-                  className="h-7 bg-amber-600 text-xs hover:bg-amber-500"
+                  className="h-control-compact bg-amber-600 text-ui-label hover:bg-amber-500"
                   onClick={() =>
                     void runAction(() =>
                       assistant.resolveApproval(approval, true)
@@ -255,7 +256,7 @@ export function AssistantDrawer({
                   type="button"
                   size="sm"
                   variant="outline"
-                  className="h-7 border-white/10 text-xs"
+                  className="h-control-compact border-white/10 text-ui-label"
                   onClick={() =>
                     void runAction(() =>
                       assistant.resolveApproval(approval, false)
@@ -268,7 +269,7 @@ export function AssistantDrawer({
             </div>
           ))}
           {assistant.activeRun?.status === AiAssistantRunStatus.Failed && (
-            <div className="rounded-xl border border-rose-400/25 bg-rose-400/5 p-3 text-xs text-rose-200">
+            <div className="rounded-panel border border-rose-400/25 bg-rose-400/5 p-3 text-ui-label text-rose-200">
               <p>
                 {assistant.activeRun.errorMessage ||
                   'AI 运行失败，请稍后重试。'}
@@ -277,7 +278,7 @@ export function AssistantDrawer({
                 type="button"
                 size="sm"
                 variant="outline"
-                className="mt-2 h-7 border-rose-400/20 text-xs"
+                className="mt-2 h-control-compact border-rose-400/20 text-ui-label"
                 onClick={() => void runAction(assistant.retryRun)}
               >
                 重试
@@ -291,7 +292,7 @@ export function AssistantDrawer({
       </ScrollArea>
 
       <footer className="shrink-0 border-t border-white/10 p-3">
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-ui-caption text-slate-500">
           <button
             type="button"
             className={cn(
@@ -340,13 +341,13 @@ export function AssistantDrawer({
             placeholder={
               isRunning ? '当前对话正在执行…' : '询问 QuantX 数据或研究任务…'
             }
-            className="min-h-20 resize-none border-white/10 bg-slate-950/80 pr-12 text-sm"
+            className="min-h-20 resize-none border-white/10 bg-slate-950/80 pr-12 text-ui-body"
             maxLength={assistant.capabilities?.maxMessageLength || 12000}
           />
           <Button
             type="button"
             size="icon"
-            className="absolute bottom-2 right-2 h-8 w-8 bg-cyan-600 hover:bg-cyan-500"
+            className="absolute bottom-2 right-2 h-control-compact w-8 bg-cyan-600 hover:bg-cyan-500"
             disabled={!canSend && !isRunning}
             onClick={() =>
               void (isRunning ? runAction(assistant.cancelRun) : handleSend())
@@ -360,7 +361,7 @@ export function AssistantDrawer({
             )}
           </Button>
         </div>
-        <p className="mt-2 text-center text-[10px] text-slate-600">
+        <p className="mt-2 text-center text-ui-caption text-slate-600">
           研究结果仅供参考；AI 无实盘交易权限
         </p>
       </footer>

@@ -58,8 +58,8 @@ function MarkerDetails({ markers }: { markers: StrategyChartMarker[] }) {
   return (
     <div className="mt-2 border-t border-white/5 pt-2">
       <div className="mb-1.5 flex items-center justify-between gap-3">
-        <span className="text-[10px] text-slate-500">买卖标记</span>
-        <span className="text-[10px] text-slate-400">
+        <span className="text-ui-caption text-slate-500">买卖标记</span>
+        <span className="text-ui-caption text-slate-400">
           {expandedMarkers.length} 条
         </span>
       </div>
@@ -69,13 +69,13 @@ function MarkerDetails({ markers }: { markers: StrategyChartMarker[] }) {
             <div className="mb-1 flex items-center gap-1.5">
               <span
                 className={cn(
-                  'inline-flex h-4 min-w-4 items-center justify-center rounded-[3px] border px-1 text-[10px] font-black leading-none shadow-sm',
+                  'inline-flex h-4 min-w-4 items-center justify-center rounded-[3px] border px-1 text-ui-caption font-black leading-none shadow-sm',
                   markerBadgeClass(marker)
                 )}
               >
                 {marker.label}
               </span>
-              <span className="text-[10px] font-bold text-slate-100">
+              <span className="text-ui-caption font-bold text-slate-100">
                 {marker.eventTitle}
               </span>
             </div>
@@ -85,10 +85,12 @@ function MarkerDetails({ markers }: { markers: StrategyChartMarker[] }) {
                   key={`${marker.id}-${row.label}-${row.value}`}
                   className="contents"
                 >
-                  <span className="text-[9px] text-slate-500">{row.label}</span>
+                  <span className="text-ui-micro text-slate-500">
+                    {row.label}
+                  </span>
                   <span
                     className={cn(
-                      'truncate text-[9px] font-medium',
+                      'truncate text-ui-micro font-medium',
                       detailToneClass(row.tone)
                     )}
                     title={row.value}
@@ -101,7 +103,7 @@ function MarkerDetails({ markers }: { markers: StrategyChartMarker[] }) {
           </div>
         ))}
         {hiddenCount > 0 && (
-          <div className="pl-5 text-[10px] text-slate-500">
+          <div className="pl-5 text-ui-caption text-slate-500">
             另有 {hiddenCount} 条标记
           </div>
         )}
@@ -112,8 +114,8 @@ function MarkerDetails({ markers }: { markers: StrategyChartMarker[] }) {
 
 function HoverPanel({ hover }: { hover: StrategyChartHoverData }) {
   return (
-    <div className="absolute top-16 left-5 z-10 max-h-[420px] min-w-[178px] max-w-[300px] overflow-hidden rounded-b-lg border border-white/5 bg-[#0B1120]/90 p-2.5 shadow-xl backdrop-blur-md pointer-events-none">
-      <div className="space-y-1 text-[10px] font-mono">
+    <div className="absolute top-16 left-5 z-10 max-h-[420px] min-w-[178px] max-w-[300px] overflow-hidden rounded-b-lg border border-white/5 bg-[#0B1120]/90 p-2.5 shadow-none backdrop-blur-md pointer-events-none">
+      <div className="space-y-1 text-ui-caption font-mono">
         <div className="flex justify-between gap-3">
           <span className="text-slate-500">时间</span>
           <span className="text-slate-200">{hover.time}</span>
@@ -233,7 +235,7 @@ const StrategyChart = ({
           className
         )}
       >
-        <p className="text-sm text-slate-500 font-mono">等待行情数据</p>
+        <p className="text-ui-body text-slate-500 font-mono">等待行情数据</p>
       </div>
     );
   }
@@ -270,18 +272,18 @@ const StrategyChart = ({
               .map(label => (
                 <span
                   key={label}
-                  className="rounded-md bg-white/5 px-2 py-1 text-[10px] font-bold text-slate-300"
+                  className="rounded-md bg-white/5 px-2 py-1 text-ui-caption font-bold text-slate-300"
                 >
                   {label}
                 </span>
               ))}
-            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-700 px-2 py-1 text-[10px] font-bold text-slate-500">
+            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-700 px-2 py-1 text-ui-caption font-bold text-slate-500">
               <Layers3 className="h-3 w-3" />
               净值/回撤待序列
             </span>
           </div>
           {rangeLabel && (
-            <div className="absolute bottom-4 right-4 z-20 rounded-lg border border-white/10 bg-slate-950/85 px-3 py-2 text-[11px] font-bold text-slate-300 shadow-lg backdrop-blur-md">
+            <div className="absolute bottom-4 right-4 z-20 rounded-lg border border-white/10 bg-slate-950/85 px-3 py-2 text-ui-caption font-bold text-slate-300 shadow-lg backdrop-blur-md">
               {rangeLabel}
             </div>
           )}
@@ -290,7 +292,7 @@ const StrategyChart = ({
 
       {!loading && isBacktest && hasRange && priceData.length === 0 && (
         <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-          <div className="rounded-xl border border-white/10 bg-slate-950/80 px-4 py-3 text-xs font-bold text-slate-400 shadow-xl backdrop-blur-md">
+          <div className="rounded-panel border border-white/10 bg-slate-950/80 px-ui-section py-3 text-ui-label font-bold text-slate-400 shadow-none backdrop-blur-md">
             当前回测区间暂无行情数据
           </div>
         </div>

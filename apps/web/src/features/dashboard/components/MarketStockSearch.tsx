@@ -1,6 +1,7 @@
 import { LoaderCircle, Search, X } from 'lucide-react';
 import { Link } from 'wouter';
 
+import { Input } from '@/components/ui/input';
 import { useStockSearch } from '@/hooks/useStockSearch';
 import { financialToneClass } from '@/shared/utils/financialColors';
 
@@ -14,9 +15,9 @@ export function MarketStockSearch() {
   return (
     <div className="relative w-full" data-testid="market-stock-search">
       <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
-      <input
+      <Input
         aria-label="搜索股票或指数"
-        className="h-9 w-full rounded-lg border border-white/10 bg-black/20 pl-9 pr-9 text-xs font-medium text-slate-200 outline-none transition-colors placeholder:text-slate-600 hover:border-white/15 focus:border-primary/50 focus:ring-2 focus:ring-primary/10"
+        className="h-control-default w-full rounded-lg border border-white/10 bg-black/20 pl-9 pr-9 text-ui-label font-medium text-slate-200 outline-none transition-colors placeholder:text-slate-600 hover:border-white/15 focus:border-primary/50 focus:ring-2 focus:ring-primary/10"
         onChange={event => setSearchQuery(event.target.value)}
         placeholder="搜代码 / 名称，直达个股…"
         value={searchQuery}
@@ -35,7 +36,7 @@ export function MarketStockSearch() {
       ) : null}
 
       {showResults ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-lg border border-white/10 bg-slate-950 shadow-2xl shadow-black/50">
+        <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-50 overflow-hidden rounded-lg border border-white/10 bg-slate-950 shadow-none shadow-black/50">
           {filteredStocks.length > 0 ? (
             <div className="max-h-72 overflow-y-auto p-1.5 custom-scrollbar">
               {filteredStocks.map(stock => {
@@ -49,19 +50,19 @@ export function MarketStockSearch() {
                     onClick={() => setSearchQuery('')}
                   >
                     <span className="min-w-0">
-                      <span className="block truncate text-xs font-bold text-slate-200">
+                      <span className="block truncate text-ui-label font-bold text-slate-200">
                         {stock.name || code}
                       </span>
-                      <span className="mt-0.5 block font-mono text-[10px] text-slate-600">
+                      <span className="mt-0.5 block font-mono text-ui-caption text-slate-600">
                         {code}
                       </span>
                     </span>
                     <span className="shrink-0 text-right">
-                      <span className="block font-mono text-xs font-bold text-slate-300">
+                      <span className="block font-mono text-ui-label font-bold text-slate-300">
                         {formatMarketPrice(stock.quote?.lastPrice)}
                       </span>
                       <span
-                        className={`block text-[10px] font-bold ${financialToneClass(change)}`}
+                        className={`block text-ui-caption font-bold ${financialToneClass(change)}`}
                       >
                         {formatMarketPercent(change)}
                       </span>
@@ -71,7 +72,7 @@ export function MarketStockSearch() {
               })}
             </div>
           ) : (
-            <div className="px-4 py-5 text-center text-xs text-slate-600">
+            <div className="px-ui-section py-ui-section text-center text-ui-label text-slate-600">
               {stocksLoading ? '正在查询…' : '没有匹配的股票或指数'}
             </div>
           )}

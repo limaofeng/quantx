@@ -142,7 +142,7 @@ export function PullbackGridConfigPanel({
     );
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-ui-panel">
       {/* Top: Grid Calculator */}
       <div>
         <GridCalculator
@@ -174,17 +174,17 @@ export function PullbackGridConfigPanel({
       </div>
 
       {/* Bottom: Strategy Parameters & Actions */}
-      <div className="rounded-2xl border border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#0d1425] p-5 space-y-5">
+      <div className="rounded-panel border border-slate-200 dark:border-white/[0.06] bg-white dark:bg-[#0d1425] p-ui-section space-y-ui-section">
         {/* Section Title */}
-        <h3 className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+        <h3 className="text-ui-caption font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
           策略参数
         </h3>
 
         {/* 3-column param grid */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-3 gap-ui-section">
           {/* 趋势 EMA 周期 */}
           <div className="space-y-1.5">
-            <Label className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+            <Label className="text-ui-caption font-medium text-slate-500 dark:text-slate-400">
               趋势 EMA 周期
             </Label>
             <Select
@@ -200,7 +200,7 @@ export function PullbackGridConfigPanel({
                 }))
               }
             >
-              <SelectTrigger className="h-9 bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-xs font-mono">
+              <SelectTrigger className="h-control-default bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-ui-label font-mono">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -210,14 +210,14 @@ export function PullbackGridConfigPanel({
                 <SelectItem value="200">EMA 200</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-[9px] text-slate-400 dark:text-slate-600">
+            <p className="text-ui-micro text-slate-400 dark:text-slate-600">
               慢线，判断主趋势方向
             </p>
           </div>
 
           {/* 快速 EMA 周期 */}
           <div className="space-y-1.5">
-            <Label className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+            <Label className="text-ui-caption font-medium text-slate-500 dark:text-slate-400">
               快速 EMA 周期
             </Label>
             <Select
@@ -229,7 +229,7 @@ export function PullbackGridConfigPanel({
                 }))
               }
             >
-              <SelectTrigger className="h-9 bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-xs font-mono">
+              <SelectTrigger className="h-control-default bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-ui-label font-mono">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -239,14 +239,14 @@ export function PullbackGridConfigPanel({
                 <SelectItem value="60">EMA 60</SelectItem>
               </SelectContent>
             </Select>
-            <p className="text-[9px] text-slate-400 dark:text-slate-600">
+            <p className="text-ui-micro text-slate-400 dark:text-slate-600">
               快线 {'>'} 慢线 = 允许买入
             </p>
           </div>
 
           {/* 反弹确认幅度 */}
           <div className="space-y-1.5">
-            <Label className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+            <Label className="text-ui-caption font-medium text-slate-500 dark:text-slate-400">
               反弹确认幅度
             </Label>
             <div className="relative">
@@ -266,13 +266,13 @@ export function PullbackGridConfigPanel({
                       (parseFloat(e.target.value) || 0) / 100,
                   }))
                 }
-                className="h-9 bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-xs font-mono pr-7"
+                className="h-9 bg-slate-50 dark:bg-white/[0.04] border-slate-200 dark:border-white/[0.06] text-ui-label font-mono pr-7"
               />
-              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-400 pointer-events-none">
+              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-ui-caption text-slate-400 pointer-events-none">
                 %
               </span>
             </div>
-            <p className="text-[9px] text-slate-400 dark:text-slate-600">
+            <p className="text-ui-micro text-slate-400 dark:text-slate-600">
               触网后需反弹多少才买入
             </p>
           </div>
@@ -285,7 +285,7 @@ export function PullbackGridConfigPanel({
               onClick={onSave}
               disabled={saveDisabled}
               variant="outline"
-              className="flex-1 h-10 rounded-xl border-slate-200 dark:border-white/[0.08] text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-white/[0.04] active:scale-[0.98] transition-all"
+              className="flex-1 h-control-large rounded-panel border-slate-200 dark:border-white/[0.08] text-slate-600 dark:text-slate-300 text-ui-label font-semibold hover:bg-slate-50 dark:hover:bg-white/[0.04] active:scale-[0.98] transition-all"
             >
               <Save className="mr-2 h-3.5 w-3.5" />
               {saveLabel}
@@ -295,7 +295,7 @@ export function PullbackGridConfigPanel({
             <Button
               onClick={onSubmit}
               disabled={submitDisabled}
-              className="flex-1 h-10 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-sm active:scale-[0.98] transition-all"
+              className="flex-1 h-control-large rounded-panel bg-blue-600 hover:bg-blue-500 text-white text-ui-label font-semibold shadow-sm active:scale-[0.98] transition-all"
             >
               <Play className="mr-2 h-3.5 w-3.5 fill-current" />
               {submitLabel}

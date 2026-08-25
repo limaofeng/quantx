@@ -114,7 +114,7 @@ export function MarketIntradayChart({
   if (loading && data.length === 0) {
     return (
       <div className="flex h-[210px] items-center justify-center xl:h-[150px]">
-        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
+        <div className="flex items-center gap-2 text-ui-label font-medium text-slate-500">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-700 border-t-primary" />
           正在加载分钟行情…
         </div>
@@ -124,12 +124,12 @@ export function MarketIntradayChart({
 
   if (data.length === 0) {
     return (
-      <div className="flex h-[210px] items-center justify-center px-6 text-center xl:h-[150px]">
+      <div className="flex h-[210px] items-center justify-center px-ui-panel text-center xl:h-[150px]">
         <div>
-          <div className="text-sm font-bold text-slate-300">
+          <div className="text-ui-body font-bold text-slate-300">
             QMT {dateLabel ? `${dateLabel} ` : ''}分钟行情暂不可用
           </div>
-          <div className="mt-1 text-xs leading-5 text-slate-600">
+          <div className="mt-1 text-ui-label leading-5 text-slate-600">
             {error
               ? 'QMT 行情连接或查询异常，顶部实时快照不受影响。'
               : dateLabel
@@ -147,7 +147,7 @@ export function MarketIntradayChart({
       data-testid="market-intraday-chart"
     >
       {dateLabel ? (
-        <span className="pointer-events-none absolute left-2 top-1 z-10 rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-[8px] font-bold text-cyan-300">
+        <span className="pointer-events-none absolute left-2 top-1 z-10 rounded border border-cyan-400/20 bg-cyan-400/10 px-1.5 py-0.5 text-ui-micro font-bold text-cyan-300">
           {dateLabel} · 分时
         </span>
       ) : null}

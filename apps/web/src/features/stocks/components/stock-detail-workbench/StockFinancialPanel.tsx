@@ -274,15 +274,15 @@ function MetricCard({
 }) {
   return (
     <div className="min-w-0 border border-white/5 bg-[#0f172a]/70 px-3 py-2.5">
-      <div className="truncate text-[10px] font-bold text-slate-500">
+      <div className="truncate text-ui-caption font-bold text-slate-500">
         {label}
       </div>
-      <div className="mt-1 truncate font-mono text-base font-black tabular-nums text-slate-100">
+      <div className="mt-1 truncate font-mono text-ui-title font-black tabular-nums text-slate-100">
         {value}
       </div>
       <div
         className={cn(
-          'mt-1 text-[10px] font-bold',
+          'mt-1 text-ui-caption font-bold',
           change == null
             ? 'text-slate-600'
             : change >= 0
@@ -350,16 +350,16 @@ export function StockFinancialPanel({
 
   if (error && !summary && !statements) {
     return (
-      <div className="flex h-full min-h-[440px] items-center justify-center p-6">
+      <div className="flex h-full min-h-[440px] items-center justify-center p-ui-panel">
         <div
           role="alert"
-          className="max-w-lg border border-rose-400/20 bg-rose-500/10 p-5 text-center"
+          className="max-w-lg border border-rose-400/20 bg-rose-500/10 p-ui-section text-center"
         >
           <AlertTriangle className="mx-auto h-5 w-5 text-rose-300" />
-          <h2 className="mt-3 text-sm font-black text-rose-100">
+          <h2 className="mt-3 text-ui-body font-black text-rose-100">
             财务数据加载失败
           </h2>
-          <p className="mt-2 text-xs text-slate-500">{error.message}</p>
+          <p className="mt-2 text-ui-label text-slate-500">{error.message}</p>
           <Button size="sm" className="mt-4" onClick={onRetry}>
             <RefreshCw className="mr-2 h-3.5 w-3.5" />
             重试财务数据
@@ -371,13 +371,13 @@ export function StockFinancialPanel({
 
   if (!hasFinancialData) {
     return (
-      <div className="flex h-full min-h-[440px] items-center justify-center p-6">
+      <div className="flex h-full min-h-[440px] items-center justify-center p-ui-panel">
         <div className="max-w-md text-center">
           <Database className="mx-auto h-6 w-6 text-slate-600" />
-          <h2 className="mt-3 text-sm font-black text-slate-200">
+          <h2 className="mt-3 text-ui-body font-black text-slate-200">
             暂无可用财务四表
           </h2>
-          <p className="mt-2 text-xs leading-5 text-slate-500">
+          <p className="mt-2 text-ui-label leading-5 text-slate-500">
             当前标的尚未同步财务数据。其他行情与交易功能仍可正常使用。
           </p>
           <Button
@@ -397,15 +397,15 @@ export function StockFinancialPanel({
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col gap-2 overflow-y-auto p-2 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-2 border border-white/5 bg-[#0b1120]/80 px-3 py-2">
         <div className="min-w-0">
-          <div className="text-[10px] font-black uppercase tracking-[0.18em] text-blue-300">
+          <div className="text-ui-caption font-black uppercase tracking-[0.18em] text-blue-300">
             Financials
           </div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-            <h2 className="text-sm font-black text-slate-100">财务分析</h2>
-            <span className="font-mono text-[10px] font-bold text-slate-500">
+            <h2 className="text-ui-body font-black text-slate-100">财务分析</h2>
+            <span className="font-mono text-ui-caption font-bold text-slate-500">
               报告期 {formatReportPeriod(summary?.latestReportDate)}
             </span>
-            <span className="text-[10px] font-bold text-slate-600">
+            <span className="text-ui-caption font-bold text-slate-600">
               公告 {summary?.latestAnnounceDate || '--'}
             </span>
           </div>
@@ -417,7 +417,7 @@ export function StockFinancialPanel({
               type="button"
               onClick={() => setBasis(item)}
               className={cn(
-                'h-7 border px-3 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                'h-7 border px-3 text-ui-caption font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 basis === item
                   ? 'border-blue-500/30 bg-blue-500/15 text-blue-100'
                   : 'border-white/5 text-slate-500 hover:bg-white/[0.04] hover:text-slate-200'
@@ -429,7 +429,7 @@ export function StockFinancialPanel({
           <Button
             size="sm"
             variant="ghost"
-            className="ml-1 h-7 px-2 text-[10px] text-slate-500"
+            className="ml-1 h-control-compact px-2 text-ui-caption text-slate-500"
             onClick={onRetry}
           >
             <RefreshCw
@@ -482,10 +482,10 @@ export function StockFinancialPanel({
       <div className="grid min-h-[300px] gap-2 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
         <section className="min-w-0 border border-white/5 bg-[#0b1120]/75 p-3">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <h3 className="text-xs font-black text-slate-200">
+            <h3 className="text-ui-label font-black text-slate-200">
               营业收入与归母净利润
             </h3>
-            <span className="text-[10px] font-bold text-slate-600">
+            <span className="text-ui-caption font-bold text-slate-600">
               单位：元
             </span>
           </div>
@@ -543,10 +543,10 @@ export function StockFinancialPanel({
 
         <section className="min-w-0 border border-white/5 bg-[#0b1120]/75 p-3">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <h3 className="text-xs font-black text-slate-200">
+            <h3 className="text-ui-label font-black text-slate-200">
               资产负债与权益结构
             </h3>
-            <span className="font-mono text-[10px] font-bold text-slate-600">
+            <span className="font-mono text-ui-caption font-bold text-slate-600">
               {formatReportPeriod(summary?.latestReportDate)}
             </span>
           </div>
@@ -606,7 +606,7 @@ export function StockFinancialPanel({
                 type="button"
                 onClick={() => setActiveTab(tab.id)}
                 className={cn(
-                  'relative h-10 shrink-0 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5',
+                  'relative h-10 shrink-0 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5',
                   activeTab === tab.id
                     ? 'text-blue-100 after:bg-blue-400'
                     : 'text-slate-500 after:bg-transparent hover:text-slate-200'
@@ -616,7 +616,7 @@ export function StockFinancialPanel({
               </button>
             ))}
           </div>
-          <span className="font-mono text-[10px] font-bold text-slate-600">
+          <span className="font-mono text-ui-caption font-bold text-slate-600">
             {table.periods.length} 个报告期
           </span>
         </div>
@@ -624,13 +624,13 @@ export function StockFinancialPanel({
           <table className="w-full min-w-[760px] border-collapse text-left">
             <thead className="sticky top-0 z-10 bg-[#0b1120]">
               <tr className="border-b border-white/5">
-                <th className="sticky left-0 z-20 min-w-36 bg-[#0b1120] px-3 py-2 text-[10px] font-black text-slate-500">
+                <th className="sticky left-0 z-20 min-w-36 bg-[#0b1120] px-3 py-2 text-ui-caption font-black text-slate-500">
                   指标
                 </th>
                 {table.periods.map(period => (
                   <th
                     key={period.reportDate}
-                    className="min-w-28 px-3 py-2 text-right font-mono text-[10px] font-black text-slate-500"
+                    className="min-w-28 px-3 py-2 text-right font-mono text-ui-caption font-black text-slate-500"
                   >
                     {formatReportPeriod(period.reportDate)}
                   </th>
@@ -643,13 +643,13 @@ export function StockFinancialPanel({
                   key={row.label}
                   className="border-b border-white/5 transition-colors hover:bg-white/[0.025]"
                 >
-                  <th className="sticky left-0 bg-[#0b1120] px-3 py-2.5 text-[11px] font-bold text-slate-300">
+                  <th className="sticky left-0 bg-[#0b1120] px-3 py-2.5 text-ui-caption font-bold text-slate-300">
                     {row.label}
                   </th>
                   {row.values.map((value, index) => (
                     <td
                       key={`${row.label}-${table.periods[index]?.reportDate || index}`}
-                      className="px-3 py-2.5 text-right font-mono text-[11px] font-bold tabular-nums text-slate-300"
+                      className="px-3 py-2.5 text-right font-mono text-ui-caption font-bold tabular-nums text-slate-300"
                     >
                       {formatCompactNumber(value)}
                     </td>

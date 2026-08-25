@@ -33,6 +33,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
+import { NativeSelect } from '@/components/ui/native-select';
 import { TradingHoldingsSidebar } from '@/features/trading/components/TradingHoldingsSidebar';
 import { ExecutionHealthControl } from '@/features/trading-safety';
 import type { ConditionalLiquidationOrdersQuery as ConditionalLiquidationOrdersQueryData } from '@/generated/gql/graphql';
@@ -251,19 +252,19 @@ function MetricCard({
 }) {
   return (
     <div className="min-w-0 rounded-md border border-white/5 bg-white/[0.03] px-3 py-2.5">
-      <div className="truncate text-[10px] font-bold text-slate-500">
+      <div className="truncate text-ui-caption font-bold text-slate-500">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-sm font-black tabular-nums',
+          'mt-1 truncate font-mono text-ui-body font-black tabular-nums',
           toneValue === undefined ? 'text-slate-100' : getToneClass(toneValue)
         )}
       >
         {value}
       </div>
       {subValue && (
-        <div className="mt-1 truncate text-[10px] font-bold text-slate-600">
+        <div className="mt-1 truncate text-ui-caption font-bold text-slate-600">
           {subValue}
         </div>
       )}
@@ -284,7 +285,9 @@ function DataPanel({
     <section className="min-w-0 rounded-md border border-white/5 bg-[#0b1120]/70">
       <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3">
         <Icon className="h-3.5 w-3.5 text-red-300" />
-        <h3 className="truncate text-xs font-black text-slate-200">{title}</h3>
+        <h3 className="truncate text-ui-label font-black text-slate-200">
+          {title}
+        </h3>
       </div>
       <div className="p-3">{children}</div>
     </section>
@@ -293,7 +296,7 @@ function DataPanel({
 
 function EmptyDataState({ label }: { label: string }) {
   return (
-    <div className="rounded-md border border-dashed border-white/10 bg-white/[0.025] px-4 py-6 text-center text-xs font-bold text-slate-500">
+    <div className="rounded-md border border-dashed border-white/10 bg-white/[0.025] px-ui-section py-ui-panel text-center text-ui-label font-bold text-slate-500">
       {label}
     </div>
   );
@@ -313,8 +316,8 @@ function RelatedOrdersTable({
           <EmptyDataState label="暂无该标的当日委托" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left text-xs">
-              <thead className="text-[10px] font-black uppercase tracking-wider text-slate-600">
+            <table className="w-full min-w-[520px] text-left text-ui-label">
+              <thead className="text-ui-caption font-black uppercase tracking-wider text-slate-600">
                 <tr className="border-b border-white/5">
                   <th className="px-2 py-2">方向</th>
                   <th className="px-2 py-2 text-right">委托/成交</th>
@@ -355,8 +358,8 @@ function RelatedOrdersTable({
           <EmptyDataState label="暂无该标的当日成交" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[480px] text-left text-xs">
-              <thead className="text-[10px] font-black uppercase tracking-wider text-slate-600">
+            <table className="w-full min-w-[480px] text-left text-ui-label">
+              <thead className="text-ui-caption font-black uppercase tracking-wider text-slate-600">
                 <tr className="border-b border-white/5">
                   <th className="px-2 py-2">方向</th>
                   <th className="px-2 py-2 text-right">成交数量</th>
@@ -485,18 +488,18 @@ function SingleStockLiquidationPanel({
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/5 bg-[#07111f]/95 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/5 bg-[#07111f]/95 px-ui-section py-3">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <h2 className="truncate text-base font-black text-slate-100">
+            <h2 className="truncate text-ui-title font-black text-slate-100">
               {stockName}
             </h2>
-            <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-[10px] font-bold text-slate-500">
+            <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-1 font-mono text-ui-caption font-bold text-slate-500">
               {selectedStockCode}
             </span>
             <span
               className={cn(
-                'rounded border px-2 py-1 text-[10px] font-black',
+                'rounded border px-2 py-1 text-ui-caption font-black',
                 holding
                   ? 'border-red-500/25 bg-red-500/10 text-red-200'
                   : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
@@ -505,7 +508,7 @@ function SingleStockLiquidationPanel({
               {holding ? '当前持仓' : '未找到持仓'}
             </span>
           </div>
-          <p className="mt-1 text-[10px] font-bold text-slate-600">
+          <p className="mt-1 text-ui-caption font-bold text-slate-600">
             预检可卖库存后提交 SELL 委托，成交状态只来自券商回报。
           </p>
         </div>
@@ -533,13 +536,13 @@ function SingleStockLiquidationPanel({
               <AlertDialogDescription asChild>
                 <div>
                   将为 {selectedStockCode} 创建独立清仓计划。
-                  <div className="mt-3 rounded-md bg-muted p-3 text-sm">
+                  <div className="mt-3 rounded-md bg-muted p-3 text-ui-body">
                     <p>可卖数量: {sellableVolume.toLocaleString()} 股</p>
                     <p>冻结数量: {formatShares(holding?.frozenVolume)} 股</p>
                     <p>在途数量: {formatShares(holding?.onRoadVolume)} 股</p>
                     <p>估算委托市值: {formatCurrency(estimatedSellValue)}</p>
                   </div>
-                  <div className="mt-3 grid gap-2 text-left text-sm">
+                  <div className="mt-3 grid gap-2 text-left text-ui-body">
                     <div className="font-bold">完成策略（必须选择）</div>
                     <label className="flex items-start gap-2">
                       <input
@@ -586,8 +589,8 @@ function SingleStockLiquidationPanel({
                     </label>
                     <label className="mt-1 grid gap-1 font-bold">
                       执行模式（必须选择）
-                      <select
-                        className="h-9 rounded border border-input bg-background px-2"
+                      <NativeSelect
+                        className="h-control-default rounded border border-input bg-background px-2"
                         onChange={event =>
                           setExecutionMode(
                             event.target.value as 'paper' | 'live' | ''
@@ -598,7 +601,7 @@ function SingleStockLiquidationPanel({
                         <option value="">请选择</option>
                         <option value="paper">模拟</option>
                         <option value="live">实盘（意图需再次确认）</option>
-                      </select>
+                      </NativeSelect>
                     </label>
                   </div>
                 </div>
@@ -632,7 +635,7 @@ function SingleStockLiquidationPanel({
       </div>
 
       {!holding && (
-        <div className="rounded-md border border-amber-400/20 bg-amber-500/10 px-4 py-3 text-xs font-bold text-amber-100">
+        <div className="rounded-md border border-amber-400/20 bg-amber-500/10 px-ui-section py-3 text-ui-label font-bold text-amber-100">
           当前账户未返回该标的持仓。请从左侧持仓列表选择可清仓标的。
         </div>
       )}
@@ -656,10 +659,10 @@ function SingleStockLiquidationPanel({
               key={label}
               className="min-w-0 rounded-md border border-white/5 bg-[#08101d]/80 px-3 py-2"
             >
-              <div className="truncate text-[10px] font-bold text-slate-500">
+              <div className="truncate text-ui-caption font-bold text-slate-500">
                 {label}
               </div>
-              <div className="mt-1 truncate font-mono text-xs font-black text-slate-200">
+              <div className="mt-1 truncate font-mono text-ui-label font-black text-slate-200">
                 {value}
               </div>
             </div>
@@ -1091,7 +1094,7 @@ export function LiquidationPage() {
   );
 
   const toolbar = (
-    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-4 custom-scrollbar">
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-ui-section custom-scrollbar">
       <nav
         aria-label="卖出工作区"
         className="flex h-full min-w-0 items-stretch"
@@ -1101,7 +1104,7 @@ export function LiquidationPage() {
           return (
             <button
               className={cn(
-                'relative flex h-full shrink-0 items-center gap-1.5 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                'relative flex h-full shrink-0 items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                 selected
                   ? mode === 'REPLAY'
                     ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
@@ -1130,7 +1133,7 @@ export function LiquidationPage() {
                 <button
                   aria-selected={selected}
                   className={cn(
-                    'relative h-full shrink-0 px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                    'relative h-full shrink-0 px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                     selected
                       ? 'text-blue-200 after:bg-blue-400'
                       : 'text-slate-500 hover:text-slate-200'
@@ -1151,7 +1154,7 @@ export function LiquidationPage() {
         {selectedStockCode && workspaceMode === 'MANAGEMENT' ? (
           <button
             aria-label="返回全部卖出计划"
-            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/35 bg-primary/10 px-3 text-xs font-black text-primary"
+            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/35 bg-primary/10 px-3 text-ui-label font-black text-primary"
             onClick={handleShowAllExitPlans}
             type="button"
           >
@@ -1171,7 +1174,7 @@ export function LiquidationPage() {
         <button
           type="button"
           onClick={handleRefresh}
-          className="flex h-8 items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-primary/40 hover:text-primary"
+          className="flex h-8 items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-black uppercase tracking-wider text-slate-400 transition-colors hover:border-primary/40 hover:text-primary"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           刷新数据
@@ -1181,7 +1184,7 @@ export function LiquidationPage() {
           type="button"
           disabled
           title="资金划转请在券商客户端办理"
-          className="flex h-8 cursor-not-allowed items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-[10px] font-black uppercase tracking-wider text-slate-600"
+          className="flex h-8 cursor-not-allowed items-center justify-center gap-2 rounded-md border border-white/10 px-3 text-ui-caption font-black uppercase tracking-wider text-slate-600"
         >
           <Wallet className="h-3.5 w-3.5" />
           券商端划转
@@ -1226,12 +1229,12 @@ export function LiquidationPage() {
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {toolbar}
       {dataError && (
-        <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs font-bold text-amber-100">
+        <div className="border-b border-amber-400/20 bg-amber-500/10 px-ui-section py-2 text-ui-label font-bold text-amber-100">
           数据读取异常：{dataError.message}
         </div>
       )}
       {actionError && (
-        <div className="border-b border-rose-400/20 bg-rose-500/10 px-4 py-2 text-xs font-bold text-rose-100">
+        <div className="border-b border-rose-400/20 bg-rose-500/10 px-ui-section py-2 text-ui-label font-bold text-rose-100">
           最近一次清仓提交异常：{actionError.message}
         </div>
       )}
@@ -1255,7 +1258,7 @@ export function LiquidationPage() {
       ) : activeMode === 'SELL_HISTORY' ? (
         <SellHistoryPanel accountId={accountId || ''} />
       ) : dataLoading && currentHoldings.length === 0 ? (
-        <div className="flex min-h-0 flex-1 items-center justify-center text-sm font-medium text-slate-500">
+        <div className="flex min-h-0 flex-1 items-center justify-center text-ui-body font-medium text-slate-500">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           加载真实清仓数据中...
         </div>

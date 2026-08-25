@@ -18,7 +18,7 @@ export function ExitPlanNotices({ plan }: { plan: ExitPlanNoticeSource }) {
         return (
           <div
             className={cn(
-              'flex items-start gap-1.5 text-[11px] font-bold',
+              'flex items-start gap-1.5 text-ui-caption font-bold',
               notice.tone === 'info' ? 'text-sky-300' : 'text-amber-200'
             )}
             key={notice.key}

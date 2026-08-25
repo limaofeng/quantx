@@ -68,7 +68,7 @@ export function DateRangePicker({
           <div
             id="date"
             className={cn(
-              'group flex flex-1 items-center justify-between rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm ring-offset-background hover:border-slate-400 focus-within:ring-1 focus-within:ring-ring disabled:cursor-not-allowed disabled:opacity-50 transition-colors duration-200 cursor-text',
+              'group flex flex-1 items-center justify-between rounded-md border border-input bg-transparent px-3 py-2 text-ui-body shadow-sm ring-offset-background hover:border-slate-400 focus-within:ring-1 focus-within:ring-ring disabled:cursor-not-allowed disabled:opacity-50 transition-colors duration-200 cursor-text',
               buttonClassName,
               isOpen && 'border-blue-500 ring-1 ring-blue-500' // active state
             )}
@@ -82,11 +82,11 @@ export function DateRangePicker({
                 onChange={handleFromChange}
                 onFocus={() => setIsOpen(true)}
                 className={cn(
-                  'flex-1 w-full min-w-0 bg-transparent text-center outline-none mx-1 text-sm placeholder:text-slate-500/50',
+                  'flex-1 w-full min-w-0 bg-transparent text-center outline-none mx-1 text-ui-body placeholder:text-slate-500/50',
                   value?.from ? 'text-foreground' : 'text-slate-400'
                 )}
               />
-              <span className="text-slate-400 text-xs font-light pointer-events-none">
+              <span className="text-slate-400 text-ui-label font-light pointer-events-none">
                 ~
               </span>
               <input
@@ -96,7 +96,7 @@ export function DateRangePicker({
                 onChange={handleToChange}
                 onFocus={() => setIsOpen(true)}
                 className={cn(
-                  'flex-1 w-full min-w-0 bg-transparent text-center outline-none mx-1 text-sm placeholder:text-slate-500/50',
+                  'flex-1 w-full min-w-0 bg-transparent text-center outline-none mx-1 text-ui-body placeholder:text-slate-500/50',
                   value?.to ? 'text-foreground' : 'text-slate-400'
                 )}
               />

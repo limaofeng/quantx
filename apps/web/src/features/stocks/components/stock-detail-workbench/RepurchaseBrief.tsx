@@ -20,10 +20,10 @@ type RepurchaseEvent = DisclosureSummary['repurchaseEvents'][0];
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 border border-white/5 bg-[#08101d]/80 px-3 py-2">
-      <div className="truncate text-[10px] font-bold text-slate-500">
+      <div className="truncate text-ui-caption font-bold text-slate-500">
         {label}
       </div>
-      <div className="mt-1 truncate font-mono text-xs font-black text-slate-200">
+      <div className="mt-1 truncate font-mono text-ui-label font-black text-slate-200">
         {value}
       </div>
     </div>
@@ -46,7 +46,7 @@ export function RepurchaseBrief({
       <div className="flex h-10 items-center justify-between gap-2 border-b border-white/5 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <RotateCcw className="h-3.5 w-3.5 text-blue-300" />
-          <h3 className="truncate text-xs font-black text-slate-200">
+          <h3 className="truncate text-ui-label font-black text-slate-200">
             回购观察
           </h3>
         </div>
@@ -67,8 +67,10 @@ export function RepurchaseBrief({
       <div className="p-3">
         {!event ? (
           <div className="flex min-h-32 flex-col justify-center gap-2 text-center">
-            <div className="text-xs font-bold text-slate-400">暂无回购事件</div>
-            <div className="text-[11px] font-medium text-slate-600">
+            <div className="text-ui-label font-bold text-slate-400">
+              暂无回购事件
+            </div>
+            <div className="text-ui-caption font-medium text-slate-600">
               {sourceStatus === 'READY'
                 ? '等待首次同步，可点击刷新公告。'
                 : '回购数据来自东方财富股票回购数据。'}
@@ -77,19 +79,19 @@ export function RepurchaseBrief({
         ) : (
           <div className="space-y-3">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <span className="rounded border border-red-500/25 bg-red-500/10 px-2 py-1 text-[10px] font-black text-red-200">
+              <span className="rounded border border-red-500/25 bg-red-500/10 px-2 py-1 text-ui-caption font-black text-red-200">
                 {event.progressStatus || '回购事件'}
               </span>
-              <span className="font-mono text-[10px] font-bold text-slate-500">
+              <span className="font-mono text-ui-caption font-bold text-slate-500">
                 {formatDate(event.latestAnnounceDate)}
               </span>
-              <span className="text-[10px] font-bold text-slate-600">
+              <span className="text-ui-caption font-bold text-slate-600">
                 {sourceLabel(event.source)}
               </span>
             </div>
 
             <div>
-              <div className="flex items-center justify-between gap-3 text-[10px] font-bold text-slate-500">
+              <div className="flex items-center justify-between gap-3 text-ui-caption font-bold text-slate-500">
                 <span>金额进度</span>
                 <span className="font-mono text-slate-300">
                   {progressPercent.toFixed(0)}%

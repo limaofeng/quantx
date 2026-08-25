@@ -21,6 +21,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { NativeSelect } from '@/components/ui/native-select';
 import {
   Table,
   TableBody,
@@ -128,9 +129,7 @@ export function CurrentHoldingsSection({
   const [conflictStrategy, setConflictStrategy] = useState<
     LiquidationConflictStrategy | ''
   >('');
-  const [executionMode, setExecutionMode] = useState<
-    'paper' | 'live' | ''
-  >('');
+  const [executionMode, setExecutionMode] = useState<'paper' | 'live' | ''>('');
   const hasExplicitChoices = Boolean(
     completionStrategy && conflictStrategy && executionMode
   );
@@ -193,11 +192,11 @@ export function CurrentHoldingsSection({
   };
 
   const liquidationChoices = (
-    <div className="mt-3 grid gap-2 rounded-md border border-border bg-muted/40 p-3 text-left text-sm">
+    <div className="mt-3 grid gap-2 rounded-md border border-border bg-muted/40 p-3 text-left text-ui-body">
       <label className="grid gap-1 font-medium">
         完成策略（必选）
-        <select
-          className="h-9 rounded border border-input bg-background px-2"
+        <NativeSelect
+          className="h-control-default rounded border border-input bg-background px-2"
           onChange={event =>
             setCompletionStrategy(
               event.target.value as LiquidationCompletionStrategy | ''
@@ -207,15 +206,13 @@ export function CurrentHoldingsSection({
         >
           <option value="">请选择</option>
           <option value="AVAILABLE_NOW">仅卖确认时可用数量</option>
-          <option value="UNTIL_SNAPSHOT_CLEARED">
-            持续至本次持仓快照清完
-          </option>
-        </select>
+          <option value="UNTIL_SNAPSHOT_CLEARED">持续至本次持仓快照清完</option>
+        </NativeSelect>
       </label>
       <label className="grid gap-1 font-medium">
         冲突策略（必选）
-        <select
-          className="h-9 rounded border border-input bg-background px-2"
+        <NativeSelect
+          className="h-control-default rounded border border-input bg-background px-2"
           onChange={event =>
             setConflictStrategy(
               event.target.value as LiquidationConflictStrategy | ''
@@ -226,12 +223,12 @@ export function CurrentHoldingsSection({
           <option value="">请选择</option>
           <option value="UNALLOCATED_ONLY">只卖未分配数量</option>
           <option value="REPLACE_CANCELLABLE">替换可取消计划</option>
-        </select>
+        </NativeSelect>
       </label>
       <label className="grid gap-1 font-medium">
         执行模式（必选）
-        <select
-          className="h-9 rounded border border-input bg-background px-2"
+        <NativeSelect
+          className="h-control-default rounded border border-input bg-background px-2"
           onChange={event =>
             setExecutionMode(event.target.value as 'paper' | 'live' | '')
           }
@@ -240,9 +237,9 @@ export function CurrentHoldingsSection({
           <option value="">请选择</option>
           <option value="paper">模拟</option>
           <option value="live">实盘（卖出意图需再次确认）</option>
-        </select>
+        </NativeSelect>
       </label>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-ui-label text-muted-foreground">
         持续清仓只保护本次确认时的持仓；后续新买不会自动加入。
       </p>
     </div>
@@ -250,13 +247,15 @@ export function CurrentHoldingsSection({
 
   if (holdings.length === 0) {
     return (
-      <Card className="p-12 text-center bg-background/60 backdrop-blur-sm border-muted/20">
-        <div className="flex flex-col items-center gap-4">
+      <Card className="p-ui-empty text-center bg-background/60 backdrop-blur-sm border-muted/20">
+        <div className="flex flex-col items-center gap-ui-section">
           <div className="w-16 h-16 rounded-full bg-muted/20 flex items-center justify-center">
             <Package className="w-8 h-8 text-muted-foreground" />
           </div>
           <div>
-            <h3 className="text-lg font-semibold text-foreground">暂无持仓</h3>
+            <h3 className="text-ui-heading font-semibold text-foreground">
+              暂无持仓
+            </h3>
             <p className="text-muted-foreground mt-1">当前没有任何持仓股票</p>
           </div>
         </div>
@@ -265,9 +264,9 @@ export function CurrentHoldingsSection({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-ui-section">
       {/* Batch Operations Bar */}
-      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
+      <div className="flex items-center justify-between p-ui-section bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
         <div className="flex items-center gap-3">
           <Checkbox
             checked={
@@ -277,7 +276,7 @@ export function CurrentHoldingsSection({
             onCheckedChange={handleToggleAll}
             data-testid="select-all-checkbox"
           />
-          <span className="text-sm font-medium">
+          <span className="text-ui-body font-medium">
             已选择{' '}
             <span className="text-primary">{selectedHoldings.length}</span> /{' '}
             {liquidatableHoldings.length} 只可清仓股票
@@ -310,7 +309,7 @@ export function CurrentHoldingsSection({
                     只股票吗？
                     <br />
                     系统将先提交市价风格卖出委托，不会把委托提交成功写成已成交。
-                    <div className="mt-3 rounded-md bg-muted p-3 text-sm">
+                    <div className="mt-3 rounded-md bg-muted p-3 text-ui-body">
                       <p>
                         可卖数量: {selectedSellableVolume.toLocaleString()} 股
                       </p>
@@ -327,7 +326,11 @@ export function CurrentHoldingsSection({
                 <AlertDialogAction
                   disabled={!hasExplicitChoices}
                   onClick={() => {
-                    if (!completionStrategy || !conflictStrategy || !executionMode)
+                    if (
+                      !completionStrategy ||
+                      !conflictStrategy ||
+                      !executionMode
+                    )
                       return;
                     onLiquidateSelected({
                       autoExitAuthorized: executionMode === 'paper',
@@ -392,23 +395,23 @@ export function CurrentHoldingsSection({
                   <TableCell>
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 bg-gradient-to-br from-primary/20 to-primary/5 rounded-lg flex items-center justify-center shrink-0 border border-primary/10">
-                        <span className="text-primary text-xs font-bold">
+                        <span className="text-primary text-ui-label font-bold">
                           {getStockIconText(
                             holding.instrumentName || holding.stockCode
                           )}
                         </span>
                       </div>
                       <div>
-                        <div className="font-medium text-sm">
+                        <div className="font-medium text-ui-body">
                           {holding.instrumentName || holding.stockCode}
                         </div>
-                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <span className="bg-primary/10 text-primary px-1 rounded-[2px] text-[10px]">
+                        <div className="flex items-center gap-1 text-ui-label text-muted-foreground">
+                          <span className="bg-primary/10 text-primary px-1 rounded-[2px] text-ui-caption">
                             Stock
                           </span>
                           {stockCode}
                           {hasCondition && (
-                            <span className="rounded border border-rose-400/20 bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-bold text-rose-200">
+                            <span className="rounded border border-rose-400/20 bg-rose-500/10 px-1.5 py-0.5 text-ui-caption font-bold text-rose-200">
                               条件清仓
                             </span>
                           )}
@@ -417,18 +420,18 @@ export function CurrentHoldingsSection({
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="font-medium text-sm">
+                    <div className="font-medium text-ui-body">
                       {holding.volume.toLocaleString()}
                     </div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="text-ui-label text-muted-foreground">
                       可卖 {sellableVolume.toLocaleString()} 股
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="text-sm">
+                    <div className="text-ui-body">
                       {formatCurrency(holding.avgPrice ?? 0)}
                     </div>
-                    <div className="text-xs text-muted-foreground flex items-center justify-end gap-1">
+                    <div className="text-ui-label text-muted-foreground flex items-center justify-end gap-1">
                       <span className="opacity-70">现价:</span>
                       <span>
                         {holding.lastPrice
@@ -446,10 +449,7 @@ export function CurrentHoldingsSection({
                     <div
                       className={cn(
                         'font-medium flex items-center justify-end gap-1',
-                        financialToneClass(
-                          holding.profitLoss ?? 0,
-                          'holding'
-                        )
+                        financialToneClass(holding.profitLoss ?? 0, 'holding')
                       )}
                     >
                       {isProfitable ? (
@@ -462,11 +462,8 @@ export function CurrentHoldingsSection({
                     </div>
                     <div
                       className={cn(
-                        'text-xs',
-                        financialToneClass(
-                          holding.profitRate ?? 0,
-                          'holding'
-                        )
+                        'text-ui-label',
+                        financialToneClass(holding.profitRate ?? 0, 'holding')
                       )}
                     >
                       {formatPercent(holding.profitRate ?? 0)}
@@ -478,7 +475,7 @@ export function CurrentHoldingsSection({
                         variant="ghost"
                         size="sm"
                         className={cn(
-                          'h-8 w-8 p-0 hover:bg-rose-500/10',
+                          'h-control-compact w-8 p-0 hover:bg-rose-500/10',
                           hasCondition
                             ? 'text-rose-300 hover:text-rose-200'
                             : 'text-muted-foreground hover:text-foreground'
@@ -497,7 +494,7 @@ export function CurrentHoldingsSection({
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
+                            className="h-control-compact w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                             disabled={
                               isProcessing || isSubmitting || !rowLiquidatable
                             }
@@ -519,7 +516,7 @@ export function CurrentHoldingsSection({
                                 {holding.instrumentName || holding.stockCode} (
                                 {holding.stockCode}) 吗？
                                 <br />
-                                <div className="mt-2 text-sm bg-muted p-2 rounded-md">
+                                <div className="mt-2 text-ui-body bg-muted p-2 rounded-md">
                                   <p>
                                     持仓数量: {holding.volume.toLocaleString()}{' '}
                                     股

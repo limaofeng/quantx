@@ -45,6 +45,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { NativeSelect } from '@/components/ui/native-select';
 import {
   Sheet,
   SheetContent,
@@ -118,14 +119,14 @@ function PendingSignalCard({
       <div className="flex items-center justify-between gap-3 px-3 py-2.5">
         <div>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-xs font-black text-slate-100">
+            <span className="font-mono text-ui-label font-black text-slate-100">
               {intent.instrumentCode}
             </span>
-            <Badge className="border-amber-400/25 bg-amber-400/10 text-[9px] text-amber-200 hover:bg-amber-400/10">
+            <Badge className="border-amber-400/25 bg-amber-400/10 text-ui-micro text-amber-200 hover:bg-amber-400/10">
               待确认
             </Badge>
           </div>
-          <div className="mt-1 text-[10px] text-slate-500">
+          <div className="mt-1 text-ui-caption text-slate-500">
             目标仓位{' '}
             {intent.targetPositionPct != null
               ? `${(intent.targetPositionPct * 100).toFixed(2)}%`
@@ -135,7 +136,7 @@ function PendingSignalCard({
         </div>
         <div
           className={cn(
-            'flex items-center gap-1 font-mono text-sm font-black',
+            'flex items-center gap-1 font-mono text-ui-body font-black',
             countdown.expired ? 'text-rose-300' : 'text-amber-200'
           )}
         >
@@ -149,7 +150,7 @@ function PendingSignalCard({
           style={{ width: `${countdown.progress}%` }}
         />
       </div>
-      <div className="grid grid-cols-3 gap-px bg-white/[0.06] text-[9px]">
+      <div className="grid grid-cols-3 gap-px bg-white/[0.06] text-ui-micro">
         <SignalMetric
           label="信号价"
           value={intent.signalPrice?.toFixed(2) ?? '--'}
@@ -167,7 +168,7 @@ function PendingSignalCard({
           size="sm"
           disabled={busy || countdown.expired}
           onClick={onReject}
-          className="h-8 border-white/10 bg-white/[0.025] text-[11px] text-slate-300 hover:bg-white/[0.06]"
+          className="h-control-compact border-white/10 bg-white/[0.025] text-ui-caption text-slate-300 hover:bg-white/[0.06]"
         >
           <X className="h-3.5 w-3.5" />
           忽略
@@ -177,7 +178,7 @@ function PendingSignalCard({
           size="sm"
           disabled={busy || countdown.expired || !canApprove}
           onClick={onApprove}
-          className="h-8 bg-market-buy-cta text-[11px] font-black text-white hover:bg-market-buy-cta/90"
+          className="h-control-compact bg-market-buy-cta text-ui-caption font-black text-white hover:bg-market-buy-cta/90"
           title={
             !canApprove
               ? '账户执行门禁尚未通过'
@@ -200,7 +201,7 @@ function SignalMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="bg-[#0d1626] px-3 py-2 text-slate-500">
       {label}
-      <strong className="mt-0.5 block font-mono text-[11px] text-slate-200">
+      <strong className="mt-0.5 block font-mono text-ui-caption text-slate-200">
         {value}
       </strong>
     </div>
@@ -245,12 +246,12 @@ function ExitPlanCard({
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <span className="font-mono text-xs font-black text-slate-100">
+            <span className="font-mono text-ui-label font-black text-slate-100">
               {plan.instrumentCode}
             </span>
             <Badge
               className={cn(
-                'text-[9px]',
+                'text-ui-micro',
                 hasError
                   ? 'border-rose-400/25 bg-rose-400/10 text-rose-200 hover:bg-rose-400/10'
                   : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/10'
@@ -263,7 +264,7 @@ function ExitPlanCard({
                   : '自动托管'}
             </Badge>
           </div>
-          <div className="mt-1 text-[10px] text-slate-500">
+          <div className="mt-1 text-ui-caption text-slate-500">
             剩余 {plan.remainingVolume.toLocaleString('zh-CN')} 股 · 成本{' '}
             {plan.entryAvgPrice.toFixed(2)}
           </div>
@@ -271,19 +272,19 @@ function ExitPlanCard({
         <div className="text-right">
           <div
             className={cn(
-              'font-mono text-sm font-black',
+              'font-mono text-ui-body font-black',
               financialToneClass(plan.lastNetProfitPct, 'holding')
             )}
           >
             {plan.lastNetProfitPct >= 0 ? '+' : ''}
             {plan.lastNetProfitPct.toFixed(2)}%
           </div>
-          <div className="text-[9px] text-slate-600">
+          <div className="text-ui-micro text-slate-600">
             现价 {plan.lastPrice.toFixed(2)}
           </div>
         </div>
       </div>
-      <div className="mt-2 flex items-center justify-between rounded-sm border border-white/[0.05] bg-black/10 px-2.5 py-2 text-[10px]">
+      <div className="mt-2 flex items-center justify-between rounded-sm border border-white/[0.05] bg-black/10 px-2.5 py-2 text-ui-caption">
         <span className="text-slate-500">T+1 状态</span>
         <span className={waitingT1 ? 'text-amber-200' : 'text-emerald-200'}>
           {waitingT1 ? '今日买入，等待可卖' : '已进入可卖日'}
@@ -293,14 +294,14 @@ function ExitPlanCard({
         {rules.map(rule => (
           <span
             key={rule}
-            className="rounded-sm border border-white/[0.07] bg-white/[0.025] px-1.5 py-1 text-[9px] text-slate-400"
+            className="rounded-sm border border-white/[0.07] bg-white/[0.025] px-1.5 py-1 text-ui-micro text-slate-400"
           >
             {rule}
           </span>
         ))}
       </div>
       {!plan.autoExitAuthorized ? (
-        <div className="mt-2 flex items-center gap-1.5 text-[9px] text-rose-300">
+        <div className="mt-2 flex items-center gap-1.5 text-ui-micro text-rose-300">
           <ShieldX className="h-3 w-3" /> 自动卖出授权未生效
         </div>
       ) : null}
@@ -520,25 +521,27 @@ export default function LimitUpBoardPage() {
 
   const replaySidebar = (
     <aside className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-4">
+      <div className="flex h-[68px] shrink-0 items-center border-b border-white/[0.05] px-ui-section">
         <div>
-          <div className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">
+          <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-cyan-300">
             Replay Lab
           </div>
-          <h1 className="mt-1 text-base font-black text-slate-100">打板回放</h1>
+          <h1 className="mt-1 text-ui-title font-black text-slate-100">
+            打板回放
+          </h1>
         </div>
       </div>
-      <div className="border-b border-white/[0.05] p-4">
-        <div className="flex items-center gap-2 text-xs font-black text-cyan-100">
+      <div className="border-b border-white/[0.05] p-ui-section">
+        <div className="flex items-center gap-2 text-ui-label font-black text-cyan-100">
           <ShieldCheck className="h-4 w-4 text-cyan-300" />
           隔离回测环境
         </div>
-        <p className="mt-2 text-[10px] leading-5 text-slate-600">
+        <p className="mt-2 text-ui-caption leading-5 text-slate-600">
           回放使用 BACKTEST
           Broker，测试信号自动确认；实时助手保持原状态，不会提交实盘委托。
         </p>
       </div>
-      <div className="space-y-3 p-4 text-[10px] text-slate-500">
+      <div className="space-y-3 p-ui-section text-ui-caption text-slate-500">
         <div className="flex items-start gap-2">
           <Database className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-600" />
           按历史时点重放动态候选与原始五档行情。
@@ -553,10 +556,10 @@ export default function LimitUpBoardPage() {
         </div>
       </div>
       <div className="mt-auto shrink-0 border-t border-white/[0.06] bg-[#091322] p-3">
-        <div className="mb-1.5 text-[10px] font-black uppercase tracking-[0.12em] text-slate-600">
+        <div className="mb-1.5 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-600">
           默认回放账户
         </div>
-        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-xs text-slate-300">
+        <div className="flex h-10 items-center border border-white/[0.08] bg-white/[0.025] px-3 font-mono text-ui-label text-slate-300">
           {accountId || '未配置'}
         </div>
       </div>
@@ -605,7 +608,7 @@ export default function LimitUpBoardPage() {
     : '--';
 
   const toolbar = (
-    <header className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] px-4">
+    <header className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-hidden border-b border-white/[0.05] px-ui-section">
       <nav
         aria-label="打板工作区"
         className="flex h-full min-w-0 items-stretch overflow-x-auto custom-scrollbar"
@@ -619,7 +622,7 @@ export default function LimitUpBoardPage() {
               aria-controls="limit-up-workbench-content"
               aria-pressed={active}
               className={cn(
-                'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                'relative flex h-full shrink-0 cursor-pointer items-center gap-1.5 px-3 text-ui-caption font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
                 active
                   ? mode === 'REPLAY'
                     ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
@@ -654,7 +657,7 @@ export default function LimitUpBoardPage() {
                     aria-controls="limit-up-realtime-view"
                     aria-selected={active}
                     className={cn(
-                      'relative h-full shrink-0 cursor-pointer px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60',
+                      'relative h-full shrink-0 cursor-pointer px-3 text-ui-label font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-red-500/60',
                       active
                         ? 'text-red-200 after:bg-red-400'
                         : 'text-slate-500 hover:text-slate-200'
@@ -664,7 +667,7 @@ export default function LimitUpBoardPage() {
                   >
                     {view.label}
                     {view.count ? (
-                      <span className="ml-1.5 rounded-sm bg-white/[0.07] px-1.5 py-0.5 font-mono text-[9px] text-slate-300">
+                      <span className="ml-1.5 rounded-sm bg-white/[0.07] px-1.5 py-0.5 font-mono text-ui-micro text-slate-300">
                         {view.count}
                       </span>
                     ) : null}
@@ -678,7 +681,7 @@ export default function LimitUpBoardPage() {
 
       <div className="flex shrink-0 items-center gap-2">
         {workspaceMode === 'REPLAY' ? (
-          <span className="hidden items-center gap-1.5 text-[10px] font-bold text-cyan-200 sm:inline-flex">
+          <span className="hidden items-center gap-1.5 text-ui-caption font-bold text-cyan-200 sm:inline-flex">
             <ShieldCheck className="h-3.5 w-3.5" />
             隔离回测 · 自动确认测试信号
           </span>
@@ -686,7 +689,7 @@ export default function LimitUpBoardPage() {
           <>
             <span
               className={cn(
-                'hidden items-center gap-1.5 text-[10px] font-bold md:inline-flex',
+                'hidden items-center gap-1.5 text-ui-caption font-bold md:inline-flex',
                 enabled ? 'text-emerald-300' : 'text-slate-600'
               )}
             >
@@ -701,7 +704,7 @@ export default function LimitUpBoardPage() {
               {enabled ? '晋级助手运行中' : '晋级助手已停止'}
             </span>
             <span className="hidden h-4 w-px bg-white/[0.08] sm:block" />
-            <span className="hidden font-mono text-[9px] text-slate-600 lg:inline">
+            <span className="hidden font-mono text-ui-micro text-slate-600 lg:inline">
               {radar.isScannerRunning ? '雷达在线' : '雷达离线'} · 更新{' '}
               {updatedAt}
             </span>
@@ -710,7 +713,7 @@ export default function LimitUpBoardPage() {
               variant="ghost"
               size="icon"
               aria-label="同步首板业务链"
-              className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
+              className="h-control-compact w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
               onClick={syncWorkbench}
               disabled={!accountId || busyAction === 'refresh'}
             >
@@ -727,7 +730,7 @@ export default function LimitUpBoardPage() {
               variant="ghost"
               size="icon"
               aria-label="打开首板风险设置"
-              className="h-8 w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
+              className="h-control-compact w-8 text-slate-500 hover:bg-white/[0.05] hover:text-slate-100"
               onClick={() => setSettingsOpen(true)}
             >
               <Settings2 className="h-3.5 w-3.5" />
@@ -748,7 +751,7 @@ export default function LimitUpBoardPage() {
       {workspaceMode === 'REALTIME' && assistant.assistant?.lastError ? (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.08] px-3 py-2 text-[10px] text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.08] px-3 py-2 text-ui-caption text-rose-100"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <strong>助手受保护</strong>
@@ -808,15 +811,15 @@ export default function LimitUpBoardPage() {
               <div className="flex h-full min-h-0 flex-col overflow-hidden border border-amber-400/15 bg-[#0d1626]/90">
                 <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
                   <div>
-                    <h2 className="flex items-center gap-2 text-xs font-black">
+                    <h2 className="flex items-center gap-2 text-ui-label font-black">
                       <Clock3 className="h-3.5 w-3.5 text-amber-300" />
                       待确认信号
                     </h2>
-                    <p className="mt-1 text-[9px] text-slate-600">
+                    <p className="mt-1 text-ui-micro text-slate-600">
                       新信号到达时自动切换一次；确认前仍会重新校验行情、资金与风控。
                     </p>
                   </div>
-                  <div className="flex items-center gap-2 text-[9px] text-slate-500">
+                  <div className="flex items-center gap-2 text-ui-micro text-slate-500">
                     <span>
                       入场门禁{' '}
                       <strong
@@ -829,7 +832,7 @@ export default function LimitUpBoardPage() {
                         {assistant.assistant?.canApprove ? '已通过' : '未通过'}
                       </strong>
                     </span>
-                    <Badge className="border-amber-400/20 bg-amber-400/10 text-[9px] text-amber-200 hover:bg-amber-400/10">
+                    <Badge className="border-amber-400/20 bg-amber-400/10 text-ui-micro text-amber-200 hover:bg-amber-400/10">
                       {assistant.pendingIntents.length}
                     </Badge>
                   </div>
@@ -871,16 +874,16 @@ export default function LimitUpBoardPage() {
               <div className="flex h-full min-h-0 flex-col overflow-hidden border border-emerald-400/15 bg-[#0d1626]/90">
                 <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-white/[0.07] px-3 py-2.5">
                   <div>
-                    <h2 className="flex items-center gap-2 text-xs font-black">
+                    <h2 className="flex items-center gap-2 text-ui-label font-black">
                       <WalletCards className="h-3.5 w-3.5 text-emerald-300" />
                       T+1 自适应退出
                     </h2>
-                    <p className="mt-1 text-[9px] text-slate-600">
+                    <p className="mt-1 text-ui-micro text-slate-600">
                       真实成交回报到达后由 Engine 建立唯一退出计划并持续托管。
                     </p>
                   </div>
                   <Button
-                    className="h-7 border-white/10 bg-white/[0.025] px-2 text-[9px] text-slate-300 hover:bg-white/[0.06]"
+                    className="h-control-compact border-white/10 bg-white/[0.025] px-2 text-ui-micro text-slate-300 hover:bg-white/[0.06]"
                     onClick={() => setLocation('/liquidation')}
                     size="sm"
                     variant="outline"
@@ -941,7 +944,7 @@ export default function LimitUpBoardPage() {
               fallback={
                 <div
                   aria-label="正在加载历史回放"
-                  className="flex h-full items-center justify-center text-[10px] text-slate-500"
+                  className="flex h-full items-center justify-center text-ui-caption text-slate-500"
                   role="status"
                 >
                   正在加载历史回放…
@@ -1083,7 +1086,7 @@ export default function LimitUpBoardPage() {
               计划托管退出。
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-2 sm:grid-cols-2">
+          <div className="grid gap-ui-section py-2 sm:grid-cols-2">
             <SettingField label="单标的资产上限（%）">
               <Input
                 type="number"
@@ -1135,18 +1138,18 @@ export default function LimitUpBoardPage() {
               />
             </SettingField>
             <SettingField label="运行环境">
-              <select
+              <NativeSelect
                 value={mode}
                 onChange={event => setMode(event.target.value)}
-                className="h-10 w-full rounded-md border border-white/10 bg-[#08111f] px-3 text-sm outline-none focus:ring-2 focus:ring-cyan-400/50"
+                className="h-10 w-full rounded-md border border-white/10 bg-[#08111f] px-3 text-ui-body outline-none focus:ring-2 focus:ring-cyan-400/50"
               >
                 <option value="paper">模拟盘</option>
                 <option value="live">实盘</option>
-              </select>
+              </NativeSelect>
             </SettingField>
           </div>
           {mode === 'live' ? (
-            <label className="flex items-start gap-2 rounded-lg border border-rose-400/20 bg-rose-500/[0.06] p-3 text-[11px] leading-5 text-slate-300">
+            <label className="flex items-start gap-2 rounded-lg border border-rose-400/20 bg-rose-500/[0.06] p-3 text-ui-caption leading-5 text-slate-300">
               <Checkbox
                 checked={autoExitAcknowledged}
                 onCheckedChange={value =>
@@ -1160,7 +1163,7 @@ export default function LimitUpBoardPage() {
               </span>
             </label>
           ) : null}
-          <div className="rounded-lg border border-white/[0.06] bg-white/[0.025] p-3 text-[10px] leading-5 text-slate-500">
+          <div className="rounded-lg border border-white/[0.06] bg-white/[0.025] p-3 text-ui-caption leading-5 text-slate-500">
             默认保守档：单票 2%、当日 6%、单笔尾损 0.15%、最多 2
             只。若一手成本超过风险预算会直接拒绝，不向上取整。
           </div>
@@ -1208,10 +1211,10 @@ function PositionMetric({
 }) {
   return (
     <div className="bg-[#0b1423] px-3 py-2">
-      <span className="text-[9px] text-slate-600">{label}</span>
+      <span className="text-ui-micro text-slate-600">{label}</span>
       <strong
         className={cn(
-          'ml-2 font-mono text-sm',
+          'ml-2 font-mono text-ui-body',
           alert ? 'text-rose-300' : 'text-slate-200'
         )}
       >
@@ -1240,8 +1243,10 @@ function EmptyWorkspace({
         <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/[0.07] bg-white/[0.025]">
           <Icon className="h-5 w-5 text-slate-700" />
         </div>
-        <div className="mt-3 text-xs font-black text-slate-300">{title}</div>
-        <p className="mt-1.5 text-[10px] leading-5 text-slate-600">
+        <div className="mt-3 text-ui-label font-black text-slate-300">
+          {title}
+        </div>
+        <p className="mt-1.5 text-ui-caption leading-5 text-slate-600">
           {description}
         </p>
         {actionLabel && onAction ? (
@@ -1249,7 +1254,7 @@ function EmptyWorkspace({
             type="button"
             variant="outline"
             size="sm"
-            className="mt-3 h-8 border-white/10 bg-transparent text-[10px] text-slate-300 hover:bg-white/[0.05]"
+            className="mt-3 h-control-compact border-white/10 bg-transparent text-ui-caption text-slate-300 hover:bg-white/[0.05]"
             onClick={onAction}
           >
             <LayoutList className="mr-1.5 h-3.5 w-3.5" />
@@ -1270,7 +1275,9 @@ function SettingField({
 }) {
   return (
     <div className="space-y-1.5">
-      <Label className="text-[10px] font-bold text-slate-400">{label}</Label>
+      <Label className="text-ui-caption font-bold text-slate-400">
+        {label}
+      </Label>
       {children}
     </div>
   );

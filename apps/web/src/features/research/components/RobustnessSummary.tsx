@@ -72,42 +72,42 @@ export function RobustnessSummary({
               >
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="h-3.5 w-3.5 text-sky-300" />
-                  <h3 className="text-[11px] font-bold text-slate-300">
+                  <h3 className="text-ui-caption font-bold text-slate-300">
                     {LABELS[name] || name}
                   </h3>
                 </div>
                 <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2">
                   <div>
-                    <dt className="text-[9px] uppercase tracking-wide text-slate-600">
+                    <dt className="text-ui-micro uppercase tracking-wide text-slate-600">
                       加权收益
                     </dt>
-                    <dd className="mt-0.5 font-mono text-sm font-bold tabular-nums text-slate-100">
+                    <dd className="mt-0.5 font-mono text-ui-body font-bold tabular-nums text-slate-100">
                       {summary.mean === null
                         ? '—'
                         : `${(summary.mean * 100).toFixed(2)}%`}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-[9px] uppercase tracking-wide text-slate-600">
+                    <dt className="text-ui-micro uppercase tracking-wide text-slate-600">
                       分组样本
                     </dt>
-                    <dd className="mt-0.5 font-mono text-sm font-bold tabular-nums text-slate-100">
+                    <dd className="mt-0.5 font-mono text-ui-body font-bold tabular-nums text-slate-100">
                       {summary.sampleSize.toLocaleString()}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-[9px] uppercase tracking-wide text-slate-600">
+                    <dt className="text-ui-micro uppercase tracking-wide text-slate-600">
                       有效单元
                     </dt>
-                    <dd className="mt-0.5 font-mono text-xs text-slate-400">
+                    <dd className="mt-0.5 font-mono text-ui-label text-slate-400">
                       {summary.cellCount}
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-[9px] uppercase tracking-wide text-slate-600">
+                    <dt className="text-ui-micro uppercase tracking-wide text-slate-600">
                       显著单元
                     </dt>
-                    <dd className="mt-0.5 font-mono text-xs text-slate-400">
+                    <dd className="mt-0.5 font-mono text-ui-label text-slate-400">
                       {summary.significantCells}
                     </dd>
                   </div>

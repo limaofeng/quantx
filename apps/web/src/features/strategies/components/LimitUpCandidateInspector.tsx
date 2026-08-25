@@ -17,15 +17,17 @@ export function LimitUpCandidateInspector({
   onOpenStock,
 }: LimitUpCandidateInspectorProps) {
   return (
-    <div className="h-full overflow-y-auto p-5 custom-scrollbar">
+    <div className="h-full overflow-y-auto p-ui-section custom-scrollbar">
       <header className="border-b border-white/[0.06] pb-4 pr-8 text-left">
-        <h2 className="text-lg font-black text-slate-100">{candidate.name}</h2>
-        <p className="mt-2 font-mono text-[10px] text-slate-500">
+        <h2 className="text-ui-heading font-black text-slate-100">
+          {candidate.name}
+        </h2>
+        <p className="mt-2 font-mono text-ui-caption text-slate-500">
           {candidate.code} · 首板晋级候选检查器
         </p>
       </header>
 
-      <div className="mt-5 space-y-5">
+      <div className="mt-5 space-y-ui-section">
         <section
           aria-label="晋级概率摘要"
           className="grid grid-cols-2 gap-px border border-white/[0.07] bg-white/[0.07] sm:grid-cols-4"
@@ -56,10 +58,10 @@ export function LimitUpCandidateInspector({
         <section className="border border-white/[0.07] bg-white/[0.02] p-3">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h3 className="text-xs font-black text-slate-200">
+              <h3 className="text-ui-label font-black text-slate-200">
                 生命周期走势
               </h3>
-              <p className="mt-1 font-mono text-[10px] text-slate-500">
+              <p className="mt-1 font-mono text-ui-caption text-slate-500">
                 数据 {new Date(candidate.updatedAt).toLocaleTimeString('zh-CN')}
               </p>
             </div>
@@ -67,7 +69,7 @@ export function LimitUpCandidateInspector({
               type="button"
               size="sm"
               variant="outline"
-              className="h-8 cursor-pointer rounded-sm border-white/10 bg-white/[0.025] px-2.5 text-[10px] text-slate-300 hover:bg-white/[0.06]"
+              className="h-control-compact cursor-pointer rounded-sm border-white/10 bg-white/[0.025] px-2.5 text-ui-caption text-slate-300 hover:bg-white/[0.06]"
               onClick={() => onOpenStock(candidate.code)}
             >
               <ExternalLink className="h-3.5 w-3.5" />
@@ -78,7 +80,7 @@ export function LimitUpCandidateInspector({
         </section>
 
         <section>
-          <h3 className="text-xs font-black text-slate-200">
+          <h3 className="text-ui-label font-black text-slate-200">
             晋级因子与判断依据
           </h3>
           <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -87,7 +89,7 @@ export function LimitUpCandidateInspector({
                 key={factor.code}
                 className="border border-white/[0.06] bg-white/[0.025] px-3 py-2.5"
               >
-                <div className="flex items-center justify-between gap-3 text-[10px]">
+                <div className="flex items-center justify-between gap-3 text-ui-caption">
                   <span className="font-black text-slate-300">
                     {factor.label}
                   </span>
@@ -95,7 +97,7 @@ export function LimitUpCandidateInspector({
                     {factor.contribution.toFixed(2)}
                   </span>
                 </div>
-                <p className="mt-1.5 text-[10px] leading-4 text-slate-500">
+                <p className="mt-1.5 text-ui-caption leading-4 text-slate-500">
                   {factor.explanation}
                 </p>
               </div>
@@ -109,7 +111,7 @@ export function LimitUpCandidateInspector({
               {candidate.events.slice(0, 6).map(event => (
                 <span
                   key={event.eventId}
-                  className="border border-white/[0.06] px-2 py-1 text-[10px] text-slate-500"
+                  className="border border-white/[0.06] px-2 py-1 text-ui-caption text-slate-500"
                 >
                   {event.stageLabel} ·{' '}
                   {new Date(event.occurredAt).toLocaleTimeString('zh-CN')}
@@ -121,11 +123,15 @@ export function LimitUpCandidateInspector({
 
         <section>
           <div className="flex items-center justify-between gap-3">
-            <h3 className="text-xs font-black text-slate-200">AI 公告研究</h3>
-            <span className="text-[10px] text-slate-500">不参与交易资格</span>
+            <h3 className="text-ui-label font-black text-slate-200">
+              AI 公告研究
+            </h3>
+            <span className="text-ui-caption text-slate-500">
+              不参与交易资格
+            </span>
           </div>
           {candidate.researchArtifact ? (
-            <div className="mt-3 space-y-3 border border-white/[0.07] bg-white/[0.02] p-3 text-[10px] leading-5">
+            <div className="mt-3 space-y-3 border border-white/[0.07] bg-white/[0.02] p-3 text-ui-caption leading-5">
               <p className="text-slate-400">
                 {candidate.researchArtifact.summary}
               </p>
@@ -167,7 +173,7 @@ export function LimitUpCandidateInspector({
               </div>
             </div>
           ) : (
-            <p className="mt-3 border border-dashed border-white/10 p-3 text-[10px] leading-5 text-slate-500">
+            <p className="mt-3 border border-dashed border-white/10 p-3 text-ui-caption leading-5 text-slate-500">
               候选进入动态 Top 5 后会生成一次市场级共享研究。AI Runtime
               离线或公告缺失不会改变资格。
             </p>
@@ -190,13 +196,13 @@ function InspectorMetric({
   value: string;
 }) {
   return (
-    <div className="bg-[#0a1524] px-3 py-2.5 text-[9px] text-slate-600">
+    <div className="bg-[#0a1524] px-3 py-2.5 text-ui-micro text-slate-600">
       {label}
-      <strong className={`mt-1 block font-mono text-sm ${tone}`}>
+      <strong className={`mt-1 block font-mono text-ui-body ${tone}`}>
         {value}
       </strong>
       {detail ? (
-        <span className="mt-0.5 block font-mono text-[8px] text-slate-600">
+        <span className="mt-0.5 block font-mono text-ui-micro text-slate-600">
           {detail}
         </span>
       ) : null}

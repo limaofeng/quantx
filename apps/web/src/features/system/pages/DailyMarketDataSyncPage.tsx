@@ -79,12 +79,12 @@ interface MetricTileProps {
 
 function MetricTile({ icon: Icon, label, value }: MetricTileProps) {
   return (
-    <div className="rounded-xl border border-slate-200/60 bg-white/70 p-4 shadow-sm dark:border-white/5 dark:bg-white/[0.03]">
-      <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+    <div className="rounded-panel border border-slate-200/60 bg-white/70 p-ui-section shadow-sm dark:border-white/5 dark:bg-white/[0.03]">
+      <div className="flex items-center gap-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500">
         <Icon className="h-3.5 w-3.5" />
         {label}
       </div>
-      <div className="mt-2 text-lg font-black text-slate-900 dark:text-white">
+      <div className="mt-2 text-ui-heading font-black text-slate-900 dark:text-white">
         {value}
       </div>
     </div>
@@ -205,22 +205,22 @@ export function DailyMarketDataSyncPage() {
       description="每日市场行情 K线/tick 数据同步"
       title="K线批量同步"
     >
-      <div className="flex flex-col gap-4 pb-8 animate-fade-in">
+      <div className="flex flex-col gap-ui-section pb-8 animate-fade-in">
         <div className="flex flex-col gap-3 py-1 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 shrink-0 rounded-lg border border-slate-200/60 bg-white/50 shadow-sm backdrop-blur-sm transition-colors hover:bg-white dark:border-white/5 dark:bg-white/5 dark:hover:bg-white/10"
+              className="h-control-compact w-8 shrink-0 rounded-lg border border-slate-200/60 bg-white/50 shadow-sm backdrop-blur-sm transition-colors hover:bg-white dark:border-white/5 dark:bg-white/5 dark:hover:bg-white/10"
               onClick={() => setLocation('/settings/data')}
             >
               <ArrowLeft className="h-4 w-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div className="min-w-0">
-              <h1 className="truncate text-lg font-black leading-none tracking-tight text-slate-900 dark:text-white">
+              <h1 className="truncate text-ui-heading font-black leading-none tracking-tight text-slate-900 dark:text-white">
                 K线批量同步
               </h1>
-              <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <p className="mt-1 text-ui-caption font-bold uppercase tracking-widest text-slate-400">
                 daily-market-data-sync · sectors / stock_list / date range
               </p>
             </div>
@@ -274,22 +274,22 @@ export function DailyMarketDataSyncPage() {
         {snapshotStatus.error ? (
           <div
             role="alert"
-            className="flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300"
+            className="flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-ui-label font-semibold text-rose-700 dark:text-rose-300"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>快照状态查询失败：{snapshotStatus.error.message}</span>
           </div>
         ) : null}
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
-          <div className="space-y-4">
-            <section className="rounded-xl border border-slate-200/60 bg-white/70 p-5 shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
+        <div className="grid grid-cols-1 gap-ui-section xl:grid-cols-[minmax(0,1fr)_420px]">
+          <div className="space-y-ui-section">
+            <section className="rounded-panel border border-slate-200/60 bg-white/70 p-ui-section shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-sm font-black text-slate-900 dark:text-white">
+                  <h2 className="text-ui-body font-black text-slate-900 dark:text-white">
                     同步目标
                   </h2>
-                  <p className="mt-1 text-xs font-medium text-slate-500">
+                  <p className="mt-1 text-ui-label font-medium text-slate-500">
                     按板块、当前持仓或手工代码确定本次同步范围。
                   </p>
                 </div>
@@ -304,7 +304,7 @@ export function DailyMarketDataSyncPage() {
                       type="button"
                       aria-pressed={targetMode === option.value}
                       className={cn(
-                        'h-7 rounded-md px-3 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
+                        'h-7 rounded-md px-3 text-ui-caption font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                         targetMode === option.value
                           ? 'bg-white text-blue-700 shadow-sm dark:bg-slate-800 dark:text-blue-300'
                           : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
@@ -327,15 +327,17 @@ export function DailyMarketDataSyncPage() {
                         type="button"
                         aria-pressed={checked}
                         className={cn(
-                          'flex min-h-[88px] flex-col justify-between rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
+                          'flex min-h-[88px] flex-col justify-between rounded-panel border p-ui-section text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60',
                           checked
                             ? 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300'
                             : 'border-slate-200/60 bg-slate-50/80 text-slate-600 hover:bg-white dark:border-white/5 dark:bg-white/[0.02] dark:text-slate-400 dark:hover:bg-white/[0.04]'
                         )}
                         onClick={() => toggleSector(sector)}
                       >
-                        <span className="text-sm font-black">{sector}</span>
-                        <span className="mt-2 inline-flex items-center gap-1.5 text-[10px] font-bold">
+                        <span className="text-ui-body font-black">
+                          {sector}
+                        </span>
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-ui-caption font-bold">
                           {checked && <CheckCircle2 className="h-3 w-3" />}
                           {checked ? '将参与同步' : '点击加入范围'}
                         </span>
@@ -345,7 +347,7 @@ export function DailyMarketDataSyncPage() {
                 </div>
               ) : targetMode === 'holdings' ? (
                 <div
-                  className="mt-4 rounded-xl border border-slate-200/60 bg-slate-50/70 p-4 dark:border-white/5 dark:bg-white/[0.02]"
+                  className="mt-4 rounded-panel border border-slate-200/60 bg-slate-50/70 p-ui-section dark:border-white/5 dark:bg-white/[0.02]"
                   aria-live="polite"
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -354,12 +356,12 @@ export function DailyMarketDataSyncPage() {
                         <BriefcaseBusiness className="h-4 w-4" />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-xs font-black text-slate-900 dark:text-white">
+                        <div className="text-ui-label font-black text-slate-900 dark:text-white">
                           {holdingsResult.fetching
                             ? '正在读取当前持仓'
                             : `当前持仓 ${holdingStockCodes.length} 只`}
                         </div>
-                        <p className="mt-1 text-[10px] font-medium text-slate-500">
+                        <p className="mt-1 text-ui-caption font-medium text-slate-500">
                           自动过滤零持仓并去重，提交时写入明确的 stock_list。
                         </p>
                       </div>
@@ -369,7 +371,7 @@ export function DailyMarketDataSyncPage() {
                       variant="ghost"
                       size="icon"
                       aria-label="刷新持仓"
-                      className="h-8 w-8 shrink-0 rounded-lg"
+                      className="h-control-compact w-8 shrink-0 rounded-lg"
                       disabled={holdingsResult.fetching}
                       onClick={() =>
                         refreshHoldings({ requestPolicy: 'network-only' })
@@ -386,7 +388,7 @@ export function DailyMarketDataSyncPage() {
                   {holdingsResult.error ? (
                     <div
                       role="alert"
-                      className="mt-3 flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-700 dark:text-rose-300"
+                      className="mt-3 flex items-start gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-ui-label font-semibold text-rose-700 dark:text-rose-300"
                     >
                       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                       当前持仓读取失败，请刷新后重试。
@@ -396,14 +398,14 @@ export function DailyMarketDataSyncPage() {
                       {holdingStockCodes.map(stockCode => (
                         <span
                           key={stockCode}
-                          className="rounded-md border border-blue-500/15 bg-blue-500/5 px-2 py-1 font-mono text-[10px] font-bold text-blue-700 dark:text-blue-300"
+                          className="rounded-md border border-blue-500/15 bg-blue-500/5 px-2 py-1 font-mono text-ui-caption font-bold text-blue-700 dark:text-blue-300"
                         >
                           {stockCode}
                         </span>
                       ))}
                     </div>
                   ) : holdingsResult.fetching ? null : (
-                    <div className="mt-3 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                    <div className="mt-3 text-ui-label font-semibold text-amber-700 dark:text-amber-300">
                       当前账户没有可同步的持仓。
                     </div>
                   )}
@@ -412,7 +414,7 @@ export function DailyMarketDataSyncPage() {
                 <div className="mt-4">
                   <label
                     htmlFor="market-data-stock-list"
-                    className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500"
+                    className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500"
                   >
                     Stock List
                   </label>
@@ -420,10 +422,10 @@ export function DailyMarketDataSyncPage() {
                     id="market-data-stock-list"
                     value={stockText}
                     onChange={event => setStockText(event.target.value)}
-                    className="mt-2 min-h-[132px] resize-y border-slate-200/70 bg-slate-50/70 font-mono text-xs dark:border-white/10 dark:bg-white/[0.03]"
+                    className="mt-2 min-h-[132px] resize-y border-slate-200/70 bg-slate-50/70 font-mono text-ui-label dark:border-white/10 dark:bg-white/[0.03]"
                     placeholder="000001.SZ, 600000.SH"
                   />
-                  <div className="mt-2 flex items-center justify-between text-[10px] font-bold text-slate-500">
+                  <div className="mt-2 flex items-center justify-between text-ui-caption font-bold text-slate-500">
                     <span>支持逗号、空格或换行分隔。</span>
                     <span>{stockList.length} 只标的</span>
                   </div>
@@ -431,19 +433,19 @@ export function DailyMarketDataSyncPage() {
               )}
             </section>
 
-            <section className="rounded-xl border border-slate-200/60 bg-white/70 p-5 shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
+            <section className="rounded-panel border border-slate-200/60 bg-white/70 p-ui-section shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
               <div className="flex items-center gap-2">
                 <CalendarDays className="h-4 w-4 text-blue-500" />
-                <h2 className="text-sm font-black text-slate-900 dark:text-white">
+                <h2 className="text-ui-body font-black text-slate-900 dark:text-white">
                   日期与周期
                 </h2>
               </div>
 
-              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="mt-4 grid grid-cols-1 gap-ui-section md:grid-cols-2">
                 <div>
                   <label
                     htmlFor="market-sync-start"
-                    className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500"
+                    className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500"
                   >
                     Start Date
                   </label>
@@ -452,13 +454,13 @@ export function DailyMarketDataSyncPage() {
                     type="date"
                     value={startDate}
                     onChange={event => setStartDate(event.target.value)}
-                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-xs font-bold dark:border-white/10 dark:bg-white/[0.03]"
+                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-ui-label font-bold dark:border-white/10 dark:bg-white/[0.03]"
                   />
                 </div>
                 <div>
                   <label
                     htmlFor="market-sync-end"
-                    className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500"
+                    className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-500"
                   >
                     End Date
                   </label>
@@ -467,7 +469,7 @@ export function DailyMarketDataSyncPage() {
                     type="date"
                     value={endDate}
                     onChange={event => setEndDate(event.target.value)}
-                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-xs font-bold dark:border-white/10 dark:bg-white/[0.03]"
+                    className="mt-2 h-9 border-slate-200/70 bg-slate-50/70 text-ui-label font-bold dark:border-white/10 dark:bg-white/[0.03]"
                   />
                 </div>
               </div>
@@ -488,13 +490,13 @@ export function DailyMarketDataSyncPage() {
                       )}
                       onClick={() => togglePeriod(option.value)}
                     >
-                      <div className="text-xs font-black text-slate-900 dark:text-white">
+                      <div className="text-ui-label font-black text-slate-900 dark:text-white">
                         {option.label}
-                        <span className="ml-1 font-mono text-[10px] text-slate-500">
+                        <span className="ml-1 font-mono text-ui-caption text-slate-500">
                           {option.value}
                         </span>
                       </div>
-                      <div className="mt-1 text-[10px] font-medium leading-relaxed text-slate-500">
+                      <div className="mt-1 text-ui-caption font-medium leading-relaxed text-slate-500">
                         {option.description}
                       </div>
                     </button>
@@ -502,17 +504,17 @@ export function DailyMarketDataSyncPage() {
                 })}
               </div>
 
-              <div className="mt-4 rounded-lg border border-blue-500/15 bg-blue-500/5 p-3 text-xs font-medium leading-relaxed text-blue-700 dark:text-blue-300">
+              <div className="mt-4 rounded-lg border border-blue-500/15 bg-blue-500/5 p-3 text-ui-label font-medium leading-relaxed text-blue-700 dark:text-blue-300">
                 <Info className="mr-2 inline h-3.5 w-3.5" />
                 手动运行会提交明确的 start_time /
                 end_time；清空日期时，后端会使用 Prefect 计划时间解析目标日期。
               </div>
             </section>
 
-            <section className="rounded-xl border border-slate-200/60 bg-white/70 p-5 shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
+            <section className="rounded-panel border border-slate-200/60 bg-white/70 p-ui-section shadow-sm backdrop-blur-sm dark:border-white/5 dark:bg-white/[0.03]">
               <div className="flex items-center gap-2">
                 <SlidersHorizontal className="h-4 w-4 text-blue-500" />
-                <h2 className="text-sm font-black text-slate-900 dark:text-white">
+                <h2 className="text-ui-body font-black text-slate-900 dark:text-white">
                   执行选项
                 </h2>
               </div>
@@ -522,10 +524,10 @@ export function DailyMarketDataSyncPage() {
                   className="flex cursor-pointer items-center justify-between rounded-lg border border-slate-200/60 bg-slate-50/70 p-3 dark:border-white/5 dark:bg-white/[0.02]"
                 >
                   <span>
-                    <span className="block text-xs font-black text-slate-800 dark:text-slate-100">
+                    <span className="block text-ui-label font-black text-slate-800 dark:text-slate-100">
                       仅补算指标（使用已入库 1d K线）
                     </span>
-                    <span className="mt-1 block text-[10px] font-medium text-slate-500">
+                    <span className="mt-1 block text-ui-caption font-medium text-slate-500">
                       不请求 QMT Agent，只读取 InfluxDB 中已有日线。
                     </span>
                   </span>
@@ -549,10 +551,10 @@ export function DailyMarketDataSyncPage() {
                   className="flex cursor-pointer items-center justify-between rounded-lg border border-slate-200/60 bg-slate-50/70 p-3 dark:border-white/5 dark:bg-white/[0.02]"
                 >
                   <span>
-                    <span className="block text-xs font-black text-slate-800 dark:text-slate-100">
+                    <span className="block text-ui-label font-black text-slate-800 dark:text-slate-100">
                       计算日级指标
                     </span>
-                    <span className="mt-1 block text-[10px] font-medium text-slate-500">
+                    <span className="mt-1 block text-ui-caption font-medium text-slate-500">
                       日线同步完成后触发快照预计算。
                     </span>
                   </span>
@@ -568,7 +570,7 @@ export function DailyMarketDataSyncPage() {
               </div>
               {validationMessage && (
                 <div
-                  className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs font-bold leading-relaxed text-amber-700 dark:text-amber-300"
+                  className="mt-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-ui-label font-bold leading-relaxed text-amber-700 dark:text-amber-300"
                   role="alert"
                   aria-live="polite"
                 >
@@ -579,18 +581,18 @@ export function DailyMarketDataSyncPage() {
             </section>
           </div>
 
-          <div className="space-y-4">
+          <div className="space-y-ui-section">
             <DeploymentRunMonitor
               deploymentId={sync.deployment?.id}
               deploymentName="daily-market-data-sync"
             />
 
-            <section className="rounded-xl border border-slate-200/60 bg-slate-950 p-4 text-slate-200 shadow-sm dark:border-white/5">
-              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
+            <section className="rounded-panel border border-slate-200/60 bg-slate-950 p-ui-section text-slate-200 shadow-sm dark:border-white/5">
+              <div className="flex items-center gap-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-400">
                 <ListFilter className="h-3.5 w-3.5" />
                 Parameters Preview
               </div>
-              <pre className="mt-3 max-h-[260px] overflow-auto rounded-lg bg-black/30 p-3 font-mono text-[11px] leading-relaxed text-slate-300 custom-scrollbar">
+              <pre className="mt-3 max-h-[260px] overflow-auto rounded-lg bg-black/30 p-3 font-mono text-ui-caption leading-relaxed text-slate-300 custom-scrollbar">
                 {JSON.stringify(syncParameters, null, 2)}
               </pre>
             </section>

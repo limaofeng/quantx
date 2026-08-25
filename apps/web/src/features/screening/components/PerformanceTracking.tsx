@@ -4,7 +4,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 
 export function PerformanceTracking() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-ui-section">
       <Alert>
         <Activity className="h-4 w-4" />
         <AlertDescription>
@@ -12,9 +12,11 @@ export function PerformanceTracking() {
         </AlertDescription>
       </Alert>
 
-      <div className="text-center py-12 text-muted-foreground">
+      <div className="text-center py-ui-empty text-muted-foreground">
         <p>性能跟踪功能正在开发中...</p>
-        <p className="text-sm mt-2">将包含收益率分析、风险指标和回测结果</p>
+        <p className="text-ui-body mt-2">
+          将包含收益率分析、风险指标和回测结果
+        </p>
       </div>
     </div>
   );

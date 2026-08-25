@@ -47,6 +47,10 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import {
+  StudioPageFrame,
+  StudioPageStack,
+} from '@/components/ui/studio-layout';
 import { gql } from '@/generated/gql';
 import type {
   AgentManagement_CancelHandoverMutation,
@@ -193,8 +197,7 @@ function stageAppearance(status: string, disabledIsReady = false) {
   ) {
     return {
       icon: CheckCircle2,
-      className:
-        'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
+      className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300',
     };
   }
   if (
@@ -229,14 +232,14 @@ function ConnectionStage({
   const appearance = stageAppearance(status, disabledIsReady);
   const StatusIcon = appearance.icon;
   return (
-    <li className="min-w-0 rounded-xl border border-white/[0.08] bg-[#0a1423]/80 p-4">
+    <li className="min-w-0 rounded-panel border border-white/[0.08] bg-[#0a1423]/80 p-ui-section">
       <div className="flex items-center justify-between gap-3">
         <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-400/15 bg-cyan-400/[0.07] text-cyan-300">
           <Icon className="h-4 w-4" />
         </span>
         <span
           className={cn(
-            'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold',
+            'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-ui-caption font-semibold',
             appearance.className
           )}
         >
@@ -244,8 +247,8 @@ function ConnectionStage({
           {normalizedStatus(status)}
         </span>
       </div>
-      <p className="mt-4 text-sm font-medium text-slate-100">{label}</p>
-      <p className="mt-1 text-[11px] leading-4 text-slate-500">
+      <p className="mt-4 text-ui-body font-medium text-slate-100">{label}</p>
+      <p className="mt-1 text-ui-caption leading-4 text-slate-500">
         {description}
       </p>
     </li>
@@ -262,23 +265,23 @@ function MetricCard({
   detail: string;
 }) {
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-[#0a1423]/70 p-4">
-      <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-500">
+    <div className="rounded-panel border border-white/[0.08] bg-[#0a1423]/70 p-ui-section">
+      <p className="text-ui-caption font-medium uppercase tracking-[0.12em] text-slate-500">
         {label}
       </p>
-      <p className="mt-2 font-mono text-xl font-semibold tabular-nums text-slate-100">
+      <p className="mt-2 font-mono text-ui-page-title font-semibold tabular-nums text-slate-100">
         {value}
       </p>
-      <p className="mt-1 text-[11px] text-slate-500">{detail}</p>
+      <p className="mt-1 text-ui-caption text-slate-500">{detail}</p>
     </div>
   );
 }
 
 function DetailValue({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex min-w-0 items-center justify-between gap-4 border-b border-white/[0.06] py-2.5 last:border-0">
-      <dt className="text-xs text-slate-500">{label}</dt>
-      <dd className="truncate text-right font-mono text-xs text-slate-300">
+    <div className="flex min-w-0 items-center justify-between gap-ui-section border-b border-white/[0.06] py-2.5 last:border-0">
+      <dt className="text-ui-label text-slate-500">{label}</dt>
+      <dd className="truncate text-right font-mono text-ui-label text-slate-300">
         {value}
       </dd>
     </div>
@@ -287,7 +290,7 @@ function DetailValue({ label, value }: { label: string; value: string }) {
 
 function ConnectionSkeleton() {
   return (
-    <div className="space-y-5" aria-label="正在读取 QMT 连接状态">
+    <div className="space-y-ui-section" aria-label="正在读取 QMT 连接状态">
       <Skeleton className="h-40 w-full" />
       <div className="grid gap-3 lg:grid-cols-5">
         {Array.from({ length: 5 }).map((_, index) => (
@@ -331,7 +334,7 @@ function HandoverProgress({
             <div className="flex items-center gap-2">
               <span
                 className={cn(
-                  'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold',
+                  'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-ui-caption font-semibold',
                   done
                     ? 'border-emerald-400/30 bg-emerald-400/15 text-emerald-300'
                     : active
@@ -354,7 +357,7 @@ function HandoverProgress({
             </div>
             <p
               className={cn(
-                'mt-2 truncate text-[10px]',
+                'mt-2 truncate text-ui-caption',
                 done || active ? 'text-slate-300' : 'text-slate-600'
               )}
             >
@@ -393,9 +396,7 @@ function HandoverDialog({
       CreateEnrollmentMutation
     );
   const [cancelResult, cancelHandover] =
-    useMutation<AgentManagement_CancelHandoverMutation>(
-      CancelHandoverMutation
-    );
+    useMutation<AgentManagement_CancelHandoverMutation>(CancelHandoverMutation);
 
   useEffect(() => {
     if (!open) return;
@@ -471,7 +472,7 @@ function HandoverDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-y-auto border-cyan-400/20 bg-[#0b1422] text-slate-100 sm:max-w-2xl">
         <DialogHeader>
-          <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+          <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-panel border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
             <Repeat2 className="h-5 w-5" />
           </div>
           <DialogTitle>
@@ -490,25 +491,25 @@ function HandoverDialog({
         />
 
         {complete ? (
-          <div className="rounded-xl border border-emerald-400/25 bg-emerald-400/10 p-5">
+          <div className="rounded-panel border border-emerald-400/25 bg-emerald-400/10 p-ui-section">
             <div className="flex items-start gap-3">
               <ShieldCheck className="mt-0.5 h-5 w-5 text-emerald-300" />
               <div>
                 <p className="font-medium text-emerald-200">安全交接已完成</p>
-                <p className="mt-1 text-sm leading-6 text-slate-400">
+                <p className="mt-1 text-ui-body leading-6 text-slate-400">
                   新 Agent 已达到 READY，旧设备凭据已自动撤销。
                 </p>
               </div>
             </div>
           </div>
         ) : enrollment ? (
-          <div className="space-y-4 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] p-5">
+          <div className="space-y-ui-section rounded-panel border border-cyan-400/20 bg-cyan-400/[0.06] p-ui-section">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <p className="text-sm font-medium text-cyan-100">
+                <p className="text-ui-body font-medium text-cyan-100">
                   一次性登记码
                 </p>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-ui-label text-slate-500">
                   剩余 {formatDuration(remainingSeconds)}，过期后需重新生成
                 </p>
               </div>
@@ -524,15 +525,15 @@ function HandoverDialog({
                 复制登记码
               </Button>
             </div>
-            <code className="block break-all rounded-lg border border-white/10 bg-[#07101c] p-3 font-mono text-xs leading-5 text-cyan-200">
+            <code className="block break-all rounded-lg border border-white/10 bg-[#07101c] p-3 font-mono text-ui-label leading-5 text-cyan-200">
               {enrollment.code}
             </code>
             <div>
-              <p className="text-xs font-medium text-slate-300">
+              <p className="text-ui-label font-medium text-slate-300">
                 在运行 MiniQMT 的电脑上执行
               </p>
               <div className="mt-2 flex items-center gap-2 rounded-lg border border-white/10 bg-[#07101c] p-3">
-                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-xs text-slate-300">
+                <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-ui-label text-slate-300">
                   {command}
                 </code>
                 <Button
@@ -548,7 +549,7 @@ function HandoverDialog({
                 </Button>
               </div>
             </div>
-            <div className="flex items-center gap-2 text-xs text-slate-400">
+            <div className="flex items-center gap-2 text-ui-label text-slate-400">
               <LoaderCircle className="h-3.5 w-3.5 animate-spin text-cyan-300" />
               {connection.handoverStatus === 'RECONCILING'
                 ? '新 Agent 已连接，正在等待完整账户快照对账…'
@@ -558,16 +559,17 @@ function HandoverDialog({
             </div>
           </div>
         ) : hasPending ? (
-          <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.06] p-5">
-            <p className="text-sm font-medium text-amber-200">
+          <div className="rounded-panel border border-amber-400/20 bg-amber-400/[0.06] p-ui-section">
+            <p className="text-ui-body font-medium text-amber-200">
               已存在进行中的安全交接
             </p>
-            <p className="mt-2 text-sm leading-6 text-slate-400">
-              出于安全原因，已生成的登记码无法再次显示。可以取消本次交接后生成新登记码；当前 Agent 不受影响。
+            <p className="mt-2 text-ui-body leading-6 text-slate-400">
+              出于安全原因，已生成的登记码无法再次显示。可以取消本次交接后生成新登记码；当前
+              Agent 不受影响。
             </p>
           </div>
         ) : (
-          <div className="space-y-2 rounded-xl border border-white/[0.08] bg-white/[0.02] p-5">
+          <div className="space-y-2 rounded-panel border border-white/[0.08] bg-white/[0.02] p-ui-section">
             <Label htmlFor="agent-handover-name">设备名称</Label>
             <Input
               id="agent-handover-name"
@@ -576,7 +578,7 @@ function HandoverDialog({
               maxLength={120}
               className="border-slate-700 bg-[#07101c]"
             />
-            <p className="text-xs leading-5 text-slate-500">
+            <p className="text-ui-label leading-5 text-slate-500">
               新设备自动绑定当前唯一账户，不会创建额外账户或并行执行实例。
             </p>
           </div>
@@ -717,18 +719,18 @@ export function AgentManagementPanel() {
     : [];
 
   return (
-    <div className="mx-auto max-w-7xl space-y-5 pb-8">
-      <header className="flex flex-wrap items-start justify-between gap-4">
+    <StudioPageStack className="space-y-ui-section pb-ui-section">
+      <header className="flex flex-wrap items-start justify-between gap-ui-section">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-cyan-400">
+          <p className="text-ui-caption font-semibold uppercase tracking-[0.24em] text-cyan-400">
             Local execution gateway
           </p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-slate-100">
+          <h1 className="mt-2 text-ui-display font-semibold tracking-tight text-slate-100">
             QMT 本机连接
           </h1>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-            查看唯一 QMT Agent 从 QuantX 到 MiniQMT 的真实连接状态。券商账号、QMT
-            路径和设备密钥始终留在本机。
+          <p className="mt-2 max-w-3xl text-ui-body leading-6 text-slate-400">
+            查看唯一 QMT Agent 从 QuantX 到 MiniQMT
+            的真实连接状态。券商账号、QMT 路径和设备密钥始终留在本机。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -773,7 +775,7 @@ export function AgentManagementPanel() {
         <>
           <section
             className={cn(
-              'relative overflow-hidden rounded-2xl border bg-[#0a1423]/80 p-5 shadow-2xl shadow-black/10 sm:p-6',
+              'relative overflow-hidden rounded-panel border bg-[#0a1423]/80 p-ui-section shadow-none shadow-black/10 sm:p-ui-panel',
               health.tone === 'ready'
                 ? 'border-emerald-400/20'
                 : health.tone === 'degraded'
@@ -791,11 +793,11 @@ export function AgentManagementPanel() {
                     : 'bg-slate-400/[0.05]'
               )}
             />
-            <div className="relative flex flex-wrap items-start justify-between gap-5">
-              <div className="flex min-w-0 items-start gap-4">
+            <div className="relative flex flex-wrap items-start justify-between gap-ui-section">
+              <div className="flex min-w-0 items-start gap-ui-section">
                 <span
                   className={cn(
-                    'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border',
+                    'flex h-12 w-12 shrink-0 items-center justify-center rounded-panel border',
                     toneClass[health.tone]
                   )}
                 >
@@ -809,33 +811,33 @@ export function AgentManagementPanel() {
                 </span>
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="truncate text-lg font-semibold text-slate-100">
+                    <h2 className="truncate text-ui-heading font-semibold text-slate-100">
                       {current?.name ?? '尚未登记 QMT Agent'}
                     </h2>
                     <span
                       className={cn(
-                        'inline-flex rounded-full border px-2.5 py-1 text-[11px] font-semibold',
+                        'inline-flex rounded-full border px-2.5 py-1 text-ui-caption font-semibold',
                         toneClass[health.tone]
                       )}
                     >
                       {health.label}
                     </span>
                     {current?.mode && (
-                      <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-mono text-[10px] uppercase text-slate-400">
+                      <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 font-mono text-ui-caption uppercase text-slate-400">
                         {current.mode}
                       </span>
                     )}
                   </div>
-                  <p className="mt-2 text-sm font-medium text-slate-300">
+                  <p className="mt-2 text-ui-body font-medium text-slate-300">
                     {health.title}
                   </p>
-                  <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+                  <p className="mt-1 max-w-2xl text-ui-label leading-5 text-slate-500">
                     {health.description}
                   </p>
                 </div>
               </div>
               {current && (
-                <dl className="grid min-w-[250px] grid-cols-2 gap-x-5 gap-y-3 rounded-xl border border-white/[0.07] bg-black/10 p-4 text-xs">
+                <dl className="grid min-w-[250px] grid-cols-2 gap-x-5 gap-y-3 rounded-panel border border-white/[0.07] bg-black/10 p-ui-section text-ui-label">
                   <div>
                     <dt className="text-slate-600">唯一账户</dt>
                     <dd className="mt-1 font-mono text-slate-300">
@@ -878,17 +880,18 @@ export function AgentManagementPanel() {
 
           {current ? (
             <>
-              <section className="rounded-2xl border border-white/[0.08] bg-slate-950/30 p-4 sm:p-5">
+              <section className="rounded-panel border border-white/[0.08] bg-slate-950/30 p-ui-section sm:p-ui-section">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-slate-100">
+                    <h2 className="text-ui-body font-semibold text-slate-100">
                       连接链路
                     </h2>
-                    <p className="mt-1 text-xs text-slate-500">
-                      状态每 5 秒自动刷新；各阶段均来自服务端确认的心跳与对账事实。
+                    <p className="mt-1 text-ui-label text-slate-500">
+                      状态每 5
+                      秒自动刷新；各阶段均来自服务端确认的心跳与对账事实。
                     </p>
                   </div>
-                  <span className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                  <span className="flex items-center gap-1.5 text-ui-caption text-slate-500">
                     <TimerReset className="h-3.5 w-3.5" />
                     自动刷新
                   </span>
@@ -903,15 +906,15 @@ export function AgentManagementPanel() {
               <section>
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                   <div>
-                    <h2 className="text-sm font-semibold text-slate-100">
+                    <h2 className="text-ui-body font-semibold text-slate-100">
                       实时行情数据面
                     </h2>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-ui-label text-slate-500">
                       当前状态 {normalizedStatus(current.marketStream.status)} ·
                       提交阶段 {current.marketStream.commitPhase}
                     </p>
                   </div>
-                  <span className="font-mono text-[11px] text-slate-600">
+                  <span className="font-mono text-ui-caption text-slate-600">
                     stream v2
                   </span>
                 </div>
@@ -954,18 +957,18 @@ export function AgentManagementPanel() {
               <Collapsible
                 open={diagnosticsOpen}
                 onOpenChange={setDiagnosticsOpen}
-                className="rounded-2xl border border-white/[0.08] bg-slate-950/30"
+                className="rounded-panel border border-white/[0.08] bg-slate-950/30"
               >
                 <CollapsibleTrigger asChild>
                   <button
                     type="button"
-                    className="flex w-full cursor-pointer items-center justify-between gap-4 p-5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
+                    className="flex w-full cursor-pointer items-center justify-between gap-ui-section p-ui-section text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60"
                   >
                     <span>
-                      <span className="block text-sm font-semibold text-slate-100">
+                      <span className="block text-ui-body font-semibold text-slate-100">
                         内部诊断
                       </span>
-                      <span className="mt-1 block text-xs text-slate-500">
+                      <span className="mt-1 block text-ui-label text-slate-500">
                         版本、journal 与行情提交细节
                       </span>
                     </span>
@@ -978,9 +981,9 @@ export function AgentManagementPanel() {
                   </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
-                  <div className="grid gap-4 border-t border-white/[0.07] p-5 lg:grid-cols-3">
-                    <section className="rounded-xl border border-white/[0.07] bg-[#0a1423]/70 p-4">
-                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                  <div className="grid gap-ui-section border-t border-white/[0.07] p-ui-section lg:grid-cols-3">
+                    <section className="rounded-panel border border-white/[0.07] bg-[#0a1423]/70 p-ui-section">
+                      <div className="flex items-center gap-2 text-ui-body font-medium text-slate-200">
                         <Server className="h-4 w-4 text-cyan-300" />
                         Agent 运行时
                       </div>
@@ -993,18 +996,15 @@ export function AgentManagementPanel() {
                           label="协议版本"
                           value={current.diagnostics.protocolVersion || '—'}
                         />
-                        <DetailValue
-                          label="设备标识"
-                          value={current.id}
-                        />
+                        <DetailValue label="设备标识" value={current.id} />
                         <DetailValue
                           label="最近心跳"
                           value={formatDuration(current.heartbeatAgeSeconds)}
                         />
                       </dl>
                     </section>
-                    <section className="rounded-xl border border-white/[0.07] bg-[#0a1423]/70 p-4">
-                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <section className="rounded-panel border border-white/[0.07] bg-[#0a1423]/70 p-ui-section">
+                      <div className="flex items-center gap-2 text-ui-body font-medium text-slate-200">
                         <HardDrive className="h-4 w-4 text-cyan-300" />
                         本地 Journal
                       </div>
@@ -1031,8 +1031,8 @@ export function AgentManagementPanel() {
                         />
                       </dl>
                     </section>
-                    <section className="rounded-xl border border-white/[0.07] bg-[#0a1423]/70 p-4">
-                      <div className="flex items-center gap-2 text-sm font-medium text-slate-200">
+                    <section className="rounded-panel border border-white/[0.07] bg-[#0a1423]/70 p-ui-section">
+                      <div className="flex items-center gap-2 text-ui-body font-medium text-slate-200">
                         <Database className="h-4 w-4 text-cyan-300" />
                         行情提交
                       </div>
@@ -1056,8 +1056,8 @@ export function AgentManagementPanel() {
                       </dl>
                     </section>
                   </div>
-                  <div className="flex flex-wrap items-center justify-between gap-4 border-t border-white/[0.07] px-5 py-4">
-                    <div className="flex items-start gap-2 text-xs leading-5 text-slate-500">
+                  <div className="flex flex-wrap items-center justify-between gap-ui-section border-t border-white/[0.07] px-ui-section py-ui-section">
+                    <div className="flex items-start gap-2 text-ui-label leading-5 text-slate-500">
                       <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
                       <span>
                         Web 端只读诊断状态；不提供远程启动、重连或 MiniQMT
@@ -1078,14 +1078,14 @@ export function AgentManagementPanel() {
               </Collapsible>
             </>
           ) : (
-            <section className="rounded-2xl border border-dashed border-cyan-400/20 bg-cyan-400/[0.03] px-6 py-12 text-center">
-              <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+            <section className="rounded-panel border border-dashed border-cyan-400/20 bg-cyan-400/[0.03] px-ui-panel py-ui-empty text-center">
+              <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-panel border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
                 <Cable className="h-6 w-6" />
               </span>
-              <h2 className="mt-4 text-base font-semibold text-slate-100">
+              <h2 className="mt-4 text-ui-title font-semibold text-slate-100">
                 登记当前电脑上的 QMT Agent
               </h2>
-              <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-slate-500">
+              <p className="mx-auto mt-2 max-w-lg text-ui-body leading-6 text-slate-500">
                 Agent 只向 QuantX 建立出站连接。完成登记后，这里会展示
                 XTData、XTTrading、账户对账与实时行情指标。
               </p>
@@ -1101,9 +1101,9 @@ export function AgentManagementPanel() {
               <CollapsibleTrigger asChild>
                 <button
                   type="button"
-                  className="flex w-full cursor-pointer items-center justify-between rounded-xl border border-white/[0.07] bg-white/[0.02] px-4 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                  className="flex w-full cursor-pointer items-center justify-between rounded-panel border border-white/[0.07] bg-white/[0.02] px-ui-section py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
                 >
-                  <span className="text-xs text-slate-500">
+                  <span className="text-ui-label text-slate-500">
                     历史登记 · {connection.history.length}
                   </span>
                   <ChevronDown
@@ -1114,16 +1114,16 @@ export function AgentManagementPanel() {
                   />
                 </button>
               </CollapsibleTrigger>
-              <CollapsibleContent className="mt-2 overflow-hidden rounded-xl border border-white/[0.07] bg-slate-950/30">
+              <CollapsibleContent className="mt-2 overflow-hidden rounded-panel border border-white/[0.07] bg-slate-950/30">
                 <div className="divide-y divide-white/[0.06]">
                   {connection.history.map(device => (
                     <div
                       key={device.id}
-                      className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[minmax(0,1fr)_110px_180px] sm:items-center"
+                      className="grid gap-2 px-ui-section py-3 text-ui-label sm:grid-cols-[minmax(0,1fr)_110px_180px] sm:items-center"
                     >
                       <div className="min-w-0">
                         <p className="truncate text-slate-300">{device.name}</p>
-                        <p className="mt-1 truncate font-mono text-[10px] text-slate-600">
+                        <p className="mt-1 truncate font-mono text-ui-caption text-slate-600">
                           {device.id}
                         </p>
                       </div>
@@ -1151,14 +1151,14 @@ export function AgentManagementPanel() {
           onRefresh={refresh}
         />
       )}
-    </div>
+    </StudioPageStack>
   );
 }
 
 export function AgentManagementPage() {
   return (
-    <div className="studio-workspace-surface custom-scrollbar h-full overflow-y-auto p-3 sm:p-5 lg:p-6">
+    <StudioPageFrame>
       <AgentManagementPanel />
-    </div>
+    </StudioPageFrame>
   );
 }

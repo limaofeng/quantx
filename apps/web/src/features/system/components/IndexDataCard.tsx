@@ -29,7 +29,7 @@ export function IndexDataCard({
   return (
     <div
       className={cn(
-        'h-full flex flex-col justify-between p-4 rounded-xl border backdrop-blur-sm transition-all relative overflow-hidden',
+        'h-full flex flex-col justify-between p-ui-section rounded-panel border backdrop-blur-sm transition-all relative overflow-hidden',
         status === 'normal' &&
           'border-slate-200/40 dark:border-slate-800/40 bg-white/40 dark:bg-slate-900/40 hover:bg-white/60 dark:hover:bg-slate-900/60',
         status === 'warning' &&
@@ -41,7 +41,7 @@ export function IndexDataCard({
       {/* Top Status Bar */}
       <div className="flex justify-between items-start mb-2">
         <div>
-          <h3 className="text-sm font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+          <h3 className="text-ui-body font-bold text-slate-700 dark:text-slate-200 flex items-center gap-2">
             {name}
             {status === 'error' && (
               <span className="flex h-2 w-2 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.6)]" />
@@ -53,26 +53,28 @@ export function IndexDataCard({
               <span className="flex h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" />
             )}
           </h3>
-          <p className="text-[10px] text-slate-500 font-mono mt-0.5">{code}</p>
+          <p className="text-ui-caption text-slate-500 font-mono mt-0.5">
+            {code}
+          </p>
         </div>
       </div>
 
       {/* Main Data View */}
       <div className="mt-2">
         <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-black tracking-tight text-slate-800 dark:text-slate-200">
+          <span className="text-ui-display font-black tracking-tight text-slate-800 dark:text-slate-200">
             {price}
           </span>
           <span
             className={cn(
-              'text-xs font-semibold',
+              'text-ui-label font-semibold',
               financialToneClass(changeValue)
             )}
           >
             {changePercent}
           </span>
         </div>
-        <div className="mt-2 text-[10px] text-slate-400 flex justify-between items-center border-t border-slate-200/30 dark:border-slate-800/30 pt-2">
+        <div className="mt-2 text-ui-caption text-slate-400 flex justify-between items-center border-t border-slate-200/30 dark:border-slate-800/30 pt-2">
           <span>Last Sync:</span>
           <span
             className={cn(
@@ -86,7 +88,7 @@ export function IndexDataCard({
           </span>
         </div>
         {status === 'error' && (
-          <div className="mt-1 text-[10px] text-red-500 font-bold flex items-center gap-1">
+          <div className="mt-1 text-ui-caption text-red-500 font-bold flex items-center gap-1">
             <AlertCircle className="w-3 h-3" /> Connection Lost
           </div>
         )}

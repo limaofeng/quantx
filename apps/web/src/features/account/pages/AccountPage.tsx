@@ -27,6 +27,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  StudioPageFrame,
+  StudioPageStack,
+} from '@/components/ui/studio-layout';
 import { useCurrentAccount } from '@/features/dashboard/hooks';
 import {
   useCancelOrder,
@@ -93,27 +97,33 @@ function KpiCard({
   icon: typeof WalletCards;
 }) {
   return (
-    <section className="min-w-0 rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
+    <section className="min-w-0 rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
       <div className="mb-4 flex items-start justify-between gap-3">
-        <span className="text-xs font-medium text-slate-400">{label}</span>
+        <span className="text-ui-label font-medium text-slate-400">
+          {label}
+        </span>
         <span className="rounded-md border border-white/[0.08] bg-white/[0.035] p-2 text-slate-300">
           <Icon className="h-4 w-4" />
         </span>
       </div>
-      <div className={cn('truncate font-mono text-2xl font-semibold', tone)}>
+      <div
+        className={cn('truncate font-mono text-ui-display font-semibold', tone)}
+      >
         {value}
       </div>
-      <p className="mt-2 truncate text-[11px] text-slate-500">{detail}</p>
+      <p className="mt-2 truncate text-ui-caption text-slate-500">{detail}</p>
     </section>
   );
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-white/[0.015] px-6 text-center">
+    <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-white/[0.015] px-ui-panel text-center">
       <Clock3 className="mb-3 h-6 w-6 text-slate-600" />
-      <p className="text-sm font-medium text-slate-300">{title}</p>
-      <p className="mt-1 max-w-md text-xs leading-5 text-slate-500">{detail}</p>
+      <p className="text-ui-body font-medium text-slate-300">{title}</p>
+      <p className="mt-1 max-w-md text-ui-label leading-5 text-slate-500">
+        {detail}
+      </p>
     </div>
   );
 }
@@ -133,7 +143,7 @@ function ScopeSwitch({
           type="button"
           onClick={() => onChange(scope)}
           className={cn(
-            'min-h-8 cursor-pointer rounded-md px-3 text-xs transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+            'min-h-8 cursor-pointer rounded-md px-3 text-ui-label transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
             value === scope
               ? 'bg-blue-500/15 text-blue-300'
               : 'text-slate-500 hover:text-slate-300'
@@ -157,13 +167,13 @@ function Pagination({
 }) {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   return (
-    <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2 text-xs text-slate-500">
+    <div className="flex items-center justify-between border-t border-white/[0.06] px-3 py-2 text-ui-label text-slate-500">
       <span>共 {total} 条</span>
       <div className="flex items-center gap-2">
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8"
+          className="h-control-compact w-8"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
         >
@@ -175,7 +185,7 @@ function Pagination({
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8"
+          className="h-control-compact w-8"
           disabled={page >= pages}
           onClick={() => onPageChange(page + 1)}
         >
@@ -479,7 +489,7 @@ export function AccountPage() {
   const error = accountError || overview.error;
   if (!loading && !account) {
     return (
-      <div className="studio-workspace-surface h-full overflow-y-auto p-4 text-slate-200 md:p-8">
+      <StudioPageFrame className="text-slate-200">
         <EmptyState
           title="当前未连接资金账户"
           detail={
@@ -487,7 +497,7 @@ export function AccountPage() {
             '账户概览不会使用默认账号或模拟资产。请先连接 miniQMT 并完成一次账户同步。'
           }
         />
-      </div>
+      </StudioPageFrame>
     );
   }
 
@@ -500,20 +510,20 @@ export function AccountPage() {
   const recentTrades = todayTrades.trades.slice(0, 5);
 
   return (
-    <div className="studio-workspace-surface h-full overflow-y-auto text-slate-100 custom-scrollbar">
-      <div className="mx-auto w-full max-w-[1800px] space-y-4 px-3 pb-10 pt-3 sm:px-4 lg:px-5 xl:px-3 xl:pt-2">
-        <header className="flex min-h-14 flex-col justify-center gap-3 rounded-lg border border-white/[0.06] bg-[#0b1120]/95 px-4 py-2 sm:flex-row sm:items-center sm:justify-between xl:min-h-11 xl:py-1">
+    <StudioPageFrame className="text-slate-100">
+      <StudioPageStack className="space-y-ui-section pb-ui-section">
+        <header className="flex min-h-control-large flex-col justify-center gap-3 rounded-panel border border-white/[0.06] bg-[#0b1120]/95 px-ui-panel py-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Landmark className="h-5 w-5 text-blue-400" />
-              <h1 className="truncate text-xs font-black uppercase tracking-[0.18em] text-slate-100">
+              <h1 className="truncate text-ui-label font-black uppercase tracking-[0.18em] text-slate-100">
                 账户概览
               </h1>
-              <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
+              <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-ui-caption text-emerald-300">
                 miniQMT · 单账户
               </span>
             </div>
-            <p className="mt-1 truncate text-[10px] font-medium text-slate-500">
+            <p className="mt-1 truncate text-ui-caption font-medium text-slate-500">
               {account
                 ? `资金、持仓、委托与盈亏 · ${account.accountName} · ${account.id}`
                 : '正在读取 miniQMT 账户'}
@@ -523,7 +533,7 @@ export function AccountPage() {
             <Button
               variant="outline"
               size="sm"
-              className="h-8 border-white/[0.08] bg-white/[0.025] text-xs hover:border-white/20 hover:bg-white/[0.05]"
+              className="h-control-compact border-white/[0.08] bg-white/[0.025] text-ui-label hover:border-white/20 hover:bg-white/[0.05]"
               onClick={refreshAll}
               disabled={loading}
             >
@@ -535,7 +545,7 @@ export function AccountPage() {
             <Button
               variant="outline"
               size="sm"
-              className="h-8 border-white/[0.08] bg-white/[0.025] text-xs hover:border-white/20 hover:bg-white/[0.05]"
+              className="h-control-compact border-white/[0.08] bg-white/[0.025] text-ui-label hover:border-white/20 hover:bg-white/[0.05]"
               onClick={exportCurrentView}
             >
               <Download className="mr-2 h-4 w-4" />
@@ -572,7 +582,7 @@ export function AccountPage() {
           />
         </div>
 
-        <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+        <div className="flex items-center justify-between gap-3 text-ui-caption text-slate-500">
           <span>
             数据来源：
             {intraday.source === 'SAME_DAY_SNAPSHOT'
@@ -590,7 +600,7 @@ export function AccountPage() {
                 type="button"
                 onClick={() => setLocation(`/account?view=${item.id}`)}
                 className={cn(
-                  'min-h-12 cursor-pointer border-b-2 px-5 text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                  'min-h-12 cursor-pointer border-b-2 px-ui-section text-ui-body transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
                   view === item.id
                     ? 'border-blue-400 text-blue-300'
                     : 'border-transparent text-slate-500 hover:text-slate-200'
@@ -603,15 +613,15 @@ export function AccountPage() {
         </nav>
 
         {error && (
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-ui-section py-3 text-ui-label text-amber-200">
             部分账户数据加载失败：{error.message}。刷新后将重新请求真实数据。
           </div>
         )}
 
         {view === 'overview' && (
-          <div className="grid gap-4 xl:grid-cols-[1.1fr_1fr]">
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
-              <h2 className="text-sm font-medium">资产构成</h2>
+          <div className="grid gap-ui-section xl:grid-cols-[1.1fr_1fr]">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
+              <h2 className="text-ui-body font-medium">资产构成</h2>
               <div className="mt-5 h-2 overflow-hidden rounded-full bg-white/5">
                 <div
                   className="h-full bg-blue-400"
@@ -620,7 +630,7 @@ export function AccountPage() {
                   }}
                 />
               </div>
-              <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+              <div className="mt-4 grid grid-cols-2 gap-3 text-ui-label sm:grid-cols-4">
                 {[
                   ['持仓市值', formatMoney(account?.marketValue)],
                   ['可用现金', formatMoney(account?.cash)],
@@ -634,8 +644,8 @@ export function AccountPage() {
                 ))}
               </div>
             </section>
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
-              <h2 className="text-sm font-medium">快捷操作</h2>
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
+              <h2 className="text-ui-body font-medium">快捷操作</h2>
               <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 {[
                   ['买入', ShoppingCart, '/holdings?mode=ORDER&side=BUY'],
@@ -647,22 +657,22 @@ export function AccountPage() {
                     key={String(label)}
                     type="button"
                     onClick={() => setLocation(String(href))}
-                    className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-xs text-slate-300 transition-colors duration-200 hover:border-blue-500/40 hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                    className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.025] text-ui-label text-slate-300 transition-colors duration-200 hover:border-blue-500/40 hover:bg-blue-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   >
                     <Icon className="h-5 w-5 text-blue-300" />
                     {String(label)}
                   </button>
                 ))}
               </div>
-              <p className="mt-3 text-[11px] text-slate-600">
+              <p className="mt-3 text-ui-caption text-slate-600">
                 账户概览只提供入口，不在本页直接下单或清仓。
               </p>
             </section>
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-medium">待处理委托</h2>
+                <h2 className="text-ui-body font-medium">待处理委托</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                  className="cursor-pointer rounded-sm text-ui-label text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/account?view=orders')}
                 >
                   查看全部
@@ -673,7 +683,7 @@ export function AccountPage() {
                   {recentActiveOrders.map(order => (
                     <div
                       key={order.id}
-                      className="flex items-center justify-between rounded-lg bg-white/[0.025] p-3 text-xs"
+                      className="flex items-center justify-between rounded-lg bg-white/[0.025] p-3 text-ui-label"
                     >
                       <div>
                         <p>{order.stockName || order.stockCode}</p>
@@ -706,11 +716,11 @@ export function AccountPage() {
                 />
               )}
             </section>
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-medium">最近成交</h2>
+                <h2 className="text-ui-body font-medium">最近成交</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                  className="cursor-pointer rounded-sm text-ui-label text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/account?view=trades')}
                 >
                   查看全部
@@ -721,7 +731,7 @@ export function AccountPage() {
                   {recentTrades.map(trade => (
                     <div
                       key={trade.tradedId}
-                      className="flex items-center justify-between rounded-lg bg-white/[0.025] p-3 text-xs"
+                      className="flex items-center justify-between rounded-lg bg-white/[0.025] p-3 text-ui-label"
                     >
                       <div>
                         <p>{trade.stockName || trade.stockCode}</p>
@@ -754,11 +764,11 @@ export function AccountPage() {
                 />
               )}
             </section>
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4 xl:col-span-2">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section xl:col-span-2">
               <div className="mb-3 flex items-center justify-between">
-                <h2 className="text-sm font-medium">主要持仓</h2>
+                <h2 className="text-ui-body font-medium">主要持仓</h2>
                 <button
-                  className="cursor-pointer rounded-sm text-xs text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                  className="cursor-pointer rounded-sm text-ui-label text-blue-300 transition-colors hover:text-blue-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
                   onClick={() => setLocation('/holdings')}
                 >
                   打开持仓工作台
@@ -766,7 +776,7 @@ export function AccountPage() {
               </div>
               {overview.positions.length ? (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[720px] text-left text-xs">
+                  <table className="w-full min-w-[720px] text-left text-ui-label">
                     <thead className="text-slate-500">
                       <tr>
                         <th className="py-2">证券</th>
@@ -806,7 +816,7 @@ export function AccountPage() {
                             )}
                           >
                             {formatMoney(position.profitLoss, true)}
-                            <p className="mt-1 text-[10px]">
+                            <p className="mt-1 text-ui-caption">
                               {formatPercent(position.profitRate, true)}
                             </p>
                           </td>
@@ -841,13 +851,13 @@ export function AccountPage() {
                   value={stockFilter}
                   onChange={event => setStockFilter(event.target.value)}
                   placeholder="代码 / 名称"
-                  className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
+                  className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-ui-label"
                 />
                 <Select
                   value={directionFilter}
                   onValueChange={setDirectionFilter}
                 >
-                  <SelectTrigger className="h-9 w-28 border-white/[0.08] bg-[#080d18]/80 text-xs">
+                  <SelectTrigger className="h-control-default w-28 border-white/[0.08] bg-[#080d18]/80 text-ui-label">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -858,7 +868,7 @@ export function AccountPage() {
                 </Select>
                 {view === 'orders' && (
                   <Select value={statusFilter} onValueChange={setStatusFilter}>
-                    <SelectTrigger className="h-9 w-32 border-white/[0.08] bg-[#080d18]/80 text-xs">
+                    <SelectTrigger className="h-control-default w-32 border-white/[0.08] bg-[#080d18]/80 text-ui-label">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -880,7 +890,7 @@ export function AccountPage() {
                       min={daysAgoKey(365)}
                       max={endDate}
                       onChange={event => setStartDate(event.target.value)}
-                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
+                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-ui-label"
                     />
                     <Input
                       type="date"
@@ -888,7 +898,7 @@ export function AccountPage() {
                       min={startDate}
                       max={today}
                       onChange={event => setEndDate(event.target.value)}
-                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
+                      className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-ui-label"
                     />
                   </>
                 )}
@@ -897,7 +907,7 @@ export function AccountPage() {
             {view === 'orders' ? (
               visibleOrders.length ? (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[900px] text-left text-xs">
+                  <table className="w-full min-w-[900px] text-left text-ui-label">
                     <thead className="bg-white/[0.025] text-slate-500">
                       <tr>
                         <th className="px-3 py-3">时间</th>
@@ -943,7 +953,7 @@ export function AccountPage() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                className="h-8 text-amber-300"
+                                className="h-control-compact text-amber-300"
                                 disabled={cancelling}
                                 onClick={() =>
                                   setCancelTarget({
@@ -964,7 +974,7 @@ export function AccountPage() {
                   </table>
                 </div>
               ) : (
-                <div className="p-4">
+                <div className="p-ui-section">
                   <EmptyState
                     title="暂无委托记录"
                     detail="筛选范围内没有当前账户的真实委托。"
@@ -973,7 +983,7 @@ export function AccountPage() {
               )
             ) : visibleTrades.length ? (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[860px] text-left text-xs">
+                <table className="w-full min-w-[860px] text-left text-ui-label">
                   <thead className="bg-white/[0.025] text-slate-500">
                     <tr>
                       <th className="px-3 py-3">时间</th>
@@ -1020,7 +1030,7 @@ export function AccountPage() {
                 </table>
               </div>
             ) : (
-              <div className="p-4">
+              <div className="p-ui-section">
                 <EmptyState
                   title="暂无成交记录"
                   detail="筛选范围内没有当前账户的真实成交。"
@@ -1040,13 +1050,13 @@ export function AccountPage() {
         )}
 
         {view === 'pnl' && (
-          <div className="space-y-4">
+          <div className="space-y-ui-section">
             <div className="flex justify-end">
               <Select
                 value={String(pnlDays)}
                 onValueChange={value => setPnlDays(Number(value))}
               >
-                <SelectTrigger className="h-9 w-32 border-white/[0.08] bg-[#080d18]/80 text-xs">
+                <SelectTrigger className="h-control-default w-32 border-white/[0.08] bg-[#080d18]/80 text-ui-label">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1089,21 +1099,24 @@ export function AccountPage() {
               ].map(([label, value, tone]) => (
                 <div
                   key={label}
-                  className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4"
+                  className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section"
                 >
-                  <p className="text-xs text-slate-500">{label}</p>
+                  <p className="text-ui-label text-slate-500">{label}</p>
                   <p
-                    className={cn('mt-3 font-mono text-base font-medium', tone)}
+                    className={cn(
+                      'mt-3 font-mono text-ui-title font-medium',
+                      tone
+                    )}
                   >
                     {value}
                   </p>
                 </div>
               ))}
             </div>
-            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-4">
+            <section className="rounded-lg border border-white/[0.06] bg-[#0b1120]/80 p-ui-section">
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-sm font-medium">日终盈亏序列</h2>
-                <span className="text-[11px] text-slate-500">
+                <h2 className="text-ui-body font-medium">日终盈亏序列</h2>
+                <span className="text-ui-caption text-slate-500">
                   数据质量：{pnlStats.quality}
                 </span>
               </div>
@@ -1114,7 +1127,7 @@ export function AccountPage() {
                     return (
                       <div
                         key={item.id}
-                        className="grid grid-cols-[84px_1fr_110px] items-center gap-3 text-xs"
+                        className="grid grid-cols-[84px_1fr_110px] items-center gap-3 text-ui-label"
                       >
                         <span className="font-mono text-slate-500">
                           {String(item.tradeDate)}
@@ -1165,7 +1178,7 @@ export function AccountPage() {
                   setStartDate(event.target.value);
                   setClosedPage(1);
                 }}
-                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
+                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-ui-label"
               />
               <Input
                 type="date"
@@ -1176,15 +1189,15 @@ export function AccountPage() {
                   setEndDate(event.target.value);
                   setClosedPage(1);
                 }}
-                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-xs"
+                className="h-9 w-36 border-white/[0.08] bg-[#080d18]/80 text-ui-label"
               />
             </div>
             {closed.loading ? (
-              <div className="p-12 text-center text-xs text-slate-500">
+              <div className="p-ui-empty text-center text-ui-label text-slate-500">
                 正在读取清仓周期...
               </div>
             ) : closed.error ? (
-              <div className="p-4">
+              <div className="p-ui-section">
                 <EmptyState
                   title="清仓周期加载失败"
                   detail={closed.error.message}
@@ -1192,7 +1205,7 @@ export function AccountPage() {
               </div>
             ) : closed.page?.items.length ? (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[980px] text-left text-xs">
+                <table className="w-full min-w-[980px] text-left text-ui-label">
                   <thead className="bg-white/[0.025] text-slate-500">
                     <tr>
                       <th className="px-3 py-3">证券</th>
@@ -1237,7 +1250,7 @@ export function AccountPage() {
                           {item.pnlQuality === 'COMPLETE_GROSS' ? (
                             <>
                               {formatMoney(item.grossRealizedPnl, true)}
-                              <p className="mt-1 text-[10px]">
+                              <p className="mt-1 text-ui-caption">
                                 {formatPercent(
                                   item.grossRealizedPnlPercent,
                                   true
@@ -1251,7 +1264,7 @@ export function AccountPage() {
                         <td className="px-3">
                           <span
                             className={cn(
-                              'rounded-full px-2 py-1 text-[10px]',
+                              'rounded-full px-2 py-1 text-ui-caption',
                               item.pnlQuality === 'COMPLETE_GROSS'
                                 ? 'bg-emerald-500/10 text-emerald-300'
                                 : 'bg-amber-500/10 text-amber-300'
@@ -1262,7 +1275,7 @@ export function AccountPage() {
                               : '历史不完整'}
                           </span>
                           {item.qualityFlags.length > 0 && (
-                            <p className="mt-2 max-w-48 text-[10px] text-slate-600">
+                            <p className="mt-2 max-w-48 text-ui-caption text-slate-600">
                               {item.qualityFlags.join('、')}
                             </p>
                           )}
@@ -1273,7 +1286,7 @@ export function AccountPage() {
                 </table>
               </div>
             ) : (
-              <div className="p-4">
+              <div className="p-ui-section">
                 <EmptyState
                   title="暂无已清仓记录"
                   detail="记录只在真实持仓由正数变为零时产生；查询不会隐式回填或修改历史。"
@@ -1287,7 +1300,7 @@ export function AccountPage() {
             />
           </section>
         )}
-      </div>
+      </StudioPageStack>
 
       <ConfirmDialog
         open={Boolean(cancelTarget)}
@@ -1298,6 +1311,6 @@ export function AccountPage() {
         loading={cancelling}
         onConfirm={handleCancel}
       />
-    </div>
+    </StudioPageFrame>
   );
 }

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 
+import { StudioPageFrame } from '@/components/ui/studio-layout';
 import { cn } from '@/utils/cn';
 
 import { DataStudioShell, type DataStudioMode } from './DataStudioShell';
@@ -27,9 +28,9 @@ export function DataStudioPageFrame({
     <DataStudioShell
       activeMode={activeMode}
       content={
-        <div className="studio-workspace-surface h-full overflow-y-auto p-3 custom-scrollbar">
+        <StudioPageFrame>
           <div className={cn('h-full min-h-0', className)}>{children}</div>
-        </div>
+        </StudioPageFrame>
       }
       showSidebar={false}
       statusBarLeft={

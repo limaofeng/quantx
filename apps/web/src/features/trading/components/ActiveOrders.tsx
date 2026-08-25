@@ -46,7 +46,7 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
 
   if (loading && activeOrders.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-muted-foreground/30 text-[10px] uppercase tracking-widest font-bold animate-pulse">
+      <div className="h-full flex items-center justify-center text-muted-foreground/30 text-ui-caption uppercase tracking-widest font-bold animate-pulse">
         Loading...
       </div>
     );
@@ -86,9 +86,9 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
       )}
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-slate-200/20 dark:border-slate-800/20 shrink-0">
-        <h4 className="text-[10px] font-black text-muted-foreground uppercase tracking-[0.2em] flex items-center gap-2">
+        <h4 className="text-ui-caption font-black text-muted-foreground uppercase tracking-[0.2em] flex items-center gap-2">
           活跃委托
-          <span className="flex h-4 min-w-[16px] items-center justify-center px-1 bg-blue-600/10 text-blue-600 rounded-full text-[9px] font-mono font-bold">
+          <span className="flex h-4 min-w-[16px] items-center justify-center px-1 bg-blue-600/10 text-blue-600 rounded-full text-ui-micro font-mono font-bold">
             {activeOrders.length}
           </span>
         </h4>
@@ -108,10 +108,10 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
           >
             <div className="flex items-center justify-between mb-1">
               <div className="flex items-center gap-1.5 min-w-0">
-                <span className="font-bold text-[11px] text-foreground/90 truncate">
+                <span className="font-bold text-ui-caption text-foreground/90 truncate">
                   {order.stockName}
                 </span>
-                <span className="text-[9px] font-mono text-muted-foreground/40 shrink-0">
+                <span className="text-ui-micro font-mono text-muted-foreground/40 shrink-0">
                   {order.stockCode}
                 </span>
               </div>
@@ -143,11 +143,11 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
               </Button>
             </div>
 
-            <div className="flex items-center justify-between text-[10px] font-mono">
+            <div className="flex items-center justify-between text-ui-caption font-mono">
               <div className="flex items-center gap-2">
                 <span
                   className={cn(
-                    'font-black uppercase tracking-widest text-[8px]',
+                    'font-black uppercase tracking-widest text-ui-micro',
                     order.type === OrderType.Buy
                       ? 'text-market-up'
                       : 'text-market-down'
@@ -161,7 +161,7 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
               </div>
               <div className="flex items-center gap-1 text-muted-foreground/60">
                 <span className="font-bold">{order.volume}</span>
-                <span className="text-[8px] opacity-60">股</span>
+                <span className="text-ui-micro opacity-60">股</span>
               </div>
             </div>
 
@@ -177,10 +177,10 @@ export function ActiveOrders({ accountId, className }: ActiveOrdersProps) {
             )}
 
             <div className="mt-1 flex justify-between items-center">
-              <span className="text-[8px] text-muted-foreground/30 font-bold uppercase tracking-tight tabular-nums">
+              <span className="text-ui-micro text-muted-foreground/30 font-bold uppercase tracking-tight tabular-nums">
                 {order.time}
               </span>
-              <span className="text-[8px] text-blue-600/60 font-black tracking-tighter uppercase tabular-nums">
+              <span className="text-ui-micro text-blue-600/60 font-black tracking-tighter uppercase tabular-nums">
                 {order.status}
               </span>
             </div>

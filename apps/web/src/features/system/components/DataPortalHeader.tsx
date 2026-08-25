@@ -15,15 +15,15 @@ function Metric({ label, value, subValue, icon: Icon }: MetricProps) {
         <Icon className="w-4 h-4" />
       </div>
       <div className="flex flex-col">
-        <p className="text-[10px] font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+        <p className="text-ui-caption font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
           {label}
         </p>
         <div className="flex items-baseline gap-1.5 leading-none">
-          <h3 className="text-sm font-black text-slate-900 dark:text-white tracking-tight">
+          <h3 className="text-ui-body font-black text-slate-900 dark:text-white tracking-tight">
             {value}
           </h3>
           {subValue && (
-            <span className="text-[10px] font-mono text-slate-400">
+            <span className="text-ui-caption font-mono text-slate-400">
               {subValue}
             </span>
           )}
@@ -35,7 +35,7 @@ function Metric({ label, value, subValue, icon: Icon }: MetricProps) {
 
 export function DataPortalHeader() {
   return (
-    <div className="flex items-center gap-8">
+    <div className="flex items-center gap-ui-panel">
       <Metric label="全市场覆盖" value="5,324" subValue="家" icon={Database} />
       <div className="h-8 w-[1px] bg-border/40" />
       <Metric label="总数据量" value="12.4" subValue="GB" icon={Server} />

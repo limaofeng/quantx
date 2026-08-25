@@ -109,7 +109,7 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
         description="同步任务详情与日志"
         title="任务详情"
       >
-        <div className="flex min-h-[320px] items-center justify-center text-sm text-slate-500">
+        <div className="flex min-h-[320px] items-center justify-center text-ui-body text-slate-500">
           Loading...
         </div>
       </DataStudioPageFrame>
@@ -121,7 +121,7 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
         description="同步任务详情与日志"
         title="任务详情"
       >
-        <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-300">
+        <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-ui-section text-ui-body text-rose-300">
           Error: {error.message}
         </div>
       </DataStudioPageFrame>
@@ -133,7 +133,7 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
         description="同步任务详情与日志"
         title="任务详情"
       >
-        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-500">
+        <div className="rounded-lg border border-white/10 bg-white/[0.03] p-ui-section text-ui-body text-slate-500">
           Flow run not found
         </div>
       </DataStudioPageFrame>
@@ -178,9 +178,9 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
       description="同步任务详情与日志"
       title={flowRun.flowName}
     >
-      <div className="flex flex-col h-full gap-6 p-6 animate-fade-in">
+      <div className="flex flex-col h-full gap-ui-panel p-ui-panel animate-fade-in">
         {/* Header */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-ui-section">
           <Button
             variant="ghost"
             size="icon"
@@ -190,13 +190,13 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
           </Button>
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-1">
-              <h1 className="text-2xl font-bold tracking-tight">
+              <h1 className="text-ui-display font-bold tracking-tight">
                 {flowRun.flowName}
               </h1>
               <Badge
                 variant="outline"
                 className={cn(
-                  'px-2.5 py-0.5 font-mono text-xs font-bold border',
+                  'px-2.5 py-0.5 font-mono text-ui-label font-bold border',
                   getStateColor(flowRun.state)
                 )}
               >
@@ -204,8 +204,8 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
                 <span className="ml-1.5">{flowRun.state}</span>
               </Badge>
             </div>
-            <div className="flex items-center gap-4 text-sm text-slate-500">
-              <span className="font-mono text-xs opacity-60">
+            <div className="flex items-center gap-ui-section text-ui-body text-slate-500">
+              <span className="font-mono text-ui-label opacity-60">
                 ID: {flowRun.id}
               </span>
               <span className="flex items-center gap-1.5">
@@ -225,25 +225,25 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
         </div>
 
         {/* Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-ui-panel flex-1 min-h-0">
           {/* Left: Task Timeline & List */}
           <Card className="lg:col-span-2 flex flex-col border-slate-200/60 shadow-sm overflow-hidden">
-            <CardHeader className="py-4 px-6 border-b bg-slate-50/50">
-              <CardTitle className="text-sm font-bold uppercase tracking-wider text-slate-500">
+            <CardHeader className="py-ui-section px-ui-panel border-b bg-slate-50/50">
+              <CardTitle className="text-ui-body font-bold uppercase tracking-wider text-slate-500">
                 Task Execution
               </CardTitle>
             </CardHeader>
             <ScrollArea className="flex-1 p-0">
               <div className="divide-y divide-slate-100">
                 {flowRun.taskRuns.length === 0 ? (
-                  <div className="p-8 text-center text-slate-400 text-sm">
+                  <div className="p-ui-section text-center text-slate-400 text-ui-body">
                     No tasks executed
                   </div>
                 ) : (
                   flowRun.taskRuns.map(task => (
                     <div
                       key={task.id}
-                      className="p-4 hover:bg-slate-50/50 transition-colors flex items-center justify-between group"
+                      className="p-ui-section hover:bg-slate-50/50 transition-colors flex items-center justify-between group"
                     >
                       <div className="flex items-start gap-3">
                         <div
@@ -255,20 +255,20 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
                           )}
                         />
                         <div>
-                          <div className="font-medium text-sm text-slate-900 group-hover:text-blue-600 transition-colors">
+                          <div className="font-medium text-ui-body text-slate-900 group-hover:text-blue-600 transition-colors">
                             {task.name}
                           </div>
                           <div className="flex items-center gap-2 mt-1">
                             <Badge
                               variant="outline"
                               className={cn(
-                                'text-[10px] px-1.5 h-4 border-none',
+                                'text-ui-caption px-1.5 h-4 border-none',
                                 getStateColor(task.state)
                               )}
                             >
                               {task.state}
                             </Badge>
-                            <span className="text-[10px] text-slate-400 font-mono">
+                            <span className="text-ui-caption text-slate-400 font-mono">
                               {task.totalRunTime
                                 ? `${task.totalRunTime.toFixed(2)}s`
                                 : '-'}
@@ -276,7 +276,7 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
                           </div>
                         </div>
                       </div>
-                      <div className="text-right text-xs text-slate-400 font-mono">
+                      <div className="text-right text-ui-label text-slate-400 font-mono">
                         <div>
                           {task.startedAt
                             ? format(new Date(task.startedAt), 'HH:mm:ss.SSS')
@@ -291,16 +291,16 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
           </Card>
 
           {/* Right: Logs & Parameters */}
-          <div className="flex flex-col gap-6 min-h-0">
+          <div className="flex flex-col gap-ui-panel min-h-0">
             <Card className="flex-1 flex flex-col border-slate-200/60 shadow-sm overflow-hidden bg-slate-950 text-slate-200">
-              <CardHeader className="py-3 px-4 border-b border-white/10 bg-white/5 flex flex-row items-center justify-between">
-                <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+              <CardHeader className="py-3 px-ui-section border-b border-white/10 bg-white/5 flex flex-row items-center justify-between">
+                <CardTitle className="text-ui-label font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                   <Terminal size={14} />
                   Logs
                 </CardTitle>
               </CardHeader>
               <ScrollArea className="flex-1">
-                <div className="p-4 font-mono text-xs space-y-1">
+                <div className="p-ui-section font-mono text-ui-label space-y-1">
                   {flowRun.detailedLogs.length === 0 ? (
                     <div className="text-slate-600 italic">
                       No logs available
@@ -341,13 +341,13 @@ export function FlowRunDetailPage({ params }: { params: { id: string } }) {
             </Card>
 
             <Card className="shrink-0 border-slate-200/60 shadow-sm">
-              <CardHeader className="py-3 px-4 border-b">
-                <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              <CardHeader className="py-3 px-ui-section border-b">
+                <CardTitle className="text-ui-label font-bold uppercase tracking-wider text-slate-500">
                   Parameters
                 </CardTitle>
               </CardHeader>
-              <CardContent className="p-4">
-                <pre className="text-xs font-mono bg-slate-50 p-3 rounded-lg overflow-x-auto text-slate-600">
+              <CardContent className="p-ui-section">
+                <pre className="text-ui-label font-mono bg-slate-50 p-3 rounded-lg overflow-x-auto text-slate-600">
                   {formatParameters(flowRun.parameters)}
                 </pre>
               </CardContent>

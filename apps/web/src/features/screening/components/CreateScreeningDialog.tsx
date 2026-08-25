@@ -52,7 +52,7 @@ export function CreateScreeningDialog({
             设置筛选名称和描述，然后配置筛选条件
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <div className="space-y-ui-section">
           <Input
             placeholder="筛选名称"
             value={newScreening.name}

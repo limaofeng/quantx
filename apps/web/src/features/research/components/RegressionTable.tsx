@@ -66,9 +66,9 @@ export function RegressionTable({ models }: { models: RegressionResult[] }) {
         />
       ) : (
         <div className="max-h-[25rem] overflow-auto">
-          <table className="w-full min-w-[900px] text-left text-[11px]">
+          <table className="w-full min-w-[900px] text-left text-ui-caption">
             <caption className="sr-only">量价交互回归系数</caption>
-            <thead className="sticky top-0 z-10 bg-[#0b1423] text-[9px] uppercase tracking-wider text-slate-500">
+            <thead className="sticky top-0 z-10 bg-[#0b1423] text-ui-micro uppercase tracking-wider text-slate-500">
               <tr>
                 <th className="px-3 py-2.5">周期</th>
                 <th className="px-3 py-2.5">收益口径</th>

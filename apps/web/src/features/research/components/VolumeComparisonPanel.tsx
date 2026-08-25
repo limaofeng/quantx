@@ -1,6 +1,8 @@
 import { CalendarDays, CheckCircle2, CircleDashed, Scale } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
+import { NativeSelect } from '@/components/ui/native-select';
+
 import { isConfirmedComparison, type ComparisonStatistic } from '../model';
 
 import { ResearchEmptyState, ResearchPanel } from './ResearchSurface';
@@ -158,15 +160,15 @@ function SensitivitySummary({
         <div>
           <h3
             id="comparison-sensitivity-title"
-            className="text-[10px] font-black text-slate-300"
+            className="text-ui-caption font-black text-slate-300"
           >
             冷却期敏感性摘要
           </h3>
-          <p className="mt-1 text-[9px] text-slate-600">
+          <p className="mt-1 text-ui-micro text-slate-600">
             只核对方向与 FDR 确认状态，不展开敏感性原始长表。
           </p>
         </div>
-        <div className="flex items-center gap-1.5 text-[9px] text-slate-500">
+        <div className="flex items-center gap-1.5 text-ui-micro text-slate-500">
           <span>主比较</span>
           <span className="rounded border border-white/10 px-1.5 py-0.5 font-bold text-slate-300">
             {baselineDirection
@@ -190,21 +192,21 @@ function SensitivitySummary({
             className="flex flex-wrap items-center justify-between gap-2 rounded border border-white/[0.05] bg-white/[0.02] px-2.5 py-2"
           >
             <div>
-              <div className="text-[10px] font-bold text-slate-300">
+              <div className="text-ui-caption font-bold text-slate-300">
                 {scenario.label}
               </div>
               {scenario.row && scenario.direction ? (
-                <div className="mt-0.5 text-[8px] text-slate-600">
+                <div className="mt-0.5 text-ui-micro text-slate-600">
                   敏感性结果：{DIRECTION_LABELS[scenario.direction]} ·{' '}
                   {scenario.confirmed ? '已确认' : '未确认'}
                 </div>
               ) : (
-                <div className="mt-0.5 text-[8px] text-slate-600">
+                <div className="mt-0.5 text-ui-micro text-slate-600">
                   当前口径无对应结果
                 </div>
               )}
             </div>
-            <div className="flex flex-wrap gap-1.5 text-[9px] font-bold">
+            <div className="flex flex-wrap gap-1.5 text-ui-micro font-bold">
               <span
                 className={`rounded border px-1.5 py-0.5 ${
                   scenario.row &&
@@ -277,15 +279,15 @@ function ComparisonCard({ row }: { row: ComparisonStatistic }) {
     >
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-[11px] font-black text-slate-200">
+          <h3 className="text-ui-caption font-black text-slate-200">
             {label || '未分组'}
           </h3>
-          <p className="mt-0.5 text-[9px] text-slate-600">
+          <p className="mt-0.5 text-ui-micro text-slate-600">
             {isInteraction ? '位置交互（差上差）' : '异常量减正常量'}
           </p>
         </div>
         <span
-          className={`inline-flex items-center gap-1 whitespace-nowrap rounded border px-1.5 py-0.5 text-[9px] font-bold ${
+          className={`inline-flex items-center gap-1 whitespace-nowrap rounded border px-1.5 py-0.5 text-ui-micro font-bold ${
             confirmed
               ? positive
                 ? 'border-emerald-500/30 text-emerald-300'
@@ -300,27 +302,27 @@ function ComparisonCard({ row }: { row: ComparisonStatistic }) {
 
       <div className="mt-3 grid grid-cols-3 gap-1">
         <div className="rounded bg-black/10 p-2">
-          <div className="text-[8px] font-bold text-slate-600">
+          <div className="text-ui-micro font-bold text-slate-600">
             {isInteraction ? '放量组位置差' : '异常放量'}
           </div>
-          <div className="mt-1 font-mono text-xs font-bold tabular-nums text-slate-300">
+          <div className="mt-1 font-mono text-ui-label font-bold tabular-nums text-slate-300">
             {percent(row.shock_mean)}
           </div>
         </div>
         <div className="rounded bg-black/10 p-2">
-          <div className="text-[8px] font-bold text-slate-600">
+          <div className="text-ui-micro font-bold text-slate-600">
             {isInteraction ? '正常组位置差' : '正常成交量'}
           </div>
-          <div className="mt-1 font-mono text-xs font-bold tabular-nums text-slate-300">
+          <div className="mt-1 font-mono text-ui-label font-bold tabular-nums text-slate-300">
             {percent(row.normal_mean)}
           </div>
         </div>
         <div className="rounded bg-black/10 p-2">
-          <div className="text-[8px] font-bold text-slate-600">
+          <div className="text-ui-micro font-bold text-slate-600">
             {isInteraction ? '差上差' : '均值差'}
           </div>
           <div
-            className={`mt-1 font-mono text-xs font-black tabular-nums ${
+            className={`mt-1 font-mono text-ui-label font-black tabular-nums ${
               confirmed
                 ? positive
                   ? 'text-emerald-300'
@@ -333,7 +335,7 @@ function ComparisonCard({ row }: { row: ComparisonStatistic }) {
         </div>
       </div>
 
-      <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[9px]">
+      <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-ui-micro">
         <div className="flex justify-between gap-2">
           <dt className="text-slate-600">FDR q</dt>
           <dd className="font-mono text-slate-400">
@@ -452,53 +454,53 @@ export function VolumeComparisonPanel({
       ) : (
         <>
           <div className="flex flex-wrap gap-2 border-b border-white/[0.05] px-3 py-2">
-            <label className="flex items-center gap-2 text-[9px] font-bold text-slate-600">
+            <label className="flex items-center gap-2 text-ui-micro font-bold text-slate-600">
               基准
-              <select
+              <NativeSelect
                 value={benchmark}
                 onChange={event =>
                   setRequestedBenchmark(event.target.value as Benchmark)
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-ui-caption text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {benchmarks.map(value => (
                   <option key={value} value={value}>
                     {BENCHMARK_LABELS[value]}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
-            <label className="flex items-center gap-2 text-[9px] font-bold text-slate-600">
+            <label className="flex items-center gap-2 text-ui-micro font-bold text-slate-600">
               收益口径
-              <select
+              <NativeSelect
                 value={returnKind}
                 onChange={event =>
                   setRequestedReturnKind(event.target.value as ReturnKind)
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-ui-caption text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {returnKinds.map(value => (
                   <option key={value} value={value}>
                     {RETURN_KIND_LABELS[value]}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
-            <label className="flex items-center gap-2 text-[9px] font-bold text-slate-600">
+            <label className="flex items-center gap-2 text-ui-micro font-bold text-slate-600">
               持有期
-              <select
+              <NativeSelect
                 value={horizon}
                 onChange={event =>
                   setRequestedHorizon(Number(event.target.value))
                 }
-                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 font-mono text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 font-mono text-ui-caption text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 {horizons.map(value => (
                   <option key={value} value={value}>
                     T+{value}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
           </div>
 
@@ -524,12 +526,12 @@ export function VolumeComparisonPanel({
               <Scale className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
             )}
             <div>
-              <div className="text-[11px] font-black text-slate-100">
+              <div className="text-ui-caption font-black text-slate-100">
                 {confirmedInteraction
                   ? '价格位置交互已确认'
                   : '价格位置交互未形成有效结论'}
               </div>
-              <p className="mt-1 text-[10px] leading-5 text-slate-400">
+              <p className="mt-1 text-ui-caption leading-5 text-slate-400">
                 {confirmedInteraction ? (
                   <>
                     高位相对低位的放量效应差上差为{' '}
@@ -579,7 +581,7 @@ export function VolumeComparisonPanel({
             </div>
           )}
 
-          <div className="flex items-center gap-2 border-t border-white/[0.05] px-3 py-2 text-[9px] leading-4 text-slate-600">
+          <div className="flex items-center gap-2 border-t border-white/[0.05] px-3 py-2 text-ui-micro leading-4 text-slate-600">
             <CalendarDays className="h-3 w-3 shrink-0" />
             “已确认”要求 significant=true、FDR q 可用且置信区间不跨
             0；其他结果仅作描述展示。

@@ -306,10 +306,12 @@ function HoldingsSkeleton() {
 
 function EmptyHoldingsState() {
   return (
-    <div className="mx-2 mt-6 rounded-md border border-dashed border-white/10 bg-white/[0.025] px-4 py-6 text-center">
+    <div className="mx-2 mt-6 rounded-md border border-dashed border-white/10 bg-white/[0.025] px-ui-section py-ui-panel text-center">
       <BriefcaseBusiness className="mx-auto h-5 w-5 text-slate-600" />
-      <div className="mt-3 text-xs font-black text-slate-300">暂无持仓</div>
-      <div className="mt-1 text-[10px] leading-relaxed text-slate-600">
+      <div className="mt-3 text-ui-label font-black text-slate-300">
+        暂无持仓
+      </div>
+      <div className="mt-1 text-ui-caption leading-relaxed text-slate-600">
         当前账户没有可展示的持仓股票。
       </div>
     </div>
@@ -632,7 +634,7 @@ export function TradingHoldingsSidebar({
         <div className="flex min-w-0 items-start gap-2.5">
           <div
             className={cn(
-              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-[10px] font-black',
+              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-ui-caption font-black',
               isSelected
                 ? 'border-blue-500/30 bg-blue-500/15 text-blue-200'
                 : 'border-white/10 bg-[#08101d] text-slate-400 group-hover:text-slate-200'
@@ -643,12 +645,12 @@ export function TradingHoldingsSidebar({
           <div className="flex min-w-0 flex-1 items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
               <HoldingInstrumentName
-                className="block min-w-0 truncate text-xs font-black"
+                className="block min-w-0 truncate text-ui-label font-black"
                 positionName={holding.instrumentName}
                 stockCode={stockCode}
               />
               <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                <span className="truncate font-mono text-[10px] font-bold text-slate-600">
+                <span className="truncate font-mono text-ui-caption font-bold text-slate-600">
                   {stockCode}
                 </span>
               </div>
@@ -656,7 +658,7 @@ export function TradingHoldingsSidebar({
             <div className="shrink-0 space-y-1 text-right font-mono leading-none">
               <div
                 className={cn(
-                  'inline-flex items-center justify-end gap-1 font-mono text-[10px] font-black leading-none',
+                  'inline-flex items-center justify-end gap-1 font-mono text-ui-caption font-black leading-none',
                   dayChangePercent === null
                     ? 'text-slate-500'
                     : financialToneClass(dayChangePercent, 'holding')
@@ -667,18 +669,18 @@ export function TradingHoldingsSidebar({
               </div>
               <div className="flex items-baseline justify-end gap-2">
                 <span className="inline-flex items-baseline gap-1">
-                  <span className="text-[8px] font-black leading-none text-slate-600">
+                  <span className="text-ui-micro font-black leading-none text-slate-600">
                     现价
                   </span>
-                  <span className="text-[9px] font-black leading-none text-slate-300">
+                  <span className="text-ui-micro font-black leading-none text-slate-300">
                     {formatCompactCurrencyOrDash(holding.lastPrice)}
                   </span>
                 </span>
                 <span className="inline-flex items-baseline gap-1">
-                  <span className="text-[8px] font-black leading-none text-slate-600">
+                  <span className="text-ui-micro font-black leading-none text-slate-600">
                     成本
                   </span>
-                  <span className="text-[9px] font-bold leading-none text-slate-500">
+                  <span className="text-ui-micro font-bold leading-none text-slate-500">
                     {formatCompactCurrencyOrDash(holding.avgPrice)}
                   </span>
                 </span>
@@ -703,12 +705,12 @@ export function TradingHoldingsSidebar({
                       metricIndex === 2 && 'justify-end'
                     )}
                   >
-                    <span className="shrink-0 text-[8px] font-black leading-none tracking-wider text-slate-600">
+                    <span className="shrink-0 text-ui-micro font-black leading-none tracking-wider text-slate-600">
                       {metric.label}
                     </span>
                     <span
                       className={cn(
-                        'min-w-0 max-w-[4.75rem] truncate font-mono text-[10px] font-bold leading-none',
+                        'min-w-0 max-w-[4.75rem] truncate font-mono text-ui-caption font-bold leading-none',
                         metric.valueClassName
                       )}
                     >
@@ -727,13 +729,13 @@ export function TradingHoldingsSidebar({
   return (
     <>
       <aside className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-        <div className="shrink-0 border-b border-white/5 px-4 py-3">
+        <div className="shrink-0 border-b border-white/5 px-ui-section py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[10px] font-black uppercase tracking-[0.24em] text-blue-400">
+              <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-blue-400">
                 Holdings
               </div>
-              <div className="mt-1 truncate text-sm font-black text-slate-100">
+              <div className="mt-1 truncate text-ui-body font-black text-slate-100">
                 持仓
               </div>
             </div>
@@ -742,7 +744,7 @@ export function TradingHoldingsSidebar({
               variant="ghost"
               size="icon"
               onClick={onRefresh}
-              className="h-8 w-8 shrink-0 rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-200"
+              className="h-control-compact w-8 shrink-0 rounded-md border border-white/10 text-slate-500 transition-colors hover:border-blue-500/30 hover:bg-blue-500/10 hover:text-blue-200"
               aria-label="刷新持仓"
               title="刷新持仓"
             >
@@ -752,20 +754,20 @@ export function TradingHoldingsSidebar({
 
           <div className="mt-3 grid grid-cols-2 gap-2">
             <div className="rounded-md border border-white/5 bg-white/[0.03] px-2.5 py-2">
-              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-600">
+              <div className="text-ui-micro font-black uppercase tracking-[0.18em] text-slate-600">
                 总资产
               </div>
-              <div className="mt-1 truncate font-mono text-[11px] font-black text-slate-200">
+              <div className="mt-1 truncate font-mono text-ui-caption font-black text-slate-200">
                 {displayTotalAsset === undefined
                   ? '读取中'
                   : formatCompactCurrency(displayTotalAsset)}
               </div>
             </div>
             <div className="rounded-md border border-white/5 bg-white/[0.03] px-2.5 py-2">
-              <div className="text-[9px] font-black uppercase tracking-[0.18em] text-slate-600">
+              <div className="text-ui-micro font-black uppercase tracking-[0.18em] text-slate-600">
                 持仓市值
               </div>
-              <div className="mt-1 truncate font-mono text-[11px] font-black text-slate-200">
+              <div className="mt-1 truncate font-mono text-ui-caption font-black text-slate-200">
                 {formatCompactCurrency(totalMarketValue)}
               </div>
             </div>
@@ -773,8 +775,8 @@ export function TradingHoldingsSidebar({
         </div>
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/5 px-4">
-            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+          <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/5 px-ui-section">
+            <span className="text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
               持仓
             </span>
             <div className="flex items-center gap-1.5">
@@ -787,7 +789,7 @@ export function TradingHoldingsSidebar({
                     aria-label="选择持仓排序"
                     title="选择持仓排序"
                     className={cn(
-                      'h-6 rounded-md border px-1.5 text-[10px] font-black transition-colors',
+                      'h-6 rounded-md border px-1.5 text-ui-caption font-black transition-colors',
                       isManualSortMode
                         ? 'border-blue-500/30 bg-blue-500/10 text-blue-200 hover:bg-blue-500/10'
                         : 'border-white/5 bg-white/[0.025] text-slate-500 hover:border-blue-500/40 hover:bg-blue-500/10 hover:text-blue-200'
@@ -800,7 +802,7 @@ export function TradingHoldingsSidebar({
                     )}
                     {selectedSortOption.shortLabel}
                     {!isManualSortMode && (
-                      <span className="ml-1 font-mono text-[9px]">
+                      <span className="ml-1 font-mono text-ui-micro">
                         {sortDirection === 'ASC' ? '↑' : '↓'}
                       </span>
                     )}
@@ -810,7 +812,7 @@ export function TradingHoldingsSidebar({
                   align="end"
                   className="w-40 border-white/10 bg-[#0b1120] text-slate-200"
                 >
-                  <DropdownMenuLabel className="px-2 py-1 text-[10px] font-black text-slate-500">
+                  <DropdownMenuLabel className="px-2 py-1 text-ui-caption font-black text-slate-500">
                     排序字段
                   </DropdownMenuLabel>
                   <DropdownMenuRadioGroup
@@ -821,7 +823,7 @@ export function TradingHoldingsSidebar({
                       <DropdownMenuRadioItem
                         key={option.id}
                         value={option.id}
-                        className="text-[11px]"
+                        className="text-ui-caption"
                       >
                         {option.label}
                       </DropdownMenuRadioItem>
@@ -830,12 +832,12 @@ export function TradingHoldingsSidebar({
                   <DropdownMenuSeparator className="bg-white/10" />
                   {isManualSortMode ? (
                     <>
-                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-black text-slate-500">
+                      <DropdownMenuLabel className="px-2 py-1 text-ui-caption font-black text-slate-500">
                         手动排序
                       </DropdownMenuLabel>
                       <DropdownMenuItem
                         onSelect={() => setIsManualSortDialogOpen(true)}
-                        className="text-[11px]"
+                        className="text-ui-caption"
                       >
                         <Settings className="h-3.5 w-3.5" />
                         编辑手动顺序
@@ -843,7 +845,7 @@ export function TradingHoldingsSidebar({
                     </>
                   ) : (
                     <>
-                      <DropdownMenuLabel className="px-2 py-1 text-[10px] font-black text-slate-500">
+                      <DropdownMenuLabel className="px-2 py-1 text-ui-caption font-black text-slate-500">
                         排序方向
                       </DropdownMenuLabel>
                       <DropdownMenuRadioGroup
@@ -852,13 +854,13 @@ export function TradingHoldingsSidebar({
                       >
                         <DropdownMenuRadioItem
                           value="DESC"
-                          className="text-[11px]"
+                          className="text-ui-caption"
                         >
                           降序优先
                         </DropdownMenuRadioItem>
                         <DropdownMenuRadioItem
                           value="ASC"
-                          className="text-[11px]"
+                          className="text-ui-caption"
                         >
                           升序优先
                         </DropdownMenuRadioItem>
@@ -867,7 +869,7 @@ export function TradingHoldingsSidebar({
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
-              <span className="font-mono text-[10px] font-bold text-slate-500">
+              <span className="font-mono text-ui-caption font-bold text-slate-500">
                 {sortedHoldings.length} 只
               </span>
             </div>
@@ -885,7 +887,7 @@ export function TradingHoldingsSidebar({
             )}
 
             {hasError && (
-              <div className="mx-2 mt-2 rounded-md border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[10px] font-bold leading-relaxed text-amber-200/80">
+              <div className="mx-2 mt-2 rounded-md border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-ui-caption font-bold leading-relaxed text-amber-200/80">
                 持仓数据读取异常，已保留当前可用数据。
               </div>
             )}
@@ -900,10 +902,10 @@ export function TradingHoldingsSidebar({
           >
             <Wallet className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs font-bold">
+              <span className="block truncate text-ui-label font-bold">
                 {accountName}
               </span>
-              <span className="mt-0.5 block truncate font-mono text-[10px] text-slate-600">
+              <span className="mt-0.5 block truncate font-mono text-ui-caption text-slate-600">
                 {displayTotalAsset === undefined
                   ? '资产读取中'
                   : formatCompactCurrency(displayTotalAsset)}
@@ -956,18 +958,18 @@ export function TradingHoldingsSidebar({
         onOpenChange={handleManualSettingsOpenChange}
       >
         <DialogContent className="border-white/10 bg-[#0b1120] p-0 text-slate-100 sm:max-w-md">
-          <DialogHeader className="border-b border-white/5 px-4 py-3">
-            <DialogTitle className="text-sm font-black text-slate-100">
+          <DialogHeader className="border-b border-white/5 px-ui-section py-3">
+            <DialogTitle className="text-ui-body font-black text-slate-100">
               设置手动排序
             </DialogTitle>
-            <DialogDescription className="text-[11px] text-slate-500">
+            <DialogDescription className="text-ui-caption text-slate-500">
               拖拽调整左侧持仓列表顺序，设置会保存在本机。
             </DialogDescription>
           </DialogHeader>
 
           <div className="max-h-[62vh] overflow-y-auto px-3 pb-3 custom-scrollbar">
             {sortedHoldings.length === 0 ? (
-              <div className="rounded-md border border-dashed border-white/10 px-4 py-8 text-center text-xs font-bold text-slate-500">
+              <div className="rounded-md border border-dashed border-white/10 px-ui-section py-ui-panel text-center text-ui-label font-bold text-slate-500">
                 暂无可排序持仓。
               </div>
             ) : (
@@ -995,23 +997,23 @@ export function TradingHoldingsSidebar({
                           holdingName={stockName}
                         >
                           <div className="flex min-w-0 items-center gap-2 rounded-md border border-white/5 bg-white/[0.025] px-2.5 py-2">
-                            <span className="w-5 shrink-0 text-right font-mono text-[10px] font-black text-slate-600">
+                            <span className="w-5 shrink-0 text-right font-mono text-ui-caption font-black text-slate-600">
                               {index + 1}
                             </span>
-                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-[#08101d] text-[9px] font-black text-slate-400">
+                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/10 bg-[#08101d] text-ui-micro font-black text-slate-400">
                               {getStockIconText(stockName)}
                             </div>
                             <div className="min-w-0 flex-1">
                               <HoldingInstrumentName
-                                className="block truncate text-xs font-black text-slate-200"
+                                className="block truncate text-ui-label font-black text-slate-200"
                                 positionName={holding.instrumentName}
                                 stockCode={stockCode}
                               />
-                              <div className="truncate font-mono text-[10px] font-bold text-slate-600">
+                              <div className="truncate font-mono text-ui-caption font-bold text-slate-600">
                                 {stockCode}
                               </div>
                             </div>
-                            <div className="shrink-0 text-right font-mono text-[10px] font-black text-slate-400">
+                            <div className="shrink-0 text-right font-mono text-ui-caption font-black text-slate-400">
                               {formatCompactCurrencyOrDash(holding.marketValue)}
                             </div>
                           </div>

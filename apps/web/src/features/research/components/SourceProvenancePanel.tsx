@@ -97,14 +97,14 @@ export function SourceProvenancePanel({
               key={item.label}
               className="rounded-md border border-white/[0.06] bg-white/[0.02] p-3"
             >
-              <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-wider text-slate-600">
+              <div className="flex items-center gap-2 text-ui-micro font-black uppercase tracking-wider text-slate-600">
                 <Icon className="h-3 w-3 text-sky-300" />
                 {item.label}
               </div>
-              <div className="mt-2 break-words font-mono text-sm font-black tabular-nums text-slate-200">
+              <div className="mt-2 break-words font-mono text-ui-body font-black tabular-nums text-slate-200">
                 {item.value}
               </div>
-              <div className="mt-1 break-words text-[9px] text-slate-600">
+              <div className="mt-1 break-words text-ui-micro text-slate-600">
                 {item.hint}
               </div>
             </article>
@@ -112,7 +112,7 @@ export function SourceProvenancePanel({
         })}
       </div>
 
-      <dl className="grid gap-x-6 gap-y-2 border-t border-white/[0.05] px-3 py-3 text-[10px] sm:grid-cols-2">
+      <dl className="grid gap-x-6 gap-y-2 border-t border-white/[0.05] px-3 py-3 text-ui-caption sm:grid-cols-2">
         <div className="flex justify-between gap-3">
           <dt className="text-slate-600">请求行情窗口</dt>
           <dd className="font-mono text-slate-400">
@@ -134,13 +134,13 @@ export function SourceProvenancePanel({
         </div>
         <div className="min-w-0 sm:col-span-2">
           <dt className="text-slate-600">Archive ledger SHA-256</dt>
-          <dd className="mt-1 break-all font-mono text-[9px] text-slate-500">
+          <dd className="mt-1 break-all font-mono text-ui-micro text-slate-500">
             {provenance.ledger_sha256 || '—'}
           </dd>
         </div>
         <div className="min-w-0 sm:col-span-2">
           <dt className="text-slate-600">分片清单 SHA-256</dt>
-          <dd className="mt-1 break-all font-mono text-[9px] text-slate-500">
+          <dd className="mt-1 break-all font-mono text-ui-micro text-slate-500">
             {provenance.selected_chunk_manifest_sha256 || '—'}
           </dd>
         </div>

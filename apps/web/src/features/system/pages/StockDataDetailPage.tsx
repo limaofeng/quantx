@@ -523,21 +523,21 @@ export function StockDataDetailPage() {
       description="基础资料、K线、财务与同步任务"
       title={`标的数据详情 ${stockCode}`}
     >
-      <div className="container mx-auto max-w-[1600px] space-y-6 pb-10">
-        <div className="flex flex-col gap-4 border-b border-slate-200 pb-4 dark:border-slate-800 lg:flex-row lg:items-end lg:justify-between">
+      <div className="studio-content-width container mx-auto space-y-ui-section pb-10">
+        <div className="flex flex-col gap-ui-section border-b border-slate-200 pb-4 dark:border-slate-800 lg:flex-row lg:items-end lg:justify-between">
           <div className="flex items-start gap-3">
             <Link href="/settings/data">
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-10 w-10 rounded-xl border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-white/5"
+                className="h-control-large w-10 rounded-panel border border-slate-200 bg-white shadow-sm dark:border-white/5 dark:bg-white/5"
               >
                 <ArrowLeft className="h-5 w-5" />
               </Button>
             </Link>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">
+                <h1 className="text-ui-display font-black tracking-tight text-slate-900 dark:text-white">
                   {instrument?.name || stockCode}
                 </h1>
                 <Badge className="rounded-md bg-slate-900 font-mono text-white dark:bg-white dark:text-slate-950">
@@ -555,7 +555,7 @@ export function StockDataDetailPage() {
                   {instrument?.isTrading ? '交易中' : '非交易'}
                 </Badge>
               </div>
-              <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+              <p className="mt-2 text-ui-body text-slate-500 dark:text-slate-400">
                 数据管理门户内的单票数据层页面：行情缓存、K线明细、财务四表与同步任务。
               </p>
             </div>
@@ -570,7 +570,7 @@ export function StockDataDetailPage() {
                 onKeyDown={event =>
                   event.key === 'Enter' && handleNavigateCode()
                 }
-                className="h-9 pl-9 text-sm"
+                className="h-9 pl-9 text-ui-body"
                 placeholder="切换标的代码"
               />
             </div>
@@ -578,7 +578,7 @@ export function StockDataDetailPage() {
               variant="outline"
               size="sm"
               onClick={handleNavigateCode}
-              className="h-9 gap-1.5"
+              className="h-control-default gap-1.5"
             >
               <Search className="h-3.5 w-3.5" />
               查询
@@ -586,7 +586,7 @@ export function StockDataDetailPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+        <div className="grid grid-cols-1 gap-ui-section md:grid-cols-2 xl:grid-cols-5">
           <MetricTile
             icon={Database}
             label="标的类型"
@@ -656,14 +656,14 @@ export function StockDataDetailPage() {
         />
 
         <Card className="overflow-hidden border-slate-200/70 shadow-sm dark:border-slate-800/70">
-          <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
+          <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02]">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <CardTitle className="flex items-center gap-2 text-base">
+                <CardTitle className="flex items-center gap-2 text-ui-title">
                   <RefreshCw className="h-4 w-4 text-indigo-500" />
                   手动同步
                 </CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription className="text-ui-label">
                   通过 Prefect 提交真实数据同步任务，运行历史可追踪。
                 </CardDescription>
               </div>
@@ -672,7 +672,7 @@ export function StockDataDetailPage() {
                   size="sm"
                   onClick={handleSyncAll}
                   disabled={isAnySyncing}
-                  className="h-8 gap-1.5 bg-indigo-600 text-xs hover:bg-indigo-700"
+                  className="h-control-compact gap-1.5 bg-indigo-600 text-ui-label hover:bg-indigo-700"
                 >
                   <RefreshCw
                     className={cn(
@@ -727,7 +727,7 @@ export function StockDataDetailPage() {
               </div>
             </div>
           </CardHeader>
-          <CardContent className="grid gap-3 p-5 md:grid-cols-3">
+          <CardContent className="grid gap-3 p-ui-section md:grid-cols-3">
             <SyncStatus
               title="基础信息"
               deploymentName={
@@ -764,23 +764,23 @@ export function StockDataDetailPage() {
           </CardContent>
         </Card>
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(420px,0.9fr)]">
+        <div className="grid grid-cols-1 gap-ui-panel xl:grid-cols-[minmax(0,1.45fr)_minmax(420px,0.9fr)]">
           <Card className="overflow-hidden border-slate-200/70 shadow-sm dark:border-slate-800/70">
-            <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
+            <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02]">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
-                  <CardTitle className="flex items-center gap-2 text-base">
+                  <CardTitle className="flex items-center gap-2 text-ui-title">
                     <CandlestickChart className="h-4 w-4 text-indigo-500" />
                     K线数据
                   </CardTitle>
-                  <CardDescription className="text-xs">
+                  <CardDescription className="text-ui-label">
                     默认日K近3年，可切换分钟周期与复权方式。
                   </CardDescription>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 gap-1.5 text-xs"
+                  className="h-control-compact gap-1.5 text-ui-label"
                   onClick={() => {
                     reloadKlines({ requestPolicy: 'network-only' });
                     reloadInstrument({ requestPolicy: 'network-only' });
@@ -796,7 +796,7 @@ export function StockDataDetailPage() {
                   value={period}
                   onValueChange={value => setPeriod(value as KLinePeriod)}
                 >
-                  <SelectTrigger className="h-9 text-xs">
+                  <SelectTrigger className="h-control-default text-ui-label">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -813,7 +813,7 @@ export function StockDataDetailPage() {
                     setDividendType(value as DividendType)
                   }
                 >
-                  <SelectTrigger className="h-9 text-xs">
+                  <SelectTrigger className="h-control-default text-ui-label">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -828,18 +828,18 @@ export function StockDataDetailPage() {
                   type="date"
                   value={startDate}
                   onChange={event => setStartDate(event.target.value)}
-                  className="h-9 text-xs"
+                  className="h-9 text-ui-label"
                 />
                 <Input
                   type="date"
                   value={endDate}
                   onChange={event => setEndDate(event.target.value)}
-                  className="h-9 text-xs"
+                  className="h-9 text-ui-label"
                 />
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="h-9 gap-1.5 text-xs"
+                  className="h-control-default gap-1.5 text-ui-label"
                   onClick={handleSyncKLines}
                   disabled={marketSync.isSyncing}
                 >
@@ -868,21 +868,21 @@ export function StockDataDetailPage() {
           </Card>
 
           <Card className="overflow-hidden border-slate-200/70 shadow-sm dark:border-slate-800/70">
-            <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
+            <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02]">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <CardTitle className="flex items-center gap-2 text-base">
+                  <CardTitle className="flex items-center gap-2 text-ui-title">
                     <FileText className="h-4 w-4 text-red-600" />
                     财务数据
                   </CardTitle>
-                  <CardDescription className="text-xs">
+                  <CardDescription className="text-ui-label">
                     摘要来自最新报告期，明细按报告期倒序展示。
                   </CardDescription>
                 </div>
                 <Button
                   variant="outline"
                   size="sm"
-                  className="h-8 gap-1.5 text-xs"
+                  className="h-control-compact gap-1.5 text-ui-label"
                   onClick={() =>
                     reloadFinancial({ requestPolicy: 'network-only' })
                   }
@@ -892,9 +892,9 @@ export function StockDataDetailPage() {
                 </Button>
               </div>
             </CardHeader>
-            <CardContent className="space-y-4 p-5">
+            <CardContent className="space-y-ui-section p-ui-section">
               {financialLoading ? (
-                <div className="flex h-40 items-center justify-center text-sm text-slate-400">
+                <div className="flex h-40 items-center justify-center text-ui-body text-slate-400">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   加载财务数据
                 </div>
@@ -977,13 +977,13 @@ export function StockDataDetailPage() {
         </div>
 
         <Card className="overflow-hidden border-slate-200/70 shadow-sm dark:border-slate-800/70">
-          <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
-            <CardTitle className="flex items-center gap-2 text-base">
+          <CardHeader className="border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02]">
+            <CardTitle className="flex items-center gap-2 text-ui-title">
               <WalletCards className="h-4 w-4 text-emerald-500" />
               基础资料与数据覆盖
             </CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
+          <CardContent className="grid gap-3 p-ui-section md:grid-cols-2 xl:grid-cols-4">
             <InfoCell label="名称" value={instrument?.name || '--'} />
             <InfoCell label="市场" value={instrument?.market || '--'} />
             <InfoCell label="昨收" value={formatMoney(instrument?.preClose)} />
@@ -1032,14 +1032,14 @@ function DataAssetMatrix({
   assets: DataAssetStatus[];
 }) {
   return (
-    <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-sm dark:border-slate-800/70 dark:bg-slate-950">
-      <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02] lg:flex-row lg:items-center lg:justify-between">
+    <section className="overflow-hidden rounded-panel border border-slate-200/70 bg-white shadow-sm dark:border-slate-800/70 dark:bg-slate-950">
+      <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02] lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white">
+          <h2 className="flex items-center gap-2 text-ui-title font-bold text-slate-900 dark:text-white">
             <Layers3 className="h-4 w-4 text-indigo-500" />
             数据资产状态
           </h2>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <p className="mt-1 text-ui-label text-slate-500 dark:text-slate-400">
             单票基础资料、行情快照、K线缓存与财务四表的当前可用情况。
           </p>
         </div>
@@ -1050,7 +1050,7 @@ function DataAssetMatrix({
               type="button"
               size="sm"
               variant="outline"
-              className="h-8 gap-1.5 text-xs"
+              className="h-control-compact gap-1.5 text-ui-label"
               disabled={action.disabled}
               onClick={action.onClick}
             >
@@ -1064,27 +1064,27 @@ function DataAssetMatrix({
           ))}
         </div>
       </div>
-      <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 p-ui-section md:grid-cols-2 xl:grid-cols-4">
         {assets.map(asset => {
           const Icon = asset.icon;
           return (
             <div
               key={asset.label}
-              className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]"
+              className="rounded-panel border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  <div className="flex items-center gap-2 text-ui-caption font-black uppercase tracking-widest text-slate-400">
                     <Icon className="h-3.5 w-3.5" />
                     {asset.label}
                   </div>
-                  <div className="mt-2 truncate text-sm font-black text-slate-900 dark:text-white">
+                  <div className="mt-2 truncate text-ui-body font-black text-slate-900 dark:text-white">
                     {asset.value}
                   </div>
                 </div>
                 <StatusBadge label={asset.statusLabel} tone={asset.status} />
               </div>
-              <div className="mt-2 truncate text-xs text-slate-500 dark:text-slate-400">
+              <div className="mt-2 truncate text-ui-label text-slate-500 dark:text-slate-400">
                 {asset.meta}
               </div>
             </div>
@@ -1114,11 +1114,11 @@ function KLineCoveragePanel({
 }) {
   const visibleRanges = coverage.missingRanges.slice(0, 6);
   return (
-    <div className="border-b border-slate-100 p-5 dark:border-slate-800">
+    <div className="border-b border-slate-100 p-ui-section dark:border-slate-800">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-black text-slate-900 dark:text-white">
+            <h3 className="flex items-center gap-2 text-ui-body font-black text-slate-900 dark:text-white">
               <CalendarDays className="h-4 w-4 text-indigo-500" />
               K线覆盖诊断
             </h3>
@@ -1135,7 +1135,7 @@ function KLineCoveragePanel({
               </Badge>
             )}
           </div>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <p className="mt-1 text-ui-label text-slate-500 dark:text-slate-400">
             {periodLabel(period)} · {dividendLabel(dividendType)} ·
             交易日存在性检查
           </p>
@@ -1143,7 +1143,7 @@ function KLineCoveragePanel({
         <Button
           type="button"
           size="sm"
-          className="h-8 gap-1.5 bg-indigo-600 text-xs hover:bg-indigo-700"
+          className="h-control-compact gap-1.5 bg-indigo-600 text-ui-label hover:bg-indigo-700"
           disabled={syncing}
           onClick={onSyncAll}
         >
@@ -1180,7 +1180,7 @@ function KLineCoveragePanel({
         />
       </div>
 
-      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02] custom-scrollbar">
+      <div className="mt-4 overflow-x-auto rounded-panel border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02] custom-scrollbar">
         <div
           className="grid min-w-full gap-1"
           style={{
@@ -1205,7 +1205,7 @@ function KLineCoveragePanel({
             ))
           )}
         </div>
-        <div className="mt-2 flex items-center justify-between gap-3 text-[10px] font-bold text-slate-500">
+        <div className="mt-2 flex items-center justify-between gap-3 text-ui-caption font-bold text-slate-500">
           <span>左侧为开始日期，右侧为结束日期</span>
           <span>
             {calendarLoading ? '交易日历加载中' : `${coverage.records} 条样本`}
@@ -1214,7 +1214,7 @@ function KLineCoveragePanel({
       </div>
 
       {coverage.queryCapped && (
-        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-xs font-medium leading-relaxed text-amber-700 dark:text-amber-300">
+        <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-ui-label font-medium leading-relaxed text-amber-700 dark:text-amber-300">
           <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5" />
           当前查询返回数量达到 {KLINE_QUERY_LIMIT}
           条上限，覆盖率可能只代表已加载窗口。
@@ -1223,17 +1223,17 @@ function KLineCoveragePanel({
 
       <div className="mt-4">
         <div className="mb-2 flex items-center justify-between gap-3">
-          <div className="text-xs font-black uppercase tracking-widest text-slate-400">
+          <div className="text-ui-label font-black uppercase tracking-widest text-slate-400">
             Missing Ranges
           </div>
           {coverage.missingRanges.length > visibleRanges.length && (
-            <div className="text-[10px] font-bold text-slate-500">
+            <div className="text-ui-caption font-bold text-slate-500">
               仅显示前 {visibleRanges.length} 段
             </div>
           )}
         </div>
         {visibleRanges.length === 0 ? (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-ui-label font-bold text-emerald-700 dark:text-emerald-300">
             <CheckCircle2 className="h-3.5 w-3.5" />
             当前区间未发现交易日级缺口
           </div>
@@ -1245,10 +1245,10 @@ function KLineCoveragePanel({
                 className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-900"
               >
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-xs font-black text-slate-900 dark:text-white">
+                  <div className="truncate font-mono text-ui-label font-black text-slate-900 dark:text-white">
                     {formatRangeLabel(range)}
                   </div>
-                  <div className="text-[10px] font-bold text-slate-500">
+                  <div className="text-ui-caption font-bold text-slate-500">
                     {range.count} 个交易日
                   </div>
                 </div>
@@ -1256,7 +1256,7 @@ function KLineCoveragePanel({
                   type="button"
                   size="sm"
                   variant="ghost"
-                  className="h-7 shrink-0 gap-1.5 px-2 text-xs"
+                  className="h-control-compact shrink-0 gap-1.5 px-2 text-ui-label"
                   disabled={syncing}
                   onClick={() => onSyncRange(range)}
                 >
@@ -1289,12 +1289,12 @@ function CoverageStat({
 }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
-      <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+      <div className="text-ui-caption font-black uppercase tracking-widest text-slate-400">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-lg font-black text-slate-900 dark:text-white',
+          'mt-1 truncate font-mono text-ui-heading font-black text-slate-900 dark:text-white',
           tone === 'good' && 'text-emerald-600 dark:text-emerald-400',
           tone === 'warning' && 'text-amber-600 dark:text-amber-400',
           tone === 'danger' && 'text-red-600 dark:text-red-400'
@@ -1303,7 +1303,7 @@ function CoverageStat({
         {value}
       </div>
       {subValue && (
-        <div className="truncate text-xs text-slate-500">{subValue}</div>
+        <div className="truncate text-ui-label text-slate-500">{subValue}</div>
       )}
     </div>
   );
@@ -1340,18 +1340,18 @@ function MetricTile({
   tone?: 'amber' | 'blue' | 'red' | 'green' | 'marketUp' | 'marketDown';
 }) {
   return (
-    <Card className="border-slate-200/70 p-4 shadow-sm dark:border-slate-800/70">
+    <Card className="border-slate-200/70 p-ui-section shadow-sm dark:border-slate-800/70">
       <div className="flex items-center gap-3">
-        <div className="rounded-xl bg-slate-100 p-2 text-slate-600 dark:bg-white/5 dark:text-slate-300">
+        <div className="rounded-panel bg-slate-100 p-2 text-slate-600 dark:bg-white/5 dark:text-slate-300">
           <Icon className="h-5 w-5" />
         </div>
         <div className="min-w-0">
-          <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+          <div className="text-ui-caption font-black uppercase tracking-widest text-slate-400">
             {label}
           </div>
           <div
             className={cn(
-              'truncate text-lg font-black text-slate-900 dark:text-white',
+              'truncate text-ui-heading font-black text-slate-900 dark:text-white',
               tone === 'marketUp' && 'text-market-up',
               tone === 'marketDown' && 'text-market-down',
               tone === 'red' && 'text-red-600 dark:text-red-400',
@@ -1363,7 +1363,7 @@ function MetricTile({
             {value}
           </div>
           {subValue && (
-            <div className="truncate text-xs text-slate-500 dark:text-slate-400">
+            <div className="truncate text-ui-label text-slate-500 dark:text-slate-400">
               {subValue}
             </div>
           )}
@@ -1391,7 +1391,7 @@ function SyncButton({
       <Button
         variant="ghost"
         size="sm"
-        className="h-7 gap-1.5 px-2 text-xs"
+        className="h-control-compact gap-1.5 px-2 text-ui-label"
         disabled={syncing}
         onClick={onSync}
       >
@@ -1405,7 +1405,7 @@ function SyncButton({
       <Button
         variant="ghost"
         size="sm"
-        className="h-7 px-2 text-xs text-slate-500"
+        className="h-control-compact px-2 text-ui-label text-slate-500"
         onClick={onHistory}
       >
         历史
@@ -1413,7 +1413,7 @@ function SyncButton({
       {runId && (
         <Badge
           variant="secondary"
-          className="h-6 rounded-md font-mono text-[10px]"
+          className="h-6 rounded-md font-mono text-ui-caption"
         >
           {runId.slice(0, 8)}
         </Badge>
@@ -1449,9 +1449,9 @@ function SyncStatus({
   const failed =
     ['Failed', 'Crashed'].includes(status || '') || Boolean(isStale);
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
+    <div className="rounded-panel border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
       <div className="flex items-center justify-between gap-2">
-        <div className="font-bold text-sm text-slate-800 dark:text-slate-100">
+        <div className="font-bold text-ui-body text-slate-800 dark:text-slate-100">
           {title}
         </div>
         <Badge
@@ -1475,7 +1475,7 @@ function SyncStatus({
           {running && isStale ? 'Running · 卡住' : status || 'Ready'}
         </Badge>
       </div>
-      <div className="mt-2 text-[11px] text-slate-500">
+      <div className="mt-2 text-ui-caption text-slate-500">
         <div className="truncate font-mono">{deploymentName}</div>
         {isStale && staleReason ? <div>{staleReason}</div> : null}
         <div>上次同步：{formatDateTime(lastRunTime)}</div>
@@ -1581,7 +1581,7 @@ function KLinePreviewChart({
     <div className="relative border-b border-slate-100 dark:border-slate-800">
       <div ref={containerRef} className="h-[360px] w-full" />
       {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white/60 text-sm text-slate-500 backdrop-blur-sm dark:bg-slate-950/60">
+        <div className="absolute inset-0 flex items-center justify-center bg-white/60 text-ui-body text-slate-500 backdrop-blur-sm dark:bg-slate-950/60">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           加载 K线
         </div>
@@ -1589,7 +1589,7 @@ function KLinePreviewChart({
       {!loading && data.length === 0 && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400">
           <CandlestickChart className="mb-2 h-8 w-8 opacity-30" />
-          <div className="text-sm font-bold">暂无 K线数据</div>
+          <div className="text-ui-body font-bold">暂无 K线数据</div>
         </div>
       )}
     </div>
@@ -1618,37 +1618,37 @@ function KLineTable({
     <Table wrapperClassName="max-h-[340px]">
       <TableHeader className="sticky top-0 z-10 bg-white dark:bg-slate-950">
         <TableRow>
-          <TableHead className="h-9 text-xs">时间</TableHead>
-          <TableHead className="h-9 text-right text-xs">开</TableHead>
-          <TableHead className="h-9 text-right text-xs">高</TableHead>
-          <TableHead className="h-9 text-right text-xs">低</TableHead>
-          <TableHead className="h-9 text-right text-xs">收</TableHead>
-          <TableHead className="h-9 text-right text-xs">成交量</TableHead>
-          <TableHead className="h-9 text-right text-xs">成交额</TableHead>
+          <TableHead className="h-9 text-ui-label">时间</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">开</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">高</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">低</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">收</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">成交量</TableHead>
+          <TableHead className="h-9 text-right text-ui-label">成交额</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {data.map(item => (
           <TableRow key={`${item.time}-${item.close}`}>
-            <TableCell className="py-2 font-mono text-xs">
+            <TableCell className="py-2 font-mono text-ui-label">
               {formatDateTime(item.time)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs">
+            <TableCell className="py-2 text-right font-mono text-ui-label">
               {formatNumber(item.open, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs text-market-up">
+            <TableCell className="py-2 text-right font-mono text-ui-label text-market-up">
               {formatNumber(item.high, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs text-market-down">
+            <TableCell className="py-2 text-right font-mono text-ui-label text-market-down">
               {formatNumber(item.low, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs">
+            <TableCell className="py-2 text-right font-mono text-ui-label">
               {formatNumber(item.close, 2)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs">
+            <TableCell className="py-2 text-right font-mono text-ui-label">
               {formatNumber(item.volume)}
             </TableCell>
-            <TableCell className="py-2 text-right font-mono text-xs">
+            <TableCell className="py-2 text-right font-mono text-ui-label">
               {formatCompactMoney(item.amount)}
             </TableCell>
           </TableRow>
@@ -1666,11 +1666,11 @@ function FinancialMetric({
   value?: number | null;
 }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
-      <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+    <div className="rounded-panel border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
+      <div className="text-ui-caption font-black uppercase tracking-widest text-slate-400">
         {label}
       </div>
-      <div className="mt-1 truncate font-mono text-lg font-black text-slate-900 dark:text-white">
+      <div className="mt-1 truncate font-mono text-ui-heading font-black text-slate-900 dark:text-white">
         {formatCompactMoney(value)}
       </div>
     </div>
@@ -1698,7 +1698,7 @@ function FinancialRows({
       <TableHeader className="sticky top-0 z-10 bg-white dark:bg-slate-950">
         <TableRow>
           {columns.map(([, label]) => (
-            <TableHead key={label} className="h-9 text-xs">
+            <TableHead key={label} className="h-9 text-ui-label">
               {label}
             </TableHead>
           ))}
@@ -1708,7 +1708,7 @@ function FinancialRows({
         {rows.map((row, index) => (
           <TableRow key={`${String(row.reportDate)}-${index}`}>
             {columns.map(([key]) => (
-              <TableCell key={key} className="py-2 font-mono text-xs">
+              <TableCell key={key} className="py-2 font-mono text-ui-label">
                 {key.toLowerCase().includes('date')
                   ? String(row[key] ?? '--')
                   : formatCompactMoney(row[key] as number | null | undefined)}
@@ -1723,11 +1723,11 @@ function FinancialRows({
 
 function InfoCell({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
-      <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+    <div className="rounded-panel border border-slate-200 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-white/[0.02]">
+      <div className="text-ui-caption font-black uppercase tracking-widest text-slate-400">
         {label}
       </div>
-      <div className="mt-1 truncate text-sm font-bold text-slate-800 dark:text-slate-100">
+      <div className="mt-1 truncate text-ui-body font-bold text-slate-800 dark:text-slate-100">
         {value}
       </div>
     </div>
@@ -1747,14 +1747,14 @@ function EmptyState({
     <div
       className={cn(
         'flex flex-col items-center justify-center text-center text-slate-400',
-        compact ? 'py-10' : 'min-h-[220px] p-8'
+        compact ? 'py-ui-empty' : 'min-h-[220px] p-ui-section'
       )}
     >
       <Table2 className="mb-2 h-8 w-8 opacity-20" />
-      <div className="text-sm font-bold text-slate-500 dark:text-slate-300">
+      <div className="text-ui-body font-bold text-slate-500 dark:text-slate-300">
         {title}
       </div>
-      <div className="mt-1 max-w-sm text-xs">{description}</div>
+      <div className="mt-1 max-w-sm text-ui-label">{description}</div>
     </div>
   );
 }

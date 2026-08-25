@@ -26,6 +26,8 @@ import {
 import { useMutation, useQuery, useSubscription } from 'urql';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { NativeSelect } from '@/components/ui/native-select';
 import { useToast } from '@/hooks/use-toast';
 import { createClientId } from '@/utils/clientId';
 import { cn } from '@/utils/cn';
@@ -111,19 +113,21 @@ function ReplayMetric({
 }) {
   return (
     <div className="rounded-md border border-white/10 bg-white/5 p-3">
-      <div className="text-[10px] font-black uppercase tracking-widest text-slate-600">
+      <div className="text-ui-caption font-black uppercase tracking-widest text-slate-600">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 font-mono text-lg font-black tabular-nums text-slate-100',
+          'mt-1 font-mono text-ui-heading font-black tabular-nums text-slate-100',
           valueTone
         )}
       >
         {value}
       </div>
       {note ? (
-        <div className="mt-1 text-[10px] font-bold text-slate-600">{note}</div>
+        <div className="mt-1 text-ui-caption font-bold text-slate-600">
+          {note}
+        </div>
       ) : null}
     </div>
   );
@@ -363,12 +367,12 @@ export function ExitPlanReplayPanel({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-black text-slate-100">
+              <h2 className="text-ui-title font-black text-slate-100">
                 {replay?.instrumentCode || '卖出计划'}回放
               </h2>
               <span
                 className={cn(
-                  'rounded-sm border px-2 py-0.5 text-[10px] font-black',
+                  'rounded-sm border px-2 py-0.5 text-ui-caption font-black',
                   replay?.status === 'COMPLETED'
                     ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
                     : replay?.errorMessage
@@ -379,7 +383,7 @@ export function ExitPlanReplayPanel({
                 {replay?.status || 'LOADING'}
               </span>
             </div>
-            <p className="mt-1 text-xs font-bold text-slate-500">
+            <p className="mt-1 text-ui-label font-bold text-slate-500">
               {replay
                 ? `${formatDateTime(replay.startTime)} — ${formatDateTime(replay.endTime)}`
                 : '读取回放运行中'}
@@ -414,15 +418,15 @@ export function ExitPlanReplayPanel({
         </div>
 
         {replayResult.error || replay?.errorMessage ? (
-          <div className="mt-3 flex gap-2 rounded-md border border-rose-400/20 bg-rose-500/10 p-3 text-xs font-bold text-rose-100">
+          <div className="mt-3 flex gap-2 rounded-md border border-rose-400/20 bg-rose-500/10 p-3 text-ui-label font-bold text-rose-100">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {replayResult.error?.message || replay?.errorMessage}
           </div>
         ) : null}
 
         {active ? (
-          <section className="mt-3 rounded-md border border-cyan-400/20 bg-cyan-500/5 p-4">
-            <div className="flex items-center justify-between text-xs font-black text-cyan-100">
+          <section className="mt-3 rounded-md border border-cyan-400/20 bg-cyan-500/5 p-ui-section">
+            <div className="flex items-center justify-between text-ui-label font-black text-cyan-100">
               <span className="flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 严格 Tick 回放进行中
@@ -437,7 +441,7 @@ export function ExitPlanReplayPanel({
                 style={{ width: `${replay?.progressPct ?? 0}%` }}
               />
             </div>
-            <p className="mt-2 text-[11px] font-bold text-slate-500">
+            <p className="mt-2 text-ui-caption font-bold text-slate-500">
               已处理至 {formatDateTime(replay?.processedUntil)}
               ；运行结束前不会强制卖出剩余持仓。
             </p>
@@ -476,11 +480,11 @@ export function ExitPlanReplayPanel({
 
             <section className="mt-3 rounded-md border border-white/10 bg-slate-950/80 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-black text-slate-200">
+                <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                   <BarChart3 className="h-4 w-4 text-cyan-300" />
                   三路径净值对比
                 </div>
-                <span className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
+                <span className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-500">
                   <ShieldCheck className="h-3.5 w-3.5 text-emerald-300" />
                   {replay?.dataQualityMessage}
                 </span>
@@ -547,28 +551,28 @@ export function ExitPlanReplayPanel({
 
             <div className="mt-3 grid gap-3 xl:grid-cols-3">
               <section className="rounded-md border border-white/10 bg-slate-950/80 xl:col-span-2">
-                <div className="border-b border-white/5 px-3 py-2.5 text-xs font-black text-slate-200">
+                <div className="border-b border-white/5 px-3 py-2.5 text-ui-label font-black text-slate-200">
                   触发与卖出事件
                 </div>
                 <div className="max-h-96 overflow-auto custom-scrollbar">
                   {(replay?.events ?? []).length === 0 ? (
-                    <div className="p-8 text-center text-xs font-bold text-slate-600">
+                    <div className="p-ui-section text-center text-ui-label font-bold text-slate-600">
                       区间内未触发卖出规则
                     </div>
                   ) : (
                     replay?.events.map(event => (
                       <div
-                        className="flex gap-3 border-b border-white/5 px-3 py-2.5 text-xs"
+                        className="flex gap-3 border-b border-white/5 px-3 py-2.5 text-ui-label"
                         key={`${event.sequence}-${event.timestamp}`}
                       >
-                        <span className="w-32 shrink-0 font-mono text-[10px] text-slate-600">
+                        <span className="w-32 shrink-0 font-mono text-ui-caption text-slate-600">
                           {formatDateTime(event.timestamp)}
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block font-black text-slate-200">
                             {event.ruleType || event.eventType}
                           </span>
-                          <span className="mt-0.5 block truncate text-[10px] font-bold text-slate-500">
+                          <span className="mt-0.5 block truncate text-ui-caption font-bold text-slate-500">
                             {event.reason}
                           </span>
                         </span>
@@ -576,7 +580,7 @@ export function ExitPlanReplayPanel({
                           <span className="block">
                             {formatMoney(event.price)}
                           </span>
-                          <span className="block text-[10px] text-slate-600">
+                          <span className="block text-ui-caption text-slate-600">
                             {event.volume.toLocaleString()} 股
                           </span>
                         </span>
@@ -585,7 +589,7 @@ export function ExitPlanReplayPanel({
                   )}
                 </div>
                 {(replay?.actualSellReferences ?? []).length > 0 ? (
-                  <div className="border-t border-amber-400/20 bg-amber-400/5 p-3 text-[10px] font-bold text-amber-100">
+                  <div className="border-t border-amber-400/20 bg-amber-400/5 p-3 text-ui-caption font-bold text-amber-100">
                     区间真实历史卖出仅作参考：
                     {replay?.actualSellReferences.map(item => (
                       <span className="ml-2 font-mono" key={item.orderId}>
@@ -599,15 +603,15 @@ export function ExitPlanReplayPanel({
 
               <div className="grid content-start gap-3">
                 <section className="rounded-md border border-emerald-400/20 bg-emerald-400/5 p-3">
-                  <div className="flex items-center gap-2 text-xs font-black text-emerald-100">
+                  <div className="flex items-center gap-2 text-ui-label font-black text-emerald-100">
                     <CheckCircle2 className="h-4 w-4" /> 区间事实结论
                   </div>
-                  <p className="mt-2 text-xs font-bold leading-6 text-slate-300">
+                  <p className="mt-2 text-ui-label font-bold leading-6 text-slate-300">
                     {summary.conclusion}
                   </p>
                 </section>
                 <section className="rounded-md border border-white/10 bg-slate-950/80 p-3">
-                  <div className="text-xs font-black text-slate-200">
+                  <div className="text-ui-label font-black text-slate-200">
                     卖出后观察
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2">
@@ -616,12 +620,12 @@ export function ExitPlanReplayPanel({
                         className="rounded border border-white/5 p-2"
                         key={item.tradingDays}
                       >
-                        <div className="text-[10px] font-bold text-slate-600">
+                        <div className="text-ui-caption font-bold text-slate-600">
                           +{item.tradingDays} 交易日
                         </div>
                         <div
                           className={cn(
-                            'mt-1 font-mono text-xs font-black',
+                            'mt-1 font-mono text-ui-label font-black',
                             percentTone(item.returnAfterExitPct)
                           )}
                         >
@@ -633,8 +637,8 @@ export function ExitPlanReplayPanel({
                     ))}
                   </div>
                 </section>
-                <section className="rounded-md border border-white/10 bg-slate-950/80 p-3 text-[11px] font-bold text-slate-500">
-                  <div className="flex items-center gap-2 text-xs font-black text-slate-200">
+                <section className="rounded-md border border-white/10 bg-slate-950/80 p-3 text-ui-caption font-bold text-slate-500">
+                  <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
                     <FileJson2 className="h-4 w-4 text-cyan-300" /> 可审计报告
                   </div>
                   <p className="mt-2 break-all">
@@ -655,10 +659,10 @@ export function ExitPlanReplayPanel({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
       <div>
-        <h2 className="flex items-center gap-2 text-base font-black text-slate-100">
+        <h2 className="flex items-center gap-2 text-ui-title font-black text-slate-100">
           <FlaskConical className="h-4 w-4 text-cyan-300" /> 卖出计划回放测试
         </h2>
-        <p className="mt-1 text-xs font-bold text-slate-500">
+        <p className="mt-1 text-ui-label font-bold text-slate-500">
           使用历史 Tick 逐笔重演卖出计划，同时比较继续持有和起点立即卖出。
         </p>
       </div>
@@ -666,8 +670,8 @@ export function ExitPlanReplayPanel({
       <div className="mt-3 grid gap-3 xl:grid-cols-3">
         <div className="grid content-start gap-3 xl:col-span-2">
           <section className="rounded-md border border-white/10 bg-slate-950/80 p-3">
-            <div className="flex items-center gap-2 text-xs font-black text-slate-200">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-[10px] text-cyan-200">
+            <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-ui-caption text-cyan-200">
                 1
               </span>
               选择卖出计划版本
@@ -687,25 +691,25 @@ export function ExitPlanReplayPanel({
                   }}
                   type="button"
                 >
-                  <span className="block text-xs font-black text-slate-100">
+                  <span className="block text-ui-label font-black text-slate-100">
                     当前未保存草稿
                   </span>
-                  <span className="mt-1 block text-[10px] font-bold text-cyan-200">
+                  <span className="mt-1 block text-ui-caption font-bold text-cyan-200">
                     启动时冻结为一次性快照
                   </span>
                 </button>
               ) : null}
               <label
                 className={cn(
-                  'grid gap-1 rounded-md border p-3 text-xs font-bold',
+                  'grid gap-1 rounded-md border p-3 text-ui-label font-bold',
                   !useDraft
                     ? 'border-cyan-400/20 bg-cyan-400/10 text-slate-300'
                     : 'border-white/10 text-slate-500'
                 )}
               >
                 已保存的不可变计划版本
-                <select
-                  className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-100"
+                <NativeSelect
+                  className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-100"
                   onChange={event => {
                     setUseDraft(false);
                     setSelectedPlanId(event.target.value);
@@ -723,15 +727,15 @@ export function ExitPlanReplayPanel({
                       {plan.status}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
             </div>
             {preparationResult.error ? (
-              <p className="mt-2 text-xs font-bold text-rose-300">
+              <p className="mt-2 text-ui-label font-bold text-rose-300">
                 {preparationResult.error.message}
               </p>
             ) : preparation ? (
-              <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-bold text-slate-500">
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-ui-caption font-bold text-slate-500">
                 <span className="rounded-sm bg-white/5 px-2 py-1 font-mono text-slate-300">
                   {preparation.instrumentCode}
                 </span>
@@ -743,7 +747,7 @@ export function ExitPlanReplayPanel({
                 ) : null}
               </div>
             ) : preparationResult.fetching ? (
-              <div className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-500">
+              <div className="mt-3 flex items-center gap-2 text-ui-label font-bold text-slate-500">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 读取计划版本
               </div>
@@ -751,8 +755,8 @@ export function ExitPlanReplayPanel({
           </section>
 
           <section className="rounded-md border border-white/10 bg-slate-950/80 p-3">
-            <div className="flex items-center gap-2 text-xs font-black text-slate-200">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-[10px] text-cyan-200">
+            <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-ui-caption text-cyan-200">
                 2
               </span>
               确定历史持仓起点
@@ -761,7 +765,7 @@ export function ExitPlanReplayPanel({
               {(['BUY_FILLS', 'MANUAL_SNAPSHOT'] as const).map(mode => (
                 <button
                   className={cn(
-                    'h-8 rounded-md border px-3 text-xs font-black',
+                    'h-8 rounded-md border px-3 text-ui-label font-black',
                     originMode === mode
                       ? 'border-cyan-400/20 bg-cyan-400/10 text-cyan-100'
                       : 'border-white/10 text-slate-500'
@@ -777,12 +781,12 @@ export function ExitPlanReplayPanel({
             {originMode === 'BUY_FILLS' ? (
               <div className="mt-3 overflow-x-auto rounded-md border border-white/5">
                 {(preparation?.buyFills ?? []).length === 0 ? (
-                  <div className="p-6 text-center text-xs font-bold text-slate-600">
+                  <div className="p-ui-panel text-center text-ui-label font-bold text-slate-600">
                     没有可用买入成交，请改用手工历史快照
                   </div>
                 ) : (
-                  <table className="w-full text-left text-xs">
-                    <thead className="bg-white/5 text-[10px] font-black text-slate-600">
+                  <table className="w-full text-left text-ui-label">
+                    <thead className="bg-white/5 text-ui-caption font-black text-slate-600">
                       <tr>
                         <th className="px-3 py-2">选择</th>
                         <th className="px-3 py-2">成交时间</th>
@@ -813,7 +817,7 @@ export function ExitPlanReplayPanel({
                               type="checkbox"
                             />
                           </td>
-                          <td className="px-3 py-2 font-mono text-[10px] text-slate-500">
+                          <td className="px-3 py-2 font-mono text-ui-caption text-slate-500">
                             {formatDateTime(fill.orderTime)}
                           </td>
                           <td className="px-3 py-2 font-mono text-slate-300">
@@ -834,36 +838,36 @@ export function ExitPlanReplayPanel({
                   </table>
                 )}
                 {selectedOrderIds.length > 1 ? (
-                  <div className="border-t border-cyan-400/10 bg-cyan-400/5 px-3 py-2 text-[10px] font-bold text-cyan-100">
+                  <div className="border-t border-cyan-400/10 bg-cyan-400/5 px-3 py-2 text-ui-caption font-bold text-cyan-100">
                     选择多笔成交时，计划从最后一笔成交完成后激活。
                   </div>
                 ) : null}
               </div>
             ) : (
               <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <label className="grid gap-1 text-xs font-bold text-slate-500">
+                <label className="grid gap-1 text-ui-label font-bold text-slate-500">
                   激活时间
-                  <input
-                    className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
+                  <Input
+                    className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
                     onChange={event => setManualActivation(event.target.value)}
                     type="datetime-local"
                     value={manualActivation}
                   />
                 </label>
-                <label className="grid gap-1 text-xs font-bold text-slate-500">
+                <label className="grid gap-1 text-ui-label font-bold text-slate-500">
                   历史持仓数量
-                  <input
-                    className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
+                  <Input
+                    className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
                     min={1}
                     onChange={event => setManualVolume(event.target.value)}
                     type="number"
                     value={manualVolume}
                   />
                 </label>
-                <label className="grid gap-1 text-xs font-bold text-slate-500">
+                <label className="grid gap-1 text-ui-label font-bold text-slate-500">
                   每股全成本
-                  <input
-                    className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
+                  <Input
+                    className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
                     min={0}
                     onChange={event => setManualUnitCost(event.target.value)}
                     step="0.001"
@@ -876,27 +880,27 @@ export function ExitPlanReplayPanel({
           </section>
 
           <section className="rounded-md border border-white/10 bg-slate-950/80 p-3">
-            <div className="flex items-center gap-2 text-xs font-black text-slate-200">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-[10px] text-cyan-200">
+            <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-cyan-400/10 font-mono text-ui-caption text-cyan-200">
                 3
               </span>
               设置历史区间与成本
             </div>
             <div className="mt-3 grid gap-3 md:grid-cols-3">
-              <label className="grid gap-1 text-xs font-bold text-slate-500">
+              <label className="grid gap-1 text-ui-label font-bold text-slate-500">
                 开始交易日
-                <input
-                  className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
+                <Input
+                  className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
                   max={endDate}
                   onChange={event => setStartDate(event.target.value)}
                   type="date"
                   value={startDate}
                 />
               </label>
-              <label className="grid gap-1 text-xs font-bold text-slate-500">
+              <label className="grid gap-1 text-ui-label font-bold text-slate-500">
                 结束交易日
-                <input
-                  className="h-9 rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
+                <Input
+                  className="h-control-default rounded border border-white/10 bg-slate-950 px-2 font-mono text-slate-200"
                   max={dateInputValue(yesterday)}
                   min={startDate}
                   onChange={event => setEndDate(event.target.value)}
@@ -907,7 +911,7 @@ export function ExitPlanReplayPanel({
               <div className="flex items-end gap-1.5">
                 {[5, 10, 20].map(days => (
                   <Button
-                    className="h-9 px-2.5 text-[10px]"
+                    className="h-control-default px-2.5 text-ui-caption"
                     key={days}
                     onClick={() => setQuickWindow(days)}
                     type="button"
@@ -919,7 +923,7 @@ export function ExitPlanReplayPanel({
               </div>
             </div>
             <button
-              className="mt-3 flex items-center gap-2 text-[10px] font-black text-slate-500 hover:text-slate-200"
+              className="mt-3 flex items-center gap-2 text-ui-caption font-black text-slate-500 hover:text-slate-200"
               onClick={() => setShowCosts(current => !current)}
               type="button"
             >
@@ -936,12 +940,12 @@ export function ExitPlanReplayPanel({
                   ['滑点率', slippageRate, setSlippageRate],
                 ].map(([label, value, setter]) => (
                   <label
-                    className="grid gap-1 text-[10px] font-bold text-slate-600"
+                    className="grid gap-1 text-ui-caption font-bold text-slate-600"
                     key={String(label)}
                   >
                     {String(label)}
-                    <input
-                      className="h-8 rounded border border-white/10 bg-slate-950 px-2 font-mono text-xs text-slate-300"
+                    <Input
+                      className="h-control-compact rounded border border-white/10 bg-slate-950 px-2 font-mono text-ui-label text-slate-300"
                       onChange={event =>
                         (
                           setter as React.Dispatch<React.SetStateAction<string>>
@@ -960,13 +964,14 @@ export function ExitPlanReplayPanel({
 
         <aside className="grid content-start gap-3">
           <section className="rounded-md border border-cyan-400/20 bg-cyan-500/5 p-3">
-            <div className="flex items-center gap-2 text-xs font-black text-cyan-100">
+            <div className="flex items-center gap-2 text-ui-label font-black text-cyan-100">
               <ShieldCheck className="h-4 w-4" />
               回放口径
             </div>
-            <ul className="mt-2 grid gap-2 text-[11px] font-bold leading-5 text-slate-500">
+            <ul className="mt-2 grid gap-2 text-ui-caption font-bold leading-5 text-slate-500">
               <li>
-                · 卖出规则与实盘共用同一个 StrategyBase.step 与统一风控/数量链路。
+                · 卖出规则与实盘共用同一个 StrategyBase.step
+                与统一风控/数量链路。
               </li>
               <li>
                 · 量价动态规则缺少 Tick 或盘口深度时直接阻断，不用分钟线近似。
@@ -976,14 +981,14 @@ export function ExitPlanReplayPanel({
             </ul>
           </section>
           {(preparation?.blockingReasons ?? []).length > 0 ? (
-            <section className="rounded-md border border-amber-400/20 bg-amber-500/10 p-3 text-[11px] font-bold text-amber-100">
+            <section className="rounded-md border border-amber-400/20 bg-amber-500/10 p-3 text-ui-caption font-bold text-amber-100">
               {(preparation?.blockingReasons ?? []).map(reason => (
                 <p key={reason}>· {reason}</p>
               ))}
             </section>
           ) : null}
           <Button
-            className="h-11 w-full bg-cyan-500 font-black text-slate-950 hover:bg-cyan-400"
+            className="h-control-large w-full bg-cyan-500 font-black text-slate-950 hover:bg-cyan-400"
             disabled={!canStart}
             onClick={() => void handleStart()}
             type="button"
@@ -996,14 +1001,14 @@ export function ExitPlanReplayPanel({
             {startResult.fetching ? '正在创建回放' : '开始严格历史回放'}
           </Button>
           <section className="rounded-md border border-white/10 bg-slate-950/80">
-            <div className="flex items-center gap-2 border-b border-white/5 px-3 py-2.5 text-xs font-black text-slate-200">
+            <div className="flex items-center gap-2 border-b border-white/5 px-3 py-2.5 text-ui-label font-black text-slate-200">
               <Clock3 className="h-4 w-4 text-slate-500" />
               最近回放
             </div>
             <div className="max-h-72 overflow-auto custom-scrollbar">
               {(historyResult.data?.exitPlanReplayHistory ?? []).length ===
               0 ? (
-                <div className="p-6 text-center text-[11px] font-bold text-slate-600">
+                <div className="p-ui-panel text-center text-ui-caption font-bold text-slate-600">
                   暂无回放记录
                 </div>
               ) : (
@@ -1021,16 +1026,16 @@ export function ExitPlanReplayPanel({
                     type="button"
                   >
                     <span className="min-w-0">
-                      <span className="block font-mono text-xs font-black text-slate-200">
+                      <span className="block font-mono text-ui-label font-black text-slate-200">
                         {item.instrumentCode}
                       </span>
-                      <span className="mt-0.5 block truncate text-[10px] text-slate-600">
+                      <span className="mt-0.5 block truncate text-ui-caption text-slate-600">
                         {formatDateTime(item.createdAt)}
                       </span>
                     </span>
                     <span
                       className={cn(
-                        'font-mono text-xs font-black',
+                        'font-mono text-ui-label font-black',
                         percentTone(item.summary?.planReturnPct)
                       )}
                     >

@@ -20,10 +20,10 @@ const GridTable: React.FC<Props> = ({ result }) => {
 
   if (result.levels.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-slate-500 dark:text-slate-400 p-6">
+      <div className="flex flex-col items-center justify-center h-full text-slate-500 dark:text-slate-400 p-ui-panel">
         <AlertTriangle className="w-8 h-8 mb-2 opacity-50 text-amber-500" />
-        <p className="font-medium text-xs">无法生成有效网格</p>
-        <p className="text-[10px] opacity-75 mt-1">
+        <p className="font-medium text-ui-label">无法生成有效网格</p>
+        <p className="text-ui-caption opacity-75 mt-1">
           请检查预算或最小成交金额限制
         </p>
       </div>
@@ -87,7 +87,7 @@ const GridTable: React.FC<Props> = ({ result }) => {
         )}
       >
         <table className="w-full text-left border-collapse min-w-[600px]">
-          <thead className="text-[10px] text-muted-foreground uppercase bg-slate-100/50 dark:bg-slate-900/50 sticky top-0 z-10 backdrop-blur-sm">
+          <thead className="text-ui-caption text-muted-foreground uppercase bg-slate-100/50 dark:bg-slate-900/50 sticky top-0 z-10 backdrop-blur-sm">
             <tr>
               <th className="px-3 py-2 whitespace-nowrap font-bold w-[100px]">
                 档位
@@ -123,7 +123,7 @@ const GridTable: React.FC<Props> = ({ result }) => {
                 <td className="px-3 py-1.5 font-medium flex items-center gap-2">
                   <span
                     className={cn(
-                      'px-1.5 py-0.5 rounded-[4px] text-[10px] flex items-center w-10 justify-center font-bold tracking-tight',
+                      'px-1.5 py-0.5 rounded-sm text-ui-caption flex items-center w-10 justify-center font-bold tracking-tight',
                       level.side === 'SELL'
                         ? 'border border-market-down/20 bg-market-down/10 text-market-down'
                         : 'border border-market-up/20 bg-market-up/10 text-market-up'
@@ -131,29 +131,29 @@ const GridTable: React.FC<Props> = ({ result }) => {
                   >
                     {level.side === 'SELL' ? '卖出' : '买入'}
                   </span>
-                  <span className="text-muted-foreground/50 font-mono text-[10px]">
+                  <span className="text-muted-foreground/50 font-mono text-ui-caption">
                     #{Math.abs(level.levelIndex)}
                   </span>
                 </td>
-                <td className="px-3 py-1.5 font-mono font-bold text-xs text-foreground/80">
+                <td className="px-3 py-1.5 font-mono font-bold text-ui-label text-foreground/80">
                   {level.price.toFixed(2)}
                 </td>
-                <td className="px-3 py-1.5 text-right font-mono text-xs text-muted-foreground">
+                <td className="px-3 py-1.5 text-right font-mono text-ui-label text-muted-foreground">
                   {level.shares.toLocaleString()}
                 </td>
-                <td className="px-3 py-1.5 text-right font-mono text-xs text-muted-foreground">
+                <td className="px-3 py-1.5 text-right font-mono text-ui-label text-muted-foreground">
                   {level.amount.toLocaleString()}
                 </td>
                 <td
                   className={cn(
-                    'px-3 py-1.5 text-right font-mono text-xs',
+                    'px-3 py-1.5 text-right font-mono text-ui-label',
                     financialToneClass(level.pctFromBase)
                   )}
                 >
                   {level.pctFromBase > 0 ? '+' : ''}
                   {level.pctFromBase.toFixed(2)}%
                 </td>
-                <td className="px-3 py-1.5 text-right font-mono text-xs text-market-up font-bold opacity-60 group-hover:opacity-100">
+                <td className="px-3 py-1.5 text-right font-mono text-ui-label text-market-up font-bold opacity-60 group-hover:opacity-100">
                   +{level.expectedProfit.toFixed(1)}
                 </td>
               </tr>
@@ -164,7 +164,7 @@ const GridTable: React.FC<Props> = ({ result }) => {
 
       {/* Footer Stats Breakdown */}
       <div className="border-t border-slate-200/50 dark:border-slate-800/50 p-3 shrink-0 bg-slate-50/30 dark:bg-black/20">
-        <div className="flex gap-4 text-[10px] mb-2">
+        <div className="flex gap-ui-section text-ui-caption mb-2">
           <div className="flex-1 space-y-1">
             <div className="flex justify-between text-muted-foreground">
               <span>持仓占用</span>

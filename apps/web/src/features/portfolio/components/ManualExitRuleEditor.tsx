@@ -24,11 +24,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { Input } from '@/components/ui/input';
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover';
+import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/utils/cn';
 
 import { getExitRuleLabel } from './exitRuleLabels';
@@ -626,10 +628,10 @@ function ParameterInput({
           type="checkbox"
         />
         <span>
-          <span className="block text-xs font-black text-slate-200">
+          <span className="block text-ui-label font-black text-slate-200">
             {field.label}
           </span>
-          <span className="mt-1 block text-[10px] font-medium leading-4 text-slate-500">
+          <span className="mt-1 block text-ui-caption font-medium leading-4 text-slate-500">
             {field.description}
           </span>
         </span>
@@ -639,17 +641,17 @@ function ParameterInput({
 
   return (
     <label className="grid gap-1.5" htmlFor={inputId}>
-      <span className="flex items-center justify-between gap-2 text-[11px] font-black text-slate-300">
+      <span className="flex items-center justify-between gap-2 text-ui-caption font-black text-slate-300">
         {field.label}
         {field.unit && (
-          <span className="font-mono text-[9px] text-slate-600">
+          <span className="font-mono text-ui-micro text-slate-600">
             {field.unit}
           </span>
         )}
       </span>
-      <input
+      <Input
         aria-label={field.label}
-        className="h-9 rounded-lg border border-white/10 bg-[#080d18] px-3 font-mono text-xs text-slate-100 outline-none transition-colors hover:border-white/20 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/10"
+        className="border-white/10 bg-[#080d18] font-mono text-ui-label hover:border-white/20 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/10"
         id={inputId}
         max={field.max}
         min={field.min}
@@ -668,7 +670,7 @@ function ParameterInput({
         type={field.type}
         value={value === undefined || value === null ? '' : String(value)}
       />
-      <span className="text-[9px] font-medium leading-4 text-slate-600">
+      <span className="text-ui-micro font-medium leading-4 text-slate-600">
         {field.description}
       </span>
     </label>
@@ -705,7 +707,7 @@ function RuleTypePicker({
       <PopoverTrigger asChild>
         <button
           aria-label={`规则 ${index + 1} 类型`}
-          className="group flex w-full cursor-pointer items-center gap-3 rounded-xl border border-blue-400/25 bg-blue-500/[0.06] p-3 text-left outline-none transition-colors hover:border-blue-400/45 hover:bg-blue-500/[0.09] focus-visible:ring-2 focus-visible:ring-blue-400/40"
+          className="group flex w-full cursor-pointer items-center gap-3 rounded-panel border border-blue-400/25 bg-blue-500/[0.06] p-3 text-left outline-none transition-colors hover:border-blue-400/45 hover:bg-blue-500/[0.09] focus-visible:ring-2 focus-visible:ring-blue-400/40"
           type="button"
         >
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-blue-400/20 bg-blue-500/10 text-blue-200">
@@ -713,20 +715,20 @@ function RuleTypePicker({
           </span>
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-black text-slate-100">
+              <span className="text-ui-label font-black text-slate-100">
                 {presentation.label}
               </span>
               {presentation.recommended && (
-                <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black text-emerald-200">
+                <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-0.5 text-ui-micro font-black text-emerald-200">
                   {presentation.recommended}
                 </span>
               )}
             </span>
-            <span className="mt-1 block truncate text-[10px] font-medium text-slate-500">
+            <span className="mt-1 block truncate text-ui-caption font-medium text-slate-500">
               {presentation.trigger}
             </span>
           </span>
-          <span className="flex shrink-0 items-center gap-2 text-[10px] font-bold text-blue-300">
+          <span className="flex shrink-0 items-center gap-2 text-ui-caption font-bold text-blue-300">
             更换
             <ChevronDown
               className={cn(
@@ -739,25 +741,25 @@ function RuleTypePicker({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="max-h-[min(720px,80vh)] w-[min(760px,calc(100vw-32px))] overflow-y-auto border-slate-700 bg-[#0b1120] p-0 shadow-2xl shadow-black/50"
+        className="max-h-[min(720px,80vh)] w-[min(760px,calc(100vw-32px))] overflow-y-auto border-slate-700 bg-[#0b1120] p-0 shadow-none shadow-black/50"
         sideOffset={8}
       >
-        <div className="sticky top-0 z-10 border-b border-white/8 bg-[#0b1120]/95 p-4 backdrop-blur-xl">
+        <div className="sticky top-0 z-10 border-b border-white/8 bg-[#0b1120]/95 p-ui-section backdrop-blur-xl">
           <div className="flex items-start gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-200">
               <Sparkles className="h-4 w-4" />
             </span>
             <div>
-              <h4 className="text-sm font-black text-slate-100">
+              <h4 className="text-ui-body font-black text-slate-100">
                 选择卖出策略
               </h4>
-              <p className="mt-1 text-[11px] font-medium leading-5 text-slate-400">
+              <p className="mt-1 text-ui-caption font-medium leading-5 text-slate-400">
                 先选择“什么情况下卖”。系统只在条件满足时触发；添加多条规则表示任一条件满足即可退出。
               </p>
             </div>
           </div>
         </div>
-        <div className="grid gap-5 p-4">
+        <div className="grid gap-ui-section p-ui-section">
           {groupOrder.map(group => {
             const meta = groupMeta[group];
             const GroupIcon = meta.icon;
@@ -770,12 +772,12 @@ function RuleTypePicker({
                 <div className="mb-2 flex items-center gap-2">
                   <GroupIcon className="h-3.5 w-3.5 text-slate-400" />
                   <h5
-                    className="text-[11px] font-black text-slate-300"
+                    className="text-ui-caption font-black text-slate-300"
                     id={`exit-rule-group-${group}`}
                   >
                     {meta.label}
                   </h5>
-                  <span className="text-[9px] font-medium text-slate-600">
+                  <span className="text-ui-micro font-medium text-slate-600">
                     {meta.description}
                   </span>
                 </div>
@@ -796,7 +798,7 @@ function RuleTypePicker({
                       <button
                         aria-checked={selected}
                         className={cn(
-                          'relative flex min-h-28 cursor-pointer items-start gap-3 rounded-xl border p-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-400/40',
+                          'relative flex min-h-28 cursor-pointer items-start gap-3 rounded-panel border p-3 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-blue-400/40',
                           selected
                             ? 'border-blue-400/50 bg-blue-500/10'
                             : 'border-white/8 bg-black/15 hover:border-white/20 hover:bg-white/[0.04]'
@@ -821,22 +823,22 @@ function RuleTypePicker({
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[11px] font-black text-slate-100">
+                            <span className="text-ui-caption font-black text-slate-100">
                               {optionPresentation.label}
                             </span>
                             {optionPresentation.recommended && (
-                              <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[8px] font-black text-emerald-200">
+                              <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-ui-micro font-black text-emerald-200">
                                 {optionPresentation.recommended}
                               </span>
                             )}
                           </span>
-                          <span className="mt-1 block text-[9px] font-mono text-slate-600">
+                          <span className="mt-1 block text-ui-micro font-mono text-slate-600">
                             {option.ruleType}
                           </span>
-                          <span className="mt-1.5 block text-[10px] font-medium leading-4 text-slate-400">
+                          <span className="mt-1.5 block text-ui-caption font-medium leading-4 text-slate-400">
                             {optionPresentation.description}
                           </span>
-                          <span className="mt-1.5 block text-[9px] font-medium leading-4 text-slate-600">
+                          <span className="mt-1.5 block text-ui-micro font-medium leading-4 text-slate-600">
                             适合：{optionPresentation.usage}
                           </span>
                         </span>
@@ -886,15 +888,17 @@ export function ManualExitRuleEditor({
   };
 
   return (
-    <article className="rounded-xl border border-white/8 bg-black/15 p-3 shadow-sm shadow-black/20">
+    <article className="rounded-panel border border-white/8 bg-black/15 p-3 shadow-sm shadow-black/20">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-white/[0.05] px-1.5 font-mono text-[10px] font-black text-slate-400">
+          <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-white/[0.05] px-1.5 font-mono text-ui-caption font-black text-slate-400">
             {index + 1}
           </span>
           <div>
-            <h4 className="text-[11px] font-black text-slate-200">触发规则</h4>
-            <p className="text-[9px] font-medium text-slate-600">
+            <h4 className="text-ui-caption font-black text-slate-200">
+              触发规则
+            </h4>
+            <p className="text-ui-micro font-medium text-slate-600">
               满足本规则时，申请卖出计划中的剩余数量
             </p>
           </div>
@@ -936,33 +940,35 @@ export function ManualExitRuleEditor({
             ruleType={rule.ruleType}
           />
 
-          <div className="rounded-xl border border-white/8 bg-[#080d18]/70 p-3">
-            <div className="flex items-center gap-2 text-[10px] font-black text-slate-300">
+          <div className="rounded-panel border border-white/8 bg-[#080d18]/70 p-3">
+            <div className="flex items-center gap-2 text-ui-caption font-black text-slate-300">
               <ChevronRight className="h-3.5 w-3.5 text-blue-300" />
               如何使用
             </div>
-            <p className="mt-2 text-[10px] font-medium leading-5 text-slate-400">
+            <p className="mt-2 text-ui-caption font-medium leading-5 text-slate-400">
               {presentation.description}
             </p>
-            <p className="mt-2 text-[10px] font-medium leading-5 text-slate-500">
+            <p className="mt-2 text-ui-caption font-medium leading-5 text-slate-500">
               <span className="font-black text-slate-400">适合：</span>
               {presentation.usage}
             </p>
             <div className="mt-3 rounded-lg border border-blue-400/15 bg-blue-500/[0.05] px-3 py-2">
-              <span className="text-[9px] font-black text-blue-300">
+              <span className="text-ui-micro font-black text-blue-300">
                 当前配置
               </span>
-              <p className="mt-1 text-[10px] font-bold leading-4 text-slate-300">
+              <p className="mt-1 text-ui-caption font-bold leading-4 text-slate-300">
                 {rulePreview(rule.ruleType, parameters)}
               </p>
             </div>
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/8 bg-[#080d18]/45 p-3">
+        <div className="rounded-panel border border-white/8 bg-[#080d18]/45 p-3">
           <div className="mb-3">
-            <h5 className="text-[11px] font-black text-slate-200">触发参数</h5>
-            <p className="mt-1 text-[9px] font-medium text-slate-600">
+            <h5 className="text-ui-caption font-black text-slate-200">
+              触发参数
+            </h5>
+            <p className="mt-1 text-ui-micro font-medium text-slate-600">
               百分比直接填写 2 表示 2%，不需要填写 0.02。
             </p>
           </div>
@@ -983,7 +989,7 @@ export function ManualExitRuleEditor({
           ) : (
             <div
               className={cn(
-                'rounded-lg border px-3 py-3 text-[10px] font-bold leading-5',
+                'rounded-lg border px-3 py-3 text-ui-caption font-bold leading-5',
                 rule.ruleType === 'MANUAL_TRIGGER'
                   ? 'border-rose-400/20 bg-rose-500/[0.06] text-rose-200'
                   : 'border-white/8 bg-white/[0.02] text-slate-400'
@@ -1000,7 +1006,7 @@ export function ManualExitRuleEditor({
           >
             <CollapsibleTrigger asChild>
               <button
-                className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-left text-[10px] font-black text-slate-400 outline-none transition-colors hover:bg-white/[0.03] hover:text-slate-200 focus-visible:ring-2 focus-visible:ring-blue-400/40"
+                className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-left text-ui-caption font-black text-slate-400 outline-none transition-colors hover:bg-white/[0.03] hover:text-slate-200 focus-visible:ring-2 focus-visible:ring-blue-400/40"
                 type="button"
               >
                 <span className="flex items-center gap-2">
@@ -1016,11 +1022,11 @@ export function ManualExitRuleEditor({
               </button>
             </CollapsibleTrigger>
             <CollapsibleContent className="grid gap-3 px-2 pb-1 pt-3 sm:grid-cols-[120px_minmax(0,1fr)]">
-              <label className="grid content-start gap-1.5 text-[10px] font-black text-slate-400">
+              <label className="grid content-start gap-1.5 text-ui-caption font-black text-slate-400">
                 优先级
-                <input
+                <Input
                   aria-label={`规则 ${index + 1} 优先级`}
-                  className="h-9 rounded-lg border border-white/10 bg-[#080d18] px-3 font-mono text-xs text-slate-100 outline-none focus:border-blue-400/60"
+                  className="border-white/10 bg-[#080d18] font-mono text-ui-label focus:border-blue-400/60"
                   onChange={event =>
                     onChange({
                       ...rule,
@@ -1030,15 +1036,15 @@ export function ManualExitRuleEditor({
                   type="number"
                   value={rule.priority}
                 />
-                <span className="text-[9px] font-medium leading-4 text-slate-600">
+                <span className="text-ui-micro font-medium leading-4 text-slate-600">
                   同时触发时，大值优先。
                 </span>
               </label>
-              <label className="grid gap-1.5 text-[10px] font-black text-slate-400">
+              <label className="grid gap-1.5 text-ui-caption font-black text-slate-400">
                 参数 JSON
-                <textarea
+                <Textarea
                   aria-label={`规则 ${index + 1} 参数 JSON`}
-                  className="min-h-20 resize-y rounded-lg border border-white/10 bg-[#080d18] px-3 py-2 font-mono text-[10px] leading-5 text-slate-300 outline-none focus:border-blue-400/60"
+                  className="resize-y border-white/10 bg-[#080d18] font-mono text-ui-caption text-slate-300 focus:border-blue-400/60"
                   onChange={event =>
                     onChange({
                       ...rule,
@@ -1048,7 +1054,7 @@ export function ManualExitRuleEditor({
                   spellCheck={false}
                   value={rule.parametersText}
                 />
-                <span className="text-[9px] font-medium leading-4 text-slate-600">
+                <span className="text-ui-micro font-medium leading-4 text-slate-600">
                   仅供专家调整未展示参数；普通配置无需修改。
                 </span>
               </label>

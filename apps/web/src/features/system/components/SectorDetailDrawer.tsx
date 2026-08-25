@@ -58,45 +58,45 @@ export function SectorDetailDrawer({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
-        className="w-[500px] sm:w-[600px] p-0 border-l border-slate-200 dark:border-white/5 shadow-2xl"
+        className="w-[500px] sm:w-[600px] p-0 border-l border-slate-200 dark:border-white/5 shadow-none"
       >
         <div className="flex flex-col h-full bg-white dark:bg-slate-950">
-          <div className="p-10 space-y-8 shrink-0 relative overflow-hidden">
+          <div className="p-ui-empty space-y-ui-section shrink-0 relative overflow-hidden">
             <div className="absolute top-0 right-0 w-64 h-64 bg-blue-500/5 rounded-full -mr-32 -mt-32 blur-[100px]" />
             <SheetHeader>
               <div className="flex items-center justify-between mb-4">
-                <Badge className="bg-blue-600/10 text-blue-600 border-none font-black text-[9px] uppercase tracking-widest px-3">
+                <Badge className="bg-blue-600/10 text-blue-600 border-none font-black text-ui-micro uppercase tracking-widest px-3">
                   {CLASSIFICATION_LABELS[sector.classification]}
                 </Badge>
-                <span className="text-[10px] font-mono font-bold text-slate-400">
+                <span className="text-ui-caption font-mono font-bold text-slate-400">
                   {sector.code}
                 </span>
               </div>
               <SheetTitle className="text-5xl font-black text-slate-900 dark:text-white tracking-tighter italic">
                 {sector.name}
               </SheetTitle>
-              <SheetDescription className="text-xs font-medium leading-relaxed text-slate-400 pt-2 opacity-80">
+              <SheetDescription className="text-ui-label font-medium leading-relaxed text-slate-400 pt-2 opacity-80">
                 {sector.description ||
                   `${sector.name}板块成分股列表及其基本行情概览。`}
               </SheetDescription>
             </SheetHeader>
 
-            <div className="grid grid-cols-2 gap-4 pt-4">
-              <div className="p-6 rounded-[32px] bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
-                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 opacity-60">
+            <div className="grid grid-cols-2 gap-ui-section pt-4">
+              <div className="p-ui-panel rounded-panel bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
+                <p className="text-ui-micro font-black text-slate-400 uppercase tracking-widest mb-1.5 opacity-60">
                   成分股数量
                 </p>
-                <h4 className="text-3xl font-black text-blue-600">
+                <h4 className="text-ui-display-lg font-black text-blue-600">
                   {(sector.stockCodes || []).length}
                 </h4>
               </div>
-              <div className="p-6 rounded-[32px] bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
-                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 opacity-60">
+              <div className="p-ui-panel rounded-panel bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5">
+                <p className="text-ui-micro font-black text-slate-400 uppercase tracking-widest mb-1.5 opacity-60">
                   数据源
                 </p>
                 <div className="flex items-center gap-2">
                   <Database size={20} className="text-blue-500" />
-                  <span className="text-lg font-black text-slate-800 dark:text-slate-200 uppercase tracking-tighter">
+                  <span className="text-ui-heading font-black text-slate-800 dark:text-slate-200 uppercase tracking-tighter">
                     QuantX DB
                   </span>
                 </div>
@@ -104,9 +104,9 @@ export function SectorDetailDrawer({
             </div>
           </div>
 
-          <div className="flex-1 flex flex-col overflow-hidden px-10 pb-10">
-            <div className="flex items-center justify-between py-6">
-              <h4 className="text-[10px] font-black text-slate-900 dark:text-white uppercase tracking-[0.2em] flex items-center gap-2">
+          <div className="flex-1 flex flex-col overflow-hidden px-ui-section pb-10">
+            <div className="flex items-center justify-between py-ui-panel">
+              <h4 className="text-ui-caption font-black text-slate-900 dark:text-white uppercase tracking-[0.2em] flex items-center gap-2">
                 <div className="w-1.5 h-1.5 bg-blue-600 rounded-full" />
                 Components List
               </h4>
@@ -116,22 +116,24 @@ export function SectorDetailDrawer({
                 {(sector.stockCodes || []).map((code: string) => (
                   <div
                     key={code}
-                    className="p-3 rounded-2xl bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5 flex flex-col items-center justify-center hover:bg-blue-600 hover:text-white transition-all cursor-default group"
+                    className="p-3 rounded-panel bg-slate-50 dark:bg-white/[0.03] border border-slate-100 dark:border-white/5 flex flex-col items-center justify-center hover:bg-blue-600 hover:text-white transition-all cursor-default group"
                   >
-                    <span className="text-xs font-black font-mono">{code}</span>
+                    <span className="text-ui-label font-black font-mono">
+                      {code}
+                    </span>
                   </div>
                 ))}
               </div>
             </ScrollArea>
           </div>
 
-          <div className="p-10 border-t border-slate-100 dark:border-white/5 flex gap-4 bg-slate-50/50 dark:bg-white/[0.01]">
-            <Button className="flex-1 h-16 rounded-[24px] bg-blue-600 hover:bg-blue-700 text-white font-black shadow-xl shadow-blue-500/10 transition-all text-sm uppercase tracking-widest">
+          <div className="p-ui-empty border-t border-slate-100 dark:border-white/5 flex gap-ui-section bg-slate-50/50 dark:bg-white/[0.01]">
+            <Button className="flex-1 h-16 rounded-panel bg-blue-600 hover:bg-blue-700 text-white font-black shadow-none shadow-blue-500/10 transition-all text-ui-body uppercase tracking-widest">
               可视化图表
             </Button>
             <Button
               variant="ghost"
-              className="w-24 h-16 rounded-[24px] font-black text-slate-500 uppercase tracking-widest text-xs"
+              className="w-24 h-16 rounded-panel font-black text-slate-500 uppercase tracking-widest text-ui-label"
               onClick={() => onOpenChange(false)}
             >
               Close

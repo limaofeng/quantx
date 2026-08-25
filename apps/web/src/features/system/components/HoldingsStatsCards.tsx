@@ -49,7 +49,7 @@ export function HoldingsStatsCards({
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-ui-section">
       {stats.map((stat, i) => (
         <Card
           key={i}
@@ -61,20 +61,20 @@ export function HoldingsStatsCards({
           <div className="absolute top-0 right-0 p-2 opacity-5 pointer-events-none">
             <stat.icon className={cn('w-24 h-24 rotate-12', stat.color)} />
           </div>
-          <CardContent className="p-4 flex items-center justify-between relative z-10">
+          <CardContent className="p-ui-section flex items-center justify-between relative z-10">
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2">
                 <div className={cn('p-1 rounded-md', stat.bg)}>
                   <stat.icon className={cn('w-3.5 h-3.5', stat.color)} />
                 </div>
-                <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+                <span className="text-ui-caption font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest">
                   {stat.label}
                 </span>
               </div>
               <div className="flex items-baseline gap-2 mt-1">
                 <span
                   className={cn(
-                    'text-3xl font-black tracking-tighter tabular-nums',
+                    'text-ui-display-lg font-black tracking-tighter tabular-nums',
                     stat.color
                   )}
                 >
@@ -83,7 +83,7 @@ export function HoldingsStatsCards({
               </div>
             </div>
             <div className="text-right">
-              <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 bg-white/50 dark:bg-black/10 px-2 py-1 rounded-full backdrop-blur-sm">
+              <span className="text-ui-caption font-bold text-slate-400 dark:text-slate-500 bg-white/50 dark:bg-black/10 px-2 py-1 rounded-full backdrop-blur-sm">
                 {stat.detail}
               </span>
             </div>

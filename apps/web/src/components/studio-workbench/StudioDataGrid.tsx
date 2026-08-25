@@ -159,7 +159,7 @@ export function StudioDataGrid({
       >
         <table
           className={cn(
-            'w-max min-w-full border-collapse text-xs',
+            'w-max min-w-full border-collapse text-ui-label',
             tableClassName
           )}
           style={tableStyle}

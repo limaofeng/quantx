@@ -172,21 +172,21 @@ export function MarketDepth({
         }
       >
         <div className="flex items-center gap-2">
-          <h4 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
+          <h4 className="text-ui-caption font-bold uppercase tracking-widest text-muted-foreground/80">
             五档行情
           </h4>
         </div>
         <div className="flex flex-col items-end">
-          <span className="text-[11px] font-mono font-bold text-foreground/90">
+          <span className="text-ui-caption font-mono font-bold text-foreground/90">
             {isReady ? stockName : '未选择标的'}
           </span>
-          <span className="text-[9px] font-mono text-muted-foreground opacity-60">
+          <span className="text-ui-micro font-mono text-muted-foreground opacity-60">
             {isReady ? stockCode : '请选择证券'}
           </span>
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col overflow-auto font-mono text-xs custom-scrollbar">
+      <div className="flex-1 flex flex-col overflow-auto font-mono text-ui-label custom-scrollbar">
         {/* Sell Orders (Top) - Reversed 5 -> 1 */}
         <div className="flex flex-col gap-[1px] mb-1">
           {[5, 4, 3, 2, 1].map(level => {
@@ -213,7 +213,7 @@ export function MarketDepth({
                 />
 
                 <div className="flex items-center gap-2 z-10 w-1/4">
-                  <span className="text-[10px] text-muted-foreground/60 w-6 text-left font-medium">
+                  <span className="text-ui-caption text-muted-foreground/60 w-6 text-left font-medium">
                     卖{level}
                   </span>
                 </div>
@@ -222,7 +222,7 @@ export function MarketDepth({
                   {formatPrice(order?.price)}
                 </span>
 
-                <span className="text-[10px] font-medium text-muted-foreground/80 z-10 w-1/3 text-right tabular-nums">
+                <span className="text-ui-caption font-medium text-muted-foreground/80 z-10 w-1/3 text-right tabular-nums">
                   {formatDepthVolume(order?.volume)}
                 </span>
               </div>
@@ -245,18 +245,18 @@ export function MarketDepth({
         >
           <div className="flex items-baseline gap-2">
             <span
-              className={`text-base font-black font-mono ${priceToneClass} tracking-tight drop-shadow-sm`}
+              className={`text-ui-title font-black font-mono ${priceToneClass} tracking-tight drop-shadow-sm`}
             >
               {formatPrice(basePrice)}
             </span>
             <span
-              className={`text-[10px] font-bold font-mono ${priceBadgeClass} px-1 py-0.5 rounded leading-none`}
+              className={`text-ui-caption font-bold font-mono ${priceBadgeClass} px-1 py-0.5 rounded leading-none`}
             >
               {formatSignedPercent(changePercent)}
             </span>
           </div>
           <div className="flex flex-col items-end leading-none">
-            <span className="text-[9px] text-muted-foreground/60 font-bold uppercase tracking-tighter">
+            <span className="text-ui-micro text-muted-foreground/60 font-bold uppercase tracking-tighter">
               最新价
             </span>
             <div
@@ -290,7 +290,7 @@ export function MarketDepth({
                   style={{ width: `${(volume / maxVol) * 70}%` }}
                 />
                 <div className="flex items-center gap-2 z-10 w-1/4">
-                  <span className="text-[10px] text-muted-foreground/60 w-6 text-left font-medium">
+                  <span className="text-ui-caption text-muted-foreground/60 w-6 text-left font-medium">
                     买{level}
                   </span>
                 </div>
@@ -299,7 +299,7 @@ export function MarketDepth({
                   {formatPrice(order?.price)}
                 </span>
 
-                <span className="text-[10px] font-medium text-muted-foreground/80 z-10 w-1/3 text-right tabular-nums">
+                <span className="text-ui-caption font-medium text-muted-foreground/80 z-10 w-1/3 text-right tabular-nums">
                   {formatDepthVolume(order?.volume)}
                 </span>
               </div>

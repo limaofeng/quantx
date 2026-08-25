@@ -135,11 +135,11 @@ function StatusCell({
     <div
       className={cn('min-w-0 rounded-md border px-2.5 py-2', toneClasses[tone])}
     >
-      <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] opacity-65">
+      <div className="flex items-center gap-1.5 text-ui-micro font-black uppercase tracking-[0.1em] opacity-65">
         <Icon aria-hidden="true" className="h-3 w-3 shrink-0" />
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 truncate text-[11px] font-black">{value}</div>
+      <div className="mt-1 truncate text-ui-caption font-black">{value}</div>
     </div>
   );
 }
@@ -155,12 +155,12 @@ function Metric({
 }) {
   return (
     <div className="min-w-0 border-b border-white/[0.05] px-2 py-2 last:border-b-0">
-      <div className="truncate text-[9px] font-bold text-slate-600">
+      <div className="truncate text-ui-micro font-bold text-slate-600">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-[11px] font-black',
+          'mt-1 truncate font-mono text-ui-caption font-black',
           tone === 'emerald'
             ? 'text-emerald-300'
             : tone === 'amber'
@@ -189,7 +189,7 @@ function ChainRow({
 }) {
   return (
     <div className="flex min-h-8 items-center justify-between gap-3 border-b border-white/[0.05] py-1.5 last:border-b-0">
-      <span className="inline-flex min-w-0 items-center gap-2 text-[10px] text-slate-500">
+      <span className="inline-flex min-w-0 items-center gap-2 text-ui-caption text-slate-500">
         {Icon ? (
           <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
         ) : null}
@@ -197,7 +197,7 @@ function ChainRow({
       </span>
       <span
         className={cn(
-          'shrink-0 font-mono text-[10px] font-bold',
+          'shrink-0 font-mono text-ui-caption font-bold',
           tone === 'emerald'
             ? 'text-emerald-300'
             : tone === 'amber'
@@ -260,10 +260,10 @@ function BuyDetails({ details }: { details: BuyExecutionHealthDetails }) {
   if (!plan) {
     return (
       <section className="border-t border-white/[0.06] p-3">
-        <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+        <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
           当前买入计划
         </h3>
-        <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-[10px] leading-4 text-slate-500">
+        <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-ui-caption leading-4 text-slate-500">
           选择已有计划后显示预算、价格、在途委托和服务端 blocker。
         </p>
       </section>
@@ -275,17 +275,17 @@ function BuyDetails({ details }: { details: BuyExecutionHealthDetails }) {
     <section className="border-t border-white/[0.06] p-3">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+          <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
             当前买入计划
           </h3>
-          <p className="mt-1 text-[11px] font-black text-slate-200">
+          <p className="mt-1 text-ui-caption font-black text-slate-200">
             {plan.instrumentName}{' '}
-            <span className="font-mono text-[9px] text-slate-600">
+            <span className="font-mono text-ui-micro text-slate-600">
               {plan.instrumentCode}
             </span>
           </p>
         </div>
-        <span className="rounded border border-white/[0.08] px-2 py-1 text-[9px] text-slate-400">
+        <span className="rounded border border-white/[0.08] px-2 py-1 text-ui-micro text-slate-400">
           {plan.authorizationLabel}
         </span>
       </div>
@@ -307,7 +307,7 @@ function BuyDetails({ details }: { details: BuyExecutionHealthDetails }) {
         <Metric label="在途买单" value={plan.hasWorkingOrder ? '1+' : '0'} />
         <Metric label="待确认意图" value={String(details.pendingIntentCount)} />
       </div>
-      <p className="mt-2 rounded-md border border-blue-400/20 bg-blue-400/[0.07] p-2.5 text-[10px] leading-4 text-blue-100">
+      <p className="mt-2 rounded-md border border-blue-400/20 bg-blue-400/[0.07] p-2.5 text-ui-caption leading-4 text-blue-100">
         {planReason || '计划条件等待中；下一次评估使用最新账户与行情快照。'}
       </p>
     </section>
@@ -319,10 +319,10 @@ function SellDetails({ details }: { details: SellExecutionHealthDetails }) {
   if (!holding) {
     return (
       <section className="border-t border-white/[0.06] p-3">
-        <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+        <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
           当前卖出诊断
         </h3>
-        <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-[10px] leading-4 text-slate-500">
+        <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-ui-caption leading-4 text-slate-500">
           从左侧选择持仓后显示可卖量、冻结、T+1 和工作卖单。
         </p>
       </section>
@@ -336,12 +336,12 @@ function SellDetails({ details }: { details: SellExecutionHealthDetails }) {
   return (
     <section className="border-t border-white/[0.06] p-3">
       <div>
-        <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+        <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
           当前卖出诊断
         </h3>
-        <p className="mt-1 text-[11px] font-black text-slate-200">
+        <p className="mt-1 text-ui-caption font-black text-slate-200">
           {holding.instrumentName}{' '}
-          <span className="font-mono text-[9px] text-slate-600">
+          <span className="font-mono text-ui-micro text-slate-600">
             {holding.instrumentCode}
           </span>
         </p>
@@ -371,7 +371,7 @@ function SellDetails({ details }: { details: SellExecutionHealthDetails }) {
       </div>
       <p
         className={cn(
-          'mt-2 rounded-md border p-2.5 text-[10px] leading-4',
+          'mt-2 rounded-md border p-2.5 text-ui-caption leading-4',
           constrained
             ? 'border-amber-400/20 bg-amber-400/[0.07] text-amber-100'
             : 'border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-100'
@@ -381,7 +381,7 @@ function SellDetails({ details }: { details: SellExecutionHealthDetails }) {
           ? `当前最多可卖 ${formatShares(holding.availableVolume)}；确认时由风控重新校验可卖量、跌停、停牌与冲突委托。`
           : '当前持仓均为可卖库存；确认时仍会重新执行实时风控。'}
       </p>
-      <div className="mt-2 grid grid-cols-2 gap-x-3 text-[9px] text-slate-600">
+      <div className="mt-2 grid grid-cols-2 gap-x-3 text-ui-micro text-slate-600">
         <span>昨日持仓 {formatShares(holding.yesterdayVolume)}</span>
         <span>在途数量 {formatShares(holding.onRoadVolume)}</span>
       </div>
@@ -461,24 +461,24 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
   return (
     <>
-      <SheetHeader className="shrink-0 border-b border-white/[0.06] px-4 py-3.5 pr-12 text-left">
+      <SheetHeader className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5 pr-12 text-left">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <SheetTitle className="text-base font-black text-slate-100">
+            <SheetTitle className="text-ui-title font-black text-slate-100">
               执行健康
             </SheetTitle>
-            <SheetDescription className="mt-1 font-mono text-[9px] text-slate-600">
+            <SheetDescription className="mt-1 font-mono text-ui-micro text-slate-600">
               {accountId || '未配置账户'}
             </SheetDescription>
           </div>
-          <span className="font-mono text-[9px] text-slate-600">
+          <span className="font-mono text-ui-micro text-slate-600">
             检查于 {formatCheckedAt(safety?.checkedAt)}
           </span>
         </div>
         <div className="mt-3 grid grid-cols-2 gap-2">
           <div
             className={cn(
-              'rounded-md border px-2.5 py-2 text-[10px] font-black',
+              'rounded-md border px-2.5 py-2 text-ui-caption font-black',
               toneClasses[headerTone]
             )}
           >
@@ -491,7 +491,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
           </div>
           <div
             className={cn(
-              'rounded-md border px-2.5 py-2 text-[10px] font-black',
+              'rounded-md border px-2.5 py-2 text-ui-caption font-black',
               toneClasses[capabilityTone]
             )}
           >
@@ -505,7 +505,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
         className="min-h-0 flex-1 overflow-y-auto custom-scrollbar"
       >
         {fetching && !safety ? (
-          <div className="flex items-center gap-2 border-b border-blue-400/15 bg-blue-400/[0.05] px-3 py-3 text-[10px] text-blue-100">
+          <div className="flex items-center gap-2 border-b border-blue-400/15 bg-blue-400/[0.05] px-3 py-3 text-ui-caption text-blue-100">
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
             正在读取账户执行健康快照…
           </div>
@@ -518,15 +518,17 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
             <div className="flex items-start gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <div className="min-w-0 flex-1">
-                <div className="text-[11px] font-black">安全状态刷新失败</div>
-                <p className="mt-1 text-[10px] leading-4 text-rose-100/80">
+                <div className="text-ui-caption font-black">
+                  安全状态刷新失败
+                </div>
+                <p className="mt-1 text-ui-caption leading-4 text-rose-100/80">
                   {stale
                     ? `已保留 ${formatCheckedAt(safety?.checkedAt)} 的最近成功快照；未知状态不会视为可执行。`
                     : '当前没有可复核的安全快照；未知状态不会视为可执行。'}
                 </p>
               </div>
               <Button
-                className="h-7 shrink-0 rounded-sm border-rose-300/20 px-2 text-[9px]"
+                className="h-control-compact shrink-0 rounded-sm border-rose-300/20 px-2 text-ui-micro"
                 onClick={handleRefresh}
                 type="button"
                 variant="outline"
@@ -600,7 +602,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
                   : 'border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-100'
               )}
             >
-              <div className="flex items-center gap-2 text-[10px] font-black">
+              <div className="flex items-center gap-2 text-ui-caption font-black">
                 {blockedReason ? (
                   <ShieldAlert className="h-3.5 w-3.5" />
                 ) : (
@@ -608,13 +610,13 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
                 )}
                 {blockedReason ? '首要账户门禁' : '账户事实链路正常'}
               </div>
-              <p className="mt-1 text-[10px] leading-4 opacity-85">
+              <p className="mt-1 text-ui-caption leading-4 opacity-85">
                 {blockedReason ||
                   '当前没有账户级阻断；具体交易仍会在确认时重新风控。'}
               </p>
             </div>
             {!safety.canIncreaseRisk && safety.canReduceRisk ? (
-              <p className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/[0.07] p-2.5 text-[10px] leading-4 text-amber-100">
+              <p className="mt-2 rounded-md border border-amber-400/20 bg-amber-400/[0.07] p-2.5 text-ui-caption leading-4 text-amber-100">
                 当前禁止新增风险，但允许风险降低卖出。
               </p>
             ) : null}
@@ -623,7 +625,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
         {safety ? (
           <section className="border-t border-white/[0.06] p-3">
-            <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+            <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
               {stale ? '最近成功快照' : '通用链路'}
             </h3>
             <div className="mt-1">
@@ -665,10 +667,10 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
         {error ? (
           <section className="border-t border-white/[0.06] p-3">
-            <h3 className="text-[9px] font-black uppercase tracking-[0.14em] text-slate-600">
+            <h3 className="text-ui-micro font-black uppercase tracking-[0.14em] text-slate-600">
               当前页面诊断
             </h3>
-            <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-[10px] leading-4 text-slate-500">
+            <p className="mt-2 rounded-md border border-white/[0.07] bg-white/[0.025] p-3 text-ui-caption leading-4 text-slate-500">
               等待账户健康恢复后重新评估
               {scope === 'BUY' ? '买入计划门禁' : '卖出库存与执行门禁'}。
             </p>
@@ -682,7 +684,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
 
       <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-white/[0.06] bg-[#07111f] p-3">
         <Button
-          className="h-9 rounded-sm text-[10px] font-black"
+          className="h-control-default rounded-sm text-ui-caption font-black"
           disabled={fetching}
           onClick={handleRefresh}
           type="button"
@@ -695,7 +697,7 @@ function ExecutionHealthPanel(props: ExecutionHealthPanelProps) {
           刷新状态
         </Button>
         <Button
-          className="h-9 rounded-sm border-white/10 text-[10px] font-black"
+          className="h-control-default rounded-sm border-white/10 text-ui-caption font-black"
           onClick={() => navigate('/settings/trading-safety')}
           type="button"
           variant="outline"
@@ -720,7 +722,7 @@ export function ExecutionHealthControl(props: ExecutionHealthControlProps) {
         <Button
           aria-label={trigger.label}
           className={cn(
-            'h-8 cursor-pointer rounded-md border-white/10 px-3 text-[10px] font-black transition-colors focus-visible:ring-blue-400/70',
+            'h-control-compact cursor-pointer rounded-md border-white/10 px-3 text-ui-caption font-black transition-colors focus-visible:ring-blue-400/70',
             trigger.tone,
             props.className
           )}
@@ -738,7 +740,7 @@ export function ExecutionHealthControl(props: ExecutionHealthControlProps) {
         </Button>
       </SheetTrigger>
       <SheetContent
-        className="flex w-[min(92vw,392px)] max-w-none flex-col gap-0 border-white/[0.08] bg-[#0b1728] p-0 text-slate-200 shadow-2xl shadow-black/45 sm:max-w-[392px]"
+        className="flex w-[min(92vw,392px)] max-w-none flex-col gap-0 border-white/[0.08] bg-[#0b1728] p-0 text-slate-200 shadow-none shadow-black/45 sm:max-w-[392px]"
         closeLabel="关闭执行健康"
         overlayClassName="bg-black/45 xl:bg-transparent"
         side="right"

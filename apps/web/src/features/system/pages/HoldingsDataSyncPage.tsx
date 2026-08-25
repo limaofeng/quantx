@@ -52,23 +52,23 @@ export function HoldingsDataSyncPage() {
       description="本地持仓数据同步"
       title="持仓数据同步"
     >
-      <div className="flex h-full min-h-0 flex-col gap-4 animate-fade-in">
+      <div className="flex h-full min-h-0 flex-col gap-ui-section animate-fade-in">
         {/* Compact Header Section */}
-        <div className="flex items-center justify-between gap-4 py-1">
+        <div className="flex items-center justify-between gap-ui-section py-1">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
+              className="h-control-compact w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
               onClick={() => setLocation('/settings/data')}
             >
               <ArrowLeft className="w-4 h-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div>
-              <h1 className="text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none">
+              <h1 className="text-ui-heading font-black text-slate-900 dark:text-white tracking-tight leading-none">
                 持仓数据管理
               </h1>
-              <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
+              <p className="text-ui-caption font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
                 {holdingsCount} 个活跃持仓 • {sectorCount} 个所属板块
               </p>
             </div>
@@ -97,14 +97,14 @@ export function HoldingsDataSyncPage() {
               <TabsList className="bg-slate-100/50 dark:bg-white/5 p-1 rounded-lg h-8">
                 <TabsTrigger
                   value="grid"
-                  className="gap-2 h-6 text-[10px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800"
+                  className="gap-2 h-6 text-ui-caption data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800"
                 >
                   <LayoutGrid className="w-3.5 h-3.5" />
                   <span className="font-bold">板块视图</span>
                 </TabsTrigger>
                 <TabsTrigger
                   value="list"
-                  className="gap-2 h-6 text-[10px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800"
+                  className="gap-2 h-6 text-ui-caption data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800"
                 >
                   <ListIcon className="w-3.5 h-3.5" />
                   <span className="font-bold">列表视图</span>
@@ -114,7 +114,7 @@ export function HoldingsDataSyncPage() {
 
             <div className="flex-1 min-h-0 mt-2">
               <TabsContent value="grid" className="h-full m-0">
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-4 overflow-y-auto h-full pr-2 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-slate-800">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-ui-section pb-4 overflow-y-auto h-full pr-2 scrollbar-thin scrollbar-thumb-slate-200 dark:scrollbar-thumb-slate-800">
                   {Object.entries(groupedHoldings).map(([sector, items]) => (
                     <SectorHoldingCard
                       key={sector}
@@ -126,7 +126,7 @@ export function HoldingsDataSyncPage() {
               </TabsContent>
 
               <TabsContent value="list" className="h-full m-0">
-                <div className="h-full rounded-2xl border border-slate-200/60 dark:border-white/5 overflow-hidden shadow-sm bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl">
+                <div className="h-full rounded-panel border border-slate-200/60 dark:border-white/5 overflow-hidden shadow-sm bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl">
                   <HoldingsDataList holdings={MOCK_HOLDINGS_DATA} />
                 </div>
               </TabsContent>

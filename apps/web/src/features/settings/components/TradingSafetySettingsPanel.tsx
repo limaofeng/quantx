@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from 'urql';
 
+import { Input } from '@/components/ui/input';
 import {
   AccountExecutionSafetyQuery,
   ConfirmAccountExecutionControlMutation,
@@ -77,7 +78,7 @@ function FreshnessIndicator({
       </div>
       <span
         className={cn(
-          'shrink-0 font-mono text-[10px] font-medium leading-3 tabular-nums',
+          'shrink-0 font-mono text-ui-caption font-medium leading-3 tabular-nums',
           freshness.tone === 'fresh'
             ? 'text-emerald-300'
             : freshness.tone === 'warning'
@@ -218,20 +219,22 @@ export function TradingSafetySettingsPanel() {
   };
 
   if (!accountId) {
-    return <p className="text-sm text-amber-300">当前用户没有可用资金账户。</p>;
+    return (
+      <p className="text-ui-body text-amber-300">当前用户没有可用资金账户。</p>
+    );
   }
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5">
-      <header className="flex items-start justify-between gap-4">
+    <div className="mx-auto max-w-6xl space-y-ui-section">
+      <header className="flex items-start justify-between gap-ui-section">
         <div>
-          <p className="text-xs font-medium uppercase text-primary">
+          <p className="text-ui-label font-medium uppercase text-primary">
             Account execution control
           </p>
-          <h1 className="mt-2 text-2xl font-semibold text-slate-100">
+          <h1 className="mt-2 text-ui-display font-semibold text-slate-100">
             账户交易安全
           </h1>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+          <p className="mt-2 max-w-3xl text-ui-body leading-6 text-slate-400">
             这里只控制账户级实盘授权、对账窗口与紧急停止。做
             T、打板和普通策略各自的功能门禁不会写入这里。
           </p>
@@ -240,7 +243,7 @@ export function TradingSafetySettingsPanel() {
           type="button"
           onClick={reload}
           disabled={fetching}
-          className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground hover:bg-muted disabled:opacity-50"
+          className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-ui-label text-muted-foreground hover:bg-muted disabled:opacity-50"
         >
           <RefreshCw className={cn('h-4 w-4', fetching && 'animate-spin')} />
           刷新
@@ -256,17 +259,17 @@ export function TradingSafetySettingsPanel() {
         ].map(([label, value]) => (
           <div
             key={label}
-            className="rounded-xl border border-border bg-card p-4"
+            className="rounded-panel border border-border bg-card p-ui-section"
           >
-            <p className="text-xs text-slate-500">{label}</p>
-            <p className="mt-2 font-mono text-sm font-semibold text-slate-100">
+            <p className="text-ui-label text-slate-500">{label}</p>
+            <p className="mt-2 font-mono text-ui-body font-semibold text-slate-100">
               {value}
             </p>
           </div>
         ))}
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-panel border border-border bg-card p-ui-section">
         <div className="flex items-start gap-3">
           {safety?.canIncreaseRisk ? (
             <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-400" />
@@ -274,10 +277,10 @@ export function TradingSafetySettingsPanel() {
             <AlertTriangle className="mt-0.5 h-5 w-5 text-warning" />
           )}
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-medium text-slate-100">
+            <h2 className="text-ui-body font-medium text-slate-100">
               {safety?.summary || '账户安全状态加载中'}
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
+            <p className="mt-1 text-ui-label leading-5 text-slate-500">
               账户 {accountId} · 快照 {safety?.snapshotId || '无'} · 实盘窗口
               {safety?.executionWindowActive ? '已建立' : '未建立'}
             </p>
@@ -292,7 +295,7 @@ export function TradingSafetySettingsPanel() {
               onClick={() =>
                 preview(AccountExecutionControlAction.BeginControlledWindow)
               }
-              className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-ui-label font-medium text-primary-foreground disabled:opacity-40"
             >
               <ShieldCheck className="h-4 w-4" /> 建立实盘窗口
             </button>
@@ -305,7 +308,7 @@ export function TradingSafetySettingsPanel() {
                 onClick={() =>
                   preview(AccountExecutionControlAction.EnableRiskIncrease)
                 }
-                className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-40"
+                className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-ui-label font-medium text-primary-foreground disabled:opacity-40"
               >
                 <CheckCircle2 className="h-4 w-4" /> 启用买入权限
               </button>
@@ -317,7 +320,7 @@ export function TradingSafetySettingsPanel() {
               onClick={() =>
                 preview(AccountExecutionControlAction.PauseRiskIncrease)
               }
-              className="inline-flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-xs font-medium text-foreground disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-ui-label font-medium text-foreground disabled:opacity-40"
             >
               <PauseCircle className="h-4 w-4" /> 暂停买入权限
             </button>
@@ -327,7 +330,7 @@ export function TradingSafetySettingsPanel() {
               type="button"
               disabled={submitting || !reason.trim()}
               onClick={() => preview(AccountExecutionControlAction.KillSwitch)}
-              className="inline-flex items-center gap-2 rounded-lg bg-destructive px-3 py-2 text-xs font-medium text-destructive-foreground disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-lg bg-destructive px-3 py-2 text-ui-label font-medium text-destructive-foreground disabled:opacity-40"
             >
               <OctagonX className="h-4 w-4" /> 账户紧急停止
             </button>
@@ -338,30 +341,30 @@ export function TradingSafetySettingsPanel() {
               onClick={() =>
                 preview(AccountExecutionControlAction.ClearKillSwitch)
               }
-              className="inline-flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-xs font-medium text-foreground disabled:opacity-40"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-ui-label font-medium text-foreground disabled:opacity-40"
             >
               清除紧急停止
             </button>
           )}
         </div>
 
-        <label className="mt-4 block text-xs text-slate-400">
+        <label className="mt-4 block text-ui-label text-slate-400">
           暂停或紧急停止原因
-          <input
+          <Input
             value={reason}
             onChange={event => setReason(event.target.value)}
             maxLength={512}
             placeholder="说明本次风险控制原因"
-            className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none focus:border-primary"
+            className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-ui-body text-foreground outline-none focus:border-primary"
           />
         </label>
 
         {pending && (
-          <div className="mt-4 rounded-lg border border-border bg-muted p-4">
-            <p className="text-sm font-medium text-foreground">
+          <div className="mt-4 rounded-lg border border-border bg-muted p-ui-section">
+            <p className="text-ui-body font-medium text-foreground">
               待确认：{actionLabels[pending.action]}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-ui-label text-muted-foreground">
               确认将消费一次性挑战；状态或快照变化时服务端会拒绝应用。
             </p>
             <div className="mt-3 flex gap-2">
@@ -369,7 +372,7 @@ export function TradingSafetySettingsPanel() {
                 type="button"
                 onClick={confirm}
                 disabled={submitting}
-                className="rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-40"
+                className="rounded-lg bg-primary px-3 py-2 text-ui-label font-medium text-primary-foreground disabled:opacity-40"
               >
                 确认应用
               </button>
@@ -377,23 +380,25 @@ export function TradingSafetySettingsPanel() {
                 type="button"
                 onClick={() => setPending(null)}
                 disabled={submitting}
-                className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground"
+                className="rounded-lg border border-border px-3 py-2 text-ui-label text-muted-foreground"
               >
                 取消
               </button>
             </div>
           </div>
         )}
-        {message && <p className="mt-3 text-xs text-slate-300">{message}</p>}
+        {message && (
+          <p className="mt-3 text-ui-label text-slate-300">{message}</p>
+        )}
       </section>
 
-      <section className="rounded-xl border border-border bg-card p-5">
+      <section className="rounded-panel border border-border bg-card p-ui-section">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-medium text-slate-100">
+            <h2 className="text-ui-body font-medium text-slate-100">
               账户实盘准入检查
             </h2>
-            <p className="mt-1 text-xs leading-5 text-slate-500">
+            <p className="mt-1 text-ui-label leading-5 text-slate-500">
               逐项确认账户是否具备实盘观察、风险控制和买入条件。
             </p>
           </div>
@@ -401,7 +406,7 @@ export function TradingSafetySettingsPanel() {
             {safety && (
               <span
                 className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium',
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-ui-label font-medium',
                   failedChecks.length
                     ? 'border-warning/20 bg-warning/10 text-amber-200'
                     : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
@@ -419,7 +424,7 @@ export function TradingSafetySettingsPanel() {
               type="button"
               aria-pressed={showGateCodes}
               onClick={() => setShowGateCodes(current => !current)}
-              className="cursor-pointer rounded-lg border border-border px-2.5 py-1 text-xs text-slate-400 transition-colors duration-200 hover:border-primary/40 hover:bg-primary/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
+              className="cursor-pointer rounded-lg border border-border px-2.5 py-1 text-ui-label text-slate-400 transition-colors duration-200 hover:border-primary/40 hover:bg-primary/10 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70"
             >
               {showGateCodes ? '隐藏技术标识' : '显示技术标识'}
             </button>
@@ -478,12 +483,12 @@ export function TradingSafetySettingsPanel() {
                 <GateStatusMark temporal={temporal} tone={tone} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-3">
-                    <h3 className="text-sm font-medium leading-4 text-slate-100">
+                    <h3 className="text-ui-body font-medium leading-4 text-slate-100">
                       {presentation.label}
                     </h3>
                     <span
                       className={cn(
-                        'shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-3',
+                        'shrink-0 rounded-full border px-1.5 py-0.5 text-ui-caption font-medium leading-3',
                         tone === 'success'
                           ? 'border-emerald-400/15 bg-emerald-400/10 text-emerald-300'
                           : tone === 'warning'
@@ -497,7 +502,7 @@ export function TradingSafetySettingsPanel() {
                   <div className="mt-1 flex min-w-0 items-start gap-3">
                     <p
                       className={cn(
-                        'min-w-0 flex-1 text-xs leading-4',
+                        'min-w-0 flex-1 text-ui-label leading-4',
                         tone === 'success'
                           ? 'text-slate-400'
                           : tone === 'warning'
@@ -514,7 +519,7 @@ export function TradingSafetySettingsPanel() {
                   {showGateCodes && (
                     <code
                       title={check.code}
-                      className="mt-0.5 block break-all text-[10px] leading-3 text-slate-600"
+                      className="mt-0.5 block break-all text-ui-caption leading-3 text-slate-600"
                     >
                       {check.code}
                     </code>
@@ -525,7 +530,7 @@ export function TradingSafetySettingsPanel() {
           })}
         </div>
         {safety && !failedChecks.length && (
-          <p className="mt-3 text-xs text-emerald-300">
+          <p className="mt-3 text-ui-label text-emerald-300">
             所有账户事实门禁均已通过。
           </p>
         )}

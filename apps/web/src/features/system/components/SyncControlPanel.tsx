@@ -89,29 +89,29 @@ export function SyncControlPanel({
 
   return (
     <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2">
-      <div className="flex items-center gap-2 bg-white/80 dark:bg-slate-900/40 backdrop-blur-sm p-1 rounded-xl border border-slate-200/60 dark:border-slate-700/60 shadow-sm">
+      <div className="flex items-center gap-2 bg-white/80 dark:bg-slate-900/40 backdrop-blur-sm p-1 rounded-panel border border-slate-200/60 dark:border-slate-700/60 shadow-sm">
         {/* Compact Sync Info */}
         <div className="hidden lg:flex items-center gap-3 px-3 py-0.5">
           <div className="flex flex-col justify-center border-r border-slate-200/60 dark:border-white/10 pr-3">
-            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none mb-0.5">
+            <span className="text-ui-micro font-black text-slate-400 uppercase tracking-widest leading-none mb-0.5">
               任务来源
             </span>
             <div className="flex items-center gap-1.5">
               <span
-                className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[100px]"
+                className="text-ui-label font-bold text-slate-800 dark:text-slate-200 truncate max-w-[100px]"
                 title={deployment?.description || undefined}
               >
                 {deployment?.flowName || defaultFlowName}
               </span>
               {deployment?.workPoolName && (
-                <span className="text-[8px] px-1 py-0 bg-slate-100 dark:bg-white/5 text-slate-500 rounded-sm font-mono uppercase border border-slate-200/50">
+                <span className="text-ui-micro px-1 py-0 bg-slate-100 dark:bg-white/5 text-slate-500 rounded-sm font-mono uppercase border border-slate-200/50">
                   {deployment.workPoolName}
                 </span>
               )}
               {deployment && (
                 <span
                   className={cn(
-                    'text-[8px] px-1 py-0 rounded-sm font-mono uppercase border',
+                    'text-ui-micro px-1 py-0 rounded-sm font-mono uppercase border',
                     isScheduleActive
                       ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20'
                       : 'bg-amber-500/10 text-amber-600 border-amber-500/20'
@@ -123,7 +123,7 @@ export function SyncControlPanel({
               {runtimeStatus && (
                 <span
                   className={cn(
-                    'inline-flex items-center gap-1 text-[8px] px-1 py-0 rounded-sm font-mono uppercase border',
+                    'inline-flex items-center gap-1 text-ui-micro px-1 py-0 rounded-sm font-mono uppercase border',
                     runtimeStatus.className
                   )}
                   title={runtimeStatus.title}
@@ -134,7 +134,7 @@ export function SyncControlPanel({
               )}
               {isStale && (
                 <span
-                  className="inline-flex items-center gap-1 rounded-sm border border-red-500/20 bg-red-500/10 px-1 py-0 font-mono text-[8px] uppercase text-red-500"
+                  className="inline-flex items-center gap-1 rounded-sm border border-red-500/20 bg-red-500/10 px-1 py-0 font-mono text-ui-micro uppercase text-red-500"
                   title={deployment?.staleReason || '运行中但长时间无活动'}
                 >
                   <AlertTriangle className="h-2.5 w-2.5" />
@@ -152,10 +152,10 @@ export function SyncControlPanel({
               />
             </div>
             <div className="flex flex-col">
-              <span className="text-[8px] font-black text-slate-400/80 uppercase tracking-tighter leading-none">
+              <span className="text-ui-micro font-black text-slate-400/80 uppercase tracking-tighter leading-none">
                 上次同步
               </span>
-              <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300 leading-tight font-mono">
+              <span className="text-ui-caption font-bold text-slate-600 dark:text-slate-300 leading-tight font-mono">
                 {deployment?.lastRunTime
                   ? format(new Date(deployment.lastRunTime), 'MM-dd HH:mm')
                   : '--'}
@@ -176,10 +176,10 @@ export function SyncControlPanel({
               />
             </div>
             <div className="flex flex-col">
-              <span className="text-[8px] font-black text-slate-400/80 uppercase tracking-tighter leading-none">
+              <span className="text-ui-micro font-black text-slate-400/80 uppercase tracking-tighter leading-none">
                 下次同步
               </span>
-              <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300 leading-tight font-mono">
+              <span className="text-ui-caption font-bold text-slate-600 dark:text-slate-300 leading-tight font-mono">
                 {deployment?.nextRunTime
                   ? format(new Date(deployment.nextRunTime), 'MM-dd HH:mm')
                   : '--'}
@@ -194,7 +194,7 @@ export function SyncControlPanel({
               variant="ghost"
               size="sm"
               className={cn(
-                'h-7 px-2.5 rounded-lg hover:bg-slate-100/80 dark:hover:bg-white/10 transition-all gap-1.5',
+                'h-control-compact px-2.5 rounded-lg hover:bg-slate-100/80 dark:hover:bg-white/10 transition-all gap-1.5',
                 !isScheduleActive && 'text-amber-600 dark:text-amber-400'
               )}
               disabled={!deployment || isScheduleUpdating}
@@ -206,7 +206,7 @@ export function SyncControlPanel({
               ) : (
                 <PlayCircle className="w-3.5 h-3.5 text-amber-500" />
               )}
-              <span className="font-bold text-[10px]">
+              <span className="font-bold text-ui-caption">
                 {isScheduleUpdating ? '更新中...' : scheduleActionLabel}
               </span>
             </Button>
@@ -215,11 +215,11 @@ export function SyncControlPanel({
           <Button
             variant="ghost"
             size="sm"
-            className="h-7 px-2.5 rounded-lg hover:bg-slate-100/80 dark:hover:bg-white/10 transition-all gap-1.5"
+            className="h-control-compact px-2.5 rounded-lg hover:bg-slate-100/80 dark:hover:bg-white/10 transition-all gap-1.5"
             onClick={onShowHistory}
           >
             <BarChart4 className="w-3.5 h-3.5 text-slate-500" />
-            <span className="font-bold text-[10px] text-slate-600 dark:text-slate-300">
+            <span className="font-bold text-ui-caption text-slate-600 dark:text-slate-300">
               历史记录
             </span>
           </Button>
@@ -228,7 +228,7 @@ export function SyncControlPanel({
             variant="default"
             size="sm"
             className={cn(
-              'group h-7 px-3 rounded-lg shadow-sm active:scale-95 transition-all gap-1.5 text-white',
+              'group h-control-compact px-3 rounded-lg shadow-sm active:scale-95 transition-all gap-1.5 text-white',
               syncButtonCancels
                 ? 'w-[88px] bg-indigo-600 border border-indigo-500/50 shadow-indigo-500/20 hover:bg-red-600 hover:border-red-500/50 hover:shadow-red-500/25 focus-visible:bg-red-600 focus-visible:border-red-500/50'
                 : 'bg-indigo-600 hover:bg-indigo-700 border border-indigo-500/50 shadow-indigo-500/20 hover:shadow-indigo-500/30'
@@ -250,13 +250,13 @@ export function SyncControlPanel({
               <span className="relative block h-3.5 w-full">
                 <span className="absolute inset-0 flex items-center justify-center gap-1.5 transition-opacity duration-150 group-hover:opacity-0 group-focus-visible:opacity-0">
                   <Activity className="!h-3 !w-3" />
-                  <span className="whitespace-nowrap font-bold text-[10px] leading-none">
+                  <span className="whitespace-nowrap font-bold text-ui-caption leading-none">
                     {isRunCancelling ? '停止中...' : syncLabel}
                   </span>
                 </span>
                 <span className="absolute inset-0 flex items-center justify-center gap-1.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
                   <Square className="!h-3 !w-3" />
-                  <span className="whitespace-nowrap font-bold text-[10px] leading-none">
+                  <span className="whitespace-nowrap font-bold text-ui-caption leading-none">
                     {isRunCancelling ? '停止中...' : '停止'}
                   </span>
                 </span>
@@ -268,7 +268,7 @@ export function SyncControlPanel({
                 ) : (
                   <RefreshCw className="w-3 h-3" />
                 )}
-                <span className="font-bold text-[10px]">{syncLabel}</span>
+                <span className="font-bold text-ui-caption">{syncLabel}</span>
               </>
             )}
           </Button>

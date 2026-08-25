@@ -3,17 +3,17 @@ import type React from 'react';
 
 import type { StudioSidebarSizing } from './types';
 
-export const DEFAULT_SIDEBAR_WIDTH = 288;
-export const MIN_SIDEBAR_WIDTH = 240;
-export const MAX_SIDEBAR_WIDTH = 560;
+export const DEFAULT_SIDEBAR_WIDTH = 264;
+export const MIN_SIDEBAR_WIDTH = 220;
+export const MAX_SIDEBAR_WIDTH = 480;
 export const RESIZE_STEP = 10;
 export const RESIZE_LARGE_STEP = 40;
 export const STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE =
   'studio-workspace-sidebar';
 export const STUDIO_WORKSPACE_SIDEBAR_SIZING: StudioSidebarSizing = {
-  defaultWidth: 304,
-  maxWidth: 440,
-  minWidth: 248,
+  defaultWidth: 280,
+  maxWidth: 420,
+  minWidth: 220,
   storageScope: STUDIO_WORKSPACE_SIDEBAR_STORAGE_SCOPE,
 };
 

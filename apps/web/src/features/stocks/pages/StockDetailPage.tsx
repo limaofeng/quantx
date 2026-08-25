@@ -63,11 +63,13 @@ function PageState({
   title: string;
 }) {
   return (
-    <div className="studio-workspace-surface flex h-full items-center justify-center p-8">
-      <div className="max-w-md border border-white/5 bg-[#0b1120]/80 p-5 text-center">
+    <div className="studio-workspace-surface flex h-full items-center justify-center p-ui-section">
+      <div className="max-w-md border border-white/5 bg-[#0b1120]/80 p-ui-section text-center">
         <Building2 className="mx-auto h-6 w-6 text-red-300" />
-        <h1 className="mt-3 text-sm font-black text-slate-100">{title}</h1>
-        <p className="mt-2 text-xs leading-5 text-slate-500">{description}</p>
+        <h1 className="mt-3 text-ui-body font-black text-slate-100">{title}</h1>
+        <p className="mt-2 text-ui-label leading-5 text-slate-500">
+          {description}
+        </p>
         {onRetry && (
           <Button
             size="sm"

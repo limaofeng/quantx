@@ -86,7 +86,7 @@ export function ConnectedEntryPlansPage() {
       {workspace.fetching ? (
         <div
           aria-live="polite"
-          className="pointer-events-none fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-md border border-white/10 bg-[#0b1120]/95 px-3 py-2 text-xs text-slate-300 shadow-xl"
+          className="pointer-events-none fixed bottom-5 right-5 z-40 inline-flex items-center gap-2 rounded-md border border-white/10 bg-[#0b1120]/95 px-3 py-2 text-ui-label text-slate-300 shadow-none"
         >
           <LoaderCircle
             aria-hidden="true"

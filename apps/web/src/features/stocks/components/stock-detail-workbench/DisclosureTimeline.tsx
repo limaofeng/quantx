@@ -69,10 +69,10 @@ export function DisclosureTimeline({
       <div className="flex min-h-10 flex-col gap-2 border-b border-white/5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-2">
           <FileText className="h-3.5 w-3.5 text-blue-300" />
-          <h3 className="truncate text-xs font-black text-slate-200">
+          <h3 className="truncate text-ui-label font-black text-slate-200">
             公告动态
           </h3>
-          <span className="rounded border border-white/10 px-2 py-0.5 font-mono text-[10px] font-bold text-slate-500">
+          <span className="rounded border border-white/10 px-2 py-0.5 font-mono text-ui-caption font-bold text-slate-500">
             {announcements.length}
           </span>
         </div>
@@ -83,7 +83,7 @@ export function DisclosureTimeline({
               type="button"
               onClick={() => setActiveFilter(filter.id)}
               className={cn(
-                'h-7 shrink-0 rounded-md px-2.5 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                'h-7 shrink-0 rounded-md px-2.5 text-ui-caption font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 activeFilter === filter.id
                   ? 'bg-blue-500/15 text-blue-100'
                   : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
@@ -97,13 +97,15 @@ export function DisclosureTimeline({
 
       <div className="max-h-[520px] overflow-y-auto p-3 custom-scrollbar">
         {isLoading ? (
-          <div className="flex h-32 items-center justify-center text-xs font-bold text-slate-500">
+          <div className="flex h-32 items-center justify-center text-ui-label font-bold text-slate-500">
             公告读取中
           </div>
         ) : filteredItems.length === 0 ? (
           <div className="flex h-32 flex-col items-center justify-center gap-2 text-center">
-            <div className="text-xs font-bold text-slate-400">暂无匹配公告</div>
-            <div className="max-w-sm text-[11px] font-medium text-slate-600">
+            <div className="text-ui-label font-bold text-slate-400">
+              暂无匹配公告
+            </div>
+            <div className="max-w-sm text-ui-caption font-medium text-slate-600">
               {sourceStatus === 'READY'
                 ? '等待首次同步，可点击刷新公告。'
                 : '可尝试刷新，或调整公告分类筛选。'}
@@ -116,14 +118,14 @@ export function DisclosureTimeline({
                 key={item.id}
                 className="grid min-w-0 gap-2 border border-white/5 bg-[#08101d]/80 p-3 md:grid-cols-[96px_minmax(0,1fr)_auto]"
               >
-                <div className="font-mono text-[11px] font-black text-slate-500">
+                <div className="font-mono text-ui-caption font-black text-slate-500">
                   {formatDate(item.announceDate)}
                 </div>
                 <div className="min-w-0">
                   <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                     <span
                       className={cn(
-                        'rounded border px-1.5 py-0.5 text-[10px] font-black',
+                        'rounded border px-1.5 py-0.5 text-ui-caption font-black',
                         item.isRepurchaseRelated
                           ? 'border-red-500/25 bg-red-500/10 text-red-200'
                           : 'border-white/10 bg-white/[0.04] text-slate-400'
@@ -132,11 +134,11 @@ export function DisclosureTimeline({
                       {item.announcementType ||
                         (item.isRepurchaseRelated ? '回购' : '公告')}
                     </span>
-                    <span className="text-[10px] font-bold text-slate-600">
+                    <span className="text-ui-caption font-bold text-slate-600">
                       {sourceLabel(item.source)}
                     </span>
                   </div>
-                  <h4 className="mt-1 line-clamp-2 text-xs font-bold leading-5 text-slate-200">
+                  <h4 className="mt-1 line-clamp-2 text-ui-label font-bold leading-5 text-slate-200">
                     {renderHighlightedTitle(item.title)}
                   </h4>
                 </div>

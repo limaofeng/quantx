@@ -10,7 +10,7 @@
   --card-foreground: hsl(222, 47%, 11%);
   --popover: hsl(0, 0%, 100%);
   --popover-foreground: hsl(222, 47%, 11%);
-  --primary: #3B82F6;
+  --primary: #3b82f6;
   /* Studio interaction blue */
   --primary-foreground: hsl(210, 40%, 98%);
   --secondary: hsl(210, 40%, 96%);
@@ -23,7 +23,7 @@
   --destructive-foreground: hsl(210, 40%, 98%);
   --border: hsl(214, 32%, 91%);
   --input: hsl(214, 32%, 91%);
-  --ring: #3B82F6;
+  --ring: #3b82f6;
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
   /* A 股行情语义色：红涨、绿跌；持仓下跌使用淡蓝色。 */
@@ -37,7 +37,42 @@
   --font-sans: Inter, system-ui, sans-serif;
   --font-serif: Georgia, serif;
   --font-mono: Menlo, monospace;
-  --radius: 0.75rem;
+  --font-size-ui-micro: 0.625rem;
+  --line-height-ui-micro: 0.75rem;
+  --font-size-ui-caption: 0.6875rem;
+  --line-height-ui-caption: 1rem;
+  --font-size-ui-label: 0.75rem;
+  --line-height-ui-label: 1rem;
+  --font-size-ui-body: 0.8125rem;
+  --line-height-ui-body: 1.125rem;
+  --font-size-ui-title: 0.875rem;
+  --line-height-ui-title: 1.25rem;
+  --font-size-ui-heading: 1rem;
+  --line-height-ui-heading: 1.5rem;
+  --font-size-ui-page-title: 1.125rem;
+  --line-height-ui-page-title: 1.5rem;
+  --font-size-ui-display: 1.25rem;
+  --line-height-ui-display: 1.75rem;
+  --font-size-ui-display-lg: 1.5rem;
+  --line-height-ui-display-lg: 2rem;
+  --font-size-ui-display-xl: 2rem;
+  --line-height-ui-display-xl: 2.5rem;
+  --control-height-compact: 2rem;
+  --control-height-default: 2.25rem;
+  --control-height-large: 2.5rem;
+  --radius-element: 0.25rem;
+  --radius-control: 0.375rem;
+  --radius-panel: 0.5rem;
+  --radius-dialog: 0.75rem;
+  --radius: var(--radius-panel);
+  --space-panel: 0.75rem;
+  --space-section: 1rem;
+  --space-empty: 1.25rem;
+  --space-page: 0.75rem;
+  --content-width-page: 100rem;
+  --studio-header-height: 2.5rem;
+  --studio-status-height: 1.5rem;
+  --studio-tab-height: 2.25rem;
 
   /* 彩色阴影系统 */
   --shadow-blue: 0 4px 12px rgba(37, 99, 235, 0.15);
@@ -45,8 +80,8 @@
   --shadow-emerald: 0 4px 12px rgba(16, 185, 129, 0.15);
   --shadow-amber: 0 4px 12px rgba(245, 158, 11, 0.15);
   --shadow-rose: 0 4px 12px rgba(244, 63, 94, 0.15);
-  --button-primary: #3B82F6;
-  --button-primary-hover: #2563EB;
+  --button-primary: #3b82f6;
+  --button-primary-hover: #2563eb;
   --button-primary-shadow: rgba(37, 99, 235, 0.2);
 
   --scrollbar-size: 8px;
@@ -61,16 +96,16 @@
   --skeleton-highlight: rgba(255, 255, 255, 0.42);
 
   /* Studio Workbench tokens */
-  --studio-workspace-surface: #050B16;
-  --studio-bg: #050B16;
-  --studio-panel: #0B1728;
-  --studio-panel-muted: #0F1D30;
+  --studio-workspace-surface: #050b16;
+  --studio-bg: #050b16;
+  --studio-panel: #0b1728;
+  --studio-panel-muted: #0f1d30;
   --studio-border: rgba(255, 255, 255, 0.07);
   --studio-text: #f8fafc;
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #3B82F6;
+  --studio-primary: #3b82f6;
   --studio-primary-soft: rgba(59, 130, 246, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
@@ -78,27 +113,27 @@
 }
 
 .dark {
-  --background: #050B16;
+  --background: #050b16;
   /* Studio base */
   --foreground: hsl(213, 31%, 91%);
-  --card: #0B1728;
+  --card: #0b1728;
   --card-foreground: hsl(213, 31%, 91%);
-  --popover: #0B1728;
+  --popover: #0b1728;
   --popover-foreground: hsl(213, 31%, 91%);
-  --primary: #3B82F6;
+  --primary: #3b82f6;
   /* Studio interaction blue */
   --primary-foreground: hsl(222, 47%, 1%);
-  --secondary: #0F1D30;
+  --secondary: #0f1d30;
   --secondary-foreground: hsl(213, 31%, 91%);
-  --muted: #0F1D30;
+  --muted: #0f1d30;
   --muted-foreground: hsl(215, 20%, 65%);
-  --accent: #0F1D30;
+  --accent: #0f1d30;
   --accent-foreground: hsl(210, 40%, 98%);
   --destructive: hsl(0, 84%, 40%);
   --destructive-foreground: hsl(210, 40%, 98%);
   --border: hsl(217, 32%, 17%);
   --input: hsl(217, 32%, 17%);
-  --ring: #3B82F6;
+  --ring: #3b82f6;
   --success: hsl(142, 71%, 45%);
   --warning: hsl(38, 92%, 50%);
   --market-up: 239 68 68;
@@ -109,8 +144,8 @@
 
   --shadow-blue: 0 0 15px rgba(37, 99, 235, 0.1);
   --shadow-blue-lg: 0 0 30px rgba(37, 99, 235, 0.2);
-  --button-primary: #3B82F6;
-  --button-primary-hover: #2563EB;
+  --button-primary: #3b82f6;
+  --button-primary-hover: #2563eb;
   --button-primary-shadow: rgba(37, 99, 235, 0.2);
   --scrollbar-track: rgba(15, 23, 42, 0.42);
   --scrollbar-thumb: rgba(71, 85, 105, 0.58);
@@ -122,16 +157,16 @@
   --skeleton-base: rgba(148, 163, 184, 0.07);
   --skeleton-highlight: rgba(226, 232, 240, 0.075);
 
-  --studio-workspace-surface: #050B16;
-  --studio-bg: #050B16;
-  --studio-panel: #0B1728;
-  --studio-panel-muted: #0F1D30;
+  --studio-workspace-surface: #050b16;
+  --studio-bg: #050b16;
+  --studio-panel: #0b1728;
+  --studio-panel-muted: #0f1d30;
   --studio-border: rgba(255, 255, 255, 0.07);
   --studio-text: #f8fafc;
   --studio-text-secondary: #cbd5e1;
   --studio-text-muted: #94a3b8;
   --studio-text-subtle: #64748b;
-  --studio-primary: #3B82F6;
+  --studio-primary: #3b82f6;
   --studio-primary-soft: rgba(59, 130, 246, 0.14);
   --studio-danger: #f43f5e;
   --studio-success: #10b981;
@@ -212,6 +247,11 @@
 
 .studio-workspace-surface {
   background-color: var(--studio-workspace-surface);
+}
+
+.studio-content-width {
+  width: 100%;
+  max-width: var(--content-width-page);
 }
 
 /* Keep horizontal tab strips scrollable without reserving scrollbar space. */
@@ -301,47 +341,8 @@
   --button-primary: var(--studio-primary);
   --button-primary-hover: #3b82f6;
   --button-primary-shadow: rgba(37, 99, 235, 0.18);
-}
-
-[data-studio-workbench] .rounded-2xl,
-[data-studio-workbench] .rounded-\[2rem\],
-[data-studio-workbench] .rounded-\[24px\],
-[data-studio-workbench] .rounded-\[20px\] {
-  border-radius: 0.5rem !important;
-}
-
-[data-studio-workbench] .shadow-xl,
-[data-studio-workbench] .shadow-2xl {
-  box-shadow: none !important;
-}
-
-[data-studio-workbench] .p-6 {
-  padding: 0.75rem !important;
-}
-
-[data-studio-workbench] .p-8 {
-  padding: 1rem !important;
-}
-
-[data-studio-workbench] .p-12 {
-  padding: 1.25rem !important;
-}
-
-[data-studio-workbench] .px-6,
-[data-studio-workbench] .px-8 {
-  padding-left: 0.75rem !important;
-  padding-right: 0.75rem !important;
-}
-
-[data-studio-workbench] .py-6,
-[data-studio-workbench] .py-8 {
-  padding-top: 0.75rem !important;
-  padding-bottom: 0.75rem !important;
-}
-
-[data-studio-workbench] .gap-6,
-[data-studio-workbench] .gap-8 {
-  gap: 0.75rem !important;
+  font-size: var(--font-size-ui-body);
+  line-height: var(--line-height-ui-body);
 }
 
 /* 动画定义 */
@@ -478,12 +479,12 @@
 
 /* 优化卡片样式 */
 .card-elevated {
-  @apply bg-slate-50/40 dark:bg-slate-950/40 rounded-2xl border border-slate-200/60 dark:border-white/5 shadow-sm hover:shadow-md hover:border-slate-300 transition-all duration-300;
+  @apply bg-slate-50/40 dark:bg-slate-950/40 rounded-panel border border-slate-200/60 dark:border-white/5 shadow-sm hover:shadow-md hover:border-slate-300 transition-all duration-300;
 }
 
 /* 优化输入框样式 */
 .input-elevated {
-  @apply w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 text-slate-900 dark:text-slate-100 text-sm transition-all duration-200;
+  @apply h-control-default w-full rounded-control border border-slate-200 bg-white px-ui-panel text-ui-body text-slate-900 transition-all duration-200 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-100;
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
@@ -498,7 +499,7 @@
 
 /* 优化按钮样式 */
 .btn-primary-elevated {
-  @apply bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl font-semibold text-sm transition-all duration-200 active:scale-[0.97];
+  @apply h-control-default rounded-control bg-blue-600 px-ui-panel text-ui-body font-semibold text-white transition-colors duration-150 hover:bg-blue-500;
   box-shadow: var(--shadow-blue);
 }
 

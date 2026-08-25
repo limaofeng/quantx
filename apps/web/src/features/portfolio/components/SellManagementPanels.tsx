@@ -27,6 +27,8 @@ import {
 } from '@/components/ui/alert-dialog';
 import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { NativeSelect } from '@/components/ui/native-select';
 import { useToast } from '@/hooks/use-toast';
 import { createClientId } from '@/utils/clientId';
 import { cn } from '@/utils/cn';
@@ -251,25 +253,25 @@ function PlanCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="flex min-w-0 items-baseline gap-2 text-sm font-black text-slate-100">
+            <h3 className="flex min-w-0 items-baseline gap-2 text-ui-body font-black text-slate-100">
               {instrumentName ? (
                 <span className="truncate">{instrumentName}</span>
               ) : null}
               <span
                 className={cn(
                   'shrink-0 font-mono',
-                  instrumentName && 'text-xs text-slate-400'
+                  instrumentName && 'text-ui-label text-slate-400'
                 )}
               >
                 {plan.instrumentCode}
               </span>
             </h3>
-            <span className="rounded border border-white/10 px-2 py-0.5 text-[10px] font-black text-slate-400">
+            <span className="rounded border border-white/10 px-2 py-0.5 text-ui-caption font-black text-slate-400">
               {sourceLabels[plan.sourceType] || plan.sourceType}
             </span>
             <span
               className={cn(
-                'rounded border px-2 py-0.5 text-[10px] font-black',
+                'rounded border px-2 py-0.5 text-ui-caption font-black',
                 statusTone(plan.status)
               )}
             >
@@ -278,7 +280,7 @@ function PlanCard({
             {plan.executionMode === 'live' ? (
               <span
                 className={cn(
-                  'rounded border px-2 py-0.5 text-[10px] font-black',
+                  'rounded border px-2 py-0.5 text-ui-caption font-black',
                   liveAuthorizationActive
                     ? 'border-emerald-400/30 text-emerald-200'
                     : 'border-amber-400/30 text-amber-200'
@@ -289,12 +291,12 @@ function PlanCard({
                   : '实盘卖出需逐次确认'}
               </span>
             ) : (
-              <span className="rounded border border-slate-500/30 px-2 py-0.5 text-[10px] font-black text-slate-400">
+              <span className="rounded border border-slate-500/30 px-2 py-0.5 text-ui-caption font-black text-slate-400">
                 模拟执行
               </span>
             )}
           </div>
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-bold text-slate-500">
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-ui-caption font-bold text-slate-500">
             <span>计划卖出 {plan.protectedVolume.toLocaleString()} 股</span>
             <span>已卖 {plan.exitedVolume.toLocaleString()} 股</span>
             <span>剩余 {plan.remainingVolume.toLocaleString()} 股</span>
@@ -308,7 +310,7 @@ function PlanCard({
               const value = rule as { strategy?: string; rule_id?: string };
               return (
                 <span
-                  className="rounded bg-white/[0.04] px-2 py-1 text-[10px] font-bold text-slate-400"
+                  className="rounded bg-white/[0.04] px-2 py-1 text-ui-caption font-bold text-slate-400"
                   key={value.rule_id || `${plan.planId}-${index}`}
                 >
                   {getExitRuleLabel(value.strategy)}
@@ -412,7 +414,7 @@ function PlanCard({
           )}
         </div>
       </div>
-      <div className="mt-3 border-t border-white/5 pt-2 text-[10px] font-medium text-slate-600">
+      <div className="mt-3 border-t border-white/5 pt-2 text-ui-caption font-medium text-slate-600">
         最近评估 {formatDateTime(plan.lastEvaluatedAt)} · 更新{' '}
         {formatDateTime(plan.updatedAt)}
       </div>
@@ -835,10 +837,10 @@ export function ManualPlanEditor({
     <section className="w-full basis-full rounded-md border border-blue-400/20 bg-blue-500/[0.06] p-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-black text-slate-100">
+          <h3 className="text-ui-body font-black text-slate-100">
             {editingPlan ? '编辑人工计划' : '人工计划编辑器'}
           </h3>
-          <p className="mt-1 text-[11px] font-bold text-slate-500">
+          <p className="mt-1 text-ui-caption font-bold text-slate-500">
             先选择“什么情况下卖”，再填写触发参数；添加多个条件时，任一条件满足即可执行。
           </p>
         </div>
@@ -847,10 +849,10 @@ export function ManualPlanEditor({
         </Button>
       </div>
       <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <label className="grid content-start gap-1 text-xs font-bold text-slate-400">
+        <label className="grid content-start gap-1 text-ui-label font-bold text-slate-400">
           股票
-          <input
-            className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
+          <Input
+            className="h-control-default rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
             onChange={event => {
               setInstrumentCode(event.target.value);
               setSelectedOrderIds([]);
@@ -862,14 +864,14 @@ export function ManualPlanEditor({
         </label>
         <div className="grid content-start gap-1">
           <label
-            className="text-xs font-bold text-slate-400"
+            className="text-ui-label font-bold text-slate-400"
             htmlFor="manual-plan-sell-volume"
           >
             计划卖出数量
           </label>
-          <input
+          <Input
             aria-describedby="manual-plan-sell-volume-help"
-            className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
+            className="h-control-default rounded-md border border-white/10 bg-[#080d18] px-3 font-mono text-slate-100 outline-none focus:border-blue-400/50"
             id="manual-plan-sell-volume"
             min={1}
             onChange={event => setProtectedVolume(event.target.value)}
@@ -877,16 +879,16 @@ export function ManualPlanEditor({
             value={protectedVolume}
           />
           <p
-            className="text-[10px] font-medium leading-4 text-slate-500"
+            className="text-ui-caption font-medium leading-4 text-slate-500"
             id="manual-plan-sell-volume-help"
           >
             触发条件满足后，最多卖出该数量；创建计划不会立即下单。
           </p>
         </div>
-        <label className="grid content-start gap-1 text-xs font-bold text-slate-400">
+        <label className="grid content-start gap-1 text-ui-label font-bold text-slate-400">
           模式
-          <select
-            className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
+          <NativeSelect
+            className="h-control-default rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
             onChange={event => {
               const mode = event.target.value as 'paper' | 'live';
               setExecutionMode(mode);
@@ -896,12 +898,12 @@ export function ManualPlanEditor({
           >
             <option value="paper">模拟</option>
             <option value="live">实盘</option>
-          </select>
+          </NativeSelect>
         </label>
         {executionMode === 'live' ? (
           <div className="grid content-start gap-1">
-            <span className="text-xs font-bold text-slate-400">授权</span>
-            <label className="flex h-9 items-center gap-2 text-xs font-bold text-slate-300">
+            <span className="text-ui-label font-bold text-slate-400">授权</span>
+            <label className="flex h-9 items-center gap-2 text-ui-label font-bold text-slate-300">
               <input
                 aria-describedby="manual-plan-live-authorization-help"
                 checked={requestLiveAuthorization}
@@ -913,7 +915,7 @@ export function ManualPlanEditor({
               保存后预览并授权自动实盘卖出
             </label>
             <p
-              className="text-[10px] font-medium leading-4 text-amber-200/70"
+              className="text-ui-caption font-medium leading-4 text-amber-200/70"
               id="manual-plan-live-authorization-help"
             >
               未授权时，触发 SELL 仍需逐次人工确认。
@@ -921,17 +923,17 @@ export function ManualPlanEditor({
           </div>
         ) : (
           <div className="grid content-start gap-1">
-            <span className="text-xs font-bold text-slate-400">授权</span>
-            <p className="flex h-9 items-center text-[11px] font-bold text-slate-500">
+            <span className="text-ui-label font-bold text-slate-400">授权</span>
+            <p className="flex h-9 items-center text-ui-caption font-bold text-slate-500">
               模拟模式不会提交实盘委托
             </p>
           </div>
         )}
       </div>
-      <label className="mt-3 grid gap-1 text-xs font-bold text-slate-400">
+      <label className="mt-3 grid gap-1 text-ui-label font-bold text-slate-400">
         备注
-        <input
-          className="h-9 rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
+        <Input
+          className="h-control-default rounded-md border border-white/10 bg-[#080d18] px-3 text-slate-100 outline-none focus:border-blue-400/50"
           onChange={event => setRemark(event.target.value)}
           placeholder="这项计划的卖出目的或备注"
           value={remark}
@@ -1054,19 +1056,19 @@ export function ManualPlanEditor({
       >
         <AlertDialogContent className="max-h-[90vh] overflow-y-auto border-amber-400/25 bg-[#0b1120] text-slate-100 sm:max-w-2xl">
           <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2 text-base">
+            <AlertDialogTitle className="flex items-center gap-2 text-ui-title">
               <ShieldAlert className="h-5 w-5 text-amber-300" />
               确认自动实盘卖出授权
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
-              <div className="space-y-3 text-left text-sm leading-6 text-slate-400">
+              <div className="space-y-3 text-left text-ui-body leading-6 text-slate-400">
                 <p className="rounded-md border border-amber-400/20 bg-amber-400/[0.08] p-3 text-amber-50">
                   授权后，当任一卖出规则触发，系统可不再逐次询问，直接进入实时风控并可能提交
                   SELL。本次确认只授权当前计划版本，不会立即创建委托。
                 </p>
                 {authorizationChallenge ? (
                   <>
-                    <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+                    <dl className="grid grid-cols-2 gap-2 text-ui-label sm:grid-cols-3">
                       {[
                         ['股票', authorizationChallenge.instrumentCode],
                         [
@@ -1105,7 +1107,7 @@ export function ManualPlanEditor({
                         </div>
                       ))}
                     </dl>
-                    <div className="rounded-md border border-white/10 p-3 text-xs leading-5 text-slate-400">
+                    <div className="rounded-md border border-white/10 p-3 text-ui-label leading-5 text-slate-400">
                       <p>T+1 策略：{authorizationChallenge.t1Policy}</p>
                       <p>
                         持仓快照：总持仓{' '}
@@ -1134,16 +1136,16 @@ export function ManualPlanEditor({
                           authorizationChallenge.position.positionUpdatedAt
                         )}
                       </p>
-                      <p className="break-all font-mono text-[10px] text-slate-600">
+                      <p className="break-all font-mono text-ui-caption text-slate-600">
                         授权指纹：
                         {authorizationChallenge.authorizationFingerprint}
                       </p>
                     </div>
-                    <details className="rounded-md border border-white/10 p-3 text-xs">
+                    <details className="rounded-md border border-white/10 p-3 text-ui-label">
                       <summary className="cursor-pointer font-bold text-slate-300">
                         查看完整卖出规则与执行策略
                       </summary>
-                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-all rounded bg-black/20 p-2 font-mono text-[10px] leading-4 text-slate-500">
+                      <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-all rounded bg-black/20 p-2 font-mono text-ui-caption leading-4 text-slate-500">
                         {JSON.stringify(
                           {
                             costBasis: authorizationChallenge.costBasis,
@@ -1158,13 +1160,13 @@ export function ManualPlanEditor({
                       </pre>
                     </details>
                     {authorizationChallenge.otherProtections.length > 0 ? (
-                      <p className="text-xs text-amber-200">
+                      <p className="text-ui-label text-amber-200">
                         当前另有{' '}
                         {authorizationChallenge.otherProtections.length}{' '}
                         个退出计划占用该持仓；授权范围已按服务端快照固定。
                       </p>
                     ) : null}
-                    <ul className="list-disc space-y-1 pl-5 text-xs text-slate-500">
+                    <ul className="list-disc space-y-1 pl-5 text-ui-label text-slate-500">
                       {authorizationChallenge.warnings.map(warning => (
                         <li key={warning}>{warning}</li>
                       ))}
@@ -1297,7 +1299,7 @@ export function ExitPlansPanel({
       title: '确认卖出意图',
       description: (
         <div className="space-y-3">
-          <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-white/10 dark:bg-slate-900">
+          <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1 rounded-panel border border-slate-200 bg-slate-50 p-3 text-ui-label dark:border-white/10 dark:bg-slate-900">
             <dt className="text-slate-500 dark:text-slate-400">标的 / 方向</dt>
             <dd className="font-mono text-slate-900 dark:text-slate-100">
               {preview.instrumentCode} {preview.side}
@@ -1348,8 +1350,8 @@ export function ExitPlansPanel({
     <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-base font-black text-slate-100">卖出计划</h2>
-          <p className="mt-1 text-xs font-bold text-slate-500">
+          <h2 className="text-ui-title font-black text-slate-100">卖出计划</h2>
+          <p className="mt-1 text-ui-label font-bold text-slate-500">
             统一监控打板、T 批次、止盈/止损、人工计划和人工清仓。
           </p>
         </div>
@@ -1363,18 +1365,18 @@ export function ExitPlansPanel({
         />
       </div>
       {plans.error && (
-        <div className="mt-3 rounded border border-rose-400/20 bg-rose-500/10 p-3 text-xs font-bold text-rose-100">
+        <div className="mt-3 rounded border border-rose-400/20 bg-rose-500/10 p-3 text-ui-label font-bold text-rose-100">
           {plans.error.message}
         </div>
       )}
       <div className="mt-3 grid gap-2">
         {plans.fetching && visiblePlans.length === 0 ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-sm font-bold text-slate-500">
+          <div className="flex items-center justify-center gap-2 py-16 text-ui-body font-bold text-slate-500">
             <Loader2 className="h-4 w-4 animate-spin" />
             加载卖出计划
           </div>
         ) : visiblePlans.length === 0 ? (
-          <div className="rounded-md border border-dashed border-white/10 py-16 text-center text-sm font-bold text-slate-500">
+          <div className="rounded-md border border-dashed border-white/10 py-16 text-center text-ui-body font-bold text-slate-500">
             暂无进行中的卖出计划
           </div>
         ) : (
@@ -1467,8 +1469,10 @@ function ChoiceCard({
         type="radio"
       />
       <span>
-        <span className="block text-xs font-black text-slate-200">{label}</span>
-        <span className="mt-1 block text-[11px] font-bold leading-5 text-slate-500">
+        <span className="block text-ui-label font-black text-slate-200">
+          {label}
+        </span>
+        <span className="mt-1 block text-ui-caption font-bold leading-5 text-slate-500">
           {description}
         </span>
       </span>
@@ -1535,15 +1539,15 @@ export function PositionLiquidationPanel({
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
       <div>
-        <h2 className="text-base font-black text-slate-100">持仓清仓</h2>
-        <p className="mt-1 text-xs font-bold text-slate-500">
+        <h2 className="text-ui-title font-black text-slate-100">持仓清仓</h2>
+        <p className="mt-1 text-ui-label font-bold text-slate-500">
           清仓是明确动作；确认后按股票创建独立卖出计划并由统一状态机执行。
         </p>
       </div>
       <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_420px]">
         <section className="rounded-md border border-white/8 bg-[#0b1120]/70">
           <div className="flex items-center justify-between border-b border-white/5 p-3">
-            <span className="text-xs font-black text-slate-200">
+            <span className="text-ui-label font-black text-slate-200">
               已选 {selected.length} / {positions.length}
             </span>
             <Button
@@ -1582,17 +1586,17 @@ export function PositionLiquidationPanel({
                       type="checkbox"
                     />
                     <span className="min-w-0">
-                      <span className="block truncate text-sm font-black text-slate-100">
+                      <span className="block truncate text-ui-body font-black text-slate-100">
                         {position.instrumentName || code}
                       </span>
-                      <span className="font-mono text-[10px] text-slate-600">
+                      <span className="font-mono text-ui-caption text-slate-600">
                         {code}
                       </span>
                     </span>
                   </span>
-                  <span className="text-right font-mono text-xs text-slate-300">
+                  <span className="text-right font-mono text-ui-label text-slate-300">
                     <span className="block">持仓 {position.volume}</span>
-                    <span className="block text-[10px] text-slate-600">
+                    <span className="block text-ui-caption text-slate-600">
                       当前可卖 {position.canUseVolume}
                     </span>
                   </span>
@@ -1602,8 +1606,10 @@ export function PositionLiquidationPanel({
           </div>
         </section>
         <section className="rounded-md border border-white/8 bg-[#0b1120]/70 p-3">
-          <h3 className="text-xs font-black text-slate-200">本次清仓规则</h3>
-          <p className="mt-1 text-[11px] font-bold text-amber-200">
+          <h3 className="text-ui-label font-black text-slate-200">
+            本次清仓规则
+          </h3>
+          <p className="mt-1 text-ui-caption font-bold text-amber-200">
             以下选项没有默认值，必须逐项明确选择。
           </p>
           <div className="mt-3 grid gap-2">
@@ -1646,10 +1652,10 @@ export function PositionLiquidationPanel({
               value="REPLACE_CANCELLABLE"
             />
           </div>
-          <label className="mt-4 grid gap-1 text-xs font-bold text-slate-400">
+          <label className="mt-4 grid gap-1 text-ui-label font-bold text-slate-400">
             执行模式（必选）
-            <select
-              className="h-9 rounded border border-white/10 bg-[#080d18] px-2 text-slate-200"
+            <NativeSelect
+              className="h-control-default rounded border border-white/10 bg-[#080d18] px-2 text-slate-200"
               onChange={event =>
                 setExecutionMode(event.target.value as 'paper' | 'live' | '')
               }
@@ -1658,15 +1664,15 @@ export function PositionLiquidationPanel({
               <option value="">请选择</option>
               <option value="paper">模拟</option>
               <option value="live">实盘（卖出意图需再次确认）</option>
-            </select>
+            </NativeSelect>
           </label>
           {conflicts.length > 0 && (
             <div className="mt-4 rounded border border-amber-400/20 bg-amber-500/10 p-3">
-              <div className="flex items-center gap-2 text-xs font-black text-amber-100">
+              <div className="flex items-center gap-2 text-ui-label font-black text-amber-100">
                 <ShieldAlert className="h-4 w-4" />
                 冲突计划 {conflicts.length} 条
               </div>
-              <div className="mt-2 grid gap-1 text-[11px] font-bold text-amber-200/80">
+              <div className="mt-2 grid gap-1 text-ui-caption font-bold text-amber-200/80">
                 {conflicts.map(plan => (
                   <div key={plan.planId}>
                     {plan.instrumentCode} ·{' '}
@@ -1694,7 +1700,7 @@ export function PositionLiquidationPanel({
               <AlertDialogHeader>
                 <AlertDialogTitle>确认本次持仓清仓</AlertDialogTitle>
                 <AlertDialogDescription asChild>
-                  <div className="grid gap-2 text-sm">
+                  <div className="grid gap-2 text-ui-body">
                     <p>本次将为 {selected.length} 只股票分别创建卖出计划。</p>
                     <p>完成策略：{completion}</p>
                     <p>冲突策略：{conflict}</p>
@@ -1740,7 +1746,7 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
   return (
     <div className="grid min-h-0 flex-1 gap-3 overflow-hidden p-3 xl:grid-cols-[360px_minmax(0,1fr)]">
       <section className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 custom-scrollbar">
-        <div className="sticky top-0 flex items-center gap-2 border-b border-white/5 bg-[#0b1120] p-3 text-xs font-black text-slate-200">
+        <div className="sticky top-0 flex items-center gap-2 border-b border-white/5 bg-[#0b1120] p-3 text-ui-label font-black text-slate-200">
           <History className="h-4 w-4 text-market-down" />
           卖出计划
         </div>
@@ -1756,19 +1762,19 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
               type="button"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-xs font-black text-slate-100">
+                <span className="font-mono text-ui-label font-black text-slate-100">
                   {plan.instrumentCode}
                 </span>
                 <span
                   className={cn(
-                    'text-[10px] font-black',
+                    'text-ui-caption font-black',
                     statusTone(plan.status)
                   )}
                 >
                   {statusLabels[plan.status] || plan.status}
                 </span>
               </div>
-              <div className="mt-1 text-[10px] font-bold text-slate-500">
+              <div className="mt-1 text-ui-caption font-bold text-slate-500">
                 {sourceLabels[plan.sourceType] || plan.sourceType} ·{' '}
                 {formatDateTime(plan.updatedAt)}
               </div>
@@ -1777,17 +1783,19 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
         </div>
       </section>
       <section className="min-h-0 overflow-y-auto rounded-md border border-white/8 bg-[#0b1120]/70 p-3 custom-scrollbar">
-        <h2 className="text-sm font-black text-slate-100">统一卖出时间线</h2>
-        <p className="mt-1 text-[11px] font-bold text-slate-500">
+        <h2 className="text-ui-body font-black text-slate-100">
+          统一卖出时间线
+        </h2>
+        <p className="mt-1 text-ui-caption font-bold text-slate-500">
           规则触发、计划变更、委托状态和真实成交均以持久化事件展示。
         </p>
         <div className="mt-4 grid gap-2">
           {events.fetching && !events.data ? (
-            <div className="flex justify-center py-12 text-slate-500">
+            <div className="flex justify-center py-ui-empty text-slate-500">
               <Loader2 className="h-4 w-4 animate-spin" />
             </div>
           ) : (events.data?.exitPlanEvents ?? []).length === 0 ? (
-            <div className="rounded border border-dashed border-white/10 py-12 text-center text-xs font-bold text-slate-500">
+            <div className="rounded border border-dashed border-white/10 py-ui-empty text-center text-ui-label font-bold text-slate-500">
               暂无事件
             </div>
           ) : (
@@ -1802,14 +1810,14 @@ export function SellHistoryPanel({ accountId }: { accountId: string }) {
                 </div>
                 <div className="mb-2 rounded border border-white/8 bg-white/[0.025] p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-black text-slate-200">
+                    <span className="text-ui-label font-black text-slate-200">
                       {event.eventType}
                     </span>
-                    <span className="font-mono text-[10px] text-slate-600">
+                    <span className="font-mono text-ui-caption text-slate-600">
                       {formatDateTime(event.createdAt)}
                     </span>
                   </div>
-                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-[10px] leading-5 text-slate-500">
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-ui-caption leading-5 text-slate-500">
                     {JSON.stringify(event.payload, null, 2)}
                   </pre>
                 </div>

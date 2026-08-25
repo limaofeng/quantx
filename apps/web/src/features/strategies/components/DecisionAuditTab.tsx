@@ -51,22 +51,22 @@ function SummaryGrid({
   const entries = Object.entries(values).slice(0, 8);
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/[0.03]">
-      <div className="mb-3 text-[9px] font-black uppercase tracking-[0.24em] text-slate-400">
+    <div className="rounded-panel border border-slate-200 bg-slate-50 p-ui-section dark:border-white/10 dark:bg-white/[0.03]">
+      <div className="mb-3 text-ui-micro font-black uppercase tracking-[0.24em] text-slate-400">
         {title}
       </div>
       {entries.length === 0 ? (
-        <p className="text-[11px] font-medium text-slate-500">
+        <p className="text-ui-caption font-medium text-slate-500">
           后端暂未返回摘要字段。
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {entries.map(([key, value]) => (
             <div key={key} className="min-w-0">
-              <div className="truncate text-[8px] font-black uppercase tracking-widest text-slate-400">
+              <div className="truncate text-ui-micro font-black uppercase tracking-widest text-slate-400">
                 {key}
               </div>
-              <div className="truncate text-[11px] font-bold text-slate-700 dark:text-slate-200">
+              <div className="truncate text-ui-caption font-bold text-slate-700 dark:text-slate-200">
                 {formatValue(value)}
               </div>
             </div>
@@ -92,21 +92,23 @@ export default function DecisionAuditTab({
 
   if (!instance) {
     return (
-      <Card className="p-10 text-center">
+      <Card className="p-ui-empty text-center">
         <AlertCircle className="mx-auto mb-4 h-8 w-8 text-slate-300" />
-        <p className="text-sm font-bold text-slate-500">请先选择策略实例。</p>
+        <p className="text-ui-body font-bold text-slate-500">
+          请先选择策略实例。
+        </p>
       </Card>
     );
   }
 
   if (decisions.length === 0) {
     return (
-      <Card className="rounded-[2rem] border border-dashed border-slate-200 bg-white p-12 text-center shadow-xl dark:border-white/10 dark:bg-slate-900/60">
+      <Card className="rounded-panel border border-dashed border-slate-200 bg-white p-ui-empty text-center shadow-none dark:border-white/10 dark:bg-slate-900/60">
         <ClipboardList className="mx-auto mb-5 h-10 w-10 text-slate-300" />
-        <h3 className="mb-2 text-sm font-black uppercase tracking-[0.2em] text-slate-700 dark:text-slate-200">
+        <h3 className="mb-2 text-ui-body font-black uppercase tracking-[0.2em] text-slate-700 dark:text-slate-200">
           暂无决策审计
         </h3>
-        <p className="mx-auto max-w-lg text-xs font-medium leading-relaxed text-slate-500">
+        <p className="mx-auto max-w-lg text-ui-label font-medium leading-relaxed text-slate-500">
           当前 GraphQL
           返回值中尚未包含策略输入、策略输出或决策原因链历史。页面已切换到新策略语义，
           后端补齐字段后会直接显示。
@@ -116,13 +118,13 @@ export default function DecisionAuditTab({
   }
 
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[280px_1fr]">
-      <Card className="flex max-h-[520px] min-h-0 flex-col overflow-hidden rounded-[2rem] border border-slate-200 bg-white p-4 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
+    <div className="grid grid-cols-1 gap-ui-panel lg:grid-cols-[280px_1fr]">
+      <Card className="flex max-h-[520px] min-h-0 flex-col overflow-hidden rounded-panel border border-slate-200 bg-white p-ui-section shadow-none dark:border-white/10 dark:bg-slate-900/60">
         <div className="mb-4 shrink-0 px-2">
-          <div className="text-[9px] font-black uppercase tracking-[0.28em] text-blue-500">
+          <div className="text-ui-micro font-black uppercase tracking-[0.28em] text-blue-500">
             决策审计
           </div>
-          <p className="mt-1 text-[10px] font-medium text-slate-500">
+          <p className="mt-1 text-ui-caption font-medium text-slate-500">
             最近 {decisions.length} 次策略步进输出
           </p>
         </div>
@@ -131,7 +133,7 @@ export default function DecisionAuditTab({
             <Button
               key={decision.id}
               variant="ghost"
-              className={`h-auto w-full justify-start rounded-xl px-3 py-3 text-left ${
+              className={`h-auto w-full justify-start rounded-panel px-3 py-3 text-left ${
                 selectedDecision?.id === decision.id
                   ? 'bg-blue-600 text-white hover:bg-blue-600 hover:text-white'
                   : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-white/5'
@@ -139,10 +141,10 @@ export default function DecisionAuditTab({
               onClick={() => setSelectedId(decision.id)}
             >
               <div className="min-w-0">
-                <div className="truncate text-[11px] font-black">
+                <div className="truncate text-ui-caption font-black">
                   {new Date(decision.decidedAt).toLocaleString('zh-CN')}
                 </div>
-                <div className="mt-1 text-[9px] font-bold uppercase tracking-widest opacity-70">
+                <div className="mt-1 text-ui-micro font-bold uppercase tracking-widest opacity-70">
                   策略意图 {decision.tradeIntents.length}
                 </div>
               </div>
@@ -152,26 +154,26 @@ export default function DecisionAuditTab({
       </Card>
 
       {selectedDecision && (
-        <div className="space-y-6">
-          <Card className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
+        <div className="space-y-ui-section">
+          <Card className="rounded-panel border border-slate-200 bg-white p-ui-panel shadow-none dark:border-white/10 dark:bg-slate-900/60">
             <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <div className="text-[9px] font-black uppercase tracking-[0.3em] text-blue-500">
+                <div className="text-ui-micro font-black uppercase tracking-[0.3em] text-blue-500">
                   策略基类执行
                 </div>
-                <h3 className="mt-1 text-lg font-black text-slate-900 dark:text-white">
+                <h3 className="mt-1 text-ui-heading font-black text-slate-900 dark:text-white">
                   {instance.displayName}
                 </h3>
               </div>
               <Badge
                 variant="outline"
-                className="w-fit rounded-lg border-blue-500/30 bg-blue-500/5 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-blue-500"
+                className="w-fit rounded-lg border-blue-500/30 bg-blue-500/5 px-3 py-1 text-ui-micro font-black uppercase tracking-widest text-blue-500"
               >
                 策略意图，不是委托或成交
               </Badge>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <div className="grid grid-cols-1 gap-ui-section lg:grid-cols-2">
               <SummaryGrid
                 title="输入摘要"
                 values={selectedDecision.inputSummary}
@@ -183,18 +185,18 @@ export default function DecisionAuditTab({
             </div>
           </Card>
 
-          <Card className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-            <div className="border-b border-slate-100 px-6 py-5 dark:border-white/5">
+          <Card className="overflow-hidden rounded-panel border border-slate-200 bg-white shadow-none dark:border-white/10 dark:bg-slate-900/60">
+            <div className="border-b border-slate-100 px-ui-panel py-ui-section dark:border-white/5">
               <div className="flex items-center gap-3">
                 <GitBranch className="h-4 w-4 text-blue-500" />
-                <h3 className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
+                <h3 className="text-ui-caption font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
                   策略意图明细
                 </h3>
               </div>
             </div>
             <div className="overflow-x-auto">
               <div className="min-w-[760px]">
-                <div className="grid grid-cols-12 gap-3 border-b border-slate-100 bg-slate-50 px-6 py-3 text-[8px] font-black uppercase tracking-[0.2em] text-slate-400 dark:border-white/5 dark:bg-white/[0.02]">
+                <div className="grid grid-cols-12 gap-3 border-b border-slate-100 bg-slate-50 px-ui-panel py-3 text-ui-micro font-black uppercase tracking-[0.2em] text-slate-400 dark:border-white/5 dark:bg-white/[0.02]">
                   <div className="col-span-2">标的</div>
                   <div className="col-span-1">方向</div>
                   <div className="col-span-2">目标仓</div>
@@ -203,14 +205,14 @@ export default function DecisionAuditTab({
                   <div className="col-span-3">原因</div>
                 </div>
                 {selectedDecision.tradeIntents.length === 0 ? (
-                  <div className="px-6 py-10 text-center text-xs font-bold text-slate-400">
+                  <div className="px-ui-panel py-ui-empty text-center text-ui-label font-bold text-slate-400">
                     本次决策未输出策略意图。
                   </div>
                 ) : (
                   selectedDecision.tradeIntents.map(intent => (
                     <div
                       key={intent.id}
-                      className="grid grid-cols-12 gap-3 border-b border-slate-100 px-6 py-4 text-[11px] font-bold transition-colors last:border-b-0 hover:bg-slate-50 dark:border-white/5 dark:hover:bg-white/[0.04]"
+                      className="grid grid-cols-12 gap-3 border-b border-slate-100 px-ui-panel py-ui-section text-ui-caption font-bold transition-colors last:border-b-0 hover:bg-slate-50 dark:border-white/5 dark:hover:bg-white/[0.04]"
                       onContextMenu={event => openAtPointer(event, intent)}
                     >
                       <div className="col-span-2 font-mono text-slate-700 dark:text-slate-200">
@@ -219,7 +221,7 @@ export default function DecisionAuditTab({
                       <div className="col-span-1">
                         <Badge
                           variant="outline"
-                          className={`rounded-full text-[8px] font-black ${
+                          className={`rounded-full text-ui-micro font-black ${
                             intent.side === 'BUY'
                               ? 'border-market-up/30 bg-market-up/5 text-market-up'
                               : 'border-market-down/30 bg-market-down/5 text-market-down'
@@ -246,7 +248,7 @@ export default function DecisionAuditTab({
                           {intent.reason || '未提供原因'}
                         </div>
                         {intent.traceId && (
-                          <div className="mt-1 truncate text-[9px] font-mono text-slate-400">
+                          <div className="mt-1 truncate text-ui-micro font-mono text-slate-400">
                             {intent.traceId}
                           </div>
                         )}
@@ -258,25 +260,25 @@ export default function DecisionAuditTab({
             </div>
           </Card>
 
-          <Card className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
+          <Card className="rounded-panel border border-slate-200 bg-white p-ui-panel shadow-none dark:border-white/10 dark:bg-slate-900/60">
             <div className="mb-4 flex items-center gap-3">
               <ShieldAlert className="h-4 w-4 text-amber-500" />
-              <h3 className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
+              <h3 className="text-ui-caption font-black uppercase tracking-[0.24em] text-slate-700 dark:text-slate-200">
                 决策原因链
               </h3>
             </div>
             {selectedDecision.decisionTrace.length === 0 ? (
-              <p className="text-xs font-medium text-slate-500">
+              <p className="text-ui-label font-medium text-slate-500">
                 后端暂未返回原因链；拒单、少买、不买和熔断原因应在此处审计。
               </p>
             ) : (
               <div className="space-y-3">
                 {selectedDecision.decisionTrace.map((item, index) => (
                   <div key={`${item}-${index}`} className="flex gap-3">
-                    <div className="mt-1 h-5 w-5 shrink-0 rounded-full bg-blue-500/10 text-center text-[10px] font-black leading-5 text-blue-500">
+                    <div className="mt-1 h-5 w-5 shrink-0 rounded-full bg-blue-500/10 text-center text-ui-caption font-black leading-5 text-blue-500">
                       {index + 1}
                     </div>
-                    <p className="text-xs font-medium leading-relaxed text-slate-600 dark:text-slate-300">
+                    <p className="text-ui-label font-medium leading-relaxed text-slate-600 dark:text-slate-300">
                       {item}
                     </p>
                   </div>

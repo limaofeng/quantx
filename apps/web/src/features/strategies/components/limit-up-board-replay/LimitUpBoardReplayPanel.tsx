@@ -97,12 +97,12 @@ function Metric({
 }) {
   return (
     <div className="min-w-[118px] border-r border-white/[0.06] px-3 py-2.5 last:border-r-0">
-      <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-slate-600">
+      <div className="text-ui-micro font-bold uppercase tracking-[0.12em] text-slate-600">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 font-mono text-sm font-black text-slate-100',
+          'mt-1 font-mono text-ui-body font-black text-slate-100',
           alert && 'text-rose-300'
         )}
       >
@@ -139,7 +139,7 @@ function EquityCurve({
 
   if (!geometry) {
     return (
-      <div className="flex h-40 items-center justify-center text-[10px] text-slate-600">
+      <div className="flex h-40 items-center justify-center text-ui-caption text-slate-600">
         场景完成后显示权益曲线
       </div>
     );
@@ -148,10 +148,10 @@ function EquityCurve({
     points.at(-1)?.returnPct != null && (points.at(-1)?.returnPct || 0) >= 0;
   return (
     <div className="relative h-40 px-2 py-3">
-      <div className="absolute left-3 top-2 font-mono text-[9px] text-slate-600">
+      <div className="absolute left-3 top-2 font-mono text-ui-micro text-slate-600">
         {formatMoney(geometry.max)}
       </div>
-      <div className="absolute bottom-2 left-3 font-mono text-[9px] text-slate-600">
+      <div className="absolute bottom-2 left-3 font-mono text-ui-micro text-slate-600">
         {formatMoney(geometry.min)}
       </div>
       <svg
@@ -260,11 +260,11 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
     >
       <aside className="min-h-0 overflow-y-auto border-b border-white/[0.07] bg-[#08111f] xl:border-b-0 xl:border-r custom-scrollbar">
         <div className="border-b border-white/[0.07] p-3">
-          <div className="flex items-center gap-2 text-xs font-black text-slate-100">
+          <div className="flex items-center gap-2 text-ui-label font-black text-slate-100">
             <BarChart3 className="h-3.5 w-3.5 text-cyan-300" />
             历史回放
           </div>
-          <p className="mt-1.5 text-[9px] leading-4 text-slate-600">
+          <p className="mt-1.5 text-ui-micro leading-4 text-slate-600">
             账户级动态候选、资金竞争、T+1 与五档保守撮合。
           </p>
         </div>
@@ -283,27 +283,27 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                 type="button"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[10px] font-bold text-slate-300">
+                  <span className="font-mono text-ui-caption font-bold text-slate-300">
                     {new Date(job.request.startTime).toLocaleDateString(
                       'zh-CN'
                     )}
                   </span>
                   <span
                     className={cn(
-                      'text-[9px] font-bold',
+                      'text-ui-micro font-bold',
                       statusTone(job.status).split(' ')[0]
                     )}
                   >
                     {statusLabel(job.status)}
                   </span>
                 </div>
-                <div className="mt-1 truncate text-[9px] text-slate-600">
+                <div className="mt-1 truncate text-ui-micro text-slate-600">
                   {job.jobId.slice(0, 8)} · {job.progressPct.toFixed(0)}%
                 </div>
               </button>
             ))
           ) : (
-            <div className="px-2 py-8 text-center text-[10px] text-slate-600">
+            <div className="px-2 py-ui-panel text-center text-ui-caption text-slate-600">
               尚无历史任务
             </div>
           )}
@@ -314,29 +314,29 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
         <header className="sticky top-0 z-10 border-b border-white/[0.07] bg-[#0b1524]/95 p-3 backdrop-blur">
           <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-[1fr_1fr_150px_150px_auto]">
             <div>
-              <Label className="text-[9px] text-slate-500">开始时间</Label>
+              <Label className="text-ui-micro text-slate-500">开始时间</Label>
               <Input
-                className="mt-1 h-8 border-white/10 bg-[#07101d] font-mono text-[10px]"
+                className="mt-1 h-control-compact border-white/10 bg-[#07101d] font-mono text-ui-caption"
                 onChange={event => setStartLocal(event.target.value)}
                 type="datetime-local"
                 value={startLocal}
               />
             </div>
             <div>
-              <Label className="text-[9px] text-slate-500">结束时间</Label>
+              <Label className="text-ui-micro text-slate-500">结束时间</Label>
               <Input
-                className="mt-1 h-8 border-white/10 bg-[#07101d] font-mono text-[10px]"
+                className="mt-1 h-control-compact border-white/10 bg-[#07101d] font-mono text-ui-caption"
                 onChange={event => setEndLocal(event.target.value)}
                 type="datetime-local"
                 value={endLocal}
               />
             </div>
             <div>
-              <Label className="text-[9px] text-slate-500">
+              <Label className="text-ui-micro text-slate-500">
                 初始现金（可选）
               </Label>
               <Input
-                className="mt-1 h-8 border-white/10 bg-[#07101d] font-mono text-[10px]"
+                className="mt-1 h-control-compact border-white/10 bg-[#07101d] font-mono text-ui-caption"
                 min="0"
                 onChange={event => setInitialCash(event.target.value)}
                 placeholder="使用账户快照"
@@ -345,11 +345,11 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
               />
             </div>
             <div>
-              <Label className="text-[9px] text-slate-500">
+              <Label className="text-ui-micro text-slate-500">
                 初始总资产（可选）
               </Label>
               <Input
-                className="mt-1 h-8 border-white/10 bg-[#07101d] font-mono text-[10px]"
+                className="mt-1 h-control-compact border-white/10 bg-[#07101d] font-mono text-ui-caption"
                 min="0"
                 onChange={event => setInitialTotalAsset(event.target.value)}
                 placeholder="无快照时必填"
@@ -359,7 +359,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
             </div>
             <div className="flex items-end gap-1.5">
               <Button
-                className="h-8 bg-cyan-500 px-3 text-[10px] font-black text-slate-950 hover:bg-cyan-400"
+                className="h-control-compact bg-cyan-500 px-3 text-ui-caption font-black text-slate-950 hover:bg-cyan-400"
                 disabled={
                   !accountId ||
                   !replay.preparation?.ready ||
@@ -378,7 +378,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
               </Button>
               {active ? (
                 <Button
-                  className="h-8 border-rose-400/25 px-2 text-[10px] text-rose-200"
+                  className="h-control-compact border-rose-400/25 px-2 text-ui-caption text-rose-200"
                   disabled={replay.cancelling}
                   onClick={cancel}
                   size="sm"
@@ -390,7 +390,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
               ) : null}
               <Button
                 aria-label="刷新历史回放"
-                className="h-8 w-8 text-slate-500"
+                className="h-control-compact w-8 text-slate-500"
                 onClick={replay.refresh}
                 size="icon"
                 variant="ghost"
@@ -404,7 +404,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
               </Button>
             </div>
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-[9px] text-slate-500">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-ui-micro text-slate-500">
             <span
               className={cn(
                 'inline-flex items-center gap-1',
@@ -425,18 +425,18 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
         </header>
 
         {!selected ? (
-          <section className="m-3 rounded-sm border border-white/[0.07] bg-white/[0.02] p-5">
-            <div className="flex items-center gap-2 text-xs font-black text-slate-200">
+          <section className="m-3 rounded-sm border border-white/[0.07] bg-white/[0.02] p-ui-section">
+            <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
               <Database className="h-4 w-4 text-cyan-300" />
               创建第一份账户级历史回放
             </div>
-            <p className="mt-2 max-w-3xl text-[10px] leading-5 text-slate-500">
+            <p className="mt-2 max-w-3xl text-ui-caption leading-5 text-slate-500">
               启动后先物化不可变候选帧与原始五档
               Tick。任何时点污染、交易日缺失或盘口字段不完整都会阻止执行；通过后才运行四档确认延迟与参与率情景。
             </p>
             <div
               className={cn(
-                'mt-4 flex items-start gap-2 rounded-sm border p-3 text-[10px]',
+                'mt-4 flex items-start gap-2 rounded-sm border p-3 text-ui-caption',
                 blockers.length
                   ? 'border-rose-400/20 bg-rose-400/[0.06] text-rose-200'
                   : 'border-emerald-400/20 bg-emerald-400/[0.05] text-emerald-200'
@@ -462,17 +462,17 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                 <div className="flex items-center gap-2">
                   <Badge
                     className={cn(
-                      'border text-[9px]',
+                      'border text-ui-micro',
                       statusTone(selected.status)
                     )}
                   >
                     {statusLabel(selected.status)}
                   </Badge>
-                  <span className="font-mono text-[9px] text-slate-600">
+                  <span className="font-mono text-ui-micro text-slate-600">
                     {selected.jobId}
                   </span>
                 </div>
-                <span className="text-[9px] text-slate-500">
+                <span className="text-ui-micro text-slate-500">
                   {formatDateTime(selected.request.startTime)} →{' '}
                   {formatDateTime(selected.request.endTime)}
                 </span>
@@ -486,7 +486,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                 />
               </div>
               {selected.errorMessage ? (
-                <div className="flex items-start gap-2 border-t border-rose-400/15 bg-rose-400/[0.07] px-3 py-2 text-[10px] text-rose-200">
+                <div className="flex items-start gap-2 border-t border-rose-400/15 bg-rose-400/[0.07] px-3 py-2 text-ui-caption text-rose-200">
                   <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
                   {selected.errorMessage}
                 </div>
@@ -506,26 +506,26 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                   type="button"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[10px] font-black text-slate-200">
+                    <span className="text-ui-caption font-black text-slate-200">
                       {item.label}
                     </span>
                     {item.theoreticalUpperBound ? (
-                      <Badge className="border-amber-400/25 bg-amber-400/10 text-[8px] text-amber-200">
+                      <Badge className="border-amber-400/25 bg-amber-400/10 text-ui-micro text-amber-200">
                         理论上界
                       </Badge>
                     ) : (
-                      <span className="text-[9px] text-slate-600">
+                      <span className="text-ui-micro text-slate-600">
                         {statusLabel(item.status)}
                       </span>
                     )}
                   </div>
-                  <div className="mt-1.5 font-mono text-[9px] text-slate-500">
+                  <div className="mt-1.5 font-mono text-ui-micro text-slate-500">
                     确认 {item.confirmationDelayMs / 1_000}s · 成交量{' '}
                     {formatPct(item.participationCapPct * 100, 0)}
                   </div>
                   <div
                     className={cn(
-                      'mt-2 font-mono text-lg font-black',
+                      'mt-2 font-mono text-ui-heading font-black',
                       (item.summary?.totalReturnPct || 0) >= 0
                         ? 'text-emerald-300'
                         : 'text-rose-300'
@@ -574,13 +574,13 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
 
             <section className="grid gap-px border-b border-white/[0.07] bg-white/[0.06] 2xl:grid-cols-[minmax(0,1.5fr)_minmax(360px,1fr)]">
               <div className="bg-[#0b1524]">
-                <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-black text-slate-300">
+                <div className="border-b border-white/[0.06] px-3 py-2 text-ui-caption font-black text-slate-300">
                   权益曲线 · {selectedScenario?.label || '--'}
                 </div>
                 <EquityCurve points={replay.curve?.items ?? []} />
               </div>
               <div className="bg-[#0b1524]">
-                <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-black text-slate-300">
+                <div className="border-b border-white/[0.06] px-3 py-2 text-ui-caption font-black text-slate-300">
                   候选到成交漏斗
                 </div>
                 <div className="grid grid-cols-3 gap-px bg-white/[0.05] sm:grid-cols-5 2xl:grid-cols-3">
@@ -596,8 +596,10 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                     ['完成退出', funnel?.completedExits],
                   ].map(([label, value]) => (
                     <div className="bg-[#0b1524] p-2.5" key={String(label)}>
-                      <div className="text-[8px] text-slate-600">{label}</div>
-                      <div className="mt-1 font-mono text-xs font-black text-slate-200">
+                      <div className="text-ui-micro text-slate-600">
+                        {label}
+                      </div>
+                      <div className="mt-1 font-mono text-ui-label font-black text-slate-200">
                         {value == null
                           ? '--'
                           : Number(value).toLocaleString('zh-CN')}
@@ -611,12 +613,12 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
             <section className="grid gap-px border-b border-white/[0.07] bg-white/[0.06] xl:grid-cols-2">
               <div className="bg-[#0b1524] p-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-[10px] font-black text-slate-300">
+                  <h3 className="text-ui-caption font-black text-slate-300">
                     数据质量
                   </h3>
                   <Badge
                     className={cn(
-                      'border text-[8px]',
+                      'border text-ui-micro',
                       quality?.executable
                         ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'
                         : 'border-rose-400/20 bg-rose-400/10 text-rose-300'
@@ -625,7 +627,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                     {quality?.status || '准备中'}
                   </Badge>
                 </div>
-                <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] text-slate-500 sm:grid-cols-4">
+                <div className="mt-3 grid grid-cols-2 gap-2 text-ui-micro text-slate-500 sm:grid-cols-4">
                   <span>
                     候选帧{' '}
                     <strong className="font-mono text-slate-200">
@@ -652,14 +654,14 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                   </span>
                 </div>
                 {blockers.length ? (
-                  <div className="mt-3 space-y-1 text-[9px] text-rose-300">
+                  <div className="mt-3 space-y-1 text-ui-micro text-rose-300">
                     {blockers.map(item => (
                       <div key={item}>阻断 · {item}</div>
                     ))}
                   </div>
                 ) : null}
                 {warnings.length ? (
-                  <div className="mt-3 space-y-1 text-[9px] text-amber-200">
+                  <div className="mt-3 space-y-1 text-ui-micro text-amber-200">
                     {warnings.slice(0, 5).map(item => (
                       <div key={item}>提示 · {item}</div>
                     ))}
@@ -667,10 +669,10 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                 ) : null}
               </div>
               <div className="bg-[#0b1524] p-3">
-                <h3 className="text-[10px] font-black text-slate-300">
+                <h3 className="text-ui-caption font-black text-slate-300">
                   拒绝与约束
                 </h3>
-                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-[9px]">
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-ui-micro">
                   {selectedScenario?.rejectionReasons.length ? (
                     selectedScenario.rejectionReasons.slice(0, 8).map(item => (
                       <div
@@ -696,11 +698,11 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
 
             <section className="grid gap-px bg-white/[0.06] 2xl:grid-cols-2">
               <div className="min-w-0 bg-[#0b1524]">
-                <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-black text-slate-300">
+                <div className="border-b border-white/[0.06] px-3 py-2 text-ui-caption font-black text-slate-300">
                   窗口末持仓（不伪造平仓）
                 </div>
                 <div className="overflow-x-auto custom-scrollbar">
-                  <table className="w-full min-w-[560px] text-left text-[9px]">
+                  <table className="w-full min-w-[560px] text-left text-ui-micro">
                     <thead className="text-slate-600">
                       <tr>
                         <th className="px-3 py-2">代码</th>
@@ -739,7 +741,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                       ) : (
                         <tr>
                           <td
-                            className="px-3 py-6 text-center text-slate-600"
+                            className="px-3 py-ui-panel text-center text-slate-600"
                             colSpan={6}
                           >
                             无窗口末持仓
@@ -751,11 +753,11 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                 </div>
               </div>
               <div className="min-w-0 bg-[#0b1524]">
-                <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-black text-slate-300">
+                <div className="border-b border-white/[0.06] px-3 py-2 text-ui-caption font-black text-slate-300">
                   最近成交
                 </div>
                 <div className="overflow-x-auto custom-scrollbar">
-                  <table className="w-full min-w-[560px] text-left text-[9px]">
+                  <table className="w-full min-w-[560px] text-left text-ui-micro">
                     <thead className="text-slate-600">
                       <tr>
                         <th className="px-3 py-2">时间</th>
@@ -802,7 +804,7 @@ export function LimitUpBoardReplayPanel({ accountId }: { accountId?: string }) {
                       ) : (
                         <tr>
                           <td
-                            className="px-3 py-6 text-center text-slate-600"
+                            className="px-3 py-ui-panel text-center text-slate-600"
                             colSpan={6}
                           >
                             暂无成交

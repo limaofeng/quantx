@@ -158,11 +158,11 @@ function NumberSetting({
           onChange={event => onChange(Number(event.target.value))}
           className="pr-12"
         />
-        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-500">
+        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ui-label text-slate-500">
           {suffix}
         </span>
       </div>
-      <p className="text-xs text-slate-500">
+      <p className="text-ui-label text-slate-500">
         允许范围：{min}–{max}
       </p>
     </div>
@@ -285,16 +285,16 @@ export function AiRuntimeSettingsPanel() {
   const applyState = String(runtime.applyState);
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
+    <div className="mx-auto max-w-6xl space-y-ui-section">
+      <header className="flex flex-wrap items-start justify-between gap-ui-section">
         <div>
-          <p className="text-xs font-medium uppercase tracking-[0.22em] text-violet-400">
+          <p className="text-ui-label font-medium uppercase tracking-[0.22em] text-violet-400">
             Model orchestration runtime
           </p>
-          <h1 className="mt-2 text-2xl font-semibold text-slate-100">
+          <h1 className="mt-2 text-ui-display font-semibold text-slate-100">
             AI Runtime
           </h1>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+          <p className="mt-2 max-w-3xl text-ui-body leading-6 text-slate-400">
             PostgreSQL 保存全局非敏感配置；API Key、Tracing
             与租约继续由服务端环境管理。
           </p>
@@ -322,41 +322,41 @@ export function AiRuntimeSettingsPanel() {
       )}
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
+        <div className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500">运行状态</span>
+            <span className="text-ui-label text-slate-500">运行状态</span>
             <Bot className="h-4 w-4 text-violet-300" />
           </div>
           <span
             className={cn(
-              'mt-3 inline-flex rounded-full border px-2.5 py-1 text-xs',
+              'mt-3 inline-flex rounded-full border px-2.5 py-1 text-ui-label',
               appearance.className
             )}
           >
             {appearance.label}
           </span>
         </div>
-        <div className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
+        <div className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500">服务端密钥</span>
+            <span className="text-ui-label text-slate-500">服务端密钥</span>
             <KeyRound className="h-4 w-4 text-sky-300" />
           </div>
-          <p className="mt-3 text-sm font-medium text-slate-100">
+          <p className="mt-3 text-ui-body font-medium text-slate-100">
             {runtime.apiKeyConfigured ? '已配置' : '未配置'}
           </p>
-          <p className="mt-1 text-xs text-slate-500">仅返回配置状态</p>
+          <p className="mt-1 text-ui-label text-slate-500">仅返回配置状态</p>
         </div>
-        <div className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
+        <div className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500">配置版本</span>
+            <span className="text-ui-label text-slate-500">配置版本</span>
             <SlidersHorizontal className="h-4 w-4 text-cyan-300" />
           </div>
-          <p className="mt-3 text-sm font-medium text-slate-100">
+          <p className="mt-3 text-ui-body font-medium text-slate-100">
             v{runtime.version} / 已应用 {runtime.appliedVersion ?? '—'}
           </p>
           <p
             className={cn(
-              'mt-1 text-xs',
+              'mt-1 text-ui-label',
               applyState === 'APPLIED' ? 'text-emerald-400' : 'text-amber-300'
             )}
           >
@@ -367,15 +367,15 @@ export function AiRuntimeSettingsPanel() {
                 : '等待 Runtime 上线'}
           </p>
         </div>
-        <div className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
+        <div className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-xs text-slate-500">配置来源</span>
+            <span className="text-ui-label text-slate-500">配置来源</span>
             <Clock3 className="h-4 w-4 text-slate-300" />
           </div>
-          <p className="mt-3 text-sm font-medium text-slate-100">
+          <p className="mt-3 text-ui-body font-medium text-slate-100">
             {runtime.source === 'DATABASE_OVERRIDE' ? '数据库覆盖' : '部署环境'}
           </p>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-ui-label text-slate-500">
             {runtime.updatedAt
               ? new Date(runtime.updatedAt).toLocaleString('zh-CN', {
                   hour12: false,
@@ -385,17 +385,19 @@ export function AiRuntimeSettingsPanel() {
         </div>
       </section>
 
-      <section className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/10 pb-4">
+      <section className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
+        <div className="flex flex-wrap items-center justify-between gap-ui-section border-b border-white/10 pb-4">
           <div>
-            <h2 className="text-base font-medium text-slate-100">运行参数</h2>
-            <p className="mt-1 text-xs text-slate-500">
+            <h2 className="text-ui-title font-medium text-slate-100">
+              运行参数
+            </h2>
+            <p className="mt-1 text-ui-label text-slate-500">
               新任务采用保存后的版本；已存在任务继续使用创建时的快照。
             </p>
           </div>
           <div className="flex items-center gap-3">
             {!canEdit && (
-              <span className="text-xs text-amber-300">
+              <span className="text-ui-label text-amber-300">
                 缺少 system-config:write
               </span>
             )}
@@ -418,12 +420,12 @@ export function AiRuntimeSettingsPanel() {
           </div>
         </div>
 
-        <div className="mt-5 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
-          <div className="space-y-3 rounded-lg border border-white/10 bg-white/[0.025] p-4 md:col-span-2 xl:col-span-3">
-            <div className="flex items-center justify-between gap-4">
+        <div className="mt-5 grid gap-ui-section md:grid-cols-2 xl:grid-cols-3">
+          <div className="space-y-3 rounded-lg border border-white/10 bg-white/[0.025] p-ui-section md:col-span-2 xl:col-span-3">
+            <div className="flex items-center justify-between gap-ui-section">
               <div>
                 <Label htmlFor="ai-runtime-enabled">接受新的 AI 任务</Label>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-ui-label text-slate-500">
                   关闭后不再领取新任务，正在运行的任务不会被强制取消。
                 </p>
               </div>
@@ -491,31 +493,31 @@ export function AiRuntimeSettingsPanel() {
         </div>
 
         {validationError && (
-          <p className="mt-4 text-sm text-rose-300">{validationError}</p>
+          <p className="mt-4 text-ui-body text-rose-300">{validationError}</p>
         )}
       </section>
 
-      <section className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
+      <section className="rounded-panel border border-white/10 bg-slate-950/40 p-ui-section">
         <div className="flex items-center gap-2 text-slate-100">
           <CheckCircle2 className="h-4 w-4 text-emerald-300" />
-          <h2 className="text-base font-medium">服务端只读参数</h2>
+          <h2 className="text-ui-title font-medium">服务端只读参数</h2>
         </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
-            <p className="text-xs text-slate-500">Tracing</p>
-            <p className="mt-2 text-sm text-slate-200">
+          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-ui-section">
+            <p className="text-ui-label text-slate-500">Tracing</p>
+            <p className="mt-2 text-ui-body text-slate-200">
               {runtime.tracingEnabled ? '已启用' : '已关闭'}
             </p>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-ui-label text-slate-500">
               仅允许通过服务端环境变量配置，避免研究上下文意外外发。
             </p>
           </div>
-          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
-            <p className="text-xs text-slate-500">任务租约</p>
-            <p className="mt-2 text-sm text-slate-200">
+          <div className="rounded-lg border border-white/10 bg-white/[0.025] p-ui-section">
+            <p className="text-ui-label text-slate-500">任务租约</p>
+            <p className="mt-2 text-ui-body text-slate-200">
               {runtime.leaseSeconds} 秒
             </p>
-            <p className="mt-1 text-xs text-slate-500">
+            <p className="mt-1 text-ui-label text-slate-500">
               由部署配置控制，用于多实例任务领取与恢复。
             </p>
           </div>

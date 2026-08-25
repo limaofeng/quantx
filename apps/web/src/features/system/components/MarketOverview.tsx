@@ -86,16 +86,16 @@ const STEPS = [
 
 export function MarketOverview() {
   return (
-    <div className="flex flex-col gap-6 h-full min-h-0">
+    <div className="flex flex-col gap-ui-panel h-full min-h-0">
       {/* Stats Cards Row */}
       <MarketStatsCards />
 
-      <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
+      <div className="flex flex-col lg:flex-row gap-ui-panel flex-1 min-h-0">
         {/* Left Column: Charts & Indices */}
-        <div className="flex-1 flex flex-col gap-6 min-h-0">
-          <Card className="flex-1 flex flex-col border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-sm overflow-hidden shadow-sm rounded-[24px]">
+        <div className="flex-1 flex flex-col gap-ui-panel min-h-0">
+          <Card className="flex-1 flex flex-col border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-sm overflow-hidden shadow-sm rounded-panel">
             <CardHeader className="pb-2 border-b border-slate-100 dark:border-white/5">
-              <CardTitle className="text-base font-bold text-slate-800 dark:text-slate-200">
+              <CardTitle className="text-ui-title font-bold text-slate-800 dark:text-slate-200">
                 市场动态
               </CardTitle>
               <CardDescription>
@@ -106,30 +106,30 @@ export function MarketOverview() {
               <div className="h-48 bg-slate-50/50 dark:bg-white/[0.02] flex items-center justify-center border-b border-slate-100 dark:border-white/5">
                 <p className="text-slate-400 flex items-center gap-2">
                   <BarChart4 className="w-8 h-8 opacity-50" />
-                  <span className="text-sm font-medium">
+                  <span className="text-ui-body font-medium">
                     Market Trend Visualization
                   </span>
                 </p>
               </div>
-              <div className="p-6 flex-1 overflow-auto">
-                <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-500 mb-4">
+              <div className="p-ui-panel flex-1 overflow-auto">
+                <h3 className="text-ui-caption font-black uppercase tracking-widest text-slate-500 mb-4">
                   Top Indices Status
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-ui-section">
                   {INDICES_PREVIEW.map((idx, k) => (
                     <div
                       key={k}
-                      className="flex items-center justify-between p-3 rounded-xl border border-slate-200/50 dark:border-white/5 bg-white/60 dark:bg-slate-800/30 hover:bg-white dark:hover:bg-slate-800/50 transition-colors"
+                      className="flex items-center justify-between p-3 rounded-panel border border-slate-200/50 dark:border-white/5 bg-white/60 dark:bg-slate-800/30 hover:bg-white dark:hover:bg-slate-800/50 transition-colors"
                     >
                       <div className="flex items-center gap-3">
                         <div
                           className={`w-1 h-8 rounded-full ${idx.pct.startsWith('+') ? 'bg-market-up' : 'bg-market-down'}`}
                         />
                         <div>
-                          <div className="font-bold text-sm text-slate-700 dark:text-slate-200">
+                          <div className="font-bold text-ui-body text-slate-700 dark:text-slate-200">
                             {idx.name}
                           </div>
-                          <div className="text-[10px] font-mono text-slate-400">
+                          <div className="text-ui-caption font-mono text-slate-400">
                             {idx.code}
                           </div>
                         </div>
@@ -139,7 +139,7 @@ export function MarketOverview() {
                           {idx.close}
                         </div>
                         <div
-                          className={`text-xs font-bold ${idx.pct.startsWith('+') ? 'text-market-up' : 'text-market-down'}`}
+                          className={`text-ui-label font-bold ${idx.pct.startsWith('+') ? 'text-market-up' : 'text-market-down'}`}
                         >
                           {idx.pct}
                         </div>
@@ -153,18 +153,18 @@ export function MarketOverview() {
         </div>
 
         {/* Right Column: Sync Process & Logs */}
-        <div className="w-full lg:w-96 flex flex-col gap-6 shrink-0 min-h-0">
-          <Card className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-sm shadow-sm relative overflow-hidden rounded-[24px]">
+        <div className="w-full lg:w-96 flex flex-col gap-ui-panel shrink-0 min-h-0">
+          <Card className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-sm shadow-sm relative overflow-hidden rounded-panel">
             <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
             <CardHeader className="pb-3 pt-5">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-bold flex items-center gap-2 text-slate-800 dark:text-slate-200">
+                <CardTitle className="text-ui-body font-bold flex items-center gap-2 text-slate-800 dark:text-slate-200">
                   <Server className="w-4 h-4 text-slate-500" />
                   同步进程
                 </CardTitle>
                 <Badge
                   variant="outline"
-                  className="text-[10px] font-bold bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-500/30 uppercase tracking-wider px-2"
+                  className="text-ui-caption font-bold bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-500/30 uppercase tracking-wider px-2"
                 >
                   Running
                 </Badge>
@@ -190,16 +190,16 @@ export function MarketOverview() {
                     </div>
                     <div>
                       <div
-                        className={`text-xs font-bold ${step.status === 'processing' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-700 dark:text-slate-300'}`}
+                        className={`text-ui-label font-bold ${step.status === 'processing' ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-700 dark:text-slate-300'}`}
                       >
                         {step.title}
                       </div>
-                      <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                      <div className="text-ui-caption text-slate-400 font-mono mt-0.5">
                         {step.detail}
                       </div>
                     </div>
                   </div>
-                  <span className="text-[10px] font-mono text-slate-400 tabular-nums opacity-60 group-hover:opacity-100 transition-opacity">
+                  <span className="text-ui-caption font-mono text-slate-400 tabular-nums opacity-60 group-hover:opacity-100 transition-opacity">
                     {step.duration}
                   </span>
                 </div>
@@ -207,16 +207,16 @@ export function MarketOverview() {
             </CardContent>
           </Card>
 
-          <Card className="flex-1 flex flex-col border-slate-200/60 dark:border-white/5 bg-slate-950 text-slate-300 overflow-hidden shadow-inner min-h-[250px] rounded-[24px]">
+          <Card className="flex-1 flex flex-col border-slate-200/60 dark:border-white/5 bg-slate-950 text-slate-300 overflow-hidden shadow-inner min-h-[250px] rounded-panel">
             <CardHeader className="py-2.5 px-3 border-b border-white/10 bg-white/5 backdrop-blur">
               <div className="flex items-center justify-between">
-                <div className="text-[10px] font-black uppercase tracking-widest flex items-center gap-2 text-slate-400">
+                <div className="text-ui-caption font-black uppercase tracking-widest flex items-center gap-2 text-slate-400">
                   <Terminal className="w-3 h-3" />
                   Console Output
                 </div>
                 <Badge
                   variant="secondary"
-                  className="h-4 px-1.5 text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider animate-pulse"
+                  className="h-4 px-1.5 text-ui-micro bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 uppercase tracking-wider animate-pulse"
                 >
                   Live
                 </Badge>
@@ -224,7 +224,7 @@ export function MarketOverview() {
             </CardHeader>
             <CardContent className="flex-1 p-0 min-h-0 relative">
               <ScrollArea className="absolute inset-0">
-                <div className="p-3 font-mono text-[10px] leading-relaxed space-y-1.5">
+                <div className="p-3 font-mono text-ui-caption leading-relaxed space-y-1.5">
                   <div className="text-emerald-400">
                     [15:30:01] Flow started: comprehensive-market-sync
                   </div>

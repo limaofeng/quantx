@@ -16,10 +16,7 @@ import { cn } from '@/utils/cn';
 
 import type { LiveMarketQuote } from '../../hooks/useRealTimeHoldings';
 
-import {
-  hasCandidateTraceIdentity,
-  traceRelatedIdGroups,
-} from './clientTrust';
+import { hasCandidateTraceIdentity, traceRelatedIdGroups } from './clientTrust';
 import {
   canApproveSnapshot,
   isKnownSignalSnapshot,
@@ -151,10 +148,7 @@ function CandidateTracePanel({
   trace?: CandidateTraceLike | null;
 }) {
   const traceIdentity = { accountId, strategyRunId, candidateId };
-  const traceMatchesSelection = hasCandidateTraceIdentity(
-    trace,
-    traceIdentity
-  );
+  const traceMatchesSelection = hasCandidateTraceIdentity(trace, traceIdentity);
   const traceForDisplay = traceMatchesSelection ? trace : undefined;
   const traceError =
     trace && !traceMatchesSelection
@@ -179,7 +173,10 @@ function CandidateTracePanel({
         : traceForDisplay?.integrityStatus === 'BROKEN'
           ? '链路断裂'
           : '读取中';
-  const linkCount = linkGroups.reduce((total, group) => total + group.ids.length, 0);
+  const linkCount = linkGroups.reduce(
+    (total, group) => total + group.ids.length,
+    0
+  );
 
   return (
     <section
@@ -190,11 +187,11 @@ function CandidateTracePanel({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h4 className="flex items-center gap-2 text-[10px] font-black text-cyan-100">
+          <h4 className="flex items-center gap-2 text-ui-caption font-black text-cyan-100">
             <Network className="h-3.5 w-3.5" aria-hidden="true" />
             候选全链路追溯
           </h4>
-          <div className="mt-1 break-all font-mono text-[8px] text-slate-600">
+          <div className="mt-1 break-all font-mono text-ui-micro text-slate-600">
             {strategyRunId} / {candidateId}
           </div>
         </div>
@@ -211,7 +208,7 @@ function CandidateTracePanel({
       {loading && (
         <div
           role="status"
-          className="flex items-center py-5 text-[9px] text-slate-500"
+          className="flex items-center py-ui-section text-ui-micro text-slate-500"
         >
           <Loader2
             aria-hidden="true"
@@ -221,12 +218,15 @@ function CandidateTracePanel({
         </div>
       )}
       {!loading && traceError && (
-        <div role="alert" className="mt-3 text-[9px] leading-4 text-rose-200">
+        <div
+          role="alert"
+          className="mt-3 text-ui-micro leading-4 text-rose-200"
+        >
           追溯读取失败：{traceError}
         </div>
       )}
       {!loading && !traceError && !traceForDisplay && (
-        <div className="mt-3 text-[9px] leading-4 text-amber-200">
+        <div className="mt-3 text-ui-micro leading-4 text-amber-200">
           当前账户未找到该候选的 MATERIAL 真源记录。
         </div>
       )}
@@ -235,7 +235,7 @@ function CandidateTracePanel({
           <div role="status" className="sr-only">
             候选 {candidateId} 的追溯已加载
           </div>
-          <div className="grid grid-cols-2 gap-2 text-[9px]">
+          <div className="grid grid-cols-2 gap-2 text-ui-micro">
             <div className="border border-white/[0.06] p-2">
               <div className="text-slate-600">完整性</div>
               <div
@@ -258,22 +258,24 @@ function CandidateTracePanel({
               </div>
             </div>
           </div>
-          <div className="border border-white/[0.06] p-2 text-[8px] leading-4 text-slate-500">
+          <div className="border border-white/[0.06] p-2 text-ui-micro leading-4 text-slate-500">
             <div>
-              source {traceForDisplay.sourceIdentity.continuityGeneration || '未知'}/
+              source{' '}
+              {traceForDisplay.sourceIdentity.continuityGeneration || '未知'}/
               {traceForDisplay.sourceIdentity.sourceTimeMs || '未知'}/
               {traceForDisplay.sourceIdentity.tickOrdinal || '未知'}
             </div>
             <div>
-              policy {traceForDisplay.sourceIdentity.policyVersion || '未知'} · feature{' '}
-              {traceForDisplay.sourceIdentity.featureSchemaVersion || '未知'} · profile{' '}
-              {traceForDisplay.sourceIdentity.profileVersion || '未知'}
+              policy {traceForDisplay.sourceIdentity.policyVersion || '未知'} ·
+              feature{' '}
+              {traceForDisplay.sourceIdentity.featureSchemaVersion || '未知'} ·
+              profile {traceForDisplay.sourceIdentity.profileVersion || '未知'}
             </div>
           </div>
           {linkGroups.length > 0 && (
             <section
               aria-label="追溯关联 ID"
-              className="border border-white/[0.06] p-2 text-[8px]"
+              className="border border-white/[0.06] p-2 text-ui-micro"
             >
               <div className="mb-2 font-black text-slate-400">关联 ID</div>
               <div className="space-y-2">
@@ -295,7 +297,7 @@ function CandidateTracePanel({
             </section>
           )}
           {traceForDisplay.missingReasons.length > 0 && (
-            <ul className="space-y-1.5 text-[9px]">
+            <ul className="space-y-1.5 text-ui-micro">
               {traceForDisplay.missingReasons.map(reason => (
                 <li
                   key={`${reason.stage}:${reason.code}`}
@@ -323,7 +325,7 @@ function CandidateTracePanel({
                 <li
                   key={`${event.stage}:${event.entityId}:${event.occurredAt}`}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[9px]">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-ui-micro">
                     <span className="font-black text-slate-200">
                       {traceStageLabels[event.stage] || event.stage} ·{' '}
                       {event.eventType}
@@ -332,18 +334,20 @@ function CandidateTracePanel({
                       {formatTime(event.occurredAt)}
                     </span>
                   </div>
-                  <div className="mt-0.5 break-all font-mono text-[8px] text-slate-600">
+                  <div className="mt-0.5 break-all font-mono text-ui-micro text-slate-600">
                     {event.entityId}
                     {event.status ? ` · ${event.status}` : ''}
                   </div>
                   {detail && (
-                    <div className="mt-1 break-words text-[8px] leading-4 text-slate-500">
+                    <div className="mt-1 break-words text-ui-micro leading-4 text-slate-500">
                       {detail}
                     </div>
                   )}
                   {relatedIdGroups.length > 0 && (
-                    <div className="mt-1 space-y-0.5 text-[8px] text-slate-500">
-                      <span className="font-bold text-slate-600">关联 ID：</span>
+                    <div className="mt-1 space-y-0.5 text-ui-micro text-slate-500">
+                      <span className="font-bold text-slate-600">
+                        关联 ID：
+                      </span>
                       {relatedIdGroups.map(group => (
                         <div key={group.key} className="break-all">
                           {group.key} · {group.ids.join(' · ')}
@@ -420,14 +424,14 @@ export function TTradeSignalsView({
 
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-3">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-ui-section py-3">
         <div>
-          <h2 className="text-sm font-black text-slate-100">服务端信号</h2>
-          <p className="mt-0.5 text-[10px] text-slate-600">
+          <h2 className="text-ui-body font-black text-slate-100">服务端信号</h2>
+          <p className="mt-0.5 text-ui-caption text-slate-600">
             当前快照、候选身份与历史证据均来自 V3 opportunity 真源
           </p>
         </div>
-        <span className="border border-amber-400/20 bg-amber-400/[0.06] px-2 py-1 text-[9px] font-black text-amber-200">
+        <span className="border border-amber-400/20 bg-amber-400/[0.06] px-2 py-1 text-ui-micro font-black text-amber-200">
           待确认 {pending.length}
         </span>
       </header>
@@ -435,7 +439,7 @@ export function TTradeSignalsView({
       {!dataTrusted && (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.07] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.07] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           正在显示最后一个可信快照；查询失败或订阅未连接，数据可能已过期，确认买入已禁用。
@@ -445,9 +449,12 @@ export function TTradeSignalsView({
       {monitorError && (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
-          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <ShieldAlert
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
           账户监控服务返回异常：{monitorError}；确认买入仍由服务端门禁重新校验。
         </div>
       )}
@@ -455,10 +462,14 @@ export function TTradeSignalsView({
       {evaluationsError && (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-400/[0.06] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
-          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          MATERIAL 评估证据读取失败；{evaluations.length > 0
+          <ShieldAlert
+            className="mt-0.5 h-3.5 w-3.5 shrink-0"
+            aria-hidden="true"
+          />
+          MATERIAL 评估证据读取失败；
+          {evaluations.length > 0
             ? '当前仍显示上次成功读取的证据。'
             : '当前没有可展示的历史证据。'}
         </div>
@@ -467,21 +478,24 @@ export function TTradeSignalsView({
         <div
           role="status"
           aria-busy="true"
-          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+          className="flex shrink-0 items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-ui-section py-2 text-ui-micro text-cyan-100"
         >
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          <Loader2
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+            aria-hidden="true"
+          />
           正在刷新 MATERIAL 评估证据，暂保留上次结果…
         </div>
       )}
 
       {pending.length > 0 && (
         <section
-          className="shrink-0 border-b border-amber-400/15 bg-amber-400/[0.025] p-4"
+          className="shrink-0 border-b border-amber-400/15 bg-amber-400/[0.025] p-ui-section"
           aria-labelledby="pending-opportunity-title"
         >
           <h3
             id="pending-opportunity-title"
-            className="mb-3 flex items-center gap-2 text-xs font-black text-amber-100"
+            className="mb-3 flex items-center gap-2 text-ui-label font-black text-amber-100"
           >
             <Activity className="h-4 w-4" />
             等待人工确认
@@ -496,29 +510,29 @@ export function TTradeSignalsView({
               return (
                 <article
                   key={snapshot.candidateId || session.runId}
-                  className="border border-white/[0.07] bg-[#0b1628] p-4"
+                  className="border border-white/[0.07] bg-[#0b1628] p-ui-section"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <div className="text-sm font-black text-slate-100">
+                      <div className="text-ui-body font-black text-slate-100">
                         {snapshot.instrumentCode}
                       </div>
-                      <div className="mt-1 text-[9px] text-slate-600">
+                      <div className="mt-1 text-ui-micro text-slate-600">
                         {snapshot.selectedPath || '未选择路径'} · 源时间{' '}
                         {formatTime(snapshot.sourceAt)}
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="font-mono text-lg font-black text-amber-200">
+                      <div className="font-mono text-ui-heading font-black text-amber-200">
                         {nullableScore(snapshot.opportunityScore)} /{' '}
                         {formatNumber(snapshot.candidateThreshold, 1)}
                       </div>
-                      <div className="text-[9px] text-slate-600">
+                      <div className="text-ui-micro text-slate-600">
                         规则机会分 / 候选阈值
                       </div>
                     </div>
                   </div>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] sm:grid-cols-4">
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-ui-micro sm:grid-cols-4">
                     <div className="border border-white/[0.05] p-2">
                       <span className="text-slate-600">数据健康</span>
                       <div className="mt-1 text-slate-200">
@@ -549,7 +563,7 @@ export function TTradeSignalsView({
                   {(!compatible || !approveAllowed) && (
                     <div
                       role="status"
-                      className="mt-3 flex items-start gap-2 text-[9px] leading-4 text-amber-200"
+                      className="mt-3 flex items-start gap-2 text-ui-micro leading-4 text-amber-200"
                     >
                       <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                       {!dataTrusted
@@ -566,7 +580,7 @@ export function TTradeSignalsView({
                       type="button"
                       size="sm"
                       variant="ghost"
-                      className="h-8 rounded-sm text-[10px] text-slate-500"
+                      className="h-control-compact rounded-sm text-ui-caption text-slate-500"
                       disabled={actionLoading}
                       onClick={() => onReject(session, snapshot)}
                     >
@@ -576,7 +590,7 @@ export function TTradeSignalsView({
                     <Button
                       type="button"
                       size="sm"
-                      className="h-8 rounded-sm bg-market-buy-cta text-[10px] text-white hover:bg-market-buy-cta/90"
+                      className="h-control-compact rounded-sm bg-market-buy-cta text-ui-caption text-white hover:bg-market-buy-cta/90"
                       disabled={actionLoading || !approveAllowed}
                       onClick={() => onApprove(session, snapshot)}
                     >
@@ -596,7 +610,7 @@ export function TTradeSignalsView({
           className="flex min-h-[360px] min-w-0 flex-col border-b border-white/[0.05] xl:min-h-0 xl:border-b-0 xl:border-r"
           aria-label="当前持仓信号"
         >
-          <div className="shrink-0 border-b border-white/[0.05] px-4 py-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="shrink-0 border-b border-white/[0.05] px-ui-section py-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             当前最新快照 · 点击标的查看双 FSM、门禁与贡献
           </div>
           <TTradeLiveBoard
@@ -610,18 +624,18 @@ export function TTradeSignalsView({
           />
         </section>
         <section
-          className="min-h-0 overflow-y-auto p-4 custom-scrollbar"
+          className="min-h-0 overflow-y-auto p-ui-section custom-scrollbar"
           aria-labelledby="signal-evidence-title"
         >
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3
               id="signal-evidence-title"
-              className="flex items-center gap-2 text-xs font-black text-slate-200"
+              className="flex items-center gap-2 text-ui-label font-black text-slate-200"
             >
               <History className="h-4 w-4 text-cyan-300" />
               MATERIAL 评估证据
             </h3>
-            <span className="font-mono text-[9px] text-slate-600">
+            <span className="font-mono text-ui-micro text-slate-600">
               {evaluations.length}
             </span>
           </div>
@@ -642,7 +656,7 @@ export function TTradeSignalsView({
               return (
                 <article
                   key={item.id}
-                  className="border border-white/[0.06] bg-[#0b1628] p-3 text-[9px]"
+                  className="border border-white/[0.06] bg-[#0b1628] p-3 text-ui-micro"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>
@@ -680,35 +694,35 @@ export function TTradeSignalsView({
                         candidateId &&
                         item.accountId === accountId &&
                         onRequestCandidateTrace && (
-                        <button
-                          type="button"
-                          aria-label={`追溯候选 ${candidateId}（账户 ${item.accountId}，运行 ${item.runId}）`}
-                          className="inline-flex items-center gap-1 border border-cyan-400/20 px-1.5 py-0.5 font-black text-cyan-200 hover:bg-cyan-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
-                          onClick={() =>
-                            onRequestCandidateTrace({
-                              accountId: item.accountId,
-                              strategyRunId: item.runId,
-                              candidateId,
-                            })
-                          }
-                        >
-                          <Link2 className="h-3 w-3" aria-hidden="true" />
-                          追溯
-                        </button>
-                      )}
+                          <button
+                            type="button"
+                            aria-label={`追溯候选 ${candidateId}（账户 ${item.accountId}，运行 ${item.runId}）`}
+                            className="inline-flex items-center gap-1 border border-cyan-400/20 px-1.5 py-0.5 font-black text-cyan-200 hover:bg-cyan-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/60"
+                            onClick={() =>
+                              onRequestCandidateTrace({
+                                accountId: item.accountId,
+                                strategyRunId: item.runId,
+                                candidateId,
+                              })
+                            }
+                          >
+                            <Link2 className="h-3 w-3" aria-hidden="true" />
+                            追溯
+                          </button>
+                        )}
                     </div>
                   </div>
                 </article>
               );
             })}
             {loadingEvaluations && evaluations.length === 0 && (
-              <div className="flex items-center justify-center py-10 text-[10px] text-slate-600">
+              <div className="flex items-center justify-center py-ui-empty text-ui-caption text-slate-600">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
                 读取评估证据…
               </div>
             )}
             {!loadingEvaluations && evaluations.length === 0 && (
-              <div className="py-10 text-center text-[10px] text-slate-600">
+              <div className="py-ui-empty text-center text-ui-caption text-slate-600">
                 <Clock3 className="mx-auto mb-2 h-7 w-7 text-slate-800" />
                 暂无持久化 MATERIAL 事件
               </div>
@@ -719,7 +733,7 @@ export function TTradeSignalsView({
               type="button"
               size="sm"
               variant="ghost"
-              className="mt-3 h-8 w-full text-[10px] text-slate-400"
+              className="mt-3 h-control-compact w-full text-ui-caption text-slate-400"
               disabled={loadingEvaluations}
               onClick={onLoadMoreEvaluations}
             >

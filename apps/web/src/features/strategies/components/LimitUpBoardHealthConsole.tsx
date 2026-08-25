@@ -118,19 +118,19 @@ export function LimitUpBoardHealthConsole({
       className="studio-workspace-surface flex h-full min-h-0 w-full flex-col text-slate-200"
       data-testid="limit-up-health-console"
     >
-      <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">
+      <div className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-[9px] font-black uppercase tracking-[0.24em] text-red-300">
+            <div className="text-ui-micro font-black uppercase tracking-[0.24em] text-red-300">
               First board operations
             </div>
             <h1
               id="limit-up-health-console-title"
-              className="mt-1 text-base font-black"
+              className="mt-1 text-ui-title font-black"
             >
               健康控制台
             </h1>
-            <div className="mt-1 truncate font-mono text-[9px] text-slate-600">
+            <div className="mt-1 truncate font-mono text-ui-micro text-slate-600">
               {accountName || '未选择账户'} · {accountId || '--'}
             </div>
           </div>
@@ -184,7 +184,7 @@ export function LimitUpBoardHealthConsole({
 
       <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
         <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 flex items-center justify-between text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 flex items-center justify-between text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             <span>业务链检查</span>
             <span>更新 {formatTime(radarUpdatedAt)}</span>
           </div>
@@ -204,7 +204,7 @@ export function LimitUpBoardHealthConsole({
                 >
                   <div className="flex items-center gap-2">
                     <Icon className={cn('h-3.5 w-3.5 shrink-0', style.icon)} />
-                    <span className="min-w-0 flex-1 text-[10px] text-slate-400">
+                    <span className="min-w-0 flex-1 text-ui-caption text-slate-400">
                       {item.label}
                     </span>
                     <span
@@ -213,11 +213,11 @@ export function LimitUpBoardHealthConsole({
                         style.dot
                       )}
                     />
-                    <strong className={cn('text-[10px]', style.text)}>
+                    <strong className={cn('text-ui-caption', style.text)}>
                       {item.value}
                     </strong>
                   </div>
-                  <p className="mt-1 pl-[22px] text-[9px] leading-4 text-slate-600">
+                  <p className="mt-1 pl-[22px] text-ui-micro leading-4 text-slate-600">
                     {item.detail}
                   </p>
                 </div>
@@ -227,7 +227,7 @@ export function LimitUpBoardHealthConsole({
         </section>
 
         <section className="p-3">
-          <div className="mb-2 flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 flex items-center gap-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             {primaryIssue ? (
               <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />
             ) : (
@@ -237,7 +237,7 @@ export function LimitUpBoardHealthConsole({
           </div>
           <p
             className={cn(
-              'text-[10px] leading-4',
+              'text-ui-caption leading-4',
               primaryIssue ? 'text-amber-100' : 'text-emerald-200'
             )}
           >
@@ -245,7 +245,7 @@ export function LimitUpBoardHealthConsole({
               ? `${primaryIssue.label} · ${primaryIssue.detail}`
               : '当前没有业务阻断项'}
           </p>
-          <p className="mt-3 border-t border-white/[0.05] pt-3 text-[9px] leading-4 text-slate-600">
+          <p className="mt-3 border-t border-white/[0.05] pt-3 text-ui-micro leading-4 text-slate-600">
             <Clock3 className="mr-1 inline h-3 w-3 text-cyan-400" />
             这里只判断首板扫描、候选收敛、入场门禁与 T+1
             退出计划。Engine、Agent、备份与死信等全局状态仍以底部状态栏和统一设置为准。
@@ -258,7 +258,7 @@ export function LimitUpBoardHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 cursor-pointer rounded-sm border-white/10 bg-transparent text-[10px] text-slate-300 hover:bg-white/[0.05]"
+            className="h-control-compact cursor-pointer rounded-sm border-white/10 bg-transparent text-ui-caption text-slate-300 hover:bg-white/[0.05]"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
@@ -268,7 +268,7 @@ export function LimitUpBoardHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 cursor-pointer rounded-sm border-white/10 bg-transparent text-[10px] text-slate-300 hover:bg-white/[0.05]"
+            className="h-control-compact cursor-pointer rounded-sm border-white/10 bg-transparent text-ui-caption text-slate-300 hover:bg-white/[0.05]"
             onClick={onOpenSettings}
           >
             <Settings2 className="mr-1.5 h-3.5 w-3.5" />
@@ -278,7 +278,7 @@ export function LimitUpBoardHealthConsole({
         <Button
           type="button"
           className={cn(
-            'h-9 w-full cursor-pointer rounded-sm text-[10px] font-black',
+            'h-control-default w-full cursor-pointer rounded-sm text-ui-caption font-black',
             assistantEnabled
               ? 'bg-slate-700 text-white hover:bg-slate-600'
               : 'bg-red-500 text-white hover:bg-red-400'
@@ -318,11 +318,11 @@ function HealthStatusCell({
       role="group"
       aria-label={label}
     >
-      <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] opacity-65">
+      <div className="flex items-center gap-1.5 text-ui-micro font-black uppercase tracking-[0.1em] opacity-65">
         <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 truncate text-[11px] font-black">{value}</div>
+      <div className="mt-1 truncate text-ui-caption font-black">{value}</div>
     </div>
   );
 }

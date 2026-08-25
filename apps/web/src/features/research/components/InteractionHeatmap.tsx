@@ -113,14 +113,14 @@ export function InteractionHeatmap({ rows }: { rows: GroupStatistic[] }) {
             </caption>
             <thead>
               <tr>
-                <th className="px-2 py-2 text-left text-[10px] font-black uppercase tracking-wider text-slate-600">
+                <th className="px-2 py-2 text-left text-ui-caption font-black uppercase tracking-wider text-slate-600">
                   RVOL
                 </th>
                 {positions.map(position => (
                   <th
                     key={position}
                     scope="col"
-                    className="px-2 py-2 text-[10px] font-bold text-slate-500"
+                    className="px-2 py-2 text-ui-caption font-bold text-slate-500"
                   >
                     {POSITION_LABELS[position] || position}
                   </th>
@@ -132,7 +132,7 @@ export function InteractionHeatmap({ rows }: { rows: GroupStatistic[] }) {
                 <tr key={rvol}>
                   <th
                     scope="row"
-                    className="whitespace-nowrap px-2 py-2 text-left font-mono text-[10px] font-bold text-slate-400"
+                    className="whitespace-nowrap px-2 py-2 text-left font-mono text-ui-caption font-bold text-slate-400"
                   >
                     {rvol}
                   </th>
@@ -151,12 +151,12 @@ export function InteractionHeatmap({ rows }: { rows: GroupStatistic[] }) {
                           ),
                         }}
                       >
-                        <span className="block font-mono text-xs font-black tabular-nums text-slate-100">
+                        <span className="block font-mono text-ui-label font-black tabular-nums text-slate-100">
                           {cell?.mean === null || cell?.mean === undefined
                             ? '—'
                             : `${(cell.mean * 100).toFixed(2)}%`}
                         </span>
-                        <span className="mt-0.5 block font-mono text-[9px] text-slate-400">
+                        <span className="mt-0.5 block font-mono text-ui-micro text-slate-400">
                           n={cell?.sampleSize || 0}
                         </span>
                       </td>

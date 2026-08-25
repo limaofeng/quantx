@@ -197,7 +197,10 @@ export default function BacktestHistoryTab({
       className: 'bg-gray-500/20 text-gray-400',
     };
     return (
-      <Badge variant="outline" className={cn('text-xs', config.className)}>
+      <Badge
+        variant="outline"
+        className={cn('text-ui-label', config.className)}
+      >
         {config.label}
       </Badge>
     );
@@ -276,7 +279,7 @@ export default function BacktestHistoryTab({
   if (mode && mode.toUpperCase() !== 'BACKTEST') {
     return (
       <Card className="bg-gray-900/50 border-gray-800">
-        <CardContent className="p-6 text-center text-gray-500">
+        <CardContent className="p-ui-panel text-center text-gray-500">
           仅回测模式支持查看回测版本
         </CardContent>
       </Card>
@@ -286,7 +289,7 @@ export default function BacktestHistoryTab({
   if (fetching && backtests.length === 0) {
     return (
       <Card className="bg-gray-900/50 border-gray-800">
-        <CardContent className="p-6 text-center text-gray-500">
+        <CardContent className="p-ui-panel text-center text-gray-500">
           <Activity className="w-6 h-6 mx-auto mb-2 animate-spin" />
           加载回测版本...
         </CardContent>
@@ -297,7 +300,7 @@ export default function BacktestHistoryTab({
   if (error) {
     return (
       <Card className="bg-gray-900/50 border-gray-800">
-        <CardContent className="p-6 text-center text-red-400">
+        <CardContent className="p-ui-panel text-center text-red-400">
           加载失败: {error.message}
         </CardContent>
       </Card>
@@ -307,10 +310,10 @@ export default function BacktestHistoryTab({
   if (backtests.length === 0) {
     return (
       <Card className="bg-gray-900/50 border-gray-800">
-        <CardContent className="p-6 text-center text-gray-500">
+        <CardContent className="p-ui-panel text-center text-gray-500">
           <Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
           <p>暂无回测版本记录</p>
-          <p className="text-sm mt-1 text-gray-600">
+          <p className="text-ui-body mt-1 text-gray-600">
             运行回测后，版本记录将显示在这里
           </p>
         </CardContent>
@@ -322,13 +325,13 @@ export default function BacktestHistoryTab({
     <>
       <Card className="bg-gray-900/50 border-gray-800">
         <CardHeader className="pb-3">
-          <CardTitle className="text-base font-medium text-gray-200 flex items-center gap-2">
+          <CardTitle className="text-ui-title font-medium text-gray-200 flex items-center gap-2">
             <Clock className="w-4 h-4" />
             回测版本
             {!activeBacktestId && (
               <Badge
                 variant="outline"
-                className="border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300"
+                className="border-emerald-500/30 bg-emerald-500/10 text-ui-label text-emerald-300"
               >
                 当前查看模板
               </Badge>
@@ -336,26 +339,26 @@ export default function BacktestHistoryTab({
             {activeBacktest && (
               <Badge
                 variant="outline"
-                className="border-blue-500/30 bg-blue-500/10 text-xs text-blue-300"
+                className="border-blue-500/30 bg-blue-500/10 text-ui-label text-blue-300"
               >
                 当前查看 v{activeBacktest.version}
               </Badge>
             )}
-            <Badge variant="secondary" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-ui-label">
               共 {backtests.length} 个版本
             </Badge>
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           {deleteError && !deleteTarget && (
-            <div className="mx-4 mb-3 rounded-md border border-red-500/30 bg-red-950/30 px-3 py-2 text-sm text-red-300">
+            <div className="mx-4 mb-3 rounded-md border border-red-500/30 bg-red-950/30 px-3 py-2 text-ui-body text-red-300">
               {deleteError}
             </div>
           )}
           <div className="divide-y divide-gray-800">
             <div
               className={cn(
-                'p-4 cursor-pointer transition-colors hover:bg-gray-800/50',
+                'p-ui-section cursor-pointer transition-colors hover:bg-gray-800/50',
                 !activeBacktestId &&
                   'bg-emerald-900/20 border-l-2 border-emerald-500'
               )}
@@ -373,22 +376,24 @@ export default function BacktestHistoryTab({
                   <span className="font-medium text-gray-200">模板版本</span>
                   <Badge
                     variant="outline"
-                    className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-xs"
+                    className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-ui-label"
                   >
                     可编辑
                   </Badge>
                   {!activeBacktestId && (
                     <Badge
                       variant="outline"
-                      className="border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300"
+                      className="border-emerald-500/30 bg-emerald-500/10 text-ui-label text-emerald-300"
                     >
                       当前查看
                     </Badge>
                   )}
                 </div>
-                <span className="text-xs text-gray-500">重新回测来源</span>
+                <span className="text-ui-label text-gray-500">
+                  重新回测来源
+                </span>
               </div>
-              <div className="text-sm text-gray-400">
+              <div className="text-ui-body text-gray-400">
                 参数配置和网格簿编辑会更新模板；已完成回测版本保持只读快照。
               </div>
             </div>
@@ -399,7 +404,7 @@ export default function BacktestHistoryTab({
                 <div
                   key={backtest.id}
                   className={cn(
-                    'p-4 cursor-pointer transition-colors hover:bg-gray-800/50',
+                    'p-ui-section cursor-pointer transition-colors hover:bg-gray-800/50',
                     isCurrent && 'bg-blue-900/20 border-l-2 border-blue-500'
                   )}
                   onContextMenu={event =>
@@ -417,21 +422,21 @@ export default function BacktestHistoryTab({
                       {isCurrent && (
                         <Badge
                           variant="outline"
-                          className="border-blue-500/30 bg-blue-500/10 text-xs text-blue-300"
+                          className="border-blue-500/30 bg-blue-500/10 text-ui-label text-blue-300"
                         >
                           当前查看
                         </Badge>
                       )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-gray-500">
+                      <span className="text-ui-label text-gray-500">
                         {formatDate(backtest.createdAt)}
                       </span>
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="h-8 w-8 rounded-lg text-gray-500 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-60"
+                        className="h-control-compact w-8 rounded-lg text-gray-500 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-60"
                         title={
                           backtest.status.toUpperCase() === 'RUNNING'
                             ? '运行中的回测版本不可删除'
@@ -453,7 +458,7 @@ export default function BacktestHistoryTab({
                   </div>
 
                   {/* 回测时间范围 */}
-                  <div className="text-sm text-gray-400 mb-2">
+                  <div className="text-ui-body text-gray-400 mb-2">
                     {backtest.backtestStartTime && backtest.backtestEndTime ? (
                       <span>
                         {formatDate(backtest.backtestStartTime)} ~{' '}
@@ -471,7 +476,7 @@ export default function BacktestHistoryTab({
                       const totalPnl = backtest.metrics?.total_pnl;
                       const totalPnlNumber = Number(totalPnl);
                       return (
-                        <div className="flex gap-4 text-xs">
+                        <div className="flex gap-ui-section text-ui-label">
                           {totalPnl !== undefined && (
                             <span
                               className={cn(
@@ -500,7 +505,7 @@ export default function BacktestHistoryTab({
 
                   {/* 错误信息 */}
                   {backtest.status === 'ERROR' && backtest.errorMessage && (
-                    <div className="mt-2 text-xs text-red-400 bg-red-900/20 p-2 rounded">
+                    <div className="mt-2 text-ui-label text-red-400 bg-red-900/20 p-2 rounded">
                       {backtest.errorMessage}
                     </div>
                   )}
@@ -525,7 +530,7 @@ export default function BacktestHistoryTab({
               {`确定要删除回测版本 v${deleteTarget?.version ?? ''}？此操作会删除该版本的执行明细、绩效快照和网格簿快照。`}
             </p>
             {deleteError && (
-              <p className="rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2 text-xs font-medium text-red-300">
+              <p className="rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2 text-ui-label font-medium text-red-300">
                 {deleteError}
               </p>
             )}

@@ -372,7 +372,7 @@ export default function XTerminalLog({
               ) : (
                 <WifiOff className="h-4 w-4 text-red-400" />
               )}
-              <span className="text-xs">
+              <span className="text-ui-label">
                 {isConnected ? 'Connected' : 'Disconnected'}
               </span>
             </div>

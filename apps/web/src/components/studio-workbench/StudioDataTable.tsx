@@ -388,7 +388,7 @@ export function StudioDataTable<TRow, TColumn extends StudioDataTableColumn>({
         scope="col"
         style={getColumnStyle(column, 'header')}
         className={cn(
-          'group/header sticky top-0 z-10 border-b border-r border-white/10 bg-slate-900/95 px-3 py-2.5 text-[10px] font-bold text-slate-500 backdrop-blur last:border-r-0',
+          'group/header sticky top-0 z-10 border-b border-r border-white/10 bg-slate-900/95 px-3 py-2.5 text-ui-caption font-bold text-slate-500 backdrop-blur last:border-r-0',
           column.widthClass,
           getTextAlignClass(column.align),
           canMoveColumn(column) && 'cursor-grab active:cursor-grabbing',
@@ -436,7 +436,7 @@ export function StudioDataTable<TRow, TColumn extends StudioDataTableColumn>({
               data-testid={`${columnMenuTestIdPrefix}-${column.id}`}
               onClick={event => onColumnMenuOpen(event, column, tableApi)}
               className={cn(
-                'absolute right-0 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[4px] text-slate-500 opacity-0 transition-all duration-150 hover:bg-white/[0.08] hover:text-slate-100 focus:bg-white/[0.08] focus:text-slate-100 focus:opacity-100 focus:outline-none group-hover/header:opacity-100',
+                'absolute right-0 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-sm text-slate-500 opacity-0 transition-all duration-150 hover:bg-white/[0.08] hover:text-slate-100 focus:bg-white/[0.08] focus:text-slate-100 focus:opacity-100 focus:outline-none group-hover/header:opacity-100',
                 isSorted && 'opacity-100'
               )}
               aria-label={`${labelText} 列菜单`}
@@ -458,7 +458,7 @@ export function StudioDataTable<TRow, TColumn extends StudioDataTableColumn>({
       )}
     >
       {(toolbarLeft || toolbarRight) && (
-        <div className="flex flex-col gap-2 border-b border-white/5 bg-slate-900/40 px-4 py-2 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-2 border-b border-white/5 bg-slate-900/40 px-ui-section py-2 md:flex-row md:items-center md:justify-between">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {toolbarLeft}
           </div>

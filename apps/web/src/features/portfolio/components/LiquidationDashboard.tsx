@@ -101,7 +101,9 @@ function DashboardPanel({
     <section className="min-w-0 rounded-md border border-white/5 bg-[#0b1120]/70">
       <div className="flex h-10 items-center gap-2 border-b border-white/5 px-3">
         <Icon className="h-3.5 w-3.5 text-red-300" />
-        <h3 className="truncate text-xs font-black text-slate-200">{title}</h3>
+        <h3 className="truncate text-ui-label font-black text-slate-200">
+          {title}
+        </h3>
       </div>
       <div className="p-3">{children}</div>
     </section>
@@ -110,7 +112,7 @@ function DashboardPanel({
 
 function EmptyDashboardState({ label }: { label: string }) {
   return (
-    <div className="rounded-md border border-dashed border-white/10 bg-white/[0.025] px-4 py-7 text-center text-xs font-bold text-slate-500">
+    <div className="rounded-md border border-dashed border-white/10 bg-white/[0.025] px-ui-section py-7 text-center text-ui-label font-bold text-slate-500">
       {label}
     </div>
   );
@@ -125,14 +127,14 @@ function MetricTile({ metric }: { metric: LiquidationDashboardMetric }) {
       )}
       data-testid={`dashboard-metric-${metric.id}`}
     >
-      <div className="truncate text-[10px] font-black uppercase tracking-wider text-slate-500">
+      <div className="truncate text-ui-caption font-black uppercase tracking-wider text-slate-500">
         {metric.label}
       </div>
-      <div className="mt-2 truncate font-mono text-lg font-black tabular-nums">
+      <div className="mt-2 truncate font-mono text-ui-heading font-black tabular-nums">
         {formatMetricValue(metric)}
       </div>
       {metric.subValue && (
-        <div className="mt-1 truncate text-[10px] font-bold text-slate-500">
+        <div className="mt-1 truncate text-ui-caption font-bold text-slate-500">
           {metric.subValue}
         </div>
       )}
@@ -162,8 +164,8 @@ function ConditionalMonitorTable({
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[820px] text-left text-xs">
-        <thead className="text-[10px] font-black uppercase tracking-wider text-slate-600">
+      <table className="w-full min-w-[820px] text-left text-ui-label">
+        <thead className="text-ui-caption font-black uppercase tracking-wider text-slate-600">
           <tr className="border-b border-white/5">
             <th className="px-2 py-2">股票</th>
             <th className="px-2 py-2">条件</th>
@@ -194,7 +196,7 @@ function ConditionalMonitorTable({
                   <div className="font-bold text-slate-100">
                     {row.instrumentName}
                   </div>
-                  <div className="font-mono text-[10px] text-slate-600">
+                  <div className="font-mono text-ui-caption text-slate-600">
                     {row.stockCode}
                   </div>
                 </td>
@@ -207,7 +209,7 @@ function ConditionalMonitorTable({
                   <div>{formatNullableCurrency(row.currentPrice)}</div>
                   <div
                     className={cn(
-                      'text-[10px]',
+                      'text-ui-caption',
                       financialToneClass(row.currentProfitPct, 'holding')
                     )}
                   >
@@ -227,17 +229,17 @@ function ConditionalMonitorTable({
                 <td className="px-2 py-2 text-right">
                   <span
                     className={cn(
-                      'inline-flex rounded border px-2 py-1 text-[10px] font-black',
+                      'inline-flex rounded border px-2 py-1 text-ui-caption font-black',
                       statusToneClass[row.status]
                     )}
                   >
                     {row.statusLabel}
                   </span>
                 </td>
-                <td className="px-2 py-2 text-right font-mono text-[10px] text-slate-500">
+                <td className="px-2 py-2 text-right font-mono text-ui-caption text-slate-500">
                   {formatDateTime(row.lastCheckedAt)}
                 </td>
-                <td className="max-w-[160px] px-2 py-2 text-right text-[10px] font-bold text-rose-200">
+                <td className="max-w-[160px] px-2 py-2 text-right text-ui-caption font-bold text-rose-200">
                   <div className="truncate">{row.lastError || '--'}</div>
                 </td>
               </tr>
@@ -275,37 +277,32 @@ function RiskAlertList({
         >
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded border border-current/20 px-2 py-1 text-[10px] font-black">
+              <span className="rounded border border-current/20 px-2 py-1 text-ui-caption font-black">
                 {alert.title}
               </span>
-              <span className="truncate text-sm font-black text-slate-100">
+              <span className="truncate text-ui-body font-black text-slate-100">
                 {alert.instrumentName}
               </span>
-              <span className="font-mono text-[10px] font-bold text-slate-500">
+              <span className="font-mono text-ui-caption font-bold text-slate-500">
                 {alert.stockCode}
               </span>
             </div>
-            <div className="mt-1 truncate text-[10px] font-bold text-slate-500">
+            <div className="mt-1 truncate text-ui-caption font-bold text-slate-500">
               {alert.reason}
             </div>
           </div>
-          <div className="grid shrink-0 grid-cols-3 gap-3 text-right font-mono text-[11px] font-black">
+          <div className="grid shrink-0 grid-cols-3 gap-3 text-right font-mono text-ui-caption font-black">
             <div>
               <div className="text-slate-600">涨跌</div>
               <div
-                className={financialToneClass(
-                  alert.changePercent,
-                  'holding'
-                )}
+                className={financialToneClass(alert.changePercent, 'holding')}
               >
                 {formatNullablePercent(alert.changePercent, true)}
               </div>
             </div>
             <div>
               <div className="text-slate-600">滚动</div>
-              <div
-                className={financialToneClass(alert.tickDropPct, 'holding')}
-              >
+              <div className={financialToneClass(alert.tickDropPct, 'holding')}>
                 {formatNullablePercent(alert.tickDropPct, true)}
               </div>
             </div>
@@ -380,7 +377,7 @@ export function LiquidationDashboard({
 
       <div className="mt-3 grid gap-3 xl:grid-cols-3">
         <DashboardPanel icon={RadioTower} title="行情状态">
-          <div className="grid gap-2 text-xs font-bold text-slate-400">
+          <div className="grid gap-2 text-ui-label font-bold text-slate-400">
             <div className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.025] px-3 py-2">
               <span>订阅覆盖</span>
               <span className="font-mono text-slate-200">
@@ -404,7 +401,7 @@ export function LiquidationDashboard({
         </DashboardPanel>
 
         <DashboardPanel icon={Activity} title="今日触发概览">
-          <div className="grid gap-2 text-xs font-bold text-slate-400">
+          <div className="grid gap-2 text-ui-label font-bold text-slate-400">
             <div className="flex items-center justify-between rounded-md border border-white/5 bg-white/[0.025] px-3 py-2">
               <span>今日触发</span>
               <span className="font-mono text-red-200">
@@ -421,7 +418,7 @@ export function LiquidationDashboard({
         </DashboardPanel>
 
         <DashboardPanel icon={BarChart3} title="Dashboard 边界">
-          <div className="rounded-md border border-blue-400/15 bg-blue-500/10 px-3 py-3 text-xs font-bold leading-5 text-blue-100">
+          <div className="rounded-md border border-blue-400/15 bg-blue-500/10 px-3 py-3 text-ui-label font-bold leading-5 text-blue-100">
             本页只做监控与预警。普通清仓、条件配置和委托确认从左侧持仓进入个股页处理。
           </div>
         </DashboardPanel>

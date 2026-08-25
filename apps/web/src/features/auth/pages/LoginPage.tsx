@@ -88,30 +88,30 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
                 <ShieldCheck className="h-5 w-5" />
               </div>
               <div>
-                <p className="font-mono text-[11px] font-semibold tracking-[0.28em] text-blue-400">
+                <p className="font-mono text-ui-caption font-semibold tracking-[0.28em] text-blue-400">
                   QUANTX SECURE
                 </p>
-                <h1 className="mt-1 text-xl font-semibold text-white">
+                <h1 className="mt-1 text-ui-page-title font-semibold text-white">
                   本地交易工作台
                 </h1>
               </div>
             </div>
 
             <div className="mt-20 max-w-sm">
-              <p className="font-mono text-xs uppercase tracking-[0.24em] text-slate-500">
+              <p className="font-mono text-ui-label uppercase tracking-[0.24em] text-slate-500">
                 Session protection
               </p>
-              <h2 className="mt-4 text-3xl font-semibold leading-tight text-slate-50">
+              <h2 className="mt-4 text-ui-display-lg font-semibold leading-tight text-slate-50">
                 让交易权限停留在受控会话中
               </h2>
-              <p className="mt-5 text-sm leading-7 text-slate-400">
+              <p className="mt-5 text-ui-body leading-7 text-slate-400">
                 Access Token 仅保存在当前页面内存，长期刷新凭证由浏览器的
                 HttpOnly Cookie 隔离保存。
               </p>
             </div>
           </div>
 
-          <div className="space-y-3 text-xs text-slate-400">
+          <div className="space-y-3 text-ui-label text-slate-400">
             <div className="flex items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.025] px-4 py-3">
               <LockKeyhole className="h-4 w-4 text-emerald-400" />
               不在 localStorage 或 sessionStorage 保存 Token
@@ -126,17 +126,20 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
         <div className="flex min-h-[560px] items-center p-12">
           <div className="mx-auto w-full max-w-sm">
             <div>
-              <h2 className="text-2xl font-semibold tracking-tight text-white">
+              <h2 className="text-ui-display font-semibold tracking-tight text-white">
                 登录 QuantX
               </h2>
-              <p className="mt-2 text-sm text-slate-400">
+              <p className="mt-2 text-ui-body text-slate-400">
                 使用本机环境中创建的账户继续访问。
               </p>
             </div>
 
             <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
               <div className="space-y-2">
-                <Label htmlFor="username" className="text-sm text-slate-300">
+                <Label
+                  htmlFor="username"
+                  className="text-ui-body text-slate-300"
+                >
                   用户名
                 </Label>
                 <div className="relative">
@@ -157,7 +160,10 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-sm text-slate-300">
+                <Label
+                  htmlFor="password"
+                  className="text-ui-body text-slate-300"
+                >
                   密码
                 </Label>
                 <div className="relative">
@@ -200,7 +206,7 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
               <Button
                 type="submit"
                 disabled={isSubmitting}
-                className="h-11 w-full cursor-pointer rounded-lg bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500"
+                className="h-control-large w-full cursor-pointer rounded-lg bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500"
               >
                 {isSubmitting ? (
                   <>
@@ -216,7 +222,7 @@ export function LoginPage({ nextPath }: { nextPath: string }) {
               </Button>
             </form>
 
-            <p className="mt-8 text-center text-[11px] leading-5 text-slate-600">
+            <p className="mt-8 text-center text-ui-caption leading-5 text-slate-600">
               仅在受信任的本地网络与设备上登录。系统不会在前端持久化访问令牌。
             </p>
           </div>

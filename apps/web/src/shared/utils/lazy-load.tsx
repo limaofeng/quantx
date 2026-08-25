@@ -15,7 +15,7 @@ export const DefaultLoadingComponent: React.FC<LoadingComponentProps> = () => (
   <div className="flex items-center justify-center min-h-[200px]">
     <div className="flex flex-col items-center space-y-2">
       <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-      <p className="text-sm text-muted-foreground">加载中...</p>
+      <p className="text-ui-body text-muted-foreground">加载中...</p>
     </div>
   </div>
 );
@@ -27,10 +27,10 @@ export const DefaultErrorComponent: React.FC<{ error: Error }> = ({
   <div className="flex items-center justify-center min-h-[200px]">
     <div className="text-center space-y-2">
       <p className="text-destructive">加载失败</p>
-      <p className="text-sm text-muted-foreground">{error.message}</p>
+      <p className="text-ui-body text-muted-foreground">{error.message}</p>
       <button
         onClick={() => window.location.reload()}
-        className="text-sm text-primary underline"
+        className="text-ui-body text-primary underline"
       >
         重新加载
       </button>
@@ -110,14 +110,14 @@ export const createLazyRoute = <P extends object>(
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center space-y-4">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
-          <p className="text-lg font-medium">加载{routeName}中...</p>
+          <p className="text-ui-heading font-medium">加载{routeName}中...</p>
         </div>
       </div>
     ),
     errorComponent: ({ error }) => (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center space-y-4 max-w-md">
-          <h2 className="text-xl font-semibold text-destructive">
+          <h2 className="text-ui-page-title font-semibold text-destructive">
             {routeName}加载失败
           </h2>
           <p className="text-muted-foreground">{error.message}</p>

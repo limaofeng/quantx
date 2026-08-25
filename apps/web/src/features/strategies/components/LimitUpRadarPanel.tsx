@@ -18,6 +18,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { NativeSelect } from '@/components/ui/native-select';
 import { cn } from '@/utils/cn';
 
 import type {
@@ -100,13 +101,13 @@ function CandidateStage({ candidate }: { candidate: RadarCandidate }) {
     <span className="text-center">
       <span
         className={cn(
-          'inline-flex rounded border px-1.5 py-1 text-[10px] font-black',
+          'inline-flex rounded border px-1.5 py-1 text-ui-caption font-black',
           stageTone[candidate.stage]
         )}
       >
         {candidate.stageLabel}
       </span>
-      <span className="mt-1 block text-[9px] text-slate-500">
+      <span className="mt-1 block text-ui-micro text-slate-500">
         进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
       </span>
     </span>
@@ -117,14 +118,14 @@ function CandidateIdentity({ candidate }: { candidate: RadarCandidate }) {
   return (
     <span className="min-w-0 text-left">
       <span className="flex min-w-0 items-center gap-1.5">
-        <span className="truncate text-xs font-black text-slate-100">
+        <span className="truncate text-ui-label font-black text-slate-100">
           {candidate.name}
         </span>
         {candidate.isStale ? (
           <Clock3 className="h-3 w-3 shrink-0 text-amber-300" />
         ) : null}
       </span>
-      <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-500">
+      <span className="mt-0.5 block truncate font-mono text-ui-micro text-slate-500">
         {candidate.code} ·{' '}
         {candidate.boardSegment === 'GROWTH' ? '双创' : '主板'} ·{' '}
         {candidate.industry || '未分类'}
@@ -158,7 +159,7 @@ function CandidateAction({
 }) {
   if (candidate.isStale) {
     return (
-      <span className="rounded-md border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1.5 text-center text-[10px] font-black text-amber-200/80">
+      <span className="rounded-md border border-amber-400/15 bg-amber-400/[0.06] px-2 py-1.5 text-center text-ui-caption font-black text-amber-200/80">
         报价过期
       </span>
     );
@@ -168,7 +169,7 @@ function CandidateAction({
     return (
       <span
         className={cn(
-          'rounded-md border px-2 py-1.5 text-center text-[10px] font-black',
+          'rounded-md border px-2 py-1.5 text-center text-ui-caption font-black',
           managed
             ? 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200'
             : 'border-amber-400/25 bg-amber-400/10 text-amber-200'
@@ -190,7 +191,7 @@ function CandidateAction({
           event.stopPropagation();
           onDisarm(candidate.code);
         }}
-        className="h-7 cursor-pointer border-white/10 bg-white/[0.03] px-2 text-[10px] text-slate-300 hover:bg-white/[0.07]"
+        className="h-7 cursor-pointer border-white/10 bg-white/[0.03] px-2 text-ui-caption text-slate-300 hover:bg-white/[0.07]"
       >
         {busy ? '处理中' : '取消关注'}
       </Button>
@@ -209,7 +210,7 @@ function CandidateAction({
       title={
         candidate.isStale ? '报价超过15秒，仅供观察' : '提高账户候选关注优先级'
       }
-      className="h-7 cursor-pointer bg-red-500 px-2 text-[10px] font-black text-white hover:bg-red-400"
+      className="h-7 cursor-pointer bg-red-500 px-2 text-ui-caption font-black text-white hover:bg-red-400"
     >
       {busy ? '处理中' : autoTracked ? '优先关注' : '关注'}
     </Button>
@@ -228,7 +229,7 @@ function CandidateMetric({
   return (
     <span className={cn('text-center font-mono font-black', tone)}>
       {value}
-      <span className="block text-[9px] font-normal text-slate-500">
+      <span className="block text-ui-micro font-normal text-slate-500">
         {detail}
       </span>
     </span>
@@ -311,10 +312,12 @@ function CandidateRow({
       style={style}
       className={cn(
         'absolute left-0 top-0 w-full cursor-pointer border-b border-white/[0.045] text-left transition-colors duration-150 hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/70 motion-reduce:transition-none',
-        layout === 'wide' && `grid ${wideGridColumns} items-center gap-2 px-4`,
+        layout === 'wide' &&
+          `grid ${wideGridColumns} items-center gap-2 px-ui-section`,
         layout === 'compact' &&
-          `grid ${compactGridColumns} items-center gap-2 px-4`,
-        layout === 'narrow' && 'flex flex-col justify-between px-4 py-2.5',
+          `grid ${compactGridColumns} items-center gap-2 px-ui-section`,
+        layout === 'narrow' &&
+          'flex flex-col justify-between px-ui-section py-2.5',
         candidate.isStale
           ? 'bg-slate-950/45'
           : pending
@@ -345,48 +348,48 @@ function CandidateRow({
           <span role="gridcell">
             <CandidateMetric
               detail="首板封住"
-              tone="text-sm text-cyan-200"
+              tone="text-ui-body text-cyan-200"
               value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
             />
           </span>
           <span role="gridcell">
             <CandidateMetric
               detail={`二板触及 / ${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住`}
-              tone="text-[12px] text-violet-200"
+              tone="text-ui-label text-violet-200"
               value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
             />
           </span>
           <span role="gridcell">
             <CandidateMetric
               detail={`净期望 / CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
-              tone="text-[11px] text-red-300"
+              tone="text-ui-caption text-red-300"
               value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
             />
           </span>
           <span
-            className="text-center text-[10px] font-black text-slate-300"
+            className="text-center text-ui-caption font-black text-slate-300"
             role="gridcell"
           >
             {getHighPositionLabel(candidate.highPositionType)}
-            <span className="mt-1 block font-mono text-[9px] font-normal text-slate-500">
+            <span className="mt-1 block font-mono text-ui-micro font-normal text-slate-500">
               晋级分 {candidate.promotionScore.toFixed(1)}
             </span>
           </span>
           <span
-            className="text-center text-[10px] font-black text-slate-300"
+            className="text-center text-ui-caption font-black text-slate-300"
             role="gridcell"
           >
             {getResearchLabel(candidate)}
-            <span className="mt-1 block text-[9px] font-normal text-slate-500">
+            <span className="mt-1 block text-ui-micro font-normal text-slate-500">
               {getResearchDetail(candidate)}
             </span>
           </span>
           <span
-            className="text-center text-[10px] text-slate-300"
+            className="text-center text-ui-caption text-slate-300"
             role="gridcell"
           >
             {candidate.promotionEligible ? '资格通过' : '硬否决'}
-            <span className="mt-1 block truncate text-[9px] text-slate-500">
+            <span className="mt-1 block truncate text-ui-micro text-slate-500">
               {candidate.blockedReasons[0] || '确定性规则'}
             </span>
           </span>
@@ -401,13 +404,13 @@ function CandidateRow({
             <span className="mt-1.5 flex items-center gap-2">
               <span
                 className={cn(
-                  'inline-flex rounded border px-1.5 py-0.5 text-[9px] font-black',
+                  'inline-flex rounded border px-1.5 py-0.5 text-ui-micro font-black',
                   stageTone[candidate.stage]
                 )}
               >
                 {candidate.stageLabel}
               </span>
-              <span className="text-[9px] text-slate-500">
+              <span className="text-ui-micro text-slate-500">
                 进度 {(candidate.normalizedLimitProgress * 100).toFixed(0)}%
               </span>
             </span>
@@ -415,25 +418,25 @@ function CandidateRow({
           <span role="gridcell">
             <CandidateMetric
               detail="首板封住"
-              tone="text-[12px] text-cyan-200"
+              tone="text-ui-label text-cyan-200"
               value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
             />
           </span>
           <span role="gridcell">
             <CandidateMetric
               detail={`${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封住`}
-              tone="text-[12px] text-violet-200"
+              tone="text-ui-label text-violet-200"
               value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
             />
           </span>
           <span role="gridcell">
             <CandidateMetric
               detail={`CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
-              tone="text-[11px] text-red-300"
+              tone="text-ui-caption text-red-300"
               value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
             />
           </span>
-          <span className="min-w-0 text-[9px] leading-4" role="gridcell">
+          <span className="min-w-0 text-ui-micro leading-4" role="gridcell">
             <span className="block truncate font-black text-slate-300">
               {getHighPositionLabel(candidate.highPositionType)} · 晋级分{' '}
               {candidate.promotionScore.toFixed(1)}
@@ -462,22 +465,22 @@ function CandidateRow({
           <span className="grid w-full grid-cols-3 gap-2" role="gridcell">
             <CandidateMetric
               detail="首板封住"
-              tone="text-[12px] text-cyan-200"
+              tone="text-ui-label text-cyan-200"
               value={`${(candidate.firstBoardCloseProbability * 100).toFixed(0)}%`}
             />
             <CandidateMetric
               detail={`T+1 / ${(candidate.nextDayLimitSealProbability * 100).toFixed(0)}% 封`}
-              tone="text-[12px] text-violet-200"
+              tone="text-ui-label text-violet-200"
               value={`${(candidate.nextDayLimitTouchProbability * 100).toFixed(0)}%`}
             />
             <CandidateMetric
               detail={`CVaR ${candidate.cvar95LossPct.toFixed(1)}%`}
-              tone="text-[11px] text-red-300"
+              tone="text-ui-caption text-red-300"
               value={`${candidate.expectedNetReturnPct >= 0 ? '+' : ''}${candidate.expectedNetReturnPct.toFixed(2)}%`}
             />
           </span>
           <span
-            className="grid w-full grid-cols-3 gap-2 text-[9px] leading-4"
+            className="grid w-full grid-cols-3 gap-2 text-ui-micro leading-4"
             role="gridcell"
           >
             <span className="min-w-0 truncate text-slate-400">
@@ -531,7 +534,7 @@ function CandidateGridHeader({ layout }: { layout: CandidateLayout }) {
   return (
     <div
       className={cn(
-        'grid shrink-0 gap-2 bg-[#0b1628] px-4 py-2.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.05)]',
+        'grid shrink-0 gap-2 bg-[#0b1628] px-ui-section py-2.5 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600 shadow-[0_1px_0_rgba(255,255,255,0.05)]',
         layout === 'wide' ? wideGridColumns : compactGridColumns
       )}
       role="row"
@@ -692,18 +695,18 @@ export function LimitUpRadarPanel({
     >
       <div
         className={cn(
-          'flex shrink-0 gap-3 border-b border-white/[0.05] px-4 py-3',
+          'flex shrink-0 gap-3 border-b border-white/[0.05] px-ui-section py-3',
           layout === 'wide'
             ? 'flex-row items-center justify-between'
             : 'flex-col items-stretch'
         )}
       >
         <div className="min-w-0">
-          <h2 className="flex items-center gap-2 text-sm font-black text-slate-100">
+          <h2 className="flex items-center gap-2 text-ui-body font-black text-slate-100">
             <Radar className="h-4 w-4 text-cyan-300" />
             首板晋级候选
           </h2>
-          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-600">
+          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-ui-caption text-slate-600">
             <span className="font-mono">
               {summary.discoveredCount} 发现 · {summary.eligibleCount} 合格 ·{' '}
               {summary.scannedCount} 已扫描
@@ -735,31 +738,31 @@ export function LimitUpRadarPanel({
               value={search}
               onChange={event => onSearchChange(event.target.value)}
               placeholder="代码 / 名称"
-              className="h-8 rounded-sm border border-white/10 bg-[#08111f] pl-8 text-[11px]"
+              className="h-8 rounded-sm border border-white/10 bg-[#08111f] pl-8 text-ui-caption"
             />
           </label>
           <label>
             <span className="sr-only">候选阶段</span>
-            <select
+            <NativeSelect
               value={stage}
               onChange={event =>
                 onStageChange(event.target.value as RadarStage | 'ALL')
               }
-              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
+              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-ui-caption text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
             >
               {stages.map(item => (
                 <option key={item.value} value={item.value}>
                   {item.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span className="sr-only">候选行业</span>
-            <select
+            <NativeSelect
               value={industry}
               onChange={event => onIndustryChange(event.target.value)}
-              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-[11px] text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
+              className="h-8 w-full rounded-sm border border-white/10 bg-[#08111f] px-2 text-ui-caption text-slate-300 outline-none focus:ring-2 focus:ring-cyan-400/50"
             >
               <option value="ALL">全部行业</option>
               {industries.map(item => (
@@ -767,7 +770,7 @@ export function LimitUpRadarPanel({
                   {item.industry} · {item.candidateCount}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
         </div>
       </div>
@@ -775,7 +778,7 @@ export function LimitUpRadarPanel({
       {errorMessage || systemWarnings.length ? (
         <div
           role="alert"
-          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.07] px-4 py-2.5 text-[10px] leading-4 text-rose-100"
+          className="flex shrink-0 items-start gap-2 border-b border-rose-400/20 bg-rose-500/[0.07] px-ui-section py-2.5 text-ui-caption leading-4 text-rose-100"
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="font-black">系统保护</span>
@@ -827,16 +830,19 @@ export function LimitUpRadarPanel({
               ))}
             </div>
           ) : (
-            <div className="flex h-full items-stretch px-4 py-3" role="row">
+            <div
+              className="flex h-full items-stretch px-ui-section py-3"
+              role="row"
+            >
               <div
                 className="flex flex-1 flex-col items-center justify-center text-center"
                 role="gridcell"
               >
                 <ShieldCheck className="h-8 w-8 text-slate-700" />
-                <p className="mt-3 text-xs font-black text-slate-300">
+                <p className="mt-3 text-ui-label font-black text-slate-300">
                   暂无匹配候选
                 </p>
-                <p className="mt-1 text-[10px] text-slate-500">
+                <p className="mt-1 text-ui-caption text-slate-500">
                   雷达会持续扫描；非交易时段保留最近快照供观察。
                 </p>
               </div>
@@ -845,7 +851,7 @@ export function LimitUpRadarPanel({
         </div>
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-1 border-t border-white/[0.05] bg-[#07111f] px-4 py-2 text-[9px] text-slate-600">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-1 border-t border-white/[0.05] bg-[#07111f] px-ui-section py-2 text-ui-micro text-slate-600">
         <span>报价过期仅供观察 · 点击候选查看评分、盘口与研究</span>
         <button
           type="button"

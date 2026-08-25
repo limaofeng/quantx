@@ -193,17 +193,17 @@ export default function MonitorSidePanel({
         onValueChange={setActiveTab}
         className="flex flex-col h-full"
       >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+        <div className="flex items-center justify-between px-ui-section py-3 border-b border-white/5">
           <TabsList className="bg-transparent h-7 p-0 gap-2">
             <TabsTrigger
               value="logs"
-              className="h-7 px-3 text-[10px] font-bold uppercase tracking-wider data-[state=active]:bg-white/10 data-[state=active]:text-white text-slate-500 hover:text-slate-300 rounded-md transition-all"
+              className="h-7 px-3 text-ui-caption font-bold uppercase tracking-wider data-[state=active]:bg-white/10 data-[state=active]:text-white text-slate-500 hover:text-slate-300 rounded-md transition-all"
             >
               <Terminal size={10} className="mr-1.5" /> 日志
             </TabsTrigger>
             <TabsTrigger
               value="intents"
-              className="h-7 px-3 text-[10px] font-bold uppercase tracking-wider data-[state=active]:bg-white/10 data-[state=active]:text-white text-slate-500 hover:text-slate-300 rounded-md transition-all"
+              className="h-7 px-3 text-ui-caption font-bold uppercase tracking-wider data-[state=active]:bg-white/10 data-[state=active]:text-white text-slate-500 hover:text-slate-300 rounded-md transition-all"
             >
               <List size={10} className="mr-1.5" /> 意图
             </TabsTrigger>
@@ -232,7 +232,7 @@ export default function MonitorSidePanel({
           <TabsContent value="logs" className="absolute inset-0 m-0 p-0">
             <div
               ref={logContainerRef}
-              className="execution-log-scrollbar h-full overflow-y-auto p-4 space-y-1 font-mono text-[9px]"
+              className="execution-log-scrollbar h-full overflow-y-auto p-ui-section space-y-1 font-mono text-ui-micro"
             >
               {logs.map((log, i) => {
                 const currentYear = getTimestampYear(log.rawTime);
@@ -244,7 +244,7 @@ export default function MonitorSidePanel({
                 return (
                   <div key={`${log.rawTime}-${log.message}-${i}`}>
                     {shouldShowYear && (
-                      <div className="my-2 flex items-center gap-2 text-[9px] font-bold text-slate-500">
+                      <div className="my-2 flex items-center gap-2 text-ui-micro font-bold text-slate-500">
                         <div className="h-px flex-1 bg-white/5" />
                         <span>{currentYear}</span>
                         <div className="h-px flex-1 bg-white/5" />
@@ -277,14 +277,14 @@ export default function MonitorSidePanel({
                 );
               })}
               {logs.length === 0 && !isFileLogFetching && (
-                <div className="p-8 text-center">
-                  <span className="text-[9px] text-slate-600 uppercase tracking-widest">
+                <div className="p-ui-section text-center">
+                  <span className="text-ui-micro text-slate-600 uppercase tracking-widest">
                     暂无运行日志
                   </span>
                 </div>
               )}
               {fileLogError && (
-                <div className="p-4 text-center text-[9px] font-bold text-rose-400">
+                <div className="p-ui-section text-center text-ui-micro font-bold text-rose-400">
                   日志文件加载失败
                 </div>
               )}
@@ -309,7 +309,7 @@ export default function MonitorSidePanel({
                         title={filter.label}
                         onClick={() => setIntentStatusFilter(filter.value)}
                         className={cn(
-                          'flex h-6 items-center gap-1 rounded px-2 text-[9px] font-bold transition-colors',
+                          'flex h-6 items-center gap-1 rounded px-2 text-ui-micro font-bold transition-colors',
                           isActive
                             ? 'bg-white/10 text-white'
                             : 'text-slate-500 hover:bg-white/5 hover:text-slate-300'
@@ -318,7 +318,7 @@ export default function MonitorSidePanel({
                         <span>{filter.label}</span>
                         <span
                           className={cn(
-                            'font-mono text-[8px]',
+                            'font-mono text-ui-micro',
                             isActive ? 'text-slate-200' : 'text-slate-600'
                           )}
                         >
@@ -341,7 +341,7 @@ export default function MonitorSidePanel({
                       <Badge
                         variant="outline"
                         className={cn(
-                          'h-4 px-1 text-[8px] font-black border-0 rounded-sm',
+                          'h-4 px-1 text-ui-micro font-black border-0 rounded-sm',
                           intent.action === 'BUY'
                             ? 'bg-rose-500/20 text-rose-300'
                             : intent.action === 'SELL'
@@ -351,13 +351,13 @@ export default function MonitorSidePanel({
                       >
                         {INTENT_ACTION_LABELS[intent.action]}
                       </Badge>
-                      <span className="text-[10px] font-bold text-slate-200 truncate">
+                      <span className="text-ui-caption font-bold text-slate-200 truncate">
                         {intent.symbol}
                       </span>
                       {intent.status && (
                         <span
                           className={cn(
-                            'text-[8px] font-bold rounded-sm px-1.5 py-0.5',
+                            'text-ui-micro font-bold rounded-sm px-1.5 py-0.5',
                             getStatusClass(intent.status)
                           )}
                         >
@@ -365,7 +365,7 @@ export default function MonitorSidePanel({
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 text-[9px] text-slate-600 font-mono">
+                    <div className="flex items-center gap-2 text-ui-micro text-slate-600 font-mono">
                       <span>{intent.time}</span>
                       {intent.quantity !== null &&
                         intent.quantity !== undefined && (
@@ -373,17 +373,17 @@ export default function MonitorSidePanel({
                         )}
                     </div>
                     {intent.reason && (
-                      <div className="mt-1 max-w-[220px] truncate text-[9px] text-slate-500">
+                      <div className="mt-1 max-w-[220px] truncate text-ui-micro text-slate-500">
                         {intent.reason}
                       </div>
                     )}
                   </div>
                   <div className="shrink-0 text-right">
-                    <div className="text-[10px] font-mono font-bold text-slate-300">
+                    <div className="text-ui-caption font-mono font-bold text-slate-300">
                       {formatMoney(intent.price)}
                     </div>
                     {intent.fillPrice && (
-                      <div className="mt-1 text-[9px] font-mono text-amber-300">
+                      <div className="mt-1 text-ui-micro font-mono text-amber-300">
                         成交 {formatMoney(intent.fillPrice)}
                         {intent.fillVolume ? ` / ${intent.fillVolume}股` : ''}
                       </div>
@@ -392,14 +392,14 @@ export default function MonitorSidePanel({
                 </div>
               ))}
               {filteredIntents.length === 0 && (
-                <div className="p-8 text-center">
-                  <span className="text-[9px] text-slate-600 uppercase tracking-widest">
+                <div className="p-ui-section text-center">
+                  <span className="text-ui-micro text-slate-600 uppercase tracking-widest">
                     暂无匹配意图
                   </span>
                 </div>
               )}
-              <div className="p-4 text-center">
-                <span className="text-[9px] text-slate-600 uppercase tracking-widest">
+              <div className="p-ui-section text-center">
+                <span className="text-ui-micro text-slate-600 uppercase tracking-widest">
                   意图列表已结束
                 </span>
               </div>

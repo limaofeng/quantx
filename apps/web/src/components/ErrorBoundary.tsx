@@ -90,7 +90,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </div>
 
               <div className="space-y-2">
-                <h1 className="text-2xl font-bold text-foreground">
+                <h1 className="text-ui-display font-bold text-foreground">
                   页面出现错误
                 </h1>
                 <p className="text-muted-foreground">
@@ -101,14 +101,14 @@ export class ErrorBoundary extends Component<Props, State> {
               {/* 开发环境显示错误详情 */}
               {import.meta.env.DEV && this.state.error && (
                 <div className="text-left bg-muted p-4 rounded-lg">
-                  <h3 className="font-semibold text-sm mb-2">
+                  <h3 className="font-semibold text-ui-body mb-2">
                     错误详情 (仅开发环境显示):
                   </h3>
-                  <pre className="text-xs text-destructive whitespace-pre-wrap">
+                  <pre className="text-ui-label text-destructive whitespace-pre-wrap">
                     {this.state.error.toString()}
                   </pre>
                   {this.state.errorInfo && (
-                    <pre className="text-xs text-muted-foreground mt-2 whitespace-pre-wrap">
+                    <pre className="text-ui-label text-muted-foreground mt-2 whitespace-pre-wrap">
                       {this.state.errorInfo.componentStack}
                     </pre>
                   )}
@@ -134,7 +134,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </div>
 
               {this.state.errorId && (
-                <div className="text-xs text-muted-foreground">
+                <div className="text-ui-label text-muted-foreground">
                   错误ID: {this.state.errorId}
                 </div>
               )}

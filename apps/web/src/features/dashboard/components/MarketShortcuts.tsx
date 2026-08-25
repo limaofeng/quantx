@@ -97,12 +97,12 @@ const marketShortcuts: MarketShortcut[] = [
 
 export function MarketShortcuts() {
   return (
-    <Card className="rounded-lg border-white/10 bg-slate-900/70 p-4">
+    <Card className="rounded-lg border-white/10 bg-slate-900/70 p-ui-section">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-300">
+        <h3 className="truncate text-ui-label font-black uppercase tracking-[0.2em] text-slate-300">
           行情快捷方式
         </h3>
-        <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] font-black uppercase tracking-wider text-slate-500">
+        <span className="shrink-0 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1 text-ui-caption font-black uppercase tracking-wider text-slate-500">
           A股数据
         </span>
       </div>
@@ -122,10 +122,10 @@ export function MarketShortcuts() {
               <span className="flex h-full flex-col justify-between gap-3">
                 <span className="flex items-start justify-between gap-3">
                   <span>
-                    <span className="block text-xs font-black text-slate-100">
+                    <span className="block text-ui-label font-black text-slate-100">
                       {item.label}
                     </span>
-                    <span className="mt-1 block text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                    <span className="mt-1 block text-ui-caption font-bold uppercase tracking-wider text-slate-600">
                       {item.meta}
                     </span>
                   </span>
@@ -135,7 +135,7 @@ export function MarketShortcuts() {
                     <Icon className="h-4 w-4" />
                   </span>
                 </span>
-                <span className="font-mono text-sm font-black text-slate-300">
+                <span className="font-mono text-ui-body font-black text-slate-300">
                   {item.value}
                 </span>
               </span>

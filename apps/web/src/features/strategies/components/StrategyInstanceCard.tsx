@@ -94,7 +94,7 @@ export default function StrategyInstanceCard({
   return (
     <>
       <Card
-        className="group relative w-full cursor-pointer overflow-hidden rounded-[1.25rem] border border-white/[0.08] bg-[#0B1120]/80 backdrop-blur-2xl transition-all duration-300 hover:border-white/[0.15]"
+        className="group relative w-full cursor-pointer overflow-hidden rounded-panel border border-white/[0.08] bg-[#0B1120]/80 backdrop-blur-2xl transition-all duration-300 hover:border-white/[0.15]"
         onClick={() => setLocation(detailUrl)}
         onContextMenu={event => openAtPointer(event, run.id)}
       >
@@ -103,7 +103,7 @@ export default function StrategyInstanceCard({
           className={`absolute top-0 left-0 h-[2px] w-full ${toneClasses.bar}`}
         />
 
-        <div className="flex flex-col gap-4 p-4">
+        <div className="flex flex-col gap-ui-section p-ui-section">
           {/* Header: Identity */}
           <div className="flex items-start justify-between">
             <div className="flex gap-3">
@@ -123,17 +123,20 @@ export default function StrategyInstanceCard({
               </div>
 
               <div className="flex min-w-0 flex-col justify-between py-0.5">
-                <h3 className="truncate pr-2 text-xs font-bold uppercase tracking-wide text-slate-200 transition-colors group-hover:text-blue-400">
+                <h3 className="truncate pr-2 text-ui-label font-bold uppercase tracking-wide text-slate-200 transition-colors group-hover:text-blue-400">
                   {instance.displayName}
                 </h3>
                 <div className="flex items-center gap-2">
                   <span
-                    className={cn('text-[10px] font-medium', toneClasses.text)}
+                    className={cn(
+                      'text-ui-caption font-medium',
+                      toneClasses.text
+                    )}
                   >
                     {state.statusLabel}
                   </span>
                   <span className="h-0.5 w-0.5 rounded-full bg-slate-600" />
-                  <span className="font-mono text-[10px] tracking-wider text-slate-500">
+                  <span className="font-mono text-ui-caption tracking-wider text-slate-500">
                     {run.id.slice(0, 6)}
                   </span>
                 </div>
@@ -142,7 +145,7 @@ export default function StrategyInstanceCard({
 
             {/* Mode Tag */}
             <div
-              className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${toneClasses.tag}`}
+              className={`rounded border px-1.5 py-0.5 text-ui-micro font-bold uppercase tracking-wider ${toneClasses.tag}`}
             >
               {state.modeLabel}
             </div>
@@ -152,12 +155,12 @@ export default function StrategyInstanceCard({
           <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-white/[0.05] bg-white/[0.05]">
             {/* Profit */}
             <div className="flex flex-col items-center justify-center gap-0.5 bg-[#0B1120]/50 p-2">
-              <span className="text-[9px] font-medium tracking-wider text-slate-500">
+              <span className="text-ui-micro font-medium tracking-wider text-slate-500">
                 盈亏
               </span>
               <span
                 className={cn(
-                  'font-mono text-xs font-bold tracking-tight',
+                  'font-mono text-ui-label font-bold tracking-tight',
                   financialToneClass(run.profitLoss)
                 )}
               >
@@ -167,10 +170,10 @@ export default function StrategyInstanceCard({
             </div>
             {/* Trades */}
             <div className="flex flex-col items-center justify-center gap-0.5 bg-[#0B1120]/50 p-2">
-              <span className="text-[9px] font-medium tracking-wider text-slate-500">
+              <span className="text-ui-micro font-medium tracking-wider text-slate-500">
                 成交
               </span>
-              <span className="font-mono text-xs font-bold tracking-tight text-slate-300">
+              <span className="font-mono text-ui-label font-bold tracking-tight text-slate-300">
                 {run.totalTrades}
               </span>
             </div>
@@ -180,7 +183,7 @@ export default function StrategyInstanceCard({
           <div className="flex items-center justify-between pt-0.5">
             {/* Bound Instrument */}
             <div className="flex -space-x-1.5 overflow-hidden py-1">
-              <div className="relative z-10 flex h-5 items-center justify-center rounded-full border border-blue-500/20 bg-blue-500/10 px-2 font-mono text-[9px] font-medium text-blue-300">
+              <div className="relative z-10 flex h-5 items-center justify-center rounded-full border border-blue-500/20 bg-blue-500/10 px-2 font-mono text-ui-micro font-medium text-blue-300">
                 绑定标的 {instance.instrumentCode}
               </div>
             </div>
@@ -204,7 +207,7 @@ export default function StrategyInstanceCard({
               )}
               <Button
                 size="sm"
-                className="h-6 rounded bg-blue-600 px-2 text-[9px] font-bold uppercase tracking-wider text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500"
+                className="h-6 rounded bg-blue-600 px-2 text-ui-micro font-bold uppercase tracking-wider text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500"
                 onClick={() => setLocation(detailUrl)}
               >
                 <Eye className="mr-1 h-3 w-3" />

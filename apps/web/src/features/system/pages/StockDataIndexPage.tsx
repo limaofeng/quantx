@@ -44,55 +44,55 @@ export function StockDataIndexPage() {
       description="单票数据覆盖、缺口与同步入口"
       title="个股数据"
     >
-      <div className="container mx-auto flex max-w-[1280px] flex-col gap-4 pb-8">
+      <div className="studio-content-width container mx-auto flex flex-col gap-ui-section pb-8">
         <div className="flex flex-col gap-3 py-1 xl:flex-row xl:items-center xl:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 shrink-0 rounded-lg border border-slate-200/60 bg-white/50 shadow-sm backdrop-blur-sm transition-colors hover:bg-white dark:border-white/5 dark:bg-white/5 dark:hover:bg-white/10"
+              className="h-control-compact w-8 shrink-0 rounded-lg border border-slate-200/60 bg-white/50 shadow-sm backdrop-blur-sm transition-colors hover:bg-white dark:border-white/5 dark:bg-white/5 dark:hover:bg-white/10"
               onClick={() => setLocation('/settings/data')}
             >
               <ArrowLeft className="h-4 w-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div className="min-w-0">
-              <h1 className="truncate text-lg font-black leading-none tracking-tight text-slate-900 dark:text-white">
+              <h1 className="truncate text-ui-heading font-black leading-none tracking-tight text-slate-900 dark:text-white">
                 个股数据
               </h1>
-              <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <p className="mt-1 text-ui-caption font-bold uppercase tracking-widest text-slate-400">
                 stock data coverage · kline gaps · manual sync
               </p>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-ui-section xl:grid-cols-[420px_minmax(0,1fr)]">
           <div className="h-[420px]">
             <StockDataQueryCard />
           </div>
 
-          <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-sm dark:border-slate-800/70 dark:bg-slate-950">
-            <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-white/[0.02]">
-              <h2 className="text-base font-black text-slate-900 dark:text-white">
+          <section className="overflow-hidden rounded-panel border border-slate-200/70 bg-white shadow-sm dark:border-slate-800/70 dark:bg-slate-950">
+            <div className="border-b border-slate-100 bg-slate-50/60 px-ui-section py-ui-section dark:border-slate-800 dark:bg-white/[0.02]">
+              <h2 className="text-ui-title font-black text-slate-900 dark:text-white">
                 数据检查范围
               </h2>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              <p className="mt-1 text-ui-label text-slate-500 dark:text-slate-400">
                 进入标的后查看每类数据是否存在、K线区间是否有缺口，并按区间补拉。
               </p>
             </div>
-            <div className="grid gap-3 p-5 md:grid-cols-2">
+            <div className="grid gap-3 p-ui-section md:grid-cols-2">
               {stockDataScopes.map(scope => {
                 const Icon = scope.icon;
                 return (
                   <div
                     key={scope.label}
-                    className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-white/[0.02]"
+                    className="rounded-panel border border-slate-200 bg-slate-50/70 p-ui-section dark:border-slate-800 dark:bg-white/[0.02]"
                   >
-                    <div className="flex items-center gap-2 text-sm font-black text-slate-900 dark:text-white">
+                    <div className="flex items-center gap-2 text-ui-body font-black text-slate-900 dark:text-white">
                       <Icon className="h-4 w-4 text-indigo-500" />
                       {scope.label}
                     </div>
-                    <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                    <p className="mt-2 text-ui-label leading-relaxed text-slate-500 dark:text-slate-400">
                       {scope.description}
                     </p>
                   </div>

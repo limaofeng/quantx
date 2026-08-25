@@ -48,7 +48,7 @@ export function ResearchStatusBadge({ status }: { status: string }) {
   return (
     <span
       className={cn(
-        'inline-flex h-5 items-center gap-1 rounded border px-1.5 text-[10px] font-bold',
+        'inline-flex h-5 items-center gap-1 rounded border px-1.5 text-ui-caption font-bold',
         meta.className
       )}
     >

@@ -13,6 +13,7 @@ import { useQuery } from 'urql';
 import { Link } from 'wouter';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { useLatestMarketQuotes } from '@/features/portfolio/hooks/useRealTimeHoldings';
 import { financialToneClass } from '@/shared/utils/financialColors';
 
@@ -51,7 +52,7 @@ function DirectoryQuote({
 }) {
   const display = getMarketIndexDirectoryQuoteDisplay(quote, isFresh);
   return (
-    <span className="font-mono text-xs font-black tabular-nums text-slate-200">
+    <span className="font-mono text-ui-label font-black tabular-nums text-slate-200">
       {display.currentPrice === null
         ? '--'
         : formatMarketPrice(display.currentPrice)}
@@ -69,7 +70,7 @@ function DirectoryChange({
   const display = getMarketIndexDirectoryQuoteDisplay(quote, isFresh);
   return (
     <span
-      className={`font-mono text-xs font-bold tabular-nums ${
+      className={`font-mono text-ui-label font-bold tabular-nums ${
         display.changePercent === null
           ? 'text-slate-600'
           : financialToneClass(display.changePercent)
@@ -98,13 +99,13 @@ function DirectoryStatus({
         : { label: '实时', tone: 'text-emerald-300' };
   return (
     <div className="flex flex-col items-end gap-1 text-right">
-      <span className={`text-[10px] font-bold ${status.tone}`}>
+      <span className={`text-ui-caption font-bold ${status.tone}`}>
         {status.label}
       </span>
-      <span className="font-mono text-[10px] text-slate-500">
+      <span className="font-mono text-ui-caption text-slate-500">
         {display.time ? formatMarketTime(display.time) : '--'}
       </span>
-      <span className="text-[9px] text-slate-700">
+      <span className="text-ui-micro text-slate-700">
         {display.time && !isFresh
           ? `快照 ${formatMarketDate(display.time)}`
           : display.time
@@ -188,7 +189,7 @@ export default function MarketIndicesPage() {
     <MarketStudioShell
       content={
         <div className="studio-workspace-surface flex min-h-0 flex-1 flex-col overflow-hidden">
-          <header className="studio-workspace-surface shrink-0 border-b border-white/5 px-4 py-3">
+          <header className="studio-workspace-surface shrink-0 border-b border-white/5 px-ui-section py-3">
             <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <Link
@@ -199,10 +200,10 @@ export default function MarketIndicesPage() {
                   <ArrowLeft className="h-4 w-4" />
                 </Link>
                 <div className="min-w-0">
-                  <h1 className="truncate text-base font-black text-slate-100">
+                  <h1 className="truncate text-ui-title font-black text-slate-100">
                     全部指数
                   </h1>
-                  <p className="mt-0.5 text-[10px] text-slate-600">
+                  <p className="mt-0.5 text-ui-caption text-slate-600">
                     真实指数目录 · {totalCount.toLocaleString('zh-CN')} 个标的 ·
                     工作台已显示 {workbenchCount}
                   </p>
@@ -211,9 +212,9 @@ export default function MarketIndicesPage() {
               <div className="flex min-w-0 flex-1 items-center justify-end gap-2 sm:max-w-xl">
                 <div className="relative min-w-0 flex-1">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
-                  <input
+                  <Input
                     aria-label="搜索指数名称或代码"
-                    className="h-9 w-full rounded-md border border-white/10 bg-black/20 pl-9 pr-3 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-blue-400/50 focus:ring-2 focus:ring-blue-500/10"
+                    className="h-control-default w-full rounded-md border border-white/10 bg-black/20 pl-9 pr-3 text-ui-label text-slate-200 outline-none placeholder:text-slate-600 focus:border-blue-400/50 focus:ring-2 focus:ring-blue-500/10"
                     onChange={event => setSearch(event.target.value)}
                     placeholder="搜索指数名称或代码"
                     value={search}
@@ -221,7 +222,7 @@ export default function MarketIndicesPage() {
                 </div>
                 <Button
                   aria-label="刷新指数目录"
-                  className="h-9 w-9 shrink-0 rounded-md border border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
+                  className="h-control-default w-9 shrink-0 rounded-md border border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
                   onClick={() => refresh({ requestPolicy: 'network-only' })}
                   size="icon"
                   type="button"
@@ -236,7 +237,7 @@ export default function MarketIndicesPage() {
           </header>
 
           <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-            <div className="mx-auto w-full max-w-7xl px-4 pb-10 pt-4">
+            <div className="mx-auto w-full max-w-7xl px-ui-section pb-10 pt-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div
                   className="flex items-center gap-2"
@@ -254,7 +255,7 @@ export default function MarketIndicesPage() {
                     <button
                       key={value}
                       aria-pressed={market === value}
-                      className={`rounded-md border px-3 py-1.5 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 ${
+                      className={`rounded-md border px-3 py-1.5 text-ui-caption font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70 ${
                         market === value
                           ? 'border-blue-400/30 bg-blue-500/15 text-blue-200'
                           : 'border-white/5 bg-white/5 text-slate-500 hover:bg-white/5 hover:text-slate-200'
@@ -266,7 +267,7 @@ export default function MarketIndicesPage() {
                     </button>
                   ))}
                 </div>
-                <div className="text-[10px] text-slate-600">
+                <div className="text-ui-caption text-slate-600">
                   {session.label} · {session.targetTradingDate || '等待交易日'}{' '}
                   ·{result.data ? ` 已载入 ${rows.length}` : ' 正在连接目录'}
                 </div>
@@ -275,47 +276,53 @@ export default function MarketIndicesPage() {
               {storageMessage ? (
                 <div
                   aria-live="polite"
-                  className="mt-3 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-[10px] text-amber-200"
+                  className="mt-3 rounded-md border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-ui-caption text-amber-200"
                 >
                   {storageMessage}
                 </div>
               ) : null}
 
-              <section className="mt-4 overflow-hidden rounded-xl border border-white/10 bg-slate-900">
-                <div className="flex items-center justify-between gap-3 border-b border-white/5 px-4 py-3">
+              <section className="mt-4 overflow-hidden rounded-panel border border-white/10 bg-slate-900">
+                <div className="flex items-center justify-between gap-3 border-b border-white/5 px-ui-section py-3">
                   <div>
-                    <h2 className="text-xs font-black text-slate-200">
+                    <h2 className="text-ui-label font-black text-slate-200">
                       指数目录
                     </h2>
-                    <p className="mt-1 text-[10px] text-slate-600">
+                    <p className="mt-1 text-ui-caption text-slate-600">
                       报价来自最新真实快照；缺失或过期不会显示旧数值。
                     </p>
                   </div>
-                  <span className="shrink-0 text-[10px] font-bold text-slate-600">
+                  <span className="shrink-0 text-ui-caption font-bold text-slate-600">
                     {search.trim() ? `搜索：${search.trim()}` : '按代码升序'}
                   </span>
                 </div>
 
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[860px] border-collapse text-left">
-                    <thead className="bg-black/10 text-[9px] font-bold uppercase tracking-[0.12em] text-slate-600">
+                    <thead className="bg-black/10 text-ui-micro font-bold uppercase tracking-[0.12em] text-slate-600">
                       <tr>
-                        <th className="px-4 py-2.5">指数</th>
-                        <th className="px-4 py-2.5">代码</th>
-                        <th className="px-4 py-2.5">市场</th>
-                        <th className="px-4 py-2.5 text-right">最新</th>
-                        <th className="px-4 py-2.5 text-right">涨跌幅</th>
-                        <th className="px-4 py-2.5 text-right">
+                        <th className="px-ui-section py-2.5">指数</th>
+                        <th className="px-ui-section py-2.5">代码</th>
+                        <th className="px-ui-section py-2.5">市场</th>
+                        <th className="px-ui-section py-2.5 text-right">
+                          最新
+                        </th>
+                        <th className="px-ui-section py-2.5 text-right">
+                          涨跌幅
+                        </th>
+                        <th className="px-ui-section py-2.5 text-right">
                           状态 / 更新时间
                         </th>
-                        <th className="px-4 py-2.5 text-right">工作台</th>
+                        <th className="px-ui-section py-2.5 text-right">
+                          工作台
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
                       {initialLoading ? (
                         <tr>
                           <td
-                            className="px-4 py-12 text-center text-xs text-slate-500"
+                            className="px-ui-section py-ui-empty text-center text-ui-label text-slate-500"
                             colSpan={7}
                           >
                             <span className="inline-flex items-center gap-2">
@@ -327,7 +334,7 @@ export default function MarketIndicesPage() {
                       ) : result.error ? (
                         <tr>
                           <td
-                            className="px-4 py-12 text-center text-xs text-amber-200"
+                            className="px-ui-section py-ui-empty text-center text-ui-label text-amber-200"
                             colSpan={7}
                           >
                             目录查询失败，请检查行情服务后重试。
@@ -336,7 +343,7 @@ export default function MarketIndicesPage() {
                       ) : rows.length === 0 ? (
                         <tr>
                           <td
-                            className="px-4 py-12 text-center text-xs text-slate-600"
+                            className="px-ui-section py-ui-empty text-center text-ui-label text-slate-600"
                             colSpan={7}
                           >
                             {search.trim()
@@ -369,53 +376,53 @@ export default function MarketIndicesPage() {
                               className="group hover:bg-white/[0.025]"
                               key={row.code}
                             >
-                              <td className="px-4 py-3">
+                              <td className="px-ui-section py-3">
                                 <div className="flex items-center gap-3">
-                                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/5 bg-white/5 text-[10px] font-black text-slate-400">
+                                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/5 bg-white/5 text-ui-caption font-black text-slate-400">
                                     {row.shortName.slice(0, 2)}
                                   </div>
                                   <div className="min-w-0">
-                                    <div className="truncate text-xs font-black text-slate-200">
+                                    <div className="truncate text-ui-label font-black text-slate-200">
                                       {row.name}
                                     </div>
-                                    <div className="mt-0.5 text-[10px] text-slate-600">
+                                    <div className="mt-0.5 text-ui-caption text-slate-600">
                                       {row.shortName}
                                     </div>
                                   </div>
                                 </div>
                               </td>
-                              <td className="px-4 py-3 font-mono text-[11px] font-bold text-slate-400">
+                              <td className="px-ui-section py-3 font-mono text-ui-caption font-bold text-slate-400">
                                 {row.code}
                               </td>
-                              <td className="px-4 py-3 text-[10px] font-bold text-slate-500">
+                              <td className="px-ui-section py-3 text-ui-caption font-bold text-slate-500">
                                 {row.group}
                               </td>
-                              <td className="px-4 py-3 text-right">
+                              <td className="px-ui-section py-3 text-right">
                                 <DirectoryQuote
                                   isFresh={isFresh}
                                   quote={quote}
                                 />
                               </td>
-                              <td className="px-4 py-3 text-right">
+                              <td className="px-ui-section py-3 text-right">
                                 <DirectoryChange
                                   isFresh={isFresh}
                                   quote={quote}
                                 />
                               </td>
-                              <td className="px-4 py-3 text-right">
+                              <td className="px-ui-section py-3 text-right">
                                 <DirectoryStatus
                                   isFresh={isFresh}
                                   quote={quote}
                                 />
                               </td>
-                              <td className="px-4 py-3 text-right">
+                              <td className="px-ui-section py-3 text-right">
                                 <Button
                                   aria-label={
                                     blockedAtLimit
                                       ? `工作台已达100项，无法加入${row.name}`
                                       : `${onWorkbench ? '移出' : configured ? '显示' : '加入'}工作台${row.name}`
                                   }
-                                  className={`h-8 rounded-md border px-2.5 text-[10px] font-bold ${
+                                  className={`h-control-compact rounded-md border px-2.5 text-ui-caption font-bold ${
                                     onWorkbench
                                       ? 'border-blue-400/20 bg-blue-400/10 text-blue-200 hover:bg-rose-400/10 hover:text-rose-200'
                                       : blockedAtLimit
@@ -458,8 +465,8 @@ export default function MarketIndicesPage() {
                   </table>
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 px-4 py-3">
-                  <span className="text-[10px] text-slate-600">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/5 px-ui-section py-3">
+                  <span className="text-ui-caption text-slate-600">
                     {pageInfo?.hasNextPage
                       ? '还有更多真实指数，可继续加载。'
                       : rows.length > 0
@@ -468,7 +475,7 @@ export default function MarketIndicesPage() {
                   </span>
                   {pageInfo?.hasNextPage ? (
                     <Button
-                      className="h-8 rounded-md border border-white/10 bg-white/[0.03] px-3 text-[10px] font-bold text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
+                      className="h-control-compact rounded-md border border-white/10 bg-white/[0.03] px-3 text-ui-caption font-bold text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
                       disabled={loadingNextPage}
                       onClick={() => setAfter(pageInfo.endCursor ?? null)}
                       type="button"

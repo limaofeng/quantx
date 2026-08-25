@@ -60,7 +60,7 @@ export function RedeemCashDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="space-y-ui-section">
           <div>
             <Label htmlFor="amount">赎回金额</Label>
             <Input
@@ -71,7 +71,7 @@ export function RedeemCashDialog({
               onChange={e => setAmount(e.target.value)}
               data-testid="redeem-amount-input"
             />
-            <p className="text-sm text-muted-foreground mt-1">
+            <p className="text-ui-body text-muted-foreground mt-1">
               可用现金：¥{availableCash.toLocaleString()}
             </p>
           </div>

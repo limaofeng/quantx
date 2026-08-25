@@ -30,6 +30,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from 'urql';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Sheet,
   SheetContent,
@@ -90,14 +91,14 @@ function MarketIndexDirectorySearch({
 
   return (
     <div className="mt-6 border-t border-white/5 pt-4">
-      <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
+      <div className="text-ui-caption font-black uppercase tracking-[0.16em] text-slate-500">
         从真实目录增补
       </div>
       <div className="relative mt-2">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-600" />
-        <input
+        <Input
           aria-label="搜索真实指数目录"
-          className="h-9 w-full rounded-md border border-white/10 bg-black/20 pl-9 pr-3 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-blue-400/50 focus:ring-2 focus:ring-blue-500/10"
+          className="h-control-default w-full rounded-md border border-white/10 bg-black/20 pl-9 pr-3 text-ui-label text-slate-200 outline-none placeholder:text-slate-600 focus:border-blue-400/50 focus:ring-2 focus:ring-blue-500/10"
           onChange={event => setSearch(event.target.value)}
           placeholder="搜索指数名称或代码"
           value={search}
@@ -105,7 +106,7 @@ function MarketIndexDirectorySearch({
       </div>
       <div
         aria-live="polite"
-        className="mt-2 min-h-5 text-[10px] text-slate-500"
+        className="mt-2 min-h-5 text-ui-caption text-slate-500"
       >
         {search.trim().length < 2
           ? '输入至少 2 个字符开始搜索真实目录。'
@@ -132,14 +133,14 @@ function MarketIndexDirectorySearch({
                 type="button"
               >
                 <span className="min-w-0">
-                  <span className="block truncate text-xs font-bold text-slate-200">
+                  <span className="block truncate text-ui-label font-bold text-slate-200">
                     {row.name}
                   </span>
-                  <span className="mt-0.5 block font-mono text-[10px] text-slate-600">
+                  <span className="mt-0.5 block font-mono text-ui-caption text-slate-600">
                     {row.code} · {row.group}
                   </span>
                 </span>
-                <span className="shrink-0 text-[10px] font-bold text-blue-300">
+                <span className="shrink-0 text-ui-caption font-bold text-blue-300">
                   {selected ? (
                     <Check className="h-3.5 w-3.5" />
                   ) : (
@@ -185,7 +186,7 @@ function SortablePreferenceRow({
       style={style}
       className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 ${
         isDragging
-          ? 'z-10 border-blue-400/40 bg-blue-500/10 shadow-xl shadow-black/30'
+          ? 'z-10 border-blue-400/40 bg-blue-500/10 shadow-none shadow-black/30'
           : 'border-white/5 bg-white/5'
       }`}
       data-testid={`market-index-preference-${item.code}`}
@@ -199,14 +200,14 @@ function SortablePreferenceRow({
       >
         <GripVertical className="h-4 w-4" />
       </button>
-      <span className="w-5 shrink-0 text-center font-mono text-[10px] font-bold text-slate-600">
+      <span className="w-5 shrink-0 text-center font-mono text-ui-caption font-bold text-slate-600">
         {index + 1}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-bold text-slate-200">
+        <span className="block truncate text-ui-label font-bold text-slate-200">
           {item.name}
         </span>
-        <span className="mt-0.5 block truncate font-mono text-[10px] text-slate-600">
+        <span className="mt-0.5 block truncate font-mono text-ui-caption text-slate-600">
           {item.code} · {item.group}
         </span>
       </span>
@@ -308,7 +309,7 @@ export function MarketIndexCustomizer({
           variant="ghost"
         >
           <Settings2 className="h-5 w-5 text-slate-400 transition-colors group-hover:text-blue-300" />
-          <span className="text-[11px] font-black">定制</span>
+          <span className="text-ui-caption font-black">定制</span>
         </Button>
       </SheetTrigger>
       <SheetContent
@@ -320,32 +321,32 @@ export function MarketIndexCustomizer({
         }}
         side="right"
       >
-        <SheetHeader className="border-b border-white/5 px-5 py-4 pr-12 text-left">
-          <SheetTitle className="text-base font-black text-slate-100">
+        <SheetHeader className="border-b border-white/5 px-ui-section py-ui-section pr-12 text-left">
+          <SheetTitle className="text-ui-title font-black text-slate-100">
             定制行情指数
           </SheetTitle>
           <SheetDescription
-            className="text-[11px] leading-5 text-slate-500"
+            className="text-ui-caption leading-5 text-slate-500"
             id="market-index-customizer-description"
           >
             拖拽或使用键盘调整顺序；隐藏只影响工作台显示，不会删除真实指数。
           </SheetDescription>
         </SheetHeader>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 custom-scrollbar">
+        <div className="min-h-0 flex-1 overflow-y-auto px-ui-section py-ui-section custom-scrollbar">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
+              <div className="text-ui-caption font-black uppercase tracking-[0.16em] text-slate-500">
                 工作台指数
               </div>
-              <div className="mt-1 text-[11px] text-slate-600">
+              <div className="mt-1 text-ui-caption text-slate-600">
                 {draft.filter(item => item.visible).length} 显示 ·{' '}
                 {draft.length}/{MAX_MARKET_INDEXES} 配置
               </div>
             </div>
             <Button
               aria-label="恢复默认指数"
-              className="h-8 rounded-md border border-white/10 bg-white/[0.03] px-2.5 text-[10px] font-bold text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
+              className="h-control-compact rounded-md border border-white/10 bg-white/[0.03] px-2.5 text-ui-caption font-bold text-slate-400 hover:bg-white/[0.06] hover:text-slate-100"
               onClick={() =>
                 setDraft(
                   normalizeMarketIndexPreferenceItems(
@@ -375,7 +376,7 @@ export function MarketIndexCustomizer({
             >
               <div className="mt-3 space-y-1.5">
                 {draft.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-white/10 px-4 py-8 text-center text-xs text-slate-600">
+                  <div className="rounded-lg border border-dashed border-white/10 px-ui-section py-ui-panel text-center text-ui-label text-slate-600">
                     当前没有已配置指数，请从真实目录增补。
                   </div>
                 ) : (
@@ -410,10 +411,10 @@ export function MarketIndexCustomizer({
           <MarketIndexDirectorySearch draft={draft} onAdd={addDirectoryRow} />
         </div>
 
-        <SheetFooter className="border-t border-white/5 px-5 py-3 sm:flex-row sm:justify-between">
+        <SheetFooter className="border-t border-white/5 px-ui-section py-3 sm:flex-row sm:justify-between">
           <div
             aria-live="polite"
-            className="flex items-center gap-2 text-[10px] text-slate-600"
+            className="flex items-center gap-2 text-ui-caption text-slate-600"
           >
             {storageStatus === 'unavailable' ? (
               <>
@@ -433,7 +434,7 @@ export function MarketIndexCustomizer({
           </div>
           <div className="flex gap-2">
             <Button
-              className="h-8 rounded-md border border-white/10 bg-transparent px-3 text-[10px] font-bold text-slate-400 hover:bg-white/[0.05] hover:text-slate-100"
+              className="h-control-compact rounded-md border border-white/10 bg-transparent px-3 text-ui-caption font-bold text-slate-400 hover:bg-white/[0.05] hover:text-slate-100"
               onClick={() => setOpen(false)}
               type="button"
               variant="ghost"
@@ -441,7 +442,7 @@ export function MarketIndexCustomizer({
               取消
             </Button>
             <Button
-              className="h-8 rounded-md bg-blue-600 px-3 text-[10px] font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+              className="h-control-compact rounded-md bg-blue-600 px-3 text-ui-caption font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
               disabled={!dirty}
               onClick={save}
               type="button"

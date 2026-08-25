@@ -23,7 +23,7 @@ export function SortableBaseAxisMarker({ children }: { children: ReactNode }) {
         transition,
       }}
       className={`cursor-default select-none transition-colors ${
-        isOver ? 'rounded-xl bg-blue-500/[0.05]' : ''
+        isOver ? 'rounded-panel bg-blue-500/[0.05]' : ''
       }`}
     >
       {children}

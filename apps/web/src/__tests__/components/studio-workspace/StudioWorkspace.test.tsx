@@ -214,7 +214,7 @@ describe('StudioWorkspace', () => {
       borderColor: '#22364d',
       borderTopLeftRadius: '8px',
       borderTopRightRadius: '8px',
-      height: '44px',
+      height: '36px',
       zIndex: 10,
     });
     expect(
@@ -230,7 +230,7 @@ describe('StudioWorkspace', () => {
     expect(main).toHaveStyle({
       borderLeft: '1px solid #22364d',
       borderTop: '1px solid #22364d',
-      borderTopLeftRadius: '12px',
+      borderTopLeftRadius: '8px',
     });
     expect(main.style.boxShadow).toBe('');
     expect(main).toHaveStyle({

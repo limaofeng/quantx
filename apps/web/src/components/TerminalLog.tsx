@@ -324,7 +324,7 @@ export default function TerminalLog({
 
       <div className="p-4">
         <ScrollArea ref={scrollAreaRef} className="h-96">
-          <div className="space-y-2 font-mono text-sm">
+          <div className="space-y-2 font-mono text-ui-body">
             {logs.length === 0 ? (
               <div className="flex items-center justify-center h-32 text-muted-foreground">
                 <div className="text-center">
@@ -340,7 +340,7 @@ export default function TerminalLog({
                 >
                   <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
                     {getLogIcon(log.level)}
-                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                    <span className="text-ui-label text-muted-foreground whitespace-nowrap">
                       {log.timestamp.toLocaleTimeString()}
                     </span>
                   </div>
@@ -357,7 +357,7 @@ export default function TerminalLog({
       </div>
 
       {/* 底部状态栏 */}
-      <div className="px-4 py-2 border-t bg-muted/20 flex items-center justify-between text-xs text-muted-foreground">
+      <div className="px-4 py-2 border-t bg-muted/20 flex items-center justify-between text-ui-label text-muted-foreground">
         <div className="flex items-center gap-4">
           <span>总计: {logs.length} 条</span>
           <span>成功: {logs.filter(l => l.level === 'success').length}</span>

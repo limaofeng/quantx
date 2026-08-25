@@ -50,37 +50,37 @@ export function GlobalSyncCard() {
 
   return (
     <div
-      className="h-full flex flex-row items-center p-6 rounded-xl border border-slate-200/40 dark:border-slate-800/40 bg-gradient-to-br from-indigo-50/50 to-blue-50/50 dark:from-indigo-900/20 dark:to-blue-900/20 overflow-hidden relative group cursor-pointer transition-all hover:bg-indigo-50/80 dark:hover:bg-indigo-900/30"
+      className="h-full flex flex-row items-center p-ui-panel rounded-panel border border-slate-200/40 dark:border-slate-800/40 bg-gradient-to-br from-indigo-50/50 to-blue-50/50 dark:from-indigo-900/20 dark:to-blue-900/20 overflow-hidden relative group cursor-pointer transition-all hover:bg-indigo-50/80 dark:hover:bg-indigo-900/30"
       onClick={e => {
         if ((e.target as HTMLElement).closest('button')) return;
         setLocation('/settings/data/market');
       }}
     >
       {/* Left Section: Icon & Identity */}
-      <div className="flex items-center gap-5 z-10 w-[300px] shrink-0">
-        <div className="p-3 rounded-2xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 ring-1 ring-inset ring-black/5 dark:ring-white/10">
+      <div className="flex items-center gap-ui-section z-10 w-[300px] shrink-0">
+        <div className="p-3 rounded-panel bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 ring-1 ring-inset ring-black/5 dark:ring-white/10">
           <Database className="w-8 h-8" />
         </div>
         <div>
-          <h3 className="font-extrabold text-lg text-slate-800 dark:text-slate-100">
+          <h3 className="font-extrabold text-ui-heading text-slate-800 dark:text-slate-100">
             全市场综合同步
           </h3>
-          <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+          <p className="text-ui-label text-slate-500 dark:text-slate-400 font-medium">
             Global Market Data Sync
           </p>
         </div>
       </div>
 
       {/* Middle Section: Description & Progress */}
-      <div className="flex-1 px-8 z-10 flex flex-col justify-center gap-3">
+      <div className="flex-1 px-ui-panel z-10 flex flex-col justify-center gap-3">
         {!syncing ? (
-          <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed max-w-[400px]">
+          <p className="text-ui-label text-slate-600 dark:text-slate-400 leading-relaxed max-w-[400px]">
             一键同步全 A 股与 ETF 基础信息、历史日/分钟 K
             线数据以及最新的财务报告指标，确保分析引擎处于最新状态。
           </p>
         ) : (
           <div className="w-full max-w-[400px]">
-            <div className="flex justify-between text-[11px] text-indigo-600 dark:text-indigo-400 mb-2 font-bold uppercase tracking-wider">
+            <div className="flex justify-between text-ui-caption text-indigo-600 dark:text-indigo-400 mb-2 font-bold uppercase tracking-wider">
               <span className="flex items-center gap-2">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 正在初始化核心数据库...
@@ -94,17 +94,17 @@ export function GlobalSyncCard() {
           </div>
         )}
 
-        <div className="flex gap-4">
-          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
+        <div className="flex gap-ui-section">
+          <div className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
             <Box className="w-3 h-3" /> A股/ETF 列表
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
+          <div className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
             <CandlestickChart className="w-3 h-3" /> K线全时间框架
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
+          <div className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
             <FileText className="w-3 h-3" /> 多维财务指标
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
+          <div className="flex items-center gap-1.5 text-ui-caption font-bold text-slate-500/80 dark:text-slate-400/80 bg-white/40 dark:bg-black/20 px-2 py-0.5 rounded border border-slate-200/50 dark:border-white/5">
             <Percent className="w-3 h-3" /> 除权数据
           </div>
         </div>
@@ -117,7 +117,7 @@ export function GlobalSyncCard() {
           disabled={syncing}
           size="lg"
           className={cn(
-            'w-full h-12 text-sm font-black shadow-lg shadow-indigo-500/20 dark:shadow-none transition-all active:scale-95',
+            'w-full h-control-large text-ui-body font-black shadow-lg shadow-indigo-500/20 dark:shadow-none transition-all active:scale-95',
             syncing
               ? 'bg-slate-100 text-slate-400 dark:bg-slate-800'
               : 'bg-indigo-600 hover:bg-indigo-700 text-white'
@@ -135,7 +135,7 @@ export function GlobalSyncCard() {
             </>
           )}
         </Button>
-        <div className="flex items-center gap-1.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+        <div className="flex items-center gap-1.5 text-ui-caption font-bold text-emerald-600 dark:text-emerald-400">
           <CheckCircle2 className="w-3.5 h-3.5" />
           系统当前已是最新
         </div>

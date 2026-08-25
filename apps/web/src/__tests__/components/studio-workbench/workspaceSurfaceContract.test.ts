@@ -18,10 +18,21 @@ describe('workspace page surface contract', () => {
   it('defines one semantic workspace surface token and utility', () => {
     const source = readSource('../../../index.css');
 
-    expect(source).toMatch(/--studio-workspace-surface:\s*#08101d;/);
+    expect(source).toMatch(/--studio-workspace-surface:\s*#050b16;/i);
     expect(source).toMatch(
       /\.studio-workspace-surface\s*\{\s*background-color:\s*var\(--studio-workspace-surface\);\s*\}/
     );
+  });
+
+  it('keeps the page-width contract independent from spacing tokens', () => {
+    const styleSource = readSource('../../../index.css');
+    const layoutSource = readSource('../../../components/ui/studio-layout.tsx');
+
+    expect(styleSource).toMatch(
+      /\.studio-content-width\s*\{[^}]*max-width:\s*var\(--content-width-page\);[^}]*\}/s
+    );
+    expect(layoutSource).toContain('studio-content-width');
+    expect(layoutSource).not.toContain('max-w-ui-page');
   });
 
   it('uses the workspace surface token for the screening page canvas', () => {
@@ -72,20 +83,17 @@ describe('workspace page surface contract', () => {
     {
       label: 'LiquidationPage toolbar',
       path: '../../../features/portfolio/pages/LiquidationPage.tsx',
-      pattern:
-        /const toolbar = \(\s*<div className="([^"]+)"/,
+      pattern: /const toolbar = \(\s*<div className="([^"]+)"/,
     },
     {
       label: 'TTradeGlobalPage replay sidebar',
       path: '../../../features/portfolio/pages/TTradeGlobalPage.tsx',
-      pattern:
-        /const replaySidebar = \(\s*<aside className="([^"]+)"/,
+      pattern: /const replaySidebar = \(\s*<aside className="([^"]+)"/,
     },
     {
       label: 'LimitUpBoardPage replay sidebar',
       path: '../../../features/strategies/pages/LimitUpBoardPage.tsx',
-      pattern:
-        /const replaySidebar = \(\s*<aside className="([^"]+)"/,
+      pattern: /const replaySidebar = \(\s*<aside className="([^"]+)"/,
     },
     {
       label: 'route skeleton content header',
@@ -104,21 +112,20 @@ describe('workspace page surface contract', () => {
     expect(rootClassName).not.toMatch(HARDCODED_CANVAS_BACKGROUND);
   });
 
-  it.each([
-    'monitorView',
-    'positionsView',
-    'settingsView',
-  ])('uses the workspace surface token for TTradeGlobalPage %s', viewName => {
-    const source = readSource(
-      '../../../features/portfolio/pages/TTradeGlobalPage.tsx'
-    );
-    const rootClassName = getClassName(
-      source,
-      new RegExp(`const ${viewName} = \\(\\s*<div className="([^"]+)"`),
-      `TTradeGlobalPage ${viewName}`
-    );
+  it.each(['monitorView', 'positionsView', 'settingsView'])(
+    'uses the workspace surface token for TTradeGlobalPage %s',
+    viewName => {
+      const source = readSource(
+        '../../../features/portfolio/pages/TTradeGlobalPage.tsx'
+      );
+      const rootClassName = getClassName(
+        source,
+        new RegExp(`const ${viewName} = \\(\\s*<div className="([^"]+)"`),
+        `TTradeGlobalPage ${viewName}`
+      );
 
-    expect(rootClassName).toContain(WORKSPACE_SURFACE_CLASS);
-    expect(rootClassName).not.toMatch(HARDCODED_CANVAS_BACKGROUND);
-  });
+      expect(rootClassName).toContain(WORKSPACE_SURFACE_CLASS);
+      expect(rootClassName).not.toMatch(HARDCODED_CANVAS_BACKGROUND);
+    }
+  );
 });

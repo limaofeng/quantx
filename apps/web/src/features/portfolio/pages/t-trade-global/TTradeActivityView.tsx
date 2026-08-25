@@ -216,8 +216,8 @@ function SnapshotMetric({
 }) {
   return (
     <div className="min-w-0 border border-white/[0.06] bg-white/[0.018] px-2.5 py-2">
-      <div className="text-[9px] font-bold text-slate-600">{label}</div>
-      <div className="mt-1 truncate font-mono text-[11px] font-black text-slate-200">
+      <div className="text-ui-micro font-bold text-slate-600">{label}</div>
+      <div className="mt-1 truncate font-mono text-ui-caption font-black text-slate-200">
         {value}
       </div>
     </div>
@@ -250,10 +250,10 @@ function ThresholdRail({ snapshot }: { snapshot: SignalSnapshot }) {
   return (
     <div className="border border-white/[0.06] bg-[#081321] p-3">
       <div className="flex items-center justify-between gap-3">
-        <h4 className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+        <h4 className="text-ui-micro font-black uppercase tracking-[0.1em] text-slate-500">
           机会分阈值轨道
         </h4>
-        <span className="font-mono text-[10px] font-black text-slate-200">
+        <span className="font-mono text-ui-caption font-black text-slate-200">
           {nullableNumber(snapshot.opportunityScore, 1)} /{' '}
           {nullableNumber(snapshot.candidateThreshold, 0)}
         </span>
@@ -271,7 +271,7 @@ function ThresholdRail({ snapshot }: { snapshot: SignalSnapshot }) {
             <span
               className={cn('block h-3 w-0.5 -translate-y-0.5', point.tone)}
             />
-            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap text-center text-[8px] text-slate-500">
+            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 whitespace-nowrap text-center text-ui-micro text-slate-500">
               {point.label} {formatNumber(point.value, 0)}
             </span>
           </div>
@@ -282,7 +282,7 @@ function ThresholdRail({ snapshot }: { snapshot: SignalSnapshot }) {
             style={{ left: position(snapshot.opportunityScore) }}
           >
             <span className="block h-4 w-4 rounded-full border-2 border-blue-200 bg-blue-500 shadow-[0_0_0_3px_rgba(59,130,246,0.18)]" />
-            <span className="absolute left-1/2 top-5 -translate-x-1/2 whitespace-nowrap bg-blue-500 px-1.5 py-0.5 font-mono text-[8px] font-black text-white">
+            <span className="absolute left-1/2 top-5 -translate-x-1/2 whitespace-nowrap bg-blue-500 px-1.5 py-0.5 font-mono text-ui-micro font-black text-white">
               {formatNumber(snapshot.opportunityScore, 1)}
             </span>
           </div>
@@ -306,10 +306,10 @@ function FsmTrack({
   return (
     <div className="border border-white/[0.06] bg-[#081321] p-3">
       <div className="flex items-center justify-between gap-3">
-        <h4 className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+        <h4 className="text-ui-micro font-black uppercase tracking-[0.1em] text-slate-500">
           {title}
         </h4>
-        <span className="text-[9px] text-slate-500">
+        <span className="text-ui-micro text-slate-500">
           {previous && previous !== current
             ? `${phaseLabels[previous] || previous} → `
             : ''}
@@ -335,7 +335,7 @@ function FsmTrack({
               <div className="w-16 shrink-0 text-center">
                 <span
                   className={cn(
-                    'mx-auto flex h-4 w-4 items-center justify-center rounded-full border text-[8px]',
+                    'mx-auto flex h-4 w-4 items-center justify-center rounded-full border text-ui-micro',
                     active
                       ? 'border-blue-200 bg-blue-500 text-white ring-2 ring-blue-400/20'
                       : reached
@@ -347,7 +347,7 @@ function FsmTrack({
                 </span>
                 <span
                   className={cn(
-                    'mt-1 block text-[8px] leading-3',
+                    'mt-1 block text-ui-micro leading-3',
                     active ? 'font-bold text-blue-100' : 'text-slate-600'
                   )}
                 >
@@ -377,7 +377,7 @@ function HistoricalSignalSnapshot({
       <div
         id={`${item.id}-snapshot`}
         role="status"
-        className="border-t border-white/[0.06] p-4 text-xs text-slate-500"
+        className="border-t border-white/[0.06] p-ui-section text-ui-label text-slate-500"
       >
         该事件没有可展示的历史信号快照。
       </div>
@@ -388,7 +388,7 @@ function HistoricalSignalSnapshot({
       <div
         id={`${item.id}-snapshot`}
         role="alert"
-        className="border-t border-rose-400/20 bg-rose-400/[0.04] p-4 text-xs text-rose-100"
+        className="border-t border-rose-400/20 bg-rose-400/[0.04] p-ui-section text-ui-label text-rose-100"
       >
         历史快照 schema
         与当前客户端不兼容，已阻止展示；请使用原始技术日志排查版本。
@@ -403,21 +403,21 @@ function HistoricalSignalSnapshot({
   return (
     <div
       id={`${item.id}-snapshot`}
-      className="border-t border-blue-400/20 bg-[#07111f] p-3 sm:p-4"
+      className="border-t border-blue-400/20 bg-[#07111f] p-3 sm:p-ui-section"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-black text-slate-100">
+          <span className="text-ui-label font-black text-slate-100">
             事件时刻快照
           </span>
-          <Badge className="rounded-sm border border-blue-400/20 bg-blue-400/10 px-2 py-0.5 text-[8px] text-blue-100">
+          <Badge className="rounded-sm border border-blue-400/20 bg-blue-400/10 px-2 py-0.5 text-ui-micro text-blue-100">
             历史事实
           </Badge>
-          <span className="font-mono text-[9px] text-slate-500">
+          <span className="font-mono text-ui-micro text-slate-500">
             源时间 {formatEventTime(snapshot.sourceAt)}
           </span>
         </div>
-        <span className="font-mono text-[8px] text-slate-600">
+        <span className="font-mono text-ui-micro text-slate-600">
           identity {snapshot.continuityGeneration}/{snapshot.sourceTimeMs}/
           {snapshot.tickOrdinal}
         </span>
@@ -486,12 +486,12 @@ function HistoricalSignalSnapshot({
       <div className="mt-2 grid gap-2 xl:grid-cols-2">
         <section className="border border-white/[0.06] bg-[#081321] p-3">
           <div className="flex items-center justify-between gap-3">
-            <h4 className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+            <h4 className="text-ui-micro font-black uppercase tracking-[0.1em] text-slate-500">
               门禁与阻断
             </h4>
             <span
               className={cn(
-                'font-mono text-[9px] font-black',
+                'font-mono text-ui-micro font-black',
                 failedGates.length ? 'text-amber-200' : 'text-emerald-300'
               )}
             >
@@ -506,7 +506,7 @@ function HistoricalSignalSnapshot({
               <div
                 key={gate.code}
                 className={cn(
-                  'grid grid-cols-[16px_minmax(100px,0.6fr)_1fr_auto] items-center gap-2 border px-2 py-1.5 text-[9px]',
+                  'grid grid-cols-[16px_minmax(100px,0.6fr)_1fr_auto] items-center gap-2 border px-2 py-1.5 text-ui-micro',
                   gate.passed
                     ? 'border-emerald-400/10 text-slate-400'
                     : 'border-rose-400/20 bg-rose-400/[0.035] text-rose-100'
@@ -530,10 +530,10 @@ function HistoricalSignalSnapshot({
 
         <section className="border border-white/[0.06] bg-[#081321] p-3">
           <div className="flex items-center justify-between gap-3">
-            <h4 className="text-[9px] font-black uppercase tracking-[0.1em] text-slate-500">
+            <h4 className="text-ui-micro font-black uppercase tracking-[0.1em] text-slate-500">
               机会分贡献
             </h4>
-            <span className="text-[8px] text-slate-600">服务端计算</span>
+            <span className="text-ui-micro text-slate-600">服务端计算</span>
           </div>
           <div className="mt-2 space-y-2">
             {snapshot.scoreContributions.slice(0, 7).map(contribution => {
@@ -550,7 +550,7 @@ function HistoricalSignalSnapshot({
               return (
                 <div
                   key={contribution.code}
-                  className="grid grid-cols-[minmax(110px,0.7fr)_1fr_64px] items-center gap-2 text-[9px]"
+                  className="grid grid-cols-[minmax(110px,0.7fr)_1fr_64px] items-center gap-2 text-ui-micro"
                 >
                   <span className="truncate text-slate-400">
                     {contribution.label}
@@ -577,7 +577,7 @@ function HistoricalSignalSnapshot({
           <Button
             type="button"
             size="sm"
-            className="h-8 rounded-sm bg-blue-600 px-3 text-[9px] hover:bg-blue-500"
+            className="h-control-compact rounded-sm bg-blue-600 px-3 text-ui-micro hover:bg-blue-500"
             onClick={() => onViewCurrent(item.stockCode)}
           >
             查看当前状态
@@ -587,14 +587,14 @@ function HistoricalSignalSnapshot({
             type="button"
             size="sm"
             variant="outline"
-            className="h-8 rounded-sm border-white/10 px-3 text-[9px]"
+            className="h-control-compact rounded-sm border-white/10 px-3 text-ui-micro"
             onClick={() => copyText(evaluation.id)}
           >
             复制事件 ID
             <Copy className="ml-1.5 h-3 w-3" />
           </Button>
         </div>
-        <span className="font-mono text-[8px] text-slate-600">
+        <span className="font-mono text-ui-micro text-slate-600">
           state {snapshot.stateSchemaVersion} · feature{' '}
           {snapshot.featureSchemaVersion} · policy {snapshot.policyVersion} ·
           config {snapshot.configVersion}
@@ -616,7 +616,7 @@ function FactRow({
 }) {
   const textValue = typeof value === 'string' ? value : null;
   return (
-    <div className="grid grid-cols-[92px_minmax(0,1fr)_24px] items-center gap-2 text-[10px]">
+    <div className="grid grid-cols-[92px_minmax(0,1fr)_24px] items-center gap-2 text-ui-caption">
       <span className="text-slate-600">{label}</span>
       <span className="min-w-0 break-all font-mono text-slate-300">
         {value}
@@ -667,16 +667,16 @@ function ExecutionEventSnapshot({
   return (
     <div
       id={`${item.id}-snapshot`}
-      className="border-t border-blue-400/20 bg-[#07111f] p-3 sm:p-4"
+      className="border-t border-blue-400/20 bg-[#07111f] p-3 sm:p-ui-section"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/[0.06] pb-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-black text-slate-100">
+          <span className="text-ui-label font-black text-slate-100">
             {isTrade ? '成交时刻快照' : '委托事件快照'}
           </span>
           <Badge
             className={cn(
-              'rounded-sm border px-2 py-0.5 text-[8px]',
+              'rounded-sm border px-2 py-0.5 text-ui-micro',
               applied
                 ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200'
                 : 'border-amber-400/20 bg-amber-400/10 text-amber-200'
@@ -685,15 +685,15 @@ function ExecutionEventSnapshot({
             {applied ? '已持久化' : event.status}
           </Badge>
           {isTrade && (
-            <Badge className="rounded-sm border border-white/10 bg-white/[0.035] px-2 py-0.5 text-[8px] text-slate-300">
+            <Badge className="rounded-sm border border-white/10 bg-white/[0.035] px-2 py-0.5 text-ui-micro text-slate-300">
               真实成交真源
             </Badge>
           )}
-          <span className="font-mono text-[9px] text-slate-500">
+          <span className="font-mono text-ui-micro text-slate-500">
             回报时间 {formatEventTime(reportTime)}
           </span>
         </div>
-        <span className="font-mono text-[8px] text-slate-600">
+        <span className="font-mono text-ui-micro text-slate-600">
           persisted {formatEventTime(event.appliedAt || event.createdAt)}
         </span>
       </div>
@@ -729,7 +729,7 @@ function ExecutionEventSnapshot({
 
       <div className="mt-2 grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
         <section className="border border-white/[0.06] bg-[#081321] p-3">
-          <h4 className="text-[10px] font-black text-slate-200">
+          <h4 className="text-ui-caption font-black text-slate-200">
             券商{isTrade ? '成交' : '委托'}事实
           </h4>
           <div className="mt-3 space-y-2">
@@ -755,7 +755,7 @@ function ExecutionEventSnapshot({
         </section>
 
         <section className="border border-white/[0.06] bg-[#081321] p-3">
-          <h4 className="text-[10px] font-black text-slate-200">
+          <h4 className="text-ui-caption font-black text-slate-200">
             批次收敛快照
           </h4>
           <div className="mt-3 space-y-2">
@@ -785,10 +785,10 @@ function ExecutionEventSnapshot({
             />
           </div>
           <div className="mt-4">
-            <div className="mb-2 text-[8px] font-black uppercase tracking-[0.1em] text-slate-600">
+            <div className="mb-2 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600">
               生命周期
             </div>
-            <div className="flex items-center gap-1 text-[8px] text-slate-500">
+            <div className="flex items-center gap-1 text-ui-micro text-slate-500">
               {['候选', '意图', '委托', '成交', '活跃批次'].map(
                 (label, index, values) => (
                   <React.Fragment key={label}>
@@ -820,7 +820,9 @@ function ExecutionEventSnapshot({
         </section>
 
         <section className="border border-white/[0.06] bg-[#081321] p-3 lg:col-span-2 xl:col-span-1">
-          <h4 className="text-[10px] font-black text-slate-200">关联与审计</h4>
+          <h4 className="text-ui-caption font-black text-slate-200">
+            关联与审计
+          </h4>
           <div className="mt-3 space-y-2">
             <FactRow
               label="策略运行"
@@ -848,7 +850,7 @@ function ExecutionEventSnapshot({
               value={formatEventTime(event.appliedAt || event.createdAt)}
             />
           </div>
-          <div className="mt-4 flex items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] p-2.5 text-[9px] leading-4 text-blue-100">
+          <div className="mt-4 flex items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] p-2.5 text-ui-micro leading-4 text-blue-100">
             <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             命令确认不代表成交；本记录来自已持久化的券商
             {isTrade ? '成交' : '委托'}回报。
@@ -856,7 +858,7 @@ function ExecutionEventSnapshot({
           {event.error && (
             <div
               role="alert"
-              className="mt-2 border border-rose-400/20 bg-rose-400/[0.05] p-2 text-[9px] text-rose-100"
+              className="mt-2 border border-rose-400/20 bg-rose-400/[0.05] p-2 text-ui-micro text-rose-100"
             >
               {event.error}
             </div>
@@ -869,7 +871,7 @@ function ExecutionEventSnapshot({
           <Button
             type="button"
             size="sm"
-            className="h-8 rounded-sm bg-blue-600 px-3 text-[9px] hover:bg-blue-500"
+            className="h-control-compact rounded-sm bg-blue-600 px-3 text-ui-micro hover:bg-blue-500"
             onClick={() => onViewBatch(event.batchId)}
           >
             查看批次
@@ -880,7 +882,7 @@ function ExecutionEventSnapshot({
           type="button"
           size="sm"
           variant="outline"
-          className="h-8 rounded-sm border-white/10 px-3 text-[9px]"
+          className="h-control-compact rounded-sm border-white/10 px-3 text-ui-micro"
           onClick={() => copyText(event.eventId)}
         >
           复制事件 ID
@@ -938,23 +940,23 @@ function ActivityRow({
         >
           <Icon className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
-        <span className="font-mono text-[10px] text-slate-400">
+        <span className="font-mono text-ui-caption text-slate-400">
           {formatTime(item.occurredAt)}
         </span>
         <span className="min-w-0">
-          <span className="block truncate font-mono text-[10px] font-black text-slate-200">
+          <span className="block truncate font-mono text-ui-caption font-black text-slate-200">
             {item.stockCode || '--'}
           </span>
           {instrumentName && (
-            <span className="block truncate text-[8px] text-slate-600">
+            <span className="block truncate text-ui-micro text-slate-600">
               {instrumentName}
             </span>
           )}
         </span>
-        <span className={cn('truncate text-[10px] font-black', tone.title)}>
+        <span className={cn('truncate text-ui-caption font-black', tone.title)}>
           {item.title}
         </span>
-        <span className="truncate text-[10px] text-slate-400">
+        <span className="truncate text-ui-caption text-slate-400">
           {item.summary}
         </span>
         {expanded ? (
@@ -1086,14 +1088,16 @@ export function TTradeActivityView({
 
   return (
     <div className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-200">
-      <header className="shrink-0 border-b border-white/[0.06] bg-[#091422] px-4 py-3">
+      <header className="shrink-0 border-b border-white/[0.06] bg-[#091422] px-ui-section py-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-black text-slate-100">运行动态</h1>
+              <h1 className="text-ui-title font-black text-slate-100">
+                运行动态
+              </h1>
               <span
                 className={cn(
-                  'inline-flex items-center gap-1.5 text-[9px] font-bold',
+                  'inline-flex items-center gap-1.5 text-ui-micro font-bold',
                   connected ? 'text-emerald-300' : 'text-amber-200'
                 )}
               >
@@ -1101,7 +1105,7 @@ export function TTradeActivityView({
                 {connected ? '实时连接' : '等待重连'}
               </span>
             </div>
-            <p className="mt-1 text-[9px] text-slate-600">
+            <p className="mt-1 text-ui-micro text-slate-600">
               关键业务事件可原位展开事件时刻快照；历史事实不代表当前状态。
             </p>
           </div>
@@ -1109,7 +1113,7 @@ export function TTradeActivityView({
             type="button"
             size="sm"
             variant="outline"
-            className="h-8 rounded-sm border-white/10 px-3 text-[9px]"
+            className="h-control-compact rounded-sm border-white/10 px-3 text-ui-micro"
             onClick={onRefresh}
           >
             <Radio className="mr-1.5 h-3 w-3" />
@@ -1127,7 +1131,7 @@ export function TTradeActivityView({
               key={value}
               type="button"
               className={cn(
-                'flex h-8 cursor-pointer items-center gap-1.5 px-4 text-[10px] font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                'flex h-8 cursor-pointer items-center gap-1.5 px-ui-section text-ui-caption font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 surface === value
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-500 hover:bg-blue-400/[0.05] hover:text-slate-200'
@@ -1143,7 +1147,7 @@ export function TTradeActivityView({
 
       {surface === 'TECHNICAL' ? (
         <div className="flex min-h-0 flex-1 flex-col p-3">
-          <div className="mb-2 flex shrink-0 items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] px-3 py-2 text-[9px] leading-4 text-blue-100">
+          <div className="mb-2 flex shrink-0 items-start gap-2 border border-blue-400/15 bg-blue-400/[0.04] px-3 py-2 text-ui-micro leading-4 text-blue-100">
             <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             原始技术日志用于专业排障；委托与成交事实以运行动态中的持久化券商回报为准。
           </div>
@@ -1161,13 +1165,13 @@ export function TTradeActivityView({
         </div>
       ) : (
         <>
-          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] bg-[#081321] px-4 py-2.5">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-white/[0.06] bg-[#081321] px-ui-section py-2.5">
             <Button
               type="button"
               size="sm"
               variant={includeDiagnostics ? 'default' : 'outline'}
               className={cn(
-                'h-8 rounded-sm px-3 text-[9px]',
+                'h-control-compact rounded-sm px-3 text-ui-micro',
                 includeDiagnostics
                   ? 'bg-blue-600 hover:bg-blue-500'
                   : 'border-white/10 text-slate-400'
@@ -1178,7 +1182,7 @@ export function TTradeActivityView({
               {includeDiagnostics ? '诊断观测已显示' : '仅关键事件'}
             </Button>
             <Select value={stockCode} onValueChange={setStockCode}>
-              <SelectTrigger className="h-8 w-40 rounded-sm border-white/10 bg-[#07111f] text-[9px]">
+              <SelectTrigger className="h-control-compact w-40 rounded-sm border-white/10 bg-[#07111f] text-ui-micro">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1194,7 +1198,7 @@ export function TTradeActivityView({
               value={kind}
               onValueChange={value => setKind(value as ActivityKindFilter)}
             >
-              <SelectTrigger className="h-8 w-40 rounded-sm border-white/10 bg-[#07111f] text-[9px]">
+              <SelectTrigger className="h-control-compact w-40 rounded-sm border-white/10 bg-[#07111f] text-ui-micro">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -1214,10 +1218,10 @@ export function TTradeActivityView({
                 value={search}
                 onChange={event => setSearch(event.target.value)}
                 placeholder="搜索消息、标的或 ID"
-                className="h-8 rounded-sm border-white/10 bg-[#07111f] pl-8 text-[9px] focus-visible:ring-blue-400/70"
+                className="h-8 rounded-sm border-white/10 bg-[#07111f] pl-8 text-ui-micro focus-visible:ring-blue-400/70"
               />
             </div>
-            <span className="inline-flex items-center gap-1.5 text-[9px] text-slate-600">
+            <span className="inline-flex items-center gap-1.5 text-ui-micro text-slate-600">
               <ListFilter className="h-3 w-3" />
               {filteredItems.length} 条
             </span>
@@ -1226,7 +1230,7 @@ export function TTradeActivityView({
           {errorMessages.length > 0 && (
             <div
               role="alert"
-              className="flex shrink-0 items-start gap-2 border-b border-amber-400/20 bg-amber-400/[0.05] px-4 py-2 text-[9px] leading-4 text-amber-100"
+              className="flex shrink-0 items-start gap-2 border-b border-amber-400/20 bg-amber-400/[0.05] px-ui-section py-2 text-ui-micro leading-4 text-amber-100"
             >
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               部分真源刷新失败，仍保留上次可信记录：
@@ -1246,7 +1250,7 @@ export function TTradeActivityView({
               <div className="sticky top-2 z-20 flex justify-center">
                 <button
                   type="button"
-                  className="rounded-full border border-blue-400/30 bg-blue-600 px-3 py-1 text-[9px] font-bold text-white shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
+                  className="rounded-full border border-blue-400/30 bg-blue-600 px-3 py-1 text-ui-micro font-bold text-white shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300"
                   onClick={() => {
                     const reducedMotion = window.matchMedia(
                       '(prefers-reduced-motion: reduce)'
@@ -1266,7 +1270,7 @@ export function TTradeActivityView({
             {loading && items.length === 0 ? (
               <div
                 role="status"
-                className="flex h-full min-h-64 items-center justify-center text-xs text-slate-600"
+                className="flex h-full min-h-64 items-center justify-center text-ui-label text-slate-600"
               >
                 <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
                 正在读取持久化运行动态…
@@ -1274,16 +1278,16 @@ export function TTradeActivityView({
             ) : filteredItems.length === 0 ? (
               <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
                 <Activity className="h-9 w-9 text-slate-800" />
-                <div className="mt-3 text-sm font-bold text-slate-500">
+                <div className="mt-3 text-ui-body font-bold text-slate-500">
                   暂无匹配的运行动态
                 </div>
-                <div className="mt-1 text-[9px] text-slate-700">
+                <div className="mt-1 text-ui-micro text-slate-700">
                   调整标的、类型或诊断观测筛选
                 </div>
               </div>
             ) : (
               <div className="min-w-[820px]">
-                <div className="sticky top-0 z-10 grid h-8 grid-cols-[40px_84px_minmax(110px,0.7fr)_minmax(135px,0.85fr)_minmax(200px,1.6fr)_24px] items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-2 text-[8px] font-black uppercase tracking-[0.08em] text-slate-600 max-lg:grid-cols-[40px_78px_minmax(100px,0.6fr)_minmax(120px,0.7fr)_minmax(160px,1fr)_24px]">
+                <div className="sticky top-0 z-10 grid h-8 grid-cols-[40px_84px_minmax(110px,0.7fr)_minmax(135px,0.85fr)_minmax(200px,1.6fr)_24px] items-center gap-2 border-b border-white/[0.06] bg-[#0b1628] px-2 text-ui-micro font-black uppercase tracking-[0.08em] text-slate-600 max-lg:grid-cols-[40px_78px_minmax(100px,0.6fr)_minmax(120px,0.7fr)_minmax(160px,1fr)_24px]">
                   <span />
                   <span>时间</span>
                   <span>标的</span>
@@ -1316,7 +1320,7 @@ export function TTradeActivityView({
                   size="sm"
                   variant="outline"
                   disabled={loadingMore}
-                  className="h-8 rounded-sm border-white/10 px-4 text-[9px]"
+                  className="h-control-compact rounded-sm border-white/10 px-ui-section text-ui-micro"
                   onClick={onLoadMore}
                 >
                   {loadingMore ? (

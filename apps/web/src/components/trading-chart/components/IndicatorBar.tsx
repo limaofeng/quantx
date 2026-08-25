@@ -28,7 +28,7 @@ export function IndicatorBar({
   return (
     <div
       className={cn(
-        'flex items-center gap-4 px-2 py-1 text-xs select-none bg-white dark:bg-[#09090b] border-t border-slate-200 dark:border-slate-800',
+        'flex items-center gap-4 px-2 py-1 text-ui-label select-none bg-white dark:bg-[#09090b] border-t border-slate-200 dark:border-slate-800',
         className
       )}
     >

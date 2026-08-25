@@ -45,7 +45,7 @@ export function TradingCalendarCard() {
 
   return (
     <div
-      className="h-full flex flex-col p-5 rounded-xl border border-slate-200/40 dark:border-slate-800/40 bg-gradient-to-br from-rose-50/50 to-orange-50/50 dark:from-rose-900/10 dark:to-orange-900/10 overflow-hidden relative group cursor-pointer transition-all hover:bg-rose-50/80 dark:hover:bg-rose-900/20 shadow-sm hover:shadow-md"
+      className="h-full flex flex-col p-ui-section rounded-panel border border-slate-200/40 dark:border-slate-800/40 bg-gradient-to-br from-rose-50/50 to-orange-50/50 dark:from-rose-900/10 dark:to-orange-900/10 overflow-hidden relative group cursor-pointer transition-all hover:bg-rose-50/80 dark:hover:bg-rose-900/20 shadow-sm hover:shadow-md"
       onClick={e => {
         if ((e.target as HTMLElement).closest('button')) return;
         setLocation('/settings/data/calendar');
@@ -54,14 +54,14 @@ export function TradingCalendarCard() {
       {/* Header */}
       <div className="flex items-start justify-between mb-4 z-10">
         <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl bg-rose-500/10 text-rose-600 dark:text-rose-400 ring-1 ring-inset ring-black/5 dark:ring-white/10">
+          <div className="p-2 rounded-panel bg-rose-500/10 text-rose-600 dark:text-rose-400 ring-1 ring-inset ring-black/5 dark:ring-white/10">
             <Calendar className={cn('w-5 h-5', isSyncing && 'animate-pulse')} />
           </div>
           <div>
-            <h3 className="font-bold text-base text-slate-800 dark:text-slate-100">
+            <h3 className="font-bold text-ui-title text-slate-800 dark:text-slate-100">
               交易日历
             </h3>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+            <p className="text-ui-caption text-slate-500 dark:text-slate-400 font-medium mt-0.5">
               Trading Calendar
             </p>
           </div>
@@ -89,7 +89,7 @@ export function TradingCalendarCard() {
           ) : (
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
           )}
-          <span className="text-[10px]">
+          <span className="text-ui-caption">
             {isStale
               ? '运行卡住'
               : isSyncing
@@ -102,15 +102,15 @@ export function TradingCalendarCard() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 gap-4 z-10 mb-4">
+      <div className="grid grid-cols-1 gap-ui-section z-10 mb-4">
         <div className="flex flex-col gap-1 p-3 rounded-lg bg-white/60 dark:bg-black/20 border border-slate-200/50 dark:border-white/5">
-          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
+          <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
             <Calendar className="w-3 h-3" />
             {currentYear}年度休市天数
           </div>
-          <div className="text-2xl font-black text-rose-600 dark:text-rose-400">
+          <div className="text-ui-display font-black text-rose-600 dark:text-rose-400">
             {holidayCount}
-            <span className="text-[10px] sm:text-xs font-normal text-slate-400 ml-1">
+            <span className="text-ui-caption sm:text-ui-label font-normal text-slate-400 ml-1">
               天
             </span>
           </div>
@@ -121,13 +121,13 @@ export function TradingCalendarCard() {
       <div className="mt-3 flex items-center justify-between z-10">
         <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
           <Clock size={12} />
-          <span className="text-[10px] font-mono whitespace-nowrap">
+          <span className="text-ui-caption font-mono whitespace-nowrap">
             {deployment?.lastRunTime
               ? `上次同步: ${new Date(deployment.lastRunTime).toLocaleDateString()}`
               : '暂无记录'}
           </span>
         </div>
-        <div className="flex items-center gap-1 text-[10px] font-semibold text-rose-600 dark:text-rose-400 opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0">
+        <div className="flex items-center gap-1 text-ui-caption font-semibold text-rose-600 dark:text-rose-400 opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0">
           管理日历
           <ChevronRight size={12} />
         </div>

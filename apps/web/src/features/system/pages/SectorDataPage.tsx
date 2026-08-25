@@ -94,7 +94,7 @@ export function SectorDataPage() {
       description="行业、概念、板块持仓"
       title="板块数据管理"
     >
-      <div className="flex h-full min-h-0 flex-col gap-6 animate-fade-in">
+      <div className="flex h-full min-h-0 flex-col gap-ui-panel animate-fade-in">
         {/* Action Bar & Identity Area */}
         <SectorActionBar
           activeTab={activeTab}
@@ -105,7 +105,7 @@ export function SectorDataPage() {
         />
 
         {/* Layout Grid */}
-        <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
+        <div className="flex flex-col lg:flex-row gap-ui-panel flex-1 min-h-0">
           {/* Left Sub-Navigation */}
           <SectorSidebar
             activeTab={activeTab}
@@ -114,7 +114,7 @@ export function SectorDataPage() {
           />
 
           {/* Right Content Column */}
-          <div className="flex-1 flex flex-col gap-6 min-h-0">
+          <div className="flex-1 flex flex-col gap-ui-panel min-h-0">
             {/* Summary Stats Row */}
             <SectorStatsCards
               totalCount={totalCount}
@@ -122,18 +122,18 @@ export function SectorDataPage() {
             />
 
             {/* Search and Table Area */}
-            <div className="flex flex-col gap-4 flex-1 min-h-0">
-              <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-col gap-ui-section flex-1 min-h-0">
+              <div className="flex items-center justify-between gap-ui-section">
                 <div className="relative flex-1 max-w-md group">
                   <Input
                     placeholder="搜索板块名称、代码或描述..."
-                    className="pl-10 h-10 rounded-2xl bg-white/50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 focus-visible:ring-primary/20 focus-visible:border-primary transition-all shadow-sm backdrop-blur-md"
+                    className="pl-10 h-control-large rounded-panel bg-white/50 dark:bg-white/[0.02] border-slate-200 dark:border-white/5 focus-visible:ring-primary/20 focus-visible:border-primary transition-all shadow-sm backdrop-blur-md"
                     value={searchQuery}
                     onChange={e => handleSearchChange(e.target.value)}
                   />
                   <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400 group-focus-within:text-primary transition-colors z-10 pointer-events-none" />
                 </div>
-                <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">
+                <div className="text-ui-caption font-black text-slate-400 uppercase tracking-widest hidden sm:block">
                   共发现 {totalCount} 个板块
                 </div>
               </div>

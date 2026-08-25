@@ -10,10 +10,10 @@ export function BaseAxisMarker({ basePrice }: BaseAxisMarkerProps) {
       <div className="relative flex min-h-12 items-center justify-center">
         <div className="absolute left-1/2 h-full w-px -translate-x-1/2 bg-blue-500/60" />
         <div className="relative rounded-lg border border-blue-400/40 bg-white px-2.5 py-1.5 text-center shadow-[0_0_18px_rgba(59,130,246,0.22)] dark:bg-slate-950">
-          <div className="text-[7px] font-black uppercase text-blue-500 dark:text-blue-300">
+          <div className="text-ui-micro font-black uppercase text-blue-500 dark:text-blue-300">
             基准价
           </div>
-          <div className="mt-0.5 font-mono text-[11px] font-black text-slate-950 dark:text-white">
+          <div className="mt-0.5 font-mono text-ui-caption font-black text-slate-950 dark:text-white">
             {formatNumber(basePrice || 0)}
           </div>
         </div>

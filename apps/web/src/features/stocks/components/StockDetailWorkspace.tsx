@@ -79,7 +79,7 @@ interface StockDetailWorkspaceProps {
 }
 
 const compactTabTriggerClass =
-  'h-7 rounded-md px-3 text-[11px] font-bold text-slate-500 transition-colors data-[state=active]:bg-blue-600 data-[state=active]:text-white dark:text-slate-400 dark:data-[state=active]:text-white';
+  'h-7 rounded-md px-3 text-ui-caption font-bold text-slate-500 transition-colors data-[state=active]:bg-blue-600 data-[state=active]:text-white dark:text-slate-400 dark:data-[state=active]:text-white';
 
 function isTerminalView(view: StockWorkspaceView) {
   return ['CHART', 'ORDER', 'TRADING'].includes(view);
@@ -124,12 +124,12 @@ function WorkspaceToolbar({
             onValueChange={value => onViewChange(value as StockWorkspaceView)}
             className="flex h-full min-w-0 max-w-full"
           >
-            <TabsList className="flex h-full min-w-0 justify-start gap-5 overflow-x-auto rounded-none bg-transparent p-0 no-scrollbar">
+            <TabsList className="flex h-full min-w-0 justify-start gap-ui-section overflow-x-auto rounded-none bg-transparent p-0 no-scrollbar">
               {modes.map(mode => (
                 <TabsTrigger
                   key={mode.id}
                   value={mode.id}
-                  className="relative h-full shrink-0 rounded-none bg-transparent px-0 text-[12px] font-bold text-slate-500 shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-transparent hover:text-slate-200 focus-visible:ring-blue-400/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-200 data-[state=active]:shadow-none data-[state=active]:after:bg-blue-500"
+                  className="relative h-full shrink-0 rounded-none bg-transparent px-0 text-ui-label font-bold text-slate-500 shadow-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:bg-transparent hover:text-slate-200 focus-visible:ring-blue-400/70 focus-visible:ring-offset-0 data-[state=active]:bg-transparent data-[state=active]:text-blue-200 data-[state=active]:shadow-none data-[state=active]:after:bg-blue-500"
                 >
                   {mode.label}
                 </TabsTrigger>
@@ -140,13 +140,13 @@ function WorkspaceToolbar({
 
         <div className="flex shrink-0 items-center gap-2">
           <div className="hidden h-7 items-center gap-2 border border-white/5 bg-white/[0.02] px-2.5 lg:flex">
-            <span className="max-w-24 truncate font-mono text-[10px] font-bold text-slate-300">
+            <span className="max-w-24 truncate font-mono text-ui-caption font-bold text-slate-300">
               {stockCode || '待选标的'}
             </span>
             <span className="h-3 w-px bg-white/10" />
             <span
               className={cn(
-                'inline-flex items-center gap-1.5 text-[10px] font-bold',
+                'inline-flex items-center gap-1.5 text-ui-caption font-bold',
                 hasActiveOrders ? 'text-amber-200' : 'text-slate-500'
               )}
             >
@@ -265,15 +265,17 @@ function AccountPanel({
   accountSummary?: AccountSummary | null;
 }) {
   return (
-    <div className="studio-workspace-surface h-full min-h-0 overflow-y-auto p-4 custom-scrollbar">
+    <div className="studio-workspace-surface h-full min-h-0 overflow-y-auto p-ui-section custom-scrollbar">
       <div className="mx-auto max-w-5xl">
         <div className="mb-4 border-b border-white/5 pb-3">
-          <div className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">
+          <div className="text-ui-caption font-black uppercase tracking-[0.22em] text-slate-500">
             Account
           </div>
           <div className="mt-1 flex min-w-0 items-center gap-3">
-            <h2 className="text-lg font-bold text-slate-100">账户资产</h2>
-            <span className="truncate font-mono text-xs font-bold text-slate-500">
+            <h2 className="text-ui-heading font-bold text-slate-100">
+              账户资产
+            </h2>
+            <span className="truncate font-mono text-ui-label font-bold text-slate-500">
               {accountName || '--'}
             </span>
           </div>
@@ -577,7 +579,7 @@ export function StockDetailWorkspace({
       />
       <div className="min-h-0 flex-1">{content}</div>
       {context === 'detail' && (
-        <div className="flex h-6 shrink-0 items-center justify-between border-t border-white/5 bg-[#07111f] px-3 text-[9px] font-bold text-slate-600">
+        <div className="flex h-6 shrink-0 items-center justify-between border-t border-white/5 bg-[#07111f] px-3 text-ui-micro font-bold text-slate-600">
           <span className="inline-flex items-center gap-1.5">
             <Activity className="h-3 w-3 text-emerald-400" />
             行情、公告与财务模块独立刷新

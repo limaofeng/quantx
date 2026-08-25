@@ -16,34 +16,34 @@ export function LiquidationStats({
   availableCash,
 }: LiquidationStatsProps) {
   return (
-    <div className="grid gap-4 md:grid-cols-3 mb-6">
-      <Card className="p-6 bg-gradient-to-br from-blue-500/10 via-blue-500/5 to-transparent border-blue-200/20 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-blue-500/10 rounded-xl">
+    <div className="grid gap-ui-section md:grid-cols-3 mb-6">
+      <Card className="p-ui-panel bg-gradient-to-br from-blue-500/10 via-blue-500/5 to-transparent border-blue-200/20 backdrop-blur-sm">
+        <div className="flex items-center gap-ui-section">
+          <div className="p-3 bg-blue-500/10 rounded-panel">
             <PieChart className="w-6 h-6 text-blue-500" />
           </div>
           <div>
-            <p className="text-sm font-medium text-muted-foreground">
+            <p className="text-ui-body font-medium text-muted-foreground">
               当前持仓市值
             </p>
-            <h3 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-blue-400">
+            <h3 className="text-ui-display font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-blue-400">
               {formatCurrency(totalMarketValue)}
             </h3>
           </div>
         </div>
       </Card>
 
-      <Card className="p-6 bg-gradient-to-br from-purple-500/10 via-purple-500/5 to-transparent border-purple-200/20 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-purple-500/10 rounded-xl">
+      <Card className="p-ui-panel bg-gradient-to-br from-purple-500/10 via-purple-500/5 to-transparent border-purple-200/20 backdrop-blur-sm">
+        <div className="flex items-center gap-ui-section">
+          <div className="p-3 bg-purple-500/10 rounded-panel">
             <Wallet className="w-6 h-6 text-purple-500" />
           </div>
           <div>
-            <p className="text-sm font-medium text-muted-foreground">
+            <p className="text-ui-body font-medium text-muted-foreground">
               已清仓盈亏
             </p>
             <h3
-              className={`text-2xl font-bold ${financialToneClass(totalLiquidatedPnL)}`}
+              className={`text-ui-display font-bold ${financialToneClass(totalLiquidatedPnL)}`}
             >
               {totalLiquidatedPnL > 0 ? '+' : ''}
               {formatCurrency(totalLiquidatedPnL)}
@@ -52,16 +52,16 @@ export function LiquidationStats({
         </div>
       </Card>
 
-      <Card className="p-6 bg-gradient-to-br from-emerald-500/10 via-emerald-500/5 to-transparent border-emerald-200/20 backdrop-blur-sm">
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-emerald-500/10 rounded-xl">
+      <Card className="p-ui-panel bg-gradient-to-br from-emerald-500/10 via-emerald-500/5 to-transparent border-emerald-200/20 backdrop-blur-sm">
+        <div className="flex items-center gap-ui-section">
+          <div className="p-3 bg-emerald-500/10 rounded-panel">
             <DollarSign className="w-6 h-6 text-emerald-500" />
           </div>
           <div>
-            <p className="text-sm font-medium text-muted-foreground">
+            <p className="text-ui-body font-medium text-muted-foreground">
               可用现金
             </p>
-            <h3 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-emerald-400">
+            <h3 className="text-ui-display font-bold bg-clip-text text-transparent bg-gradient-to-r from-emerald-600 to-emerald-400">
               {formatCurrency(availableCash)}
             </h3>
           </div>

@@ -115,33 +115,33 @@ export function SyncStatusWidget() {
   }, []);
 
   return (
-    <div className="flex flex-col h-full rounded-xl border border-slate-200/40 dark:border-slate-800/40 bg-slate-50/40 dark:bg-slate-900/40 backdrop-blur-sm overflow-hidden">
+    <div className="flex flex-col h-full rounded-panel border border-slate-200/40 dark:border-slate-800/40 bg-slate-50/40 dark:bg-slate-900/40 backdrop-blur-sm overflow-hidden">
       {/* Header */}
-      <div className="flex justify-between items-center px-4 py-3 border-b border-slate-200/40 dark:border-slate-800/40 bg-slate-100/40 dark:bg-slate-900/40">
+      <div className="flex justify-between items-center px-ui-section py-3 border-b border-slate-200/40 dark:border-slate-800/40 bg-slate-100/40 dark:bg-slate-900/40">
         <div className="flex items-center gap-2">
           <Rocket className="w-4 h-4 text-indigo-500" />
-          <h3 className="text-sm font-bold text-slate-700 dark:text-slate-200">
+          <h3 className="text-ui-body font-bold text-slate-700 dark:text-slate-200">
             任务调度
           </h3>
         </div>
         <Badge
           variant="outline"
-          className="font-mono text-[10px] text-slate-500 border-slate-200/60 dark:border-slate-700/60"
+          className="font-mono text-ui-caption text-slate-500 border-slate-200/60 dark:border-slate-700/60"
         >
           Prefect
         </Badge>
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="flex flex-col p-2 space-y-4">
+        <div className="flex flex-col p-2 space-y-ui-section">
           {/* Active Section */}
           <div>
-            <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
+            <h4 className="text-ui-caption font-bold text-slate-400 uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
               <Activity className="w-3 h-3" /> 正在执行
             </h4>
             <div className="space-y-1">
               {flowRuns.filter(r => r.state === 'Running').length === 0 ? (
-                <div className="px-2 py-1 text-[10px] text-slate-400 italic">
+                <div className="px-2 py-1 text-ui-caption text-slate-400 italic">
                   No active tasks
                 </div>
               ) : (
@@ -153,12 +153,12 @@ export function SyncStatusWidget() {
                       className="flex flex-col gap-1 p-2 rounded bg-white/60 dark:bg-slate-800/60 border border-indigo-100 dark:border-indigo-900/30"
                     >
                       <div className="flex items-center justify-between">
-                        <span className="font-medium text-xs text-slate-700 dark:text-slate-200 truncate">
+                        <span className="font-medium text-ui-label text-slate-700 dark:text-slate-200 truncate">
                           {run.name}
                         </span>
                         <RotateCw className="w-3 h-3 text-indigo-500 animate-spin" />
                       </div>
-                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                      <div className="flex items-center justify-between text-ui-caption text-slate-400">
                         <span className="font-mono">{run.startTime}</span>
                         <Button
                           variant="ghost"
@@ -176,7 +176,7 @@ export function SyncStatusWidget() {
 
           {/* Deployments */}
           <div>
-            <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
+            <h4 className="text-ui-caption font-bold text-slate-400 uppercase tracking-wider mb-2 px-2 flex items-center gap-1">
               <Clock className="w-3 h-3" /> 定时任务
             </h4>
             <div className="space-y-1">
@@ -186,7 +186,7 @@ export function SyncStatusWidget() {
                   className="flex flex-col gap-1 p-2 rounded hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors border border-transparent hover:border-slate-100 dark:hover:border-slate-800"
                 >
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    <span className="text-ui-label font-semibold text-slate-700 dark:text-slate-300">
                       {dep.name}
                     </span>
                     {dep.lastRunStatus === 'success' && (
@@ -208,7 +208,7 @@ export function SyncStatusWidget() {
                       />
                     )}
                   </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+                  <div className="flex items-center justify-between text-ui-caption text-slate-400">
                     <span>{dep.schedule}</span>
                     <span className="font-mono">
                       Next: {dep.nextRunTime.split(' ')[1] || dep.nextRunTime}

@@ -120,7 +120,7 @@ export function FinancialDataSyncCard() {
   return (
     <div
       className={cn(
-        'h-full flex flex-col p-5 rounded-xl border overflow-hidden relative group cursor-pointer transition-all shadow-sm hover:shadow-md hover:shadow-blue-600/5',
+        'h-full flex flex-col p-ui-section rounded-panel border overflow-hidden relative group cursor-pointer transition-all shadow-sm hover:shadow-md hover:shadow-blue-600/5',
         theme.bg,
         theme.border,
         theme.hover
@@ -132,7 +132,7 @@ export function FinancialDataSyncCard() {
         <div className="flex items-center gap-3">
           <div
             className={cn(
-              'p-2 rounded-xl ring-1 ring-inset ring-black/5 dark:ring-white/10',
+              'p-2 rounded-panel ring-1 ring-inset ring-black/5 dark:ring-white/10',
               theme.iconBg,
               theme.iconText
             )}
@@ -142,13 +142,13 @@ export function FinancialDataSyncCard() {
           <div>
             <h3
               className={cn(
-                'font-bold text-base transition-colors',
+                'font-bold text-ui-title transition-colors',
                 theme.text
               )}
             >
               财务数据
             </h3>
-            <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium mt-0.5">
+            <p className="text-ui-caption text-slate-500 dark:text-slate-400 font-medium mt-0.5">
               Financial Reports
             </p>
           </div>
@@ -181,7 +181,7 @@ export function FinancialDataSyncCard() {
             ) : (
               <Activity size={10} className="opacity-50" />
             )}
-            <span className="text-[10px]">
+            <span className="text-ui-caption">
               {isStale
                 ? '数据过期'
                 : isSyncing
@@ -206,31 +206,31 @@ export function FinancialDataSyncCard() {
             variant="outline"
             className="bg-slate-500/5 text-slate-500 border-slate-500/20"
           >
-            <span className="text-[10px]">状态未知</span>
+            <span className="text-ui-caption">状态未知</span>
           </Badge>
         )}
       </div>
 
       {/* Main Stats Grid */}
-      <div className="grid grid-cols-2 gap-4 z-10 mb-4">
+      <div className="grid grid-cols-2 gap-ui-section z-10 mb-4">
         <div className="flex flex-col gap-1 p-3 rounded-lg bg-white/60 dark:bg-black/20 border border-slate-200/50 dark:border-white/5">
-          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
+          <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
             <FileText className="w-3 h-3" />
             已入库报表
           </div>
-          <div className={cn('text-2xl font-black', theme.text)}>
+          <div className={cn('text-ui-display font-black', theme.text)}>
             {stats.reportsCount.toLocaleString()}
-            <span className="text-[10px] sm:text-xs font-normal text-slate-400 ml-1">
+            <span className="text-ui-caption sm:text-ui-label font-normal text-slate-400 ml-1">
               份
             </span>
           </div>
         </div>
         <div className="flex flex-col gap-1 p-3 rounded-lg bg-white/60 dark:bg-black/20 border border-slate-200/50 dark:border-white/5">
-          <div className="flex items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
+          <div className="flex items-center gap-1.5 text-ui-caption text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
             <PieChart className="w-3 h-3" />
             同步覆盖
           </div>
-          <div className={cn('text-2xl font-black', theme.text)}>
+          <div className={cn('text-ui-display font-black', theme.text)}>
             {syncHealth
               ? `${syncHealth.syncedCodes.toLocaleString()}/${syncHealth.requestedCodes.toLocaleString()}`
               : stats.instrumentsCount.toLocaleString()}
@@ -247,7 +247,7 @@ export function FinancialDataSyncCard() {
       >
         <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
           <Clock size={12} />
-          <span className="text-[10px] font-mono">
+          <span className="text-ui-caption font-mono">
             {isStale
               ? syncHealth?.warnings?.[0] || '财务同步数据已过期'
               : isSyncing
@@ -262,7 +262,7 @@ export function FinancialDataSyncCard() {
 
         <div
           className={cn(
-            'flex items-center gap-1 text-[10px] font-semibold opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0',
+            'flex items-center gap-1 text-ui-caption font-semibold opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0',
             theme.accent
           )}
         >

@@ -712,23 +712,23 @@ export function FinancialDataPage() {
       description="财报、指标、财务快照"
       title="财务数据"
     >
-      <div className="flex flex-col gap-4 pb-10 animate-fade-in">
+      <div className="flex flex-col gap-ui-section pb-10 animate-fade-in">
         {/* Compact Header Section */}
-        <div className="flex items-center justify-between gap-4 py-1">
+        <div className="flex items-center justify-between gap-ui-section py-1">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
+              className="h-control-compact w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
               onClick={() => setLocation('/settings/data')}
             >
               <ArrowLeft className="w-4 h-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div>
-              <h1 className="text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none">
+              <h1 className="text-ui-heading font-black text-slate-900 dark:text-white tracking-tight leading-none">
                 财务数据
               </h1>
-              <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
+              <p className="text-ui-caption font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
                 FINANCIAL REPORTS & STATEMENTS
               </p>
             </div>
@@ -744,7 +744,7 @@ export function FinancialDataPage() {
         {syncHealth && (
           <div
             className={cn(
-              'flex flex-col gap-2 rounded-lg border px-4 py-3 text-xs md:flex-row md:items-center md:justify-between',
+              'flex flex-col gap-2 rounded-lg border px-ui-section py-3 text-ui-label md:flex-row md:items-center md:justify-between',
               syncHealthy
                 ? 'border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300'
                 : 'border-amber-500/30 bg-amber-500/10 text-amber-800 dark:text-amber-200'
@@ -759,7 +759,7 @@ export function FinancialDataPage() {
                 {syncHealth.statementRows.toLocaleString()} 行
               </span>
             </div>
-            <div className="text-[11px] opacity-80">
+            <div className="text-ui-caption opacity-80">
               {syncHealth.warnings.length > 0
                 ? syncHealth.warnings.join('；')
                 : syncHealth.lastCompletedAt
@@ -770,44 +770,44 @@ export function FinancialDataPage() {
         )}
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-500">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-ui-panel">
+          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-ui-section flex items-center gap-ui-section">
+            <div className="p-3 rounded-panel bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-500">
               <FileText className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 已入库报表
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-ui-display font-black text-slate-900 dark:text-white mt-1">
                 {formatNumber(overview?.reportCount)}
               </p>
             </div>
           </Card>
 
-          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-red-50 text-red-600 dark:bg-red-950 dark:text-red-400">
+          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-ui-section flex items-center gap-ui-section">
+            <div className="p-3 rounded-panel bg-red-50 text-red-600 dark:bg-red-950 dark:text-red-400">
               <PieChart className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 覆盖标的
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-ui-display font-black text-slate-900 dark:text-white mt-1">
                 {formatNumber(overview?.instrumentCount)}
               </p>
             </div>
           </Card>
 
-          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-orange-50 text-orange-600 dark:bg-orange-950 dark:text-orange-400">
+          <Card className="border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 shadow-sm p-ui-section flex items-center gap-ui-section">
+            <div className="p-3 rounded-panel bg-orange-50 text-orange-600 dark:bg-orange-950 dark:text-orange-400">
               <TrendingUp className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 最新报告期
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-ui-display font-black text-slate-900 dark:text-white mt-1">
                 {overview?.latestReportDate || '--'}
               </p>
             </div>
@@ -816,28 +816,28 @@ export function FinancialDataPage() {
 
         {/* Main Content: Data Table */}
         <div className="flex min-h-[500px] flex-col overflow-hidden rounded-md border border-white/10 bg-[#050915] shadow-sm">
-          <div className="flex flex-col gap-2 border-b border-white/5 bg-slate-900/40 px-4 py-2 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-col gap-2 border-b border-white/5 bg-slate-900/40 px-ui-section py-2 md:flex-row md:items-center md:justify-between">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <LayoutList className="h-4 w-4 shrink-0 text-slate-400" />
-              <span className="truncate text-xs font-bold text-slate-200">
+              <span className="truncate text-ui-label font-bold text-slate-200">
                 上市公司财报明细
               </span>
               <Badge
                 variant="outline"
-                className="font-mono text-[10px] font-normal text-slate-400"
+                className="font-mono text-ui-caption font-normal text-slate-400"
               >
                 总数: {displayReports.length}
               </Badge>
               <Badge
                 variant="outline"
-                className="font-mono text-[10px] font-normal text-slate-400"
+                className="font-mono text-ui-caption font-normal text-slate-400"
               >
                 字段: {selectedColumnCount}
               </Badge>
               {activeFilterCount > 0 && (
                 <Badge
                   variant="outline"
-                  className="border-red-500/30 bg-red-500/10 font-mono text-[10px] font-normal text-red-300"
+                  className="border-red-500/30 bg-red-500/10 font-mono text-ui-caption font-normal text-red-300"
                 >
                   筛选: {activeFilterCount}
                 </Badge>
@@ -850,7 +850,7 @@ export function FinancialDataPage() {
                   <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
                   <Input
                     placeholder="搜索股票代码或名称..."
-                    className="h-7 rounded-[4px] border-white/10 bg-[#0b1120]/80 pl-8 text-xs text-slate-200 placeholder:text-slate-600 focus-visible:ring-red-500/30"
+                    className="h-control-compact rounded-sm border-white/10 bg-[#0b1120]/80 pl-8 text-ui-label text-slate-200 placeholder:text-slate-600 focus-visible:ring-red-500/30"
                     value={searchTerm}
                     onChange={e => setSearchTerm(e.target.value)}
                   />
@@ -861,7 +861,7 @@ export function FinancialDataPage() {
                       variant="outline"
                       size="icon"
                       className={cn(
-                        'relative h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white',
+                        'relative h-control-compact w-7 shrink-0 rounded-sm border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white',
                         activeFilterCount > 0 &&
                           'border-red-500/40 bg-red-500/10 text-red-300'
                       )}
@@ -869,7 +869,7 @@ export function FinancialDataPage() {
                     >
                       <Filter className="h-3.5 w-3.5" />
                       {activeFilterCount > 0 && (
-                        <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 font-mono text-[10px] leading-none text-white">
+                        <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 font-mono text-ui-caption leading-none text-white">
                           {activeFilterCount}
                         </span>
                       )}
@@ -879,19 +879,19 @@ export function FinancialDataPage() {
                     side="right"
                     className="w-[92vw] overflow-y-auto border-slate-200 bg-white p-0 dark:border-slate-800 dark:bg-slate-950 sm:max-w-[420px]"
                   >
-                    <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 dark:border-slate-800">
+                    <div className="flex items-center justify-between border-b border-slate-100 px-ui-section py-ui-section dark:border-slate-800">
                       <div>
-                        <div className="text-sm font-black text-slate-900 dark:text-slate-100">
+                        <div className="text-ui-body font-black text-slate-900 dark:text-slate-100">
                           筛选条件
                         </div>
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                        <div className="text-ui-caption font-bold uppercase tracking-widest text-slate-400">
                           Financial filters
                         </div>
                       </div>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="mr-8 h-7 px-2 text-xs"
+                        className="mr-8 h-control-compact px-2 text-ui-label"
                         onClick={resetFilters}
                         disabled={activeFilterCount === 0}
                       >
@@ -900,7 +900,7 @@ export function FinancialDataPage() {
                       </Button>
                     </div>
 
-                    <div className="space-y-5 p-5">
+                    <div className="space-y-ui-section p-ui-section">
                       <div className="space-y-2">
                         <FilterLabel>快捷范围</FilterLabel>
                         <div className="grid grid-cols-3 gap-2">
@@ -919,11 +919,11 @@ export function FinancialDataPage() {
                                 )}
                                 onClick={() => setQuickFilter(filter.value)}
                               >
-                                <div className="flex items-center gap-1.5 text-xs font-bold">
+                                <div className="flex items-center gap-1.5 text-ui-label font-bold">
                                   <Icon className="h-3.5 w-3.5" />
                                   {filter.label}
                                 </div>
-                                <div className="mt-1 font-mono text-[11px] text-slate-400">
+                                <div className="mt-1 font-mono text-ui-caption text-slate-400">
                                   {formatNumber(filter.count)}
                                 </div>
                               </button>
@@ -941,7 +941,7 @@ export function FinancialDataPage() {
                               setReportPeriodFilter(value as ReportPeriodFilter)
                             }
                           >
-                            <SelectTrigger className="h-9 text-xs">
+                            <SelectTrigger className="h-control-default text-ui-label">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -963,7 +963,7 @@ export function FinancialDataPage() {
                               setDisclosureFilter(value as DisclosureFilter)
                             }
                           >
-                            <SelectTrigger className="h-9 text-xs">
+                            <SelectTrigger className="h-control-default text-ui-label">
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
@@ -989,7 +989,7 @@ export function FinancialDataPage() {
                               key={value}
                               type="button"
                               className={cn(
-                                'h-8 rounded-lg border text-xs font-bold transition-colors cursor-pointer',
+                                'h-8 rounded-lg border text-ui-label font-bold transition-colors cursor-pointer',
                                 profitFilter === value
                                   ? value === 'profit'
                                     ? 'border-market-up/40 bg-market-up/10 text-market-up'
@@ -1031,11 +1031,11 @@ export function FinancialDataPage() {
                     <Button
                       variant="outline"
                       size="icon"
-                      className="relative h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
+                      className="relative h-control-compact w-7 shrink-0 rounded-sm border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
                       title="配置显示字段"
                     >
                       <Columns3 className="h-3.5 w-3.5" />
-                      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-slate-900 px-1 font-mono text-[10px] leading-none text-white dark:bg-slate-100 dark:text-slate-900">
+                      <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-slate-900 px-1 font-mono text-ui-caption leading-none text-white dark:bg-slate-100 dark:text-slate-900">
                         {selectedColumnCount}
                       </span>
                     </Button>
@@ -1044,13 +1044,13 @@ export function FinancialDataPage() {
                     align="end"
                     side="top"
                     sideOffset={10}
-                    className="max-h-[300px] w-80 overflow-hidden border-slate-200 bg-white p-0 shadow-xl dark:border-slate-800 dark:bg-slate-950"
+                    className="max-h-[300px] w-80 overflow-hidden border-slate-200 bg-white p-0 shadow-none dark:border-slate-800 dark:bg-slate-950"
                   >
-                    <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
-                      <div className="text-sm font-black text-slate-900 dark:text-slate-100">
+                    <div className="border-b border-slate-100 px-ui-section py-3 dark:border-slate-800">
+                      <div className="text-ui-body font-black text-slate-900 dark:text-slate-100">
                         显示字段
                       </div>
-                      <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      <div className="text-ui-caption font-bold uppercase tracking-widest text-slate-400">
                         Columns & pinned fields
                       </div>
                     </div>
@@ -1094,7 +1094,7 @@ export function FinancialDataPage() {
                                     />
                                     <button
                                       type="button"
-                                      className="min-w-0 flex-1 text-left text-xs font-bold text-slate-700 dark:text-slate-200"
+                                      className="min-w-0 flex-1 text-left text-ui-label font-bold text-slate-700 dark:text-slate-200"
                                       onClick={() =>
                                         toggleColumnVisibility(column, !visible)
                                       }
@@ -1132,14 +1132,14 @@ export function FinancialDataPage() {
                       })}
                     </div>
 
-                    <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 dark:border-slate-800">
-                      <span className="text-[11px] text-slate-500">
+                    <div className="flex items-center justify-between border-t border-slate-100 px-ui-section py-3 dark:border-slate-800">
+                      <span className="text-ui-caption text-slate-500">
                         已显示 {selectedColumnCount} 列
                       </span>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 px-2 text-xs"
+                        className="h-control-compact px-2 text-ui-label"
                         onClick={resetColumnSettings}
                       >
                         重置默认
@@ -1150,7 +1150,7 @@ export function FinancialDataPage() {
                 <Button
                   variant="outline"
                   size="icon"
-                  className="h-7 w-7 shrink-0 rounded-[4px] border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
+                  className="h-control-compact w-7 shrink-0 rounded-sm border-white/10 bg-transparent text-slate-400 hover:bg-white/[0.06] hover:text-white"
                   disabled={activeFetching || !isFilteringReady}
                   onClick={() => {
                     if (quickFilter === 'all') {
@@ -1200,7 +1200,7 @@ export function FinancialDataPage() {
                 <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/60 backdrop-blur-[2px]">
                   <div className="flex flex-col items-center text-slate-400">
                     <Loader2 className="mb-4 h-8 w-8 animate-spin opacity-50" />
-                    <p className="text-xs font-bold uppercase tracking-widest">
+                    <p className="text-ui-label font-bold uppercase tracking-widest">
                       正在加载真实财务数据
                     </p>
                   </div>
@@ -1246,7 +1246,7 @@ export function FinancialDataPage() {
                     <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800/50">
                       <Banknote className="h-6 w-6 text-slate-400" />
                     </div>
-                    <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                    <p className="text-ui-label font-bold uppercase tracking-widest text-slate-400">
                       {getEmptyMessage(quickFilter)}
                     </p>
                   </div>
@@ -1399,7 +1399,7 @@ export function FinancialDataPage() {
 
 function FilterLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+    <div className="text-ui-caption font-black uppercase tracking-widest text-slate-400">
       {children}
     </div>
   );
@@ -1425,14 +1425,14 @@ function RangeFilter({
         <Input
           inputMode="decimal"
           placeholder="最小值(亿)"
-          className="h-9 text-xs"
+          className="h-control-default text-ui-label"
           value={minValue}
           onChange={e => onMinChange(e.target.value)}
         />
         <Input
           inputMode="decimal"
           placeholder="最大值(亿)"
-          className="h-9 text-xs"
+          className="h-control-default text-ui-label"
           value={maxValue}
           onChange={e => onMaxChange(e.target.value)}
         />
@@ -1743,10 +1743,10 @@ function renderFinancialCell(
     case 'stock':
       return (
         <div className="flex flex-col">
-          <span className="text-sm font-semibold leading-4 text-slate-200 group-hover:text-red-300">
+          <span className="text-ui-body font-semibold leading-4 text-slate-200 group-hover:text-red-300">
             {item.stockName || item.stockCode}
           </span>
-          <span className="font-mono text-[10px] leading-4 text-slate-500">
+          <span className="font-mono text-ui-caption leading-4 text-slate-500">
             {item.stockCode}
           </span>
         </div>
@@ -1756,7 +1756,7 @@ function renderFinancialCell(
       return (
         <Badge
           variant="secondary"
-          className="h-5 border-0 bg-slate-800/70 px-2 font-mono text-[10px] font-medium text-slate-400"
+          className="h-5 border-0 bg-slate-800/70 px-2 font-mono text-ui-caption font-medium text-slate-400"
         >
           {formatReportPeriod(item.reportDate)}
         </Badge>
@@ -1764,7 +1764,7 @@ function renderFinancialCell(
 
     case 'announceDate':
       return (
-        <div className="flex items-center justify-end gap-2 font-mono text-[11px] text-slate-500">
+        <div className="flex items-center justify-end gap-2 font-mono text-ui-caption text-slate-500">
           <Clock className="h-3.5 w-3.5 opacity-40" />
           {item.announceDate || summary?.latestAnnounceDate || '--'}
         </div>
@@ -1772,7 +1772,7 @@ function renderFinancialCell(
 
     case 'status':
       return (
-        <Badge className="h-5 border border-emerald-500/20 bg-emerald-500/10 px-2 font-mono text-[10px] text-emerald-400">
+        <Badge className="h-5 border border-emerald-500/20 bg-emerald-500/10 px-2 font-mono text-ui-caption text-emerald-400">
           {item.announceDate || summary?.latestAnnounceDate
             ? '已披露'
             : '已入库'}
@@ -1787,14 +1787,14 @@ function renderFinancialCell(
 
     case 'epsBasic':
       return (
-        <span className="font-mono text-[11px] font-bold text-slate-300">
+        <span className="font-mono text-ui-caption font-bold text-slate-300">
           {formatDecimal(item.epsBasic ?? summary?.epsBasic, 3)}
         </span>
       );
 
     case 'netProfitMargin':
       return (
-        <span className="font-mono text-[11px] font-bold text-slate-300">
+        <span className="font-mono text-ui-caption font-bold text-slate-300">
           {formatRatio(netProfit, revenue)}
         </span>
       );
@@ -1825,7 +1825,7 @@ function renderFinancialCell(
 
     case 'assetLiabilityRatio':
       return (
-        <span className="font-mono text-[11px] font-bold text-slate-300">
+        <span className="font-mono text-ui-caption font-bold text-slate-300">
           {summaryFetching && !summary
             ? '--'
             : formatRatio(summary?.totalLiabilities, summary?.totalAssets)}
@@ -1867,7 +1867,7 @@ function renderFinancialCell(
 
     case 'statementCounts':
       return (
-        <span className="font-mono text-[11px] font-bold text-slate-500">
+        <span className="font-mono text-ui-caption font-bold text-slate-500">
           {summaryFetching && !summary
             ? '--'
             : [
@@ -1954,7 +1954,7 @@ function MoneyValue({
   return (
     <span
       className={cn(
-        'font-mono text-[11px] font-bold',
+        'font-mono text-ui-caption font-bold',
         trend ? financialToneClass(value) : 'text-slate-300'
       )}
     >
@@ -1973,7 +1973,7 @@ function SummaryMoneyValue({
   trend?: boolean;
 }) {
   if (loading && value == null) {
-    return <span className="font-mono text-sm text-slate-300">--</span>;
+    return <span className="font-mono text-ui-body text-slate-300">--</span>;
   }
 
   return <MoneyValue value={value} trend={trend} />;
@@ -1987,11 +1987,11 @@ function SummaryNumberValue({
   loading: boolean;
 }) {
   if (loading && value == null) {
-    return <span className="font-mono text-sm text-slate-300">--</span>;
+    return <span className="font-mono text-ui-body text-slate-300">--</span>;
   }
 
   return (
-    <span className="font-mono text-[11px] font-bold text-slate-300">
+    <span className="font-mono text-ui-caption font-bold text-slate-300">
       {formatCompactNumber(value)}
     </span>
   );

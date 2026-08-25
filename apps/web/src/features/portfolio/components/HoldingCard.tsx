@@ -116,19 +116,19 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
         onContextMenu={event => openAtPointer(event, holding)}
       >
         <div className="flex min-w-0 items-center gap-3 border-r border-white/5 px-3 py-2">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-blue-500/15 bg-blue-500/10 text-xs font-black text-blue-300">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-blue-500/15 bg-blue-500/10 text-ui-label font-black text-blue-300">
             {getStockIconText(stockName)}
           </div>
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <h3 className="truncate text-sm font-black tracking-tight text-slate-100">
+              <h3 className="truncate text-ui-body font-black tracking-tight text-slate-100">
                 {stockName}
               </h3>
-              <span className="shrink-0 rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[10px] font-black text-slate-500">
+              <span className="shrink-0 rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-ui-caption font-black text-slate-500">
                 {holding.stockCode}
               </span>
             </div>
-            <div className="mt-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-600">
+            <div className="mt-1 flex items-center gap-2 text-ui-caption font-bold uppercase tracking-[0.16em] text-slate-600">
               <span>Realtime</span>
               <span className="h-1 w-1 rounded-full bg-emerald-400" />
               <span>Sync 1s</span>
@@ -172,12 +172,12 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
 
         <div className="relative min-h-[96px] border-r border-white/5 px-3 py-2">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-black uppercase tracking-[0.18em] text-slate-600">
+            <span className="text-ui-caption font-black uppercase tracking-[0.18em] text-slate-600">
               Intraday
             </span>
             <span
               className={cn(
-                'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] font-black',
+                'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-ui-caption font-black',
                 financialToneBadgeClass(holding.changePercent ?? 0, 'holding')
               )}
             >
@@ -200,7 +200,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             type="button"
             size="sm"
             variant="ghost"
-            className="h-7 justify-start gap-2 rounded-md px-2 text-[10px] font-black text-slate-300 hover:bg-white/10 hover:text-slate-50"
+            className="h-control-compact justify-start gap-2 rounded-md px-2 text-ui-caption font-black text-slate-300 hover:bg-white/10 hover:text-slate-50"
             onClick={event => {
               event.stopPropagation();
               openStudioTab(`/holdings?symbol=${holding.stockCode}`);
@@ -213,7 +213,7 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
             type="button"
             size="sm"
             variant="ghost"
-            className="h-7 justify-start gap-2 rounded-md px-2 text-[10px] font-black text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+            className="h-control-compact justify-start gap-2 rounded-md px-2 text-ui-caption font-black text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
             onClick={event => {
               event.stopPropagation();
               void handleLiquidate();
@@ -281,10 +281,10 @@ export function HoldingCard({ holding, onLiquidate }: HoldingCardProps) {
 function MetricCell({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex min-w-0 flex-col justify-center border-b border-r border-white/5 px-3 py-2 last:border-r-0 even:border-r-0 [&:nth-child(n+3)]:border-b-0">
-      <span className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">
+      <span className="text-ui-micro font-black uppercase tracking-[0.16em] text-slate-600">
         {label}
       </span>
-      <span className="mt-0.5 truncate font-mono text-xs font-black text-slate-200">
+      <span className="mt-0.5 truncate font-mono text-ui-label font-black text-slate-200">
         {value}
       </span>
     </div>
@@ -304,13 +304,13 @@ function PnLCell({
 }) {
   return (
     <div className="flex min-w-0 flex-col justify-center border-b border-white/5 px-3 py-2 last:border-b-0">
-      <span className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">
+      <span className="text-ui-micro font-black uppercase tracking-[0.16em] text-slate-600">
         {label}
       </span>
       <div className="mt-0.5 flex min-w-0 items-baseline gap-2">
         <span
           className={cn(
-            'truncate font-mono text-xs font-black',
+            'truncate font-mono text-ui-label font-black',
             financialToneClass(amount, 'holding')
           )}
         >
@@ -319,7 +319,7 @@ function PnLCell({
         {suffix && (
           <span
             className={cn(
-              'shrink-0 font-mono text-[10px] font-bold',
+              'shrink-0 font-mono text-ui-caption font-bold',
               financialToneClass(amount, 'holding'),
               'opacity-70'
             )}

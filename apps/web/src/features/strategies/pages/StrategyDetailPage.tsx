@@ -323,17 +323,21 @@ function PaperAccountSnapshotEditor({
       <p className="leading-relaxed">
         将创建一个独立模拟账户快照，不连接真实账户，也不复用其他模拟盘账户。
       </p>
-      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/[0.03]">
+      <div className="rounded-panel border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/[0.03]">
         <div className="mb-3 grid grid-cols-2 gap-2">
           <div className="space-y-1">
-            <div className="text-[10px] font-bold text-slate-400">绑定标的</div>
-            <div className="text-xs font-bold text-slate-900 dark:text-white">
+            <div className="text-ui-caption font-bold text-slate-400">
+              绑定标的
+            </div>
+            <div className="text-ui-label font-bold text-slate-900 dark:text-white">
               {draft.instrumentCode}
             </div>
           </div>
           <div className="space-y-1">
-            <div className="text-[10px] font-bold text-slate-400">账户模型</div>
-            <div className="text-xs font-bold text-slate-900 dark:text-white">
+            <div className="text-ui-caption font-bold text-slate-400">
+              账户模型
+            </div>
+            <div className="text-ui-label font-bold text-slate-900 dark:text-white">
               独立快照
             </div>
           </div>
@@ -341,7 +345,7 @@ function PaperAccountSnapshotEditor({
         <div className="grid gap-3">
           {fields.map(field => (
             <div key={field.key} className="space-y-1.5">
-              <Label className="text-[10px] font-bold text-slate-400">
+              <Label className="text-ui-caption font-bold text-slate-400">
                 {field.label}
               </Label>
               <div className="relative">
@@ -356,9 +360,9 @@ function PaperAccountSnapshotEditor({
                       [field.key]: event.target.value,
                     })
                   }
-                  className="h-9 rounded-lg border-slate-200 bg-white pr-10 text-xs font-bold tabular-nums dark:border-white/10 dark:bg-slate-950/40"
+                  className="h-9 rounded-lg border-slate-200 bg-white pr-10 text-ui-label font-bold tabular-nums dark:border-white/10 dark:bg-slate-950/40"
                 />
-                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-ui-caption font-bold text-slate-400">
                   {field.suffix}
                 </span>
               </div>
@@ -366,7 +370,7 @@ function PaperAccountSnapshotEditor({
           ))}
         </div>
       </div>
-      <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+      <p className="text-ui-label leading-relaxed text-slate-500 dark:text-slate-400">
         创建后不会自动启动；启动模拟盘时只使用这份虚拟资金和持仓快照。
       </p>
     </div>
@@ -675,7 +679,7 @@ function ScrollableStrategyTabs({
           isDragging ? 'cursor-grabbing select-none' : 'cursor-grab'
         )}
       >
-        <TabsList className="h-auto w-max min-w-max justify-start gap-6 bg-transparent p-0 sm:gap-8">
+        <TabsList className="h-auto w-max min-w-max justify-start gap-ui-panel bg-transparent p-0 sm:gap-ui-panel">
           {tabs.map(tab => {
             const TabIcon = tab.icon;
             return (
@@ -683,7 +687,7 @@ function ScrollableStrategyTabs({
                 key={tab.id}
                 value={tab.id}
                 data-strategy-run-tab={tab.id}
-                className="group relative shrink-0 rounded-none bg-transparent px-0 py-4 text-xs font-bold text-slate-500 transition-colors hover:bg-transparent hover:text-slate-300 data-[state=active]:bg-transparent data-[state=active]:text-red-400 data-[state=active]:shadow-none"
+                className="group relative shrink-0 rounded-none bg-transparent px-0 py-ui-section text-ui-label font-bold text-slate-500 transition-colors hover:bg-transparent hover:text-slate-300 data-[state=active]:bg-transparent data-[state=active]:text-red-400 data-[state=active]:shadow-none"
               >
                 <div className="flex items-center gap-2">
                   <TabIcon
@@ -1402,17 +1406,17 @@ export default function StrategyDetailPage() {
 
   const loadingSidebar = (
     <aside className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-white/5 px-4 py-3">
-        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+      <div className="border-b border-white/5 px-ui-section py-3">
+        <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-red-400">
           Strategy Studio
         </div>
-        <div className="mt-1 text-xs font-medium leading-relaxed text-slate-500">
+        <div className="mt-1 text-ui-label font-medium leading-relaxed text-slate-500">
           策略实例、模板和运行状态集中管理。
         </div>
       </div>
 
       <div className="border-b border-white/5 p-2">
-        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+        <div className="mb-2 px-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
           Workspace
         </div>
         <div className="space-y-1">
@@ -1429,10 +1433,10 @@ export default function StrategyDetailPage() {
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-bold">
+                  <span className="block truncate text-ui-label font-bold">
                     {item.label}
                   </span>
-                  <span className="block truncate text-[10px] font-medium text-slate-600">
+                  <span className="block truncate text-ui-caption font-medium text-slate-600">
                     {item.meta}
                   </span>
                 </span>
@@ -1443,7 +1447,7 @@ export default function StrategyDetailPage() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden p-2">
-        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+        <div className="mb-2 px-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
           Strategy Instances
         </div>
         <div className="space-y-2">
@@ -1463,10 +1467,10 @@ export default function StrategyDetailPage() {
       activeMode="MONITOR"
       className="h-full min-h-0"
       content={
-        <div className="studio-workspace-surface flex h-full items-center justify-center p-6">
+        <div className="studio-workspace-surface flex h-full items-center justify-center p-ui-panel">
           <div
             className={cn(
-              'rounded-lg border px-5 py-4 text-center text-[11px] font-black uppercase tracking-widest',
+              'rounded-lg border px-ui-section py-ui-section text-center text-ui-caption font-black uppercase tracking-widest',
               tone === 'rose'
                 ? 'border-rose-500/20 bg-rose-500/10 text-rose-300'
                 : 'border-white/10 bg-white/[0.03] text-slate-400'
@@ -1483,7 +1487,7 @@ export default function StrategyDetailPage() {
       statusBarLeft={<span>策略详情</span>}
       statusBarRight={<span>{strategyId || '-'}</span>}
       tabBar={
-        <div className="flex h-10 shrink-0 items-center border-b border-white/5 bg-[#0b1120]/80 px-3 text-[11px] font-black uppercase tracking-[0.2em] text-slate-300">
+        <div className="flex h-10 shrink-0 items-center border-b border-white/5 bg-[#0b1120]/80 px-3 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-300">
           QuantX Strategy Studio
         </div>
       }
@@ -1586,21 +1590,21 @@ export default function StrategyDetailPage() {
 
   const detailSidebar = (
     <aside className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-white/5 px-4 py-3">
+      <div className="border-b border-white/5 px-ui-section py-3">
         <Link
           href="/strategies"
-          className="mb-3 inline-flex h-7 items-center gap-2 rounded-md border border-white/10 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
+          className="mb-3 inline-flex h-7 items-center gap-2 rounded-md border border-white/10 px-2 text-ui-caption font-bold uppercase tracking-wider text-slate-400 transition-colors hover:border-red-500/40 hover:text-red-300"
         >
           <ArrowLeft className="h-3 w-3" />
           策略看板
         </Link>
-        <div className="text-[10px] font-black uppercase tracking-[0.24em] text-red-400">
+        <div className="text-ui-caption font-black uppercase tracking-[0.24em] text-red-400">
           Strategy Dashboard
         </div>
-        <h2 className="mt-1 truncate text-sm font-bold text-slate-100">
+        <h2 className="mt-1 truncate text-ui-body font-bold text-slate-100">
           {strategyInstance?.displayName || strategy.name}
         </h2>
-        <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-slate-500">
+        <p className="mt-1 line-clamp-2 text-ui-caption leading-relaxed text-slate-500">
           {strategy.description}
         </p>
       </div>
@@ -1612,12 +1616,12 @@ export default function StrategyDetailPage() {
               key={stat.label}
               className="rounded-md border border-white/5 bg-white/[0.03] px-2 py-2"
             >
-              <div className="truncate text-[9px] font-black uppercase tracking-wider text-slate-600">
+              <div className="truncate text-ui-micro font-black uppercase tracking-wider text-slate-600">
                 {stat.label}
               </div>
               <div
                 className={cn(
-                  'mt-1 truncate font-mono text-xs font-bold',
+                  'mt-1 truncate font-mono text-ui-label font-bold',
                   stat.color
                 )}
               >
@@ -1629,12 +1633,12 @@ export default function StrategyDetailPage() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-2 custom-scrollbar">
-        <div className="mb-2 px-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">
+        <div className="mb-2 px-2 text-ui-caption font-black uppercase tracking-[0.2em] text-slate-600">
           Runs
         </div>
         <div className="space-y-1">
           {strategyRuns.length === 0 && (
-            <div className="rounded-md border border-dashed border-white/10 px-3 py-4 text-center text-[11px] text-slate-500">
+            <div className="rounded-md border border-dashed border-white/10 px-3 py-ui-section text-center text-ui-caption text-slate-500">
               暂无运行实例
             </div>
           )}
@@ -1665,10 +1669,10 @@ export default function StrategyDetailPage() {
                   )}
                 />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-bold">
+                  <span className="block truncate text-ui-label font-bold">
                     {run.name}
                   </span>
-                  <span className="block truncate text-[10px] text-slate-600">
+                  <span className="block truncate text-ui-caption text-slate-600">
                     {state.modeLabel} / {state.statusLabel}
                   </span>
                 </span>
@@ -1698,13 +1702,13 @@ export default function StrategyDetailPage() {
         )}
       >
         {/* Unified Command Center Header Card */}
-        <div className="relative overflow-hidden border border-white/5 bg-[#0b1120]/70 px-4 py-3">
+        <div className="relative overflow-hidden border border-white/5 bg-[#0b1120]/70 px-ui-section py-3">
           <div className="relative z-10 flex flex-col gap-3 w-full">
             {/* Slim Top Row: Back Nav & Tags */}
             <div className="flex justify-between items-center w-full">
               <Link
                 href="/strategies"
-                className="group -ml-2 inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 transition-all duration-300 hover:bg-red-500/10 hover:text-red-400"
+                className="group -ml-2 inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-ui-caption font-bold uppercase tracking-wider text-slate-500 transition-all duration-300 hover:bg-red-500/10 hover:text-red-400"
               >
                 <ArrowLeft className="h-3 w-3 transition-transform duration-300 group-hover:-translate-x-0.5" />
                 返回策略看板
@@ -1712,7 +1716,7 @@ export default function StrategyDetailPage() {
 
               <div className="flex flex-wrap items-center justify-end gap-1.5">
                 <div
-                  className={`px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border ${getTagClass(runState?.color)}`}
+                  className={`px-2 py-0.5 rounded text-ui-micro font-bold uppercase tracking-wider border ${getTagClass(runState?.color)}`}
                 >
                   {runState?.statusLabel || '未创建实例'}
                 </div>
@@ -1720,7 +1724,7 @@ export default function StrategyDetailPage() {
                 {runState && (
                   <div
                     className={cn(
-                      'flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider border',
+                      'flex items-center gap-1 px-2 py-0.5 rounded text-ui-micro font-bold uppercase tracking-wider border',
                       runState.mode === 'BACKTEST' && getTagClass('red'),
                       runState.mode === 'PAPER' && getTagClass('emerald'),
                       runState.mode === 'LIVE' && getTagClass('rose')
@@ -1742,7 +1746,7 @@ export default function StrategyDetailPage() {
                 {displayRun?.mode === StrategyRunMode.Backtest && (
                   <button
                     type="button"
-                    className="flex items-center gap-2 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-red-200 shadow-sm shadow-red-500/10 hover:border-red-300/60 hover:bg-red-500/20"
+                    className="flex items-center gap-2 rounded-md border border-red-400/30 bg-red-500/10 px-3 py-1 text-ui-caption font-bold uppercase tracking-wider text-red-200 shadow-sm shadow-red-500/10 hover:border-red-300/60 hover:bg-red-500/20"
                     onClick={() => setActiveTab('history')}
                     aria-label="查看当前回测版本"
                   >
@@ -1764,34 +1768,34 @@ export default function StrategyDetailPage() {
             </div>
 
             {/* Main Row: Identity & Compact Controls */}
-            <div className="flex flex-col xl:flex-row justify-between xl:items-center gap-5 w-full pb-3">
+            <div className="flex flex-col xl:flex-row justify-between xl:items-center gap-ui-section w-full pb-3">
               {/* Identity compressed */}
-              <div className="flex items-center gap-4 flex-1 min-w-0 pr-4">
-                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-red-600/20 to-red-500/5 border border-red-500/20 flex items-center justify-center text-red-500 shadow-md shrink-0">
+              <div className="flex items-center gap-ui-section flex-1 min-w-0 pr-4">
+                <div className="w-11 h-11 rounded-panel bg-gradient-to-br from-red-600/20 to-red-500/5 border border-red-500/20 flex items-center justify-center text-red-500 shadow-md shrink-0">
                   <Bot size={22} strokeWidth={1.5} />
                 </div>
 
                 <div className="flex flex-col gap-1 min-w-0 flex-1">
-                  <h1 className="text-xl font-bold text-slate-50 tracking-tight truncate">
+                  <h1 className="text-ui-page-title font-bold text-slate-50 tracking-tight truncate">
                     {strategyInstance?.displayName || strategy.name}
                   </h1>
-                  <p className="text-slate-400 text-xs font-medium truncate max-w-2xl">
+                  <p className="text-slate-400 text-ui-label font-medium truncate max-w-2xl">
                     {strategy.description}
                   </p>
                 </div>
               </div>
 
               {/* Compressed Stats & Actions */}
-              <div className="flex items-center gap-5 shrink-0 hidden md:flex xl:ml-auto">
+              <div className="flex items-center gap-ui-section shrink-0 hidden md:flex xl:ml-auto">
                 {/* Ultracompact Stats List */}
-                <div className="flex items-center gap-5 pr-5 border-r border-white/10">
+                <div className="flex items-center gap-ui-section pr-5 border-r border-white/10">
                   {stats.map((stat, i) => (
                     <div key={i} className="flex flex-col items-start gap-0.5">
-                      <span className="text-[9px] font-medium text-slate-400 uppercase tracking-widest pl-0.5">
+                      <span className="text-ui-micro font-medium text-slate-400 uppercase tracking-widest pl-0.5">
                         {stat.label}
                       </span>
                       <span
-                        className={`text-sm font-mono font-bold leading-none ${stat.color}`}
+                        className={`text-ui-body font-mono font-bold leading-none ${stat.color}`}
                       >
                         {stat.value}
                       </span>
@@ -1807,7 +1811,7 @@ export default function StrategyDetailPage() {
                       return (
                         <Button
                           className={cn(
-                            'rounded-lg h-8 px-4 text-white shadow text-[10px] font-bold uppercase tracking-wider',
+                            'rounded-lg h-control-compact px-ui-section text-white shadow text-ui-caption font-bold uppercase tracking-wider',
                             getPrimaryActionClass(primaryAction.tone)
                           )}
                           onClick={() => void executeAction(primaryAction.id)}
@@ -1819,7 +1823,7 @@ export default function StrategyDetailPage() {
                     })()}
                   {!primaryAction && !displayRun && (
                     <Button
-                      className="rounded-lg h-8 px-4 bg-red-600 hover:bg-red-500 text-white shadow shadow-red-600/20 text-[10px] font-bold uppercase tracking-wider"
+                      className="rounded-lg h-control-compact px-ui-section bg-red-600 hover:bg-red-500 text-white shadow shadow-red-600/20 text-ui-caption font-bold uppercase tracking-wider"
                       onClick={() => setLocation(`/strategies/${id}/run`)}
                     >
                       <Play className="mr-1.5 h-3 w-3 fill-current" />
@@ -1829,13 +1833,13 @@ export default function StrategyDetailPage() {
                   {secondaryActions.length > 0 && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button className="h-8 px-2 bg-white/5 hover:bg-white/10 text-white rounded-lg focus-visible:ring-0 focus-visible:ring-offset-0">
+                        <Button className="h-control-compact px-2 bg-white/5 hover:bg-white/10 text-white rounded-lg focus-visible:ring-0 focus-visible:ring-offset-0">
                           <ChevronDown className="h-3 w-3" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent
                         align="end"
-                        className="w-36 border-white/10 bg-[#0F1729] shadow-2xl p-1 flex flex-col gap-1"
+                        className="w-36 border-white/10 bg-[#0F1729] shadow-none p-1 flex flex-col gap-1"
                       >
                         {secondaryActions.map(action => {
                           const ItemIcon = getActionIcon(action.id);
@@ -1843,7 +1847,7 @@ export default function StrategyDetailPage() {
                             <DropdownMenuItem
                               key={action.id}
                               className={cn(
-                                'text-[10px] h-8 font-bold uppercase tracking-wider cursor-pointer',
+                                'text-ui-caption h-8 font-bold uppercase tracking-wider cursor-pointer',
                                 action.dangerous
                                   ? 'text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 focus:bg-rose-500/10 focus:text-rose-300'
                                   : 'text-slate-300 hover:text-red-300 hover:bg-red-500/10 focus:bg-red-500/10 focus:text-red-300'
@@ -1861,7 +1865,7 @@ export default function StrategyDetailPage() {
                   <Button
                     variant="outline"
                     size="icon"
-                    className="h-8 w-8 ml-0.5 rounded-lg border-white/10 bg-transparent text-slate-400 hover:text-white hover:bg-white/5"
+                    className="h-control-compact w-8 ml-0.5 rounded-lg border-white/10 bg-transparent text-slate-400 hover:text-white hover:bg-white/5"
                     onClick={() => setActiveTab('config')}
                   >
                     <Settings size={14} />
@@ -2093,10 +2097,10 @@ export default function StrategyDetailPage() {
             <div className="flex min-w-0 items-center gap-3">
               <Bot className="h-4 w-4 shrink-0 text-red-400" />
               <div className="min-w-0">
-                <div className="truncate text-[11px] font-black uppercase tracking-[0.2em] text-slate-200">
+                <div className="truncate text-ui-caption font-black uppercase tracking-[0.2em] text-slate-200">
                   {strategyInstance?.displayName || strategy.name}
                 </div>
-                <div className="truncate text-[10px] font-medium text-slate-600">
+                <div className="truncate text-ui-caption font-medium text-slate-600">
                   {activeTab} / {runState?.modeLabel || 'template'}
                 </div>
               </div>
@@ -2110,7 +2114,7 @@ export default function StrategyDetailPage() {
                       type="button"
                       onClick={() => void executeAction(primaryAction.id)}
                       className={cn(
-                        'flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[10px] font-black uppercase tracking-wider text-white transition-colors',
+                        'flex h-7 items-center gap-1.5 rounded-md px-2.5 text-ui-caption font-black uppercase tracking-wider text-white transition-colors',
                         getPrimaryActionClass(primaryAction.tone)
                       )}
                     >
@@ -2145,8 +2149,8 @@ export default function StrategyDetailPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
+          <div className="space-y-ui-section">
+            <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/70 px-ui-section py-3 text-ui-body">
               <span className="text-slate-400">当前范围</span>
               <span className="font-semibold text-slate-100">
                 {backtestRangeLabel || '-'}
@@ -2163,7 +2167,7 @@ export default function StrategyDetailPage() {
             />
 
             {rerunError && (
-              <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-ui-section py-3 text-ui-body text-rose-200">
                 {rerunError}
               </div>
             )}

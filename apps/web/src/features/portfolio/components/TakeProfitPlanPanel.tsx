@@ -161,12 +161,12 @@ function PlanMetric({
 }) {
   return (
     <div className="min-w-0 rounded-md border border-white/5 bg-white/[0.025] px-3 py-2.5">
-      <div className="truncate text-[10px] font-black uppercase tracking-wider text-slate-600">
+      <div className="truncate text-ui-caption font-black uppercase tracking-wider text-slate-600">
         {label}
       </div>
       <div
         className={cn(
-          'mt-1 truncate font-mono text-sm font-black tabular-nums text-slate-100',
+          'mt-1 truncate font-mono text-ui-body font-black tabular-nums text-slate-100',
           tone === 'danger' && 'text-rose-300',
           tone === 'success' && 'text-emerald-300',
           tone === 'muted' && 'text-slate-400',
@@ -187,7 +187,7 @@ function SectionTitle({
   label: string;
 }) {
   return (
-    <div className="flex items-center gap-2 text-xs font-black text-slate-200">
+    <div className="flex items-center gap-2 text-ui-label font-black text-slate-200">
       <Icon className="h-3.5 w-3.5 text-red-300" />
       {label}
     </div>
@@ -408,11 +408,9 @@ export function TakeProfitPlanPanel({
         strategyId === 'PARTIAL_TRAILING'
           ? '平衡型量价动态止盈；固定保护数量，逐笔成交回填'
           : null,
-      sellMode:
-        strategyId === 'PARTIAL_TRAILING' ? 'FIXED_VOLUME' : sellMode,
+      sellMode: strategyId === 'PARTIAL_TRAILING' ? 'FIXED_VOLUME' : sellMode,
       sellRatioPct:
-        strategyId !== 'PARTIAL_TRAILING' &&
-        sellMode === 'PERCENT_AVAILABLE'
+        strategyId !== 'PARTIAL_TRAILING' && sellMode === 'PERCENT_AVAILABLE'
           ? ratioPct
           : null,
       sellVolume:
@@ -440,12 +438,12 @@ export function TakeProfitPlanPanel({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <ShieldCheck className="h-3.5 w-3.5 text-market-up" />
-            <h3 className="truncate text-xs font-black text-slate-100">
+            <h3 className="truncate text-ui-label font-black text-slate-100">
               止盈计划
             </h3>
             <span
               className={cn(
-                'rounded border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] font-black',
+                'rounded border border-white/10 bg-white/[0.04] px-2 py-1 text-ui-caption font-black',
                 status.tone
               )}
             >
@@ -453,17 +451,17 @@ export function TakeProfitPlanPanel({
             </span>
             {selectedTemplate.status === 'preview' && (
               <span
-                className="rounded border border-amber-400/20 bg-amber-500/10 px-2 py-1 text-[10px] font-black text-amber-100"
+                className="rounded border border-amber-400/20 bg-amber-500/10 px-2 py-1 text-ui-caption font-black text-amber-100"
                 role="alert"
               >
                 待接入监控引擎
               </span>
             )}
           </div>
-          <p className="mt-1 text-[10px] font-bold text-slate-600">
+          <p className="mt-1 text-ui-caption font-bold text-slate-600">
             动态模式进入止盈区后继续观察量价，成交状态以券商回报为准。
           </p>
-          <p className="mt-1 text-[10px] font-bold text-slate-600">
+          <p className="mt-1 text-ui-caption font-bold text-slate-600">
             最近检查 {formatDateTime(order?.lastCheckedAt)}
             {order?.lastError ? ` · ${order.lastError}` : ''}
           </p>
@@ -477,7 +475,7 @@ export function TakeProfitPlanPanel({
             title="立即检查条件，满足时提交止盈委托"
             disabled={!order?.id || isTerminal || actionLoading}
             onClick={onEvaluate}
-            className="h-8 px-2 text-[10px] font-black"
+            className="h-control-compact px-2 text-ui-caption font-black"
           >
             <Target className="mr-1.5 h-3.5 w-3.5" />
             立即检查
@@ -491,7 +489,7 @@ export function TakeProfitPlanPanel({
             onClick={() =>
               order?.id && onToggleEnabled(order.id, !order.enabled)
             }
-            className="h-8 px-2 text-[10px] font-black"
+            className="h-8 px-2 text-ui-caption font-black"
           >
             <Power className="mr-1.5 h-3.5 w-3.5" />
             {order?.enabled ? '停用' : '启用'}
@@ -499,7 +497,7 @@ export function TakeProfitPlanPanel({
         </div>
       </div>
 
-      <div className="space-y-4 p-3">
+      <div className="space-y-ui-section p-3">
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
           <PlanMetric label="当前价" value={formatPrice(holding?.lastPrice)} />
           <PlanMetric label="成本价" value={formatPrice(holding?.avgPrice)} />
@@ -533,12 +531,12 @@ export function TakeProfitPlanPanel({
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-black text-slate-100">
+                  <span className="text-ui-label font-black text-slate-100">
                     {selectedTemplate.label}
                   </span>
                   <span
                     className={cn(
-                      'rounded border px-1.5 py-0.5 text-[9px] font-black',
+                      'rounded border px-1.5 py-0.5 text-ui-micro font-black',
                       isSaveSupported
                         ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
                         : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
@@ -547,10 +545,10 @@ export function TakeProfitPlanPanel({
                     {isSaveSupported ? '可保存' : '待接入监控引擎'}
                   </span>
                 </div>
-                <p className="mt-1 text-[10px] font-bold leading-4 text-slate-400">
+                <p className="mt-1 text-ui-caption font-bold leading-4 text-slate-400">
                   {selectedTemplate.description}
                 </p>
-                <p className="mt-1 text-[10px] font-bold leading-4 text-slate-600">
+                <p className="mt-1 text-ui-caption font-bold leading-4 text-slate-600">
                   {selectedTemplate.summary}
                 </p>
               </div>
@@ -558,7 +556,7 @@ export function TakeProfitPlanPanel({
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-8 shrink-0 gap-1 border border-white/10 bg-white/[0.025] px-2 text-[10px] font-black text-slate-300 hover:border-primary/25 hover:bg-primary/10 hover:text-primary"
+                className="h-control-compact shrink-0 gap-1 border border-white/10 bg-white/[0.025] px-2 text-ui-caption font-black text-slate-300 hover:border-primary/25 hover:bg-primary/10 hover:text-primary"
                 onClick={() => setStrategyPickerOpen(open => !open)}
                 aria-expanded={strategyPickerOpen}
               >
@@ -596,12 +594,12 @@ export function TakeProfitPlanPanel({
                         )}
                       >
                         <div className="flex items-start justify-between gap-2">
-                          <span className="text-xs font-black">
+                          <span className="text-ui-label font-black">
                             {template.label}
                           </span>
                           <span
                             className={cn(
-                              'shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-black',
+                              'shrink-0 rounded border px-1.5 py-0.5 text-ui-micro font-black',
                               supported
                                 ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
                                 : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
@@ -610,7 +608,7 @@ export function TakeProfitPlanPanel({
                             {supported ? '可保存' : '待接入监控引擎'}
                           </span>
                         </div>
-                        <p className="mt-1 text-[10px] font-bold leading-4">
+                        <p className="mt-1 text-ui-caption font-bold leading-4">
                           {template.description}
                         </p>
                       </button>
@@ -636,7 +634,7 @@ export function TakeProfitPlanPanel({
                   type="button"
                   onClick={() => setTriggerMode(mode as TakeProfitTriggerMode)}
                   className={cn(
-                    'h-8 rounded-md border px-3 text-[10px] font-black transition-colors',
+                    'h-8 rounded-md border px-3 text-ui-caption font-black transition-colors',
                     triggerMode === mode
                       ? 'border-primary/35 bg-primary/10 text-primary'
                       : 'border-white/10 bg-white/[0.025] text-slate-500 hover:border-primary/25 hover:text-primary'
@@ -652,7 +650,7 @@ export function TakeProfitPlanPanel({
                 <div className="grid gap-1.5">
                   <Label
                     htmlFor="take-profit-target-profit"
-                    className="text-[10px] font-black text-slate-500"
+                    className="text-ui-caption font-black text-slate-500"
                   >
                     目标收益率 (%)
                   </Label>
@@ -662,10 +660,10 @@ export function TakeProfitPlanPanel({
                     inputMode="decimal"
                     value={targetProfitPct}
                     onChange={event => setTargetProfitPct(event.target.value)}
-                    className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100"
+                    className="h-9 rounded-md border-white/10 bg-[#050b14] text-ui-label font-bold text-slate-100"
                   />
                   {derivedTargetPrice !== null && (
-                    <div className="text-[10px] font-bold text-slate-600">
+                    <div className="text-ui-caption font-bold text-slate-600">
                       对应目标价 {formatPrice(derivedTargetPrice)}
                     </div>
                   )}
@@ -676,7 +674,7 @@ export function TakeProfitPlanPanel({
                 <div className="grid gap-1.5">
                   <Label
                     htmlFor="take-profit-target-price"
-                    className="text-[10px] font-black text-slate-500"
+                    className="text-ui-caption font-black text-slate-500"
                   >
                     目标价
                   </Label>
@@ -686,10 +684,10 @@ export function TakeProfitPlanPanel({
                     inputMode="decimal"
                     value={targetPrice}
                     onChange={event => setTargetPrice(event.target.value)}
-                    className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100"
+                    className="h-9 rounded-md border-white/10 bg-[#050b14] text-ui-label font-bold text-slate-100"
                   />
                   {derivedTargetProfitPct !== null && (
-                    <div className="text-[10px] font-bold text-slate-600">
+                    <div className="text-ui-caption font-bold text-slate-600">
                       对应收益率{' '}
                       {formatPercentOrDash(derivedTargetProfitPct, true)}
                     </div>
@@ -699,7 +697,7 @@ export function TakeProfitPlanPanel({
             </div>
 
             {triggerMode === 'EITHER' && (
-              <div className="rounded-md border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[10px] font-bold text-amber-100">
+              <div className="rounded-md border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-ui-caption font-bold text-amber-100">
                 任一条件满足即触发。历史双条件订单按当前后端 OR 语义执行。
               </div>
             )}
@@ -711,7 +709,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('10', 'PERCENT_AVAILABLE', '30')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-ui-caption font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">轻仓止盈</div>
                 +10% / 卖30%
@@ -719,7 +717,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('15', 'PERCENT_AVAILABLE', '50')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-ui-caption font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">标准止盈</div>
                 +15% / 卖50%
@@ -727,7 +725,7 @@ export function TakeProfitPlanPanel({
               <button
                 type="button"
                 onClick={() => applyPreset('20', 'ALL_AVAILABLE')}
-                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-[10px] font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
+                className="rounded-md border border-white/10 bg-white/[0.025] px-2 py-2 text-left text-ui-caption font-bold text-slate-300 transition-colors hover:border-market-down/25 hover:bg-market-down/10"
               >
                 <div className="font-black text-slate-100">全部止盈</div>
                 +20% / 全部
@@ -738,7 +736,7 @@ export function TakeProfitPlanPanel({
               <div className="grid gap-1.5">
                 <Label
                   htmlFor="take-profit-sell-mode"
-                  className="text-[10px] font-black text-slate-500"
+                  className="text-ui-caption font-black text-slate-500"
                 >
                   卖出数量
                 </Label>
@@ -750,7 +748,7 @@ export function TakeProfitPlanPanel({
                 >
                   <SelectTrigger
                     id="take-profit-sell-mode"
-                    className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100"
+                    className="h-control-default rounded-md border-white/10 bg-[#050b14] text-ui-label font-bold text-slate-100"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -765,7 +763,7 @@ export function TakeProfitPlanPanel({
               <div className="grid gap-1.5">
                 <Label
                   htmlFor="take-profit-sell-value"
-                  className="text-[10px] font-black text-slate-500"
+                  className="text-ui-caption font-black text-slate-500"
                 >
                   {sellMode === 'PERCENT_AVAILABLE'
                     ? '卖出比例 (%)'
@@ -792,7 +790,7 @@ export function TakeProfitPlanPanel({
                       setSellVolume(event.target.value);
                     }
                   }}
-                  className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100 disabled:opacity-70"
+                  className="h-9 rounded-md border-white/10 bg-[#050b14] text-ui-label font-bold text-slate-100 disabled:opacity-70"
                 />
               </div>
             </div>
@@ -804,14 +802,14 @@ export function TakeProfitPlanPanel({
             <div className="grid gap-1.5">
               <Label
                 htmlFor="take-profit-execution-mode"
-                className="text-[10px] font-black text-slate-500"
+                className="text-ui-caption font-black text-slate-500"
               >
                 自动止盈执行模式
               </Label>
               <Select value={executionMode} onValueChange={setExecutionMode}>
                 <SelectTrigger
                   id="take-profit-execution-mode"
-                  className="h-9 rounded-md border-white/10 bg-[#050b14] text-xs font-bold text-slate-100"
+                  className="h-control-default rounded-md border-white/10 bg-[#050b14] text-ui-label font-bold text-slate-100"
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -821,7 +819,7 @@ export function TakeProfitPlanPanel({
                 </SelectContent>
               </Select>
             </div>
-            <label className="flex cursor-pointer items-center gap-2 rounded-md border border-white/10 bg-[#050b14] px-3 text-[10px] font-bold text-slate-300">
+            <label className="flex cursor-pointer items-center gap-2 rounded-md border border-white/10 bg-[#050b14] px-3 text-ui-caption font-bold text-slate-300">
               <input
                 type="checkbox"
                 checked={autoExitAuthorized}
@@ -839,11 +837,11 @@ export function TakeProfitPlanPanel({
         >
           <div className="xl:col-span-2">
             <SectionTitle icon={Activity} label="执行预览" />
-            <div className="mt-2 text-xs font-bold leading-5 text-blue-100">
+            <div className="mt-2 text-ui-label font-bold leading-5 text-blue-100">
               {preview.triggerSummary} 后提交 SELL 委托，成交以券商回报为准。
             </div>
             {strategyId === 'PARTIAL_TRAILING' && (
-              <div className="mt-1 text-[10px] font-bold text-blue-200/70">
+              <div className="mt-1 text-ui-caption font-bold text-blue-200/70">
                 达标后不立即卖出：强势放量继续跟涨，量价转弱连续确认或快速回撤时卖出固定保护股数。
               </div>
             )}
@@ -856,7 +854,7 @@ export function TakeProfitPlanPanel({
             label="估算委托市值"
             value={formatCurrency(preview.estimatedOrderValue)}
           />
-          <div className="xl:col-span-4 rounded-md border border-white/5 bg-[#050b14]/60 px-3 py-2 text-[10px] font-bold leading-5 text-slate-500">
+          <div className="xl:col-span-4 rounded-md border border-white/5 bg-[#050b14]/60 px-3 py-2 text-ui-caption font-bold leading-5 text-slate-500">
             T+1、可卖量、冻结、停牌、涨跌停、100
             股整数倍与零股清仓仍由交易域和券商回报校验。
           </div>
@@ -881,11 +879,14 @@ export function TakeProfitPlanPanel({
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-white/5 bg-[#08101d]/75 px-3 py-2">
           {!isSaveSupported ? (
-            <div className="text-[10px] font-bold text-amber-100" role="alert">
+            <div
+              className="text-ui-caption font-bold text-amber-100"
+              role="alert"
+            >
               该策略待接入监控引擎，暂不能保存为自动执行计划。
             </div>
           ) : (
-            <div className="inline-flex items-center gap-2 text-[10px] font-bold text-slate-500">
+            <div className="inline-flex items-center gap-2 text-ui-caption font-bold text-slate-500">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-300" />
               可保存为真实止盈监控单
             </div>
@@ -900,7 +901,7 @@ export function TakeProfitPlanPanel({
                 title="取消止盈计划"
                 disabled={actionLoading}
                 onClick={() => order.id && onCancel(order.id)}
-                className="h-8 px-2 text-[10px] font-black text-rose-200 hover:text-rose-100"
+                className="h-8 px-2 text-ui-caption font-black text-rose-200 hover:text-rose-100"
               >
                 <Trash2 className="mr-1.5 h-3.5 w-3.5" />
                 取消计划
@@ -912,7 +913,7 @@ export function TakeProfitPlanPanel({
               size="sm"
               disabled={!canOperate || isLoading || !isSaveSupported}
               onClick={() => handleSave(false)}
-              className="h-8 px-3 text-[10px] font-black"
+              className="h-8 px-3 text-ui-caption font-black"
             >
               <Clock className="mr-1.5 h-3.5 w-3.5" />
               仅保存
@@ -922,7 +923,7 @@ export function TakeProfitPlanPanel({
               size="sm"
               disabled={!canOperate || isLoading || !isSaveSupported}
               onClick={() => handleSave(true)}
-              className="h-8 bg-market-down px-4 text-[10px] font-black text-white hover:bg-market-down/90"
+              className="h-8 bg-market-down px-ui-section text-ui-caption font-black text-white hover:bg-market-down/90"
             >
               {isLoading ? (
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />

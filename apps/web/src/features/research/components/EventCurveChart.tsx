@@ -10,6 +10,8 @@ import {
   YAxis,
 } from 'recharts';
 
+import { NativeSelect } from '@/components/ui/native-select';
+
 import { selectPreferredBenchmark } from '../model';
 import type { EventCurvePoint } from '../model';
 
@@ -59,7 +61,7 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
       description="均值及按事件日期聚类 Bootstrap 的置信区间；横轴为事件后的交易日。"
       className="min-w-0"
     >
-      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.05] px-4 py-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.05] px-ui-section py-2">
         <div
           className="flex flex-wrap gap-1"
           aria-label="收益口径"
@@ -72,7 +74,7 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
                 type="button"
                 aria-pressed={returnKind === value}
                 onClick={() => setReturnKind(value)}
-                className={`h-7 cursor-pointer rounded px-2.5 text-[10px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                className={`h-7 cursor-pointer rounded px-2.5 text-ui-caption font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                   returnKind === value
                     ? 'bg-blue-500/15 text-blue-200'
                     : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
@@ -83,14 +85,14 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
             )
           )}
         </div>
-        <label className="ml-auto flex items-center gap-2 text-[10px] font-bold text-slate-500">
+        <label className="ml-auto flex items-center gap-2 text-ui-caption font-bold text-slate-500">
           基准
-          <select
+          <NativeSelect
             value={benchmark}
             onChange={event =>
               setBenchmark(event.target.value as EventCurvePoint['benchmark'])
             }
-            className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-[10px] text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            className="h-7 cursor-pointer rounded border border-white/10 bg-[#0b1120] px-2 text-ui-caption text-slate-300 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             {(
               Object.keys(BENCHMARK_LABELS) as EventCurvePoint['benchmark'][]
@@ -99,7 +101,7 @@ export function EventCurveChart({ rows }: { rows: EventCurvePoint[] }) {
                 {BENCHMARK_LABELS[value]}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
       </div>
 

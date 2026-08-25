@@ -24,8 +24,8 @@ function SummaryTile({
   className?: string;
 }) {
   return (
-    <div className="rounded-xl border border-slate-200 px-3 py-2 dark:border-white/10">
-      <div className="text-[8px] uppercase tracking-widest text-slate-400">
+    <div className="rounded-panel border border-slate-200 px-3 py-2 dark:border-white/10">
+      <div className="text-ui-micro uppercase tracking-widest text-slate-400">
         {label}
       </div>
       <div className={`mt-1 ${className}`}>{value}</div>
@@ -43,8 +43,8 @@ function InventoryTile({
   className: string;
 }) {
   return (
-    <div className={`rounded-xl border px-3 py-2 ${className}`}>
-      <div className="text-[8px] uppercase tracking-widest text-slate-400">
+    <div className={`rounded-panel border px-3 py-2 ${className}`}>
+      <div className="text-ui-micro uppercase tracking-widest text-slate-400">
         {label}
       </div>
       <div className="mt-1">{value}</div>
@@ -63,25 +63,25 @@ export function GridBookSummaryCard({
   const viewLabel = backtestId ? '回测快照' : '模板版本';
 
   return (
-    <Card className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-xl dark:border-white/10 dark:bg-slate-900/60">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+    <Card className="rounded-panel border border-slate-200 bg-white p-ui-panel shadow-none dark:border-white/10 dark:bg-slate-900/60">
+      <div className="flex flex-col gap-ui-section lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.3em] text-red-500">
+          <div className="flex items-center gap-2 text-ui-micro font-black uppercase tracking-[0.3em] text-red-500">
             <BookOpen className="h-4 w-4" />
             网格簿
             <span className="rounded-md border border-red-500/20 bg-red-500/10 px-2 py-0.5 tracking-normal text-red-300">
               {viewLabel}
             </span>
           </div>
-          <h3 className="mt-2 text-lg font-black text-slate-900 dark:text-white">
+          <h3 className="mt-2 text-ui-heading font-black text-slate-900 dark:text-white">
             {book?.instrumentCode || instrumentCode}
           </h3>
-          <p className="mt-1 text-xs font-medium text-slate-500">
+          <p className="mt-1 text-ui-label font-medium text-slate-500">
             网格簿只维护未来执行计划；成交状态只能由 broker / miniQMT 回报推进。
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 text-[10px] font-bold text-slate-500 md:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 text-ui-caption font-bold text-slate-500 md:grid-cols-6">
           <SummaryTile label="总档位" value={summary.totalLevels} />
           <SummaryTile
             label="启用"
@@ -110,7 +110,7 @@ export function GridBookSummaryCard({
         </div>
       </div>
 
-      <div className="mt-5 grid grid-cols-2 gap-3 text-[10px] font-bold text-slate-500 md:grid-cols-6">
+      <div className="mt-5 grid grid-cols-2 gap-3 text-ui-caption font-bold text-slate-500 md:grid-cols-6">
         <InventoryTile
           label="买入档"
           value={summary.buySlotCount || 0}
@@ -140,7 +140,7 @@ export function GridBookSummaryCard({
       </div>
 
       {!editable && (
-        <div className="mt-5 flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs font-medium text-amber-300">
+        <div className="mt-5 flex items-start gap-2 rounded-panel border border-amber-500/20 bg-amber-500/10 px-ui-section py-3 text-ui-label font-medium text-amber-300">
           <Lock className="mt-0.5 h-4 w-4 shrink-0" />
           {backtestId
             ? '已完成回测版本是只读快照；请回到模板版本修改网格簿后重新回测。'
@@ -149,13 +149,13 @@ export function GridBookSummaryCard({
       )}
 
       {book?.needsBacktest && (
-        <div className="mt-5 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs font-medium text-red-300">
+        <div className="mt-5 rounded-panel border border-red-500/20 bg-red-500/10 px-ui-section py-3 text-ui-label font-medium text-red-300">
           网格簿计划已变更，当前回测结果可能不是最新计划，请重新回测。
         </div>
       )}
 
       {saveError && (
-        <div className="mt-5 flex items-start gap-2 rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-xs font-medium text-rose-300">
+        <div className="mt-5 flex items-start gap-2 rounded-panel border border-rose-500/20 bg-rose-500/10 px-ui-section py-3 text-ui-label font-medium text-rose-300">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           {saveError}
         </div>

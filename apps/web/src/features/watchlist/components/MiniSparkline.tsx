@@ -35,7 +35,7 @@ export function MiniSparkline({
     return (
       <span
         aria-label="迷你走势暂无数据"
-        className="inline-flex h-7 w-16 items-center justify-center font-mono text-[10px] text-slate-600"
+        className="inline-flex h-7 w-16 items-center justify-center font-mono text-ui-caption text-slate-600"
       >
         --
       </span>

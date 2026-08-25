@@ -681,20 +681,20 @@ export default function StrategyLogsTab({
     <>
       <Card
         className={cn(
-          'overflow-hidden rounded-lg border border-white/5 bg-slate-950 shadow-2xl',
+          'overflow-hidden rounded-lg border border-white/5 bg-slate-950 shadow-none',
           fillAvailable && 'flex h-full min-h-0 flex-col'
         )}
       >
-        <div className="flex items-center justify-between border-b border-white/5 bg-slate-900/40 px-6 py-4 backdrop-blur-md">
+        <div className="flex items-center justify-between border-b border-white/5 bg-slate-900/40 px-ui-panel py-ui-section backdrop-blur-md">
           <div className="flex min-w-0 items-center gap-3">
             <Terminal size={14} className="shrink-0 text-slate-400" />
-            <span className="truncate font-mono text-[11px] font-bold text-slate-300">
+            <span className="truncate font-mono text-ui-caption font-bold text-slate-300">
               终端 - {strategyName}
             </span>
             <Badge
               variant="outline"
               className={cn(
-                'rounded-full px-2 py-0.5 text-[8px] font-black uppercase tracking-widest',
+                'rounded-full px-2 py-0.5 text-ui-micro font-black uppercase tracking-widest',
                 isRunning
                   ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
                   : 'border-slate-600 text-slate-500'
@@ -702,7 +702,7 @@ export default function StrategyLogsTab({
             >
               {isRunning ? '运行中' : '已停止'}
             </Badge>
-            <div className="flex shrink-0 items-center gap-1.5 text-[9px] font-bold">
+            <div className="flex shrink-0 items-center gap-1.5 text-ui-micro font-bold">
               {realtimeStatus.icon}
               <span className={realtimeStatus.className}>
                 {realtimeStatus.text}
@@ -715,7 +715,7 @@ export default function StrategyLogsTab({
               aria-label={isPaused ? '继续实时日志' : '暂停实时日志'}
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              className="h-control-compact w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
               onClick={() => setIsPaused(!isPaused)}
             >
               {isPaused ? <Play size={14} /> : <Pause size={14} />}
@@ -724,7 +724,7 @@ export default function StrategyLogsTab({
               aria-label="复制当前筛选日志"
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              className="h-control-compact w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
               onClick={handleCopy}
             >
               <Copy size={14} />
@@ -733,7 +733,7 @@ export default function StrategyLogsTab({
               aria-label="下载当前筛选日志"
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
+              className="h-control-compact w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-white"
               onClick={handleDownload}
             >
               <Download size={14} />
@@ -742,7 +742,7 @@ export default function StrategyLogsTab({
               aria-label="清空当前已加载日志"
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-rose-400"
+              className="h-control-compact w-8 rounded-lg text-slate-400 hover:bg-slate-800 hover:text-rose-400"
               onClick={handleClear}
             >
               <Trash2 size={14} />
@@ -750,16 +750,16 @@ export default function StrategyLogsTab({
           </div>
         </div>
 
-        <div className="border-b border-slate-800 bg-slate-900/30 px-6 py-2">
+        <div className="border-b border-slate-800 bg-slate-900/30 px-ui-panel py-2">
           <div className="flex items-center justify-center gap-3 text-center">
-            <span className="rounded border border-blue-600/30 bg-blue-600/5 px-3 py-0.5 font-mono text-[10px] text-blue-500">
+            <span className="rounded border border-blue-600/30 bg-blue-600/5 px-3 py-0.5 font-mono text-ui-caption text-blue-500">
               A股量化交易策略日志终端
             </span>
-            <span className="font-mono text-[10px] text-slate-500">
+            <span className="font-mono text-ui-caption text-slate-500">
               {loadedSummary}
             </span>
             {fileError && (
-              <span className="font-mono text-[10px] text-rose-400">
+              <span className="font-mono text-ui-caption text-rose-400">
                 文件加载错误
               </span>
             )}
@@ -767,12 +767,12 @@ export default function StrategyLogsTab({
         </div>
 
         {showAdvancedFilters && (
-          <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-4 py-2">
-            <span className="text-[9px] font-bold text-slate-600">级别</span>
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950 px-ui-section py-2">
+            <span className="text-ui-micro font-bold text-slate-600">级别</span>
             <button
               type="button"
               className={cn(
-                'h-7 border px-2.5 font-mono text-[9px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                'h-7 border px-2.5 font-mono text-ui-micro font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                 levelFilter === 'ALL'
                   ? 'border-blue-400/30 bg-blue-500/15 text-blue-200'
                   : 'border-white/10 text-slate-500 hover:text-slate-200'
@@ -786,7 +786,7 @@ export default function StrategyLogsTab({
                 key={level}
                 type="button"
                 className={cn(
-                  'h-7 border px-2 font-mono text-[9px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
+                  'h-7 border px-2 font-mono text-ui-micro font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70',
                   levelFilter === level
                     ? 'border-blue-400/30 bg-blue-500/15 text-blue-200'
                     : 'border-white/10 text-slate-500 hover:text-slate-200'
@@ -797,7 +797,7 @@ export default function StrategyLogsTab({
               </button>
             ))}
             <Select value={sourceFilter} onValueChange={setSourceFilter}>
-              <SelectTrigger className="h-7 w-40 rounded-none border-white/10 bg-slate-950 font-mono text-[9px] text-slate-300">
+              <SelectTrigger className="h-control-compact w-40 rounded-none border-white/10 bg-slate-950 font-mono text-ui-micro text-slate-300">
                 <SelectValue placeholder="全部来源" />
               </SelectTrigger>
               <SelectContent>
@@ -816,7 +816,7 @@ export default function StrategyLogsTab({
                 value={searchQuery}
                 onChange={event => setSearchQuery(event.target.value)}
                 placeholder="搜索原文、来源或时间"
-                className="h-7 rounded-none border-white/10 bg-slate-950 pl-8 font-mono text-[9px] focus-visible:ring-blue-400/70"
+                className="h-7 rounded-none border-white/10 bg-slate-950 pl-8 font-mono text-ui-micro focus-visible:ring-blue-400/70"
               />
             </div>
           </div>
@@ -825,24 +825,29 @@ export default function StrategyLogsTab({
         <div
           ref={logContainerRef}
           className={cn(
-            'execution-log-scrollbar overflow-auto p-5 font-mono text-[10px] leading-relaxed',
+            'execution-log-scrollbar overflow-auto p-ui-section font-mono text-ui-caption leading-relaxed',
             fillAvailable && 'min-h-0 flex-1'
           )}
           style={fillAvailable ? undefined : { height: `${viewportHeight}px` }}
           onScroll={handleScroll}
         >
           {!runId ? (
-            <div className="py-12 text-center text-slate-600">
+            <div className="py-ui-empty text-center text-slate-600">
               请选择一个运行中的策略实例
             </div>
           ) : logs.length === 0 && isFileFetching ? (
-            <div className="py-12 text-center text-slate-600" role="status">
+            <div
+              className="py-ui-empty text-center text-slate-600"
+              role="status"
+            >
               正在读取原始技术日志…
             </div>
           ) : logs.length === 0 && !isFileFetching ? (
-            <div className="py-12 text-center text-slate-600">暂无日志记录</div>
+            <div className="py-ui-empty text-center text-slate-600">
+              暂无日志记录
+            </div>
           ) : filteredLogs.length === 0 ? (
-            <div className="py-12 text-center text-slate-600">
+            <div className="py-ui-empty text-center text-slate-600">
               没有匹配当前筛选条件的日志
             </div>
           ) : (

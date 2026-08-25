@@ -8,9 +8,12 @@ export default {
   theme: {
     extend: {
       borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        lg: 'var(--radius-panel)',
+        md: 'var(--radius-control)',
+        sm: 'var(--radius-element)',
+        panel: 'var(--radius-panel)',
+        control: 'var(--radius-control)',
+        dialog: 'var(--radius-dialog)',
       },
       colors: {
         background: 'var(--background)',
@@ -69,6 +72,70 @@ export default {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         serif: ['var(--font-serif)'],
         mono: ['var(--font-mono)'],
+      },
+      fontSize: {
+        'ui-micro': [
+          'var(--font-size-ui-micro)',
+          { lineHeight: 'var(--line-height-ui-micro)' },
+        ],
+        'ui-caption': [
+          'var(--font-size-ui-caption)',
+          { lineHeight: 'var(--line-height-ui-caption)' },
+        ],
+        'ui-label': [
+          'var(--font-size-ui-label)',
+          { lineHeight: 'var(--line-height-ui-label)' },
+        ],
+        'ui-body': [
+          'var(--font-size-ui-body)',
+          { lineHeight: 'var(--line-height-ui-body)' },
+        ],
+        'ui-title': [
+          'var(--font-size-ui-title)',
+          { lineHeight: 'var(--line-height-ui-title)' },
+        ],
+        'ui-heading': [
+          'var(--font-size-ui-heading)',
+          { lineHeight: 'var(--line-height-ui-heading)' },
+        ],
+        'ui-page-title': [
+          'var(--font-size-ui-page-title)',
+          { lineHeight: 'var(--line-height-ui-page-title)' },
+        ],
+        'ui-display': [
+          'var(--font-size-ui-display)',
+          { lineHeight: 'var(--line-height-ui-display)' },
+        ],
+        'ui-display-lg': [
+          'var(--font-size-ui-display-lg)',
+          { lineHeight: 'var(--line-height-ui-display-lg)' },
+        ],
+        'ui-display-xl': [
+          'var(--font-size-ui-display-xl)',
+          { lineHeight: 'var(--line-height-ui-display-xl)' },
+        ],
+      },
+      height: {
+        'control-compact': 'var(--control-height-compact)',
+        'control-default': 'var(--control-height-default)',
+        'control-large': 'var(--control-height-large)',
+        'studio-header': 'var(--studio-header-height)',
+        'studio-status': 'var(--studio-status-height)',
+        'studio-tab': 'var(--studio-tab-height)',
+      },
+      minHeight: {
+        'control-compact': 'var(--control-height-compact)',
+        'control-default': 'var(--control-height-default)',
+        'control-large': 'var(--control-height-large)',
+      },
+      spacing: {
+        'control-compact': 'var(--control-height-compact)',
+        'control-default': 'var(--control-height-default)',
+        'control-large': 'var(--control-height-large)',
+        'ui-panel': 'var(--space-panel)',
+        'ui-section': 'var(--space-section)',
+        'ui-empty': 'var(--space-empty)',
+        'ui-page': 'var(--space-page)',
       },
       keyframes: {
         'accordion-down': {

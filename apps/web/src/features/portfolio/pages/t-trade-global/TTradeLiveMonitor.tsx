@@ -235,11 +235,11 @@ function StatusCell({
   };
   return (
     <div className={cn('min-w-0 border px-2.5 py-2', tones[tone])}>
-      <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-[0.1em] opacity-65">
+      <div className="flex items-center gap-1.5 text-ui-micro font-black uppercase tracking-[0.1em] opacity-65">
         <Icon className="h-3 w-3 shrink-0" aria-hidden="true" />
         <span className="truncate">{label}</span>
       </div>
-      <div className="mt-1 truncate text-[11px] font-black">{value}</div>
+      <div className="mt-1 truncate text-ui-caption font-black">{value}</div>
     </div>
   );
 }
@@ -312,14 +312,14 @@ export function TTradeHealthConsole({
 
   return (
     <aside className="studio-workspace-surface flex h-full min-h-0 flex-col text-slate-200">
-      <div className="shrink-0 border-b border-white/[0.06] px-4 py-3.5">
+      <div className="shrink-0 border-b border-white/[0.06] px-ui-section py-3.5">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.24em] text-blue-300">
+            <div className="text-ui-micro font-black uppercase tracking-[0.24em] text-blue-300">
               Stateful opportunity V3
             </div>
-            <h1 className="mt-1 text-base font-black">健康控制台</h1>
-            <div className="mt-1 font-mono text-[9px] text-slate-600">
+            <h1 className="mt-1 text-ui-title font-black">健康控制台</h1>
+            <div className="mt-1 font-mono text-ui-micro text-slate-600">
               {accountId || '未配置账户'}
             </div>
           </div>
@@ -393,16 +393,19 @@ export function TTradeHealthConsole({
           <div
             role="status"
             aria-busy="true"
-            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-3 py-3 text-[10px] text-cyan-100"
+            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-3 py-3 text-ui-caption text-cyan-100"
           >
-            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
             正在读取账户健康快照…
           </div>
         )}
         {!loading && !monitor && !accountId && (
           <div
             role="status"
-            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-[10px] leading-4 text-amber-100"
+            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-ui-caption leading-4 text-amber-100"
           >
             尚未配置交易账户，健康控制台处于只读等待状态。
           </div>
@@ -410,20 +413,20 @@ export function TTradeHealthConsole({
         {!loading && !monitor && accountId && (
           <div
             role="status"
-            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-[10px] leading-4 text-amber-100"
+            className="border-b border-amber-400/15 bg-amber-400/[0.04] px-3 py-3 text-ui-caption leading-4 text-amber-100"
           >
             当前账户尚未返回健康快照；控制台保持安全关闭，请刷新或先完成持仓同步。
           </div>
         )}
         <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             服务端数据健康
           </div>
           <div className="grid grid-cols-2 gap-2">
             {DATA_HEALTH_VALUES.map(health => (
               <div
                 key={health}
-                className="flex items-center justify-between border border-white/[0.06] px-2 py-1.5 text-[9px]"
+                className="flex items-center justify-between border border-white/[0.06] px-2 py-1.5 text-ui-micro"
               >
                 <span
                   className={
@@ -438,16 +441,16 @@ export function TTradeHealthConsole({
               </div>
             ))}
           </div>
-          <p className="mt-2 text-[9px] leading-4 text-slate-600">
+          <p className="mt-2 text-ui-micro leading-4 text-slate-600">
             READY 与阻断原因完全来自服务端信号快照；页面行情仅用于价格展示。
           </p>
         </section>
 
         <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             链路与投影
           </div>
-          <div className="space-y-2 text-[10px]">
+          <div className="space-y-2 text-ui-caption">
             <div className="flex items-center justify-between">
               <span className="inline-flex items-center gap-2 text-slate-500">
                 <Waves className="h-3.5 w-3.5 text-cyan-400" />
@@ -495,7 +498,7 @@ export function TTradeHealthConsole({
         </section>
 
         <section className="border-b border-white/[0.06] p-3">
-          <div className="mb-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             需要关注
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -527,7 +530,7 @@ export function TTradeHealthConsole({
         </section>
 
         <section className="p-3">
-          <div className="mb-2 flex items-center gap-2 text-[9px] font-black uppercase tracking-[0.12em] text-slate-600">
+          <div className="mb-2 flex items-center gap-2 text-ui-micro font-black uppercase tracking-[0.12em] text-slate-600">
             {blockedReason ? (
               <ShieldAlert className="h-3.5 w-3.5 text-amber-300" />
             ) : (
@@ -537,7 +540,7 @@ export function TTradeHealthConsole({
           </div>
           <p
             className={cn(
-              'text-[10px] leading-4',
+              'text-ui-caption leading-4',
               blockedReason ? 'text-amber-100' : 'text-emerald-200'
             )}
           >
@@ -551,7 +554,7 @@ export function TTradeHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 rounded-sm border-white/10 text-[10px]"
+            className="h-control-compact rounded-sm border-white/10 text-ui-caption"
             disabled={!accountId || actionLoading}
             onClick={onRefresh}
           >
@@ -561,7 +564,7 @@ export function TTradeHealthConsole({
           <Button
             type="button"
             variant="outline"
-            className="h-8 rounded-sm border-white/10 text-[10px]"
+            className="h-control-compact rounded-sm border-white/10 text-ui-caption"
             disabled={!accountId || actionLoading}
             onClick={onReconcile}
           >
@@ -572,7 +575,7 @@ export function TTradeHealthConsole({
         <Button
           type="button"
           className={cn(
-            'h-9 w-full rounded-sm text-[10px] font-black',
+            'h-control-default w-full rounded-sm text-ui-caption font-black',
             monitor?.enabled
               ? 'bg-slate-700 text-white hover:bg-slate-600'
               : 'bg-primary text-primary-foreground hover:bg-primary/90'
@@ -598,7 +601,7 @@ function PriceSparkline({ points }: { points: readonly QuoteHistoryPoint[] }) {
   if (points.length < 2) {
     return (
       <div
-        className="flex h-16 items-center justify-center text-[9px] text-slate-600"
+        className="flex h-16 items-center justify-center text-ui-micro text-slate-600"
         role="img"
         aria-label="价格走势：样本不足"
       >
@@ -633,7 +636,7 @@ function PriceSparkline({ points }: { points: readonly QuoteHistoryPoint[] }) {
           points={polyline}
         />
       </svg>
-      <div className="flex justify-between font-mono text-[9px] text-slate-600">
+      <div className="flex justify-between font-mono text-ui-micro text-slate-600">
         <span>低 {formatNumber(min, 3)}</span>
         <span>高 {formatNumber(max, 3)}</span>
       </div>
@@ -831,7 +834,7 @@ function SignalScoreTrend({
           );
         })}
       </svg>
-      <div className="mt-2 grid grid-cols-2 gap-2 text-[9px] sm:grid-cols-5">
+      <div className="mt-2 grid grid-cols-2 gap-2 text-ui-micro sm:grid-cols-5">
         {signalTrendMetrics.map(metric => {
           const value = metric.value(snapshot);
           return (
@@ -849,10 +852,10 @@ function SignalScoreTrend({
           );
         })}
       </div>
-      <div className="mt-2 text-[9px] text-slate-600">
+      <div className="mt-2 text-ui-micro text-slate-600">
         仅连接同一 continuity generation 内的服务端值；代际变化或缺值处断线。
       </div>
-      <div className="mt-1 flex justify-between gap-2 text-[8px] text-slate-700">
+      <div className="mt-1 flex justify-between gap-2 text-ui-micro text-slate-700">
         <span>机会分（0–100）</span>
         <span>
           源时间：{formatTime(snapshots[0]?.sourceAt)} →{' '}
@@ -874,7 +877,7 @@ function FsmTrack({
 }) {
   return (
     <section aria-label={`${title}状态机`}>
-      <div className="mb-2 flex items-center justify-between text-[10px]">
+      <div className="mb-2 flex items-center justify-between text-ui-caption">
         <span className="font-black text-slate-300">{title}</span>
         <span className="text-cyan-200">{phaseLabels[current] || current}</span>
       </div>
@@ -884,7 +887,7 @@ function FsmTrack({
             key={value}
             aria-current={value === current ? 'step' : undefined}
             className={cn(
-              'border px-2 py-1.5 text-[9px]',
+              'border px-2 py-1.5 text-ui-micro',
               value === current
                 ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-100'
                 : 'border-white/[0.05] text-slate-600'
@@ -912,7 +915,7 @@ function SnapshotInspector({
   const now = useNow();
   if (!snapshot) {
     return (
-      <div className="mt-6 border border-amber-400/15 bg-amber-400/[0.05] p-4 text-xs text-amber-100">
+      <div className="mt-6 border border-amber-400/15 bg-amber-400/[0.05] p-ui-section text-ui-label text-amber-100">
         服务端尚未生成 V3 信号快照。当前不可判断，也不能确认买入。
       </div>
     );
@@ -930,28 +933,28 @@ function SnapshotInspector({
   );
 
   return (
-    <div className="space-y-5 py-5 text-slate-300">
+    <div className="space-y-ui-section py-ui-section text-slate-300">
       {!compatible && (
         <div
           role="alert"
-          className="flex items-start gap-2 border border-rose-400/25 bg-rose-400/[0.08] p-3 text-[10px] leading-4 text-rose-100"
+          className="flex items-start gap-2 border border-rose-400/25 bg-rose-400/[0.08] p-3 text-ui-caption leading-4 text-rose-100"
         >
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
           版本不兼容或出现未知状态。页面已进入只读失败态，禁止确认。
         </div>
       )}
 
-      <section className="border border-white/[0.07] bg-white/[0.025] p-4">
+      <section className="border border-white/[0.07] bg-white/[0.025] p-ui-section">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="text-[9px] font-black uppercase tracking-[0.16em] text-slate-600">
+            <div className="text-ui-micro font-black uppercase tracking-[0.16em] text-slate-600">
               服务端结论
             </div>
-            <div className="mt-1 text-sm font-black text-slate-100">
+            <div className="mt-1 text-ui-body font-black text-slate-100">
               {candidateLabels[snapshot.candidateStatus] ||
                 `未知状态 · ${snapshot.candidateStatus}`}
             </div>
-            <div className="mt-1 text-[10px] text-slate-500">
+            <div className="mt-1 text-ui-caption text-slate-500">
               {pathLabels[snapshot.selectedPath || ''] || '尚未选择路径'} ·{' '}
               {phaseLabels[snapshot.dominantPhase] || snapshot.dominantPhase}
             </div>
@@ -959,18 +962,18 @@ function SnapshotInspector({
           <div className="text-right">
             <div
               className={cn(
-                'font-mono text-xl font-black',
+                'font-mono text-ui-page-title font-black',
                 scoreTone(snapshot)
               )}
             >
               {scoreLabel(snapshot)}
             </div>
-            <div className="text-[9px] text-slate-600">
+            <div className="text-ui-micro text-slate-600">
               规则机会分 / 候选阈值，不是概率
             </div>
           </div>
         </div>
-        <div className="mt-3 flex items-start gap-2 border-t border-white/[0.05] pt-3 text-[10px] leading-4">
+        <div className="mt-3 flex items-start gap-2 border-t border-white/[0.05] pt-3 text-ui-caption leading-4">
           {blocker ? (
             <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
           ) : (
@@ -982,7 +985,7 @@ function SnapshotInspector({
               : '当前无服务端 blocker'}
           </span>
         </div>
-        <div className="mt-2 font-mono text-[9px] text-slate-600">
+        <div className="mt-2 font-mono text-ui-micro text-slate-600">
           source {formatTime(snapshot.sourceAt)} · identity{' '}
           {snapshot.continuityGeneration}/{snapshot.sourceTimeMs}/
           {snapshot.tickOrdinal}
@@ -990,11 +993,11 @@ function SnapshotInspector({
       </section>
 
       <section>
-        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+        <h3 className="mb-2 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
           价格上下文
         </h3>
         <PriceSparkline points={history} />
-        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] sm:grid-cols-4">
+        <div className="mt-3 grid grid-cols-2 gap-2 text-ui-caption sm:grid-cols-4">
           {[
             ['服务端价格', nullableNumber(snapshot.features.price, 3)],
             ['VWAP', nullableNumber(snapshot.features.sessionVwap, 3)],
@@ -1017,7 +1020,7 @@ function SnapshotInspector({
       </section>
 
       <section>
-        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+        <h3 className="mb-2 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
           分数趋势与四条阈值
         </h3>
         <SignalScoreTrend
@@ -1033,7 +1036,7 @@ function SnapshotInspector({
           ].map(([label, value]) => (
             <div
               key={String(label)}
-              className="border border-white/[0.06] p-2 text-[9px]"
+              className="border border-white/[0.06] p-2 text-ui-micro"
             >
               <div className="text-slate-600">{label}</div>
               <div className="mt-1 font-mono text-slate-200">
@@ -1043,7 +1046,7 @@ function SnapshotInspector({
           ))}
         </div>
         <div className="mt-2 overflow-x-auto">
-          <table className="w-full min-w-[420px] text-left text-[9px]">
+          <table className="w-full min-w-[420px] text-left text-ui-micro">
             <caption className="sr-only">
               最近服务端机会分历史；缺失值保持不可计算
             </caption>
@@ -1080,7 +1083,10 @@ function SnapshotInspector({
               ))}
               {instrumentEvaluations.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-4 text-center text-slate-600">
+                  <td
+                    colSpan={5}
+                    className="py-ui-section text-center text-slate-600"
+                  >
                     暂无持久化评估历史
                   </td>
                 </tr>
@@ -1090,7 +1096,7 @@ function SnapshotInspector({
         </div>
       </section>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-ui-section xl:grid-cols-2">
         <FsmTrack
           title="回撤反弹 FSM"
           values={PULLBACK_PHASE_VALUES}
@@ -1104,7 +1110,7 @@ function SnapshotInspector({
       </div>
 
       <section>
-        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+        <h3 className="mb-2 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
           硬门禁
         </h3>
         <div className="space-y-1.5">
@@ -1112,7 +1118,7 @@ function SnapshotInspector({
             <div
               key={gate.code}
               className={cn(
-                'grid gap-2 border px-3 py-2 text-[10px] sm:grid-cols-[18px_minmax(120px,0.7fr)_1fr_auto]',
+                'grid gap-2 border px-3 py-2 text-ui-caption sm:grid-cols-[18px_minmax(120px,0.7fr)_1fr_auto]',
                 gate.passed
                   ? 'border-emerald-400/10 bg-emerald-400/[0.025]'
                   : 'border-rose-400/20 bg-rose-400/[0.05]'
@@ -1135,7 +1141,7 @@ function SnapshotInspector({
       </section>
 
       <section>
-        <h3 className="mb-2 text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+        <h3 className="mb-2 text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
           分数贡献
         </h3>
         <div className="space-y-2">
@@ -1150,7 +1156,7 @@ function SnapshotInspector({
             return (
               <div
                 key={item.code}
-                className="border border-white/[0.06] p-2.5 text-[10px]"
+                className="border border-white/[0.06] p-2.5 text-ui-caption"
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="font-bold text-slate-300">{item.label}</span>
@@ -1165,7 +1171,7 @@ function SnapshotInspector({
                     style={{ width: `${width}%` }}
                   />
                 </div>
-                <div className="mt-1.5 flex flex-wrap justify-between gap-2 text-[9px] text-slate-600">
+                <div className="mt-1.5 flex flex-wrap justify-between gap-2 text-ui-micro text-slate-600">
                   <span>{item.detail}</span>
                   <span>
                     观测 {nullableNumber(item.observedValue)} · 目标{' '}
@@ -1180,10 +1186,10 @@ function SnapshotInspector({
 
       <section className="grid gap-3 lg:grid-cols-2">
         <div className="border border-white/[0.07] p-3">
-          <h3 className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          <h3 className="text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
             数据健康
           </h3>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-[9px]">
+          <div className="mt-3 grid grid-cols-2 gap-2 text-ui-micro">
             <div>
               <span className="text-slate-600">状态</span>
               <div className="mt-1 text-slate-200">
@@ -1225,7 +1231,7 @@ function SnapshotInspector({
               </div>
             </div>
           </div>
-          <ul className="mt-3 space-y-1 border-t border-white/[0.05] pt-2 text-[9px] text-slate-500">
+          <ul className="mt-3 space-y-1 border-t border-white/[0.05] pt-2 text-ui-micro text-slate-500">
             {snapshot.dataHealthReasons.map(reason => (
               <li key={reason.code}>
                 <span className="text-slate-300">{reason.label}</span> ·{' '}
@@ -1238,10 +1244,10 @@ function SnapshotInspector({
           </ul>
         </div>
         <div className="border border-white/[0.07] p-3">
-          <h3 className="text-[10px] font-black uppercase tracking-[0.12em] text-slate-500">
+          <h3 className="text-ui-caption font-black uppercase tracking-[0.12em] text-slate-500">
             候选与执行审计
           </h3>
-          <div className="mt-3 space-y-2 text-[9px]">
+          <div className="mt-3 space-y-2 text-ui-micro">
             <div className="flex justify-between gap-3">
               <span className="text-slate-600">候选状态</span>
               <span>
@@ -1348,7 +1354,7 @@ export function TTradeLiveBoard({
       <div
         role="status"
         aria-busy="true"
-        className="flex h-full items-center justify-center text-xs text-slate-600"
+        className="flex h-full items-center justify-center text-ui-label text-slate-600"
       >
         <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
         读取服务端信号快照…
@@ -1359,10 +1365,10 @@ export function TTradeLiveBoard({
     return (
       <div className="flex h-full min-h-64 flex-col items-center justify-center text-center">
         <Database className="h-10 w-10 text-slate-800" />
-        <div className="mt-3 text-sm font-bold text-slate-500">
+        <div className="mt-3 text-ui-body font-bold text-slate-500">
           暂无可展示持仓
         </div>
-        <div className="mt-1 text-[10px] text-slate-700">
+        <div className="mt-1 text-ui-caption text-slate-700">
           持仓同步并生成 V3 快照后显示
         </div>
       </div>
@@ -1376,13 +1382,16 @@ export function TTradeLiveBoard({
           <div
             role="status"
             aria-busy="true"
-            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-2 text-[9px] text-cyan-100"
+            className="flex items-center gap-2 border-b border-cyan-400/15 bg-cyan-400/[0.04] px-ui-section py-2 text-ui-micro text-cyan-100"
           >
-            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            <Loader2
+              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            />
             正在刷新服务端快照，暂保留上次可信结果…
           </div>
         )}
-        <div className="hidden min-w-[880px] grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] border-b border-white/[0.06] px-4 py-2 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600 lg:grid">
+        <div className="hidden min-w-[880px] grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] border-b border-white/[0.06] px-ui-section py-2 text-ui-micro font-black uppercase tracking-[0.1em] text-slate-600 lg:grid">
           <span>持仓标的</span>
           <span>服务端价格</span>
           <span>数据健康</span>
@@ -1421,23 +1430,23 @@ export function TTradeLiveBoard({
                 lastSelectedCodeRef.current = row.holding.stockCode;
                 setSelectedCode(row.holding.stockCode);
               }}
-              className="grid w-full cursor-pointer gap-3 border-b border-white/[0.05] px-4 py-3 text-left transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60 lg:min-w-[880px] lg:grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] lg:items-center"
+              className="grid w-full cursor-pointer gap-3 border-b border-white/[0.05] px-ui-section py-3 text-left transition-colors hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-cyan-400/60 lg:min-w-[880px] lg:grid-cols-[minmax(170px,1.3fr)_100px_130px_minmax(135px,1fr)_100px_minmax(150px,1.2fr)_120px] lg:items-center"
             >
               <span className="min-w-0">
-                <span className="block truncate text-xs font-black text-slate-100">
+                <span className="block truncate text-ui-label font-black text-slate-100">
                   {row.holding.instrumentName || row.holding.stockCode}
                 </span>
-                <span className="mt-0.5 block font-mono text-[9px] text-slate-600">
+                <span className="mt-0.5 block font-mono text-ui-micro text-slate-600">
                   {row.holding.stockCode} · 持仓{' '}
                   {row.holding.volume.toLocaleString()}
                 </span>
               </span>
-              <span className="font-mono text-xs text-slate-200">
-                <span className="mr-2 text-[9px] text-slate-600 lg:hidden">
+              <span className="font-mono text-ui-label text-slate-200">
+                <span className="mr-2 text-ui-micro text-slate-600 lg:hidden">
                   价格
                 </span>
                 {nullableNumber(snapshot?.features.price, 3)}
-                <span className="mt-0.5 block text-[8px] font-normal text-slate-600">
+                <span className="mt-0.5 block text-ui-micro font-normal text-slate-600">
                   {snapshot
                     ? `源时间 ${formatTime(snapshot.sourceAt)}`
                     : '等待源时间'}
@@ -1446,7 +1455,7 @@ export function TTradeLiveBoard({
               <span>
                 <span
                   className={cn(
-                    'inline-flex items-center gap-1 border px-2 py-0.5 text-[9px] font-black',
+                    'inline-flex items-center gap-1 border px-2 py-0.5 text-ui-micro font-black',
                     healthTone(snapshot?.dataHealth)
                   )}
                 >
@@ -1455,43 +1464,46 @@ export function TTradeLiveBoard({
                     ? healthLabels[snapshot?.dataHealth || ''] || '等待快照'
                     : '版本不兼容'}
                 </span>
-                <span className="mt-1 block text-[8px] text-slate-600">
+                <span className="mt-1 block text-ui-micro text-slate-600">
                   {snapshot?.dataHealthReasons[0]?.label ||
                     (snapshot?.dataHealth === 'READY'
                       ? '无健康异常'
                       : '等待原因')}
                 </span>
               </span>
-              <span className="text-[10px] text-slate-300">
+              <span className="text-ui-caption text-slate-300">
                 <span className="mr-2 text-slate-600 lg:hidden">形态</span>
                 {phaseLabels[snapshot?.dominantPhase || ''] || '等待服务端评估'}
-                <span className="mt-0.5 block text-[9px] text-slate-600">
+                <span className="mt-0.5 block text-ui-micro text-slate-600">
                   {pathLabels[snapshot?.selectedPath || ''] || '尚未选择路径'}
                 </span>
               </span>
               <span
                 className={cn(
-                  'font-mono text-xs font-black',
+                  'font-mono text-ui-label font-black',
                   scoreTone(snapshot)
                 )}
               >
-                <span className="mr-2 text-[9px] font-normal text-slate-600 lg:hidden">
+                <span className="mr-2 text-ui-micro font-normal text-slate-600 lg:hidden">
                   机会分
                 </span>
                 {scoreLabel(snapshot)}
               </span>
-              <span className="truncate text-[10px] text-amber-100">
+              <span className="truncate text-ui-caption text-amber-100">
                 <span className="mr-2 text-slate-600 lg:hidden">阻断</span>
                 {blocker?.label ||
                   (snapshot?.dataHealth === 'READY'
                     ? '无'
                     : snapshot?.dataHealthReasons[0]?.label || '等待快照')}
               </span>
-              <span className="text-[10px] font-bold text-slate-300">
+              <span className="text-ui-caption font-bold text-slate-300">
                 <span className="mr-2 text-slate-600 lg:hidden">候选</span>
-                <CandidateIcon className="mr-1 inline-block h-3 w-3" aria-hidden="true" />
+                <CandidateIcon
+                  className="mr-1 inline-block h-3 w-3"
+                  aria-hidden="true"
+                />
                 {candidateLabels[snapshot?.candidateStatus || ''] || '无候选'}
-                <span className="mt-0.5 block text-[8px] font-normal text-slate-600">
+                <span className="mt-0.5 block text-ui-micro font-normal text-slate-600">
                   批次 {row.session?.status || '无活动批次'}
                 </span>
               </span>
@@ -1513,18 +1525,18 @@ export function TTradeLiveBoard({
       >
         <SheetContent
           side="right"
-          className="w-full overflow-y-auto border-white/[0.08] bg-[#081322] p-5 custom-scrollbar sm:max-w-2xl xl:max-w-4xl"
+          className="w-full overflow-y-auto border-white/[0.08] bg-[#081322] p-ui-section custom-scrollbar sm:max-w-2xl xl:max-w-4xl"
         >
           {selected && (
             <>
               <SheetHeader className="border-b border-white/[0.06] pb-4 pr-8 text-left">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <SheetTitle className="text-lg font-black text-slate-100">
+                    <SheetTitle className="text-ui-heading font-black text-slate-100">
                       {selected.holding.instrumentName ||
                         selected.holding.stockCode}
                     </SheetTitle>
-                    <SheetDescription className="font-mono text-[10px] text-slate-500">
+                    <SheetDescription className="font-mono text-ui-caption text-slate-500">
                       {selected.holding.stockCode} · V3 服务端信号检查器
                     </SheetDescription>
                   </div>
@@ -1533,7 +1545,7 @@ export function TTradeLiveBoard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      className="h-8 rounded-sm border-white/10 text-[10px]"
+                      className="h-control-compact rounded-sm border-white/10 text-ui-caption"
                       onClick={() =>
                         onIgnore(
                           selected.holding.stockCode,

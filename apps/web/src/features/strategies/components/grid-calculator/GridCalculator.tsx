@@ -63,31 +63,31 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
   return (
     <div
       className={cn(
-        'h-[calc(100vh-140px)] w-full overflow-hidden flex flex-col bg-slate-50/90 dark:bg-slate-950/95 backdrop-blur-3xl border border-slate-200/40 dark:border-slate-800/40 rounded-2xl shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] dark:shadow-[0_32px_64px_-16px_rgba(0,0,0,0.6)] relative',
+        'h-[calc(100vh-140px)] w-full overflow-hidden flex flex-col bg-slate-50/90 dark:bg-slate-950/95 backdrop-blur-3xl border border-slate-200/40 dark:border-slate-800/40 rounded-panel shadow-[0_32px_64px_-16px_rgba(0,0,0,0.3)] dark:shadow-[0_32px_64px_-16px_rgba(0,0,0,0.6)] relative',
         className
       )}
     >
       {/* Header Bar */}
-      <div className="flex items-center justify-between px-5 h-12 border-b border-slate-200/30 dark:border-slate-800/30 bg-slate-100/20 dark:bg-slate-900/20 shrink-0 z-20">
-        <div className="flex items-center gap-6">
+      <div className="flex items-center justify-between px-ui-section h-12 border-b border-slate-200/30 dark:border-slate-800/30 bg-slate-100/20 dark:bg-slate-900/20 shrink-0 z-20">
+        <div className="flex items-center gap-ui-panel">
           <div className="flex items-center gap-2.5">
             <div className="relative">
               <div className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse" />
               <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-blue-500 blur-[4px] animate-pulse opacity-60" />
             </div>
-            <h3 className="text-[11px] font-black tracking-[0.2em] uppercase text-foreground/80">
+            <h3 className="text-ui-caption font-black tracking-[0.2em] uppercase text-foreground/80">
               网格策略计算器
             </h3>
           </div>
           <div className="h-5 w-[1px] bg-border/40" />
-          <div className="flex gap-4">
+          <div className="flex gap-ui-section">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-bold text-muted-foreground/60 uppercase">
+              <span className="text-ui-caption font-bold text-muted-foreground/60 uppercase">
                 状态
               </span>
               <span
                 className={cn(
-                  'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded',
+                  'text-ui-caption font-mono font-bold px-1.5 py-0.5 rounded',
                   result.isValid
                     ? 'bg-green-500/10 text-green-600 dark:text-green-400'
                     : 'bg-red-500/10 text-red-600 dark:text-red-400'
@@ -110,8 +110,8 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
             className="bg-slate-50/40 dark:bg-slate-950/40 border-r border-slate-200/30 dark:border-slate-800/30"
           >
             <div className="h-full w-full overflow-hidden flex flex-col">
-              <div className="px-4 py-3 border-b border-slate-200/30 dark:border-slate-800/30 bg-white/5">
-                <h4 className="text-[10px] font-black uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+              <div className="px-ui-section py-3 border-b border-slate-200/30 dark:border-slate-800/30 bg-white/5">
+                <h4 className="text-ui-caption font-black uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                   <Settings2 className="w-3 h-3" /> 参数配置
                 </h4>
               </div>
@@ -134,7 +134,7 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
               <ResizablePanel
                 defaultSize={55}
                 minSize={30}
-                className="p-4 pb-0"
+                className="p-ui-section pb-0"
               >
                 <GridChart result={result} stockCode={config.symbol} />
               </ResizablePanel>
@@ -145,17 +145,17 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
               <ResizablePanel
                 defaultSize={45}
                 minSize={20}
-                className="px-4 pb-4 pt-2"
+                className="px-ui-section pb-4 pt-2"
               >
-                <div className="h-full overflow-y-auto custom-scrollbar space-y-4">
+                <div className="h-full overflow-y-auto custom-scrollbar space-y-ui-section">
                   {!result.isValid && (
                     <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 flex items-start gap-3">
                       <AlertOctagon className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
                       <div>
-                        <h3 className="text-sm font-bold text-red-800 dark:text-red-300">
+                        <h3 className="text-ui-body font-bold text-red-800 dark:text-red-300">
                           配置错误
                         </h3>
-                        <ul className="list-disc list-inside text-xs text-red-700 dark:text-red-400 mt-1">
+                        <ul className="list-disc list-inside text-ui-label text-red-700 dark:text-red-400 mt-1">
                           {result.errors.map((e, i) => (
                             <li key={i}>{e}</li>
                           ))}
@@ -186,15 +186,15 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
                         <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3 flex items-start gap-3">
                           <AlertOctagon className="w-5 h-5 text-yellow-600 dark:text-yellow-400 shrink-0 mt-0.5" />
                           <div>
-                            <h3 className="text-sm font-bold text-yellow-800 dark:text-yellow-300">
+                            <h3 className="text-ui-body font-bold text-yellow-800 dark:text-yellow-300">
                               预算超出风控限制
                             </h3>
-                            <div className="text-xs text-yellow-700 dark:text-yellow-400 mt-1">
+                            <div className="text-ui-label text-yellow-700 dark:text-yellow-400 mt-1">
                               <p>
                                 意图买入预算 ({config.buyBudgetPct}%)
                                 超出最大仓位限制。
                               </p>
-                              <div className="flex gap-4 mt-1 font-mono">
+                              <div className="flex gap-ui-section mt-1 font-mono">
                                 <span>
                                   意图: ¥
                                   {Math.round(intentBudget).toLocaleString()}
@@ -227,8 +227,8 @@ export const GridCalculator: React.FC<GridCalculatorProps> = ({
             className="bg-white/5 dark:bg-black/5"
           >
             <div className="h-full w-full overflow-hidden flex flex-col">
-              <div className="px-4 py-3 border-b border-slate-200/30 dark:border-slate-800/30 bg-white/5">
-                <h4 className="text-[10px] font-black uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+              <div className="px-ui-section py-3 border-b border-slate-200/30 dark:border-slate-800/30 bg-white/5">
+                <h4 className="text-ui-caption font-black uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                   <Columns className="w-3 h-3" /> 网格明细
                 </h4>
               </div>

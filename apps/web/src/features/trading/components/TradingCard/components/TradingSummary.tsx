@@ -18,20 +18,20 @@ export function TradingSummary({
   if (estimatedAmount <= 0) return null;
 
   return (
-    <Card className="bg-secondary p-4 space-y-2">
-      <div className="flex justify-between text-sm">
+    <Card className="bg-secondary p-ui-section space-y-2">
+      <div className="flex justify-between text-ui-body">
         <span>预估金额:</span>
         <span className="font-medium" data-testid="estimated-amount">
           {formatCurrency(estimatedAmount)}
         </span>
       </div>
-      <div className="flex justify-between text-sm">
+      <div className="flex justify-between text-ui-body">
         <span>手续费:</span>
         <span data-testid="estimated-fees">
           {formatCurrency(estimatedFees)}
         </span>
       </div>
-      <div className="flex justify-between text-sm">
+      <div className="flex justify-between text-ui-body">
         <span>印花税:</span>
         <span>¥0.00</span>
       </div>

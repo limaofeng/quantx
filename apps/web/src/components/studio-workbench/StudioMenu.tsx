@@ -284,7 +284,7 @@ export function StudioMenu<TPayload = unknown>({
       data-studio-menu
       {...dataAttributes}
       className={cn(
-        'fixed z-[10030] overflow-hidden rounded-lg border border-white/10 bg-[#0b1120]/95 py-1.5 text-xs font-bold text-slate-300 shadow-2xl shadow-black/40 backdrop-blur-xl',
+        'fixed z-[10030] overflow-hidden rounded-lg border border-white/10 bg-[#0b1120]/95 py-1.5 text-ui-label font-bold text-slate-300 shadow-none shadow-black/40 backdrop-blur-xl',
         className
       )}
       style={{
@@ -374,7 +374,7 @@ export function StudioMenu<TPayload = unknown>({
               </span>
               <span className="min-w-0 flex-1 truncate">{item.label}</span>
               {item.shortcut && (
-                <span className="shrink-0 font-mono text-[10px] text-slate-600">
+                <span className="shrink-0 font-mono text-ui-caption text-slate-600">
                   {item.shortcut}
                 </span>
               )}

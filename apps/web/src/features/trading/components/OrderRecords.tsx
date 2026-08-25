@@ -104,7 +104,7 @@ export function OrderRecords({
 
   if (isLoading && displayOrders.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-muted-foreground/40 text-xs">
+      <div className="h-full flex items-center justify-center text-muted-foreground/40 text-ui-label">
         加载中...
       </div>
     );
@@ -129,7 +129,7 @@ export function OrderRecords({
             <path d="m9 12 2 2 4-4" />
           </svg>
         </div>
-        <span className="text-xs font-medium">
+        <span className="text-ui-label font-medium">
           暂无
           {filterType === 'history'
             ? '历史'
@@ -233,31 +233,31 @@ export function OrderRecords({
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 bg-muted/50 z-10">
               <tr>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                   {filterType === 'history' ? '日期' : '时间'}
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                   证券代码
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                   证券名称
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                   方向
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                   委托价格
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                   委托数量
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                   已成交
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                   状态
                 </th>
-                <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                   操作
                 </th>
               </tr>
@@ -269,19 +269,19 @@ export function OrderRecords({
                   onContextMenu={event => openAtPointer(event, order)}
                   className="hover:bg-muted/30 transition-colors group"
                 >
-                  <td className="px-3 py-1 text-[10px] font-mono text-muted-foreground tabular-nums">
+                  <td className="px-3 py-1 text-ui-caption font-mono text-muted-foreground tabular-nums">
                     {order.time}
                   </td>
-                  <td className="px-3 py-1 text-[11px] font-mono font-bold text-foreground/80">
+                  <td className="px-3 py-1 text-ui-caption font-mono font-bold text-foreground/80">
                     {order.stockCode}
                   </td>
-                  <td className="px-3 py-1 text-[11px] font-bold text-foreground">
+                  <td className="px-3 py-1 text-ui-caption font-bold text-foreground">
                     {order.stockName}
                   </td>
                   <td className="px-3 py-1">
                     <span
                       className={cn(
-                        'px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-tighter shrink-0',
+                        'px-1.5 py-0.5 rounded-md text-ui-micro font-black uppercase tracking-tighter shrink-0',
                         order.type === OrderType.Buy
                           ? 'bg-market-up/10 text-market-up'
                           : 'bg-market-down/10 text-market-down'
@@ -290,13 +290,13 @@ export function OrderRecords({
                       {order.type === OrderType.Buy ? '买入' : '卖出'}
                     </span>
                   </td>
-                  <td className="px-3 py-1 text-[11px] font-mono font-bold text-right tabular-nums text-foreground/80">
+                  <td className="px-3 py-1 text-ui-caption font-mono font-bold text-right tabular-nums text-foreground/80">
                     {formatCurrency(order.price)}
                   </td>
-                  <td className="px-3 py-1 text-[11px] font-mono font-bold text-right text-muted-foreground tabular-nums opacity-60">
+                  <td className="px-3 py-1 text-ui-caption font-mono font-bold text-right text-muted-foreground tabular-nums opacity-60">
                     {order.volume}
                   </td>
-                  <td className="px-3 py-1 text-[11px] font-mono font-bold text-right tabular-nums">
+                  <td className="px-3 py-1 text-ui-caption font-mono font-bold text-right tabular-nums">
                     <span
                       className={
                         order.tradedVolume > 0
@@ -307,7 +307,7 @@ export function OrderRecords({
                       {order.tradedVolume}
                     </span>
                   </td>
-                  <td className="px-3 py-1 text-[10px] font-bold text-muted-foreground uppercase tracking-tight tabular-nums">
+                  <td className="px-3 py-1 text-ui-caption font-bold text-muted-foreground uppercase tracking-tight tabular-nums">
                     {order.status}
                   </td>
                   <td className="px-3 py-1 text-right">
@@ -315,7 +315,7 @@ export function OrderRecords({
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-6 px-2 text-[10px] text-destructive hover:text-white hover:bg-destructive transition-all duration-300"
+                        className="h-6 px-2 text-ui-caption text-destructive hover:text-white hover:bg-destructive transition-all duration-300"
                         disabled={isCancelling}
                         onClick={e => {
                           e.stopPropagation();
@@ -342,13 +342,13 @@ export function OrderRecords({
       className="card-elevated h-full flex flex-col border-none shadow-none bg-slate-50/80 dark:bg-slate-950/80 overflow-hidden px-1 animate-slide-up"
     >
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-200/20 dark:border-slate-800/20 shrink-0 min-h-[40px]">
-        <h4 className="text-[10px] font-bold text-muted-foreground/80 uppercase tracking-widest flex items-center gap-2">
+        <h4 className="text-ui-caption font-bold text-muted-foreground/80 uppercase tracking-widest flex items-center gap-2">
           {filterType === 'history'
             ? '历史委托'
             : filterType === 'all'
               ? '当日委托'
               : '当前委托'}
-          <span className="px-1.5 py-0.5 bg-blue-500/10 text-primary rounded-full text-[9px] font-mono">
+          <span className="px-1.5 py-0.5 bg-blue-500/10 text-primary rounded-full text-ui-micro font-mono">
             {displayOrders.length}
           </span>
         </h4>
@@ -360,7 +360,7 @@ export function OrderRecords({
             key={order.id}
             onContextMenu={event => openAtPointer(event, order)}
             className={cn(
-              'relative flex items-center justify-between p-2.5 rounded-xl bg-card dark:bg-slate-900 border border-slate-200/40 dark:border-slate-800/40 text-xs shadow-sm hover:shadow hover:bg-card/90 dark:hover:bg-slate-800 transition-all duration-300 group overflow-hidden pl-3',
+              'relative flex items-center justify-between p-2.5 rounded-panel bg-card dark:bg-slate-900 border border-slate-200/40 dark:border-slate-800/40 text-ui-label shadow-sm hover:shadow hover:bg-card/90 dark:hover:bg-slate-800 transition-all duration-300 group overflow-hidden pl-3',
               order.type === OrderType.Buy
                 ? 'border-l-4 border-l-market-up shadow-market-up/5'
                 : 'border-l-4 border-l-market-down shadow-market-down/5'
@@ -371,7 +371,7 @@ export function OrderRecords({
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   <span
                     className={cn(
-                      'px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-tighter shrink-0',
+                      'px-1.5 py-0.5 rounded-md text-ui-micro font-black uppercase tracking-tighter shrink-0',
                       order.type === OrderType.Buy
                         ? 'bg-market-up/10 text-market-up'
                         : 'bg-market-down/10 text-market-down'
@@ -379,18 +379,18 @@ export function OrderRecords({
                   >
                     {order.type === OrderType.Buy ? '买入' : '卖出'}
                   </span>
-                  <span className="font-bold text-[12px] text-foreground/90 tracking-tight truncate">
+                  <span className="font-bold text-ui-label text-foreground/90 tracking-tight truncate">
                     {order.stockName}
                   </span>
-                  <span className="text-[9px] font-mono text-muted-foreground/40 font-medium shrink-0">
+                  <span className="text-ui-micro font-mono text-muted-foreground/40 font-medium shrink-0">
                     {order.stockCode}
                   </span>
                 </div>
               </div>
 
-              <div className="flex items-center gap-4 text-[11px] font-mono pl-0.5 w-full">
+              <div className="flex items-center gap-ui-section text-ui-caption font-mono pl-0.5 w-full">
                 <div className="flex flex-col">
-                  <span className="text-[8px] text-muted-foreground/50 uppercase font-bold tracking-tighter leading-none mb-0.5">
+                  <span className="text-ui-micro text-muted-foreground/50 uppercase font-bold tracking-tighter leading-none mb-0.5">
                     价格
                   </span>
                   <span className="text-foreground font-black tracking-tight">
@@ -399,7 +399,7 @@ export function OrderRecords({
                 </div>
                 <div className="w-[1px] h-4 bg-slate-200/20 dark:bg-slate-800/20 mx-1" />
                 <div className="flex flex-col">
-                  <span className="text-[8px] text-muted-foreground/50 uppercase font-bold tracking-tighter leading-none mb-0.5">
+                  <span className="text-ui-micro text-muted-foreground/50 uppercase font-bold tracking-tighter leading-none mb-0.5">
                     数量
                   </span>
                   <span className="text-foreground/80 font-bold">
@@ -410,7 +410,7 @@ export function OrderRecords({
                 {order.tradedVolume > 0 && (
                   <div className="ml-auto flex items-center gap-1.5 px-2 py-0.5 bg-primary/5 rounded-md border border-primary/10">
                     <div className="w-1 h-1 bg-primary rounded-full animate-pulse" />
-                    <span className="text-[9px] font-bold text-primary/80 whitespace-nowrap">
+                    <span className="text-ui-micro font-bold text-primary/80 whitespace-nowrap">
                       已成交 {order.tradedVolume}
                     </span>
                   </div>
@@ -422,7 +422,7 @@ export function OrderRecords({
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 w-7 p-0 rounded-lg text-muted-foreground/30 hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
+                className="h-control-compact w-7 p-0 rounded-lg text-muted-foreground/30 hover:text-destructive hover:bg-destructive/10 transition-all duration-200"
                 disabled={isCancelling}
                 onClick={e => {
                   e.stopPropagation();

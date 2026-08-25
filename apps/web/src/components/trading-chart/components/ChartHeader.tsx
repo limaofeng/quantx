@@ -34,7 +34,7 @@ export function ChartHeader({
         <button
           onClick={() => onTimePeriodChange('1m_line')}
           className={cn(
-            'px-3 h-full rounded-lg text-[10px] font-bold transition-all duration-300 flex items-center gap-1.5',
+            'px-3 h-full rounded-lg text-ui-caption font-bold transition-all duration-300 flex items-center gap-1.5',
             activePeriod === '1m_line'
               ? 'bg-blue-600 text-white shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5'
@@ -46,7 +46,7 @@ export function ChartHeader({
         <button
           onClick={() => onTimePeriodChange('5d_line')}
           className={cn(
-            'px-3 h-full rounded-lg text-[10px] font-bold transition-all duration-300 flex items-center gap-1.5',
+            'px-3 h-full rounded-lg text-ui-caption font-bold transition-all duration-300 flex items-center gap-1.5',
             activePeriod === '5d_line'
               ? 'bg-blue-600 text-white shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5'
@@ -61,7 +61,7 @@ export function ChartHeader({
           <DropdownMenuTrigger asChild>
             <button
               className={cn(
-                'px-3 h-full rounded-lg text-[10px] font-bold transition-all duration-300 flex items-center gap-1.5',
+                'px-3 h-full rounded-lg text-ui-caption font-bold transition-all duration-300 flex items-center gap-1.5',
                 !isTimeMode
                   ? 'bg-blue-600 text-white shadow-sm'
                   : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5'
@@ -78,14 +78,14 @@ export function ChartHeader({
             align="start"
             className="w-[120px] max-h-[300px] overflow-y-auto custom-scrollbar"
           >
-            <div className="px-2 py-1.5 text-[10px] uppercase font-bold text-muted-foreground">
+            <div className="px-2 py-1.5 text-ui-caption uppercase font-bold text-muted-foreground">
               常用周期
             </div>
             {PERIODS.map(period => (
               <DropdownMenuItem
                 key={period.value}
                 className={cn(
-                  'text-xs cursor-pointer',
+                  'text-ui-label cursor-pointer',
                   activePeriod === period.value &&
                     'text-blue-600 bg-blue-50 dark:bg-blue-600/10'
                 )}
@@ -94,14 +94,14 @@ export function ChartHeader({
                 {period.label}
               </DropdownMenuItem>
             ))}
-            <div className="px-2 py-1.5 text-[10px] uppercase font-bold text-muted-foreground mt-2 border-t pt-2">
+            <div className="px-2 py-1.5 text-ui-caption uppercase font-bold text-muted-foreground mt-2 border-t pt-2">
               分钟周期
             </div>
             {MINUTE_PERIODS.map(period => (
               <DropdownMenuItem
                 key={period.value}
                 className={cn(
-                  'text-xs cursor-pointer',
+                  'text-ui-label cursor-pointer',
                   activePeriod === period.value &&
                     'text-blue-600 bg-blue-50 dark:bg-blue-600/10'
                 )}

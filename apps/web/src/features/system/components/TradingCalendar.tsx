@@ -248,11 +248,11 @@ export function TradingCalendar({
   }, [holidays, currentYear]);
 
   return (
-    <div className="flex flex-col lg:flex-row gap-4 h-full min-h-0 animate-fade-in relative">
+    <div className="flex flex-col lg:flex-row gap-ui-section h-full min-h-0 animate-fade-in relative">
       {/* Left Column: Calendar Main Area */}
-      <div className="flex-1 flex flex-col gap-4 min-h-0 min-w-0">
+      <div className="flex-1 flex flex-col gap-ui-section min-h-0 min-w-0">
         {/* Stats Row */}
-        <div className="grid grid-cols-2 gap-4 shrink-0 h-24">
+        <div className="grid grid-cols-2 gap-ui-section shrink-0 h-24">
           {calendarStats.map((stat, i) => (
             <Card
               key={i}
@@ -264,25 +264,25 @@ export function TradingCalendar({
               <div className="absolute top-0 right-0 p-2 opacity-5 pointer-events-none">
                 <stat.icon className={cn('w-16 h-16 rotate-12', stat.color)} />
               </div>
-              <CardContent className="p-4 h-full flex flex-col justify-center">
+              <CardContent className="p-ui-section h-full flex flex-col justify-center">
                 <div className="flex items-center gap-2 mb-1">
                   <div className={cn('p-1 rounded-md', stat.bg)}>
                     <stat.icon className={cn('w-3 h-3', stat.color)} />
                   </div>
-                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                  <span className="text-ui-caption font-black text-slate-400 uppercase tracking-widest">
                     {stat.label}
                   </span>
                 </div>
                 <div className="flex items-baseline gap-2 relative z-10">
                   <span
                     className={cn(
-                      'text-3xl font-black tracking-tighter tabular-nums',
+                      'text-ui-display-lg font-black tracking-tighter tabular-nums',
                       stat.color
                     )}
                   >
                     {stat.value}
                   </span>
-                  <span className="text-[10px] font-bold text-slate-400/80">
+                  <span className="text-ui-caption font-bold text-slate-400/80">
                     {stat.detail}
                   </span>
                 </div>
@@ -292,20 +292,20 @@ export function TradingCalendar({
         </div>
 
         {/* Calendar Grid */}
-        <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-2xl rounded-[24px] overflow-hidden flex flex-col shadow-sm">
-          <CardHeader className="py-2.5 px-6 border-b border-slate-100/50 dark:border-white/5 shadow-sm z-50">
+        <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-2xl rounded-panel overflow-hidden flex flex-col shadow-sm">
+          <CardHeader className="py-2.5 px-ui-panel border-b border-slate-100/50 dark:border-white/5 shadow-sm z-50">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-1.5 p-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400">
                   <Calendar className="w-4 h-4" />
-                  <span className="text-xs font-black tracking-tight">
+                  <span className="text-ui-label font-black tracking-tight">
                     月视图
                   </span>
                 </div>
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="h-7 px-3 text-[10px] font-black uppercase tracking-wider text-slate-500 hover:text-indigo-600 hover:bg-indigo-50/50 dark:hover:bg-white/5 rounded-lg transition-all ml-2"
+                  className="h-control-compact px-3 text-ui-caption font-black uppercase tracking-wider text-slate-500 hover:text-indigo-600 hover:bg-indigo-50/50 dark:hover:bg-white/5 rounded-lg transition-all ml-2"
                   onClick={() => setCurrentDate(new Date())}
                 >
                   <RotateCcw className="w-3 h-3 mr-1.5" />
@@ -317,7 +317,7 @@ export function TradingCalendar({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7 rounded-md hover:bg-white"
+                  className="h-control-compact w-7 rounded-md hover:bg-white"
                   onClick={() =>
                     setCurrentDate(new Date(currentYear, currentMonth - 1, 1))
                   }
@@ -330,7 +330,7 @@ export function TradingCalendar({
                       setShowYearPicker(!showYearPicker);
                       setShowMonthPicker(false);
                     }}
-                    className="px-2 py-0.5 rounded hover:bg-white/50 transition-colors text-sm font-black text-slate-700 dark:text-slate-300 font-mono tabular-nums"
+                    className="px-2 py-0.5 rounded hover:bg-white/50 transition-colors text-ui-body font-black text-slate-700 dark:text-slate-300 font-mono tabular-nums"
                   >
                     {currentYear}
                   </button>
@@ -340,7 +340,7 @@ export function TradingCalendar({
                       setShowMonthPicker(!showMonthPicker);
                       setShowYearPicker(false);
                     }}
-                    className="px-2 py-0.5 rounded hover:bg-white/50 transition-colors text-sm font-black text-slate-700 dark:text-slate-300 font-mono tracking-wide uppercase"
+                    className="px-2 py-0.5 rounded hover:bg-white/50 transition-colors text-ui-body font-black text-slate-700 dark:text-slate-300 font-mono tracking-wide uppercase"
                   >
                     {MONTHS[currentMonth]}
                   </button>
@@ -348,7 +348,7 @@ export function TradingCalendar({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7 rounded-md hover:bg-white"
+                  className="h-control-compact w-7 rounded-md hover:bg-white"
                   onClick={() =>
                     setCurrentDate(new Date(currentYear, currentMonth + 1, 1))
                   }
@@ -360,13 +360,13 @@ export function TradingCalendar({
           </CardHeader>
 
           <CardContent className="p-0 overflow-hidden relative group/calendar flex-1 flex flex-col">
-            <div className="px-6 py-2 border-b border-slate-100/30 dark:border-white/5 bg-slate-50/30 dark:bg-white/[0.01]">
+            <div className="px-ui-panel py-2 border-b border-slate-100/30 dark:border-white/5 bg-slate-50/30 dark:bg-white/[0.01]">
               <div className="grid grid-cols-7 gap-2">
                 {WEEKDAYS.map((day, i) => (
                   <div
                     key={day}
                     className={cn(
-                      'text-center text-[10px] font-black uppercase tracking-widest',
+                      'text-center text-ui-caption font-black uppercase tracking-widest',
                       i >= 5 ? 'text-rose-500' : 'text-slate-400'
                     )}
                   >
@@ -376,18 +376,18 @@ export function TradingCalendar({
               </div>
             </div>
 
-            <div className="flex-1 p-4 relative">
+            <div className="flex-1 p-ui-section relative">
               {/* Pickers Overlay */}
               {(showMonthPicker || showYearPicker) && (
-                <div className="absolute inset-0 z-50 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md p-6 flex flex-col animate-in fade-in zoom-in-95">
+                <div className="absolute inset-0 z-50 bg-white/95 dark:bg-slate-950/95 backdrop-blur-md p-ui-panel flex flex-col animate-in fade-in zoom-in-95">
                   <div className="flex justify-between items-center mb-4">
-                    <span className="text-xs font-black uppercase text-slate-400">
+                    <span className="text-ui-label font-black uppercase text-slate-400">
                       选择{showYearPicker ? '年份' : '月份'}
                     </span>
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="h-6 text-[10px]"
+                      className="h-6 text-ui-caption"
                       onClick={() => {
                         setShowMonthPicker(false);
                         setShowYearPicker(false);
@@ -403,7 +403,7 @@ export function TradingCalendar({
                             key={y}
                             variant={currentYear === y ? 'default' : 'outline'}
                             className={cn(
-                              'h-10 text-xs font-mono',
+                              'h-control-large text-ui-label font-mono',
                               currentYear === y && 'bg-indigo-600'
                             )}
                             onClick={() => {
@@ -419,7 +419,7 @@ export function TradingCalendar({
                             key={m}
                             variant={currentMonth === i ? 'default' : 'outline'}
                             className={cn(
-                              'h-10 text-xs',
+                              'h-control-large text-ui-label',
                               currentMonth === i && 'bg-indigo-600'
                             )}
                             onClick={() => {
@@ -440,7 +440,7 @@ export function TradingCalendar({
                     return (
                       <div
                         key={`e-${i}`}
-                        className="bg-slate-50/30 dark:bg-white/[0.01] rounded-xl border border-transparent border-dashed border-slate-200/50"
+                        className="bg-slate-50/30 dark:bg-white/[0.01] rounded-panel border border-transparent border-dashed border-slate-200/50"
                       />
                     );
 
@@ -468,7 +468,7 @@ export function TradingCalendar({
 
                   if (selected) {
                     containerClass =
-                      'bg-indigo-600 border-indigo-500 text-white z-30 shadow-xl scale-110 ring-2 ring-indigo-200 dark:ring-indigo-900';
+                      'bg-indigo-600 border-indigo-500 text-white z-30 shadow-none scale-110 ring-2 ring-indigo-200 dark:ring-indigo-900';
                     textClass = 'text-white';
                   }
 
@@ -483,13 +483,13 @@ export function TradingCalendar({
                       onClick={() => handleDayClick(date)}
                       disabled={weekend && !holiday}
                       className={cn(
-                        'relative rounded-xl border flex flex-col items-center justify-center transition-all group p-1 overflow-hidden',
+                        'relative rounded-panel border flex flex-col items-center justify-center transition-all group p-1 overflow-hidden',
                         containerClass
                       )}
                     >
                       <span
                         className={cn(
-                          'text-sm font-black tracking-tighter mb-0.5 transition-colors',
+                          'text-ui-body font-black tracking-tighter mb-0.5 transition-colors',
                           textClass
                         )}
                       >
@@ -498,7 +498,7 @@ export function TradingCalendar({
                       {info?.description && (
                         <span
                           className={cn(
-                            'text-[8px] font-bold truncate max-w-[90%] px-1.5 py-0.5 rounded-full mt-1 transition-colors',
+                            'text-ui-micro font-bold truncate max-w-[90%] px-1.5 py-0.5 rounded-full mt-1 transition-colors',
                             selected
                               ? 'bg-white/20 text-white'
                               : 'bg-white/60 dark:bg-black/20 text-rose-600 dark:text-rose-400'
@@ -531,13 +531,13 @@ export function TradingCalendar({
       </div>
 
       {/* Right Column: Sidebar & Actions */}
-      <div className="w-full lg:w-72 shrink-0 flex flex-col gap-4">
+      <div className="w-full lg:w-72 shrink-0 flex flex-col gap-ui-section">
         {/* Sync Widget */}
         {!hideSyncWidget && (
-          <Card className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-[20px] shadow-sm">
-            <CardContent className="p-4">
+          <Card className="border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-panel shadow-sm">
+            <CardContent className="p-ui-section">
               <div className="flex items-center justify-between mb-3">
-                <span className="text-[10px] uppercase font-black text-slate-400">
+                <span className="text-ui-caption uppercase font-black text-slate-400">
                   同步状态
                 </span>
                 <div className="flex items-center gap-1">
@@ -549,27 +549,27 @@ export function TradingCalendar({
                         : 'bg-emerald-500'
                     )}
                   />
-                  <span className="text-[10px] font-bold text-slate-500">
+                  <span className="text-ui-caption font-bold text-slate-500">
                     {isSyncing ? '运行中' : '空闲'}
                   </span>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 mb-3">
                 <div className="bg-white/50 dark:bg-white/5 rounded-lg p-2 border border-slate-100 dark:border-white/5">
-                  <div className="text-[9px] text-slate-400 mb-0.5">
+                  <div className="text-ui-micro text-slate-400 mb-0.5">
                     上次运行
                   </div>
-                  <div className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
+                  <div className="text-ui-caption font-mono font-bold text-slate-700 dark:text-slate-300">
                     {deployment?.lastRunTime
                       ? format(new Date(deployment.lastRunTime), 'MM-dd HH:mm')
                       : '--'}
                   </div>
                 </div>
                 <div className="bg-white/50 dark:bg-white/5 rounded-lg p-2 border border-slate-100 dark:border-white/5">
-                  <div className="text-[9px] text-slate-400 mb-0.5">
+                  <div className="text-ui-micro text-slate-400 mb-0.5">
                     下次运行
                   </div>
-                  <div className="text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
+                  <div className="text-ui-caption font-mono font-bold text-slate-700 dark:text-slate-300">
                     {deployment?.nextRunTime
                       ? format(new Date(deployment.nextRunTime), 'MM-dd HH:mm')
                       : '--'}
@@ -577,7 +577,7 @@ export function TradingCalendar({
                 </div>
               </div>
               <Button
-                className="w-full h-8 text-xs font-bold bg-indigo-600 hover:bg-indigo-700"
+                className="w-full h-control-compact text-ui-label font-bold bg-indigo-600 hover:bg-indigo-700"
                 size="sm"
                 disabled={isSyncing}
                 onClick={() => {
@@ -596,22 +596,22 @@ export function TradingCalendar({
         )}
 
         {/* Holiday List */}
-        <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-[24px] overflow-hidden flex flex-col shadow-sm min-h-[300px]">
-          <div className="px-4 py-3 border-b border-slate-100/50 dark:border-white/5 flex justify-between items-center">
-            <span className="text-xs font-black text-slate-500 dark:text-slate-400 flex items-center gap-2">
+        <Card className="flex-1 border-slate-200/60 dark:border-white/5 bg-white/40 dark:bg-white/[0.02] backdrop-blur-xl rounded-panel overflow-hidden flex flex-col shadow-sm min-h-[300px]">
+          <div className="px-ui-section py-3 border-b border-slate-100/50 dark:border-white/5 flex justify-between items-center">
+            <span className="text-ui-label font-black text-slate-500 dark:text-slate-400 flex items-center gap-2">
               <Info size={12} />
               节假日列表
             </span>
-            <span className="text-[9px] bg-slate-100 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono">
+            <span className="text-ui-micro bg-slate-100 dark:bg-white/10 px-1.5 py-0.5 rounded font-mono">
               {holidays.length}
             </span>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-3 space-y-2">
               {holidays.length === 0 ? (
-                <div className="text-center py-10 opacity-40">
+                <div className="text-center py-ui-empty opacity-40">
                   <Calendar size={24} className="mx-auto mb-2" />
-                  <p className="text-[10px]">暂无节假日数据</p>
+                  <p className="text-ui-caption">暂无节假日数据</p>
                 </div>
               ) : (
                 sortedHolidays.map(h => (
@@ -619,7 +619,7 @@ export function TradingCalendar({
                     key={h.id}
                     id={`holiday-item-${h.id}`}
                     className={cn(
-                      'p-3 rounded-xl border border-transparent transition-all group relative scroll-mt-20 duration-300',
+                      'p-3 rounded-panel border border-transparent transition-all group relative scroll-mt-20 duration-300',
                       highlightedId === h.id
                         ? 'bg-rose-50 dark:bg-rose-900/20 border-rose-200 shadow-md ring-1 ring-rose-500/20 scale-[1.02] z-10'
                         : 'bg-white/50 dark:bg-white/5 hover:bg-white hover:shadow-sm'
@@ -629,7 +629,7 @@ export function TradingCalendar({
                       <div className="flex flex-col">
                         <span
                           className={cn(
-                            'text-xs font-bold transition-colors',
+                            'text-ui-label font-bold transition-colors',
                             highlightedId === h.id
                               ? 'text-rose-700 dark:text-rose-300'
                               : 'text-slate-800 dark:text-slate-200'
@@ -637,7 +637,7 @@ export function TradingCalendar({
                         >
                           {h.description || '节假日'}
                         </span>
-                        <span className="text-[10px] font-mono text-slate-400 mt-0.5">
+                        <span className="text-ui-caption font-mono text-slate-400 mt-0.5">
                           {h.holidayDate}
                         </span>
                       </div>
@@ -672,18 +672,18 @@ export function TradingCalendar({
 
       {/* Floating Add Dialog */}
       {selectedDate && (
-        <div className="absolute bottom-6 left-6 right-80 z-50 p-4 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl rounded-[24px] border border-indigo-500/20 shadow-2xl animate-in slide-in-from-bottom-4">
+        <div className="absolute bottom-6 left-6 right-80 z-50 p-ui-section bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl rounded-panel border border-indigo-500/20 shadow-none animate-in slide-in-from-bottom-4">
           <div className="flex gap-2">
             <Input
               autoFocus
               placeholder={`添加节假日: ${formatDateKey(selectedDate)}...`}
               value={newDescription}
               onChange={e => setNewDescription(e.target.value)}
-              className="flex-1 h-9 bg-white dark:bg-black/20 text-xs"
+              className="flex-1 h-9 bg-white dark:bg-black/20 text-ui-label"
             />
             <Button
               size="sm"
-              className="h-9 bg-indigo-600 hover:bg-indigo-700 text-xs"
+              className="h-control-default bg-indigo-600 hover:bg-indigo-700 text-ui-label"
               onClick={handleAddHoliday}
               disabled={addResult.fetching}
             >
@@ -692,7 +692,7 @@ export function TradingCalendar({
             <Button
               size="sm"
               variant="ghost"
-              className="h-9 text-xs"
+              className="h-control-default text-ui-label"
               onClick={() => setSelectedDate(null)}
             >
               取消

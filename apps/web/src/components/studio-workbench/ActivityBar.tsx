@@ -99,11 +99,11 @@ export function ActivityBar({
           />
         )}
         {isStudioVariant ? (
-          <span className="max-w-full truncate text-[11px] font-medium leading-none tracking-wide">
+          <span className="max-w-full truncate text-ui-caption font-medium leading-none tracking-wide">
             {action.shortLabel || action.label}
           </span>
         ) : (
-          <span className="pointer-events-none absolute left-full z-50 ml-2 whitespace-nowrap rounded-lg border border-white/10 bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-white opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+          <span className="pointer-events-none absolute left-full z-50 ml-2 whitespace-nowrap rounded-lg border border-white/10 bg-slate-800 px-2.5 py-1.5 text-ui-label font-bold text-white opacity-0 shadow-none transition-opacity group-hover:opacity-100">
             {action.label}
           </span>
         )}
@@ -181,11 +181,11 @@ export function ActivityBar({
           />
         )}
         {isStudioVariant ? (
-          <span className="max-w-full truncate text-[11px] font-medium leading-none tracking-wide">
+          <span className="max-w-full truncate text-ui-caption font-medium leading-none tracking-wide">
             {mode.label}
           </span>
         ) : (
-          <span className="pointer-events-none absolute left-full z-50 ml-2 whitespace-nowrap rounded-lg border border-white/10 bg-slate-800 px-2.5 py-1.5 text-xs font-bold text-white opacity-0 shadow-xl transition-opacity group-hover:opacity-100">
+          <span className="pointer-events-none absolute left-full z-50 ml-2 whitespace-nowrap rounded-lg border border-white/10 bg-slate-800 px-2.5 py-1.5 text-ui-label font-bold text-white opacity-0 shadow-none transition-opacity group-hover:opacity-100">
             {mode.disabledReason || mode.label}
           </span>
         )}
@@ -200,7 +200,7 @@ export function ActivityBar({
         'flex shrink-0 flex-col items-center',
         isStudioVariant
           ? 'studio-shell-activity-bar gap-1 py-2'
-          : 'w-12 gap-2.5 border-r border-white/5 bg-[#0b1120] py-4'
+          : 'w-12 gap-2.5 border-r border-white/5 bg-[#0b1120] py-ui-section'
       )}
       data-testid="studio-activity-bar"
       data-variant={variant}
@@ -295,7 +295,7 @@ export function ActivityBar({
 
       {isStudioVariant && environmentStatus && (
         <div
-          className="mx-2 mb-1 mt-auto shrink-0 rounded-md border border-white/10 bg-[#0b1120] px-2 py-2"
+          className="mx-2 mb-1 mt-auto shrink-0 rounded-control border border-white/10 bg-[#0b1120] px-2 py-2"
           data-testid="studio-environment-status"
           style={{
             background: '#091524',
@@ -307,7 +307,7 @@ export function ActivityBar({
         >
           <div
             className={cn(
-              'flex items-center gap-1.5 font-mono text-[10px] font-bold',
+              'flex items-center gap-1.5 font-mono text-ui-micro font-bold',
               environmentStatus.tone === 'ready'
                 ? 'text-emerald-300'
                 : environmentStatus.tone === 'reduce-only'
@@ -331,7 +331,7 @@ export function ActivityBar({
             />
             {environmentStatus.label}
           </div>
-          <div className="mt-1 truncate text-center text-[10px] text-slate-500">
+          <div className="mt-1 truncate text-center text-ui-micro text-slate-500">
             {environmentStatus.detail}
           </div>
         </div>

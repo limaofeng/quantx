@@ -219,21 +219,21 @@ export const InsightTile: React.FC<{
       )}
       <div className="flex-1 min-w-0 relative z-10">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xl font-black text-slate-900 dark:text-white tracking-tight">
+          <span className="text-ui-page-title font-black text-slate-900 dark:text-white tracking-tight">
             {value}
           </span>
           {status && (
             <span
-              className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase flex-shrink-0 ${statusColors[theme]}`}
+              className={`text-ui-micro font-bold px-1.5 py-0.5 rounded uppercase flex-shrink-0 ${statusColors[theme]}`}
             >
               {status}
             </span>
           )}
         </div>
-        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest truncate">
+        <p className="text-ui-caption font-bold text-slate-400 uppercase tracking-widest truncate">
           {label}
         </p>
-        <p className="text-[9px] font-medium text-slate-500 truncate mt-0.5">
+        <p className="text-ui-micro font-medium text-slate-500 truncate mt-0.5">
           {subValue}
         </p>
       </div>

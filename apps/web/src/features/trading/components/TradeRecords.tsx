@@ -61,23 +61,25 @@ export function TradeRecords({
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'completed':
-        return <span className="text-[10px] text-success">已成交</span>;
+        return <span className="text-ui-caption text-success">已成交</span>;
       case 'pending':
-        return <span className="text-[10px] text-warning">待成交</span>;
+        return <span className="text-ui-caption text-warning">待成交</span>;
       case 'cancelled':
-        return <span className="text-[10px] text-destructive">已取消</span>;
+        return <span className="text-ui-caption text-destructive">已取消</span>;
       default:
         return (
-          <span className="text-[10px] text-muted-foreground">{status}</span>
+          <span className="text-ui-caption text-muted-foreground">
+            {status}
+          </span>
         );
     }
   };
 
   const getTypeBadge = (type: string) => {
     return type === 'buy' ? (
-      <span className="text-[10px] text-market-up font-bold">买入</span>
+      <span className="text-ui-caption text-market-up font-bold">买入</span>
     ) : (
-      <span className="text-[10px] text-market-down font-bold">卖出</span>
+      <span className="text-ui-caption text-market-down font-bold">卖出</span>
     );
   };
 
@@ -132,13 +134,13 @@ export function TradeRecords({
   return (
     <div className="space-y-3 h-full flex flex-col">
       {/* Inline Toolbar & Summary */}
-      <div className="flex justify-between items-center gap-4 px-1">
-        <div className="flex gap-4 items-center">
-          <div className="flex items-center gap-1.5 text-[10px] font-mono">
+      <div className="flex justify-between items-center gap-ui-section px-1">
+        <div className="flex gap-ui-section items-center">
+          <div className="flex items-center gap-1.5 text-ui-caption font-mono">
             <span className="text-muted-foreground uppercase">成交笔数:</span>
             <span className="font-bold">{filteredTransactions.length}</span>
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] font-mono">
+          <div className="flex items-center gap-1.5 text-ui-caption font-mono">
             <span className="text-muted-foreground uppercase">成交金额:</span>
             <span className="font-bold">{formatCurrency(totalAmount)}</span>
           </div>
@@ -146,7 +148,7 @@ export function TradeRecords({
 
         <div className="flex gap-2">
           <Select value={typeFilter} onValueChange={setTypeFilter}>
-            <SelectTrigger className="h-7 w-24 text-[10px] border-none bg-muted/30">
+            <SelectTrigger className="h-control-compact w-24 text-ui-caption border-none bg-muted/30">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -157,7 +159,7 @@ export function TradeRecords({
           </Select>
 
           <Select value={timeFilter} onValueChange={setTimeFilter}>
-            <SelectTrigger className="h-7 w-24 text-[10px] border-none bg-muted/30">
+            <SelectTrigger className="h-control-compact w-24 text-ui-caption border-none bg-muted/30">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -173,7 +175,7 @@ export function TradeRecords({
       {/* Transaction History Table */}
       <div className="flex-1 overflow-hidden border border-border/50 rounded-md bg-muted/5 flex flex-col">
         {isTransactionsLoading ? (
-          <div className="flex-1 flex items-center justify-center text-[11px] text-muted-foreground italic">
+          <div className="flex-1 flex items-center justify-center text-ui-caption text-muted-foreground italic">
             同步历史数据中...
           </div>
         ) : (
@@ -181,28 +183,28 @@ export function TradeRecords({
             <table className="w-full text-left border-collapse">
               <thead className="sticky top-0 bg-muted/50 z-10">
                 <tr>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                     时间
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                     股票
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                     类型
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                     数量
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                     价格
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                     金额
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b">
                     属性/状态
                   </th>
-                  <th className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
+                  <th className="px-3 py-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider border-b text-right">
                     盈亏口径
                   </th>
                 </tr>
@@ -228,7 +230,7 @@ export function TradeRecords({
                             <path d="m9 12 2 2 4-4" />
                           </svg>
                         </div>
-                        <span className="text-xs font-medium">
+                        <span className="text-ui-label font-medium">
                           {filteredTransactions.length === 0
                             ? '暂无成交记录'
                             : '无符合条件的记录'}
@@ -250,7 +252,7 @@ export function TradeRecords({
                           }
                           className="hover:bg-muted/30 transition-colors group"
                         >
-                          <td className="px-3 py-1 text-[10px] font-mono text-muted-foreground">
+                          <td className="px-3 py-1 text-ui-caption font-mono text-muted-foreground">
                             {transaction.createdAt
                               ? new Date(
                                   transaction.createdAt
@@ -265,10 +267,10 @@ export function TradeRecords({
                           </td>
                           <td className="px-3 py-1">
                             <div className="flex items-center gap-2">
-                              <span className="text-[11px] font-bold">
+                              <span className="text-ui-caption font-bold">
                                 {stock.name}
                               </span>
-                              <span className="text-[9px] font-mono text-muted-foreground">
+                              <span className="text-ui-micro font-mono text-muted-foreground">
                                 {stock.code}
                               </span>
                             </div>
@@ -276,20 +278,20 @@ export function TradeRecords({
                           <td className="px-3 py-1">
                             {getTypeBadge(transaction.type)}
                           </td>
-                          <td className="px-3 py-1 text-[11px] font-mono">
+                          <td className="px-3 py-1 text-ui-caption font-mono">
                             {transaction.quantity}
                           </td>
-                          <td className="px-3 py-1 text-[11px] font-mono text-right">
+                          <td className="px-3 py-1 text-ui-caption font-mono text-right">
                             {transaction.price}
                           </td>
-                          <td className="px-3 py-1 text-[11px] font-mono text-right font-medium">
+                          <td className="px-3 py-1 text-ui-caption font-mono text-right font-medium">
                             {formatCurrency(transaction.totalAmount)}
                           </td>
                           <td className="px-3 py-1">
                             {getStatusBadge(transaction.status)}
                           </td>
                           <td className="px-3 py-1 text-right">
-                            <span className="text-[10px] text-muted-foreground">
+                            <span className="text-ui-caption text-muted-foreground">
                               --
                             </span>
                           </td>
@@ -307,7 +309,7 @@ export function TradeRecords({
         {/* Dense Pagination */}
         {totalPages > 1 && (
           <div className="px-2 py-1.5 border-t border-border flex items-center justify-between bg-muted/20">
-            <div className="text-[9px] text-muted-foreground font-mono">
+            <div className="text-ui-micro text-muted-foreground font-mono">
               REC: {startIndex + 1}-
               {Math.min(startIndex + itemsPerPage, filteredTransactions.length)}{' '}
               / TOTAL: {filteredTransactions.length}
@@ -315,18 +317,18 @@ export function TradeRecords({
             <div className="flex gap-1">
               <Button
                 variant="ghost"
-                className="h-5 px-1.5 text-[9px] hover:bg-muted"
+                className="h-5 px-1.5 text-ui-micro hover:bg-muted"
                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                 disabled={currentPage === 1}
               >
                 PREV
               </Button>
-              <span className="flex items-center text-[9px] font-mono px-2 bg-muted/50 rounded">
+              <span className="flex items-center text-ui-micro font-mono px-2 bg-muted/50 rounded">
                 PAGE {currentPage} OF {totalPages}
               </span>
               <Button
                 variant="ghost"
-                className="h-5 px-1.5 text-[9px] hover:bg-muted"
+                className="h-5 px-1.5 text-ui-micro hover:bg-muted"
                 onClick={() =>
                   setCurrentPage(Math.min(totalPages, currentPage + 1))
                 }

@@ -66,7 +66,7 @@ export function StockSelector({
                   }}
                   onFocus={() => setOpen(true)}
                   className={cn(
-                    'h-8 text-xs font-mono bg-muted/30 border-none focus-visible:ring-1 pr-8 transition-all',
+                    'h-8 text-ui-label font-mono bg-muted/30 border-none focus-visible:ring-1 pr-8 transition-all',
                     showingSelectedStock &&
                       'bg-white/70 placeholder:font-black placeholder:text-slate-900 dark:bg-slate-950/70 dark:placeholder:text-slate-100 ring-1 ring-primary/20 focus-visible:ring-primary/40',
                     inputClassName
@@ -106,7 +106,7 @@ export function StockSelector({
           {filteredStocks.length > 0 ? (
             <div className="max-h-[280px] overflow-y-auto divide-y divide-border/30 custom-scrollbar">
               {(!searchQuery || searchQuery.length < 2) && (
-                <div className="px-3 py-1.5 bg-muted/30 text-[10px] font-bold text-muted-foreground uppercase tracking-widest border-b border-border/30">
+                <div className="px-3 py-1.5 bg-muted/30 text-ui-caption font-bold text-muted-foreground uppercase tracking-widest border-b border-border/30">
                   当前持仓 / 推荐
                 </div>
               )}
@@ -122,22 +122,22 @@ export function StockSelector({
                   }}
                 >
                   <div className="flex flex-col">
-                    <span className="text-[11px] font-bold group-hover:text-primary transition-colors">
+                    <span className="text-ui-caption font-bold group-hover:text-primary transition-colors">
                       {stock.name}
                     </span>
-                    <span className="text-[10px] font-mono text-muted-foreground">
+                    <span className="text-ui-caption font-mono text-muted-foreground">
                       {stock.id}
                     </span>
                   </div>
                   <div className="text-right flex flex-col">
-                    <span className="text-[10px] font-mono font-bold">
+                    <span className="text-ui-caption font-mono font-bold">
                       {stock.quote
                         ? formatCurrency(stock.quote.lastPrice ?? 0)
                         : '--'}
                     </span>
                     <span
                       className={cn(
-                        'text-[10px] font-mono font-medium',
+                        'text-ui-caption font-mono font-medium',
                         financialToneClass(stock.quote?.changePercent)
                       )}
                     >
@@ -149,7 +149,7 @@ export function StockSelector({
               ))}
             </div>
           ) : searchQuery ? (
-            <div className="px-3 py-4 text-center text-[10px] text-muted-foreground italic">
+            <div className="px-3 py-4 text-center text-ui-caption text-muted-foreground italic">
               未找到匹配股票
             </div>
           ) : null}

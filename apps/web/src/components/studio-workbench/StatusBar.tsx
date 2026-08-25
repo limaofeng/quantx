@@ -12,9 +12,9 @@ export function StatusBar({
   return (
     <div
       className={cn(
-        'relative flex h-[38px] shrink-0 items-center justify-between overflow-hidden border-t border-white/10 bg-[#07111f] px-4 text-[11px] font-medium leading-none text-slate-400',
+        'relative flex h-studio-status shrink-0 items-center justify-between overflow-hidden border-t border-white/10 bg-[#07111f] px-3 text-ui-micro font-medium text-slate-400',
         isWorkspaceVariant
-          ? 'studio-shell-status-bar px-5 text-slate-400'
+          ? 'studio-shell-status-bar px-3 text-slate-400'
           : '[&_.text-slate-700]:hidden'
       )}
       data-variant={variant}
@@ -38,13 +38,13 @@ export function StatusBar({
         )}
       />
       <div
-        className="flex min-w-0 flex-1 items-center gap-4 overflow-hidden whitespace-nowrap"
+        className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden whitespace-nowrap"
         data-testid="studio-status-left"
       >
         {left}
       </div>
       <div
-        className="ml-5 flex min-w-0 flex-1 items-center justify-end gap-4 overflow-hidden whitespace-nowrap"
+        className="ml-3 flex min-w-0 flex-1 items-center justify-end gap-3 overflow-hidden whitespace-nowrap"
         data-testid="studio-status-right"
       >
         {right}

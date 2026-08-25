@@ -151,23 +151,23 @@ export function TransactionDataPage() {
       description="交易流水、委托成交数据"
       title="交易流水数据"
     >
-      <div className="flex flex-col gap-4 pb-10 animate-fade-in">
+      <div className="flex flex-col gap-ui-section pb-10 animate-fade-in">
         {/* Compact Header Section */}
-        <div className="flex items-center justify-between gap-4 py-1">
+        <div className="flex items-center justify-between gap-ui-section py-1">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="h-8 w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
+              className="h-control-compact w-8 rounded-lg bg-white/50 dark:bg-white/5 border border-slate-200/60 dark:border-white/5 shadow-sm hover:scale-105 active:scale-95 transition-all backdrop-blur-sm"
               onClick={() => setLocation('/settings/data')}
             >
               <ArrowLeft className="w-4 h-4 text-slate-600 dark:text-slate-400" />
             </Button>
             <div>
-              <h1 className="text-lg font-black text-slate-900 dark:text-white tracking-tight leading-none">
+              <h1 className="text-ui-heading font-black text-slate-900 dark:text-white tracking-tight leading-none">
                 交易数据
               </h1>
-              <p className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
+              <p className="text-ui-caption font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mt-0.5 opacity-80">
                 TRANSACTION HISTORY & LOGS
               </p>
             </div>
@@ -181,44 +181,44 @@ export function TransactionDataPage() {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-5 flex items-center gap-4 bg-gradient-to-br from-indigo-50/50 to-purple-50/50 dark:from-indigo-900/10 dark:to-purple-900/10">
-            <div className="p-3 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-ui-panel">
+          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-ui-section flex items-center gap-ui-section bg-gradient-to-br from-indigo-50/50 to-purple-50/50 dark:from-indigo-900/10 dark:to-purple-900/10">
+            <div className="p-3 rounded-panel bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
               <ArrowLeftRight className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 总交易笔数
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-ui-display font-black text-slate-900 dark:text-white mt-1">
                 12,580
               </p>
             </div>
           </Card>
 
-          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400">
+          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-ui-section flex items-center gap-ui-section">
+            <div className="p-3 rounded-panel bg-blue-500/10 text-blue-600 dark:text-blue-400">
               <BarChart2 className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 总成交额
               </p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white mt-1">
+              <p className="text-ui-display font-black text-slate-900 dark:text-white mt-1">
                 28.5亿
               </p>
             </div>
           </Card>
 
-          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-5 flex items-center gap-4">
-            <div className="p-3 rounded-xl bg-market-up/10 text-market-up">
+          <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm p-ui-section flex items-center gap-ui-section">
+            <div className="p-3 rounded-panel bg-market-up/10 text-market-up">
               <TrendingUp className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+              <p className="text-ui-label font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
                 平均收益率
               </p>
-              <p className="text-2xl font-black text-market-up mt-1">
+              <p className="text-ui-display font-black text-market-up mt-1">
                 +8.5%
               </p>
             </div>
@@ -227,13 +227,13 @@ export function TransactionDataPage() {
 
         {/* Main Content: Data Table */}
         <Card className="border-slate-200/60 dark:border-slate-800/60 shadow-sm overflow-hidden min-h-[500px] flex flex-col">
-          <CardHeader className="px-6 py-5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-white/[0.01]">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <CardHeader className="px-ui-panel py-ui-section border-b border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-white/[0.01]">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-ui-section">
               <div>
-                <CardTitle className="text-lg font-bold tracking-tight">
+                <CardTitle className="text-ui-heading font-bold tracking-tight">
                   历史交易记录
                 </CardTitle>
-                <CardDescription className="text-xs">
+                <CardDescription className="text-ui-label">
                   近期买入与卖出交易明细
                 </CardDescription>
               </div>
@@ -243,7 +243,7 @@ export function TransactionDataPage() {
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-slate-400" />
                   <Input
                     placeholder="搜索股票代码或名称..."
-                    className="pl-9 h-9 text-sm bg-white dark:bg-slate-900/50"
+                    className="pl-9 h-control-default text-ui-body bg-white dark:bg-slate-900/50"
                     value={searchTerm}
                     onChange={e => setSearchTerm(e.target.value)}
                   />
@@ -251,7 +251,7 @@ export function TransactionDataPage() {
                 <Button
                   variant="outline"
                   size="icon"
-                  className="h-9 w-9 shrink-0"
+                  className="h-control-default w-9 shrink-0"
                 >
                   <Filter className="w-4 h-4 text-slate-500" />
                 </Button>
@@ -262,9 +262,9 @@ export function TransactionDataPage() {
             <div className="overflow-x-auto">
               <table className="w-full border-collapse">
                 <thead>
-                  <tr className="bg-slate-50/50 dark:bg-white/[0.01] text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800">
+                  <tr className="bg-slate-50/50 dark:bg-white/[0.01] text-ui-caption font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800">
                     <th
-                      className="px-6 py-4 text-left font-black"
+                      className="px-ui-panel py-ui-section text-left font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -276,7 +276,7 @@ export function TransactionDataPage() {
                       时间/股票
                     </th>
                     <th
-                      className="px-6 py-4 text-left font-black"
+                      className="px-ui-panel py-ui-section text-left font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -288,7 +288,7 @@ export function TransactionDataPage() {
                       类型
                     </th>
                     <th
-                      className="px-6 py-4 text-right font-black"
+                      className="px-ui-panel py-ui-section text-right font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -300,7 +300,7 @@ export function TransactionDataPage() {
                       成交价格
                     </th>
                     <th
-                      className="px-6 py-4 text-right font-black"
+                      className="px-ui-panel py-ui-section text-right font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -312,7 +312,7 @@ export function TransactionDataPage() {
                       数量
                     </th>
                     <th
-                      className="px-6 py-4 text-right font-black"
+                      className="px-ui-panel py-ui-section text-right font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -324,7 +324,7 @@ export function TransactionDataPage() {
                       成交金额
                     </th>
                     <th
-                      className="px-6 py-4 text-right font-black"
+                      className="px-ui-panel py-ui-section text-right font-black"
                       onContextMenu={event =>
                         openTableMenuAtPointer(event, {
                           kind: 'column',
@@ -346,19 +346,19 @@ export function TransactionDataPage() {
                         openTableMenuAtPointer(event, { kind: 'row', item })
                       }
                     >
-                      <td className="px-6 py-5 whitespace-nowrap">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap">
                         <div className="flex flex-col">
-                          <span className="font-bold text-sm text-slate-900 dark:text-slate-100">
+                          <span className="font-bold text-ui-body text-slate-900 dark:text-slate-100">
                             {item.name}
                           </span>
-                          <span className="font-mono text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                          <span className="font-mono text-ui-label text-slate-500 dark:text-slate-400 flex items-center gap-1">
                             {item.code}
                             <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600 mx-1"></span>
                             {item.date}
                           </span>
                         </div>
                       </td>
-                      <td className="px-6 py-5 whitespace-nowrap">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap">
                         <Badge
                           variant="outline"
                           className={cn(
@@ -371,22 +371,22 @@ export function TransactionDataPage() {
                           {item.type}
                         </Badge>
                       </td>
-                      <td className="px-6 py-5 whitespace-nowrap text-right">
-                        <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap text-right">
+                        <span className="font-mono text-ui-body font-bold text-slate-700 dark:text-slate-300">
                           {item.price}
                         </span>
                       </td>
-                      <td className="px-6 py-5 whitespace-nowrap text-right">
-                        <span className="font-mono text-sm font-bold text-slate-700 dark:text-slate-300">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap text-right">
+                        <span className="font-mono text-ui-body font-bold text-slate-700 dark:text-slate-300">
                           {item.amount}
                         </span>
                       </td>
-                      <td className="px-6 py-5 whitespace-nowrap text-right">
-                        <span className="font-mono text-sm font-bold text-slate-900 dark:text-slate-100">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap text-right">
+                        <span className="font-mono text-ui-body font-bold text-slate-900 dark:text-slate-100">
                           {item.total}
                         </span>
                       </td>
-                      <td className="px-6 py-5 whitespace-nowrap text-right">
+                      <td className="px-ui-panel py-ui-section whitespace-nowrap text-right">
                         <Badge className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20">
                           {item.status}
                         </Badge>
@@ -399,10 +399,10 @@ export function TransactionDataPage() {
 
             {filteredData.length === 0 && (
               <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-                <div className="p-4 rounded-full bg-slate-50 dark:bg-slate-800/50 mb-4">
+                <div className="p-ui-section rounded-full bg-slate-50 dark:bg-slate-800/50 mb-4">
                   <ArrowLeftRight className="w-8 h-8 opacity-20" />
                 </div>
-                <p className="text-xs font-bold uppercase tracking-widest">
+                <p className="text-ui-label font-bold uppercase tracking-widest">
                   未找到相关交易
                 </p>
               </div>

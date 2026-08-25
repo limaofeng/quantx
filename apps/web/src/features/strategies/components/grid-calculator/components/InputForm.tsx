@@ -9,6 +9,7 @@ import {
 import React from 'react';
 
 import { StockSelector } from '@/components/StockSelector';
+import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { useHoldings } from '@/features/portfolio/hooks/useHoldings';
 import { useStockSearch } from '@/hooks/useStockSearch';
@@ -31,7 +32,7 @@ const InputGroup = ({
   icon?: React.ElementType;
 }) => (
   <div className="space-y-1.5">
-    <label className="flex items-center gap-1.5 text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+    <label className="flex items-center gap-1.5 text-ui-caption font-bold text-muted-foreground uppercase tracking-wider">
       {Icon && <Icon className="w-3 h-3 opacity-70" />}
       {label}
     </label>
@@ -86,7 +87,7 @@ const NumberInput = ({
       )}
     >
       {prefix && (
-        <div className="pl-2 text-xs font-mono select-none flex items-center whitespace-nowrap pointer-events-none">
+        <div className="pl-2 text-ui-label font-mono select-none flex items-center whitespace-nowrap pointer-events-none">
           {typeof prefix === 'string' ? (
             <span className="text-muted-foreground/60">{prefix}</span>
           ) : (
@@ -94,7 +95,7 @@ const NumberInput = ({
           )}
         </div>
       )}
-      <input
+      <Input
         type="text"
         inputMode="decimal"
         pattern="[0-9]*\.?[0-9]*"
@@ -134,14 +135,14 @@ const NumberInput = ({
           }
         }}
         className={cn(
-          'w-full bg-transparent border-none py-1.5 text-xs font-mono font-bold text-foreground outline-none',
+          'w-full bg-transparent border-none py-1.5 text-ui-label font-mono font-bold text-foreground outline-none',
           'flex-1 min-w-0 text-center', // Use text-center for better balance
           !prefix && 'pl-2',
           !suffix && 'pr-2'
         )}
       />
       {suffix && (
-        <div className="pr-2 text-[10px] font-bold select-none flex items-center whitespace-nowrap pointer-events-none">
+        <div className="pr-2 text-ui-caption font-bold select-none flex items-center whitespace-nowrap pointer-events-none">
           {typeof suffix === 'string' ? (
             <span className="text-muted-foreground/60">{suffix}</span>
           ) : (
@@ -224,12 +225,12 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
   };
 
   return (
-    <div className="h-full overflow-y-auto custom-scrollbar p-4 space-y-6">
+    <div className="h-full overflow-y-auto custom-scrollbar p-ui-section space-y-ui-section">
       {/* Section 1: Asset Info */}
       <section className="space-y-3">
         <div className="flex items-center gap-2 mb-2">
           <div className="w-0.5 h-3 bg-blue-500/50 rounded-full" />
-          <h3 className="text-xs font-black text-foreground/80 uppercase tracking-widest">
+          <h3 className="text-ui-label font-black text-foreground/80 uppercase tracking-widest">
             标的资产
           </h3>
         </div>
@@ -261,7 +262,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               selectedStock={selectedDisplayStock}
             >
               <div className="relative group">
-                <input
+                <Input
                   type="text"
                   placeholder="搜索代码 / 名称 / 拼音"
                   value={searchQuery}
@@ -271,16 +272,16 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
                     setTimeout(() => setIsFocused(false), 200);
                   }}
                   onChange={e => setSearchQuery(e.target.value)}
-                  className="w-full px-3 py-1.5 text-xs font-mono font-bold border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 rounded-lg focus:ring-1 focus:ring-blue-500/50 focus:border-blue-500/50 outline-none transition-all placeholder:text-muted-foreground/30 text-foreground"
+                  className="w-full px-3 py-1.5 text-ui-label font-mono font-bold border border-slate-200 dark:border-slate-800 bg-slate-100/50 dark:bg-slate-900/50 rounded-lg focus:ring-1 focus:ring-blue-500/50 focus:border-blue-500/50 outline-none transition-all placeholder:text-muted-foreground/30 text-foreground"
                 />
 
                 {/* Name & Symbol Display Overlay */}
                 {!isFocused && !searchQuery && selectedDisplayStock && (
                   <div className="absolute inset-x-[1px] inset-y-[1px] flex items-center px-3 pointer-events-none bg-slate-100 dark:bg-slate-900 rounded-lg">
-                    <span className="text-xs font-bold text-foreground mr-2 truncate">
+                    <span className="text-ui-label font-bold text-foreground mr-2 truncate">
                       {selectedDisplayStock.name}
                     </span>
-                    <span className="text-[10px] font-mono text-muted-foreground/60 shrink-0">
+                    <span className="text-ui-caption font-mono text-muted-foreground/60 shrink-0">
                       {selectedDisplayStock.id}
                     </span>
                   </div>
@@ -313,18 +314,18 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
           <div className="space-y-3 px-3 py-3 bg-slate-100/50 dark:bg-slate-900/30 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <span className="text-[10px] text-muted-foreground font-medium">
+                <span className="text-ui-caption text-muted-foreground font-medium">
                   总持仓（参数目标）
                 </span>
-                <p className="text-xs font-mono font-bold text-foreground">
+                <p className="text-ui-label font-mono font-bold text-foreground">
                   {config.positionShares}
                 </p>
               </div>
               <div className="space-y-1 text-right">
-                <span className="text-[10px] text-muted-foreground font-medium">
+                <span className="text-ui-caption text-muted-foreground font-medium">
                   持仓成本
                 </span>
-                <p className="text-xs font-mono font-bold text-foreground">
+                <p className="text-ui-label font-mono font-bold text-foreground">
                   ¥{config.avgCost.toFixed(2)}
                 </p>
               </div>
@@ -354,7 +355,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               </InputGroup>
             </div>
 
-            <p className="text-[9px] leading-relaxed text-muted-foreground/70">
+            <p className="text-ui-micro leading-relaxed text-muted-foreground/70">
               已有持仓默认归入核心仓；卖出网格只占用活跃仓，避免误卖长期底仓。
             </p>
           </div>
@@ -366,7 +367,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <div className="w-0.5 h-3 bg-purple-500/50 rounded-full" />
-            <h3 className="text-xs font-black text-foreground/80 uppercase tracking-widest">
+            <h3 className="text-ui-label font-black text-foreground/80 uppercase tracking-widest">
               网格参数
             </h3>
           </div>
@@ -388,7 +389,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
             ) : (
               <Hash className="w-3 h-3 text-blue-500" />
             )}
-            <span className="text-[10px] font-bold uppercase">
+            <span className="text-ui-caption font-bold uppercase">
               {config.gridType === GridType.GEOMETRIC ? '等比' : '等差'}
             </span>
           </button>
@@ -402,7 +403,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
             )}
           >
             <div className="flex items-center justify-between">
-              <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">
+              <label className="text-ui-caption font-bold text-muted-foreground uppercase tracking-wider">
                 步长配置
               </label>
               <button
@@ -417,12 +418,12 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               >
                 {config.isStepUnified ? (
                   <div className="flex items-center gap-1">
-                    <span className="text-[9px] opacity-70">统一</span>
+                    <span className="text-ui-micro opacity-70">统一</span>
                     <Lock className="w-3 h-3" />
                   </div>
                 ) : (
                   <div className="flex items-center gap-1">
-                    <span className="text-[9px] opacity-70">独立</span>
+                    <span className="text-ui-micro opacity-70">独立</span>
                     <Unlock className="w-3 h-3" />
                   </div>
                 )}
@@ -481,7 +482,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               config.isStepUnified ? 'col-span-6' : 'col-span-4'
             )}
           >
-            <label className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider block">
+            <label className="text-ui-caption font-bold text-muted-foreground uppercase tracking-wider block">
               网格档位 (总计)
             </label>
             <div className="flex items-center h-[30px] bg-slate-100/50 dark:bg-slate-900/50 rounded-lg border border-slate-200 dark:border-slate-800">
@@ -498,11 +499,11 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               >
                 -
               </button>
-              <input
+              <Input
                 type="text"
                 inputMode="numeric"
                 pattern="[0-9]*"
-                className="flex-1 w-full bg-transparent text-center font-mono text-xs font-bold border-x border-slate-200/50 dark:border-slate-800/50 h-full outline-none focus:bg-white/50 dark:focus:bg-black/20 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors"
+                className="flex-1 w-full bg-transparent text-center font-mono text-ui-label font-bold border-x border-slate-200/50 dark:border-slate-800/50 h-full outline-none focus:bg-white/50 dark:focus:bg-black/20 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors"
                 value={config.nUp + config.nDown}
                 onKeyDown={e => {
                   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
@@ -546,11 +547,11 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
 
         <div className="pt-2">
           <div className="flex justify-between items-end mb-2">
-            <div className="text-[10px] font-bold text-market-up flex items-center gap-1">
+            <div className="text-ui-caption font-bold text-market-up flex items-center gap-1">
               <ArrowDownRight className="w-3 h-3" />
               买入 {config.nDown}
             </div>
-            <div className="text-[10px] font-bold text-market-down flex items-center gap-1">
+            <div className="text-ui-caption font-bold text-market-down flex items-center gap-1">
               卖出 {config.nUp}
               <ArrowUpRight className="w-3 h-3" />
             </div>
@@ -588,15 +589,15 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
             />
           </div>
           <div className="flex justify-between mt-1">
-            <span className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-widest">
+            <span className="text-ui-caption font-bold text-muted-foreground/50 uppercase tracking-widest">
               防御区
             </span>
-            <span className="text-[10px] font-bold text-muted-foreground/50 uppercase tracking-widest">
+            <span className="text-ui-caption font-bold text-muted-foreground/50 uppercase tracking-widest">
               盈利区
             </span>
           </div>
           {config.nUp > 0 && (config.swingShares || 0) <= 0 && (
-            <p className="mt-2 text-[9px] leading-relaxed text-amber-600 dark:text-amber-300">
+            <p className="mt-2 text-ui-micro leading-relaxed text-amber-600 dark:text-amber-300">
               当前初始活跃仓为 0，卖出水位会等待下方买入成交后再获得可卖库存。
             </p>
           )}
@@ -607,18 +608,18 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
       <section className="space-y-3">
         <div className="flex items-center gap-2 mb-2">
           <div className="w-0.5 h-3 bg-yellow-500/50 rounded-full" />
-          <h3 className="text-xs font-black text-foreground/80 uppercase tracking-widest">
+          <h3 className="text-ui-label font-black text-foreground/80 uppercase tracking-widest">
             风控管理
           </h3>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-ui-section">
           <div className="space-y-2">
             <div className="flex justify-between items-center">
-              <label className="text-[10px] font-bold text-muted-foreground">
+              <label className="text-ui-caption font-bold text-muted-foreground">
                 最大仓位上限
               </label>
-              <span className="text-xs font-mono font-bold text-foreground">
+              <span className="text-ui-label font-mono font-bold text-foreground">
                 {config.maxPositionValuePct}%
               </span>
             </div>
@@ -632,7 +633,7 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
               }
               className="py-1.5"
             />
-            <div className="flex justify-between text-[10px] font-mono text-muted-foreground">
+            <div className="flex justify-between text-ui-caption font-mono text-muted-foreground">
               <span>
                 已用: ¥
                 {Math.round(
@@ -651,10 +652,10 @@ const InputForm: React.FC<Props> = ({ config, onChange }) => {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <div className="flex justify-between items-center">
-                <label className="text-[10px] font-bold text-muted-foreground">
+                <label className="text-ui-caption font-bold text-muted-foreground">
                   买入预算 (%)
                 </label>
-                <span className="text-xs font-mono font-bold text-foreground">
+                <span className="text-ui-label font-mono font-bold text-foreground">
                   {config.buyBudgetPct ?? 0}%
                 </span>
               </div>

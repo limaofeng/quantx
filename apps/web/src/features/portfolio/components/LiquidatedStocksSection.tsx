@@ -55,13 +55,13 @@ export function LiquidatedStocksSection({
 }: LiquidatedStocksSectionProps) {
   if (liquidatedStocks.length === 0) {
     return (
-      <Card className="p-12 text-center bg-background/60 backdrop-blur-sm border-muted/20">
-        <div className="flex flex-col items-center gap-4">
+      <Card className="p-ui-empty text-center bg-background/60 backdrop-blur-sm border-muted/20">
+        <div className="flex flex-col items-center gap-ui-section">
           <div className="w-16 h-16 rounded-full bg-muted/20 flex items-center justify-center">
             <History className="w-8 h-8 text-muted-foreground" />
           </div>
           <div>
-            <h3 className="text-lg font-semibold text-foreground">
+            <h3 className="text-ui-heading font-semibold text-foreground">
               暂无真实清仓回报
             </h3>
             <p className="text-muted-foreground mt-1">
@@ -83,23 +83,23 @@ export function LiquidatedStocksSection({
   const hasRealizedPnL = realizedPnLValues.length > 0;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-ui-section">
       {/* Summary Inline Card */}
-      <div className="flex items-center justify-between p-4 bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
+      <div className="flex items-center justify-between p-ui-section bg-muted/30 backdrop-blur-md rounded-md border border-white/10 shadow-sm">
         <div className="flex items-center gap-2">
           <BarChart2 className="w-5 h-5 text-muted-foreground" />
-          <span className="text-sm font-medium text-muted-foreground">
+          <span className="text-ui-body font-medium text-muted-foreground">
             清仓总盈亏
           </span>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-ui-section">
           <div className="text-right">
-            <span className="text-xs text-muted-foreground mr-2">
+            <span className="text-ui-label text-muted-foreground mr-2">
               共 {liquidatedStocks.length} 笔交易
             </span>
             <span
               className={cn(
-                'text-xl font-bold',
+                'text-ui-page-title font-bold',
                 !hasRealizedPnL
                   ? 'text-slate-400'
                   : financialToneClass(totalRealizedPnL)
@@ -140,39 +140,41 @@ export function LiquidatedStocksSection({
                   <TableCell>
                     <div className="flex items-center gap-3">
                       <div className="w-9 h-9 bg-muted/50 rounded-lg flex items-center justify-center shrink-0 border border-white/10">
-                        <span className="text-muted-foreground text-xs font-bold">
+                        <span className="text-muted-foreground text-ui-label font-bold">
                           {getStockIconText(stock.name)}
                         </span>
                       </div>
                       <div>
-                        <div className="font-medium text-sm flex items-center gap-2">
+                        <div className="font-medium text-ui-body flex items-center gap-2">
                           {stock.name}
                           <Badge
                             variant="secondary"
-                            className="text-[10px] h-4 px-1"
+                            className="text-ui-caption h-4 px-1"
                           >
                             {stock.status || '真实回报'}
                           </Badge>
                         </div>
-                        <div className="text-xs text-muted-foreground">
+                        <div className="text-ui-label text-muted-foreground">
                           {stock.symbol}
                         </div>
                       </div>
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="font-medium text-sm">
+                    <div className="font-medium text-ui-body">
                       {stock.quantity.toLocaleString()}
                     </div>
-                    <div className="text-xs text-muted-foreground">股</div>
+                    <div className="text-ui-label text-muted-foreground">
+                      股
+                    </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="text-sm">
+                    <div className="text-ui-body">
                       {formatCurrencyOrDash(stock.sellPrice)}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="text-sm">
+                    <div className="text-ui-body">
                       {new Date(stock.sellDate).toLocaleDateString('zh-CN')}
                     </div>
                   </TableCell>
@@ -194,7 +196,7 @@ export function LiquidatedStocksSection({
                     </div>
                     <div
                       className={cn(
-                        'text-xs',
+                        'text-ui-label',
                         realizedPnL === null
                           ? 'text-slate-500'
                           : financialToneClass(realizedPnL)

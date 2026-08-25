@@ -360,7 +360,7 @@ export function SystemInsightCard() {
   return (
     <div
       className={cn(
-        'w-full p-5 rounded-xl border relative overflow-hidden transition-all duration-300',
+        'w-full p-ui-section rounded-panel border relative overflow-hidden transition-all duration-300',
         overallStatus === 'healthy' &&
           'border-slate-200/40 dark:border-slate-800/40 bg-white/40 dark:bg-slate-900/40',
         overallStatus === 'warning' &&
@@ -370,11 +370,11 @@ export function SystemInsightCard() {
       )}
     >
       <div className="relative z-10">
-        <div className="flex flex-col gap-4 border-b border-slate-200/50 pb-4 dark:border-white/5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-ui-section border-b border-slate-200/50 pb-4 dark:border-white/5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-ui-section">
             <div
               className={cn(
-                'flex h-12 w-12 shrink-0 items-center justify-center rounded-xl shadow-sm',
+                'flex h-12 w-12 shrink-0 items-center justify-center rounded-panel shadow-sm',
                 overallStatus === 'healthy' &&
                   'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
                 overallStatus === 'warning' &&
@@ -392,20 +392,20 @@ export function SystemInsightCard() {
               {overallStatus === 'error' && <XCircle className="h-7 w-7" />}
             </div>
             <div>
-              <h3 className="font-bold text-lg text-slate-800 dark:text-slate-100">
+              <h3 className="font-bold text-ui-heading text-slate-800 dark:text-slate-100">
                 {overallStatus === 'healthy'
                   ? '系统运行正常'
                   : overallStatus === 'warning'
                     ? '存在潜在风险'
                     : '系统异常'}
               </h3>
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 text-ui-label text-slate-500">
                 关键服务与运行时依赖状态
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 font-mono text-xs text-slate-500">
+          <div className="flex items-center gap-2 font-mono text-ui-label text-slate-500">
             <span>
               Last Check:{' '}
               {lastCheck
@@ -432,21 +432,21 @@ export function SystemInsightCard() {
             <section
               key={group.id}
               aria-labelledby={`health-group-${group.id}`}
-              className="rounded-xl border border-slate-200/50 bg-white/35 p-3 dark:border-white/5 dark:bg-white/[0.025]"
+              className="rounded-panel border border-slate-200/50 bg-white/35 p-3 dark:border-white/5 dark:bg-white/[0.025]"
             >
               <div className="mb-3 flex items-end justify-between gap-3 px-1">
                 <div>
                   <h4
                     id={`health-group-${group.id}`}
-                    className="text-xs font-semibold text-slate-700 dark:text-slate-200"
+                    className="text-ui-label font-semibold text-slate-700 dark:text-slate-200"
                   >
                     {group.label}
                   </h4>
-                  <p className="mt-0.5 text-[10px] text-slate-400">
+                  <p className="mt-0.5 text-ui-caption text-slate-400">
                     {group.description}
                   </p>
                 </div>
-                <span className="font-mono text-[10px] text-slate-400">
+                <span className="font-mono text-ui-caption text-slate-400">
                   {
                     services.filter(service => service.group === group.id)
                       .length
@@ -476,11 +476,11 @@ export function SystemInsightCard() {
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
-                          <span className="truncate text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          <span className="truncate text-ui-label font-semibold text-slate-700 dark:text-slate-300">
                             {service.name}
                           </span>
                           {service.optional && (
-                            <span className="rounded bg-slate-200/60 px-1 py-0.5 text-[8px] font-medium uppercase tracking-wide text-slate-500 dark:bg-white/5 dark:text-slate-500">
+                            <span className="rounded bg-slate-200/60 px-1 py-0.5 text-ui-micro font-medium uppercase tracking-wide text-slate-500 dark:bg-white/5 dark:text-slate-500">
                               可选
                             </span>
                           )}
@@ -488,7 +488,7 @@ export function SystemInsightCard() {
                         <p
                           title={service.metric}
                           className={cn(
-                            'mt-0.5 truncate font-mono text-[10px]',
+                            'mt-0.5 truncate font-mono text-ui-caption',
                             service.status === 'healthy'
                               ? 'text-slate-400'
                               : service.status === 'warning'

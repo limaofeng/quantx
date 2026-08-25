@@ -168,7 +168,7 @@ export default function StrategyMonitor({
 
   return (
     <Card
-      className={`relative w-full bg-[#0F1729] border border-white/5 rounded-[2rem] shadow-2xl overflow-hidden ${className}`}
+      className={`relative w-full bg-[#0F1729] border border-white/5 rounded-panel shadow-none overflow-hidden ${className}`}
     >
       <ResizablePanelGroup direction="horizontal">
         <ResizablePanel defaultSize={60} minSize={40} maxSize={80}>
@@ -189,12 +189,12 @@ export default function StrategyMonitor({
                     className={`relative inline-flex rounded-full h-2 w-2 ${isBacktest ? 'bg-blue-500' : isConnected ? 'bg-emerald-500' : 'bg-slate-500'}`}
                   ></span>
                 </span>
-                <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">
+                <span className="text-ui-caption font-bold text-slate-300 uppercase tracking-wider">
                   {isBacktest ? '回测范围' : '实时监控'}
                 </span>
               </div>
               <div className="w-px h-3 bg-white/10" />
-              <span className="text-[10px] font-black text-white font-mono tracking-wider">
+              <span className="text-ui-caption font-black text-white font-mono tracking-wider">
                 {stockCode || '待机'}
               </span>
             </div>
@@ -204,11 +204,11 @@ export default function StrategyMonitor({
               <div className="absolute top-4 right-4 z-20 px-3 py-2 rounded-lg bg-slate-900/80 backdrop-blur-md border border-white/5 shadow-lg">
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-[9px] text-slate-400 uppercase tracking-wider">
+                    <span className="text-ui-micro text-slate-400 uppercase tracking-wider">
                       最新价
                     </span>
                     <span
-                      className={`text-sm font-bold font-mono ${financialToneClass(
+                      className={`text-ui-body font-bold font-mono ${financialToneClass(
                         latestTick.lastPrice - (latestTick.preClose || 0)
                       )}`}
                     >
@@ -217,11 +217,13 @@ export default function StrategyMonitor({
                   </div>
                   {latestTick.preClose && (
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-[9px] text-slate-500">涨跌幅</span>
+                      <span className="text-ui-micro text-slate-500">
+                        涨跌幅
+                      </span>
                       <span
-                      className={`text-[10px] font-mono ${financialToneClass(
-                        latestTick.lastPrice - latestTick.preClose
-                      )}`}
+                        className={`text-ui-caption font-mono ${financialToneClass(
+                          latestTick.lastPrice - latestTick.preClose
+                        )}`}
                       >
                         {latestTick.lastPrice - latestTick.preClose >= 0
                           ? '+'
@@ -256,7 +258,7 @@ export default function StrategyMonitor({
               ) : (
                 <div className="flex flex-col items-center justify-center text-slate-600 gap-2 h-full w-full">
                   <Activity size={32} className="opacity-20 animate-pulse" />
-                  <span className="text-xs font-mono font-bold uppercase tracking-widest opacity-50">
+                  <span className="text-ui-label font-mono font-bold uppercase tracking-widest opacity-50">
                     系统待机
                   </span>
                 </div>

@@ -15,21 +15,21 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
   const isPositive = quote.change! >= 0;
   const changePercent = quote.changePercent!;
   return (
-    <Card className="mb-0 rounded-lg border-white/10 bg-[#0f172a]/70 p-4">
-      <div className="grid grid-cols-3 gap-4">
+    <Card className="mb-0 rounded-lg border-white/10 bg-[#0f172a]/70 p-ui-section">
+      <div className="grid grid-cols-3 gap-ui-section">
         <div>
-          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+          <p className="mb-1 text-ui-caption font-black uppercase tracking-[0.18em] text-slate-500">
             当前价格
           </p>
           <div className="flex items-baseline">
             <span
-              className="font-mono text-2xl font-black text-slate-100"
+              className="font-mono text-ui-display font-black text-slate-100"
               data-testid="current-price"
             >
               ¥{quote.lastPrice.toFixed(2)}
             </span>
             <div
-              className={`ml-3 flex items-center text-xs font-bold ${financialToneClass(quote.change)}`}
+              className={`ml-3 flex items-center text-ui-label font-bold ${financialToneClass(quote.change)}`}
             >
               {isPositive ? (
                 <ArrowUpRight className="h-4 w-4 mr-1" />
@@ -44,10 +44,10 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
         </div>
 
         <div>
-          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+          <p className="mb-1 text-ui-caption font-black uppercase tracking-[0.18em] text-slate-500">
             52周最高/最低
           </p>
-          <div className="space-y-1 text-xs">
+          <div className="space-y-1 text-ui-label">
             <div className="flex justify-between">
               <span className="text-slate-500">最高:</span>
               <span
@@ -70,10 +70,10 @@ export default function PriceInfo({ stock }: PriceInfoProps) {
         </div>
 
         <div>
-          <p className="mb-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500">
+          <p className="mb-1 text-ui-caption font-black uppercase tracking-[0.18em] text-slate-500">
             成交量/成交额
           </p>
-          <div className="space-y-1 text-xs">
+          <div className="space-y-1 text-ui-label">
             <div className="flex justify-between">
               <span className="text-slate-500">成交量:</span>
               <span

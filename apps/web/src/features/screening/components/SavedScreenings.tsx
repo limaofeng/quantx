@@ -32,13 +32,15 @@ interface SavedScreeningsProps {
 
 export function SavedScreenings({ screenings }: SavedScreeningsProps) {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-ui-panel">
       {screenings.map(screening => (
         <Card key={screening.id} className="hover:shadow-lg transition-shadow">
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
-                <CardTitle className="text-lg">{screening.name}</CardTitle>
+                <CardTitle className="text-ui-heading">
+                  {screening.name}
+                </CardTitle>
                 <CardDescription className="mt-1">
                   {screening.description}
                 </CardDescription>
@@ -49,19 +51,19 @@ export function SavedScreenings({ screenings }: SavedScreeningsProps) {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm">
+            <div className="space-y-ui-section">
+              <div className="flex items-center justify-between text-ui-body">
                 <span className="text-gray-500">创建时间</span>
                 <span>
                   {new Date(screening.createdAt).toLocaleDateString()}
                 </span>
               </div>
-              <div className="flex items-center justify-between text-sm">
+              <div className="flex items-center justify-between text-ui-body">
                 <span className="text-gray-500">跟踪股票</span>
                 <span>{screening.results.length} 只</span>
               </div>
               <div className="space-y-2">
-                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                <p className="text-ui-body font-medium text-gray-700 dark:text-gray-300">
                   股票列表：
                 </p>
                 <div className="flex flex-wrap gap-2">
@@ -69,7 +71,7 @@ export function SavedScreenings({ screenings }: SavedScreeningsProps) {
                     <Badge
                       key={result.id}
                       variant="outline"
-                      className="text-xs"
+                      className="text-ui-label"
                     >
                       {result.stock.name}
                       <span

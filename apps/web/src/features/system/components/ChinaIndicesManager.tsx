@@ -104,14 +104,14 @@ const SectionHeader = ({
   icon: ComponentType<{ className?: string }>;
 }) => (
   <div className="flex items-center gap-3 mb-6 mt-8 first:mt-2 px-2">
-    <div className="p-2 rounded-xl bg-indigo-500/10 text-indigo-500 ring-4 ring-indigo-500/5">
+    <div className="p-2 rounded-panel bg-indigo-500/10 text-indigo-500 ring-4 ring-indigo-500/5">
       <Icon className="w-5 h-5" />
     </div>
     <div className="flex items-baseline gap-2">
-      <h3 className="text-base font-bold text-slate-800 dark:text-slate-100 leading-none">
+      <h3 className="text-ui-title font-bold text-slate-800 dark:text-slate-100 leading-none">
         {title}
       </h3>
-      <p className="text-[9px] font-black uppercase tracking-[0.15em] text-slate-400">
+      <p className="text-ui-micro font-black uppercase tracking-[0.15em] text-slate-400">
         {subtitle}
       </p>
     </div>
@@ -128,11 +128,11 @@ export function ChinaIndicesManager() {
       <div className="shrink-0 p-1 pb-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-black text-slate-900 dark:text-white tracking-tight flex items-center gap-2">
+            <h2 className="text-ui-heading font-black text-slate-900 dark:text-white tracking-tight flex items-center gap-2">
               <TrendingUp className="w-5 h-5 text-indigo-500" />
               沪深市场核心指数
             </h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
+            <p className="text-ui-body text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
               实时监控A股市场核心板块与风格指数表现 (Real-time Market Indices)
             </p>
           </div>
@@ -140,7 +140,7 @@ export function ChinaIndicesManager() {
           {/* Market Status Pulse */}
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/5 border border-emerald-500/20">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400">
+            <span className="text-ui-label font-bold text-emerald-600 dark:text-emerald-400">
               市场交易中
             </span>
           </div>
@@ -156,7 +156,7 @@ export function ChinaIndicesManager() {
             subtitle="Market Core Indices"
             icon={Layers}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-ui-section">
             {MARKET_CORE.map((idx, i) => (
               <IndexDataCard key={i} {...idx} status={idx.status} />
             ))}
@@ -168,7 +168,7 @@ export function ChinaIndicesManager() {
             subtitle="Growth & Technology"
             icon={Zap}
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-ui-section">
             {GROWTH_TECH.map((idx, i) => (
               <IndexDataCard key={i} {...idx} status={idx.status} />
             ))}
@@ -180,7 +180,7 @@ export function ChinaIndicesManager() {
             subtitle="Key Sectors & Themes"
             icon={BarChart3}
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-ui-section">
             {KEY_SECTORS.map((idx, i) => (
               <IndexDataCard key={i} {...idx} status={idx.status} />
             ))}

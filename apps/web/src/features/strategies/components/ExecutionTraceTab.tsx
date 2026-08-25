@@ -42,14 +42,14 @@ function Stage({
   }[tone];
 
   return (
-    <div className={`rounded-xl border px-4 py-3 ${color}`}>
+    <div className={`rounded-panel border px-ui-section py-3 ${color}`}>
       <div className="mb-2 flex items-center gap-2">
         <Icon className="h-3.5 w-3.5" />
-        <span className="text-[8px] font-black uppercase tracking-[0.2em]">
+        <span className="text-ui-micro font-black uppercase tracking-[0.2em]">
           {label}
         </span>
       </div>
-      <div className="min-h-[18px] truncate text-[11px] font-black">
+      <div className="min-h-[18px] truncate text-ui-caption font-black">
         {value || '未返回'}
       </div>
     </div>
@@ -66,20 +66,22 @@ export default function ExecutionTraceTab({
 
   if (!instance) {
     return (
-      <Card className="p-10 text-center">
-        <p className="text-sm font-bold text-slate-500">请先选择策略实例。</p>
+      <Card className="p-ui-empty text-center">
+        <p className="text-ui-body font-bold text-slate-500">
+          请先选择策略实例。
+        </p>
       </Card>
     );
   }
 
   if (traces.length === 0) {
     return (
-      <Card className="rounded-[2rem] border border-dashed border-slate-200 bg-white p-12 text-center shadow-xl dark:border-white/10 dark:bg-slate-900/60">
+      <Card className="rounded-panel border border-dashed border-slate-200 bg-white p-ui-empty text-center shadow-none dark:border-white/10 dark:bg-slate-900/60">
         <GitCommitHorizontal className="mx-auto mb-5 h-10 w-10 text-slate-300" />
-        <h3 className="mb-2 text-sm font-black uppercase tracking-[0.2em] text-slate-700 dark:text-slate-200">
+        <h3 className="mb-2 text-ui-body font-black uppercase tracking-[0.2em] text-slate-700 dark:text-slate-200">
           暂无执行跟踪
         </h3>
-        <p className="mx-auto max-w-lg text-xs font-medium leading-relaxed text-slate-500">
+        <p className="mx-auto max-w-lg text-ui-label font-medium leading-relaxed text-slate-500">
           执行跟踪只展示风控、OrderSizer、委托和成交状态流；策略意图不会在这里被当作成交。
         </p>
       </Card>
@@ -89,17 +91,17 @@ export default function ExecutionTraceTab({
   return (
     <>
       <div className="space-y-3">
-        <Card className="rounded-lg border border-white/10 bg-[#0b1120]/70 p-4 shadow-none">
+        <Card className="rounded-lg border border-white/10 bg-[#0b1120]/70 p-ui-section shadow-none">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <div className="text-[9px] font-black uppercase tracking-[0.3em] text-red-500">
+              <div className="text-ui-micro font-black uppercase tracking-[0.3em] text-red-500">
                 执行跟踪
               </div>
-              <h3 className="mt-1 text-lg font-black text-slate-900 dark:text-white">
+              <h3 className="mt-1 text-ui-heading font-black text-slate-900 dark:text-white">
                 {instance.instrumentCode}
               </h3>
             </div>
-            <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[10px] font-bold text-amber-500">
+            <div className="flex items-center gap-2 rounded-panel border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-ui-caption font-bold text-amber-500">
               <AlertTriangle className="h-3.5 w-3.5" />
               策略意图、风控、委托、成交分层展示
             </div>
@@ -109,19 +111,19 @@ export default function ExecutionTraceTab({
         {traces.map(trace => (
           <Card
             key={trace.id}
-            className="rounded-lg border border-white/10 bg-[#0b1120]/70 p-4 shadow-none transition-colors hover:border-red-500/25 hover:bg-white/[0.04]"
+            className="rounded-lg border border-white/10 bg-[#0b1120]/70 p-ui-section shadow-none transition-colors hover:border-red-500/25 hover:bg-white/[0.04]"
             onContextMenu={event => openAtPointer(event, trace)}
           >
             <div className="mb-5 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="flex items-center gap-3">
-                <div className="rounded-lg bg-red-500/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-widest text-red-500">
+                <div className="rounded-lg bg-red-500/10 px-2.5 py-1 text-ui-micro font-black uppercase tracking-widest text-red-500">
                   策略意图
                 </div>
-                <div className="font-mono text-xs font-black text-slate-700 dark:text-slate-200">
+                <div className="font-mono text-ui-label font-black text-slate-700 dark:text-slate-200">
                   {trace.intentId}
                 </div>
               </div>
-              <div className="text-[10px] font-bold text-slate-500">
+              <div className="text-ui-caption font-bold text-slate-500">
                 {trace.instrumentCode} · {trace.side}
               </div>
             </div>
@@ -134,7 +136,7 @@ export default function ExecutionTraceTab({
             </div>
 
             {trace.reason && (
-              <div className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-xs font-medium text-slate-500 dark:bg-white/[0.03]">
+              <div className="mt-4 rounded-panel bg-slate-50 px-ui-section py-3 text-ui-label font-medium text-slate-500 dark:bg-white/[0.03]">
                 {trace.reason}
               </div>
             )}

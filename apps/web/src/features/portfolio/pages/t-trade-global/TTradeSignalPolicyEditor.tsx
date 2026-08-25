@@ -55,7 +55,7 @@ function PolicyField({
   const id = `t-trade-policy-${field}`;
   return (
     <div className="space-y-1.5" data-policy-field={field}>
-      <Label htmlFor={id} className="text-[10px] font-bold text-slate-400">
+      <Label htmlFor={id} className="text-ui-caption font-bold text-slate-400">
         {label}
       </Label>
       <div className="relative">
@@ -65,7 +65,7 @@ function PolicyField({
           value={value}
           onChange={event => onChange(field, event.target.value)}
           className={cn(
-            'h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-xs focus-visible:ring-cyan-500/60',
+            'h-9 rounded-sm border-white/10 bg-[#07111f] font-mono text-ui-label focus-visible:ring-cyan-500/60',
             suffix && 'pr-14'
           )}
           aria-describedby={suffix ? `${id}-unit` : undefined}
@@ -73,7 +73,7 @@ function PolicyField({
         {suffix && (
           <span
             id={`${id}-unit`}
-            className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-[9px] text-slate-600"
+            className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-ui-micro text-slate-600"
           >
             {suffix}
           </span>
@@ -101,21 +101,21 @@ function Group({
       open={open}
       onToggle={event => setOpen(event.currentTarget.open)}
     >
-      <summary className="cursor-pointer list-none border-b border-white/[0.05] p-4 marker:content-none">
-        <h3 className="flex items-center justify-between text-xs font-black text-slate-200">
+      <summary className="cursor-pointer list-none border-b border-white/[0.05] p-ui-section marker:content-none">
+        <h3 className="flex items-center justify-between text-ui-label font-black text-slate-200">
           {title}
-          <span className="text-[9px] text-cyan-300 group-open:hidden">
+          <span className="text-ui-micro text-cyan-300 group-open:hidden">
             展开
           </span>
-          <span className="hidden text-[9px] text-slate-500 group-open:inline">
+          <span className="hidden text-ui-micro text-slate-500 group-open:inline">
             收起
           </span>
         </h3>
-        <p className="mt-1 text-[9px] leading-4 text-slate-600">
+        <p className="mt-1 text-ui-micro leading-4 text-slate-600">
           {description}
         </p>
       </summary>
-      <div className="grid grid-cols-2 gap-3 p-4 lg:grid-cols-3 2xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 p-ui-section lg:grid-cols-3 2xl:grid-cols-4">
         {children}
       </div>
     </details>
@@ -594,7 +594,7 @@ function PolicyEditorControl({
   if (field.kind === 'toggle') {
     return (
       <label
-        className="col-span-2 flex min-h-9 cursor-pointer items-center justify-between border border-white/[0.07] px-3 text-[10px] text-slate-300 lg:col-span-1"
+        className="col-span-2 flex min-h-9 cursor-pointer items-center justify-between border border-white/[0.07] px-3 text-ui-caption text-slate-300 lg:col-span-1"
         data-policy-field={field.field}
       >
         {field.label}
@@ -619,14 +619,14 @@ function PolicyEditorControl({
         className="col-span-2 border border-white/[0.07] p-3 lg:col-span-2"
         data-policy-field={field.field}
       >
-        <legend className="px-1 text-[10px] font-bold text-slate-400">
+        <legend className="px-1 text-ui-caption font-bold text-slate-400">
           {field.label}
         </legend>
         <div className="grid gap-2 sm:grid-cols-2">
           {options.map(option => (
             <label
               key={option}
-              className="flex cursor-pointer items-center gap-2 font-mono text-[9px] text-slate-300"
+              className="flex cursor-pointer items-center gap-2 font-mono text-ui-micro text-slate-300"
             >
               <input
                 type="checkbox"
@@ -707,7 +707,7 @@ export function TTradeSignalPolicyEditor({
       {conflictVersion != null && (
         <div
           role="alert"
-          className="flex items-start gap-2 border border-rose-400/25 bg-rose-400/[0.08] p-3 text-[10px] leading-4 text-rose-100"
+          className="flex items-start gap-2 border border-rose-400/25 bg-rose-400/[0.08] p-3 text-ui-caption leading-4 text-rose-100"
         >
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0 flex-1">
@@ -718,7 +718,7 @@ export function TTradeSignalPolicyEditor({
             </div>
             {conflictPolicy && conflictRows.length > 0 && (
               <div className="mt-3 overflow-x-auto">
-                <table className="w-full min-w-[520px] text-left text-[9px]">
+                <table className="w-full min-w-[520px] text-left text-ui-micro">
                   <caption className="sr-only">
                     服务端最新配置与当前本地草稿对比
                   </caption>
@@ -745,7 +745,7 @@ export function TTradeSignalPolicyEditor({
               </div>
             )}
             {conflictPolicy && conflictRows.length === 0 && (
-              <div className="mt-2 text-[9px] text-rose-200/65">
+              <div className="mt-2 text-ui-micro text-rose-200/65">
                 100 个策略字段与服务端一致；冲突来自其他全局配置字段。
               </div>
             )}
@@ -772,18 +772,18 @@ export function TTradeSignalPolicyEditor({
       ))}
 
       <section
-        className="border border-cyan-400/15 bg-cyan-400/[0.035] p-4"
+        className="border border-cyan-400/15 bg-cyan-400/[0.035] p-ui-section"
         aria-labelledby="t-trade-policy-preview-heading"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3
               id="t-trade-policy-preview-heading"
-              className="text-xs font-black text-cyan-100"
+              className="text-ui-label font-black text-cyan-100"
             >
               服务端纯校验预览
             </h3>
-            <p className="mt-1 text-[9px] text-slate-600">
+            <p className="mt-1 text-ui-micro text-slate-600">
               基于配置版本 v{serverConfigVersion}
               ；预览不写数据库、不改变运行状态。
             </p>
@@ -792,7 +792,7 @@ export function TTradeSignalPolicyEditor({
             type="button"
             size="sm"
             variant="outline"
-            className="h-8 rounded-sm border-cyan-400/20 text-[10px] text-cyan-100"
+            className="h-control-compact rounded-sm border-cyan-400/20 text-ui-caption text-cyan-100"
             disabled={previewLoading || localErrors.length > 0}
             onClick={onPreview}
           >
@@ -808,7 +808,7 @@ export function TTradeSignalPolicyEditor({
         {localErrors.length > 0 && (
           <ul
             role="alert"
-            className="mt-3 space-y-1 border-t border-rose-400/15 pt-3 text-[10px] text-rose-200"
+            className="mt-3 space-y-1 border-t border-rose-400/15 pt-3 text-ui-caption text-rose-200"
           >
             {localErrors.map(message => (
               <li key={message}>• {message}</li>
@@ -826,7 +826,7 @@ export function TTradeSignalPolicyEditor({
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={cn(
-                  'inline-flex items-center gap-1.5 border px-2 py-1 text-[9px] font-black',
+                  'inline-flex items-center gap-1.5 border px-2 py-1 text-ui-micro font-black',
                   preview.valid
                     ? 'border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-200'
                     : 'border-rose-400/20 bg-rose-400/[0.07] text-rose-200'
@@ -840,31 +840,31 @@ export function TTradeSignalPolicyEditor({
                 {preview.valid ? '服务端校验通过' : '存在阻断错误'}
               </span>
               {preview.requiresRewarm && (
-                <span className="inline-flex items-center gap-1.5 border border-amber-400/20 bg-amber-400/[0.07] px-2 py-1 text-[9px] font-black text-amber-200">
+                <span className="inline-flex items-center gap-1.5 border border-amber-400/20 bg-amber-400/[0.07] px-2 py-1 text-ui-micro font-black text-amber-200">
                   <AlertTriangle className="h-3.5 w-3.5" />
                   保存后需要重热
                 </span>
               )}
               {preview.normalizedPolicy && (
-                <span className="font-mono text-[9px] text-slate-500">
+                <span className="font-mono text-ui-micro text-slate-500">
                   {preview.normalizedPolicy.policyVersion} · feature{' '}
                   {preview.normalizedPolicy.featureSchemaVersion}
                 </span>
               )}
             </div>
             {preview.requiresRewarm && (
-              <p className="mt-2 text-[10px] leading-4 text-amber-100">
+              <p className="mt-2 text-ui-caption leading-4 text-amber-100">
                 旧待确认信号会失效并重新进入
                 WARMING；已真实成交批次、BucketLedger 与退出计划不受影响。
               </p>
             )}
             {preview.changedFields.length > 0 && (
-              <p className="mt-2 text-[9px] text-slate-500">
+              <p className="mt-2 text-ui-micro text-slate-500">
                 规范化变更：{preview.changedFields.join('、')}
               </p>
             )}
             {preview.errors.length > 0 && (
-              <ul className="mt-2 space-y-1 text-[10px] text-rose-200">
+              <ul className="mt-2 space-y-1 text-ui-caption text-rose-200">
                 {preview.errors.map(issue => (
                   <li key={`${issue.code}:${issue.field || ''}`}>
                     {issue.field ? `${issue.field}：` : ''}
@@ -874,7 +874,7 @@ export function TTradeSignalPolicyEditor({
               </ul>
             )}
             {preview.warnings.length > 0 && (
-              <ul className="mt-2 space-y-1 text-[10px] text-amber-200">
+              <ul className="mt-2 space-y-1 text-ui-caption text-amber-200">
                 {preview.warnings.map(issue => (
                   <li key={`${issue.code}:${issue.field || ''}`}>
                     {issue.field ? `${issue.field}：` : ''}

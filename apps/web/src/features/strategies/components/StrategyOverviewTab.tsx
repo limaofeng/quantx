@@ -83,41 +83,41 @@ export default function StrategyOverviewTab({
         ] || activeRun?.status;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-ui-panel">
       {/* 策略说明 */}
-      <Card className="p-8 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-[2rem] shadow-xl relative overflow-hidden">
+      <Card className="p-ui-section bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-panel shadow-none relative overflow-hidden">
         <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 rounded-full blur-3xl" />
-        <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-[0.3em] mb-6 italic">
+        <h3 className="text-ui-micro font-black text-blue-500 uppercase tracking-[0.3em] mb-6 italic">
           策略定义
         </h3>
-        <p className="text-slate-600 dark:text-slate-400 text-xs font-medium leading-relaxed mb-8">
+        <p className="text-slate-600 dark:text-slate-400 text-ui-label font-medium leading-relaxed mb-8">
           {strategy.description || '暂无系统说明。'}
         </p>
 
-        <div className="space-y-6">
+        <div className="space-y-ui-section">
           <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-white/5 group">
-            <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
+            <span className="text-ui-micro font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
               策略分类
             </span>
-            <span className="text-[11px] font-black text-slate-900 dark:text-slate-200 uppercase tracking-widest">
+            <span className="text-ui-caption font-black text-slate-900 dark:text-slate-200 uppercase tracking-widest">
               {getCategoryName(strategy.category as string)}
             </span>
           </div>
           <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-white/5 group">
-            <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-amber-500 transition-colors">
+            <span className="text-ui-micro font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-amber-500 transition-colors">
               风险等级
             </span>
             <span
-              className={`text-[11px] font-black uppercase tracking-widest ${getRiskLevelColor(strategy.riskLevel as string)}`}
+              className={`text-ui-caption font-black uppercase tracking-widest ${getRiskLevelColor(strategy.riskLevel as string)}`}
             >
               {getRiskLevelName(strategy.riskLevel as string)}
             </span>
           </div>
           <div className="flex items-center justify-between py-3 border-t border-slate-100 dark:border-white/5 group">
-            <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
+            <span className="text-ui-micro font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
               绑定标的
             </span>
-            <span className="text-[11px] font-mono font-black text-slate-900 dark:text-slate-200">
+            <span className="text-ui-caption font-mono font-black text-slate-900 dark:text-slate-200">
               {instance?.instrumentCode || '--'}
             </span>
           </div>
@@ -125,16 +125,16 @@ export default function StrategyOverviewTab({
       </Card>
 
       {/* 运行状态 */}
-      <Card className="p-8 bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-[2rem] shadow-xl relative overflow-hidden">
+      <Card className="p-ui-section bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-white/10 rounded-panel shadow-none relative overflow-hidden">
         <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 rounded-full blur-3xl" />
-        <h3 className="text-[9px] font-black text-blue-500 uppercase tracking-[0.3em] mb-6 italic">
+        <h3 className="text-ui-micro font-black text-blue-500 uppercase tracking-[0.3em] mb-6 italic">
           实例运行状态
         </h3>
 
         {activeRun ? (
-          <div className="space-y-8">
+          <div className="space-y-ui-section">
             <div className="flex items-center justify-between group">
-              <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
+              <span className="text-ui-micro font-black text-slate-400 uppercase tracking-[0.2em] group-hover:text-blue-500 transition-colors">
                 运行状态
               </span>
               <div className="flex items-center gap-2 bg-white/5 py-1 px-3 rounded-full border border-white/5 shadow-inner">
@@ -142,7 +142,7 @@ export default function StrategyOverviewTab({
                   className={`w-1.5 h-1.5 rounded-full ${activeRun.status === StrategyRunStatus.Running ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)] animate-pulse' : 'bg-slate-500'}`}
                 />
                 <span
-                  className={`text-[9px] font-black uppercase tracking-widest ${activeRun.status === StrategyRunStatus.Running ? 'text-emerald-500' : 'text-slate-500'}`}
+                  className={`text-ui-micro font-black uppercase tracking-widest ${activeRun.status === StrategyRunStatus.Running ? 'text-emerald-500' : 'text-slate-500'}`}
                 >
                   {runStatusLabel || activeRun.status}
                 </span>
@@ -152,11 +152,11 @@ export default function StrategyOverviewTab({
             <div className="flex items-center justify-between group">
               <div className="flex items-center gap-3 font-black text-slate-400 group-hover:text-blue-500 transition-all">
                 <Clock size={16} />
-                <span className="text-[9px] uppercase tracking-[0.2em]">
+                <span className="text-ui-micro uppercase tracking-[0.2em]">
                   最近启动时间
                 </span>
               </div>
-              <span className="text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300">
+              <span className="text-ui-caption font-mono font-bold text-slate-600 dark:text-slate-300">
                 {activeRun.startTime
                   ? new Date(activeRun.startTime).toLocaleString('zh-CN')
                   : '--'}
@@ -167,11 +167,11 @@ export default function StrategyOverviewTab({
               <div className="flex items-center justify-between group">
                 <div className="flex items-center gap-3 font-black text-slate-400 group-hover:text-blue-500 transition-all">
                   <CalendarDays size={16} />
-                  <span className="text-[9px] uppercase tracking-[0.2em]">
+                  <span className="text-ui-micro uppercase tracking-[0.2em]">
                     回测数据区间
                   </span>
                 </div>
-                <span className="text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300">
+                <span className="text-ui-caption font-mono font-bold text-slate-600 dark:text-slate-300">
                   {backtestRangeLabel}
                 </span>
               </div>
@@ -180,18 +180,18 @@ export default function StrategyOverviewTab({
             <div className="flex items-center justify-between group">
               <div className="flex items-center gap-3 font-black text-slate-400 group-hover:text-blue-500 transition-all">
                 <Activity size={16} />
-                <span className="text-[9px] uppercase tracking-[0.2em]">
+                <span className="text-ui-micro uppercase tracking-[0.2em]">
                   下一执行序列
                 </span>
               </div>
-              <span className="text-[11px] font-mono font-bold text-slate-600 dark:text-slate-300 italic">
+              <span className="text-ui-caption font-mono font-bold text-slate-600 dark:text-slate-300 italic">
                 {getNextCheckTime()}
               </span>
             </div>
 
             {activeRun.instruments.length > 0 && (
               <div className="pt-6 border-t border-slate-100 dark:border-white/5">
-                <span className="text-[8px] font-black text-slate-400 uppercase tracking-[0.2em] block mb-4">
+                <span className="text-ui-micro font-black text-slate-400 uppercase tracking-[0.2em] block mb-4">
                   绑定标的
                 </span>
                 <div className="flex flex-wrap gap-2">
@@ -201,7 +201,7 @@ export default function StrategyOverviewTab({
                   ).map(inst => (
                     <code
                       key={inst}
-                      className="text-[10px] font-mono font-black bg-blue-500/5 dark:bg-blue-500/10 px-2.5 py-1 rounded-xl border border-blue-500/20 text-blue-600 dark:text-blue-400 shadow-sm transition-all hover:scale-105 hover:bg-blue-500/20"
+                      className="text-ui-caption font-mono font-black bg-blue-500/5 dark:bg-blue-500/10 px-2.5 py-1 rounded-panel border border-blue-500/20 text-blue-600 dark:text-blue-400 shadow-sm transition-all hover:scale-105 hover:bg-blue-500/20"
                     >
                       {inst}
                     </code>
@@ -212,13 +212,13 @@ export default function StrategyOverviewTab({
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="w-16 h-16 rounded-[2rem] bg-slate-50 dark:bg-white/5 flex items-center justify-center mb-6 text-slate-300 opacity-50">
+            <div className="w-16 h-16 rounded-panel bg-slate-50 dark:bg-white/5 flex items-center justify-center mb-6 text-slate-300 opacity-50">
               <AlertCircle size={32} />
             </div>
-            <p className="text-sm font-black text-slate-400 uppercase tracking-widest mb-2">
+            <p className="text-ui-body font-black text-slate-400 uppercase tracking-widest mb-2">
               系统离线
             </p>
-            <p className="text-[10px] text-slate-500 italic uppercase">
+            <p className="text-ui-caption text-slate-500 italic uppercase">
               请启动策略实例以查看实时遥测数据。
             </p>
           </div>

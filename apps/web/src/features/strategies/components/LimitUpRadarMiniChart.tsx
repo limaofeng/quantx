@@ -21,7 +21,10 @@ export function LimitUpRadarMiniChart({ code }: { code: string }) {
     pause: !code,
     requestPolicy: 'cache-and-network',
   });
-  const values = useMemo(() => result.data?.klines ?? [], [result.data?.klines]);
+  const values = useMemo(
+    () => result.data?.klines ?? [],
+    [result.data?.klines]
+  );
   const geometry = useMemo(() => {
     if (values.length < 2) return null;
     const closes = values.map(value => value.close);
@@ -42,7 +45,7 @@ export function LimitUpRadarMiniChart({ code }: { code: string }) {
 
   if (result.fetching && values.length === 0) {
     return (
-      <div className="flex h-40 items-center justify-center text-xs text-slate-500">
+      <div className="flex h-40 items-center justify-center text-ui-label text-slate-500">
         <Activity className="mr-2 h-4 w-4 animate-pulse" />
         加载 1 分钟行情
       </div>
@@ -51,7 +54,7 @@ export function LimitUpRadarMiniChart({ code }: { code: string }) {
 
   if (!geometry) {
     return (
-      <div className="flex h-40 flex-col items-center justify-center text-xs text-slate-600">
+      <div className="flex h-40 flex-col items-center justify-center text-ui-label text-slate-600">
         <CandlestickChart className="mb-2 h-6 w-6" />
         暂无可用分钟 K 线
       </div>

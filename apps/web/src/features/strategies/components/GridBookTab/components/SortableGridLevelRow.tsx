@@ -81,10 +81,10 @@ export function SortableGridLevelRow({
                   : 'border-market-up/25 text-market-up'
             }`}
           >
-            <div className="font-mono text-[11px] font-black leading-none">
+            <div className="font-mono text-ui-caption font-black leading-none">
               {formatNumber(level.price)}
             </div>
-            <div className="mt-1 font-mono text-[8px] font-bold leading-none opacity-70">
+            <div className="mt-1 font-mono text-ui-micro font-bold leading-none opacity-70">
               {formatSignedPercent(pctFromBase)}
             </div>
           </div>
