@@ -870,7 +870,10 @@ class TestStrategyManager:
     ]
 
     await manager._sync_missing_backtest_data(
-      runtime=SimpleNamespace(run_id="replay-run"),
+      runtime=SimpleNamespace(
+        run_id="replay-run",
+        context=SimpleNamespace(backtest_id="backtest-split"),
+      ),
       missing={
         "600887.SH": {
           "dates": set(trading_dates),
@@ -887,24 +890,28 @@ class TestStrategyManager:
         "start_time": "20260720",
         "end_time": "20260724",
         "periods": ["tick"],
+        "idempotency_scope": "backtest-data-supplement-v1:backtest-split",
       },
       {
         "stock_list": ["600887.SH"],
         "start_time": "20260727",
         "end_time": "20260731",
         "periods": ["tick"],
+        "idempotency_scope": "backtest-data-supplement-v1:backtest-split",
       },
       {
         "stock_list": ["600887.SH"],
         "start_time": "20260803",
         "end_time": "20260807",
         "periods": ["tick"],
+        "idempotency_scope": "backtest-data-supplement-v1:backtest-split",
       },
       {
         "stock_list": ["600887.SH"],
         "start_time": "20260810",
         "end_time": "20260814",
         "periods": ["tick"],
+        "idempotency_scope": "backtest-data-supplement-v1:backtest-split",
       },
     ]
     StrategyManager._instance = None
@@ -925,7 +932,10 @@ class TestStrategyManager:
     missing_day = date(2026, 8, 5)
 
     await manager._sync_missing_backtest_data(
-      runtime=SimpleNamespace(run_id="replay-run"),
+      runtime=SimpleNamespace(
+        run_id="replay-run",
+        context=SimpleNamespace(backtest_id="backtest-1"),
+      ),
       missing={
         "600887.SH": {
           "dates": {missing_day},
@@ -941,6 +951,7 @@ class TestStrategyManager:
       start_time="20260805",
       end_time="20260805",
       periods=["tick"],
+      idempotency_scope="backtest-data-supplement-v1:backtest-1",
     )
     StrategyManager._instance = None
 

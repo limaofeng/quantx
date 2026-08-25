@@ -7,6 +7,7 @@ import {
   quoteTone,
   replayDatePreset,
   replayIdempotencyKey,
+  replayPhaseLabel,
   resolveInstrumentName,
   signalHistoryCategory,
   signalReasonLabel,
@@ -33,6 +34,12 @@ describe('TTradeGlobal utilities', () => {
     expect(integerValue('3.9', 1)).toBe(3);
     expect(formatSignedPercent(Number.NaN)).toBe('--');
     expect(formatSignedPercent(1.25)).toBe('+1.25%');
+  });
+
+  it('labels replay preparation and execution phases for account replay', () => {
+    expect(replayPhaseLabel('CHECKING_DATA')).toBe('检查本地行情');
+    expect(replayPhaseLabel('DOWNLOADING_DATA')).toBe('下载缺失行情');
+    expect(replayPhaseLabel('REPLAYING')).toBe('执行历史回放');
   });
 
   it('uses the holding palette for live T-trade quote declines', () => {

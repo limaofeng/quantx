@@ -69,6 +69,7 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
   )
   payload = {
     "account_id": "account-1",
+    "portfolio_source": "MANUAL",
     "start_time": datetime(2026, 8, 19, 9, 30),
     "end_time": datetime(2026, 8, 19, 15, 0),
     "initial_portfolio_as_of": datetime(2026, 8, 18, 15, 0),
@@ -104,6 +105,12 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
       return_value=[date(2026, 8, 19)],
     ),
     patch(
+      "quantx_infrastructure.services.trading_time_service."
+      "TradingTimeService.get_previous_trading_day",
+      new_callable=AsyncMock,
+      return_value=date(2026, 8, 18),
+    ),
+    patch(
       "quantx_infrastructure.services.t_trade_replay_service."
       "t_trade_replay_projection_service.create",
       new_callable=AsyncMock,
@@ -125,6 +132,8 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
   create_projection.assert_awaited_once_with(
     run_id=request_id,
     account_id="account-1",
+    phase="VALIDATING_PORTFOLIO",
+    phase_message="初始组合已冻结，正在准备历史行情",
   )
   update_projection.assert_not_awaited()
   manager.defer_start_strategy.assert_awaited_once_with(request_id)
@@ -136,7 +145,7 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
   )
   assert run_kwargs["parameters"]["initial_instrument_metadata"]["600887.SH"] == {
     "instrument_name": "伊利股份",
-    "instrument_status_as_of": None,
+    "instrument_status_as_of": "2026-08-18",
     "listing_date": "1996-03-12",
     "expiry_date": "2038-01-19",
     "price_limit_reference_source": "INSTRUMENT_MASTER",
@@ -177,14 +186,14 @@ async def test_deferred_replay_stays_pending_until_runtime_actually_starts() -> 
 @pytest.mark.parametrize(
   ("portfolio_as_of", "message"),
   [
-    (None, "手工历史组合必须提供可审计的组合时点"),
+    (None, "回放时间格式无效"),
     (
       datetime(2026, 8, 19, 9, 30),
-      "手工历史组合时点必须早于回放开始时间，禁止使用未来账户数据",
+      "初始组合时点必须是回放首日前一个交易日",
     ),
     (
       datetime(2026, 8, 20, 15, 0),
-      "手工历史组合时点必须早于回放开始时间，禁止使用未来账户数据",
+      "初始组合时点必须是回放首日前一个交易日",
     ),
   ],
 )
@@ -197,6 +206,7 @@ async def test_manual_portfolio_requires_auditable_pre_replay_timestamp(
   service._has_active_replay = AsyncMock(return_value=False)
   payload = {
     "account_id": "account-1",
+    "portfolio_source": "MANUAL",
     "start_time": datetime(2026, 8, 19, 9, 30),
     "end_time": datetime(2026, 8, 19, 15, 0),
     "initial_portfolio_as_of": portfolio_as_of,
@@ -213,11 +223,19 @@ async def test_manual_portfolio_requires_auditable_pre_replay_timestamp(
     ],
   }
 
-  with patch(
-    "quantx_infrastructure.services.t_trade_replay_service."
-    "TradingDateHelper.get_trading_calendar",
-    new_callable=AsyncMock,
-    return_value=[date(2026, 8, 19)],
+  with (
+    patch(
+      "quantx_infrastructure.services.t_trade_replay_service."
+      "TradingDateHelper.get_trading_calendar",
+      new_callable=AsyncMock,
+      return_value=[date(2026, 8, 19)],
+    ),
+    patch(
+      "quantx_infrastructure.services.trading_time_service."
+      "TradingTimeService.get_previous_trading_day",
+      new_callable=AsyncMock,
+      return_value=date(2026, 8, 18),
+    ),
   ):
     with pytest.raises(ValueError, match=message):
       await service.start(payload)

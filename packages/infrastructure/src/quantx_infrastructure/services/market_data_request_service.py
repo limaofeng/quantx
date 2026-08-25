@@ -133,6 +133,7 @@ async def request_market_data_sync(
   end_time: str,
   periods: list[str],
   timeout_seconds: float = 600,
+  idempotency_scope: str = _T_TRADE_REPLAY_SUPPLEMENT_SCOPE,
 ) -> dict[str, Any]:
   payload = {
     "operation": "bars",
@@ -145,7 +146,7 @@ async def request_market_data_sync(
   return await request_agent_market_data(
     payload=payload,
     timeout_seconds=timeout_seconds,
-    idempotency_scope=_T_TRADE_REPLAY_SUPPLEMENT_SCOPE,
+    idempotency_scope=idempotency_scope,
   )
 
 

@@ -44,6 +44,10 @@ def _snapshot(row: TTradeReplayProjection) -> Dict[str, Any]:
     "account_id": row.account_id,
     "status": row.status,
     "progress_pct": float(row.progress_pct or 0.0),
+    "phase": str(row.phase or "VALIDATING_PORTFOLIO"),
+    "phase_progress_pct": float(row.phase_progress_pct or 0.0),
+    "phase_message": str(row.phase_message or ""),
+    "data_preparation": dict(row.data_preparation or {}),
     "processed_until": row.processed_until,
     "revision": str(row.revision or 0),
     "created_at": row.created_at,
@@ -84,12 +88,18 @@ class TTradeReplayProjectionService:
     run_id: str,
     account_id: str,
     status: str = "PENDING",
+    phase: str = "VALIDATING_PORTFOLIO",
+    phase_message: str = "",
   ) -> Dict[str, Any]:
     return await self.update(
       run_id=run_id,
       account_id=account_id,
       status=status,
       progress_pct=0.0,
+      phase=phase,
+      phase_progress_pct=0.0,
+      phase_message=phase_message,
+      data_preparation={},
       processed_until=None,
       kind=TTradeReplayUpdateKind.CREATED,
     )
@@ -101,12 +111,17 @@ class TTradeReplayProjectionService:
     account_id: str,
     status: str,
     progress_pct: Optional[float] = None,
+    phase: Optional[str] = None,
+    phase_progress_pct: Optional[float] = None,
+    phase_message: Optional[str] = None,
+    data_preparation: Optional[Dict[str, Any]] = None,
     processed_until: Optional[datetime] = None,
     kind: TTradeReplayUpdateKind = TTradeReplayUpdateKind.STATUS_CHANGED,
   ) -> Dict[str, Any]:
     normalized_run_id = str(run_id or "").strip()
     normalized_account_id = str(account_id or "").strip()
     normalized_status = str(getattr(status, "value", status) or "PENDING").upper()
+    normalized_phase = self._normalized_phase(normalized_status, phase)
     normalized_processed_until = (
       time_utils.to_shanghai(processed_until)
       if processed_until is not None and processed_until.tzinfo
@@ -126,6 +141,12 @@ class TTradeReplayProjectionService:
           account_id=normalized_account_id,
           status=normalized_status,
           progress_pct=self._normalized_progress(normalized_status, progress_pct),
+          phase=normalized_phase,
+          phase_progress_pct=self._normalized_phase_progress(
+            normalized_phase, phase_progress_pct
+          ),
+          phase_message=str(phase_message or ""),
+          data_preparation=dict(data_preparation or {}),
           processed_until=normalized_processed_until,
           revision=1,
         )
@@ -153,6 +174,29 @@ class TTradeReplayProjectionService:
           self._normalized_progress(normalized_status, progress_pct),
         )
         next_processed_until = row.processed_until
+        next_phase = normalized_phase if phase is not None else self._normalized_phase(
+          normalized_status, row.phase
+        )
+        if phase_progress_pct is not None:
+          next_phase_progress = self._normalized_phase_progress(
+            next_phase, phase_progress_pct
+          )
+        elif next_phase == "REPLAYING":
+          next_phase_progress = next_progress
+        elif next_phase != row.phase:
+          next_phase_progress = self._normalized_phase_progress(next_phase, None)
+        else:
+          next_phase_progress = float(row.phase_progress_pct or 0.0)
+        next_phase_message = (
+          str(phase_message or "")
+          if phase_message is not None
+          else str(row.phase_message or "")
+        )
+        next_data_preparation = (
+          dict(data_preparation)
+          if data_preparation is not None
+          else dict(row.data_preparation or {})
+        )
         if normalized_processed_until is not None and (
           next_processed_until is None
           or normalized_processed_until > next_processed_until
@@ -162,12 +206,20 @@ class TTradeReplayProjectionService:
           (
             row.status != normalized_status,
             abs(float(row.progress_pct or 0.0) - next_progress) >= 0.001,
+            row.phase != next_phase,
+            abs(float(row.phase_progress_pct or 0.0) - next_phase_progress) >= 0.001,
+            str(row.phase_message or "") != next_phase_message,
+            dict(row.data_preparation or {}) != next_data_preparation,
             row.processed_until != next_processed_until,
           )
         )
         if changed:
           row.status = normalized_status
           row.progress_pct = next_progress
+          row.phase = next_phase
+          row.phase_progress_pct = next_phase_progress
+          row.phase_message = next_phase_message
+          row.data_preparation = next_data_preparation
           row.processed_until = next_processed_until
           row.revision = int(row.revision or 0) + 1
       await db.commit()
@@ -217,6 +269,38 @@ class TTradeReplayProjectionService:
     except (TypeError, ValueError):
       progress = 0.0
     return max(0.0, min(99.9, progress))
+
+  @staticmethod
+  def _normalized_phase(status: str, phase: Optional[str]) -> str:
+    if status == "COMPLETED":
+      return "COMPLETED"
+    if status in {"ERROR", "FAILED", "STOPPED"}:
+      return "FAILED"
+    if status == "CANCELLED":
+      return "CANCELLED"
+    normalized = str(getattr(phase, "value", phase) or "VALIDATING_PORTFOLIO").upper()
+    allowed = {
+      "VALIDATING_PORTFOLIO",
+      "CHECKING_DATA",
+      "DOWNLOADING_DATA",
+      "VERIFYING_DATA",
+      "REPLAYING",
+      "FINALIZING",
+      "COMPLETED",
+      "FAILED",
+      "CANCELLED",
+    }
+    return normalized if normalized in allowed else "VALIDATING_PORTFOLIO"
+
+  @staticmethod
+  def _normalized_phase_progress(phase: str, progress_pct: Optional[float]) -> float:
+    if phase in {"COMPLETED", "FAILED", "CANCELLED"}:
+      return 100.0
+    try:
+      progress = float(progress_pct or 0.0)
+    except (TypeError, ValueError):
+      progress = 0.0
+    return max(0.0, min(100.0, progress))
 
 
 t_trade_replay_projection_service = TTradeReplayProjectionService()

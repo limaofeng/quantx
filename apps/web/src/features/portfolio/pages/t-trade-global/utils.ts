@@ -249,7 +249,8 @@ export function replayDatePreset(
   const completedTradingDays = Array.from(new Set(tradingCalendar))
     .sort()
     .filter(
-      day => day < current.date || (day === current.date && current.minutes >= 900)
+      day =>
+        day < current.date || (day === current.date && current.minutes >= 900)
     );
   if (completedTradingDays.length > 0) {
     const selected = completedTradingDays.slice(-tradingDayCount);
@@ -288,4 +289,19 @@ export function replayStatusLabel(status?: string | null) {
     STOPPED: '已停止',
   };
   return labels[String(status || '').toUpperCase()] || status || '未知';
+}
+
+export function replayPhaseLabel(phase?: string | null) {
+  const labels: Record<string, string> = {
+    VALIDATING_PORTFOLIO: '校验初始账户',
+    CHECKING_DATA: '检查本地行情',
+    DOWNLOADING_DATA: '下载缺失行情',
+    VERIFYING_DATA: '复核行情完整性',
+    REPLAYING: '执行历史回放',
+    FINALIZING: '生成回测结果',
+    COMPLETED: '回测已完成',
+    FAILED: '回测失败',
+    CANCELLED: '回测已取消',
+  };
+  return labels[String(phase || '').toUpperCase()] || phase || '准备中';
 }

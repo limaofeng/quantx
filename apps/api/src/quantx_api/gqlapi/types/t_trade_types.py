@@ -1148,15 +1148,39 @@ class TTradeGlobalMutationResult:
   monitor: Optional[TTradeGlobalMonitor] = None
 
 
+@strawberry.enum(description="做 T 历史回放初始组合来源")
+class TTradeReplayPortfolioSource(Enum):
+  SNAPSHOT = "SNAPSHOT"
+  MANUAL = "MANUAL"
+
+
+@strawberry.enum(description="做 T 历史回放当前执行阶段")
+class TTradeReplayPhase(Enum):
+  VALIDATING_PORTFOLIO = "VALIDATING_PORTFOLIO"
+  CHECKING_DATA = "CHECKING_DATA"
+  DOWNLOADING_DATA = "DOWNLOADING_DATA"
+  VERIFYING_DATA = "VERIFYING_DATA"
+  REPLAYING = "REPLAYING"
+  FINALIZING = "FINALIZING"
+  COMPLETED = "COMPLETED"
+  FAILED = "FAILED"
+  CANCELLED = "CANCELLED"
+
+
 @strawberry.input(description="做 T 历史回放的手工初始持仓")
 class TTradeReplayPositionInput:
   stock_code: str
   volume: int
-  available_volume: int
-  instrument_name: str = ""
-  avg_price: float = 0.0
-  last_price: float = 0.0
-  market_value: float = 0.0
+  avg_price: float
+
+
+@strawberry.input(description="做 T 历史回放的不可变初始组合")
+class TTradeReplayPortfolioInput:
+  source: TTradeReplayPortfolioSource
+  as_of: datetime
+  snapshot_id: Optional[str] = None
+  cash_available: Optional[float] = None
+  positions: List[TTradeReplayPositionInput] = field(default_factory=list)
 
 
 @strawberry.input(description="启动做 T 历史回放")
@@ -1166,10 +1190,7 @@ class TTradeReplayStartInput:
   start_time: datetime
   end_time: datetime
   signal_policy: TTradeSignalPolicyInput
-  initial_portfolio_as_of: Optional[datetime] = None
-  initial_cash: Optional[float] = None
-  initial_total_asset: Optional[float] = None
-  initial_positions: List[TTradeReplayPositionInput] = field(default_factory=list)
+  portfolio: TTradeReplayPortfolioInput
   target_trade_amount: float = 10_000.0
   max_trade_amount: float = 12_000.0
   max_concurrent_batches: int = 3
@@ -1224,6 +1245,30 @@ class TTradeReplayPreparation:
   initial_total_asset: float
   requires_manual_portfolio: bool
   message: str
+  positions: List[TTradeReplayPosition]
+
+
+@strawberry.type(description="做 T 回放历史行情准备进度")
+class TTradeReplayDataPreparation:
+  status: str
+  required_instruments: List[str]
+  required_periods: List[str]
+  total_windows: int
+  completed_windows: int
+  current_instrument: Optional[str] = None
+  current_periods: List[str] = field(default_factory=list)
+  current_start_date: Optional[str] = None
+  current_end_date: Optional[str] = None
+  missing_instruments: List[str] = field(default_factory=list)
+
+
+@strawberry.type(description="做 T 回放最终采用的不可变初始组合")
+class TTradeReplayInitialPortfolio:
+  source: TTradeReplayPortfolioSource
+  as_of: datetime
+  snapshot_id: Optional[str]
+  cash_available: float
+  total_asset: float
   positions: List[TTradeReplayPosition]
 
 
@@ -1328,6 +1373,9 @@ class TTradeReplay:
   account_id: str
   status: str
   progress_pct: float
+  phase: TTradeReplayPhase
+  phase_progress_pct: float
+  phase_message: str
   revision: str
   processed_until: Optional[datetime]
   start_time: datetime
@@ -1339,6 +1387,8 @@ class TTradeReplay:
   error_message: Optional[str]
   data_quality: str
   data_quality_message: str
+  data_preparation: TTradeReplayDataPreparation
+  initial_portfolio: TTradeReplayInitialPortfolio
   skipped_stock_codes: List[str]
   summary: Optional[TTradeReplaySummary]
   instruments: List[TTradeReplayInstrumentResult]

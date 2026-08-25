@@ -33,6 +33,7 @@ async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> No
     end_time="20260724",
     periods=["tick"],
     timeout_seconds=120,
+    idempotency_scope="backtest-data-supplement-v1:backtest-1",
   )
 
   assert result == {"status": "success", "request_id": "request-1"}
@@ -46,7 +47,7 @@ async def test_market_data_sync_forces_agent_history_download(monkeypatch) -> No
       "periods": ["tick"],
     },
     "timeout_seconds": 120,
-    "idempotency_scope": "t-trade-replay-supplement-v2",
+    "idempotency_scope": "backtest-data-supplement-v1:backtest-1",
   }
 
 

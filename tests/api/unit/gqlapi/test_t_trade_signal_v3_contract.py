@@ -18,6 +18,8 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeCandidateApprovalExpectationInput,
   TTradeExternalEntryInput,
   TTradeGlobalSettingsInput,
+  TTradeReplayPortfolioInput,
+  TTradeReplayPortfolioSource,
   TTradeReplayStartInput,
   TTradeSignalDataHealth,
   TTradeSignalEvaluationKind,
@@ -41,6 +43,14 @@ def _policy_input(**overrides) -> TTradeSignalPolicyInput:
   payload.pop("feature_schema_version")
   payload.update(overrides)
   return TTradeSignalPolicyInput(**payload)
+
+
+def _replay_portfolio_input() -> TTradeReplayPortfolioInput:
+  return TTradeReplayPortfolioInput(
+    source=TTradeReplayPortfolioSource.SNAPSHOT,
+    as_of=datetime(2026, 7, 31, tzinfo=timezone.utc),
+    snapshot_id="snapshot-d1",
+  )
 
 
 def _camel_case(value: str) -> str:
@@ -1014,6 +1024,7 @@ async def test_replay_start_raw_key_is_not_derived_from_payload_digest(
     start_time=datetime(2026, 8, 1, tzinfo=timezone.utc),
     end_time=datetime(2026, 8, 2, tzinfo=timezone.utc),
     signal_policy=_policy_input(),
+    portfolio=_replay_portfolio_input(),
   )
 
   first = await TTradeResolver.start_replay(TTradeReplayStartInput(**base))
@@ -1042,6 +1053,7 @@ async def test_replay_start_submission_unknown_is_retryable_and_not_terminal(
     start_time=datetime(2026, 8, 1, tzinfo=timezone.utc),
     end_time=datetime(2026, 8, 2, tzinfo=timezone.utc),
     signal_policy=_policy_input(),
+    portfolio=_replay_portfolio_input(),
   )
 
   result = await TTradeResolver.start_replay(input_value)

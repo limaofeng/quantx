@@ -1180,6 +1180,9 @@ export const TTradeReplayHistoryQuery = gql(`
       backtestId
       status
       progressPct
+      phase
+      phaseProgressPct
+      phaseMessage
       revision
       processedUntil
       startTime
@@ -1206,6 +1209,9 @@ export const TTradeReplayQuery = gql(`
       accountId
       status
       progressPct
+      phase
+      phaseProgressPct
+      phaseMessage
       revision
       processedUntil
       startTime
@@ -1217,6 +1223,34 @@ export const TTradeReplayQuery = gql(`
       errorMessage
       dataQuality
       dataQualityMessage
+      dataPreparation {
+        status
+        requiredInstruments
+        requiredPeriods
+        totalWindows
+        completedWindows
+        currentInstrument
+        currentPeriods
+        currentStartDate
+        currentEndDate
+        missingInstruments
+      }
+      initialPortfolio {
+        source
+        asOf
+        snapshotId
+        cashAvailable
+        totalAsset
+        positions {
+          stockCode
+          instrumentName
+          volume
+          availableVolume
+          avgPrice
+          lastPrice
+          marketValue
+        }
+      }
       skippedStockCodes
       summary {
         initialEquity

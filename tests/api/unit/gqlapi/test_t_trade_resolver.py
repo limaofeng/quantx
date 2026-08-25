@@ -7,6 +7,8 @@ import quantx_api.gqlapi.resolvers.t_trade as resolver_module
 from quantx_api.gqlapi.resolvers.t_trade import TTradeResolver
 from quantx_api.gqlapi.types.t_trade_types import (
   TTradeGlobalMonitor,
+  TTradeReplayPortfolioInput,
+  TTradeReplayPortfolioSource,
   TTradeReplayStartInput,
   TTradeRolloutTarget,
   TTradeSignalPolicyInput,
@@ -23,6 +25,14 @@ def _policy_input() -> TTradeSignalPolicyInput:
   payload.pop("policy_version")
   payload.pop("feature_schema_version")
   return TTradeSignalPolicyInput(**payload)
+
+
+def _portfolio_input() -> TTradeReplayPortfolioInput:
+  return TTradeReplayPortfolioInput(
+    source=TTradeReplayPortfolioSource.SNAPSHOT,
+    as_of=datetime(2026, 7, 22, 15, 0),
+    snapshot_id="snapshot-d1",
+  )
 
 
 def _policy_projection() -> dict:
@@ -417,6 +427,7 @@ async def test_replay_start_processing_receipt_is_explicitly_pending(
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
       signal_policy=_policy_input(),
+      portfolio=_portfolio_input(),
     )
   )
 
@@ -457,6 +468,7 @@ async def test_replay_start_failed_receipt_is_not_mislabeled_as_validation(
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
       signal_policy=_policy_input(),
+      portfolio=_portfolio_input(),
     )
   )
 
@@ -495,6 +507,18 @@ async def test_replay_start_succeeded_command_with_pending_run_is_accepted(
           "error_message": None,
           "data_quality": "PENDING",
           "data_quality_message": "正在准备历史数据",
+          "phase": "VALIDATING_PORTFOLIO",
+          "phase_progress_pct": 0.0,
+          "phase_message": "正在校验初始组合",
+          "data_preparation": {},
+          "initial_portfolio": {
+            "source": "SNAPSHOT",
+            "as_of": "2026-07-22T15:00:00",
+            "snapshot_id": "snapshot-d1",
+            "cash_available": 100_000.0,
+            "total_asset": 100_000.0,
+            "positions": [],
+          },
           "skipped_stock_codes": [],
           "summary": None,
           "instruments": [],
@@ -512,6 +536,7 @@ async def test_replay_start_succeeded_command_with_pending_run_is_accepted(
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
       signal_policy=_policy_input(),
+      portfolio=_portfolio_input(),
     )
   )
 
@@ -535,6 +560,7 @@ async def test_replay_start_rejects_blank_idempotency_key(
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
       signal_policy=_policy_input(),
+      portfolio=_portfolio_input(),
     )
   )
 
@@ -560,6 +586,7 @@ async def test_replay_start_submission_exception_is_structured(
       start_time=datetime(2026, 7, 23, 9, 30),
       end_time=datetime(2026, 8, 19, 15, 0),
       signal_policy=_policy_input(),
+      portfolio=_portfolio_input(),
     )
   )
 

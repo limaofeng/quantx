@@ -66,7 +66,14 @@ class TTradeReplayService:
     if not account_id:
       raise ValueError("账户不能为空")
     start_time = self._naive(start_time)
+    previous_trading_date = (
+      await TradingDateHelper().trading_time_service.get_previous_trading_day(
+        "SH", start_time.date()
+      )
+    )
     snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
+    if snapshot is not None and snapshot.trade_date != previous_trading_date:
+      snapshot, positions = None, []
     requires_manual = snapshot is None or not positions
     reconciliation = (
       self._build_initial_asset_reconciliation(
@@ -79,9 +86,9 @@ class TTradeReplayService:
       else None
     )
     message = (
-      "已采用回放开始日前最近一个账户日结快照"
+      "已采用回放首日前一个交易日的账户日结快照"
       if not requires_manual
-      else "开始日前没有完整账户快照，无法启动正式历史回放；请先导入开始日前的账户快照"
+      else "回放首日前一个交易日没有完整账户快照；可手工配置一次性回测账户"
     )
     if reconciliation is not None:
       residual = float(reconciliation["non_trading_asset"])
@@ -186,23 +193,41 @@ class TTradeReplayService:
     if await self._has_active_replay(account_id):
       raise ValueError("该账户已有正在执行的做 T 回放，请等待完成或先取消")
 
+    portfolio_source = str(payload.get("portfolio_source") or "").strip().upper()
+    if portfolio_source not in {"SNAPSHOT", "MANUAL"}:
+      raise ValueError("初始组合来源必须是 SNAPSHOT 或 MANUAL")
+    portfolio_as_of = self._naive(payload.get("initial_portfolio_as_of"))
+    previous_trading_date = (
+      await TradingDateHelper().trading_time_service.get_previous_trading_day(
+        "SH", trading_dates[0]
+      )
+    )
+    if portfolio_as_of.date() != previous_trading_date:
+      raise ValueError("初始组合时点必须是回放首日前一个交易日")
+
     manual_positions = self._normalize_input_positions(
       payload.get("initial_positions") or []
     )
-    manual_as_of = None
-    if manual_positions:
-      raw_manual_as_of = payload.get("initial_portfolio_as_of")
-      if raw_manual_as_of is None:
-        raise ValueError("手工历史组合必须提供可审计的组合时点")
-      manual_as_of = self._naive(raw_manual_as_of)
-      if manual_as_of >= start_time:
-        raise ValueError("手工历史组合时点必须早于回放开始时间，禁止使用未来账户数据")
+    manual_as_of = portfolio_as_of if portfolio_source == "MANUAL" else None
+    if portfolio_source == "MANUAL" and not manual_positions:
+      raise ValueError("手工初始组合必须至少包含一只持仓")
+    if portfolio_source == "SNAPSHOT" and manual_positions:
+      raise ValueError("快照初始组合不得同时提交手工持仓")
     snapshot = None
     positions = manual_positions
-    if not positions:
-      snapshot, positions = await self._load_snapshot_portfolio(account_id, start_time)
+    if portfolio_source == "SNAPSHOT":
+      expected_snapshot_id = str(payload.get("expected_snapshot_id") or "").strip()
+      if not expected_snapshot_id:
+        raise ValueError("快照初始组合必须绑定准备阶段返回的快照")
+      snapshot, positions = await self._load_snapshot_portfolio(
+        account_id,
+        start_time,
+        expected_snapshot_id=expected_snapshot_id,
+      )
       if snapshot is None or not positions:
-        raise ValueError("开始日前没有完整账户快照，无法启动正式历史回放")
+        raise ValueError("指定的 D-1 账户快照不存在或不属于当前账户")
+      if snapshot.trade_date != previous_trading_date:
+        raise ValueError("指定账户快照不是回放首日对应的 D-1 日结快照")
 
     initial_cash = self._optional_number(payload.get("initial_cash"))
     initial_total_asset = self._optional_number(payload.get("initial_total_asset"))
@@ -257,7 +282,9 @@ class TTradeReplayService:
       metadata[code] = {
         "instrument_name": instrument_name,
         "instrument_status_as_of": (
-          snapshot.trade_date.isoformat() if snapshot is not None else None
+          snapshot.trade_date.isoformat()
+          if snapshot is not None
+          else manual_as_of.date().isoformat()
         ),
         "listing_date": (
           reference.open_date.isoformat()
@@ -307,6 +334,14 @@ class TTradeReplayService:
       "initial_total_asset": initial_total_asset,
       "initial_positions": positions,
       "initial_portfolio_as_of": manual_as_of.isoformat() if manual_as_of else None,
+      "initial_portfolio": {
+        "source": portfolio_source,
+        "as_of": portfolio_as_of.isoformat(),
+        "snapshot_id": snapshot.id if snapshot is not None else None,
+        "cash_available": initial_cash,
+        "total_asset": initial_total_asset,
+        "positions": positions,
+      },
       "initial_asset_reconciliation": initial_asset_reconciliation,
       "initial_portfolio_metadata": metadata,
       "initial_instrument_metadata": {code: metadata[code] for code in instruments},
@@ -354,6 +389,8 @@ class TTradeReplayService:
     await t_trade_replay_projection_service.create(
       run_id=run_id,
       account_id=account_id,
+      phase="VALIDATING_PORTFOLIO",
+      phase_message="初始组合已冻结，正在准备历史行情",
     )
     if defer_start:
       if not await strategy_manager.defer_start_strategy(run_id):
@@ -484,14 +521,27 @@ class TTradeReplayService:
     return await t_trade_replay_projection_service.has_active(account_id)
 
   async def _load_snapshot_portfolio(
-    self, account_id: str, start_time: datetime
+    self,
+    account_id: str,
+    start_time: datetime,
+    *,
+    expected_snapshot_id: Optional[str] = None,
   ) -> Tuple[Any, List[Dict[str, Any]]]:
     async for db in get_async_db():
       snapshot_repo = DailyAssetSnapshotRepository(db)
       position_repo = DailyAssetPositionSnapshotRepository(db)
       scope_key = snapshot_repo.scope_key("account", account_id)
-      snapshot = await snapshot_repo.find_previous(scope_key, start_time.date())
+      snapshot = (
+        await snapshot_repo.find_by_id(expected_snapshot_id)
+        if expected_snapshot_id
+        else await snapshot_repo.find_previous(scope_key, start_time.date())
+      )
       if snapshot is None:
+        return None, []
+      if (
+        str(snapshot.scope_key or "") != scope_key
+        or snapshot.trade_date >= start_time.date()
+      ):
         return None, []
       rows = await position_repo.find_by_snapshot(snapshot.id)
       return snapshot, self._aggregate_snapshot_positions(rows)
@@ -717,12 +767,21 @@ class TTradeReplayService:
   @staticmethod
   def _normalize_input_positions(items: List[Any]) -> List[Dict[str, Any]]:
     result = []
+    seen_codes: set[str] = set()
     for raw in items:
       data = vars(raw) if not isinstance(raw, dict) else dict(raw)
       code = str(data.get("stock_code", "") or "").strip().upper()
-      volume = max(0, int(data.get("volume", 0) or 0))
-      if not code or volume <= 0:
-        continue
+      volume = int(data.get("volume", 0) or 0)
+      avg_price = float(data.get("avg_price", 0.0) or 0.0)
+      if not code:
+        raise ValueError("手工初始持仓的股票代码不能为空")
+      if code in seen_codes:
+        raise ValueError(f"手工初始持仓包含重复股票: {code}")
+      if volume <= 0:
+        raise ValueError(f"手工初始持仓数量必须大于零: {code}")
+      if not isfinite(avg_price) or avg_price <= 0:
+        raise ValueError(f"手工初始持仓成本必须是正数: {code}")
+      seen_codes.add(code)
       last_price = max(0.0, float(data.get("last_price", 0.0) or 0.0))
       result.append(
         {
@@ -733,7 +792,7 @@ class TTradeReplayService:
             volume, max(0, int(data.get("available_volume", 0) or 0))
           ),
           "frozen_volume": 0,
-          "avg_price": max(0.0, float(data.get("avg_price", 0.0) or 0.0)),
+          "avg_price": avg_price,
           "last_price": last_price,
           "market_value": max(
             0.0,
@@ -773,12 +832,43 @@ class TTradeReplayService:
     replay_metrics = self._replay_metrics(run, backtest)
     skipped = list(params.get("replay_skipped_instruments") or [])
     error_message = getattr(backtest, "error_message", None) or run.error_message
+    data_preparation = {
+      "status": "PENDING",
+      "required_instruments": list(run.instruments or []),
+      "required_periods": ["tick"],
+      "total_windows": 0,
+      "completed_windows": 0,
+      "current_instrument": None,
+      "current_periods": [],
+      "current_start_date": None,
+      "current_end_date": None,
+      "missing_instruments": [],
+      **dict(projection.get("data_preparation") or {}),
+    }
+    initial_portfolio = dict(params.get("initial_portfolio") or {})
+    if not initial_portfolio:
+      fallback_as_of = (
+        params.get("initial_portfolio_as_of")
+        or params.get("replay_snapshot_date")
+        or start_time.isoformat()
+      )
+      initial_portfolio = {
+        "source": "SNAPSHOT" if params.get("replay_snapshot_id") else "MANUAL",
+        "as_of": fallback_as_of,
+        "snapshot_id": params.get("replay_snapshot_id"),
+        "cash_available": float(params.get("initial_cash", 0.0) or 0.0),
+        "total_asset": float(params.get("initial_total_asset", 0.0) or 0.0),
+        "positions": list(params.get("initial_positions") or []),
+      }
     return {
       "run_id": run.id,
       "backtest_id": backtest.id if backtest else None,
       "account_id": str(projection["account_id"]),
       "status": raw_status,
       "progress_pct": progress,
+      "phase": str(projection.get("phase") or "VALIDATING_PORTFOLIO"),
+      "phase_progress_pct": float(projection.get("phase_progress_pct") or 0.0),
+      "phase_message": str(projection.get("phase_message") or ""),
       "processed_until": current_time,
       "revision": str(projection["revision"]),
       "start_time": start_time,
@@ -794,6 +884,8 @@ class TTradeReplayService:
       "data_quality_message": str(
         replay_metrics.get("data_quality_message") or error_message or "回放正在执行"
       ),
+      "data_preparation": data_preparation,
+      "initial_portfolio": initial_portfolio,
       "skipped_stock_codes": list(
         replay_metrics.get("skipped_stock_codes")
         or [str(item.get("stock_code", "") or "") for item in skipped]

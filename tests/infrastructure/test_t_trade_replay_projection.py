@@ -52,6 +52,7 @@ async def test_replay_projection_is_monotonic_and_publishes_after_changes(
     account_id="account-1",
     status="RUNNING",
     progress_pct=42.0,
+    phase="REPLAYING",
     processed_until=now,
     kind=TTradeReplayUpdateKind.PROGRESS,
   )
@@ -82,11 +83,16 @@ async def test_replay_projection_is_monotonic_and_publishes_after_changes(
 
   assert created["revision"] == "1"
   assert progressed["revision"] == "2"
+  assert progressed["phase"] == "REPLAYING"
+  assert progressed["phase_progress_pct"] == 42.0
   assert regressed["revision"] == "2"
   assert regressed["progress_pct"] == 42.0
+  assert regressed["phase_progress_pct"] == 42.0
   assert regressed["processed_until"] == now
   assert completed["revision"] == "3"
   assert completed["progress_pct"] == 100.0
+  assert completed["phase"] == "COMPLETED"
+  assert completed["phase_progress_pct"] == 100.0
   assert completed["processed_until"] == now + timedelta(hours=1)
   assert late_progress == completed
   assert publish.await_count == 3

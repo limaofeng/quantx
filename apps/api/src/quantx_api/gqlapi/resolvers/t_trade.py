@@ -87,8 +87,12 @@ from quantx_api.gqlapi.types.t_trade_types import (
   TTradeReplayCurvePoint,
   TTradeReplayCycle,
   TTradeReplayCyclePage,
+  TTradeReplayDataPreparation,
+  TTradeReplayInitialPortfolio,
   TTradeReplayInstrumentResult,
   TTradeReplayMutationResult,
+  TTradeReplayPhase,
+  TTradeReplayPortfolioSource,
   TTradeReplayPosition,
   TTradeReplayPreparation,
   TTradeReplayReport,
@@ -848,6 +852,44 @@ class TTradeResolver:
         TTradeReplayCurvePoint(**cls._graphql_kwargs(TTradeReplayCurvePoint, point))
       )
     payload["curve"] = curve
+    payload["phase"] = TTradeReplayPhase(
+      str(payload.get("phase") or "VALIDATING_PORTFOLIO").upper()
+    )
+    payload.setdefault("phase_progress_pct", 0.0)
+    payload.setdefault("phase_message", "")
+    preparation = {
+      "status": "PENDING",
+      "required_instruments": [],
+      "required_periods": ["tick"],
+      "total_windows": 0,
+      "completed_windows": 0,
+      **dict(payload.get("data_preparation") or {}),
+    }
+    payload["data_preparation"] = TTradeReplayDataPreparation(
+      **cls._graphql_kwargs(TTradeReplayDataPreparation, preparation)
+    )
+    initial_portfolio = {
+      "source": "SNAPSHOT",
+      "as_of": payload.get("snapshot_date") or payload.get("start_time"),
+      "snapshot_id": payload.get("snapshot_id"),
+      "cash_available": 0.0,
+      "total_asset": 0.0,
+      "positions": [],
+      **dict(payload.get("initial_portfolio") or {}),
+    }
+    initial_portfolio["source"] = TTradeReplayPortfolioSource(
+      str(initial_portfolio.get("source") or "SNAPSHOT").upper()
+    )
+    initial_portfolio["as_of"] = cls._datetime(initial_portfolio.get("as_of"))
+    initial_portfolio["positions"] = [
+      TTradeReplayPosition(
+        **cls._graphql_kwargs(TTradeReplayPosition, item)
+      )
+      for item in initial_portfolio.get("positions", [])
+    ]
+    payload["initial_portfolio"] = TTradeReplayInitialPortfolio(
+      **cls._graphql_kwargs(TTradeReplayInitialPortfolio, initial_portfolio)
+    )
     return TTradeReplay(**cls._graphql_kwargs(TTradeReplay, payload))
 
   @classmethod
@@ -2099,6 +2141,39 @@ class TTradeResolver:
     raw_policy = getattr(input, "signal_policy", None)
     if raw_policy is not None:
       payload["signal_policy"] = cls._policy_from_input(raw_policy).to_dict()
+    raw_portfolio = dict(payload.pop("portfolio", {}) or {})
+    if raw_portfolio:
+      source = str(raw_portfolio.get("source") or "").strip().upper()
+      payload["portfolio_source"] = source
+      payload["initial_portfolio_as_of"] = raw_portfolio.get("as_of")
+      if source == "SNAPSHOT":
+        payload["expected_snapshot_id"] = str(
+          raw_portfolio.get("snapshot_id") or ""
+        ).strip()
+        payload["initial_positions"] = []
+      else:
+        cash = raw_portfolio.get("cash_available")
+        positions = []
+        for item in list(raw_portfolio.get("positions") or []):
+          row = dict(item or {})
+          volume = int(row.get("volume", 0) or 0)
+          avg_price = float(row.get("avg_price", 0.0) or 0.0)
+          positions.append(
+            {
+              "stock_code": str(row.get("stock_code") or "").strip().upper(),
+              "volume": volume,
+              "available_volume": volume,
+              "avg_price": avg_price,
+              "last_price": avg_price,
+              "market_value": max(0.0, avg_price * volume),
+            }
+          )
+        payload["initial_cash"] = cash
+        payload["initial_positions"] = positions
+        if cash is not None:
+          payload["initial_total_asset"] = float(cash) + sum(
+            float(item["market_value"]) for item in positions
+          )
     return payload
 
   @classmethod

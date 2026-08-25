@@ -39,6 +39,7 @@ from quantx_infrastructure.models.parameter_schema import (
   validate_strategy_configuration,
 )
 from quantx_infrastructure.repositories import StrategyRunRepository
+from quantx_infrastructure.repositories.backtest_repository import BacktestRepository
 from quantx_infrastructure.repositories.managed_plan_repository import (
   managed_plan_config_fingerprint,
 )
@@ -1038,14 +1039,28 @@ class StrategyManager:
           runtime,
           canonical_archive_adapter=canonical_archive_adapter,
         )
+        await self._finalize_t_trade_replay_initial_portfolio(runtime)
       except RuntimeError as e:
         runtime.status = ExecutionStatus.ERROR
         runtime.error_message = str(e)
         self.logger.error(f"回测数据准备失败: {e}")
+        await self._set_t_trade_replay_phase(
+          runtime,
+          phase="FAILED",
+          phase_progress_pct=100.0,
+          phase_message=str(e),
+        )
         await self._update_runtime_status(run_id, "ERROR", str(e))
         if runtime.context.backtest_id:
           await self._mark_backtest_error_safely(runtime.context.backtest_id, str(e))
         return False
+
+      await self._set_t_trade_replay_phase(
+        runtime,
+        phase="REPLAYING",
+        phase_progress_pct=0.0,
+        phase_message="历史行情已通过严格复核，正在执行回放",
+      )
 
     if canonical_archive_adapter is None:
       success = await self.executor.start(
@@ -1286,6 +1301,20 @@ class StrategyManager:
 
     service = HistoricalMarketDataService()
 
+    is_t_trade_replay = bool(runtime.context.parameters.get("t_trade_replay"))
+    if is_t_trade_replay:
+      initial_portfolio = dict(
+        runtime.context.parameters.get("initial_portfolio") or {}
+      )
+      if str(initial_portfolio.get("source") or "").upper() == "MANUAL":
+        await self._ensure_t_trade_portfolio_reference_data(runtime, service)
+      await self._set_t_trade_replay_phase(
+        runtime,
+        phase="CHECKING_DATA",
+        phase_progress_pct=0.0,
+        phase_message="正在检查配置标的的 Tick 历史行情",
+      )
+
     # 处理开始与结束时间，将其扩展到包含整个交易时段
     start_time = start_time.replace(hour=9, minute=30, second=0, microsecond=0)
     end_time = end_time.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -1308,7 +1337,6 @@ class StrategyManager:
       f"tick={require_tick}, periods={sorted(required_kline_periods)}"
     )
 
-    is_t_trade_replay = bool(runtime.context.parameters.get("t_trade_replay"))
     is_exit_plan_replay = bool(runtime.context.parameters.get("exit_plan_replay"))
     is_strict_tick_replay = is_t_trade_replay or is_exit_plan_replay
     missing_before = await self._find_missing_backtest_data(
@@ -1326,6 +1354,27 @@ class StrategyManager:
     )
 
     if not missing_before:
+      if is_t_trade_replay:
+        await self._set_t_trade_replay_phase(
+          runtime,
+          phase="VERIFYING_DATA",
+          phase_progress_pct=100.0,
+          phase_message="本地历史行情完整，严格复核已通过",
+          data_preparation={
+            "status": "COMPLETED",
+            "required_instruments": list(runtime.context.instruments),
+            "required_periods": sorted(
+              ({"tick"} if require_tick else set()) | required_kline_periods
+            ),
+            "total_windows": 0,
+            "completed_windows": 0,
+            "current_instrument": None,
+            "current_periods": [],
+            "current_start_date": None,
+            "current_end_date": None,
+            "missing_instruments": [],
+          },
+        )
       return
 
     missing_desc = self._format_missing_data(missing_before)
@@ -1344,6 +1393,13 @@ class StrategyManager:
       sync_error: Optional[Exception] = None
       if sync_periods:
         try:
+          if is_t_trade_replay:
+            await self._set_t_trade_replay_phase(
+              runtime,
+              phase="DOWNLOADING_DATA",
+              phase_progress_pct=0.0,
+              phase_message="正在通过 QMT Agent 下载配置标的的行情缺口",
+            )
           await self._sync_missing_backtest_data(
             runtime=runtime,
             missing=missing_before,
@@ -1364,6 +1420,13 @@ class StrategyManager:
         else:
           synchronization["status"] = "COMPLETED"
 
+      if is_t_trade_replay:
+        await self._set_t_trade_replay_phase(
+          runtime,
+          phase="VERIFYING_DATA",
+          phase_progress_pct=0.0,
+          phase_message="行情下载完成，正在严格复核落库数据",
+        )
       missing_after = await self._find_missing_backtest_data(
         service=service,
         instruments=runtime.instruments,
@@ -1397,6 +1460,25 @@ class StrategyManager:
         self.logger.warning(
           "做 T 回放历史数据补齐返回失败，但严格 InfluxDB 复核已通过: %s",
           sync_error,
+        )
+      if is_t_trade_replay:
+        await self._set_t_trade_replay_phase(
+          runtime,
+          phase="VERIFYING_DATA",
+          phase_progress_pct=100.0,
+          phase_message="配置标的历史行情严格复核通过",
+          data_preparation={
+            "status": "COMPLETED",
+            "required_instruments": list(runtime.context.instruments),
+            "required_periods": sorted(sync_periods),
+            "total_windows": 0,
+            "completed_windows": 0,
+            "current_instrument": None,
+            "current_periods": [],
+            "current_start_date": None,
+            "current_end_date": None,
+            "missing_instruments": [],
+          },
         )
       return
 
@@ -1565,6 +1647,8 @@ class StrategyManager:
     sync_periods: Set[str],
   ) -> None:
     """按本地缺口逐标的补齐回测历史数据，并清理可能过期的同步缓存。"""
+    idempotency_scope = self._backtest_data_sync_idempotency_scope(runtime)
+    work_items: List[tuple[str, Set[str], date, date]] = []
     for instrument, info in missing.items():
       periods = self._sync_periods_for_missing_info(info, sync_periods)
       dates = sorted(info.get("dates") or [])
@@ -1580,36 +1664,251 @@ class StrategyManager:
         start_day=start_day,
         end_day=end_day,
       )
-
       for chunk_start, chunk_end in self._market_data_sync_date_windows(
         dates,
         periods,
       ):
-        chunk_start_day = chunk_start.strftime("%Y%m%d")
-        chunk_end_day = chunk_end.strftime("%Y%m%d")
-        self.logger.info(
-          f"补齐回测历史数据: {runtime.run_id}, 标的={instrument}, "
-          f"日期={chunk_start_day}~{chunk_end_day}, periods={sorted(periods)}"
-        )
-        result = await request_market_data_sync(
-          stock_list=[instrument],
-          start_time=chunk_start_day,
-          end_time=chunk_end_day,
-          periods=sorted(periods),
-        )
+        work_items.append((instrument, periods, chunk_start, chunk_end))
 
-        status = result.get("status")
-        if status == "skipped":
-          self.logger.info(
-            f"daily-market-data-sync 已跳过: {runtime.run_id}, "
-            f"instrument={instrument}, reason={result.get('reason')}"
-          )
-          status = "success"
-        if status not in {"success", "partial_success"}:
-          raise RuntimeError(
-            f"daily-market-data-sync 执行失败: instrument={instrument}, "
-            f"status={status}, reason={result.get('reason')}"
-          )
+    completed_windows = 0
+    for instrument, periods, chunk_start, chunk_end in work_items:
+      chunk_start_day = chunk_start.strftime("%Y%m%d")
+      chunk_end_day = chunk_end.strftime("%Y%m%d")
+      await self._set_t_trade_replay_phase(
+        runtime,
+        phase="DOWNLOADING_DATA",
+        phase_progress_pct=(
+          completed_windows / len(work_items) * 100.0 if work_items else 100.0
+        ),
+        phase_message=(
+          f"正在下载 {instrument} {chunk_start_day}~{chunk_end_day} "
+          f"{','.join(sorted(periods))}"
+        ),
+        data_preparation={
+          "status": "RUNNING",
+          "required_instruments": sorted(missing),
+          "required_periods": sorted(sync_periods),
+          "total_windows": len(work_items),
+          "completed_windows": completed_windows,
+          "current_instrument": instrument,
+          "current_periods": sorted(periods),
+          "current_start_date": chunk_start.isoformat(),
+          "current_end_date": chunk_end.isoformat(),
+          "missing_instruments": sorted(missing),
+        },
+      )
+      self.logger.info(
+        f"补齐回测历史数据: {runtime.run_id}, 标的={instrument}, "
+        f"日期={chunk_start_day}~{chunk_end_day}, periods={sorted(periods)}"
+      )
+      result = await request_market_data_sync(
+        stock_list=[instrument],
+        start_time=chunk_start_day,
+        end_time=chunk_end_day,
+        periods=sorted(periods),
+        idempotency_scope=idempotency_scope,
+      )
+
+      status = result.get("status")
+      if status == "skipped":
+        self.logger.info(
+          f"daily-market-data-sync 已跳过: {runtime.run_id}, "
+          f"instrument={instrument}, reason={result.get('reason')}"
+        )
+        status = "success"
+      if status not in {"success", "partial_success"}:
+        raise RuntimeError(
+          f"daily-market-data-sync 执行失败: instrument={instrument}, "
+          f"status={status}, reason={result.get('reason')}"
+        )
+      completed_windows += 1
+
+  async def _set_t_trade_replay_phase(
+    self,
+    runtime: StrategyRuntime,
+    *,
+    phase: str,
+    phase_progress_pct: float,
+    phase_message: str,
+    data_preparation: Optional[Dict[str, Any]] = None,
+  ) -> None:
+    params = dict(getattr(runtime.context, "parameters", {}) or {})
+    account_id = str(params.get("account_id") or "").strip()
+    if not params.get("t_trade_replay") or not account_id:
+      return
+    try:
+      projection = await t_trade_replay_projection_service.get(runtime.run_id)
+      status = str((projection or {}).get("status") or "PENDING")
+      await t_trade_replay_projection_service.update(
+        run_id=runtime.run_id,
+        account_id=account_id,
+        status=status,
+        progress_pct=(projection or {}).get("progress_pct"),
+        processed_until=(projection or {}).get("processed_until"),
+        phase=phase,
+        phase_progress_pct=phase_progress_pct,
+        phase_message=phase_message,
+        data_preparation=data_preparation,
+        kind=TTradeReplayUpdateKind.PROGRESS,
+      )
+    except Exception:
+      self.logger.exception("更新做 T 回放准备阶段失败: %s", runtime.run_id)
+
+  async def _ensure_t_trade_portfolio_reference_data(
+    self,
+    runtime: StrategyRuntime,
+    service: HistoricalMarketDataService,
+  ) -> None:
+    portfolio = dict(runtime.context.parameters.get("initial_portfolio") or {})
+    positions = list(portfolio.get("positions") or [])
+    instruments = sorted(
+      {
+        str(item.get("stock_code") or "").strip().upper()
+        for item in positions
+        if str(item.get("stock_code") or "").strip()
+      }
+    )
+    if not instruments:
+      raise RuntimeError("INITIAL_PORTFOLIO_EMPTY: 初始组合没有可估值持仓")
+    as_of = datetime.fromisoformat(str(portfolio.get("as_of") or ""))
+    reference_start = datetime.combine(as_of.date(), time.min)
+    reference_end = datetime.combine(as_of.date(), time.max)
+    await self._set_t_trade_replay_phase(
+      runtime,
+      phase="CHECKING_DATA",
+      phase_progress_pct=0.0,
+      phase_message="正在检查初始组合 D-1 日线估值数据",
+    )
+    missing = await self._find_missing_backtest_data(
+      service=service,
+      instruments=instruments,
+      start_time=reference_start,
+      end_time=reference_end,
+      required_kline_periods={"1d"},
+      require_tick=False,
+    )
+    if missing:
+      await self._sync_missing_backtest_data(
+        runtime=runtime,
+        missing=missing,
+        sync_periods={"1d"},
+      )
+      missing = await self._find_missing_backtest_data(
+        service=service,
+        instruments=instruments,
+        start_time=reference_start,
+        end_time=reference_end,
+        required_kline_periods={"1d"},
+        require_tick=False,
+      )
+    if missing:
+      raise RuntimeError(
+        "DATA_INSUFFICIENT: 初始组合 D-1 日线仍不完整: "
+        + self._format_missing_data(missing)
+      )
+
+  async def _finalize_t_trade_replay_initial_portfolio(
+    self,
+    runtime: StrategyRuntime,
+  ) -> None:
+    params = runtime.context.parameters
+    if not params.get("t_trade_replay"):
+      return
+    portfolio = dict(params.get("initial_portfolio") or {})
+    if str(portfolio.get("source") or "").upper() != "MANUAL":
+      return
+    as_of = datetime.fromisoformat(str(portfolio.get("as_of") or ""))
+    start = datetime.combine(as_of.date(), time.min)
+    end = datetime.combine(as_of.date(), time.max)
+    service = HistoricalMarketDataService()
+    finalized_positions: List[Dict[str, Any]] = []
+    market_value = 0.0
+    for raw in list(portfolio.get("positions") or []):
+      position = dict(raw or {})
+      code = str(position.get("stock_code") or "").strip().upper()
+      klines = await service.get_kline_data(
+        code,
+        period="1d",
+        start_time=start,
+        end_time=end,
+        order="desc",
+        limit=1,
+      )
+      close = float(getattr(klines[0], "close", 0.0) or 0.0) if klines else 0.0
+      if close <= 0:
+        raise RuntimeError(f"INITIAL_VALUATION_MISSING: {code} 缺少 D-1 收盘价")
+      volume = int(position.get("volume", 0) or 0)
+      position["available_volume"] = volume
+      position["frozen_volume"] = 0
+      position["last_price"] = close
+      position["market_value"] = close * volume
+      market_value += position["market_value"]
+      finalized_positions.append(position)
+
+    cash = float(portfolio.get("cash_available", 0.0) or 0.0)
+    total_asset = cash + market_value
+    portfolio.update(
+      {
+        "cash_available": cash,
+        "total_asset": total_asset,
+        "positions": finalized_positions,
+      }
+    )
+    params["initial_portfolio"] = portfolio
+    params["initial_positions"] = finalized_positions
+    params["initial_cash"] = cash
+    params["initial_total_asset"] = total_asset
+    params["initial_capital"] = total_asset
+    params["initial_asset_reconciliation"] = {
+      "schema_version": 1,
+      "reported_total_asset": total_asset,
+      "available_cash": cash,
+      "position_market_value": market_value,
+      "raw_residual": 0.0,
+      "non_trading_asset": 0.0,
+      "effective_initial_equity": total_asset,
+      "negative_residual_clamped": False,
+      "policy": "MANUAL_D1_MARK_TO_MARKET",
+      "quality_flags": [],
+    }
+    metadata = dict(params.get("initial_portfolio_metadata") or {})
+    for position in finalized_positions:
+      code = str(position["stock_code"])
+      item = dict(metadata.get(code) or {})
+      item["position_available_shares"] = int(position["volume"])
+      item["position_frozen_shares"] = 0
+      item["position_avg_price"] = float(position["avg_price"])
+      item["position_market_value"] = float(position["market_value"])
+      metadata[code] = item
+    params["initial_portfolio_metadata"] = metadata
+    params["initial_instrument_metadata"] = {
+      code: metadata[code] for code in runtime.context.instruments
+    }
+    runtime.context.initial_capital = total_asset
+    runtime.metrics.initial_capital = total_asset
+    runtime.metrics.current_capital = total_asset
+    async for db in get_async_db():
+      await StrategyRunRepository(db).update_run(
+        runtime.run_id,
+        {"parameters": params, "initial_capital": total_asset},
+      )
+      if runtime.context.backtest_id:
+        backtest = await BacktestRepository(db).get_backtest(
+          runtime.context.backtest_id
+        )
+        if backtest is not None:
+          backtest.parameters = params
+          await db.commit()
+      break
+
+  @staticmethod
+  def _backtest_data_sync_idempotency_scope(runtime: StrategyRuntime) -> str:
+    """Keep recovery idempotent without caching an empty result across versions."""
+
+    context = getattr(runtime, "context", None)
+    backtest_id = str(getattr(context, "backtest_id", "") or "").strip()
+    owner_id = backtest_id or str(runtime.run_id)
+    return f"backtest-data-supplement-v1:{owner_id}"
 
   @staticmethod
   def _market_data_sync_date_windows(

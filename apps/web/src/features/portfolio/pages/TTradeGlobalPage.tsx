@@ -56,6 +56,7 @@ import { useAppDialog } from '@/components/ui/app-dialog-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Progress } from '@/components/ui/progress';
 import {
   Select,
   SelectContent,
@@ -67,9 +68,11 @@ import {
   useGraphqlWsStatus,
   type GraphqlWsStatus,
 } from '@/core/graphql/ws-status';
+import { StrategyInstrumentSelector } from '@/features/strategies/components/StrategyInstrumentSelector';
 import { useTradingSafety } from '@/features/trading-safety';
 import { useFragment as readFragment } from '@/generated/gql';
 import {
+  TTradeReplayPortfolioSource,
   TTradeRolloutTarget,
   TTradeTimeExitMode,
   type TTradeBatch,
@@ -183,6 +186,7 @@ import {
   numberValue,
   replayDatePreset,
   replayIdempotencyKey,
+  replayPhaseLabel,
   replayStatusLabel,
   resolveInstrumentName,
 } from './t-trade-global/utils';
@@ -347,6 +351,19 @@ function TTradeReplayPanel({
   const [endDate, setEndDate] = React.useState(initialRange.end);
   const appliedTradingCalendarRef = React.useRef(false);
   const [activeRunId, setActiveRunId] = React.useState('');
+  const [portfolioSource, setPortfolioSource] = React.useState<
+    'SNAPSHOT' | 'MANUAL'
+  >('SNAPSHOT');
+  const [portfolioDirty, setPortfolioDirty] = React.useState(false);
+  const [manualCash, setManualCash] = React.useState('');
+  const [manualPositions, setManualPositions] = React.useState<
+    Array<{
+      stockCode: string;
+      instrumentName: string;
+      volume: string;
+      avgPrice: string;
+    }>
+  >([]);
   const startTime = `${startDate}T09:30:00`;
   const endTime = `${endDate}T15:00:00`;
 
@@ -411,6 +428,34 @@ function TTradeReplayPanel({
     String(cyclesResult.operation?.variables.runId || '')
   );
   const cycles = cyclesPage?.items || [];
+  const previousTradingDate = React.useMemo(
+    () =>
+      [...replayTradingDays]
+        .filter(day => day < startDate)
+        .sort()
+        .at(-1) ||
+      preparation?.snapshotDate ||
+      '',
+    [preparation?.snapshotDate, replayTradingDays, startDate]
+  );
+  const manualCashNumber = Number(manualCash);
+  const manualRowsValid = manualPositions.every(
+    item =>
+      Boolean(item.stockCode) &&
+      Number.isInteger(Number(item.volume)) &&
+      Number(item.volume) > 0 &&
+      Number.isFinite(Number(item.avgPrice)) &&
+      Number(item.avgPrice) > 0
+  );
+  const manualPortfolioValid =
+    previousTradingDate !== '' &&
+    Number.isFinite(manualCashNumber) &&
+    manualCashNumber >= 0 &&
+    manualPositions.some(item => Number(item.volume) >= 100) &&
+    manualRowsValid;
+  const snapshotPortfolioValid = Boolean(
+    preparation?.snapshotId && preparation.snapshotDate
+  );
   const isRunning = ['PENDING', 'RUNNING', 'STARTING'].includes(
     String(replay?.status || '').toUpperCase()
   );
@@ -440,6 +485,30 @@ function TTradeReplayPanel({
     setStartDate(range.start);
     setEndDate(range.end);
   }, [replayTradingDays]);
+
+  React.useEffect(() => {
+    if (!preparation || portfolioDirty) return;
+    if (!preparation.requiresManualPortfolio && preparation.snapshotId) {
+      setPortfolioSource('SNAPSHOT');
+      setManualCash(String(preparation.initialCash));
+      setManualPositions(
+        preparation.positions.map(item => ({
+          stockCode: item.stockCode,
+          instrumentName: item.instrumentName,
+          volume: String(item.volume),
+          avgPrice: String(item.avgPrice),
+        }))
+      );
+      return;
+    }
+    setPortfolioSource('MANUAL');
+    setManualCash('');
+    setManualPositions([]);
+  }, [portfolioDirty, preparation]);
+
+  React.useEffect(() => {
+    setPortfolioDirty(false);
+  }, [startDate]);
 
   React.useEffect(() => {
     if (!activeRunId && history.length > 0) setActiveRunId(history[0].runId);
@@ -550,11 +619,46 @@ function TTradeReplayPanel({
   };
 
   const handleStart = async () => {
+    if (portfolioSource === 'SNAPSHOT' && !snapshotPortfolioValid) {
+      toast({
+        title: '缺少 D-1 账户快照',
+        description: '请选择手工组合，或先准备回放首日前的账户日结快照。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (portfolioSource === 'MANUAL' && !manualPortfolioValid) {
+      toast({
+        title: '初始回测账户不完整',
+        description:
+          '请填写非负可用资金，并至少配置一只不少于 100 股的有效持仓。',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const portfolio =
+      portfolioSource === 'SNAPSHOT'
+        ? {
+            source: TTradeReplayPortfolioSource.Snapshot,
+            asOf: `${preparation?.snapshotDate}T15:00:00`,
+            snapshotId: preparation?.snapshotId,
+            positions: [],
+          }
+        : {
+            source: TTradeReplayPortfolioSource.Manual,
+            asOf: `${previousTradingDate}T15:00:00`,
+            cashAvailable: manualCashNumber,
+            positions: manualPositions.map(item => ({
+              stockCode: item.stockCode,
+              volume: Number(item.volume),
+              avgPrice: Number(item.avgPrice),
+            })),
+          };
     const input = {
       accountId,
       startTime,
       endTime,
-      initialPositions: [],
+      portfolio,
       targetTradeAmount: numberValue(form.targetTradeAmount, 10000),
       maxTradeAmount: numberValue(form.maxTradeAmount, 12000),
       maxConcurrentBatches: integerValue(form.maxConcurrentBatches, 3),
@@ -786,7 +890,9 @@ function TTradeReplayPanel({
                 disabled={
                   !accountId ||
                   !preparation ||
-                  preparation.requiresManualPortfolio ||
+                  (portfolioSource === 'SNAPSHOT'
+                    ? !snapshotPortfolioValid
+                    : !manualPortfolioValid) ||
                   startResult.fetching ||
                   history.some(item =>
                     ['PENDING', 'RUNNING', 'STARTING'].includes(item.status)
@@ -834,6 +940,225 @@ function TTradeReplayPanel({
             </span>
           </div>
 
+          <div className="mt-3 border border-white/[0.08] bg-[#07111f] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-black text-slate-100">
+                  初始回测账户
+                </p>
+                <p className="mt-0.5 text-[10px] text-slate-500">
+                  组合冻结后，系统只为其中的股票准备历史行情。
+                </p>
+              </div>
+              <div className="flex h-8 overflow-hidden border border-white/10">
+                <button
+                  type="button"
+                  disabled={!snapshotPortfolioValid}
+                  onClick={() => {
+                    setPortfolioSource('SNAPSHOT');
+                    setPortfolioDirty(true);
+                  }}
+                  className={cn(
+                    'cursor-pointer px-3 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70 disabled:cursor-not-allowed disabled:opacity-35',
+                    portfolioSource === 'SNAPSHOT'
+                      ? 'bg-blue-500/15 text-blue-200'
+                      : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
+                  )}
+                >
+                  D-1 快照
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPortfolioSource('MANUAL');
+                    setPortfolioDirty(true);
+                  }}
+                  className={cn(
+                    'cursor-pointer border-l border-white/10 px-3 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                    portfolioSource === 'MANUAL'
+                      ? 'bg-blue-500/15 text-blue-200'
+                      : 'text-slate-500 hover:bg-white/[0.05] hover:text-slate-200'
+                  )}
+                >
+                  手工组合
+                </button>
+              </div>
+            </div>
+
+            {portfolioSource === 'SNAPSHOT' ? (
+              <div className="mt-3 grid gap-3 lg:grid-cols-[180px_1fr_auto] lg:items-end">
+                <div>
+                  <Label className="text-[9px] text-slate-500">可用资金</Label>
+                  <div className="mt-1 font-mono text-sm font-black text-slate-100">
+                    ¥{formatNumber(preparation?.initialCash || 0)}
+                  </div>
+                </div>
+                <div className="text-[10px] leading-5 text-slate-500">
+                  快照 {preparation?.snapshotDate || '--'} ·{' '}
+                  {preparation?.positions.length || 0} 只持仓 · 可做 T{' '}
+                  {preparation?.positions.filter(item => item.volume >= 100)
+                    .length || 0}{' '}
+                  只
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setPortfolioSource('MANUAL');
+                    setPortfolioDirty(true);
+                  }}
+                  className="h-8 rounded-sm border-blue-400/25 text-[10px] text-blue-200 hover:bg-blue-500/10"
+                >
+                  导入并编辑
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-3 md:grid-cols-[180px_1fr] md:items-end">
+                  <div>
+                    <Label
+                      htmlFor="replay-cash"
+                      className="text-[9px] text-slate-500"
+                    >
+                      可用资金
+                    </Label>
+                    <Input
+                      id="replay-cash"
+                      type="number"
+                      min="0"
+                      value={manualCash}
+                      onChange={event => {
+                        setManualCash(event.target.value);
+                        setPortfolioDirty(true);
+                      }}
+                      className="mt-1 h-8 rounded-sm border-white/10 bg-[#050b16] font-mono text-xs focus-visible:ring-blue-400/70"
+                    />
+                  </div>
+                  <div className="text-[10px] leading-5 text-slate-500">
+                    组合时点 {previousTradingDate || '--'}{' '}
+                    收盘；开盘前持仓全部按已结算库存处理。
+                  </div>
+                </div>
+
+                <div className="overflow-hidden border border-white/[0.07]">
+                  <div className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] gap-2 border-b border-white/[0.07] bg-white/[0.025] px-2 py-1.5 text-[9px] font-black uppercase tracking-[0.1em] text-slate-600">
+                    <span>股票</span>
+                    <span>持仓股数</span>
+                    <span>平均成本</span>
+                    <span />
+                  </div>
+                  {manualPositions.map((item, index) => (
+                    <div
+                      key={item.stockCode}
+                      className="grid grid-cols-[minmax(160px,1fr)_110px_120px_36px] items-center gap-2 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-[10px] font-bold text-slate-200">
+                          {item.instrumentName || item.stockCode}
+                        </div>
+                        <div className="font-mono text-[9px] text-slate-600">
+                          {item.stockCode}
+                        </div>
+                      </div>
+                      <Input
+                        aria-label={`${item.stockCode} 持仓股数`}
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={item.volume}
+                        onChange={event => {
+                          const value = event.target.value;
+                          setManualPositions(rows =>
+                            rows.map((row, rowIndex) =>
+                              rowIndex === index
+                                ? { ...row, volume: value }
+                                : row
+                            )
+                          );
+                          setPortfolioDirty(true);
+                        }}
+                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-[10px] focus-visible:ring-blue-400/70"
+                      />
+                      <Input
+                        aria-label={`${item.stockCode} 平均成本`}
+                        type="number"
+                        min="0.001"
+                        step="0.001"
+                        value={item.avgPrice}
+                        onChange={event => {
+                          const value = event.target.value;
+                          setManualPositions(rows =>
+                            rows.map((row, rowIndex) =>
+                              rowIndex === index
+                                ? { ...row, avgPrice: value }
+                                : row
+                            )
+                          );
+                          setPortfolioDirty(true);
+                        }}
+                        className="h-7 rounded-sm border-white/10 bg-[#050b16] font-mono text-[10px] focus-visible:ring-blue-400/70"
+                      />
+                      <button
+                        type="button"
+                        aria-label={`删除 ${item.stockCode}`}
+                        onClick={() => {
+                          setManualPositions(rows =>
+                            rows.filter((_, rowIndex) => rowIndex !== index)
+                          );
+                          setPortfolioDirty(true);
+                        }}
+                        className="flex h-7 w-7 cursor-pointer items-center justify-center text-slate-600 hover:bg-rose-500/10 hover:text-rose-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/70"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="p-2">
+                    <StrategyInstrumentSelector
+                      value=""
+                      onChange={(stockCode, stock) => {
+                        if (!stockCode) return;
+                        if (
+                          manualPositions.some(
+                            item => item.stockCode === stockCode
+                          )
+                        ) {
+                          toast({
+                            title: '股票已经存在',
+                            description: `${stockCode} 已在初始组合中。`,
+                            variant: 'destructive',
+                          });
+                          return;
+                        }
+                        setManualPositions(rows => [
+                          ...rows,
+                          {
+                            stockCode,
+                            instrumentName: stock?.name || stockCode,
+                            volume: '100',
+                            avgPrice: String(stock?.quote?.lastPrice || ''),
+                          },
+                        ]);
+                        setPortfolioDirty(true);
+                      }}
+                      inputClassName="h-8 rounded-sm border-white/10 bg-[#050b16] text-[10px]"
+                      placeholder="搜索股票代码或名称并加入持仓"
+                    />
+                  </div>
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  {manualPositions.length} 只持仓 ·{' '}
+                  {
+                    manualPositions.filter(item => Number(item.volume) >= 100)
+                      .length
+                  }{' '}
+                  只可做 T；不足 100 股的持仓仅计入账户权益。
+                </div>
+              </div>
+            )}
+          </div>
+
           {preparation?.requiresManualPortfolio && (
             <div className="mt-2 border border-amber-400/15 bg-amber-400/[0.035] px-3 py-2">
               <div>
@@ -841,7 +1166,8 @@ function TTradeReplayPanel({
                   缺少可审计的历史初始组合
                 </p>
                 <p className="mt-0.5 text-[10px] text-amber-200/55">
-                  当前账户状态晚于回放起点，禁止用于正式历史回放。请先导入开始日前的账户日结快照。
+                  当前没有可采用的 D-1
+                  日结快照，请使用上方手工组合配置回测账户。
                 </p>
               </div>
             </div>
@@ -896,6 +1222,36 @@ function TTradeReplayPanel({
                   </Button>
                 )}
               </div>
+              {replay.phase && (
+                <div className="mt-3 border border-cyan-400/15 bg-cyan-400/[0.035] px-3 py-2.5">
+                  <div className="flex items-center justify-between gap-3 text-[10px]">
+                    <span className="font-black text-cyan-100">
+                      {replayPhaseLabel(replay.phase)}
+                    </span>
+                    <span className="font-mono text-cyan-200/65">
+                      {formatNumber(replay.phaseProgressPct, 0)}%
+                    </span>
+                  </div>
+                  <Progress
+                    value={replay.phaseProgressPct}
+                    className="mt-2 h-1 bg-white/[0.06]"
+                  />
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+                    <span>{replay.phaseMessage || '正在准备回测任务'}</span>
+                    {replay.dataPreparation?.currentInstrument && (
+                      <span className="font-mono text-slate-600">
+                        {replay.dataPreparation.currentInstrument}
+                        {replay.dataPreparation.currentStartDate
+                          ? ` · ${replay.dataPreparation.currentStartDate}~${
+                              replay.dataPreparation.currentEndDate ||
+                              replay.dataPreparation.currentStartDate
+                            }`
+                          : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               {replay.errorMessage && (
                 <div className="mt-3 flex items-center gap-2 border border-rose-400/20 bg-rose-400/[0.06] px-3 py-2 text-[11px] text-rose-100">
                   <AlertTriangle className="h-3.5 w-3.5" />
