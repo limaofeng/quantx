@@ -965,7 +965,9 @@ export function ExitPlanReplayPanel({
               回放口径
             </div>
             <ul className="mt-2 grid gap-2 text-[11px] font-bold leading-5 text-slate-500">
-              <li>· 卖出规则与实盘共用 ExitPlanBook 和统一风控/数量链路。</li>
+              <li>
+                · 卖出规则与实盘共用同一个 StrategyBase.step 与统一风控/数量链路。
+              </li>
               <li>
                 · 量价动态规则缺少 Tick 或盘口深度时直接阻断，不用分钟线近似。
               </li>

@@ -251,6 +251,7 @@ class EntryExitProtection:
 @strawberry.type(description="建仓/加仓托管计划投影")
 class EntryPlan:
   plan_id: strawberry.ID
+  run_id: strawberry.ID
   config_version: int
   account_id: str
   instrument_code: str

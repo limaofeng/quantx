@@ -8,8 +8,10 @@ from datetime import datetime
 from math import isfinite
 from typing import Any, Dict, List, Optional, Tuple
 
-from quantx_domain.strategies.ashare_exit_plan_replay_harness import (
-  AshareExitPlanReplayHarnessStrategy,
+from quantx_domain.strategies.ashare_managed_exit_plan import (
+  EXIT_PLAN_ENABLED_KEY,
+  MANAGED_EXIT_PLAN_KEY,
+  AshareManagedExitPlanStrategy,
 )
 from quantx_domain.trading.exit_plan import (
   ExitPlanTemplate,
@@ -39,7 +41,7 @@ from quantx_infrastructure.services.exit_plan_replay_projection_service import (
 from quantx_infrastructure.services.trading_time_service import TradingDateHelper
 
 _CANCELLABLE_STATUSES = frozenset({"PENDING", "RUNNING", "PAUSED"})
-_HARNESS_CLASS_NAME = "AshareExitPlanReplayHarnessStrategy"
+_STRATEGY_CLASS_NAME = "AshareManagedExitPlanStrategy"
 
 
 class ExitPlanReplayService:
@@ -211,6 +213,11 @@ class ExitPlanReplayService:
       "exit_plan_replay_plan_id": saved.plan_id if saved is not None else None,
       "exit_plan_replay_config_version": int(template.config_version),
       "exit_plan_replay_template": replay_template.to_dict(),
+      MANAGED_EXIT_PLAN_KEY: replay_template.to_dict(),
+      EXIT_PLAN_ENABLED_KEY: True,
+      "initial_protected_volume": volume,
+      "initial_entry_avg_price": entry_price,
+      "initial_entry_time": origin["activation_time"].isoformat(),
       "exit_plan_replay_origin": self._serialize_origin(origin),
       "actual_sell_references": actual_sell_references,
       **cost_parameters,
@@ -219,7 +226,7 @@ class ExitPlanReplayService:
     manager = self._require_runtime_manager()
     run_id = await manager.run_strategy(
       strategy_id=strategy_id,
-      strategy_class=AshareExitPlanReplayHarnessStrategy,
+      strategy_class=AshareManagedExitPlanStrategy,
       mode=StrategyRunMode.BACKTEST,
       instruments=[code],
       parameters=parameters,
@@ -233,13 +240,6 @@ class ExitPlanReplayService:
         if normalized_request_id
         else None
       ),
-    )
-    manager.executor.register_external_exit_plan(
-      run_id,
-      replay_template,
-      volume=volume,
-      price=entry_price,
-      trade_time=origin["activation_time"],
     )
     await exit_plan_replay_projection_service.create(
       run_id=run_id,
@@ -505,11 +505,13 @@ class ExitPlanReplayService:
 
   async def _get_strategy_template_id(self) -> int:
     async for db in get_async_db():
-      strategy = await StrategyRepository(db).find_by_class_name(_HARNESS_CLASS_NAME)
+      strategy = await StrategyRepository(db).find_by_class_name(
+        _STRATEGY_CLASS_NAME
+      )
       if strategy is None:
-        raise ValueError("卖出计划回放适配器尚未注册，请重启 Engine 后重试")
+        raise ValueError("卖出托管策略尚未注册，请重启 Engine 后重试")
       return int(strategy.id)
-    raise ValueError("无法读取卖出计划回放适配器")
+    raise ValueError("无法读取卖出托管策略")
 
   async def _load_run_and_backtest(self, run_id: str) -> Tuple[Any, Any]:
     async for db in get_async_db():

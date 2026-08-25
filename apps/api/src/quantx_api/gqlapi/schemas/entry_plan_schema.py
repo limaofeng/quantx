@@ -244,6 +244,7 @@ class EntryPlanMutation:
     principal = principal_from_context(info.context)
     principal.require_permission("trade:approve")
     account_id = _single_entry_account(info)
+    plan = await EntryPlanResolver._require_plan(account_id, str(plan_id))
     preview = await EntryPlanResolver.preview_intent(
       account_id, str(plan_id), str(intent_id)
     )
@@ -253,7 +254,7 @@ class EntryPlanMutation:
       principal=principal,
       action=STRATEGY_TRADE_INTENT_APPROVAL,
       account_id=account_id,
-      run_id=str(plan_id),
+      run_id=str(plan.run_id),
       intent_id=str(intent_id),
     )
     preview.challenge_id = challenge.challenge_id
@@ -273,12 +274,13 @@ class EntryPlanMutation:
     principal = principal_from_context(info.context)
     principal.require_permission("trade:approve")
     account_id = _single_entry_account(info)
+    plan = await EntryPlanResolver._require_plan(account_id, str(plan_id))
     try:
       challenge_id = await TradeApprovalChallengeService.consume(
         principal=principal,
         action=STRATEGY_TRADE_INTENT_APPROVAL,
         account_id=account_id,
-        run_id=str(plan_id),
+        run_id=str(plan.run_id),
         intent_id=str(intent_id),
         confirmation_token=confirmation_token,
       )
@@ -322,7 +324,7 @@ class EntryPlanSubscription:
     yield current
     async for _wake_up in runtime_subscription_bridge.stream(
       "strategy-events",
-      run_id=plan_id_value,
+      run_id=str(current.run_id),
     ):
       updated = await EntryPlanResolver.get(account_id, plan_id_value)
       if updated is None:
@@ -357,7 +359,7 @@ class EntryPlanSubscription:
     yield current
     async for _wake_up in runtime_subscription_bridge.stream(
       "strategy-events",
-      run_id=plan_id_value,
+      run_id=str(plan.run_id),
     ):
       updated = await projection()
       updated_signature = repr(updated)

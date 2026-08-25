@@ -14,6 +14,7 @@ query EntryPlanWorkspace {
   }
   entryPlans {
     planId
+    runId
     configVersion
     instrumentCode
     instrumentName

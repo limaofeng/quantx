@@ -91,12 +91,21 @@ class ExitPlanMonitor:
       repo = AutoExitPlanRepository(db)
       if plan_id:
         plan = await repo.find_by_id(plan_id)
-        plans = [plan] if plan is not None and plan.enabled else []
+        plans = (
+          [plan]
+          if plan is not None
+          and plan.enabled
+          and not str(plan.strategy_run_id or "").strip()
+          else []
+        )
       else:
         plans = await repo.find_active(
           account_id=account_id,
           instrument_code=instrument_code,
         )
+        plans = [
+          plan for plan in plans if not str(plan.strategy_run_id or "").strip()
+        ]
     if not plans:
       return []
     if not self.scanner.is_running:

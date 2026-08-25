@@ -5,14 +5,15 @@
 """
 
 from .ashare_dynamic_balance_dual_bucket import AshareDynamicBalanceDualBucketStrategy
-from .ashare_exit_plan_replay_harness import AshareExitPlanReplayHarnessStrategy
 from .ashare_intraday_t_assistant import AshareIntradayTAssistantStrategy
 from .ashare_limit_up_board import AshareLimitUpBoardStrategy
 from .ashare_limit_up_board_assistant import AshareLimitUpBoardAssistantStrategy
 from .ashare_managed_entry_plan import AshareManagedEntryPlanStrategy
+from .ashare_managed_exit_plan import AshareManagedExitPlanStrategy
 from .ashare_supermarket import AshareSupermarketStrategy
 from .base import (
   ManualApprovalRecoveryCandidate,
+  ManualCommandIntentOrigin,
   MarketDataContext,
   MarketDataSession,
   OrderStateEvent,
@@ -22,11 +23,14 @@ from .base import (
   StrategyContext,
   StrategyInput,
   StrategyOutput,
+  StrategyRunIntentOrigin,
   StrategyRunMode,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentExecutionMode,
+  TradeIntentOrigin,
+  TradeIntentOriginType,
   TradeIntentPriority,
   TradeIntentType,
 )
@@ -41,11 +45,15 @@ __all__ = [
   "MarketDataContext",
   "MarketDataSession",
   "ManualApprovalRecoveryCandidate",
+  "ManualCommandIntentOrigin",
   "StrategyInput",
   "StrategyOutput",
+  "StrategyRunIntentOrigin",
   "TradeIntent",
   "TradeIntentDirection",
   "TradeIntentExecutionMode",
+  "TradeIntentOrigin",
+  "TradeIntentOriginType",
   "TradeIntentPriority",
   "TradeIntentType",
   "RuntimeStatePatch",
@@ -53,11 +61,11 @@ __all__ = [
   "TradeExecutionEvent",
   # 策略实现
   "AshareDynamicBalanceDualBucketStrategy",
-  "AshareExitPlanReplayHarnessStrategy",
   "AshareIntradayTAssistantStrategy",
   "AshareLimitUpBoardStrategy",
   "AshareLimitUpBoardAssistantStrategy",
   "AshareManagedEntryPlanStrategy",
+  "AshareManagedExitPlanStrategy",
   "AshareSupermarketStrategy",
   "PullbackGridStrategy",
 ]

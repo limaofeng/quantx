@@ -125,6 +125,48 @@ class TradeIntentExecutionMode(str, Enum):
   MANUAL_CONFIRM = "MANUAL_CONFIRM"
 
 
+class TradeIntentOriginType(str, Enum):
+  """The audited business owner that created one trade intent."""
+
+  STRATEGY_RUN = "STRATEGY_RUN"
+  MANUAL_COMMAND = "MANUAL_COMMAND"
+
+
+@dataclass(frozen=True)
+class StrategyRunIntentOrigin:
+  run_id: str
+  strategy_id: str
+  plan_id: Optional[str] = None
+  origin_type: TradeIntentOriginType = field(
+    default=TradeIntentOriginType.STRATEGY_RUN,
+    init=False,
+  )
+
+  def __post_init__(self) -> None:
+    if not str(self.run_id or "").strip() or not str(self.strategy_id or "").strip():
+      raise ValueError("strategy-run intent origin requires run_id and strategy_id")
+
+
+@dataclass(frozen=True)
+class ManualCommandIntentOrigin:
+  command_id: str
+  action_type: str
+  liquidation_group_id: Optional[str] = None
+  origin_type: TradeIntentOriginType = field(
+    default=TradeIntentOriginType.MANUAL_COMMAND,
+    init=False,
+  )
+
+  def __post_init__(self) -> None:
+    if not str(self.command_id or "").strip() or not str(
+      self.action_type or ""
+    ).strip():
+      raise ValueError("manual-command intent origin requires command_id and action_type")
+
+
+TradeIntentOrigin = StrategyRunIntentOrigin | ManualCommandIntentOrigin
+
+
 FORBIDDEN_RUNTIME_STATE_FIELDS = {
   "cash",
   "available_cash",
@@ -319,6 +361,7 @@ class TradeIntent:
   trace_id: Optional[str] = None
   intent_id: str = field(default_factory=lambda: str(uuid.uuid4()))
   created_at: datetime = field(default_factory=time_utils.now)
+  origin: Optional[TradeIntentOrigin] = None
 
   def __post_init__(self) -> None:
     if isinstance(self.direction, str):
@@ -331,6 +374,20 @@ class TradeIntent:
       self.execution_mode = TradeIntentExecutionMode(self.execution_mode)
     if self.intent_type is None:
       self.intent_type = self._infer_intent_type()
+    if self.origin is None:
+      self.origin = StrategyRunIntentOrigin(
+        run_id=self.run_id,
+        strategy_id=self.strategy_id,
+        plan_id=str(self.metadata.get("plan_id") or "") or None,
+      )
+    elif isinstance(self.origin, StrategyRunIntentOrigin):
+      if self.run_id != self.origin.run_id or self.strategy_id != self.origin.strategy_id:
+        raise ValueError("TradeIntent strategy origin conflicts with run identity")
+    elif isinstance(self.origin, ManualCommandIntentOrigin):
+      if self.run_id or self.strategy_id:
+        raise ValueError("manual-command TradeIntent cannot carry a strategy run identity")
+    else:
+      raise ValueError("TradeIntent origin is invalid")
 
     if self.direction in {TradeIntentDirection.BUY, TradeIntentDirection.SELL}:
       if not self.instrument_code:

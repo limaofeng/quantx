@@ -39,6 +39,9 @@ from quantx_infrastructure.models.parameter_schema import (
   validate_strategy_configuration,
 )
 from quantx_infrastructure.repositories import StrategyRunRepository
+from quantx_infrastructure.repositories.managed_plan_repository import (
+  managed_plan_config_fingerprint,
+)
 from quantx_infrastructure.services.canonical_tick_archive import (
   CanonicalTickArchive,
   CanonicalTickArchiveError,
@@ -2530,16 +2533,35 @@ class StrategyManager:
     normalized = dict(parameters or {})
     runtime = self.executor.get(run_id)
     previous = dict(runtime.context.parameters or {}) if runtime else None
-    if runtime:
-      runtime.context.parameters = normalized
     try:
       async for db in get_async_db():
-        run = await StrategyRunRepository(db).update_run(
-          run_id, {"parameters": normalized}
-        )
+        repo = StrategyRunRepository(db)
+        persisted = await repo.find_run_by_id_for_update(run_id)
+        if persisted is None:
+          raise ValueError(f"策略运行不存在: {run_id}")
+        if persisted.plan_id and persisted.frozen_config_fingerprint:
+          config_key = (
+            "managed_entry_plan"
+            if str(persisted.plan_kind or "").upper() == "ENTRY"
+            else "managed_exit_plan"
+          )
+          snapshot = normalized.get(config_key)
+          if not isinstance(snapshot, dict) or (
+            managed_plan_config_fingerprint(snapshot)
+            != str(persisted.frozen_config_fingerprint)
+          ):
+            raise ValueError(
+              "托管计划配置不可原地修改；请创建新的配置版本与 StrategyRun"
+            )
+        persisted.parameters = normalized
+        await db.commit()
+        await db.refresh(persisted)
+        run = persisted
         if run is None:
           raise ValueError(f"策略运行不存在: {run_id}")
         break
+      if runtime:
+        runtime.context.parameters = normalized
     except Exception:
       if runtime and previous is not None:
         runtime.context.parameters = previous
@@ -2650,6 +2672,7 @@ class StrategyManager:
       repo = StrategyRunRepository(db)
 
       run_name = name or f"{strategy_id}-{runtime.run_id[:8]}"
+      binding = dict(runtime.context.parameters.get("_managed_plan_binding") or {})
       run_data = {
         "id": runtime.run_id,
         "name": run_name,
@@ -2661,6 +2684,14 @@ class StrategyManager:
         "instruments": runtime.context.instruments,
         "initial_capital": runtime.context.initial_capital,
         "user_id": "system",
+        "plan_id": str(binding.get("plan_id") or "") or None,
+        "plan_kind": str(binding.get("plan_kind") or "").upper() or None,
+        "plan_config_version": int(binding.get("config_version") or 0) or None,
+        "frozen_config_snapshot": dict(binding.get("config_snapshot") or {}) or None,
+        "frozen_config_fingerprint": str(binding.get("config_fingerprint") or "") or None,
+        "supersedes_run_id": str(binding.get("supersedes_run_id") or "") or None,
+        "parent_run_id": str(binding.get("parent_run_id") or "") or None,
+        "input_event_watermark": str(binding.get("input_event_watermark") or "") or None,
       }
 
       await repo.create_strategy_run(run_data)

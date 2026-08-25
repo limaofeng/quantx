@@ -703,9 +703,10 @@ async def _transition_place_order_command(
     and correlation is not None
     and intent is not None
     and str(pending.side or "").upper() == "BUY"
-    and str(pending.strategy_run_id or "") == entry_plan_id
-    and str(correlation.strategy_run_id or "") == entry_plan_id
-    and str(intent.strategy_run_id or "") == entry_plan_id
+    and bool(str(pending.strategy_run_id or ""))
+    and str(correlation.strategy_run_id or "")
+    == str(pending.strategy_run_id or "")
+    and str(intent.strategy_run_id or "") == str(pending.strategy_run_id or "")
     and str(intent.direction or "").upper() == "BUY"
     and str(intent_metadata.get("entry_plan_id") or "") == entry_plan_id
     and intent_zero_execution

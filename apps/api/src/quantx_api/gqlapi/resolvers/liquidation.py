@@ -336,6 +336,13 @@ class LiquidationResolver:
     record = await LiquidationResolver._load_exit_plan(plan_id)
     return record.account_id if record is not None else None
 
+  @staticmethod
+  async def exit_plan_run_id(plan_id: str) -> str:
+    record = await LiquidationResolver._load_exit_plan(plan_id)
+    if record is None or not record.strategy_run_id:
+      raise ValueError("卖出计划当前没有可确认的 StrategyRun")
+    return str(record.strategy_run_id)
+
   @classmethod
   async def prepare_exit_plan_replay(
     cls,

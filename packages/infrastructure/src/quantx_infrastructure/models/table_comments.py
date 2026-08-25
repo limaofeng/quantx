@@ -44,6 +44,8 @@ TABLE_COMMENTS: dict[str, str] = {
   "entry_plan_authorization_events": "自动买入授权安全审计事件",
   "entry_plan_authorization_grants": "建仓计划精确自动买入授权",
   "exit_plan_replay_projections": "卖出计划历史回放生命周期投影",
+  "managed_plans": "买入与卖出托管计划稳定业务身份",
+  "managed_plan_config_revisions": "托管计划不可变配置版本与运行绑定",
   "financial_balance_sheet": "上市公司资产负债表",
   "financial_capital": "上市公司股本结构",
   "financial_cash_flow": "上市公司现金流量表",

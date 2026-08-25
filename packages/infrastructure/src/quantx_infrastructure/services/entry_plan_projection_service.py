@@ -1,7 +1,7 @@
 """Read model for strategy-backed managed entry plans.
 
-The product ``plan_id`` is the underlying ``StrategyRun.id``.  This service
-only projects existing truth; it never advances a plan or treats an intent,
+The product ``plan_id`` is stable across immutable ``StrategyRun`` revisions.
+This service only projects existing truth; it never advances a plan or treats an intent,
 outbox acknowledgement, or broker order as a fill.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -112,6 +112,11 @@ class EntryPlanProjectionService:
           in {str(code or "").upper() for code in list(run.instruments or [])}
         )
       ]
+      current_by_plan: dict[str, StrategyRun] = {}
+      for run in runs:
+        stable_plan_id = str(getattr(run, "plan_id", "") or run.id)
+        current_by_plan.setdefault(stable_plan_id, run)
+      runs = list(current_by_plan.values())
       views = [await self._project(db, run) for run in runs]
     if wanted_statuses:
       views = [view for view in views if view["phase"] in wanted_statuses]
@@ -133,9 +138,17 @@ class EntryPlanProjectionService:
           .join(StrategyRun.strategy)
           .options(selectinload(StrategyRun.strategy))
           .where(
-            StrategyRun.id == normalized_plan_id,
+            or_(
+              StrategyRun.id == normalized_plan_id,
+              StrategyRun.plan_id == normalized_plan_id,
+            ),
             Strategy.class_name == MANAGED_ENTRY_STRATEGY_CLASS_NAME,
           )
+          .order_by(
+            StrategyRun.plan_config_version.desc().nullslast(),
+            StrategyRun.updated_at.desc(),
+          )
+          .limit(1)
         )
       ).scalar_one_or_none()
       if run is None:
@@ -152,7 +165,7 @@ class EntryPlanProjectionService:
     instrument_code: str = "",
   ) -> list[dict[str, Any]]:
     plans = await self.list(account_id, instrument_code=instrument_code)
-    run_ids = [plan["plan_id"] for plan in plans]
+    run_ids = [plan["run_id"] for plan in plans]
     if not run_ids:
       return []
     async with AsyncSessionLocal() as db:
@@ -187,11 +200,22 @@ class EntryPlanProjectionService:
       return []
     safe_limit = max(1, min(int(limit or 100), 300))
     async with AsyncSessionLocal() as db:
+      run_ids = list(
+        (
+          await db.execute(
+            select(StrategyRun.id).where(
+              or_(StrategyRun.id == plan_id, StrategyRun.plan_id == plan_id)
+            )
+          )
+        )
+        .scalars()
+        .all()
+      ) or [plan_id]
       intents = list(
         (
           await db.execute(
             select(TradeIntentRecord)
-            .where(TradeIntentRecord.strategy_run_id == plan_id)
+            .where(TradeIntentRecord.strategy_run_id.in_(tuple(run_ids)))
             .order_by(
               TradeIntentRecord.created_at.desc(), TradeIntentRecord.id.desc()
             )
@@ -205,7 +229,7 @@ class EntryPlanProjectionService:
         (
           await db.execute(
             select(StrategyDecisionTraceRecord)
-            .where(StrategyDecisionTraceRecord.strategy_run_id == plan_id)
+            .where(StrategyDecisionTraceRecord.strategy_run_id.in_(tuple(run_ids)))
             .order_by(
               StrategyDecisionTraceRecord.decided_at.desc(),
               StrategyDecisionTraceRecord.id.desc(),
@@ -491,6 +515,21 @@ class EntryPlanProjectionService:
   async def _project(self, db: Any, run: StrategyRun) -> dict[str, Any]:
     parameters = _mapping(run.parameters)
     config = _mapping(parameters.get("managed_entry_plan")) or parameters
+    stable_plan_id = str(getattr(run, "plan_id", "") or run.id)
+    plan_run_ids = list(
+      (
+        await db.execute(
+          select(StrategyRun.id).where(
+            or_(
+              StrategyRun.id == stable_plan_id,
+              StrategyRun.plan_id == stable_plan_id,
+            )
+          )
+        )
+      )
+      .scalars()
+      .all()
+    ) or [str(run.id)]
     instrument_code = str(
       config.get("instrument_code")
       or (list(run.instruments or [""])[0] if run.instruments else "")
@@ -505,7 +544,7 @@ class EntryPlanProjectionService:
         await db.execute(
           select(TradeIntentRecord)
           .where(
-            TradeIntentRecord.strategy_run_id == run.id,
+            TradeIntentRecord.strategy_run_id.in_(tuple(plan_run_ids)),
             TradeIntentRecord.direction == "BUY",
           )
           .order_by(TradeIntentRecord.created_at.desc())
@@ -570,7 +609,8 @@ class EntryPlanProjectionService:
     baseline_volume = max(0, _integer(baseline.get("position_volume")))
     plan_kind = "BUILD" if baseline_volume == 0 else "ADD"
     return {
-      "plan_id": str(run.id),
+      "plan_id": stable_plan_id,
+      "run_id": str(run.id),
       "config_version": max(1, _integer(config.get("config_version"), 1)),
       "account_id": account_id,
       "instrument_code": instrument_code,
@@ -588,7 +628,7 @@ class EntryPlanProjectionService:
         execution.get("authorization_mode") or "MANUAL_CONFIRM"
       ).upper(),
       "authorization_state": await self._authorization_state(
-        db, run, config, execution
+        db, run, config, execution, plan_id=stable_plan_id
       ),
       "target_mode": str(target_policy.get("mode") or "TARGET_POSITION_PCT"),
       "target_position_pct": _number(target_policy.get("target_position_pct")),
@@ -690,6 +730,8 @@ class EntryPlanProjectionService:
     run: StrategyRun,
     config: dict[str, Any],
     execution: dict[str, Any],
+    *,
+    plan_id: str,
   ) -> str:
     if _enum_value(run.mode).upper() != "LIVE":
       return "NOT_REQUIRED"
@@ -707,7 +749,7 @@ class EntryPlanProjectionService:
     except ImportError:
       return "REQUIRED"
     repository = EntryPlanAuthorizationRepository(db)
-    grant = await repository.find_current_for_plan(str(run.id))
+    grant = await repository.find_current_for_plan(plan_id)
     if grant is None:
       return "REQUIRED"
     if getattr(grant, "revoked_at", None) is not None:
@@ -720,7 +762,11 @@ class EntryPlanProjectionService:
       config.get("config_version", 1) or 1
     ):
       return "STALE"
-    expected = scope_from_managed_entry_config(plan_id=str(run.id), config=config)
+    expected = scope_from_managed_entry_config(
+      plan_id=plan_id,
+      run_id=str(run.id),
+      config=config,
+    )
     if (
       str(grant.plan_fingerprint) != expected.plan_fingerprint
       or str(grant.rule_fingerprint) != expected.rule_fingerprint
@@ -868,7 +914,7 @@ class EntryPlanProjectionService:
     expires_at_ms = _integer(_mapping(metadata.get("expiry_policy")).get("expire_at_ms"))
     return {
       "intent_id": str(row.id),
-      "plan_id": str(row.strategy_run_id or row.owner_id or ""),
+      "plan_id": str(metadata.get("entry_plan_id") or row.owner_id or row.strategy_run_id or ""),
       "instrument_code": str(row.instrument_code or ""),
       "bucket": str(row.bucket or "core"),
       "reason_code": str(row.reason or ""),

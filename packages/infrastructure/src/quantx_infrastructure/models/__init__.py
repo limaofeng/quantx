@@ -122,6 +122,7 @@ from .liquidation import (
   LiquidationType,
   RedemptionRecord,
 )
+from .managed_plan import ManagedPlanConfigRevision, ManagedPlanRecord
 from .order import Order
 from .position import Position
 from .sector import Sector
@@ -200,6 +201,8 @@ __all__ = [
   "EntryPlanAuthorizationEvent",
   "EntryPlanAuthorizationGrant",
   "ExitPlanReplayProjection",
+  "ManagedPlanRecord",
+  "ManagedPlanConfigRevision",
   "AuthUser",
   "AuthUserAccountAccess",
   "AuthDeviceSession",

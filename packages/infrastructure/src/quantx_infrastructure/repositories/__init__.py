@@ -28,13 +28,25 @@ from .limit_up_board_assistant_repository import (
   LimitUpBoardAssistantConfigRepository,
   LimitUpBoardCandidateArmRepository,
 )
+from .managed_plan_repository import (
+  ManagedPlanRepository,
+  managed_plan_config_fingerprint,
+)
 from .order_repository import OrderRepository
 from .position_repository import PositionRepository
 from .strategy_decision_trace_repository import StrategyDecisionTraceRepository
 from .strategy_performance_sample_repository import StrategyPerformanceSampleRepository
 from .strategy_repository import StrategyRepository
 from .strategy_run_repository import StrategyRunRepository
+from .t_trade_candidate_outcome_repository import (
+  CandidateOutcomeConcurrencyError,
+  TTradeCandidateOutcomeRepository,
+)
 from .t_trade_global_config_repository import TTradeGlobalConfigRepository
+from .t_trade_opportunity_intelligence_repository import (
+  TTradeInstrumentProfileRepository,
+  TTradeOpportunityEvaluationRepository,
+)
 from .trade_intent_repository import TradeIntentRepository
 from .watchlist_repository import WatchlistRepository
 
@@ -57,6 +69,10 @@ __all__ = [
   "StrategyDecisionTraceRepository",
   "TradeIntentRepository",
   "TTradeGlobalConfigRepository",
+  "CandidateOutcomeConcurrencyError",
+  "TTradeCandidateOutcomeRepository",
+  "TTradeInstrumentProfileRepository",
+  "TTradeOpportunityEvaluationRepository",
   "WatchlistRepository",
   "StrategyPerformanceSampleRepository",
   "MarketDataRepository",
@@ -65,4 +81,6 @@ __all__ = [
   "AutoExitPlanRepository",
   "DailyAssetSnapshotRepository",
   "DailyAssetPositionSnapshotRepository",
+  "ManagedPlanRepository",
+  "managed_plan_config_fingerprint",
 ]

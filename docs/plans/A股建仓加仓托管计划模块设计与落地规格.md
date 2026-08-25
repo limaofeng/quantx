@@ -71,7 +71,8 @@ QuantX 新增产品模块 `EntryPlan`，统一承载无持仓时的建仓和已�
 | EntryPlan GraphQL | 查询、创建、更新、暂停、取消、预览、授权和人工确认 |
 | 买入管理页面 | 计划编辑、状态监控、待确认和事件记录 |
 
-产品层 `plan_id` 直接等于 `StrategyRun.run_id`，不增加第二个映射 ID。GraphQL
+产品层 `plan_id` 是稳定计划身份，`StrategyRun.run_id` 是某个不可变配置版本的运行
+身份；GraphQL
 把该特定策略运行投影成用户可理解的 EntryPlan，但不把它暴露为通用策略配置页。
 `StrategyRun.parameters` 保存权威配置，`StrategyRunState.custom_state` 的
 `managed_entry_plan` 系统键保存算法状态；意图、订单、成交和 BucketLedger 继续
@@ -549,7 +550,7 @@ EntryEvaluationContext
 
 ```text
 StrategyRun
-├── id                            // plan_id = run_id
+├── id                            // 当前不可变 StrategyRun.run_id
 ├── strategy_id                   // ashare_managed_entry_plan
 ├── instruments                   // 长度固定为 1
 ├── mode                          // BACKTEST | PAPER | LIVE
@@ -749,9 +750,9 @@ confirmEntryIntent(input: EntryIntentConfirmationInput!): EntryIntentConfirmatio
 rejectEntryIntent(intentId: ID!): EntryIntentConfirmationResult!
 ```
 
-创建输入使用强类型嵌套 input，不接受任意 JSON 字符串。`updateEntryPlan` 必须原子
-替换 `StrategyRun.parameters.managed_entry_plan` 的当前权威配置并递增配置版本，
-不保留旧协议分支。`planId` 在所有操作中就是 `runId`。创建输入可显式携带
+创建输入使用强类型嵌套 input，不接受任意 JSON 字符串。`updateEntryPlan` 必须追加
+不可变配置版本、创建新的 `StrategyRun`，并将稳定 `planId` 原子切换到新 `runId`，
+不保留原地修改运行配置或旧协议分支。创建输入可显式携带
 `startImmediately`，只允许 PAPER 或 LIVE+MANUAL_CONFIRM；LIVE+AUTO 必须拒绝
 直接启动并先完成授权挑战。
 
@@ -1097,7 +1098,8 @@ ENTRY_PLAN_RECONCILE_REQUIRED
 
 - StrategyManager 租约和稳定业务键保证一个 managed-entry 运行不会重复产生意图。
 - RuntimeState、组合、BucketLedger、ExitPlan 与 event marker 在同一 durable 快照提交。
-- `owner_type=STRATEGY_RUN`、`owner_id=plan_id/run_id` 正确进入现有 StrategyExecutor。
+- `owner_type=STRATEGY_RUN`、`owner_id=run_id`，并通过元数据中的稳定 `plan_id`
+  正确进入现有 StrategyExecutor。
 - EntryGapCalculator 输出剩余增量，OrderSizer 对不足一手和整手修正给出明确原因。
 - 资金、冻结、停牌、涨停、数据陈旧和 QMT 离线均阻止实盘买入。
 - 缺账户或证券状态快照时明确失败关闭，不能使用空账户或构造安全行情。

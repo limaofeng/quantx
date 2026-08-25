@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from quantx_domain.strategies.base import (
+  ManualCommandIntentOrigin,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentPriority,
@@ -64,8 +65,12 @@ async def test_route_rechecks_market_gate_immediately_before_place_order(
     ),
     intent=TradeIntent(
       intent_id="intent-1",
-      strategy_id="exit-plan",
+      strategy_id="",
       run_id="",
+      origin=ManualCommandIntentOrigin(
+        command_id="liquidation-command-1",
+        action_type="LIQUIDATE_POSITIONS",
+      ),
       instrument_code="600000.SH",
       direction=TradeIntentDirection.SELL,
       bucket="manual",

@@ -13,6 +13,9 @@ from quantx_domain.trading.entry_plan import (
   ManagedEntryPlanConfig,
 )
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
+from quantx_infrastructure.repositories.managed_plan_repository import (
+  ManagedPlanRepository,
+)
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
 )
@@ -117,7 +120,15 @@ class EntryPlanResolver:
     config_version: int,
   ) -> tuple[ManagedEntryPlanConfig, EntryPlanAuthorizationScope]:
     async with AsyncSessionLocal() as db:
-      run = await StrategyRunRepository(db).find_run_by_id(str(plan_id))
+      run_repo = StrategyRunRepository(db)
+      run = await run_repo.find_run_by_id(str(plan_id))
+      if run is None:
+        plan = await ManagedPlanRepository(db).find(str(plan_id))
+        run = (
+          await run_repo.find_run_by_id(str(plan.current_run_id))
+          if plan is not None and plan.current_run_id
+          else None
+        )
       if run is None or getattr(run, "strategy", None) is None:
         raise ValueError("建仓/加仓计划不存在")
       if str(run.strategy.class_name) != "AshareManagedEntryPlanStrategy":
@@ -139,6 +150,7 @@ class EntryPlanResolver:
         raise ValueError("只有 LIVE 自动托管计划可以申请精确授权")
       return config, scope_from_managed_entry_config(
         plan_id=str(plan_id),
+        run_id=str(run.id),
         config=config,
       )
 
@@ -549,13 +561,13 @@ class EntryPlanResolver:
   async def preview_intent(
     cls, account_id: str, plan_id: str, intent_id: str
   ) -> EntryIntentPreview:
-    await cls._require_plan(account_id, plan_id)
+    plan = await cls._require_plan(account_id, plan_id)
     payload = await cls._engine_request(
       "ENTRY_PLAN_PREVIEW_INTENT",
       {
         "account_id": account_id,
         "plan_id": plan_id,
-        "run_id": plan_id,
+        "run_id": str(plan.run_id),
         "intent_id": intent_id,
       },
       aggregate_id=plan_id,
@@ -584,11 +596,11 @@ class EntryPlanResolver:
     challenge_id: str,
   ) -> EntryPlanMutationResult:
     try:
-      await cls._require_plan(account_id, plan_id)
+      plan = await cls._require_plan(account_id, plan_id)
       result = await cls._engine_request(
         "STRATEGY_APPROVE_TRADE_INTENT",
         {
-          "run_id": plan_id,
+          "run_id": str(plan.run_id),
           "intent_id": intent_id,
           "approval_audit": {
             "actor_id": str(actor_user_id or "")[:64],
@@ -615,11 +627,11 @@ class EntryPlanResolver:
     cls, account_id: str, plan_id: str, intent_id: str
   ) -> EntryPlanMutationResult:
     try:
-      await cls._require_plan(account_id, plan_id)
+      plan = await cls._require_plan(account_id, plan_id)
       result = await cls._engine_request(
         "STRATEGY_REJECT_TRADE_INTENT",
         {
-          "run_id": plan_id,
+          "run_id": str(plan.run_id),
           "intent_id": intent_id,
           "reason": "USER_REJECTED",
         },

@@ -8,6 +8,12 @@ from decimal import ROUND_FLOOR, Decimal
 from math import isfinite
 from typing import Any, Callable, Mapping, Optional
 
+from quantx_domain.strategies.ashare_managed_exit_plan import (
+  EXIT_PLAN_ENABLED_KEY,
+  MANAGED_EXIT_PLAN_KEY,
+  MANAGED_EXIT_RUNTIME_KEY,
+  AshareManagedExitPlanStrategy,
+)
 from quantx_domain.trading.exit_plan import (
   EXIT_PLAN_BOOK_STATE_KEY,
   ExitBuyFeeTreatment,
@@ -39,7 +45,7 @@ from quantx_infrastructure.models.auto_exit_plan import (
   AutoExitPlanEvent,
   AutoExitPlanRecord,
 )
-from quantx_infrastructure.models.enums import OrderType
+from quantx_infrastructure.models.enums import OrderType, StrategyRunMode
 from quantx_infrastructure.models.liquidation import (
   ConditionalLiquidationOrder,
   ConditionalLiquidationSellMode,
@@ -56,6 +62,7 @@ from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
 from quantx_infrastructure.repositories.auto_exit_plan_repository import (
   AutoExitPlanRepository,
 )
+from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
 from quantx_infrastructure.services.exit_plan_authorization_service import (
   authorization_expiry_for_challenge,
   build_exit_plan_authorization_snapshot,
@@ -70,6 +77,9 @@ from quantx_infrastructure.services.exit_plan_scope_lock import (
   LockedExitPlanScope,
   lock_exit_plan_scope,
   lock_exit_plan_scope_for_plan,
+)
+from quantx_infrastructure.services.managed_plan_runtime_service import (
+  ManagedPlanRuntimeService,
 )
 from quantx_infrastructure.services.trade_command_service import TradeCommandService
 from quantx_infrastructure.services.trade_intent_processor import (
@@ -99,6 +109,7 @@ ACTIVE_ORDER_STATUSES = {
 }
 MANUAL_PLAN_SOURCE = "MANUAL_POSITION"
 MANUAL_LIQUIDATION_SOURCE = "MANUAL_LIQUIDATION"
+MANAGED_EXIT_STRATEGY_CLASS_NAME = "AshareManagedExitPlanStrategy"
 AVAILABLE_NOW = "AVAILABLE_NOW"
 UNTIL_SNAPSHOT_CLEARED = "UNTIL_SNAPSHOT_CLEARED"
 UNALLOCATED_ONLY = "UNALLOCATED_ONLY"
@@ -136,6 +147,159 @@ def normalize_dynamic_policy(value: Optional[Mapping[str, Any]]) -> dict[str, An
 
 
 class AutoExitPlanService:
+  def __init__(self, runtime_manager: Any = None) -> None:
+    self._runtime_manager = runtime_manager
+    self._managed_runtime = (
+      ManagedPlanRuntimeService(runtime_manager)
+      if runtime_manager is not None
+      else None
+    )
+
+  async def _strategy_template_id(self) -> int:
+    async with AsyncSessionLocal() as db:
+      strategy = await StrategyRepository(db).find_by_class_name(
+        MANAGED_EXIT_STRATEGY_CLASS_NAME
+      )
+      if strategy is None:
+        raise ValueError("卖出托管策略尚未注册，请重启 Engine 后重试")
+      return int(strategy.id)
+
+  @staticmethod
+  def _managed_parameters(
+    record: AutoExitPlanRecord,
+    plan: ExitPlan,
+  ) -> dict[str, Any]:
+    return {
+      MANAGED_EXIT_PLAN_KEY: plan.template.to_dict(),
+      EXIT_PLAN_ENABLED_KEY: bool(record.enabled),
+      "account_id": str(record.account_id),
+      "instrument_code": str(record.instrument_code),
+      "initial_protected_volume": int(plan.entry_filled_volume or 0),
+      "initial_entry_avg_price": float(plan.entry_avg_price or 0.0),
+      "initial_entry_time": str(plan.entry_trade_date or ""),
+    }
+
+  async def _create_managed_runtime(
+    self,
+    record: AutoExitPlanRecord,
+    plan: ExitPlan,
+  ) -> None:
+    if self._managed_runtime is None:
+      return
+    strategy_id = await self._strategy_template_id()
+    run_id, _ = await self._managed_runtime.create(
+      plan_id=str(record.plan_id),
+      plan_kind="EXIT",
+      account_id=str(record.account_id),
+      instrument_code=str(record.instrument_code),
+      config_snapshot=plan.template.to_dict(),
+      parameters=self._managed_parameters(record, plan),
+      strategy_id=strategy_id,
+      strategy_class=AshareManagedExitPlanStrategy,
+      mode=(
+        StrategyRunMode.LIVE
+        if str(record.execution_mode or "").lower() == "live"
+        else StrategyRunMode.PAPER
+      ),
+      name=f"卖出托管-{record.instrument_code}",
+      start_immediately=bool(record.enabled),
+      state_migration_policy="INITIAL_EXIT_PLAN_STATE",
+      initial_state={MANAGED_EXIT_RUNTIME_KEY: plan.to_dict()},
+    )
+    await self._bind_strategy_run(record.plan_id, run_id)
+    record.strategy_run_id = run_id
+
+  async def _revise_managed_runtime(
+    self,
+    record: AutoExitPlanRecord,
+    plan: ExitPlan,
+    *,
+    expected_version: int,
+  ) -> None:
+    if self._managed_runtime is None:
+      return
+    strategy_id = await self._strategy_template_id()
+    run_id, _, _ = await self._managed_runtime.revise(
+      plan_id=str(record.plan_id),
+      expected_version=expected_version,
+      config_snapshot=plan.template.to_dict(),
+      parameters=self._managed_parameters(record, plan),
+      strategy_id=strategy_id,
+      strategy_class=AshareManagedExitPlanStrategy,
+      mode=(
+        StrategyRunMode.LIVE
+        if str(record.execution_mode or "").lower() == "live"
+        else StrategyRunMode.PAPER
+      ),
+      name=f"卖出托管-{record.instrument_code}-v{plan.template.config_version}",
+      start_immediately=bool(record.enabled),
+      state_migration_policy="CARRY_EXIT_ALGORITHM_STATE",
+      initial_state={MANAGED_EXIT_RUNTIME_KEY: plan.to_dict()},
+    )
+    await self._bind_strategy_run(record.plan_id, run_id)
+    record.strategy_run_id = run_id
+
+  async def _bind_strategy_run(self, plan_id: str, run_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+      record = await AutoExitPlanRepository(db).find_by_id(plan_id, for_update=True)
+      if record is None:
+        raise ValueError("退出计划在 StrategyRun 创建后不存在")
+      record.strategy_run_id = run_id
+      record.last_error = None
+      await db.commit()
+
+  async def _set_runtime_enabled(
+    self,
+    record: AutoExitPlanRecord,
+    enabled: bool,
+  ) -> None:
+    if self._runtime_manager is None or not record.strategy_run_id:
+      return
+    run_id = str(record.strategy_run_id)
+    runtime = self._runtime_manager.get_run(run_id)
+    if runtime is None:
+      raise RuntimeError("卖出计划 StrategyRun 当前不可用")
+    parameters = {
+      **dict(runtime.context.parameters or {}),
+      EXIT_PLAN_ENABLED_KEY: bool(enabled),
+    }
+    await self._runtime_manager.update_run_parameters(run_id, parameters)
+    if enabled:
+      if not await self._runtime_manager.resume_strategy(run_id):
+        if not await self._runtime_manager.start_strategy(run_id):
+          raise RuntimeError("卖出计划 StrategyRun 恢复失败")
+      if self._managed_runtime is not None:
+        await self._managed_runtime.set_status(record.plan_id, "RUNNING")
+    else:
+      if not await self._runtime_manager.pause_strategy(run_id):
+        raise RuntimeError("卖出计划 StrategyRun 暂停失败")
+      if self._managed_runtime is not None:
+        await self._managed_runtime.set_status(record.plan_id, "PAUSED")
+
+  async def sync_managed_runtime_state(
+    self,
+    *,
+    strategy_run_id: str,
+    plan_state: Mapping[str, Any],
+    evaluated_at: Optional[datetime] = None,
+  ) -> None:
+    """Project strategy-owned exit algorithm state into the sell workspace."""
+
+    if not strategy_run_id or not plan_state:
+      return
+    plan = ExitPlan.from_dict(dict(plan_state))
+    async with AsyncSessionLocal() as db:
+      record = await db.scalar(
+        select(AutoExitPlanRecord)
+        .where(AutoExitPlanRecord.strategy_run_id == strategy_run_id)
+        .with_for_update()
+      )
+      if record is None or str(record.plan_id) != plan.plan_id:
+        return
+      self._sync_record(record, plan, evaluated_at=evaluated_at)
+      await self._sync_source_order(db, record, plan, checked_at=evaluated_at)
+      await db.commit()
+
   async def list_cost_basis_candidates(
     self,
     *,
@@ -678,7 +842,10 @@ class AutoExitPlanService:
       )
       await db.commit()
       await db.refresh(record)
-      return record
+      created_record = record
+      created_plan = plan
+    await self._create_managed_runtime(created_record, created_plan)
+    return created_record
 
   async def update_manual_exit_plan(
     self,
@@ -786,7 +953,14 @@ class AutoExitPlanService:
       )
       await db.commit()
       await db.refresh(record)
-      return record
+      updated_record = record
+      updated_plan = plan
+    await self._revise_managed_runtime(
+      updated_record,
+      updated_plan,
+      expected_version=expected_version,
+    )
+    return updated_record
 
   async def create_liquidation_group(
     self,
@@ -1358,14 +1532,6 @@ class AutoExitPlanService:
           raise ValueError("已有卖出委托待成交，暂不能暂停")
         plan.status = ExitPlanStatus.PAUSED
       record.enabled = bool(enabled)
-      record.config_version = int(record.config_version) + 1
-      plan.template = ExitPlanTemplate.from_dict(
-        {
-          **plan.template.to_dict(),
-          "config_version": record.config_version,
-          "auto_exit_authorized": False,
-        }
-      )
       clear_exact_auto_exit_authorization(record)
       self._sync_record(record, plan)
       await self._append_event(
@@ -1379,7 +1545,89 @@ class AutoExitPlanService:
       )
       await db.commit()
       await db.refresh(record)
-      return record
+      updated_record = record
+    await self._set_runtime_enabled(updated_record, enabled)
+    return updated_record
+
+  async def evaluate_now(
+    self,
+    plan_id: str,
+    *,
+    account_id: str,
+  ) -> dict[str, Any]:
+    if self._runtime_manager is None:
+      raise RuntimeError("卖出计划即时检查只能由 QuantX Engine 执行")
+    async with AsyncSessionLocal() as db:
+      record = await AutoExitPlanRepository(db).find_by_id(plan_id)
+    if record is None or (account_id and record.account_id != account_id):
+      raise ValueError("退出计划不存在或不属于当前账户")
+    if not record.strategy_run_id:
+      raise ValueError("退出计划尚未绑定 StrategyRun")
+    runtime = self._runtime_manager.get_run(str(record.strategy_run_id))
+    if runtime is None or not bool(record.enabled):
+      raise ValueError("退出计划未在监控，不能立即检查")
+    instrument_code = str(record.instrument_code or "").upper()
+    market_data = runtime.latest_market_data.get(instrument_code)
+    if market_data is None:
+      raise ValueError("最新权威行情不可用，不能立即检查")
+    await runtime.event_queue.put(
+      (
+        "entry_plan_evaluate",
+        {
+          "type": "EXIT_PLAN_EVALUATE_NOW",
+          "instrument_code": instrument_code,
+          "market_data": market_data,
+        },
+      )
+    )
+    return {
+      "success": True,
+      "code": "EXIT_PLAN_EVALUATION_QUEUED",
+      "plan_id": plan_id,
+      "run_id": str(record.strategy_run_id),
+    }
+
+  async def confirm_managed_intent(
+    self,
+    *,
+    plan_id: str,
+    intent_id: str,
+  ) -> dict[str, Any]:
+    if self._runtime_manager is None:
+      raise RuntimeError("卖出意图确认只能由 QuantX Engine 执行")
+    async with AsyncSessionLocal() as db:
+      record = await AutoExitPlanRepository(db).find_by_id(plan_id)
+    if record is None or not record.strategy_run_id:
+      raise ValueError("退出计划或 StrategyRun 不存在")
+    result = await self._runtime_manager.executor.approve_trade_intent(
+      str(record.strategy_run_id),
+      intent_id,
+    )
+    if not result.get("success"):
+      raise ValueError(str(result.get("message") or result.get("code") or "确认失败"))
+    return dict(result)
+
+  async def reject_managed_intent(
+    self,
+    *,
+    plan_id: str,
+    intent_id: str,
+    reason: str,
+  ) -> dict[str, Any]:
+    if self._runtime_manager is None:
+      raise RuntimeError("卖出意图忽略只能由 QuantX Engine 执行")
+    async with AsyncSessionLocal() as db:
+      record = await AutoExitPlanRepository(db).find_by_id(plan_id)
+    if record is None or not record.strategy_run_id:
+      raise ValueError("退出计划或 StrategyRun 不存在")
+    result = await self._runtime_manager.executor.reject_trade_intent(
+      str(record.strategy_run_id),
+      intent_id,
+      reason,
+    )
+    if not result.get("success"):
+      raise ValueError(str(result.get("message") or result.get("code") or "忽略失败"))
+    return dict(result)
 
   async def cancel(
     self,
@@ -1407,14 +1655,6 @@ class AutoExitPlanService:
       plan.status = ExitPlanStatus.CANCELLED
       plan.error_message = reason
       record.enabled = False
-      record.config_version = int(record.config_version) + 1
-      plan.template = ExitPlanTemplate.from_dict(
-        {
-          **plan.template.to_dict(),
-          "config_version": record.config_version,
-          "auto_exit_authorized": False,
-        }
-      )
       clear_exact_auto_exit_authorization(record)
       self._sync_record(record, plan)
       await self._append_event(
@@ -1426,7 +1666,18 @@ class AutoExitPlanService:
       )
       await db.commit()
       await db.refresh(record)
-      return record
+      cancelled_record = record
+    if self._runtime_manager is not None and cancelled_record.strategy_run_id:
+      run_id = str(cancelled_record.strategy_run_id)
+      runtime = self._runtime_manager.get_run(run_id)
+      if runtime is not None and not await self._runtime_manager.stop_strategy(
+        run_id,
+        force=False,
+      ):
+        raise RuntimeError("卖出计划 StrategyRun 停止失败")
+    if self._managed_runtime is not None:
+      await self._managed_runtime.set_status(plan_id, "CANCELLED")
+    return cancelled_record
 
   async def evaluate_and_submit(
     self,
@@ -1797,7 +2048,8 @@ class AutoExitPlanService:
       intent = await db.get(TradeIntentRecord, intent_id)
       if record is None or intent is None:
         raise ValueError("退出计划或卖出意图不存在")
-      if intent.owner_type != "EXIT_PLAN" or intent.owner_id != plan_id:
+      metadata = dict(intent.intent_metadata or {})
+      if str(metadata.get("exit_plan_id") or "") != plan_id:
         raise ValueError("卖出意图不属于该退出计划")
       if intent.status != "AWAITING_APPROVAL":
         raise ValueError("卖出意图已处理或不再等待确认")

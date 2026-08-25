@@ -252,8 +252,9 @@ class _Service(EntryPlanService):
     account_id: str,
     instrument_code: str,
     reason: str,
+    stable_plan_id: str | None = None,
   ) -> str:
-    del account_id, instrument_code
+    del account_id, instrument_code, stable_plan_id
     self.offline_terminal_calls.append((plan_id, intent_id, reason))
     if self.offline_terminal_intent_id != intent_id:
       return ""
@@ -550,7 +551,7 @@ async def test_create_defaults_to_paused_real_strategy_run() -> None:
     }
   )
 
-  assert result["plan_id"] == result["run_id"]
+  assert result["plan_id"] != result["run_id"]
   assert result["started"] is False
   assert manager.start_calls == []
   assert manager.run_calls[0]["strategy_class"].__name__ == (
@@ -569,7 +570,7 @@ async def test_create_defaults_to_paused_real_strategy_run() -> None:
     "reference_price": 125.0,
     "account_snapshot_version": "account-v7",
   }
-  assert service.persisted_statuses == [(result["plan_id"], StrategyRunStatus.PAUSED)]
+  assert service.persisted_statuses == [(result["run_id"], StrategyRunStatus.PAUSED)]
 
 
 @pytest.mark.asyncio
@@ -791,9 +792,10 @@ async def test_create_uses_command_id_as_stable_plan_id_on_replay() -> None:
   first = await service.create(payload, command_id="command-create-1")
   persisted = manager.run_calls[0]["parameters"]
   service.loaded = _LoadedPlan(
-    run=SimpleNamespace(id="command-create-1"),
+    run=SimpleNamespace(id=first["run_id"]),
     parameters=persisted,
     config=ManagedEntryPlanConfig.from_dict(persisted["managed_entry_plan"]),
+    plan_id=first["plan_id"],
   )
   second = await service.create(payload, command_id="command-create-1")
 
@@ -1188,8 +1190,9 @@ async def test_update_revokes_grant_and_increments_config_version() -> None:
   )
 
   assert result["config_version"] == 4
+  assert result["run_id"] != "plan-1"
   assert service.revocations == [("plan-1", "CONFIG_UPDATED")]
-  persisted = manager.updated_parameters[0][1]["managed_entry_plan"]
+  persisted = manager.run_calls[-1]["parameters"]["managed_entry_plan"]
   assert persisted["config_version"] == 4
   assert persisted["target_policy"]["incremental_amount_cny"] == 25_000
   assert service.overlap_checks[-1] == ("acct-1", "605499.SH", "plan-1")
@@ -1692,11 +1695,14 @@ def test_authorization_scope_is_stable_and_binds_all_risk_limits() -> None:
     config_version=6,
   )
 
-  first = EntryPlanService.authorization_scope("plan-1", config)
-  second = EntryPlanService.authorization_scope("plan-1", config.to_dict())
+  first = EntryPlanService.authorization_scope("plan-1", config, run_id="run-1")
+  second = EntryPlanService.authorization_scope(
+    "plan-1", config.to_dict(), run_id="run-1"
+  )
 
   assert first == second
-  assert first.plan_id == first.run_id == "plan-1"
+  assert first.plan_id == "plan-1"
+  assert first.run_id == "run-1"
   assert first.config_version == 6
   assert first.instrument_code == "605499.SH"
   assert first.account_snapshot_version == "account-v7"

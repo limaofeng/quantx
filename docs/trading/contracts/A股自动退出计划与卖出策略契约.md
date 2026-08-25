@@ -284,11 +284,11 @@ T+1/可卖量、涨跌停、后置风控和数据库消息箱投递。实盘未�
 持仓数量和每股全成本作为手工快照。真实历史 SELL 只作为图表和事件参考，不改变回放
 计划的账户状态与收益。
 
-回放使用无入场信号的 `AshareExitPlanReplayHarnessStrategy` 承载历史持仓，卖出判断仍由
-Engine 的 `ExitPlanBook` 产生标准 SELL `TradeIntent`，继续经过公共 OrderSizer、A 股
-T+1/涨跌停/停牌约束、后置风控和 `BacktestBroker`。不得为回放复制卖出规则或绕过
-统一执行链路。回放是隔离的非交易写操作，不需要实盘自动卖出授权，也不能提交 QMT
-委托。
+回放与实盘统一运行 `AshareManagedExitPlanStrategy.step(StrategyInput)`：策略内部的
+`ExitPlanBook` 产生标准 SELL `TradeIntent`，继续经过公共 OrderSizer、A 股
+T+1/涨跌停/停牌约束、后置风控和 `BacktestBroker`。不得为回放保留适配器策略、复制
+卖出规则或绕过统一执行链路。回放是隔离的非交易写操作，不需要实盘自动卖出授权，
+也不能提交 QMT 委托。
 
 数据与结果口径：
 

@@ -14,6 +14,8 @@ from quantx_domain.brokers.base import (
   PriceType as BrokerPriceType,
 )
 from quantx_domain.strategies.base import (
+  ManualCommandIntentOrigin,
+  StrategyRunIntentOrigin,
   TradeIntent,
   TradeIntentDirection,
   TradeIntentPriority,
@@ -65,9 +67,25 @@ class TradeIntentProcessor:
         authorization_code = authorization.code
       else:
         authorization_code = "AUTO_EXIT_NOT_AUTHORIZED"
+    run_id = str(plan.strategy_run_id or "")
+    manual_command_id = str(plan.group_id or plan.source_id or plan.plan_id)
+    is_strategy_run = bool(run_id)
     metadata = {
-      "owner_type": "EXIT_PLAN",
-      "owner_id": plan.plan_id,
+      "owner_type": "STRATEGY_RUN" if is_strategy_run else "MANUAL_COMMAND",
+      "owner_id": run_id if is_strategy_run else manual_command_id,
+      "intent_origin_type": (
+        "STRATEGY_RUN" if is_strategy_run else "MANUAL_COMMAND"
+      ),
+      "manual_command_id": None if is_strategy_run else manual_command_id,
+      "manual_action_type": (
+        None
+        if is_strategy_run
+        else (
+          "LIQUIDATE_POSITIONS"
+          if str(plan.source_type or "") == "MANUAL_LIQUIDATION"
+          else "LEGACY_CONDITIONAL_EXIT"
+        )
+      ),
       "account_id": plan.account_id,
       "requested_volume": int(decision.volume),
       "exit_plan_id": plan.plan_id,
@@ -94,8 +112,21 @@ class TradeIntentProcessor:
     }
     intent = TradeIntent(
       intent_id=intent_id,
-      strategy_id=str(plan.strategy_run_id or "exit-plan"),
-      run_id=str(plan.strategy_run_id or ""),
+      strategy_id=run_id,
+      run_id=run_id,
+      origin=(
+        StrategyRunIntentOrigin(
+          run_id=run_id,
+          strategy_id=run_id,
+          plan_id=plan.plan_id,
+        )
+        if is_strategy_run
+        else ManualCommandIntentOrigin(
+          command_id=manual_command_id,
+          action_type=str(metadata["manual_action_type"]),
+          liquidation_group_id=str(plan.group_id or "") or None,
+        )
+      ),
       instrument_code=plan.instrument_code,
       direction=TradeIntentDirection.SELL,
       bucket=plan.bucket,
@@ -148,7 +179,7 @@ class TradeIntentProcessor:
     limit_price: float,
     market_ready: Optional[Callable[[], bool]] = None,
   ) -> dict[str, Any]:
-    if record.owner_type != "EXIT_PLAN" or record.owner_id != plan.plan_id:
+    if str(dict(record.intent_metadata or {}).get("exit_plan_id") or "") != plan.plan_id:
       raise ValueError("卖出意图不属于该退出计划")
     if record.status != "AWAITING_APPROVAL" or record.direction != "SELL":
       raise ValueError("卖出意图已处理或不再等待确认")
@@ -163,10 +194,27 @@ class TradeIntentProcessor:
         },
       )
       return self._market_not_ready_result(record.id)
+    record_metadata = dict(record.intent_metadata or {})
+    record_run_id = str(record.strategy_run_id or "")
     intent = TradeIntent(
       intent_id=record.id,
-      strategy_id=str(record.strategy_id or "exit-plan"),
-      run_id=str(record.strategy_run_id or ""),
+      strategy_id=str(record.strategy_id or "") if record_run_id else "",
+      run_id=record_run_id,
+      origin=(
+        StrategyRunIntentOrigin(
+          run_id=record_run_id,
+          strategy_id=str(record.strategy_id or record_run_id),
+          plan_id=plan.plan_id,
+        )
+        if record_run_id
+        else ManualCommandIntentOrigin(
+          command_id=str(record.owner_id),
+          action_type=str(
+            record_metadata.get("manual_action_type") or "LIQUIDATE_POSITIONS"
+          ),
+          liquidation_group_id=str(plan.group_id or "") or None,
+        )
+      ),
       instrument_code=record.instrument_code,
       direction=TradeIntentDirection.SELL,
       bucket=record.bucket,
@@ -174,7 +222,7 @@ class TradeIntentProcessor:
       priority=TradeIntentPriority(record.priority),
       target_volume=record.target_volume,
       limit_price_hint=limit_price,
-      metadata=dict(record.intent_metadata or {}),
+      metadata=record_metadata,
       trace_id=record.trace_id,
     )
     await self._update_intent(record.id, status="APPROVED")
@@ -365,10 +413,10 @@ class TradeIntentProcessor:
         TradeIntentRecord(
           id=intent.intent_id,
           strategy_run_id=plan.strategy_run_id,
-          owner_type="EXIT_PLAN",
-          owner_id=plan.plan_id,
+          owner_type=str(intent.metadata.get("owner_type") or "STRATEGY_RUN"),
+          owner_id=str(intent.metadata.get("owner_id") or ""),
           account_id=plan.account_id,
-          strategy_id=str(plan.strategy_run_id or "exit-plan"),
+          strategy_id=str(intent.strategy_id or "") or None,
           instrument_code=intent.instrument_code,
           direction=intent.direction.value,
           bucket=intent.bucket,

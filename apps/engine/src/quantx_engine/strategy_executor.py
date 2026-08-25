@@ -6255,6 +6255,18 @@ class StrategyExecutor:
     return time_utils.now()
 
   @staticmethod
+  def _managed_plan_id(runtime: StrategyRuntime) -> str:
+    """Return the stable business plan id bound to this immutable run."""
+
+    parameters = dict(runtime.context.parameters or {})
+    binding = parameters.get("_managed_plan_binding")
+    if isinstance(binding, Mapping):
+      plan_id = str(binding.get("plan_id") or "").strip()
+      if plan_id:
+        return plan_id
+    return runtime.run_id
+
+  @staticmethod
   def _advance_runtime_replay_clock(
     runtime: StrategyRuntime,
     timestamp: datetime,
@@ -10393,6 +10405,15 @@ class StrategyExecutor:
       return
     if output.runtime_state_patch:
       self._apply_runtime_state_patch(runtime, output.runtime_state_patch)
+      managed_exit_state = output.runtime_state_patch.set.get(
+        "managed_exit_plan_runtime"
+      )
+      if isinstance(managed_exit_state, Mapping):
+        await AutoExitPlanService().sync_managed_runtime_state(
+          strategy_run_id=runtime.run_id,
+          plan_state=managed_exit_state,
+          evaluated_at=(input_snapshot.timestamp if input_snapshot else None),
+        )
     if output.exit_plan_commands:
       for command in output.exit_plan_commands:
         runtime.exit_plan_book.apply_command(command)
@@ -13747,7 +13768,7 @@ class StrategyExecutor:
     if kind == "RECONCILED_ZERO_FILL":
       metadata = {
         **dict(truth.get("metadata") or {}),
-        "entry_plan_id": runtime.run_id,
+        "entry_plan_id": StrategyExecutor._managed_plan_id(runtime),
         "entry_stage_id": state.pending_stage_id,
         "entry_rule_id": state.pending_rule_id,
         "intent_id": intent_id,
@@ -13840,7 +13861,8 @@ class StrategyExecutor:
       if (
         str(intent.strategy_run_id or "") != runtime.run_id
         or str(intent.direction or "").upper() != "BUY"
-        or str(metadata.get("entry_plan_id") or "") != runtime.run_id
+        or str(metadata.get("entry_plan_id") or "")
+        != StrategyExecutor._managed_plan_id(runtime)
         or execution_mode not in {"AUTO", "MANUAL_CONFIRM"}
         or not instrument_code
         or str(intent.instrument_code or "").upper() != instrument_code
@@ -14192,7 +14214,8 @@ class StrategyExecutor:
         order_id = cancellation.strategy_order_id or cancellation.client_order_id
         cancellation_metadata = dict(cancellation.request_metadata or {})
         is_managed_entry = (
-          str(cancellation_metadata.get("entry_plan_id") or "") == run_id
+          str(cancellation_metadata.get("entry_plan_id") or "")
+          == self._managed_plan_id(runtime)
         )
         if runtime.state_manager:
           runtime.state_manager.release_order_resources(order_id)
@@ -14665,7 +14688,7 @@ class StrategyExecutor:
     )
     if continuity_failure is not None:
       return continuity_failure
-    if str(metadata.get("entry_plan_id") or "") == runtime.run_id:
+    if str(metadata.get("entry_plan_id") or "") == self._managed_plan_id(runtime):
       parameters = dict(runtime.context.parameters or {})
       if parameters.get("entry_plan_enabled") is not True:
         return "ENTRY_PLAN_PAUSED", "买入计划已暂停或取消，不能确认旧意图"
@@ -15393,7 +15416,8 @@ class StrategyExecutor:
       runtime.context.mode == StrategyRunMode.LIVE
       and intent.direction == TradeIntentDirection.BUY
       and intent.execution_mode == TradeIntentExecutionMode.AUTO
-      and str(metadata.get("entry_plan_id") or "") == runtime.run_id
+      and str(metadata.get("entry_plan_id") or "")
+      == StrategyExecutor._managed_plan_id(runtime)
       and str(metadata.get("owner_type") or "") == "STRATEGY_RUN"
       and str(metadata.get("owner_id") or "") == runtime.run_id
     )
@@ -15429,8 +15453,9 @@ class StrategyExecutor:
       return ("ENTRY_ACCOUNT_REQUIRED", "实盘自动买入缺少唯一账户绑定")
     try:
       scope = scope_from_managed_entry_config(
-        plan_id=runtime.run_id,
+        plan_id=self._managed_plan_id(runtime),
         config=runtime.context.parameters,
+        run_id=runtime.run_id,
       )
     except EntryPlanAuthorizationError as exc:
       return (exc.code, exc.message)
@@ -15480,7 +15505,7 @@ class StrategyExecutor:
     try:
       async with AsyncSessionLocal() as db:
         validation = await EntryPlanAuthorizationService(db).validate_or_invalidate(
-          plan_id=runtime.run_id,
+          plan_id=self._managed_plan_id(runtime),
           current_scope=scope,
           account_id=account_id,
           proposed_amount_cny=amount,

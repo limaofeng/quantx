@@ -17,6 +17,9 @@ from quantx_infrastructure.core.strategy_registry import strategy_registry
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
 from quantx_infrastructure.models.agent_runtime import EngineCommandOutbox
 from quantx_infrastructure.models.enums import StrategyRunMode
+from quantx_infrastructure.repositories.auto_exit_plan_repository import (
+  AutoExitPlanRepository,
+)
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
@@ -295,18 +298,30 @@ async def _dispatch(
       )
     }
   if command_type == "EXIT_PLAN_CREATE_MANUAL":
-    record = await AutoExitPlanService().create_manual_exit_plan(payload)
-    return {"plan_id": record.plan_id, "config_version": record.config_version}
+    record = await AutoExitPlanService(strategy_manager).create_manual_exit_plan(
+      payload
+    )
+    return {
+      "plan_id": record.plan_id,
+      "run_id": record.strategy_run_id,
+      "config_version": record.config_version,
+    }
   if command_type == "EXIT_PLAN_UPDATE_MANUAL":
-    record = await AutoExitPlanService().update_manual_exit_plan(payload)
-    return {"plan_id": record.plan_id, "config_version": record.config_version}
+    record = await AutoExitPlanService(strategy_manager).update_manual_exit_plan(
+      payload
+    )
+    return {
+      "plan_id": record.plan_id,
+      "run_id": record.strategy_run_id,
+      "config_version": record.config_version,
+    }
   if command_type == "EXIT_PLAN_RECONCILE_CAPACITY":
     return await AutoExitPlanService().reconcile_holding_capacity(
       account_id=str(payload["account_id"]),
       instrument_code=str(payload["instrument_code"]),
     )
   if command_type == "EXIT_PLAN_SET_ENABLED":
-    record = await AutoExitPlanService().set_enabled(
+    record = await AutoExitPlanService(strategy_manager).set_enabled(
       str(payload["plan_id"]),
       bool(payload["enabled"]),
       account_id=payload.get("account_id"),
@@ -317,7 +332,7 @@ async def _dispatch(
       "config_version": record.config_version if record else None,
     }
   if command_type == "EXIT_PLAN_CANCEL":
-    record = await AutoExitPlanService().cancel(
+    record = await AutoExitPlanService(strategy_manager).cancel(
       str(payload["plan_id"]),
       str(payload.get("reason") or "USER_CANCELLED"),
       account_id=payload.get("account_id"),
@@ -328,32 +343,55 @@ async def _dispatch(
       "config_version": record.config_version if record else None,
     }
   if command_type == "EXIT_PLAN_EVALUATE_NOW":
-    return {
-      "items": _json_value(
-        await exit_plan_monitor.evaluate_all_active_plans(
-          account_id=payload.get("account_id"),
-          instrument_code=payload.get("instrument_code"),
-          plan_id=payload.get("plan_id"),
-        )
+    return _json_value(
+      await AutoExitPlanService(strategy_manager).evaluate_now(
+        str(payload["plan_id"]),
+        account_id=str(payload.get("account_id") or ""),
       )
-    }
+    )
   if command_type == "EXIT_PLAN_LIQUIDATE_POSITIONS":
     return _json_value(
       await AutoExitPlanService().create_liquidation_group(payload)
     )
   if command_type == "EXIT_PLAN_CONFIRM_INTENT":
+    async with AsyncSessionLocal() as db:
+      exit_record = await AutoExitPlanRepository(db).find_by_id(
+        str(payload["plan_id"])
+      )
+    if exit_record is None:
+      raise ValueError("退出计划不存在")
+    if not exit_record.strategy_run_id:
+      return _json_value(
+        await exit_plan_monitor.confirm_exit_intent(
+          plan_id=str(payload["plan_id"]),
+          intent_id=str(payload["intent_id"]),
+        )
+      )
     return _json_value(
-      await exit_plan_monitor.confirm_exit_intent(
+      await AutoExitPlanService(strategy_manager).confirm_managed_intent(
         plan_id=str(payload["plan_id"]),
         intent_id=str(payload["intent_id"]),
       )
     )
   if command_type == "EXIT_PLAN_REJECT_INTENT":
-    await AutoExitPlanService().reject_exit_intent(
-      plan_id=str(payload["plan_id"]),
-      intent_id=str(payload["intent_id"]),
-      reason=str(payload.get("reason") or "USER_REJECTED"),
-    )
+    async with AsyncSessionLocal() as db:
+      exit_record = await AutoExitPlanRepository(db).find_by_id(
+        str(payload["plan_id"])
+      )
+    if exit_record is None:
+      raise ValueError("退出计划不存在")
+    if exit_record.strategy_run_id:
+      await AutoExitPlanService(strategy_manager).reject_managed_intent(
+        plan_id=str(payload["plan_id"]),
+        intent_id=str(payload["intent_id"]),
+        reason=str(payload.get("reason") or "USER_REJECTED"),
+      )
+    else:
+      await AutoExitPlanService().reject_exit_intent(
+        plan_id=str(payload["plan_id"]),
+        intent_id=str(payload["intent_id"]),
+        reason=str(payload.get("reason") or "USER_REJECTED"),
+      )
     return {"success": True}
   if command_type == "WARM_CACHE_REFRESH_SOURCES":
     await intraday_warm_cache.refresh_source_symbols()

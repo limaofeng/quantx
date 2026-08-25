@@ -15,6 +15,7 @@ from quantx_domain.strategies.base import (
   StrategyCadence,
   StrategyInput,
   StrategyOutput,
+  StrategyRunIntentOrigin,
   TradeExecutionEvent,
   TradeIntent,
   TradeIntentDirection,
@@ -164,6 +165,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def step(self, input: StrategyInput) -> StrategyOutput:
     config = self._require_config()
+    plan_id = self._plan_id()
     if input.instrument_code != config.instrument_code:
       return StrategyOutput(
         decision_tags=["entry_instrument_mismatch"],
@@ -186,13 +188,18 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
         decision_tags=["entry_plan_paused"],
         trace_payload={
           "reason": "ENTRY_PLAN_PAUSED",
-          "plan_id": input.run_id,
+          "plan_id": plan_id,
           "phase": state.phase.value,
         },
       )
 
     state = _state_from_input(input, self.state.to_dict())
-    evaluation_context = _build_evaluation_context(input, config, state)
+    evaluation_context = _build_evaluation_context(
+      input,
+      config,
+      state,
+      plan_id=plan_id,
+    )
     result = self._evaluator.evaluate(config, state, evaluation_context)
     patch = RuntimeStatePatch(set={MANAGED_ENTRY_STATE_KEY: result.state.to_dict()})
     self.state.set(
@@ -228,6 +235,11 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
     intent = TradeIntent(
       strategy_id=input.strategy_id,
       run_id=input.run_id,
+      origin=StrategyRunIntentOrigin(
+        run_id=input.run_id,
+        strategy_id=input.strategy_id,
+        plan_id=plan_id,
+      ),
       instrument_code=input.instrument_code,
       direction=TradeIntentDirection.BUY,
       bucket=config.bucket,
@@ -247,7 +259,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
       metadata={
         "owner_type": "STRATEGY_RUN",
         "owner_id": input.run_id,
-        "entry_plan_id": input.run_id,
+        "entry_plan_id": plan_id,
         "entry_config_version": config.config_version,
         "entry_rule_id": decision.rule_id,
         "entry_rule_type": decision.rule_type,
@@ -258,7 +270,8 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
         "entry_cash_buffer_pct": config.pacing_policy.cash_buffer_pct,
         "exit_plan_template": _exit_plan_template_for_stage(
           config.exit_plan_template,
-          plan_id=input.run_id,
+          plan_id=plan_id,
+          run_id=input.run_id,
           stage_id=decision.stage_id,
         ),
       },
@@ -273,7 +286,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
       decision_tags=["managed_entry_intent", decision.rule_type.lower()],
       trace_payload={
         "reason": decision.reason,
-        "plan_id": input.run_id,
+        "plan_id": plan_id,
         "rule_id": decision.rule_id,
         "stage_id": decision.stage_id,
         "intent_id": decision.intent_id,
@@ -306,7 +319,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_order(self, event: OrderStateEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if str(metadata.get("entry_plan_id", "")) != self.context.run_id:
+    if str(metadata.get("entry_plan_id", "")) != self._plan_id():
       return None
     status = str(event.status or "").split(".")[-1].upper()
     if status not in TERMINAL_ORDER_STATUSES:
@@ -330,7 +343,7 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
 
   async def on_trade(self, event: TradeExecutionEvent) -> Optional[RuntimeStatePatch]:
     metadata = dict(event.metadata or {})
-    if str(metadata.get("entry_plan_id", "")) != self.context.run_id:
+    if str(metadata.get("entry_plan_id", "")) != self._plan_id():
       return None
     if event.instrument_code != self._require_config().instrument_code:
       return None
@@ -382,6 +395,10 @@ class AshareManagedEntryPlanStrategy(StrategyBase):
       raw = _mapping(self.context.parameters.get(MANAGED_ENTRY_STATE_KEY))
       self._config = ManagedEntryPlanConfig.from_dict(raw)
     return self._config
+
+  def _plan_id(self) -> str:
+    binding = _mapping(self.context.parameters.get("_managed_plan_binding"))
+    return str(binding.get("plan_id") or self.context.run_id)
 
 
 def _target_reached_after_fill(
@@ -438,6 +455,7 @@ def _exit_plan_template_for_stage(
   template: Optional[Mapping[str, Any]],
   *,
   plan_id: str,
+  run_id: Optional[str] = None,
   stage_id: str,
 ) -> Optional[Dict[str, Any]]:
   """Bind one independent exit plan to one entry slice.
@@ -456,7 +474,7 @@ def _exit_plan_template_for_stage(
       "plan_id": f"entry:{plan_id}:slice:{stage_id}",
       "source_type": "ENTRY_PLAN",
       "source_id": stage_id,
-      "run_id": plan_id,
+      "run_id": str(run_id or plan_id),
     }
   )
   metadata = dict(_mapping(result.get("metadata")))
@@ -469,6 +487,8 @@ def _build_evaluation_context(
   input: StrategyInput,
   config: ManagedEntryPlanConfig,
   state: ManagedEntryPlanState,
+  *,
+  plan_id: Optional[str] = None,
 ) -> EntryEvaluationContext:
   portfolio = _mapping(input.portfolio_state)
   account = _mapping(portfolio.get("account"))
@@ -523,7 +543,7 @@ def _build_evaluation_context(
       intraday = (*intraday, CausalPriceObservation(input.decision_time_ms, price))
   manual_rule_id = _manual_rule_id(input.event)
   return EntryEvaluationContext(
-    plan_id=input.run_id,
+    plan_id=str(plan_id or input.run_id),
     decision_time_ms=input.decision_time_ms,
     trade_date=input.trade_date,
     instrument_code=input.instrument_code,

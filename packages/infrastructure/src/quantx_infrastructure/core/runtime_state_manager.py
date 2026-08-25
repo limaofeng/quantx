@@ -4309,6 +4309,27 @@ class RuntimeStateManager:
 
     def _trade_intent_record_data(self, intent, *, status: str) -> Dict[str, Any]:
         metadata = dict(getattr(intent, "metadata", {}) or {})
+        origin = getattr(intent, "origin", None)
+        origin_type = _enum_value(getattr(origin, "origin_type", "STRATEGY_RUN"))
+        if origin_type == "MANUAL_COMMAND":
+            strategy_run_id = None
+            owner_type = "MANUAL_COMMAND"
+            owner_id = str(getattr(origin, "command_id", "") or "")
+            metadata.setdefault("manual_action_type", getattr(origin, "action_type", ""))
+            metadata.setdefault(
+                "liquidation_group_id",
+                getattr(origin, "liquidation_group_id", None),
+            )
+        else:
+            strategy_run_id = str(
+                getattr(origin, "run_id", None)
+                or getattr(intent, "run_id", self.run_id)
+                or self.run_id
+            )
+            owner_type = "STRATEGY_RUN"
+            owner_id = strategy_run_id
+            metadata.setdefault("plan_id", getattr(origin, "plan_id", None))
+        metadata.setdefault("origin_type", origin_type)
         metadata.setdefault(
             "execution_mode", _enum_value(getattr(intent, "execution_mode", "AUTO"))
         )
@@ -4322,7 +4343,9 @@ class RuntimeStateManager:
             metadata.setdefault("intent_created_at", created_at.isoformat())
         return {
             "id": str(getattr(intent, "intent_id", "") or ""),
-            "strategy_run_id": str(getattr(intent, "run_id", self.run_id) or self.run_id),
+            "strategy_run_id": strategy_run_id,
+            "owner_type": owner_type,
+            "owner_id": owner_id,
             "account_id": str(metadata.get("account_id") or "").strip() or None,
             "strategy_id": str(getattr(intent, "strategy_id", "") or ""),
             "instrument_code": str(getattr(intent, "instrument_code", "") or ""),
@@ -4346,6 +4369,8 @@ class RuntimeStateManager:
         allowed = {
             "id",
             "strategy_run_id",
+            "owner_type",
+            "owner_id",
             "account_id",
             "strategy_id",
             "instrument_code",

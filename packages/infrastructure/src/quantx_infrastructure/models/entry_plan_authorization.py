@@ -37,7 +37,6 @@ class EntryPlanAuthorizationGrant(Base, TimestampMixin):
       postgresql_where=text("revoked_at IS NULL AND invalidated_at IS NULL"),
       sqlite_where=text("revoked_at IS NULL AND invalidated_at IS NULL"),
     ),
-    CheckConstraint("plan_id = run_id", name="ck_entry_plan_auth_plan_run"),
     CheckConstraint(
       "max_total_amount_cny > 0 AND max_single_amount_cny > 0 "
       "AND max_daily_amount_cny > 0",

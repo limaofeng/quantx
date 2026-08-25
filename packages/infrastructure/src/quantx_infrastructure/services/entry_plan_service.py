@@ -38,7 +38,7 @@ from quantx_domain.trading.exit_plan import (
   ExitRuleSpec,
   ExitRuleType,
 )
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from quantx_infrastructure.core.utils import time_utils
 from quantx_infrastructure.database.relational_connection import AsyncSessionLocal
@@ -59,8 +59,13 @@ from quantx_infrastructure.models.enums import (
   StrategyRunStatus,
 )
 from quantx_infrastructure.models.instrument import Instrument
+from quantx_infrastructure.models.managed_plan import ManagedPlanRecord
 from quantx_infrastructure.models.position import Position
+from quantx_infrastructure.models.strategy_run import StrategyRun
 from quantx_infrastructure.models.trade_intent_record import TradeIntentRecord
+from quantx_infrastructure.repositories.managed_plan_repository import (
+  ManagedPlanRepository,
+)
 from quantx_infrastructure.repositories.strategy_repository import StrategyRepository
 from quantx_infrastructure.repositories.strategy_run_repository import (
   StrategyRunRepository,
@@ -75,6 +80,9 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationScope,
   EntryPlanAuthorizationService,
   scope_from_managed_entry_config,
+)
+from quantx_infrastructure.services.managed_plan_runtime_service import (
+  ManagedPlanRuntimeService,
 )
 
 MANAGED_ENTRY_STRATEGY_CLASS_NAME = "AshareManagedEntryPlanStrategy"
@@ -133,6 +141,12 @@ class _LoadedPlan:
   run: Any
   parameters: dict[str, Any]
   config: ManagedEntryPlanConfig
+  plan_id: str = ""
+  managed_plan: Optional[ManagedPlanRecord] = None
+
+  @property
+  def stable_plan_id(self) -> str:
+    return str(self.plan_id or getattr(self.run, "plan_id", "") or self.run.id)
 
 
 class EntryPlanService:
@@ -144,12 +158,17 @@ class EntryPlanService:
     *,
     session_factory: Callable[[], Any] = AsyncSessionLocal,
     authorization_service_factory: Callable[[Any], Any] = EntryPlanAuthorizationService,
+    managed_runtime_service_factory: Callable[..., Any] = ManagedPlanRuntimeService,
   ) -> None:
     if runtime_manager is None:
       raise RuntimeError("EntryPlan 操作只能由 QuantX Engine 执行")
     self._runtime_manager = runtime_manager
     self._session_factory = session_factory
     self._authorization_service_factory = authorization_service_factory
+    self._managed_runtime = managed_runtime_service_factory(
+      runtime_manager,
+      session_factory=session_factory,
+    )
 
   async def create(
     self,
@@ -217,33 +236,40 @@ class EntryPlanService:
           )
       await self._ensure_no_active_overlap(account_id, config)
       strategy_id = await self._strategy_template_id()
-      created_id = await self._runtime_manager.run_strategy(
+      run_id, _ = await self._managed_runtime.create(
+        plan_id=plan_id,
+        plan_kind="ENTRY",
+        account_id=account_id,
+        instrument_code=config.instrument_code,
+        config_snapshot=config.to_dict(),
+        state_migration_policy="INITIAL_ENTRY_STATE",
+        created_by_user_id=actor_user_id,
+        command_id=normalized_command_id or None,
         strategy_id=strategy_id,
         strategy_class=AshareManagedEntryPlanStrategy,
         mode=mode,
-        instruments=[config.instrument_code],
         parameters=parameters,
         name=f"买入托管-{config.instrument_code}",
-        auto_start=False,
-        run_id=plan_id,
+        start_immediately=False,
       )
-      if str(created_id) != plan_id:
-        raise RuntimeError("EntryPlan 与 StrategyRun 标识不一致")
 
       started = False
       if start_immediately and not authorization_required:
         try:
-          parameters = await self._activate_entry_plan(plan_id, parameters)
+          parameters = await self._activate_entry_plan(run_id, parameters)
+          await self._managed_runtime.set_status(plan_id, "RUNNING")
         except Exception:
-          await self._persist_run_status(plan_id, StrategyRunStatus.PAUSED)
+          await self._persist_run_status(run_id, StrategyRunStatus.PAUSED)
+          await self._managed_runtime.set_status(plan_id, "ERROR")
           raise
         started = True
       else:
-        await self._persist_run_status(plan_id, StrategyRunStatus.PAUSED)
+        await self._persist_run_status(run_id, StrategyRunStatus.PAUSED)
+        await self._managed_runtime.set_status(plan_id, "PAUSED")
 
     return {
       "plan_id": plan_id,
-      "run_id": plan_id,
+      "run_id": run_id,
       "config_version": config.config_version,
       "started": started,
       "authorization_required": authorization_required,
@@ -268,7 +294,8 @@ class EntryPlanService:
 
     async with _ENTRY_PLAN_COMMAND_LOCK:
       loaded = await self._load_owned_plan(plan_id, account_id)
-      await self._require_plan_not_terminal(plan_id)
+      old_run_id = str(loaded.run.id)
+      await self._require_plan_not_terminal(old_run_id)
       if (
         normalized_command_id
         and str(loaded.parameters.get(ENTRY_PLAN_LAST_COMMAND_ID_KEY) or "")
@@ -310,14 +337,14 @@ class EntryPlanService:
       ):
         raise ValueError("执行环境创建后不可切换，请为新环境创建独立计划")
 
-      runtime_was_running = self._runtime_is_running(plan_id)
+      runtime_was_running = self._runtime_is_running(old_run_id)
       plan_was_enabled = bool(
         loaded.parameters.get(ENTRY_PLAN_ENABLED_KEY, runtime_was_running)
       )
       if (
         runtime_was_running
         and plan_was_enabled
-        and not await self._pause_runtime_for_update(plan_id)
+        and not await self._pause_runtime_for_update(old_run_id)
       ):
         raise ValueError("计划正在产生或收敛交易事实，请暂停后再修改")
       if runtime_was_running and plan_was_enabled:
@@ -345,27 +372,46 @@ class EntryPlanService:
       }
       if normalized_command_id:
         parameters[ENTRY_PLAN_LAST_COMMAND_ID_KEY] = normalized_command_id
-      await self._require_plan_not_terminal(plan_id)
-      await self._runtime_manager.update_run_parameters(plan_id, parameters)
-      self._install_runtime_config(plan_id, updated)
+      await self._require_plan_not_terminal(old_run_id)
+      previous_state = await self._managed_runtime.load_state(old_run_id)
+      strategy_id = int(getattr(loaded.run, "strategy_id", 0) or 0)
+      if strategy_id <= 0:
+        strategy_id = await self._strategy_template_id()
+      run_id, _, _ = await self._managed_runtime.revise(
+        plan_id=plan_id,
+        expected_version=expected_version,
+        config_snapshot=updated.to_dict(),
+        parameters=parameters,
+        strategy_id=strategy_id,
+        strategy_class=AshareManagedEntryPlanStrategy,
+        mode=self._run_mode(updated),
+        name=f"买入托管-{updated.instrument_code}-v{updated.config_version}",
+        start_immediately=False,
+        state_migration_policy="PRESERVE_ENTRY_PROGRESS",
+        initial_state=previous_state,
+        created_by_user_id=actor_user_id,
+        command_id=normalized_command_id or None,
+      )
 
       runtime_resumed = False
       if runtime_was_running:
         if should_reenable:
-          parameters = await self._activate_entry_plan(plan_id, parameters)
+          parameters = await self._activate_entry_plan(run_id, parameters)
+          await self._managed_runtime.set_status(plan_id, "RUNNING")
           runtime_resumed = True
         else:
-          await self._require_plan_not_terminal(plan_id)
-          runtime_resumed = await self._start_or_resume(plan_id)
+          await self._require_plan_not_terminal(run_id)
+          runtime_resumed = await self._start_or_resume(run_id)
           if not runtime_resumed:
             raise RuntimeError("计划配置已保存，但恢复监控失败")
+          await self._managed_runtime.set_status(plan_id, "RUNNING")
       enabled_after_update = bool(
         runtime_resumed and parameters[ENTRY_PLAN_ENABLED_KEY]
       )
 
     return {
       "plan_id": plan_id,
-      "run_id": plan_id,
+      "run_id": run_id,
       "config_version": updated.config_version,
       "started": enabled_after_update and runtime_resumed,
       "authorization_required": self._requires_live_auto_authorization(updated),
@@ -386,9 +432,10 @@ class EntryPlanService:
 
     async with _ENTRY_PLAN_COMMAND_LOCK:
       loaded = await self._load_owned_plan(normalized_plan_id, normalized_account_id)
+      run_id = str(loaded.run.id)
       self._require_version(loaded.config, expected_version)
       if enabled:
-        await self._require_plan_not_terminal(normalized_plan_id)
+        await self._require_plan_not_terminal(run_id)
         if self._requires_live_auto_authorization(loaded.config):
           await self._require_live_auto_authorization(
             normalized_plan_id,
@@ -396,9 +443,10 @@ class EntryPlanService:
             loaded.config,
           )
         await self._activate_entry_plan(
-          normalized_plan_id,
+          run_id,
           loaded.parameters,
         )
+        await self._managed_runtime.set_status(normalized_plan_id, "RUNNING")
         success = True
         code = "ENTRY_PLAN_ARMED"
       else:
@@ -407,29 +455,31 @@ class EntryPlanService:
         reconciled_zero_intent_id = ""
         if facts.pending_intent_id:
           rejection = await self._runtime_manager.executor.reject_trade_intent(
-            normalized_plan_id,
+            run_id,
             facts.pending_intent_id,
             reason="ENTRY_PLAN_PAUSED",
           )
           if (
             not bool(dict(rejection or {}).get("success"))
-            and self._runtime_manager.get_run(normalized_plan_id) is None
+            and self._runtime_manager.get_run(run_id) is None
           ):
             reconciled_zero_intent_id = await self._terminalize_offline_awaiting_intent(
-              normalized_plan_id,
+              run_id,
               facts.pending_intent_id,
               account_id=normalized_account_id,
               instrument_code=loaded.config.instrument_code,
               reason="ENTRY_PLAN_PAUSED",
+              stable_plan_id=normalized_plan_id,
             )
         await self._set_phase(
-          normalized_plan_id,
+          run_id,
           EntryPlanStatus.PAUSED,
           reason="USER_PAUSED",
           reconciled_zero_intent_id=reconciled_zero_intent_id,
         )
         success = True
         code = "ENTRY_PLAN_PAUSED"
+        await self._managed_runtime.set_status(normalized_plan_id, "PAUSED")
 
     return {
       "success": success,
@@ -454,6 +504,7 @@ class EntryPlanService:
 
     async with _ENTRY_PLAN_COMMAND_LOCK:
       loaded = await self._load_owned_plan(normalized_plan_id, normalized_account_id)
+      run_id = str(loaded.run.id)
       self._require_version(loaded.config, expected_version)
       await self._revoke_authorization(
         normalized_plan_id,
@@ -465,25 +516,26 @@ class EntryPlanService:
       reconciled_zero_intent_id = ""
       if facts.pending_intent_id:
         rejection = await self._runtime_manager.executor.reject_trade_intent(
-          normalized_plan_id,
+          run_id,
           facts.pending_intent_id,
           reason="ENTRY_PLAN_CANCELLED",
         )
         if (
           not bool(dict(rejection or {}).get("success"))
-          and self._runtime_manager.get_run(normalized_plan_id) is None
+          and self._runtime_manager.get_run(run_id) is None
         ):
           reconciled_zero_intent_id = await self._terminalize_offline_awaiting_intent(
-            normalized_plan_id,
+            run_id,
             facts.pending_intent_id,
             account_id=normalized_account_id,
             instrument_code=loaded.config.instrument_code,
             reason="ENTRY_PLAN_CANCELLED",
+            stable_plan_id=normalized_plan_id,
           )
       facts = await self._facts(normalized_plan_id)
       pending_work = bool(facts.active_intent_id or facts.has_working_order)
       terminal_phase = await self._request_terminal(
-        normalized_plan_id,
+        run_id,
         EntryPlanStatus.CANCELLED,
         reason="USER_CANCELLED",
         pending_work=pending_work,
@@ -495,7 +547,7 @@ class EntryPlanService:
       cancel_count = 0
       if draining and cancel_working_order:
         cancel_count = await self._runtime_manager.executor.cancel_open_buy_orders(
-          normalized_plan_id,
+          run_id,
           "ENTRY_PLAN_CANCELLED",
         )
         facts = await self._facts(normalized_plan_id)
@@ -505,7 +557,7 @@ class EntryPlanService:
           and facts.reconciled_zero_intent_id
         ):
           terminal_phase = await self._request_terminal(
-            normalized_plan_id,
+            run_id,
             EntryPlanStatus.CANCELLED,
             reason="USER_CANCELLED",
             pending_work=False,
@@ -516,7 +568,11 @@ class EntryPlanService:
         # ExitPlanBook may still protect filled lots.  The generic stop guard
         # correctly keeps such a runtime alive while the entry phase stays
         # CANCELLED and cannot emit another BUY.
-        await self._runtime_manager.stop_strategy(normalized_plan_id)
+        await self._runtime_manager.stop_strategy(run_id)
+      await self._managed_runtime.set_status(
+        normalized_plan_id,
+        "DRAINING" if draining else "CANCELLED",
+      )
 
     return {
       "success": True,
@@ -533,9 +589,10 @@ class EntryPlanService:
     account_id: str,
   ) -> dict[str, Any]:
     normalized_plan_id = self._required_text(plan_id, "计划不能为空")
-    await self._load_owned_plan(normalized_plan_id, account_id)
-    runtime = self._runtime_manager.get_run(normalized_plan_id)
-    if runtime is None or not self._runtime_is_running(normalized_plan_id):
+    loaded = await self._load_owned_plan(normalized_plan_id, account_id)
+    run_id = str(loaded.run.id)
+    runtime = self._runtime_manager.get_run(run_id)
+    if runtime is None or not self._runtime_is_running(run_id):
       raise ValueError("计划未在监控，不能立即检查")
     if getattr(runtime, "durable_event_barrier_key", None):
       raise ValueError("持久化成交回报尚未收敛，暂不执行新的计划检查")
@@ -575,6 +632,7 @@ class EntryPlanService:
     normalized_plan_id = self._required_text(plan_id, "计划不能为空")
     normalized_rule_id = self._required_text(rule_id, "人工触发规则不能为空")
     loaded = await self._load_owned_plan(normalized_plan_id, account_id)
+    run_id = str(loaded.run.id)
     rule = next(
       (
         item
@@ -590,8 +648,8 @@ class EntryPlanService:
     if loaded.parameters.get(ENTRY_PLAN_ENABLED_KEY) is not True:
       raise ValueError("计划已暂停，不能人工触发买入")
 
-    runtime = self._runtime_manager.get_run(normalized_plan_id)
-    if runtime is None or not self._runtime_is_running(normalized_plan_id):
+    runtime = self._runtime_manager.get_run(run_id)
+    if runtime is None or not self._runtime_is_running(run_id):
       raise ValueError("计划未在监控，不能人工触发")
     if getattr(runtime, "durable_event_barrier_key", None):
       raise ValueError("持久化成交回报尚未收敛，暂不接受人工触发")
@@ -627,8 +685,8 @@ class EntryPlanService:
   ) -> dict[str, Any]:
     normalized_plan_id = self._required_text(plan_id, "计划不能为空")
     normalized_intent_id = self._required_text(intent_id, "买入意图不能为空")
-    await self._load_owned_plan(normalized_plan_id, account_id)
-    runtime = self._runtime_manager.get_run(normalized_plan_id)
+    loaded = await self._load_owned_plan(normalized_plan_id, account_id)
+    runtime = self._runtime_manager.get_run(str(loaded.run.id))
     if runtime is None:
       raise ValueError("计划尚未恢复到 Engine")
     intent = runtime.pending_approvals.get(normalized_intent_id)
@@ -780,10 +838,13 @@ class EntryPlanService:
   def authorization_scope(
     plan_id: str,
     config: ManagedEntryPlanConfig | Mapping[str, Any],
+    *,
+    run_id: str,
   ) -> EntryPlanAuthorizationScope:
     """Build the one canonical scope used by preview, start and order gates."""
     return scope_from_managed_entry_config(
       plan_id=str(plan_id),
+      run_id=str(run_id),
       config=config,
     )
 
@@ -1017,7 +1078,8 @@ class EntryPlanService:
       )
       state_repository = StrategyRunStateRepository(db)
       for run in runs:
-        if str(run.id) == str(exclude_plan_id or ""):
+        other_plan_id = str(getattr(run, "plan_id", "") or run.id)
+        if other_plan_id == str(exclude_plan_id or ""):
           continue
         parameters = self._mapping(run.parameters)
         other_account_id = str(parameters.get("account_id") or "")
@@ -1052,10 +1114,10 @@ class EntryPlanService:
             str(item or "").upper() for item in list(run.instruments or [])
           ]
           if config.instrument_code in instruments:
-            raise ValueError(f"ACTIVE_ENTRY_PLAN_EXISTS:{run.id}")
+            raise ValueError(f"ACTIVE_ENTRY_PLAN_EXISTS:{other_plan_id}")
           continue
         if other.instrument_code == config.instrument_code:
-          raise ValueError(f"ACTIVE_ENTRY_PLAN_EXISTS:{run.id}")
+          raise ValueError(f"ACTIVE_ENTRY_PLAN_EXISTS:{other_plan_id}")
 
   async def _load_owned_plan_if_exists(
     self,
@@ -1063,19 +1125,38 @@ class EntryPlanService:
     account_id: str,
   ) -> Optional[_LoadedPlan]:
     async with self._session_factory() as db:
-      run = await StrategyRunRepository(db).find_run_by_id(plan_id)
+      run_repo = StrategyRunRepository(db)
+      run = await run_repo.find_run_by_id(plan_id)
+      managed_plan = None
+      stable_plan_id = plan_id
+      if run is None:
+        managed_plan = await ManagedPlanRepository(db).find(plan_id)
+        if managed_plan is None or not managed_plan.current_run_id:
+          return None
+        run = await run_repo.find_run_by_id(str(managed_plan.current_run_id))
     if run is None:
       return None
-    return self._owned_plan_from_run(run, account_id)
+    return self._owned_plan_from_run(
+      run,
+      account_id,
+      plan_id=stable_plan_id,
+      managed_plan=managed_plan,
+    )
 
   async def _load_owned_plan(self, plan_id: str, account_id: str) -> _LoadedPlan:
-    async with self._session_factory() as db:
-      run = await StrategyRunRepository(db).find_run_by_id(plan_id)
-    if run is None:
+    loaded = await self._load_owned_plan_if_exists(plan_id, account_id)
+    if loaded is None:
       raise ValueError("建仓/加仓计划不存在")
-    return self._owned_plan_from_run(run, account_id)
+    return loaded
 
-  def _owned_plan_from_run(self, run: Any, account_id: str) -> _LoadedPlan:
+  def _owned_plan_from_run(
+    self,
+    run: Any,
+    account_id: str,
+    *,
+    plan_id: Optional[str] = None,
+    managed_plan: Optional[ManagedPlanRecord] = None,
+  ) -> _LoadedPlan:
     if (
       getattr(run, "strategy", None) is None
       or str(run.strategy.class_name) != MANAGED_ENTRY_STRATEGY_CLASS_NAME
@@ -1093,7 +1174,22 @@ class EntryPlanService:
     run_mode = self._status_value(getattr(run, "mode", ""))
     if run_mode and run_mode != config.execution_policy.environment.value:
       raise ValueError("建仓计划执行环境与 StrategyRun 模式不一致")
-    return _LoadedPlan(run=run, parameters=parameters, config=config)
+    binding = self._mapping(parameters.get("_managed_plan_binding"))
+    stable_plan_id = str(
+      plan_id or getattr(run, "plan_id", "") or binding.get("plan_id") or run.id
+    )
+    persisted_plan_id = str(
+      getattr(run, "plan_id", "") or binding.get("plan_id") or stable_plan_id
+    )
+    if persisted_plan_id != stable_plan_id:
+      raise ValueError("建仓计划配置与稳定计划身份不一致")
+    return _LoadedPlan(
+      plan_id=stable_plan_id,
+      run=run,
+      parameters=parameters,
+      config=config,
+      managed_plan=managed_plan,
+    )
 
   async def _converge_replayed_create(
     self,
@@ -1108,7 +1204,7 @@ class EntryPlanService:
     saved_baseline = loaded.config.to_dict()["target_policy"]["baseline_snapshot"]
     requested = self._build_config(
       self._with_authoritative_baseline(raw_input, saved_baseline),
-      plan_id=str(loaded.run.id),
+      plan_id=loaded.stable_plan_id,
       account_id=str(loaded.parameters.get("account_id") or ""),
       config_version=loaded.config.config_version,
     )
@@ -1122,44 +1218,46 @@ class EntryPlanService:
     ):
       raise ValueError("ENTRY_COMMAND_REPLAY_CONFLICT:创建命令备注不一致")
 
-    plan_id = str(loaded.run.id)
+    plan_id = loaded.stable_plan_id
+    run_id = str(loaded.run.id)
     authorization_required = self._requires_live_auto_authorization(loaded.config)
     start_requested = bool(raw_input.get("start_immediately", False))
     started = False
     if start_requested and not authorization_required:
       try:
-        await self._activate_entry_plan(plan_id, loaded.parameters)
+        await self._activate_entry_plan(run_id, loaded.parameters)
       except Exception:
-        await self._persist_run_status(plan_id, StrategyRunStatus.PAUSED)
+        await self._persist_run_status(run_id, StrategyRunStatus.PAUSED)
         raise
       started = True
     else:
       await self._set_entry_enabled(loaded, False)
       await self._set_phase(
-        plan_id,
+        run_id,
         EntryPlanStatus.PAUSED,
         reason="CREATE_REPLAY_PAUSED",
       )
-      await self._persist_run_status(plan_id, StrategyRunStatus.PAUSED)
+      await self._persist_run_status(run_id, StrategyRunStatus.PAUSED)
 
     return {
       "plan_id": plan_id,
-      "run_id": plan_id,
+      "run_id": run_id,
       "config_version": loaded.config.config_version,
       "started": started,
       "authorization_required": authorization_required,
     }
 
   def _idempotent_update_result(self, loaded: _LoadedPlan) -> dict[str, Any]:
-    plan_id = str(loaded.run.id)
-    self._install_runtime_config(plan_id, loaded.config)
+    plan_id = loaded.stable_plan_id
+    run_id = str(loaded.run.id)
+    self._install_runtime_config(run_id, loaded.config)
     return {
       "plan_id": plan_id,
-      "run_id": plan_id,
+      "run_id": run_id,
       "config_version": loaded.config.config_version,
       "started": bool(
         loaded.parameters.get(ENTRY_PLAN_ENABLED_KEY) is True
-        and self._runtime_is_running(plan_id)
+        and self._runtime_is_running(run_id)
       ),
       "authorization_required": self._requires_live_auto_authorization(loaded.config),
     }
@@ -1172,6 +1270,7 @@ class EntryPlanService:
     account_id: str,
     instrument_code: str,
     reason: str,
+    stable_plan_id: Optional[str] = None,
   ) -> str:
     """Close a no-runtime approval only after proving no order side effect exists."""
 
@@ -1186,13 +1285,14 @@ class EntryPlanService:
       if intent is None:
         return ""
       metadata = dict(intent.intent_metadata or {})
+      expected_plan_id = str(stable_plan_id or plan_id)
       if (
         str(intent.strategy_run_id or "") != plan_id
         or (intent.account_id and str(intent.account_id) != account_id)
         or str(intent.instrument_code or "").upper() != instrument_code.upper()
         or str(intent.direction or "").upper() != "BUY"
         or str(intent.status or "").upper() != "AWAITING_APPROVAL"
-        or str(metadata.get("entry_plan_id") or "") != plan_id
+        or str(metadata.get("entry_plan_id") or "") != expected_plan_id
         or str(metadata.get("execution_mode") or "").upper() != "MANUAL_CONFIRM"
       ):
         return ""
@@ -1266,12 +1366,25 @@ class EntryPlanService:
 
   async def _facts(self, plan_id: str) -> EntryPlanFacts:
     async with self._session_factory() as db:
+      run_ids = list(
+        (
+          await db.execute(
+            select(StrategyRun.id).where(
+              or_(StrategyRun.id == plan_id, StrategyRun.plan_id == plan_id)
+            )
+          )
+        )
+        .scalars()
+        .all()
+      )
+      if not run_ids:
+        run_ids = [plan_id]
       intents = list(
         (
           await db.execute(
             select(TradeIntentRecord)
             .where(
-              TradeIntentRecord.strategy_run_id == plan_id,
+              TradeIntentRecord.strategy_run_id.in_(tuple(run_ids)),
               TradeIntentRecord.direction == "BUY",
             )
             .order_by(TradeIntentRecord.created_at.desc(), TradeIntentRecord.id.desc())
@@ -1283,7 +1396,7 @@ class EntryPlanService:
       working_order = await db.scalar(
         select(PendingTradeOrder.client_order_id)
         .where(
-          PendingTradeOrder.strategy_run_id == plan_id,
+          PendingTradeOrder.strategy_run_id.in_(tuple(run_ids)),
           PendingTradeOrder.side == "BUY",
           PendingTradeOrder.status.in_(tuple(_WORKING_ORDER_STATUSES)),
         )
@@ -1331,6 +1444,8 @@ class EntryPlanService:
     plan_id: str,
     account_id: str,
     config: ManagedEntryPlanConfig,
+    *,
+    run_id: Optional[str] = None,
   ) -> None:
     # Refresh the server-owned facts to fail closed on stale account,
     # position, instrument or rollout data.  Do not compare the composite
@@ -1343,7 +1458,13 @@ class EntryPlanService:
       config.instrument_code,
       EntryEnvironment.LIVE,
     )
-    scope = self.authorization_scope(plan_id, config)
+    resolved_run_id = str(run_id or "")
+    if not resolved_run_id:
+      try:
+        resolved_run_id = await self._managed_runtime.current_run_id(plan_id)
+      except (RuntimeError, ValueError):
+        resolved_run_id = plan_id
+    scope = self.authorization_scope(plan_id, config, run_id=resolved_run_id)
     async with self._session_factory() as db:
       validation = await self._authorization_service_factory(db).validate_or_invalidate(
         plan_id=plan_id,
@@ -1384,8 +1505,18 @@ class EntryPlanService:
     parameters: Mapping[str, Any],
     enabled: bool,
   ) -> dict[str, Any]:
+    runtime = self._runtime_manager.get_run(plan_id)
+    runtime_context = getattr(runtime, "context", None)
+    runtime_parameters = getattr(runtime_context, "parameters", None)
+    if not isinstance(runtime_parameters, Mapping):
+      runtime_parameters = getattr(runtime, "parameters", None)
     parameters = {
       **dict(parameters),
+      **(
+        dict(runtime_parameters)
+        if isinstance(runtime_parameters, Mapping)
+        else {}
+      ),
       ENTRY_PLAN_ENABLED_KEY: bool(enabled),
     }
     await self._runtime_manager.update_run_parameters(
@@ -1961,7 +2092,9 @@ class EntryPlanService:
     expiry = dict(intent.expiry_policy or {})
     return {
       "intent_id": intent.intent_id,
-      "plan_id": intent.run_id,
+      "plan_id": str(
+        (intent.metadata or {}).get("entry_plan_id") or intent.run_id
+      ),
       "instrument_code": intent.instrument_code,
       "valid": bool(valid),
       "code": str(code or ""),

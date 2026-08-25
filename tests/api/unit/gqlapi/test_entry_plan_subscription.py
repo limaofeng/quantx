@@ -10,7 +10,13 @@ from quantx_api.gqlapi.schemas import entry_plan_schema
 async def test_entry_plan_subscription_emits_initial_and_changed_projection_only(
   monkeypatch,
 ):
-  plans = iter(["plan-v1", "plan-v1", "plan-v2"])
+  plans = iter(
+    [
+      SimpleNamespace(run_id="run-1", value="plan-v1"),
+      SimpleNamespace(run_id="run-1", value="plan-v1"),
+      SimpleNamespace(run_id="run-2", value="plan-v2"),
+    ]
+  )
 
   async def get_plan(_account_id: str, _plan_id: str):
     return next(plans)
@@ -26,8 +32,8 @@ async def test_entry_plan_subscription_emits_initial_and_changed_projection_only
   subscription = entry_plan_schema.EntryPlanSubscription().entry_plan_updated(
     object(), "plan-1"
   )
-  assert await anext(subscription) == "plan-v1"
-  assert await anext(subscription) == "plan-v2"
+  assert (await anext(subscription)).value == "plan-v1"
+  assert (await anext(subscription)).value == "plan-v2"
 
 
 @pytest.mark.asyncio
@@ -41,7 +47,7 @@ async def test_entry_intent_subscription_is_plan_scoped(monkeypatch):
   )
 
   async def get_plan(_account_id: str, _plan_id: str):
-    return "owned-plan"
+    return SimpleNamespace(run_id="run-1")
 
   async def pending(_account_id: str):
     return next(projections)

@@ -745,19 +745,19 @@ async def _consume_exact_auto_entry_fill(
       raise ValueError("LIVE 自动买入成交账户或标的与权威命令不匹配")
     metadata = dict(pending.request_metadata or {})
     plan_id = str(metadata.get("entry_plan_id") or "")
+    run_id = str(pending.strategy_run_id or "")
     grant_id = str(metadata.get("auto_entry_authorization_grant_id") or "")
     if not plan_id or not grant_id:
       return
-    if str(pending.strategy_run_id or "") != plan_id or not bool(
-      metadata.get("exact_auto_entry_authorized")
-    ):
+    if not run_id or not bool(metadata.get("exact_auto_entry_authorized")):
       raise ValueError("LIVE 自动买入成交缺少已验证的计划授权关联")
     intent = await db.get(TradeIntentRecord, str(pending.intent_id or ""))
     intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
     if (
       intent is None
-      or str(intent.strategy_run_id or "") != plan_id
+      or str(intent.strategy_run_id or "") != run_id
       or str(intent.direction or "").upper() != "BUY"
+      or str(intent_metadata.get("entry_plan_id") or plan_id) != plan_id
       or str(intent_metadata.get("execution_mode") or "").upper() != "AUTO"
       or str(intent_metadata.get("auto_entry_authorization_grant_id") or "") != grant_id
     ):
@@ -2216,10 +2216,11 @@ async def _full_snapshot_zero_fill_items(
       **dict(correlation.request_metadata or {}),
     }
     plan_id = str(request_metadata.get("entry_plan_id") or "").strip()
+    run_id = str(pending.strategy_run_id or "").strip()
     if (
       not plan_id
-      or plan_id != str(correlation.strategy_run_id or "")
-      or plan_id != str(pending.strategy_run_id or "")
+      or not run_id
+      or run_id != str(correlation.strategy_run_id or "")
       or str(correlation.account_id or "") != account_id
       or str(pending.account_id or "") != account_id
       or str(pending.instrument_code or "").upper() != instrument_code
@@ -2248,7 +2249,7 @@ async def _full_snapshot_zero_fill_items(
       continue
     if (
       intent is None
-      or str(intent.strategy_run_id or "") != plan_id
+      or str(intent.strategy_run_id or "") != run_id
       or str(intent.direction or "").upper() != "BUY"
       or str(intent.instrument_code or "").upper() != instrument_code
       or (intent.account_id and str(intent.account_id) != account_id)
@@ -2416,6 +2417,7 @@ async def _command_expired_entry_zero_fill_reconciliation(
   plan_id = str(
     request_metadata.get("entry_plan_id") or intent_metadata.get("entry_plan_id") or ""
   ).strip()
+  run_id = str(pending.strategy_run_id or "").strip()
   try:
     executed_volume = int(intent.executed_volume or 0)
     executed_price = Decimal(str(intent.executed_price or 0))
@@ -2423,9 +2425,9 @@ async def _command_expired_entry_zero_fill_reconciliation(
     return None
   if (
     not plan_id
-    or plan_id != str(pending.strategy_run_id or "")
-    or plan_id != str(correlation.strategy_run_id or "")
-    or plan_id != str(intent.strategy_run_id or "")
+    or not run_id
+    or run_id != str(correlation.strategy_run_id or "")
+    or run_id != str(intent.strategy_run_id or "")
     or str(pending.side or "").upper() != "BUY"
     or str(intent.direction or "").upper() != "BUY"
     or str(intent_metadata.get("entry_plan_id") or "") != plan_id

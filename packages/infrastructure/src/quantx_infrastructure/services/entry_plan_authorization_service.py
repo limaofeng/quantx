@@ -136,9 +136,9 @@ def _decimal(
 def normalize_scope(scope: EntryPlanAuthorizationScope) -> EntryPlanAuthorizationScope:
   plan_id = str(scope.plan_id or "").strip()
   run_id = str(scope.run_id or "").strip()
-  if not plan_id or plan_id != run_id:
+  if not plan_id or not run_id:
     raise EntryPlanAuthorizationError(
-      "PLAN_RUN_MISMATCH", "EntryPlan ID 必须等于 StrategyRun ID"
+      "PLAN_RUN_REQUIRED", "自动买入授权必须同时绑定计划与当前 StrategyRun"
     )
   if int(scope.config_version or 0) <= 0:
     raise EntryPlanAuthorizationError("INVALID_CONFIG_VERSION", "配置版本必须大于零")
@@ -244,6 +244,7 @@ def _token_digest(token: str) -> str:
 def scope_from_managed_entry_config(
   *,
   plan_id: str,
+  run_id: Optional[str] = None,
   config: Mapping[str, Any] | ManagedEntryPlanConfig,
 ) -> EntryPlanAuthorizationScope:
   """Build the one canonical authorization scope used by every execution gate.
@@ -289,7 +290,7 @@ def scope_from_managed_entry_config(
   return normalize_scope(
     EntryPlanAuthorizationScope(
       plan_id=str(plan_id),
-      run_id=str(plan_id),
+      run_id=str(run_id or plan_id),
       config_version=normalized_config.config_version,
       plan_fingerprint=_canonical(canonical_config),
       rule_fingerprint=_canonical(

@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from quantx_domain.clock import to_naive_utc, utcnow
 from quantx_domain.strategies.ashare_managed_entry_plan import (
@@ -439,11 +439,13 @@ class TradeCommandService:
     self,
     *,
     plan_id: str,
+    strategy_run_id: str = "",
     account_id: str,
     instrument_code: str,
     working_orders: list[PendingTradeOrder],
     invalidate_auto_external_buy: bool = False,
   ) -> None:
+    strategy_run_id = str(strategy_run_id or plan_id)
     instrument_orders = [
       order
       for order in working_orders
@@ -454,7 +456,7 @@ class TradeCommandService:
       status = str(order.status or "").upper()
       metadata = dict(getattr(order, "request_metadata", None) or {})
       belongs_to_plan = (
-        str(getattr(order, "strategy_run_id", "") or "") == plan_id
+        str(getattr(order, "strategy_run_id", "") or "") == strategy_run_id
         or str(metadata.get("entry_plan_id") or "") == plan_id
       )
       if side == "SELL" or status == "RECONCILE_REQUIRED":
@@ -477,7 +479,7 @@ class TradeCommandService:
     reconcile_intent = await self.db.scalar(
       select(TradeIntentRecord.id)
       .where(
-        TradeIntentRecord.strategy_run_id == plan_id,
+        TradeIntentRecord.strategy_run_id == strategy_run_id,
         TradeIntentRecord.instrument_code == instrument_code,
         TradeIntentRecord.status == "RECONCILE_REQUIRED",
       )
@@ -528,6 +530,7 @@ class TradeCommandService:
     self,
     *,
     plan_id: str,
+    strategy_run_id: str = "",
     account_id: str,
     instrument_code: str,
     working_orders: list[PendingTradeOrder],
@@ -544,6 +547,7 @@ class TradeCommandService:
     reconciliation rather than allowing a second broker order.
     """
 
+    strategy_run_id = str(strategy_run_id or plan_id)
     trading_day_start = datetime.combine(time_utils.today(), datetime.min.time())
     trading_day_end = trading_day_start + timedelta(days=1)
     authoritative_orders = list(
@@ -628,7 +632,7 @@ class TradeCommandService:
     for order, pending in represented_unknown:
       metadata = dict(getattr(pending, "request_metadata", None) or {})
       belongs_to_plan = (
-        str(getattr(pending, "strategy_run_id", "") or "") == plan_id
+        str(getattr(pending, "strategy_run_id", "") or "") == strategy_run_id
         or str(metadata.get("entry_plan_id") or "") == plan_id
       )
       conflicts.append((order, not belongs_to_plan))
@@ -640,7 +644,7 @@ class TradeCommandService:
         metadata = dict(correlation.request_metadata or {})
         belongs_to_plan = (
           str(order.stock_code or "") == instrument_code
-          and str(correlation.strategy_run_id or "") == plan_id
+          and str(correlation.strategy_run_id or "") == strategy_run_id
           and str(metadata.get("entry_plan_id") or "") == plan_id
         )
       conflicts.append((order, not belongs_to_plan))
@@ -681,10 +685,12 @@ class TradeCommandService:
     self,
     *,
     plan_id: str,
+    strategy_run_id: str = "",
     account_id: str,
     instrument_code: str,
     grant: EntryPlanAuthorizationGrant,
   ) -> None:
+    strategy_run_id = str(strategy_run_id or plan_id)
     authorized_at = getattr(grant, "authorized_at", None)
     if authorized_at is None:
       raise AgentUnavailableError("自动买入授权缺少生效时间")
@@ -719,7 +725,7 @@ class TradeCommandService:
     attributed_order_ids = {
       str(item.broker_order_id)
       for item in correlations
-      if str(item.strategy_run_id or "") == plan_id
+      if str(item.strategy_run_id or "") == strategy_run_id
     }
     if broker_order_ids - attributed_order_ids:
       await EntryPlanAuthorizationService(self.db).invalidate(
@@ -813,14 +819,14 @@ class TradeCommandService:
     grant_id = str(
       request_metadata.get("auto_entry_authorization_grant_id") or ""
     ).strip()
-    if not plan_id or plan_id != str(strategy_run_id or "") or not grant_id:
+    if not plan_id or not str(strategy_run_id or "").strip() or not grant_id:
       raise AgentUnavailableError("自动买入命令缺少精确计划与 grant 绑定")
 
     run_row = (
       await self.db.execute(
         select(StrategyRun, Strategy)
         .join(Strategy, Strategy.id == StrategyRun.strategy_id)
-        .where(StrategyRun.id == plan_id)
+        .where(StrategyRun.id == strategy_run_id)
         .with_for_update()
       )
     ).one_or_none()
@@ -828,19 +834,30 @@ class TradeCommandService:
       raise AgentUnavailableError("自动买入对应建仓计划不存在")
     run, strategy = run_row
     parameters = dict(run.parameters or {})
+    bound_plan_id = str(getattr(run, "plan_id", "") or "").strip()
+    if not bound_plan_id:
+      binding = parameters.get("_managed_plan_binding")
+      if isinstance(binding, Mapping):
+        bound_plan_id = str(binding.get("plan_id") or "").strip()
+    bound_plan_id = bound_plan_id or str(getattr(run, "id", strategy_run_id))
     if (
       strategy.class_name != "AshareManagedEntryPlanStrategy"
       or self._enum_value(run.mode) != "live"
       or self._enum_value(run.status) != "running"
       or parameters.get(ENTRY_PLAN_ENABLED_KEY) is not True
       or list(run.instruments or []) != [instrument_code]
+      or bound_plan_id != plan_id
     ):
       raise AgentUnavailableError("建仓计划已暂停、终止或不再绑定当前标的")
     try:
       config = ManagedEntryPlanConfig.from_dict(
         dict(parameters.get("managed_entry_plan") or {})
       )
-      scope = scope_from_managed_entry_config(plan_id=plan_id, config=config)
+      scope = scope_from_managed_entry_config(
+        plan_id=plan_id,
+        config=config,
+        run_id=strategy_run_id,
+      )
     except (TypeError, ValueError) as exc:
       raise AgentUnavailableError("建仓计划权威配置无效") from exc
     if (
@@ -859,7 +876,7 @@ class TradeCommandService:
     intent_metadata = dict(intent.intent_metadata or {}) if intent is not None else {}
     if (
       intent is None
-      or str(intent.strategy_run_id or "") != plan_id
+      or str(intent.strategy_run_id or "") != strategy_run_id
       or str(intent.instrument_code or "") != instrument_code
       or str(intent.direction or "").upper() != "BUY"
       or str(intent.bucket or "").lower() != config.bucket
@@ -883,7 +900,7 @@ class TradeCommandService:
     plan_state = (
       await self.db.execute(
         select(StrategyRunState)
-        .where(StrategyRunState.run_id == plan_id)
+        .where(StrategyRunState.run_id == strategy_run_id)
         .with_for_update()
       )
     ).scalar_one_or_none()
@@ -962,6 +979,7 @@ class TradeCommandService:
       raise AgentUnavailableError("自动买入精确授权不存在")
     await self._require_no_conflicting_entry_exit(
       plan_id=plan_id,
+      strategy_run_id=strategy_run_id,
       account_id=account_id,
       instrument_code=instrument_code,
       working_orders=active_pending,
@@ -969,6 +987,7 @@ class TradeCommandService:
     )
     await self._require_no_authoritative_entry_order_conflict(
       plan_id=plan_id,
+      strategy_run_id=strategy_run_id,
       account_id=account_id,
       instrument_code=instrument_code,
       working_orders=active_pending,
@@ -1055,6 +1074,7 @@ class TradeCommandService:
       raise AgentUnavailableError(f"自动买入精确授权已失效：{validation.code}")
     await self._require_no_unattributed_buy_trades(
       plan_id=plan_id,
+      strategy_run_id=strategy_run_id,
       account_id=account_id,
       instrument_code=instrument_code,
       grant=grant,
@@ -1135,6 +1155,12 @@ class TradeCommandService:
       raise AgentUnavailableError("逐笔确认对应建仓计划不存在")
     run, strategy = row
     parameters = dict(run.parameters or {})
+    bound_plan_id = str(getattr(run, "plan_id", "") or "").strip()
+    if not bound_plan_id:
+      binding = parameters.get("_managed_plan_binding")
+      if isinstance(binding, Mapping):
+        bound_plan_id = str(binding.get("plan_id") or "").strip()
+    bound_plan_id = bound_plan_id or str(getattr(run, "id", strategy_run_id))
     if (
       strategy.class_name != "AshareManagedEntryPlanStrategy"
       or self._enum_value(run.mode) != "live"
@@ -1159,7 +1185,7 @@ class TradeCommandService:
       or str(intent.instrument_code or "") != instrument_code
       or str(intent.direction or "").upper() != "BUY"
       or str(intent.status or "").upper() != "APPROVED"
-      or str(intent_metadata.get("entry_plan_id") or "") != strategy_run_id
+      or str(intent_metadata.get("entry_plan_id") or "") != bound_plan_id
       or int(intent_metadata.get("entry_config_version") or 0) != config.config_version
       or str(intent_metadata.get("execution_mode") or "").upper() != "MANUAL_CONFIRM"
     ):
@@ -1232,13 +1258,15 @@ class TradeCommandService:
       .all()
     )
     await self._require_no_conflicting_entry_exit(
-      plan_id=strategy_run_id,
+      plan_id=bound_plan_id,
+      strategy_run_id=strategy_run_id,
       account_id=account_id,
       instrument_code=instrument_code,
       working_orders=pending_orders,
     )
     await self._require_no_authoritative_entry_order_conflict(
-      plan_id=strategy_run_id,
+      plan_id=bound_plan_id,
+      strategy_run_id=strategy_run_id,
       account_id=account_id,
       instrument_code=instrument_code,
       working_orders=pending_orders,
@@ -1269,7 +1297,7 @@ class TradeCommandService:
     if position is not None and current_market_value <= 0:
       current_market_value = price * int(position.volume or 0)
     self._require_managed_entry_capacity(
-      plan_id=strategy_run_id,
+      plan_id=bound_plan_id,
       intent_id=intent_id,
       config=config,
       managed_state=managed_state,
@@ -2025,14 +2053,15 @@ class TradeCommandService:
               result_request_metadata = intent_metadata
           pending_metadata = dict(order.request_metadata or {})
           has_managed_entry_marker = bool(
-            str(pending_metadata.get("entry_plan_id") or "") == strategy_run_id
-            or str(intent_metadata.get("entry_plan_id") or "") == strategy_run_id
+            str(pending_metadata.get("entry_plan_id") or "").strip()
+            or str(intent_metadata.get("entry_plan_id") or "").strip()
           )
           is_bound_managed_entry = bool(
             intent is not None
             and str(intent.strategy_run_id or "") == strategy_run_id
             and str(intent.direction or "").upper() == "BUY"
-            and str(intent_metadata.get("entry_plan_id") or "") == strategy_run_id
+            and str(intent_metadata.get("entry_plan_id") or "").strip()
+            == str(pending_metadata.get("entry_plan_id") or "").strip()
           )
           try:
             executed_volume = int(intent.executed_volume or 0) if intent else 0

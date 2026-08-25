@@ -725,11 +725,12 @@ class LiquidationMutation:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     account_id = authorized_account_id(info, owner)
     try:
+      run_id = await LiquidationResolver.exit_plan_run_id(plan_id)
       preview = await TradeApprovalChallengeService.issue(
         principal=principal_from_context(info.context),
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        run_id=plan_id,
+        run_id=run_id,
         intent_id=intent_id,
       )
       return TradeApprovalPreviewResult(
@@ -754,11 +755,12 @@ class LiquidationMutation:
     owner = await LiquidationResolver.exit_plan_account_id(plan_id)
     account_id = authorized_account_id(info, owner)
     try:
+      run_id = await LiquidationResolver.exit_plan_run_id(plan_id)
       challenge_id = await TradeApprovalChallengeService.consume(
         principal=principal_from_context(info.context),
         action=EXIT_PLAN_SELL_APPROVAL,
         account_id=account_id,
-        run_id=plan_id,
+        run_id=run_id,
         intent_id=intent_id,
         confirmation_token=confirmation_token,
       )

@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, Mapping, Optional
 
+from quantx_domain.strategies.ashare_managed_exit_plan import (
+  MANAGED_EXIT_RUNTIME_KEY,
+)
+from quantx_domain.trading.exit_plan import ExitPlan
+
 
 def _number(value: Any, default: float = 0.0) -> float:
   try:
@@ -178,6 +183,10 @@ def build_exit_plan_replay_metrics(runtime: Any) -> Dict[str, Any]:
   events = [_trade_event(trade, index) for index, trade in enumerate(trades)]
   plans = list(runtime.exit_plan_book.plans.values())
   plan = plans[0] if plans else None
+  if plan is None and runtime.strategy is not None:
+    raw_plan = runtime.strategy.state.get(MANAGED_EXIT_RUNTIME_KEY)
+    if isinstance(raw_plan, Mapping) and raw_plan:
+      plan = ExitPlan.from_dict(raw_plan)
   remaining = int(plan.remaining_volume) if plan is not None else volume
   sold_volume = max(0, volume - remaining)
   exit_price = _number(getattr(plan, "exit_avg_price", 0.0)) if plan else 0.0

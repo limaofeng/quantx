@@ -99,6 +99,15 @@ class StrategyRun(BaseModel, TimestampMixin):
   metrics: Optional[ExecutionMetrics] = Column(ExecutionMetricsType, comment="执行指标")
   """策略执行过程中的各项指标，使用 ExecutionMetrics 类型"""
 
+  plan_id = Column(String(128), nullable=True, index=True, comment="稳定计划ID")
+  plan_kind = Column(String(16), nullable=True, comment="ENTRY/EXIT")
+  plan_config_version = Column(Integer, nullable=True, comment="冻结计划配置版本")
+  frozen_config_snapshot = Column(JSON, nullable=True, comment="不可变计划配置快照")
+  frozen_config_fingerprint = Column(String(64), nullable=True, comment="配置快照指纹")
+  supersedes_run_id = Column(String(36), nullable=True, comment="被本运行替代的旧运行")
+  parent_run_id = Column(String(36), nullable=True, comment="父策略运行")
+  input_event_watermark = Column(String(128), nullable=True, comment="恢复输入水位")
+
   # 版本追踪
   strategy_version = Column(String(20), comment="策略版本")
   """运行时使用的策略代码版本号"""
@@ -146,6 +155,14 @@ class StrategyRun(BaseModel, TimestampMixin):
       "instruments": self.instruments or [],
       "initial_capital": self.initial_capital,
       "metrics": metrics_dict,
+      "plan_id": self.plan_id,
+      "plan_kind": self.plan_kind,
+      "plan_config_version": self.plan_config_version,
+      "frozen_config_snapshot": self.frozen_config_snapshot,
+      "frozen_config_fingerprint": self.frozen_config_fingerprint,
+      "supersedes_run_id": self.supersedes_run_id,
+      "parent_run_id": self.parent_run_id,
+      "input_event_watermark": self.input_event_watermark,
       # 从 metrics 中提取常用指标
       "profit_loss": metrics_dict.get("total_pnl", 0.0),
       "total_trades": metrics_dict.get("trades_executed", 0),
