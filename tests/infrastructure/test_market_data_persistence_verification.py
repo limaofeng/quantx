@@ -43,6 +43,28 @@ def _summary(
   }
 
 
+async def _key_batches(
+  *,
+  code: str,
+  period: str,
+  times: list[int],
+  ordinals: list[int] | None = None,
+):
+  if not times:
+    return
+  yield verification.ExpectedBarKeyBatch(
+    code=code,
+    period=period,
+    keys=tuple(
+      (
+        time_ms,
+        ordinals[index] if ordinals is not None else None,
+      )
+      for index, time_ms in enumerate(times)
+    ),
+  )
+
+
 def _tick_reader(rows: list[tuple[int, int]], *, batch_rows: int = 1024):
   times = [
     datetime.fromtimestamp(source_ms / 1000, timezone.utc)
@@ -143,6 +165,12 @@ async def test_tick_readback_uses_parameterized_bounded_arrow_pages() -> None:
 
   result = await verification.verify_persisted_bar_summaries(
     code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code=code,
+      period="tick",
+      times=[item[0] for item in rows],
+      ordinals=[item[1] for item in rows],
+    ),
     start_ms=START_MS,
     end_exclusive_ms=END_EXCLUSIVE_MS,
     connection=connection,
@@ -154,8 +182,8 @@ async def test_tick_readback_uses_parameterized_bounded_arrow_pages() -> None:
   assert result["records_verified"] == 4
   assert result["code_summaries"] == [expected]
   assert result["attempts_by_group"] == {f"{code}/tick": 1}
-  assert len(connection.client.calls) == 3
-  first, second, last = connection.client.calls
+  assert len(connection.client.calls) == 2
+  first, second = connection.client.calls
   assert first["mode"] == "reader"
   assert first["language"] == "sql"
   assert first["query_parameters"] == {"stock_code": code, "period": "tick"}
@@ -165,7 +193,6 @@ async def test_tick_readback_uses_parameterized_bounded_arrow_pages() -> None:
   assert "ORDER BY time ASC LIMIT 2" in first["query"]
   assert "AND time > '" not in first["query"]
   assert "AND time > '" in second["query"]
-  assert "LIMIT 1" in last["query"]
 
 
 @pytest.mark.asyncio
@@ -176,6 +203,11 @@ async def test_kline_readback_recomputes_canonical_key_digest() -> None:
 
   result = await verification.verify_persisted_bar_summaries(
     code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code="000001.SZ",
+      period="1m",
+      times=times,
+    ),
     start_ms=START_MS,
     end_exclusive_ms=END_EXCLUSIVE_MS,
     connection=connection,
@@ -194,6 +226,12 @@ async def test_legal_empty_summary_queries_influx_and_confirms_no_point() -> Non
 
   result = await verification.verify_persisted_bar_summaries(
     code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code="600000.SH",
+      period="tick",
+      times=[],
+      ordinals=[],
+    ),
     start_ms=START_MS,
     end_exclusive_ms=END_EXCLUSIVE_MS,
     connection=connection,
@@ -221,6 +259,12 @@ async def test_visibility_mismatch_is_retried_then_can_converge() -> None:
 
   result = await verification.verify_persisted_bar_summaries(
     code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code="600000.SH",
+      period="tick",
+      times=[source_ms],
+      ordinals=[0],
+    ),
     start_ms=START_MS,
     end_exclusive_ms=END_EXCLUSIVE_MS,
     connection=connection,
@@ -246,6 +290,12 @@ async def test_persistent_mismatch_is_retryable_and_bounded() -> None:
   with pytest.raises(verification.MarketDataPersistenceMismatchError):
     await verification.verify_persisted_bar_summaries(
       code_summaries=[expected],
+      expected_key_batches=_key_batches(
+        code="600000.SH",
+        period="tick",
+        times=[source_ms],
+        ordinals=[0],
+      ),
       start_ms=START_MS,
       end_exclusive_ms=END_EXCLUSIVE_MS,
       connection=connection,
@@ -257,7 +307,7 @@ async def test_persistent_mismatch_is_retryable_and_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_bounds_but_different_tick_keys_fail_the_digest_audit() -> None:
+async def test_missing_uploaded_tick_key_fails_the_readback_audit() -> None:
   source_ms = START_MS + 34_200_123
   expected = _summary(
     code="600000.SH",
@@ -265,16 +315,20 @@ async def test_same_bounds_but_different_tick_keys_fail_the_digest_audit() -> No
     times=[source_ms, source_ms],
     ordinals=[0, 1],
   )
-  connection = FakeConnection(
-    [lambda: _tick_reader([(source_ms, 0), (source_ms, 2)])]
-  )
+  connection = FakeConnection([lambda: _tick_reader([(source_ms, 0)])])
 
   with pytest.raises(
     verification.MarketDataPersistenceMismatchError,
-    match="does not match Agent summary",
+    match="missing an uploaded key",
   ):
     await verification.verify_persisted_bar_summaries(
       code_summaries=[expected],
+      expected_key_batches=_key_batches(
+        code="600000.SH",
+        period="tick",
+        times=[source_ms, source_ms],
+        ordinals=[0, 1],
+      ),
       start_ms=START_MS,
       end_exclusive_ms=END_EXCLUSIVE_MS,
       connection=connection,
@@ -291,6 +345,12 @@ async def test_query_failure_is_never_treated_as_an_empty_result() -> None:
   with pytest.raises(verification.MarketDataPersistenceQueryError, match="query failed"):
     await verification.verify_persisted_bar_summaries(
       code_summaries=[expected],
+      expected_key_batches=_key_batches(
+        code="600000.SH",
+        period="tick",
+        times=[],
+        ordinals=[],
+      ),
       start_ms=START_MS,
       end_exclusive_ms=END_EXCLUSIVE_MS,
       connection=connection,
@@ -302,25 +362,54 @@ async def test_query_failure_is_never_treated_as_an_empty_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_extra_persisted_key_is_enough_to_reject_the_group() -> None:
-  expected_time = START_MS
-  expected = _summary(code="600000.SH", period="1d", times=[expected_time])
+async def test_preexisting_key_between_uploaded_keys_is_merged() -> None:
+  expected_times = [START_MS, START_MS + 120_000]
+  expected = _summary(code="600000.SH", period="1m", times=expected_times)
   connection = FakeConnection(
-    [lambda: _kline_reader([expected_time, expected_time + 60_000])]
+    [lambda: _kline_reader([START_MS, START_MS + 60_000, START_MS + 120_000])]
   )
 
-  with pytest.raises(verification.MarketDataPersistenceMismatchError):
-    await verification.verify_persisted_bar_summaries(
-      code_summaries=[expected],
-      start_ms=START_MS,
-      end_exclusive_ms=END_EXCLUSIVE_MS,
-      connection=connection,
-      max_attempts=1,
-      retry_delays=(),
-      page_rows=2,
-    )
+  result = await verification.verify_persisted_bar_summaries(
+    code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code="600000.SH",
+      period="1m",
+      times=expected_times,
+    ),
+    start_ms=START_MS,
+    end_exclusive_ms=END_EXCLUSIVE_MS,
+    connection=connection,
+    max_attempts=1,
+    retry_delays=(),
+    page_rows=3,
+  )
 
-  assert "LIMIT 2" in connection.client.calls[0]["query"]
+  assert result["records_verified"] == 2
+  assert result["existing_rows_observed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_upload_accepts_preexisting_realtime_point() -> None:
+  expected = _summary(code="000001.SH", period="1m", times=[])
+  connection = FakeConnection([lambda: _kline_reader([START_MS + 33_900_000])])
+
+  result = await verification.verify_persisted_bar_summaries(
+    code_summaries=[expected],
+    expected_key_batches=_key_batches(
+      code="000001.SH",
+      period="1m",
+      times=[],
+    ),
+    start_ms=START_MS,
+    end_exclusive_ms=END_EXCLUSIVE_MS,
+    connection=connection,
+    max_attempts=1,
+    retry_delays=(),
+  )
+
+  assert result["records_verified"] == 0
+  assert result["existing_rows_observed"] == 1
+  assert result["code_summaries"] == [expected]
 
 
 @pytest.mark.asyncio
@@ -331,6 +420,12 @@ async def test_missing_reader_schema_is_a_query_failure_not_an_empty_group() -> 
   with pytest.raises(verification.MarketDataPersistenceQueryError, match="missing required"):
     await verification.verify_persisted_bar_summaries(
       code_summaries=[expected],
+      expected_key_batches=_key_batches(
+        code="600000.SH",
+        period="tick",
+        times=[],
+        ordinals=[],
+      ),
       start_ms=START_MS,
       end_exclusive_ms=END_EXCLUSIVE_MS,
       connection=connection,
@@ -356,6 +451,12 @@ async def test_invalid_reader_field_type_is_a_query_failure() -> None:
   ):
     await verification.verify_persisted_bar_summaries(
       code_summaries=[expected],
+      expected_key_batches=_key_batches(
+        code="600000.SH",
+        period="tick",
+        times=[source_ms],
+        ordinals=[0],
+      ),
       start_ms=START_MS,
       end_exclusive_ms=END_EXCLUSIVE_MS,
       connection=connection,

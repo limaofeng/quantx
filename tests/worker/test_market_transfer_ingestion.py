@@ -19,8 +19,18 @@ from quantx_worker.prefector.flows import durable_agent_flows
 
 @pytest.fixture(autouse=True)
 def _stub_persistence_readback(monkeypatch):
-  async def verify(*, code_summaries, start_ms, end_exclusive_ms):
+  async def verify(
+    *,
+    code_summaries,
+    expected_key_batches,
+    start_ms,
+    end_exclusive_ms,
+  ):
     assert start_ms < end_exclusive_ms
+    batches = [batch async for batch in expected_key_batches]
+    assert sum(len(batch.keys) for batch in batches) == sum(
+      int(summary["row_count"]) for summary in code_summaries
+    )
     actual = [
       {
         key: summary[key]

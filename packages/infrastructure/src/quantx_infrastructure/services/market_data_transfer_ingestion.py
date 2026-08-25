@@ -37,6 +37,7 @@ from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
 from quantx_infrastructure.services.market_data_persistence_verification import (
+  ExpectedBarKeyBatch,
   MarketDataPersistenceVerificationError,
   verify_persisted_bar_summaries,
 )
@@ -888,6 +889,62 @@ async def _iterate_record_chunks(
       yield chunk
 
 
+async def _uploaded_key_batches(
+  manifest: list[dict[str, Any]],
+) -> AsyncIterable[ExpectedBarKeyBatch]:
+  """Re-read uploaded keys in bounded batches for merge-aware verification."""
+
+  budget = _TransferBudget()
+  current_group: tuple[str, str] | None = None
+  keys: list[tuple[int, int | None]] = []
+  for item in manifest:
+    chunk = await asyncio.to_thread(_read_transfer_chunk, item, budget)
+    for record in chunk:
+      if "record_type" in record:
+        if keys and current_group is not None:
+          code, period = current_group
+          yield ExpectedBarKeyBatch(
+            code=code,
+            period=period,
+            keys=tuple(keys),
+          )
+        current_group = None
+        keys = []
+        continue
+      group = (str(record["code"]), str(record["period"]))
+      if current_group is not None and group != current_group:
+        if keys:
+          code, period = current_group
+          yield ExpectedBarKeyBatch(
+            code=code,
+            period=period,
+            keys=tuple(keys),
+          )
+        keys = []
+      current_group = group
+      keys.append(
+        (
+          int(record["time"]),
+          (
+            int(record[HISTORICAL_TICK_ORDINAL_FIELD])
+            if group[1] == "tick"
+            else None
+          ),
+        )
+      )
+      if len(keys) >= MARKET_DATA_WRITE_BATCH_RECORDS:
+        code, period = current_group
+        yield ExpectedBarKeyBatch(
+          code=code,
+          period=period,
+          keys=tuple(keys),
+        )
+        keys = []
+  if keys and current_group is not None:
+    code, period = current_group
+    yield ExpectedBarKeyBatch(code=code, period=period, keys=tuple(keys))
+
+
 async def _persist_validated_records(
   record_chunks: Iterable[list[dict[str, Any]]]
   | AsyncIterable[list[dict[str, Any]]],
@@ -1028,6 +1085,7 @@ async def ingest_uploaded_bar_request(
   verifier = verify_persistence or verify_persisted_bar_summaries
   verification = await verifier(
     code_summaries=audit["code_summaries"],
+    expected_key_batches=_uploaded_key_batches(manifest),
     start_ms=scope.start_ms,
     end_exclusive_ms=scope.end_exclusive_ms,
   )
