@@ -101,6 +101,10 @@ _register(
     "entryPlanCapabilities",
     "entryPlanEvents",
     "entryPlans",
+    "exitPlanReplay",
+    "exitPlanReplayEvents",
+    "exitPlanReplayHistory",
+    "exitPlanReplayPreparation",
     "firstBoardPromotionDesk",
     "limitUpBoardAssistant",
     "limitUpBoardReplay",
@@ -309,7 +313,12 @@ _register(
 _register(
   "Mutation",
   "strategy:write",
-  {"cancelTTradeReplay", "startTTradeReplay"},
+  {
+    "cancelExitPlanReplay",
+    "cancelTTradeReplay",
+    "startExitPlanReplay",
+    "startTTradeReplay",
+  },
   risk="NON_TRADING_WRITE",
 )
 _register(
@@ -495,6 +504,7 @@ _register(
     "firstBoardPromotionUpdates",
     "entryIntentUpdated",
     "entryPlanUpdated",
+    "exitPlanReplayUpdates",
     "limitUpBoardAssistantUpdates",
     "limitUpBoardReplayUpdates",
     "strategyInstanceEvents",

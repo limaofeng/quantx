@@ -167,6 +167,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "cancelExitPlanReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
       "cancelFlowRun": {
         "audiences": [
           "web"
@@ -1240,6 +1252,18 @@
         "risk": "TRADING_WRITE",
         "stability": "supported"
       },
+      "startExitPlanReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:write"
+        ],
+        "risk": "NON_TRADING_WRITE",
+        "stability": "supported"
+      },
       "startLimitUpBoardReplay": {
         "audiences": [
           "web",
@@ -1753,6 +1777,54 @@
         ],
         "requiredPermissions": [
           "orders:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanReplay": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanReplayEvents": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanReplayHistory": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanReplayPreparation": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
         ],
         "risk": "READ",
         "stability": "supported"
@@ -2906,6 +2978,18 @@
         "stability": "supported"
       },
       "entryPlanUpdated": {
+        "audiences": [
+          "web",
+          "native",
+          "third-party"
+        ],
+        "requiredPermissions": [
+          "strategy:read"
+        ],
+        "risk": "READ",
+        "stability": "supported"
+      },
+      "exitPlanReplayUpdates": {
         "audiences": [
           "web",
           "native",

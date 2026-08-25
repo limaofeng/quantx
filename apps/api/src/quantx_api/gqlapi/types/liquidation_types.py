@@ -772,3 +772,208 @@ class RedeemPositionInput:
   amount: Optional[float] = strawberry.field(
     default=None, description="赎回金额，为空则赎回全部"
   )
+
+
+@strawberry.input(description="卖出计划回放准备输入")
+class ExitPlanReplayPreparationInput:
+  account_id: str
+  plan_id: Optional[str] = None
+  draft_template: Optional[JSON] = None
+
+
+@strawberry.input(description="卖出计划回放的历史持仓起点")
+class ExitPlanReplayOriginInput:
+  mode: str
+  order_ids: List[str] = strawberry.field(default_factory=list)
+  activation_time: Optional[datetime] = None
+  volume: Optional[int] = None
+  unit_cost: Optional[float] = None
+
+
+@strawberry.input(description="启动卖出计划历史回放")
+class ExitPlanReplayStartInput:
+  account_id: str
+  idempotency_key: str
+  start_time: datetime
+  end_time: datetime
+  origin: ExitPlanReplayOriginInput
+  plan_id: Optional[str] = None
+  expected_config_version: Optional[int] = None
+  draft_template: Optional[JSON] = None
+  commission_rate: float = 0.0003
+  minimum_commission: float = 5.0
+  stamp_tax_rate: float = 0.0005
+  transfer_fee_rate: float = 0.00001
+  slippage_rate: float = 0.0001
+
+
+@strawberry.type(description="可作为卖出计划回放起点的真实买入成交")
+class ExitPlanReplayBuyFill:
+  order_id: str
+  traded_volume: int
+  traded_price: float
+  estimated_buy_fee_cny: float
+  order_time: datetime
+  strategy_name: Optional[str]
+  remark: Optional[str]
+  selected_by_plan: bool
+
+
+@strawberry.type(description="卖出计划回放准备结果")
+class ExitPlanReplayPreparation:
+  account_id: str
+  plan_id: Optional[str]
+  config_version: int
+  instrument_code: str
+  plan_source: str
+  template: JSON
+  requires_tick: bool
+  requires_depth: bool
+  default_window_trading_days: int
+  quick_windows: List[int]
+  buy_fills: List[ExitPlanReplayBuyFill]
+  message: str
+  blocking_reasons: List[str]
+
+
+@strawberry.type(description="卖出计划回放收益比较摘要")
+class ExitPlanReplaySummary:
+  initial_equity: float
+  plan_final_value: float
+  hold_final_value: float
+  immediate_sell_final_value: float
+  plan_return_pct: float
+  hold_return_pct: float
+  immediate_sell_return_pct: float
+  excess_vs_hold_pct: float
+  excess_vs_immediate_pct: float
+  sold_volume: int
+  remaining_volume: int
+  exit_price: Optional[float]
+  exit_time: Optional[datetime]
+  total_fees: float
+  max_drawdown_pct: float
+  conclusion_code: str
+  conclusion: str
+
+
+@strawberry.type(description="卖出计划、继续持有与立即卖出的同轴曲线点")
+class ExitPlanReplayCurvePoint:
+  timestamp: datetime
+  plan_value: float
+  hold_value: float
+  immediate_sell_value: float
+  market_price: float
+  plan_return_pct: float
+  hold_return_pct: float
+  immediate_sell_return_pct: float
+
+
+@strawberry.type(description="卖出计划回放事件")
+class ExitPlanReplayEvent:
+  sequence: int
+  timestamp: datetime
+  event_type: str
+  rule_id: str
+  rule_type: str
+  reason: str
+  price: float
+  volume: int
+  fees: float
+  remaining_volume: Optional[int]
+  details: JSON
+
+
+@strawberry.type(description="计划卖出后的固定交易日观察")
+class ExitPlanReplayHorizon:
+  trading_days: int
+  available: bool
+  market_price: Optional[float]
+  return_after_exit_pct: Optional[float]
+
+
+@strawberry.type(description="区间内真实历史卖出参考")
+class ExitPlanReplayActualSellReference:
+  order_id: str
+  timestamp: datetime
+  volume: int
+  price: float
+
+
+@strawberry.type(description="卖出计划回放报告产物")
+class ExitPlanReplayReport:
+  status: str
+  schema_version: int
+  generated_at: Optional[datetime]
+  conclusion_code: str
+  conclusion: str
+  html_artifact: str
+  json_artifact: str
+
+
+@strawberry.type(description="卖出计划历史回放运行")
+class ExitPlanReplay:
+  run_id: str
+  backtest_id: Optional[str]
+  account_id: str
+  plan_id: Optional[str]
+  config_version: int
+  instrument_code: str
+  status: str
+  progress_pct: float
+  revision: str
+  processed_until: Optional[datetime]
+  start_time: datetime
+  end_time: datetime
+  created_at: Optional[datetime]
+  updated_at: Optional[datetime]
+  error_message: Optional[str]
+  data_quality: str
+  data_quality_message: str
+  plan_snapshot: JSON
+  origin: JSON
+  summary: Optional[ExitPlanReplaySummary]
+  curve: List[ExitPlanReplayCurvePoint]
+  events: List[ExitPlanReplayEvent]
+  post_exit_horizons: List[ExitPlanReplayHorizon]
+  actual_sell_references: List[ExitPlanReplayActualSellReference]
+  report: Optional[ExitPlanReplayReport]
+
+
+@strawberry.type(description="卖出计划回放事件分页")
+class ExitPlanReplayEventPage:
+  run_id: str
+  total: int
+  offset: int
+  limit: int
+  has_more: bool
+  items: List[ExitPlanReplayEvent]
+
+
+@strawberry.type(description="卖出计划回放操作结果")
+class ExitPlanReplayMutationResult:
+  success: bool
+  code: str
+  message: str
+  run_id: Optional[str] = strawberry.field(
+    default=None,
+    description="确定性的回放运行 ID；命令排队时也可立即用于查询",
+  )
+  replay: Optional[ExitPlanReplay] = None
+
+
+@strawberry.enum(description="卖出计划回放更新类型")
+class ExitPlanReplayUpdateKind(Enum):
+  CREATED = "CREATED"
+  STATUS_CHANGED = "STATUS_CHANGED"
+  PROGRESS = "PROGRESS"
+  RESULT_READY = "RESULT_READY"
+
+
+@strawberry.type(description="卖出计划回放更新通知")
+class ExitPlanReplayUpdateNotice:
+  account_id: str
+  run_id: str
+  revision: str
+  kind: ExitPlanReplayUpdateKind
+  occurred_at: datetime

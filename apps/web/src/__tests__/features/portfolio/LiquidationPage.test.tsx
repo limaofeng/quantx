@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -52,6 +52,10 @@ vi.mock('@/features/portfolio/components/TakeProfitPlanPanel', () => ({
   TakeProfitPlanPanel: () => null,
 }));
 
+vi.mock('@/features/portfolio/components/ExitPlanReplayPanel', () => ({
+  ExitPlanReplayPanel: () => <div>回放测试内容</div>,
+}));
+
 vi.mock('@/features/portfolio/hooks/useLiquidationActions', () => ({
   useLiquidationActions: () => ({
     error: undefined,
@@ -94,5 +98,25 @@ describe('LiquidationPage overview navigation', () => {
 
     expect(mocks.setLocation).toHaveBeenCalledWith('/liquidation');
     expect(screen.getByText('全部计划内容')).toBeVisible();
+  });
+
+  it('keeps first- and second-level tabs in the same toolbar row', async () => {
+    const user = userEvent.setup();
+    render(<LiquidationPage />);
+
+    const navigation = screen.getByRole('navigation', { name: '卖出工作区' });
+    expect(within(navigation).getByText('卖出管理')).toBeVisible();
+    expect(within(navigation).getByText('回放测试')).toBeVisible();
+    expect(within(navigation).getByText('卖出计划')).toBeVisible();
+    expect(within(navigation).getByText('持仓清仓')).toBeVisible();
+    expect(within(navigation).getByText('卖出记录')).toBeVisible();
+
+    await user.click(within(navigation).getByText('回放测试'));
+
+    expect(screen.getByText('回放测试内容')).toBeVisible();
+    expect(within(navigation).queryByText('卖出计划')).not.toBeInTheDocument();
+    expect(mocks.setLocation).toHaveBeenCalledWith(
+      '/liquidation?symbol=300917.SZ&workspace=REPLAY'
+    );
   });
 });

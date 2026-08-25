@@ -5,6 +5,7 @@
 """
 
 from .ashare_dynamic_balance_dual_bucket import AshareDynamicBalanceDualBucketStrategy
+from .ashare_exit_plan_replay_harness import AshareExitPlanReplayHarnessStrategy
 from .ashare_intraday_t_assistant import AshareIntradayTAssistantStrategy
 from .ashare_limit_up_board import AshareLimitUpBoardStrategy
 from .ashare_limit_up_board_assistant import AshareLimitUpBoardAssistantStrategy
@@ -52,6 +53,7 @@ __all__ = [
   "TradeExecutionEvent",
   # 策略实现
   "AshareDynamicBalanceDualBucketStrategy",
+  "AshareExitPlanReplayHarnessStrategy",
   "AshareIntradayTAssistantStrategy",
   "AshareLimitUpBoardStrategy",
   "AshareLimitUpBoardAssistantStrategy",

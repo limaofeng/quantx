@@ -23,6 +23,9 @@ from quantx_infrastructure.repositories.strategy_run_repository import (
 )
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.entry_plan_service import EntryPlanService
+from quantx_infrastructure.services.exit_plan_replay_service import (
+  ExitPlanReplayService,
+)
 from quantx_infrastructure.services.t_trade_replay_service import TTradeReplayService
 from quantx_infrastructure.services.t_trade_service import (
   TTradeApprovalExpectation,
@@ -440,6 +443,16 @@ async def _dispatch(
     return _json_value(await replay_service.start(payload["input"], **start_kwargs))
   if command_type == "T_TRADE_REPLAY_CANCEL":
     return _json_value(await replay_service.cancel(payload["run_id"]))
+  exit_plan_replay_service = ExitPlanReplayService(strategy_manager)
+  if command_type == "EXIT_PLAN_REPLAY_START":
+    start_kwargs: dict[str, Any] = {"defer_start": True}
+    if command_id:
+      start_kwargs["request_id"] = command_id
+    return _json_value(
+      await exit_plan_replay_service.start(payload["input"], **start_kwargs)
+    )
+  if command_type == "EXIT_PLAN_REPLAY_CANCEL":
+    return _json_value(await exit_plan_replay_service.cancel(payload["run_id"]))
   raise ValueError(f"不支持的 Engine command_type: {command_type}")
 
 

@@ -1,0 +1,22 @@
+"""Durable lifecycle projection for one exit-plan historical replay."""
+
+from sqlalchemy import BigInteger, Column, DateTime, Float, ForeignKey, String
+
+from quantx_infrastructure.database.relational_base import Base, TimestampMixin
+
+
+class ExitPlanReplayProjection(Base, TimestampMixin):
+  __tablename__ = "exit_plan_replay_projections"
+
+  run_id = Column(
+    String(36),
+    ForeignKey("strategy_runs.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  account_id = Column(String(50), nullable=False, index=True)
+  plan_id = Column(String(128), nullable=True, index=True)
+  instrument_code = Column(String(20), nullable=False, index=True)
+  status = Column(String(20), nullable=False, default="PENDING")
+  progress_pct = Column(Float, nullable=False, default=0.0)
+  processed_until = Column(DateTime, nullable=True)
+  revision = Column(BigInteger, nullable=False, default=1)

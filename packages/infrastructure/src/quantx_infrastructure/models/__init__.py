@@ -52,6 +52,7 @@ from .entry_plan_authorization import (
   EntryPlanAuthorizationEvent,
   EntryPlanAuthorizationGrant,
 )
+from .exit_plan_replay_projection import ExitPlanReplayProjection
 from .enums import (
   AccountType,
   InstrumentType,
@@ -196,6 +197,7 @@ __all__ = [
   "EntryPlanAuthorizationConsumption",
   "EntryPlanAuthorizationEvent",
   "EntryPlanAuthorizationGrant",
+  "ExitPlanReplayProjection",
   "AuthUser",
   "AuthUserAccountAccess",
   "AuthDeviceSession",

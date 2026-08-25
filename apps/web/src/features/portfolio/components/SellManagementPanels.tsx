@@ -3,6 +3,7 @@ import {
   CirclePause,
   Clock3,
   ExternalLink,
+  FlaskConical,
   History,
   Loader2,
   Plus,
@@ -216,6 +217,7 @@ function PlanCard({
   onEvaluate,
   onEdit,
   onNavigate,
+  onReplay,
   onRejectIntent,
   onToggle,
   plan,
@@ -227,6 +229,7 @@ function PlanCard({
   onEvaluate: (plan: ExitPlan) => void;
   onEdit: (plan: ExitPlan) => void;
   onNavigate: (path: string) => void;
+  onReplay: (plan: ExitPlan) => void;
   onRejectIntent: (plan: ExitPlan) => void;
   onToggle: (plan: ExitPlan) => void;
   plan: ExitPlan;
@@ -316,6 +319,16 @@ function PlanCard({
           <ExitPlanNotices plan={plan} />
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          <Button
+            disabled={busy}
+            onClick={() => onReplay(plan)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <FlaskConical />
+            回放测试
+          </Button>
           {plan.pendingIntentId && !plan.pendingClientOrderId && (
             <>
               <Button
@@ -412,12 +425,14 @@ export function ManualPlanEditor({
   editingPlan,
   initialInstrumentCode,
   onFinishedEditing,
+  onReplayDraft,
   onSaved,
 }: {
   accountId: string;
   editingPlan?: ExitPlan | null;
   initialInstrumentCode?: string;
   onFinishedEditing: () => void;
+  onReplayDraft?: (template: Record<string, unknown>) => void;
   onSaved: () => void;
 }) {
   const { toast } = useToast();
@@ -496,6 +511,47 @@ export function ManualPlanEditor({
       ? selectedCostBasis.volume < requestedVolume ||
         selectedCostBasis.volume <= 0
       : !Number.isFinite(Number(manualUnitCost)) || Number(manualUnitCost) <= 0;
+
+  const serializedRules = React.useCallback(
+    () =>
+      rules.map(rule => ({
+        enabled: true,
+        once: false,
+        parameters: JSON.parse(rule.parametersText || '{}') as object,
+        priority: Number(rule.priority),
+        rule_id: rule.id,
+        sizing: { mode: 'ALL_REMAINING' },
+        strategy: rule.ruleType,
+      })),
+    [rules]
+  );
+
+  const replayDraft = () => {
+    if (!onReplayDraft) return;
+    try {
+      onReplayDraft({
+        account_id: accountId,
+        auto_exit_authorized: false,
+        bucket: 'manual',
+        config_version: editingPlan ? editingPlan.configVersion + 1 : 1,
+        instrument_code: normalizedCode,
+        metadata: {
+          draft_protected_volume: Number(protectedVolume),
+          remark,
+        },
+        plan_id: createClientId('exit-plan-draft'),
+        rules: serializedRules(),
+        source_id: editingPlan?.planId || 'DRAFT',
+        source_type: 'MANUAL_EXIT_PLAN',
+      });
+    } catch (error) {
+      toast({
+        title: '草稿不能回放',
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'destructive',
+      });
+    }
+  };
 
   React.useEffect(() => {
     if (!editingPlan) return;
@@ -630,15 +686,7 @@ export function ManualPlanEditor({
   const submit = async () => {
     let savedPlan: { configVersion: number; planId: string } | undefined;
     try {
-      const serializedRules = rules.map(rule => ({
-        enabled: true,
-        once: false,
-        parameters: JSON.parse(rule.parametersText || '{}') as object,
-        priority: Number(rule.priority),
-        rule_id: rule.id,
-        sizing: { mode: 'ALL_REMAINING' },
-        strategy: rule.ruleType,
-      }));
+      const rulesPayload = serializedRules();
       if (editingPlan) {
         const result = await updatePlan({
           input: {
@@ -649,7 +697,7 @@ export function ManualPlanEditor({
             planId: editingPlan.planId,
             protectedVolume: Number(protectedVolume),
             remark,
-            rules: serializedRules,
+            rules: rulesPayload,
           },
         });
         if (result.error) throw result.error;
@@ -675,7 +723,7 @@ export function ManualPlanEditor({
           instrumentCode: normalizedCode,
           protectedVolume: Number(protectedVolume),
           remark,
-          rules: serializedRules,
+          rules: rulesPayload,
         };
         const fingerprint = JSON.stringify(createInput);
         if (createRequestRef.current?.fingerprint !== fingerprint) {
@@ -947,33 +995,50 @@ export function ManualPlanEditor({
           <Plus />
           添加另一个条件
         </Button>
-        <Button
-          disabled={
-            createResult.fetching ||
-            updateResult.fetching ||
-            authorizationPreviewResult.fetching ||
-            authorizationConfirmResult.fetching ||
-            !normalizedCode ||
-            Number(protectedVolume) <= 0 ||
-            costBasisInvalid ||
-            capacity.data?.exitPlanHoldingCapacity?.capacityStatus ===
-              'RECONCILE_REQUIRED' ||
-            rules.length === 0
-          }
-          onClick={submit}
-          type="button"
-        >
-          {(createResult.fetching ||
-            updateResult.fetching ||
-            authorizationPreviewResult.fetching) && (
-            <Loader2 className="animate-spin" />
-          )}
-          {executionMode === 'live' && requestLiveAuthorization
-            ? '保存并预览授权'
-            : editingPlan
-              ? '保存计划修改'
-              : '创建卖出计划'}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onReplayDraft ? (
+            <Button
+              disabled={
+                !normalizedCode ||
+                Number(protectedVolume) <= 0 ||
+                rules.length === 0
+              }
+              onClick={replayDraft}
+              type="button"
+              variant="outline"
+            >
+              <FlaskConical />
+              回放当前草稿
+            </Button>
+          ) : null}
+          <Button
+            disabled={
+              createResult.fetching ||
+              updateResult.fetching ||
+              authorizationPreviewResult.fetching ||
+              authorizationConfirmResult.fetching ||
+              !normalizedCode ||
+              Number(protectedVolume) <= 0 ||
+              costBasisInvalid ||
+              capacity.data?.exitPlanHoldingCapacity?.capacityStatus ===
+                'RECONCILE_REQUIRED' ||
+              rules.length === 0
+            }
+            onClick={submit}
+            type="button"
+          >
+            {(createResult.fetching ||
+              updateResult.fetching ||
+              authorizationPreviewResult.fetching) && (
+              <Loader2 className="animate-spin" />
+            )}
+            {executionMode === 'live' && requestLiveAuthorization
+              ? '保存并预览授权'
+              : editingPlan
+                ? '保存计划修改'
+                : '创建卖出计划'}
+          </Button>
+        </div>
       </div>
       <AlertDialog
         open={Boolean(authorizationChallenge)}
@@ -1158,11 +1223,15 @@ export function ExitPlansPanel({
   holdings = [],
   instrumentCode,
   onNavigate,
+  onReplayDraft = () => undefined,
+  onReplayPlan = () => undefined,
 }: {
   accountId: string;
   holdings?: readonly Position[];
   instrumentCode?: string;
   onNavigate: (path: string) => void;
+  onReplayDraft?: (template: Record<string, unknown>) => void;
+  onReplayPlan?: (planId: string) => void;
 }) {
   const { toast } = useToast();
   const { confirm: confirmDialog } = useAppDialog();
@@ -1289,6 +1358,7 @@ export function ExitPlansPanel({
           editingPlan={editingPlan}
           initialInstrumentCode={instrumentCode}
           onFinishedEditing={() => setEditingPlan(null)}
+          onReplayDraft={onReplayDraft}
           onSaved={() => plans.refetch({ requestPolicy: 'network-only' })}
         />
       </div>
@@ -1332,6 +1402,7 @@ export function ExitPlansPanel({
               }
               onEdit={item => setEditingPlan(item)}
               onNavigate={onNavigate}
+              onReplay={item => onReplayPlan(item.planId)}
               onRejectIntent={item =>
                 void run(
                   () =>

@@ -41,6 +41,7 @@ TABLE_COMMENTS: dict[str, str] = {
   "entry_plan_authorization_consumptions": "自动买入授权真实成交消费流水",
   "entry_plan_authorization_events": "自动买入授权安全审计事件",
   "entry_plan_authorization_grants": "建仓计划精确自动买入授权",
+  "exit_plan_replay_projections": "卖出计划历史回放生命周期投影",
   "financial_balance_sheet": "上市公司资产负债表",
   "financial_capital": "上市公司股本结构",
   "financial_cash_flow": "上市公司现金流量表",

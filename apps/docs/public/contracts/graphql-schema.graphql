@@ -1403,6 +1403,210 @@ type ExitPlanHoldingCapacity {
   conflicts: [ExitPlanCapacityConflict!]!
 }
 
+"""卖出计划历史回放运行"""
+type ExitPlanReplay {
+  runId: String!
+  backtestId: String
+  accountId: String!
+  planId: String
+  configVersion: Int!
+  instrumentCode: String!
+  status: String!
+  progressPct: Float!
+  revision: String!
+  processedUntil: DateTime
+  startTime: DateTime!
+  endTime: DateTime!
+  createdAt: DateTime
+  updatedAt: DateTime
+  errorMessage: String
+  dataQuality: String!
+  dataQualityMessage: String!
+  planSnapshot: JSON!
+  origin: JSON!
+  summary: ExitPlanReplaySummary
+  curve: [ExitPlanReplayCurvePoint!]!
+  events: [ExitPlanReplayEvent!]!
+  postExitHorizons: [ExitPlanReplayHorizon!]!
+  actualSellReferences: [ExitPlanReplayActualSellReference!]!
+  report: ExitPlanReplayReport
+}
+
+"""区间内真实历史卖出参考"""
+type ExitPlanReplayActualSellReference {
+  orderId: String!
+  timestamp: DateTime!
+  volume: Int!
+  price: Float!
+}
+
+"""可作为卖出计划回放起点的真实买入成交"""
+type ExitPlanReplayBuyFill {
+  orderId: String!
+  tradedVolume: Int!
+  tradedPrice: Float!
+  estimatedBuyFeeCny: Float!
+  orderTime: DateTime!
+  strategyName: String
+  remark: String
+  selectedByPlan: Boolean!
+}
+
+"""卖出计划、继续持有与立即卖出的同轴曲线点"""
+type ExitPlanReplayCurvePoint {
+  timestamp: DateTime!
+  planValue: Float!
+  holdValue: Float!
+  immediateSellValue: Float!
+  marketPrice: Float!
+  planReturnPct: Float!
+  holdReturnPct: Float!
+  immediateSellReturnPct: Float!
+}
+
+"""卖出计划回放事件"""
+type ExitPlanReplayEvent {
+  sequence: Int!
+  timestamp: DateTime!
+  eventType: String!
+  ruleId: String!
+  ruleType: String!
+  reason: String!
+  price: Float!
+  volume: Int!
+  fees: Float!
+  remainingVolume: Int
+  details: JSON!
+}
+
+"""卖出计划回放事件分页"""
+type ExitPlanReplayEventPage {
+  runId: String!
+  total: Int!
+  offset: Int!
+  limit: Int!
+  hasMore: Boolean!
+  items: [ExitPlanReplayEvent!]!
+}
+
+"""计划卖出后的固定交易日观察"""
+type ExitPlanReplayHorizon {
+  tradingDays: Int!
+  available: Boolean!
+  marketPrice: Float
+  returnAfterExitPct: Float
+}
+
+"""卖出计划回放操作结果"""
+type ExitPlanReplayMutationResult {
+  success: Boolean!
+  code: String!
+  message: String!
+
+  """确定性的回放运行 ID；命令排队时也可立即用于查询"""
+  runId: String
+  replay: ExitPlanReplay
+}
+
+"""卖出计划回放的历史持仓起点"""
+input ExitPlanReplayOriginInput {
+  mode: String!
+  orderIds: [String!]! = []
+  activationTime: DateTime = null
+  volume: Int = null
+  unitCost: Float = null
+}
+
+"""卖出计划回放准备结果"""
+type ExitPlanReplayPreparation {
+  accountId: String!
+  planId: String
+  configVersion: Int!
+  instrumentCode: String!
+  planSource: String!
+  template: JSON!
+  requiresTick: Boolean!
+  requiresDepth: Boolean!
+  defaultWindowTradingDays: Int!
+  quickWindows: [Int!]!
+  buyFills: [ExitPlanReplayBuyFill!]!
+  message: String!
+  blockingReasons: [String!]!
+}
+
+"""卖出计划回放准备输入"""
+input ExitPlanReplayPreparationInput {
+  accountId: String!
+  planId: String = null
+  draftTemplate: JSON = null
+}
+
+"""卖出计划回放报告产物"""
+type ExitPlanReplayReport {
+  status: String!
+  schemaVersion: Int!
+  generatedAt: DateTime
+  conclusionCode: String!
+  conclusion: String!
+  htmlArtifact: String!
+  jsonArtifact: String!
+}
+
+"""启动卖出计划历史回放"""
+input ExitPlanReplayStartInput {
+  accountId: String!
+  idempotencyKey: String!
+  startTime: DateTime!
+  endTime: DateTime!
+  origin: ExitPlanReplayOriginInput!
+  planId: String = null
+  expectedConfigVersion: Int = null
+  draftTemplate: JSON = null
+  commissionRate: Float! = 0.0003
+  minimumCommission: Float! = 5
+  stampTaxRate: Float! = 0.0005
+  transferFeeRate: Float! = 1e-05
+  slippageRate: Float! = 0.0001
+}
+
+"""卖出计划回放收益比较摘要"""
+type ExitPlanReplaySummary {
+  initialEquity: Float!
+  planFinalValue: Float!
+  holdFinalValue: Float!
+  immediateSellFinalValue: Float!
+  planReturnPct: Float!
+  holdReturnPct: Float!
+  immediateSellReturnPct: Float!
+  excessVsHoldPct: Float!
+  excessVsImmediatePct: Float!
+  soldVolume: Int!
+  remainingVolume: Int!
+  exitPrice: Float
+  exitTime: DateTime
+  totalFees: Float!
+  maxDrawdownPct: Float!
+  conclusionCode: String!
+  conclusion: String!
+}
+
+"""卖出计划回放更新类型"""
+enum ExitPlanReplayUpdateKind {
+  CREATED
+  STATUS_CHANGED
+  PROGRESS
+  RESULT_READY
+}
+
+"""卖出计划回放更新通知"""
+type ExitPlanReplayUpdateNotice {
+  accountId: String!
+  runId: String!
+  revision: String!
+  kind: ExitPlanReplayUpdateKind!
+  occurredAt: DateTime!
+}
+
 """退出规则能力"""
 type ExitPlanRuleCapability {
   ruleType: String!
@@ -3372,6 +3576,12 @@ type Mutation {
   """创建撤单命令并返回受理结果；最终撤单状态以 QMT 委托回报收敛结果为准"""
   cancelOrder(input: CancelOrderInput!): CancelOrderResult!
 
+  """启动卖出计划历史回放"""
+  startExitPlanReplay(input: ExitPlanReplayStartInput!): ExitPlanReplayMutationResult!
+
+  """取消正在执行的卖出计划历史回放"""
+  cancelExitPlanReplay(runId: String!): ExitPlanReplayMutationResult!
+
   """预览既有 LIVE 退出计划的精确自动实盘授权"""
   previewExitPlanAuthorization(input: ExitPlanAuthorizationPreviewInput!): ExitPlanAuthorizationPreviewResult!
 
@@ -4436,6 +4646,18 @@ type Query {
 
   """退出计划、规则、委托和成交时间线"""
   exitPlanEvents(planId: String!, limit: Int! = 200): [ExitPlanEventView!]!
+
+  """准备卖出计划历史回放并列出可用买入成交"""
+  exitPlanReplayPreparation(input: ExitPlanReplayPreparationInput!): ExitPlanReplayPreparation!
+
+  """读取单次卖出计划历史回放"""
+  exitPlanReplay(runId: String!): ExitPlanReplay
+
+  """读取账户的卖出计划历史回放记录"""
+  exitPlanReplayHistory(accountId: String = null, limit: Int! = 20): [ExitPlanReplay!]!
+
+  """分页读取卖出计划回放触发与卖出事件"""
+  exitPlanReplayEvents(runId: String!, offset: Int! = 0, limit: Int! = 50): ExitPlanReplayEventPage!
 
   """获取清仓概况"""
   liquidationSummary(accountId: String = null): LiquidationSummary!
@@ -6246,6 +6468,9 @@ type Subscription {
 
   """订阅退出计划权威投影变更通知"""
   exitPlanUpdates(accountId: String = null, instrumentCode: String = null): ExitPlanUpdate!
+
+  """订阅卖出计划历史回放的轻量生命周期通知"""
+  exitPlanReplayUpdates(accountId: String = null): ExitPlanReplayUpdateNotice!
 
   """订阅首板晋级工作台版本通知"""
   firstBoardPromotionUpdates(accountId: String!): LimitUpBoardAssistantUpdateNotice!

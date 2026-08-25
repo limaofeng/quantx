@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BarChart3,
   ClipboardList,
+  FlaskConical,
   Hand,
   History,
   Loader2,
@@ -39,6 +40,7 @@ import { financialToneClass } from '@/shared/utils/financialColors';
 import { cn } from '@/utils/cn';
 import { formatCurrency, formatPercent } from '@/utils/transform/data';
 
+import { ExitPlanReplayPanel } from '../components/ExitPlanReplayPanel';
 import {
   ExitPlansPanel,
   PositionLiquidationPanel,
@@ -70,6 +72,7 @@ import type {
 } from '../types';
 
 type LiquidationStudioMode = 'EXIT_PLANS' | 'LIQUIDATION' | 'SELL_HISTORY';
+type LiquidationWorkspaceMode = 'MANAGEMENT' | 'REPLAY';
 type ConditionalLiquidationOrderView = NonNullable<
   ConditionalLiquidationOrdersQueryData['conditionalLiquidationOrders']
 >[number];
@@ -90,6 +93,17 @@ function getUrlSymbol(search: string) {
 
 function getManualWorkspaceTabId(search: string) {
   return normalizeStockCode(new URLSearchParams(search).get('workspaceTab'));
+}
+
+function getReplayQueryValue(search: string, key: 'planId' | 'runId') {
+  return new URLSearchParams(search).get(key)?.trim() || '';
+}
+
+function getLiquidationWorkspaceMode(search: string): LiquidationWorkspaceMode {
+  const params = new URLSearchParams(search);
+  return params.get('workspace') === 'REPLAY' || params.has('runId')
+    ? 'REPLAY'
+    : 'MANAGEMENT';
 }
 
 function buildLiquidationSymbolPath(
@@ -674,6 +688,14 @@ export function LiquidationPage() {
   const search = useSearch();
   const [, setLocation] = useLocation();
   const selectedStockCode = React.useMemo(() => getUrlSymbol(search), [search]);
+  const initialReplayPlanId = React.useMemo(
+    () => getReplayQueryValue(search, 'planId'),
+    [search]
+  );
+  const initialReplayRunId = React.useMemo(
+    () => getReplayQueryValue(search, 'runId'),
+    [search]
+  );
   const manualWorkspaceTabId = React.useMemo(
     () => getManualWorkspaceTabId(search),
     [search]
@@ -773,6 +795,62 @@ export function LiquidationPage() {
   const totalAsset = portfolioSummary?.totalAsset;
   const [activeMode, setActiveMode] = React.useState<LiquidationStudioMode>(
     selectedStockCode ? 'LIQUIDATION' : 'EXIT_PLANS'
+  );
+  const [workspaceMode, setWorkspaceMode] =
+    React.useState<LiquidationWorkspaceMode>(() =>
+      getLiquidationWorkspaceMode(search)
+    );
+  const [replayDraft, setReplayDraft] = React.useState<Record<
+    string,
+    unknown
+  > | null>(null);
+
+  const updateReplayLocation = React.useCallback(
+    ({ planId, runId }: { planId?: string; runId?: string }) => {
+      const params = new URLSearchParams(search);
+      params.set('workspace', 'REPLAY');
+      if (planId) params.set('planId', planId);
+      else params.delete('planId');
+      if (runId) params.set('runId', runId);
+      else params.delete('runId');
+      setLocation(`/liquidation?${params.toString()}`);
+    },
+    [search, setLocation]
+  );
+
+  const changeWorkspaceMode = React.useCallback(
+    (mode: LiquidationWorkspaceMode) => {
+      setWorkspaceMode(mode);
+      const params = new URLSearchParams(search);
+      if (mode === 'REPLAY') params.set('workspace', 'REPLAY');
+      else {
+        params.delete('workspace');
+        params.delete('planId');
+        params.delete('runId');
+        setReplayDraft(null);
+      }
+      const query = params.toString();
+      setLocation(query ? `/liquidation?${query}` : '/liquidation');
+    },
+    [search, setLocation]
+  );
+
+  const openReplayPlan = React.useCallback(
+    (planId: string) => {
+      setReplayDraft(null);
+      setWorkspaceMode('REPLAY');
+      updateReplayLocation({ planId });
+    },
+    [updateReplayLocation]
+  );
+
+  const openReplayDraft = React.useCallback(
+    (template: Record<string, unknown>) => {
+      setReplayDraft(template);
+      setWorkspaceMode('REPLAY');
+      updateReplayLocation({});
+    },
+    [updateReplayLocation]
   );
 
   const showActionResult = React.useCallback(
@@ -916,6 +994,7 @@ export function LiquidationPage() {
 
   const handleShowAllExitPlans = React.useCallback(() => {
     setActiveMode('EXIT_PLANS');
+    setWorkspaceMode('MANAGEMENT');
     setLocation('/liquidation');
   }, [setLocation]);
 
@@ -955,29 +1034,74 @@ export function LiquidationPage() {
   );
 
   const toolbar = (
-    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 border-b border-white/5 px-4">
-      <div className="flex min-w-0 items-center gap-3">
-        {selectedStockCode ? (
+    <div className="studio-workspace-surface flex h-12 shrink-0 items-center justify-between gap-3 overflow-x-auto border-b border-white/[0.05] px-4 custom-scrollbar">
+      <nav
+        aria-label="卖出工作区"
+        className="flex h-full min-w-0 items-stretch"
+      >
+        {(['MANAGEMENT', 'REPLAY'] as const).map(mode => {
+          const selected = workspaceMode === mode;
+          return (
+            <button
+              className={cn(
+                'relative flex h-full shrink-0 items-center gap-1.5 px-3 text-[11px] font-black transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset',
+                selected
+                  ? mode === 'REPLAY'
+                    ? 'text-cyan-200 after:bg-cyan-400 focus-visible:ring-cyan-400/60'
+                    : 'text-blue-200 after:bg-blue-400 focus-visible:ring-blue-400/70'
+                  : 'text-slate-600 hover:text-slate-200'
+              )}
+              key={mode}
+              onClick={() => changeWorkspaceMode(mode)}
+              type="button"
+            >
+              {mode === 'REPLAY' ? (
+                <FlaskConical className="h-3.5 w-3.5" />
+              ) : (
+                <Hand className="h-3.5 w-3.5" />
+              )}
+              {mode === 'REPLAY' ? '回放测试' : '卖出管理'}
+            </button>
+          );
+        })}
+        {workspaceMode === 'MANAGEMENT' ? (
+          <>
+            <span className="mx-2 my-3 w-px bg-white/[0.08]" />
+            {liquidationModes.map(mode => {
+              const selected = activeMode === mode.id;
+              return (
+                <button
+                  aria-selected={selected}
+                  className={cn(
+                    'relative h-full shrink-0 px-3 text-xs font-bold transition-colors after:absolute after:inset-x-3 after:bottom-0 after:h-0.5 after:bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400/70',
+                    selected
+                      ? 'text-blue-200 after:bg-blue-400'
+                      : 'text-slate-500 hover:text-slate-200'
+                  )}
+                  key={mode.id}
+                  onClick={() => handleStudioModeChange(mode.id)}
+                  role="tab"
+                  type="button"
+                >
+                  {mode.label}
+                </button>
+              );
+            })}
+          </>
+        ) : null}
+      </nav>
+      <div className="flex shrink-0 items-center gap-2">
+        {selectedStockCode && workspaceMode === 'MANAGEMENT' ? (
           <button
-            type="button"
             aria-label="返回全部卖出计划"
+            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/35 bg-primary/10 px-3 text-xs font-black text-primary"
             onClick={handleShowAllExitPlans}
-            className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-primary/35 bg-primary/10 px-3 text-xs font-black text-primary transition-colors duration-200 hover:border-primary/60 hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0b1120]"
+            type="button"
           >
             <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
             全部卖出计划
           </button>
         ) : null}
-        <div className="min-w-0">
-          <div className="truncate text-xs font-black uppercase tracking-[0.2em] text-slate-200">
-            卖出管理
-          </div>
-          <div className="truncate text-[10px] font-medium text-slate-600">
-            卖出计划、持仓清仓与真实卖出记录
-          </div>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
         <button
           type="button"
           onClick={handleRefresh}
@@ -1011,37 +1135,6 @@ export function LiquidationPage() {
     />
   );
 
-  const modeNavigation = (
-    <div
-      aria-label="卖出管理功能"
-      className="flex shrink-0 items-center gap-1 border-b border-white/5 bg-[#080d18]/70 px-4 py-2"
-      role="tablist"
-    >
-      {liquidationModes.map(mode => {
-        const Icon = mode.icon;
-        const selected = activeMode === mode.id;
-        return (
-          <button
-            aria-selected={selected}
-            className={cn(
-              'flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-black transition-colors',
-              selected
-                ? 'border-primary/35 bg-primary/10 text-primary'
-                : 'border-transparent text-slate-500 hover:border-white/10 hover:text-slate-200'
-            )}
-            key={mode.id}
-            onClick={() => handleStudioModeChange(mode.id)}
-            role="tab"
-            type="button"
-          >
-            <Icon className="h-3.5 w-3.5" />
-            {mode.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-
   const stockContent = (
     <div className="min-h-0 flex-1 overflow-y-auto p-3 custom-scrollbar">
       <SingleStockLiquidationPanel
@@ -1066,7 +1159,6 @@ export function LiquidationPage() {
   const content = (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {toolbar}
-      {modeNavigation}
       {dataError && (
         <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2 text-xs font-bold text-amber-100">
           数据读取异常：{dataError.message}
@@ -1077,12 +1169,22 @@ export function LiquidationPage() {
           最近一次清仓提交异常：{actionError.message}
         </div>
       )}
-      {activeMode === 'EXIT_PLANS' ? (
+      {workspaceMode === 'REPLAY' ? (
+        <ExitPlanReplayPanel
+          accountId={accountId || ''}
+          draftTemplate={replayDraft}
+          initialPlanId={initialReplayPlanId || undefined}
+          initialRunId={initialReplayRunId || undefined}
+          onLocationChange={updateReplayLocation}
+        />
+      ) : activeMode === 'EXIT_PLANS' ? (
         <ExitPlansPanel
           accountId={accountId || ''}
           holdings={currentHoldings}
           instrumentCode={selectedStockCode || undefined}
           onNavigate={openStudioTab}
+          onReplayDraft={openReplayDraft}
+          onReplayPlan={openReplayPlan}
         />
       ) : activeMode === 'SELL_HISTORY' ? (
         <SellHistoryPanel accountId={accountId || ''} />
@@ -1105,7 +1207,7 @@ export function LiquidationPage() {
       className="h-full min-h-0"
       content={content}
       isPage
-      modes={liquidationModes}
+      modes={workspaceMode === 'MANAGEMENT' ? liquidationModes : []}
       onModeChange={handleStudioModeChange}
       sidebar={sidebar}
       sidebarSizing={{
@@ -1119,12 +1221,16 @@ export function LiquidationPage() {
         <>
           <span className="inline-flex items-center gap-2">
             <span className="h-1.5 w-1.5 rounded-full bg-market-down" />
-            卖出管理
+            {workspaceMode === 'REPLAY' ? '回放测试' : '卖出管理'}
           </span>
           <span className="text-slate-700">|</span>
           <span>{accountName}</span>
           <span className="text-slate-700">|</span>
-          <span>卖出计划与清仓统一监控</span>
+          <span>
+            {workspaceMode === 'REPLAY'
+              ? '严格 Tick · 三路径事实比较'
+              : '卖出计划与清仓统一监控'}
+          </span>
         </>
       }
       statusBarRight={
@@ -1140,9 +1246,9 @@ export function LiquidationPage() {
         </>
       }
       theme={{
-        icon: Hand,
-        name: 'blue',
-        title: '卖出管理',
+        icon: workspaceMode === 'REPLAY' ? FlaskConical : Hand,
+        name: workspaceMode === 'REPLAY' ? 'cyan' : 'blue',
+        title: workspaceMode === 'REPLAY' ? '卖出计划回放' : '卖出管理',
       }}
     />
   );

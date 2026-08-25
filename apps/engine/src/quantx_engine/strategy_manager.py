@@ -44,6 +44,10 @@ from quantx_infrastructure.services.canonical_tick_archive import (
   CanonicalTickArchiveError,
   CanonicalTickArchiveHistoricalAdapter,
 )
+from quantx_infrastructure.services.exit_plan_replay_projection_service import (
+  ExitPlanReplayUpdateKind,
+  exit_plan_replay_projection_service,
+)
 from quantx_infrastructure.services.historical_market_data_service import (
   HistoricalMarketDataService,
 )
@@ -525,11 +529,17 @@ class StrategyManager:
               mode_value == StrategyRunMode.BACKTEST.value
               and parameters.get("t_trade_replay")
             )
+            is_exit_plan_replay = bool(
+              mode_value == StrategyRunMode.BACKTEST.value
+              and parameters.get("exit_plan_replay")
+            )
             is_limit_up_board_replay = bool(
               mode_value == StrategyRunMode.BACKTEST.value
               and parameters.get("limit_up_board_replay")
             )
-            is_deferred_replay = is_t_trade_replay or is_limit_up_board_replay
+            is_deferred_replay = (
+              is_t_trade_replay or is_exit_plan_replay or is_limit_up_board_replay
+            )
             should_start = status_value == StrategyRunStatus.RUNNING.value
             if (
               mode_value == StrategyRunMode.BACKTEST.value
@@ -548,6 +558,18 @@ class StrategyManager:
               if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
                 self.logger.warning(
                   "检测到中断的做 T 回放启动，恢复后台准备: run_id=%s",
+                  run.id,
+                )
+                should_start = True
+            if (
+              is_exit_plan_replay
+              and status_value == StrategyRunStatus.PENDING.value
+            ):
+              projection = await exit_plan_replay_projection_service.get(run.id)
+              projection_status = str((projection or {}).get("status") or "").upper()
+              if projection_status in {"PENDING", "RUNNING", "PAUSED"}:
+                self.logger.warning(
+                  "检测到中断的卖出计划回放，恢复后台准备: run_id=%s",
                   run.id,
                 )
                 should_start = True
@@ -1142,6 +1164,7 @@ class StrategyManager:
     parameters = dict(runtime.context.parameters or {}) if runtime is not None else {}
     account_id = str(parameters.get("account_id") or "").strip()
     is_t_trade_replay = bool(parameters.get("t_trade_replay"))
+    is_exit_plan_replay = bool(parameters.get("exit_plan_replay"))
     board_replay_job_id = str(
       parameters.get("limit_up_board_replay_job_id") or ""
     ).strip()
@@ -1157,10 +1180,16 @@ class StrategyManager:
             persisted_parameters = run.parameters or {}
             if isinstance(persisted_parameters, str):
               persisted_parameters = json.loads(persisted_parameters)
+            parameters = dict(persisted_parameters or {})
             account_id = (
               account_id
-              or str(dict(persisted_parameters or {}).get("account_id") or "").strip()
+              or str(parameters.get("account_id") or "").strip()
             )
+            is_t_trade_replay = bool(parameters.get("t_trade_replay"))
+            is_exit_plan_replay = bool(parameters.get("exit_plan_replay"))
+            board_replay_job_id = str(
+              parameters.get("limit_up_board_replay_job_id") or ""
+            ).strip()
           if not backtest_id:
             history = await BacktestRepository(db).get_backtests_by_run(run_id)
             backtest_id = history[0].id if history else None
@@ -1197,6 +1226,19 @@ class StrategyManager:
         )
       except Exception:
         self.logger.exception("收敛后台启动回放投影失败: %s", run_id)
+    if account_id and is_exit_plan_replay:
+      try:
+        await exit_plan_replay_projection_service.update(
+          run_id=run_id,
+          account_id=account_id,
+          status="ERROR",
+          processed_until=(
+            runtime.context.current_time if runtime is not None else None
+          ),
+          kind=ExitPlanReplayUpdateKind.RESULT_READY,
+        )
+      except Exception:
+        self.logger.exception("收敛卖出计划回放投影失败: %s", run_id)
 
   async def _cancel_deferred_starts_for_shutdown(self) -> None:
     tasks = list(self._deferred_start_tasks.values())
@@ -1264,6 +1306,8 @@ class StrategyManager:
     )
 
     is_t_trade_replay = bool(runtime.context.parameters.get("t_trade_replay"))
+    is_exit_plan_replay = bool(runtime.context.parameters.get("exit_plan_replay"))
+    is_strict_tick_replay = is_t_trade_replay or is_exit_plan_replay
     missing_before = await self._find_missing_backtest_data(
       service=service,
       instruments=runtime.instruments,
@@ -1271,7 +1315,7 @@ class StrategyManager:
       end_time=end_time,
       required_kline_periods=required_kline_periods,
       require_tick=require_tick,
-      strict_tick_quality=is_t_trade_replay,
+      strict_tick_quality=is_strict_tick_replay,
     )
 
     self.logger.info(
@@ -1284,9 +1328,9 @@ class StrategyManager:
     missing_desc = self._format_missing_data(missing_before)
     sync_periods = self._extract_supported_sync_periods(missing_before)
     unsupported_periods = self._collect_unsupported_periods(missing_before)
-    if is_t_trade_replay:
+    if is_strict_tick_replay:
       self.logger.info(
-        "做 T 回放本地历史数据不完整，将阻塞补齐并严格复核 InfluxDB: %s",
+        "严格 Tick 回放本地历史数据不完整，将阻塞补齐并复核 InfluxDB: %s",
         missing_desc,
       )
       synchronization: Dict[str, Any] = {
@@ -1311,7 +1355,7 @@ class StrategyManager:
             }
           )
           self.logger.warning(
-            "做 T 回放历史数据补齐失败，将严格复核已落库 InfluxDB 数据: %s",
+            "严格 Tick 回放历史数据补齐失败，将复核已落库 InfluxDB 数据: %s",
             exc,
           )
         else:
@@ -1340,7 +1384,7 @@ class StrategyManager:
           else "DATA_INSUFFICIENT"
         )
         error = RuntimeError(
-          f"{error_code}: 做 T 回放区间内仍存在缺少可证明完整的已落库历史数据的标的: "
+          f"{error_code}: 回放区间内仍存在缺少可证明完整的已落库历史数据的标的: "
           f"{self._format_missing_data(missing_after)}"
         )
         if sync_error is not None:
@@ -2306,9 +2350,12 @@ class StrategyManager:
 
     if force and not (
       runtime.context.mode == StrategyRunMode.BACKTEST
-      and runtime.context.parameters.get("t_trade_replay")
+      and (
+        runtime.context.parameters.get("t_trade_replay")
+        or runtime.context.parameters.get("exit_plan_replay")
+      )
     ):
-      self.logger.warning("拒绝强制停止非做 T 历史回放运行: %s", run_id)
+      self.logger.warning("拒绝强制停止非隔离历史回放运行: %s", run_id)
       return False
 
     # 委托给 Executor 停止
@@ -2672,6 +2719,28 @@ class StrategyManager:
           )
         except Exception:
           self.logger.exception("更新做 T 回放生命周期投影失败: %s", run_id)
+    if parameters.get("exit_plan_replay"):
+      account_id = str(parameters.get("account_id") or "").strip()
+      if account_id:
+        normalized_status = str(
+          getattr(status_to_store, "value", status_to_store) or status_key
+        ).upper()
+        terminal = normalized_status in {"COMPLETED", "ERROR", "STOPPED"}
+        try:
+          await exit_plan_replay_projection_service.update(
+            run_id=run_id,
+            account_id=account_id,
+            status=normalized_status,
+            progress_pct=100.0 if normalized_status == "COMPLETED" else None,
+            processed_until=runtime.context.current_time,
+            kind=(
+              ExitPlanReplayUpdateKind.RESULT_READY
+              if terminal
+              else ExitPlanReplayUpdateKind.STATUS_CHANGED
+            ),
+          )
+        except Exception:
+          self.logger.exception("更新卖出计划回放生命周期投影失败: %s", run_id)
 
   async def _update_runtime_metrics(self, run_id: str, metrics: ExecutionMetrics):
     """

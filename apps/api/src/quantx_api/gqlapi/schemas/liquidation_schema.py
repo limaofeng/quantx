@@ -11,6 +11,9 @@ from quantx_infrastructure.database.redis_pubsub import redis_pubsub
 from quantx_infrastructure.services.exit_plan_notifications import (
   EXIT_PLAN_UPDATE_CHANNEL,
 )
+from quantx_infrastructure.services.exit_plan_replay_projection_service import (
+  exit_plan_replay_projection_service,
+)
 
 from quantx_api.auth.errors import AuthError, forbidden
 
@@ -46,6 +49,14 @@ from ..types.liquidation_types import (
   ExitPlanCostBasisCandidates,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
+  ExitPlanReplay,
+  ExitPlanReplayEventPage,
+  ExitPlanReplayMutationResult,
+  ExitPlanReplayPreparation,
+  ExitPlanReplayPreparationInput,
+  ExitPlanReplayStartInput,
+  ExitPlanReplayUpdateKind,
+  ExitPlanReplayUpdateNotice,
   ExitPlanUpdate,
   ExitPlanView,
   LiquidateAllPositionsInput,
@@ -111,6 +122,26 @@ class LiquidationSubscription:
         )
     finally:
       await subscription.close()
+
+  @strawberry.subscription(description="订阅卖出计划历史回放的轻量生命周期通知")
+  async def exit_plan_replay_updates(
+    self,
+    info: strawberry.types.Info,
+    account_id: Optional[str] = None,
+  ) -> AsyncIterator[ExitPlanReplayUpdateNotice]:
+    authorized = authorized_account_id(info, account_id)
+    async for message in exit_plan_replay_projection_service.subscribe(authorized):
+      yield ExitPlanReplayUpdateNotice(
+        account_id=authorized,
+        run_id=str(message.get("run_id") or ""),
+        revision=str(message.get("revision") or "0"),
+        kind=ExitPlanReplayUpdateKind(
+          str(message.get("kind") or "STATUS_CHANGED")
+        ),
+        occurred_at=datetime.fromisoformat(
+          str(message.get("occurred_at")).replace("Z", "+00:00")
+        ),
+      )
 
 
 def _require_legacy_web_liquidation_session(
@@ -309,6 +340,55 @@ class LiquidationQuery:
       limit=limit,
     )
 
+  @strawberry.field(description="准备卖出计划历史回放并列出可用买入成交")
+  async def exit_plan_replay_preparation(
+    self,
+    info: strawberry.types.Info,
+    input: ExitPlanReplayPreparationInput,
+  ) -> ExitPlanReplayPreparation:
+    return await LiquidationResolver.prepare_exit_plan_replay(
+      input,
+      authorized_account_id(info, input.account_id),
+    )
+
+  @strawberry.field(description="读取单次卖出计划历史回放")
+  async def exit_plan_replay(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> Optional[ExitPlanReplay]:
+    owner = await LiquidationResolver.exit_plan_replay_account_id(run_id)
+    authorized_account_id(info, owner)
+    return await LiquidationResolver.get_exit_plan_replay(run_id)
+
+  @strawberry.field(description="读取账户的卖出计划历史回放记录")
+  async def exit_plan_replay_history(
+    self,
+    info: strawberry.types.Info,
+    account_id: Optional[str] = None,
+    limit: int = 20,
+  ) -> List[ExitPlanReplay]:
+    return await LiquidationResolver.get_exit_plan_replay_history(
+      authorized_account_id(info, account_id),
+      limit=limit,
+    )
+
+  @strawberry.field(description="分页读取卖出计划回放触发与卖出事件")
+  async def exit_plan_replay_events(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+    offset: int = 0,
+    limit: int = 50,
+  ) -> ExitPlanReplayEventPage:
+    owner = await LiquidationResolver.exit_plan_replay_account_id(run_id)
+    authorized_account_id(info, owner)
+    return await LiquidationResolver.get_exit_plan_replay_events(
+      run_id,
+      offset=offset,
+      limit=limit,
+    )
+
   @strawberry.field(description="获取清仓概况")
   async def liquidation_summary(
     self,
@@ -369,6 +449,43 @@ class LiquidationQuery:
 
 @strawberry.type(description="卖出管理与统一退出计划变更")
 class LiquidationMutation:
+  @strawberry.mutation(description="启动卖出计划历史回放")
+  async def start_exit_plan_replay(
+    self,
+    info: strawberry.types.Info,
+    input: ExitPlanReplayStartInput,
+  ) -> ExitPlanReplayMutationResult:
+    try:
+      return await LiquidationResolver.start_exit_plan_replay(
+        input,
+        authorized_account_id(info, input.account_id),
+      )
+    except (AuthError, ValueError, RuntimeError) as exc:
+      return ExitPlanReplayMutationResult(
+        success=False,
+        code=getattr(exc, "code", "START_FAILED"),
+        message=str(getattr(exc, "message", exc)),
+      )
+
+  @strawberry.mutation(description="取消正在执行的卖出计划历史回放")
+  async def cancel_exit_plan_replay(
+    self,
+    info: strawberry.types.Info,
+    run_id: str,
+  ) -> ExitPlanReplayMutationResult:
+    try:
+      owner = await LiquidationResolver.exit_plan_replay_account_id(run_id)
+      return await LiquidationResolver.cancel_exit_plan_replay(
+        run_id,
+        authorized_account_id(info, owner),
+      )
+    except (AuthError, ValueError, RuntimeError) as exc:
+      return ExitPlanReplayMutationResult(
+        success=False,
+        code=getattr(exc, "code", "CANCEL_FAILED"),
+        message=str(getattr(exc, "message", exc)),
+      )
+
   @strawberry.mutation(description="预览既有 LIVE 退出计划的精确自动实盘授权")
   async def preview_exit_plan_authorization(
     self,

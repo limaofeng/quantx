@@ -392,6 +392,204 @@ export const ExitPlanUpdatesSubscription = gql(`
   }
 `);
 
+export const ExitPlanReplayPreparationQuery = gql(`
+  query ExitPlanReplayPreparation($input: ExitPlanReplayPreparationInput!) {
+    exitPlanReplayPreparation(input: $input) {
+      accountId
+      planId
+      configVersion
+      instrumentCode
+      planSource
+      template
+      requiresTick
+      requiresDepth
+      defaultWindowTradingDays
+      quickWindows
+      message
+      blockingReasons
+      buyFills {
+        orderId
+        tradedVolume
+        tradedPrice
+        estimatedBuyFeeCny
+        orderTime
+        strategyName
+        remark
+        selectedByPlan
+      }
+    }
+  }
+`);
+
+export const ExitPlanReplayQuery = gql(`
+  query ExitPlanReplay($runId: String!) {
+    exitPlanReplay(runId: $runId) {
+      runId
+      backtestId
+      accountId
+      planId
+      configVersion
+      instrumentCode
+      status
+      progressPct
+      revision
+      processedUntil
+      startTime
+      endTime
+      createdAt
+      updatedAt
+      errorMessage
+      dataQuality
+      dataQualityMessage
+      planSnapshot
+      origin
+      summary {
+        initialEquity
+        planFinalValue
+        holdFinalValue
+        immediateSellFinalValue
+        planReturnPct
+        holdReturnPct
+        immediateSellReturnPct
+        excessVsHoldPct
+        excessVsImmediatePct
+        soldVolume
+        remainingVolume
+        exitPrice
+        exitTime
+        totalFees
+        maxDrawdownPct
+        conclusionCode
+        conclusion
+      }
+      curve {
+        timestamp
+        planValue
+        holdValue
+        immediateSellValue
+        marketPrice
+        planReturnPct
+        holdReturnPct
+        immediateSellReturnPct
+      }
+      events {
+        sequence
+        timestamp
+        eventType
+        ruleId
+        ruleType
+        reason
+        price
+        volume
+        fees
+        remainingVolume
+        details
+      }
+      postExitHorizons {
+        tradingDays
+        available
+        marketPrice
+        returnAfterExitPct
+      }
+      actualSellReferences {
+        orderId
+        timestamp
+        volume
+        price
+      }
+      report {
+        status
+        schemaVersion
+        generatedAt
+        conclusionCode
+        conclusion
+        htmlArtifact
+        jsonArtifact
+      }
+    }
+  }
+`);
+
+export const ExitPlanReplayHistoryQuery = gql(`
+  query ExitPlanReplayHistory($accountId: String, $limit: Int! = 20) {
+    exitPlanReplayHistory(accountId: $accountId, limit: $limit) {
+      runId
+      planId
+      instrumentCode
+      status
+      progressPct
+      revision
+      startTime
+      endTime
+      createdAt
+      dataQuality
+      dataQualityMessage
+      summary {
+        planReturnPct
+        holdReturnPct
+        immediateSellReturnPct
+        excessVsHoldPct
+        conclusionCode
+        conclusion
+      }
+    }
+  }
+`);
+
+export const ExitPlanReplayUpdatesSubscription = gql(`
+  subscription ExitPlanReplayUpdates($accountId: String) {
+    exitPlanReplayUpdates(accountId: $accountId) {
+      accountId
+      runId
+      revision
+      kind
+      occurredAt
+    }
+  }
+`);
+
+export const StartExitPlanReplayMutation = gql(`
+  mutation StartExitPlanReplay($input: ExitPlanReplayStartInput!) {
+    startExitPlanReplay(input: $input) {
+      success
+      code
+      message
+      runId
+      replay {
+        runId
+        status
+        progressPct
+        revision
+        instrumentCode
+        planId
+        startTime
+        endTime
+      }
+    }
+  }
+`);
+
+export const CancelExitPlanReplayMutation = gql(`
+  mutation CancelExitPlanReplay($runId: String!) {
+    cancelExitPlanReplay(runId: $runId) {
+      success
+      code
+      message
+      runId
+      replay {
+        runId
+        status
+        progressPct
+        revision
+        instrumentCode
+        planId
+        startTime
+        endTime
+      }
+    }
+  }
+`);
+
 export const ExitPlanCapabilitiesQuery = gql(`
   query ExitPlanCapabilities {
     exitPlanCapabilities {

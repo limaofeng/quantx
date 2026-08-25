@@ -28,6 +28,9 @@ from quantx_infrastructure.repositories.auto_exit_plan_repository import (
 )
 from quantx_infrastructure.services.auto_exit_plan_service import AutoExitPlanService
 from quantx_infrastructure.services.engine_command_service import engine_command_service
+from quantx_infrastructure.services.exit_plan_replay_service import (
+  ExitPlanReplayService,
+)
 from quantx_infrastructure.services.liquidation_service import LiquidationService
 from sqlalchemy import desc, select
 
@@ -46,6 +49,19 @@ from ..types.liquidation_types import (
   ExitPlanCostBasisCandidates,
   ExitPlanEventView,
   ExitPlanHoldingCapacity,
+  ExitPlanReplay,
+  ExitPlanReplayActualSellReference,
+  ExitPlanReplayBuyFill,
+  ExitPlanReplayCurvePoint,
+  ExitPlanReplayEvent,
+  ExitPlanReplayEventPage,
+  ExitPlanReplayHorizon,
+  ExitPlanReplayMutationResult,
+  ExitPlanReplayPreparation,
+  ExitPlanReplayPreparationInput,
+  ExitPlanReplayReport,
+  ExitPlanReplayStartInput,
+  ExitPlanReplaySummary,
   ExitPlanRuleCapability,
   ExitPlanView,
   LiquidatablePosition,
@@ -195,6 +211,114 @@ class LiquidationResolver:
     return dict(receipt.result or {})
 
   @staticmethod
+  def _datetime(value) -> Optional[datetime]:
+    if value is None or isinstance(value, datetime):
+      return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+  @classmethod
+  def _exit_plan_replay(cls, data: dict) -> ExitPlanReplay:
+    summary_data = data.get("summary")
+    summary = None
+    if isinstance(summary_data, dict):
+      summary = ExitPlanReplaySummary(
+        **{
+          **summary_data,
+          "exit_time": cls._datetime(summary_data.get("exit_time")),
+        }
+      )
+    report_data = data.get("report")
+    report = None
+    if isinstance(report_data, dict):
+      report = ExitPlanReplayReport(
+        **{
+          **report_data,
+          "generated_at": cls._datetime(report_data.get("generated_at")),
+        }
+      )
+    return ExitPlanReplay(
+      run_id=str(data["run_id"]),
+      backtest_id=data.get("backtest_id"),
+      account_id=str(data["account_id"]),
+      plan_id=data.get("plan_id"),
+      config_version=int(data.get("config_version") or 0),
+      instrument_code=str(data["instrument_code"]),
+      status=str(data.get("status") or "PENDING"),
+      progress_pct=float(data.get("progress_pct") or 0.0),
+      revision=str(data.get("revision") or "0"),
+      processed_until=cls._datetime(data.get("processed_until")),
+      start_time=cls._datetime(data.get("start_time")),
+      end_time=cls._datetime(data.get("end_time")),
+      created_at=cls._datetime(data.get("created_at")),
+      updated_at=cls._datetime(data.get("updated_at")),
+      error_message=data.get("error_message"),
+      data_quality=str(data.get("data_quality") or "RUNNING"),
+      data_quality_message=str(data.get("data_quality_message") or ""),
+      plan_snapshot=dict(data.get("plan_snapshot") or {}),
+      origin=dict(data.get("origin") or {}),
+      summary=summary,
+      curve=[
+        ExitPlanReplayCurvePoint(
+          **{
+            **item,
+            "timestamp": cls._datetime(item.get("timestamp")),
+          }
+        )
+        for item in list(data.get("curve") or [])
+      ],
+      events=[
+        ExitPlanReplayEvent(
+          **{
+            **item,
+            "timestamp": cls._datetime(item.get("timestamp")),
+          }
+        )
+        for item in list(data.get("events") or [])
+      ],
+      post_exit_horizons=[
+        ExitPlanReplayHorizon(**item)
+        for item in list(data.get("post_exit_horizons") or [])
+      ],
+      actual_sell_references=[
+        ExitPlanReplayActualSellReference(
+          **{
+            **item,
+            "timestamp": cls._datetime(item.get("timestamp")),
+          }
+        )
+        for item in list(data.get("actual_sell_references") or [])
+      ],
+      report=report,
+    )
+
+  @staticmethod
+  def _exit_plan_replay_payload(input: ExitPlanReplayStartInput) -> dict:
+    return {
+      "account_id": input.account_id,
+      "plan_id": input.plan_id,
+      "expected_config_version": input.expected_config_version,
+      "draft_template": dict(input.draft_template or {}) or None,
+      "start_time": input.start_time.isoformat(),
+      "end_time": input.end_time.isoformat(),
+      "origin": {
+        "mode": input.origin.mode,
+        "order_ids": list(input.origin.order_ids),
+        "activation_time": (
+          input.origin.activation_time.isoformat()
+          if input.origin.activation_time
+          else None
+        ),
+        "volume": input.origin.volume,
+        "unit_cost": input.origin.unit_cost,
+      },
+      "commission_rate": input.commission_rate,
+      "minimum_commission": input.minimum_commission,
+      "stamp_tax_rate": input.stamp_tax_rate,
+      "transfer_fee_rate": input.transfer_fee_rate,
+      "slippage_rate": input.slippage_rate,
+    }
+
+  @staticmethod
   async def _load_exit_plan(
     plan_id: str,
     *,
@@ -211,6 +335,166 @@ class LiquidationResolver:
   async def exit_plan_account_id(plan_id: str) -> Optional[str]:
     record = await LiquidationResolver._load_exit_plan(plan_id)
     return record.account_id if record is not None else None
+
+  @classmethod
+  async def prepare_exit_plan_replay(
+    cls,
+    input: ExitPlanReplayPreparationInput,
+    account_id: str,
+  ) -> ExitPlanReplayPreparation:
+    data = await ExitPlanReplayService().prepare(
+      {
+        "account_id": account_id,
+        "plan_id": input.plan_id,
+        "draft_template": dict(input.draft_template or {}) or None,
+      }
+    )
+    return ExitPlanReplayPreparation(
+      account_id=str(data["account_id"]),
+      plan_id=data.get("plan_id"),
+      config_version=int(data.get("config_version") or 0),
+      instrument_code=str(data["instrument_code"]),
+      plan_source=str(data["plan_source"]),
+      template=dict(data.get("template") or {}),
+      requires_tick=bool(data.get("requires_tick")),
+      requires_depth=bool(data.get("requires_depth")),
+      default_window_trading_days=int(
+        data.get("default_window_trading_days") or 20
+      ),
+      quick_windows=[int(item) for item in data.get("quick_windows") or []],
+      buy_fills=[
+        ExitPlanReplayBuyFill(
+          **{
+            **item,
+            "order_time": cls._datetime(item.get("order_time")),
+          }
+        )
+        for item in list(data.get("buy_fills") or [])
+      ],
+      message=str(data.get("message") or ""),
+      blocking_reasons=[str(item) for item in data.get("blocking_reasons") or []],
+    )
+
+  @classmethod
+  async def get_exit_plan_replay(cls, run_id: str) -> Optional[ExitPlanReplay]:
+    data = await ExitPlanReplayService().get(run_id)
+    return cls._exit_plan_replay(data) if data is not None else None
+
+  @staticmethod
+  async def exit_plan_replay_account_id(run_id: str) -> Optional[str]:
+    data = await ExitPlanReplayService().get(run_id)
+    return str(data.get("account_id") or "") if data is not None else None
+
+  @classmethod
+  async def get_exit_plan_replay_history(
+    cls, account_id: str, *, limit: int = 20
+  ) -> List[ExitPlanReplay]:
+    rows = await ExitPlanReplayService().history(account_id, limit)
+    return [cls._exit_plan_replay(item) for item in rows]
+
+  @classmethod
+  async def get_exit_plan_replay_events(
+    cls,
+    run_id: str,
+    *,
+    offset: int = 0,
+    limit: int = 50,
+  ) -> ExitPlanReplayEventPage:
+    data = await ExitPlanReplayService().events(run_id, offset, limit)
+    return ExitPlanReplayEventPage(
+      run_id=str(data["run_id"]),
+      total=int(data["total"]),
+      offset=int(data["offset"]),
+      limit=int(data["limit"]),
+      has_more=bool(data["has_more"]),
+      items=[
+        ExitPlanReplayEvent(
+          **{
+            **item,
+            "timestamp": cls._datetime(item.get("timestamp")),
+          }
+        )
+        for item in list(data.get("items") or [])
+      ],
+    )
+
+  @classmethod
+  async def start_exit_plan_replay(
+    cls,
+    input: ExitPlanReplayStartInput,
+    account_id: str,
+  ) -> ExitPlanReplayMutationResult:
+    key = str(input.idempotency_key or "").strip()
+    if not key or len(key) > 128:
+      return ExitPlanReplayMutationResult(
+        success=False,
+        code="INVALID_IDEMPOTENCY_KEY",
+        message="回放幂等键不能为空且长度不能超过 128",
+      )
+    payload = cls._exit_plan_replay_payload(input)
+    payload["account_id"] = account_id
+    receipt = await engine_command_service.request(
+      "EXIT_PLAN_REPLAY_START",
+      {"input": payload},
+      aggregate_id=account_id,
+      idempotency_key=f"exit-plan-replay-start:{account_id}:{key}",
+    )
+    if receipt.status == "FAILED":
+      return ExitPlanReplayMutationResult(
+        success=False,
+        code="START_FAILED",
+        message=receipt.error or "卖出计划回放启动失败",
+        run_id=receipt.message_id,
+      )
+    if receipt.status != "SUCCEEDED":
+      return ExitPlanReplayMutationResult(
+        success=True,
+        code="QUEUED",
+        message="卖出计划回放已进入 Engine 队列",
+        run_id=receipt.message_id,
+      )
+    replay = cls._exit_plan_replay(dict(receipt.result or {}))
+    return ExitPlanReplayMutationResult(
+      success=True,
+      code="STARTED",
+      message="卖出计划回放已启动",
+      run_id=replay.run_id,
+      replay=replay,
+    )
+
+  @classmethod
+  async def cancel_exit_plan_replay(
+    cls,
+    run_id: str,
+    account_id: str,
+  ) -> ExitPlanReplayMutationResult:
+    receipt = await engine_command_service.request(
+      "EXIT_PLAN_REPLAY_CANCEL",
+      {"run_id": run_id},
+      aggregate_id=account_id,
+      idempotency_key=f"exit-plan-replay-cancel:{run_id}",
+    )
+    if receipt.status == "FAILED":
+      return ExitPlanReplayMutationResult(
+        success=False,
+        code="CANCEL_FAILED",
+        message=receipt.error or "卖出计划回放取消失败",
+        run_id=run_id,
+      )
+    if receipt.status != "SUCCEEDED":
+      return ExitPlanReplayMutationResult(
+        success=True,
+        code="QUEUED",
+        message="取消请求已进入 Engine 队列",
+        run_id=run_id,
+      )
+    return ExitPlanReplayMutationResult(
+      success=True,
+      code="CANCELLED",
+      message="卖出计划回放已取消",
+      run_id=run_id,
+      replay=cls._exit_plan_replay(dict(receipt.result or {})),
+    )
 
   @staticmethod
   async def get_exit_plans(

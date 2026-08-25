@@ -142,6 +142,10 @@ from quantx_infrastructure.services.entry_plan_authorization_service import (
   EntryPlanAuthorizationService,
   scope_from_managed_entry_config,
 )
+from quantx_infrastructure.services.exit_plan_replay_projection_service import (
+  ExitPlanReplayUpdateKind,
+  exit_plan_replay_projection_service,
+)
 from quantx_infrastructure.services.t_trade_candidate_outcome_service import (
   TTradeCandidateOutcomePersistenceFacade,
 )
@@ -3630,11 +3634,14 @@ class StrategyExecutor:
           and account.get("total_asset", 0.0) <= 0
           and not positions
         )
-        is_t_trade_replay = bool(
+        is_portfolio_replay = bool(
           runtime.context.mode == StrategyRunMode.BACKTEST
-          and runtime.context.parameters.get("t_trade_replay")
+          and (
+            runtime.context.parameters.get("t_trade_replay")
+            or runtime.context.parameters.get("exit_plan_replay")
+          )
         )
-        if initialize_account and not is_t_trade_replay:
+        if initialize_account and not is_portfolio_replay:
           runtime.state_manager.update_account(
             cash=runtime.context.initial_capital,
             frozen_cash=0.0,
@@ -3650,7 +3657,7 @@ class StrategyExecutor:
             self._sync_dynamic_holding_inventory(runtime, initial_metadata)
           else:
             self._seed_bucket_ledger_from_parameters(runtime)
-        if initialize_account and is_t_trade_replay:
+        if initialize_account and is_portfolio_replay:
           initial_cash_value = runtime.context.parameters.get("initial_cash")
           initial_cash = (
             runtime.context.initial_capital
@@ -5550,6 +5557,7 @@ class StrategyExecutor:
       is_strict_tick_replay = bool(
         runtime.context.parameters.get("limit_up_board_replay")
         or runtime.context.parameters.get("t_trade_replay")
+        or runtime.context.parameters.get("exit_plan_replay")
       )
       runtime.broker = BacktestBroker(
         account_id=runtime.run_id,
@@ -5805,6 +5813,34 @@ class StrategyExecutor:
                   "json_artifact": "",
                 }
               metrics["t_trade_replay"] = replay_metrics
+            if runtime.context.parameters.get("exit_plan_replay"):
+              from quantx_infrastructure.core.exit_plan_replay_metrics import (
+                build_exit_plan_replay_metrics,
+              )
+              from quantx_infrastructure.core.exit_plan_replay_report import (
+                write_exit_plan_replay_report,
+              )
+
+              replay_metrics = build_exit_plan_replay_metrics(runtime)
+              try:
+                replay_metrics["report"] = write_exit_plan_replay_report(
+                  result_path,
+                  replay_metrics,
+                  run_id=runtime.run_id,
+                  backtest_id=runtime.context.backtest_id,
+                )
+              except Exception:
+                self.logger.exception("卖出计划回放报告生成失败")
+                replay_metrics["report"] = {
+                  "status": "FAILED",
+                  "schema_version": 1,
+                  "generated_at": None,
+                  "conclusion_code": "REPORT_GENERATION_FAILED",
+                  "conclusion": "回放已完成，但报告文件生成失败。",
+                  "html_artifact": "",
+                  "json_artifact": "",
+                }
+              metrics["exit_plan_replay"] = replay_metrics
             if runtime.context.parameters.get("limit_up_board_replay"):
               from quantx_infrastructure.core.limit_up_board_replay_metrics import (
                 build_limit_up_board_replay_metrics,
@@ -6354,7 +6390,9 @@ class StrategyExecutor:
       return False
     parameters = runtime.context.parameters
     return bool(
-      parameters.get("limit_up_board_replay") or parameters.get("t_trade_replay")
+      parameters.get("limit_up_board_replay")
+      or parameters.get("t_trade_replay")
+      or parameters.get("exit_plan_replay")
     )
 
   async def _board_replay_report_barrier(
@@ -6761,7 +6799,10 @@ class StrategyExecutor:
   ) -> List[Any]:
     """Load a replay window without silently accepting a backend row limit."""
 
-    if not runtime.context.parameters.get("t_trade_replay"):
+    if not (
+      runtime.context.parameters.get("t_trade_replay")
+      or runtime.context.parameters.get("exit_plan_replay")
+    ):
       return await data_adapter.get_ticks(
         instrument_code=instrument_code,
         start_time=start_time,
@@ -7360,6 +7401,24 @@ class StrategyExecutor:
       return
     bids = list(getattr(market_data, "bid_price", []) or [])
     asks = list(getattr(market_data, "ask_price", []) or [])
+    if runtime.context.parameters.get("exit_plan_replay"):
+      requires_depth = any(
+        any(
+          rule.enabled and rule.strategy == "ADAPTIVE_VOLUME_PRICE_TRAILING"
+          for rule in plan.template.rules
+        )
+        for plan in runtime.exit_plan_book.active_plans()
+        if plan.template.instrument_code == instrument_code
+      )
+      if requires_depth and (
+        not bids
+        or not asks
+        or not list(getattr(market_data, "bid_vol", []) or [])
+        or not list(getattr(market_data, "ask_vol", []) or [])
+      ):
+        raise RuntimeError(
+          f"EXIT_PLAN_REPLAY_DEPTH_DATA_MISSING:{instrument_code}:{timestamp.isoformat()}"
+        )
     current_price = float(
       getattr(market_data, "price", 0.0) or getattr(market_data, "close", 0.0) or 0.0
     )
@@ -9236,7 +9295,10 @@ class StrategyExecutor:
     start_time = runtime.context.backtest_start_time
     end_time = runtime.context.backtest_end_time
     if (
-      not parameters.get("t_trade_replay")
+      not (
+        parameters.get("t_trade_replay")
+        or parameters.get("exit_plan_replay")
+      )
       or current_time is None
       or start_time is None
       or end_time is None
@@ -9272,14 +9334,24 @@ class StrategyExecutor:
     if not account_id:
       return
     try:
-      await t_trade_replay_projection_service.update(
-        run_id=runtime.run_id,
-        account_id=account_id,
-        status="RUNNING",
-        progress_pct=progress_pct,
-        processed_until=current_time,
-        kind=TTradeReplayUpdateKind.PROGRESS,
-      )
+      if parameters.get("exit_plan_replay"):
+        await exit_plan_replay_projection_service.update(
+          run_id=runtime.run_id,
+          account_id=account_id,
+          status="RUNNING",
+          progress_pct=progress_pct,
+          processed_until=current_time,
+          kind=ExitPlanReplayUpdateKind.PROGRESS,
+        )
+      else:
+        await t_trade_replay_projection_service.update(
+          run_id=runtime.run_id,
+          account_id=account_id,
+          status="RUNNING",
+          progress_pct=progress_pct,
+          processed_until=current_time,
+          kind=TTradeReplayUpdateKind.PROGRESS,
+        )
       runtime._last_replay_progress_pct = max(
         runtime._last_replay_progress_pct,
         progress_pct,
@@ -9289,7 +9361,7 @@ class StrategyExecutor:
       else:
         runtime._last_replay_projection_at = now
     except Exception:
-      self.logger.exception("更新做 T 回放进度投影失败: %s", runtime.run_id)
+      self.logger.exception("更新历史回放进度投影失败: %s", runtime.run_id)
 
   def _build_execution_context_snapshot(
     self,
