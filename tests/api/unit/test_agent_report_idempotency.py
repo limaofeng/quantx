@@ -45,6 +45,7 @@ async def test_same_execution_with_new_message_id_is_acknowledged_once(
       message_type=AgentMessageType.EXECUTION_REPORT,
       payload=payload,
     ),
+    received_at=agent_api.utcnow(),
   )
   duplicate = await agent_api._record_report(
     "device-1",
@@ -53,6 +54,7 @@ async def test_same_execution_with_new_message_id_is_acknowledged_once(
       message_type=AgentMessageType.EXECUTION_REPORT,
       payload=payload,
     ),
+    received_at=agent_api.utcnow(),
   )
 
   async with session_factory() as db:

@@ -36,6 +36,12 @@ Gateway 进程承载，控制面 API 重启不会中断行情提交。Agent 只�
 回调入口继续按同一 active universe 做防御性过滤。单标的 `1m/5m/1d` 等 QMT
 K 线仍由主连接控制 `subscribe_quote`，不得从 tick 合成。
 
+主控制连接的 API receiver 不执行命令或行情数据库轮询；收到的帧先进入按字节和
+条数限制的队列，再按连接顺序持久化。API 使用唯一 writer 发送 ACK、交易命令和
+行情控制，并为 `report_ack` 保留高优先级容量。只有 `agent_report_inbox` 提交成功
+才会确认报告；API 超时、断线或背压关闭连接时，未确认报告继续保留在本地 SQLite
+journal，并在重连后用原消息 ID 重放。
+
 原生 whole-quote 采集与行情 WebSocket sink 生命周期分离：API 断线、ACK 超时、
 RESYNC 或下游 Redis 故障只会令 sink 进入 `SYNCING/STALE`，采集器继续维护每个
 标的的最新状态，不取消并重建 XTData 订阅。新 stream 从一致性 watermark 生成

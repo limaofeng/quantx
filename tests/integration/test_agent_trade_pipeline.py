@@ -310,7 +310,12 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
 
   await agent_api._record_command_ack("device-1", command_ack.payload)
   acknowledgements = [
-    await agent_api._record_report("device-1", report) for report in reports
+    await agent_api._record_report(
+      "device-1",
+      report,
+      received_at=agent_api.utcnow(),
+    )
+    for report in reports
   ]
   assert all(item.accepted and not item.duplicate for item in acknowledgements)
 
@@ -320,6 +325,7 @@ async def test_fake_broker_pipeline_is_durable_idempotent_and_recovers_ordering(
     execution_report.model_copy(
       update={"message_id": "00000000-0000-4000-8000-000000000099"}
     ),
+    received_at=agent_api.utcnow(),
   )
   assert duplicate.accepted and duplicate.duplicate
 
@@ -451,7 +457,13 @@ async def test_partial_fill_converges_before_final_fill(
   ]
   await agent_api._record_command_ack("device-1", ack.payload)
   for report in reports:
-    assert (await agent_api._record_report("device-1", report)).accepted
+    assert (
+      await agent_api._record_report(
+        "device-1",
+        report,
+        received_at=agent_api.utcnow(),
+      )
+    ).accepted
 
   for report in reports[:2]:
     async with session_factory() as db:
@@ -698,7 +710,13 @@ async def test_managed_entry_agent_expiry_ack_and_error_report_replay_one_zero_f
       "is_complete": False,
     },
   )
-  assert (await agent_api._record_report("device-1", error_report)).accepted
+  assert (
+    await agent_api._record_report(
+      "device-1",
+      error_report,
+      received_at=agent_api.utcnow(),
+    )
+  ).accepted
   async with session_factory() as db:
     inbox = await db.get(AgentReportInbox, error_report.message_id)
   assert inbox is not None
@@ -775,7 +793,13 @@ async def test_managed_entry_reconnect_expiry_closes_prior_reconcile_gate(
       "is_complete": False,
     },
   )
-  assert (await agent_api._record_report("device-1", error_report)).accepted
+  assert (
+    await agent_api._record_report(
+      "device-1",
+      error_report,
+      received_at=agent_api.utcnow(),
+    )
+  ).accepted
   async with session_factory() as db:
     inbox = await db.get(AgentReportInbox, error_report.message_id)
   assert inbox is not None
@@ -1178,7 +1202,13 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
       message_type=AgentMessageType(message_type),
       payload=report_payload,
     )
-    assert (await agent_api._record_report("device-1", envelope)).accepted
+    assert (
+      await agent_api._record_report(
+        "device-1",
+        envelope,
+        received_at=agent_api.utcnow(),
+      )
+    ).accepted
     async with session_factory() as db:
       inbox = await db.get(AgentReportInbox, envelope.message_id)
     assert inbox is not None
@@ -1193,7 +1223,13 @@ async def test_real_broker_reports_override_reconcile_gate_and_restore_monitorin
     message_type=AgentMessageType.ORDER_REPORT,
     payload=final_order_payload,
   )
-  assert (await agent_api._record_report("device-1", final_order)).accepted
+  assert (
+    await agent_api._record_report(
+      "device-1",
+      final_order,
+      received_at=agent_api.utcnow(),
+    )
+  ).accepted
   async with session_factory() as db:
     final_order_inbox = await db.get(AgentReportInbox, final_order.message_id)
   assert final_order_inbox is not None

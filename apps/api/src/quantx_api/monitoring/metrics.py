@@ -136,6 +136,26 @@ MARKET_STREAM_INSTRUMENTS = Gauge(
   "quantx_market_stream_instruments",
   "Instrument count in the last whole-market frame",
 )
+AGENT_CONTROL_QUEUE_DEPTH = Gauge(
+  "quantx_agent_control_queue_depth",
+  "Queued QMT Agent control messages by direction",
+  ["device_id", "direction"],
+)
+AGENT_CONTROL_QUEUE_OLDEST_AGE = Gauge(
+  "quantx_agent_control_queue_oldest_age_seconds",
+  "Age of the oldest queued QMT Agent control message",
+  ["device_id", "direction"],
+)
+AGENT_CONTROL_STAGE_DURATION = Histogram(
+  "quantx_agent_control_stage_duration_seconds",
+  "QMT Agent control pipeline latency by stage and message type",
+  ["stage", "message_type"],
+)
+AGENT_CONTROL_EVENTS = Counter(
+  "quantx_agent_control_events_total",
+  "QMT Agent control pipeline failures and lifecycle events",
+  ["event", "reason"],
+)
 T_TRADE_V3_RUNTIME_VALUE = Gauge(
   "quantx_t_trade_v3_runtime_value",
   "Engine-observed T-trade V3 cumulative value since the current Engine start",

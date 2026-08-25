@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import hmac
 import json
 import logging
@@ -11,8 +12,9 @@ import os
 import shutil
 import time
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 from pathlib import Path
@@ -76,6 +78,10 @@ from quantx_api.auth.agent_service import AgentAuthService
 from quantx_api.auth.errors import AuthError
 from quantx_api.auth.tokens import utcnow
 from quantx_api.monitoring.metrics import (
+  AGENT_CONTROL_EVENTS,
+  AGENT_CONTROL_QUEUE_DEPTH,
+  AGENT_CONTROL_QUEUE_OLDEST_AGE,
+  AGENT_CONTROL_STAGE_DURATION,
   MARKET_STREAM_CONNECTIONS,
   MARKET_STREAM_FRAME_BYTES,
   MARKET_STREAM_FRAMES,
@@ -125,6 +131,17 @@ MARKET_STREAM_CONTROL_REGISTRATION_WAIT_SECONDS = 2.0
 MARKET_STREAM_CONTROL_REGISTRATION_POLL_SECONDS = 0.025
 TRADE_COMMAND_EXPIRY_SWEEP_INTERVAL_SECONDS = 1.0
 TRADE_COMMAND_EXPIRY_SWEEP_BATCH_SIZE = 100
+AGENT_CONTROL_INBOUND_QUEUE_CAPACITY = 32
+AGENT_CONTROL_INBOUND_QUEUE_MAX_BYTES = 32 * 1024 * 1024
+AGENT_CONTROL_OUTBOUND_QUEUE_CAPACITY = 64
+AGENT_CONTROL_OUTBOUND_ACK_RESERVE = 16
+AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS = 2.0
+AGENT_CONTROL_MAX_QUEUE_AGE_SECONDS = 5.0
+AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS = 10.0
+AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS = 5.0
+AGENT_CONTROL_SEND_TIMEOUT_SECONDS = 5.0
+AGENT_CONTROL_POLL_INTERVAL_SECONDS = 1.0
+AGENT_CONTROL_SLOW_STAGE_SECONDS = 1.0
 
 _MARKET_DATA_MUTABLE_UPLOAD_STATUSES = frozenset(
   {"QUEUED", "DELIVERED", "RECEIVING"}
@@ -139,6 +156,212 @@ MARKET_DATA_RECONNECT_STALE_SECONDS = 5 * 60
 _MARKET_DATA_AGENT_BUSY_REASON = "MARKET_DATA_AGENT_BUSY"
 _market_data_staging_lock = asyncio.Lock()
 _market_data_staging_sweep_lock = asyncio.Lock()
+
+
+class _AgentControlPipelineError(RuntimeError):
+  def __init__(self, reason: str, *, close_code: int = 1011) -> None:
+    super().__init__(reason)
+    self.reason = reason
+    self.close_code = close_code
+
+
+@dataclass(frozen=True)
+class _AgentInboundItem:
+  envelope: AgentEnvelope
+  received_at: datetime
+  received_monotonic: float
+  frame_bytes: int
+
+
+@dataclass(order=True)
+class _AgentOutboundItem:
+  priority: int
+  sequence: int
+  envelope: AgentEnvelope = field(compare=False)
+  queued_monotonic: float = field(compare=False)
+  protocol_reply: bool = field(compare=False)
+  dedup_key: str = field(compare=False, default="")
+
+
+class _AgentInboundBuffer:
+  """Bound accepted control frames by count and retained encoded bytes."""
+
+  def __init__(
+    self,
+    *,
+    capacity: int = AGENT_CONTROL_INBOUND_QUEUE_CAPACITY,
+    max_bytes: int = AGENT_CONTROL_INBOUND_QUEUE_MAX_BYTES,
+  ) -> None:
+    self._capacity = capacity
+    self._max_bytes = max_bytes
+    self._items: deque[_AgentInboundItem] = deque()
+    self._retained_bytes = 0
+    self._condition = asyncio.Condition()
+
+  async def put(self, item: _AgentInboundItem) -> None:
+    if item.frame_bytes > self._max_bytes:
+      raise _AgentControlPipelineError("inbound_frame_too_large", close_code=1009)
+    async with self._condition:
+      await self._condition.wait_for(
+        lambda: (
+          len(self._items) < self._capacity
+          and self._retained_bytes + item.frame_bytes <= self._max_bytes
+        )
+      )
+      self._items.append(item)
+      self._retained_bytes += item.frame_bytes
+      self._condition.notify_all()
+
+  async def get(self) -> _AgentInboundItem:
+    async with self._condition:
+      await self._condition.wait_for(lambda: bool(self._items))
+      item = self._items.popleft()
+      self._retained_bytes -= item.frame_bytes
+      self._condition.notify_all()
+      return item
+
+  def qsize(self) -> int:
+    return len(self._items)
+
+  def oldest_age(self) -> float:
+    if not self._items:
+      return 0.0
+    return max(0.0, time.monotonic() - self._items[0].received_monotonic)
+
+
+class _AgentOutboundBuffer:
+  """Prioritize protocol acknowledgements while reserving bounded capacity."""
+
+  def __init__(
+    self,
+    *,
+    capacity: int = AGENT_CONTROL_OUTBOUND_QUEUE_CAPACITY,
+    ack_reserve: int = AGENT_CONTROL_OUTBOUND_ACK_RESERVE,
+  ) -> None:
+    self._capacity = capacity
+    self._work_capacity = capacity - ack_reserve
+    self._items: list[_AgentOutboundItem] = []
+    self._work_items = 0
+    self._sequence = 0
+    self._dedup_keys: set[str] = set()
+    self._condition = asyncio.Condition()
+
+  async def put(
+    self,
+    envelope: AgentEnvelope,
+    *,
+    priority: int,
+    protocol_reply: bool = False,
+    dedup_key: str = "",
+  ) -> bool:
+    async with self._condition:
+      if dedup_key and dedup_key in self._dedup_keys:
+        return False
+      await self._condition.wait_for(
+        lambda: (
+          len(self._items) < self._capacity
+          and (protocol_reply or self._work_items < self._work_capacity)
+        )
+      )
+      if dedup_key and dedup_key in self._dedup_keys:
+        return False
+      self._sequence += 1
+      heapq.heappush(
+        self._items,
+        _AgentOutboundItem(
+          priority=priority,
+          sequence=self._sequence,
+          envelope=envelope,
+          queued_monotonic=time.monotonic(),
+          protocol_reply=protocol_reply,
+          dedup_key=dedup_key,
+        ),
+      )
+      if not protocol_reply:
+        self._work_items += 1
+      if dedup_key:
+        self._dedup_keys.add(dedup_key)
+      self._condition.notify_all()
+      return True
+
+  async def get(self) -> _AgentOutboundItem:
+    async with self._condition:
+      await self._condition.wait_for(lambda: bool(self._items))
+      item = heapq.heappop(self._items)
+      if not item.protocol_reply:
+        self._work_items -= 1
+      self._condition.notify_all()
+      return item
+
+  async def complete(self, item: _AgentOutboundItem) -> None:
+    if not item.dedup_key:
+      return
+    async with self._condition:
+      self._dedup_keys.discard(item.dedup_key)
+      self._condition.notify_all()
+
+  def qsize(self) -> int:
+    return len(self._items)
+
+  def oldest_age(self) -> float:
+    if not self._items:
+      return 0.0
+    oldest = min(item.queued_monotonic for item in self._items)
+    return max(0.0, time.monotonic() - oldest)
+
+
+def _set_agent_control_queue_metrics(
+  device_id: str,
+  direction: str,
+  buffer: _AgentInboundBuffer | _AgentOutboundBuffer,
+) -> None:
+  AGENT_CONTROL_QUEUE_DEPTH.labels(
+    device_id=device_id,
+    direction=direction,
+  ).set(buffer.qsize())
+  AGENT_CONTROL_QUEUE_OLDEST_AGE.labels(
+    device_id=device_id,
+    direction=direction,
+  ).set(buffer.oldest_age())
+
+
+def _observe_agent_control_stage(
+  *,
+  stage: str,
+  envelope: AgentEnvelope,
+  duration: float,
+  device_id: str,
+) -> None:
+  safe_duration = max(0.0, duration)
+  AGENT_CONTROL_STAGE_DURATION.labels(
+    stage=stage,
+    message_type=envelope.message_type.value,
+  ).observe(safe_duration)
+  if safe_duration >= AGENT_CONTROL_SLOW_STAGE_SECONDS:
+    logger.warning(
+      "Slow Agent control stage: device_id=%s message_type=%s message_id=%s "
+      "stage=%s duration=%.3fs",
+      device_id,
+      envelope.message_type.value,
+      envelope.message_id,
+      stage,
+      safe_duration,
+    )
+
+
+def _outbound_priority(envelope: AgentEnvelope) -> tuple[int, bool]:
+  if envelope.message_type in {
+    AgentMessageType.REPORT_ACK,
+    AgentMessageType.HEARTBEAT_ACK,
+  }:
+    return 0, True
+  if envelope.message_type is AgentMessageType.CANCEL_COMMAND:
+    return 1, False
+  if envelope.message_type is AgentMessageType.COMMAND:
+    return 2, False
+  if envelope.message_type is AgentMessageType.MARKET_DATA_REQUEST:
+    return 3, False
+  return 4, False
 
 
 class _MarketConnectionRegistry:
@@ -997,6 +1220,8 @@ async def _record_command_ack(device_id: str, payload: dict[str, Any]) -> None:
 async def _record_report(
   device_id: str,
   envelope: AgentEnvelope,
+  *,
+  received_at: datetime,
 ) -> ReportAckPayload:
   payload = envelope.payload
   if envelope.protocol_version == PROTOCOL_VERSION:
@@ -1028,10 +1253,11 @@ async def _record_report(
     raw_payload_hash=payload_hash,
     business_idempotency_key=business_idempotency_key,
     payload=payload,
-    received_at=utcnow(),
+    received_at=received_at,
     processing_status="PENDING",
   )
   ack: ReportAckPayload
+  persist_started = time.monotonic()
   async with AsyncSessionLocal() as db:
     db.add(report)
     try:
@@ -1062,6 +1288,12 @@ async def _record_report(
         duplicate=same,
         reason="" if same else "message_id_payload_mismatch",
       )
+  _observe_agent_control_stage(
+    stage="report_persist",
+    envelope=envelope,
+    duration=time.monotonic() - persist_started,
+    device_id=device_id,
+  )
   if ack.accepted:
     try:
       await asyncio.wait_for(
@@ -1283,39 +1515,38 @@ async def _requeue_incomplete_market_requests(
 
 
 async def _process_message(
-  websocket: WebSocket,
   device_id: str,
   envelope: AgentEnvelope,
   *,
+  received_at: datetime,
   protocol_version: str = PROTOCOL_VERSION,
-) -> None:
+) -> AgentEnvelope | None:
   if envelope.message_type is AgentMessageType.HEARTBEAT:
     if str(envelope.payload.get("device_id", "")) != device_id:
       raise AuthError("UNAUTHENTICATED", "heartbeat 设备不匹配")
     await _record_heartbeat(device_id, envelope.payload)
-    reply = AgentEnvelope(
+    return AgentEnvelope(
       protocol_version=protocol_version,
       message_type=AgentMessageType.HEARTBEAT_ACK,
       payload={"heartbeat_message_id": envelope.message_id},
     )
-    await websocket.send_text(reply.model_dump_json())
-    return
   if envelope.message_type is AgentMessageType.COMMAND_ACK:
     await _record_command_ack(device_id, envelope.payload)
-    return
+    return None
   if envelope.message_type in REPORT_TYPES:
-    ack = await _record_report(device_id, envelope)
-    await websocket.send_text(
-      AgentEnvelope(
-        protocol_version=protocol_version,
-        message_type=AgentMessageType.REPORT_ACK,
-        payload=ack.model_dump(mode="json"),
-      ).model_dump_json()
+    ack = await _record_report(
+      device_id,
+      envelope,
+      received_at=received_at,
     )
-    return
+    return AgentEnvelope(
+      protocol_version=protocol_version,
+      message_type=AgentMessageType.REPORT_ACK,
+      payload=ack.model_dump(mode="json"),
+    )
   if envelope.message_type is AgentMessageType.MARKET_EVENT:
     await _publish_market_event(device_id, envelope.payload)
-    return
+    return None
   raise ValueError(f"不支持的 Agent 消息类型: {envelope.message_type.value}")
 
 
@@ -1726,6 +1957,416 @@ async def agent_market_websocket(websocket: WebSocket) -> None:
         )
 
 
+def _observe_source_to_receive(
+  device_id: str,
+  envelope: AgentEnvelope,
+  received_at: datetime,
+) -> None:
+  if envelope.message_type is not AgentMessageType.DELTA_REPORT:
+    return
+  raw_source = envelope.payload.get("source_event_at")
+  if not raw_source:
+    return
+  try:
+    source_at = datetime.fromisoformat(str(raw_source).replace("Z", "+00:00"))
+    if source_at.tzinfo is None:
+      source_at = source_at.replace(tzinfo=timezone.utc)
+    received_utc = (
+      received_at.replace(tzinfo=timezone.utc)
+      if received_at.tzinfo is None
+      else received_at.astimezone(timezone.utc)
+    )
+    duration = (received_utc - source_at.astimezone(timezone.utc)).total_seconds()
+  except (TypeError, ValueError):
+    return
+  if duration < 0:
+    AGENT_CONTROL_EVENTS.labels(
+      event="timestamp",
+      reason="future_source_event",
+    ).inc()
+    return
+  _observe_agent_control_stage(
+    stage="source_to_socket_receive",
+    envelope=envelope,
+    duration=duration,
+    device_id=device_id,
+  )
+
+
+async def _enqueue_agent_outbound(
+  device_id: str,
+  buffer: _AgentOutboundBuffer,
+  envelope: AgentEnvelope,
+  *,
+  deduplicate: bool = False,
+) -> bool:
+  priority, protocol_reply = _outbound_priority(envelope)
+  dedup_key = envelope.message_id if deduplicate else ""
+  try:
+    queued = await asyncio.wait_for(
+      buffer.put(
+        envelope,
+        priority=priority,
+        protocol_reply=protocol_reply,
+        dedup_key=dedup_key,
+      ),
+      timeout=AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS,
+    )
+  except asyncio.TimeoutError as exc:
+    AGENT_CONTROL_EVENTS.labels(
+      event="backpressure",
+      reason="outbound_queue_full",
+    ).inc()
+    raise _AgentControlPipelineError("outbound_queue_full") from exc
+  _set_agent_control_queue_metrics(device_id, "outbound", buffer)
+  return queued
+
+
+async def _receive_agent_control_messages(
+  websocket: WebSocket,
+  *,
+  device_id: str,
+  protocol_version: str,
+  inbound: _AgentInboundBuffer,
+) -> None:
+  while True:
+    raw = await websocket.receive_text()
+    received_monotonic = time.monotonic()
+    received_at = utcnow()
+    envelope = AgentEnvelope.model_validate_json(raw)
+    if envelope.protocol_version != protocol_version:
+      raise ValueError("Agent connection changed protocol version")
+    _observe_source_to_receive(device_id, envelope, received_at)
+    item = _AgentInboundItem(
+      envelope=envelope,
+      received_at=received_at,
+      received_monotonic=received_monotonic,
+      frame_bytes=len(raw.encode("utf-8")),
+    )
+    try:
+      await asyncio.wait_for(
+        inbound.put(item),
+        timeout=AGENT_CONTROL_QUEUE_PUT_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="backpressure",
+        reason="inbound_queue_full",
+      ).inc()
+      raise _AgentControlPipelineError("inbound_queue_full") from exc
+    _set_agent_control_queue_metrics(device_id, "inbound", inbound)
+
+
+async def _process_agent_control_messages(
+  *,
+  device_id: str,
+  protocol_version: str,
+  inbound: _AgentInboundBuffer,
+  outbound: _AgentOutboundBuffer,
+) -> None:
+  while True:
+    item = await inbound.get()
+    _set_agent_control_queue_metrics(device_id, "inbound", inbound)
+    queue_age = max(0.0, time.monotonic() - item.received_monotonic)
+    _observe_agent_control_stage(
+      stage="inbound_queue_wait",
+      envelope=item.envelope,
+      duration=queue_age,
+      device_id=device_id,
+    )
+    if queue_age > AGENT_CONTROL_MAX_QUEUE_AGE_SECONDS:
+      AGENT_CONTROL_EVENTS.labels(
+        event="backpressure",
+        reason="inbound_queue_stale",
+      ).inc()
+      raise _AgentControlPipelineError("inbound_queue_stale")
+    processing_started = time.monotonic()
+    try:
+      reply = await asyncio.wait_for(
+        _process_message(
+          device_id,
+          item.envelope,
+          received_at=item.received_at,
+          protocol_version=protocol_version,
+        ),
+        timeout=AGENT_CONTROL_INBOUND_PROCESSING_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="inbound_processing",
+      ).inc()
+      raise _AgentControlPipelineError("inbound_processing_timeout") from exc
+    _observe_agent_control_stage(
+      stage="inbound_processing",
+      envelope=item.envelope,
+      duration=time.monotonic() - processing_started,
+      device_id=device_id,
+    )
+    if reply is not None:
+      await _enqueue_agent_outbound(device_id, outbound, reply)
+
+
+async def _send_agent_control_messages(
+  websocket: WebSocket,
+  *,
+  device_id: str,
+  outbound: _AgentOutboundBuffer,
+) -> None:
+  while True:
+    item = await outbound.get()
+    _set_agent_control_queue_metrics(device_id, "outbound", outbound)
+    queue_age = max(0.0, time.monotonic() - item.queued_monotonic)
+    _observe_agent_control_stage(
+      stage="outbound_queue_wait",
+      envelope=item.envelope,
+      duration=queue_age,
+      device_id=device_id,
+    )
+    send_started = time.monotonic()
+    try:
+      await asyncio.wait_for(
+        websocket.send_text(item.envelope.model_dump_json()),
+        timeout=AGENT_CONTROL_SEND_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="socket_send",
+      ).inc()
+      raise _AgentControlPipelineError("socket_send_timeout") from exc
+    await outbound.complete(item)
+    _observe_agent_control_stage(
+      stage="socket_send",
+      envelope=item.envelope,
+      duration=time.monotonic() - send_started,
+      device_id=device_id,
+    )
+
+
+async def _poll_agent_trade_commands(
+  *,
+  device_id: str,
+  protocol_version: str,
+  outbound: _AgentOutboundBuffer,
+) -> None:
+  while True:
+    try:
+      command = await asyncio.wait_for(
+        _next_command(device_id, protocol_version=protocol_version),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="trade_command_poll",
+      ).inc()
+      logger.warning("Agent trade-command poll timed out: device_id=%s", device_id)
+    else:
+      if command is not None:
+        await _enqueue_agent_outbound(
+          device_id,
+          outbound,
+          command,
+          deduplicate=True,
+        )
+    await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+
+
+async def _poll_agent_market_requests(
+  *,
+  device_id: str,
+  protocol_version: str,
+  outbound: _AgentOutboundBuffer,
+) -> None:
+  while True:
+    try:
+      request = await asyncio.wait_for(
+        _next_market_data_request(device_id, protocol_version=protocol_version),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="market_request_poll",
+      ).inc()
+      logger.warning("Agent market-request poll timed out: device_id=%s", device_id)
+    else:
+      if request is not None:
+        await _enqueue_agent_outbound(
+          device_id,
+          outbound,
+          request,
+          deduplicate=True,
+        )
+    await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+
+
+async def _relay_agent_hub_controls(
+  *,
+  device_id: str,
+  protocol_version: str,
+  control_queue: asyncio.Queue[AgentEnvelope],
+  outbound: _AgentOutboundBuffer,
+) -> None:
+  while True:
+    control = await control_queue.get()
+    await _enqueue_agent_outbound(
+      device_id,
+      outbound,
+      control.model_copy(update={"protocol_version": protocol_version}),
+    )
+
+
+async def _guard_agent_control_session(
+  *,
+  device_id: str,
+  expires_at: datetime,
+) -> None:
+  while True:
+    if utcnow() >= expires_at:
+      raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
+    try:
+      await asyncio.wait_for(
+        _ensure_device_active(device_id),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="device_validation",
+      ).inc()
+      raise _AgentControlPipelineError("device_validation_timeout") from exc
+    await asyncio.sleep(AGENT_CONTROL_POLL_INTERVAL_SECONDS)
+
+
+async def _refresh_agent_market_lease(
+  *,
+  device_id: str,
+  control_queue: asyncio.Queue[AgentEnvelope],
+) -> None:
+  while True:
+    try:
+      await asyncio.wait_for(
+        agent_connection_hub.refresh_market_device(device_id, control_queue),
+        timeout=AGENT_CONTROL_DATABASE_POLL_TIMEOUT_SECONDS,
+      )
+    except asyncio.TimeoutError as exc:
+      AGENT_CONTROL_EVENTS.labels(
+        event="timeout",
+        reason="market_lease_refresh",
+      ).inc()
+      raise _AgentControlPipelineError("market_lease_refresh_timeout") from exc
+    await asyncio.sleep(MARKET_DEVICE_LEASE_REFRESH_SECONDS)
+
+
+async def _run_agent_control_pipeline(
+  websocket: WebSocket,
+  *,
+  device_id: str,
+  protocol_version: str,
+  session_expires_at: datetime,
+  control_queue: asyncio.Queue[AgentEnvelope],
+) -> None:
+  inbound = _AgentInboundBuffer()
+  outbound = _AgentOutboundBuffer()
+  tasks = {
+    asyncio.create_task(
+      _receive_agent_control_messages(
+        websocket,
+        device_id=device_id,
+        protocol_version=protocol_version,
+        inbound=inbound,
+      ),
+      name=f"agent-control-receiver:{device_id}",
+    ),
+    asyncio.create_task(
+      _process_agent_control_messages(
+        device_id=device_id,
+        protocol_version=protocol_version,
+        inbound=inbound,
+        outbound=outbound,
+      ),
+      name=f"agent-control-processor:{device_id}",
+    ),
+    asyncio.create_task(
+      _send_agent_control_messages(
+        websocket,
+        device_id=device_id,
+        outbound=outbound,
+      ),
+      name=f"agent-control-writer:{device_id}",
+    ),
+    asyncio.create_task(
+      _poll_agent_trade_commands(
+        device_id=device_id,
+        protocol_version=protocol_version,
+        outbound=outbound,
+      ),
+      name=f"agent-command-poller:{device_id}",
+    ),
+    asyncio.create_task(
+      _poll_agent_market_requests(
+        device_id=device_id,
+        protocol_version=protocol_version,
+        outbound=outbound,
+      ),
+      name=f"agent-market-request-poller:{device_id}",
+    ),
+    asyncio.create_task(
+      _relay_agent_hub_controls(
+        device_id=device_id,
+        protocol_version=protocol_version,
+        control_queue=control_queue,
+        outbound=outbound,
+      ),
+      name=f"agent-control-relay:{device_id}",
+    ),
+    asyncio.create_task(
+      _guard_agent_control_session(
+        device_id=device_id,
+        expires_at=session_expires_at,
+      ),
+      name=f"agent-control-guard:{device_id}",
+    ),
+    asyncio.create_task(
+      _refresh_agent_market_lease(
+        device_id=device_id,
+        control_queue=control_queue,
+      ),
+      name=f"agent-market-lease:{device_id}",
+    ),
+  }
+  try:
+    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    for task in done:
+      error = task.exception()
+      if error is not None:
+        raise error
+    raise WebSocketDisconnect(code=1000)
+  finally:
+    for task in tasks:
+      if not task.done():
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    AGENT_CONTROL_QUEUE_DEPTH.labels(
+      device_id=device_id,
+      direction="inbound",
+    ).set(0)
+    AGENT_CONTROL_QUEUE_DEPTH.labels(
+      device_id=device_id,
+      direction="outbound",
+    ).set(0)
+    AGENT_CONTROL_QUEUE_OLDEST_AGE.labels(
+      device_id=device_id,
+      direction="inbound",
+    ).set(0)
+    AGENT_CONTROL_QUEUE_OLDEST_AGE.labels(
+      device_id=device_id,
+      direction="outbound",
+    ).set(0)
+
+
 @agent_router.websocket("/ws/agent")
 async def agent_websocket(websocket: WebSocket) -> None:
   await websocket.accept()
@@ -1742,12 +2383,6 @@ async def agent_websocket(websocket: WebSocket) -> None:
         f"真实交易 Agent 必须使用协议 {PROTOCOL_VERSION}",
       )
     connection_protocol = first.protocol_version
-    await websocket.send_text(
-      _auth_result(
-        accepted=True,
-        protocol_version=connection_protocol,
-      ).model_dump_json()
-    )
     await _record_heartbeat(
       device.id,
       {
@@ -1762,70 +2397,54 @@ async def agent_websocket(websocket: WebSocket) -> None:
       device.id,
       set(first.payload.get("capabilities") or []),
     )
-    next_market_lease_refresh = time.monotonic()
-    while True:
-      if utcnow() >= session.expires_at:
-        raise AuthError("UNAUTHENTICATED", "Agent 访问令牌已过期")
-      await _ensure_device_active(device.id)
-      if time.monotonic() >= next_market_lease_refresh:
-        await agent_connection_hub.refresh_market_device(
-          device.id,
-          control_queue,
-        )
-        next_market_lease_refresh = (
-          time.monotonic() + MARKET_DEVICE_LEASE_REFRESH_SECONDS
-        )
-      command = await _next_command(
-        device.id,
-        protocol_version=connection_protocol,
-      )
-      if command is not None:
-        await websocket.send_text(command.model_dump_json())
-      market_request = await _next_market_data_request(
-        device.id,
-        protocol_version=connection_protocol,
-      )
-      if market_request is not None:
-        await websocket.send_text(market_request.model_dump_json())
-      while True:
-        try:
-          control = control_queue.get_nowait()
-        except asyncio.QueueEmpty:
-          break
-        await websocket.send_text(
-          control.model_copy(
-            update={"protocol_version": connection_protocol}
-          ).model_dump_json()
-        )
-      try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
-      except asyncio.TimeoutError:
-        continue
-      envelope = AgentEnvelope.model_validate_json(raw)
-      if envelope.protocol_version != connection_protocol:
-        raise ValueError("Agent connection changed protocol version")
-      await _process_message(
-        websocket,
-        device.id,
-        envelope,
-        protocol_version=connection_protocol,
-      )
-  except WebSocketDisconnect:
-    return
-  except AuthError as exc:
     await websocket.send_text(
       _auth_result(
-        accepted=False,
-        reason=exc.message,
-        protocol_version=(
-          first.protocol_version if "first" in locals() else PROTOCOL_VERSION
-        ),
+        accepted=True,
+        protocol_version=connection_protocol,
       ).model_dump_json()
     )
-    await websocket.close(code=4401)
+    await _run_agent_control_pipeline(
+      websocket,
+      device_id=device.id,
+      protocol_version=connection_protocol,
+      session_expires_at=session.expires_at,
+      control_queue=control_queue,
+    )
+  except WebSocketDisconnect:
+    AGENT_CONTROL_EVENTS.labels(event="close", reason="disconnect").inc()
+    return
+  except _AgentControlPipelineError as exc:
+    AGENT_CONTROL_EVENTS.labels(event="close", reason=exc.reason).inc()
+    logger.warning("Agent WebSocket closed: reason=%s", exc.reason)
+    try:
+      await websocket.close(code=exc.close_code, reason=exc.reason[:120])
+    except Exception:
+      pass
+  except AuthError as exc:
+    AGENT_CONTROL_EVENTS.labels(event="close", reason="auth_error").inc()
+    try:
+      await websocket.send_text(
+        _auth_result(
+          accepted=False,
+          reason=exc.message,
+          protocol_version=(
+            first.protocol_version if "first" in locals() else PROTOCOL_VERSION
+          ),
+        ).model_dump_json()
+      )
+      await websocket.close(code=4401)
+    except Exception:
+      pass
   except Exception as exc:
+    AGENT_CONTROL_EVENTS.labels(
+      event="close",
+      reason=exc.__class__.__name__,
+    ).inc()
     logger.warning("Agent WebSocket closed: %s", exc.__class__.__name__)
-    await websocket.close(code=4400)
+    try:
+      await websocket.close(code=4400)
+    except Exception:
+      pass
   finally:
     if "control_queue" in locals() and "device" in locals():
       await agent_connection_hub.unregister(device.id, control_queue)
